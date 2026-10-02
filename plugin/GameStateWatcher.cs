@@ -6839,6 +6839,8 @@ namespace CompetitiveRounds
                         matchIsRanked && oneVOneMatchAtStart);
                 }
                 catch { }
+                // Card draw evidence (B4): after the seat record, same gate.
+                try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
             }
 
             // Evaluate achievements before clearing match state
@@ -9141,6 +9143,8 @@ namespace CompetitiveRounds
                 int[] s = SeatEvidenceCore.CutScore(localRounds, oppRounds, opponentDCReported);
                 SeatEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), s[0], s[1],
                     matchIsRanked && oneVOneMatchAtStart);
+                // Card draw evidence (B4): the same game cut short, same attach key.
+                try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
             }
             catch { }
         }

@@ -904,7 +904,7 @@ namespace CompetitiveRounds
         /// queued (unix s), how many sends it has spent, how many 401 refreshes.</summary>
         internal sealed class Pending
         {
-            internal string Route;   // "e" seat evidence, "c" compat outcome
+            internal string Route;   // "e" seat evidence, "c" compat outcome, "k" card draw evidence
             internal string Body;
             internal long FirstUnix;
             internal int Attempts;
@@ -963,6 +963,7 @@ namespace CompetitiveRounds
         /// "end", when present, follows that key's two-number array directly.</summary>
         internal static bool IsCutRecord(Pending p)
         {
+            if (p != null && p.Route == "k") return IsCutCardBody(p.Body);
             if (p == null || p.Route != "e" || p.Body == null) return false;
             const string R = "\\\"rounds\\\":[";
             const string E = ",\\\"end\\\":\\\"";
@@ -970,6 +971,22 @@ namespace CompetitiveRounds
             if (i < 0) return false;
             int j = p.Body.IndexOf(']', i + R.Length);
             return j > 0 && j + 1 + E.Length <= p.Body.Length && string.CompareOrdinal(p.Body, j + 1, E, 0, E.Length) == 0;
+        }
+
+        /// <summary>Whether a queued card draw record (route "k") is a cut
+        /// game's: its record opens {"schema":1,"g":&lt;digits&gt; and, for a cut
+        /// game, "end" follows "g" directly (the envelope fields before
+        /// "record" cannot hold a quote, so the first match is the record's).</summary>
+        internal static bool IsCutCardBody(string body)
+        {
+            if (body == null) return false;
+            const string H = "\\\"schema\\\":1,\\\"g\\\":";
+            const string K = ",\\\"end\\\":\\\"";
+            int i = body.IndexOf(H, StringComparison.Ordinal);
+            if (i < 0) return false;
+            int k = i + H.Length;
+            while (k < body.Length && body[k] >= '0' && body[k] <= '9') k++;
+            return k > i + H.Length && k + K.Length <= body.Length && string.CompareOrdinal(body, k, K, 0, K.Length) == 0;
         }
 
         /// <summary>Retry spacing: 2 min doubling, at most an hour.</summary>
@@ -1038,7 +1055,7 @@ namespace CompetitiveRounds
         {
             if (line == null) return null;
             string[] f = line.Split(new[] { '\t' }, 6);
-            if (f.Length != 6 || f[0] != LINE_TAG || (f[4] != "e" && f[4] != "c") || f[5].Length == 0) return null;
+            if (f.Length != 6 || f[0] != LINE_TAG || (f[4] != "e" && f[4] != "c" && f[4] != "k") || f[5].Length == 0) return null;
             long first; int att, ses;
             if (!long.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out first)
                 || !int.TryParse(f[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out att)

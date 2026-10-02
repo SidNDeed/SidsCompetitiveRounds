@@ -230,6 +230,7 @@ namespace CompetitiveRounds
             _games = 0;
             RpcSender = 0;
             try { SeatEvidence.RoomExit(); } catch { }
+            try { CardDrawEvidence.RoomExit(); } catch { }
         }
     }
 

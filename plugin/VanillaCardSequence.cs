@@ -60,6 +60,13 @@ namespace CompetitiveRounds
 
         public static int Game => _game;
 
+        /// <summary>Read-only copy of this game's served-slot counter (slots
+        /// the engine spawned from the shared sequence; it rises after each
+        /// such spawn returns). Card draw evidence reads it around each spawn
+        /// of an own deal to know which slots the engine served. Allocates
+        /// nothing, generates nothing.</summary>
+        internal static int SharedSlotsServed => _sharedSlots;
+
         /// <summary>A fighter seat in an online, non-FFA room. FFA runs the
         /// engine from its own lifecycle; a spectator never deals; an offline
         /// room has no rules record.</summary>

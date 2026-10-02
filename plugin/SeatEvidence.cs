@@ -33,6 +33,7 @@ namespace CompetitiveRounds
         internal const string TAG = "[SEAT-EV]";
         private const string ROUTE_RECORD = "/api/v1/matches/seat-evidence";
         private const string ROUTE_COMPAT = "/api/v1/client/compat-outcome";
+        private const string ROUTE_CARD = "/api/v1/matches/card-evidence";
 
         private static readonly Stopwatch _sw = Stopwatch.StartNew();
         internal static long SwMs { get { return _sw.ElapsedMilliseconds; } }
@@ -56,6 +57,10 @@ namespace CompetitiveRounds
         internal const long FROZEN_MS = 120000;
         private static string _room = "";
         private static string _end;   // C.END_KINDS, or null: this seat saw the game over
+
+        /// <summary>The end kind noted for the current game (read-only; the
+        /// card draw record carries the same kind as the seat record).</summary>
+        internal static string NotedEnd { get { return _end; } }
 
         /// <summary>Opened at the start of combat of a game with exactly two
         /// fighters (GameStateWatcher's start block); everything below resets.</summary>
@@ -701,6 +706,11 @@ namespace CompetitiveRounds
         private static bool _hashStarted;
         private static string _compat = "not_run";
 
+        /// <summary>The game DLL's hash and its state, as hashed at boot
+        /// (read-only; the card draw record's deal-profile id).</summary>
+        internal static string GameDllSha { get { return _gameSha; } }
+        internal static string GameDllState { get { return _gameState; } }
+
         internal static void StartHashing()
         {
             try
@@ -1005,6 +1015,13 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>A card draw envelope (route "k"), persisted like the
+        /// others and sent by the same pump, outside combat.</summary>
+        internal static void EnqueueCard(string body)
+        {
+            Enqueue("k", body);
+        }
+
         /// <summary>Persists the frozen body before any network yield. Every
         /// retry sends these exact bytes.</summary>
         private static void Enqueue(string route, string body)
@@ -1035,7 +1052,7 @@ namespace CompetitiveRounds
             Save();
             _inFlight = true;
             var sent = p;
-            bool started = ApiClient.SeatEvidencePost(p.Route == "c" ? ROUTE_COMPAT : ROUTE_RECORD, p.Body, (ok, text, carried) =>
+            bool started = ApiClient.SeatEvidencePost(p.Route == "c" ? ROUTE_COMPAT : (p.Route == "k" ? ROUTE_CARD : ROUTE_RECORD), p.Body, (ok, text, carried) =>
             {
                 try { Answer(sent, ok, text, carried); } catch { }
                 _inFlight = false;
@@ -1056,7 +1073,7 @@ namespace CompetitiveRounds
             }
             long delay; string reason;
             var act = C.Decide(p, status, body, retryAfter, now, out delay, out reason);
-            string what = p.Route == "c" ? "compat outcome" : "record";
+            string what = p.Route == "c" ? "compat outcome" : (p.Route == "k" ? "card record" : "record");
             switch (act)
             {
                 case C.Act.Drop:

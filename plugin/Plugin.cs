@@ -1364,6 +1364,8 @@ namespace CompetitiveRounds
                     }
                 }
                 Log.LogInfo($"[HARMONY] Patches applied: {applied} ok, {failed} failed");
+                // Card draw evidence (B4): one line naming its six patches as attached.
+                try { CardDrawEvidence.BootLine(); } catch { }
             }
             catch (Exception ex)
             {
@@ -3537,6 +3539,9 @@ namespace CompetitiveRounds
             // [SC-SELFTEST] (room rules §6): the vanilla-mode Same Cards seams
             // against the live game, once per process, only with its cfg lever.
             try { VanillaCardSequence.EnsureSelfTest(); } catch { }
+            // [CARD-EV] census dump (B4): this seat's pool census, once per
+            // process, only with its cfg lever, never in a room.
+            try { CardDrawEvidence.EnsureCensusDump(); } catch { }
 
             // SCR Broadcast director + §2c identity fence (design §3a). Runs
             // from THIS persistent tick — never a coroutine host that
