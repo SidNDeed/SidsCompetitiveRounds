@@ -368,8 +368,20 @@ MUTANTS = [
                 "Grade(black, grade);\n            Grade(white, grade);\n            Matte(black, white, work, out f.Lit, out f.Partial, out f.Covered);")],
      "targets": ["grade_after_matte"], "controls": ["matte_arith"]},
     {"name": "edge_band_one_short", "file": "DanceMotionCore.cs",
-     "edits": [("internal static bool EdgeClear(", "bool band = y < margin ||", "bool band = y < margin - 1 ||")],
+     "edits": [("internal static bool FirstEdgePixel(", "bool band = y < margin ||", "bool band = y < margin - 1 ||")],
      "targets": ["edge_band"], "controls": ["matte_arith"]},
+    # bug 405: the logged band pixel's row is the PNG's from the top
+    {"name": "edge_row_buffer_order", "file": "DanceMotionCore.cs",
+     "edits": [("internal static FrameOut ProcessPair(", "f.EdgeY = bottomUp ? edge - 1 - ey : ey;", "f.EdgeY = ey;")],
+     "targets": ["edge_first_pixel"], "controls": ["edge_band", "matte_arith"]},
+    # bug 405: the fit before the fix -- the solid square whatever is drawn
+    {"name": "fit_solid_only", "file": "DanceMotionCore.cs",
+     "edits": [("internal static FitMode FitDrawn(", "if (all) return FitMode.Solid;", "if (true) return FitMode.Solid;")],
+     "targets": ["fit_drawn"], "controls": ["edge_band", "edge_first_pixel"]},
+    # bug 405: a capped square free to move off the solid square
+    {"name": "fit_cap_cuts_solid", "file": "DanceMotionCore.cs",
+     "edits": [("internal static FitMode FitDrawn(", "float slack = (cap - side) * 0.5f;", "float slack = cap;")],
+     "targets": ["fit_drawn"], "controls": ["edge_band"]},
     {"name": "selfcheck_no_wrap", "file": "DanceMotionCore.cs",
      "edits": [("internal static string SelfCheck(", "if (frames.Count > 1)", "if (frames.Count > 1 && false)")],
      "targets": ["selfcheck_order"], "controls": ["classify_motion"]},

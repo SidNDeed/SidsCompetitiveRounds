@@ -1432,7 +1432,21 @@ namespace CompetitiveRounds
         private static readonly List<PlayerCardMotion.Slot> motionTiles = new List<PlayerCardMotion.Slot>();
         private static readonly List<PlayerCardMotion.Slot> motionPool = new List<PlayerCardMotion.Slot>();
         private static readonly PlayerCardMotion.Slot motionPopup = new PlayerCardMotion.Slot();
-        private static readonly string[] MotionViews = { "open", "binder", "info" };
+        // The playback's view names, one per View value and indexed by it,
+        // derived from the enum itself so a view added later has its entry
+        // (bug 405: a hand-written list of three threw on every Trades frame).
+        private static readonly string[] MotionViews = MotionViewNames();
+
+        private static string[] MotionViewNames()
+        {
+            var values = (View[])Enum.GetValues(typeof(View));
+            int top = 0;
+            foreach (var v in values) top = Math.Max(top, (int)v);
+            var names = new string[top + 1];
+            for (int i = 0; i < names.Length; i++) names[i] = "view" + i;   // a gap in the values still has an entry
+            foreach (var v in values) if ((int)v >= 0) names[(int)v] = v.ToString().ToLowerInvariant();
+            return names;
+        }
         private static string motionKey, motionKeyPack;
         private static int motionKeyView = -1, motionKeyPage = int.MinValue;
 
@@ -1455,7 +1469,7 @@ namespace CompetitiveRounds
                     if (lastStrip != null && lastStrip.activeInHierarchy) MotionAdd(revealTiles, ref used);
                     key = MotionPageKey(0, historyIndex, shown != null ? shown.pack_id : null);
                 }
-                else key = MotionPageKey(2, 0, null);
+                else key = MotionPageKey((int)view, 0, null);
             }
             PlayerCardMotion.Slot pop = null;
             if (popup)
