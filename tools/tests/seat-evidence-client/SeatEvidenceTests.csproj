@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Seat evidence (contract V2), client half: executes the REAL
+       plugin/SeatEvidenceCore.cs (the record, the budgeter, signing, the
+       answer table, the queue line, the statistics) and writes fixtures that
+       run_tests.py hands to the SERVER branch's own seat_evidence.py
+       (budget_record, check_record, parse_envelope, verify_sig), so the bytes
+       this seat sends are compared with what the server parses. Mutants are
+       built from COPIES of the core (CoreSource override); the tracked file is
+       never modified. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>SeatEvidenceTests</AssemblyName>
+    <RootNamespace>SeatEvidenceTests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(CoreSource)' == ''">
+    <CoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs</CoreSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(CoreSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>
