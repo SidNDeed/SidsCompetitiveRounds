@@ -1,0 +1,4 @@
+full_game
+game2_held_samecards
+cut_left
+over_cap

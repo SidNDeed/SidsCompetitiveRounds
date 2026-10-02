@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Card draw evidence (B4) hook harness: compiles the six hook classes and
+       the test gate class run_hooks.py copies VERBATIM out of
+       plugin/CardDrawEvidence.cs (HooksSource), against Stubs.cs, where every
+       collector throws. ExtraDefine adds one symbol (the test gate's positive
+       control build); the plugin's own csproj is never involved. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>CardDrawHookTests</AssemblyName>
+    <RootNamespace>CompetitiveRounds</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0169;CS0649;CS0414</NoWarn>
+    <DefineConstants>$(DefineConstants);$(ExtraDefine)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+    <Compile Include="$(HooksSource)" />
+  </ItemGroup>
+
+</Project>

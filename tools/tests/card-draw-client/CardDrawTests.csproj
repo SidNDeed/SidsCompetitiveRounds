@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Card draw evidence (B4), client half: executes the REAL
+       plugin/CardDrawEvidenceCore.cs (census, game assembly, record layout,
+       budgeter, signing) with the REAL plugin/SeatEvidenceCore.cs (JSON
+       writer, hashing, the queue answer table it shares), and writes the
+       canonical fixtures run_tests.py checks with an independent Python
+       reference budgeter and validator. Mutants are built from COPIES
+       (CoreSource / SeatCoreSource overrides); tracked files are never
+       modified. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>CardDrawTests</AssemblyName>
+    <RootNamespace>CardDrawTests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(CoreSource)' == ''">
+    <CoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\CardDrawEvidenceCore.cs</CoreSource>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(SeatCoreSource)' == ''">
+    <SeatCoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs</SeatCoreSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(CoreSource)" />
+    <Compile Include="$(SeatCoreSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>
