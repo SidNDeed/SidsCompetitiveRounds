@@ -484,7 +484,10 @@ def test_the_janitor_sweeps_expired_leases_and_used_nonces():
 
 
 def test_the_face_route_has_its_own_rate_bucket_and_health_reports_the_renderer():
-    src = _src(main.rate_limit_gate)
+    # The buckets live in _rl_charge, which rate_limit_gate calls for every
+    # /api/v1/ request that is not internal or bypassed.
+    assert "refusal = _rl_charge(request)" in _src(main.rate_limit_gate)
+    src = _src(main._rl_charge)
     assert "_RL_FACE_PREFIX" in src and '|f"' in src
     assert main._RL_FACE_PREFIX == "/api/v1/pc-face/" and main._RL_FACE[0] >= 60
     assert "pc_renderer_fp=_pc_renderer_fp()" in _src(main.health_check)
