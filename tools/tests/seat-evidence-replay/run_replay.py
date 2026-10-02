@@ -31,7 +31,7 @@ SE = os.path.join(PLUGIN, "SeatEvidence.cs")
 TRACKED = ["SeatEvidence.cs", "SeatEvidenceCore.cs", "GameStateWatcher.cs", "Plugin.cs"]
 
 CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left", "cut_guards",
-         "closing_next_boot", "compat_sender", "compat_bounds", "cut_422_kept"]
+         "closing_next_boot", "compat_sender", "compat_bounds", "cut_422_kept", "path1_unstamped"]
 
 # (name, old text, new text, target case, control case); old occurs exactly once.
 MUTANTS = [
@@ -45,7 +45,7 @@ MUTANTS = [
     ("own_block_any_target", "target != RpcTarget.Others || ", "", "victim_block_hit", "shooter_paths"),
     ("victim_dmg_unmarked", "_awaitDamage[6] = gate ? 1 : 0;", "_awaitDamage[6] = 0;", "victim_block_hit", "shooter_paths"),
     ("path1_unstamped_listed", "if (!f.HasStamp) { _unpairHits++; return; }", "if (!f.HasStamp) { _unpairHits++; }",
-     "shooter_paths", "victim_block_hit"),
+     "path1_unstamped", "shooter_paths"),
     ("victim_lists_path1", "else _unpairHits++;",
      "else _hitRecv.Add(C.HitRecvEntry(1, c.Stamp, 0, 0, ServerNow(), false, gate, -1));", "victim_block_hit", "shooter_paths"),
     ("nesting_no_restore", "if (before >= 0) _ctxDepth = before;", "", "unkeyed_and_nesting", "victim_block_hit"),
@@ -59,7 +59,7 @@ MUTANTS = [
     ("end_last_wins", "&& _end == null && C.IsEndKind(kind)", "&& C.IsEndKind(kind)", "cut_guards", "cut_left"),
     ("clear_end_noop", "try { if (_open) _end = null; } catch { }", "", "cut_guards", "cut_left"),
     ("closing_not_persisted", "_queue.Add(new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() });\n            Save();",
-     "_queue.Add(new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() });", "closing_next_boot", "cut_left"),
+     "_queue.Add(new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() });", "closing_next_boot", "compat_sender"),
     ("sender_sends_records", "(onlyRoute == null || q.Route == onlyRoute) && ", "", "compat_sender", "closing_next_boot"),
     ("sender_never_auths", "if (SwMs >= _nextAuthMs) { _nextAuthMs = SwMs + 1000; SteamAuth.MaybeRefresh(); }", "",
      "compat_sender", "closing_next_boot"),
@@ -84,7 +84,7 @@ WIRING = [
      [r"int\[\] s = SeatEvidenceCore\.CutScore\(localRounds, oppRounds, opponentDCReported\);",
       r"SeatEvidence\.Dispatch\(localSteamId, opponentSteamId, BuildReportRoomId\(s\[0\], s\[1\]\), s\[0\], s\[1\],"]),
     ("GameStateWatcher.cs", "the quit hook notes closing and dispatches a live game",
-     [r"internal static void SeatEvidenceOnQuit\(\)", r"if \(!isTracking \|\| gameOverReported\) return;",
+     [r"internal static void SeatEvidenceOnQuit\(\)\s*\{\s*try\s*\{\s*if \(!isTracking \|\| gameOverReported\) return;",
       r'SeatEvidence\.NoteEnd\("closing"\);', r"SeatEvidenceCut\(localTeamId == 0 \? p1Rounds : p2Rounds"]),
     ("Plugin.cs", "the quit hook is registered",
      [r"Application\.quitting \+= \(\) =>\s*\{\s*try \{ GameStateWatcher\.SeatEvidenceOnQuit\(\); \} catch \{ \}"]),

@@ -227,6 +227,24 @@ namespace SeatEvidenceReplay
             Check(path1, "D2: the shooter lists its one-sided path-1 entry");
         }
 
+        /// <summary>A path-1 hit with no damage envelope has no stamp: it counts
+        /// in unpair[1] and is never listed, even when a later block of the
+        /// other seat would admit a stamp of 0 into its window.</summary>
+        private static void Path1Unstamped()
+        {
+            SeatEvidence.BeginGame(true, true);
+            var mine = Proj(801, ME, true);
+            Hit(mine, 79, _opp, false);                                   // path 1, no damage envelope
+            PhotonNetwork.ServerTimestamp = 70;
+            Rpc(_opp.View.ViewID, 50, "RPCAO_DoBlock", OPP, () => DoBlock(_opp, true, BlockTrigger.BlockTriggerType.Default, false, true));
+            Dispatch(1, 0, ROOM + "_123456_r1");
+            string attach;
+            var rec = LastRecord(out attach);
+            Eq(1, rec.GetProperty("blk_recv").GetArrayLength(), "the block near stamp 0 is listed");
+            Eq("[]", Arr(rec, "hit_sent"), "the unstamped hit is never listed");
+            Eq("[0,1]", Arr(rec, "unpair"), "it counts in unpair[1]");
+        }
+
         /// <summary>Unkeyed windows count, never list; nested RPC frames
         /// restore the outer frame (an inner RPC does not hide the outer block's
         /// key); a remote frame from another view keys nothing.</summary>
@@ -420,7 +438,7 @@ namespace SeatEvidenceReplay
             { "victim_block_hit", VictimBlockHit }, { "shooter_paths", ShooterPaths },
             { "unkeyed_and_nesting", UnkeyedAndNesting }, { "cut_left", CutLeft }, { "cut_guards", CutGuards },
             { "closing_next_boot", ClosingNextBoot }, { "compat_sender", CompatSender }, { "compat_bounds", CompatBounds },
-            { "cut_422_kept", Cut422Kept },
+            { "cut_422_kept", Cut422Kept }, { "path1_unstamped", Path1Unstamped },
         };
 
         private static int Main(string[] args)
