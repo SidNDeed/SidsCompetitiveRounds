@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Merge pass 5, item 4: the title ladders client against the server's
+       CURRENT answer. backend/tests/test_title_ladders_current_server_compat.py
+       writes ExtractedSource (the shipped parser and the Titles section's text
+       and rung members, copied out of plugin/ApiClient.cs and
+       plugin/TitleLaddersUI.cs at test time), builds this project beside the
+       real plugin/TitleLadderRules.cs and runs it over the answer files. The
+       plugin sources are never modified. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>TitleLaddersCompat</AssemblyName>
+    <RootNamespace>CompetitiveRounds</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\TitleLadderRules.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+    <Compile Include="$(ExtractedSource)" />
+  </ItemGroup>
+
+</Project>
