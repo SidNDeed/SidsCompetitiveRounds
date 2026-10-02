@@ -68,7 +68,7 @@ import re
 import secrets
 import time
 import uuid
-from collections import OrderedDict
+from collections import OrderedDict, namedtuple
 from datetime import datetime, timezone
 
 from fastapi import Depends, HTTPException, Request
@@ -917,6 +917,23 @@ async def operator_version_exempt(request, app) -> bool:
 
 # -- The chat socket (counted in this build) ---------------------------------
 
+def socket_census_class(internal_ok: bool, session_presented: bool, operator: str,
+                        operator_name: str = "", version_present: bool = True) -> str:
+    """The connect-time counting class of one chat socket, one of five:
+    internal (a valid internal key), session (a session token was presented),
+    operator:<name> (a live operator key), mod_no_session, other (no version
+    header). `operator` is the operator verifier's word; any word but `valid`
+    names no operator. The ONE definition: count_socket counts with it and the
+    future socket read gate (socket_connect_verdict) reports it."""
+    if internal_ok:
+        return "internal"
+    if session_presented:
+        return "session"
+    if operator == "valid":
+        return "operator:" + operator_name
+    return "mod_no_session" if version_present else "other"
+
+
 async def count_socket(ws) -> None:
     """Count one accepted chat socket by its connect-time credential class, in
     log and enforce. Inbound behaviour is unchanged; never raises."""
@@ -926,17 +943,15 @@ async def count_socket(ws) -> None:
             return
         headers = ws.headers
         version_present = bool(headers.get("x-mod-version"))
-        key_id = ""
-        if internal_key_valid(headers.get("x-internal-key")):
-            cred = "internal"
-        elif headers.get("x-session-token"):
-            cred = "session"
-        else:
+        internal_ok = internal_key_valid(headers.get("x-internal-key"))
+        session_presented = bool(headers.get("x-session-token"))
+        verdict, payload, key_id = "absent", None, ""
+        if not internal_ok and not session_presented:
             verdict, payload = await verify_operator_key(headers.get("x-operator-key"), ws)
             if verdict == "valid":
-                cred, key_id = "operator:" + payload[2], _key_id(payload)
-            else:
-                cred = "mod_no_session" if version_present else "other"
+                key_id = _key_id(payload)
+        cred = socket_census_class(internal_ok, session_presented, verdict,
+                                   payload[2] if verdict == "valid" else "", version_present)
         client = getattr(ws, "client", None)
         census_add(SOCKET_TEMPLATE, "WEBSOCKET", cred, key_id, version_present, False,
               client.host if client else None, headers.get("user-agent"))
@@ -946,86 +961,136 @@ async def count_socket(ws) -> None:
 
 # -- The chat socket's read-side protocol (specified; NOT wired) ----------------
 #
-# Requirement 26 / finding M4. This build COUNTS the socket (count_socket) and
-# refuses nothing on it; the mode route refuses `enforce` while
-# SOCKET_READ_GATE_BUILT is False. What follows is the protocol the socket
-# read gate must implement before that constant may become True, written as
-# pure decision functions so the protocol is executable and tested
-# (test_read_gate_socket_protocol.py). Nothing in the app calls them yet.
+# Requirement 26 / finding M4 (round 1) and M2 (round 2). This build COUNTS the
+# socket (count_socket) and refuses nothing on it; the mode route refuses
+# `enforce` while SOCKET_READ_GATE_BUILT is False. The complete protocol the
+# socket read gate must implement before that constant may become True is ONE
+# table, Section 0 (b2) of the build notes, held row by row as PROTOCOL in
+# test_read_gate_socket_protocol.py; the functions below are that table as
+# executable decisions. Nothing in the app calls them yet.
 #
-# 1. Connect credentials, read from the HANDSHAKE headers only (the
-#    message-borne `auth` frame binds the inbound identity and is not a read
-#    credential). Exactly the three of the HTTP gate:
-#      X-Internal-Key  equal to API_SECRET_KEY                -> internal
-#      X-Session-Token whose row exists, is verified, unexpired -> session
-#      X-Operator-Key  naming a live api_operator_keys row     -> operator:<name>
-#    Any one valid credential admits (as evaluate). The verifiers and their
-#    caches are the HTTP gate's own (verify_session, verify_operator_key).
-# 2. Where it runs: after the version check and accept(), BEFORE the socket
-#    joins the chat manager and before the first outbound frame (the lockdown
-#    snapshot), so a refused socket never receives a chat frame.
-# 3. Refusal: the socket is closed with an application close code and the
-#    HTTP gate's own detail word as the reason --
-#      4401 read_credential_required   nothing valid was presented
-#      4401 session_required           a session token was presented and failed
-#      4401 operator_key_invalid       an operator key was presented and failed
-#      1013 read_gate_unavailable      a lookup raised, or the stage is unknown
-#      1013 session_replication_pending  the standby has no row for the token
-#    (4401 mirrors HTTP 401; 1013 is the protocol's "try again later").
-# 4. Rechecks while open, every SOCKET_RECHECK_SECONDS (the 60 s revocation
-#    bound of the HTTP gate), and the stage every MODE_TTL:
-#      session expiry   closed 4401 session_expired at the row's expires_at
-#      session deleted  closed 4401 session_required
-#      key revoked      closed 4401 operator_key_invalid
-#      stage -> enforce an open socket with no valid credential is closed
-#                       4401 read_credential_required
-#      stage -> log/off nothing is closed; rechecks stop refusing
-# 5. Counting is unchanged: every socket counted once at connect by its class
-#    (internal, session, operator:<name>, mod_no_session, other), a refused
-#    one with refused=True.
-# socket_enforcing() is the one switch: it answers True only for `enforce`
-# AND a built socket gate, so while SOCKET_READ_GATE_BUILT is False no stage
-# can select socket enforcement.
+# 1. Order at connect: the version check, accept(), then the stage. A built
+#    gate on a node whose stage is unknown closes 1013 read_gate_unavailable
+#    BEFORE any credential lookup (socket_stage_refusal), so no valid
+#    credential is admitted on it.
+# 2. Credentials from the HANDSHAKE headers only (the message-borne `auth`
+#    frame binds the inbound identity and is not a read credential):
+#      X-Internal-Key  equal to API_SECRET_KEY (compared, no lookup) -> internal
+#      X-Session-Token whose row exists, is verified, unexpired       -> session
+#      X-Operator-Key  naming a live api_operator_keys row            -> operator
+#    looked up through the HTTP gate's verifiers and caches; a cache miss is
+#    charged to the per-address limiter first (LOOKUP_CHARGE) and a refused
+#    charge is the word `limited`. Under enforce any one valid credential
+#    admits.
+# 3. Two separate results: the CENSUS CLASS (socket_census_class, five
+#    values) and the REFUSAL DIAGNOSIS (stage_unknown, lookup_error,
+#    lookup_limited, replication_pending, bad_session, bad_operator_key,
+#    no_credential; None when admitted). A diagnosis is never a census class.
+# 4. With nothing valid under enforce the diagnosis is the first of the order
+#    above after stage_unknown; each has one close code and reason
+#    (SOCKET_CLOSE).
+# 5. Counting: not built, counted in log and enforce (count_socket); built,
+#    counted in log, enforce and unknown (refused when closed), not in off.
+# 6. Rechecks while open (built, enforce): every SOCKET_RECHECK_SECONDS (the
+#    60 s revocation bound of the HTTP gate) and the stage every MODE_TTL --
+#    see socket_recheck_verdict.
 
 SOCKET_REFUSE_CODE = 4401
 SOCKET_RETRY_CODE = 1013
 SOCKET_RECHECK_SECONDS = CRED_TTL
+
+# refusal diagnosis -> (close code, close reason)
+SOCKET_CLOSE = {
+    "stage_unknown": (SOCKET_RETRY_CODE, "read_gate_unavailable"),
+    "lookup_error": (SOCKET_RETRY_CODE, "read_gate_unavailable"),
+    "lookup_limited": (SOCKET_RETRY_CODE, "rate_limited"),
+    "replication_pending": (SOCKET_RETRY_CODE, "session_replication_pending"),
+    "bad_session": (SOCKET_REFUSE_CODE, "session_required"),
+    "bad_operator_key": (SOCKET_REFUSE_CODE, "operator_key_invalid"),
+    "no_credential": (SOCKET_REFUSE_CODE, "read_credential_required"),
+}
+
+
+# (admit, close_code, close_reason, census_class, counted, diagnosis)
+SocketVerdict = namedtuple("SocketVerdict", ("admit", "close_code", "close_reason",
+                                             "census_class", "counted", "diagnosis"))
 
 
 def socket_enforcing(mode: str) -> bool:
     return mode == "enforce" and SOCKET_READ_GATE_BUILT is True
 
 
-def socket_connect_verdict(mode: str, internal_ok: bool, session: str, operator: str,
-                           operator_name: str = "", replica: bool = False,
-                           version_present: bool = True) -> tuple:
-    """(admit, close_code, reason, credential_class) for one handshake.
-    `session` and `operator` are the verifiers' verdict words (absent, bad,
-    miss, error, valid). An unverified socket's class is the HTTP gate's
-    unverified class (lookup_error, replication_pending, bad_session,
-    bad_operator_key, mod_no_session, other)."""
-    if internal_ok:
-        return True, None, None, "internal"
-    if session == "valid":
-        return True, None, None, "session"
-    if operator == "valid":
-        return True, None, None, "operator:" + operator_name
+def socket_stage_refusal(mode: str):
+    """Step 1, before any lookup: the refusal diagnosis `stage_unknown` when a
+    BUILT gate's stage is unknown, else None."""
+    if SOCKET_READ_GATE_BUILT is True and mode == UNKNOWN:
+        return "stage_unknown"
+    return None
+
+
+def _socket_diagnosis(internal_ok, session, operator, replica) -> str | None:
+    """Why nothing valid admits under enforce; None when a credential is valid."""
+    if internal_ok or session == "valid" or operator == "valid":
+        return None
     if session == "error" or operator == "error":
-        cls, code, reason = "lookup_error", SOCKET_RETRY_CODE, "read_gate_unavailable"
-    elif session == "miss" and replica:
-        cls, code, reason = "replication_pending", SOCKET_RETRY_CODE, "session_replication_pending"
-    elif session in ("bad", "miss"):
-        cls, code, reason = "bad_session", SOCKET_REFUSE_CODE, "session_required"
-    elif operator == "bad":
-        cls, code, reason = "bad_operator_key", SOCKET_REFUSE_CODE, "operator_key_invalid"
-    else:
-        cls = "mod_no_session" if version_present else "other"
-        code, reason = SOCKET_REFUSE_CODE, "read_credential_required"
-    if mode == UNKNOWN and SOCKET_READ_GATE_BUILT is True:
-        return False, SOCKET_RETRY_CODE, "read_gate_unavailable", cls
+        return "lookup_error"
+    if session == "limited" or operator == "limited":
+        return "lookup_limited"
+    if session == "miss" and replica:
+        return "replication_pending"
+    if session in ("bad", "miss"):
+        return "bad_session"
+    if operator == "bad":
+        return "bad_operator_key"
+    return "no_credential"
+
+
+def socket_connect_verdict(mode: str, internal_ok: bool, session: str = "absent",
+                           operator: str = "absent", operator_name: str = "",
+                           replica: bool = False, version_present: bool = True) -> SocketVerdict:
+    """The table of Section 0 (b2) for one handshake. `session` and `operator`
+    are the verifiers' words (absent, bad, miss, error, limited, valid; a
+    session `unchecked` = presented, not looked up); under a built gate whose
+    stage is unknown none of them was looked up, so only the session's
+    presence names a class there."""
+    stage_refusal = socket_stage_refusal(mode)
+    if stage_refusal is not None:
+        census = socket_census_class(internal_ok, session != "absent", "absent", "",
+                                     version_present)
+        code, reason = SOCKET_CLOSE[stage_refusal]
+        return SocketVerdict(False, code, reason, census, True, stage_refusal)
+    census = socket_census_class(internal_ok, session != "absent", operator, operator_name,
+                                 version_present)
+    counted = mode in ("log", "enforce")
     if not socket_enforcing(mode):
-        return True, None, None, cls
-    return False, code, reason, cls
+        return SocketVerdict(True, None, None, census, counted, None)
+    diagnosis = _socket_diagnosis(internal_ok, session, operator, replica)
+    if diagnosis is None:
+        return SocketVerdict(True, None, None, census, counted, None)
+    code, reason = SOCKET_CLOSE[diagnosis]
+    return SocketVerdict(False, code, reason, census, counted, diagnosis)
+
+
+async def socket_connect_check(ws, mode: str) -> SocketVerdict:
+    """The connect half of the protocol in its ORDER (not called by ws_chat
+    while SOCKET_READ_GATE_BUILT is False): the stage first, and only then the
+    handshake credentials through the HTTP gate's verifiers -- the session
+    unless the internal key is valid, the operator key unless the session is."""
+    headers = ws.headers
+    version_present = bool(headers.get("x-mod-version"))
+    internal_ok = internal_key_valid(headers.get("x-internal-key"))
+    token = headers.get("x-session-token")
+    if socket_stage_refusal(mode) is not None:
+        return socket_connect_verdict(mode, internal_ok, "unchecked" if token else "absent",
+                                      "absent", "", REPLICA_NODE, version_present)
+    session, operator, name = "absent", "absent", ""
+    if not internal_ok:
+        session, _ = await verify_session(token, ws)
+        if session != "valid":
+            operator, payload = await verify_operator_key(headers.get("x-operator-key"), ws)
+            name = payload[2] if operator == "valid" else ""
+    return socket_connect_verdict(mode, internal_ok, session, operator, name, REPLICA_NODE,
+                                  version_present)
 
 
 def socket_recheck_verdict(mode: str, credential: str, now: float,
@@ -1033,6 +1098,8 @@ def socket_recheck_verdict(mode: str, credential: str, now: float,
                            session_still_valid: bool = True,
                            operator_still_live: bool = True) -> tuple:
     """(keep, close_code, reason) for one open socket at one recheck."""
+    if socket_stage_refusal(mode) is not None:
+        return (False,) + SOCKET_CLOSE["stage_unknown"]
     if not socket_enforcing(mode):
         return True, None, None
     if credential == "internal":
