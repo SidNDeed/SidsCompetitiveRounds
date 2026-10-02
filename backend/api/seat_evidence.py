@@ -193,18 +193,34 @@ RECORD_SPEC = (
     ("omit", _O(tuple((k, CNT) for k in LIST_ORDER))),
 )
 RECORD_KEYS = tuple(k for k, _ in RECORD_SPEC)
+# Amendment A1: how this seat's game ended, OPTIONAL, right after "rounds"
+# when present. Absent means this seat saw the game over, so a full-game
+# record keeps the contract V2 key set and bytes.
+END_KINDS = ("left", "other_left", "lost", "closing")
+RECORD_KEYS_END = (RECORD_KEYS[:RECORD_KEYS.index("rounds") + 1] + ("end",)
+                   + RECORD_KEYS[RECORD_KEYS.index("rounds") + 1:])
+
+
+def record_keys(rec) -> tuple:
+    """The key set a record must carry, in order: contract V2's, or that with
+    the amendment-A1 `end` key after `rounds` when the record names one."""
+    return RECORD_KEYS_END if "end" in rec else RECORD_KEYS
 
 
 def check_record(rec) -> None:
     """Raise EvidenceRefused(422, <key>) for the first key outside its bound,
-    or a key set / key order other than the contract's."""
+    or a key set / key order other than the contract's (with or without the
+    amendment-A1 `end` key right after `rounds`)."""
     if not isinstance(rec, dict):
         raise EvidenceRefused(422, "record")
     keys = list(rec.keys())
-    if keys != list(RECORD_KEYS):
-        missing = [k for k in RECORD_KEYS if k not in rec]
-        extra = [k for k in keys if k not in RECORD_KEYS]
+    want = list(record_keys(rec))
+    if keys != want:
+        missing = [k for k in want if k not in rec]
+        extra = [k for k in keys if k not in want]
         raise EvidenceRefused(422, (missing or extra or ["key_order"])[0])
+    if "end" in rec and rec["end"] not in END_KINDS:
+        raise EvidenceRefused(422, "end")
     for key, check in RECORD_SPEC:
         if not check(rec[key]):
             raise EvidenceRefused(422, key)
@@ -297,8 +313,9 @@ def _dumps(obj) -> str:
 def budget_record(rec: dict, limit: int = RECORD_MAX_BYTES) -> str:
     """The reference budgeter. `rec` holds every section-2 key in order with
     full lists; returns the record text, <= limit bytes, with `omit` counting
-    every entry it dropped. Deterministic: the same input gives the same bytes."""
-    out = {k: rec[k] for k in RECORD_KEYS}
+    every entry it dropped. Deterministic: the same input gives the same bytes.
+    An amendment-A1 `end` key stays in place and is never removed."""
+    out = {k: rec[k] for k in record_keys(rec)}
     omit = {k: int(rec["omit"].get(k, 0)) for k in LIST_ORDER}
     for k in LIST_ORDER:
         lst = list(out[k])

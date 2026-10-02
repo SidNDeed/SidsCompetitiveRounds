@@ -552,3 +552,35 @@ def test_exact_attach_identity_compares_only_records_of_the_attached_room(live, 
     other = [r["id"] for r in rec_ids if r["attach_key"] == key + "_r7"]
     assert ce._jsonv(game["record_faults"])["other_attach_key"] == other and len(other) == 1
     assert [(r["source"], r["coverage"]) for r in daily] == [("meas", "one"), ("self", "one")]
+
+
+def test_seat_route_a1_a_cut_game_record_with_end_is_recorded_not_refused(live, monkeypatch):
+    """Seat evidence amendment A1 at the seat route: a record carrying `end`
+    is stored (200 recorded), with `end` in the stored payload."""
+    import seat_evidence_fixtures as sfx
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", sfx.KEY)
+    a, b = seat(25), seat(26)
+
+    def with_end(rec, kind):
+        out = {}
+        for k, v in rec.items():
+            out[k] = v
+            if k == "rounds":
+                out["end"] = kind
+        return out
+
+    async def go():
+        sm = live.sm
+        await _players(sm, a, b)
+        ta = await _session(sm, a)
+        body = sfx.envelope(with_end(sfx.base_record(), "other_left"), seat=a, other=b,
+                            stable="room_cev_a1_000001")
+        async with sm() as db:
+            r = await main.submit_seat_evidence(Req(body, ta), db)
+        code, payload = (200, r) if isinstance(r, dict) else (r.status_code, json.loads(r.body))
+        stored = await _scalar(sm, "SELECT payload ->> 'end' FROM seat_evidence "
+                                   "WHERE stable_game_key = 'room_cev_a1_000001'")
+        return code, payload, stored
+    code, payload, stored = live.run(go())
+    assert (code, payload) == (200, {"status": "recorded"})
+    assert stored == "other_left"

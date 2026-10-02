@@ -2,3 +2,4 @@
 backend/tests/evidence/** -text
 # The combat evidence canonical fixtures are reproduced byte for byte by the client.
 backend/tests/fixtures/combat_evidence/** -text
+backend/tests/fixtures/seat_evidence_client/** -text
