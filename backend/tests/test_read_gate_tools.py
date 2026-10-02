@@ -290,9 +290,9 @@ def test_coverage_reads_one_anchor_per_box():
     assert len([r for r in scoped if r["at"] < start]) == 2
     v = T.coverage(recs, 14, now)
     assert v["primary"]["ok"] and v["standby"]["ok"], v
-    # the primary's anchor is more than an hour before its first window pull:
-    # it anchors, so the leading interval is measured from it, clipped
-    assert v["primary"]["longest_gap"] <= 3600, v
+    assert v["primary"]["anchor"] is True and v["standby"]["anchor"] is True, v
+    for box in ("primary", "standby"):   # the anchor is read, never counted as a window pull
+        assert v[box]["pulls"] == len([r for r in recs if r["box"] == box and r["at"] >= start]), v
 
 
 def test_canary_counts_exactly_n(seat):
