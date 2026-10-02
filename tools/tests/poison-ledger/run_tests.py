@@ -184,10 +184,10 @@ MUTANTS = [
      "if (_started.Count >= StartedCap) _started.Clear();", "start_durable", "broadcast_then_claim"),
     # F5: the id is consumed before any lookup
     ("collect_before_admit",
-     "string dup = Admit(sender, claimId, nowMs, out overRate);\n            if (dup != null) return dup;\n"
+     "string dup = Consume(sender, claimId);\n            if (dup != null) return dup;\n"
      "            try { facts = collect(); }\n            catch (Exception ex) { return \"fault:\" + ex.GetType().Name; }",
      "try { facts = collect(); }\n            catch (Exception ex) { return \"fault:\" + ex.GetType().Name; }\n"
-     "            string dup = Admit(sender, claimId, nowMs, out overRate);\n            if (dup != null) return dup;",
+     "            string dup = Consume(sender, claimId);\n            if (dup != null) return dup;",
      "claim_fault_terminal", "claim_starts_once"),
     # F6: the traffic terms are the payloads' sizes
     ("wire_activate_short", "return new object[] { TypeActivate, Protocol, aid, fighters, point.Ts, point.Set };",
@@ -209,6 +209,20 @@ MUTANTS = [
     ("point_unchecked",
      "if (!point.SameAs(_epoch)) { Kill(\"point-boundary\"); why = \"killed:\" + _killWhy; return false; }", "",
      "retake_invalidates", "activation_requires_all_acks"),
+    # Fix pass 2. H1: a header that was not sent retires the stream
+    ("header_failure_kept", "if (!sent) Retire(ret, \"header-send-failed\");", "",
+     "header_failure_retires", "late_acker_replay"),
+    # H2: a fence this seat could not record retires what it ends
+    ("fence_unrecorded_kept", "if (!ok) Break(view);", "", "fence_unrecorded_retires", "unstamped_boundary_retires"),
+    ("retire_keeps_retained", "if (Kept != null) { ret.Drop(Kept); Kept = null; }", "",
+     "retired_stream_sends_nothing", "late_acker_replay"),
+    # M1 + M2: the rate admission precedes every per-claim step, truncated payloads included
+    ("truncated_skips_rate", "if (!AdmitRate(sender, nowMs)) { Refuse(sender, nowMs, a); return; }",
+     "if (a != null && a.Length >= 9 && !AdmitRate(sender, nowMs)) { Refuse(sender, nowMs, a); return; }",
+     "truncated_claim_terminal", "claim_starts_once"),
+    # M2: past the rate a claim is refused and counted
+    ("recv_rate_unbounded", "if (q.Count >= ClaimsPerRollingSecond) return false;", "",
+     "claim_rate_bounded", "dup_verdict"),
 ]
 
 

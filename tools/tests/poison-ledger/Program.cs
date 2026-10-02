@@ -1105,6 +1105,157 @@ namespace PoisonLedgerTests
                 && V3Wire.Ack(1, 1).Length < 7, "v1.40.3 drops every short v3 payload");
         }
 
+        // ── Fix pass 2 ───────────────────────────────────────────────────
+
+        // 77. H1: LIFE goes out, the header's raise fails, later tick raises
+        //     would succeed. The victim retires the stream -- no later tick, no
+        //     summary, no replay -- so the victim, a LIFE holder and a late
+        //     acknowledger all leave the stream's health unchanged.
+        private static void HeaderFailureRetires()
+        {
+            var ret = new PointRetainer();
+            LifeEpoch P = E(100), L = E(100);
+            var seat = new PoisonLedgerCore[4]; var ap = new Ap[4]; var inbox = new EpochInbox[4];
+            for (int i = 1; i <= 3; i++)
+            {
+                seat[i] = new PoisonLedgerCore(); ap[i] = new Ap(); inbox[i] = new EpochInbox();
+                seat[i].NotePointBoundary(100); seat[i].OnRevive(V);
+            }
+            var send = new StreamSend(V, ret.Begin(V, 1, P, L, new[] { 1, 2 }, new[] { 1, 2 }, null));
+            inbox[1].Note(V, 1, L); inbox[2].Note(V, 1, L);           // LIFE to actors 1 (the victim) and 2: sent
+            Check(send.AfterLife(ret, true), "v3 after its LIFE");
+            send.AfterHeader(ret, false);                             // the header's raise fails: no seat gets it
+            send.AfterTick(0, false, false);
+            int ticksSent = 0;
+            for (int t = 1; t <= 3; t++)
+            {
+                if (!send.MaySendTick) break;
+                ticksSent++;
+                for (int i = 1; i <= 3; i++) seat[i].OnTick(V, 1, t, false, true, ap[i]);
+                send.AfterTick(t, false, true);
+            }
+            if (send.Kept != null && !send.Retired)                   // CloseV3: a kept, unretired stream only
+                foreach (int a in PointRetainer.CloseTargets(send.Kept, new[] { 1, 2, 3 }, 1)) Deliver(seat[a], send.Kept, ap[a]);
+            foreach (var k in ret.ReplayFor(3, 1, V, P, L)) Deliver(seat[3], k, ap[3]);   // actor 3 acknowledges late
+            Eq("||", ap[1].Seen + "|" + ap[2].Seen + "|" + ap[3].Seen, "every seat leaves the stream's health unchanged");
+            Eq(0, ticksSent, "no later tick");
+            Eq(0, ret.CountFor(V), "out of the retained state");
+            Check(inbox[2].Count == 1 && seat[2].Find(V, 1) == null, "the holder's LIFE names a stream it never holds");
+        }
+
+        // 78. H2: a fence this seat could not record -- a fault while recording
+        //     it, or no stamp -- retires every held record of the views it ends
+        //     before any later tick can move health; a recorded fence retires
+        //     nothing of the current life.
+        private static void FenceUnrecordedRetires()
+        {
+            var l = new PoisonLedgerCore(); var ap = new Ap();
+            l.NotePointBoundary(100); l.OnRevive(V); l.OnRevive(U);
+            l.OnHeader(V, 1, E(100), false, null, true, ap);
+            l.OnTick(V, 1, 1, false, false, ap);                      // pending: the replica is not live
+            l.OnHeader(U, 2, E(100), false, null, true, ap);
+            Check(l.Fence(V, () => { l.OnRevive(V); return true; }), "a recorded revive fence");
+            Check(l.Find(V, 1) != null && !l.Broken, "retires nothing of the current life");
+            Check(!l.Fence(V, () => { throw new InvalidOperationException("revive"); }), "a fault while recording");
+            Check(l.Find(V, 1) == null && l.Broken, "the view's held record retired");
+            Eq(1, l.RetiredLog[0].PendingDropped, "its pending tick dropped");
+            Check(!l.OnTick(V, 1, 2, false, true, ap), "a later tick of it moves nothing");
+            l.Fill(V, true, ap);
+            Check(l.Find(U, 2) != null, "another view's record stays");
+            Check(!l.Fence(-1, () => false), "a point boundary without its stamp");
+            Check(l.Find(U, 2) == null, "every view's record retired");
+            Eq("R1.0,R2.0", ap.Seen, "nothing after the unrecorded fences");
+        }
+
+        // 79. H2 and the send sweep: an open stream retired by a fence this
+        //     seat could not record sends nothing more -- no tick, and it is out
+        //     of the retained state, so no summary or replay names it. A stream
+        //     whose LIFE was not sent is today's everywhere and still sends.
+        private static void RetiredStreamSendsNothing()
+        {
+            var ret = new PointRetainer();
+            var send = new StreamSend(V, ret.Begin(V, 1, E(100), E(100), new[] { 1, 2 }, new[] { 1, 2 }, null));
+            Check(send.AfterLife(ret, true) && send.AfterHeader(ret, true), "a live v3 stream");
+            send.AfterTick(0, false, true); send.AfterTick(1, false, true);
+            send.Retire(ret, "epoch-broken");
+            Check(!send.MaySendTick && !send.V3, "nothing more is sent");
+            Check(send.Kept == null, "no summary");
+            Eq(0, ret.ReplayFor(3, 1, V, E(100), E(100)).Count, "no replay");
+            Eq("epoch-broken", send.RetiredWhy, "named");
+            var noLife = new StreamSend(V, ret.Begin(V, 2, E(100), E(100), new[] { 1, 2 }, new[] { 1, 2 }, null));
+            Check(!noLife.AfterLife(ret, false) && noLife.Kept == null && noLife.MaySendTick,
+                "LIFE not sent: today's everywhere, its header and ticks still go out");
+            Eq(0, ret.CountFor(V), "and it leaves the retained state");
+            var today = new StreamSend(V, null);
+            Check(!today.AfterHeader(ret, false) && !today.MaySendTick, "any stream whose header failed sends nothing more");
+        }
+
+        private static object[] ClaimEv(int id, int proj) { return V3Wire.Claim(V, proj, id, 5, 1, E(100)); }
+
+        // 80. M1: a current-protocol claim shorter than its nine typed elements
+        //     gets exactly one line: its tuple as far as the payload carries it
+        //     and the named result "malformed". Truncated claims count toward
+        //     the rate before any parsing, like any other claim.
+        private static void TruncatedClaimTerminal()
+        {
+            var c = new ClaimCore();
+            int filled = 0, started = 0;
+            Action<ClaimFacts> fill = f => filled++;
+            Func<int, string> start = id => { started++; return "started streams=none"; };
+            object T = V3Wire.TypeClaim, P = V3Wire.Protocol;
+            c.Receive(2, new object[] { T, P }, 1000, fill, start);
+            c.Receive(2, new object[] { T, P, V }, 1000, fill, start);
+            c.Receive(2, new object[] { T, P, V, 10 }, 1000, fill, start);
+            c.Receive(2, new object[] { T, P, V, 10, 7, 5 }, 1000, fill, start);
+            Eq("[POISON-CLAIM] recv from=2 c=-1 proj=-1 victim=-1 outcome=drop reason=malformed|"
+                + "[POISON-CLAIM] recv from=2 c=-1 proj=-1 victim=1001 outcome=drop reason=malformed|"
+                + "[POISON-CLAIM] recv from=2 c=-1 proj=10 victim=1001 outcome=drop reason=malformed|"
+                + "[POISON-CLAIM] recv from=2 c=7 proj=10 victim=1001 outcome=drop reason=malformed",
+                string.Join("|", c.Lines), "one line each, the tuple as far as present");
+            Eq(0, filled + started, "no fact collection, nothing started");
+            c.Lines.Clear();
+            for (int i = 0; i < 40; i++) c.Receive(3, new object[] { T, P }, 2000 + i, fill, start);
+            Eq(ClaimCore.ClaimsPerRollingSecond, c.Lines.Count, "truncated claims are admitted by the rate first");
+            c.FlushRate(3000, false);
+            Eq(ClaimCore.ClaimsPerRollingSecond + 1, c.Lines.Count, "the excess is one aggregate line");
+            Eq("[POISON-CLAIM] rate from=3 second=2 excess=8 first=(c=-1 proj=-1 victim=-1) last=(c=-1 proj=-1 victim=-1)"
+                + " total=8 room_total=8 outcome=drop reason=rate", c.Lines[c.Lines.Count - 1], "counted, the tuples as far as present");
+        }
+
+        // 81. M2: ten times the rate from one sender, two seconds running.
+        //     Within the rate each claim has its own line; past it each is
+        //     refused "rate" and counted: one aggregate line per sender and
+        //     aligned second with the first and last tuple and the running
+        //     totals. Every claim is on its own line or in a counted aggregate,
+        //     another sender is admitted on its own, and the line bytes are bounded.
+        private static void ClaimRateBounded()
+        {
+            var c = new ClaimCore();
+            int filled = 0;
+            Action<ClaimFacts> fill = f => { filled++; f.GateOn = false; f.GateWhy = "test"; };
+            Func<int, string> start = id => "started streams=none";
+            int R = ClaimCore.ClaimsPerRollingSecond, N = 10 * R, id = 0;
+            for (int s = 1; s <= 2; s++)
+                for (int i = 0; i < N; i++) { id++; c.Receive(2, ClaimEv(id, 500 + id), s * 1000L + i * 3, fill, start); }
+            c.Receive(3, ClaimEv(1, 9), 2500, fill, start);
+            c.FlushRate(3000, false);
+            var recv = c.Lines.Where(x => x.StartsWith("[POISON-CLAIM] recv ")).ToList();
+            var rate = c.Lines.Where(x => x.StartsWith("[POISON-CLAIM] rate ")).ToList();
+            Eq(2 * (R + 1) + 1, c.Lines.Count, "exactly R own lines and one aggregate per second, plus the other sender's");
+            Eq(2 * R + 1, recv.Count, "own lines");
+            Eq(2 * R + 1, filled, "facts collected for admitted claims only");
+            Eq("[POISON-CLAIM] rate from=2 second=1 excess=288 first=(c=33 proj=533 victim=1001) last=(c=320 proj=820 victim=1001)"
+                + " total=288 room_total=288 outcome=drop reason=rate", rate[0], "the first second's aggregate");
+            Eq("[POISON-CLAIM] rate from=2 second=2 excess=288 first=(c=353 proj=853 victim=1001) last=(c=640 proj=1140 victim=1001)"
+                + " total=576 room_total=576 outcome=drop reason=rate", rate[1], "the second's");
+            Eq(2 * N, (recv.Count - 1) + 288 + 288, "every claim of the sender is on its own line or counted");
+            Check(recv.Last().StartsWith("[POISON-CLAIM] recv from=3 c=1 "), "another sender is admitted on its own");
+            Eq(95, ClaimLine.Recv(int.MinValue, int.MinValue, int.MinValue, int.MinValue, "").Length, "an own line: 95 bytes + its outcome");
+            var ext = new object[] { null, null, int.MinValue, int.MinValue, int.MinValue };
+            Eq(279, ClaimLine.Rate(int.MinValue, long.MinValue, int.MaxValue, ext, ext, long.MaxValue, long.MaxValue).Length,
+                "an aggregate line: at most 279 bytes");
+        }
+
         private static ClaimFacts Facts(int sender, int claimId, long proj)
         {
             return new ClaimFacts
@@ -1192,6 +1343,11 @@ namespace PoisonLedgerTests
             { "silent_arm_label", SilentArmLabel },
             { "retake_invalidates", RetakeInvalidates },
             { "traffic_formula", TrafficFormula },
+            { "header_failure_retires", HeaderFailureRetires },
+            { "fence_unrecorded_retires", FenceUnrecordedRetires },
+            { "retired_stream_sends_nothing", RetiredStreamSendsNothing },
+            { "truncated_claim_terminal", TruncatedClaimTerminal },
+            { "claim_rate_bounded", ClaimRateBounded },
         };
 
         private static int Main(string[] args)

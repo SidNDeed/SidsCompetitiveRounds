@@ -246,6 +246,22 @@ namespace CompetitiveRounds
 
         internal bool Broken { get { return _broken; } }
 
+        /// <summary>Fix pass 2 (H2): one fence (a point boundary, a Phoenix
+        /// boundary or a revive) as its hook records it. record() returns true
+        /// when the fence is recorded. False (the boundary RPC carried no
+        /// stamp) or a fault inside it is a fence this seat could not record:
+        /// every held record of the views that fence ends (view &lt; 0: every
+        /// view) retires now with its pending ticks dropped, and no record is
+        /// created again in the room (Break), so nothing held from before the
+        /// fence can move health after it. True when recorded.</summary>
+        internal bool Fence(int view, Func<bool> record)
+        {
+            bool ok;
+            try { ok = record(); } catch { ok = false; }
+            if (!ok) Break(view);
+            return ok;
+        }
+
         /// <summary>A v3 header: creates the record if absent (a repeat never
         /// overwrites one) and treats the header as tick 0's verdict. Null when
         /// this seat refused to hold a new record (the memory backstop).</summary>
@@ -420,7 +436,7 @@ namespace CompetitiveRounds
 
     internal sealed class ClaimFacts
     {
-        internal int Sender, ClaimId, VictimView, ProjOwner, PoisonChildren;
+        internal int Sender, ClaimId, VictimView, ProjView, ProjOwner, PoisonChildren;
         internal long ProjInstance, NowMs;
         internal bool GateOn, SenderAcked, VictimFound, VictimIsMine, ProjFound, Live, VictimFenceKnown;
         internal string GateWhy;
@@ -471,48 +487,184 @@ namespace CompetitiveRounds
             return null;
         }
 
-        /// <summary>The victim's first step for a claim whose fields have their
-        /// types, before any lookup: the sender's claim id is consumed and the
-        /// receive-rate slot taken. "dup" for an id at or below the sender's
-        /// high water, else null.</summary>
-        internal string Admit(int sender, int claimId, long nowMs, out bool overRate)
+        /// <summary>The sender's claim id is consumed: "dup" for an id at or
+        /// below the sender's high water, else null (the high water moves to it).</summary>
+        private string Consume(int sender, int claimId)
         {
-            overRate = false;
             int hw;
             if (_highWater.TryGetValue(sender, out hw) && !PoisonLedgerCore.After(claimId, hw)) return "dup";
             _highWater[sender] = claimId;
-            Queue<long> q;
-            if (!_recvTimes.TryGetValue(sender, out q)) { q = new Queue<long>(); _recvTimes[sender] = q; }
-            while (q.Count > 0 && q.Peek() <= nowMs - RollingWindowMs) q.Dequeue();
-            q.Enqueue(nowMs);
-            overRate = q.Count > ClaimsPerRollingSecond;
             return null;
         }
 
-        /// <summary>One received claim, end to end (V4 B6): the id is consumed
-        /// first, then the facts are collected; a fault while collecting is the
-        /// terminal result "fault:&lt;type&gt;". Every path returns one named
-        /// result, and a repeat of the id is "dup" whatever the first got.</summary>
+        /// <summary>A claim the rate admission let through, past its type
+        /// checks (V4 B6): the id is consumed first, then the facts are
+        /// collected; a fault while collecting is the terminal result
+        /// "fault:&lt;type&gt;". Every path returns one named result, and a
+        /// repeat of the id is "dup" whatever the first got. The rate is not
+        /// read here: fix pass 2 (M2) takes it in AdmitRate, ahead of every
+        /// per-claim step, so nowMs only names the receive time.</summary>
         internal string Handle(int sender, int claimId, long nowMs, Func<ClaimFacts> collect, out ClaimFacts facts)
         {
             facts = null;
-            bool overRate;
-            string dup = Admit(sender, claimId, nowMs, out overRate);
+            string dup = Consume(sender, claimId);
             if (dup != null) return dup;
             try { facts = collect(); }
             catch (Exception ex) { return "fault:" + ex.GetType().Name; }
             if (facts == null) return "fault:no-facts";
-            return Decide(facts, overRate);
+            return Decide(facts);
         }
 
-        /// <summary>Handle with facts already in hand.</summary>
+        /// <summary>A claim with its facts already in hand, behind the same rate
+        /// admission as Receive: past the rate it is "rate" (counted, its id
+        /// consumed), else Handle.</summary>
         internal string VictimDecide(ClaimFacts f)
         {
+            int sender = f.Sender;
+            if (!AdmitRate(sender, f.NowMs))
+            {
+                Refuse(sender, f.NowMs, new object[] { V3Wire.TypeClaim, V3Wire.Protocol, f.VictimView, f.ProjView, f.ClaimId });
+                return "rate";
+            }
             ClaimFacts got;
-            return Handle(f.Sender, f.ClaimId, f.NowMs, () => f, out got);
+            return Handle(sender, f.ClaimId, f.NowMs, () => f, out got);
         }
 
-        private string Decide(ClaimFacts f, bool overRate)
+        // ── Received claims: the rate first, then one line each (fix pass 2, M1, M2) ──
+
+        /// <summary>The claims of one sender past the rate in one aligned
+        /// second: their count, the first and the last payload (their tuples
+        /// are read only when the line is written), and the sender's running
+        /// total for the room.</summary>
+        private sealed class Excess
+        {
+            internal long Second;
+            internal int Count;
+            internal object[] First, Last;
+            internal long Total;
+        }
+
+        private readonly Dictionary<int, Excess> _excess = new Dictionary<int, Excess>();
+        private long _roomExcess;
+
+        /// <summary>The claim evidence lines, in order, for the shell to write
+        /// and clear: one per claim Receive admitted, one per sender and aligned
+        /// second that had claims past the rate (VictimDecide writes none).</summary>
+        internal readonly List<string> Lines = new List<string>();
+
+        /// <summary>The aligned second a receive time lies in.</summary>
+        internal static long SecondOf(long ms)
+        {
+            return ms >= 0 ? ms / RollingWindowMs : (ms - (RollingWindowMs - 1)) / RollingWindowMs;
+        }
+
+        /// <summary>A payload field as the tuple shows it: -1 unless the
+        /// payload carries an int there.</summary>
+        internal static int Field(object[] a, int i)
+        {
+            return a != null && i < a.Length && a[i] is int ? (int)a[i] : -1;
+        }
+
+        /// <summary>Fix pass 2 (M2): the receive-side admission, per sender and
+        /// per room, taken before any per-claim step. At most
+        /// ClaimsPerRollingSecond claims of one sender are admitted in any
+        /// rolling second (the window holds admitted claims only, so excess
+        /// traffic never extends it). False: refused.</summary>
+        internal bool AdmitRate(int sender, long nowMs)
+        {
+            Queue<long> q;
+            if (!_recvTimes.TryGetValue(sender, out q)) { q = new Queue<long>(); _recvTimes[sender] = q; }
+            while (q.Count > 0 && q.Peek() <= nowMs - RollingWindowMs) q.Dequeue();
+            if (q.Count >= ClaimsPerRollingSecond) return false;
+            q.Enqueue(nowMs);
+            return true;
+        }
+
+        /// <summary>A claim past the rate: its terminal result is "rate". Its
+        /// id is consumed when the payload carries one (a repeat is "dup"), and
+        /// it is counted in the sender's aggregate for its aligned second; that
+        /// aggregate is one line, written by the first FlushRate after its
+        /// second ends (the shell's upkeep, about once a second; the next
+        /// admitted claim; or that sender's next claim past the rate in a later
+        /// second), or at room exit.</summary>
+        private void Refuse(int sender, long nowMs, object[] a)
+        {
+            if (a != null && a.Length > 4 && a[4] is int) Consume(sender, (int)a[4]);
+            Excess x;
+            if (!_excess.TryGetValue(sender, out x)) { x = new Excess(); _excess[sender] = x; }
+            long sec = SecondOf(nowMs);
+            if (x.Count > 0 && x.Second != sec) Flush(sender, x);
+            if (x.Count == 0) { x.Second = sec; x.First = a; }
+            x.Count++;
+            x.Last = a;
+            x.Total++;
+            _roomExcess++;
+        }
+
+        private void Flush(int sender, Excess x)
+        {
+            Lines.Add(ClaimLine.Rate(sender, x.Second, x.Count, x.First, x.Last, x.Total, _roomExcess));
+            x.Count = 0;
+            x.First = null;
+            x.Last = null;
+        }
+
+        /// <summary>Writes the aggregate of every sender whose second has ended
+        /// before nowMs's (every pending one when all: room exit).</summary>
+        internal void FlushRate(long nowMs, bool all)
+        {
+            long sec = SecondOf(nowMs);
+            foreach (var kv in _excess)
+                if (kv.Value.Count > 0 && (all || kv.Value.Second < sec)) Flush(kv.Key, kv.Value);
+        }
+
+        /// <summary>One claim event that reached the dispatcher (fix pass 2, M1
+        /// and M2), end to end. The rate admission comes first, before any
+        /// per-claim step, a truncated payload included. An admitted claim gets
+        /// exactly one line: its tuple (sender, claim, projectile, victim; -1
+        /// for a field the payload does not carry as an int) and one named
+        /// terminal result -- "malformed" for a payload short of its nine typed
+        /// elements, "fault:&lt;type&gt;" for a fault anywhere, else Handle's
+        /// result, where start(claim id) runs a started claim and names the
+        /// streams it opened. fill() is the fact collection Handle runs after
+        /// the id is consumed.</summary>
+        internal void Receive(int sender, object[] a, long nowMs, Action<ClaimFacts> fill, Func<int, string> start)
+        {
+            if (!AdmitRate(sender, nowMs)) { Refuse(sender, nowMs, a); return; }
+            FlushRate(nowMs, false);
+            int victim = -1, proj = -1, claimId = -1;
+            string outcome;
+            try
+            {
+                victim = Field(a, 2);
+                proj = Field(a, 3);
+                claimId = Field(a, 4);
+                if (a == null || a.Length < 9 || !(a[2] is int) || !(a[3] is int) || !(a[4] is int) || !(a[5] is int)
+                    || !(a[6] is byte) || !(a[7] is int) || !(a[8] is bool))
+                    outcome = ClaimLine.Outcome("malformed");
+                else
+                {
+                    var shooterEpoch = (bool)a[8] ? LifeEpoch.At((int)a[7]) : default(LifeEpoch);
+                    int v = victim, p = proj, id = claimId;
+                    ClaimFacts f;
+                    string result = Handle(sender, claimId, nowMs, () =>
+                    {
+                        var c = new ClaimFacts
+                        {
+                            Sender = sender, ClaimId = id, VictimView = v, ProjView = p, NowMs = nowMs,
+                            ShooterEpoch = shooterEpoch,
+                        };
+                        fill(c);
+                        return c;
+                    }, out f);
+                    outcome = result == "started" ? start(claimId) : ClaimLine.Outcome(result);
+                }
+            }
+            catch (Exception ex) { outcome = ClaimLine.Outcome("fault:" + ex.GetType().Name); }
+            Lines.Add(ClaimLine.Recv(sender, claimId, proj, victim, outcome));
+        }
+
+        private string Decide(ClaimFacts f)
         {
             if (!f.GateOn) return "gate:" + (f.GateWhy ?? "unknown");
             if (!f.SenderAcked) return "sender-not-acked";
@@ -522,7 +674,6 @@ namespace CompetitiveRounds
             if (f.PoisonChildren <= 0) return "no-poison";
             if (!f.Live) return "not-live";
             if (!f.VictimFenceKnown || !f.ShooterEpoch.SameAs(f.VictimEpoch)) return "fence";
-            if (overRate) return "rate";
             if (!TryStart(f.ProjInstance, f.VictimView, StartPath.Claim)) return _saturated ? "start-refused" : "dup-broadcast";
             return "started";
         }
@@ -571,6 +722,7 @@ namespace CompetitiveRounds
             _sentPairs.Clear(); _sendTimes.Clear();
             _highWater.Clear(); _recvTimes.Clear(); _started.Clear();
             _saturated = false; _claimStarts = 0;
+            _excess.Clear(); _roomExcess = 0; Lines.Clear();
         }
     }
 
@@ -898,6 +1050,68 @@ namespace CompetitiveRounds
         internal void Clear() { _views.Clear(); }
     }
 
+    // ── The victim's send sequence of one stream (fix pass 2, H1) ──────────
+
+    /// <summary>One stream's raises on the victim's seat, in order: LIFE (v3
+    /// only, to the acknowledged actors present), the header (tick 0's
+    /// verdict, to all), the ticks (to all), then the close summary (to the
+    /// holders still present) and any replay (to one late acknowledger). A
+    /// seat's record of a stream is created by its header, or later by its
+    /// summary or a replay; a tick finds no record without one of them. So
+    /// when the header was not sent the victim retires the stream -- out of
+    /// the retained state, so no replay or summary names it -- and sends no
+    /// later tick: no seat ever holds it, and every seat leaves that stream's
+    /// health unchanged. A fence this seat could not record retires its open
+    /// streams the same way (Retire).</summary>
+    internal sealed class StreamSend
+    {
+        internal readonly int View;
+        internal Kept Kept;                          // the retained v3 stream; null when the stream is today's
+        internal bool Retired;
+        internal string RetiredWhy;
+
+        internal StreamSend(int view, Kept kept) { View = view; Kept = kept; }
+
+        internal bool V3 { get { return Kept != null && !Retired; } }
+
+        /// <summary>Whether the stream's next tick goes out.</summary>
+        internal bool MaySendTick { get { return !Retired; } }
+
+        /// <summary>Tick 0's LIFE raise. Not sent: no seat holds the LIFE, so
+        /// the stream is today's on every seat and leaves the retained state;
+        /// its header still goes to all. True while the stream is v3.</summary>
+        internal bool AfterLife(PointRetainer ret, bool sent)
+        {
+            if (!sent && Kept != null) { ret.Drop(Kept); Kept = null; }
+            return V3;
+        }
+
+        /// <summary>Tick 0's header raise. Not sent: the stream is retired
+        /// (the class note). True while the stream may send its next tick.</summary>
+        internal bool AfterHeader(PointRetainer ret, bool sent)
+        {
+            if (!sent) Retire(ret, "header-send-failed");
+            return MaySendTick;
+        }
+
+        /// <summary>A tick raise (tick 0 is the header): the retained state
+        /// names only ticks that went out, and nothing of a retired stream.</summary>
+        internal void AfterTick(int tick, bool blocked, bool sent)
+        {
+            if (sent && Kept != null && !Retired) PointRetainer.Note(Kept, tick, blocked);
+        }
+
+        /// <summary>Nothing more is sent for this stream: no tick, no summary,
+        /// no replay (it leaves the retained state).</summary>
+        internal void Retire(PointRetainer ret, string why)
+        {
+            if (Retired) return;
+            Retired = true;
+            RetiredWhy = why;
+            if (Kept != null) { ret.Drop(Kept); Kept = null; }
+        }
+    }
+
     // ── Hooks contain their own faults (V4 B7) ──────────────────────────────
 
     internal static class HookGuard
@@ -997,6 +1211,22 @@ namespace CompetitiveRounds
         {
             return "[POISON-CLAIM] recv from=" + from + " c=" + claimId + " proj=" + projView + " victim=" + victimView
                 + " outcome=" + outcome;
+        }
+
+        /// <summary>Fix pass 2 (M2): one sender's claims past the rate in one
+        /// aligned second, as one line: their count, the first and the last
+        /// tuple, the sender's running total and the room's.</summary>
+        internal static string Rate(int from, long second, int excess, object[] first, object[] last, long total,
+                                    long roomTotal)
+        {
+            return "[POISON-CLAIM] rate from=" + from + " second=" + second + " excess=" + excess
+                + " first=(" + Tuple(first) + ") last=(" + Tuple(last) + ") total=" + total + " room_total=" + roomTotal
+                + " outcome=drop reason=rate";
+        }
+
+        private static string Tuple(object[] a)
+        {
+            return "c=" + ClaimCore.Field(a, 4) + " proj=" + ClaimCore.Field(a, 3) + " victim=" + ClaimCore.Field(a, 2);
         }
 
         /// <summary>A result as its outcome field: "started" stays, every other
