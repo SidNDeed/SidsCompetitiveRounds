@@ -69,6 +69,7 @@ def test_m3_the_route_parser_and_budgeter_read_the_one_bound():
 
 
 def test_m3_the_envelope_takes_exactly_the_bound_and_refuses_one_byte_over():
+    assert cm.RECORD_MAX_BYTES == ce.RECORD_MAX_BYTES == 16384      # the contract's bound
     rec = fx.empty_record()
     at = fx.envelope(rec, text=" " * cm.RECORD_MAX_BYTES)
     env = ce.parse_envelope(at)
@@ -437,6 +438,13 @@ def test_m2_a_mixed_version_pair_is_stored_but_every_cross_record_measure_is_not
             if c.row["subject"] == A] == [None]
     control = cm.pair_view(fx.records(*fx.a24_pair()))
     assert _owner_dir(control)["cycles"][0]["not_run"] is None
+
+
+def test_m2_a_mixed_version_pair_with_no_cycles_is_not_run_never_agreed():
+    view = cm.pair_view(fx.records(fx.empty_record(), fx.empty_record(2)))
+    assert _owner_dir(view)["cycles"] == [] and _owner_dir(view)["case"] == "not_run"
+    control = cm.pair_view(fx.records(fx.empty_record(), fx.empty_record()))
+    assert _owner_dir(control)["case"] == "both_agree"
 
 
 def test_m2_contributions_carry_the_contributing_records_version():
