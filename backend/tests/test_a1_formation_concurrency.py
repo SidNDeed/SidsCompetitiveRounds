@@ -357,3 +357,72 @@ def test_identity_lock_is_actually_exclusive_across_connections():
         "a second connection took the same identity lock without waiting -- "
         "the lock is not exclusive and every other assertion here is vacuous"
     )
+
+
+# -- merge pass 5, R2-C-L1: ONE budget for the whole barrier -------------------
+
+SID_C = "90000000000000003"
+# What this test does not attribute to the barrier: asyncio scheduling of the
+# helper that frees the first identity and of the awaits around the call.
+SCHEDULING_SLACK_S = 0.15
+
+
+async def _sequence(budget_ms):
+    """Two identities blocked in sequence. Connection one holds A, connection
+    two holds B; A is freed at 70% of the budget, B never. The barrier over
+    [A, B] waits for A, then for B with what is left. Returns (status,
+    elapsed_s, pair_s): the answer, the barrier's wall time, and the measured
+    non-waiting time of one re-arm-and-lock pair on an uncontended identity."""
+    engine, sm, _pa, _pb = await _setup()
+    try:
+        async with sm() as one, sm() as two, sm() as three:
+            await main._identity_lock_many(one, [SID_A])
+            await main._identity_lock_many(two, [SID_B])
+            g0 = time.monotonic()
+            await three.execute(text("SET LOCAL lock_timeout = '1000ms'"))
+            await three.execute(text("SELECT pg_advisory_xact_lock(hashtext(CAST(:s AS text)))"),
+                                {"s": SID_C})
+            pair_s = time.monotonic() - g0
+            await three.rollback()
+
+            async def free_a():
+                await asyncio.sleep(budget_ms * 0.7 / 1000.0)
+                await one.rollback()
+            freer = asyncio.ensure_future(free_a())
+            status = None
+            started = time.monotonic()
+            try:
+                await asyncio.wait_for(
+                    main._identity_lock_many(three, [SID_B, SID_A], timeout_ms=budget_ms),
+                    timeout=budget_ms * 4 / 1000.0)
+                status = 200
+            except main.HTTPException as exc:
+                status = exc.status_code
+            except asyncio.TimeoutError:
+                status = "outer_timeout"
+            elapsed = time.monotonic() - started
+            await freer
+            await two.rollback()
+            await three.rollback()
+        return status, elapsed, pair_s
+    finally:
+        await engine.dispose()
+
+
+def test_blocked_identities_in_sequence_share_one_budget():
+    """R2-C-L1, the bound proven: _identity_lock_many ends no later than its
+    budget plus the non-waiting time of one re-arm-and-lock pair (plus under
+    1 ms of rounding) after it starts, however many identities are blocked in
+    sequence. Here A is freed at 0.7 x budget and B is never freed; a barrier
+    that gave each statement its own full budget would end near 1.7 x budget.
+    The assertion allows the measured pair time twice and SCHEDULING_SLACK_S
+    for the event loop, and requires the barrier really waited (>= 0.9 x
+    budget) and answered 503 queue_contended."""
+    budget_ms = 1000
+    status, elapsed, pair_s = run(_sequence(budget_ms))
+    assert status == 503, (status, elapsed)
+    assert elapsed >= 0.9 * budget_ms / 1000.0, ("the barrier did not wait", elapsed)
+    bound = budget_ms / 1000.0 + 2 * pair_s + SCHEDULING_SLACK_S
+    assert elapsed <= bound, (
+        "blocked identities in sequence held the barrier past its one budget",
+        elapsed, bound, pair_s)

@@ -4517,7 +4517,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:50755 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:50790 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4583,7 +4583,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:50556 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:50591 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4653,7 +4653,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:50434 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:50469 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -15950,11 +15950,18 @@ FORMATION_MAX_ATTEMPTS = 3
 FORMATION_LOCK_TIMEOUT_MS = 2500
 
 
+class _IdentityBudgetSpent(Exception):
+    """_identity_lock_many's one budget ran out between two identity locks;
+    answered exactly as a lock_timeout (55P03) on a lock is."""
+
+
 async def _identity_lock_many(db: AsyncSession, steam_ids, *,
                               timeout_ms: int | None = None) -> list:
     """Take the per-identity advisory lock for EVERY sid, in ONE canonical order.
 
-    `timeout_ms` bounds the wait instead of FORMATION_LOCK_TIMEOUT_MS, for a
+    The bound is ONE budget for the whole barrier, not one per identity (see
+    the deadline below). `timeout_ms` is that budget instead of
+    FORMATION_LOCK_TIMEOUT_MS, for a
     caller whose transaction carries a tighter budget of its own (the FFA
     assembly routes' ASM_TXN_DEADLINE_S, _asm_identity_phase). It changes the
     bound only: the keys, the order, the release-on-timeout and the 503 are
@@ -16005,18 +16012,37 @@ async def _identity_lock_many(db: AsyncSession, steam_ids, *,
     # Interpolated rather than bound because SET takes no bind parameters;
     # the value is an int() the server computed (the module constant, or a
     # caller's own remaining budget), never a request input.
+    #
+    # ONE budget for the whole barrier (merge pass 5, R2-C-L1). lock_timeout
+    # bounds each statement separately, so N identities blocked in sequence
+    # could each wait nearly the full bound. The bound is therefore spent as
+    # a deadline: the first lock runs under the whole budget, and before each
+    # later one the timeout is re-armed with what is left (an int() of the
+    # monotonic remainder in ms); nothing left answers exactly as a 55P03
+    # does. A lock statement waits at most the remainder computed just before
+    # its re-arm, so the barrier ends no later than the budget plus the
+    # non-waiting time of one re-arm-and-lock pair (plus under 1 ms of
+    # rounding) after it started.
+    _deadline = time.monotonic() + max(1, _wait_ms) / 1000.0
     await db.execute(text(
         f"SET LOCAL lock_timeout = '{max(1, _wait_ms)}ms'"))
     try:
-        for sid in ordered:
+        for _i, sid in enumerate(ordered):
+            if _i > 0:
+                _left_ms = int((_deadline - time.monotonic()) * 1000)
+                if _left_ms < 1:
+                    raise _IdentityBudgetSpent()
+                await db.execute(text(f"SET LOCAL lock_timeout = '{_left_ms}ms'"))
             await db.execute(
                 text("SELECT pg_advisory_xact_lock(hashtext(CAST(:sid AS text)))"),
                 {"sid": sid},
             )
-    except DBAPIError as _exc:
-        # 55P03 lock_not_available ONLY. Anything else re-raises untouched:
-        # a guard that swallows its neighbours is worse than no guard.
-        if getattr(getattr(_exc, "orig", None), "sqlstate", None) != "55P03":
+    except (DBAPIError, _IdentityBudgetSpent) as _exc:
+        # 55P03 lock_not_available (or the budget spent between two locks)
+        # ONLY. Anything else re-raises untouched: a guard that swallows its
+        # neighbours is worse than no guard.
+        if not isinstance(_exc, _IdentityBudgetSpent) and \
+                getattr(getattr(_exc, "orig", None), "sqlstate", None) != "55P03":
             raise
         # Release what we did take, rather than leaving it until the session
         # dependency closes. The transaction is in a failed state anyway.
@@ -56548,15 +56574,27 @@ async def _asm_reform_formation(db, lobby_id, trigger):
     When the carried set moved past the barrier (ctx.reform_due again) it
     rolls back and rediscovers, at most FORMATION_MAX_ATTEMPTS times.
     Returns the decision taken, or None: the bound reached, a lobby that no
-    longer re-forms, or any error, each rolled back and printed, the lobby
-    left as it was for its next trigger."""
+    longer re-forms, the deadline spent, or any error, each rolled back and
+    printed, the lobby left as it was for its next trigger.
+
+    Under a route deadline (merge pass 5, R2-C-L1): one ASM_TXN_DEADLINE_S
+    budget from entry covers every attempt, the same budget and timeouts the
+    assembly routes run under (_asm_begin): the identity phase waits at most
+    what is left of it, and lock_timeout and statement_timeout are re-armed
+    from what is left before the lobby row and queue rows are taken, so no
+    wait here runs on the session defaults. A spent budget, or a lock or
+    statement timeout, rolls back and returns None like any other refusal.
+    The COMMIT itself is not bounded (R39), as on the routes."""
+    t0 = time.monotonic()
     try:
         for attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
-            held = await _asm_identity_phase(db, lobby_id)
+            await _asm_begin(db, t0)
+            held = await _asm_identity_phase(db, lobby_id, t0=t0)
             if not held:
                 await _asm_rollback(db)
                 return None
-            ctx = await _asm_ctx_slot(db, lobby_id, route=trigger, trigger=trigger)
+            await _asm_begin(db, t0, stage="identity")
+            ctx = await _asm_ctx_slot(db, lobby_id, route=trigger, trigger=trigger, t0=t0)
             qids = (await db.execute(text(
                 "SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
                 {"lid": lobby_id})).scalars().all()
@@ -56579,8 +56617,18 @@ async def _asm_reform_formation(db, lobby_id, trigger):
         print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} reform deferred after "
               f"{FORMATION_MAX_ATTEMPTS} attempts trigger={trigger}")
         return None
+    except _AsmDeadline as d:
+        await _asm_rollback(db)
+        print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} reform formation deadline "
+              f"stage={d.stage} ms={_asm_elapsed_ms(t0)} trigger={trigger}")
+        return None
     except Exception as exc:
         await _asm_rollback(db)
+        stage = _ASM_SQLSTATE_STAGE.get(_asm_sqlstate(exc) or "")
+        if stage is not None:
+            print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} reform formation deadline "
+                  f"stage={stage} ms={_asm_elapsed_ms(t0)} trigger={trigger}")
+            return None
         print(f"[FFA-ASM] lobby {_asm_id8(lobby_id)} reform formation failed "
               f"trigger={trigger}: {type(exc).__name__}")
         return None
@@ -57287,23 +57335,35 @@ async def _asm_reform(ctx, rule, cls, trigger):
     # round 2). The carry gives each carried seat a lease for L' through
     # _ffa_lock_roster, whose acquisition supersedes whatever lease the seat
     # holds, and A1 lets a formation supersede only its own predecessor: a
-    # carried seat must hold ("ffa", L) or no live lease. A seat whose release
-    # marker is set (its release pre-step committed before this barrier) has
-    # left L and is not carried either. A seat refused here is released from L
-    # like a PENDING seat; _asm_release_row is fenced to L, so its lease and
-    # roster for any other commitment are not touched.
+    # carried seat must hold ("ffa", L) itself (merge pass 5, R2-H1-L1: a seat
+    # with no live lease has left L or let it lapse, and is not carried;
+    # require=True). A seat whose release marker is set (its release pre-step
+    # committed before this barrier) has left L and is not carried either; a
+    # marker that commits after this revalidation is answered by the release
+    # itself (_asm_release_work drops the player from L'). A seat refused here
+    # is released from L like a PENDING seat; _asm_release_row is fenced to L,
+    # so its lease and roster for any other commitment are not touched.
     _carry_from = ("ffa", uuid.UUID(str(old)))
-    refused, released = [], []
+    refused, unleased, released = [], [], []
     for p in k_seats:
         if p["released_at"] is not None:
             released.append(p)
-        elif await _formation_lease_conflict(ctx.db, [(p["seat_steam_id"], p["player_id"])],
-                                             allow=_carry_from) is not None:
+            continue
+        why = await _formation_lease_conflict(ctx.db, [(p["seat_steam_id"], p["player_id"])],
+                                              allow=_carry_from, require=True)
+        if why is None:
+            continue
+        if why[1] == "lease_expired":
+            unleased.append(p)
+        else:
             refused.append(p)
     if released:
         ctx.log(f"carry released={len(released)} release marker set")
     if refused:
         ctx.log(f"carry refused={len(refused)} committed elsewhere")
+    if unleased:
+        ctx.log(f"carry refused_unleased={len(unleased)} no live lease")
+    refused = refused + unleased
     if released or refused:
         k_seats = [p for p in k_seats if p not in refused and p not in released]
         x_seats = x_seats + released + refused
@@ -58122,6 +58182,10 @@ _ASM_RELEASE_MARK_SQL = (
     " WHERE lobby_id = :lid AND player_id = :pid AND released_at IS NULL")
 _ASM_RELEASE_LEASE_SQL = (
     "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid")
+# How many REFORM hops a release follows from the lobby it names (R2-H1-L1):
+# FORMATION_MAX_ATTEMPTS bounds one trigger's attempts, not a chain, so the
+# chain gets its own small bound.
+_ASM_RELEASE_CARRY_HOPS = 4
 
 
 async def _asm_release_work(ctx, pid, arg) -> dict:
@@ -58143,7 +58207,18 @@ async def _asm_release_work(ctx, pid, arg) -> dict:
     try's pre-step has found the seat row (else its lease expires by its
     TTL), so the player's next FFA join clears it as an unleased husk
     (ffa_queue_join), and the janitor's stranded-row sweep deletes it once
-    the lobby is no longer active."""
+    the lobby is no longer active.
+
+    A REFORM that carried the caller (merge pass 5, R2-H1-L1): when the seat
+    row read under this lobby lock says 'carried', a REFORM revalidated the
+    seat before any marker of this release was visible to it and committed
+    first (the two serialize on this lobby row), so the player sits in the
+    lobby L' it formed. The release then drops the player from L' as well,
+    and from every later lobby the same chain carried it into (at most
+    _ASM_RELEASE_CARRY_HOPS): L''s row lock after L's (the REFORM's own order),
+    the caller's queue row, then the same marker, queue row and lease
+    statements fenced to L'. So a 200 never leaves the player seated in a
+    lobby its own release was racing."""
     req, held = arg
     me = ctx.seat_of(pid)
     row = (await ctx.db.execute(text(
@@ -58158,8 +58233,25 @@ async def _asm_release_work(ctx, pid, arg) -> dict:
                                      {"pid": pid, "lid": ctx.lid})
         if (freed.rowcount or 0) > 0:
             held["lease"] = 1
+    dropped = []
+    nxt = (ctx.lobby or {}).get("reformed_to") if me.get("verdict") == "carried" else None
+    while nxt is not None and len(dropped) < _ASM_RELEASE_CARRY_HOPS:
+        nrow = (await ctx.db.execute(text(
+            "SELECT reformed_to FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"),
+            {"lid": nxt})).mappings().first()
+        seat = (await ctx.db.execute(text(
+            "SELECT verdict FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),
+            {"lid": nxt, "pid": pid})).mappings().first()
+        if nrow is None or seat is None:
+            break
+        await _lock_queue_rows_ordered(ctx.db, "ffa_queue", [pid])
+        await ctx.db.execute(text(_ASM_RELEASE_MARK_SQL), {"why": req.why, "lid": nxt, "pid": pid})
+        await _asm_release_row(ctx.db, nxt, pid)
+        dropped.append(nxt)
+        nxt = nrow["reformed_to"] if seat["verdict"] == "carried" else None
     ctx.log(f"release slot={me['slot']} why={req.why} lease={held['lease']} "
-            f"row={0 if row is None else 1} mark={held['mark']}")
+            f"row={0 if row is None else 1} mark={held['mark']}"
+            + (f" carried_dropped={','.join(_asm_id8(x) for x in dropped)}" if dropped else ""))
     return {"release": {"status": "ok"}}
 
 
@@ -58252,7 +58344,9 @@ async def ffa_lobby_release(lobby_id: uuid.UUID, req: _AsmReleaseReq, request: R
     its own queue row for it and writes that pair itself when the seat row
     it reads there carries no marker (round 3, M1), so every 200 commits
     with the marker set and neither that lease nor that queue row left;
-    writes nothing else; idempotent (200 on a repeat)."""
+    when a REFORM carried the caller first, the same marker, lease and queue
+    row writes for the lobby it was carried into (_asm_release_work); writes
+    nothing else; idempotent (200 on a repeat)."""
     if req.why not in _ASM_RELEASE_WHY or not _pg_text_ok(req.steam_id):
         raise HTTPException(422, "invalid release")
     held = {"lease": 0, "mark": "kept"}

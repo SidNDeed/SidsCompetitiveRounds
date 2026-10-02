@@ -817,10 +817,16 @@ class FakeDb:
             # because this fake is one object across many simulated
             # requests while SET LOCAL is per TRANSACTION -- an identity
             # lock from an earlier send is not "already taken" for this one.
-            # Two forms reach here: the arming, which must carry the
-            # constant, and the disarming that follows the barrier.
+            # Three forms reach here: the arming, which must carry the
+            # constant; the re-arming before each later identity lock (merge
+            # pass 5, R2-C-L1: the barrier spends ONE budget, so each later
+            # lock waits only what is left of it, never more than the
+            # constant); and the disarming that follows the barrier.
+            rearm = re.match(r"SET LOCAL lock_timeout = '(\d+)ms'$", sql.strip())
             assert (sql.rstrip().endswith("DEFAULT")
-                    or str(main.FORMATION_LOCK_TIMEOUT_MS) in sql), sql
+                    or str(main.FORMATION_LOCK_TIMEOUT_MS) in sql
+                    or (rearm is not None
+                        and 1 <= int(rearm.group(1)) <= main.FORMATION_LOCK_TIMEOUT_MS)), sql
             return _Res([])
         # Deleting a mail WITHDRAWS the relay DM that has not gone out
         # yet. Undelivered only -- a DM already sent is out, and its row has
