@@ -804,12 +804,14 @@ def run_combat_selftest(rs, cases, deadline):
         for r in case["combat"]:
             try:
                 # A stored case is JSON whose key order the store does not
-                # keep; the key SET must be the layout's, and the record is
-                # checked in the layout's order.
+                # keep; the key SETS (record and omit) must be the layout's,
+                # and the record is checked in the layout's order.
                 rec = r["rec"]
                 if not isinstance(rec, dict) or set(rec) != set(cm.KEYS):
                     raise cm.Refusal("record")
                 rec = {k: rec[k] for k in cm.KEYS}
+                if isinstance(rec["omit"], dict) and set(rec["omit"]) == set(cm.OMIT_KEYS):
+                    rec["omit"] = {k: rec["omit"][k] for k in cm.OMIT_KEYS}
                 cm.check_record(rec)
                 records.append({"seat": r["seat"], "other": r["other"], "rec": rec})
             except (cm.Refusal, KeyError, TypeError):
