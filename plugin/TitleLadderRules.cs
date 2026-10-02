@@ -4,11 +4,11 @@ using System.Collections.Generic;
 namespace CompetitiveRounds
 {
     /// <summary>
-    /// The animal title ladders as entries of the Shop's Titles section
-    /// (v1.41.0 item 12 follow-up): which ladders the section renders, which
-    /// listing rows each rendered ladder replaces, which tier a player holds,
-    /// and what the Buy / Upgrade button on an entry and in its tier popup
-    /// says and does. Kept free of Unity, Photon, BepInEx and I18n so it runs
+    /// The title ladders as entries of the Shop's Titles section (v1.41.0
+    /// item 12 follow-up; five tiers since board row 29): which ladders the
+    /// section renders, which listing rows each rendered ladder replaces,
+    /// which tier a player holds, and what the Buy / Upgrade button on an
+    /// entry says and does. Kept free of Unity, Photon, BepInEx and I18n so it runs
     /// under a plain compiler: TitleLaddersUI resolves every value from the
     /// ladder answer, the shop listing and the player's stats, hands them in,
     /// and paints what comes back.
@@ -30,7 +30,9 @@ namespace CompetitiveRounds
         /// <summary>One rung, reduced to what the rules read. `Price` is the
         /// ladder answer's price, where 0 means "granted by play, never sold"
         /// (the purchase endpoint refuses every rung above the first by its
-        /// pool); `Threshold` is the series count on the line that grants it.
+        /// pool); `Threshold` is the count on the line that grants it, in the line's own
+        /// unit (games, wins, losses, gold or a run of wins; series before the
+        /// five-tier server build).
         /// </summary>
         internal struct Rung
         {
@@ -64,7 +66,7 @@ namespace CompetitiveRounds
             NotOnSale,
             /// <summary>The balance is below the price the listing charges.</summary>
             NotEnoughGold,
-            /// <summary>The next tier is granted by ranked series, not sold.</summary>
+            /// <summary>The next tier is granted by ranked play, not sold.</summary>
             EarnedByPlay,
         }
 
@@ -85,13 +87,13 @@ namespace CompetitiveRounds
             /// listing offers the sku (what the purchase endpoint charges), the
             /// answer's price otherwise; 0 when the next tier is not sold.</summary>
             public int Price;
-            /// <summary>The next tier's series threshold (0 at the top).</summary>
+            /// <summary>The next tier's threshold (0 at the top).</summary>
             public int Threshold;
-            /// <summary>Series still to play to reach it, never negative.</summary>
+            /// <summary>The count still to make to reach it, never negative.</summary>
             public int SeriesToGo;
         }
 
-        /// <summary>A rung's row in the tier popup.</summary>
+        /// <summary>A rung's row in the ladder's dropdown.</summary>
         internal enum TierState { Current, Owned, Next, Locked }
 
         /// <summary>The highest tier the player owns a rung of, or 0. Held is
@@ -188,8 +190,8 @@ namespace CompetitiveRounds
             return d;
         }
 
-        /// <summary>A rung's row state in the popup. Current is the held tier
-        /// (the row the popup highlights); a rung the player does not own is
+        /// <summary>A rung's row state in the dropdown. Current is the held tier
+        /// (the row the dropdown highlights); a rung the player does not own is
         /// Next when it sits on the tier the button is about, Locked
         /// otherwise.</summary>
         internal static TierState StateOf(Rung r, int held, int next)
@@ -216,9 +218,9 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The progress bar's fill, 0..1. It spans the HELD tier's
-        /// threshold to the next tier's, not 0 to the next: 80 series held at
-        /// tier 4 (threshold 75) toward tier 5 (150) is 5 of 75, under 7 %,
-        /// where a 0-to-next bar would show 80 of 150. Nothing held draws an
+        /// threshold to the next tier's, not 0 to the next: 110 games held at
+        /// tier 4 (threshold 100) toward tier 5 (200) is 10 of 100, 10 %,
+        /// where a 0-to-next bar would show 110 of 200. Nothing held draws an
         /// empty bar -- a player who has not started is in no countdown --
         /// and the top draws a full one.</summary>
         internal static float Progress(IList<Rung> rungs, int games, Decision d)
@@ -273,68 +275,6 @@ namespace CompetitiveRounds
                     if (!string.IsNullOrEmpty(skus[k])) plan.Folded.Add(skus[k]);
             }
             return plan;
-        }
-
-        // ── the tier popup's IMGUI event shield ─────────────────────────────
-
-        /// <summary>An IMGUI event, reduced to what the shield reads. Other is
-        /// everything that is not pointer input: Layout and Repaint, which must
-        /// never be used, and keys, which the popup does not take and which
-        /// the hotkey guards already gate while it is open.</summary>
-        internal enum ShieldInput { Other, Press, Release, Drag, Scroll, Context }
-
-        /// <summary>What the shield does with one event: whether it is used,
-        /// and the latch to keep afterwards (one bit per mouse button whose
-        /// press the shield took).</summary>
-        internal struct ShieldVerdict
-        {
-            public bool Consume;
-            public int Latch;
-        }
-
-        /// <summary>The decision behind the tier popup's IMGUI event shield.
-        /// The popup is uGUI; the shield is its IMGUI half, which the
-        /// click-blocking rule asks for (an IMGUI backdrop plus Event.Use).
-        ///
-        /// Pointer input inside the popup's extent is used while the popup is
-        /// open, and also on the frame the popup closed. A dismiss press
-        /// closes the popup before that frame's IMGUI pass sees the press,
-        /// and the press still has to reach nothing beneath the popup.
-        ///
-        /// A press the shield takes latches its button. The drag and the
-        /// release of that press are then taken wherever they land, even
-        /// after the popup has gone, so a whole dismiss click is consumed.
-        ///
-        /// An IMGUI modal drawn above the popup owns its own clicks, so the
-        /// shield stands aside and drops its latch.
-        ///
-        /// A press the shield lets through starts a new gesture and clears
-        /// that button's latch. So when a release never arrives, the latch
-        /// takes at most that button's drags and one release before its next
-        /// press clears it: the latch expires, it never blocks for good.</summary>
-        internal static ShieldVerdict Shield(ShieldInput input, int button, bool inside,
-                                             bool popupOpen, bool closedThisFrame,
-                                             bool modalAbove, int latch)
-        {
-            var v = new ShieldVerdict { Consume = false, Latch = latch };
-            if (input == ShieldInput.Other) return v;
-            if (modalAbove) { v.Latch = 0; return v; }
-            int bit = button >= 0 && button < 30 ? 1 << button : 0;
-            if (bit != 0 && (latch & bit) != 0
-                && (input == ShieldInput.Drag || input == ShieldInput.Release))
-            {
-                v.Consume = true;
-                if (input == ShieldInput.Release) v.Latch = latch & ~bit;
-                return v;
-            }
-            if ((popupOpen || closedThisFrame) && inside)
-            {
-                v.Consume = true;
-                if (input == ShieldInput.Press) v.Latch = latch | bit;
-                return v;
-            }
-            if (input == ShieldInput.Press) v.Latch = latch & ~bit;
-            return v;
         }
     }
 }

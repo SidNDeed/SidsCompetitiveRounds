@@ -323,11 +323,9 @@ namespace CompetitiveRounds
             // click that dismissed it ALSO reached the armed Discard on the
             // tile beneath, in the same click (#141/#200).
             || PlayerCardsUI.CardPopupOpen
-            // Sept 23 (item 12 follow-up): the ladder tier popup raises its own
-            // uGUI backdrop over the Shop. Without this term the Shop rows'
-            // raw-poll handlers under it stay live, and the press that closes
-            // the popup could also buy on the row beneath (#141/#200).
-            || TitleLaddersUI.PopupOpen
+            // (The title ladders' tier popup was a term here until the
+            // five-tier build replaced it with a dropdown inside the Shop's
+            // own list: no backdrop, nothing to own input for.)
             || !Plugin.DataConsentAsked;
         private static bool AnyModalOwnsInput => OtherModalOwnsInput || NativeUI.UtilityPopupOpen;
 
@@ -344,13 +342,6 @@ namespace CompetitiveRounds
         /// reads this beside it so a space typed into chat never presses a
         /// settings row.</summary>
         internal static bool ChatTypingOwnsKeyboard => chatInputOpen;
-
-        // Item 12 r2: the IMGUI surfaces that sit ABOVE every uGUI popup and own
-        // their own clicks. The backdrop-less modals are topmost by definition
-        // (the same fact ClickHandler.BypassSuspended states below), and the
-        // consent prompt is drawn last, over everything. A popup's IMGUI event
-        // shield stands aside while one of them is up.
-        internal static bool ImguiModalAbovePopups => BackdroplessModalOpen || !Plugin.DataConsentAsked;
 
         // Sept 8 item 1: IMGUI is painted after the mod's uGUI canvases, so a page's
         // IMGUI (the search boxes, the hover graphs, the session report, the shop
@@ -369,7 +360,6 @@ namespace CompetitiveRounds
             || NativeUI.TournBetsPopupOpen || NativeUI.RecentTournPopupOpen
             || NativeUI.CardPreviewOpen
             || PlayerCardsUI.CardPopupOpen
-            || TitleLaddersUI.PopupOpen   // Sept 23 (item 12 follow-up): the Shop's IMGUI previews must not paint over the ladder popup
             // Sept 8 r1b L2: the language chooser is a backdrop modal too (Home has the
             // ranked-hint callout + caret as page IMGUI).
             || NativeUI.LangPromptOpen;
@@ -383,11 +373,6 @@ namespace CompetitiveRounds
             // FIRST, before anything that can throw: releases the chat input lock
             // if the box stopped rendering (bug #128 — see TickChatLockWatchdog).
             TickChatLockWatchdog();
-            // Item 12 r2: the ladder tier popup's IMGUI event shield, before
-            // every draw below that can react to a click. An event it uses
-            // reaches none of them, on the frame the popup closed as well. It
-            // paints nothing and cannot throw out of here.
-            TitleLaddersUI.ShieldImguiEvents(Event.current, ImguiModalAbovePopups);
             // Spectator blackout/HUD draws EARLY (#255): it must not be
             // starveable by a later overlay throwing, and everything after it
             // may legitimately paint on top (notifications, Tab stats, chat).

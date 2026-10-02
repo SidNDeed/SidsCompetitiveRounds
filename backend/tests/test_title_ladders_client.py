@@ -276,22 +276,39 @@ def test_the_helper_documents_its_fallback():
     assert "catch" in body, body
 
 
+def _catalogue():
+    """The server's ladder catalogue, IMPORTED rather than regex-read: the
+    five-tier build (board row 29) writes LADDERS as data, not as _line()
+    calls, and a parser of either spelling reads nothing from the other."""
+    import title_ladders
+    return title_ladders.LADDERS
+
+
 def _ladder_names():
-    """The 48 display names, DERIVED from the catalogue rather than listed."""
-    src = _server("title_ladders.py")
-    block = src[src.index("LADDERS = ["):src.index("# ── Derived indexes")]
+    """Every string the client translates from the catalogue, DERIVED from
+    it rather than listed: the ladder display names, the tier names, and
+    (five-tier build) each ladder's condition, which the dropdown shows."""
     names = []
-    for _, display, body in re.findall(r'_line\("(\w+)", "([^"]+)", \[(.*?)\]\)',
-                                       block, re.S):
-        names.append(display)
-        names.extend(m.group(1) for m in
-                     re.finditer(r'\(\d+, (?:None|"\w+"), "([^"]+)",', body))
+    for line in _catalogue():
+        names.append(line["display"])
+        if line.get("condition"):
+            names.append(line["condition"])
+        names.extend(r["name"] for r in line["rungs"])
     return sorted(set(names))
 
 
-def test_the_catalogue_defines_forty_eight_distinct_names():
+# The catalogue's shape, keyed by its ladder count: the eight six-rung animal
+# lines before the five-tier build (48 names), and the five-tier build's 32
+# ladders (32 displays, 160 tiers and 19 conditions, with repeats removed).
+EXPECTED_NAMES = {8: 48, 32: 192}
+
+
+def test_the_catalogue_has_the_expected_number_of_distinct_names():
+    ladders = len(_catalogue())
     names = _ladder_names()
-    assert len(names) == 48, "the ladder catalogue changed shape: %d names" % len(names)
+    assert ladders in EXPECTED_NAMES, "the ladder catalogue changed shape: %d ladders" % ladders
+    assert len(names) == EXPECTED_NAMES[ladders], (
+        "the ladder catalogue changed shape: %d names for %d ladders" % (len(names), ladders))
 
 
 def test_every_ladder_name_is_registered_for_extraction():
@@ -320,11 +337,23 @@ LOCALES = ("es", "ru", "uk", "sv")
 # key. The allowance is PER LOCALE and exhaustive: a locale-blind allowance
 # would also excuse a Russian entry that had quietly become an echo, which is
 # the exact failure this test exists to catch (#342).
+#
+# Five-tier build (board row 29): the catalogue reuses words the bundled
+# catalogues ALREADY carry as echoes, and I18n.Tr is one flat dictionary, so
+# the ladder renders whatever that entry says. Card names (Poison, Toxic
+# Cloud, Huge, Bouncy, Echo, Tank) are kept English everywhere, as ROUNDS
+# shows them; Windup and the older shop titles (Sniper, Berserker, Blitz,
+# Phoenix, Apex, Clown, Idiot, Midas, Noobie, Tryhard) kept the English word
+# in these locales before this build. Re-translating one here would change
+# every other surface that shows it, so they are listed, per locale.
+ALL_LOCALE_ECHOES = ("Poison", "Toxic Cloud", "Huge", "Bouncy", "Echo", "Windup")
 SAME_WORD = {
-    "es": ("Grizzly",),
-    "ru": (),
-    "uk": (),
-    "sv": ("Grizzly", "Megalodon"),
+    "es": ("Grizzly", "Supernova") + ALL_LOCALE_ECHOES + (
+        "Sniper", "Berserker", "Blitz", "Phoenix", "Apex", "Midas", "Noobie", "Tryhard"),
+    "ru": ALL_LOCALE_ECHOES,
+    "uk": ALL_LOCALE_ECHOES,
+    "sv": ("Grizzly", "Megalodon", "Supernova", "Tank") + ALL_LOCALE_ECHOES + (
+        "Blitz", "Apex", "Clown", "Idiot", "Midas", "Tryhard"),
 }
 
 

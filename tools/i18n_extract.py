@@ -114,7 +114,7 @@ FILES = [
     # Room rules (Sept 10): the friendly-fire / same-cards summaries and the
     # game-start toast, all at I18n.Tr/TrF sites.
     "RoomRules.cs",
-    # Animal title ladders (Sept 19, item 12): the Titles tab -- per-line
+    # Title ladders (Sept 19, item 12; five tiers since board row 29) -- per-line
     # state and caption lines, the unavailable states, the equip messages.
     # Rung and line NAMES are deliberately absent: they are shop_items rows
     # that arrive from the server, like every other title, and render raw

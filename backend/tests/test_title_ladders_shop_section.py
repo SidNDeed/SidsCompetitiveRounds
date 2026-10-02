@@ -1,13 +1,14 @@
-"""Item 12 follow-up (2026-09-23): the animal title ladders left their own
+"""Item 12 follow-up (2026-09-23): the title ladders left their own
 Shop-group sub-tab and became entries of the Shop's Titles section, with a
-tier popup on click and a Buy button that becomes Upgrade.
+Buy button that becomes Upgrade; since the five-tier build (board row 29) a
+click opens the ladder's tiers in a dropdown under the entry.
 
 The DECISIONS (which lines render, which listing rows they replace, which
 tier is held, what the button says and why) are executed by the client rules
 harness -- see test_client_rules_harness.py's laddershop suite. This file
 gates the WIRING the harness cannot run: the tab table that must not shift,
-where RefreshShop plans and paints the ladders, how the popup is torn down
-and owns input, and that the purchase statement is the Shop row's own.
+where RefreshShop plans and paints the ladders, where the dropdown sits and
+how it closes, and that the purchase statement is the Shop row's own.
 
 Every table gate here carries an in-memory mutation of the real source that
 it must catch, so a parser that stops seeing the table reds instead of
@@ -122,18 +123,20 @@ def _section_order_ok(body):
         plan = body.index("TitleLaddersUI.PlanShopSection()")
         fold = body.index("titles.RemoveAll(")
         header = body.index("shopTitlesHeader.SetActive(true)")
+        free = body.index("for (int i = 0; i < freeTitles.Count")
         paint = body.index("TitleLaddersUI.PaintShopEntries(")
-        loop = body.index("for (int i = 0; i < titles.Count")
+        paid = body.index("for (int i = 0; i < paidTitles.Count")
     except ValueError:
         return False
-    return plan < fold < header < paint < loop
+    return plan < fold < header < free < paint < paid
 
 
-def test_the_ladders_are_planned_before_the_header_and_painted_before_the_titles():
+def test_the_ladders_are_planned_before_the_header_and_painted_between_the_title_groups():
     """The fold must precede the header decision (a section holding only
     ladders still gets its header, and a folded rung is not also drawn as an
-    ordinary row), and the entries go between the header and the ordinary
-    titles -- once each."""
+    ordinary row). Five-tier build (board row 29): the titles that cost
+    nothing come first, then the ladder entries, then the priced single
+    titles -- each painted once."""
     body = code_of(_plugin("NativeUI.cs"), REFRESH_SHOP)
     assert _section_order_ok(body), body[:2000]
     assert body.count("TitleLaddersUI.PlanShopSection()") == 1
@@ -152,6 +155,28 @@ def test_the_section_order_gate_can_fail():
     assert moved.count(anchor) == 1
     moved = moved.replace(anchor, anchor + fold, 1)
     assert not _section_order_ok(moved), "a fold AFTER the header decision passed"
+    # the free titles painted after the ladders must fail too
+    free = re.search(r"            for \(int i = 0; i < freeTitles\.Count.*?\n            \}\n", body, re.S).group(0)
+    late = body.replace(free, "", 1)
+    paid_at = late.index("            for (int i = 0; i < paidTitles.Count")
+    late = late[:paid_at] + free + late[paid_at:]
+    assert not _section_order_ok(late), "free titles AFTER the ladder entries passed"
+
+
+def test_the_free_titles_split_on_price_and_put_owned_first_stably():
+    nat = _plugin("NativeUI.cs")
+    body = " ".join(code_of(nat, REFRESH_SHOP).split())
+    assert "var freeTitles = titles.FindAll(t => t != null && t.price <= 0);" in body
+    assert "var paidTitles = titles.FindAll(t => t != null && t.price > 0);" in body
+    assert "freeTitles = OrderOwnedFirst(freeTitles);" in body
+    # every title is in exactly one group: the two predicates partition
+    assert body.count("titles.FindAll(") == 2
+    helper = " ".join(code_of(nat, "private static List<ApiClient.ShopItemData> OrderOwnedFirst("
+                                   "List<ApiClient.ShopItemData> items)").split())
+    # a partition, not List.Sort (unstable): each part keeps its order
+    assert "var outp = items.FindAll(t => t.owned);" in helper
+    assert "outp.AddRange(items.FindAll(t => !t.owned));" in helper
+    assert ".Sort(" not in helper
 
 
 def test_the_entries_are_built_into_the_shop_rows_container_once():
@@ -161,209 +186,155 @@ def test_the_entries_are_built_into_the_shop_rows_container_once():
     assert build.index("TitleLaddersUI.BuildShopEntries(") > pool
 
 
-# ── L3: the popup ────────────────────────────────────────────────────────
-
-def test_the_popup_closes_on_every_close_path_and_on_leaving_the_tab():
-    nat = _plugin("NativeUI.cs")
-    teardown = code_of(nat, "private static void TeardownOverlaySurfaces()")
-    assert "TitleLaddersUI.HidePopup()" in teardown, (
-        "the popup is a persistent-overlay child; every close and recovery "
-        "path goes through TeardownOverlaySurfaces (#369)")
-    switch = code_of(nat, "private static void SwitchTab(int idx)")
-    leaving = switch[:switch.index("currentTab=idx;")]
-    assert "TitleLaddersUI.HidePopup()" in leaving
-    shop = switch[switch.index("if(idx==4){"):]
-    shop = shop[:shop.index("}if(idx==6)")]
-    assert "TitleLaddersUI.OnShopEntered();" in shop
-
-
-def test_the_popup_owns_input_while_it_is_open():
-    cui = code_of(_plugin("CompetitiveUI.cs"))
-    for prop in ("internal static bool OtherModalOwnsInput =>",
-                 "internal static bool PopupCoversPage =>"):
-        i = cui.index(prop)
-        expr = cui[i:cui.index(";", i)]
-        assert "TitleLaddersUI.PopupOpen" in expr, prop
-
-
-def test_the_popup_creates_no_canvas_and_never_touches_the_event_system():
-    src = _plugin("TitleLaddersUI.cs")
-    assert "EventSystem" not in src
-    code = code_of(src)
-    for banned in ("tCanvas", "GraphicRaycaster", "sortingOrder", "mainMenuGroup"):
-        assert banned not in code, banned
-    opened = code_of(src, "private static void OpenPopup(string lineId)")
-    assert "NativeUI.OverlayRoot" in opened
-    assert "bdClick.bypassModalBlock = true;" in opened
-    assert "NativeUI.MarkPopupChildrenInteractive(popupGO);" in opened
-    # a press on the box is not a backdrop click, and neither is the opening press
-    assert "NativeUI.PointerOverActive(popupBox)" in opened
-    assert "Time.frameCount == popupFrame" in opened
-    hide = code_of(src, "internal static void HidePopup()")
-    assert hide.index("go.SetActive(false)") < hide.index("Destroy(go)"), (
-        "Destroy is deferred to the end of the frame; the popup must be "
-        "inactive first so its raw-poll Buy cannot fire (#369 rule b)")
-    assert "popupGO = null;" in hide
-
-
-# ── r2 (Codex r1 M1): the popup's IMGUI event shield ─────────────────────
-#
-# The click-blocking rule is an IMGUI backdrop plus Event.Use. The popup is
-# uGUI, so its IMGUI half is TitleLaddersUI.ShieldImguiEvents:
-#   * DrawUI calls it before any draw that can take a click;
-#   * it uses pointer events exactly as TitleLadderRules.Shield decides (the
-#     harness's laddershop suite executes that decision);
-#   * every close arms it for the rest of the closing frame, whose IMGUI pass
-#     runs after the close;
-#   * a click's close runs in LateUpdate, so the pressing frame's uGUI pass
-#     still finds the popup whichever Update runs first.
-# The gate is one function that lists problems. The positive test asserts
-# none, and each mutation below must produce at least one (#391).
-
-SHIELD_CALL = "TitleLaddersUI.ShieldImguiEvents(Event.current, ImguiModalAbovePopups);"
-DRAW_UI = "public static void DrawUI()"
-POINTER_KINDS = {"MouseDown": "Press", "MouseUp": "Release", "MouseDrag": "Drag",
-                 "ScrollWheel": "Scroll", "ContextClick": "Context"}
-
-
 def _flat(text):
     return " ".join(text.split())
 
 
-def _shield_problems(cui_src, tlu_src):
+# ── L3: the dropdown (five-tier build, board row 29) ────────────────────
+#
+# The tier popup became a dropdown UNDER the clicked entry, inside the Shop's
+# own list: no backdrop, no overlay child, nothing that owns input. The gate
+# is one function that lists problems; the positive test asserts none and
+# each mutation below must produce at least one (#391).
+
+PAINT = "internal static int PaintShopEntries(bool show, int sibling, int? balance)"
+ENTRY_PLACED = "e.root.transform.SetSiblingIndex(sibling++);"
+DROP_PLACED = "drop.transform.SetSiblingIndex(sibling++);"
+
+
+def _dropdown_problems(cui_src, tlu_src, nat_src):
     problems = []
+    if "TitleLaddersUI" in code_of(cui_src):
+        problems.append("CompetitiveUI still names TitleLaddersUI (a modal term or a shield)")
+    code = code_of(tlu_src)
+    if "EventSystem" in tlu_src:
+        problems.append("TitleLaddersUI names the EventSystem")
+    for banned in ("tCanvas", "GraphicRaycaster", "sortingOrder", "mainMenuGroup",
+                   "OverlayRoot", "bypassModalBlock", "PopupOpen", "Shield", "Event.current"):
+        if banned in code:
+            problems.append("TitleLaddersUI carries %r" % banned)
 
-    draw = code_of(cui_src, DRAW_UI)
-    if draw.count(SHIELD_CALL) != 1:
-        problems.append("DrawUI does not call the shield exactly once")
+    paint = _flat(code_of(tlu_src, PAINT))
+    if paint.count(DROP_PLACED) != 1:
+        problems.append("the dropdown is not placed exactly once")
+    elif paint.count(ENTRY_PLACED) != 1:
+        problems.append("an entry is not placed exactly once")
     else:
-        before = draw[draw.index("{") + 1:draw.index(SHIELD_CALL)]
-        if _flat(before) != "TickChatLockWatchdog();":
-            problems.append("DrawUI runs more than the watchdog before the shield: %r" % _flat(before))
-    cui = code_of(cui_src)
-    i = cui.find("internal static bool ImguiModalAbovePopups =>")
-    if i < 0:
-        problems.append("no ImguiModalAbovePopups")
-    else:
-        expr = _flat(cui[i:cui.index(";", i)])
-        if expr != "internal static bool ImguiModalAbovePopups => BackdroplessModalOpen || !Plugin.DataConsentAsked":
-            problems.append("the modal-above set changed: %r" % expr)
+        e = paint.index(ENTRY_PLACED)
+        d = paint.index(DROP_PLACED)
+        between = paint[e:d]
+        if not e < d:
+            problems.append("the dropdown is placed before its entry")
+        elif "if (drop != null && ln.line == openLine)" not in between or "PaintEntry(e, ln);" not in between:
+            problems.append("the dropdown does not follow the OPEN entry: %r" % between)
+        elif "for (" in between or "continue;" in between:
+            problems.append("the dropdown is placed outside the entry's own pass")
+    if "if (drop != null && !dropPlaced) drop.SetActive(false);" not in paint:
+        problems.append("a dropdown not placed this paint stays visible")
+    if "openLine = null;" not in paint:
+        problems.append("a ladder that left the answer keeps its dropdown")
 
-    shield = _flat(code_of(tlu_src, "internal static void ShieldImguiEvents(Event ev, bool modalAbove)"))
-    for need in ("if (input == TitleLadderRules.ShieldInput.Other) return;",
-                 "if (popupGO != null) CaptureShieldExtent();",
-                 "var v = TitleLadderRules.Shield(input, ev.button, inside, popupGO != null, "
-                 "Time.frameCount == shieldClosedFrame, modalAbove, shieldLatch);",
-                 "shieldLatch = v.Latch;",
-                 "if (v.Consume) ev.Use();"):
-        if need not in shield:
-            problems.append("ShieldImguiEvents lacks %r" % need)
-    if shield.count(".Use()") != 1:
-        problems.append("ShieldImguiEvents uses an event the rules did not decide")
+    toggle = _flat(code_of(tlu_src, "private static void ToggleDropdown(string lineId)"))
+    if "openLine = openLine == lineId ? null : lineId;" not in toggle:
+        problems.append("a click does not toggle one open ladder")
+    build = _flat(code_of(tlu_src, "private static Entry BuildEntry(Transform parent, int idx)"))
+    if "ToggleDropdown(e.line);" not in build:
+        problems.append("a press on the row does not toggle its dropdown")
+    drop = _flat(code_of(tlu_src, "private static void PaintDrop(ApiClient.TitleLadderLine ln)"))
+    if "UIFactory.SetPrefH(drop," not in drop or "shown * DROP_ROW" not in drop:
+        problems.append("the dropdown's height does not follow the tiers it shows")
 
-    kinds = _flat(code_of(tlu_src, "private static TitleLadderRules.ShieldInput ShieldInputOf(EventType t)"))
-    for ev, kind in sorted(POINTER_KINDS.items()):
-        if "case EventType.%s: return TitleLadderRules.ShieldInput.%s;" % (ev, kind) not in kinds:
-            problems.append("the shield does not read %s as %s" % (ev, kind))
-    if "default: return TitleLadderRules.ShieldInput.Other;" not in kinds:
-        problems.append("an unlisted event is not Other")
-    if kinds.count("case EventType.") != len(POINTER_KINDS):
-        problems.append("the shield reads an event type that is not pointer input")
-
-    hide = code_of(tlu_src, "internal static void HidePopup()")
-    release = hide.index("popupGO = null;")
-    for need in ("CaptureShieldExtent();", "shieldClosedFrame = Time.frameCount;"):
-        if need not in hide:
-            problems.append("HidePopup lacks %r" % need)
-        elif hide.index(need) > release:
-            problems.append("HidePopup runs %r after releasing the popup" % need)
-
-    opened = _flat(code_of(tlu_src, "private static void OpenPopup(string lineId)"))
-    for need in ("popupGO.AddComponent<PopupLateClose>();",
-                 "if (ClickGuard.Claim(bd)) RequestClose();",
-                 "() => { if (Time.frameCount != popupFrame) RequestClose(); }"):
-        if need not in opened:
-            problems.append("OpenPopup lacks %r" % need)
-    if opened.count("HidePopup();") != 2:
-        problems.append("OpenPopup closes directly outside its reset and its fault path")
-    late = _flat(code_of(tlu_src, "private sealed class PopupLateClose : MonoBehaviour"))
-    if "private void LateUpdate() { if (closeRequested && popupGO == gameObject) HidePopup(); }" not in late:
-        problems.append("PopupLateClose does not run the requested close in LateUpdate")
-    req = _flat(code_of(tlu_src, "private static void RequestClose()"))
-    if "if (popupGO != null) closeRequested = true;" not in req:
-        problems.append("RequestClose does not request")
+    teardown = code_of(nat_src, "private static void TeardownOverlaySurfaces()")
+    if "TitleLaddersUI.CollapseDropdown()" not in teardown:
+        problems.append("a page close leaves the dropdown open (#369)")
+    switch = code_of(nat_src, "private static void SwitchTab(int idx)")
+    if "TitleLaddersUI.CollapseDropdown()" not in switch[:switch.index("currentTab=idx;")]:
+        problems.append("leaving the tab leaves the dropdown open")
     return problems
 
 
-def test_the_popup_has_an_imgui_event_shield_first_in_the_pass():
-    problems = _shield_problems(_plugin("CompetitiveUI.cs"), _plugin("TitleLaddersUI.cs"))
+def test_the_dropdown_opens_under_its_entry_and_is_not_a_modal():
+    problems = _dropdown_problems(_plugin("CompetitiveUI.cs"), _plugin("TitleLaddersUI.cs"),
+                                  _plugin("NativeUI.cs"))
     assert not problems, problems
 
 
-SHIELD_MUTATIONS = [
-    ("no shield call", "cui", [(SHIELD_CALL, "")]),
-    ("the shield after the spectator HUD", "cui",
-     [(SHIELD_CALL, ""), ("SpectatorHud.Draw();", "SpectatorHud.Draw();" + SHIELD_CALL)]),
-    ("a modal above loses the backdrop-less set", "cui",
-     [("ImguiModalAbovePopups => BackdroplessModalOpen || !Plugin.DataConsentAsked",
-       "ImguiModalAbovePopups => !Plugin.DataConsentAsked")]),
-    ("the verdict is never applied", "tlu", [("if (v.Consume) ev.Use();", "")]),
-    ("the closed frame is not passed", "tlu",
-     [("Time.frameCount == shieldClosedFrame, modalAbove", "false, modalAbove")]),
-    ("the latch is not kept", "tlu", [("shieldLatch = v.Latch;", "")]),
-    ("Repaint read as pointer input", "tlu",
-     [("case EventType.ContextClick:", "case EventType.Repaint: case EventType.ContextClick:")]),
-    ("a close does not arm its frame", "tlu", [("shieldClosedFrame = Time.frameCount;", "")]),
-    ("the extent captured after the release", "tlu",
-     [("            CaptureShieldExtent();\n            shieldClosedFrame", "            shieldClosedFrame"),
-      ("popupGO = null; popupBox = null;", "popupGO = null; CaptureShieldExtent(); popupBox = null;")]),
-    ("the backdrop closes at once", "tlu",
-     [("if (ClickGuard.Claim(bd)) RequestClose();", "if (ClickGuard.Claim(bd)) HidePopup();")]),
-    ("the Close button closes at once", "tlu",
-     [("if (Time.frameCount != popupFrame) RequestClose(); }", "if (Time.frameCount != popupFrame) HidePopup(); }")]),
-    ("LateUpdate never closes", "tlu",
-     [("if (closeRequested && popupGO == gameObject) HidePopup();", "")]),
+DROPDOWN_MUTATIONS = [
+    ("a modal term comes back", "cui",
+     [("            // (The title ladders' tier popup was a term here until the\n",
+       "            || TitleLaddersUI.PopupOpen\n"
+       "            // (The title ladders' tier popup was a term here until the\n")]),
+    ("an overlay parent", "tlu",
+     [("drop = UIFactory.CreatePanel(\"TLDrop\", parent, C_DROP);",
+       "drop = UIFactory.CreatePanel(\"TLDrop\", NativeUI.OverlayRoot, C_DROP);")]),
+    ("the dropdown placed ahead of the entries", "tlu",
+     [("                    if (drop != null && ln.line == openLine)\n"
+       "                    {\n"
+       "                        drop.SetActive(true);\n"
+       "                        drop.transform.SetSiblingIndex(sibling++);\n"
+       "                        PaintDrop(ln);\n"
+       "                        dropPlaced = true;\n"
+       "                    }\n", ""),
+      ("                if (openLine != null && (!show",
+       "                if (drop != null) drop.transform.SetSiblingIndex(sibling++);\n"
+       "                if (openLine != null && (!show")]),
+    ("the dropdown under every entry", "tlu",
+     [("if (drop != null && ln.line == openLine)", "if (drop != null)")]),
+    ("an unplaced dropdown kept visible", "tlu",
+     [("if (drop != null && !dropPlaced) drop.SetActive(false);", "")]),
+    ("a second click does not close", "tlu",
+     [("openLine = openLine == lineId ? null : lineId;", "openLine = lineId;")]),
+    ("a fixed height", "tlu",
+     [("+ shown * DROP_ROW + 4 * DROP_GAP", "+ MAX_RUNGS * DROP_ROW + 4 * DROP_GAP")]),
+    ("the close paths forget it", "nat",
+     [("try{TitleLaddersUI.CollapseDropdown();}catch{}/* Five-tier", "try{}catch{}/* Five-tier")]),
 ]
 
 
-@pytest.mark.parametrize("name,which,edits", SHIELD_MUTATIONS, ids=[m[0] for m in SHIELD_MUTATIONS])
-def test_the_shield_gate_can_fail(name, which, edits):
-    srcs = {"cui": _plugin("CompetitiveUI.cs"), "tlu": _plugin("TitleLaddersUI.cs")}
+@pytest.mark.parametrize("name,which,edits", DROPDOWN_MUTATIONS, ids=[m[0] for m in DROPDOWN_MUTATIONS])
+def test_the_dropdown_gate_can_fail(name, which, edits):
+    srcs = {"cui": _plugin("CompetitiveUI.cs"), "tlu": _plugin("TitleLaddersUI.cs"),
+            "nat": _plugin("NativeUI.cs")}
     for old, new in edits:
+        nl = "\r\n" if "\r\n" in srcs[which] else "\n"
+        old = old.replace("\n", nl)
+        new = new.replace("\n", nl)
         assert srcs[which].count(old) == 1, (name, old)
         srcs[which] = srcs[which].replace(old, new, 1)
-    assert _shield_problems(srcs["cui"], srcs["tlu"]), name
+    assert _dropdown_problems(srcs["cui"], srcs["tlu"], srcs["nat"]), name
 
 
-def test_the_shield_probe_is_a_broadcast_lever_that_clicks_nothing():
-    """The in-game witness drives the shield with a synthetic event and only
-    READS the other two paths. It never invokes a control, and only the
-    lever (broadcast identity, see test_a_local_board_never_buys_or_wears)
-    starts it."""
+def test_the_shop_entered_fetch_and_the_section_row_count_include_the_dropdown():
+    nat = _plugin("NativeUI.cs")
+    switch = code_of(nat, "private static void SwitchTab(int idx)")
+    shop = switch[switch.index("if(idx==4){"):]
+    shop = shop[:shop.index("}if(idx==6)")]
+    assert "TitleLaddersUI.OnShopEntered();" in shop
+    rows = _flat(code_of(_plugin("TitleLaddersUI.cs"), "internal static int ShopSectionRows"))
+    # the sub-header, one row per entry and the open dropdown
+    assert "if (n > 0) return n + 1 + (openLine != null ? 1 : 0);" in rows, rows
+
+
+def test_the_lever_opens_and_closes_and_clicks_nothing():
+    """The in-game witness drives the dropdown through the broadcast lever
+    (see test_a_local_board_never_buys_or_wears for who can call it). The
+    lever opens, closes and swaps boards; it never buys or wears."""
     src = _plugin("TitleLaddersUI.cs")
-    probe = code_of(src, "private sealed class ShieldProbe : MonoBehaviour")
-    for banned in ("PurchaseItem", "SetActiveTitle", "OnActionClicked", "OnWearClicked",
-                   "onClick", "Invoke(", "HidePopup(", "OpenPopup("):
-        assert banned not in probe, banned
-    assert "ShieldImguiEvents(down, above);" in probe
-    assert "RequestClose();" in probe
-    assert "NativeUI.DevTopHit(sp)" in probe
-    starts = [n for n in sorted(os.listdir(os.path.join(REPO, "plugin")))
-              if n.endswith(".cs") and "AddComponent<ShieldProbe>()" in code_of(_plugin(n))]
-    assert starts == ["TitleLaddersUI.cs"], starts
     directive = code_of(src, "internal static void DevDirective(string directive)")
-    assert "probe = pgo.AddComponent<ShieldProbe>();" in directive
-    # The read-only raycast: it sets and toggles nothing on the input system.
-    gate = code_of(_plugin("OverlayInputGate.cs"), "internal static GameObject DevTopHit(Vector2 screenPoint)")
-    for banned in ("SetValue(es", "SetSelected", "enabled", "SetActive"):
-        assert banned not in gate, banned
+    for verb in ('verb == "fixture"', 'verb == "ladder"', 'verb == "close"', 'verb == "live"'):
+        assert verb in directive, verb
+    assert "shield" not in directive.lower()
+    for banned in ("PurchaseItem", "SetActiveTitle", "OnActionClicked", "OnWearClicked", "Invoke("):
+        assert banned not in directive, banned
+    opened = code_of(src, "private static void OpenDropdown(string lineId)")
+    assert "ToggleDropdown(lineId)" in opened and "if (openLine != lineId)" in opened
 
 
 # ── L4: the button ───────────────────────────────────────────────────────
 
 def test_the_button_decides_at_click_time_and_buys_only_what_the_decision_names():
     body = code_of(_plugin("TitleLaddersUI.cs"),
-                   "private static void OnActionClicked(string lineId, bool fromPopup)")
+                   "private static void OnActionClicked(string lineId)")
     order = [body.index(s) for s in (
         "DecideFor(",
         "if (!d.Enabled || string.IsNullOrEmpty(d.TargetSku))",
@@ -381,7 +352,6 @@ def test_every_painted_button_reads_its_label_and_state_from_the_rules():
     assert "NativeUI.SetButtonInteractable(btn, d.Enabled)" in paint
     code = code_of(src)
     assert "PaintAction(e.btn, e.btnTxt, d);" in code
-    assert "PaintAction(popupAction, popActionTxt, d);" in code
     label = code_of(src, "private static string ActionLabel(TitleLadderRules.Decision d)")
     for key in ('I18n.Tr("Maxed")', 'I18n.Tr("Upgrade")', 'I18n.Tr("Buy")'):
         assert key in label, key
@@ -390,7 +360,7 @@ def test_every_painted_button_reads_its_label_and_state_from_the_rules():
     enum = re.search(r"internal enum Reason\s*\{(.*?)\}", rules, re.S).group(1)
     members = set(re.findall(r"\b([A-Z]\w*)\b", enum)) - {"None"}
     assert len(members) >= 6, members
-    reasons = code_of(src, "private static string ReasonText(TitleLadderRules.Decision d)")
+    reasons = code_of(src, "private static string ReasonText(TitleLadderRules.Decision d, string unit)")
     missing = sorted(m for m in members if "TitleLadderRules.Reason.%s:" % m not in reasons)
     assert not missing, "reasons with no text: %r" % missing
 
@@ -398,11 +368,11 @@ def test_every_painted_button_reads_its_label_and_state_from_the_rules():
 def test_the_entry_row_yields_only_to_an_enabled_button():
     """#540: the row and its button are raw-poll handlers on one mouse-down.
     An ENABLED button is what the player aimed at; a disabled one claims
-    nothing, so the press opens the popup that says why."""
+    nothing, so the press opens the dropdown that says why."""
     build = code_of(_plugin("TitleLaddersUI.cs"), "private static Entry BuildEntry(Transform parent, int idx)")
     assert "if (e.enabled && NativeUI.PointerOverActive(e.btn)) return;" in build
-    assert "OpenPopup(e.line);" in build
-    assert "OnActionClicked(e.line, false)" in build
+    assert "ToggleDropdown(e.line);" in build
+    assert "OnActionClicked(e.line)" in build
 
 
 def test_a_local_board_never_buys_or_wears():
@@ -435,10 +405,18 @@ def test_the_purchase_statement_is_the_shop_rows_byte_for_byte():
 # ── L6: the new strings ──────────────────────────────────────────────────
 
 NEW_KEYS = [
-    "Current tier", "Current tier: {0} - {1}", "Earned at {0} series", "In use",
+    "Current tier", "Current tier: {0} - {1}", "In use",
     "Locked", "Maxed", "Next tier", "No tiers listed", "Not enough gold",
     "Not on sale yet", "Owned", "Shop still loading", "Tier {0}", "Upgrade",
     "{0} tiers - click to see them all",
+    # the five-tier dropdown (board row 29)
+    "Title Ladders", "click to close", "Top of the ladder.", "Earned at {0}",
+    "{0} games", "{0} wins", "{0} losses", "{0} gold", "{0} wins in a row",
+    "{0} series", "Wear it and finish ranked series",
+    "(only the ladder you are wearing counts)",
+    "Not started - buy {0} in the Shop to begin this ladder.", "Not started.",
+    "{0} - top of the ladder.", "Current run: {0}", "Best run: {0}",
+    "{0} of {1} - {2} to go.", "{0} of {1} to {2} - {3} to go.",
 ]
 
 

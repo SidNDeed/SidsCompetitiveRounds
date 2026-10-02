@@ -79,7 +79,8 @@ TOOLTIPS = {
 }
 NOT_PAGE = {
     "CompetitiveRoundsBehaviour": "the root (Plugin.cs): its OnGUI is DrawUI, which draws the report",
-    "ShieldProbe": "a dev self-test (the ladder popup's shield probe): it synthesizes input events and logs, and paints nothing",
+    # (ShieldProbe, the ladder popup's shield self-test, left with the popup
+    # when the five-tier ladders replaced it with a dropdown: merge pass 5.)
 }
 GUARD = re.compile(r"if \(!SessionReportRules\.PageElementMayDraw\(NativeUI\.IsOpen, [^;]*?, "
                    r"SessionReportView\.Active\)\) return;")
