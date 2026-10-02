@@ -58,6 +58,7 @@ A ranked competitive mod for **vanilla ROUNDS v1.1.2 ONLY** by Landfall. Built f
 - **Macro detection, too-many-cards, inactive-reporter heuristics** — flagged to a private admin channel for review
 - **In-game admin tab** (whitelisted Steam IDs only) for banning, achievement grants, series reversal, and flag triage — every action audit-logged
 - **HMAC-signed** match reports and admin endpoints prevent spoofing
+- **Advisory review** — the server can open advisory review items for the maintainer from recorded match evidence. The rules it applies are server configuration that is not part of this repository. Without them the server stores the evidence and opens nothing. Review items never change a match result, a rating or a reward on their own.
 
 ### Quality of life
 - **50 achievements** (100-1000g by difficulty, several unlock exclusive titles) — card-build challenges, marathon streaks, rating milestones, and FFA feats — with retroactive grants from your existing match history
