@@ -3818,6 +3818,18 @@ namespace CompetitiveRounds
                     // on its own it labelled team_ and ovt_ exits "RANKED" too.
                     string matchType = RoomModeLabels.ModeLabel(photonRoomId, matchIsRanked);
 
+                    // Seat evidence: how this seat saw the game end. The other
+                    // seat's departure, when noted, was noted first and is kept.
+                    try
+                    {
+                        string seEnd = opponentDCReported ? "other_left" : "left";
+                        string seCause;
+                        if (!opponentDCReported && TransportExit.TryGetFreshInvoluntary(TransportExit.NowSeconds(), out seCause))
+                            seEnd = "lost";
+                        SeatEvidence.NoteEnd(seEnd);
+                    }
+                    catch { }
+
                     // If this client is the leaver while the opponent already
                     // has a reportable DC-win lead, preserve its exact local
                     // macro sample before ResetMatchState clears the counters.
@@ -3903,6 +3915,12 @@ namespace CompetitiveRounds
                             Plugin.Log.LogInfo(
                                 $"[POLL] exit followed an involuntary disconnect cause={dcCause} toast={(toasted ? "shown" : "declined")}");
                     }
+
+                    // Seat evidence: a game that got no game over here (the
+                    // DC-win branches above went through OnGameOver, which
+                    // dispatched) still yields this seat's record of what it
+                    // collected up to the exit.
+                    if (!gameOverReported) SeatEvidenceCut(localRounds, oppRounds);
                 }
 
                 Plugin.Log.LogInfo("[POLL] Left room");
@@ -4346,12 +4364,14 @@ namespace CompetitiveRounds
                     if (playerCount >= 2 && opponentDCReported)
                     {
                         opponentDCReported = false;
+                        try { SeatEvidence.ClearEnd(); } catch { }
                         Plugin.Log.LogInfo("[POLL] Opponent returned to the room — cleared stale DC latch");
                     }
 
                     if (opponentWasPresent && playerCount <= 1 && !opponentDCReported)
                     {
                         opponentDCReported = true;
+                        try { SeatEvidence.NoteEnd("other_left"); } catch { }
                         // The 1v1 DC-win report is finalised from the
                         // room-LEAVE handler below, where the players are
                         // already gone — this is the last frame that still
@@ -9104,6 +9124,39 @@ namespace CompetitiveRounds
         {
             fromToken = sharedGameT0Set && !string.IsNullOrEmpty(sharedGameToken);
             return fromToken ? sharedGameT0 : matchStartServerTimestamp;
+        }
+
+        /// <summary>Seat evidence for a game that got no game over on this seat
+        /// (a leave, a drop, or the game closing): the record of what this seat
+        /// collected up to the end, with the end kind it noted. Its score and
+        /// attach key follow the report the game gets (SeatEvidenceCore.CutScore:
+        /// only the round TOTAL enters the key). Contained: it never changes the
+        /// exit's own handling.</summary>
+        private static void SeatEvidenceCut(int localRounds, int oppRounds)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(photonRoomId)
+                    && photonRoomId.IndexOf("offline", StringComparison.OrdinalIgnoreCase) >= 0) return;
+                int[] s = SeatEvidenceCore.CutScore(localRounds, oppRounds, opponentDCReported);
+                SeatEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), s[0], s[1],
+                    matchIsRanked && oneVOneMatchAtStart);
+            }
+            catch { }
+        }
+
+        /// <summary>Application.quitting: a game still live while the game
+        /// closes is queued to the seat-evidence file now (end "closing") and
+        /// sent at the next launch.</summary>
+        internal static void SeatEvidenceOnQuit()
+        {
+            try
+            {
+                if (!isTracking || gameOverReported) return;
+                SeatEvidence.NoteEnd("closing");
+                SeatEvidenceCut(localTeamId == 0 ? p1Rounds : p2Rounds, localTeamId == 0 ? p2Rounds : p1Rounds);
+            }
+            catch { }
         }
         public static string LocalDisplayName => localDisplayName;
         public static string OpponentDisplayName => opponentDisplayName;

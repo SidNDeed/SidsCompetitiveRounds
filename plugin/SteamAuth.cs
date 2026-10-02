@@ -52,6 +52,20 @@ namespace CompetitiveRounds
         /// session waits: whether a sign-in they depend on is still running.</summary>
         internal static SecureRouteRules.TicketLatch Latch => _latch;
 
+        /// <summary>Set only by the seat-evidence compat sender on a seat the
+        /// other-plug-in check disabled, where GameStateWatcher never resolves
+        /// the local identity: this seat's own Steam id, read from Steam.</summary>
+        internal static string FallbackIdentity;
+
+        /// <summary>The identity a ticket is exchanged for: the resolved local
+        /// Steam id, else FallbackIdentity when one is set.</summary>
+        internal static string Identity()
+        {
+            string sid = MatchTracker.LocalSteamId;
+            if ((string.IsNullOrEmpty(sid) || sid == "unknown") && !string.IsNullOrEmpty(FallbackIdentity)) return FallbackIdentity;
+            return sid;
+        }
+
         public static bool HasFreshToken =>
             !string.IsNullOrEmpty(SessionToken)
             && Time.realtimeSinceStartup < _sessionExpiresAt - 3600f;   // refresh 1h before expiry
@@ -75,7 +89,7 @@ namespace CompetitiveRounds
                     if (tickFailed) Plugin.Log.LogWarning(note);
                     else Plugin.Log.LogInfo(note);
                 }
-                string sid = MatchTracker.LocalSteamId;
+                string sid = Identity();
                 if (string.IsNullOrEmpty(sid) || sid == "unknown" || sid.StartsWith("photon_")) return;
                 // No ticket while the api would refuse to exchange it (the
                 // plaintext backup; PostSteamAuth asks the same question). On

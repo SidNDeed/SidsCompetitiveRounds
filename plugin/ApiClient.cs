@@ -2964,6 +2964,16 @@ namespace CompetitiveRounds
 
         internal static string SeatEvidenceSig(string canonical) { return ComputeHmacHex(canonical); }
 
+        /// <summary>The compat sender on a seat the other-plug-in check
+        /// disabled (Initialize never runs there): sets the base the one compat
+        /// send and its Steam ticket exchange use, and starts nothing else (no
+        /// probe, loop, outbox or fetch). An already initialised base is kept.</summary>
+        internal static void SeatEvidenceCompatBase(string url)
+        {
+            if (!string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(url)) return;
+            baseUrl = url.TrimEnd('/');
+        }
+
         /// <summary>The api is configured and this seat holds a session token
         /// (the seat-evidence routes answer 401 without one).</summary>
         internal static bool SeatEvidenceReady
@@ -24282,7 +24292,7 @@ namespace CompetitiveRounds
                 ended = true;
                 try { onEnded?.Invoke(outcome); } catch (Exception ex) { Plugin.Log.LogWarning($"[STEAM-AUTH] ticket end hook threw: {ex.Message}"); }
             };
-            string sid = MatchTracker.LocalSteamId;
+            string sid = SteamAuth.Identity();
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { end("not sent: no identity"); return; }
             // F1 (Codex r3): never exchange a Steam ticket over plaintext to a
             // PUBLIC host — the returned 24h bearer would be capturable in

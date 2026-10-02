@@ -542,6 +542,10 @@ namespace CompetitiveRounds
             internal string T0Src = "o";
             internal int Master, Ranked;
             internal int RoundsSelf, RoundsOther;
+            /// <summary>How the game ended as this seat observed it (END_KINDS),
+            /// or null when this seat saw the game over: the "end" key is then
+            /// absent (contract amendment A1, build notes).</summary>
+            internal string End;
             internal string[] Build = { "", "", "" };
             internal string DllSha = "", DllState = "no_location";
             internal string GameDllSha = "", GameDllState = "no_location";
@@ -607,6 +611,7 @@ namespace CompetitiveRounds
                 o.Add("master", (long)(Master != 0 ? 1 : 0));
                 o.Add("ranked", (long)(Ranked != 0 ? 1 : 0));
                 o.Add("rounds", new long[] { Clamp(RoundsSelf, 0, 9), Clamp(RoundsOther, 0, 9) });
+                if (IsEndKind(End)) o.Add("end", End);
                 o.Add("build", new List<object> { Build[0], Build[1], Build[2] });
                 o.Add("dll", Dll(DllSha, DllState));
                 o.Add("game_dll", Dll(GameDllSha, GameDllState));
@@ -643,7 +648,48 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>The record keys in order (the server's RECORD_KEYS).</summary>
+        /// <summary>How a game that did not reach its game over ended, as one
+        /// seat observed it: "left" (this seat left the room while the game was
+        /// live), "other_left" (the other seat left or dropped while this seat
+        /// stayed), "lost" (this seat's own connection dropped), "closing" (this
+        /// seat's game was closing; the record is sent at its next launch).</summary>
+        internal static readonly string[] END_KINDS = { "left", "other_left", "lost", "closing" };
+
+        internal static bool IsEndKind(string k) { return k != null && Array.IndexOf(END_KINDS, k) >= 0; }
+
+        /// <summary>The score a record of a cut game carries (and its attach
+        /// key's round total), following the report that game gets: a seat
+        /// that leaves a game tied at 4 or more each, with no departure of the
+        /// other seat noted, carries the other seat's awarded 5 (the remaining
+        /// seat's report awards it; the macro-evidence rule). Otherwise the
+        /// score as observed.</summary>
+        internal static int[] CutScore(int self, int other, bool otherLeft)
+        {
+            if (!otherLeft && self >= 4 && other >= 4) return new[] { self, 5 };
+            return new[] { self, other };
+        }
+
+        /// <summary>The compat sender's next step (V1 6.4: a seat disabled by
+        /// a finding makes ONE bounded attempt to send the queued outcome, then
+        /// stays disabled). Stop: nothing to do (not disabled, or nothing
+        /// queued); NoConsent: the seat has not granted data consent, so nothing
+        /// is sent; GiveUp: the bound ran out (the outcome stays queued for the
+        /// next launch); Auth: obtain a session through the existing Steam
+        /// ticket exchange; Post: send it now.</summary>
+        internal enum SendStep { Stop, NoConsent, GiveUp, Auth, Post }
+
+        internal const long COMPAT_SEND_LIMIT_MS = 60000;
+
+        internal static SendStep CompatSenderStep(bool disabled, bool consent, bool queued, bool hasToken, long elapsedMs)
+        {
+            if (!disabled || !queued) return SendStep.Stop;
+            if (!consent) return SendStep.NoConsent;
+            if (elapsedMs > COMPAT_SEND_LIMIT_MS) return SendStep.GiveUp;
+            return hasToken ? SendStep.Post : SendStep.Auth;
+        }
+
+        /// <summary>The record keys in order (the server's RECORD_KEYS). The
+        /// optional "end" key, when present, follows "rounds".</summary>
         internal static readonly string[] RECORD_KEYS =
         {
             "schema", "t0", "t0_src", "master", "ranked", "rounds", "build", "dll", "game_dll", "compat",

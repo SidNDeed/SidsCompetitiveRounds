@@ -49,6 +49,14 @@ namespace CompetitiveRounds
         private static int _localActor;
         private static bool _masterAtStart, _rankedAtStart;
 
+        // A window closed by a room exit before any record was built: frozen as
+        // it stood, for the room-exit dispatch (or a DC-win report) to take.
+        private static bool _frozen;
+        private static long _frozenAtMs;
+        internal const long FROZEN_MS = 120000;
+        private static string _room = "";
+        private static string _end;   // C.END_KINDS, or null: this seat saw the game over
+
         /// <summary>Opened at the start of combat of a game with exactly two
         /// fighters (GameStateWatcher's start block); everything below resets.</summary>
         internal static void BeginGame(bool oneVOne, bool rankedAtStart)
@@ -58,6 +66,7 @@ namespace CompetitiveRounds
                 ResetGame();
                 _open = oneVOne;
                 if (!_open) return;
+                try { _room = PhotonNetwork.CurrentRoom != null ? (PhotonNetwork.CurrentRoom.Name ?? "") : ""; } catch { _room = ""; }
                 _rankedAtStart = rankedAtStart;
                 try { _masterAtStart = PhotonNetwork.IsMasterClient; } catch { _masterAtStart = false; }
                 try { _localActor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : 0; } catch { _localActor = 0; }
@@ -68,12 +77,38 @@ namespace CompetitiveRounds
             catch { _open = false; }
         }
 
-        /// <summary>Room exit: the window closes without a record (a game cut
-        /// short by a leave is not covered by this build).</summary>
+        /// <summary>Room exit: the window stops collecting and is frozen as it
+        /// stands, so a game cut short by a leave or a drop still yields the
+        /// record of what this seat collected up to the exit. The dispatch that
+        /// takes it is GameStateWatcher's room-exit branch, or OnGameOver for a
+        /// DC win; a frozen window that no dispatch takes within FROZEN_MS, or
+        /// a dispatch for another room, never becomes a record.</summary>
         internal static void RoomExit()
         {
-            _open = false;
-            _ctxDepth = 0;
+            try
+            {
+                if (_open) { _open = false; _frozen = true; _frozenAtMs = SwMs; }
+                _ctxDepth = 0;
+            }
+            catch { }
+        }
+
+        /// <summary>How the game ended as this seat observed it (C.END_KINDS).
+        /// The first kind noted for the game is kept.</summary>
+        internal static void NoteEnd(string kind)
+        {
+            try
+            {
+                if ((_open || _frozen) && _end == null && C.IsEndKind(kind)) _end = kind;
+            }
+            catch { }
+        }
+
+        /// <summary>The noted end no longer holds (the other seat came back to
+        /// the room); the game continues as if none was noted.</summary>
+        internal static void ClearEnd()
+        {
+            try { if (_open) _end = null; } catch { }
         }
 
         private static void ResolveOpponent()
@@ -131,6 +166,7 @@ namespace CompetitiveRounds
         private static void ResetGame()
         {
             _open = false; _oppActor = 0; _masterAtStart = false; _rankedAtStart = false;
+            _frozen = false; _frozenAtMs = 0; _room = ""; _end = null;
             _ageView = new C.AgeStats(11); _ageRpc = new C.AgeStats(12); _ageHit = new C.AgeStats(13); _ageBlk = new C.AgeStats(14);
             _samples.Clear(); _cad = new C.Cadence();
             foreach (var l in new[] { _blkSent, _hitRecv, _blkRecv, _hitSent }) { l.Items.Clear(); l.Omitted = 0; }
@@ -384,7 +420,14 @@ namespace CompetitiveRounds
         /// <summary>ProjectileHit.RPCA_DoHit prefix, before the body can reset
         /// a block. Victim side: hit_recv. Shooter side: hit_sent, from this
         /// seat's own decision (path 0 through the hit RPC; path 1 waits in a
-        /// frame for the damage envelope sent inside the body).</summary>
+        /// frame for the damage envelope sent inside the body).
+        ///
+        /// Path 1 is ONE-SIDED by construction (ruling D2, amendment A2): the
+        /// victim seat cannot tell a direct hit's damage envelope from any other
+        /// damage envelope the other seat sends, so it never lists path 1 in
+        /// hit_recv and counts such envelopes in unpair[1]. A hit_sent entry
+        /// with path 1 is therefore the named one-sided kind, never a hit whose
+        /// partner went missing; the path field itself is the label.</summary>
         internal static int HitEnter(ProjectileHit ph, int pid, int viewID, bool wasBlocked)
         {
             try
@@ -708,25 +751,93 @@ namespace CompetitiveRounds
         private static string _compatOutcome;
         private static List<string> _compatPlugins;
 
+        private static string OwnSteamId()
+        {
+            try { return Steamworks.SteamUser.GetSteamID().m_SteamID.ToString(CultureInfo.InvariantCulture); } catch { return ""; }
+        }
+
         /// <summary>Above Plugin's modDisabled return: once this seat's Steam id
         /// is known, the pending compat outcome is signed and persisted (sent by
-        /// the queue on a launch whose api is up).</summary>
+        /// the queue on a launch whose api is up). On a seat the finding has
+        /// disabled, the compat sender then makes its one bounded attempt.</summary>
         internal static void CompatTick()
         {
             try
             {
-                if (_compatOutcome == null) return;
-                string seat = "";
-                try { seat = Steamworks.SteamUser.GetSteamID().m_SteamID.ToString(CultureInfo.InvariantCulture); } catch { return; }
-                if (!C.IsSteamId(seat)) return;
-                string outcome = _compatOutcome; _compatOutcome = null;
-                string sig = ApiClient.SeatEvidenceSig(C.CompatCanonical(seat, outcome, _compatPlugins));
-                string body = C.CompatBody(seat, outcome, _compatPlugins, sig);
-                if (body == null) { Plugin.Log.LogWarning(TAG + " compat outcome not queued: a field is outside its bound"); return; }
-                Enqueue("c", body);
-                Plugin.Log.LogInfo(TAG + " compat outcome queued: " + outcome + " plugins=" + _compatPlugins.Count.ToString(CultureInfo.InvariantCulture));
+                if (_compatOutcome != null)
+                {
+                    string seat = OwnSteamId();
+                    if (C.IsSteamId(seat))
+                    {
+                        string outcome = _compatOutcome; _compatOutcome = null;
+                        string sig = ApiClient.SeatEvidenceSig(C.CompatCanonical(seat, outcome, _compatPlugins));
+                        string body = C.CompatBody(seat, outcome, _compatPlugins, sig);
+                        if (body == null) Plugin.Log.LogWarning(TAG + " compat outcome not queued: a field is outside its bound");
+                        else
+                        {
+                            Enqueue("c", body);
+                            Plugin.Log.LogInfo(TAG + " compat outcome queued: " + outcome + " plugins=" + _compatPlugins.Count.ToString(CultureInfo.InvariantCulture));
+                        }
+                    }
+                }
+                CompatSend();
             }
             catch { }
+        }
+
+        // -- the compat sender (V1 6.4) ------------------------------------------------------
+
+        private static int _sendPhase;          // 0 not started, 1 running, 2 finished for this launch
+        private static long _sendStartMs, _nextAuthMs;
+
+        /// <summary>A seat the other-plug-in check disabled never initialises
+        /// the api, so the queue's own pump never runs on it. Instead this makes
+        /// ONE bounded attempt (C.COMPAT_SEND_LIMIT_MS) to send the queued compat
+        /// outcome: it points the api at the configured base without starting
+        /// any of its loops, obtains a session through the existing Steam ticket
+        /// exchange, and posts the compat route once. Seat evidence game records
+        /// are never sent from here. Without data consent nothing is sent; an
+        /// outcome not sent stays queued for the next launch.</summary>
+        private static void CompatSend()
+        {
+            if (_sendPhase == 2 || !Plugin.modDisabled) return;
+            Load();
+            bool queued = false;
+            foreach (var q in _queue) if (q.Route == "c") { queued = true; break; }
+            if (_sendPhase == 0)
+            {
+                if (!queued) return;
+                _sendPhase = 1; _sendStartMs = SwMs; _nextAuthMs = 0;
+                if (Plugin.DataConsentGranted)
+                {
+                    try { ApiClient.SeatEvidenceCompatBase(Plugin.ApiBaseUrl.Value); } catch { }
+                    try { SteamAuth.FallbackIdentity = OwnSteamId(); } catch { }
+                }
+            }
+            var step = C.CompatSenderStep(Plugin.modDisabled, Plugin.DataConsentGranted, queued, !string.IsNullOrEmpty(SteamAuth.SessionToken), SwMs - _sendStartMs);
+            switch (step)
+            {
+                case C.SendStep.Auth:
+                    if (SwMs >= _nextAuthMs) { _nextAuthMs = SwMs + 1000; SteamAuth.MaybeRefresh(); }
+                    return;
+                case C.SendStep.Post:
+                    _sendPhase = 2;
+                    _nextPumpMs = 0;
+                    Pump(SwMs, "c");
+                    Plugin.Log.LogInfo(TAG + " compat outcome: one send attempted while the mod stays disabled");
+                    return;
+                case C.SendStep.GiveUp:
+                    _sendPhase = 2;
+                    Plugin.Log.LogInfo(TAG + " compat outcome not sent within " + (C.COMPAT_SEND_LIMIT_MS / 1000).ToString(CultureInfo.InvariantCulture) + " s: kept for the next launch");
+                    return;
+                case C.SendStep.NoConsent:
+                    _sendPhase = 2;
+                    Plugin.Log.LogInfo(TAG + " compat outcome not sent: no data consent");
+                    return;
+                default:
+                    _sendPhase = 2;
+                    return;
+            }
         }
 
         private static void Foreign(out long asm, out long owners)
@@ -771,15 +882,22 @@ namespace CompetitiveRounds
 
         // -- the record (built once, after the match report is queued) -------------------------
 
-        /// <summary>From OnGameOver, after ApiClient.ReportMatch returned. Ranked
-        /// 1v1 games only, both seats. Freezes the window, builds, budgets,
-        /// signs and persists the envelope before any network work.</summary>
+        /// <summary>From OnGameOver, after ApiClient.ReportMatch returned; from
+        /// GameStateWatcher's room-exit branch for a game cut short; from the
+        /// quit hook for a game still live while the game closes. Ranked 1v1
+        /// games only, both seats. Takes the live window, or a frozen one of
+        /// the same room no older than FROZEN_MS, builds, budgets, signs and
+        /// persists the envelope before any network work. The end kind this
+        /// seat noted rides in the record; none means it saw the game over.</summary>
         internal static void Dispatch(string seat, string other, string attach, int roundsSelf, int roundsOther, bool rankedNow)
         {
             try
             {
-                if (!_open) return;
-                _open = false;
+                bool live = _open;
+                bool frozen = !live && _frozen && SwMs - _frozenAtMs <= FROZEN_MS
+                              && _room.Length > 0 && attach != null && attach.StartsWith(_room + "_", StringComparison.Ordinal);
+                if (!live && !frozen) return;
+                _open = false; _frozen = false;
                 if (!rankedNow) return;
                 string stable = StableOf(attach);
                 if (stable == null || !C.IsSteamId(seat) || !C.IsSteamId(other))
@@ -792,7 +910,7 @@ namespace CompetitiveRounds
                 var r = new C.Record
                 {
                     T0 = t0, T0Src = fromToken ? "m" : "o", Master = _masterAtStart ? 1 : 0, Ranked = _rankedAtStart ? 1 : 0,
-                    RoundsSelf = roundsSelf, RoundsOther = roundsOther,
+                    RoundsSelf = roundsSelf, RoundsOther = roundsOther, End = _end,
                     Build = C.SplitBuild(PeerBuild.BuildValue()) ?? new[] { "", "", "" },
                     DllSha = _dllSha, DllState = _dllState, GameDllSha = _gameSha, GameDllState = _gameState,
                     Compat = _compat,
@@ -822,7 +940,8 @@ namespace CompetitiveRounds
                 Enqueue("e", env);
                 Plugin.Log.LogInfo(TAG + " record queued: " + text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, lists "
                     + r.BlkSent.Count + "/" + r.HitRecv.Count + "/" + r.BlkRecv.Count + "/" + r.HitSent.Count
-                    + ", unpaired " + _unpairBlocks + "/" + _unpairHits + ", t0 " + (fromToken ? "m" : "o"));
+                    + ", unpaired " + _unpairBlocks + "/" + _unpairHits + ", t0 " + (fromToken ? "m" : "o")
+                    + ", end " + (r.End ?? "game_over"));
             }
             catch (Exception ex)
             {
@@ -897,7 +1016,9 @@ namespace CompetitiveRounds
             _nextPumpMs = 0;
         }
 
-        private static void Pump(long nowMs)
+        /// <summary>One send of the oldest due request (of `onlyRoute` when
+        /// given), never during combat and only with a session.</summary>
+        private static void Pump(long nowMs, string onlyRoute = null)
         {
             if (_inFlight || nowMs < _nextPumpMs) return;
             _nextPumpMs = nowMs + 5000;
@@ -907,7 +1028,8 @@ namespace CompetitiveRounds
             if (!ApiClient.SeatEvidenceReady) return;
             long now = UnixNow();
             C.Pending p = null;
-            foreach (var q in _queue) if (!q.HoldUntilNextLaunch && q.NotBeforeUnix <= now) { p = q; break; }
+            foreach (var q in _queue)
+                if ((onlyRoute == null || q.Route == onlyRoute) && !q.HoldUntilNextLaunch && q.NotBeforeUnix <= now) { p = q; break; }
             if (p == null) return;
             p.Attempts++;
             Save();

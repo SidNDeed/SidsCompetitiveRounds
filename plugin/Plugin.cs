@@ -512,6 +512,12 @@ namespace CompetitiveRounds
                     }
                     catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit-time log copy failed: {ex.Message}"); }
                 };
+                // Seat evidence: a game still live while the game closes is
+                // queued to its file now and sent at the next launch.
+                UnityEngine.Application.quitting += () =>
+                {
+                    try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }
+                };
             }
             catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
 
