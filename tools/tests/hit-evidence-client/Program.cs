@@ -104,11 +104,49 @@ namespace HitEvidenceTests
             Check(HitEvidenceCore.ShotObsLine(1, 2, new HitEvidenceCore.GameTally()).EndsWith("observed_hit_pct=na"), "no spawn: na");
         }
 
+        // [PEER-BUILD] (merge pass 5): every key is listed, sorted; only the
+        // version/variant/capability keys print a value; an account id in any
+        // other key never reaches the line.
+        private static void Peer()
+        {
+            var props = new Dictionary<string, string>
+            {
+                { "u_id", "ACCOUNT-ID-MARKER" }, { "playerID", "1" }, { "cr_build", "1.41.0|standalone|0c36c644e658" },
+                { "cr_pois2", "1" }, { "cr_gstats", "9|9|9" }, { "cr_dc2", "2" },
+            };
+            Eq("[PEER-BUILD] actor=3 keys=6 ours=4 list=cr_build,cr_dc2,cr_gstats,cr_pois2,playerID,u_id"
+               + " cr_build=1.41.0|standalone|0c36c644e658 cr_dc2=2 cr_dc3=- cr_ffacfg=- cr_grow2=- cr_msv2=- cr_pois2=1"
+               + " cr_prox1=- cr_saw1=- cr_wcd1=-",
+               PeerBuildCore.Line(3, props), "PEER-BUILD");
+            Check(!PeerBuildCore.Line(3, props).Contains("ACCOUNT-ID-MARKER"), "no account id");
+            Check(!PeerBuildCore.Line(3, props).Contains("9|9|9"), "no other value");
+            // A seat with none of our keys still gets its line, saying so.
+            var vanilla = new Dictionary<string, string> { { "playerID", "2" }, { "u_id", "x" } };
+            Eq("[PEER-BUILD] actor=2 keys=2 ours=none list=playerID,u_id cr_build=- cr_dc2=- cr_dc3=- cr_ffacfg=-"
+               + " cr_grow2=- cr_msv2=- cr_pois2=- cr_prox1=- cr_saw1=- cr_wcd1=-",
+               PeerBuildCore.Line(2, vanilla), "PEER-BUILD vanilla");
+            Check(PeerBuildCore.Line(5, new Dictionary<string, string>()).Contains(" keys=0 ours=none list=- "), "empty seat");
+            // Tokens: unsafe characters masked, long ones cut.
+            Eq("a?b", PeerBuildCore.Token("a b"), "mask");
+            Eq(new string('x', PeerBuildCore.MAX_TOKEN) + "~", PeerBuildCore.Token(new string('x', 100)), "cut");
+            Eq("null", PeerBuildCore.Token(null), "null");
+            // The value part, which decides a reprint, ignores every non-value key.
+            var moreKeys = new Dictionary<string, string>(props) { { "cr_cards", "A|B" } };
+            Eq(PeerBuildCore.Values(props), PeerBuildCore.Values(moreKeys), "values ignore other keys");
+            var newBuild = new Dictionary<string, string>(props);
+            newBuild["cr_build"] = "1.41.1|standalone|aaaaaaaaaaaa";
+            Check(PeerBuildCore.Values(props) != PeerBuildCore.Values(newBuild), "a new build changes the values");
+            // The key list is capped.
+            var many = new Dictionary<string, string>();
+            for (int i = 0; i < PeerBuildCore.MAX_KEYS + 3; i++) many["k" + i.ToString("000")] = "v";
+            Check(PeerBuildCore.Line(1, many).Contains(",+3 "), "capped key list");
+        }
+
         private static int Main(string[] args)
         {
             var cases = new Dictionary<string, Action>
             {
-                { "bucket", Bucket }, { "pair", Pair }, { "impacts", Impacts }, { "tally", Tally }, { "lines", Lines },
+                { "bucket", Bucket }, { "pair", Pair }, { "impacts", Impacts }, { "tally", Tally }, { "lines", Lines }, { "peer", Peer },
             };
             var run = args.Length > 0 ? new List<string>(args) : new List<string>(cases.Keys);
             int failed = 0;

@@ -22,8 +22,15 @@
     <CoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\HitEvidenceCore.cs</CoreSource>
   </PropertyGroup>
 
+  <!-- Merge pass 5: the [PEER-BUILD] line's pure half, plugin/PeerBuildCore.cs,
+       executed the same way (PeerSource override for its mutants). -->
+  <PropertyGroup Condition="'$(PeerSource)' == ''">
+    <PeerSource>$(MSBuildThisFileDirectory)..\..\..\plugin\PeerBuildCore.cs</PeerSource>
+  </PropertyGroup>
+
   <ItemGroup>
     <Compile Include="$(CoreSource)" />
+    <Compile Include="$(PeerSource)" />
     <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
   </ItemGroup>
 

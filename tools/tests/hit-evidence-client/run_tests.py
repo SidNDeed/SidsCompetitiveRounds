@@ -1,7 +1,8 @@
-"""Item D harness: build the cases over the REAL plugin/HitEvidenceCore.cs,
-run them, then build mutated COPIES (work/, CoreSource override -- the
-tracked file is never written) and require each mutant's target case to FAIL
-and its control case to PASS. Exit 0 only when everything holds.
+"""Item D harness: build the cases over the REAL plugin/HitEvidenceCore.cs
+(and, since merge pass 5, plugin/PeerBuildCore.cs: case peer), run them, then
+build mutated COPIES (work/, CoreSource / PeerSource override -- the tracked
+files are never written) and require each mutant's target case to FAIL and its
+control case to PASS. Exit 0 only when everything holds.
 
     python tools/tests/hit-evidence-client/run_tests.py
 """
@@ -30,17 +31,29 @@ MUTANTS = [
      "\n            }\n\n            internal void AddForce", "tally", "bucket"),
 ]
 
+# Merge pass 5: mutants of plugin/PeerBuildCore.cs (the [PEER-BUILD] line),
+# same shape, built through the PeerSource override.
+PEER = os.path.join(REPO, "plugin", "PeerBuildCore.cs")
+PEER_MUTANTS = [
+    ("peer_prints_every_value", "sb.Append(' ').Append(Values(props));",
+     "sb.Append(' ').Append(Values(props)); foreach (var kv in props ?? new Dictionary<string, string>()) sb.Append(' ').Append(kv.Value);",
+     "peer", "lines"),
+    ("peer_no_none_fact", "ours > 0 ? ours.ToString(System.Globalization.CultureInfo.InvariantCulture) : \"none\"",
+     "ours.ToString(System.Globalization.CultureInfo.InvariantCulture)", "peer", "lines"),
+    ("peer_build_value_dropped", "BuildProp, \"cr_dc2\"", "\"cr_dc2\"", "peer", "lines"),
+]
+
 
 def sha(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
 
-def build(tag, core):
+def build(tag, core, peer=None):
     out = os.path.join(WORK, tag)
     cmd = ["dotnet", "build", PROJ, "-c", "Release", "-nologo", "-v", "q",
            "-p:IntermediateOutputPath=" + os.path.join(out, "obj") + os.sep,
            "-p:OutDir=" + os.path.join(out, "bin") + os.sep,
-           "-p:CoreSource=" + core]
+           "-p:CoreSource=" + core, "-p:PeerSource=" + (peer or PEER)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout[-3000:], r.stderr[-2000:])
@@ -58,7 +71,9 @@ def main():
     head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     print("commit", head)
     before = sha(CORE)
+    before_peer = sha(PEER)
     print("plugin/HitEvidenceCore.cs sha256", before)
+    print("plugin/PeerBuildCore.cs sha256", before_peer)
     ok = True
 
     dll = build("base", CORE)
@@ -69,34 +84,38 @@ def main():
     print(out)
     ok = ok and rc == 0
 
-    raw = open(CORE, "rb").read().decode("utf-8")
-    nl = "\r\n" if "\r\n" in raw else "\n"
     caught = 0
-    for name, old, new, target, control in MUTANTS:
-        o, n = old.replace("\n", nl), new.replace("\n", nl)
-        count = raw.count(o)
-        if count != 1:
-            print("BAD mutant %s: anchor occurs %d times" % (name, count))
-            ok = False
-            continue
-        path = os.path.join(WORK, "mut_" + name + ".cs")
-        open(path, "wb").write(raw.replace(o, n).encode("utf-8"))
-        mdll = build("mut_" + name, path)
-        if mdll is None:
-            print("BAD mutant %s: does not build" % name)
-            ok = False
-            continue
-        trc, _ = run(mdll, [target])
-        crc, _ = run(mdll, [control])
-        hit = trc != 0 and crc == 0
-        caught += hit
-        ok = ok and hit
-        print("%s mutant %s: target %s=%s; control %s=%s" % (
-            "CAUGHT" if hit else "MISSED", name, target, "FAIL" if trc else "PASS", control, "PASS" if crc == 0 else "FAIL"))
-    print("mutants: %d of %d caught" % (caught, len(MUTANTS)))
+    total = 0
+    for src, mutants in ((CORE, MUTANTS), (PEER, PEER_MUTANTS)):
+        raw = open(src, "rb").read().decode("utf-8")
+        nl = "\r\n" if "\r\n" in raw else "\n"
+        for name, old, new, target, control in mutants:
+            total += 1
+            o, n = old.replace("\n", nl), new.replace("\n", nl)
+            count = raw.count(o)
+            if count != 1:
+                print("BAD mutant %s: anchor occurs %d times" % (name, count))
+                ok = False
+                continue
+            path = os.path.join(WORK, "mut_" + name + ".cs")
+            open(path, "wb").write(raw.replace(o, n).encode("utf-8"))
+            mdll = build("mut_" + name, path, None) if src == CORE else build("mut_" + name, CORE, path)
+            if mdll is None:
+                print("BAD mutant %s: does not build" % name)
+                ok = False
+                continue
+            trc, _ = run(mdll, [target])
+            crc, _ = run(mdll, [control])
+            hit = trc != 0 and crc == 0
+            caught += hit
+            ok = ok and hit
+            print("%s mutant %s: target %s=%s; control %s=%s" % (
+                "CAUGHT" if hit else "MISSED", name, target, "FAIL" if trc else "PASS", control, "PASS" if crc == 0 else "FAIL"))
+    print("mutants: %d of %d caught" % (caught, total))
     after = sha(CORE)
-    print("tracked file unchanged:", after == before)
-    ok = ok and after == before
+    after_peer = sha(PEER)
+    print("tracked files unchanged:", after == before and after_peer == before_peer)
+    ok = ok and after == before and after_peer == before_peer
     print("RESULT", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

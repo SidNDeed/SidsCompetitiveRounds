@@ -3424,6 +3424,14 @@ namespace CompetitiveRounds
             // apply nothing (#276/#430).
             try { ProximityVictimGate.RepublishCapability(); } catch { }
 
+            // [PEER-BUILD] evidence, also ABOVE the modDisabled return: stage
+            // this seat's cr_build statement once, pre-join, and print one line
+            // per remote seat per room join (again when its values change). No
+            // setting, lever or room-kind check is in front of it, because
+            // evidence a player can dispute ships in every client build. It
+            // reads the room and writes only this seat's own statement.
+            try { PeerBuild.StageBuildProp("tick"); PeerBuild.Tick(); } catch { }
+
             if (Plugin.modDisabled) return;
 
             // Menu injection runs independently
