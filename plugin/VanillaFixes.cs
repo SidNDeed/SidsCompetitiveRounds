@@ -1546,31 +1546,29 @@ namespace CompetitiveRounds
             Vector2 damage,
             bool healthRemoval)
         {
-            try
-            {
-                if (!healthRemoval) return true;
-                // AnyGameScope since #151. battleOngoing is driven false by
-                // RPCA_NextRound (an All-RPC) on every client, and the transition ends
-                // in RevivePlayers() -> health reset everywhere, so any mixed-roster
-                // disagreement inside the window is erased before combat resumes.
-                // Widening strictly REDUCES the number of clients that apply
-                // transition-window ticks.
-                if (!RefusesNow()) return true;
-
-                VanillaFixSupport.DiagLimited(
-                    "EndScreenKill-damage",
-                    "EndScreenKill blocked transition DoT player=" +
-                    VanillaFixSupport.PlayerId(__instance) +
-                    " damage=" + VanillaFixSupport.Float(damage.magnitude) +
-                    " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
-                    20);
-                return false;
-            }
-            catch (Exception ex)
-            {
-                VanillaFixSupport.LogError("EndScreenKill.DoDamage", ex);
-                return true;
-            }
+            // AnyGameScope since #151. battleOngoing is driven false by
+            // RPCA_NextRound (an All-RPC) on every client, and the transition ends
+            // in RevivePlayers() -> health reset everywhere, so any mixed-roster
+            // disagreement inside the window is erased before combat resumes.
+            // Widening strictly REDUCES the number of clients that apply
+            // transition-window ticks.
+            // V4 B7: the evidence line runs after the decision under
+            // HookGuard.Prefix, so a fault in it never turns a refusal into a
+            // run (a fault in the decision itself still runs the method).
+            return HookGuard.Prefix(
+                () => !healthRemoval || !RefusesNow(),
+                ex => { VanillaFixSupport.LogError("EndScreenKill.DoDamage", ex); return true; },
+                run =>
+                {
+                    if (run) return;
+                    VanillaFixSupport.DiagLimited(
+                        "EndScreenKill-damage",
+                        "EndScreenKill blocked transition DoT player=" +
+                        VanillaFixSupport.PlayerId(__instance) +
+                        " damage=" + VanillaFixSupport.Float(damage.magnitude) +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                        20);
+                });
         }
 
         [HarmonyPrefix]

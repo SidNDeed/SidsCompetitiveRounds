@@ -24,6 +24,7 @@ APPLY = "r.Applied.Add(k);\n            try { ap.Regular(r, k); } catch { r.Exce
 SUMMARY_SKIP = "if (r.Committed.Contains(k) || r.Blocked.Contains(k) || r.Applied.Contains(k)) continue;"
 BROADCAST_RULE = "return path == StartPath.Broadcast && had == StartPath.Broadcast;"
 SEND_RATE = "if (_sendTimes.Count >= ClaimsPerRollingSecond) return \"rate\";"
+CREATE_GATE = "if (_broken || CountForView(view) >= HeldCeilingPerView) return null;"
 EXACT = ("if (f.Length != _roster.Length) return false;\n"
          "            for (int i = 0; i < f.Length; i++) if (f[i] != _roster[i] || !cap3(f[i])) return false;")
 
@@ -66,13 +67,11 @@ MUTANTS = [
     ("corrective_not_consumed", "r.Pending.Remove(k);", "", "rule_refusal_consumed", "dup_verdict"),
     ("tick_range_unbounded", "if (k < 0 || k >= MaxTick) { r.OutOfRange++; return; }",
      "if (k < 0) { r.OutOfRange++; return; }", "index_range", "dup_verdict"),
-    ("evict_any_oldest", "if (r.View == view && r.Terminal) victims.Add(r);", "if (r.View == view) victims.Add(r);",
-     "per_view_cap", "two_seat_convergence"),
     ("inbox_not_consumed", "_byKey.Remove(k);\n            return true;", "return true;",
      "life_message_required", "dup_verdict"),
     ("fill_regular", "try { ap.Corrective(r, k); }", "try { ap.Regular(r, k); }", "two_seat_convergence", "dup_verdict"),
     ("claim_no_highwater",
-     "if (_highWater.TryGetValue(f.Sender, out hw) && !PoisonLedgerCore.After(f.ClaimId, hw)) return \"dup\";",
+     "if (_highWater.TryGetValue(sender, out hw) && !PoisonLedgerCore.After(claimId, hw)) return \"dup\";",
      "", "claim_starts_once", "claim_not_owner"),
     ("broadcast_beats_claim", BROADCAST_RULE, "return path == StartPath.Broadcast;",
      "claim_then_broadcast", "broadcast_repeat_allowed"),
@@ -90,8 +89,8 @@ MUTANTS = [
      "summary_older_epoch_refused", "summary_late_joiner"),
     ("summary_ignores_applied", SUMMARY_SKIP, "if (r.Blocked.Contains(k)) continue;",
      "summary_idempotent", "summary_late_joiner"),
-    ("boundary_last_arrival", "if (!_hasPoint || After(ts, _point)) { _point = ts; _hasPoint = true; }",
-     "{ _point = ts; _hasPoint = true; }", "boundary_stamp_order_independent", "late_joiner_unset"),
+    ("boundary_last_arrival", "if (_hasPoint && !After(ts, _point)) { if (ts == _point) _pointAdopted = false; return; }",
+     "", "boundary_stamp_order_independent", "late_joiner_unset"),
     # A2b: activation over the acknowledged fighters; rooms stay open
     ("ack_count_any", "if (acked < _roster.Length)", "if (acked == 0)",
      "activation_requires_all_acks", "activation_master_only"),
@@ -119,14 +118,13 @@ MUTANTS = [
      "fighter_leave", "activation_requires_all_acks"),
     ("ack_ignores_cap", "if (f[i] != _roster[i] || !cap3(f[i])) return false;", "if (f[i] != _roster[i]) return false;",
      "property_flip", "activation_requires_all_acks"),
-    ("ack_ignores_aid", "if (_roster == null || master != _master || aid != _aid) return;",
-     "if (_roster == null || master != _master) return;", "readmission", "activation_master_only"),
-    ("summary_targets_present_now", "if (ackedNow != null)\n                foreach (int a in ackedNow)",
-     "if (presentNow != null)\n                foreach (int a in presentNow)", "join_during_active_stream",
-     "today_path_seat_not_caught_up"),
-    ("summary_targets_acked_now",
-     "if ((presentAtStart == null || Array.IndexOf(presentAtStart, a) < 0) && !r.Contains(a)) r.Add(a);",
-     "if (!r.Contains(a)) r.Add(a);", "today_path_seat_not_caught_up", "join_during_active_stream"),
+    ("ack_ignores_aid", "if (_roster == null || master != _master || aid != _aid) return false;",
+     "if (_roster == null || master != _master) return false;", "readmission", "activation_master_only"),
+    ("close_targets_ignore_holders", "if (a != self && k.Holders.Contains(a) && !r.Contains(a)) r.Add(a);",
+     "if (a != self && !r.Contains(a)) r.Add(a);", "join_during_active_stream", "late_acker_replay"),
+    ("replay_ignores_present_at_start",
+     "return k.PresentAtStart == null || Array.IndexOf(k.PresentAtStart, actor) < 0;", "return true;",
+     "today_path_seat_not_caught_up", "join_during_active_stream"),
     ("owner_ack_unchecked", "if (!ownerAcked) return \"owner-not-acked\";", "",
      "claim_owner_not_acked", "sender_pair_marked"),
     ("sender_ack_unchecked", "if (!f.SenderAcked) return \"sender-not-acked\";", "",
@@ -135,15 +133,14 @@ MUTANTS = [
     ("summary_applies_regular", "r.Pending.Add(k);\n                r.CatchUp++;",
      "r.Applied.Add(k); ap.Regular(r, k);\n                r.CatchUp++;", "catchup_never_regular", "dup_verdict"),
     # A4: bounds
-    ("no_ceiling", "if (CountForView(view, true) >= NonTerminalCeilingPerView) return null;", "",
-     "ceiling_refuses_new", "per_view_cap"),
+    ("no_ceiling", CREATE_GATE, "if (_broken) return null;", "ceiling_refuses_new", "two_seat_convergence"),
     ("admission_unbounded", "if (_openUntil.Count >= MaxOpenV3StreamsPerVictim) return false;", "",
      "victim_admission_bound", "wrap"),
     # A5: durable claim results, one TryStart
-    ("highwater_not_advanced", "_highWater[f.Sender] = f.ClaimId;", "",
+    ("highwater_not_advanced", "_highWater[sender] = claimId;", "",
      "claim_rate_refusal_durable", "claim_not_owner"),
     ("claim_ignores_tried_start",
-     "if (!TryStart(f.ProjInstance, f.VictimView, StartPath.Claim)) return \"dup-broadcast\";",
+     "if (!TryStart(f.ProjInstance, f.VictimView, StartPath.Claim)) return _saturated ? \"start-refused\" : \"dup-broadcast\";",
      "TryStart(f.ProjInstance, f.VictimView, StartPath.Claim);", "broadcast_then_claim", "claim_then_broadcast"),
     ("broadcast_once", BROADCAST_RULE, "return false;", "broadcast_repeat_allowed", "claim_then_broadcast"),
     # A6: sender-side limits
@@ -153,6 +150,65 @@ MUTANTS = [
     ("rate_unmarks_pair", SEND_RATE,
      "if (_sendTimes.Count >= ClaimsPerRollingSecond) { _sentPairs.Remove(key); return \"rate\"; }",
      "sender_no_retry_after_fail", "sender_pair_marked"),
+    # V4 (fix pass 1): F1 retained state, replay, the point-bound activation
+    ("replay_ignores_holders", "if (k.Holders.Contains(actor)) return false;", "",
+     "late_acker_replay", "today_path_seat_not_caught_up"),
+    ("no_point_adoption", "_point = ts; _hasPoint = true; _pointAdopted = true;", "",
+     "no_boundary_seat_adopts", "late_joiner_unset"),
+    ("no_life_adoption", "if (!_pointAdopted || !s.Set || !InPoint(s)) return;", "return;",
+     "joiner_takes_owner_life", "late_joiner_unset"),
+    ("replay_any_life", "if (!v.Point.SameAs(point) || !v.Life.SameAs(currentLife)) return r;", "",
+     "retained_current_life_only", "late_acker_replay"),
+    ("retained_unbounded", "if (v.Streams.Count >= MaxKeptPerLife) return null;", "",
+     "retained_bounded", "late_acker_replay"),
+    ("kept_ticks_unbounded", "if (tick < 0 || tick >= PoisonLedgerCore.MaxTick) return;", "",
+     "retained_ticks_bounded", "late_acker_replay"),
+    ("accept_any_point", "return _hasAckedPoint && _ackedPoint.SameAs(point);", "return _hasAckedPoint;",
+     "accept_bound_to_point", "ack_bound_to_point"),
+    ("ack_any_point", "if (!point.SameAs(_epoch)) return false;", "",
+     "ack_bound_to_point", "accept_bound_to_point"),
+    # F2: an unstamped boundary
+    ("break_keeps_held", "foreach (var r in gone) Retire(r, \"epoch-broken\");", "",
+     "unstamped_boundary_retires", "broken_refuses_later"),
+    ("broken_admits", CREATE_GATE, "if (CountForView(view) >= HeldCeilingPerView) return null;",
+     "broken_refuses_later", "unstamped_boundary_retires"),
+    # F3: no eviction
+    ("evict_at_ceiling", CREATE_GATE,
+     "if (_broken) return null;\n            if (CountForView(view) >= HeldCeilingPerView) "
+     "foreach (var o in _recs.Values) if (o.View == view) { Retire(o, \"evict\"); break; }",
+     "held_never_evicted", "two_seat_convergence"),
+    # F4: durable marks and starts
+    ("pairs_expire", "if (_sentPairs.Count >= PairCap) return \"pair-cap\";",
+     "if (_sentPairs.Count >= PairCap) _sentPairs.Clear();", "pair_marks_durable", "sender_pair_marked"),
+    ("starts_expire", "if (_started.Count >= StartedCap) { _saturated = true; return true; }",
+     "if (_started.Count >= StartedCap) _started.Clear();", "start_durable", "broadcast_then_claim"),
+    # F5: the id is consumed before any lookup
+    ("collect_before_admit",
+     "string dup = Admit(sender, claimId, nowMs, out overRate);\n            if (dup != null) return dup;\n"
+     "            try { facts = collect(); }\n            catch (Exception ex) { return \"fault:\" + ex.GetType().Name; }",
+     "try { facts = collect(); }\n            catch (Exception ex) { return \"fault:\" + ex.GetType().Name; }\n"
+     "            string dup = Admit(sender, claimId, nowMs, out overRate);\n            if (dup != null) return dup;",
+     "claim_fault_terminal", "claim_starts_once"),
+    # F6: the traffic terms are the payloads' sizes
+    ("wire_activate_short", "return new object[] { TypeActivate, Protocol, aid, fighters, point.Ts, point.Set };",
+     "return new object[] { TypeActivate, Protocol, aid, fighters, point.Ts };", "traffic_formula", "dup_verdict"),
+    # F7: every result named
+    ("outcome_unnamed", "return \"drop reason=\" + (string.IsNullOrEmpty(result) ? \"unnamed\" : result);",
+     "return \"drop\";", "claim_terminal_every_path", "claim_fault_terminal"),
+    # F8: hooks contain their own faults
+    ("after_fault_runs", "if (after != null) { try { after(run); } catch { } }",
+     "if (after != null) { try { after(run); } catch { run = true; } }", "refused_start_stands",
+     "phoenix_postfix_contained"),
+    ("run_rethrows", "try { body(); } catch { }", "body();", "phoenix_postfix_contained", "refused_start_stands"),
+    ("fault_runs_always", "if (_claimStarts > 0) return false;", "", "prefix_fault_no_second_stream",
+     "start_durable"),
+    # F9: the SILENT arm
+    ("label_merged", "return arm == Broadcast ? \"broadcast\" : \"direct\";", "return \"broadcast-or-direct\";",
+     "silent_arm_label", "dup_verdict"),
+    # F10: the point boundary invalidates
+    ("point_unchecked",
+     "if (!point.SameAs(_epoch)) { Kill(\"point-boundary\"); why = \"killed:\" + _killWhy; return false; }", "",
+     "retake_invalidates", "activation_requires_all_acks"),
 ]
 
 

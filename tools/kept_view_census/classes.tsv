@@ -237,6 +237,7 @@ Plugin.cs	OvtExtraPickPatch	Prefix	players	N	OVT rooms
 Plugin.cs	PlayerAssigner_CreatePlayer_2v2_Patch	Prefix	players	N	2v2 body creation	
 Plugin.cs	QuickplayChurnAbandonGuardPatch	Prefix	ActiveFighterCount	N	quickplay rooms	
 Plugin.cs	QuickplayChurnFreezePatch	Postfix	ActiveFighterCount	N	quickplay rooms	
+PoisonLedgerCore.cs	ClaimCore	Decide	Sender	R	the decision body Handle runs after the claim id is consumed (V4 B6): a claim's sender actor (EventData.Sender) is compared with the projectile's owner; a started claim's damage reaches the DoDamage prefix (surface 3)	
 PoisonLedgerCore.cs	ClaimCore	VictimDecide	Sender	R	a claim's sender actor (EventData.Sender): the per-sender claim-id and rate key, and compared with the projectile's owner; a started claim's damage reaches the DoDamage prefix (surface 3)	
 PoisonSync.cs	PointEvidence	PointEnd	players	N	evidence only (bugs 406/407 item C): reads each player's health for the bounded per-point [HP-POINT-END]/[SAW-POINT] lines and writes nothing	
 PoisonSync.cs	PointEvidence	SawAfter	players	N	evidence only (bugs 406/407 item C): reads each player's health for the bounded per-point [HP-POINT-END]/[SAW-POINT] lines and writes nothing	
@@ -245,9 +246,9 @@ PoisonSync.cs	PoisonSync	ApplyCommitted	players	V	attacker lookup for credit; th
 PoisonSync.cs	PoisonSync	Fighters	ActiveFighters	V	the v3 activation roster is the room's kept fighter view itself (A2b: the players the game is scoring)	
 PoisonSync.cs	PoisonSync	FindPlayer	players	V	attacker lookup for a corrective poison tick; the funnel asks DamageRulesGate.Refuses, which is the DoDamage prefix's own rule (surface 3)	VanillaFixes.cs|DamageRulesGate|BeforeDoDamage
 PoisonSync.cs	PoisonSync	HasCap3	PlayerList	R	raw replicated read of one actor's cr_pois3: a fighter without it turns v3 off, and an actor without it is never a v3 addressee	
-PoisonSync.cs	PoisonSync	NotePointBoundary	IsMasterClient	R	only the current master re-takes the v3 activation at a point boundary; every seat still acknowledges only the fighters it sees	
+PoisonSync.cs	PoisonSync	NotePointBoundary	IsMasterClient	R	only the current master offers the next v3 activation at a point boundary (every seat's activation, bound to the previous point, is dead there already); every seat still acknowledges only the fighters it sees	
 PoisonSync.cs	PoisonSync	OnActivate	MasterClient	R	raw by design: an ACTIVATE counts only from the actor who is master when it arrives; every seat still acknowledges only the fighters it sees	
-PoisonSync.cs	PoisonSync	OnEvent	Sender	R	identity check: only the victim's owner speaks for the victim (PoisonSync.cs:1662-1667); the claim, activation and acknowledgement kinds are handed the sender raw and judge it themselves, so a quarantined sender speaks only for its own quarantined body, whose damage no count or credit reads (surfaces 3 and 6)	
+PoisonSync.cs	PoisonSync	OnEvent	Sender	R	identity check: only the victim's owner speaks for the victim (OnEvent's view.Owner.ActorNumber != e.Sender check); the claim, activation and acknowledgement kinds are handed the sender raw and judge it themselves, so a quarantined sender speaks only for its own quarantined body, whose damage no count or credit reads (surfaces 3 and 6)	
 PoisonSync.cs	PoisonSync	PresentActors	PlayerList	R	the addressee base: the handshake goes to present cr_pois3 actors, LIFE and summaries to present acknowledged actors; an actor not yet seen to join is in no list	
 PoisonSync.cs	PoisonSync	RawNonSpectatorCount	PlayerList	R	whole-room predicate over every actor (counting a quarantined one is the stricter side)	
 PoisonSync.cs	PoisonSync	RawNonSpectators	PlayerList	R	whole-room predicate over every actor	

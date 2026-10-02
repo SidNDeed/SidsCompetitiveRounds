@@ -281,24 +281,6 @@ namespace PoisonLedgerTests
             Eq(2, l.Find(V, 1).OutOfRange, "two ignored");
         }
 
-        // 19. (restated by A4) Above 128 records on a view only terminal ones
-        //     are evicted; a held record and another view's are never touched.
-        private static void PerViewCap()
-        {
-            var l = new PoisonLedgerCore(); var ap = new Ap();
-            l.OnHeader(V, 1, default(LifeEpoch), false, null, false, ap);   // pending: never evictable
-            l.OnHeader(U, 1, default(LifeEpoch), false, null, true, ap);
-            for (int s = 2; s <= 140; s++)
-            {
-                l.OnHeader(V, s, default(LifeEpoch), false, null, true, ap);
-                l.OnSummary(V, s, default(LifeEpoch), 1, M(1, 0), M(1), null, true, ap);
-            }
-            Check(l.Find(V, 1) != null, "the held record survives");
-            Check(l.Find(U, 1) != null, "another view's record survives");
-            Eq(129, l.Count, "128 on the view plus the other view's one");
-            Eq("evict", l.RetiredLog[0].Retired, "evicted as terminal");
-        }
-
         // 20. (restated by A2b) A header is v3 only on a seat holding that
         //     stream's LIFE message; every other header is today's, and a LIFE
         //     message is consumed by its own stream's header once.
@@ -445,7 +427,7 @@ namespace PoisonLedgerTests
         private static ActivationCore Armed(int aid, int[] fighters, params int[] extraAcks)
         {
             var a = new ActivationCore();
-            a.OnActivate(1, 1, aid, fighters, 0);
+            a.OnActivate(1, 1, aid, fighters, P0, 0);
             foreach (int x in fighters) a.OnAck(x, 1, aid);
             foreach (int x in extraAcks) a.OnAck(x, 1, aid);
             return a;
@@ -455,14 +437,14 @@ namespace PoisonLedgerTests
         private static void ActivationRequiresAllAcks()
         {
             var a = new ActivationCore(); string w;
-            a.OnActivate(1, 1, 7, F12, 0);
-            Check(!a.Evaluate(F12, All, 10, out w), "no acks");
+            a.OnActivate(1, 1, 7, F12, P0, 0);
+            Check(!a.Evaluate(F12, All, 10, P0, out w), "no acks");
             a.OnAck(1, 1, 7); a.OnAck(9, 1, 7);
-            Check(!a.Evaluate(F12, All, 10, out w) && w == "not-acked 1/2", "one fighter and a spectator: " + w);
+            Check(!a.Evaluate(F12, All, 10, P0, out w) && w == "not-acked 1/2", "one fighter and a spectator: " + w);
             a.OnAck(2, 1, 8);
-            Check(!a.Evaluate(F12, All, 10, out w), "an ack for another activation does not count");
+            Check(!a.Evaluate(F12, All, 10, P0, out w), "an ack for another activation does not count");
             a.OnAck(2, 1, 7);
-            Check(a.Evaluate(F12, All, 10, out w), "both fighters: " + w);
+            Check(a.Evaluate(F12, All, 10, P0, out w), "both fighters: " + w);
             Eq("1,2,9", string.Join(",", a.AckedPresent(new[] { 1, 2, 9 })), "the acknowledged spectator is an addressee");
         }
 
@@ -471,27 +453,27 @@ namespace PoisonLedgerTests
         private static void ActivationKilledByRoomEvent()
         {
             var a = Armed(7, F12); string w;
-            Check(a.Evaluate(F12, All, 10, out w), "armed");
+            Check(a.Evaluate(F12, All, 10, P0, out w), "armed");
             a.OnRoomEvent("player-entered actor=3");
-            Check(!a.Evaluate(F12, All, 10, out w) && w == "killed:player-entered actor=3", "event: " + w);
+            Check(!a.Evaluate(F12, All, 10, P0, out w) && w == "killed:player-entered actor=3", "event: " + w);
             Eq(0, a.AckedPresent(F12).Length, "nothing is addressed while off");
             a.OnAck(1, 1, 7); a.OnAck(2, 1, 7);
-            Check(!a.Evaluate(F12, All, 20, out w), "re-acks of the old activation do not revive it: " + w);
-            a.OnActivate(1, 1, 8, F12, 30); a.OnAck(1, 1, 8); a.OnAck(2, 1, 8);
-            Check(a.Evaluate(F12, All, 40, out w), "fresh activation: " + w);
+            Check(!a.Evaluate(F12, All, 20, P0, out w), "re-acks of the old activation do not revive it: " + w);
+            a.OnActivate(1, 1, 8, F12, P0, 30); a.OnAck(1, 1, 8); a.OnAck(2, 1, 8);
+            Check(a.Evaluate(F12, All, 40, P0, out w), "fresh activation: " + w);
         }
 
         // 33. A fighter without cr_pois3 turns v3 off and gets no ack anywhere.
         private static void ActivationCapMissing()
         {
             var fresh = new ActivationCore(); string w;
-            Check(!fresh.Evaluate(F12, x => x != 2, 10, out w) && w == "cap-missing actor=2", "before any activation: " + w);
+            Check(!fresh.Evaluate(F12, x => x != 2, 10, P0, out w) && w == "cap-missing actor=2", "before any activation: " + w);
             var a = Armed(7, F12);
-            Check(!a.Evaluate(F12, x => x != 2, 10, out w), "armed, then a fighter's cap missing");
-            Check(!a.Evaluate(F12, All, 10, out w), "sticky: " + w);
+            Check(!a.Evaluate(F12, x => x != 2, 10, P0, out w), "armed, then a fighter's cap missing");
+            Check(!a.Evaluate(F12, All, 10, P0, out w), "sticky: " + w);
             var b = new ActivationCore();
-            b.OnActivate(1, 1, 9, F12, 0);
-            Check(!b.ShouldAck(F12, x => x != 2), "no ack with a fighter's cap missing");
+            b.OnActivate(1, 1, 9, F12, P0, 0);
+            Check(!b.ShouldAck(F12, x => x != 2, P0), "no ack with a fighter's cap missing");
         }
 
         // 34. An OLD spectator (no cr_pois3) joins: before this seat observes
@@ -506,10 +488,10 @@ namespace PoisonLedgerTests
             a.OnRoomEvent("player-entered actor=3");
             int[] present = { 1, 2, 3 };
             Check(V3Targets.ShouldOffer(F12, cap, true), "the fighters still all carry cr_pois3");
-            a.OnActivate(1, 1, 8, F12, 50);
+            a.OnActivate(1, 1, 8, F12, P0, 50);
             Eq("1,2", string.Join(",", V3Targets.Capable(present, cap)), "ACTIVATE/ACK addressees exclude it");
             a.OnAck(1, 1, 8); a.OnAck(2, 1, 8);
-            Check(a.Evaluate(F12, cap, 60, out w), "an old spectator does not block the fighters: " + w);
+            Check(a.Evaluate(F12, cap, 60, P0, out w), "an old spectator does not block the fighters: " + w);
             Eq("1,2", string.Join(",", a.AckedPresent(present)), "LIFE/summary addressees exclude it");
         }
 
@@ -517,28 +499,28 @@ namespace PoisonLedgerTests
         private static void AckRequiresExactRoster()
         {
             var a = new ActivationCore();
-            a.OnActivate(1, 1, 7, F123, 0);
-            Check(a.ShouldAck(new[] { 3, 1, 2 }, All), "exact, any order");
-            Check(!a.ShouldAck(new[] { 1, 2 }, All), "subset");
-            Check(!a.ShouldAck(new[] { 1, 2, 3, 4 }, All), "superset");
+            a.OnActivate(1, 1, 7, F123, P0, 0);
+            Check(a.ShouldAck(new[] { 3, 1, 2 }, All, P0), "exact, any order");
+            Check(!a.ShouldAck(new[] { 1, 2 }, All, P0), "subset");
+            Check(!a.ShouldAck(new[] { 1, 2, 3, 4 }, All, P0), "superset");
         }
 
         // 36. Only the current master's ACTIVATE counts.
         private static void ActivationMasterOnly()
         {
             var a = new ActivationCore(); string w;
-            Check(!a.OnActivate(2, 1, 7, F12, 0), "not the master");
-            Check(!a.Evaluate(F12, All, 10, out w) && w == "no-activation", w);
+            Check(!a.OnActivate(2, 1, 7, F12, P0, 0), "not the master");
+            Check(!a.Evaluate(F12, All, 10, P0, out w) && w == "no-activation", w);
         }
 
         // 37. An activation not fully acknowledged in time is retired.
         private static void ActivationAckTimeout()
         {
             var a = new ActivationCore(); string w;
-            a.OnActivate(1, 1, 7, F12, 0);
+            a.OnActivate(1, 1, 7, F12, P0, 0);
             a.OnAck(1, 1, 7);
-            Check(!a.Evaluate(F12, All, 14999, out w) && w == "not-acked 1/2", "before the timeout: " + w);
-            Check(!a.Evaluate(F12, All, 15000, out w) && w == "killed:ack-timeout", "at the timeout: " + w);
+            Check(!a.Evaluate(F12, All, 14999, P0, out w) && w == "not-acked 1/2", "before the timeout: " + w);
+            Check(!a.Evaluate(F12, All, 15000, P0, out w) && w == "killed:ack-timeout", "at the timeout: " + w);
             Check(!a.Live, "retired");
         }
 
@@ -551,7 +533,7 @@ namespace PoisonLedgerTests
             Eq("1,2", string.Join(",", a.AckedPresent(F12)), "unseen: addressed nothing");
             a.OnRoomEvent("player-entered actor=3");
             Check(!V3Targets.ShouldOffer(F123, cap, true), "no offer while a fighter lacks cr_pois3");
-            Check(!a.Evaluate(F123, cap, 10, out w) && w == "cap-missing actor=3", w);
+            Check(!a.Evaluate(F123, cap, 10, P0, out w) && w == "cap-missing actor=3", w);
             var c = new ClaimCore(); int id;
             Eq("v3-off:" + w, c.ShooterArm(false, w, true, true, 5, V, 0, out id), "no claim sent");
             var f = Facts(2, 1, 77); f.GateOn = false; f.GateWhy = w;
@@ -566,19 +548,19 @@ namespace PoisonLedgerTests
             a.OnRoomEvent("player-entered actor=3");
             Check(V3Targets.ShouldOffer(F123, All, true), "offered over three fighters");
             Check(!V3Targets.ShouldOffer(F123, All, false), "not while the join is settling");
-            a.OnActivate(1, 1, 8, F123, 100);
+            a.OnActivate(1, 1, 8, F123, P0, 100);
             a.OnAck(3, 1, 8);
-            Check(!a.Evaluate(F123, All, 110, out w) && w == "not-acked 1/3", "the earlier acks do not carry over: " + w);
+            Check(!a.Evaluate(F123, All, 110, P0, out w) && w == "not-acked 1/3", "the earlier acks do not carry over: " + w);
             a.OnAck(1, 1, 8); a.OnAck(2, 1, 8);
-            Check(a.Evaluate(F123, All, 120, out w), "all three: " + w);
+            Check(a.Evaluate(F123, All, 120, P0, out w), "all three: " + w);
         }
 
         // 49. A fighter leaving turns v3 off even before the event is seen.
         private static void FighterLeave()
         {
             var a = Armed(7, F123); string w;
-            Check(!a.Evaluate(F12, All, 10, out w) && w == "killed:roster-change", "fighter gone: " + w);
-            Check(!a.Evaluate(F123, All, 20, out w), "sticky: " + w);
+            Check(!a.Evaluate(F12, All, 10, P0, out w) && w == "killed:roster-change", "fighter gone: " + w);
+            Check(!a.Evaluate(F123, All, 20, P0, out w), "sticky: " + w);
         }
 
         // 50. A cr_pois3 change kills; a fighter whose value is no longer 1
@@ -588,9 +570,9 @@ namespace PoisonLedgerTests
             Func<int, bool> flipped = x => x != 2;
             var a = Armed(7, F12); string w;
             a.OnRoomEvent("cap-change actor=2");
-            Check(!a.Evaluate(F12, All, 10, out w), "the event kills: " + w);
-            a.OnActivate(1, 1, 8, F12, 20);
-            Check(!a.ShouldAck(F12, flipped), "no ack while a fighter reads cr_pois3 != 1");
+            Check(!a.Evaluate(F12, All, 10, P0, out w), "the event kills: " + w);
+            a.OnActivate(1, 1, 8, F12, P0, 20);
+            Check(!a.ShouldAck(F12, flipped, P0), "no ack while a fighter reads cr_pois3 != 1");
             Check(!V3Targets.ShouldOffer(F12, flipped, true), "no offer either");
         }
 
@@ -601,34 +583,38 @@ namespace PoisonLedgerTests
             var a = Armed(7, F12); string w;
             a.OnRoomEvent("player-left actor=2");
             a.OnRoomEvent("player-entered actor=2");
-            a.OnActivate(1, 1, 8, F12, 100);
+            a.OnActivate(1, 1, 8, F12, P0, 100);
             a.OnAck(1, 1, 8);
             a.OnAck(2, 1, 7);
-            Check(!a.Evaluate(F12, All, 110, out w) && w == "not-acked 1/2", "the old ack: " + w);
+            Check(!a.Evaluate(F12, All, 110, P0, out w) && w == "not-acked 1/2", "the old ack: " + w);
             a.OnAck(2, 1, 8);
-            Check(a.Evaluate(F12, All, 120, out w), "re-acknowledged: " + w);
+            Check(a.Evaluate(F12, All, 120, P0, out w), "re-acknowledged: " + w);
         }
 
-        // 52. A join during an active stream: the joiner gets that stream's
-        //     catch-up only once it has acknowledged (it never saw the header).
+        // 52. (restated by V4 B3) A join during an active stream: the joiner
+        //     gets that stream's catch-up once it acknowledges (it never saw
+        //     the header), and is a holder of its close summary from then on.
         private static void JoinDuringActiveStream()
         {
-            int[] life = { 1, 2 }, atStart = { 1, 2 };
-            Eq("2", string.Join(",", V3Targets.SummaryTargets(life, atStart, new[] { 1, 2, 3 }, new int[0], 1)),
+            var ret = new PointRetainer();
+            var k = ret.Begin(V, 1, E(100), E(100), new[] { 1, 2 }, new[] { 1, 2 }, null);
+            Eq("2", string.Join(",", PointRetainer.CloseTargets(k, new[] { 1, 2, 3 }, 1)),
                 "not acknowledged: not caught up");
-            Eq("2,3", string.Join(",", V3Targets.SummaryTargets(life, atStart, new[] { 1, 2, 3 }, new[] { 1, 2, 3 }, 1)),
-                "acknowledged: caught up");
-            Eq("3", string.Join(",", V3Targets.SummaryTargets(life, atStart, new[] { 1, 3 }, new[] { 1, 3 }, 1)),
-                "a LIFE addressee that left is dropped");
+            Eq("1", Streams(ret.ReplayFor(3, 1, V, E(100), E(100))), "acknowledged: replayed");
+            Eq("2,3", string.Join(",", PointRetainer.CloseTargets(k, new[] { 1, 2, 3, 4 }, 1)),
+                "holders only; an actor that never held it gets nothing");
+            Eq("3", string.Join(",", PointRetainer.CloseTargets(k, new[] { 1, 3 }, 1)), "a holder that left is dropped");
         }
 
-        // 53. An actor present at the start WITHOUT the LIFE message handled
-        //     the stream by today's path: never caught up on top of it.
+        // 53. (restated by V4 B3) An actor present at the start WITHOUT the
+        //     LIFE message handled the stream by today's path: never caught up
+        //     on top of it, by replay or by the close summary.
         private static void TodayPathSeatNotCaughtUp()
         {
-            int[] life = { 1, 2 }, atStart = { 1, 2, 9 };
-            Eq("2", string.Join(",", V3Targets.SummaryTargets(life, atStart, new[] { 1, 2, 9 }, new[] { 1, 2, 9 }, 1)),
-                "the spectator that acked after the start is excluded");
+            var ret = new PointRetainer();
+            var k = ret.Begin(V, 1, E(100), E(100), new[] { 1, 2 }, new[] { 1, 2, 9 }, null);
+            Eq(0, ret.ReplayFor(9, 1, V, E(100), E(100)).Count, "the spectator that acked after the start");
+            Eq("2", string.Join(",", PointRetainer.CloseTargets(k, new[] { 1, 2, 9 }, 1)), "excluded from the close");
         }
 
         // 54. The shooter claims only toward an acknowledged victim owner.
@@ -665,7 +651,7 @@ namespace PoisonLedgerTests
         private static void CeilingRefusesNew()
         {
             var l = new PoisonLedgerCore(); var ap = new Ap();
-            for (int s = 1; s <= PoisonLedgerCore.NonTerminalCeilingPerView; s++)
+            for (int s = 1; s <= PoisonLedgerCore.HeldCeilingPerView; s++)
                 l.OnHeader(V, s, default(LifeEpoch), false, null, false, ap);
             Check(l.OnHeader(V, 5000, default(LifeEpoch), false, null, false, ap) == null, "refused");
             Check(l.Find(V, 1) != null, "the oldest held record survives");
@@ -752,6 +738,373 @@ namespace PoisonLedgerTests
             Eq("pair-marked", c.ShooterArm(true, null, true, true, 999, V, 5000, out id), "not retried after the window");
         }
 
+        // ── V4 (fix pass 1) ──────────────────────────────────────────────
+
+        private static readonly LifeEpoch P0 = default(LifeEpoch);
+
+        private static string Streams(IEnumerable<Kept> ks) { return string.Join(",", ks.Select(k => k.Stream)); }
+
+        private static void Deliver(PoisonLedgerCore l, Kept k, Ap ap)
+        {
+            int n = k.Ticks;
+            l.OnSummary(k.View, k.Stream, k.Life, n, PoisonLedgerCore.Mask(k.Committed, n),
+                PoisonLedgerCore.Mask(k.Blocked, n), null, true, ap);
+        }
+
+        // 56. F1: an actor that acknowledges late gets the victim's retained
+        //     streams of the current life once, applies each missing tick
+        //     once, and is never replayed to again.
+        private static void LateAckerReplay()
+        {
+            var ret = new PointRetainer();
+            LifeEpoch P = E(100), L = E(100);
+            var k1 = ret.Begin(V, 1, P, L, new[] { 1, 2 }, new[] { 1, 2 }, null);
+            foreach (int t in new[] { 0, 1, 3 }) PointRetainer.Note(k1, t, false);
+            PointRetainer.Note(k1, 2, true);
+            Eq("2", string.Join(",", PointRetainer.CloseTargets(k1, new[] { 1, 2 }, 1)), "closed before the join");
+            var k2 = ret.Begin(V, 2, P, L, new[] { 1, 2 }, new[] { 1, 2 }, null);
+            PointRetainer.Note(k2, 0, false); PointRetainer.Note(k2, 1, false);
+
+            var late = new PoisonLedgerCore(); var ap = new Ap();
+            late.AdoptPoint(100);
+            var replay = ret.ReplayFor(3, 1, V, P, L);
+            Eq("1,2", Streams(replay), "both retained streams");
+            foreach (var k in replay) Deliver(late, k, ap);
+            late.OnTick(V, 2, 2, false, true, ap);
+            PointRetainer.Note(k2, 2, false);
+            Eq("2,3", string.Join(",", PointRetainer.CloseTargets(k2, new[] { 1, 2, 3 }, 1)), "the late seat is a holder");
+            Deliver(late, k2, ap);
+            Eq("C1.0,C1.1,C1.3,C2.0,C2.1,R2.2", ap.Seen, "each missing tick once, the blocked one never");
+            Eq(0, ret.ReplayFor(3, 1, V, P, L).Count, "a holder is never replayed to again");
+            Eq(0, ret.ReplayFor(1, 1, V, P, L).Count, "nor this seat");
+        }
+
+        // 57. F1: a seat that executed no boundary RPC takes the point epoch
+        //     from the ACTIVATE; the previous point's life is never applied.
+        private static void NoBoundarySeatAdopts()
+        {
+            var l = new PoisonLedgerCore(); var ap = new Ap();
+            l.AdoptPoint(100);
+            Check(l.PointEpoch.SameAs(E(100)), "adopted");
+            Check(!l.InPoint(E(50)) && !l.InPoint(P0) && l.InPoint(E(100)) && l.InPoint(E(150)), "in point");
+            l.OnSummary(V, 1, E(50), 2, M(2, 0, 1), M(2), null, true, ap);
+            l.OnSummary(V, 2, E(100), 2, M(2, 0, 1), M(2), null, true, ap);
+            Eq("C2.0,C2.1", ap.Seen, "the previous point's life is never applied");
+            l.AdoptPoint(80);
+            Check(l.PointEpoch.SameAs(E(100)), "an older point is not adopted");
+        }
+
+        // 58. F1 (B2): such a seat takes the view's life from the owner's own
+        //     record (a Phoenix life inside the point included); a seat that
+        //     executed the boundary itself keeps A1's rule.
+        private static void JoinerTakesOwnerLife()
+        {
+            var l = new PoisonLedgerCore(); var ap = new Ap();
+            l.AdoptPoint(100);
+            l.OnSummary(V, 1, E(150), 2, M(2, 0, 1), M(2), null, true, ap);
+            Eq("C1.0,C1.1", ap.Seen, "the owner's life, applied");
+            LifeEpoch f;
+            Check(l.FenceOf(V, out f) && f.SameAs(E(150)), "fence taken from the owner");
+            var own = new PoisonLedgerCore(); var ap2 = new Ap();
+            own.NotePointBoundary(100);
+            own.OnSummary(V, 1, E(150), 2, M(2, 0, 1), M(2), null, true, ap2);
+            Eq("", ap2.Seen, "held until this seat's own revive");
+            var both = new PoisonLedgerCore(); var ap3 = new Ap();
+            both.AdoptPoint(100); both.NotePointBoundary(100);
+            both.OnSummary(V, 1, E(150), 2, M(2, 0, 1), M(2), null, true, ap3);
+            Eq("", ap3.Seen, "a seat that then executes the boundary itself keeps A1's rule too");
+        }
+
+        // 59. F1: only the view's current life in the current point is
+        //     retained and replayed.
+        private static void RetainedCurrentLifeOnly()
+        {
+            var ret = new PointRetainer();
+            Check(ret.Begin(V, 1, E(100), E(100), new[] { 1 }, new[] { 1 }, null) != null, "kept");
+            Eq("1", Streams(ret.ReplayFor(3, 1, V, E(100), E(100))), "the current life");
+            ret.Begin(V, 2, E(100), E(150), new[] { 1 }, new[] { 1 }, null);
+            Eq(1, ret.CountFor(V), "the previous life's streams are gone");
+            Eq(0, ret.ReplayFor(4, 1, V, E(100), E(100)).Count, "a previous life is never replayed");
+            Eq("2", Streams(ret.ReplayFor(4, 1, V, E(100), E(150))), "only the current life");
+            Eq(0, ret.ReplayFor(5, 1, V, E(200), E(150)).Count, "nor at another point");
+        }
+
+        // 60. F1: the retained state is bounded per view and life.
+        private static void RetainedBounded()
+        {
+            var ret = new PointRetainer();
+            for (int s = 0; s < PointRetainer.MaxKeptPerLife; s++)
+                Check(ret.Begin(V, s, E(1), E(1), new[] { 1 }, new[] { 1 }, null) != null, "kept " + s);
+            Check(ret.Begin(V, 9999, E(1), E(1), new[] { 1 }, new[] { 1 }, null) == null, "past the bound the stream is today's");
+            Check(ret.Begin(U, 1, E(1), E(1), new[] { 1 }, new[] { 1 }, null) != null, "another view");
+            Check(ret.Begin(V, 10000, E(1), E(2), new[] { 1 }, new[] { 1 }, null) != null, "a new life starts fresh");
+        }
+
+        // 76. F1: a retained stream keeps only tick indices a receiver can
+        //     hold, so its bytes are bounded by MaxTick whatever its length.
+        private static void RetainedTicksBounded()
+        {
+            var ret = new PointRetainer();
+            var k = ret.Begin(V, 1, E(1), E(1), new[] { 1 }, new[] { 1 }, null);
+            for (int t = 0; t < PoisonLedgerCore.MaxTick + 500; t++) PointRetainer.Note(k, t, t % 7 == 3);
+            PointRetainer.Note(k, -1, false);
+            Eq(PoisonLedgerCore.MaxTick, k.Committed.Count + k.Blocked.Count, "at most MaxTick ticks kept");
+            Eq(PoisonLedgerCore.MaxTick, k.Ticks, "the summary names the receivable range");
+        }
+
+        // 61. F1: a seat creates a new v3 record only after acknowledging an
+        //     activation bound to its current point.
+        private static void AcceptBoundToPoint()
+        {
+            var a = new ActivationCore();
+            a.OnActivate(1, 1, 7, F12, E(100), 0);
+            Check(!a.AcceptsAt(E(100)), "nothing before this seat's own ack");
+            a.NoteSelfAck();
+            Check(a.AcceptsAt(E(100)), "at the acknowledged point");
+            Check(!a.AcceptsAt(E(200)), "not at the next point");
+            Check(!a.AcceptsAt(P0), "nor with no point");
+        }
+
+        // 62. F1: a seat acknowledges only at the activation's own point.
+        private static void AckBoundToPoint()
+        {
+            var a = new ActivationCore();
+            a.OnActivate(1, 1, 7, F12, E(100), 0);
+            Check(!a.ShouldAck(F12, All, E(200)), "no ack at another point");
+            Check(!a.ShouldAck(F12, All, P0), "nor with no point");
+            Check(a.ShouldAck(F12, All, E(100)), "at the activation's point");
+        }
+
+        // 63. F2: a boundary without its stamp retires every held record of
+        //     the views it ends, pending ticks dropped; nothing of that life
+        //     moves health afterwards.
+        private static void UnstampedBoundaryRetires()
+        {
+            var l = new PoisonLedgerCore(); var ap = new Ap();
+            l.NotePointBoundary(100); l.OnRevive(V); l.OnRevive(U);
+            l.OnHeader(V, 1, E(100), false, null, true, ap);
+            l.OnTick(V, 1, 1, false, false, ap);
+            l.OnHeader(U, 2, E(100), false, null, true, ap);
+            l.Break(V);
+            Check(l.Find(V, 1) == null, "the view's held record retired");
+            Eq("epoch-broken", l.RetiredLog[0].Retired, "named");
+            Eq(1, l.RetiredLog[0].PendingDropped, "its pending tick dropped");
+            Check(!l.OnTick(V, 1, 2, false, true, ap), "a later tick of it moves nothing");
+            l.Fill(V, true, ap);
+            Eq("R1.0,R2.0", ap.Seen, "nothing of that life after the boundary");
+            Check(l.Find(U, 2) != null, "another view's record stays");
+        }
+
+        // 64. F2: after an unstamped boundary no record is created again in
+        //     the room.
+        private static void BrokenRefusesLater()
+        {
+            var l = new PoisonLedgerCore(); var ap = new Ap();
+            l.Break(-1);
+            Check(l.Broken, "broken");
+            Check(l.OnHeader(V, 1, P0, false, null, true, ap) == null, "no new header record");
+            Check(l.OnSummary(U, 2, E(5), 1, M(1, 0), M(1), null, true, ap) == null, "no new summary record");
+            Eq("", ap.Seen, "nothing applied");
+            l.Clear();
+            Check(l.OnHeader(V, 1, P0, false, null, true, ap) != null, "the next room starts clean");
+        }
+
+        // 65. F3 (restates 19): current, terminal records at the ceiling are
+        //     never evicted; the new record is refused instead.
+        private static void HeldNeverEvicted()
+        {
+            var l = new PoisonLedgerCore(); var ap = new Ap();
+            for (int s = 1; s <= PoisonLedgerCore.HeldCeilingPerView; s++)
+            {
+                l.OnHeader(V, s, P0, false, null, true, ap);
+                l.OnSummary(V, s, P0, 1, M(1, 0), M(1), null, true, ap);
+            }
+            Check(l.OnHeader(V, 5000, P0, false, null, true, ap) == null, "past the ceiling a new record is refused");
+            Check(l.Find(V, 1) != null, "the oldest current record is never evicted");
+            Eq(0, l.RetiredLog.Count, "nothing retired");
+            Eq(PoisonLedgerCore.HeldCeilingPerView, l.Count, "all held");
+        }
+
+        // 66. F4: sender pair marks are durable for the room; past the bound
+        //     the seat sends nothing.
+        private static void PairMarksDurable()
+        {
+            var c = new ClaimCore(); int id;
+            for (int i = 0; i < ClaimCore.PairCap; i++)
+                Eq(null, c.ShooterArm(true, null, true, true, i, V, i * 40L, out id), "send " + i);
+            long now = ClaimCore.PairCap * 40L + 5000;
+            Eq("pair-cap", c.ShooterArm(true, null, true, true, 999999, V, now, out id), "a new pair past the bound: no send");
+            Eq("pair-marked", c.ShooterArm(true, null, true, true, 0, V, now + 10, out id), "the first pair is never forgotten");
+            Eq("pair-cap", c.ShooterArm(true, null, true, true, 999999, V, now + 20, out id), "and stays refused");
+        }
+
+        // 67. F4: start results are durable for the room; past the bound no
+        //     claim starts, so no second stream can follow an unrecorded one.
+        private static void StartDurable()
+        {
+            var c = new ClaimCore();
+            Check(c.TryStart(0, V, StartPath.Claim), "first claim starts");
+            for (int i = 1; i < ClaimCore.StartedCap; i++) c.TryStart(i, V, StartPath.Broadcast);
+            Check(!c.TryStart(0, V, StartPath.Broadcast), "the first pair's claim is never forgotten");
+            Check(c.TryStart(99999, V, StartPath.Broadcast), "past the bound a broadcast proceeds as vanilla");
+            Check(c.Saturated, "and the seat is saturated");
+            Check(!c.TryStart(99999, V, StartPath.Claim), "no claim follows the unrecorded broadcast");
+            Check(!c.TryStart(123456, V, StartPath.Claim), "no claim starts again");
+            Check(!c.TryStart(0, V, StartPath.Broadcast), "still never forgotten");
+            Eq("start-refused", c.VictimDecide(Facts(2, 1, 777777)), "named");
+        }
+
+        // 68. F5: the claim id is consumed before any lookup; a throwing
+        //     lookup is that id's one terminal result.
+        private static void ClaimFaultTerminal()
+        {
+            var c = new ClaimCore(); ClaimFacts got;
+            Eq("fault:InvalidOperationException",
+                c.Handle(2, 5, 1000, () => { throw new InvalidOperationException("lookup"); }, out got), "terminal");
+            Eq("dup", c.Handle(2, 5, 1000, () => Facts(2, 5, 77), out got), "its repeat is a dup, never started");
+            Eq("fault:no-facts", c.Handle(2, 6, 1000, () => null, out got), "no facts");
+            Eq("started", c.Handle(2, 7, 1000, () => Facts(2, 7, 78), out got), "the next claim");
+        }
+
+        // 69. F7: every result is named and every line carries the tuple.
+        private static void ClaimTerminalEveryPath()
+        {
+            var c = new ClaimCore(); ClaimFacts got;
+            var results = new List<string>();
+            var tweaks = new List<Action<ClaimFacts>>
+            {
+                f => f.GateOn = false, f => f.SenderAcked = false, f => f.VictimFound = false, f => f.ProjFound = false,
+                f => f.ProjOwner = 9, f => f.PoisonChildren = 0, f => f.Live = false, f => f.VictimFenceKnown = false,
+                f => { },
+            };
+            int id = 1;
+            foreach (var t in tweaks)
+            {
+                var f = Facts(2, id, 500 + id); t(f);
+                results.Add(c.Handle(2, id, 1000, () => f, out got));
+                id++;
+            }
+            results.Add(c.Handle(2, 1, 1000, () => Facts(2, 1, 1), out got));
+            results.Add(c.Handle(2, 99, 1000, () => { throw new ArgumentException(); }, out got));
+            foreach (var r in results) Check(!string.IsNullOrEmpty(r), "a named result");
+            Eq("gate:unknown,sender-not-acked,not-victim,no-projectile,not-owner,no-poison,not-live,fence,started,dup,fault:ArgumentException",
+                string.Join(",", results), "every path");
+            Eq("drop reason=rate", ClaimLine.Outcome("rate"), "a drop names its reason");
+            Eq("drop reason=unnamed", ClaimLine.Outcome(null), "never an empty reason");
+            Eq("sent", ClaimLine.Outcome("sent"), "sent");
+            Eq("[POISON-CLAIM] recv from=2 c=5 proj=10 victim=1001 outcome=drop reason=malformed",
+                ClaimLine.Recv(2, 5, 10, V, ClaimLine.Outcome("malformed")), "the tuple");
+            Eq("[POISON-CLAIM] arm from=3 c=6 proj=10 victim=1001 outcome=drop reason=fault:NullReferenceException",
+                ClaimLine.Arm(3, 6, 10, V, ClaimLine.Outcome("fault:NullReferenceException")), "the arm tuple");
+        }
+
+        // 70. F8 (M6): once the shared TryStart refuses the broadcast poison,
+        //     a fault in the diagnostic after it never runs the effect.
+        private static void RefusedStartStands()
+        {
+            var c = new ClaimCore();
+            Eq("started", c.VictimDecide(Facts(2, 1, 77)), "a claim started the pair");
+            int afterRan = 0;
+            bool run = HookGuard.Prefix(() => c.TryStart(77, V, StartPath.Broadcast), ex => true,
+                r => { afterRan++; throw new InvalidOperationException("diagnostic"); });
+            Check(!run, "the refusal stands although the diagnostic threw");
+            Eq(1, afterRan, "the diagnostic ran once");
+            Check(HookGuard.Prefix(() => true, ex => false, r => { throw new Exception(); }), "a run stands too");
+        }
+
+        // 71. F8 (M7): a postfix step that throws stays inside its guard and
+        //     the next step still runs.
+        private static void PhoenixPostfixContained()
+        {
+            var steps = new List<string>();
+            HookGuard.Run(() => { steps.Add("boundary"); throw new NullReferenceException(); });
+            HookGuard.Run(() => steps.Add("flush"));
+            Eq("boundary,flush", string.Join(",", steps), "contained, and the next step runs");
+        }
+
+        // 72. F8: a fault before the start decision never starts a second
+        //     stream: skipped once a claim started, else vanilla with the seat
+        //     saturated so no claim starts after it.
+        private static void PrefixFaultNoSecondStream()
+        {
+            var c = new ClaimCore();
+            Eq("started", c.VictimDecide(Facts(2, 1, 77)), "a claim started");
+            Check(!HookGuard.Prefix(() => { throw new InvalidOperationException(); }, ex => c.FaultBeforeStart(), null),
+                "skipped once a claim started");
+            var d = new ClaimCore();
+            Check(HookGuard.Prefix(() => { throw new InvalidOperationException(); }, ex => d.FaultBeforeStart(), null),
+                "with no claim started it runs as vanilla");
+            Check(d.Saturated, "saturated");
+            Eq("start-refused", d.VictimDecide(Facts(2, 1, 88)), "no claim starts after it");
+            Check(HookGuard.Prefix(() => { throw new Exception(); }, ex => { throw new Exception(); }, null),
+                "a faulting fault handler runs the method");
+        }
+
+        // 73. F9: the SILENT line names its arm unambiguously.
+        private static void SilentArmLabel()
+        {
+            Eq("local-only c=5", SilentArm.Label(5), "local-only");
+            Eq("broadcast", SilentArm.Label(SilentArm.Broadcast), "broadcast");
+            Eq("direct", SilentArm.Label(0), "outside any poison effect");
+        }
+
+        // 74. F10: the point boundary is a real invalidation on every seat;
+        //     the re-take over the new point turns v3 on again.
+        private static void RetakeInvalidates()
+        {
+            foreach (int self in new[] { 1, 2 })
+            {
+                var l = new PoisonLedgerCore(); l.NotePointBoundary(100);
+                var a = new ActivationCore(); string w;
+                a.OnActivate(1, 1, 7, F12, l.PointEpoch, 0);
+                a.OnAck(1, 1, 7); a.OnAck(2, 1, 7); a.NoteSelfAck();
+                Check(a.Evaluate(F12, All, 10, l.PointEpoch, out w), "seat " + self + " on at point 100: " + w);
+                l.NotePointBoundary(200);
+                Check(!a.Evaluate(F12, All, 20, l.PointEpoch, out w) && w == "killed:point-boundary",
+                    "seat " + self + " the boundary kills: " + w);
+                Check(!a.AcceptsAt(l.PointEpoch), "no new record at the next point under the old ack");
+                Eq(0, a.AckedPresent(F12).Length, "nothing is addressed");
+                a.OnAck(1, 1, 7); a.OnAck(2, 1, 7);
+                Check(!a.Evaluate(F12, All, 30, l.PointEpoch, out w), "old acks never revive it: " + w);
+                a.OnActivate(1, 1, 8, F12, l.PointEpoch, 40);
+                Check(a.ShouldAck(F12, All, l.PointEpoch), "the re-take is acknowledged");
+                a.OnAck(1, 1, 8); a.OnAck(2, 1, 8); a.NoteSelfAck();
+                Check(a.Evaluate(F12, All, 50, l.PointEpoch, out w), "seat " + self + " on at point 200: " + w);
+                Check(a.AcceptsAt(E(200)), "accepts at the new point");
+            }
+        }
+
+        // F6: Protocol16 sizes of every v3 payload, element by element
+        //     (array header 3; byte, bool 2; int, float 5; int[] 5+4n; byte[] 5+n).
+        private static int Sz(object o)
+        {
+            if (o is byte || o is bool) return 2;
+            if (o is int || o is float) return 5;
+            if (o is int[]) return 5 + 4 * ((int[])o).Length;
+            if (o is byte[]) return 5 + ((byte[])o).Length;
+            var arr = o as object[];
+            if (arr != null) { int n = 3; foreach (var x in arr) n += Sz(x); return n; }
+            throw new Exception("unsized " + (o == null ? "null" : o.GetType().Name));
+        }
+
+        // 75. F6: the notes' traffic terms are the payloads' own sizes.
+        private static void TrafficFormula()
+        {
+            Eq(24, Sz(V3Wire.Life(V, 1, E(5))), "LIFE");
+            Eq(36, Sz(V3Wire.Claim(V, 7, 1, 5, 1, E(5))), "claim");
+            Eq(17, Sz(V3Wire.Ack(7, 1)), "ACK");
+            for (int r = 1; r <= 8; r++)
+                Eq(24 + 4 * r, Sz(V3Wire.Activate(1, new int[r], E(5))), "ACTIVATE r=" + r);
+            for (int n = 0; n <= 40; n++)
+            {
+                var m = PoisonLedgerCore.Mask(new int[0], n);
+                Eq(78 + 2 * ((n + 7) / 8), Sz(V3Wire.Summary(V, 1, E(5), 0f, 0f, 0f, 0f, 0f, 1, false, 0, n, m, m, 1)),
+                    "summary n=" + n);
+            }
+            Check(V3Wire.Life(V, 1, E(5)).Length < 7 && V3Wire.Activate(1, new int[2], E(5)).Length < 7
+                && V3Wire.Ack(1, 1).Length < 7, "v1.40.3 drops every short v3 payload");
+        }
+
         private static ClaimFacts Facts(int sender, int claimId, long proj)
         {
             return new ClaimFacts
@@ -782,7 +1135,6 @@ namespace PoisonLedgerTests
             { "exception_at_most_once", ExceptionAtMostOnce },
             { "rule_refusal_consumed", RuleRefusalConsumed },
             { "index_range", IndexRange },
-            { "per_view_cap", PerViewCap },
             { "life_message_required", LifeMessageRequired },
             { "two_seat_convergence", TwoSeatConvergence },
             { "claim_starts_once", ClaimStartsOnce },
@@ -819,6 +1171,27 @@ namespace PoisonLedgerTests
             { "today_path_seat_not_caught_up", TodayPathSeatNotCaughtUp },
             { "claim_owner_not_acked", ClaimOwnerNotAcked },
             { "claim_sender_not_acked", ClaimSenderNotAcked },
+            { "late_acker_replay", LateAckerReplay },
+            { "no_boundary_seat_adopts", NoBoundarySeatAdopts },
+            { "joiner_takes_owner_life", JoinerTakesOwnerLife },
+            { "retained_current_life_only", RetainedCurrentLifeOnly },
+            { "retained_bounded", RetainedBounded },
+            { "retained_ticks_bounded", RetainedTicksBounded },
+            { "accept_bound_to_point", AcceptBoundToPoint },
+            { "ack_bound_to_point", AckBoundToPoint },
+            { "unstamped_boundary_retires", UnstampedBoundaryRetires },
+            { "broken_refuses_later", BrokenRefusesLater },
+            { "held_never_evicted", HeldNeverEvicted },
+            { "pair_marks_durable", PairMarksDurable },
+            { "start_durable", StartDurable },
+            { "claim_fault_terminal", ClaimFaultTerminal },
+            { "claim_terminal_every_path", ClaimTerminalEveryPath },
+            { "refused_start_stands", RefusedStartStands },
+            { "phoenix_postfix_contained", PhoenixPostfixContained },
+            { "prefix_fault_no_second_stream", PrefixFaultNoSecondStream },
+            { "silent_arm_label", SilentArmLabel },
+            { "retake_invalidates", RetakeInvalidates },
+            { "traffic_formula", TrafficFormula },
         };
 
         private static int Main(string[] args)

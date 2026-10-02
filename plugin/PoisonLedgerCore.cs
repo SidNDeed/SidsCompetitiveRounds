@@ -7,7 +7,7 @@
 // feeds it what the game and the network say and executes what it returns.
 //
 // Design record: ai-collab/v1410/POISON-CONVERGENCE-DESIGN-V2.md as amended by
-// POISON-CONVERGENCE-AMENDMENTS-V3.md (local notes, not shipped).
+// POISON-CONVERGENCE-AMENDMENTS-V3.md and -V4.md (local notes, not shipped).
 
 using System;
 using System.Collections.Generic;
@@ -48,8 +48,7 @@ namespace CompetitiveRounds
     internal sealed class PoisonLedgerCore
     {
         internal const int MaxTick = 1024;                    // tick indices outside [0, 1024) are ignored
-        internal const int EvictTerminalAbovePerView = 128;   // only terminal records are ever evicted
-        internal const int NonTerminalCeilingPerView = 1024;  // memory backstop: a new header is refused past it
+        internal const int HeldCeilingPerView = 1024;         // nothing is evicted: past this a new record is refused
 
         /// <summary>Wrap-safe ordering of two server-clock stamps (PoisonSync.ServerTsAfter's rule).</summary>
         internal static bool After(int a, int b) { unchecked { return (a - b) > 0; } }
@@ -66,6 +65,8 @@ namespace CompetitiveRounds
 
         private bool _hasPoint;
         private int _point;
+        private bool _pointAdopted;   // the latest point came from an ACTIVATE, not from this seat's own RPC
+        private bool _broken;         // V4 B4: an unstamped boundary was seen; no record is created again
         private readonly Dictionary<int, ViewLife> _lives = new Dictionary<int, ViewLife>();
 
         private ViewLife Life(int view)
@@ -88,9 +89,49 @@ namespace CompetitiveRounds
             return false;
         }
 
+        /// <summary>This seat executed a point boundary RPC with this stamp.
+        /// The latest stamp wins; executing the one it had adopted makes the
+        /// point this seat's own (A1's rule applies to it from then on).</summary>
         internal void NotePointBoundary(int ts)
         {
-            if (!_hasPoint || After(ts, _point)) { _point = ts; _hasPoint = true; }
+            if (_hasPoint && !After(ts, _point)) { if (ts == _point) _pointAdopted = false; return; }
+            _point = ts; _hasPoint = true; _pointAdopted = false;
+        }
+
+        /// <summary>V4 B1: the point epoch named by the current master's
+        /// ACTIVATE. The seat takes it when it holds no boundary or an older
+        /// one (the stamp is the boundary RPC's own), and remembers that it did
+        /// not execute that RPC itself.</summary>
+        internal void AdoptPoint(int ts)
+        {
+            if (_hasPoint && !After(ts, _point)) return;
+            _point = ts; _hasPoint = true; _pointAdopted = true;
+        }
+
+        /// <summary>This seat's point epoch: the latest point boundary it holds.</summary>
+        internal LifeEpoch PointEpoch { get { return _hasPoint ? LifeEpoch.At(_point) : default(LifeEpoch); } }
+
+        /// <summary>A life lies in this seat's current point: before the first
+        /// boundary any life does; after it, the boundary's own stamp or a later
+        /// (Phoenix) one.</summary>
+        internal bool InPoint(LifeEpoch s)
+        {
+            if (!_hasPoint) return true;
+            return s.Set && (s.Ts == _point || After(s.Ts, _point));
+        }
+
+        /// <summary>V4 B2: a seat that adopted its point (it had not executed
+        /// that boundary RPC when the ACTIVATE arrived, as a joiner has not)
+        /// and has never revived the view takes the view's life from
+        /// the owner's own record, when that life lies in the point. A seat
+        /// that executed the boundary RPC itself keeps A1's rule.</summary>
+        private void AdoptLife(int view, LifeEpoch s)
+        {
+            if (!_pointAdopted || !s.Set || !InPoint(s)) return;
+            var l = Life(view);
+            if (l.FenceState != 0) return;
+            if (After(s.Ts, _point)) NotePhoenixBoundary(view, s.Ts);
+            l.FenceState = 2; l.Fence = s.Ts;
         }
 
         internal void NotePhoenixBoundary(int view, int ts)
@@ -162,11 +203,10 @@ namespace CompetitiveRounds
 
         internal int Count { get { return _recs.Count; } }
 
-        private int CountForView(int view, bool nonTerminalOnly)
+        private int CountForView(int view)
         {
             int n = 0;
-            foreach (var r in _recs.Values)
-                if (r.View == view && (!nonTerminalOnly || !r.Terminal)) n++;
+            foreach (var r in _recs.Values) if (r.View == view) n++;
             return n;
         }
 
@@ -174,35 +214,37 @@ namespace CompetitiveRounds
         {
             if (r.Retired != null) return;
             r.Retired = why;
-            if (why == "revive" || why == "stale-verdict") r.PendingDropped += r.Pending.Count;
+            if (why == "revive" || why == "stale-verdict" || why == "epoch-broken") r.PendingDropped += r.Pending.Count;
             _recs.Remove(Key(r.View, r.Stream));
             RetiredLog.Add(r);
         }
 
-        /// <summary>Above the per-view count, evict that view's TERMINAL records,
-        /// oldest first. A record that is current, next, ending, pending or
-        /// unapplied is never evicted here: it leaves by retirement only.</summary>
-        private void EvictTerminal(int view)
-        {
-            int total = CountForView(view, false);
-            if (total <= EvictTerminalAbovePerView) return;
-            var victims = new List<Rec>();
-            foreach (var r in _recs.Values)
-                if (r.View == view && r.Terminal) victims.Add(r);
-            victims.Sort((a, b) => a.Seq.CompareTo(b.Seq));
-            for (int i = 0; i < victims.Count && total > EvictTerminalAbovePerView; i++, total--)
-                Retire(victims[i], "evict");
-        }
-
+        /// <summary>No record is ever evicted (V4 B5): a record leaves by
+        /// retirement only (stale, revive, unstamped boundary, room exit). Past
+        /// the per-view ceiling, or once an unstamped boundary was seen, a new
+        /// record is refused and the stream is not applied on this seat.</summary>
         private Rec Create(int view, int stream, LifeEpoch s, object payload)
         {
-            if (CountForView(view, true) >= NonTerminalCeilingPerView) return null;
+            if (_broken || CountForView(view) >= HeldCeilingPerView) return null;
+            AdoptLife(view, s);
             var r = new Rec { View = view, Stream = stream, Life = s, Payload = payload, Seq = ++_seq };
             r.Cls0 = Classify(view, s);
             _recs[Key(view, stream)] = r;
-            EvictTerminal(view);
             return r;
         }
+
+        /// <summary>V4 B4: a boundary seen without its stamp. Every record held
+        /// for the views it ends (view &lt; 0: every view) retires now with its
+        /// pending ticks dropped, and no record is created again in this room.</summary>
+        internal void Break(int view)
+        {
+            _broken = true;
+            var gone = new List<Rec>();
+            foreach (var r in _recs.Values) if (view < 0 || r.View == view) gone.Add(r);
+            foreach (var r in gone) Retire(r, "epoch-broken");
+        }
+
+        internal bool Broken { get { return _broken; } }
 
         /// <summary>A v3 header: creates the record if absent (a repeat never
         /// overwrites one) and treats the header as tick 0's verdict. Null when
@@ -350,6 +392,8 @@ namespace CompetitiveRounds
             _lives.Clear();
             _hasPoint = false;
             _point = 0;
+            _pointAdopted = false;
+            _broken = false;
             _openUntil.Clear();
         }
 
@@ -387,25 +431,29 @@ namespace CompetitiveRounds
     {
         internal const int ClaimsPerRollingSecond = 32;
         internal const long RollingWindowMs = 1000;
-        internal const int StartedCap = 4096;
-        internal const int PairCap = 4096;
+        // V4 B5: marks are durable for the room. Past either bound the seat
+        // stops sending (pair marks) or stops starting claims (starts): it
+        // never forgets a mark.
+        internal const int StartedCap = 16384;
+        internal const int PairCap = 16384;
 
         private int _nextClaimId;
         private readonly HashSet<long> _sentPairs = new HashSet<long>();
-        private readonly Queue<long> _sentPairOrder = new Queue<long>();
         private readonly Queue<long> _sendTimes = new Queue<long>();
 
         private readonly Dictionary<int, int> _highWater = new Dictionary<int, int>();
         private readonly Dictionary<int, Queue<long>> _recvTimes = new Dictionary<int, Queue<long>>();
         private readonly Dictionary<long, StartPath> _started = new Dictionary<long, StartPath>();
-        private readonly Queue<long> _startedOrder = new Queue<long>();
+        private bool _saturated;      // no claim starts again in this room
+        private int _claimStarts;
 
         internal static long PairKey(long projInstance, int victimView) { return (projInstance << 32) ^ (uint)victimView; }
 
         /// <summary>The shooter's decision for one local-only poison arm. Every
         /// arm gets a claim id. Null means "raise it now"; anything else is the
         /// drop reason. The pair is marked BEFORE the raise and never cleared,
-        /// so a refused or failed send is never retried.</summary>
+        /// so a refused or failed send is never retried; past PairCap marks an
+        /// arm sends nothing.</summary>
         internal string ShooterArm(bool v3On, string offWhy, bool ownerAcked, bool victimFenceKnown, long projInstance,
                                    int victimView, long nowMs, out int claimId)
         {
@@ -415,31 +463,57 @@ namespace CompetitiveRounds
             if (!victimFenceKnown) return "no-life";
             long key = PairKey(projInstance, victimView);
             if (_sentPairs.Contains(key)) return "pair-marked";
+            if (_sentPairs.Count >= PairCap) return "pair-cap";
             _sentPairs.Add(key);
-            _sentPairOrder.Enqueue(key);
-            while (_sentPairOrder.Count > PairCap) _sentPairs.Remove(_sentPairOrder.Dequeue());
             while (_sendTimes.Count > 0 && _sendTimes.Peek() <= nowMs - RollingWindowMs) _sendTimes.Dequeue();
             if (_sendTimes.Count >= ClaimsPerRollingSecond) return "rate";
             _sendTimes.Enqueue(nowMs);
             return null;
         }
 
-        /// <summary>The victim's decision for one syntactically valid claim.
-        /// The sender's claim id is consumed FIRST, so every claim has a
-        /// terminal result before this returns and a repeat is "dup" whatever
-        /// the first one's result was. "started" means start it now.</summary>
+        /// <summary>The victim's first step for a claim whose fields have their
+        /// types, before any lookup: the sender's claim id is consumed and the
+        /// receive-rate slot taken. "dup" for an id at or below the sender's
+        /// high water, else null.</summary>
+        internal string Admit(int sender, int claimId, long nowMs, out bool overRate)
+        {
+            overRate = false;
+            int hw;
+            if (_highWater.TryGetValue(sender, out hw) && !PoisonLedgerCore.After(claimId, hw)) return "dup";
+            _highWater[sender] = claimId;
+            Queue<long> q;
+            if (!_recvTimes.TryGetValue(sender, out q)) { q = new Queue<long>(); _recvTimes[sender] = q; }
+            while (q.Count > 0 && q.Peek() <= nowMs - RollingWindowMs) q.Dequeue();
+            q.Enqueue(nowMs);
+            overRate = q.Count > ClaimsPerRollingSecond;
+            return null;
+        }
+
+        /// <summary>One received claim, end to end (V4 B6): the id is consumed
+        /// first, then the facts are collected; a fault while collecting is the
+        /// terminal result "fault:&lt;type&gt;". Every path returns one named
+        /// result, and a repeat of the id is "dup" whatever the first got.</summary>
+        internal string Handle(int sender, int claimId, long nowMs, Func<ClaimFacts> collect, out ClaimFacts facts)
+        {
+            facts = null;
+            bool overRate;
+            string dup = Admit(sender, claimId, nowMs, out overRate);
+            if (dup != null) return dup;
+            try { facts = collect(); }
+            catch (Exception ex) { return "fault:" + ex.GetType().Name; }
+            if (facts == null) return "fault:no-facts";
+            return Decide(facts, overRate);
+        }
+
+        /// <summary>Handle with facts already in hand.</summary>
         internal string VictimDecide(ClaimFacts f)
         {
-            int hw;
-            if (_highWater.TryGetValue(f.Sender, out hw) && !PoisonLedgerCore.After(f.ClaimId, hw)) return "dup";
-            _highWater[f.Sender] = f.ClaimId;
+            ClaimFacts got;
+            return Handle(f.Sender, f.ClaimId, f.NowMs, () => f, out got);
+        }
 
-            Queue<long> q;
-            if (!_recvTimes.TryGetValue(f.Sender, out q)) { q = new Queue<long>(); _recvTimes[f.Sender] = q; }
-            while (q.Count > 0 && q.Peek() <= f.NowMs - RollingWindowMs) q.Dequeue();
-            q.Enqueue(f.NowMs);
-            bool overRate = q.Count > ClaimsPerRollingSecond;
-
+        private string Decide(ClaimFacts f, bool overRate)
+        {
             if (!f.GateOn) return "gate:" + (f.GateWhy ?? "unknown");
             if (!f.SenderAcked) return "sender-not-acked";
             if (!f.VictimFound || !f.VictimIsMine) return "not-victim";
@@ -449,33 +523,54 @@ namespace CompetitiveRounds
             if (!f.Live) return "not-live";
             if (!f.VictimFenceKnown || !f.ShooterEpoch.SameAs(f.VictimEpoch)) return "fence";
             if (overRate) return "rate";
-            if (!TryStart(f.ProjInstance, f.VictimView, StartPath.Claim)) return "dup-broadcast";
+            if (!TryStart(f.ProjInstance, f.VictimView, StartPath.Claim)) return _saturated ? "start-refused" : "dup-broadcast";
             return "started";
         }
 
         /// <summary>The one start decision both paths share, per (projectile
-        /// instance, victim view). A claim starts only an untouched pair. A
-        /// broadcast hit proceeds on an untouched pair or one broadcast hits
-        /// already started (a bullet that hits twice poisons twice, as in
-        /// vanilla), and loses only to a claim.</summary>
+        /// instance, victim view), durable for the room. A claim starts only an
+        /// untouched pair and is recorded before it starts. A broadcast hit
+        /// proceeds on an untouched pair or one broadcast hits already started
+        /// (a bullet that hits twice poisons twice, as in vanilla), and loses
+        /// only to a claim. Past StartedCap a broadcast on an untouched pair
+        /// proceeds unrecorded and the seat is saturated: no claim starts again,
+        /// so no claim can follow an unrecorded broadcast.</summary>
         internal bool TryStart(long projInstance, int victimView, StartPath path)
         {
             long key = PairKey(projInstance, victimView);
             StartPath had;
-            if (!_started.TryGetValue(key, out had))
+            if (_started.TryGetValue(key, out had))
+                return path == StartPath.Broadcast && had == StartPath.Broadcast;
+            if (path == StartPath.Claim)
             {
+                if (_saturated || _started.Count >= StartedCap) { _saturated = true; return false; }
                 _started[key] = path;
-                _startedOrder.Enqueue(key);
-                while (_startedOrder.Count > StartedCap) _started.Remove(_startedOrder.Dequeue());
+                _claimStarts++;
                 return true;
             }
-            return path == StartPath.Broadcast && had == StartPath.Broadcast;
+            if (_started.Count >= StartedCap) { _saturated = true; return true; }
+            _started[key] = path;
+            return true;
         }
+
+        /// <summary>The poison-effect prefix faulted before its start decision.
+        /// With a claim started in this room the effect is skipped (it may be
+        /// that claim's pair); otherwise it runs as vanilla, unrecorded, and the
+        /// seat is saturated so no claim can start after it.</summary>
+        internal bool FaultBeforeStart()
+        {
+            if (_claimStarts > 0) return false;
+            _saturated = true;
+            return true;
+        }
+
+        internal bool Saturated { get { return _saturated; } }
 
         internal void Clear()
         {
-            _sentPairs.Clear(); _sentPairOrder.Clear(); _sendTimes.Clear();
-            _highWater.Clear(); _recvTimes.Clear(); _started.Clear(); _startedOrder.Clear();
+            _sentPairs.Clear(); _sendTimes.Clear();
+            _highWater.Clear(); _recvTimes.Clear(); _started.Clear();
+            _saturated = false; _claimStarts = 0;
         }
     }
 
@@ -488,6 +583,9 @@ namespace CompetitiveRounds
         internal const long AckTimeoutMs = 15000;
 
         private int _master = -1, _aid;
+        private LifeEpoch _epoch;                    // V4 B1: the point the activation is bound to
+        private bool _hasAckedPoint;                 // this seat acknowledged an activation at _ackedPoint
+        private LifeEpoch _ackedPoint;
         private int[] _roster;                       // the fighters, sorted
         private readonly HashSet<int> _acks = new HashSet<int>();
         private bool _killed;
@@ -497,13 +595,18 @@ namespace CompetitiveRounds
         internal int Aid { get { return _roster != null ? _aid : 0; } }
         internal int RosterSize { get { return _roster != null ? _roster.Length : 0; } }
         internal bool Live { get { return _roster != null && !_killed; } }
+        internal LifeEpoch Epoch { get { return _epoch; } }
+
+        /// <summary>Live and bound to this point epoch.</summary>
+        internal bool BoundTo(LifeEpoch point) { return Live && _epoch.SameAs(point); }
 
         /// <summary>An ACTIVATE counts only from the actor who is master when it
-        /// arrives; it replaces any earlier activation and its acknowledgements.</summary>
-        internal bool OnActivate(int sender, int currentMaster, int aid, int[] fighters, long nowMs)
+        /// arrives; it replaces any earlier activation and its acknowledgements,
+        /// and it is bound to the master's point epoch.</summary>
+        internal bool OnActivate(int sender, int currentMaster, int aid, int[] fighters, LifeEpoch point, long nowMs)
         {
             if (sender != currentMaster || fighters == null || fighters.Length == 0) return false;
-            _master = sender; _aid = aid;
+            _master = sender; _aid = aid; _epoch = point;
             _roster = (int[])fighters.Clone();
             Array.Sort(_roster);
             _acks.Clear();
@@ -514,23 +617,33 @@ namespace CompetitiveRounds
 
         /// <summary>An acknowledgement of the current activation, from a fighter
         /// or a spectator. A spectator's acknowledgement only makes it a v3
-        /// addressee; it is never required.</summary>
-        internal void OnAck(int sender, int master, int aid)
+        /// addressee; it is never required. True the first time this sender
+        /// acknowledges this activation (the victim then replays to it).</summary>
+        internal bool OnAck(int sender, int master, int aid)
         {
-            if (_roster == null || master != _master || aid != _aid) return;
-            _acks.Add(sender);
+            if (_roster == null || master != _master || aid != _aid) return false;
+            return _acks.Add(sender);
         }
+
+        /// <summary>This seat sent its acknowledgement of the current activation.</summary>
+        internal void NoteSelfAck() { if (_roster != null) { _ackedPoint = _epoch; _hasAckedPoint = true; } }
+
+        /// <summary>V4 B1: a seat creates a new v3 record only when it has
+        /// acknowledged an activation bound to its current point epoch.</summary>
+        internal bool AcceptsAt(LifeEpoch point) { return _hasAckedPoint && _ackedPoint.SameAs(point); }
 
         /// <summary>A player entered or left the room, or a cr_pois3 property
         /// changed: v3 is off on this seat from now until a fresh activation is
         /// acknowledged by every fighter present.</summary>
         internal void OnRoomEvent(string why) { Kill(why); }
 
-        /// <summary>A seat acknowledges only an exact match: the fighters it
-        /// sees equal the roster, and every one carries cr_pois3.</summary>
-        internal bool ShouldAck(int[] fighters, Func<int, bool> cap3)
+        /// <summary>A seat acknowledges only an exact match: its point epoch is
+        /// the activation's, the fighters it sees equal the roster, and every
+        /// one carries cr_pois3.</summary>
+        internal bool ShouldAck(int[] fighters, Func<int, bool> cap3, LifeEpoch point)
         {
             if (_roster == null || _killed || fighters == null) return false;
+            if (!point.SameAs(_epoch)) return false;
             var f = (int[])fighters.Clone();
             Array.Sort(f);
             if (f.Length != _roster.Length) return false;
@@ -539,15 +652,17 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The v3 decision, re-read at every use. A fighter without
-        /// cr_pois3, or a fighter set different from the roster, kills the
-        /// activation on this seat. Spectators play no part.</summary>
-        internal bool Evaluate(int[] fighters, Func<int, bool> cap3, long nowMs, out string why)
+        /// cr_pois3, a fighter set different from the roster, or a point epoch
+        /// different from the one the activation is bound to (the next point
+        /// boundary) kills the activation on this seat. Spectators play no part.</summary>
+        internal bool Evaluate(int[] fighters, Func<int, bool> cap3, long nowMs, LifeEpoch point, out string why)
         {
             if (fighters != null)
                 foreach (int a in fighters)
                     if (!cap3(a)) { Kill("cap-missing actor=" + a); why = "cap-missing actor=" + a; return false; }
             if (_roster == null) { why = "no-activation"; return false; }
             if (_killed) { why = "killed:" + _killWhy; return false; }
+            if (!point.SameAs(_epoch)) { Kill("point-boundary"); why = "killed:" + _killWhy; return false; }
             if (fighters == null || !SameSet(fighters, _roster)) { Kill("roster-change"); why = "killed:" + _killWhy; return false; }
             int acked = 0;
             foreach (int a in _roster) if (_acks.Contains(a)) acked++;
@@ -593,6 +708,7 @@ namespace CompetitiveRounds
         internal void Clear()
         {
             _master = -1; _aid = 0; _roster = null; _acks.Clear(); _killed = false; _killWhy = null;
+            _epoch = default(LifeEpoch); _hasAckedPoint = false; _ackedPoint = default(LifeEpoch);
         }
     }
 
@@ -618,25 +734,6 @@ namespace CompetitiveRounds
             if (!settled || fighters == null || fighters.Length == 0) return false;
             foreach (int a in fighters) if (!cap3(a)) return false;
             return true;
-        }
-
-        /// <summary>A stream's catch-up goes to the actors that received its
-        /// LIFE message and are still present, plus actors acknowledged now
-        /// that were NOT present when it started (they never saw its header).
-        /// An actor present at the start without the LIFE message handled the
-        /// stream by today's path and is never caught up on top of it.</summary>
-        internal static int[] SummaryTargets(int[] lifeTargets, int[] presentAtStart, int[] presentNow,
-                                             int[] ackedNow, int self)
-        {
-            var r = new List<int>();
-            if (lifeTargets != null && presentNow != null)
-                foreach (int a in lifeTargets) if (Array.IndexOf(presentNow, a) >= 0 && !r.Contains(a)) r.Add(a);
-            if (ackedNow != null)
-                foreach (int a in ackedNow)
-                    if ((presentAtStart == null || Array.IndexOf(presentAtStart, a) < 0) && !r.Contains(a)) r.Add(a);
-            r.Remove(self);
-            r.Sort();
-            return r.ToArray();
         }
     }
 
@@ -671,5 +768,243 @@ namespace CompetitiveRounds
         internal int Count { get { return _byKey.Count; } }
 
         internal void Clear() { _byKey.Clear(); _order.Clear(); }
+    }
+
+    // ── Retained point state and replay (V4 B3) ─────────────────────────────
+
+    /// <summary>One stream the victim's seat authored, replayed only while
+    /// its life and point are the view's current ones.</summary>
+    internal sealed class Kept
+    {
+        internal int View, Stream;
+        internal LifeEpoch Life;
+        internal object Payload;                     // the shell's header data
+        internal readonly List<int> Committed = new List<int>();
+        internal readonly List<int> Blocked = new List<int>();
+        internal readonly HashSet<int> Holders = new HashSet<int>();   // actors that hold the stream as v3
+        internal int[] PresentAtStart;               // a non-holder among them took today's path
+        internal bool Closed;
+
+        /// <summary>Tick count named by a summary: one past the last tick sent.</summary>
+        internal int Ticks
+        {
+            get
+            {
+                int n = 0;
+                foreach (int k in Committed) if (k + 1 > n) n = k + 1;
+                foreach (int k in Blocked) if (k + 1 > n) n = k + 1;
+                return n;
+            }
+        }
+    }
+
+    /// <summary>The victim's seat keeps, per own view, every v3 stream of its
+    /// current life in the current point, and replays each to an actor that
+    /// acknowledges late: once per actor and stream, never to a holder, never
+    /// to an actor that was present at the stream's start without holding it
+    /// (it handled the stream by today's path).</summary>
+    internal sealed class PointRetainer
+    {
+        internal const int MaxKeptPerLife = 256;
+
+        private sealed class ViewKept
+        {
+            internal LifeEpoch Point, Life;
+            internal readonly List<Kept> Streams = new List<Kept>();
+        }
+
+        private readonly Dictionary<int, ViewKept> _views = new Dictionary<int, ViewKept>();
+
+        /// <summary>A new v3 stream. A different point or life than the one kept
+        /// for the view starts a fresh list. Null past MaxKeptPerLife: the
+        /// stream is then today's everywhere.</summary>
+        internal Kept Begin(int view, int stream, LifeEpoch point, LifeEpoch life, int[] holders, int[] presentAtStart,
+                            object payload)
+        {
+            ViewKept v;
+            if (!_views.TryGetValue(view, out v) || !v.Point.SameAs(point) || !v.Life.SameAs(life))
+            {
+                v = new ViewKept { Point = point, Life = life };
+                _views[view] = v;
+            }
+            if (v.Streams.Count >= MaxKeptPerLife) return null;
+            var k = new Kept { View = view, Stream = stream, Life = life, Payload = payload, PresentAtStart = presentAtStart };
+            if (holders != null) foreach (int a in holders) k.Holders.Add(a);
+            v.Streams.Add(k);
+            return k;
+        }
+
+        /// <summary>A stream that did not become v3 after all (its LIFE message
+        /// could not be sent) leaves the list.</summary>
+        internal void Drop(Kept k)
+        {
+            ViewKept v;
+            if (k != null && _views.TryGetValue(k.View, out v)) v.Streams.Remove(k);
+        }
+
+        /// <summary>A tick that went out, in the stream's catch-up state. Only
+        /// indices a receiver can hold are kept ([0, MaxTick): every ledger
+        /// ignores the rest), so a stream retains at most MaxTick ticks.</summary>
+        internal static void Note(Kept k, int tick, bool blocked)
+        {
+            if (tick < 0 || tick >= PoisonLedgerCore.MaxTick) return;
+            (blocked ? k.Blocked : k.Committed).Add(tick);
+        }
+
+        /// <summary>The stream's end: its summary goes to the holders still
+        /// present, never to this seat.</summary>
+        internal static int[] CloseTargets(Kept k, int[] presentNow, int self)
+        {
+            k.Closed = true;
+            var r = new List<int>();
+            if (presentNow != null)
+                foreach (int a in presentNow)
+                    if (a != self && k.Holders.Contains(a) && !r.Contains(a)) r.Add(a);
+            r.Sort();
+            return r.ToArray();
+        }
+
+        internal static bool ShouldReplay(Kept k, int actor)
+        {
+            if (k.Holders.Contains(actor)) return false;
+            return k.PresentAtStart == null || Array.IndexOf(k.PresentAtStart, actor) < 0;
+        }
+
+        /// <summary>The streams to replay to an actor that just acknowledged an
+        /// activation bound to this point: only those of the view's CURRENT life
+        /// in this point, each marked as held by that actor.</summary>
+        internal List<Kept> ReplayFor(int actor, int self, int view, LifeEpoch point, LifeEpoch currentLife)
+        {
+            var r = new List<Kept>();
+            ViewKept v;
+            if (actor == self || !_views.TryGetValue(view, out v)) return r;
+            if (!v.Point.SameAs(point) || !v.Life.SameAs(currentLife)) return r;
+            foreach (var k in v.Streams)
+                if (ShouldReplay(k, actor)) { k.Holders.Add(actor); r.Add(k); }
+            return r;
+        }
+
+        /// <summary>A replay that could not be sent: the actor does not hold it.</summary>
+        internal static void Unmark(Kept k, int actor) { k.Holders.Remove(actor); }
+
+        internal List<int> Views() { return new List<int>(_views.Keys); }
+
+        internal int CountFor(int view)
+        {
+            ViewKept v;
+            return _views.TryGetValue(view, out v) ? v.Streams.Count : 0;
+        }
+
+        internal void Clear() { _views.Clear(); }
+    }
+
+    // ── Hooks contain their own faults (V4 B7) ──────────────────────────────
+
+    internal static class HookGuard
+    {
+        /// <summary>A postfix, a finalizer's side effect or a callback step: a
+        /// fault inside stays inside, so the attached game method's result and
+        /// exception are untouched. Independent steps take one Run each.</summary>
+        internal static void Run(Action body)
+        {
+            try { body(); } catch { }
+        }
+
+        /// <summary>A prefix that may skip the game method. decide() returns
+        /// true to run it, false to skip. A fault inside decide() returns
+        /// onFault(the exception) (true when onFault itself faults). The
+        /// follow-up (evidence, logging, arming) runs after the decision and can
+        /// never change it.</summary>
+        internal static bool Prefix(Func<bool> decide, Func<Exception, bool> onFault, Action<bool> after)
+        {
+            bool run;
+            try { run = decide(); }
+            catch (Exception ex)
+            {
+                try { run = onFault != null ? onFault(ex) : true; } catch { run = true; }
+            }
+            if (after != null) { try { after(run); } catch { } }
+            return run;
+        }
+    }
+
+    // ── The SILENT line's arm (V4 B8) ───────────────────────────────────────
+
+    internal static class SilentArm
+    {
+        /// <summary>The arm marker for a stream started inside a poison effect
+        /// of a broadcast hit; a positive value is a local-only arm's claim id;
+        /// zero is a stream started outside any poison effect.</summary>
+        internal const int Broadcast = -1;
+
+        internal static string Label(int arm)
+        {
+            if (arm > 0) return "local-only c=" + arm;
+            return arm == Broadcast ? "broadcast" : "direct";
+        }
+    }
+
+    // ── v3 wire (event 47, Protocol 2): the payloads, one place ─────────────
+
+    internal static class V3Wire
+    {
+        internal const byte Protocol = 2;
+        internal const byte TypeClaim = 2, TypeSummary = 3, TypeActivate = 4, TypeAck = 5, TypeLife = 6;
+
+        internal static object[] Life(int view, int stream, LifeEpoch e)
+        {
+            return new object[] { TypeLife, Protocol, view, stream, e.Ts, e.Set };
+        }
+
+        internal static object[] Claim(int victimView, int projView, int claimId, int hitTs, byte nPoison, LifeEpoch e)
+        {
+            return new object[] { TypeClaim, Protocol, victimView, projView, claimId, hitTs, nPoison, e.Ts, e.Set };
+        }
+
+        internal static object[] Summary(int view, int stream, LifeEpoch e, float sliceX, float sliceY,
+                                         float r, float g, float b, int attacker, bool lethal, byte damageSource,
+                                         int ticks, byte[] committed, byte[] blocked, int seq)
+        {
+            return new object[]
+            {
+                TypeSummary, Protocol, view, stream, e.Ts, e.Set, sliceX, sliceY, r, g, b, attacker, lethal, damageSource,
+                ticks, committed, blocked, seq
+            };
+        }
+
+        internal static object[] Activate(int aid, int[] fighters, LifeEpoch point)
+        {
+            return new object[] { TypeActivate, Protocol, aid, fighters, point.Ts, point.Set };
+        }
+
+        internal static object[] Ack(int aid, int master)
+        {
+            return new object[] { TypeAck, Protocol, aid, master };
+        }
+    }
+
+    // ── Claim evidence lines (V4 B6) ────────────────────────────────────────
+
+    internal static class ClaimLine
+    {
+        internal static string Arm(int from, int claimId, int projView, int victimView, string outcome)
+        {
+            return "[POISON-CLAIM] arm from=" + from + " c=" + claimId + " proj=" + projView + " victim=" + victimView
+                + " outcome=" + outcome;
+        }
+
+        internal static string Recv(int from, int claimId, int projView, int victimView, string outcome)
+        {
+            return "[POISON-CLAIM] recv from=" + from + " c=" + claimId + " proj=" + projView + " victim=" + victimView
+                + " outcome=" + outcome;
+        }
+
+        /// <summary>A result as its outcome field: "started" stays, every other
+        /// result is a named drop.</summary>
+        internal static string Outcome(string result)
+        {
+            if (result == "started" || result == "sent" || result == "send-failed") return result;
+            return "drop reason=" + (string.IsNullOrEmpty(result) ? "unnamed" : result);
+        }
     }
 }
