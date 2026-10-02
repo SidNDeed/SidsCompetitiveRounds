@@ -3021,8 +3021,13 @@ def test_mod_version_advertises_no_series_status_capability():
     values = {ast.unparse(k): ast.unparse(v) for k, v in zip(answer.keys, answer.values)}
     # The advert: exactly two subscript writes to body, both under the one
     # version condition.
+    sent = [n for n in ast.walk(node) if isinstance(n, ast.Assign)
+            and [ast.unparse(t) for t in n.targets] == ["sent_version"]]
+    assert len(sent) == 1 and ast.unparse(sent[0].value) == (
+        "request.headers.get('x-mod-version') if request is not None else None"), \
+        [ast.unparse(s) for s in sent]
     ifs = [n for n in ast.walk(node) if isinstance(n, ast.If)
-           and ast.unparse(n.test) == "read_gate.advert_requested(request.headers.get('x-mod-version'))"]
+           and ast.unparse(n.test) == "read_gate.advert_requested(sent_version)"]
     assert len(ifs) == 1, [ast.unparse(n.test) for n in ast.walk(node) if isinstance(n, ast.If)]
     writes = {ast.unparse(t): ast.unparse(n.value) for n in ast.walk(node)
               if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Subscript)}

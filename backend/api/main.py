@@ -7150,7 +7150,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
-async def get_mod_version(request: Request):
+async def get_mod_version(request: Request = None):
     """Returns the latest recommended mod version, the gating floor, and the
     capability flags a client must see BEFORE it changes what it puts on the
     wire.
@@ -7197,15 +7197,15 @@ async def get_mod_version(request: Request):
         _INVOLUNTARY_CAUSE_CAPABILITY_FIELD: _involuntary,
     }
     # Verified reads: the stage this box acts on (off | log | enforce |
-    # unknown), which a running client polls to learn a flip or a rollback,
-    # and the GET templates the gate never refuses for want of a read
-    # credential, which the client sends in every stage (computed from the
-    # live routing table, never written down). Present only for a request
-    # whose X-Mod-Version is READ_GATE_ADVERT_MIN or later; any other request
-    # (an older client, no header, an unparseable one) gets the body above
+    # unknown), which a running client polls to learn a flip or a rollback, and
+    # the GET templates the gate never refuses for want of a read credential
+    # (from the live routing table). Present only for a request whose
+    # X-Mod-Version is READ_GATE_ADVERT_MIN or later; any other request (older,
+    # absent, unparseable) and a bare call with no request get the body above
     # byte for byte. The header selects the response SHAPE only: both fields
     # are readable by anyone, and nothing is admitted or refused on it.
-    if read_gate.advert_requested(request.headers.get("x-mod-version")):
+    sent_version = request.headers.get("x-mod-version") if request is not None else None
+    if read_gate.advert_requested(sent_version):
         body["read_gate"] = await read_gate.current_mode()
         body["read_gate_open"] = read_gate.ungated_templates(app.routes)
     return body
