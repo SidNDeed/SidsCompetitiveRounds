@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Throwing-collector harness (seat evidence contract V2, B1/H1): compiles
+       the evidence hook classes run_hooks.py copies VERBATIM out of
+       plugin/HitEvidence.cs, plugin/SeatEvidence.cs and plugin/PoisonSync.cs
+       (HooksSource), against Stubs.cs, where every collector throws. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>HookTests</AssemblyName>
+    <RootNamespace>CompetitiveRounds</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0169;CS0649;CS0414</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+    <Compile Include="$(HooksSource)" />
+  </ItemGroup>
+
+</Project>
