@@ -1516,6 +1516,15 @@ namespace CompetitiveRounds
     [HarmonyPatch]
     internal static class EndScreenKillPatch
     {
+        /// <summary>The DoDamage refusal's own condition, one function for the
+        /// prefix below and PoisonSync's live-replica test (convergence v3): a
+        /// healthRemoval hit is refused while it holds. Reads state only.</summary>
+        internal static bool RefusesNow()
+        {
+            if (!VanillaFixSupport.AnyGameScope()) return false;
+            return GameManager.instance != null && !GameManager.instance.battleOngoing;
+        }
+
         [HarmonyPrefix]
         [HarmonyPatch(
             typeof(HealthHandler),
@@ -1546,8 +1555,7 @@ namespace CompetitiveRounds
                 // disagreement inside the window is erased before combat resumes.
                 // Widening strictly REDUCES the number of clients that apply
                 // transition-window ticks.
-                if (!VanillaFixSupport.AnyGameScope()) return true;
-                if (GameManager.instance == null || GameManager.instance.battleOngoing) return true;
+                if (!RefusesNow()) return true;
 
                 VanillaFixSupport.DiagLimited(
                     "EndScreenKill-damage",
@@ -4921,6 +4929,18 @@ namespace CompetitiveRounds
         })]
     internal static class DamageRulesGate
     {
+        /// <summary>Would DoDamage on this victim from this attacker be refused
+        /// by the three rules below? PoisonSync's convergence v3 calls it where
+        /// it moves health without DoDamage (the spectator display path and the
+        /// correction funnel), so those seats consume exactly the ticks every
+        /// fighter seat's DoDamage refuses. It is the prefix itself, so the
+        /// two can never disagree; a refusal writes the prefix's own bounded
+        /// evidence line and nothing else.</summary>
+        internal static bool Refuses(HealthHandler victim, Player damagingPlayer)
+        {
+            return !BeforeDoDamage(victim, damagingPlayer);
+        }
+
         [HarmonyPrefix]
         private static bool BeforeDoDamage(HealthHandler __instance, Player damagingPlayer)
         {
