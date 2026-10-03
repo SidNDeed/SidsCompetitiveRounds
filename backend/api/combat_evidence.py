@@ -219,8 +219,12 @@ def dedup_key(key: str, lo, hi) -> str:
 
 
 # A game is a candidate when it has work: with no revision, while it is
-# unattached; with one, while it is open, while a record with lists is
-# still unevaluated under this revision, or when it holds MORE records than
+# open and either unattached or holding another number of records than its
+# last pass saw (a game holds at most one record per seat and a stored
+# record is never replaced, so its record set changes only by a record
+# arriving or leaving, which changes the count); with one, while it is
+# open, while a record with lists is still unevaluated under this
+# revision, or when it holds MORE records than
 # its last evaluation saw (a record that arrived after a one-sided game was
 # finalized: the game is derived again and its contributions replaced).
 _CANDIDATES = text(
@@ -233,7 +237,8 @@ _CANDIDATES = text(
     " GROUP BY e.stable_game_key, LEAST(e.seat_player_id, e.other_player_id), "
     "          GREATEST(e.seat_player_id, e.other_player_id), g.finalized_at, g.match_id, "
     "          g.evaluated_rev, g.records_n, g.processed_at "
-    "HAVING (CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
+    "HAVING (CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL "
+    "        AND (g.match_id IS NULL OR count(*) <> g.records_n)) "
     "    OR (CAST(:rev AS varchar) IS NOT NULL AND (g.finalized_at IS NULL "
     "        OR (g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) "
     "            AND bool_or(e.lists_purged_at IS NULL)) "
@@ -298,17 +303,20 @@ async def evaluate_game(db, key: str, lo, hi, rs) -> tuple:
     if rs is None:
         # No revision: the attachment and its exact coverage (the records
         # whose attach key IS the match's room, paired when each names the
-        # other) are kept; nothing is derived (no measure, fault,
-        # contribution, daily row or finding).
+        # other) are kept with the record count and readiness this pass saw,
+        # so a record that arrives later selects the game again; nothing is
+        # derived (no measure, fault, contribution, daily row or finding).
         exact = [r for r in rows if match is not None and r["attach_key"] == attach]
         seats = {r["seat_player_id"] for r in exact}
         exact_paired = len(exact) == 2 and all(r["other_player_id"] in seats for r in exact)
         await db.execute(text(
             "UPDATE combat_games SET match_id = :m, attach_key = :a, coverage = :cov, "
-            "  processed_at = now() "
+            "  records_n = CAST(:n AS int), readiness_sig = :sig, processed_at = now() "
             "WHERE stable_game_key = :k AND pair_lo = :lo AND pair_hi = :hi"),
             {"m": match["id"] if match else None, "a": attach,
-             "cov": "paired" if exact_paired else "one", "k": key, "lo": lo, "hi": hi})
+             "cov": "paired" if exact_paired else "one", "n": len(rows),
+             "sig": await _readiness(db, key, lo, hi, rows, match),
+             "k": key, "lo": lo, "hi": hi})
         return ("attached" if match else "waiting"), 0, 0, False
     sig = await _readiness(db, key, lo, hi, rows, match)
     now = datetime.now(timezone.utc)
@@ -463,10 +471,13 @@ async def games_pass(session_factory, state=None, limit: int = GAMES_PER_PASS) -
 
 
 async def purge_pass(session_factory) -> dict:
-    """Retention: trimmable lists out of the payload after
-    LIST_RETENTION_DAYS (totals, cycle summaries, stat blocks and histograms
-    stay); records never attached after GAME_EXPIRY_DAYS; contributions and
-    daily rows after AGG_RETENTION_DAYS."""
+    """Retention. After LIST_RETENTION_DAYS every raw list of PURGED_LISTS
+    leaves the payload: each list and shot group of the layout except
+    RETAINED_LISTS, the never-trimmed `gun_*` and `ivl_*` lists included.
+    What stays: every key that is no list (the scalars, the whole-game rows
+    and the histograms) and RETAINED_LISTS, the cycle summaries `cx_s` and
+    `cx_o`. Records never attached go after GAME_EXPIRY_DAYS; contributions
+    and daily rows after AGG_RETENTION_DAYS."""
     out = {}
     async with session_factory() as db:
         if await setting(db, "combat_evidence_purge") != "1":

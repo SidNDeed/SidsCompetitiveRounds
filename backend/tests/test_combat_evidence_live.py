@@ -381,6 +381,50 @@ def test_l8_no_revision_one_exact_record_is_coverage_one(live, signing):
     assert not _errors(st) and g["coverage"] == "one" and g["attach_key"] == key + "_r8"
 
 
+async def _no_rev_game(sm, a, b, key, late_rounds):
+    """Seat a's exact record, a no-revision pass, then seat b's record (of
+    the attached room, or of another), another pass, and an idle pass."""
+    ids = await _players(sm, a, b)
+    ta, tb = await _session(sm, a), await _session(sm, b)
+    await _match(sm, ids, a, b, key + "_r8")
+    oa, _mb = _pair_bodies(a, b, key, rounds=8)
+    _oa, mb = _pair_bodies(a, b, key, rounds=late_rounds)
+    snaps = []
+    sql = ("SELECT coverage, records_n, readiness_sig, processed_at, evaluated_rev, finalized_at, "
+           "record_faults FROM combat_games WHERE stable_game_key = :k")
+    await _post(sm, oa, ta)
+    st1 = await ce.games_pass(sm, None)
+    snaps.append((await _rows(sm, sql, k=key))[0])
+    st_idle = await ce.games_pass(sm, None)                          # nothing new: not selected
+    snaps.append((await _rows(sm, sql, k=key))[0])
+    await _post(sm, mb, tb)
+    st2 = await ce.games_pass(sm, None)
+    snaps.append((await _rows(sm, sql, k=key))[0])
+    n = {t: await _scalar(sm, "SELECT count(*) FROM %s WHERE subject_player_id = ANY(CAST(:i AS uuid[]))"
+                          % t, i=[str(ids[a]), str(ids[b])])
+         for t in ("combat_contrib", "combat_player_daily")}
+    f = await _rows(sm, FIND_SQL, k=ce.DEDUP_PREFIX + key + "|%")
+    return (st1, st_idle, st2), snaps, n, f
+
+
+@pytest.mark.parametrize("late_rounds,cov", [(8, "paired"), (7, "one")], ids=["exact", "other_room"])
+def test_f2_l8_no_revision_reselects_when_the_record_set_changes(live, signing, late_rounds, cov):
+    a, b = (seat(57), seat(58)) if late_rounds == 8 else (seat(59), seat(60))
+    key = "ranked_cevw_0000%d" % (57 if late_rounds == 8 else 59)
+    sts, snaps, n, f = live.run(_no_rev_game(live.sm, a, b, key, late_rounds))
+    assert not any(_errors(s) for s in sts)
+    one, idle, late = snaps
+    assert (one["coverage"], one["records_n"]) == ("one", 1) and one["readiness_sig"]
+    assert idle["processed_at"] == one["processed_at"]                   # control: not reselected
+    assert late["processed_at"] > one["processed_at"]                    # the late record reselects
+    assert (late["coverage"], late["records_n"]) == (cov, 2)
+    assert late["readiness_sig"] != one["readiness_sig"]
+    for g in snaps:                                                      # and nothing is derived
+        assert g["evaluated_rev"] is None and g["finalized_at"] is None
+        assert ce._jsonv(g["record_faults"]) == {}
+    assert n == {"combat_contrib": 0, "combat_player_daily": 0} and f == []
+
+
 def test_bar12_shadow_then_armed_and_bar11_counted_once_then_paired(live, signing, revs):
     a, b = seat(9), seat(10)
     key = "ranked_cevw_000002"

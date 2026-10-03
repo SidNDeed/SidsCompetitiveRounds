@@ -1498,6 +1498,28 @@ def test_f2_m8_the_other_seats_lists_against_their_counters(key, view_key, field
     assert row["not_run"] == "inconsistent"
 
 
+# -- FIX PASS 2: the purge states the allowlist the constants apply (L-6) -----------------
+
+def test_f2_l6_the_purge_wording_is_the_allowlist_the_constants_apply():
+    doc = " ".join(ce.purge_pass.__doc__.split())
+    named = re.findall(r"`([a-z0-9_*]+)`", doc)
+    kept = [n for n in named if not n.endswith("*")]
+    families = [n[:-1] for n in named if n.endswith("*")]
+    assert sorted(kept) == sorted(ce.RETAINED_LISTS)                     # every kept list, no other
+    assert set(ce.PURGED_LISTS) == set(cm.LISTS) - set(ce.RETAINED_LISTS)
+    for fam in families:                                                 # each named family goes whole
+        members = [k for k in cm.LISTS if k.startswith(fam)]
+        assert members and set(members) <= set(ce.PURGED_LISTS), fam
+    assert sorted(families) == ["gun_", "ivl_"]
+    stays = [k for k in cm.KEYS if k not in cm.LISTS]                    # scalars, rows, histograms
+    assert {cm.SPEC[k][0] for k in stays} == {"int", "enum", "row", "rows", "hist", "omit"}
+    assert not set(stays) & set(ce.PURGED_LISTS)
+    for name in ("PURGED_LISTS", "RETAINED_LISTS", "LIST_RETENTION_DAYS"):
+        assert name in doc
+    assert "whole-game rows" in doc and "histograms" in doc
+    assert "stat blocks" not in doc                                      # gun_* is purged
+
+
 # -- FIX PASS 1: the steering references, subjects and measures (M-3) ---------------------
 
 def test_m3_the_pinned_homing_and_target_bounce_cases_and_their_mutants():
