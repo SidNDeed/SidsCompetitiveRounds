@@ -229,16 +229,31 @@ def test_outside_the_sandbox_the_probe_reads_the_file_and_reaches_the_network(tm
 
 def test_the_probe_holds_only_when_both_attempts_are_refused(tmp_path):
     """The probe's verdict logic: a missing file and a closed port both count
-    as refused, so exit 0; either one open is exit 1."""
+    as refused, so exit 0; either one open ALONE is exit 1."""
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
+    closed = s.getsockname()[1]
     s.close()
-    p = subprocess.run([sys.executable, "-I", RUNNER, "probe", str(tmp_path / "none"),
-                        "127.0.0.1", str(port)], capture_output=True, text=True, timeout=30)
-    assert p.returncode == 0, p.stdout
-    out = json.loads(p.stdout)
+    readable = tmp_path / "readable"
+    readable.write_text("x")
+
+    def run(path, port):
+        p = subprocess.run([sys.executable, "-I", RUNNER, "probe", str(path), "127.0.0.1", str(port)],
+                           capture_output=True, text=True, timeout=30)
+        return p.returncode, json.loads(p.stdout)
+    rc, out = run(tmp_path / "none", closed)
+    assert rc == 0, out
     assert out["undeclared_read"].startswith("refused:") and out["network"].startswith("refused:")
+    rc, out = run(readable, closed)                               # the read alone is open
+    assert rc == 1 and out["undeclared_read"] == "read" and out["network"].startswith("refused:"), out
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    try:
+        rc, out = run(tmp_path / "none", srv.getsockname()[1])    # the network alone is open
+    finally:
+        srv.close()
+    assert rc == 1 and out["network"] == "open" and out["undeclared_read"].startswith("refused:"), out
 
 
 # -- the exchange ------------------------------------------------------------
