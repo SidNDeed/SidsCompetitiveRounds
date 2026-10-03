@@ -1272,9 +1272,120 @@ def test_m6_a_stat_difference_without_cycles_is_seen_and_unavailable_inputs_stay
     assert _owner_dir(cm.pair_view(fx.records(fx.a24_pair()[0], None)))["case"] == "only_owner"
 
 
+# -- FIX PASS 2: every shared semantic, generated from the field lists (M-6) --------------
+
+def _bump(spec_row, v):
+    """One value of a wire field that differs from `v` and stays in range."""
+    if spec_row[0] in ("rep", "am"):                                     # the emission marker flips
+        return 0 if v == -1 else -1
+    return v + 1 if v + 1 <= spec_row[2] else v - 1
+
+
+def _header_class(field):
+    """The class a one-field header difference must raise."""
+    cyc = cm.CYCLE_HEADER[field]
+    if cyc == "s0" or cyc in cm.CYCLE_STATED:
+        return "cycle"
+    if cyc in cm.CLOCKS or cyc == "st_end":
+        return "clock"
+    raise AssertionError("header field %s is compared by nothing" % field)
+
+
+def _generated_one_field():
+    """(side, part, field, expected class) for every wire field of a shot
+    group on both accounts, from the layout's own field lists: each header
+    field, each entry field of a listed shot, each refill event field."""
+    out = []
+    for side, gk in (("s", "sh_s"), ("o", "sh_o")):
+        for row in cm.SPEC[gk][3]:
+            out.append((side, 0, row, _header_class(row[0])))
+        for row in cm.SPEC[gk][5]:
+            if row[0] not in cm.SHOT_OWNER_ONLY:
+                out.append((side, 1, row, "shot"))
+        for row in cm.SPEC[gk][7]:
+            out.append((side, 2, row, "refill"))
+    return out
+
+
+GENERATED = _generated_one_field()
+
+
+def test_f2_m6_the_generated_list_covers_every_wire_field_of_a_shot_group():
+    for gk, side in (("sh_s", "s"), ("sh_o", "o")):
+        assert [r[0] for r in cm.SPEC[gk][3]] == list(cm.CYCLE_HEADER)
+        entry = {r[0] for r in cm.SPEC[gk][5]}
+        assert entry <= set(cm.SHOT_ENTRY) | set(cm.SHOT_OWNER_ONLY)
+        assert set(cm.SHOT_COMPARED) <= {cm.SHOT_ENTRY[f] for f in entry if f in cm.SHOT_ENTRY}
+        got = {(r[0]) for sd, part, r, _c in GENERATED if sd == side and part == 1}
+        assert got == entry - set(cm.SHOT_OWNER_ONLY)
+    assert not set(cm.SHOT_OWNER_ONLY) & {r[0] for r in cm.SPEC["sh_o"][5]}
+    assert len(GENERATED) == sum(len(cm.SPEC[gk][3]) + len(cm.SPEC[gk][5]) + len(cm.SPEC[gk][7])
+                                 for gk in ("sh_s", "sh_o")) - len(cm.SHOT_OWNER_ONLY)
+
+
+@pytest.mark.parametrize("side,part,row,cls", GENERATED,
+                         ids=["%s.%d.%s" % (g[0], g[1], g[2][0]) for g in GENERATED])
+def test_f2_m6_every_one_field_difference_makes_the_case_differ(side, part, row, cls):
+    owner, meas = _regen_both()
+    rec, gk = (fx.clone(owner), "sh_s") if side == "s" else (fx.clone(meas), "sh_o")
+    group = rec[gk][0]
+    target = group[0] if part == 0 else group[part][0 if part == 2 else 1]
+    i = [r[0] for r in cm.SPEC[gk][(3, 5, 7)[part]]].index(row[0])
+    target[i] = _bump(row, target[i])
+    pair = (rec, meas) if side == "s" else (owner, rec)
+    d = _owner_dir(cm.pair_view(fx.records(*pair)))
+    assert d["case"] == "both_differ" and cls in d["differs_by"], (row[0], d["case"], d["differs_by"])
+
+
+@pytest.mark.parametrize("field", cm.SHOT_OWNER_ONLY)
+def test_f2_m6_the_owner_only_gate_state_is_not_compared(field):
+    owner, meas = _regen_both()
+    rec = fx.clone(owner)
+    row = next(r for r in cm.SPEC["sh_s"][5] if r[0] == field)
+    e = rec["sh_s"][0][1][1]
+    e[cm.SHOT["s"][field]] = _bump(row, e[cm.SHOT["s"][field]])
+    assert _owner_dir(cm.pair_view(fx.records(owner, meas)))["case"] == "both_agree"   # control
+    d = _owner_dir(cm.pair_view(fx.records(rec, meas)))
+    assert "shot" not in d["differs_by"]
+
+
+def test_f2_m6_first_of_emission_and_the_header_identity_are_exposed_per_row():
+    owner, meas = _regen_both()
+    m = fx.clone(meas)
+    e = m["sh_o"][0][1][1]
+    e[cm.SHOT["o"]["am"]] = _bump(("am",), e[cm.SHOT["o"]["am"]])
+    (row,) = _owner_dir(cm.pair_view(fx.records(owner, m)))["cycles"]
+    assert row["shots"][1]["d_first"] in (1, -1) and "shot" in row["differs_by"]
+    assert row["shots"][0]["d_first"] == 0
+    (row,) = _owner_dir(cm.pair_view(fx.records(owner, meas)))["cycles"]
+    for acct in ("self", "meas"):
+        assert {"s0", "pid0", "pt", "regen_stated"} <= set(row[acct])
+
+
+def test_f2_m6_a_missing_cycle_partner_is_absent_or_not_run_never_agreement():
+    owner, meas = fx.a24_pair()
+    gone = fx.clone(meas)
+    gone["sh_o"] = []
+    d = _owner_dir(cm.pair_view(fx.records(owner, gone)))
+    (row,) = [r for r in d["cycles"] if r["self"] is not None]
+    assert row["absent_in"] == "meas" and "cycle" in row["differs_by"]
+    assert d["case"] == "both_differ" and "cycle" in d["differs_by"]
+    trimmed = fx.clone(gone)
+    trimmed["omit"]["sh_o"] = 1
+    d = _owner_dir(cm.pair_view(fx.records(owner, trimmed)))
+    (row,) = [r for r in d["cycles"] if r["self"] is not None]
+    assert row["not_run"] == "trimmed" and row["absent_in"] is None
+    assert "cycle" not in row["differs_by"] and d["case"] != "both_agree"
+    (sub,) = [c for c in cm.combat_subjects(cm.pair_view(fx.records(owner, gone)))["combat.cycle"]
+              if c.row["owner"] == A]
+    assert cm.m_cycle_partner_absent(sub, None) == "meas"
+    d = _owner_dir(cm.pair_view(fx.records(owner, meas)))                # control: partnered
+    assert d["case"] == "both_agree" and all(r["absent_in"] is None for r in d["cycles"])
+
+
 # -- FIX PASS 1: target bounce pairing and R5 absence (M-8) -------------------------------
 
-def _bounce_pair(meas_rows, own_stamps=(4200,), omit=0):
+def _bounce_pair(meas_rows, own_stamps=(4200,), omit=0, target=None, bsel_count=None):
     victim, shooter = fx.r_sections_pair()
     tmpl = shooter["bsel"][0]
     shooter["bsel"] = []
@@ -1282,10 +1393,12 @@ def _bounce_pair(meas_rows, own_stamps=(4200,), omit=0):
         e = list(tmpl)
         e[cm.IX["bsel"]["stamp"]] = st
         shooter["bsel"].append(e)
-    shooter["r_tot"][cm.IX["r_tot"]["bsel"]] = len(shooter["bsel"])
+    shooter["r_tot"][cm.IX["r_tot"]["bsel"]] = (len(shooter["bsel"]) if bsel_count is None
+                                                 else bsel_count)
     victim["p3tb"] = [fx.named_row("p3tb", pid=fx.HIT[0], s_init=si, s_rel=sr, gap=gap,
                                    has_retarget=1, ang_to_me=40) for si, sr, gap in meas_rows]
     victim["omit"]["p3tb"] = omit
+    victim["p3n"][cm.IX["p3n"]["target"]] = len(meas_rows) + omit if target is None else target
     view = cm.pair_view(fx.records(victim, shooter))
     return _by(view, "velocity", B, "owner")
 
@@ -1318,7 +1431,7 @@ def _death_hits(**edit):
     victim, shooter = fx.r_sections_pair()
     if edit.get("drop_push"):
         victim["push_s"] = []
-        victim["r_tot"][cm.IX["r_tot"]["push_own"]] = edit.get("omit", 0)
+        victim["r_tot"][cm.IX["r_tot"]["push_own"]] = edit.get("count", edit.get("omit", 0))
         victim["omit"]["push_s"] = edit.get("omit", 0)
     if edit.get("no_push_cap"):
         victim["caps"] &= ~cm.W["caps"]["push"]
@@ -1339,6 +1452,50 @@ def test_m8_r5_absence_only_when_the_retained_push_list_proves_it():
     assert (hit["push_listed"], hit["push_not_run"], n) == (None, "trimmed", None)
     hit, n = _death_hits(no_push_cap=True)
     assert (hit["push_listed"], hit["push_not_run"], n) == (None, "not_collected", None)
+
+
+# -- FIX PASS 2: absence only from a list whole against its whole-game counter (M-8) ------
+
+def test_f2_m8_every_absence_list_has_a_whole_game_counter():
+    used = {"push_o", "ch_o", "p3tb", "bsel", "push_s", "bd_o"}
+    assert used <= set(cm.WHOLE_COUNTERS)
+    for key, (row, field, _cap) in cm.WHOLE_COUNTERS.items():
+        assert field in cm.IX[row], key
+
+
+def test_f2_m8_p3tb_against_p3n_target():
+    assert _bounce_pair([])["bounces"][0]["meas_not_run"] == "absent"   # control: 0 counted
+    assert _bounce_pair([], target=1)["bounces"][0]["meas_not_run"] == "inconsistent"
+    assert _bounce_pair([], omit=1, target=1)["bounces"][0]["meas_not_run"] == "trimmed"
+
+
+def test_f2_m8_bsel_against_r_tot_bsel():
+    other = [(fx.HIT[1] + 1, 4200, 110)]
+    assert [u["not_run"] for u in _bounce_pair(other)["meas_unpaired"]] == ["absent"]   # control
+    assert [u["not_run"] for u in _bounce_pair(other, bsel_count=2)["meas_unpaired"]] == [
+        "inconsistent"]
+
+
+def test_f2_m8_push_s_against_r_tot_push_own():
+    hit, n = _death_hits(drop_push=True)                                 # control: 0 counted
+    assert (hit["push_listed"], hit["push_not_run"], n) == (False, None, 1)
+    hit, n = _death_hits(drop_push=True, count=1)                        # counted one, lists none
+    assert (hit["push_listed"], hit["push_not_run"], n) == (None, "inconsistent", None)
+
+
+@pytest.mark.parametrize("key,view_key,field,count", [
+    ("push_o", "pushes", "victim", "push_other"),
+    ("ch_o", "chains", "victim", "chain_other"),
+    ("bd_o", "deaths", "seat", "death_other")])
+def test_f2_m8_the_other_seats_lists_against_their_counters(key, view_key, field, count):
+    victim, shooter = fx.r_sections_pair()
+    shooter[key] = []
+    shooter["r_tot"][cm.IX["r_tot"][count]] = 0
+    (row,) = _by(cm.pair_view(fx.records(victim, shooter)), view_key, A, field)["rows"]
+    assert row["not_run"] == "absent"                                    # control: 0 counted
+    shooter["r_tot"][cm.IX["r_tot"][count]] = 1
+    (row,) = _by(cm.pair_view(fx.records(victim, shooter)), view_key, A, field)["rows"]
+    assert row["not_run"] == "inconsistent"
 
 
 # -- FIX PASS 1: the steering references, subjects and measures (M-3) ---------------------

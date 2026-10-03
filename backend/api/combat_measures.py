@@ -828,8 +828,8 @@ def _incompatible(rows, out):
         r["stat"]["diff"] = None
         r["clock"] = None
         for s in r["shots"]:
-            s.update(d_ammo=None, d_reloading=None, d_counter=None, absent_in=None,
-                     not_run="incompatible")
+            s.update(absent_in=None, not_run="incompatible")
+            s.update({d: None for d in SHOT_COMPARED.values()})
     for st in out["stat"]:
         st["diff"], st["not_run"] = None, "incompatible"
     out["attacks"]["d_emit_msgs"], out["attacks"]["not_run"] = None, "incompatible"
@@ -843,10 +843,28 @@ TOTALS_COMPARED = ("cycles", "volleys", "units", "inits_rl", "why_over_mag", "wh
                    "why_short_gap", "why_found_reloading", "sum_excess", "gap_minus_rexp_min")
 # Reason bits only the owner's own account can carry.
 WHY_OWNER_ONLY = WHY["gate_reloading"]
+# Every wire field of a shot group's header and the cycle field it becomes.
+# Both accounts state every one of them: `s0` pairs the two accounts' cycles
+# (a cycle with no partner of the same `s0` is absent on the other side),
+# the clocks compare through the clock deltas, and the rest field by field.
+CYCLE_HEADER = {"s0": "s0", "pid0": "pid0", "n": "units", "pt": "pt", "end": "end",
+                "src": "src", "amt": "amt", "st_end": "st_end", "rl_g": "rl_g", "rl_s": "rl_s",
+                "rl_r": "rl_r", "rg": "regen_stated", "nrg": "regen_events"}
 # Cycle fields both accounts state (the header) and derive (the rebuild).
-CYCLE_STATED = ("units", "end", "src", "amt", "regen_events")
+CYCLE_STATED = ("pid0", "pt", "units", "end", "src", "amt", "regen_stated", "regen_events")
 CYCLE_DERIVED = ("mag", "rexp", "regen", "vol", "exh", "tail", "in_rl", "gaps", "excess")
 CLOCKS = ("rl_g", "rl_s", "rl_r")
+# Every wire field of a listed shot and the shot field it becomes: `dpid` and
+# `dt` give the shot's identity (pid, stamp), the owner's repeat ordinal and
+# the copy's attack message both give `first_of_emission`. `since` and `fl`
+# are the owner's own gate state, which the other seat cannot observe.
+SHOT_ENTRY = {"dpid": "pid", "dt": "stamp", "ammo_before": "ammo_before",
+              "reloading": "reloading", "counter": "counter", "rep": "first_of_emission",
+              "am": "first_of_emission"}
+SHOT_OWNER_ONLY = ("since", "fl")
+# Shot fields both accounts carry, each with the difference it is shown as.
+SHOT_COMPARED = {"ammo_before": "d_ammo", "reloading": "d_reloading", "counter": "d_counter",
+                 "first_of_emission": "d_first"}
 
 
 def _mark(row, what):
@@ -860,11 +878,15 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
     from its record's own gun) and the other seat's account of the same gun
     (OTHER-SEAT-MEASURED, from that seat's copy). Either may be absent.
 
-    The display case is derived from EVERY comparable field: per shot (ammo,
-    reloading, reload counter, presence), per cycle (stated and derived
-    fields, reason bits without the owner-only bit, the refill events and the
-    cycle clocks), the attack count against the emissions, the stat blocks at
-    every point and the whole-game totals. Any difference is `both_differ`
+    The display case is derived from EVERY comparable field: per shot (each
+    field of SHOT_COMPARED, including which shot opens an emission, and
+    presence), per cycle (its partner of the same `s0`, every header field
+    of CYCLE_HEADER, the derived fields, reason bits without the owner-only
+    bit, the refill events and the cycle clocks), the attack count against
+    the emissions, the stat blocks at every point and the whole-game totals.
+    A cycle whose partner the other record does not list, with that record's
+    list whole, is absent there (a difference); with the list trimmed it is
+    NOT-RUN; it is never an agreement. Any difference is `both_differ`
     and `differs_by` names its classes. `both_agree` needs something compared
     and nothing differing; with listed cycles that is at least one cycle
     compared. Otherwise `not_run` (every dependency missing, trimmed or of
@@ -904,6 +926,7 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
             rows.append({"s0": e[CX["s0"]], "pt": None, "self": None, "meas": None,
                          "summary": {acct: _named(e, SPEC[ck][3])}, "shots": [], "refill": None,
                          "differs": False, "differs_by": [], "clock": None, "not_run": "trimmed",
+                         "absent_in": None,
                          "stat": {"self": None, "meas": None, "diff": None},
                          "time": {"self": None, "meas": None}})
     out = {"case": case, "case_text": None, "cycles": rows,
@@ -975,7 +998,8 @@ def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, p
                 partner = oc
                 break
     row = {"s0": c["s0"], "pt": c["pt"], mine: _cycle_fields(c), theirs: None, "shots": [],
-           "refill": None, "differs": False, "differs_by": [], "clock": None, "not_run": None}
+           "refill": None, "differs": False, "differs_by": [], "clock": None, "not_run": None,
+           "absent_in": None}
     if partner is not None:
         row[theirs] = _cycle_fields(partner)
         # A cycle either account could not rebuild whole (a shot or refill
@@ -987,18 +1011,22 @@ def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, p
         row["not_run"] = "missing_record"
     elif _trimmed(other_rec, other_gk):
         row["not_run"] = "trimmed"
+    else:
+        # The other record lists its groups whole and none has this `s0`:
+        # the cycle is absent from that account, never an agreement.
+        row["absent_in"] = theirs
+        _mark(row, "cycle")
     for s in c["shots"]:
         o = other_map.get(_shot_key(s))
         srow = {"pid": s["pid"], "stamp": s["stamp"], mine: _shot_fields(s), theirs: None,
-                "d_ammo": None, "d_reloading": None, "d_counter": None, "not_run": None,
-                "absent_in": None}
+                "not_run": None, "absent_in": None}
+        srow.update({d: None for d in SHOT_COMPARED.values()})
         if o is not None:
             srow[theirs] = _shot_fields(o)
             sv, mv = (o, s) if primary_is_meas else (s, o)
-            srow["d_ammo"] = sv["ammo_before"] - mv["ammo_before"]
-            srow["d_reloading"] = sv["reloading"] - mv["reloading"]
-            srow["d_counter"] = sv["counter"] - mv["counter"]
-            if srow["d_ammo"] or srow["d_reloading"] or srow["d_counter"]:
+            for f, d in SHOT_COMPARED.items():
+                srow[d] = int(sv[f]) - int(mv[f])
+            if any(srow[d] for d in SHOT_COMPARED.values()):
                 _mark(row, "shot")
         elif other_rec is None:
             srow["not_run"] = "missing_record"
@@ -1018,8 +1046,8 @@ def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, p
             if _shot_key(s) in listed:
                 continue
             srow = {"pid": s["pid"], "stamp": s["stamp"], mine: None, theirs: _shot_fields(s),
-                    "d_ammo": None, "d_reloading": None, "d_counter": None, "not_run": None,
-                    "absent_in": None}
+                    "not_run": None, "absent_in": None}
+            srow.update({d: None for d in SHOT_COMPARED.values()})
             if not c["complete"] or _trimmed(own_rec, own_gk):
                 srow["not_run"] = "trimmed"
             else:
@@ -1080,7 +1108,8 @@ def _compare_cycles(row, self_cycle, meas_cycle):
 
 
 def _cycle_fields(c):
-    keep = ("units", "listed", "complete", "mag", "regen", "regen_stated", "rexp", "vol", "exh",
+    keep = ("s0", "pid0", "pt", "units", "listed", "complete", "mag", "regen", "regen_stated",
+            "rexp", "vol", "exh",
             "tail", "in_rl", "gaps", "why", "excess", "end", "src", "amt", "st_end", "rl_g", "rl_s",
             "rl_r", "regen_events", "events_complete", "regens", "not_run")
     return {k: c[k] for k in keep}
@@ -1240,6 +1269,34 @@ def section_faults(rec) -> list:
     return faults
 
 
+# Every retained list an absence is decided from, with the never-trimmed
+# whole-game counter that counts each entry the seat saw (row, field) and the
+# capability that fills the list (None: always filled). An addendum section's
+# lists count in `r_tot`; the measured target bounces count in `p3n.target`.
+WHOLE_COUNTERS = {key: ("r_tot", count, name) for name, parts in W["sections"]
+                  for key, count in parts}
+WHOLE_COUNTERS["p3tb"] = ("p3n", "target", None)
+
+
+def list_gap(rec, key):
+    """Why the list `key` of `rec` cannot prove that an entry is absent, or
+    None when it can. It can only when the record exists, the capability
+    that fills the list is set, nothing was omitted from it, and it lists
+    exactly as many entries as its whole-game counter counts. Otherwise:
+    `missing_record`, `not_collected`, `trimmed` or `inconsistent` (the
+    counter and the list disagree, so the list proves nothing)."""
+    if rec is None:
+        return "missing_record"
+    row, field, cap = WHOLE_COUNTERS[key]
+    if cap is not None and not has_cap(rec, cap):
+        return "not_collected"
+    if rec["omit"][key] > 0:
+        return "trimmed"
+    if len(rec[key]) != rec[row][IX[row][field]]:
+        return "inconsistent"
+    return None
+
+
 def _own_section(rec, name):
     """Why a seat's own section has no rows to show, or None when it has."""
     if rec is None:
@@ -1281,7 +1338,7 @@ def pushes(victim_rec, shooter_rec) -> list:
             if (k[0], k[1]) in bad:
                 row["not_run"] = "ambiguous"
             elif k not in by_key:
-                row["not_run"] = "trimmed" if _trimmed(shooter_rec, "push_o") else "absent"
+                row["not_run"] = list_gap(shooter_rec, "push_o") or "absent"
             else:
                 o = by_key[k]
                 row["meas"] = dict(zip(fields, o))
@@ -1316,7 +1373,7 @@ def chains(victim_rec, shooter_rec) -> list:
             if (k[0], k[1]) in bad:
                 row["not_run"] = "ambiguous"
             elif k not in by_key:
-                row["not_run"] = "trimmed" if _trimmed(shooter_rec, "ch_o") else "absent"
+                row["not_run"] = list_gap(shooter_rec, "ch_o") or "absent"
             else:
                 o = by_key[k]
                 row["dec_to_msg"] = wrap(o[O["t_msg"]] - o[O["t_dec"]])
@@ -1380,7 +1437,7 @@ def velocity_changes(owner_rec, meas_rec) -> dict:
         elif meas_count[key] == 1:
             meas = dict(zip(tb_fields, meas_by[key]))
         else:
-            why = "trimmed" if _trimmed(meas_rec, "p3tb") else "absent"
+            why = list_gap(meas_rec, "p3tb") or "absent"
         out["bounces"].append({
             "pid": e[Bx["pid"]], "s_init": e[Bx["s_init"]], "stamp": e[Bx["stamp"]],
             "target": next(n for n, v in W["bounce_target"].items() if v == target),
@@ -1388,7 +1445,7 @@ def velocity_changes(owner_rec, meas_rec) -> dict:
             "d_other": d_other, "los_other": e[Bx["los_other"]], "nearer": nearer,
             "meas": meas, "meas_not_run": why})
     # Measured target bounces no owner selection names: shown, never paired.
-    gap = "trimmed" if _trimmed(owner_rec, "bsel") else "absent"
+    gap = list_gap(owner_rec, "bsel") or "absent"
     out["meas_unpaired"] = [dict(zip(tb_fields, e), not_run="ambiguous" if meas_count[k] > 1 else gap)
                             for k, e in zip(meas_keys, meas_rec["p3tb"] if meas_rec else [])
                             if not own_count[k]]
@@ -1402,16 +1459,16 @@ def deaths(own_rec, other_rec) -> list:
     and force identities (each resolved against the seat's own push list).
 
     A recent hit's `push_listed` is True when the seat's own push list holds
-    it; False only when that list is whole (collected, nothing omitted), so
-    absence is proven; otherwise None with `push_not_run` naming why
-    (`not_collected`, `trimmed`)."""
+    it; False only when that list proves absence (`list_gap`: collected,
+    nothing omitted, as many entries as `r_tot.push_own` counts); otherwise
+    None with `push_not_run` naming why (`not_collected`, `trimmed`,
+    `inconsistent`)."""
     if own_rec is None or not has_cap(own_rec, "death"):
         return []
     D = IX["bd_s"]
     fields = [f[0] for f in SPEC["bd_s"][3]]
     pushes_own = set(_keyed(own_rec["push_s"], IX["push_s"])) if has_cap(own_rec, "push") else None
-    push_gap = ("not_collected" if pushes_own is None else
-                "trimmed" if _trimmed(own_rec, "push_s") else None)
+    push_gap = list_gap(own_rec, "push_s")
     theirs = {}
     if other_rec is not None:
         for e in other_rec["bd_o"]:
@@ -1435,7 +1492,7 @@ def deaths(own_rec, other_rec) -> list:
             cand = theirs.get(e[D["ord"]], [])
             if len(cand) != 1:
                 row["not_run"] = ("ambiguous" if cand else
-                                  ("trimmed" if _trimmed(other_rec, "bd_o") else "absent"))
+                                  (list_gap(other_rec, "bd_o") or "absent"))
             else:
                 o = cand[0]
                 row["meas"] = dict(zip(fields, o))
@@ -1609,7 +1666,8 @@ def combat_subjects(view: dict) -> dict:
             for account in ("self", "meas"):
                 if cyc[account] is not None:
                     add("combat.cycle", dict(cyc[account], account=account, owner=d["owner"],
-                                             s0=cyc["s0"], pt=cyc["pt"]))
+                                             s0=cyc["s0"], pt=cyc["pt"],
+                                             partner_absent_in=cyc["absent_in"]))
                     for ev in cyc[account]["regens"]:
                         add("combat.regen", dict(ev, account=account, owner=d["owner"],
                                                  s0=cyc["s0"],
@@ -1794,6 +1852,25 @@ def m_shot_d_reloading(ctx, p):
 @cmeasure("b2.shot.d_counter", "combat.shot")
 def m_shot_d_counter(ctx, p):
     return _get(ctx, "d_counter")
+
+
+@cmeasure("b2.shot.d_first", "combat.shot")
+def m_shot_d_first(ctx, p):
+    """The owner's first-of-emission marker minus the copy's (None unless
+    both accounts list the projectile)."""
+    return _get(ctx, "d_first")
+
+
+@cmeasure("b2.cycle.pid0", "combat.cycle")
+def m_cycle_pid0(ctx, p):
+    return _get(ctx, "pid0")
+
+
+@cmeasure("b2.cycle.partner_absent", "combat.cycle")
+def m_cycle_partner_absent(ctx, p):
+    """Which account lacks this cycle (its `s0`) while listing its groups
+    whole, or None."""
+    return _get(ctx, "partner_absent_in")
 
 
 @cmeasure("b2.shot.absent", "combat.shot")
@@ -2304,7 +2381,8 @@ def m_bounce_meas_gap(ctx, p):
 @cmeasure("death.boundary.push_unlisted", "combat.death")
 def m_death_push_unlisted(ctx, p):
     """How many recent hits the seat's own push list proves it lacks; None
-    when the list cannot prove absence (trimmed or not collected)."""
+    when the list cannot prove absence (not collected, trimmed, or listing
+    other than its whole-game count)."""
     hits = ctx.row["hits"]
     if any(h["push_listed"] is None for h in hits):
         return None

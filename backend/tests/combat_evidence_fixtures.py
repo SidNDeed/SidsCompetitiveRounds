@@ -319,6 +319,8 @@ def r_sections_pair(variant="base"):
     # stamp, the stamp the new velocity was sent under).
     victim["p3tb"] = [named_row("p3tb", pid=HIT[0], s_init=HIT[1], s_rel=4200, gap=110,
                                 has_retarget=1, ang_to_me=40)]
+    # Its whole-game count of measured target bounces, which the list matches.
+    victim["p3n"][cm.IX["p3n"]["target"]] = len(victim["p3tb"])
     death = named_row("bd_s", ord=0, stamp=5100, cause=W["death_cause"]["out_of_bounds"],
                       edge=W["edge"]["left"], px=-4000, py=300, vx=-900, vy=50,
                       h1_pid=HIT[0], h1_s_init=HIT[1], h1_cord=HIT[2], h1_age=800,
