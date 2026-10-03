@@ -82,6 +82,43 @@ def test_the_shared_budget_fixture_pins_the_bytes_the_client_must_produce():
     assert len(text) <= se.RECORD_MAX_BYTES
     assert hashlib.sha256(text.encode("ascii")).hexdigest() == fixture["sha256"]
     assert len(text) == fixture["bytes"]
+    # the fixture is contract-valid: every entry passes the cross-field
+    # invariants, and the budgeted record passes the whole record check
+    se.check_events(fixture["input"])
+    se.check_record(json.loads(text))
+
+
+# -- M-8: the enumerated and cross-field event invariants ------------------------
+
+EVENT_CASES = [
+    ("blk_sent", [1, 0, 0, -1], "blk_sent.own_open"),
+    ("blk_sent", [1, 0, 0, 200], "blk_sent.own_open"),
+    ("hit_recv", [1, 5, 7, 0, 5, 0, 1, -1], "hit_recv.path"),
+    ("hit_recv", [0, 5, 7, 0, 5, 0, 1, -1], "hit_recv.pid"),
+    ("hit_sent", [0, 5, 7, 0, 10, 0, 0, -1, 0], "hit_sent.pid"),
+    ("hit_sent", [0, 5, 0, 0, 10, 0, 3, -1, 0], "hit_sent.last"),
+    ("hit_sent", [0, 5, 0, 0, 10, 0, 0, -1, 4], "hit_sent.last"),
+]
+EVENT_CONTROLS = [
+    ("blk_sent", [1, 0, 0, 0]), ("blk_sent", [1, 0, 0, -200]),
+    ("hit_recv", [0, 5, 0, 0, 5, 0, 1, -1]),
+    ("hit_sent", [1, 5, 7, 0, 10, 0, 0, -1, 0]),
+    ("hit_sent", [0, 5, 0, 0, 10, 0, 0, -1, 0]),
+    ("hit_sent", [0, 5, 0, 0, 10, 0, 9, 2, 3]),
+]
+
+
+@pytest.mark.parametrize("field,entry,name", EVENT_CASES)
+def test_m8_an_event_breaking_an_invariant_is_refused_by_name(field, entry, name):
+    rec = fx.base_record(**{field: [entry]})
+    with pytest.raises(se.EvidenceRefused) as e:
+        se.check_record(rec)
+    assert (e.value.status, e.value.field) == (422, name)
+
+
+@pytest.mark.parametrize("field,entry", EVENT_CONTROLS)
+def test_m8_control_the_legal_forms_pass(field, entry):
+    se.check_record(fx.base_record(**{field: [entry]}))
 
 
 def test_the_relayed_build_holds_the_complete_46_character_tuple():
@@ -151,7 +188,7 @@ PROTECTED = ("matches", "ranked_series", "players", "rating_history", "glicko_ra
              "player_achievements", "team_series", "ffa_lobbies", "ffa_matches")
 LANE_WRITES = {"seat_evidence", "seat_evidence_games", "seat_evidence_findings",
                "client_compat_events", "mod_release_digests", "flagged_matches",
-               "review_sitting_dirty", "review_cursor"}
+               "review_sitting_dirty", "review_cursor", "review_seen"}
 _WRITE = re.compile(r"\b(?:INSERT\s+INTO|(?<!DO\s)(?<!FOR\s)UPDATE|DELETE\s+FROM"
                     r"|TRUNCATE(?:\s+TABLE)?|ALTER\s+TABLE)"
                     r"\s+(?:ONLY\s+)?([A-Za-z_][A-Za-z0-9_]*)")
@@ -184,7 +221,7 @@ def _lane_sources():
     mods = "\n\n".join(_read(API, m) for m in REVIEW_MODULES)
     routes = "\n\n".join(textwrap.dedent(inspect.getsource(fn)) for fn in (
         main.submit_seat_evidence, main.submit_compat_outcome, main.admin_seat_evidence,
-        main.admin_register_release_digest, main.review_worker_loop,
+        main.admin_register_release_digest, main.review_worker_loop, main.review_worker_pass,
         main.review_rules_refresh_loop, main._sev_claimed_seat, main._sev_refusal,
         main._sev_header_version))
     return mods, routes
@@ -235,7 +272,8 @@ def test_the_models_declare_every_column_the_lane_assigns():
         assert cols <= declared, (table, sorted(cols - declared))
     assert {"rule_id", "rules_rev"} <= got["seat_evidence_findings"]
     assert "evaluated_rev" in got["seat_evidence_games"]
-    assert {"position_at", "position_id", "rules_rev"} <= got["review_cursor"]
+    assert got["review_cursor"] == {"name", "rules_rev", "updated_at"}
+    assert {"match_id", "created_at"} <= got["review_seen"]
 
 
 def test_the_column_check_sees_an_undeclared_column():
@@ -312,14 +350,14 @@ def test_the_health_words_are_declared_required():
     import schemas
     fields = schemas.HealthResponse.model_fields
     assert fields["seat_evidence"].annotation is int and fields["seat_evidence"].is_required()
-    for k in ("review_eval", "review_rules"):
+    for k in ("review_eval", "review_rules", "review_module"):
         assert fields[k].annotation is str and fields[k].is_required(), k
 
 
 def test_both_health_arms_carry_the_review_words():
     main = _main()
     src = inspect.getsource(main.health_check)
-    for k in ("seat_evidence=", "review_eval=", "review_rules="):
+    for k in ("seat_evidence=", "review_eval=", "review_rules=", "review_module="):
         assert src.count(k) == 2, k
 
 
@@ -330,9 +368,38 @@ def test_the_migration_seeds_only_the_operational_switches():
     seeded = re.findall(r"\('([a-z_]+)',\s*'[01]'\)", sql)
     assert sorted(seeded) == sorted(se.SWITCHES)
     assert "BEGIN;" in sql and "COMMIT;" in sql
-    for word in ("rule_id", "rules_rev", "evaluated_rev", "review_sitting_dirty", "review_cursor"):
+    for word in ("rule_id", "rules_rev", "evaluated_rev", "review_sitting_dirty", "review_cursor",
+                 "review_seen", "seat_evidence_seeded_keys"):
         assert word in sql, word
     assert not re.search(r"\bkind\s+VARCHAR", sql)
+    assert "position_at" not in sql and "position_id" not in sql
+    # the seeds are recorded as this file's own, in the same statement
+    assert re.search(r"WITH seeded AS \(\s*INSERT INTO runtime_settings.*?RETURNING key\s*\)\s*"
+                     r"INSERT INTO seat_evidence_seeded_keys", sql, re.S)
+
+
+def test_the_rollback_states_its_assumption_and_deletes_only_seeded_keys():
+    sql = _read(BACKEND, "sql", "rollback_368_seat_evidence.sql")
+    head = sql.split("BEGIN;")[0]
+    assert "ASSUMPTION" in head and "seat_evidence_seeded_keys" in head
+    body = sql.split("BEGIN;")[1]
+    deletes = re.findall(r"DELETE FROM runtime_settings.*?;", body, re.S)
+    assert len(deletes) == 1 and "USING seat_evidence_seeded_keys" in deletes[0]
+    assert "DROP TABLE IF EXISTS seat_evidence_seeded_keys" in body
+    assert body.index("DELETE FROM runtime_settings") < body.index("DROP TABLE IF EXISTS seat_evidence_seeded_keys")
+
+
+def test_l7_the_compat_route_checks_the_switch_right_after_the_session():
+    """Static order inside the route: session, then the switch, then any
+    validation, signature work or storage."""
+    main = _main()
+    src = textwrap.dedent(inspect.getsource(main.submit_compat_outcome))
+    i_session = src.index("_strict_steam_session_ok")
+    i_switch = src.index('"seat_evidence_accept"')
+    assert i_session < i_switch
+    for later in ("check_compat", "verify_compat_sig", "store_compat", "select(Player.id)"):
+        assert i_switch < src.index(later), later
+    assert '"seat_evidence_off"' in src
 
 
 def test_the_bot_prints_the_rendered_line_and_adds_no_wording():

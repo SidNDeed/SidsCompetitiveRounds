@@ -16,6 +16,7 @@ import ast
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import types
 import uuid
@@ -29,6 +30,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "api"))
 sys.path.insert(0, HERE)
 
 import main  # noqa: E402
+import models  # noqa: E402
+import review_measures as rm  # noqa: E402
 import review_rules as rr  # noqa: E402
 import review_testkit as tk  # noqa: E402
 import seat_evidence as se  # noqa: E402
@@ -203,6 +206,9 @@ def test_migration_368_applies_twice_with_an_identical_result(live):
     names = {r[0] for r in first["constraints"]}
     assert {"seat_evidence_one_per_seat"} <= names
     assert first["review_cursor"] == [] and first["review_sitting_dirty"] == []
+    assert first["review_seen"] == []
+    # 368 recorded the three switches as its own seeds (the rollback guard)
+    assert [r[0] for r in first["seat_evidence_seeded_keys"]] == sorted(se.SWITCHES)
 
 
 def test_a_third_apply_keeps_a_switch_sid_set(live):
@@ -403,37 +409,69 @@ def test_m10_the_match_commits_while_every_worker_statement_fails(live, monkeypa
 # -- A3: the absent state ------------------------------------------------------
 
 def test_a3_absent_reads_absent_passes_evaluate_nothing_and_the_match_body_is_unchanged(
-        live, monkeypatch, revs):
+        live, monkeypatch, revs, tmp_path, capsys):
+    """The same fixed submission, from the same database state (each run in a
+    transaction that is rolled back after), answers the SAME RAW BYTES under
+    the absent state and under a loaded revision; the worker's own pass, run
+    with nothing staged, prints the absent pass line."""
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.responses import JSONResponse
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     async def no_session_check(request, steam_id, db):
         return None
     monkeypatch.setattr(main, "MATCH_HMAC_SECRET", "")
     monkeypatch.setattr(main, "_check_steam_session", no_session_check)
-    pairs = [("76561190000000611", "76561190000000612"), ("76561190000000613", "76561190000000614")]
+    from sqlalchemy import event
+    fixed = uuid.UUID("00000000-0000-4000-8000-0000000003a3")
 
-    async def submit(a, b, room):
-        async with live.sm() as db:
-            r = await main.submit_match(lh._report_1v1(room, a=a, b=b), lh._FakeRequest(), db)
-        return json.loads(r.model_dump_json())
+    def pin_match_id(_mapper, _connection, target):
+        # the one input that differs between two runs from the same state is
+        # the new row's generated key; pin it so the bytes can be compared
+        if target.id is None:
+            target.id = fixed
+    a, b, room = "76561190000000611", "76561190000000612", "ranked_seva3_000001_r1"
+
+    async def raw_once():
+        engine = live.sm.kw["bind"]
+        async with engine.connect() as conn:
+            outer = await conn.begin()
+            db = AsyncSession(bind=conn, join_transaction_mode="create_savepoint",
+                              expire_on_commit=False)
+            try:
+                r = await main.submit_match(lh._report_1v1(room, a=a, b=b), lh._FakeRequest(), db)
+                body = r.body if hasattr(r, "body") else JSONResponse(jsonable_encoder(r)).body
+            finally:
+                await db.close()
+                await outer.rollback()
+        return body
 
     async def go():
+        empty = tmp_path / "nothing-staged"
+        empty.mkdir()
+        monkeypatch.setenv(rr.ROOT_ENV, str(empty))
+        monkeypatch.setattr(rr, "_KEY", None)
         monkeypatch.setattr(rr, "_STATE", rr.State("absent"))
+        capsys.readouterr()
+        out = await main.review_worker_pass(live.sm, purge=False)
+        printed = capsys.readouterr().out
         word = rr.health_word()
-        g = await se.games_pass(live.sm, rr.current_rules())
-        s = await se.sitting_pass(live.sm, rr.current_rules())
-        line = main._review_pass_line(rr.health_word(), g, s)
-        absent = await submit(*pairs[0], "ranked_seva3_000001_r1")
+        absent = await raw_once()
         monkeypatch.setattr(rr, "_STATE", revs.shadow)
-        loaded = await submit(*pairs[1], "ranked_seva3_000002_r1")
-        return word, line, absent, loaded
-    word, line, absent, loaded = live.run(go())
-    assert word == "absent"
-    assert line.startswith("[REVIEW] pass rev=absent evaluated=0 fired=0 errors=0"), line
-    # Two fresh pairs in the same state: the bodies differ only in the row
-    # identity (the new match id and the winner's own steam id).
-    for body, (a, _b) in ((absent, pairs[0]), (loaded, pairs[1])):
-        assert body.pop("winner_steam_id") == a
-        body.pop("match_id")
-    assert json.dumps(absent, sort_keys=True) == json.dumps(loaded, sort_keys=True)
+        loaded = await raw_once()
+        left = await _scalar(live.sm, "SELECT count(*) FROM matches WHERE photon_room_id = :r", r=room)
+        return word, out, printed, absent, loaded, left
+    event.listen(models.Match, "before_insert", pin_match_id)
+    try:
+        word, out, printed, absent, loaded, left = live.run(go())
+    finally:
+        event.remove(models.Match, "before_insert", pin_match_id)
+    assert word == "absent" and out[0] == "absent"
+    lines = [ln for ln in printed.splitlines() if ln.startswith("[REVIEW] pass ")]
+    assert lines == ["[REVIEW] pass rev=absent evaluated=0 fired=0 errors=0"], printed
+    assert isinstance(absent, bytes) and absent == loaded, (absent, loaded)
+    assert str(fixed).encode() in absent                         # the pinned row identity answered
+    assert left == 0                                              # both runs were rolled back
 
 
 # -- A8: shadow, then one posted flag; re-evaluation on a revision change -------
@@ -554,6 +592,109 @@ def test_a4_each_refused_revision_changes_no_count_and_a_loaded_one_does(live, s
     assert control[1][1] > control[0][1]                          # the negative control
 
 
+def _deny_read(path):
+    """Make one file's DATA unreadable to this process, for real, and return
+    the undo. On Windows only read-data is denied: denying the whole generic
+    read would also deny reading the ACL, and the undo could not remove it."""
+    if os.name == "nt":
+        user = os.environ.get("USERNAME") or os.getlogin()
+        subprocess.run(["icacls", path, "/deny", "%s:(RD)" % user], check=True, capture_output=True)
+        return lambda: subprocess.run(["icacls", path, "/remove:d", user], check=True,
+                                      capture_output=True)
+    os.chmod(path, 0)
+    return lambda: os.chmod(path, 0o644)
+
+
+def test_a4_an_actually_unreadable_revision_is_refused_everywhere_and_changes_nothing(
+        live, signing, revs, monkeypatch, capsys):
+    shadow = revs.shadow.ruleset.rev
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, A4_A, A4_B)
+        ta, tb = await _session(sm, A4_A), await _session(sm, A4_B)
+        key = "ranked_seva4_000002"
+        await _match(sm, ids, A4_A, A4_B, key + "_r8")
+        await _post(sm, _body(A4_A, A4_B, key, dec=[40, 2]), ta)
+        await _post(sm, _body(A4_B, A4_A, key, rounds=[3, 5]), tb)
+        import shutil
+        dst = os.path.join(os.path.dirname(revs.store), "unreadable", "rules-" + shadow)
+        shutil.copytree(os.path.join(revs.store, "rules-" + shadow), dst)
+        target = os.path.join(dst, "rules.json")
+        undo = _deny_read(target)
+        try:
+            try:
+                open(target, "rb").close()
+                readable = True
+            except OSError:
+                readable = False
+            root = os.path.dirname(dst)
+            tk.point(root, os.path.basename(dst))
+            monkeypatch.setenv(rr.ROOT_ENV, root)
+            monkeypatch.setattr(rr, "_KEY", None)
+            monkeypatch.setattr(rr, "_LOGGED", None)
+            capsys.readouterr()
+            st = rr.refresh_rules()
+            again = rr.refresh_rules()
+            word = rr.health_word()
+            log = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("[REVIEW] rules")]
+            before = await _counts(sm)
+            g = await se.games_pass(sm, st)
+            s = await se.sitting_pass(sm, st)
+            after = await _counts(sm)
+        finally:
+            undo()
+        before2 = await _counts(sm)
+        await se.games_pass(sm, revs.shadow)
+        control = (before2, await _counts(sm))
+        return readable, st, again, word, log, before, after, g, s, control
+    readable, st, again, word, log, before, after, g, s, control = live.run(go())
+    assert readable is False                                      # the file really was unreadable
+    assert (st.word, st.reason) == ("refused", "unreadable") and again is st
+    assert word == "refused"
+    assert log == ["[REVIEW] rules: refused (unreadable)"]        # logged once, class only
+    assert before == after and g["evaluated"] == 0 and s["evaluated"] == 0
+    assert control[1][1] > control[0][1]                          # the negative control
+
+
+# -- M-7: a record is evaluated only against the match its own key names -------
+
+def test_m7_differing_attach_keys_with_both_matches_present_never_cross(live, signing, revs):
+    a, b = "1000000000000701", "1000000000000702"
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b)
+        ta, tb = await _session(sm, a), await _session(sm, b)
+        out = {}
+        for tag, b_suffix in (("split", 9), ("same", 8)):
+            key = "ranked_sevm7%s_000001" % tag
+            m8 = await _match(sm, ids, a, b, key + "_r8", minutes_ago=20)
+            m9 = await _match(sm, ids, a, b, key + "_r9", minutes_ago=10)
+            await _post(sm, _body(a, b, key, suffix=8, dec=[40, 2]), ta)
+            await _post(sm, _body(b, a, key, suffix=b_suffix, rounds=[3, 5]), tb)
+            st = await se.games_pass(sm, revs.shadow)
+            g = await _rows(sm, GAME_SQL, k=key)
+            f = await _rows(sm, _findings_sql("dedup_key LIKE :k"), k=key + "|%")
+            async with sm() as db:
+                view = await se.admin_view(db, stable_game_key=key, rs=revs.shadow.ruleset)
+            out[tag] = (st, g, f, view, m8, m9)
+        return out
+    out = live.run(go())
+    st, g, f, view, m8, _m9 = out["split"]
+    assert not _errors(st)
+    # the selected match is the earlier-ended one (key _r8); the record naming
+    # _r9 is not evaluated against it, so the two-seat rule cannot fire and the
+    # game stays incomplete
+    assert g[0]["match_id"] == m8 and g[0]["finalized_at"] is None
+    assert tk.ID_GAP not in {r["rule_id"] for r in f}
+    assert sorted(r["names_the_match"] for r in view["games"][0]["records"]) == [False, True]
+    # control: both records name _r8, the same evidence fires the two-seat rule
+    st, g, f, _view, m8, _m9 = out["same"]
+    assert g[0]["match_id"] == m8 and g[0]["finalized_at"] is not None
+    assert tk.ID_GAP in {r["rule_id"] for r in f}
+
+
 # -- design report finding 3: the persisted dirty-sitting cursor -----------------
 
 async def _step_sitting(sm, ids, a, b, days_ago, tag, *, created_seconds_ago=None):
@@ -635,6 +776,39 @@ def test_finding3_the_cursor_reaches_every_sitting_in_the_window_including_after
     assert cur[0]["rules_rev"] == revs.armed.ruleset.rev
 
 
+def test_m3_a_row_committed_behind_an_already_folded_row_is_still_read(live, revs):
+    """created_at is stamped when a transaction starts, not when it commits:
+    a match row stamped EARLIER than rows already folded, but committed after
+    they were folded, must still reach the dirty set (the review_seen ledger
+    is keyed by row, not by position)."""
+    a, b, c, d = ("1000000000000801", "1000000000000802", "1000000000000803",
+                  "1000000000000804")
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b, c, d)
+        await _drain(sm, revs.shadow)
+        await _step_sitting(sm, ids, a, b, 2, "f", created_seconds_ago=150)
+        await _drain(sm, revs.shadow)                              # folded: the later stamps
+        await _step_sitting(sm, ids, c, d, 2, "g", created_seconds_ago=900)   # earlier stamps, later commit
+        passes = await _drain(sm, revs.shadow)
+        seen = await _scalar(sm, "SELECT count(*) FROM review_seen s JOIN matches m ON m.id = s.match_id "
+                                 "WHERE m.player1_id = ANY(CAST(:p AS uuid[]))",
+                             p=[str(ids[c]), str(ids[d])])
+
+        def k(x, y):
+            lo, hi = sorted([str(ids[x]), str(ids[y])])
+            return "%s|%s|%%" % (lo, hi)
+        found = [await _scalar(sm, "SELECT count(*) FROM seat_evidence_findings WHERE scope = 'sitting' "
+                                   "AND rule_id = :r AND dedup_key LIKE :k", r=tk.ID_STEP, k=k(x, y))
+                 for x, y in ((a, b), (c, d))]
+        return passes, seen, found
+    passes, seen, found = live.run(go())
+    assert any(p.get("marked_rows") for p in passes), passes
+    assert seen == 4                                              # all four late rows recorded
+    assert found == [1, 1]
+
+
 def test_finding3_a_failing_sitting_rule_keeps_the_dirty_rows_for_the_next_pass(live, revs, monkeypatch):
     a, b = "1000000000000601", "1000000000000602"
 
@@ -688,6 +862,35 @@ def test_purge_drops_old_lists_and_old_unattached_records_only(live, signing):
     assert rows[0]["lists_purged_at"] is not None
 
 
+def test_l7_the_compat_route_answers_503_with_the_switch_off_before_any_work(live, signing):
+    a = "1000000000000901"
+
+    async def go():
+        sm = live.sm
+        await _players(sm, a)
+        tok = await _session(sm, a)
+        route = main.submit_compat_outcome
+        malformed = {"seat_steam_id": a, "outcome": "pass", "plugins": ["has space"], "sig": "x"}
+        await _set(sm, "seat_evidence_accept", "0")
+        try:
+            off = [await _post(sm, malformed, tok, route),
+                   await _post(sm, {"seat_steam_id": a, "outcome": "not_run", "plugins": [],
+                                    "sig": "f" * 64}, tok, route),
+                   await _post(sm, malformed, None, route)]
+        finally:
+            await _set(sm, "seat_evidence_accept", "1")
+        on = await _post(sm, malformed, tok, route)
+        rows = await _scalar(sm, "SELECT count(*) FROM client_compat_events c JOIN players p "
+                                 "ON p.id = c.player_id WHERE p.steam_id = :s", s=a)
+        return off, on, rows
+    off, on, rows = live.run(go())
+    # with the switch off: a malformed body and a bad signature both answer
+    # 503 (no validation, no signature work); no session is still 401 first
+    assert off == [(503, {"error": "seat_evidence_off"}), (503, {"error": "seat_evidence_off"}),
+                   (401, {"detail": "seat_session"})]
+    assert on[0] == 422 and rows == 0                             # control: the switch on validates
+
+
 def test_the_compat_outcome_is_one_row_per_account_per_hour(live, signing):
     async def go():
         sm = live.sm
@@ -728,16 +931,24 @@ def test_the_rollback_removes_exactly_what_368_added_and_368_reapplies(live):
         conn = live.case.conn
         others = await conn.fetchval("SELECT count(*) FROM pg_tables WHERE schemaname = current_schema()")
         flags = await conn.fetchval("SELECT count(*) FROM flagged_matches")
+        # one switch key is treated as pre-existing (not recorded as 368's own
+        # seed): the rollback must leave its row in place
+        await conn.execute("DELETE FROM seat_evidence_seeded_keys WHERE key = 'seat_evidence_purge'")
         await conn.execute(open(rollback, encoding="utf-8").read())
+        kept = await conn.fetch("SELECT key, value FROM runtime_settings WHERE key LIKE 'seat%'")
+        await conn.execute(open(rollback, encoding="utf-8").read())      # re-runnable
+        await conn.execute("DELETE FROM runtime_settings WHERE key = 'seat_evidence_purge'")
         gone = (await tables(conn),
                 await conn.fetchval("SELECT count(*) FROM runtime_settings WHERE key LIKE 'seat%'"),
                 await conn.fetchval("SELECT count(*) FROM pg_tables WHERE schemaname = current_schema()"),
                 await conn.fetchval("SELECT count(*) FROM flagged_matches"))
         await conn.execute(sp.read_368())
         back = await sp.snapshot(conn)
-        return others, flags, gone, back
-    others, flags, gone, back = live.run(go())
+        return others, flags, gone, back, kept
+    others, flags, gone, back, kept = live.run(go())
+    assert [tuple(r) for r in kept] == [("seat_evidence_purge", "1")]
     assert gone == (0, 0, others - len(sp.SEV_TABLES), flags)
+    assert [r[0] for r in back["seat_evidence_seeded_keys"]] == sorted(se.SWITCHES)
     first = live.snaps[0]
 
     def seat_keys(snap):

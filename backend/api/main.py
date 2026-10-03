@@ -39,6 +39,7 @@ from database import get_asm_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 import seat_evidence as _sev
 import review_rules as _review_rules
+import review_module as _review_module
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
@@ -4445,30 +4446,37 @@ def _review_pass_line(word, games, sittings) -> str:
             f"fired={n(games, 'fired') + n(sittings, 'fired')} errors={errors}")
 
 
+async def review_worker_pass(session_factory, purge: bool):
+    """One pass of the review worker: read the loader's published state once
+    and use it for the whole pass, attach and evaluate games, run the sitting
+    rules, purge when asked, and print the pass lines. With no valid revision
+    it attaches records to matches and purges, evaluates nothing and opens
+    nothing; the pass line then names the word (absent or refused)."""
+    state = await asyncio.to_thread(_review_rules.refresh_rules)
+    games = await _sev.games_pass(session_factory, state)
+    sittings = await _sev.sitting_pass(session_factory, state)
+    purged = await _sev.purge_pass(session_factory) if purge else None
+    print(_review_pass_line(state.word, games, sittings), flush=True)
+    print(f"[SEAT-EVIDENCE] games={games} sittings={sittings} purge={purged}", flush=True)
+    return state.word, games, sittings, purged
+
+
 async def review_worker_loop():
     """The seat-evidence and review worker. PRIMARY ONLY: started in
     lifespan's primary branch, and every pass it runs writes.
 
-    Each pass reads the loader's published state once and uses it for the
-    whole pass. With no valid revision it attaches records to matches and
-    purges, evaluates nothing and opens nothing. Every evaluation runs here
-    and nowhere else: the match report path neither awaits nor transacts with
-    any of this SQL. Each game and each sitting rule runs in its own
-    transaction and guard."""
+    Every evaluation runs here and nowhere else: the match report path
+    neither awaits nor transacts with any of this SQL. Each game and each
+    sitting rule runs in its own transaction and guard."""
     from database import async_session
     last_purge = None
     await asyncio.sleep(REVIEW_FIRST_PASS_S)
     while True:
         try:
-            state = await asyncio.to_thread(_review_rules.refresh_rules)
-            games = await _sev.games_pass(async_session, state)
-            sittings = await _sev.sitting_pass(async_session, state)
-            purged = None
-            if last_purge is None or time.monotonic() - last_purge > REVIEW_PURGE_EVERY_S:
-                purged = await _sev.purge_pass(async_session)
+            purge = last_purge is None or time.monotonic() - last_purge > REVIEW_PURGE_EVERY_S
+            await review_worker_pass(async_session, purge)
+            if purge:
                 last_purge = time.monotonic()
-            print(_review_pass_line(state.word, games, sittings), flush=True)
-            print(f"[SEAT-EVIDENCE] games={games} sittings={sittings} purge={purged}", flush=True)
         except Exception as e:
             print(f"[REVIEW] pass error: {type(e).__name__}", flush=True)
         await asyncio.sleep(REVIEW_PASS_S)
@@ -7169,6 +7177,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               seat_evidence=_seat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
+                              review_module=_review_module.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -7202,6 +7211,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               seat_evidence=_seat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
+                              review_module=_review_module.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
@@ -8136,11 +8146,15 @@ async def submit_compat_outcome(request: Request, db: AsyncSession = Depends(get
     """A seat's other-plug-in check outcome (contract V2 section 5.1): sent once
     by a seat whose check found another plug-in (`finding`) or could not run
     (`not_run`). Session first, as the seat-evidence route; writes only
-    client_compat_events, one row per account per UTC hour."""
+    client_compat_events, one row per account per UTC hour. With the accept
+    switch off it answers 503 seat_evidence_off right after the session check,
+    before any validation, signature work or storage."""
     seat, body = await _sev_claimed_seat(request)
     if not seat or not await _strict_steam_session_ok(request, seat, db):
         return JSONResponse(status_code=401, content={"detail": "seat_session"})
     try:
+        if await _sev.setting(db, "seat_evidence_accept", "0") != "1":
+            return JSONResponse(status_code=503, content={"error": "seat_evidence_off"})
         c = _sev.check_compat(body)
         if not _sev.verify_compat_sig(MATCH_HMAC_SECRET, c):
             return JSONResponse(status_code=403, content={"detail": "signature"})

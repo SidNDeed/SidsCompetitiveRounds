@@ -1,7 +1,7 @@
 -- 368_seat_evidence.sql
 --
 -- SEAT EVIDENCE, server half (contract V2), and the state of the review
--- rules worker. Additive only: seven new tables and three seeded runtime
+-- rules worker. Additive only: nine new tables and three seeded runtime
 -- switches. No existing table, column, constraint or row is changed; the
 -- match table and the 7-field match HMAC are untouched.
 --
@@ -18,8 +18,15 @@
 --   client_compat_events    a seat's other-plug-in check outcome, one row per
 --                           account per UTC hour
 --   review_sitting_dirty    (pair, UTC day) sittings waiting for evaluation
---   review_cursor           the worker's position in the match rows it folds
---                           into review_sitting_dirty
+--   review_seen             the match rows already folded into
+--                           review_sitting_dirty under the current revision (a
+--                           durable ledger keyed by row: created_at is not
+--                           commit order, so no position can stand for it)
+--   review_cursor           the revision review_seen was filled under
+--   seat_evidence_seeded_keys
+--                           the runtime switch keys THIS file inserted (a key
+--                           that already existed is not recorded), so the
+--                           rollback removes only those
 --
 -- What is evaluated, and whether a finding is posted, is decided by the
 -- loaded review rules revision, not by any row here. With no revision loaded
@@ -124,18 +131,34 @@ CREATE TABLE IF NOT EXISTS review_sitting_dirty (
 );
 CREATE INDEX IF NOT EXISTS ix_review_sitting_dirty_marked ON review_sitting_dirty (marked_at);
 
+CREATE TABLE IF NOT EXISTS review_seen (
+    match_id    UUID        PRIMARY KEY,
+    created_at  TIMESTAMPTZ NOT NULL,
+    seen_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_review_seen_created ON review_seen (created_at);
+
 CREATE TABLE IF NOT EXISTS review_cursor (
     name         VARCHAR(16) PRIMARY KEY,
-    position_at  TIMESTAMPTZ NULL,
-    position_id  UUID        NULL,
     rules_rev    VARCHAR(16) NULL,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-INSERT INTO runtime_settings (key, value) VALUES
-    ('seat_evidence_accept', '1'),
-    ('seat_evidence_worker', '1'),
-    ('seat_evidence_purge', '1')
+CREATE TABLE IF NOT EXISTS seat_evidence_seeded_keys (
+    key        VARCHAR(64) PRIMARY KEY,
+    seeded_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+WITH seeded AS (
+    INSERT INTO runtime_settings (key, value) VALUES
+        ('seat_evidence_accept', '1'),
+        ('seat_evidence_worker', '1'),
+        ('seat_evidence_purge', '1')
+    ON CONFLICT (key) DO NOTHING
+    RETURNING key
+)
+INSERT INTO seat_evidence_seeded_keys (key)
+SELECT key FROM seeded
 ON CONFLICT (key) DO NOTHING;
 
 COMMIT;

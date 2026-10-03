@@ -12,7 +12,12 @@ environment variable SCR_REVIEW_PRIVATE_STORE:
   nonce     every revision's nonce
   wording   every rule's wording as the ordered sequence of its literal
             fragments (placeholders are gaps), so the template and every line
-            rendered from it match, and one common phrase alone does not
+            rendered from it match, and one common phrase alone does not; a
+            wording with ONE fragment is a needle when that fragment alone is
+            at least WORDING_MIN characters
+  data      every data table name a revision ships under data/ and every name
+            its rules reference ({"data": name}), with and without the
+            extension (a stem shorter than DATA_STEM_MIN is not used alone)
   listed    every line of the store's tests/needles.txt (identifiers the
             store's owner lists by hand)
   basename  the names of the store's own private files (not its revision
@@ -26,14 +31,19 @@ Modes:
   message  <file>                   one commit message
   scan-dir <dir>                    every file under a directory
   packet   <repo> <commit> <allowlist> <out dir>
-           assemble a review packet ONLY from the allowlisted repository paths
-           at <commit>, byte-verified against the commit's blobs; anything not
-           on the list (a brief, a note, a single number) cannot enter. The
-           assembled packet is then scanned like a directory.
+           assemble a review packet ONLY from the allowlist: a line
+           `<repository path>` copies that path at <commit>, byte-verified
+           against the commit's blob; a line `doc <absolute path> <sha256>`
+           copies one document from outside the repository into docs/,
+           admitted only when its bytes hash to the pinned digest (a document
+           edited after its digest was pinned is refused). Anything not on the
+           list (a brief, a note, a single number) cannot enter. The assembled
+           packet is then scanned like a directory.
 
 Exit 0 clean, 1 found (or a packet refused), 2 usage, 3 no verdict (the
-store variable is set but the store cannot be read). With the variable unset
-it prints `review_needles: unarmed` and exits 0.
+store variable names a store that cannot be read or holds no revision), 4
+unarmed (the store variable is unset). 3 and 4 are REFUSALS: no scan ran, and
+neither is ever a pass.
 """
 
 from __future__ import annotations
@@ -50,6 +60,7 @@ WORDING_MIN = 12
 FRAGMENT_MIN = 3
 WORDING_GAP = 80
 BASENAME_MIN = 12
+DATA_STEM_MIN = 8
 # Names the public loader and build tool themselves use: not private.
 PUBLIC_NAMES = {"REVISIONS.tsv", "selftest.json"}
 _REV_DIR = re.compile(r"rules-[0-9a-f]{12}")
@@ -62,17 +73,22 @@ class NoVerdict(Exception):
 
 def derive(store: str) -> dict:
     """{class: set(needles)} from the private store."""
-    out = {"rule_id": set(), "nonce": set(), "wording": set(), "listed": set(), "basename": set()}
+    out = {"rule_id": set(), "nonce": set(), "wording": set(), "listed": set(), "basename": set(),
+           "data": set()}
     try:
         names = sorted(os.listdir(store))
     except OSError as e:
         raise NoVerdict(type(e).__name__)
+    revisions = 0
     for name in names:
         path = os.path.join(store, name)
         if _REV_DIR.fullmatch(name) and os.path.isdir(path):
+            revisions += 1
             try:
                 with open(os.path.join(path, "rules.json"), encoding="utf-8") as f:
                     doc = json.load(f)
+                ddir = os.path.join(path, "data")
+                shipped = sorted(os.listdir(ddir)) if os.path.isdir(ddir) else []
             except (OSError, ValueError) as e:
                 raise NoVerdict(type(e).__name__)
             if isinstance(doc.get("nonce"), str) and doc["nonce"]:
@@ -82,8 +98,15 @@ def derive(store: str) -> dict:
                     out["rule_id"].add(r["id"])
                 frags = tuple(f.strip() for f in _PLACE.split(r.get("line") or "")
                               if len(f.strip()) >= FRAGMENT_MIN)
-                if len(frags) >= 2 and sum(len(f) for f in frags) >= WORDING_MIN:
+                if frags and sum(len(f) for f in frags) >= WORDING_MIN:
                     out["wording"].add(frags)
+            for dn in shipped + sorted(_data_refs(doc)):
+                out["data"].add(dn)
+                stem = dn.rsplit(".", 1)[0]
+                if len(stem) >= DATA_STEM_MIN:
+                    out["data"].add(stem)
+    if not revisions:
+        raise NoVerdict("no revision")
     tests = os.path.join(store, "tests")
     listed = os.path.join(tests, "needles.txt")
     if os.path.exists(listed):
@@ -95,6 +118,20 @@ def derive(store: str) -> dict:
                 if (os.path.isfile(os.path.join(base, name)) and "." in name
                         and len(name) >= BASENAME_MIN and name not in PUBLIC_NAMES):
                     out["basename"].add(name)
+    return out
+
+
+def _data_refs(node) -> set:
+    """Every name a rules document references as {"data": name}."""
+    out = set()
+    if isinstance(node, dict):
+        if set(node) == {"data"} and isinstance(node["data"], str):
+            out.add(node["data"])
+        for v in node.values():
+            out |= _data_refs(v)
+    elif isinstance(node, list):
+        for v in node:
+            out |= _data_refs(v)
     return out
 
 
@@ -184,14 +221,44 @@ def packet(repo, commit, allowlist, out_dir, needles):
     """Copy ONLY allowlisted repository paths at `commit` into out_dir, each
     verified byte for byte against its blob; then scan the result."""
     with open(allowlist, encoding="utf-8") as f:
-        paths = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+        lines = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+    paths, docs = [], []
+    for ln in lines:
+        parts = ln.split()
+        if parts[0] == "doc":
+            if (len(parts) != 3 or not os.path.isabs(parts[1])
+                    or not re.fullmatch(r"[0-9a-f]{64}", parts[2])):
+                return {"refused": "malformed_doc_entry"}
+            docs.append((parts[1], parts[2]))
+        else:
+            paths.append(ln)
     if os.path.exists(out_dir) and os.listdir(out_dir):
         return {"refused": "out_dir_not_empty"}
     tracked = set(_git(repo, "ls-tree", "-r", "--name-only", "-z", commit).split("\0"))
     for p in paths:
-        if p not in tracked or p.startswith("/") or ".." in p.split("/"):
+        if p not in tracked or p.startswith("/") or ".." in p.split("/") or p.startswith("docs/"):
             return {"refused": "not_an_allowlisted_public_source"}
+    if len({os.path.basename(d) for d, _h in docs}) != len(docs):
+        return {"refused": "doc_name_collision"}
+    doc_bytes = []
+    for d, want in docs:
+        try:
+            with open(d, "rb") as f:
+                raw = f.read()
+        except OSError:
+            return {"refused": "doc_unreadable"}
+        if hashlib.sha256(raw).hexdigest() != want:
+            return {"refused": "doc_digest_differs"}
+        doc_bytes.append((os.path.basename(d), raw, want))
     os.makedirs(out_dir, exist_ok=True)
+    for name, raw, want in doc_bytes:
+        dst = os.path.join(out_dir, "docs", name)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as f:
+            f.write(raw)
+        with open(dst, "rb") as f:
+            if hashlib.sha256(f.read()).hexdigest() != want:
+                return {"refused": "bytes_differ_from_the_pin"}
     for p in paths:
         raw = _git(repo, "show", "%s:%s" % (commit, p), binary=True)
         want = _git(repo, "rev-parse", "%s:%s" % (commit, p)).strip()
@@ -205,7 +272,7 @@ def packet(repo, commit, allowlist, out_dir, needles):
         if hashlib.sha1(header + got).hexdigest() != want:
             return {"refused": "bytes_differ_from_the_commit"}
     entries = sum(len(files) for _t, _d, files in os.walk(out_dir))
-    if entries != len(paths):
+    if entries != len(paths) + len(docs):
         return {"refused": "extra_entries"}
     return scan_dir(out_dir, needles)
 
@@ -227,12 +294,12 @@ def main(argv):
         print(__doc__.split("Modes:")[1].split("Exit 0")[0].rstrip())
         return 2
     if not store:
-        print("review_needles: unarmed (%s is unset)" % STORE_ENV)
-        return 0
+        print("review_needles: unarmed (%s is unset): refused, nothing was scanned" % STORE_ENV)
+        return 4
     try:
         needles = derive(store)
     except NoVerdict as e:
-        print("review_needles: no verdict (store unreadable: %s)" % e)
+        print("review_needles: no verdict (store unreadable: %s): refused, nothing was scanned" % e)
         return 3
     cmd, rest = argv[0], argv[1:]
     if cmd == "staged" and len(rest) == 1:

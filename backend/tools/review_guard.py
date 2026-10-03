@@ -16,9 +16,23 @@ over the source of every tree it is given:
     followed and scanned whole.
 
 Within that reach it refuses:
-  number   a numeric constant (after folding constant arithmetic) other than
-           the structural ones, unless it is a subscript index on a computed
-           value or sits inside a PINNED contract bound whose value matches;
+  number   a numeric constant (after folding constant arithmetic) unless its
+           CONTEXT makes it structural (STRUCTURAL below: a subscript index
+           or slice bound on a computed value; 0 in any comparison and 1 or -1
+           only in an equality test; a step of 1, a halving, a millisecond
+           conversion or an integer wrap in arithmetic; 0, 1, -1 or 2 as a
+           call argument; 0, 1 or -1 anywhere else) or it sits inside a
+           PINNED contract bound whose value matches. A structural value used
+           as a threshold (`x > 2`, `x * 2 > y`) is therefore refused;
+  select   a string constant compared against a value (==, !=, in, not in,
+           including the members of a literal collection on the right of
+           `in`) that is not one of the closed public SELECTORS, so a new
+           kind, label or category cannot decide anything unseen;
+  bool     a module-level True/False binding that is not PINNED, a
+           comparison against True or False other than the three-valued
+           identity test (`is True`, `is False`), and a True/False constant as an
+           if, while-else, conditional-expression or boolean-operator operand
+           (`while True:` is the one structural form);
   text     a digit inside a string constant or comment, other than a
            standalone 0 or 1 and the closed set of identifiers that carry one;
   call     a value decoded from a constant (int/float/Decimal/json of a
@@ -53,16 +67,41 @@ import tokenize
 
 API = "backend/api/"
 JUDGING = ("review_measures", "review_rules", "review_module", "review_module_runner")
-ROOTED = {"seat_evidence": None, "main": ("review_worker_loop", "review_rules_refresh_loop",
-                                          "_review_pass_line")}
+ROOTED = {"seat_evidence": None, "main": ("review_worker_loop", "review_worker_pass",
+                                          "review_rules_refresh_loop", "_review_pass_line")}
 REVIEW_NAMES = {"rm", "rr", "_review_rules", "review_measures", "review_rules"}
 REVIEW_PARAMS = {"rs", "state", "ruleset"}
 # Plumbing a rooted function may import without it being followed: the
 # session factory and the table declarations decide nothing.
 INFRA = {"database", "models"}
 
-ALLOWED_NUMBERS = {0, 1, -1, 2, 2 ** 31, 2 ** 32, 1000}
 INDEX_MAX = 15
+# Structural numbers BY CONTEXT (see the module docstring). No value is
+# allowed everywhere; each context names what it admits.
+STRUCTURAL = {
+    "compare_any": {0},
+    "compare_eq": {0, 1, -1},
+    "binop": {(ast.Add, 1), (ast.Sub, 1), (ast.Add, -1), (ast.Sub, -1),
+              (ast.FloorDiv, 2), (ast.Mod, 2),
+              (ast.Mult, 1000), (ast.Div, 1000), (ast.FloorDiv, 1000)},
+    "wrap": {2 ** 31, 2 ** 32},
+    "augassign": {1, -1},
+    "call": {0, 1, -1, 2},
+    "plain": {0, 1, -1},
+}
+_EQ_OPS = (ast.Eq, ast.NotEq, ast.Is, ast.IsNot)
+_SEL_OPS = (ast.Eq, ast.NotEq, ast.In, ast.NotIn)
+# The closed public selectors: every string a reached function compares a
+# value against. Contract words only (record fields, rule scopes and effects,
+# loader words, health words, file names of the public format). A string
+# outside this set in a comparison is refused.
+SELECTORS = frozenset({
+    "1", "REVISION", "__main__", "__pycache__", "abs", "absent", "add", "all", "any", "b",
+    "build", "core.game", "data", "dirty", "edges", "eq", "expr", "filters", "flag", "game",
+    "ge", "gt", "honoured", "int", "json", "label", "le", "list", "literal", "lt", "m",
+    "missing", "ne", "not", "note", "nt", "num", "open", "params", "pointer", "post_rows",
+    "probe", "read", "refused", "rel", "reporter", "row", "seat", "serve", "side", "sitting",
+    "sub", "unhonoured", "v", "validate", "window_days", "{", "}"})
 
 # Contract bounds and scheduling: pinned BY VALUE. A deciding value added to
 # one of these makes the pin differ, and the guard refuses it.
@@ -77,9 +116,18 @@ PINNED = {
         "line_max": 400, "places_default": 3, "round_places": 4, "render_items_max": 6,
         "id_hex": 8, "rev_hex": 12, "nonce_bytes": 16, "digest_hex": 64, "data_name_max": 40,
         "pointer_bytes_max": 64, "frame_bytes": 8, "format": 1},
-    ("review_module", "CONTRACT_BOUNDS"): {"api": 1, "start_s": 20, "call_s": 2,
-                                           "line_bytes_max": 65536, "nobody_uid": 65534,
-                                           "reason_max": 32},
+    ("review_module", "CONTRACT_BOUNDS"): {"api": 1, "call_s": 2, "poll_ms": 10,
+                                           "reply_bytes_max": 65536, "status_bytes_max": 65536,
+                                           "heartbeat_stale_s": 10, "reason_max": 32,
+                                           "rev_hex": 12, "fp_hex": 64, "id_bytes": 8},
+    ("review_module_runner", "CONTRACT_BOUNDS"): {
+        "api": 1, "call_s": 2, "poll_ms": 10, "beat_s": 1, "request_bytes_max": 1048576,
+        "reply_bytes_max": 65536, "files_max": 64, "file_bytes_max": 8388608, "frame_bytes": 8,
+        "rev_hex": 12, "fp_hex": 64, "connect_s": 3, "argc": 4, "exit_usage": 2},
+    ("seat_evidence", "SEATS"): 2,
+    ("review_measures", "SEATS"): 2,
+    ("review_rules", "PAIR"): 2,
+    ("review_rules", "EXIT_USAGE"): 2,
     ("seat_evidence", "GAME_EXPIRY_DAYS"): 14,
     ("seat_evidence", "GAMES_PER_PASS"): 500,
     ("seat_evidence", "SITTINGS_PER_PASS"): 500,
@@ -93,7 +141,7 @@ PINNED = {
 }
 SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge"}
 SETTINGS_READER = ("seat_evidence", "setting")
-ENV_KEYS = {"SCR_REVIEW_ROOT", "SYSTEMROOT"}
+ENV_KEYS = {"SCR_REVIEW_ROOT", "SCR_REVIEW_MODULE_EXCHANGE", "SYSTEMROOT"}
 
 # Identifiers that carry a digit and decide nothing: match-row columns of the
 # two seats, their SQL aliases, digest and encoding names.
@@ -185,12 +233,21 @@ class _Scan:
             skip = {id(n) for n in ast.walk(pinned_node)}
         index_ok = set()
         folded = set()
+        parents = {}
+        for node in ast.walk(top):
+            for child in ast.iter_child_nodes(node):
+                parents[id(child)] = node
         for node in ast.walk(top):
             if isinstance(node, ast.Subscript) and not isinstance(node.value, (ast.Constant, ast.List,
                                                                                ast.Tuple, ast.Dict)):
-                v = _fold(node.slice)
-                if isinstance(v, int) and -1 <= v <= INDEX_MAX:
-                    index_ok.update(id(n) for n in ast.walk(node.slice))
+                parts = ([node.slice.lower, node.slice.upper, node.slice.step]
+                         if isinstance(node.slice, ast.Slice) else [node.slice])
+                for part in parts:
+                    v = _fold(part) if part is not None else None
+                    if isinstance(v, int) and -1 <= v <= INDEX_MAX:
+                        index_ok.update(id(n) for n in ast.walk(part))
+        if top is self.tree or isinstance(top, (ast.Assign, ast.AnnAssign)):
+            self._module_bool(top)
         for node in ast.walk(top):
             nid = id(node)
             if nid in skip:
@@ -199,9 +256,19 @@ class _Scan:
                 v = _fold(node)
                 if v is not None:
                     folded.update(id(n) for n in ast.walk(node))
-                    if nid not in index_ok and v not in ALLOWED_NUMBERS:
+                    if nid not in index_ok and not self._number_ok(v, node, parents):
                         self.add(node.lineno, "number")
                     continue
+            if isinstance(node, ast.Compare):
+                self._compare(node)
+            elif isinstance(node, (ast.If, ast.IfExp, ast.While)):
+                t = node.test
+                if isinstance(t, ast.Constant) and isinstance(t.value, bool) \
+                        and not (isinstance(node, ast.While) and t.value is True and not node.orelse):
+                    self.add(node.lineno, "bool")
+            elif isinstance(node, ast.BoolOp):
+                if any(isinstance(x, ast.Constant) and isinstance(x.value, bool) for x in node.values):
+                    self.add(node.lineno, "bool")
             if isinstance(node, ast.Constant):
                 if nid in folded:
                     continue
@@ -209,7 +276,7 @@ class _Scan:
                 if isinstance(v, bool) or v is None:
                     continue
                 if isinstance(v, (int, float, complex)):
-                    if nid not in index_ok and v not in ALLOWED_NUMBERS:
+                    if nid not in index_ok and not self._number_ok(v, node, parents):
                         self.add(node.lineno, "number")
                 elif isinstance(v, (str, bytes)):
                     t = v.decode("latin-1") if isinstance(v, bytes) else v
@@ -229,6 +296,59 @@ class _Scan:
                 for m in mods:
                     if m.split(".")[0] in _DYNAMIC_MODULES:
                         self.add(node.lineno, "call")
+
+    def _number_ok(self, v, node, parents) -> bool:
+        """Whether numeric value v at node is structural IN ITS CONTEXT."""
+        p = parents.get(id(node))
+        while isinstance(p, ast.Tuple) and isinstance(parents.get(id(p)), ast.Compare):
+            p = parents.get(id(p))          # `x in (0, 1)` is judged as the comparison
+        if isinstance(p, ast.Compare):
+            if v in STRUCTURAL["compare_any"]:
+                return True
+            return v in STRUCTURAL["compare_eq"] and all(isinstance(o, _EQ_OPS + (ast.In, ast.NotIn))
+                                                         for o in p.ops)
+        if isinstance(p, ast.BinOp):
+            if v in STRUCTURAL["wrap"] and isinstance(p.op, (ast.Mod, ast.Sub, ast.Add, ast.BitAnd)):
+                return True
+            return (type(p.op), v) in STRUCTURAL["binop"]
+        if isinstance(p, ast.AugAssign):
+            return v in STRUCTURAL["augassign"] and isinstance(p.op, (ast.Add, ast.Sub))
+        if isinstance(p, ast.keyword) or (isinstance(p, ast.Call) and node in p.args):
+            return v in STRUCTURAL["call"]
+        return v in STRUCTURAL["plain"]
+
+    def _compare(self, node):
+        operands = [node.left] + list(node.comparators)
+        for i, op in enumerate(node.ops):
+            pair = (operands[i], operands[i + 1])
+            # `v is True` / `v is False` is the three-valued identity test
+            # (unknown stays unknown); every other comparison with a boolean
+            # constant is a toggle and is refused.
+            for x in pair:
+                if isinstance(x, ast.Constant) and isinstance(x.value, bool) \
+                        and not isinstance(op, (ast.Is, ast.IsNot)):
+                    self.add(node.lineno, "bool")
+            if not isinstance(op, _SEL_OPS):
+                continue
+            strings = []
+            for x in pair:
+                if isinstance(x, ast.Constant) and isinstance(x.value, str):
+                    strings.append(x.value)
+                elif isinstance(op, (ast.In, ast.NotIn)) and x is pair[1] \
+                        and isinstance(x, (ast.Tuple, ast.List, ast.Set)):
+                    strings.extend(e.value for e in x.elts
+                                   if isinstance(e, ast.Constant) and isinstance(e.value, str))
+            if any(s not in SELECTORS for s in strings):
+                self.add(node.lineno, "select")
+
+    def _module_bool(self, top):
+        nodes = self.tree.body if top is self.tree else [top]
+        for n in nodes:
+            if isinstance(n, (ast.Assign, ast.AnnAssign)) and isinstance(n.value, ast.Constant) \
+                    and isinstance(n.value.value, bool) and n in self.tree.body:
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                if not all(isinstance(t, ast.Name) and (self.mod, t.id) in PINNED for t in targets):
+                    self.add(n.lineno, "bool")
 
     def _fn_of(self, node):
         line = getattr(node, "lineno", 0)

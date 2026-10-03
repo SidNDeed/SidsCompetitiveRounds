@@ -22,8 +22,8 @@ Outside this lane's own tables, statements here read `matches`,
 `flagged_matches` (advisory rows, `flag_reason = 'review'`,
 `auto_invalidated = false`, only for a rule the revision arms). The lane's own
 tables are `seat_evidence`, `seat_evidence_games`, `seat_evidence_findings`,
-`client_compat_events`, `mod_release_digests`, `review_sitting_dirty` and
-`review_cursor`. No statement here touches a match result, a rating or gold;
+`client_compat_events`, `mod_release_digests`, `review_sitting_dirty`,
+`review_seen` and `review_cursor`. No statement here touches a match result, a rating or gold;
 a test scans every statement of this module and finds only reads of those.
 
 A seat's record is a statement by that seat. Nothing here turns one into a
@@ -33,16 +33,17 @@ item.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import re
-import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import text
 
 import review_measures as rm
+import review_module as rmod
 import review_rules as rr
 
 CONTRACT = 2
@@ -52,6 +53,7 @@ LIST_ORDER = ("blk_sent", "hit_recv", "blk_recv", "hit_sent", "age_b")
 SEAT_HOURLY_CAP = 40
 DETAILS_MAX_BYTES = 2048
 READY_LAG_S = rm.CONTRACT_BOUNDS["ready_lag_s"]   # a match row is read only this long after it ended
+SEATS = 2                      # the two seats of a game
 GAME_EXPIRY_DAYS = 14          # unattached records, and attached games still missing a record
 LIST_RETENTION_DAYS = 120
 COMPAT_RETENTION_DAYS = 365
@@ -61,7 +63,6 @@ SITTINGS_PER_PASS = 500
 MARK_ROWS_PER_PASS = 5000
 SWITCHES = ("seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge")
 CURSOR = "sittings"
-ZERO_UUID = str(uuid.UUID(int=0))
 COMPAT_ROWS_SHOWN = 10
 
 _STEAM = re.compile(r"\d{15,20}")
@@ -195,9 +196,38 @@ RECORD_SPEC = (
 RECORD_KEYS = tuple(k for k, _ in RECORD_SPEC)
 
 
+# The event invariants the contract states beyond each element's own range
+# (section 2.4 and amendment A2): `own_open` has exactly two states; a path-0
+# hit carries no projectile identity; a received hit is always path 0 (a
+# path-1 hit is one-sided by construction and is counted in `unpair`, never
+# listed); and the no-block tuple of a sent hit is exactly [0, -1, 0].
+OWN_OPEN_STATES = (0, -200)
+NO_BLOCK = (0, -1, 0)
+
+
+def check_events(rec) -> None:
+    """Raise EvidenceRefused(422, "<list>.<field>") for the first event entry
+    that breaks an enumerated or cross-field invariant. Runs after every
+    entry passed its own range check."""
+    for e in rec["blk_sent"]:
+        if e[3] not in OWN_OPEN_STATES:
+            raise EvidenceRefused(422, "blk_sent.own_open")
+    for e in rec["hit_recv"]:
+        if e[0] != 0:
+            raise EvidenceRefused(422, "hit_recv.path")
+        if e[2] != 0:
+            raise EvidenceRefused(422, "hit_recv.pid")
+    for e in rec["hit_sent"]:
+        if e[0] == 0 and e[2] != 0:
+            raise EvidenceRefused(422, "hit_sent.pid")
+        if e[7] == NO_BLOCK[1] and (e[6], e[7], e[8]) != NO_BLOCK:
+            raise EvidenceRefused(422, "hit_sent.last")
+
+
 def check_record(rec) -> None:
     """Raise EvidenceRefused(422, <key>) for the first key outside its bound,
-    or a key set / key order other than the contract's."""
+    or a key set / key order other than the contract's; then the event
+    invariants (check_events), each refused under its own field name."""
     if not isinstance(rec, dict):
         raise EvidenceRefused(422, "record")
     keys = list(rec.keys())
@@ -212,6 +242,7 @@ def check_record(rec) -> None:
         sha, state = rec[name]
         if (state == "ok") != bool(sha):
             raise EvidenceRefused(422, name)
+    check_events(rec)
 
 
 def parse_envelope(payload) -> dict:
@@ -440,12 +471,27 @@ _CANDIDATES = text(
     "          GREATEST(e.seat_player_id, e.other_player_id) ORDER BY min(g.processed_at) NULLS FIRST, rx LIMIT CAST(:lim AS int)")
 
 
-async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:
+def attached_records(rows, match) -> tuple:
+    """The rows whose OWN attach key is the selected match's exact
+    photon_room_id, and the rest. Only the first list is ever evaluated
+    against that match: a record carrying another key (a different report id
+    for the same stable game) stays incomplete, and is never read as evidence
+    about a match its own key does not name."""
+    if match is None:
+        return [], list(rows)
+    room = match["photon_room_id"]
+    return ([r for r in rows if r["attach_key"] == room],
+            [r for r in rows if r["attach_key"] != room])
+
+
+async def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:
     """One game, in the caller's transaction. Attaches the records to their
-    ranked match (one ended at least READY_LAG_S ago). With a revision
-    loaded, re-evaluates when the readiness signature (attached match, record
-    set, conflict markers) or the revision changed; marks the game final once
-    the match is attached AND both records are present, its age passed
+    ranked match (one ended at least READY_LAG_S ago); each record is
+    evaluated only against the match its own attach key names exactly
+    (attached_records). With a revision loaded, re-evaluates when the
+    readiness signature (attached match, record set, conflict markers, which
+    records the match's key names) or the revision changed; marks the game
+    final once the match is attached AND both records name it, its age passed
     GAME_EXPIRY_DAYS, or its lists were purged. A game with no match is never
     final; the purge removes it after expiry. With no revision it attaches and
     evaluates nothing. Returns (state, fired, rule errors, evaluated)."""
@@ -469,7 +515,8 @@ async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:
         return "empty", 0, 0, False
     keys = sorted({r["attach_key"] for r in rows})
     match = (await db.execute(text(
-        "SELECT id, player1_id, player2_id, p1_rounds_won, p2_rounds_won, ended_at FROM matches "
+        "SELECT id, player1_id, player2_id, p1_rounds_won, p2_rounds_won, ended_at, photon_room_id "
+        "FROM matches "
         "WHERE photon_room_id = ANY(CAST(:keys AS varchar[])) AND is_ranked IS TRUE "
         "  AND ((player1_id = :lo AND player2_id = :hi) OR (player1_id = :hi AND player2_id = :lo)) "
         "  AND ended_at <= now() - make_interval(secs => CAST(:lag AS int)) "
@@ -481,8 +528,11 @@ async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:
             "WHERE stable_game_key = :k AND pair_lo = :lo AND pair_hi = :hi"),
             {"m": match["id"] if match else None, "k": key, "lo": lo, "hi": hi})
         return ("attached" if match else "waiting"), 0, 0, False
+    named, other_key = attached_records(rows, match)
+    named_ids = {r["id"] for r in named}
     sig = "%s|%s" % (match["id"] if match else "-",
-                     ",".join("%d:%d" % (r["id"], 1 if r["conflict_at"] else 0) for r in rows))
+                     ",".join("%d:%d:%d" % (r["id"], 1 if r["conflict_at"] else 0,
+                                            1 if r["id"] in named_ids else 0) for r in rows))
     now = datetime.now(timezone.utc)
     expired = (g["first_seen_at"] < now - timedelta(days=GAME_EXPIRY_DAYS))
     if sig == g["signature"] and g["evaluated_rev"] == rev and not (expired and match is not None):
@@ -491,17 +541,20 @@ async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:
             "WHERE stable_game_key = :k AND pair_lo = :lo AND pair_hi = :hi"),
             {"k": key, "lo": lo, "hi": hi})
         return "unchanged", 0, 0, False
-    final = (match is not None and len(rows) >= 2) or (match is not None and expired)
+    final = match is not None and ((len(named) >= SEATS and not other_key) or expired)
     fired = errors = 0
     evaluated = None
-    if match is not None:
+    if match is not None and named:
         records = [{"seat": r["seat_player_id"], "other": r["other_player_id"],
                     "rec": _jsonv(r["payload"]), "header_version": r["header_mod_version"],
-                    "conflict": r["conflict_at"] is not None} for r in rows]
+                    "conflict": r["conflict_at"] is not None} for r in named]
         if any(not _has_lists(r["rec"]) for r in records):
             final = True          # lists purged: nothing left to compare
         else:
-            findings, _fired, errors = rs.evaluate_game(records, dict(match), registry)
+            # Off the event loop: a module measure (choice two) waits on its
+            # exchange with a bounded deadline per call.
+            findings, _fired, errors = await asyncio.to_thread(
+                rs.evaluate_game, records, dict(match), registry, module)
             dedup = "%s|%s|%s" % (key, lo, hi)
             produced = set()
             for rule, det in findings:
@@ -539,6 +592,7 @@ async def games_pass(session_factory, state=None, limit: int = GAMES_PER_PASS) -
     cannot hold back the rest. `state` is review_rules' published state; its
     ruleset is None unless a revision is loaded."""
     rs = state.ruleset if state is not None else None
+    module = rmod.current_module() if rs is not None else None
     stats = {"evaluated": 0, "fired": 0, "rule_errors": 0}
     async with session_factory() as db:
         if await setting(db, "seat_evidence_worker") != "1":
@@ -549,7 +603,7 @@ async def games_pass(session_factory, state=None, limit: int = GAMES_PER_PASS) -
     for key, lo, hi, _rx in cands:
         async with session_factory() as db:
             try:
-                st, fired, errors, done = await evaluate_one(db, key, lo, hi, registry, rs)
+                st, fired, errors, done = await evaluate_one(db, key, lo, hi, registry, rs, module)
                 await db.commit()
             except Exception as exc:          # noqa: BLE001 -- counted, next game
                 await db.rollback()
@@ -562,36 +616,44 @@ async def games_pass(session_factory, state=None, limit: int = GAMES_PER_PASS) -
 
 
 async def _mark_dirty(db, rs, limit: int) -> int:
-    """Fold committed ranked match rows into the persisted dirty-sitting set,
-    in insertion order from a persisted cursor: every row is visited once, at
-    least READY_LAG_S after it was written. A new revision restarts the
-    cursor at the widest window its sitting rules read, so every sitting that
-    revision can see is evaluated under it. Returns the rows consumed."""
+    """Fold committed ranked match rows into the persisted dirty-sitting set.
+
+    The ledger is DURABLE and keyed by row, not by position: every ranked row
+    created inside the revision's widest window that review_seen does not yet
+    hold is read (an anti-join), its sitting marked dirty and its id recorded
+    in review_seen, in the same transaction. `created_at` is a transaction
+    -time stamp, not commit order: a row whose transaction committed after a
+    later-stamped row was already folded is still absent from review_seen,
+    so the next pass reads it. Every row is therefore visited exactly once
+    per revision, at least READY_LAG_S after it was stamped. A new revision
+    empties review_seen, so every sitting that revision can see is evaluated
+    under it; ids leave review_seen once their row falls out of the window
+    (and so can never be read again). Returns the rows consumed."""
     await db.execute(text(
         "INSERT INTO review_cursor (name) VALUES (:n) ON CONFLICT (name) DO NOTHING"),
         {"n": CURSOR})
     cur = (await db.execute(text(
-        "SELECT position_at, position_id, rules_rev FROM review_cursor WHERE name = :n FOR UPDATE"),
-        {"n": CURSOR})).mappings().first()
-    pos_at, pos_id = cur["position_at"], cur["position_id"]
-    if cur["rules_rev"] != rs.rev or pos_at is None:
-        pos_at = (await db.execute(text(
-            "SELECT now() - make_interval(days => CAST(:h AS int))"),
-            {"h": rs.horizon_days()})).scalar_one()
-        pos_id = ZERO_UUID
+        "SELECT rules_rev FROM review_cursor WHERE name = :n FOR UPDATE"),
+        {"n": CURSOR})).scalar()
+    if cur != rs.rev:
+        await db.execute(text("DELETE FROM review_seen"))
         await db.execute(text(
-            "UPDATE review_cursor SET position_at = :a, position_id = CAST(:i AS uuid), "
-            "  rules_rev = :rev, updated_at = now() WHERE name = :n"),
-            {"a": pos_at, "i": pos_id, "rev": rs.rev, "n": CURSOR})
+            "UPDATE review_cursor SET rules_rev = :rev, updated_at = now() WHERE name = :n"),
+            {"rev": rs.rev, "n": CURSOR})
+    horizon = rs.horizon_days()
+    await db.execute(text(
+        "DELETE FROM review_seen WHERE created_at <= now() - make_interval(days => CAST(:h AS int))"),
+        {"h": horizon})
     rows = (await db.execute(text(
         "SELECT m.id, m.created_at, LEAST(m.player1_id, m.player2_id) lo, "
         "       GREATEST(m.player1_id, m.player2_id) hi, (m.ended_at AT TIME ZONE 'UTC')::date d "
         "  FROM matches m "
-        " WHERE (m.created_at, m.id) > (CAST(:a AS timestamptz), CAST(:i AS uuid)) "
+        " WHERE m.created_at > now() - make_interval(days => CAST(:h AS int)) "
         "   AND m.created_at <= now() - make_interval(secs => CAST(:lag AS int)) "
-        "   AND m.is_ranked IS TRUE AND m.player1_id <> m.player2_id "
+        "   AND m.is_ranked IS TRUE AND m.player1_id <> m.player2_id AND m.ended_at IS NOT NULL "
+        "   AND NOT EXISTS (SELECT 1 FROM review_seen s WHERE s.match_id = m.id) "
         " ORDER BY m.created_at, m.id LIMIT CAST(:lim AS int)"),
-        {"a": pos_at, "i": str(pos_id), "lag": READY_LAG_S, "lim": limit})).mappings().all()
+        {"h": horizon, "lag": READY_LAG_S, "lim": limit})).mappings().all()
     if not rows:
         return 0
     keys = sorted({(str(r["lo"]), str(r["hi"]), r["d"]) for r in rows})
@@ -600,10 +662,11 @@ async def _mark_dirty(db, rs, limit: int) -> int:
         "SELECT * FROM unnest(CAST(:lo AS uuid[]), CAST(:hi AS uuid[]), CAST(:d AS date[])) "
         "ON CONFLICT (pair_lo, pair_hi, day) DO UPDATE SET marked_at = now()"),
         {"lo": [k[0] for k in keys], "hi": [k[1] for k in keys], "d": [k[2] for k in keys]})
-    last = rows[-1]
     await db.execute(text(
-        "UPDATE review_cursor SET position_at = :a, position_id = :i, updated_at = now() "
-        "WHERE name = :n"), {"a": last["created_at"], "i": last["id"], "n": CURSOR})
+        "INSERT INTO review_seen (match_id, created_at) "
+        "SELECT * FROM unnest(CAST(:ids AS uuid[]), CAST(:ts AS timestamptz[])) "
+        "ON CONFLICT (match_id) DO NOTHING"),
+        {"ids": [str(r["id"]) for r in rows], "ts": [r["created_at"] for r in rows]})
     return len(rows)
 
 
@@ -847,15 +910,21 @@ async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dic
             match = None
             if g is not None and g["match_id"] is not None:
                 match = (await db.execute(text(
-                    "SELECT id, player1_id, player2_id, p1_rounds_won, p2_rounds_won, is_ranked "
-                    "FROM matches WHERE id = :m"), {"m": g["match_id"]})).mappings().first()
+                    "SELECT id, player1_id, player2_id, p1_rounds_won, p2_rounds_won, is_ranked, "
+                    "       photon_room_id FROM matches WHERE id = :m"),
+                    {"m": g["match_id"]})).mappings().first()
+            # The comparison reads the records the match's own key names (all
+            # of them while no match is attached), and it is ALWAYS rendered:
+            # after the purge the retained aggregates and the availability
+            # metadata stay, and only the list-derived parts read unavailable.
+            named, _other = attached_records(rs_rows, match)
+            view_rows = named if match is not None else rs_rows
             records = [{"seat": r["seat_player_id"], "other": r["other_player_id"],
                         "rec": _jsonv(r["payload"]), "header_version": r["header_mod_version"],
-                        "conflict": r["conflict_at"] is not None} for r in rs_rows]
-            view = None
-            if all(_has_lists(x["rec"]) for x in records):
-                view = rm.game_view(records, dict(match) if match else None, registry,
-                                    rs.params if rs is not None else None)
+                        "conflict": r["conflict_at"] is not None} for r in view_rows]
+            view = rm.game_view(records, dict(match) if match else None, registry,
+                                rs.params if rs is not None else None)
+            named_ids = {r["id"] for r in named}
             dedup = "%s|%s|%s" % (key, lo, hi)
             findings = (await db.execute(text(
                 "SELECT rule_id, rules_rev, details, flag_id FROM seat_evidence_findings "
@@ -875,6 +944,7 @@ async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dic
                              "attach_key": r["attach_key"], "received_at": r["received_at"].isoformat(),
                              "conflict_kind": r["conflict_kind"], "payload_bytes": r["payload_bytes"],
                              "lists_purged": r["lists_purged_at"] is not None,
+                             "names_the_match": (r["id"] in named_ids) if match else None,
                              "record": _jsonv(r["payload"])} for r in rs_rows],
                 "comparison": view,
                 "findings": [{"rule_id": f["rule_id"], "rules_rev": f["rules_rev"],

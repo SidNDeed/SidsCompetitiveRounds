@@ -1035,6 +1035,11 @@ class HealthResponse(BaseModel):
     # staged) or "refused" (the staged one failed a check). It reads the id
     # only, never anything about the revision's contents. No default.
     review_rules: str
+    # review_module: the running review module's revision id (12 hex), or
+    # "absent" (the sandboxed module service is not running, the default) or
+    # "refused" (it runs but failed a check, its heartbeat is stale, or a
+    # computation timed out). The refusal class goes to the log only. No default.
+    review_module: str
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

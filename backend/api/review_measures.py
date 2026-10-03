@@ -8,8 +8,10 @@ is a parameter that revision supplies. This module holds no such value; the
 no-tunables guard (backend/tools/review_guard.py) refuses one here, whether it
 is written inline, hoisted, imported, or carried in text.
 
-Every entry has a semantic FINGERPRINT over its implementation and over the
-implementations and constants it references. A revision binds the
+Every entry has a semantic FINGERPRINT over its implementation and,
+transitively, over every function, class, compiled pattern and constant it
+reaches -- by a bare name or qualified by a fingerprinted module (`rm.Ctx`,
+`rm.sitting_binds`). A revision binds the
 fingerprint of every entry it uses, so a changed implementation makes a
 revision built against the old one stale (refused) instead of silently
 reinterpreted. BRIDGE holds older entry versions a live revision may still
@@ -26,6 +28,7 @@ import ast
 import hashlib
 import inspect
 import json
+import re
 import textwrap
 
 # Public contract bounds (the guard pins each name and value).
@@ -43,6 +46,7 @@ WINDOW_KINDS = (0, 2, 3)
 FINGERPRINT_MODULES = ("review_measures", "review_rules", "review_module")
 
 REGISTRY: dict = {}
+SEATS = 2      # the two seats of a game
 BRIDGE: dict = {}
 
 
@@ -104,30 +108,80 @@ def _const_tag(v) -> str:
     return "const_" + type(v).__name__ + "_" + hashlib.sha256(text.encode()).hexdigest()
 
 
+def _strip_docs(node):
+    """Drop the docstring of the node and of every function and class inside
+    it: documentation never moves a fingerprint."""
+    for n in ast.walk(node):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            n.decorator_list = []
+            body = n.body
+            if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
+                    and isinstance(body[0].value.value, str)):
+                n.body = body[1:] or [ast.Pass()]
+    return node
+
+
+class _Refs(ast.NodeTransformer):
+    """Replaces every reference the code makes -- a bare name, or a name
+    qualified by a fingerprinted module (`rm.Ctx`, `rm.sitting_binds`) -- by
+    a tag over what it refers to, so a change in anything reached moves the
+    fingerprint of everything that reaches it."""
+
+    def __init__(self, names, seen):
+        self.names = names
+        self.seen = seen
+
+    def _tagged(self, v, n):
+        tag = _ref_tag(v, self.seen)
+        if tag is None:
+            return None
+        return ast.copy_location(ast.Name(id=tag, ctx=ast.Load()), n)
+
+    def visit_Name(self, n):
+        if isinstance(n.ctx, ast.Load) and n.id in self.names:
+            out = self._tagged(self.names[n.id], n)
+            if out is not None:
+                return out
+        return n
+
+    def visit_Attribute(self, n):
+        base = n.value
+        if (isinstance(n.ctx, ast.Load) and isinstance(base, ast.Name) and base.id in self.names
+                and inspect.ismodule(self.names[base.id])
+                and self.names[base.id].__name__ in FINGERPRINT_MODULES
+                and n.attr in self.names[base.id].__dict__):
+            out = self._tagged(self.names[base.id].__dict__[n.attr], n)
+            if out is not None:
+                return out
+        self.generic_visit(n)
+        return n
+
+
 def _fn_dump(fn, seen) -> str:
-    node = ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0]
-    node.decorator_list = []
+    node = _strip_docs(ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0])
     node.name = "fn"
-    body = node.body
-    if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
-            and isinstance(body[0].value.value, str)):
-        node.body = body[1:] or [ast.Pass()]
-    names = fn.__globals__
+    return ast.dump(_Refs(fn.__globals__, seen).visit(node), include_attributes=False)
 
-    class _Refs(ast.NodeTransformer):
-        def visit_Name(self, n):
-            if isinstance(n.ctx, ast.Load) and n.id in names:
-                tag = _ref_tag(names[n.id], seen)
-                if tag is not None:
-                    return ast.copy_location(ast.Name(id=tag, ctx=ast.Load()), n)
-            return n
 
-    return ast.dump(_Refs().visit(node), include_attributes=False)
+def _cls_fp(cls, seen) -> str:
+    """A class's fingerprint: its normalised source (every method, slot and
+    class attribute) with every reference resolved as for a function."""
+    if cls in seen:
+        return "cycle"
+    node = _strip_docs(ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0])
+    node.name = "cls"
+    names = inspect.getmodule(cls).__dict__
+    dumped = ast.dump(_Refs(names, seen | {cls}).visit(node), include_attributes=False)
+    return hashlib.sha256(dumped.encode()).hexdigest()
 
 
 def _ref_tag(v, seen):
     if inspect.isfunction(v) and v.__module__ in FINGERPRINT_MODULES:
         return "fn_" + _fn_fp(v, seen)
+    if inspect.isclass(v) and v.__module__ in FINGERPRINT_MODULES:
+        return "cls_" + _cls_fp(v, seen)
+    if isinstance(v, re.Pattern):
+        return _const_tag([v.pattern, v.flags])
     if _simple(v):
         return _const_tag(v)
     return None
@@ -383,7 +437,7 @@ class Ctx:
         self.cache = cache
         self.module = module
         by_seat = {r["seat"]: r for r in records}
-        self.two = len(records) == 2 and all(r["other"] in by_seat for r in records)
+        self.two = len(records) == SEATS and all(r["other"] in by_seat for r in records)
         self.r = records[i] if i is not None else None
         self.other = by_seat.get(self.r["other"]) if self.r is not None else None
         self.pair_other = self.other if self.two else None
@@ -841,25 +895,47 @@ def sitting_binds(entry: Entry, args: dict) -> dict:
 
 # -- the admin view (descriptions only; no rule, no decision) -------------------
 
+# The record's event lists: the only part the retention purge removes.
+LIST_KEYS = ("blk_sent", "hit_recv", "blk_recv", "hit_sent", "age_b")
+UNAVAILABLE_ONE_SIDED = (
+    "other_seat_measurements_of_the_capable_seat",
+    "both_seat_agreement (missing blocks, decided against received hits, block cases a/b/c)",
+    "reciprocal_age_sum_and_drift_cross_check",
+    "old_seat_build_statement (unknown: an absent build statement identifies no build)",
+)
+UNAVAILABLE_PURGED = (
+    "list_derived_measures (event lists purged: reciprocal age sum, block case table, "
+    "one-record honour edge)",
+)
+
+
 def game_view(records: list, match, registry, params) -> dict:
-    """What the admin read shows for one game: the reciprocal age sum and
-    drift (two records), the block case table and the one-record view per
-    victim, and the unavailable matrix when only one seat sent a record.
-    `params` are the loaded revision's measure parameters; without them the
-    parameterised parts read None."""
+    """What the admin read shows for one game, ALWAYS: the evidence class and
+    its unavailable matrix (one-sided games), each seat's retained aggregate
+    fields, and the drift cross-check (two records) -- all of which survive
+    the retention purge -- plus, while the event lists are still stored, the
+    list-derived parts: the reciprocal age sum, the block case table and the
+    one-record view per victim. After the purge those parts read
+    unavailable and nothing else changes. `params` are the loaded revision's
+    measure parameters; without them the parameterised parts read None."""
     by_seat = {r["seat"]: r for r in records}
-    two = len(records) == 2 and all(r["other"] in by_seat for r in records)
-    view = {"records": len(records)}
+    two = len(records) == SEATS and all(r["other"] in by_seat for r in records)
+    lists = all(all(k in r["rec"] for k in LIST_KEYS) for r in records)
+    view = {"records": len(records), "lists": "present" if lists else "purged"}
+    view["aggregates"] = [{k: v for k, v in r["rec"].items() if k not in LIST_KEYS}
+                          for r in records]
     l_hat = None
     p_age = (params or {}).get("params.age_sum")
     p5 = (params or {}).get("params.case_table")
     p1 = (params or {}).get("params.one_record")
+    view["age_sum"] = None
     if two:
         a, b = records[0]["rec"], records[1]["rec"]
-        s = age_sum(a, b, p_age)
-        view["age_sum"] = s
-        if s["sum_median"] is not None:
-            l_hat = s["sum_median"] // 2
+        if lists:
+            s = age_sum(a, b, p_age)
+            view["age_sum"] = s
+            if s["sum_median"] is not None:
+                l_hat = s["sum_median"] // 2
         ra, rb = a["drift"][0], b["drift"][0]
         view["drift"] = {"a_sees_b_cppm": ra, "b_sees_a_cppm": rb, "sum_cppm": ra + rb,
                          "sign": "positive = the measured seat's stamp clock runs fast"}
@@ -867,7 +943,7 @@ def game_view(records: list, match, registry, params) -> dict:
     for i, victim_r in enumerate(records):
         shooter_r = by_seat.get(victim_r["other"]) if two else None
         entry = {"victim_index": i, "counts": None, "blk_faults": None, "one_record": None}
-        if p5 is not None:
+        if p5 is not None and lists:
             table = classify_blocks(victim_r["rec"], shooter_r["rec"] if shooter_r else None, p5)
             entry["counts"], entry["blk_faults"] = table["counts"], table["blk_faults"]
             if p1 is not None:
@@ -875,15 +951,14 @@ def game_view(records: list, match, registry, params) -> dict:
                     victim_r["rec"], shooter_r["rec"] if shooter_r else None, l_hat, p5, p1)
         view["case_table"].append(entry)
     view["params"] = "loaded" if params else "absent"
+    unavailable = []
     if not two:
         view["evidence"] = "one_sided_legacy"
-        view["unavailable"] = [
-            "other_seat_measurements_of_the_capable_seat",
-            "both_seat_agreement (missing blocks, decided against received hits, block cases a/b/c)",
-            "reciprocal_age_sum_and_drift_cross_check",
-            "old_seat_build_statement (an absent build property implies no build)",
-        ]
+        unavailable.extend(UNAVAILABLE_ONE_SIDED)
     else:
         view["evidence"] = "two_records"
+    if not lists:
+        unavailable.extend(UNAVAILABLE_PURGED)
+    view["unavailable"] = unavailable
     return view
 

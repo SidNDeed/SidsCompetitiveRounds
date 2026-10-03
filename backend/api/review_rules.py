@@ -70,6 +70,8 @@ CONTRACT_BOUNDS = {
     "format": 1,
 }
 _BOUNDS = CONTRACT_BOUNDS
+PAIR = 2           # a two-operand node, a show pair, hex characters per byte
+EXIT_USAGE = 2     # the command line's usage exit
 
 ROOT_ENV = "SCR_REVIEW_ROOT"
 DEFAULT_ROOT = "/app/private/review"
@@ -82,7 +84,7 @@ _HEX = re.compile(r"[a-f\d]+")
 _REV_DIR = re.compile(r"rules-[a-f\d]{%d}" % _BOUNDS["rev_hex"])
 _RULE_ID = re.compile(r"r[a-f\d]{%d}" % _BOUNDS["id_hex"])
 _DATA_NAME = re.compile(r"[a-z_]{1,%d}\.(json|txt)" % _BOUNDS["data_name_max"])
-_RULE_LABEL = re.compile(r"[a-z_]\w{0,%d}" % (rm.CONTRACT_BOUNDS["label_max"] * 2))
+_RULE_LABEL = re.compile(r"[a-z_]\w{0,%d}" % (rm.CONTRACT_BOUNDS["label_max"] * PAIR))
 _STRATA = re.compile(r"[a-z_]{1,%d}" % rm.CONTRACT_BOUNDS["label_max"])
 _PLACE = re.compile(r"\{([a-z_]\w*)(?::(\d))?(\|none)?\}")
 RELS = ("gt", "ge", "lt", "le", "eq", "ne")
@@ -126,11 +128,61 @@ def _check_time(deadline):
         raise Refused("work", "deadline")
 
 
+def _entries(path: str, deadline: float, plan: list):
+    """One directory's entries, INCREMENTALLY: the directory is read one entry
+    at a time (never listed whole, never sorted first), and the deadline and
+    the file-count cap are checked at every entry, so a directory of any size
+    costs at most the cap before it is refused."""
+    with os.scandir(path) as it:
+        for ent in it:
+            _check_time(deadline)
+            if len(plan) >= _BOUNDS["files_max"]:
+                raise Refused("inventory", "file count")
+            yield ent.name, os.path.join(path, ent.name)
+
+
+_OPEN_FLAGS = os.O_RDONLY | (os.O_BINARY if os.name == "nt" else os.O_NOFOLLOW)
+
+
+def _read_verified(path: str, ident: tuple, size: int, cap: int) -> bytes:
+    """Read one planned file through a handle opened without following a
+    link, after proving that the handle IS the file the inventory planned:
+    a regular file with the same device, inode and size as the lstat that
+    admitted it. A path replaced between the two (a rename over it, a link
+    swapped in) is refused, never read."""
+    try:
+        fd = os.open(path, _OPEN_FLAGS)
+    except OSError as e:
+        raise Refused("unreadable", type(e).__name__)
+    try:
+        fs = os.fstat(fd)
+        if (not stat.S_ISREG(fs.st_mode) or (fs.st_dev, fs.st_ino) != ident
+                or fs.st_size != size):
+            raise Refused("inventory", "file changed before read")
+        chunks, left = [], cap + 1
+        while left > 0:
+            b = os.read(fd, left)
+            if not b:
+                break
+            chunks.append(b)
+            left -= len(b)
+        data = b"".join(chunks)
+    except OSError as e:
+        raise Refused("unreadable", type(e).__name__)
+    finally:
+        os.close(fd)
+    if len(data) > cap or len(data) != size:
+        raise Refused("inventory", "file changed while read")
+    return data
+
+
 def _inventory(rdir: str, deadline: float) -> dict:
     """Every file of a revision, as bytes, after the shape and size bounds:
     regular files only, no links, `data/` the only subdirectory, names from a
     closed set, per-file and aggregate byte caps, a file-count cap and the
-    deadline, all checked from lstat BEFORE anything is read or parsed."""
+    deadline -- all checked entry by entry from lstat BEFORE anything is read
+    or parsed -- then each file read through a verified handle
+    (_read_verified)."""
     try:
         st = os.lstat(rdir)
     except OSError as e:
@@ -139,53 +191,42 @@ def _inventory(rdir: str, deadline: float) -> dict:
         raise Refused("inventory", "not a directory")
     plan = []
     try:
-        for name in sorted(os.listdir(rdir)):
-            _check_time(deadline)
-            path = os.path.join(rdir, name)
+        for name, path in _entries(rdir, deadline, plan):
             s = os.lstat(path)
             if stat.S_ISLNK(s.st_mode):
                 raise Refused("inventory", "link")
             if name == "data":
                 if not stat.S_ISDIR(s.st_mode):
                     raise Refused("inventory", "data")
-                for dn in sorted(os.listdir(path)):
-                    _check_time(deadline)
-                    dp = os.path.join(path, dn)
+                for dn, dp in _entries(path, deadline, plan):
                     ds = os.lstat(dp)
                     if (stat.S_ISLNK(ds.st_mode) or not stat.S_ISREG(ds.st_mode)
                             or not _DATA_NAME.fullmatch(dn)):
                         raise Refused("inventory", "data entry")
-                    plan.append(("data/" + dn, dp, ds.st_size, _BOUNDS["data_bytes_max"]))
+                    plan.append(("data/" + dn, dp, ds.st_size, _BOUNDS["data_bytes_max"],
+                                 (ds.st_dev, ds.st_ino)))
             elif name in TOP_FILES:
                 if not stat.S_ISREG(s.st_mode):
                     raise Refused("inventory", "not a regular file")
                 cap = {"rules.json": _BOUNDS["rules_bytes_max"],
                        "selftest.json": _BOUNDS["selftest_bytes_max"]}.get(name, _BOUNDS["digest_hex"] + 1)
-                plan.append((name, path, s.st_size, cap))
+                plan.append((name, path, s.st_size, cap, (s.st_dev, s.st_ino)))
             else:
                 raise Refused("inventory", "unexpected entry")
-            if len(plan) > _BOUNDS["files_max"]:
-                raise Refused("inventory", "file count")
     except OSError as e:
         raise Refused("unreadable", type(e).__name__)
+    plan.sort()
     if sum(p[2] for p in plan) > _BOUNDS["total_bytes_max"]:
         raise Refused("inventory", "aggregate bytes")
     for name in TOP_FILES:
         if name not in {p[0] for p in plan}:
             raise Refused("inventory", "missing " + name)
     files = {}
-    for rel, path, size, cap in plan:
+    for rel, path, size, cap, ident in plan:
         _check_time(deadline)
         if size > cap:
             raise Refused("inventory", "file bytes")
-        try:
-            with open(path, "rb") as f:
-                data = f.read(cap + 1)
-        except OSError as e:
-            raise Refused("unreadable", type(e).__name__)
-        if len(data) > cap or len(data) != size:
-            raise Refused("inventory", "file changed while read")
-        files[rel] = data
+        files[rel] = _read_verified(path, ident, size, cap)
     return files
 
 
@@ -236,6 +277,9 @@ class Ruleset:
 
     def sitting_statement(self, rule, mode="dirty"):
         return self.core["core.sitting"].impl[1](rule, mode)
+
+    def run_sitting_selftest(self):
+        return self.core["core.sitting"].impl[-1](self)
 
     def horizon_days(self):
         """The widest window any sitting rule reads (None without sitting rules)."""
@@ -311,7 +355,7 @@ def _compile_expr(node, bind, subject):
             raise Refused("malformed", "literal")
         return ("v", v)
     if k in ("add", "sub"):
-        if not isinstance(v, list) or len(v) != 2:
+        if not isinstance(v, list) or len(v) != PAIR:
             raise Refused("malformed", "arithmetic")
         return (k, _compile_expr(v[0], bind, subject), _compile_expr(v[-1], bind, subject))
     if k == "abs":
@@ -419,7 +463,7 @@ def _compile_sitting(node, bind0):
             if not isinstance(v, str) or not _STRATA.fullmatch(v):
                 raise Refused("malformed", "label")
         out[name] = v
-    if "window_days" not in out or out["window_days"] < 1:
+    if "window_days" not in out or out["window_days"] <= 0:
         raise Refused("malformed", "window")
     for mode in ("dirty", "days_back"):
         entry.impl[0](out, _bound_lookup(refs), mode)
@@ -464,7 +508,7 @@ def compile_rules(doc, bind, data) -> Ruleset:
     if doc["format"] != _BOUNDS["format"]:
         raise Refused("malformed", "format")
     nonce = doc["nonce"]
-    if (not isinstance(nonce, str) or len(nonce) != _BOUNDS["nonce_bytes"] * 2
+    if (not isinstance(nonce, str) or len(nonce) != _BOUNDS["nonce_bytes"] * PAIR
             or not _HEX.fullmatch(nonce)):
         raise Refused("malformed", "nonce")
     if not isinstance(doc["vocabulary"], dict):
@@ -501,7 +545,7 @@ def compile_rules(doc, bind, data) -> Ruleset:
         r.post_since = _parse_time(raw.get("post_since"))
         show = raw.get("show")
         if (not isinstance(show, list) or not show or len(show) > rm.CONTRACT_BOUNDS["show_max"]
-                or not all(isinstance(s, list) and len(s) == 2
+                or not all(isinstance(s, list) and len(s) == PAIR
                            and isinstance(s[0], str) and _RULE_LABEL.fullmatch(s[0]) for s in show)
                 or len({s[0] for s in show}) != len(show)):
             raise Refused("malformed", "show")
@@ -549,7 +593,7 @@ class _Budget:
 
 
 def _measure_value(m, ctx, memo, rs):
-    if isinstance(m, tuple):          # a module measure (choice two; absent here)
+    if isinstance(m, tuple):          # a module measure (choice two, the sandboxed service)
         _kind, name, fp = m
         mod = ctx.module
         if mod is None or mod.fingerprint(name) != fp:
@@ -710,6 +754,25 @@ def sitting_statement(rule, mode="dirty"):
     return sql, rm.sitting_binds(entry, args)
 
 
+_BIND = re.compile(r"(?<![:\w]):(\w+)")
+# The binds the CALLER supplies per mode: the dirty-set snapshot (worker) and
+# the days back (the tuning tool's literal).
+CALLER_BINDS = {"dirty": {"snap"}, "days_back": {"days_back"}}
+
+
+def sitting_selftest(rs):
+    """Every sitting rule, in both modes, through the bound statement builder
+    and the bound bind builder: the statement's named parameters must be
+    exactly the binds built plus the caller's own. A revision whose sitting
+    statements and binds disagree is refused at load, before any pass reads
+    it."""
+    for rule in rs.sitting_rules:
+        for mode, extra in CALLER_BINDS.items():
+            sql, binds = rs.sitting_statement(rule, mode)
+            if set(_BIND.findall(sql)) != set(binds) | extra:
+                raise Refused("selftest", "sitting binds")
+
+
 def run_selftest(rs, cases, deadline):
     """Each synthetic case must fire exactly the rule ids it lists."""
     budget = _Budget(_BOUNDS["work_max"])
@@ -736,7 +799,7 @@ def _register_core():
                                                 _measure_value, run_selftest)))
     rm._register(rm.Entry("core", "core.render", (render_line, render_item, _render_value)))
     rm._register(rm.Entry("core", "core.sitting", (sitting_items, sitting_statement, norm_pair,
-                                                   _py, _bound_lookup)))
+                                                   _py, _bound_lookup, sitting_selftest)))
 
 
 if __name__ != "__main__" and "core.game" not in rm.REGISTRY:
@@ -788,6 +851,7 @@ def load_dir(rdir: str, *, deadline: float | None = None) -> Ruleset:
             or not isinstance(selftest["cases"], list) or len(selftest["cases"]) > _BOUNDS["cases_max"]):
         raise Refused("malformed", "selftest")
     rs.run_selftest(selftest["cases"], deadline)
+    rs.run_sitting_selftest()
     rs.rev = digest[: _BOUNDS["rev_hex"]]
     rs.digest = digest
     rs.vocabulary = dict(binder.vocab)
@@ -833,9 +897,14 @@ def _pointer_target(base):
     return target
 
 
-def _log(state):
+def _log(state, key=None):
+    """One line per CHANGE: the outcome and the internal identity of what
+    changed (the pointer target and its directory's identity). Re-pointing
+    from one refused revision to another refused for the same class is a
+    change and is logged; neither the identity nor the reason ever reaches
+    the health word."""
     global _LOGGED
-    sig = (state.word, state.reason)
+    sig = (state.word, state.reason, key)
     if sig != _LOGGED:
         _LOGGED = sig
         if state.word == "refused":
@@ -882,7 +951,7 @@ def refresh_rules() -> State:
                 new = State("refused", reason="error:" + type(e).__name__)
         _STATE = new
         _KEY = key
-        _log(new)
+        _log(new, key)
         return new
     finally:
         _LOCK.release()
@@ -1014,7 +1083,7 @@ def cli(argv) -> int:
         print(literal(rdir, rule_id, int(days)))
         return 0
     print(__doc__.split("Command line")[1].strip())
-    return 2
+    return EXIT_USAGE
 
 
 if __name__ == "__main__":

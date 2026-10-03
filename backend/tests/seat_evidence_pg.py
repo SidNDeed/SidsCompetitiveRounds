@@ -6,7 +6,7 @@ ORM makes the tables no migration makes, widen, replay again, 331 and 355
 whole), with two differences, both on purpose:
 
   - 368_seat_evidence.sql is held out of both replays, and the ORM does NOT
-    create its seven tables, so 368 runs WHOLE, as its first apply, on a schema
+    create its nine tables, so 368 runs WHOLE, as its first apply, on a schema
     that has never held them -- and then runs whole a SECOND time (the
     re-run rule) before any case work;
   - the schema is sealed after both applies, so the census proves that
@@ -49,7 +49,8 @@ M368_NAME = "368_seat_evidence.sql"
 M368 = os.path.join(cf_pg.SQL_DIR, M368_NAME)
 SEV_TABLES = frozenset({"seat_evidence", "seat_evidence_games", "seat_evidence_findings",
                         "mod_release_digests", "client_compat_events",
-                        "review_sitting_dirty", "review_cursor"})
+                        "review_sitting_dirty", "review_cursor", "review_seen",
+                        "seat_evidence_seeded_keys"})
 
 
 def require_live_pg():
@@ -88,6 +89,8 @@ async def snapshot(conn):
         "SELECT key, value, updated_at::text FROM runtime_settings ORDER BY key")
     for t in sorted(SEV_TABLES):
         out[t] = await conn.fetch("SELECT * FROM %s ORDER BY 1" % t)
+    out["seat_evidence_seeded_keys"] = await conn.fetch(
+        "SELECT key FROM seat_evidence_seeded_keys ORDER BY key")
     out["constraints"] = await conn.fetch(
         "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
         "WHERE connamespace = current_schema()::regnamespace ORDER BY conname")

@@ -16,8 +16,19 @@ What is asserted, for every rule of the revision:
     evaluator agrees with both labels;
   * posting: a rule is armed exactly when its reference kind was;
   * every rule has at least one mutation, and every mutation changes the
-    result set (the rule's content is load-bearing);
-  * sittings: the worker's dirty-set statement and the tuning tool's literal
+    finding IDENTITY set exactly as its frozen `expect` states, only on its
+    own rule, and every rule keeps its scope and posting. A moved-VALUE
+    mutation flips only that rule's labelled boundary cases (lost identities
+    are positive labels, gained ones negative labels) and every retained
+    identity keeps exactly the same items and line, except the item keys the
+    moved value is itself rendered into (its frozen `renders`). A STRUCTURE
+    mutation (a rule whose decision has no value to move: its measure,
+    relation or literal replaced) loses only positive labels, reaches at
+    least one labelled case, and moves nothing outside its own rule;
+  * sittings: the OLD statements run UNMODIFIED (the old worker's own
+    candidate window, horizon and lag; the fixture plants its cases inside
+    that window), and the worker's dirty-set statement (over the sittings of
+    that same window) and the tuning tool's literal (with the same window)
     both reproduce the reference rows, grouping, items and text; A17: one
     snapshot, the reference and the literal give the same digest of sorted
     result identities.
@@ -153,20 +164,80 @@ def _mutant(rs, m, kindmap):
     return out
 
 
-def test_a16_every_game_rule_mutation_changes_the_result():
+def _same_scope_and_posting(rs, mrs, kind):
+    for r in rs.rules:
+        mr = mrs.rule(r.id)
+        assert (mr.scope, mr.post, mr.post_since) == (r.scope, r.post, r.post_since), kind
+
+
+def _check_change(m, lose, gain, pos, neg):
+    """The intended identity change: exactly the frozen expectation, non-empty,
+    only the mutated kind, lost identities positive labels of it; a value
+    mutation gains only negative labels, a structure mutation reaches at
+    least one labelled case."""
+    kind = m["kind"]
+    assert m["class"] in ("value", "structure") and "expect" in m, kind
+    assert (lose or gain), kind
+    assert all(k == kind for _i, k in lose | gain), kind
+    assert lose <= pos, kind
+    if m["class"] == "value":
+        assert gain <= neg, kind
+    else:
+        assert (lose & pos) or (gain & neg), kind
+    assert sorted([list(t) for t in lose]) == m["expect"]["lose"], kind
+    assert sorted([list(t) for t in gain]) == m["expect"]["gain"], kind
+
+
+def _without(items, keys):
+    if isinstance(items, list):
+        return [_without(x, keys) for x in items]
+    if isinstance(items, dict):
+        return {k: v for k, v in items.items() if k not in keys}
+    return items
+
+
+def _retained_equal(m, a, b, what):
+    """A retained identity is unchanged: exactly, or (value mutations) except
+    the frozen keys the moved value is rendered into."""
+    if m["class"] == "structure":
+        return
+    keys = set(m["renders"])
+    if isinstance(a, dict) and "items" in a:
+        if "line" not in keys:
+            assert a["line"] == b["line"], (m["kind"], what, "line")
+        a, b = a["items"], b["items"]
+    if "n_items" not in keys:
+        assert len(a) == len(b), (m["kind"], what, "items")
+    if len(a) == len(b):
+        assert _without(a, keys) == _without(b, keys), (m["kind"], what)
+
+
+def test_a16_every_game_rule_mutation_changes_exactly_its_intended_identities():
     rs = _ruleset()
     kindmap = _json("kindmap")
+    rid_kind = {v: k for k, v in kindmap.items()}
     games = _json("fixture")
     muts = _json("mutations")
     game_ids = {r.id for r in rs.game_rules}
+    pos = {(g["name"], k) for g in games for k in g["pos"]}
+    neg = {(g["name"], k) for g in games for k in g["neg"]}
+    base = {g["name"]: _game_result(rs, g) for g in games}
     covered = set()
     for m in muts:
         if kindmap[m["kind"]] not in game_ids:
             continue
         mrs = _mutant(rs, m, kindmap)
-        base = [sorted(_game_result(rs, g).items()) for g in games]
-        mut = [sorted(_game_result(mrs, g).items()) for g in games]
-        assert base != mut, m["kind"]
+        _same_scope_and_posting(rs, mrs, m["kind"])
+        mut = {g["name"]: _game_result(mrs, g) for g in games}
+        b_ids = {(n, rid_kind[x]) for n, res in base.items() for x in res}
+        m_ids = {(n, rid_kind[x]) for n, res in mut.items() for x in res}
+        _check_change(m, b_ids - m_ids, m_ids - b_ids, pos, neg)
+        for n in base:
+            for x in set(base[n]) & set(mut[n]):
+                if x != kindmap[m["kind"]]:
+                    assert mut[n][x] == base[n][x], (m["kind"], "another rule moved")
+                else:
+                    _retained_equal(m, base[n][x], mut[n][x], n)
         covered.add(kindmap[m["kind"]])
     assert covered == game_ids
 
@@ -244,10 +315,14 @@ async def _sitting_run(muts=()):
                 " - make_interval(days => $%d) + make_interval(hours => $%d) + make_interval(mins => $%d), "
                 "now(), CASE WHEN $%d THEN now() END)" % (cols, ph, n + 1, n + 2, n + 3, n + 4),
                 *vals, r["days_ago"], 12, r["minute"], r["invalidated"])
+        # the worker's dirty set over the OLD candidate window only: the same
+        # sittings the old worker would have evaluated in this snapshot
         await conn.execute(
             "INSERT INTO review_sitting_dirty (pair_lo, pair_hi, day) "
             "SELECT DISTINCT LEAST(player1_id, player2_id), GREATEST(player1_id, player2_id), "
-            "(ended_at AT TIME ZONE 'UTC')::date FROM matches")
+            "(ended_at AT TIME ZONE 'UTC')::date FROM matches "
+            "WHERE (ended_at AT TIME ZONE 'UTC')::date >= (now() AT TIME ZONE 'UTC')::date - CAST($1 AS int)",
+            ref["cand_days"])
         snap = await conn.fetchval("SELECT now()")
         today = await conn.fetchval("SELECT (now() AT TIME ZONE 'UTC')::date")
         out["today"] = today
@@ -333,13 +408,39 @@ def test_a16_every_sitting_rule_has_a_positive_and_a_boundary_negative_case(sitt
     assert {kindmap[p["kind"]] for p in fx["neg"]} == {r.id for r in rs.sitting_rules}
 
 
-def test_a16_every_sitting_rule_mutation_changes_the_result(sittings):
+def test_a16_every_sitting_rule_mutation_changes_exactly_its_intended_identities(sittings):
+    import datetime
     kindmap = _json("kindmap")
+    fx = _json("sitting_fixture")
+    rs = _ruleset()
+    today = sittings["today"]
+
+    def ident(p):
+        a, b = sorted(p["pair"])
+        return "%s|%s|%s" % (a, b, today - datetime.timedelta(days=p["days_ago"]))
+    pos = {(ident(p), p["kind"]) for p in fx["pos"]}
+    neg = {(ident(p), p["kind"]) for p in fx["neg"]}
     covered = set()
     for m, got in sittings["mutants"]:
-        assert got != sittings["kinds"][m["kind"]]["old"], m["kind"]
-        covered.add(kindmap[m["kind"]])
-    assert covered == {r.id for r in _ruleset().sitting_rules}
+        kind = m["kind"]
+        _same_scope_and_posting(rs, _mutant(rs, m, kindmap), kind)
+        b_new = {d: it for d, _m, it in sittings["kinds"][kind]["new"]}
+        m_new = {d: it for d, _m, it in got}
+        _check_change(m, {(d, kind) for d in set(b_new) - set(m_new)},
+                      {(d, kind) for d in set(m_new) - set(b_new)}, pos, neg)
+        for d in set(b_new) & set(m_new):
+            _retained_equal(m, b_new[d], m_new[d], d)
+        covered.add(kindmap[kind])
+    assert covered == {r.id for r in rs.sitting_rules}
+
+
+def test_m6_the_old_statements_run_unmodified():
+    """The reference statements carry the old worker's own candidate window
+    (the private generator calls the old literal with no override), and the
+    worker's dirty set and the literal here use that same window."""
+    ref = _json("old_sitting")
+    for kind, sql in ref["sql"].items():
+        assert "::date - CAST(%d AS int)" % ref["cand_days"] in sql, kind
 
 
 def test_a17_one_snapshot_gives_the_same_identity_digest(sittings):

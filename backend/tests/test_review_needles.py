@@ -141,9 +141,83 @@ def test_finding4_a_packet_admits_only_allowlisted_public_sources(world, tmp_pat
     assert not (tmp_path / "p2").exists()
 
 
-def test_unarmed_and_no_verdict_are_distinct(monkeypatch, tmp_path, capsys):
+def test_m5_unarmed_and_no_verdict_refuse_and_differ_from_a_hit(monkeypatch, tmp_path, capsys):
+    """An unset store variable REFUSES (4), an unreadable or empty store
+    REFUSES (3); both differ from a hit (1) and neither is a pass (0)."""
+    d = tmp_path / "clean"
+    d.mkdir()
+    (d / "a.txt").write_text("public\n")
     monkeypatch.delenv(rn.STORE_ENV, raising=False)
-    assert rn.main(["scan-dir", str(tmp_path)]) == 0
+    assert rn.main(["scan-dir", str(d)]) == 4
     assert "unarmed" in capsys.readouterr().out
     monkeypatch.setenv(rn.STORE_ENV, str(tmp_path / "missing"))
-    assert rn.main(["scan-dir", str(tmp_path)]) == 3
+    assert rn.main(["scan-dir", str(d)]) == 3
+    empty = tmp_path / "empty_store"
+    empty.mkdir()
+    monkeypatch.setenv(rn.STORE_ENV, str(empty))
+    assert rn.main(["scan-dir", str(d)]) == 3
+
+
+def test_m5_control_an_armed_store_passes_the_same_clean_directory(world, tmp_path):
+    d = tmp_path / "clean"
+    d.mkdir()
+    (d / "a.txt").write_text("public\n")
+    assert rn.main(["scan-dir", str(d)]) == 0
+
+
+def test_m5_a_single_fragment_wording_is_a_needle(world, tmp_path, capsys):
+    store, _repo, _base = world
+    n = rn.derive(store)
+    assert ("synthetic note seat",) in n["wording"]          # tk.ID_NOTE's one fragment
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "x.txt").write_text("rendered: synthetic note seat 1\n")
+    assert rn.main(["scan-dir", str(d)]) == 1
+    assert "wording=1" in capsys.readouterr().out
+    (d / "x.txt").write_text("rendered: synthetic note\n")    # control: the fragment cut short
+    assert rn.main(["scan-dir", str(d)]) == 0
+
+
+def test_m5_referenced_and_shipped_data_names_are_needles(world, tmp_path, capsys):
+    store, _repo, _base = world
+    rdir = [os.path.join(store, x) for x in os.listdir(store) if x.startswith("rules-")][0]
+    os.makedirs(os.path.join(rdir, "data"))
+    with open(os.path.join(rdir, "data", "synthetic_lookup_table.json"), "w", encoding="utf-8") as f:
+        f.write("[]\n")
+    import json
+    with open(os.path.join(rdir, "rules.json"), encoding="utf-8") as f:
+        doc = json.load(f)
+    doc["rules"][0]["when"]["args"]["b"] = {"data": "synthetic_referenced_name.json"}
+    with open(os.path.join(rdir, "rules.json"), "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+    n = rn.derive(store)
+    assert {"synthetic_lookup_table.json", "synthetic_lookup_table",
+            "synthetic_referenced_name.json", "synthetic_referenced_name"} <= n["data"]
+    d = tmp_path / "d"
+    d.mkdir()
+    (d / "x.txt").write_text("loads synthetic_referenced_name\n")
+    assert rn.main(["scan-dir", str(d)]) == 1
+    assert "data=1" in capsys.readouterr().out
+    (d / "x.txt").write_text("loads a lookup table\n")         # control
+    assert rn.main(["scan-dir", str(d)]) == 0
+
+
+def test_m4_a_packet_admits_a_pinned_document_and_refuses_an_edited_one(world, tmp_path, capsys):
+    import hashlib
+    _store, repo, base = world
+    doc = tmp_path / "notes.md"
+    doc.write_text("generic description of the evidence\n")
+    digest = hashlib.sha256(doc.read_bytes()).hexdigest()
+    allow = tmp_path / "allow.txt"
+    allow.write_text("a.txt\ndoc %s %s\n" % (doc, digest))
+    out = tmp_path / "packet"
+    assert rn.main(["packet", repo, base, str(allow), str(out)]) == 0
+    assert sorted(os.listdir(out)) == ["a.txt", "docs"] and os.listdir(out / "docs") == ["notes.md"]
+    doc.write_text("generic description of the evidence, edited\n")
+    assert rn.main(["packet", repo, base, str(allow), str(tmp_path / "p2")]) == 1
+    assert "doc_digest_differs" in capsys.readouterr().out
+    assert not (tmp_path / "p2").exists()
+    doc.write_text("rule %s\n" % tk.ID_NOTE)                   # pinned, but carrying a needle
+    allow.write_text("doc %s %s\n" % (doc, hashlib.sha256(doc.read_bytes()).hexdigest()))
+    assert rn.main(["packet", repo, base, str(allow), str(tmp_path / "p3")]) == 1
+    assert "rule_id=1" in capsys.readouterr().out

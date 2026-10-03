@@ -155,10 +155,52 @@ services:
       # staged /health reads review_rules=absent, records are stored, and
       # nothing is evaluated or opened.
       - ${SCR_REVIEW_DIR:-/opt/competitive-rounds/private/review}:/app/private/review:ro
+      # The review module exchange (review_module.py): the ONLY path between
+      # the api and the `review-module` service below. The api writes
+      # requests into in/ and reads replies and the runner's status from
+      # out/. Both are tmpfs volumes; with the service not running the
+      # status file never exists and /health reads review_module=absent.
+      - review-module-in:/app/private/review-module-exchange/in
+      - review-module-out:/app/private/review-module-exchange/out
     ports:
       - "${API_PORT:-8443}:8000"
     security_opt:
       - apparmor:unconfined
+
+  # ── Review module (choice two, review_module.py) ────────────
+  # Runs a private module that adds review measures, in its own sandbox. Off
+  # by default (profile): `docker compose --profile review-module up -d
+  # --build review-module` starts it. The service has no network at all, a
+  # read-only root filesystem, no capabilities, no new privileges and an
+  # unprivileged user, and it sees exactly three mounts: the module revision
+  # READ-ONLY, the request exchange READ-ONLY and a tmpfs it answers into.
+  # Nothing else of the host or of the api is mounted. The image carries only
+  # the runner (Dockerfile.review-module), no api code and no secrets, and
+  # the service gets no environment from .env.
+  review-module:
+    profiles: ["review-module"]
+    build:
+      context: ./api
+      dockerfile: Dockerfile.review-module
+    container_name: comp-rounds-review-module
+    restart: unless-stopped
+    network_mode: none
+    read_only: true
+    user: "65534:65534"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:unconfined
+    pids_limit: 64
+    mem_limit: 256m
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    command: ["serve", "/module", "/exchange/in", "/exchange/out"]
+    volumes:
+      - ${SCR_REVIEW_MODULE_DIR:-/opt/competitive-rounds/private/review-module/current}:/module:ro
+      - review-module-in:/exchange/in:ro
+      - review-module-out:/exchange/out
 
   # ── Discord Bot ─────────────────────────────────────────────
   bot:
@@ -222,3 +264,17 @@ volumes:
     driver: local
   pc-motion:
     driver: local
+  # The review module exchange: memory only, never on disk, emptied on every
+  # restart. out/ is owned by the runner's unprivileged user.
+  review-module-in:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,mode=0755"
+  review-module-out:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=65534,gid=65534,mode=0755"

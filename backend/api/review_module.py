@@ -1,71 +1,72 @@
-"""Choice two (designed, NOT built): the interface for a private module that
-ADDS measures. It never decides: every review item is still a rule in the
-rules revision, so wording, arming and values keep one home.
+"""Choice two: a private module that ADDS measures, run as its own sandboxed
+service. It never decides: every review item is still a rule in the rules
+revision, so wording, arming and values keep one home.
 
-The api never imports a private module. A module runs in its own killable
-process (review_module_runner.py), started and supervised from here:
+The api never imports, starts or hosts a module. A module runs in the compose
+service `review-module` (backend/docker-compose.yml, profile `review-module`,
+image backend/api/Dockerfile.review-module holding only the runner):
 
-  * isolation the runner proves BEFORE it imports anything of the module, or
-    it refuses: it is not root, it sees no network interface but loopback,
-    and its environment is empty (the supervisor passes none, so no database
-    address or credential reaches it). On a platform where this cannot be
-    shown the module is refused. Deployment supplies the isolation (a
-    sibling container with networking disabled, or a network namespace)
-    and stages the module directory read-only, like a rules revision;
-  * inputs are copies sent over the child's stdin as JSON lines; replies are
-    single bounded JSON lines on its stdout; nothing else is shared;
-  * deadlines: import, handshake and the module's own self-test share one
-    start deadline; each computation has its own. A timeout, an exit, an
-    oversized or malformed reply, a wrong API version, a policy refusal or a
-    failed self-test kills the child and refuses the module at start; during
-    a computation the measure is unknown and the module is refused for the
-    rest of the process (it is not restarted silently).
+  * no network at all (network_mode: none), a read-only root filesystem, no
+    capabilities, no new privileges, an unprivileged user and no environment;
+  * exactly three mounts, and nothing else of the host: the module revision
+    directory READ-ONLY, the request exchange READ-ONLY, and a tmpfs the
+    runner answers into;
+  * the api reaches it ONLY through that exchange (two tmpfs volumes shared
+    with the api):
+        <exchange>/in/<id>.req      the api writes (atomic rename); the runner reads
+        <exchange>/out/<id>.rep     the runner writes (atomic rename); the api reads
+                                    and removes it
+        <exchange>/out/status.json  the runner's word, its measures and a heartbeat
+
+The runner validates the module ONCE, at its own start (code is never
+reloaded): the framed digest of the revision directory against its REVISION
+file, the module's api version, its measure names and fingerprints, and its
+own selftest.json of inputs and expected outputs. The api then checks the
+names against the public vocabulary (a module measure may not collide with a
+public one).
+
+Health word `review_module`: the module revision id (rev_hex characters) when the
+runner's status says loaded, its heartbeat is fresh and the names are
+admissible; `absent` when no status was ever written (the service is not
+running, the default); `refused` otherwise. The refusal class goes to the
+log once per change, never to the health word.
 
 A refused or absent module makes every module measure unknown, so a rule that
-needs one never fires and every other rule runs. The api stays responsive in
-every case: every wait is bounded and the child is killed, never awaited
-unbounded.
-
-Protocol (MODULE_API):
-  {"call": "hello"}     -> {"api": <int>, "measures": {name: fingerprint}}
-  {"call": "selftest"}  -> {"ok": <bool>}
-  {"call": "compute", "name": n, "inputs": {...}, "params": {...}}
-                        -> {"value": <number | list of numbers | null>}
-"""
+needs one never fires and every other rule runs. Every wait here is bounded.
+A computation that times out makes its measure unknown and refuses the module
+for the rest of this process (it is not retried silently)."""
 
 from __future__ import annotations
 
 import json
 import math
 import os
-import queue
-import subprocess
-import sys
+import re
+import secrets
 import threading
+import time
+
+import review_measures as rm
 
 CONTRACT_BOUNDS = {
     "api": 1,
-    "start_s": 20,
     "call_s": 2,
-    "line_bytes_max": 65536,
-    "nobody_uid": 65534,
+    "poll_ms": 10,
+    "reply_bytes_max": 65536,
+    "status_bytes_max": 65536,
+    "heartbeat_stale_s": 10,
     "reason_max": 32,
+    "rev_hex": 12,
+    "fp_hex": 64,
+    "id_bytes": 8,
 }
 MODULE_API = CONTRACT_BOUNDS["api"]
-RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "review_module_runner.py")
+EXCHANGE_ENV = "SCR_REVIEW_MODULE_EXCHANGE"
+DEFAULT_EXCHANGE = "/app/private/review-module-exchange"
+STATUS = "status.json"
+MODULE_PREFIX = "module."
 
-
-class ModuleRefused(Exception):
-    def __init__(self, cls):
-        super().__init__(cls)
-        self.cls = cls
-
-
-def _drop_privileges():                      # runs in the child before exec (POSIX only)
-    uid = CONTRACT_BOUNDS["nobody_uid"]
-    os.setgroups([])
-    os.setgid(uid)
-    os.setuid(uid)
+_HEX = re.compile(r"[a-f\d]+")
 
 
 def _value_ok(v) -> bool:
@@ -81,121 +82,159 @@ def _value_ok(v) -> bool:
     return False
 
 
-class ModuleSupervisor:
-    """One module process. `policy` is "isolated" in production; a test may
-    pass "none" to exercise the deadlines on a seat that cannot show
-    isolation (the runner then skips only the isolation probe)."""
+def _read_capped(path, cap):
+    with open(path, "rb") as f:
+        data = f.read(cap + 1)
+    if len(data) > cap:
+        raise ValueError("oversized")
+    return data
 
-    def __init__(self, module_dir, *, policy="isolated", start_s=None, call_s=None):
-        self.module_dir = module_dir
-        self.policy = policy
-        self.start_s = CONTRACT_BOUNDS["start_s"] if start_s is None else start_s
+
+class ExchangeModule:
+    """The api's side of the exchange with one running module service."""
+
+    def __init__(self, root, *, call_s=None, stale_s=None):
+        self.root = root
         self.call_s = CONTRACT_BOUNDS["call_s"] if call_s is None else call_s
-        self.proc = None
-        self.lines = queue.Queue()
-        self.word = "absent"
-        self.reason = None
-        self.measures = {}
+        self.stale_s = CONTRACT_BOUNDS["heartbeat_stale_s"] if stale_s is None else stale_s
+        self.failed = None          # a refusal this process saw during a computation
+        self.lock = threading.Lock()
 
-    # -- process plumbing --
-    def _spawn(self):
-        env = {}
-        if os.name == "nt":                     # the interpreter cannot start without it there
-            env["SYSTEMROOT"] = os.environ.get("SYSTEMROOT", "")
-        kw = {}
-        if os.name == "posix" and self.policy == "isolated" and os.geteuid() == 0:
-            kw["preexec_fn"] = _drop_privileges
-        self.proc = subprocess.Popen(
-            [sys.executable, "-I", RUNNER, self.module_dir, self.policy],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            env=env, cwd=self.module_dir, **kw)
-        threading.Thread(target=self._read, args=(self.proc,), daemon=True).start()
+    @property
+    def inbox(self):
+        return os.path.join(self.root, "in")
 
-    def _read(self, proc):
-        limit = CONTRACT_BOUNDS["line_bytes_max"]
-        try:
-            while True:
-                line = proc.stdout.readline(limit + 1)
-                if not line:
-                    break
-                self.lines.put(line)
-        finally:
-            self.lines.put(None)
+    @property
+    def outbox(self):
+        return os.path.join(self.root, "out")
 
-    def _kill(self):
-        if self.proc is not None:
-            try:
-                self.proc.kill()
-                self.proc.wait(timeout=self.call_s)
-            except Exception:                   # noqa: BLE001 -- best effort; the process is gone or going
-                pass
-            self.proc = None
+    def status(self):
+        """(word, reason, measures): the runner's status checked here."""
+        if self.failed is not None:
+            return "refused", self.failed, {}
+        path = os.path.join(self.outbox, STATUS)
+        try:
+            doc = json.loads(_read_capped(path, CONTRACT_BOUNDS["status_bytes_max"]).decode("utf-8"))
+        except FileNotFoundError:
+            return "absent", None, {}
+        except (OSError, ValueError, UnicodeDecodeError):
+            return "refused", "status", {}
+        if not isinstance(doc, dict) or doc.get("api") != MODULE_API:
+            return "refused", "api", {}
+        beat = doc.get("beat")
+        if not isinstance(beat, (int, float)) or abs(time.time() - beat) > self.stale_s:
+            return "refused", "stale", {}
+        word = doc.get("word")
+        if word == "refused":
+            reason = str(doc.get("reason") or "runner")[: CONTRACT_BOUNDS["reason_max"]]
+            return "refused", "runner:" + reason, {}
+        if (not isinstance(word, str) or len(word) != CONTRACT_BOUNDS["rev_hex"]
+                or not _HEX.fullmatch(word)):
+            return "refused", "word", {}
+        measures = doc.get("measures")
+        if not isinstance(measures, dict):
+            return "refused", "measures", {}
+        for name, fp in measures.items():
+            if (not isinstance(name, str) or not name.startswith(MODULE_PREFIX)
+                    or name in rm.REGISTRY):
+                return "refused", "collision", {}
+            if (not isinstance(fp, str) or len(fp) != CONTRACT_BOUNDS["fp_hex"]
+                    or not _HEX.fullmatch(fp)):
+                return "refused", "fingerprint", {}
+        return word, None, dict(measures)
 
-    def _call(self, msg, timeout):
-        try:
-            self.proc.stdin.write((json.dumps(msg) + "\n").encode())
-            self.proc.stdin.flush()
-        except OSError:
-            raise ModuleRefused("exit")
-        try:
-            line = self.lines.get(timeout=timeout)
-        except queue.Empty:
-            raise ModuleRefused("timeout")
-        if line is None:
-            raise ModuleRefused("exit")
-        if len(line) > CONTRACT_BOUNDS["line_bytes_max"] or not line.endswith(b"\n"):
-            raise ModuleRefused("reply_size")
-        try:
-            reply = json.loads(line)
-        except ValueError:
-            raise ModuleRefused("reply")
-        if not isinstance(reply, dict):
-            raise ModuleRefused("reply")
-        if "error" in reply:
-            raise ModuleRefused(str(reply["error"])[: CONTRACT_BOUNDS["reason_max"]] or "error")
-        return reply
-
-    # -- public --
-    def start(self) -> str:
-        """Start, handshake and self-test inside the start deadline. Returns
-        the module word: "loaded" or "refused" (reason in .reason)."""
-        try:
-            self._spawn()
-            hello = self._call({"call": "hello"}, self.start_s)
-            if hello.get("api") != MODULE_API or not isinstance(hello.get("measures"), dict):
-                raise ModuleRefused("api")
-            ok = self._call({"call": "selftest"}, self.start_s)
-            if ok.get("ok") is not True:
-                raise ModuleRefused("selftest")
-            self.measures = {str(k): str(v) for k, v in hello["measures"].items()}
-            self.word = "loaded"
-        except ModuleRefused as e:
-            self._kill()
-            self.word, self.reason = "refused", e.cls
-        except OSError:
-            self._kill()
-            self.word, self.reason = "refused", "spawn"
-        return self.word
+    def word(self) -> str:
+        return self.status()[0]
 
     def fingerprint(self, name):
-        return self.measures.get(name) if self.word == "loaded" else None
+        word, _reason, measures = self.status()
+        if word in ("absent", "refused"):
+            return None
+        return measures.get(name)
 
     def compute(self, name, ctx, params):
         """One module measure for one subject, or None (unknown)."""
-        if self.word != "loaded":
+        if self.fingerprint(name) is None:
             return None
-        inputs = {"subject_index": ctx.i, "records": [r["rec"] for r in ctx.records]}
+        rid = secrets.token_hex(CONTRACT_BOUNDS["id_bytes"])
+        req = {"id": rid, "name": name, "params": params,
+               "inputs": {"subject_index": ctx.i, "records": [r["rec"] for r in ctx.records]}}
+        tmp = os.path.join(self.inbox, "." + rid + ".tmp")
+        final = os.path.join(self.inbox, rid + ".req")
+        reply = os.path.join(self.outbox, rid + ".rep")
         try:
-            reply = self._call({"call": "compute", "name": name, "inputs": inputs,
-                                "params": params}, self.call_s)
-            v = reply.get("value")
-            if not _value_ok(v):
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(req, f, separators=(",", ":"))
+            os.replace(tmp, final)
+            deadline = time.monotonic() + self.call_s
+            while not os.path.exists(reply):
+                if time.monotonic() > deadline:
+                    self._refuse("timeout")
+                    return None
+                time.sleep(CONTRACT_BOUNDS["poll_ms"] / 1000)
+            try:
+                doc = json.loads(_read_capped(reply, CONTRACT_BOUNDS["reply_bytes_max"]).decode("utf-8"))
+            except ValueError:
+                self._refuse("reply")
                 return None
-            return v
-        except ModuleRefused as e:
-            self._kill()
-            self.word, self.reason = "refused", e.cls
+            if not isinstance(doc, dict) or doc.get("id") != rid:
+                self._refuse("reply")
+                return None
+            v = doc.get("value")
+            return v if _value_ok(v) else None
+        except OSError:
+            self._refuse("exchange")
             return None
+        finally:
+            for p in (tmp, final, reply):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
-    def stop(self):
-        self._kill()
+    def _refuse(self, cls):
+        with self.lock:
+            if self.failed is None:
+                self.failed = cls
+
+
+_MODULE = None
+_LOGGED = None
+
+
+def exchange_root() -> str:
+    return os.environ.get(EXCHANGE_ENV) or DEFAULT_EXCHANGE
+
+
+def _module() -> ExchangeModule:
+    global _MODULE
+    root = exchange_root()
+    if _MODULE is None or _MODULE.root != root:
+        _MODULE = ExchangeModule(root)
+    return _MODULE
+
+
+def _log(word, reason):
+    global _LOGGED
+    sig = (word, reason)
+    if sig != _LOGGED:
+        _LOGGED = sig
+        if word == "refused":
+            print("[REVIEW] module: refused (%s)" % reason, flush=True)
+        else:
+            print("[REVIEW] module: %s" % word, flush=True)
+
+
+def health_word() -> str:
+    """The revision id | absent | refused, derived on every call."""
+    word, reason, _m = _module().status()
+    _log(word, reason)
+    return word
+
+
+def current_module():
+    """The module for a pass, or None when it is absent or refused."""
+    m = _module()
+    word, reason, _measures = m.status()
+    _log(word, reason)
+    return None if word in ("absent", "refused") else m

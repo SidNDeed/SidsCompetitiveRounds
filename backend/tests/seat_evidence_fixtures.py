@@ -68,7 +68,10 @@ def base_record(**over) -> dict:
 def worst_case_record(n=400) -> dict:
     """Every scalar at its widest legal text, and every list far past the cap
     with full-width signed stamps (the L6 failing input: four 160-entry lists
-    of int32-minimum stamps already pass 12 KiB)."""
+    of int32-minimum stamps already pass 12 KiB). Every entry is CONTRACT
+    -VALID, cross-field invariants included (check_events): own_open is one
+    of its two states, hit_recv is path 0 with pid 0, and a hit_sent naming
+    a block carries that block's last_* tuple."""
     lo = se.I32_MIN
     rec = base_record(
         t0=lo, rounds=[9, 9],
@@ -87,8 +90,8 @@ def worst_case_record(n=400) -> dict:
         imp=[se.BIG] * 3, dec=[se.BIG] * 2, push=[se.BIG] * 7,
         blk_faults=se.BIG, unpair=[se.BIG, se.BIG],
     )
-    rec["blk_sent"] = [[lo, 9, 255, -600000] for _ in range(n)]
-    rec["hit_recv"] = [[1, lo, se.I32_MAX, 255, lo, 1, 1, 600000] for _ in range(n)]
+    rec["blk_sent"] = [[lo, 9, 255, -200] for _ in range(n)]
+    rec["hit_recv"] = [[0, lo, 0, 255, lo, 1, 1, 600000] for _ in range(n)]
     rec["blk_recv"] = [[lo, 9, 255, lo, 1] for _ in range(n)]
     rec["hit_sent"] = [[1, lo, se.I32_MAX, 255, 600000, 1, lo, 9, 255] for _ in range(n)]
     rec["age_b"] = [[720, 1000000, 1000000, se.BIG, -600000, -600000] for _ in range(n)]

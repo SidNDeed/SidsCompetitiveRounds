@@ -418,3 +418,186 @@ def test_the_build_never_overwrites_and_leaves_no_staging_behind(tmp_path):
     with pytest.raises(rr.Refused):
         tk.build_revision(tmp_path, doc, name="bad")
     assert [n for n in os.listdir(store) if n.startswith(".")] == []
+
+
+
+# -- M-2: transitive fingerprints, module-qualified dependencies included ----------
+# A revision is built by this (unaltered) tree; the same revision is then
+# loaded by a COPY of the review modules with one change, in a fresh process
+# (fingerprints are taken at import). A semantic change to a class or function
+# a bound entry reaches through a module-qualified name refuses the revision
+# as stale; a comment-only change and the unaltered copy load it.
+
+API_DIR = os.path.join(HERE, "..", "api")
+COPIED = ("review_measures", "review_rules", "review_module")
+LOAD = ("import sys; sys.path.insert(0, sys.argv[1]); import review_rules as rr\n"
+        "try:\n    rr.load_dir(sys.argv[2]); print('loaded')\n"
+        "except rr.Refused as e:\n    print('refused ' + e.cls)\n")
+
+
+def _load_with_copy(tmp_path, rdir, edit=None):
+    import subprocess
+    d = tmp_path / ("api-" + (edit[0] if edit else "same"))
+    d.mkdir()
+    for m in COPIED:
+        shutil.copy(os.path.join(API_DIR, m + ".py"), str(d))
+    if edit:
+        _name, mod, old, new = edit
+        path = d / (mod + ".py")
+        src = path.read_text(encoding="utf-8")
+        assert src.count(old) == 1, (mod, old)
+        path.write_text(src.replace(old, new), encoding="utf-8")
+    out = subprocess.run([sys.executable, "-c", LOAD, str(d), rdir], capture_output=True,
+                         text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip().splitlines()[-1]
+
+
+M2_MUTANTS = [
+    ("ctx", "review_measures", "        self.pair_other = self.other if self.two else None\n",
+     "        self.pair_other = self.other\n"),
+    ("sitting_binds", "review_measures", '        binds["post_follow"] = args["post_rows"] - 1\n',
+     '        binds["post_follow"] = args["post_rows"]\n'),
+]
+M2_CONTROLS = [
+    ("ctx_comment", "review_measures", "        self.pair_other = self.other if self.two else None\n",
+     "        self.pair_other = self.other if self.two else None  # synthetic comment\n"),
+    ("sitting_binds_comment", "review_measures", '        binds["post_follow"] = args["post_rows"] - 1\n',
+     '        # synthetic comment\n        binds["post_follow"] = args["post_rows"] - 1\n'),
+]
+
+
+@pytest.mark.parametrize("edit", M2_MUTANTS, ids=[m[0] for m in M2_MUTANTS])
+def test_m2_a_semantic_change_a_bound_entry_reaches_is_stale(tmp_path, edit):
+    rdir, _ = _built(tmp_path)
+    assert _load_with_copy(tmp_path, rdir) == "loaded"            # the unaltered copy
+    assert _load_with_copy(tmp_path, rdir, edit) == "refused stale"
+
+
+@pytest.mark.parametrize("edit", M2_CONTROLS, ids=[m[0] for m in M2_CONTROLS])
+def test_m2_control_a_comment_only_change_still_loads(tmp_path, edit):
+    rdir, _ = _built(tmp_path)
+    assert _load_with_copy(tmp_path, rdir, edit) == "loaded"
+
+
+def test_m2_the_sitting_bindings_are_in_the_self_test_path(tmp_path, monkeypatch):
+    """A bind builder that disagrees with the statement it serves refuses the
+    revision at load (the sitting self-test), before any pass reads it."""
+    rdir, _ = _built(tmp_path)
+    rr.load_dir(rdir)                                             # control
+    real = rm.sitting_binds
+
+    def short(entry, args):
+        b = dict(real(entry, args))
+        b.pop("lag_s")
+        return b
+    monkeypatch.setattr(rm, "sitting_binds", short)
+    with pytest.raises(rr.Refused) as e:
+        rr.load_dir(rdir)
+    assert (e.value.cls, str(e.value)) == ("selftest", "selftest: sitting binds")
+
+
+# -- L-3: incremental enumeration and verified reads ------------------------------
+
+def test_l3_enumeration_is_incremental_under_the_count_cap(tmp_path, monkeypatch):
+    rdir, _ = _built(tmp_path)
+    data = os.path.join(rdir, "data")
+    os.mkdir(data)
+    n = rr._BOUNDS["files_max"] * 4
+    for i in range(n):
+        with open(os.path.join(data, "t_" + chr(97 + i % 26) * (1 + i // 26) + ".txt"), "w") as f:
+            f.write("x")
+    pulled = {"n": 0}
+    real = os.scandir
+
+    class Counting:
+        def __init__(self, path):
+            self.it = real(path)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            self.it.close()
+
+        def __iter__(self):
+            for ent in self.it:
+                pulled["n"] += 1
+                yield ent
+    monkeypatch.setattr(rr.os, "scandir", Counting)
+    with pytest.raises(rr.Refused) as e:
+        rr.load_dir(rdir)
+    assert str(e.value) == "inventory: file count"
+    # never listed whole: at most the cap (plus the few top-level entries)
+    assert pulled["n"] <= rr._BOUNDS["files_max"] + 5 < n
+
+
+@pytest.mark.parametrize("how", ["replaced", "grown"])
+def test_l3_a_file_changed_between_admission_and_read_is_refused(tmp_path, monkeypatch, how):
+    rdir, rev = _built(tmp_path)
+    assert rr.load_dir(rdir).rev == rev                           # control
+    real = rr._read_verified
+
+    def swap(path, ident, size, cap):
+        if path.endswith("rules.json"):
+            if how == "replaced":
+                with open(path, "rb") as f:
+                    raw = f.read()
+                tmp = path + ".new"
+                with open(tmp, "wb") as f:
+                    f.write(raw)
+                os.replace(tmp, path)                             # same bytes, another file
+            else:
+                with open(path, "ab") as f:
+                    f.write(b" ")
+        return real(path, ident, size, cap)
+    monkeypatch.setattr(rr, "_read_verified", swap)
+    with pytest.raises(rr.Refused) as e:
+        rr.load_dir(rdir)
+    assert e.value.cls == "inventory" and "changed" in str(e.value)
+
+
+# -- L-4: refusal logging carries the target identity ------------------------------
+
+def test_l4_two_different_refused_revisions_of_one_class_log_twice(fresh, tmp_path, capsys):
+    names = []
+    for tag in ("one", "two"):
+        rdir, _ = _built(tmp_path, name=tag)
+        with open(os.path.join(rdir, "rules.json"), "w") as f:
+            f.write("{not json " + tag)
+        new, rev = tk.reseal(rdir)
+        _into_root(fresh, new)
+        names.append("rules-" + rev)
+    tk.point(fresh, names[0])
+    rr.refresh_rules()
+    rr.refresh_rules()
+    tk.point(fresh, names[1])
+    rr.refresh_rules()
+    out = capsys.readouterr().out
+    assert out.count("[REVIEW] rules: refused (malformed)") == 2, out
+    assert rr.health_word() == "refused"
+    assert not any(n[len("rules-"):] in out for n in names)        # no identity in the log line
+
+
+# -- L-5 / L-6: the admin comparison after the purge, and the one-sided game --------
+
+def test_l5_after_the_purge_aggregates_and_availability_are_always_rendered():
+    g = tk.game()
+    for r in g:
+        for k in rm.LIST_KEYS:
+            r["rec"].pop(k, None)
+    v = rm.game_view(g, tk.MATCH, tk.registry_of(g), None)
+    assert v["lists"] == "purged" and v["evidence"] == "two_records"
+    assert len(v["aggregates"]) == 2 and all("rtt" in a for a in v["aggregates"])
+    assert v["drift"] is not None
+    assert v["unavailable"] == list(rm.UNAVAILABLE_PURGED)
+    full = rm.game_view(tk.game(), tk.MATCH, tk.registry_of(tk.game()), None)   # control
+    assert full["lists"] == "present" and full["unavailable"] == []
+
+
+def test_l6_a_one_sided_game_states_the_old_seat_build_as_unknown():
+    g = tk.game(one_sided=True)
+    v = rm.game_view(g, tk.MATCH, tk.registry_of(g), None)
+    assert v["evidence"] == "one_sided_legacy"
+    line = [u for u in v["unavailable"] if u.startswith("old_seat_build_statement")]
+    assert line and "unknown" in line[0] and "identifies no build" in line[0]

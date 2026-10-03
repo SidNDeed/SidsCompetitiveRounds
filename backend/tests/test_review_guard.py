@@ -72,8 +72,8 @@ MUTANTS = [
     ("env", "review_rules", "def rules_root() -> str:\n",
      'def rules_root() -> str:\n    os.environ.get("SCR_SYNTHETIC_SLACK")\n', "env"),
     ("pinned", "review_rules", '"work_max": 200000,', '"work_max": 200000, "slack": 0,', "pinned"),
-    ("hoisted_rooted", "seat_evidence", "async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n",
-     "SYNTHETIC_FLOOR = 7\n\n\nasync def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n"
+    ("hoisted_rooted", "seat_evidence", "async def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:\n",
+     "SYNTHETIC_FLOOR = 7\n\n\nasync def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:\n"
      "    _unused = SYNTHETIC_FLOOR\n", "number"),
     ("setting", "seat_evidence", 'if await setting(db, "seat_evidence_worker") != "1":\n            return {"off": 1}\n        cands',
      'if await setting(db, "review_post_synthetic") != "1":\n            return {"off": 1}\n        cands', "setting"),
@@ -95,7 +95,8 @@ def test_each_planted_form_is_refused(tmp_path, name, mod, old, new, cls):
     assert cls in classes, (name, findings)
     # the report names the line and class only, never the text
     for label, line, c in findings:
-        assert isinstance(line, int) and c in ("number", "text", "call", "setting", "env", "pinned")
+        assert isinstance(line, int) and c in ("number", "text", "call", "setting", "env", "pinned",
+                                                 "select", "bool")
 
 
 def test_a_hoisted_module_constant_in_a_judging_module_is_refused(tmp_path):
@@ -122,8 +123,8 @@ def test_a_module_imported_by_a_rooted_function_is_followed(tmp_path):
     repo, dst = _copy(tmp_path)
     with open(os.path.join(dst, "synthetic_cut.py"), "w", encoding="utf-8") as f:
         f.write("CUT = 7\n")
-    _edit(dst, "seat_evidence", "async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n",
-          "async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n"
+    _edit(dst, "seat_evidence", "async def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:\n",
+          "async def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:\n"
           "    from synthetic_cut import CUT  # noqa: F401\n")
     classes, findings = _classes(repo)
     assert any("synthetic_cut.py" in label and c == "number" for label, _l, c in findings)
@@ -169,3 +170,62 @@ def test_the_command_line_exit_codes(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "pinned" in out and "200001" not in out
     assert g.main([]) == 2
+
+
+# -- design finding M-5: structural numbers, selectors and booleans BY CONTEXT --
+# Each planted form is refused, and its control -- the same shape with a
+# structural use -- is not, so the context (not the token) decides.
+CONTEXT = [
+    ("threshold_two",
+     'v = ctx.r["rec"]["imp"][2]\n@@return v if v > 2 else None\n',
+     'v = ctx.r["rec"]["imp"][2]\n@@return v if v > 0 else None\n', "number"),
+    ("scaled_two",
+     'return ctx.r["rec"]["imp"][2] * 2\n',
+     'return ctx.r["rec"]["imp"][2] // 2\n', "number"),
+    ("equality_two",
+     'return None if ctx.r["rec"]["imp"][2] == 2 else ctx.r["rec"]["imp"][2]\n',
+     'return None if ctx.r["rec"]["imp"][2] == 1 else ctx.r["rec"]["imp"][2]\n', "number"),
+    ("selector",
+     'return None if ctx.r.get("kind") == "synthetic_kind" else ctx.r["rec"]["imp"][2]\n',
+     'return None if ctx.r.get("kind") == "seat" else ctx.r["rec"]["imp"][2]\n', "select"),
+    ("selector_member",
+     'return None if ctx.r.get("kind") in ("seat", "synthetic_kind") else ctx.r["rec"]["imp"][2]\n',
+     'return None if ctx.r.get("kind") in ("seat", "game") else ctx.r["rec"]["imp"][2]\n', "select"),
+    ("bool_compare",
+     'return None if ctx.two == False else ctx.r["rec"]["imp"][2]\n',
+     'return None if ctx.two is False else ctx.r["rec"]["imp"][2]\n', "bool"),
+    ("bool_operand",
+     'return ctx.r["rec"]["imp"][2] if (ctx.two or True) else None\n',
+     'return ctx.r["rec"]["imp"][2] if (ctx.two or ctx.i) else None\n', "bool"),
+]
+
+
+def _measure_indent(dst):
+    with open(os.path.join(dst, "review_measures.py"), encoding="utf-8") as f:
+        src = f.read()
+    i = src.index(MEASURE)
+    return src[src.rindex("\n", 0, i) + 1:i]
+
+
+@pytest.mark.parametrize("name,planted,control,cls", CONTEXT, ids=[c[0] for c in CONTEXT])
+def test_m5_context_decides_and_the_control_passes(tmp_path, name, planted, control, cls):
+    for body, want in ((planted, [cls]), (control, [])):
+        repo, dst = _copy(tmp_path / ("planted" if want else "control"))
+        ind = _measure_indent(dst)
+        _edit(dst, "review_measures", ind + MEASURE, ind + body.replace("@@", ind))
+        assert _classes(repo)[0] == want, (name, want)
+
+
+def test_m5_a_module_level_boolean_toggle_is_refused_unless_pinned(tmp_path, monkeypatch):
+    repo, dst = _copy(tmp_path)
+    _edit(dst, "review_measures", "REGISTRY: dict = {}\n", "REGISTRY: dict = {}\nSYNTHETIC_STRICT = True\n")
+    assert _classes(repo)[0] == ["bool"]
+    monkeypatch.setitem(g.PINNED, ("review_measures", "SYNTHETIC_STRICT"), True)
+    assert _classes(repo)[0] == []
+
+
+def test_m5_no_number_is_structural_everywhere():
+    """The global allowlist is gone: every structural set is tied to a context."""
+    assert not hasattr(g, "ALLOWED_NUMBERS")
+    assert set(g.STRUCTURAL) == {"compare_any", "compare_eq", "binop", "wrap", "augassign", "call",
+                                 "plain"}

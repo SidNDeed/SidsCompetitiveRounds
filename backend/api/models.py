@@ -1593,11 +1593,27 @@ class ReviewSittingDirty(Base):
     marked_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class ReviewSeen(Base):
+    __tablename__ = "review_seen"
+    __table_args__ = (
+        Index("ix_review_seen_created", "created_at"),
+    )
+
+    match_id = Column(UUID(as_uuid=True), primary_key=True)
+    created_at = Column(DateTime(timezone=True), nullable=False)
+    seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class ReviewCursor(Base):
     __tablename__ = "review_cursor"
 
     name = Column(String(16), primary_key=True)
-    position_at = Column(DateTime(timezone=True), nullable=True)
-    position_id = Column(UUID(as_uuid=True), nullable=True)
     rules_rev = Column(String(16), nullable=True)
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class SeatEvidenceSeededKey(Base):
+    __tablename__ = "seat_evidence_seeded_keys"
+
+    key = Column(String(64), primary_key=True)
+    seeded_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
