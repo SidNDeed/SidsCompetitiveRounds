@@ -31,7 +31,7 @@ TRACKED = ["CardDrawEvidence.cs", "CardDrawEvidenceCore.cs", "SeatEvidenceCore.c
 CASES = ["seal", "first_fault", "orphan_fault", "freeze", "not_run", "census_per_game", "census_states",
          "quit_spools", "ring_bounded",
          # fix pass 3
-         "census_final_collision", "gate_precomputed", "build_on_tick"]
+         "census_final_collision", "gate_precomputed", "build_on_tick", "census_initial_collision"]
 
 # (name, [(old, new), ...], target case, control case); each old occurs exactly once.
 MUTANTS = [
@@ -52,7 +52,7 @@ MUTANTS = [
     # CD-M4: a census per game; collision and change in the record
     ("census_reused", [("var c = TakeCensus(e.Pool);", "var c = _dCensus != null ? _dCensus : TakeCensus(e.Pool);")], "census_per_game", "seal"),
     ("collision_dropped", [("game.PoolState = !c.Ok ? K.POOL_NOT_RUN : (c.Collision ? K.POOL_COLLISION : K.POOL_OK);",
-                            "game.PoolState = !c.Ok ? K.POOL_NOT_RUN : K.POOL_OK;")], "census_states", "seal"),
+                            "game.PoolState = !c.Ok ? K.POOL_NOT_RUN : K.POOL_OK;")], "census_initial_collision", "seal"),
     ("pool_ref_unchecked", [("else if (e.Pool != null && !ReferenceEquals(e.Pool, _dPool)) _game.PoolState = K.WorstPool(_game.PoolState, K.POOL_CHANGED);", "")],
      "census_states", "seal"),
     ("content_unchecked", [("p.Game.PoolState = K.WorstPool(p.Game.PoolState, fin);", "")], "census_states", "seal"),

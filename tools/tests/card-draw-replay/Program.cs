@@ -337,6 +337,24 @@ namespace CardDrawReplay
             Eq("collision", Last().GetProperty("pool")[2].GetString(), "the final census's collision");
         }
 
+        /// <summary>CD-M4: a collision the game's first census found stays in
+        /// the record when the pool no longer collides at the build (the
+        /// colliding category replaced by the shared object): no later reading
+        /// returns a game to ok.</summary>
+        private static void CensusInitialCollision()
+        {
+            _choice.cards = Pool(10, "", true);
+            Phase(0);
+            Pick(Hand(0, 1, 2, 3, 4, 5), 0, 0);
+            CardDrawEvidence.Tick();
+            var gun = _choice.cards[0].categories[0];
+            for (int i = 1; i < _choice.cards.Length; i += 2) _choice.cards[i].categories = new[] { gun };
+            Dispatch();
+            CardDrawEvidence.Tick();
+            Eq(1, SeatEvidence.Queued.Count, "recorded");
+            Eq("collision", Last().GetProperty("pool")[2].GetString(), "the first census's collision kept");
+        }
+
         /// <summary>F4: the phase hook reads a room verdict the tick computed;
         /// it scans nothing itself. In a room the tick has not evaluated yet
         /// the hook collects nothing; after a tick it collects.</summary>
@@ -393,7 +411,7 @@ namespace CardDrawReplay
             { "quit_spools", QuitSpools }, { "ring_bounded", RingBounded },
             // fix pass 3
             { "census_final_collision", CensusFinalCollision }, { "gate_precomputed", GatePrecomputed },
-            { "build_on_tick", BuildOnTick },
+            { "build_on_tick", BuildOnTick }, { "census_initial_collision", CensusInitialCollision },
         };
 
         private static int Main(string[] args)
