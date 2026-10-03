@@ -578,9 +578,9 @@ def test_m10_a_duplicated_or_gapped_contact_key_is_ambiguous_and_not_run():
     assert [r["not_run"] for r in rows] == ["ambiguous", "ambiguous"]
     assert all(r["since_ms"] is None and r["since_c"] is None for r in rows)
     victim, shooter = _contact_pair([(9, 100, 0, 1500)], [(9, 100, 1, 1530)])
-    assert cm.contacts(victim, shooter)[0]["not_run"] in ("ambiguous", "absent")
+    assert cm.contacts(victim, shooter)[0]["not_run"] in ("ambiguous", "uncounted")
     victim, shooter = _contact_pair([(9, 100, 0, 1500)], [])
-    assert cm.contacts(victim, shooter)[0]["not_run"] == "absent"
+    assert cm.contacts(victim, shooter)[0]["not_run"] == "uncounted"     # no counter (M-8)
     shooter["omit"]["b5_h"] = 1
     assert cm.contacts(victim, shooter)[0]["not_run"] == "trimmed"
 
@@ -1461,6 +1461,20 @@ def test_f2_m8_every_absence_list_has_a_whole_game_counter():
     assert used <= set(cm.WHOLE_COUNTERS)
     for key, (row, field, _cap) in cm.WHOLE_COUNTERS.items():
         assert field in cm.IX[row], key
+    assert not {"b5_o", "b5_h"} & set(cm.WHOLE_COUNTERS)                # the layout names none
+
+
+def test_f2_m8_a_list_without_a_counter_never_proves_absence():
+    victim, shooter = _contact_pair([(9, 100, 0, 1500)], [])
+    assert cm.contacts(victim, shooter)[0]["not_run"] == "uncounted"
+    shooter["omit"]["b5_h"] = 1
+    assert cm.contacts(victim, shooter)[0]["not_run"] == "trimmed"
+    victim, shooter = _block_pair(7010, 7030)
+    assert cm.blocks(victim, shooter)[0]["not_run"] is None              # control: paired
+    shooter["b5_o"] = []
+    assert cm.blocks(victim, shooter)[0]["not_run"] == "uncounted"
+    shooter["omit"]["b5_o"] = 1
+    assert cm.blocks(victim, shooter)[0]["not_run"] == "trimmed"
 
 
 def test_f2_m8_p3tb_against_p3n_target():

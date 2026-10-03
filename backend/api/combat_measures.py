@@ -1177,7 +1177,7 @@ def blocks(victim_rec, shooter_rec) -> list:
                "self": _named(e, SPEC["b5_s"][3]), "meas": None, "not_run": None}
         if len(cand) != 1:
             row["not_run"] = ("ambiguous" if cand else
-                              ("trimmed" if _trimmed(shooter_rec, "b5_o") else "absent"))
+                              (list_gap(shooter_rec, "b5_o") or "absent"))
         else:
             o = cand[0]
             row["meas"] = _named(o, SPEC["b5_o"][3])
@@ -1221,7 +1221,7 @@ def contacts(victim_rec, shooter_rec) -> list:
         elif shooter_rec is None:
             row["not_run"] = "missing_record"
         elif k not in by_key:
-            row["not_run"] = "trimmed" if _trimmed(shooter_rec, "b5_h") else "absent"
+            row["not_run"] = list_gap(shooter_rec, "b5_h") or "absent"
         else:
             h = by_key[k]
             row["since_ms"] = h[H["since_ms"]]
@@ -1283,10 +1283,14 @@ def list_gap(rec, key):
     None when it can. It can only when the record exists, the capability
     that fills the list is set, nothing was omitted from it, and it lists
     exactly as many entries as its whole-game counter counts. Otherwise:
-    `missing_record`, `not_collected`, `trimmed` or `inconsistent` (the
-    counter and the list disagree, so the list proves nothing)."""
+    `missing_record`, `not_collected`, `trimmed`, `inconsistent` (the
+    counter and the list disagree, so the list proves nothing) or
+    `uncounted` (a list the layout gives no whole-game counter, `b5_o` and
+    `b5_h`, never proves an absence)."""
     if rec is None:
         return "missing_record"
+    if key not in WHOLE_COUNTERS:
+        return "trimmed" if rec["omit"][key] > 0 else "uncounted"
     row, field, cap = WHOLE_COUNTERS[key]
     if cap is not None and not has_cap(rec, cap):
         return "not_collected"
