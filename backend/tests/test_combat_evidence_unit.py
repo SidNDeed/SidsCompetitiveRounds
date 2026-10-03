@@ -289,6 +289,12 @@ def test_the_canonical_comparison_sees_one_changed_byte(tmp_path):
     assert changed != data
     (copy / name).write_bytes(changed)
     assert fx.validate_dir(str(copy)) == [name]
+    # A file no budget re-check covers is rejected by the byte comparison alone.
+    other = tmp_path / "canon_other"
+    shutil.copytree(fx.FIXTURE_DIR, str(other))
+    steer = (other / "steering.json").read_bytes()
+    (other / "steering.json").write_bytes(steer.replace(b"{", b"{ ", 1))
+    assert fx.validate_dir(str(other)) == ["steering.json"]
     assert fx.validate_dir(fx.FIXTURE_DIR) == []
 
 
