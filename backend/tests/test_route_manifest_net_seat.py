@@ -155,27 +155,170 @@ def _index_module(path):
                      local `from X import n` binds, and `a.attr` where `a` is a
                      function-local `import X as a`.
 
+        Read per LEXICAL SCOPE (combat fix pass 1, M-9). Every function,
+        lambda, class body and comprehension is its own scope, holding the
+        names it binds: parameters, assignment and loop targets, `with` and
+        `except` names, match captures, the names its defs and classes bind,
+        and its imports. A name read inside a scope that binds it (or inside
+        a function nested in one that does; a class body's names are not
+        visible to the functions in it) is LOCAL and charges no module
+        binding: a local `case` is not the module's `case` import. A name no
+        enclosing scope binds (or one declared `global`) is a module global,
+        charged as before. Every function-local import target is retained,
+        on EVERY branch: `from X import n` charges "X:n" wherever it sits,
+        and `a.attr` on a local alias charges "X:attr" for each module the
+        alias is bound to anywhere in its scope, so a reused alias keeps both
+        targets.
+
         An attribute read on anything else (a local value, a call result)
         names no module-level binding and is not a reference."""
-        local_modules, names = {}, set()
-        for sub in ast.walk(node):
+
+        class Scope:
+            def __init__(self, parent, kind):
+                self.parent, self.kind = parent, kind
+                self.bound, self.loads = {}, []
+                self.declared_global, self.declared_nonlocal = set(), set()
+
+        def bind_name(scope, name, refs=()):
+            scope.bound.setdefault(name, set()).update(refs)
+
+        def import_refs(sub):
+            out = {}
             if isinstance(sub, ast.Import):
                 for alias in sub.names:
-                    if alias.asname or "." not in alias.name:
-                        local_modules[alias.asname or alias.name] = alias.name
-            elif isinstance(sub, ast.ImportFrom) and sub.module and not sub.level:
+                    local = alias.asname or alias.name.split(".")[0]
+                    target = alias.name if alias.asname else alias.name.split(".")[0]
+                    out.setdefault(local, set()).add(target + ":")
+            elif isinstance(sub, ast.ImportFrom):
                 for alias in sub.names:
-                    if alias.name != "*":
-                        names.add(f"{sub.module}:{alias.name}")
-        for sub in ast.walk(node):
-            if isinstance(sub, ast.Name):
-                names.add(sub.id)
-            elif isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name):
-                base = sub.value.id
-                if base in local_modules:
-                    names.add(f"{local_modules[base]}:{sub.attr}")
+                    if alias.name == "*":
+                        continue
+                    refs = ({f"{sub.module}:{alias.name}"}
+                            if sub.module and not sub.level else set())
+                    out.setdefault(alias.asname or alias.name, set()).update(refs)
+            return out
+
+        def outer_args(args, scope):
+            for d in list(args.defaults) + [d for d in args.kw_defaults if d is not None]:
+                visit(d, scope)
+            for a in args.posonlyargs + args.args + args.kwonlyargs + [args.vararg, args.kwarg]:
+                if a is not None and a.annotation is not None:
+                    visit(a.annotation, scope)
+
+        def bind_params(args, scope):
+            for a in args.posonlyargs + args.args + args.kwonlyargs + [args.vararg, args.kwarg]:
+                if a is not None:
+                    bind_name(scope, a.arg)
+
+        def visit(n, scope):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for d in n.decorator_list:
+                    visit(d, scope)
+                outer_args(n.args, scope)
+                if n.returns is not None:
+                    visit(n.returns, scope)
+                bind_name(scope, n.name)
+                inner = Scope(scope, "function")
+                bind_params(n.args, inner)
+                for st in n.body:
+                    visit(st, inner)
+                scopes.append(inner)
+                return
+            if isinstance(n, ast.Lambda):
+                outer_args(n.args, scope)
+                inner = Scope(scope, "function")
+                bind_params(n.args, inner)
+                visit(n.body, inner)
+                scopes.append(inner)
+                return
+            if isinstance(n, ast.ClassDef):
+                for d in n.decorator_list + n.bases + [k.value for k in n.keywords]:
+                    visit(d, scope)
+                bind_name(scope, n.name)
+                inner = Scope(scope, "class")
+                for st in n.body:
+                    visit(st, inner)
+                scopes.append(inner)
+                return
+            if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                gens = n.generators
+                visit(gens[0].iter, scope)
+                inner = Scope(scope, "comp")
+                for i, g in enumerate(gens):
+                    if i:
+                        visit(g.iter, inner)
+                    visit(g.target, inner)
+                    for cond in g.ifs:
+                        visit(cond, inner)
+                for part in ((n.key, n.value) if isinstance(n, ast.DictComp) else (n.elt,)):
+                    visit(part, inner)
+                scopes.append(inner)
+                return
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                for name, refs in import_refs(n).items():
+                    bind_name(scope, name, refs)
+                return
+            if isinstance(n, ast.Global):
+                scope.declared_global.update(n.names)
+                return
+            if isinstance(n, ast.Nonlocal):
+                scope.declared_nonlocal.update(n.names)
+                return
+            if isinstance(n, ast.NamedExpr):
+                home = scope
+                while home.kind == "comp" and home.parent is not None:
+                    home = home.parent
+                bind_name(home, n.target.id)
+                visit(n.value, scope)
+                return
+            if isinstance(n, ast.Name):
+                if isinstance(n.ctx, ast.Load) or n.id in scope.declared_global:
+                    scope.loads.append((n.id, None))      # a read, or a write to a global
                 else:
-                    names.add(f"{base}.{sub.attr}")
+                    bind_name(scope, n.id)
+                return
+            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
+                    and isinstance(n.value.ctx, ast.Load):
+                scope.loads.append((n.value.id, None))
+                scope.loads.append((n.value.id, n.attr))
+                return
+            if isinstance(n, ast.ExceptHandler) and n.name:
+                bind_name(scope, n.name)
+            if isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name:
+                bind_name(scope, n.name)
+            if isinstance(n, ast.MatchMapping) and n.rest:
+                bind_name(scope, n.rest)
+            for child in ast.iter_child_nodes(n):
+                visit(child, scope)
+
+        def owner(scope, name):
+            """The scope whose binding `name` denotes when read in `scope`,
+            or None for a module global."""
+            s, first = scope, True
+            while s is not None and s.kind != "module":
+                if name in s.declared_global:
+                    return None
+                if name in s.bound and name not in s.declared_nonlocal \
+                        and (s.kind != "class" or first):
+                    return s
+                first = False
+                s = s.parent
+            return None
+
+        module = Scope(None, "module")
+        scopes = [module]
+        visit(node, module)
+        names = set()
+        for scope in scopes:
+            if scope.kind != "module":
+                for refs in scope.bound.values():
+                    names.update(r for r in refs if not r.endswith(":"))
+            for name, attr in scope.loads:
+                home = owner(scope, name)
+                if home is None:
+                    names.add(name if attr is None else f"{name}.{attr}")
+                elif attr is not None:
+                    names.update(r + attr for r in home.bound[name] if r.endswith(":"))
         return names
 
     def import_target(node, alias):
@@ -2526,3 +2669,96 @@ def test_a_real_route_whose_code_names_another_helper_grows():
     assert target in after and set(before) < set(after), route.path
     text = lambda idx, reached: "".join(idx[m][n][1] for m, n in sorted(reached))  # noqa: E731
     assert text(index, after) != text(_binding_index(), before)
+
+
+def _closure_text(index, reached):
+    return "".join(index[m][n][1] for m, n in sorted(reached))
+
+
+def _with_segment(index, module, name, text):
+    """A copy of `index` with one binding's source text replaced."""
+    out = {m: dict(t) for m, t in index.items()}
+    kind, _old, refs = out[module][name]
+    out[module][name] = (kind, text, refs)
+    return out
+
+
+def test_a_reused_local_alias_keeps_every_branch_target(tmp_path):
+    """Combat fix pass 1, M-9. A function-local alias bound on two branches
+    (`import b as m` / `import c as m`, and `from b import helper as h` /
+    `from c import helper as h`) reaches BOTH targets, so editing either
+    side's helper moves the route's fingerprint text. Negative control: an
+    edit to a binding neither branch reaches moves nothing."""
+    index = _tmp_index(
+        tmp_path,
+        a=("def route(flag):\n"
+           "    if flag:\n"
+           "        import b as m\n"
+           "    else:\n"
+           "        import c as m\n"
+           "    return m.helper()\n"
+           "def from_route(flag):\n"
+           "    if flag:\n"
+           "        from b import helper as h\n"
+           "    else:\n"
+           "        from c import helper as h\n"
+           "    return h()\n"),
+        b="def helper():\n    return 1\ndef other():\n    return 3\n",
+        c="def helper():\n    return 2\n")
+    for seed in (("a", "route"), ("a", "from_route")):
+        reached = set(_walk_bindings([seed], index=index))
+        assert {("b", "helper"), ("c", "helper")} <= reached, (seed, sorted(reached))
+        base = _closure_text(index, reached)
+        for side in ("b", "c"):
+            moved = _with_segment(index, side, "helper", "def helper():\n    return 9\n")
+            assert _closure_text(moved, set(_walk_bindings([seed], index=moved))) != base, side
+        still = _with_segment(index, "b", "other", "def other():\n    return 9\n")
+        assert _closure_text(still, set(_walk_bindings([seed], index=still))) == base
+
+
+def test_a_local_shadow_does_not_charge_the_module_binding(tmp_path):
+    """Combat fix pass 1, M-9. A name a function binds locally is not the
+    module's binding of that name: `route` assigns its own `case` and reads
+    it, and the module's `case` import is NOT in its closure, so editing that
+    import moves `route` not at all; `uses_import` reads the module's `case`
+    and does move (positive control). A name declared `global` and a name
+    read in a nested function stay resolved as before."""
+    index = _tmp_index(
+        tmp_path,
+        a=("from sqlalchemy import case\n"
+           "import d\n"
+           "G = 1\n"
+           "def route(x):\n"
+           "    case = d.lookup(x)\n"
+           "    return case.id, [c for c in case]\n"
+           "def uses_import():\n"
+           "    return case(1)\n"
+           "def writes_global():\n"
+           "    global G\n"
+           "    G = 2\n"
+           "def nested():\n"
+           "    def inner():\n"
+           "        return G\n"
+           "    return inner\n"),
+        d="def lookup(x):\n    return x\n")
+    route = set(_walk_bindings([("a", "route")], index=index))
+    assert ("a", "case") not in route and ("d", "lookup") in route, sorted(route)
+    assert "case" not in index["a"]["route"][2] and "case.id" not in index["a"]["route"][2]
+    uses = set(_walk_bindings([("a", "uses_import")], index=index))
+    assert ("a", "case") in uses
+    moved = _with_segment(index, "a", "case", "from sqlalchemy import case as case\n")
+    assert _closure_text(moved, route) == _closure_text(index, route)
+    assert _closure_text(moved, uses) != _closure_text(index, uses)
+    assert ("a", "G") in set(_walk_bindings([("a", "writes_global")], index=index))
+    assert ("a", "G") in set(_walk_bindings([("a", "nested")], index=index))
+
+
+def test_the_tip_witness_local_case_is_not_charged_to_the_sqlalchemy_import():
+    """The real app: `_moderation_case_act` binds its own `case` (the row it
+    reads) while main imports sqlalchemy's `case` at module scope. The local
+    is not a reference to the import."""
+    table = _binding_index()["main"]
+    assert table["case"][0] == "import"
+    witness = table["_moderation_case_act"]
+    assert "case" in witness[1] and "case" not in witness[2]
+    assert "case_id" not in witness[2]                     # a parameter is local too
