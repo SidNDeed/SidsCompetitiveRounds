@@ -4456,7 +4456,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:47701 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:47749 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4522,7 +4522,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:47513 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:47561 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4592,7 +4592,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:47416 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:47464 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -6386,11 +6386,14 @@ def _rl_charge(request, force: bool = False):
     rate_limit_gate calls it for every /api/v1/ path outside
     _RATE_LIMIT_BYPASS. `force` charges a path in that bypass too: the version
     gate passes it before the operator-key exemption lookup, and the read gate
-    (read_gate.LOOKUP_CHARGE) before a credential lookup that would read the
+    (app.state.lookup_charge) before a credential lookup that would read the
     database on a connection nothing has charged. A valid internal key is
-    never charged, as before."""
-    state = request.state
-    if getattr(state, "rl_charged", False):
+    never charged, as before. The once-per-connection mark lives on the
+    request's state; an object with url, client and headers but no state
+    (what rate_limit_gate accepted before this function) is charged on every
+    call."""
+    state = getattr(request, "state", None)
+    if state is not None and getattr(state, "rl_charged", False):
         return None
     path = request.url.path
     if not force and ((not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS):
@@ -6453,7 +6456,8 @@ def _rl_charge(request, force: bool = False):
             headers={"Retry-After": str(int(window))},
         )
     dq.append(now)
-    state.rl_charged = True
+    if state is not None:
+        state.rl_charged = True
     # Periodic prune of idle buckets so the dict can't grow unbounded.
     if now - _RL_LAST_PRUNE[0] > 60:
         _RL_LAST_PRUNE[0] = now
@@ -6470,8 +6474,11 @@ def _rl_charge(request, force: bool = False):
 
 # Verified reads: the read gate charges a credential lookup that would read the
 # database on a connection nothing has charged yet (a route in
-# _RATE_LIMIT_BYPASS, the chat socket) to the same per-address buckets.
-read_gate.LOOKUP_CHARGE = lambda conn: _rl_charge(conn, force=True) is None
+# _RATE_LIMIT_BYPASS, the chat socket) to the same per-address buckets. The
+# charge is held by this app and the read gate reads it from the app serving
+# the connection, so importing this file a second time (as api.main) gives that
+# second app its own charge and leaves this app's charge unchanged.
+app.state.lookup_charge = lambda conn: _rl_charge(conn, force=True) is None
 
 
 @app.middleware("http")

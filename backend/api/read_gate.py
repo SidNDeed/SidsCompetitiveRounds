@@ -50,7 +50,7 @@ Lookups run on their own short session (database.async_session), never the
 handler's, so a failed lookup cannot abort the handler's transaction. A
 lookup that would read the database (a cache miss) is charged to the
 per-address rate limiter first when the request or socket has not been
-charged yet (LOOKUP_CHARGE, installed by main; on every route behind
+charged yet (app.state.lookup_charge, set by main; on every route behind
 rate_limit_gate the request is already charged and this is a no-op). A
 refused charge is the verdict `limited`: no lookup runs.
 Positive verdicts are cached: a session until min(now + 60 s, its
@@ -482,21 +482,30 @@ _OPERATOR_SQL = ("SELECT id, operator_name, slot FROM api_operator_keys "
 
 _cred_cache: "OrderedDict[str, tuple[float, object]]" = OrderedDict()
 
-# The per-address rate limiter's charge, installed by main at import:
-# LOOKUP_CHARGE(conn) -> True when the lookup may read the database. It charges
-# a request or socket the limiter has not charged yet (a route in
+# The per-address rate limiter's charge: app.state.lookup_charge(conn) -> True
+# when the lookup may read the database, set by main on its app. It charges a
+# request or socket the limiter has not charged yet (a route in
 # main._RATE_LIMIT_BYPASS, the version gate's operator exemption, the chat
-# socket) and is a no-op for one already charged. None (this module alone, as
-# in unit tests of the verifiers) charges nothing.
-LOOKUP_CHARGE = None
+# socket) and is a no-op for one already charged. It is read from the app that
+# serves `conn` (scope["app"]), not from a module global, so a second import of
+# main (as api.main) builds a second app with its own charge and cannot change
+# which buckets the first app's connections are charged to. A connection with
+# no app, or an app with no charge (this module alone, as in unit tests of the
+# verifiers), charges nothing.
+def _lookup_charge(conn):
+    scope = getattr(conn, "scope", None)
+    app = scope.get("app") if isinstance(scope, dict) else None
+    return getattr(getattr(app, "state", None), "lookup_charge", None)
 
 
 def _lookup_allowed(conn) -> bool:
     """Charge `conn` before a database lookup; False when the limiter refused
     it. A charge that raises lets the lookup run: the limiter is an
     availability bound, and its own failure must not refuse a valid read."""
-    hook = LOOKUP_CHARGE
-    if hook is None or conn is None:
+    if conn is None:
+        return True
+    hook = _lookup_charge(conn)
+    if hook is None:
         return True
     try:
         return bool(hook(conn))
@@ -979,7 +988,7 @@ async def count_socket(ws) -> None:
 #      X-Session-Token whose row exists, is verified, unexpired       -> session
 #      X-Operator-Key  naming a live api_operator_keys row            -> operator
 #    looked up through the HTTP gate's verifiers and caches; a cache miss is
-#    charged to the per-address limiter first (LOOKUP_CHARGE) and a refused
+#    charged to the per-address limiter first (_lookup_allowed) and a refused
 #    charge is the word `limited`. Under enforce any one valid credential
 #    admits.
 # 3. Two separate results: the CENSUS CLASS (socket_census_class, five

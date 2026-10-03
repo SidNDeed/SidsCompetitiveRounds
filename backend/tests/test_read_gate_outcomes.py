@@ -596,6 +596,25 @@ def test_socket_operator_lookup_charged(env):
     assert K.census_rows(route=read_gate.SOCKET_TEMPLATE, **{"class": "mod_no_session"})
 
 
+def test_lookup_charge_follows_the_serving_app(env, monkeypatch):
+    """main.py imported a second time (the suite imports it as api.main too)
+    builds a second app with its own charge and buckets. A lookup on THIS
+    app's connection is charged to this app's buckets: with the second copy's
+    bucket for this address already full, the first `limit` lookups here still
+    run and only the ones past this app's own bucket are refused."""
+    from api import main as second
+    assert second is not main and second.app is not main.app
+    monkeypatch.setattr(main, "_RATE_LIMIT_BYPASS", main._RATE_LIMIT_BYPASS | {PUBLIC_PATH})
+    monkeypatch.setattr(second, "_RL_BUCKETS", second._RL_BUCKETS.__class__(second._RL_BUCKETS.default_factory))
+    limit = main._RL_GLOBAL[0]
+    second._RL_BUCKETS["testclient|g"].extend([second._rl_time.monotonic()] * (limit + 10))
+    env.set_mode("enforce")
+    st = [_get(env, PUBLIC_PATH, session="unknown-token-%05d" % i).status_code
+          for i in range(limit + 5)]
+    assert st[:limit] == [401] * limit and st[limit:] == [429] * 5, st
+    assert env.stub.calls["session"] == limit
+
+
 # -- M5 / requirement 26: the chat socket is counted --------------------------
 
 def test_ws_connect_counted_by_class(env):
