@@ -715,10 +715,16 @@ namespace SeatEvidenceReplay
         {
             SeatEvidence.BeginGame(true, true);
             var ph = Proj(901, OPP, false);
-            int ts = 1000600;
+            // the own block's window admits the hits (as in victim_block_hit)
+            DoBlock(_me, true, BlockTrigger.BlockTriggerType.Default, false, true);
+            PhotonNetwork.ServerTimestamp = 1000005;
+            PhotonNetwork.rpcEvent = new Hashtable();
+            PhotonNetwork.rpcEvent[(byte)0] = _me.View.ViewID; PhotonNetwork.rpcEvent[(byte)2] = 1000010;
+            SeatEvidence.BlockSent(_me.View, "RPCAO_DoBlock", RpcTarget.Others);
+            int ts = 1000010;
             for (int k = 0; k < 4; k++)
             {
-                ts += 1000;
+                ts += 100;
                 PhotonNetwork.ServerTimestamp = ts + 10;
                 int pid = 60 + k;
                 Rpc(901, ts, "RPCA_DoHit", OPP, () => Hit(ph, pid, _me, false));

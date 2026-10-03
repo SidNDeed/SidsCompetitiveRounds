@@ -62,7 +62,7 @@ MUTANTS = [
     ("end_dropped", "End = _end,", "End = null,", "cut_left", "victim_block_hit"),
     ("end_last_wins", "&& _end == null && C.IsEndKind(kind)", "&& C.IsEndKind(kind)", "cut_guards", "cut_left"),
     ("clear_end_noop", "try { if (_open) _end = null; } catch { }", "", "cut_guards", "cut_left"),
-    ("closing_not_persisted", "if (!Save(next)) return false;\n            _queue.Clear();", "_queue.Clear();", "closing_next_boot", "compat_sender"),
+    ("closing_not_persisted", "if (!Save(next)) return false;\n            _queue.Clear();", "_queue.Clear();", "closing_next_boot", "combat_gate"),
     ("sender_never_auths", "if (SwMs >= _nextAuthMs) { _nextAuthMs = SwMs + 1000; SteamAuth.MaybeRefresh(); }", "",
      "compat_sender", "closing_next_boot"),
     ("sender_no_identity", "try { SteamAuth.FallbackIdentity = OwnSteamId(); } catch { }", "", "compat_sender", "compat_bounds"),
@@ -79,7 +79,7 @@ MUTANTS = [
     # F3: current-frame combat state, before any load
     ("combat_stale_flag", "try { live = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }", "",
      "combat_gate", "victim_block_hit"),
-    ("combat_after_load", "if (CombatLive()) return;       // before any load", "Load(); if (CombatLive()) return;",
+    ("combat_after_load", "if (CombatLive()) return;       // before any load", "Load(); if (CombatLive()) return;       // before any load",
      "combat_gate", "victim_block_hit"),
     # F4: the dispatch only captures
     ("dispatch_builds_inline", "_nextCaptureTryMs = 0;\n            }", "_nextCaptureTryMs = 0;\n                BuildCaptures(false);\n            }",
