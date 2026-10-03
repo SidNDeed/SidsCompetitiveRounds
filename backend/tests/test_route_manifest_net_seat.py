@@ -145,13 +145,48 @@ def _index_module(path):
         return "".join(lines[start - 1:end])
 
     def referenced(node):
-        names = set()
+        """The references a binding's source makes, in three forms the walk
+        resolves to bindings (2026-10-02, the binding-resolved closure):
+
+          "n"        a bare name, resolved in the module it is written in;
+          "a.attr"   an attribute read on a bare name, resolved through the
+                     module the name `a` imports, if it imports one of ours;
+          "X:n"      binding `n` of module `X` directly -- what a function-
+                     local `from X import n` binds, and `a.attr` where `a` is a
+                     function-local `import X as a`.
+
+        An attribute read on anything else (a local value, a call result)
+        names no module-level binding and is not a reference."""
+        local_modules, names = {}, set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Import):
+                for alias in sub.names:
+                    if alias.asname or "." not in alias.name:
+                        local_modules[alias.asname or alias.name] = alias.name
+            elif isinstance(sub, ast.ImportFrom) and sub.module and not sub.level:
+                for alias in sub.names:
+                    if alias.name != "*":
+                        names.add(f"{sub.module}:{alias.name}")
         for sub in ast.walk(node):
             if isinstance(sub, ast.Name):
                 names.add(sub.id)
-            elif isinstance(sub, ast.Attribute):
-                names.add(sub.attr)
+            elif isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name):
+                base = sub.value.id
+                if base in local_modules:
+                    names.add(f"{local_modules[base]}:{sub.attr}")
+                else:
+                    names.add(f"{base}.{sub.attr}")
         return names
+
+    def import_target(node, alias):
+        """What one module-level import alias denotes, as a reference: "X:"
+        for a module, "X:n" for a name imported from one. A relative or star
+        import denotes nothing the walk can name."""
+        if isinstance(node, ast.Import):
+            return {alias.name.split(".")[0] + ":"}
+        if node.module and not node.level and alias.name != "*":
+            return {f"{node.module}:{alias.name}"}
+        return set()
 
     def header_refs(node):
         """r2 (Sept 6): the names a block HEADER references -- the `if` test,
@@ -193,8 +228,9 @@ def _index_module(path):
             return ""
         return "".join(lines[previous.end_lineno:part[0].lineno - 1])
 
-    def bind(name, kind, node, guard="", guard_refs=frozenset()):
-        text, refs = guard + segment(node), referenced(node) | set(guard_refs)
+    def bind(name, kind, node, guard="", guard_refs=frozenset(), own_refs=None):
+        own = referenced(node) if own_refs is None else own_refs
+        text, refs = guard + segment(node), set(own) | set(guard_refs)
         if name in table:
             prev_kind, prev_text, prev_refs = table[name]
             table[name] = (prev_kind, prev_text + text, prev_refs | refs)
@@ -223,9 +259,13 @@ def _index_module(path):
                 # them separately: a route references ~40 imported names, which
                 # inflates the CLOSURE without inflating the DRIFT, because
                 # import lines change far more rarely than code does.
+                #
+                # Each alias carries what IT denotes ("X:" or "X:n"), not the
+                # whole statement's names, so `from X import a, b` does not
+                # make `a` reach `b`.
                 for alias in node.names:
                     bind(alias.asname or alias.name.split(".")[0], "import", node,
-                         guard, guard_refs)
+                         guard, guard_refs, own_refs=import_target(node, alias))
             elif isinstance(node, (ast.If, ast.Try, ast.With)):
                 if _is_script_guard(node):
                     continue
@@ -358,11 +398,16 @@ def _walk_bindings(seeds, index=None):
     exactly the raw-SQL hole this method exists to close, one level of
     indirection further down.
 
-    A bare name is resolved in the module it is written in first and then in
-    every other indexed module, and EVERY match is folded in rather than the
-    first -- on a name two modules share, both enter. That widens the reviewed
-    surface rather than narrowing it, which is the only direction this gate may
-    be wrong in."""
+    A reference is resolved to the binding it denotes (2026-10-02, the
+    binding-resolved closure; see `_resolve`): a bare name in the module it is
+    written in, an imported name through its import to the binding in the
+    module it comes from, `a.attr` through the module `a` imports. A name is
+    charged to a route only when the route's closure binds it: `json.dumps` and
+    `combat_measures.dumps` are different names, and an import in a module the
+    route does not reach charges that route nothing. Until this change a bare
+    name was resolved in every indexed module and an attribute by its last
+    part alone, so one new module importing `text` or defining `dumps` entered
+    hundreds of route closures it is not part of."""
     index = _binding_index() if index is None else index
     reached = {}
     frontier = list(seeds)
@@ -383,15 +428,51 @@ def _walk_bindings(seeds, index=None):
         # FEATURE decides which implementation a route runs. An import's refs
         # are only ever its block headers' names (r2), so following them costs
         # nothing on an unguarded import and closes the hole on a guarded one.
-        order = [module] + [other for other in index if other != module]
+        # An import of one of OUR modules is followed to the binding it names
+        # ("X:n"); that is how a route reaches a helper in another module.
         for ref in refs:
-            for other in order:
-                if ref not in index[other] or (other, ref) in reached:
+            for target in _resolve(index, module, ref):
+                if target in reached:
                     continue
-                if kind == "data" and index[other][ref][0] != "data":
+                if kind == "data" and index[target[0]][target[1]][0] != "data":
                     continue
-                frontier.append((other, ref))
+                frontier.append(target)
     return reached
+
+
+def _resolve(index, module, ref):
+    """The bindings one reference written in `module` denotes (forms in
+    `_index_module.referenced`).
+
+      "X:n"     binding n of module X, if X is one of ours and binds n;
+      "a.attr"  binding attr of module X, when `a` is a module-level import of
+                X in `module` (every X, when guarded imports bind `a` twice);
+      "n"       the binding n of `module` itself and, when that binding is an
+                import, the binding it imports -- so a data binding composed
+                from an imported constant still reaches that constant.
+
+    Anything else -- a builtin, a local, a name `module` does not bind --
+    denotes no binding of ours."""
+    table = index.get(module, {})
+    if ":" in ref:
+        target, _, name = ref.partition(":")
+        return [(target, name)] if name and name in index.get(target, {}) else []
+    if "." in ref:
+        base, _, attr = ref.partition(".")
+        binding = table.get(base)
+        if binding is None or binding[0] != "import":
+            return []
+        return [(r[:-1], attr) for r in sorted(binding[2])
+                if r.endswith(":") and attr in index.get(r[:-1], {})]
+    binding = table.get(ref)
+    if binding is None:
+        return []
+    keys = [(module, ref)]
+    if binding[0] == "import":
+        for r in sorted(binding[2]):
+            if ":" in r:
+                keys.extend(_resolve(index, module, r))
+    return keys
 
 
 def _route_seeds(route):
@@ -1175,6 +1256,24 @@ def test_the_helper_closure_stays_affordable():
     # they do not triple is the DRIFT: an import line changes far more rarely
     # than the code around it. A walk that has gone wrong still has to fail
     # here, so the bound is real and not merely raised to fit.
+    #
+    # Binding-resolved closure (2026-10-02): until then a bare name was
+    # resolved in every indexed module and an attribute by its last part alone,
+    # so the combat evidence lane's two modules -- importing text, datetime,
+    # hashlib, hmac and json, and defining a `dumps` that every `json.dumps`
+    # matched -- grew 386 of 391 existing routes and took this median from 86
+    # (base 43a6316c) to 92. Each reference now resolves to the binding it
+    # denotes (`_resolve`). The same walk measures 45 / 137 / 457 all kinds and
+    # 22 / 88 / 369 code over base 43a6316c (391 routes) AND over the lane tip
+    # (393 routes): identical, and the only existing routes whose closure moved
+    # are the two whose code the lane changed (health and the seat record).
+    # The difference from 86 is what the old walk charged by name alone: on
+    # the lane tip it dropped 243 code and data bindings, each a same-named
+    # binding the route's code does not name (main._PNG_MAX_CHUNKS reached
+    # through pc_face's own, title_ladders.router through tournaments' own),
+    # and reached 24 it had missed: imported helpers it treated as leaves
+    # (region_pick's selection rule behind main's import of
+    # pick_region_for_group). The bound stays.
     assert all_median <= 90, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
@@ -2317,3 +2416,110 @@ def test_a_guarded_import_follows_its_guard(tmp_path):
     assert ("m", "FEATURE") in reached, sorted(reached)
     assert reached[("m", "engine")] == "import"
     assert _walk_bindings([("m", "os")], index=index) == {("m", "os"): "import"}
+
+
+def _tmp_index(tmp_path, **sources):
+    index = {}
+    for stem, text in sources.items():
+        path = tmp_path / f"{stem}.py"
+        path.write_text(text, encoding="utf-8")
+        index[stem] = _index_module(path)
+    return index
+
+
+def test_a_reference_resolves_to_the_binding_it_denotes(tmp_path):
+    """2026-10-02, the binding-resolved closure. A name is charged to a route
+    only when the route's closure binds it: `json.dumps` is not `b.dumps`, a
+    name a module does not bind denotes nothing in it, and an import in a
+    module the route does not reach charges the route nothing. Through an
+    import of one of ours -- module-level or function-local, `import X as a`
+    or `from X import n` -- the walk reaches the binding in X."""
+    index = _tmp_index(
+        tmp_path,
+        a=("import json\n"
+           "import b as bee\n"
+           "from b import helper\n"
+           "def route():\n"
+           "    return json.dumps(bee.thing()), helper()\n"
+           "def late_route():\n"
+           "    import b as late\n"
+           "    from b import unused as u\n"
+           "    return late.thing(), u(), text\n"),
+        b=("def dumps(x):\n    return x\n"
+           "def thing():\n    return 1\n"
+           "def helper():\n    return 2\n"
+           "def unused():\n    return 3\n"),
+        c=("import json\n"
+           "from sqlalchemy import text\n"
+           "def dumps(x):\n    return json.dumps(x)\n"
+           "def helper():\n    return text\n"
+           "def route():\n    return 0\n"))
+    reached = set(_walk_bindings([("a", "route")], index=index))
+    assert reached == {("a", "route"), ("a", "json"), ("a", "bee"), ("a", "helper"),
+                       ("b", "thing"), ("b", "helper")}, sorted(reached)
+    late = set(_walk_bindings([("a", "late_route")], index=index))
+    assert late == {("a", "late_route"), ("b", "thing"), ("b", "unused")}, sorted(late)
+    # Mutation: the route names b's dumps through its import -- now it is in.
+    index["a"]["route"] = _tmp_index(tmp_path, a2=(
+        "def route():\n"
+        "    return json.dumps(bee.thing()), helper(), bee.dumps(1)\n"))["a2"]["route"]
+    grown = set(_walk_bindings([("a", "route")], index=index))
+    assert grown == reached | {("b", "dumps")}, sorted(grown)
+
+
+def test_an_unrelated_module_with_common_imports_moves_no_route():
+    """Negative control on the real app: a module no route imports, binding
+    the names the app's own code uses most (`json`, `text`, `datetime`, a
+    `dumps`, a `router`, a `W`), enters no route's closure. Non-vacuous: the
+    app's routes do name `json.dumps`, `text` and `router`."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "zz_unrelated.py"
+        path.write_text(
+            "import hashlib\nimport hmac\nimport json\nimport math\n"
+            "from datetime import datetime, timedelta, timezone\n"
+            "from sqlalchemy import text\n"
+            "W = {}\nrouter = None\nSIZES = ()\n"
+            "def dumps(obj):\n    return json.dumps(obj)\n"
+            "def ready():\n    return text\n", encoding="utf-8")
+        extra = _index_module(path)
+    index = dict(_binding_index())
+    index["zz_unrelated"] = extra
+    named = set()
+    routes = [r for r in main.app.routes
+              if isinstance(r, APIRoute) and r.path.startswith("/api/v1/")]
+    for route in routes:
+        seeds = _route_seeds(route)
+        base = _reached(seeds)
+        assert _walk_bindings(seeds, index=index) == base, route.path
+        for module, name in base:
+            named |= _binding_index()[module][name][2] & {"json.dumps", "text", "router"}
+    assert named == {"json.dumps", "text", "router"}, sorted(named)
+
+
+def test_a_real_route_whose_code_names_another_helper_grows():
+    """Positive control on the real app: one real route's handler, re-indexed
+    with one more line naming a seat evidence helper through main's own import
+    of that module, reaches that helper and its fingerprint text moves."""
+    index = {module: dict(table) for module, table in _binding_index().items()}
+    target = ("seat_evidence", "budget_record")
+    for route in main.app.routes:
+        if not (isinstance(route, APIRoute) and route.path.startswith("/api/v1/")):
+            continue
+        seeds = _route_seeds(route)
+        key = _binding_key(route.endpoint)
+        if key and key[0] == "main" and target not in _reached(seeds):
+            break
+    else:
+        raise AssertionError("no main route without the helper")
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "main_mutant.py"
+        path.write_text(_segment(*key).rstrip("\r\n") + "\n    _sev.budget_record\n",
+                        encoding="utf-8")
+        index["main"][key[1]] = _index_module(path)[key[1]]
+    before = _reached(seeds)
+    after = _walk_bindings(seeds, index=index)
+    assert target in after and set(before) < set(after), route.path
+    text = lambda idx, reached: "".join(idx[m][n][1] for m, n in sorted(reached))  # noqa: E731
+    assert text(index, after) != text(_binding_index(), before)
