@@ -1266,7 +1266,7 @@ namespace PoisonLedgerTests
         {
             var c = new ClaimCore();
             Action<ClaimFacts> fill = f => { f.GateOn = false; f.GateWhy = "test"; };
-            Func<int, string> start = id => ClaimLine.Started(0, 0, 0, 0, null);
+            Func<int, string> start = id => ClaimLine.Started(0, 0, 0, 0, 0, null);
             for (int i = 1; i <= ClaimCore.ClaimsPerRollingSecond; i++) c.Receive(2, ClaimEv(i, 500 + i), 1000 + i, fill, start);
             c.Receive(2, ClaimEv(100, 600), 1500, fill, start);   // past the rate: refused, high water 100
             c.Receive(2, ClaimEv(50, 601), 1600, fill, start);    // past the rate: refused, below the high water
@@ -1326,7 +1326,7 @@ namespace PoisonLedgerTests
                 Check(r.Contains(" excess=2 ") && r.Contains(" total=2 room_total=4 hw=34 "), "counted: " + r);
         }
 
-        // 85. Every claim line has a finite byte bound: the outcome field is
+        // 85. Every claim line has a finite length bound (bytes: case 87): the outcome field is
         //     capped, a started claim's outcome counts its streams and children
         //     (no per-stream or per-child list), and an exception type is capped.
         private static void ClaimLineBounded()
@@ -1334,16 +1334,57 @@ namespace PoisonLedgerTests
             string big = new string('x', 10000);
             Eq(ClaimLine.RecvMax, ClaimLine.Recv(int.MinValue, int.MinValue, int.MinValue, int.MinValue, big).Length, "recv");
             Eq(ClaimLine.RecvMax - 1, ClaimLine.Arm(int.MinValue, int.MinValue, int.MinValue, int.MinValue, big).Length, "arm");
-            Eq("started streams=3 first=s10 last=s12 children=4 threw=2 first_threw=NullReferenceException",
-                ClaimLine.Started(3, 10, 4, 2, "NullReferenceException"), "one field per fact");
-            Eq("started streams=0 children=1 threw=0", ClaimLine.Started(0, 10, 1, 0, null), "nothing opened");
-            string st = ClaimLine.Started(int.MaxValue, int.MinValue, int.MaxValue, int.MaxValue, big);
-            Check(st.Length <= ClaimLine.OutcomeMax && st.EndsWith("..."), "a started outcome fits its field uncut: " + st.Length);
+            Eq("started streams=3 first=s10 last=s12 children=4 threw=2 contained=0 first_fault=child:NullReferenceException",
+                ClaimLine.Started(3, 10, 4, 2, 0, "child:NullReferenceException"), "one field per fact");
+            Eq("started streams=0 children=1 threw=0 contained=0", ClaimLine.Started(0, 10, 1, 0, 0, null), "nothing opened");
+            string st = ClaimLine.Started(int.MaxValue, int.MinValue, int.MaxValue, int.MaxValue, int.MaxValue, big);
+            Check(st.Length <= ClaimLine.OutcomeMax && st.EndsWith("..."), "an oversized fault name is cut: " + st.Length);
+            string wide = ClaimLine.Started(int.MaxValue, int.MinValue, int.MinValue, int.MinValue, int.MaxValue,
+                new string('y', ClaimLine.FaultMax));
+            Check(wide.Contains(" first_fault="), "the widest outcome carries its fault name");
+            Check(wide.Length <= ClaimLine.OutcomeMax && !wide.EndsWith("..."),
+                "every number at its widest fits uncut: " + wide.Length);
             Check(ClaimLine.StartFault(big).Length <= ClaimLine.OutcomeMax, "a start fault");
             var c = new ClaimCore();
             c.Receive(2, ClaimEv(1, 9), 1000, f => { f.GateOn = false; f.GateWhy = big; }, id => "started");
             Check(c.Lines[0].Length <= ClaimLine.RecvMax && c.Lines[0].EndsWith("..."),
                 "a received claim's line with an oversized reason: " + c.Lines[0].Length);
+        }
+
+        // 87. Fix pass 4 (M2): the bound is in encoded bytes. Every claim line
+        //     is printable ASCII, so its UTF-8 byte count is its length, even
+        //     when a text field carries other characters or a line break.
+        private static void ClaimLineAscii()
+        {
+            string odd = "gate:\u00e9t\u00e9\n\u2713\u0000" + new string('\u4e2d', 400);
+            var lines = new List<string>
+            {
+                ClaimLine.Recv(int.MinValue, int.MinValue, int.MinValue, int.MinValue, odd),
+                ClaimLine.Arm(int.MinValue, int.MinValue, int.MinValue, int.MinValue, odd),
+                ClaimLine.Recv(1, 2, 3, 4, ClaimLine.Started(1, 2, 3, 1, 1, "child:\u00c9rror\r\n")),
+                ClaimLine.Recv(1, 2, 3, 4, ClaimLine.StartFault("T\u00ffpe\n")),
+            };
+            var c = new ClaimCore();
+            c.Receive(2, ClaimEv(1, 9), 1000, f => { f.GateOn = false; f.GateWhy = odd; }, id => "started");
+            lines.AddRange(c.Lines);
+            foreach (var l in lines)
+            {
+                Eq(l.Length, System.Text.Encoding.UTF8.GetByteCount(l), "bytes == length: " + l.Length);
+                Check(l.Length <= ClaimLine.RecvMax, "within the byte bound: " + l.Length);
+                foreach (char ch in l) Check(ch >= ' ' && ch <= '~', "printable ASCII only");
+            }
+            Eq("drop reason=gate:?t??", ClaimLine.Cap("drop reason=gate:\u00e9t\u00e9\n", 100), "each other character is one '?'");
+        }
+
+        // 88. Fix pass 4 (M2): a fault contained inside a claim's start (a
+        //     child's prefix, the scheduler, a stream's first step) reaches the
+        //     claim's own outcome: counted, and named when it is the first.
+        private static void StartedContainedCounted()
+        {
+            Eq("started streams=1 first=s5 last=s5 children=2 threw=0 contained=3 first_fault=prefix:NullReferenceException",
+                ClaimLine.Started(1, 5, 2, 0, 3, "prefix:NullReferenceException"), "contained faults counted and named");
+            Eq("started streams=0 children=1 threw=0 contained=1 first_fault=unknown",
+                ClaimLine.Started(0, 0, 1, 0, 1, null), "a contained fault with no name is still named as one");
         }
 
         private static ClaimFacts Facts(int sender, int claimId, long proj)
@@ -1443,6 +1484,8 @@ namespace PoisonLedgerTests
             { "start_refused_explained", StartRefusedExplained },
             { "claim_line_bounded", ClaimLineBounded },
             { "rate_totals_counted", RateTotalsCounted },
+            { "claim_line_ascii", ClaimLineAscii },
+            { "started_contained_counted", StartedContainedCounted },
         };
 
         private static int Main(string[] args)

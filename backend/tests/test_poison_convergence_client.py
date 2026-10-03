@@ -198,7 +198,7 @@ def check_claim_decided_before_start(src):
     assert "if (vv.IsMine && pv != null && !pv.IsMine && _claimStartDepth == 0)" in enter
     assert "return _claims.TryStart(ph.GetInstanceID(), vv.ViewID, StartPath.Broadcast);" in enter, \
         "the broadcast path does not share the claim's TryStart"
-    assert "return HookGuard.Prefix(" in enter and "ex => PrefixFaultDecision()," in enter, \
+    assert "return HookGuard.Prefix(" in enter and "ex => PrefixFaultDecision(ex)," in enter, \
         "the start decision is not the guarded prefix's own"
 
 
@@ -523,8 +523,8 @@ def check_claim_evidence_bounded(src):
     [POISON-CLAIM] line the shell writes itself sits under a per-room cap."""
     start = _code(_member(src[PS], "private static string StartClaim("))
     assert "Plugin.Log" not in start, "a started claim writes a line beside its own"
-    assert "catch (Exception ex) { threw++; if (firstThrew == null) firstThrew = ex.GetType().Name; }" in start
-    assert "return ClaimLine.Started(_nextStream - first, first, children, threw, firstThrew);" in start
+    assert 'catch (Exception ex) { threw++; NoteFirstFault("child", ex); }' in start
+    assert "return ClaimLine.Started(_nextStream - first, first, children, threw, contained, firstFault);" in start
     assert "catch (Exception ex) { return ClaimLine.StartFault(ex.GetType().Name); }" in start
     assert "StringBuilder" not in start and "Append(" not in start, "a started claim lists its streams"
     ps = _code(src[PS])
@@ -538,13 +538,80 @@ def check_claim_evidence_bounded(src):
 
 # check_claim_evidence_bounded: one mutation per bounded structure (each red).
 CLAIM_EVIDENCE_MUTANTS = {
-    "per-child-line": (PS, "catch (Exception ex) { threw++; if (firstThrew == null) firstThrew = ex.GetType().Name; }",
+    "per-child-line": (PS, 'catch (Exception ex) { threw++; NoteFirstFault("child", ex); }',
                        'catch (Exception ex) { threw++; Plugin.Log.LogWarning("[POISON-CLAIM] start threw c=" + claimId + ": " + ex.Message); }'),
     "prefix-fault-uncapped": (PS, "if (_prefixFaults <= 20)", "if (_prefixFaults >= 0)"),
     "skip-uncapped": (PS, "if (_skipLines < 20)", "if (_skipLines >= 0)"),
-    "stream-list": (PS, "return ClaimLine.Started(_nextStream - first, first, children, threw, firstThrew);",
+    "stream-list": (PS, "return ClaimLine.Started(_nextStream - first, first, children, threw, contained, firstFault);",
                     "var sb = new System.Text.StringBuilder();\n            for (int s = first; s < _nextStream; s++) sb.Append('s').Append(s);\n"
                     "            return \"started streams=\" + sb;"),
+}
+
+
+def check_claim_start_faults_attributed(src):
+    """Fix pass 4 (M2): every fault contained inside a claim's own start --
+    a child's prefix (HookGuard.Prefix's onFault and the patch's own catch),
+    the DOT scheduler's catch, a stream's or tick sound's first coroutine
+    step -- is counted on that claim's one line (ClaimStartFault) and writes
+    no line of its own; outside a claim's start each keeps its own evidence."""
+    ps = _code(src[PS])
+    csf = _code(_member(src[PS], "internal static bool ClaimStartFault("))
+    assert "if (_claimStartDepth <= 0) return false;" in csf, "a fault outside a claim's start is swallowed"
+    assert "_startContained++;" in csf and "NoteFirstFault(where, ex);" in csf
+    pfd = _code(_member(src[PS], "internal static bool PrefixFaultDecision("))
+    assert 'if (ClaimStartFault("prefix", ex)) return run;' in pfd, "a claim's prefix fault is not the claim's"
+    assert pfd.index('if (ClaimStartFault("prefix", ex)) return run;') < pfd.index("_prefixFaults++;"), \
+        "a claim's prefix fault writes the room line"
+    enter = _code(_member(src[PS], "internal static bool PoisonEffectEnter("))
+    assert "ex => PrefixFaultDecision(ex)," in enter
+    assert "if (_claimStartDepth > 0) return;" in enter and \
+        enter.index("if (_claimStartDepth > 0) return;") < enter.index("if (_skipLines < 20)"), \
+        "a skip inside a claim's start writes the room skip line"
+    arm = _code(_member(_member(ps, "internal static class PoisonArmPatch"), "private static bool Prefix("))
+    assert "catch (Exception ex) { return PoisonSync.PrefixFaultDecision(ex); }" in arm
+    sched = _code(_member(_member(ps, "internal static class PoisonDotSchedulerPatch"), "private static bool Prefix("))
+    assert 'try { claims = PoisonSync.ClaimStartFault("scheduler", ex); } catch { }' in sched
+    assert 'if (!claims) Plugin.Log.LogError("[POISON-SYNC] scheduler failed' in sched, \
+        "the scheduler's fault inside a claim's start writes a line of its own"
+    assert sched.count("StartCoroutine(") == 3, "a coroutine the scheduler starts is not swept"
+    assert "StartCoroutine(PoisonSync.ClaimContained(PoisonSync.AuthoritativeDot(" in sched, "a stream's first step is not contained"
+    assert "StartCoroutine(PoisonSync.ClaimContained(PoisonSync.LocalTickSound(" in sched, "a tick sound's first step is not contained"
+    assert "StartCoroutine(PoisonSync.ShadowDot(" in sched   # a replica's observer: never inside a claim's start (victim is mine)
+    steps = _code(_member(src[PS], "private static IEnumerator StartContained("))
+    assert "if (!ClaimStartFault(where, ex)) UnityEngine.Debug.LogException(ex);" in steps
+    start = _code(_member(src[PS], "private static string StartClaim("))
+    assert "contained = _startContained;" in start and "firstFault = _startFirstFault;" in start, \
+        "the claim's line does not carry its contained faults"
+    assert "_startContained = 0;" in start and \
+        start.index("_startContained = 0;") < start.index("_claimStartDepth++;"), "a start's count is not its own"
+    flat = " ".join(ps.split())
+    raise_lines = flat.count('"[POISON-AUTH] raise threw: "')
+    assert raise_lines == 2 and flat.count(
+        'if (!ClaimStartFault("raise", ex)) Plugin.Log.LogWarning("[POISON-AUTH] raise threw: "') == raise_lines, \
+        "a send fault inside a claim's start writes a line of its own"
+
+
+# check_claim_start_faults_attributed: one mutation per contained-fault path (each red).
+CLAIM_START_FAULT_MUTANTS = {
+    "outside-swallowed": (PS, "            if (_claimStartDepth <= 0) return false;\n            _startContained++;",
+                          "            _startContained++;"),
+    "prefix-room-line": (PS, '                if (ClaimStartFault("prefix", ex)) return run;\n', ""),
+    "skip-line-in-start": (PS, "                        if (_claimStartDepth > 0) return;\n                        if (_skipLines < 20)",
+                           "                        if (_skipLines < 20)"),
+    "arm-catch-unattributed": (PS, "catch (Exception ex) { return PoisonSync.PrefixFaultDecision(ex); }",
+                               "catch { return PoisonSync.PrefixFaultDecision(null); }"),
+    "scheduler-room-line": (PS, 'if (!claims) Plugin.Log.LogError("[POISON-SYNC] scheduler failed',
+                            'Plugin.Log.LogError("[POISON-SYNC] scheduler failed'),
+    "stream-uncontained": (PS, "StartCoroutine(PoisonSync.ClaimContained(PoisonSync.AuthoritativeDot(",
+                           "StartCoroutine(PoisonSync.Identity(PoisonSync.AuthoritativeDot("),
+    "sound-uncontained": (PS, "StartCoroutine(PoisonSync.ClaimContained(PoisonSync.LocalTickSound(",
+                          "StartCoroutine(PoisonSync.Identity(PoisonSync.LocalTickSound("),
+    "step-fault-logged": (PS, "if (!ClaimStartFault(where, ex)) UnityEngine.Debug.LogException(ex);",
+                          "UnityEngine.Debug.LogException(ex);"),
+    "contained-not-carried": (PS, "contained = _startContained;", "contained = 0;"),
+    "raise-room-line": (PS, "        private static bool Raise(object[] payload)",
+                        '        private static void RaiseNote(Exception ex) { Plugin.Log.LogWarning("[POISON-AUTH] raise threw: " + ex.Message); }\n'
+                        "        private static bool Raise(object[] payload)"),
 }
 
 
@@ -563,7 +630,7 @@ CHECKS = {f.__name__: f for f in (
     check_funnel_is_closed, check_shared_predicates, check_epoch_wire, check_flush_on_every_stop,
     check_evidence_tags, check_point_binding, check_replay_wiring, check_unstamped_break, check_silent_arm,
     check_header_failure_retires, check_fence_failure_retires, check_v3_live_names_every_dependency,
-    check_claim_dispatch_terminal, check_claim_evidence_bounded,
+    check_claim_dispatch_terminal, check_claim_evidence_bounded, check_claim_start_faults_attributed,
 )}
 
 # (check, file, old, new): one named mutation per check that must turn it red.
@@ -604,6 +671,7 @@ MUTANTS = {
     "check_v3_live_names_every_dependency": (PS, "                    && ReviveFenceLive\n", ""),
     "check_claim_dispatch_terminal": (PS, "if (a == null || a.Length < 2) return;", "if (a == null || a.Length < 4) return;"),
     "check_claim_evidence_bounded": CLAIM_EVIDENCE_MUTANTS["per-child-line"],
+    "check_claim_start_faults_attributed": CLAIM_START_FAULT_MUTANTS["prefix-room-line"],
 }
 
 # check_v3_live_names_every_dependency: one mutation per term of V3PatchesLive
@@ -666,6 +734,14 @@ def test_claim_evidence_turns_red(which):
     check_claim_evidence_bounded(_mutate(src, CONTROL))
 
 
+@pytest.mark.parametrize("which", sorted(CLAIM_START_FAULT_MUTANTS))
+def test_claim_start_faults_turn_red(which):
+    src = _normal(_load())
+    with pytest.raises(AssertionError):
+        check_claim_start_faults_attributed(_mutate(src, CLAIM_START_FAULT_MUTANTS[which]))
+    check_claim_start_faults_attributed(_mutate(src, CONTROL))
+
+
 @pytest.mark.parametrize("term", sorted(V3_LIVE_MUTANTS))
 def test_v3_live_turns_red(term):
     src = _normal(_load())
@@ -725,8 +801,8 @@ HOOK_ALLOWED = (
 
 HOOK_REQUIRED = {
     "PoisonArmPatch.Prefix": ("try { return PoisonSync.PoisonEffectEnter(__instance, hit, out __state); }",
-                              "catch { return PoisonSync.PrefixFaultDecision(); }"),
-    "PoisonSync.PoisonEffectEnter": ("return HookGuard.Prefix(", "ex => PrefixFaultDecision(),"),
+                              "catch (Exception ex) { return PoisonSync.PrefixFaultDecision(ex); }"),
+    "PoisonSync.PoisonEffectEnter": ("return HookGuard.Prefix(", "ex => PrefixFaultDecision(ex),"),
     "EndScreenKillPatch.BeforeTransitionDamage": ("return HookGuard.Prefix(", "() => !healthRemoval || !RefusesNow(),"),
 }
 
@@ -849,7 +925,7 @@ HOOK_MUTANTS = {
                                      "{ PoisonSync.HitEnter(__instance); }"),
     "PoisonHitBracketPatch.Finalizer": (PS, "HookGuard.Run(() => PoisonSync.HitExit(__instance));",
                                         "PoisonSync.HitExit(__instance);"),
-    "PoisonArmPatch.Prefix": (PS, "catch { return PoisonSync.PrefixFaultDecision(); }", "catch { return true; }"),
+    "PoisonArmPatch.Prefix": (PS, "catch (Exception ex) { return PoisonSync.PrefixFaultDecision(ex); }", "catch { return true; }"),
     "PoisonArmPatch.Finalizer": (PS, "HookGuard.Run(() => PoisonSync.PoisonEffectExit(__state));",
                                  "PoisonSync.PoisonEffectExit(__state);"),
     "PoisonSync.PoisonEffectEnter": (PS, "            prevArm = _currentArmClaim;\n",

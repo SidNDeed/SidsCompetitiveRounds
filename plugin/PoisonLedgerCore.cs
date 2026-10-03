@@ -1246,18 +1246,26 @@ namespace CompetitiveRounds
 
     internal static class ClaimLine
     {
-        /// <summary>Fix pass 3 (M2): the outcome field of an arm or recv line
-        /// is at most OutcomeMax characters and an exception type name inside
-        /// one at most NameMax, so a recv line is at most RecvMax and a rate
-        /// line at most RateMax (int and long fields at their widest).</summary>
-        internal const int OutcomeMax = 192, NameMax = 48;
+        /// <summary>Fix pass 3/4 (M2): every claim line is ASCII -- its literals
+        /// and numbers are, and every text field goes through Cap, which writes
+        /// any other character as '?' -- so its UTF-8 byte count equals its
+        /// length. The outcome field of an arm or recv line is at most
+        /// OutcomeMax bytes, an exception type name inside one at most
+        /// NameMax, a "where:type" fault at most FaultMax, so a recv line is at
+        /// most RecvMax bytes, an arm line RecvMax - 1 and a rate line RateMax
+        /// (ids at their widest, counts non-negative).</summary>
+        internal const int OutcomeMax = 200, NameMax = 48, FaultMax = NameMax + 10;
         internal const int RecvMax = 95 + OutcomeMax, RateMax = 294;
 
-        /// <summary>Text cut to at most max characters ("..." marks a cut).</summary>
+        /// <summary>Text as printable ASCII ('?' for any other character, a
+        /// line break included), cut to at most max bytes ("..." marks a cut).</summary>
         internal static string Cap(string s, int max)
         {
             if (s == null) return "";
-            return s.Length <= max ? s : s.Substring(0, max - 3) + "...";
+            int n = s.Length <= max ? s.Length : max - 3;
+            var b = new char[n];
+            for (int i = 0; i < n; i++) b[i] = s[i] >= ' ' && s[i] <= '~' ? s[i] : '?';
+            return s.Length <= max ? new string(b) : new string(b) + "...";
         }
 
         internal static string Arm(int from, int claimId, int projView, int victimView, string outcome)
@@ -1272,17 +1280,20 @@ namespace CompetitiveRounds
                 + " outcome=" + Cap(outcome, OutcomeMax);
         }
 
-        /// <summary>Fix pass 3 (M2): a started claim's outcome, one field per
+        /// <summary>Fix pass 3/4 (M2): a started claim's outcome, one field per
         /// fact and no per-child or per-stream list: the streams it opened (a
         /// count and the first and last id: a claim's streams take consecutive
-        /// ids), the poison children it ran, how many threw and the first
-        /// thrower's exception type.</summary>
-        internal static string Started(int streams, int firstStream, int children, int threw, string firstThrew)
+        /// ids), the poison children it ran, how many threw, how many faults
+        /// were contained inside the start (a child's prefix, the scheduler, a
+        /// stream's or sound's first step), and the first fault of either kind
+        /// as "where:type". At most 196 bytes with every number at its widest.</summary>
+        internal static string Started(int streams, int firstStream, int children, int threw, int contained,
+                                       string firstFault)
         {
             return "started streams=" + streams
                 + (streams > 0 ? " first=s" + firstStream + " last=s" + (firstStream + streams - 1) : "")
-                + " children=" + children + " threw=" + threw
-                + (threw > 0 ? " first_threw=" + Cap(firstThrew, NameMax) : "");
+                + " children=" + children + " threw=" + threw + " contained=" + contained
+                + (threw > 0 || contained > 0 ? " first_fault=" + Cap(firstFault ?? "unknown", FaultMax) : "");
         }
 
         /// <summary>A start that faulted outside its children.</summary>

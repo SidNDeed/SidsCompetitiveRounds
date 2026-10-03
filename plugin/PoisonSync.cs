@@ -1180,7 +1180,8 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[POISON-AUTH] raise threw: " + ex.Message);
+                if (!ClaimStartFault("raise", ex))   // fix pass 4: inside a claim's start, its line counts it
+                    Plugin.Log.LogWarning("[POISON-AUTH] raise threw: " + ex.Message);
                 return false;
             }
         }
@@ -1702,6 +1703,8 @@ namespace CompetitiveRounds
         private static int _claimStartDepth;
         private static int _skipLines;
         private static int _prefixFaults;
+        private static int _startContained;      // fix pass 4: faults contained inside the running claim start
+        private static string _startFirstFault;  // that start's first fault of any kind, "where:Type"
 
         internal static void HitEnter(ProjectileHit ph)
         {
@@ -1758,11 +1761,15 @@ namespace CompetitiveRounds
                         return _claims.TryStart(ph.GetInstanceID(), vv.ViewID, StartPath.Broadcast);
                     return true;
                 },
-                ex => PrefixFaultDecision(),
+                ex => PrefixFaultDecision(ex),
                 run =>
                 {
                     if (!run)
                     {
+                        // Fix pass 4 (M2): inside a claim's own start the decision
+                        // is always "run", so a skip there comes only from a
+                        // contained prefix fault, which that claim's line counts.
+                        if (_claimStartDepth > 0) return;
                         if (_skipLines < 20)
                         {
                             _skipLines++;
@@ -1799,13 +1806,18 @@ namespace CompetitiveRounds
 
         /// <summary>The poison-effect prefix faulted before its start decision
         /// (V4 B5): skip when a claim already started in this room, else run as
-        /// vanilla with the seat saturated so no claim starts after it.</summary>
-        internal static bool PrefixFaultDecision()
+        /// vanilla with the seat saturated so no claim starts after it. Fix
+        /// pass 4 (M2): inside a claim's own start the fault is that claim's,
+        /// counted on its one line (ClaimStartFault), and writes no room line;
+        /// elsewhere (a broadcast or local hit, no received claim) the room
+        /// line stays, capped at 20 per room.</summary>
+        internal static bool PrefixFaultDecision(Exception ex)
         {
             bool run;
-            try { run = _claims.FaultBeforeStart(); } catch { return false; }
+            try { run = _claims.FaultBeforeStart(); } catch { run = false; }
             try
             {
+                if (ClaimStartFault("prefix", ex)) return run;
                 _prefixFaults++;
                 if (_prefixFaults <= 20)   // bounded like the skip lines; n counts every fault
                     Plugin.Log.LogWarning("[POISON-CLAIM] poison prefix faulted before its start decision: "
@@ -1908,33 +1920,94 @@ namespace CompetitiveRounds
 
         /// <summary>A started claim runs the bullet's poison effects on this
         /// victim; the outcome (ClaimLine.Started) counts the streams it opened
-        /// with their first and last id, the children it ran and the children
-        /// that threw, in a bounded field of the claim's one line.</summary>
+        /// with their first and last id, the children it ran, the children
+        /// that threw, the faults contained inside the start (a child's prefix,
+        /// the DOT scheduler, a stream's or tick sound's first step) and the
+        /// first fault of any kind, in a bounded field of the claim's one line.</summary>
         private static string StartClaim(int claimId, PhotonView vv, RayHitPoison[] poisons)
         {
-            // Fix pass 3 (M2): a child that throws is counted, not written on a
-            // line of its own; the claim's one recv line carries the counts and
-            // the first thrower's type (ClaimLine.Started, bounded).
-            int first = _nextStream, children = 0, threw = 0;
-            string firstThrew = null;
+            // Fix pass 3/4 (M2): no fault inside the start writes a line of its
+            // own; the claim's one recv line carries the counts and the first
+            // fault's place and type (ClaimLine.Started, bounded).
+            int first = _nextStream, children = 0, threw = 0, contained = 0;
+            string firstFault = null;
+            int outerContained = _startContained;
+            string outerFirst = _startFirstFault;
+            _startContained = 0;
+            _startFirstFault = null;
             try
             {
-                _claimStartDepth++;
                 try
                 {
-                    var hit = new HitInfo { transform = vv.transform, point = vv.transform.position };
-                    foreach (var c in poisons)
+                    _claimStartDepth++;
+                    try
                     {
-                        if (c == null) continue;
-                        children++;
-                        try { c.DoHitEffect(hit); }
-                        catch (Exception ex) { threw++; if (firstThrew == null) firstThrew = ex.GetType().Name; }
+                        var hit = new HitInfo { transform = vv.transform, point = vv.transform.position };
+                        foreach (var c in poisons)
+                        {
+                            if (c == null) continue;
+                            children++;
+                            try { c.DoHitEffect(hit); }
+                            catch (Exception ex) { threw++; NoteFirstFault("child", ex); }
+                        }
                     }
+                    finally { _claimStartDepth--; }
                 }
-                finally { _claimStartDepth--; }
+                catch (Exception ex) { return ClaimLine.StartFault(ex.GetType().Name); }
+                contained = _startContained;
+                firstFault = _startFirstFault;
             }
-            catch (Exception ex) { return ClaimLine.StartFault(ex.GetType().Name); }
-            return ClaimLine.Started(_nextStream - first, first, children, threw, firstThrew);
+            finally
+            {
+                _startContained = outerContained;
+                _startFirstFault = outerFirst;
+            }
+            return ClaimLine.Started(_nextStream - first, first, children, threw, contained, firstFault);
+        }
+
+        /// <summary>Fix pass 4 (M2): a fault contained inside a claim's own
+        /// start (a child's prefix, the DOT scheduler, a stream's or tick
+        /// sound's first step) is that claim's: counted for its one recv line
+        /// and never written on a line of its own. False outside a claim's
+        /// start: the caller keeps its own evidence.</summary>
+        internal static bool ClaimStartFault(string where, Exception ex)
+        {
+            if (_claimStartDepth <= 0) return false;
+            _startContained++;
+            NoteFirstFault(where, ex);
+            return true;
+        }
+
+        private static void NoteFirstFault(string where, Exception ex)
+        {
+            if (_startFirstFault == null) _startFirstFault = where + ":" + (ex != null ? ex.GetType().Name : "unknown");
+        }
+
+        /// <summary>Fix pass 4 (M2): a coroutine started inside a claim's own
+        /// start has its steps contained, so a fault in its first step (run
+        /// synchronously by StartCoroutine, inside the start) is counted on the
+        /// claim's line instead of being logged by Unity. A later step's fault
+        /// is logged as Unity would log it. Outside a claim's start the
+        /// coroutine is returned unchanged.</summary>
+        internal static IEnumerator ClaimContained(IEnumerator e, string where)
+        {
+            return _claimStartDepth > 0 && e != null ? StartContained(e, where) : e;
+        }
+
+        private static IEnumerator StartContained(IEnumerator e, string where)
+        {
+            while (true)
+            {
+                bool more;
+                try { more = e.MoveNext(); }
+                catch (Exception ex)
+                {
+                    if (!ClaimStartFault(where, ex)) UnityEngine.Debug.LogException(ex);
+                    yield break;
+                }
+                if (!more) yield break;
+                yield return e.Current;
+            }
         }
 
         // ── Tick sound ────────────────────────────────────────────────────
@@ -2030,7 +2103,8 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[POISON-AUTH] raise threw: " + ex.Message);
+                if (!ClaimStartFault("raise", ex))   // fix pass 4: inside a claim's start, its line counts it
+                    Plugin.Log.LogWarning("[POISON-AUTH] raise threw: " + ex.Message);
                 return false;
             }
         }
@@ -2875,8 +2949,8 @@ namespace CompetitiveRounds
                 // paths that return false and therefore suppress vanilla's own loop.
                 object snd = (__args != null && __args.Length > 5) ? __args[5] : null;
                 if (snd != null)
-                    __instance.StartCoroutine(PoisonSync.LocalTickSound(
-                        __instance, data, snd, PoisonSync.Quantise(damage.magnitude), time, interval));
+                    __instance.StartCoroutine(PoisonSync.ClaimContained(PoisonSync.LocalTickSound(
+                        __instance, data, snd, PoisonSync.Quantise(damage.magnitude), time, interval), "sound"));
 
                 // Hosted on the DamageOverTime component deliberately: vanilla's
                 // RPCA_Die, RPCA_Die_Phoenix and Revive all call
@@ -2888,16 +2962,20 @@ namespace CompetitiveRounds
                     return false;
                 }
 
-                __instance.StartCoroutine(PoisonSync.AuthoritativeDot(
+                __instance.StartCoroutine(PoisonSync.ClaimContained(PoisonSync.AuthoritativeDot(
                     __instance, data, view, damage, time, interval, color,
-                    damagingPlayer, lethal, (int)damageSource));
+                    damagingPlayer, lethal, (int)damageSource), "stream"));
                 return false;
             }
             catch (Exception ex)
             {
                 // A capable victim must NEVER silently end up with no damage at
                 // all. Falling through to vanilla is the self-healing direction.
-                Plugin.Log.LogError("[POISON-SYNC] scheduler failed, using vanilla: " + ex.Message);
+                // Fix pass 4 (M2): inside a claim's own start the fault is
+                // counted on that claim's line instead of a line of its own.
+                bool claims = false;
+                try { claims = PoisonSync.ClaimStartFault("scheduler", ex); } catch { }
+                if (!claims) Plugin.Log.LogError("[POISON-SYNC] scheduler failed, using vanilla: " + ex.Message);
                 return true;
             }
         }
@@ -3243,7 +3321,7 @@ namespace CompetitiveRounds
         {
             __state = 0;
             try { return PoisonSync.PoisonEffectEnter(__instance, hit, out __state); }
-            catch { return PoisonSync.PrefixFaultDecision(); }
+            catch (Exception ex) { return PoisonSync.PrefixFaultDecision(ex); }
         }
 
         [HarmonyFinalizer]

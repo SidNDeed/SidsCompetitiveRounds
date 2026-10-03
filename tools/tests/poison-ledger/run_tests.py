@@ -231,9 +231,14 @@ MUTANTS = [
      "victim_decide_lines", "claim_starts_once"),
     ("saturation_unnamed", "if (!_saturated) _faultSaturated = true;", "",
      "start_refused_explained", "prefix_fault_no_second_stream"),
-    ("outcome_uncapped", "return s.Length <= max ? s : s.Substring(0, max - 3) + \"...\";", "return s;",
+    ("outcome_uncapped", "int n = s.Length <= max ? s.Length : max - 3;", "int n = s.Length;",
      "claim_line_bounded", "dup_verdict"),
     ("room_excess_uncounted", "_roomExcess++;", "", "rate_totals_counted", "dup_verdict"),
+    # Fix pass 4 (M2): bytes, not characters; contained start faults reach the claim's outcome
+    ("line_not_ascii", "b[i] = s[i] >= ' ' && s[i] <= '~' ? s[i] : '?';", "b[i] = s[i];",
+     "claim_line_ascii", "claim_line_bounded"),
+    ("contained_unrecorded", "(threw > 0 || contained > 0 ?", "(threw > 0 ?",
+     "started_contained_counted", "dup_verdict"),
 ]
 
 
