@@ -605,6 +605,39 @@ def test_socket_operator_lookup_charged(env):
     assert K.census_rows(route=read_gate.SOCKET_TEMPLATE, **{"class": "mod_no_session"})
 
 
+def test_count_socket_charges_an_uncharged_connection(env):
+    """count_socket on a connection nothing has charged (the future socket
+    protocol's order: the stage, then the lookups) charges the operator
+    lookup's cache miss to the serving app's limiter itself: past the bucket
+    the key is not looked up."""
+    import asyncio
+    from types import SimpleNamespace
+    from starlette.datastructures import Headers
+    env.set_mode("log")
+    limit = main._RL_GLOBAL[0]
+
+    def conn(i):
+        return SimpleNamespace(
+            scope={"app": main.app}, state=SimpleNamespace(), url=SimpleNamespace(path="/api/v1/ws/chat"),
+            client=SimpleNamespace(host="testclient"),
+            headers=Headers(headers={"X-Mod-Version": K.LIVE_VERSION, "X-Operator-Key": _unissued(i)}))
+    for i in range(limit + 3):
+        asyncio.run(read_gate.count_socket(conn(i)))
+    assert env.stub.calls["operator"] == limit and _charges() == limit
+
+
+def test_bypassed_route_operator_lookups_charged_at_miss(env, monkeypatch):
+    """The operator-key twin of the session case above: on a gated route the
+    limiter never charges, each unissued key's lookup is charged first, so
+    past the bucket no key is looked up (429 in enforce)."""
+    monkeypatch.setattr(main, "_RATE_LIMIT_BYPASS", main._RATE_LIMIT_BYPASS | {PUBLIC_PATH})
+    limit = main._RL_GLOBAL[0]
+    env.set_mode("enforce")
+    st = [_get(env, PUBLIC_PATH, operator=_unissued(i)).status_code for i in range(limit + 5)]
+    assert st[:limit] == [401] * limit and st[limit:] == [429] * 5, st
+    assert env.stub.calls["operator"] == limit
+
+
 def test_lookup_charge_follows_the_serving_app(env, monkeypatch):
     """main.py imported a second time (the suite imports it as api.main too)
     builds a second app with its own charge and buckets. A lookup on THIS
