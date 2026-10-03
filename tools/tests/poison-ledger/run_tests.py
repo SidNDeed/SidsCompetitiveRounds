@@ -97,7 +97,7 @@ MUTANTS = [
     ("event_not_sticky", "internal void OnRoomEvent(string why) { Kill(why); }",
      "internal void OnRoomEvent(string why) { }", "activation_killed_by_room_event", "activation_requires_all_acks"),
     ("cap_not_checked",
-     "if (!cap3(a)) { Kill(\"cap-missing actor=\" + a); why = \"cap-missing actor=\" + a; return false; }",
+     "if (!cap3(a)) { Kill(\"cap-missing actor=\" + ClaimLine.N(a)); why = \"cap-missing actor=\" + ClaimLine.N(a); return false; }",
      "{ }", "activation_cap_missing", "activation_master_only"),
     ("targets_ignore_cap", "if (present != null) foreach (int a in present) if (cap3(a)) r.Add(a);",
      "if (present != null) foreach (int a in present) r.Add(a);", "join_unseen_old_spectator",
@@ -239,6 +239,21 @@ MUTANTS = [
      "claim_line_ascii", "claim_line_bounded"),
     ("contained_unrecorded", "(threw > 0 || contained > 0 ?", "(threw > 0 ?",
      "started_contained_counted", "dup_verdict"),
+    # Fix pass 5 (M2): every number on a claim line is written by N, never by the thread's culture
+    ("n_culture", 'if (v == 0) return "0";', "if (v != long.MinValue) return v.ToString();",
+     "number_format_invariant", "dup_verdict"),
+    ("arm_culture", '"[POISON-CLAIM] arm from=" + N(from)', '"[POISON-CLAIM] arm from=" + from',
+     "arm_line_invariant", "recv_line_invariant"),
+    ("recv_culture", '"[POISON-CLAIM] recv from=" + N(from)', '"[POISON-CLAIM] recv from=" + from',
+     "recv_line_invariant", "arm_line_invariant"),
+    ("rate_culture", '" second=" + N(second)', '" second=" + second',
+     "rate_line_invariant", "rate_tuple_invariant"),
+    ("tuple_culture", '"c=" + N(ClaimCore.Field(a, 4))', '"c=" + ClaimCore.Field(a, 4)',
+     "rate_tuple_invariant", "recv_line_invariant"),
+    ("started_culture", '"started streams=" + N(streams)', '"started streams=" + streams',
+     "started_invariant", "started_contained_counted"),
+    ("dup_culture", '"hw=" + ClaimLine.N(hw) + " hw_from=line"', '"hw=" + hw + " hw_from=line"',
+     "dup_state_invariant", "arm_line_invariant"),
 ]
 
 

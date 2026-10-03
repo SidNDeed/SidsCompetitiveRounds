@@ -1114,7 +1114,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                string why = kind + " actor=" + (p != null ? p.ActorNumber : -1);
+                string why = kind + " actor=" + ClaimLine.N(p != null ? p.ActorNumber : -1);
                 bool was = _act.Live;
                 _act.OnRoomEvent(why);
                 _v3LastRoomEvent = Time.unscaledTime;
@@ -1774,7 +1774,7 @@ namespace CompetitiveRounds
                         {
                             _skipLines++;
                             Plugin.Log.LogInfo("[POISON-CLAIM] broadcast poison skipped proj="
-                                + (pv != null ? pv.ViewID : -1) + " victim=" + (vv != null ? vv.ViewID : -1)
+                                + ClaimLine.N(pv != null ? pv.ViewID : -1) + " victim=" + ClaimLine.N(vv != null ? vv.ViewID : -1)
                                 + ": a claim already started this bullet's poison on this victim");
                         }
                         return;
@@ -1821,7 +1821,7 @@ namespace CompetitiveRounds
                 _prefixFaults++;
                 if (_prefixFaults <= 20)   // bounded like the skip lines; n counts every fault
                     Plugin.Log.LogWarning("[POISON-CLAIM] poison prefix faulted before its start decision: "
-                        + (run ? "ran, claims off" : "skipped") + " n=" + _prefixFaults);
+                        + (run ? "ran, claims off" : "skipped") + " n=" + ClaimLine.N(_prefixFaults));
             }
             catch { }
             return run;

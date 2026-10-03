@@ -1387,6 +1387,138 @@ namespace PoisonLedgerTests
                 ClaimLine.Started(0, 0, 1, 0, 1, null), "a contained fault with no name is still named as one");
         }
 
+        // Fix pass 5 (M2): the cultures a receiving thread may run under. One
+        // with a non-ASCII negative sign (U+2212, as sv-SE writes it), one
+        // whose NumberFormatInfo is customized (a long negative and positive
+        // sign with non-ASCII letters), and sv-SE itself when this runtime has
+        // it. Each must really format -5 otherwise, or the case proves nothing.
+        private static void UnderCultures(string what, Action body)
+        {
+            var saved = System.Globalization.CultureInfo.CurrentCulture;
+            var minus = (System.Globalization.CultureInfo)System.Globalization.CultureInfo.InvariantCulture.Clone();
+            minus.NumberFormat.NegativeSign = new string((char)0x2212, 1);
+            var custom = (System.Globalization.CultureInfo)System.Globalization.CultureInfo.InvariantCulture.Clone();
+            custom.NumberFormat.NegativeSign = "neg" + (char)0xE9 + (char)0xE9;
+            custom.NumberFormat.PositiveSign = "pos" + (char)0xE9;
+            var cultures = new List<System.Globalization.CultureInfo> { minus, custom };
+            try
+            {
+                var sv = new System.Globalization.CultureInfo("sv-SE");
+                if ((-5).ToString(sv) != "-5") cultures.Add(sv);
+            }
+            catch { }
+            try
+            {
+                foreach (var ci in cultures)
+                {
+                    System.Globalization.CultureInfo.CurrentCulture = ci;
+                    Check((-5).ToString() != "-5" && (-5L).ToString() != "-5",
+                        what + ": culture " + ci.Name + " formats -5 otherwise");
+                    body();
+                }
+            }
+            finally { System.Globalization.CultureInfo.CurrentCulture = saved; }
+        }
+
+        private static void Ascii(string line, int max, string what)
+        {
+            Eq(line.Length, System.Text.Encoding.UTF8.GetByteCount(line), what + ": bytes == length");
+            Check(line.Length <= max, what + ": within " + max + " bytes: " + line.Length);
+            foreach (char ch in line) Check(ch >= ' ' && ch <= '~', what + ": printable ASCII only");
+        }
+
+        // 89. Fix pass 5: N writes every number the same on every seat.
+        private static void NumberFormatInvariant()
+        {
+            UnderCultures("N", () =>
+            {
+                Eq("-5", ClaimLine.N(-5), "-5");
+                Eq("0", ClaimLine.N(0), "0");
+                Eq("2147483647", ClaimLine.N(int.MaxValue), "int max");
+                Eq("-2147483648", ClaimLine.N(int.MinValue), "int min");
+                Eq("-9223372036854775808", ClaimLine.N(long.MinValue), "long min");
+                Eq("9223372036854775807", ClaimLine.N(long.MaxValue), "long max");
+            });
+        }
+
+        // 90. Fix pass 5: an arm line, numeric fields negative, under each culture.
+        private static void ArmLineInvariant()
+        {
+            UnderCultures("arm", () =>
+            {
+                Eq("[POISON-CLAIM] arm from=-5 c=-2147483648 proj=-1 victim=-7 outcome=sent",
+                    ClaimLine.Arm(-5, int.MinValue, -1, -7, "sent"), "arm");
+                Ascii(ClaimLine.Arm(int.MinValue, int.MinValue, int.MinValue, int.MinValue, new string('x', 999)),
+                    ClaimLine.RecvMax - 1, "arm widest");
+            });
+        }
+
+        // 91. Fix pass 5: a recv line, numeric fields negative, under each culture.
+        private static void RecvLineInvariant()
+        {
+            UnderCultures("recv", () =>
+            {
+                Eq("[POISON-CLAIM] recv from=-5 c=-2147483648 proj=-1 victim=-7 outcome=drop reason=malformed",
+                    ClaimLine.Recv(-5, int.MinValue, -1, -7, "drop reason=malformed"), "recv");
+                Ascii(ClaimLine.Recv(int.MinValue, int.MinValue, int.MinValue, int.MinValue, new string('x', 999)),
+                    ClaimLine.RecvMax, "recv widest");
+            });
+        }
+
+        // 95. Fix pass 5: a dup outcome's own number (the deciding high
+        //     water) on a received claim's line, under each culture.
+        private static void DupStateInvariant()
+        {
+            UnderCultures("dup", () =>
+            {
+                var c = new ClaimCore();
+                c.Receive(-3, ClaimEv(-9, 9), 1000, f => { f.GateOn = false; f.GateWhy = "off"; }, id => "started");
+                c.Receive(-3, ClaimEv(-9, 9), 1001, f => { f.GateOn = false; f.GateWhy = "off"; }, id => "started");
+                Eq(2, c.Lines.Count, "two lines");
+                Check(c.Lines[1].EndsWith("outcome=drop reason=dup hw=-9 hw_from=line"), "the dup names its high water: " + c.Lines[1]);
+                foreach (var x in c.Lines) Ascii(x, ClaimLine.RecvMax, "received");
+            });
+        }
+
+        // 92. Fix pass 5: a rate line's own numeric fields negative, under each culture.
+        private static void RateLineInvariant()
+        {
+            UnderCultures("rate", () =>
+            {
+                var t = new object[] { V3Wire.TypeClaim, V3Wire.Protocol, 3, 2, 1 };
+                Eq("[POISON-CLAIM] rate from=-5 second=-2 excess=1 first=(c=1 proj=2 victim=3) last=(c=1 proj=2 victim=3)"
+                    + " total=1 room_total=1 hw=-9 outcome=drop reason=rate",
+                    ClaimLine.Rate(-5, -2, 1, t, t, 1, 1, -9), "rate");
+                var w = new object[] { V3Wire.TypeClaim, V3Wire.Protocol, int.MinValue, int.MinValue, int.MinValue };
+                Ascii(ClaimLine.Rate(int.MinValue, long.MinValue, int.MaxValue, w, w, long.MaxValue, long.MaxValue, int.MinValue),
+                    ClaimLine.RateMax, "rate widest");
+            });
+        }
+
+        // 93. Fix pass 5: a rate line's tuples negative (claim, projectile, victim).
+        private static void RateTupleInvariant()
+        {
+            UnderCultures("tuple", () =>
+            {
+                var t = new object[] { V3Wire.TypeClaim, V3Wire.Protocol, -3, -2, -1 };
+                Eq("[POISON-CLAIM] rate from=5 second=2 excess=1 first=(c=-1 proj=-2 victim=-3) last=(c=-1 proj=-2 victim=-3)"
+                    + " total=1 room_total=1 hw=9 outcome=drop reason=rate",
+                    ClaimLine.Rate(5, 2, 1, t, t, 1, 1, 9), "tuple");
+            });
+        }
+
+        // 94. Fix pass 5: a started claim's counts and stream ids, under each culture.
+        private static void StartedInvariant()
+        {
+            UnderCultures("started", () =>
+            {
+                Eq("started streams=1 first=s-4 last=s-4 children=1 threw=0 contained=0",
+                    ClaimLine.Started(1, -4, 1, 0, 0, null), "started");
+                Eq("started streams=-1 children=-2 threw=-3 contained=-4", ClaimLine.Started(-1, 0, -2, -3, -4, "x"),
+                    "negative counts");
+            });
+        }
+
         private static ClaimFacts Facts(int sender, int claimId, long proj)
         {
             return new ClaimFacts
@@ -1486,6 +1618,13 @@ namespace PoisonLedgerTests
             { "rate_totals_counted", RateTotalsCounted },
             { "claim_line_ascii", ClaimLineAscii },
             { "started_contained_counted", StartedContainedCounted },
+            { "number_format_invariant", NumberFormatInvariant },
+            { "arm_line_invariant", ArmLineInvariant },
+            { "recv_line_invariant", RecvLineInvariant },
+            { "rate_line_invariant", RateLineInvariant },
+            { "rate_tuple_invariant", RateTupleInvariant },
+            { "started_invariant", StartedInvariant },
+            { "dup_state_invariant", DupStateInvariant },
         };
 
         private static int Main(string[] args)

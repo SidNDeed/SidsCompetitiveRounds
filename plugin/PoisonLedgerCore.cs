@@ -510,14 +510,14 @@ namespace CompetitiveRounds
             int hw;
             long sec;
             if (!_highWater.TryGetValue(sender, out hw)) return "hw=none";
-            if (!_hwSecond.TryGetValue(sender, out sec) || sec < 0) return "hw=" + hw + " hw_from=line";
-            return "hw=" + hw + " hw_from=rate second=" + sec;
+            if (!_hwSecond.TryGetValue(sender, out sec) || sec < 0) return "hw=" + ClaimLine.N(hw) + " hw_from=line";
+            return "hw=" + ClaimLine.N(hw) + " hw_from=rate second=" + ClaimLine.N(sec);
         }
 
         /// <summary>The state that refuses a start once the seat is saturated.</summary>
         internal string SaturatedState()
         {
-            return "saturated=" + (_faultSaturated ? "prefix-fault" : "start-cap") + " starts=" + _started.Count;
+            return "saturated=" + (_faultSaturated ? "prefix-fault" : "start-cap") + " starts=" + ClaimLine.N(_started.Count);
         }
 
         /// <summary>A result as the outcome field of its claim line, with the
@@ -856,7 +856,7 @@ namespace CompetitiveRounds
         {
             if (fighters != null)
                 foreach (int a in fighters)
-                    if (!cap3(a)) { Kill("cap-missing actor=" + a); why = "cap-missing actor=" + a; return false; }
+                    if (!cap3(a)) { Kill("cap-missing actor=" + ClaimLine.N(a)); why = "cap-missing actor=" + ClaimLine.N(a); return false; }
             if (_roster == null) { why = "no-activation"; return false; }
             if (_killed) { why = "killed:" + _killWhy; return false; }
             if (!point.SameAs(_epoch)) { Kill("point-boundary"); why = "killed:" + _killWhy; return false; }
@@ -866,10 +866,10 @@ namespace CompetitiveRounds
             if (acked < _roster.Length)
             {
                 if (nowMs - _receivedMs >= AckTimeoutMs) { Kill("ack-timeout"); why = "killed:" + _killWhy; return false; }
-                why = "not-acked " + acked + "/" + _roster.Length;
+                why = "not-acked " + ClaimLine.N(acked) + "/" + ClaimLine.N(_roster.Length);
                 return false;
             }
-            why = "on a=" + _aid + " fighters=" + _roster.Length;
+            why = "on a=" + ClaimLine.N(_aid) + " fighters=" + ClaimLine.N(_roster.Length);
             return true;
         }
 
@@ -1198,7 +1198,7 @@ namespace CompetitiveRounds
 
         internal static string Label(int arm)
         {
-            if (arm > 0) return "local-only c=" + arm;
+            if (arm > 0) return "local-only c=" + ClaimLine.N(arm);
             return arm == Broadcast ? "broadcast" : "direct";
         }
     }
@@ -1246,10 +1246,11 @@ namespace CompetitiveRounds
 
     internal static class ClaimLine
     {
-        /// <summary>Fix pass 3/4 (M2): every claim line is ASCII -- its literals
-        /// and numbers are, and every text field goes through Cap, which writes
-        /// any other character as '?' -- so its UTF-8 byte count equals its
-        /// length. The outcome field of an arm or recv line is at most
+        /// <summary>Fix pass 3/4/5 (M2): every claim line is ASCII on every
+        /// seat -- its literals are, every number is written by N (never by the
+        /// thread's culture), and every text field goes through Cap, which
+        /// writes any other character as '?' -- so its UTF-8 byte count equals
+        /// its length. The outcome field of an arm or recv line is at most
         /// OutcomeMax bytes, an exception type name inside one at most
         /// NameMax, a "where:type" fault at most FaultMax, so a recv line is at
         /// most RecvMax bytes, an arm line RecvMax - 1 and a rate line RateMax
@@ -1268,16 +1269,31 @@ namespace CompetitiveRounds
             return s.Length <= max ? new string(b) : new string(b) + "...";
         }
 
+        /// <summary>Fix pass 5 (M2): a number as evidence text, the same on
+        /// every seat: ASCII digits with a leading '-' when negative, written
+        /// here and never by the thread's culture (whose negative sign may be
+        /// any text). At most 20 bytes (long.MinValue).</summary>
+        internal static string N(long v)
+        {
+            if (v == 0) return "0";
+            var b = new char[20];
+            int i = b.Length;
+            ulong u = v < 0 ? (ulong)(-(v + 1)) + 1UL : (ulong)v;
+            while (u > 0) { b[--i] = (char)('0' + (int)(u % 10UL)); u /= 10UL; }
+            if (v < 0) b[--i] = '-';
+            return new string(b, i, b.Length - i);
+        }
+
         internal static string Arm(int from, int claimId, int projView, int victimView, string outcome)
         {
-            return "[POISON-CLAIM] arm from=" + from + " c=" + claimId + " proj=" + projView + " victim=" + victimView
-                + " outcome=" + Cap(outcome, OutcomeMax);
+            return "[POISON-CLAIM] arm from=" + N(from) + " c=" + N(claimId) + " proj=" + N(projView)
+                + " victim=" + N(victimView) + " outcome=" + Cap(outcome, OutcomeMax);
         }
 
         internal static string Recv(int from, int claimId, int projView, int victimView, string outcome)
         {
-            return "[POISON-CLAIM] recv from=" + from + " c=" + claimId + " proj=" + projView + " victim=" + victimView
-                + " outcome=" + Cap(outcome, OutcomeMax);
+            return "[POISON-CLAIM] recv from=" + N(from) + " c=" + N(claimId) + " proj=" + N(projView)
+                + " victim=" + N(victimView) + " outcome=" + Cap(outcome, OutcomeMax);
         }
 
         /// <summary>Fix pass 3/4 (M2): a started claim's outcome, one field per
@@ -1290,9 +1306,9 @@ namespace CompetitiveRounds
         internal static string Started(int streams, int firstStream, int children, int threw, int contained,
                                        string firstFault)
         {
-            return "started streams=" + streams
-                + (streams > 0 ? " first=s" + firstStream + " last=s" + (firstStream + streams - 1) : "")
-                + " children=" + children + " threw=" + threw + " contained=" + contained
+            return "started streams=" + N(streams)
+                + (streams > 0 ? " first=s" + N(firstStream) + " last=s" + N(firstStream + streams - 1) : "")
+                + " children=" + N(children) + " threw=" + N(threw) + " contained=" + N(contained)
                 + (threw > 0 || contained > 0 ? " first_fault=" + Cap(firstFault ?? "unknown", FaultMax) : "");
         }
 
@@ -1309,14 +1325,15 @@ namespace CompetitiveRounds
         internal static string Rate(int from, long second, int excess, object[] first, object[] last, long total,
                                     long roomTotal, int hw)
         {
-            return "[POISON-CLAIM] rate from=" + from + " second=" + second + " excess=" + excess
-                + " first=(" + Tuple(first) + ") last=(" + Tuple(last) + ") total=" + total + " room_total=" + roomTotal
-                + " hw=" + hw + " outcome=drop reason=rate";
+            return "[POISON-CLAIM] rate from=" + N(from) + " second=" + N(second) + " excess=" + N(excess)
+                + " first=(" + Tuple(first) + ") last=(" + Tuple(last) + ") total=" + N(total)
+                + " room_total=" + N(roomTotal) + " hw=" + N(hw) + " outcome=drop reason=rate";
         }
 
         private static string Tuple(object[] a)
         {
-            return "c=" + ClaimCore.Field(a, 4) + " proj=" + ClaimCore.Field(a, 3) + " victim=" + ClaimCore.Field(a, 2);
+            return "c=" + N(ClaimCore.Field(a, 4)) + " proj=" + N(ClaimCore.Field(a, 3))
+                + " victim=" + N(ClaimCore.Field(a, 2));
         }
 
         /// <summary>A result as its outcome field: "started" stays, every other

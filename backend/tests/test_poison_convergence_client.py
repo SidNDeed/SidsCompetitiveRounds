@@ -615,6 +615,101 @@ CLAIM_START_FAULT_MUTANTS = {
 }
 
 
+# Fix pass 5 (M2): every member that builds an arm, recv or rate record, its
+# outcome, or a reason an outcome carries (gate, activation, room event), and
+# the shell's own [POISON-CLAIM] lines.
+NUMBER_SITES = (
+    (CORE, "internal static class ClaimLine"),
+    (CORE, "internal string DupState("),
+    (CORE, "internal string SaturatedState()"),
+    (CORE, "internal string RecvOutcome("),
+    (CORE, "private string Decide("),
+    (CORE, "internal string Handle("),
+    (CORE, "internal void Receive("),
+    (CORE, "internal bool Evaluate(int[] fighters"),
+    (CORE, "internal static string Label(int arm)"),
+    (PS, "internal static void V3RoomEvent("),
+    (PS, "internal static bool PoisonEffectEnter("),
+    (PS, "internal static bool PrefixFaultDecision("),
+    (PS, "private static void NoteFirstFault("),
+)
+
+# Operands a site may concatenate as they are: text, never a number.
+STRINGY = {"Cap", "Tuple", "DupState", "SaturatedState", "Outcome", "ClaimLine.Outcome", "o", "outcome", "kind",
+           "why", "_killWhy", "where", "result", "typeName", "ex.GetType", "f.GateWhy", "ex.Message"}
+
+_TOKEN = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*|\([^()]*\))*"
+
+
+def _strip_n(text):
+    """The text with every N(...) / ClaimLine.N(...) group written as the
+    literal "#" (the only way a number may reach these lines)."""
+    out, i = [], 0
+    for m in re.finditer(r"(?:ClaimLine\.)?\bN\(", text):
+        if m.start() < i:
+            continue
+        out.append(text[i:m.start()])
+        out.append('"#"')
+        i = _close(text, m.end() - 1, "(", ")")
+    out.append(text[i:])
+    return "".join(out)
+
+
+def _number_leaks(body):
+    """Operands concatenated with text that are not text: an identifier,
+    member or call whose head is not in STRINGY, or a parenthesized group
+    holding no string literal (an int ternary or sum)."""
+    t = _strip_n(_code(body))
+    bad = []
+    for m in re.finditer(r'"\s*\+\s*(' + _TOKEN + ")", t):
+        head = m.group(1).split("(")[0]
+        if head not in STRINGY:
+            bad.append(m.group(1))
+    for m in re.finditer(r"([A-Za-z_][\w.]*)\s*\+\s*\"", t):
+        if m.group(1) not in STRINGY:
+            bad.append(m.group(1))
+    for m in re.finditer(r'"\s*\+\s*\(', t):
+        j = _close(t, m.end() - 1, "(", ")")
+        if '"' not in t[m.end() - 1:j]:
+            bad.append(t[m.end() - 1:j])
+    for form in (".ToString(", "$\"", "string.Format(", "String.Format("):
+        if form in t:
+            bad.append(form)
+    return bad
+
+
+def check_claim_numbers_invariant(src):
+    """Fix pass 5 (M2): every number on an arm, recv or rate record, in its
+    outcome, or in a reason an outcome carries, is written by ClaimLine.N
+    (ASCII digits and '-'), never by the receiving thread's culture."""
+    for f, sig in NUMBER_SITES:
+        body = _member(src[f], sig)
+        bad = _number_leaks(body)
+        assert not bad, "%s writes a number by culture: %s" % (sig, bad)
+    n = _code(_member(src[CORE], "internal static string N(long v)"))
+    assert "ToString" not in n and "Format" not in n, "N formats by culture"
+
+
+# check_claim_numbers_invariant: one mutation per path (each red).
+NUMBER_MUTANTS = {
+    "arm": (CORE, '"[POISON-CLAIM] arm from=" + N(from)', '"[POISON-CLAIM] arm from=" + from'),
+    "recv": (CORE, '"[POISON-CLAIM] recv from=" + N(from)', '"[POISON-CLAIM] recv from=" + from'),
+    "rate": (CORE, '" second=" + N(second)', '" second=" + second'),
+    "tuple": (CORE, '"c=" + N(ClaimCore.Field(a, 4))', '"c=" + ClaimCore.Field(a, 4)'),
+    "stream-range": (CORE, '" last=s" + N(firstStream + streams - 1)', '" last=s" + (firstStream + streams - 1)'),
+    "dup": (CORE, '"hw=" + ClaimLine.N(hw) + " hw_from=line"', '"hw=" + hw + " hw_from=line"'),
+    "saturated": (CORE, '" starts=" + ClaimLine.N(_started.Count)', '" starts=" + _started.Count'),
+    "evaluate": (CORE, '"not-acked " + ClaimLine.N(acked)', '"not-acked " + acked'),
+    "label": (CORE, '"local-only c=" + ClaimLine.N(arm)', '"local-only c=" + arm'),
+    "interpolated": (CORE, 'return "local-only c=" + ClaimLine.N(arm);', 'return $"local-only c={arm}";'),
+    "room-event": (PS, 'kind + " actor=" + ClaimLine.N(p != null ? p.ActorNumber : -1)',
+                   'kind + " actor=" + (p != null ? p.ActorNumber : -1)'),
+    "skip": (PS, "+ ClaimLine.N(pv != null ? pv.ViewID : -1) + \" victim=\"", "+ (pv != null ? pv.ViewID : -1) + \" victim=\""),
+    "prefix": (PS, '" n=" + ClaimLine.N(_prefixFaults)', '" n=" + _prefixFaults'),
+    "n-by-culture": (CORE, 'if (v == 0) return "0";', 'if (v != long.MinValue) return v.ToString();'),
+}
+
+
 def check_silent_arm(src):
     shadow = _code(_member(src[PS], "internal static IEnumerator ShadowDot("))
     assert '" arm=" + SilentArm.Label(armClaim)' in shadow, "the SILENT line does not name its arm"
@@ -631,6 +726,7 @@ CHECKS = {f.__name__: f for f in (
     check_evidence_tags, check_point_binding, check_replay_wiring, check_unstamped_break, check_silent_arm,
     check_header_failure_retires, check_fence_failure_retires, check_v3_live_names_every_dependency,
     check_claim_dispatch_terminal, check_claim_evidence_bounded, check_claim_start_faults_attributed,
+    check_claim_numbers_invariant,
 )}
 
 # (check, file, old, new): one named mutation per check that must turn it red.
@@ -672,6 +768,7 @@ MUTANTS = {
     "check_claim_dispatch_terminal": (PS, "if (a == null || a.Length < 2) return;", "if (a == null || a.Length < 4) return;"),
     "check_claim_evidence_bounded": CLAIM_EVIDENCE_MUTANTS["per-child-line"],
     "check_claim_start_faults_attributed": CLAIM_START_FAULT_MUTANTS["prefix-room-line"],
+    "check_claim_numbers_invariant": NUMBER_MUTANTS["rate"],
 }
 
 # check_v3_live_names_every_dependency: one mutation per term of V3PatchesLive
@@ -740,6 +837,14 @@ def test_claim_start_faults_turn_red(which):
     with pytest.raises(AssertionError):
         check_claim_start_faults_attributed(_mutate(src, CLAIM_START_FAULT_MUTANTS[which]))
     check_claim_start_faults_attributed(_mutate(src, CONTROL))
+
+
+@pytest.mark.parametrize("which", sorted(NUMBER_MUTANTS))
+def test_claim_numbers_turn_red(which):
+    src = _normal(_load())
+    with pytest.raises(AssertionError):
+        check_claim_numbers_invariant(_mutate(src, NUMBER_MUTANTS[which]))
+    check_claim_numbers_invariant(_mutate(src, CONTROL))
 
 
 @pytest.mark.parametrize("term", sorted(V3_LIVE_MUTANTS))
