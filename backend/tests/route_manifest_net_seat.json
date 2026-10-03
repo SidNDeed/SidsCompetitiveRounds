@@ -682,7 +682,7 @@
           ],
           "main",
           "pc_card_face",
-          "d5641741d37a36d3bf1413e5187f6d8bbbef3fc9"
+          "fb4020aa69d13554a9faae98671967d107e55e4f"
         ],
         [
           "/api/v1/pc/collection",
@@ -691,7 +691,7 @@
           ],
           "main",
           "pc_collection",
-          "2c3656d2bb5da6664abc40fb70ba3d610f573675"
+          "50efa9309738f4a8c5bd3cd9e8125b4003939bce"
         ],
         [
           "/api/v1/pc/daily",
@@ -718,7 +718,7 @@
           ],
           "main",
           "pc_packs_history",
-          "6b16cf8f0fb14274aef5a2119061c2659d6719d5"
+          "69a74203f97f6c30bd4cd6741e6fe7da534ecd1f"
         ],
         [
           "/api/v1/pc/packs/open",
@@ -727,7 +727,7 @@
           ],
           "main",
           "pc_open_pack",
-          "4b6820cf6f6f36652204638ae27bfdc6ae5fb275"
+          "be8640d4883b9c70af5cb59bfa37676e6692f6c0"
         ],
         [
           "/api/v1/pc/packs/result",
@@ -736,7 +736,7 @@
           ],
           "main",
           "pc_pack_result",
-          "dd2641497182f862b37fe3bd46213c0f5796af8d"
+          "58856a09c387ee638ff7121ac45d41654f5029bf"
         ],
         [
           "/api/v1/pc/pool",
@@ -1849,7 +1849,7 @@
           ],
           "main",
           "health_check",
-          "43cb64db3ab672791bcfc49ae71f1752186d51da"
+          "a7dc1f35ad48058d4b4dfb4eb526e2a0a6c215b6"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2981,7 +2981,7 @@
           ],
           "main",
           "internal_pc_binder",
-          "ebb53a06f36faaea08b38c4c10bd05937d619cd4"
+          "eaa47e70ade47795b9a50f47cbc571e71a8fb011"
         ],
         [
           "/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png",
@@ -2990,7 +2990,7 @@
           ],
           "main",
           "internal_pc_binder_page",
-          "d2d7520ff566b0dcac8a34b7e74df1813f057d93"
+          "f6b6515252e97d8dede557c680506689beeefe54"
         ],
         [
           "/api/v1/internal/pc/card",
@@ -3008,7 +3008,7 @@
           ],
           "main",
           "internal_pc_collection",
-          "08e7727d42f54dad052bad86feb619674e1ebc92"
+          "fee629824da76c334dff074bb6c5420d07286dd6"
         ],
         [
           "/api/v1/internal/pc/daily",
@@ -3197,7 +3197,7 @@
           ],
           "main",
           "internal_pc_face_preview",
-          "5f265d895aa6a11a11b566b301e19e394df17872"
+          "93829b7eddf969483afe5a7bc48992e007b80dc1"
         ],
         [
           "/api/v1/internal/pc/face/print/{print_id}/{locale}",
@@ -3206,7 +3206,7 @@
           ],
           "main",
           "internal_pc_face_print",
-          "69e86616a48540243debea14ea35c269fe18e18c"
+          "85374cfee7595ba9915a1e816ce72ce7912b5265"
         ],
         [
           "/api/v1/internal/pc/lease",
@@ -3242,7 +3242,7 @@
           ],
           "main",
           "internal_pc_packs",
-          "b49dd6e93c1970b9c7f4177c4fd3e1d6e3b2454d"
+          "67f5fe97b0f1831ecaa391e601d691b6fec782d2"
         ],
         [
           "/api/v1/internal/pc/packs/open",
@@ -3251,7 +3251,7 @@
           ],
           "main",
           "internal_pc_open_pack",
-          "8546ebbd2c9f442874d239d333a34114a6ef277d"
+          "f9f274ce2ff383a300a9d2cb0201ca2c0bf8147d"
         ],
         [
           "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
@@ -3260,7 +3260,7 @@
           ],
           "main",
           "internal_pc_pack_strip",
-          "370a66ca37ae697281d3cbfa7df6e7d3f72f7790"
+          "1e3ef00bc6546b4789cc23b57503d2a5ee09468e"
         ],
         [
           "/api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png",
@@ -3269,7 +3269,7 @@
           ],
           "main",
           "pc_face_png",
-          "9128c0765d1059c8f6210466706c7f1169299311"
+          "617ba9c361dca7f3eb065514d34f43532563ed4b"
         ],
         [
           "/api/v1/pc/portrait",
@@ -3287,7 +3287,7 @@
           ],
           "main",
           "pc_motion_upload",
-          "20c70e0cd9c932ff49be5c07453ed4da35aa7666"
+          "b24a3142ca1377df509ae0ecd97b0cacdb57c88d"
         ],
         [
           "/api/v1/pc/dance",
@@ -3305,7 +3305,7 @@
           ],
           "main",
           "pc_face_motion_read",
-          "853126ed53d9a03882fa833bf4be1312b53008fc"
+          "29eb49d964d1a4a23447d042581dac0613105c20"
         ],
         [
           "/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png",
@@ -3314,7 +3314,7 @@
           ],
           "main",
           "pc_face_motion_atlas",
-          "be2da83675c68e9418064532332474e16644fd2f"
+          "1ca028186a180a487c8c72f853273035e81406d3"
         ],
         [
           "/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif",
@@ -3323,7 +3323,7 @@
           ],
           "main",
           "internal_pc_motion_preview",
-          "adea559a57433a30ad3cf3a6c6bce1e00d5d5605"
+          "a8d5eb328fedb10b46154e7ad95d17b49d059df3"
         ],
         [
           "/api/v1/pc/trades",
@@ -3332,7 +3332,7 @@
           ],
           "main",
           "pc_trades",
-          "2e9f20f16ea737c72d40bd254d676c76ad256598"
+          "17f7848a908939b16d0338661c334a39f75d4495"
         ],
         [
           "/api/v1/pc/trades/accept",
@@ -3341,7 +3341,7 @@
           ],
           "main",
           "pc_trade_accept",
-          "e934df62a8187ab1ad35c5dec063f4dd8287dfe5"
+          "2eeb80975ba65fe752543e4ad3f11b9762b0bfe2"
         ],
         [
           "/api/v1/pc/trades/cancel",
@@ -3350,7 +3350,7 @@
           ],
           "main",
           "pc_trade_cancel",
-          "2ad430d3b916e954540f7ad4f5557290a95821f5"
+          "91d250b1be68efd3f258d4f485b57bd4cd9e36fa"
         ],
         [
           "/api/v1/pc/trades/decline",
@@ -3359,7 +3359,7 @@
           ],
           "main",
           "pc_trade_decline",
-          "5596be0c9c199a5854b73e24e5dcbc5e4f001ba9"
+          "2017e9ff6f8716fd4c02b16581c5edfbb2f16c5d"
         ],
         [
           "/api/v1/pc/trades/propose",
@@ -3368,7 +3368,7 @@
           ],
           "main",
           "pc_trade_propose",
-          "0ba0bffb53934f71241b9c33f5d927ac8e026040"
+          "6db0d41d7592083226444d0d27d0e7b6f7cfcfc5"
         ]
       ]
     },
@@ -3563,7 +3563,7 @@
       [
         "main",
         "lifespan",
-        "54a734767147dc6d19bedf449dffd9851ee95175"
+        "46e37f7ed7742b40a530696d5eba6aab36a4f2ad"
       ]
     ]
   },
