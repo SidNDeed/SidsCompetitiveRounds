@@ -76,6 +76,13 @@ namespace CompetitiveRounds
         private static int _frzRule = -1, _frzVerdict = -1, _frzShared = -1;
 
         private const int TARGET_CAP = 8, SLOT_SCAN_CAP = 64, PLAYER_SCAN_CAP = 16, EV_CAP = 256;
+
+        // the room predicate as the tick last evaluated it, outside combat (F4): the
+        // phase hook reads only these two values, never the room
+        private static bool _gateOk;
+        private static string _gateRoom = "";
+        private static long _gateNextMs;
+        private const long GATE_EVERY_MS = 250;
         private const int EV_PHASE = 1, EV_SPAWN = 2, EV_ENDPICK = 3, EV_DONE = 4, EV_APPLY = 5, EV_SEAL = 6;
 
         /// <summary>One collector call as the hook copied it. Preallocated and
@@ -107,7 +114,7 @@ namespace CompetitiveRounds
             internal readonly int[] Tgt = new int[TARGET_CAP];
             // the seal
             internal bool Keep;
-            internal string Seat, Other, Attach, End, RulesProp, BuildValue;
+            internal string Seat, Other, Attach, End, RulesProp;
             internal int Rule, Verdict, Closing, Inc;
             internal readonly long[] Cost = new long[K.COLLECTORS * COST_W];
         }
@@ -138,7 +145,7 @@ namespace CompetitiveRounds
             e.Src = null; e.Creator = -1;
             e.SlotN = 0; e.Pi = -1; e.Vid = -1; e.Pk = -1; e.Wp = -1; e.SenderOk = -1;
             e.ApKind = 0; e.Outcome = K.APPLY_FAULTED; e.TgtN = 0;
-            e.Keep = false; e.Seat = e.Other = e.Attach = e.End = e.RulesProp = e.BuildValue = null;
+            e.Keep = false; e.Seat = e.Other = e.Attach = e.End = e.RulesProp = null;
             e.Rule = -1; e.Verdict = -1; e.Closing = -1; e.Inc = 0;
             return e;
         }
@@ -191,7 +198,7 @@ namespace CompetitiveRounds
         /// game also copies the player order and the held cards.</summary>
         internal static void PhaseStarted(CardChoice choice)
         {
-            if (!GateRoom()) return;
+            if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) return;
             long t0 = Stopwatch.GetTimestamp();
             try { C1(choice); } catch (Exception ex) { Fault(0, ex); }
             Cost(0, t0);
@@ -387,7 +394,9 @@ namespace CompetitiveRounds
 
         /// <summary>An online 1v1 fighter room: the room predicate the seat
         /// evidence start block uses (GameStateWatcher oneVOneMatchAtStart),
-        /// plus not a spectator and not the FFA engine.</summary>
+        /// plus not a spectator and not the FFA engine. It scans and
+        /// classifies the room, so only the tick evaluates it, outside combat
+        /// (RefreshGate, F4).</summary>
         private static bool GateRoom()
         {
             try
@@ -403,6 +412,20 @@ namespace CompetitiveRounds
                 return RoomActors.ActiveFighterCount() == 2;
             }
             catch { return false; }
+        }
+
+        /// <summary>Tick, outside combat: the room predicate for the phase
+        /// hook, at once for a room it has not seen, else every
+        /// GATE_EVERY_MS. A hook in a room the tick has not evaluated yet
+        /// collects nothing.</summary>
+        private static void RefreshGate()
+        {
+            string room = RoomName();
+            long now = _sw.ElapsedMilliseconds;
+            if (now < _gateNextMs && string.Equals(room, _gateRoom, StringComparison.Ordinal)) return;
+            _gateNextMs = now + GATE_EVERY_MS;
+            _gateOk = GateRoom();
+            _gateRoom = room;
         }
 
         private static string RoomName()
@@ -564,7 +587,6 @@ namespace CompetitiveRounds
                     e.Closing = SharedNow();
                     try { e.RulesProp = RoomRules.LatchedProp; } catch { e.RulesProp = null; }
                 }
-                try { e.BuildValue = PeerBuild.BuildValue(); } catch { e.BuildValue = null; }
                 e.Inc = _hookInc | (_hookLost > 0 ? K.INC_LOST : 0);
                 Array.Copy(_cost, e.Cost, _cost.Length);
                 e.Faulted = false;
@@ -704,7 +726,7 @@ namespace CompetitiveRounds
             if (e.Kind == EV_PHASE)
             {
                 if (!Current(e)) DrainBegin(e);
-                else if (e.Pool != null && !ReferenceEquals(e.Pool, _dPool)) _game.PoolState = K.POOL_CHANGED;
+                else if (e.Pool != null && !ReferenceEquals(e.Pool, _dPool)) _game.PoolState = K.WorstPool(_game.PoolState, K.POOL_CHANGED);
                 if (e.Faulted) _game.Inc |= K.INC_FAULT;
                 _game.OpenPhase(e.Role, e.Picks, e.Rs, e.Ro, e.Shared);
                 return;
@@ -774,7 +796,7 @@ namespace CompetitiveRounds
         {
             internal K.CardGame Game;
             internal CardInfo[] PoolRef;
-            internal string Seat, Other, Attach, End, BuildValue, Text, Env;
+            internal string Seat, Other, Attach, End, Text, Env;
             internal int Rule, Verdict;
             internal long[][] Cost;
             internal K.Profile Prof;
@@ -804,7 +826,7 @@ namespace CompetitiveRounds
             _pending.Add(new Pending
             {
                 Game = game, PoolRef = _dPool, Seat = e.Seat, Other = e.Other, Attach = e.Attach, End = e.End,
-                BuildValue = e.BuildValue, Rule = e.Rule, Verdict = e.Verdict, Cost = cost,
+                Rule = e.Rule, Verdict = e.Verdict, Cost = cost,
                 Prof = new K.Profile { Rules = e.RulesProp ?? "" },
             });
             _nextBuildMs = 0;
@@ -835,6 +857,7 @@ namespace CompetitiveRounds
             {
                 DrainNotes();
                 if (SeatEvidence.CombatLive()) return;
+                RefreshGate();
                 DrainEvents();
                 BuildPending(false);
             }
@@ -900,14 +923,19 @@ namespace CompetitiveRounds
                         if (!p.Checked)
                         {
                             p.Checked = true;
+                            // the final census's own state, every one of them (CD-M4): a collision it
+                            // finds is a collision whether or not the name digest moved
                             var again = TakeCensus(p.PoolRef);
-                            if (!again.Ok) p.Game.PoolState = K.POOL_NOT_RUN;
-                            else if (again.Digest != p.Game.Digest && p.Game.PoolState == K.POOL_OK) p.Game.PoolState = K.POOL_CHANGED;
+                            string fin = !again.Ok ? K.POOL_NOT_RUN
+                                       : (again.Collision ? K.POOL_COLLISION : (again.Digest != p.Game.Digest ? K.POOL_CHANGED : K.POOL_OK));
+                            p.Game.PoolState = K.WorstPool(p.Game.PoolState, fin);
                         }
                         var prof = p.Prof;
                         prof.GameSha = SeatEvidence.GameDllSha; prof.GameState = SeatEvidence.GameDllState;
                         prof.ModSha = SeatEvidence.OwnDllSha; prof.ModState = SeatEvidence.OwnDllState;
-                        prof.Build = SeatEvidenceCore.SplitBuild(p.BuildValue) ?? new[] { "", "", "" };
+                        string build = null;
+                        try { build = PeerBuild.BuildValue(); } catch { }      // the build lookup is the tick's (F4)
+                        prof.Build = SeatEvidenceCore.SplitBuild(build) ?? new[] { "", "", "" };
                         string text = K.Budget(p.Game.Record(p.End, prof, p.Rule, p.Verdict, p.Cost));
                         string sig = ApiClient.SeatEvidenceSig(K.Canonical(p.Seat, p.Other, stable, p.Attach, text));
                         string env = K.Envelope(p.Seat, p.Other, stable, p.Attach, text, sig);

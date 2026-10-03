@@ -62,6 +62,8 @@ namespace CardDrawReplay
             _choice = new CardChoice { cards = Pool(10) };
             _choice.transform.childCount = 5;
             CardChoice.instance = _choice;
+            // the room predicate is the tick's (F4): a tick evaluates it before any phase
+            CardDrawEvidence.Tick();
         }
 
         private static void Phase(int pickrId)
@@ -318,11 +320,80 @@ namespace CardDrawReplay
             Eq(2, Last().GetProperty("inc").GetInt32() & 2, "events lost");
         }
 
+        // -- fix pass 3 -------------------------------------------------------------------
+
+        /// <summary>CD-M4: a category that becomes a distinct object with the
+        /// same name during the game (the name digest unchanged) reads
+        /// collision in the record, never ok.</summary>
+        private static void CensusFinalCollision()
+        {
+            Phase(0);
+            Pick(Hand(0, 1, 2, 3, 4, 5), 0, 0);
+            CardDrawEvidence.Tick();
+            _choice.cards[2].categories = new[] { new CardCategory { name = "Gun" } };
+            Dispatch();
+            CardDrawEvidence.Tick();
+            Eq(1, SeatEvidence.Queued.Count, "recorded");
+            Eq("collision", Last().GetProperty("pool")[2].GetString(), "the final census's collision");
+        }
+
+        /// <summary>F4: the phase hook reads a room verdict the tick computed;
+        /// it scans nothing itself. In a room the tick has not evaluated yet
+        /// the hook collects nothing; after a tick it collects.</summary>
+        private static void GatePrecomputed()
+        {
+            int s0 = RoomActors.Scans;
+            Check(s0 >= 1, "the tick scanned the room");
+            Phase(0);
+            Phase(1);
+            Phase(0);
+            Eq(s0, RoomActors.Scans, "no room scan in the phase hook");
+            Pick(Hand(0, 1, 2, 3, 4, 5), 0, 0);
+            Dispatch();
+            CardDrawEvidence.Tick();
+            Eq(1, SeatEvidence.Queued.Count, "the first room's game recorded");
+            // a new room before any tick: nothing collected
+            PhotonNetwork.CurrentRoom.Name = "ranked_room2";
+            Phase(0);
+            Pick(Hand(0, 1, 2, 3, 4, 5), 0, 0);
+            CardDrawEvidence.Dispatch(SEAT, OTHER, "ranked_room2_123456_r3", true);
+            CardDrawEvidence.Tick();
+            Eq(1, SeatEvidence.Queued.Count, "a room the tick had not evaluated collects nothing");
+            // the tick evaluated it: the next game collects
+            VanillaCardSequence.GameValue = 2;
+            Phase(0);
+            Pick(Hand(0, 1, 2, 3, 4, 5), 0, 0);
+            CardDrawEvidence.Dispatch(SEAT, OTHER, "ranked_room2_123456_r4", true);
+            CardDrawEvidence.Tick();
+            Eq(2, SeatEvidence.Queued.Count, "collected once the tick evaluated the room");
+        }
+
+        /// <summary>F4: the build lookup (reflection) is the tick's: no hook
+        /// and no dispatch looks it up, and the record carries it.</summary>
+        private static void BuildOnTick()
+        {
+            Phase(0);
+            var h = Hand(0, 1, 2, 3, 4, 5);
+            Apply(2, ME, CardDrawEvidenceCore.APPLY_DONE);
+            Pick(h, 0, 0);
+            Dispatch();
+            Eq(0, PeerBuild.Calls, "no build lookup in a hook or the dispatch");
+            CardDrawEvidence.Tick();
+            Check(PeerBuild.Calls >= 1, "the tick looked the build up");
+            var p = Last().GetProperty("prof");
+            Eq("1.41.0", p[4].GetString(), "the version");
+            Eq("STANDALONE", p[5].GetString(), "the variant");
+            Eq("abc1234", p[6].GetString(), "the commit");
+        }
+
         private static readonly Dictionary<string, Action> Cases = new Dictionary<string, Action>
         {
             { "seal", Seal }, { "first_fault", FirstFault }, { "orphan_fault", OrphanFault }, { "freeze", Freeze },
             { "not_run", NotRun }, { "census_per_game", CensusPerGame }, { "census_states", CensusStates },
             { "quit_spools", QuitSpools }, { "ring_bounded", RingBounded },
+            // fix pass 3
+            { "census_final_collision", CensusFinalCollision }, { "gate_precomputed", GatePrecomputed },
+            { "build_on_tick", BuildOnTick },
         };
 
         private static int Main(string[] args)

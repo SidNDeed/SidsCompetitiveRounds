@@ -99,7 +99,34 @@ BOUND_REQUIRED = ["HitEvidence.PointEnd", "HitEvidence.GameEnd", "HitEvidence.No
                   "PoisonSync.ReportUnansweredSilences", "SeatEvidence.Dispatch", "SeatEvidence.DamageGate",
                   "SeatEvidence.DamageArrived", "CardDrawEvidence.Dispatch", "CardDrawEvidence.C1",
                   "CardDrawEvidence.Push", "CardDrawEvidence.Fault", "CardDrawEvidence.FirstPhase", "SeatEvidence.Handover",
-                  "SeatEvidenceCore.Block", "SeatEvidenceCore.Offer", "SeatEvidenceCore.Next"]
+                  "SeatEvidenceCore.Block", "SeatEvidenceCore.Offer", "SeatEvidenceCore.Next",
+                  # fix pass 3: the walk crosses into the rest of the plugin (methods and property getters)
+                  "FfaCardSequence.DrawIndexOf", "VanillaCardSequence.SharedSlotsServed",
+                  "NetworkReplicaDiagnostics.TryGetOpponentGameObs", "RoomActors.LocalIsSpectator"]
+
+# fix pass 3 (F4, transitive): (name, [(file, old, new), ...], method the check must flag)
+BOUND_MULTI = [
+    # the room predicate back in the phase hook: its scan is three calls down, in another file
+    ("gate_scan_in_hook", [("CardDrawEvidence.cs",
+                            "if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) return;",
+                            "if (!GateRoom()) return;")], "RoomActors.ActiveFighters"),
+    # the reflected build lookup back in either dispatch
+    ("card_build_lookup_at_dispatch", [("CardDrawEvidence.cs", "e.Keep = rankedNow || CardDrawEvidenceTestGate.On;",
+                                        "e.Keep = rankedNow || CardDrawEvidenceTestGate.On; PeerBuild.BuildValue();")],
+     "PeerBuild.BuildValue"),
+    ("seat_build_lookup_at_dispatch", [("SeatEvidence.cs", "_captures.Add(cap);", "PeerBuild.BuildValue(); _captures.Add(cap);")],
+     "PeerBuild.BuildValue"),
+    # an uncapped loop two calls below a hook-reached method, in a file the hooks never name
+    ("uncapped_two_down", [("CardDrawEvidence.cs", "_hookPhase = false;\n            var e = Push(EV_DONE);",
+                            "_hookPhase = false;\n            RoomActors.ProbeOuter();\n            var e = Push(EV_DONE);"),
+                           ("RoomActors.cs", "        internal static bool LocalIsSpectator",
+                            "        internal static void ProbeOuter() { ProbeInner(); }\n"
+                            "        private static void ProbeInner() { int n = 0; while (n < 3) n++; }\n"
+                            "        internal static bool LocalIsSpectator")], "RoomActors.ProbeInner"),
+    # the dispatch's diagnostics read loses its cap
+    ("diag_scan_uncapped", [("NetworkReplicaDiagnostics.cs", "for (int i = 0; i < ACTOR_SCAN_CAP && en.MoveNext(); i++)",
+                             "while (en.MoveNext())")], "NetworkReplicaDiagnostics.TryGetOpponentGameObs"),
+]
 
 # (name, file, old, new, method the check must flag); old occurs once in the file
 BOUND_MUTANTS = [
@@ -132,8 +159,16 @@ BOUND_MUTANTS = [
 
 
 def bound_filter(f, cls):
-    # PoisonSync.cs also holds gameplay patches; only its evidence hooks are entries
+    # entries: the evidence files' hooks only (every other plugin file is walked, never an entry);
+    # PoisonSync.cs also holds gameplay patches, so only its evidence hooks are entries
+    if f not in BOUND_SOURCES:
+        return False
     return not (f == "PoisonSync.cs" and not cls.endswith("EvidencePatch"))
+
+
+def plugin_texts():
+    """Every plugin source file: the bound walk is transitive over all of them (fix pass 3)."""
+    return {f: read(os.path.join(PLUGIN, f)) for f in sorted(os.listdir(PLUGIN)) if f.endswith(".cs")}
 
 
 def bound_section():
@@ -143,12 +178,15 @@ def bound_section():
     planted method and nowhere else."""
     sys.path.insert(0, HERE)
     import bound_check
-    texts = {f: read(os.path.join(PLUGIN, f)) for f in BOUND_SOURCES}
+    texts = plugin_texts()
     ok = True
     findings, closure = bound_check.check(texts, bound_filter)
     missing = [m for m in BOUND_REQUIRED if m not in closure]
-    print("bound check: %d methods reachable from the hooks and dispatches; findings %d; required reached %s"
-          % (len(closure), len(findings), "all" if not missing else "MISSING " + ",".join(missing)))
+    outside = sorted(c for c in closure if not any(c.startswith(s[:-3] + ".") or c.startswith(s[:-3] + "_") for s in BOUND_SOURCES))
+    print("bound check: %d plugin files walked; %d methods reachable from the hooks and dispatches (%d outside the evidence files); "
+          "findings %d; required reached %s"
+          % (len(texts), len(closure), len(outside), len(findings), "all" if not missing else "MISSING " + ",".join(missing)))
+    print("  reached outside the evidence files:", ", ".join(outside))
     for f in findings:
         print("  FORBIDDEN in hook-time code: plugin/%s %s uses %s" % f)
     ok = ok and not findings and not missing
@@ -158,14 +196,20 @@ def bound_section():
     print("bound negative control (a token in a comment is not a finding):", "PASS" if not cf else "FAIL %s" % cf)
     ok = ok and not cf
     caught = 0
-    for name, f, old, new, want in BOUND_MUTANTS:
-        n = texts[f].count(old)
-        if n != 1:
-            print("BAD bound mutant %s: anchor occurs %d times in %s" % (name, n, f))
+    every = [(name, [(f, old, new)], want) for name, f, old, new, want in BOUND_MUTANTS] + BOUND_MULTI
+    for name, edits, want in every:
+        mt = dict(texts)
+        good = True
+        for f, old, new in edits:
+            n = mt[f].count(old)
+            if n != 1:
+                print("BAD bound mutant %s: anchor occurs %d times in %s" % (name, n, f))
+                good = False
+                break
+            mt[f] = mt[f].replace(old, new)
+        if not good:
             ok = False
             continue
-        mt = dict(texts)
-        mt[f] = texts[f].replace(old, new)
         mf, mclosure = bound_check.check(mt, bound_filter)
         target = any(x[1] == want for x in mf)
         # control: nothing the base already reached is flagged except the planted method
@@ -174,7 +218,7 @@ def bound_section():
         caught += hit
         ok = ok and hit
         print("%s bound mutant %s: %s flagged=%s; no other base-reached method flagged=%s" % ("CAUGHT" if hit else "MISSED", name, want, target, control))
-    print("bound mutants: %d of %d caught" % (caught, len(BOUND_MUTANTS)))
+    print("bound mutants: %d of %d caught" % (caught, len(every)))
     return ok
 
 

@@ -107,8 +107,18 @@ MUTANTS = [
     ("po_uncapped", "core", "i < po.Count && i < PO_CAP;", "i < po.Count;", "po", "census"),
     ("prof_without_sha", "core", 'bool g = GameState == "ok" && GameSha != null && GameSha.Length == 64;', 'bool g = GameState == "ok";', "opening", "census"),
     ("end_any_text", "core", 'if (SeatEvidenceCore.IsEndKind(end)) o.Add("end", end);', 'if (end != null) o.Add("end", end);', "end", "census"),
-    ("cards_unsorted", "core", "var refs = new SortedSet<long>();", "var refs = new HashSet<long>();", "opening", "census"),
-    ("cards_miss_spawn_refs", "core", "foreach (var s in (List<long>)l[8]) if (s >= 0) refs.Add(s); }", "}", "spawn_order", "census"),
+    ("cards_unsorted", "core", "var kept = new SortedSet<long>();", "var kept = new HashSet<long>();", "opening", "census"),
+    ("cards_miss_spawn_refs", "core", "foreach (var s in (List<long>)entry[8]) if (s >= 0) into.Add(s);", "", "spawn_order", "census"),
+    # fix pass 3, CD-A16: above CARDS_CAP every entry naming an unnamed index is omitted
+    # and counted, and "cards" is exactly the indices the kept entries name
+    ("cards_dependents_kept", "core", "if (hr.IsSubsetOf(named)) hd.Add(e); else hdDrop++;", "hd.Add(e);", "cards_over_cap", "census"),
+    ("cards_hd_drop_uncounted", "core", "if (hr.IsSubsetOf(named)) hd.Add(e); else hdDrop++;", "if (hr.IsSubsetOf(named)) hd.Add(e);", "cards_over_cap", "census"),
+    ("cards_held_drop_uncounted", "core", "heldOut[r].Add(s); else heldDrop[r]++; }", "heldOut[r].Add(s); }", "cards_over_cap", "census"),
+    ("cards_ap_drop_uncounted", "core", "ap.Add(e); else apDrop++; }", "ap.Add(e); }", "cards_over_cap", "census"),
+    ("cards_not_rebuilt", "core", "foreach (var ix in kept)", "foreach (var ix in new SortedSet<long>(named))", "cards_over_cap", "census"),
+    ("cards_named_highest", "core", "foreach (var ix in refs) { if (named.Count < CARDS_CAP)", "foreach (var ix in refs.Reverse()) { if (named.Count < CARDS_CAP)", "cards_over_cap", "census"),
+    # fix pass 3, CD-M4: two readings leave the more severe state
+    ("worst_pool_latest", "core", "return PoolRank(a) >= PoolRank(b) ? PoolStateOf(a) : PoolStateOf(b);", "return PoolStateOf(b);", "worst_pool", "census"),
     ("budget_tie_latest", "core", "if (counts[i] > 0 && (pick < 0 || counts[i] > counts[pick])) pick = i;",
      "if (counts[i] > 0 && (pick < 0 || counts[i] >= counts[pick])) pick = i;", "budget_ties", "census"),
     ("budget_removes_referenced_card", "core", "if (c <= 0) { lastFreeCard = i; break; }", "{ lastFreeCard = i; break; }", "budget_cards", "census"),

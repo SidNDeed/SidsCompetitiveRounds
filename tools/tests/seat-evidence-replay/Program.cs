@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
 using CompetitiveRounds;
@@ -144,6 +145,8 @@ namespace SeatEvidenceReplay
             SetField("_spoolChecked", false);
             SetField("_nextPumpMs", 0L);
             SetField("_inFlight", false);
+            var kept = Field("_spoolKept");
+            kept.GetType().GetMethod("Clear").Invoke(kept, null);
         }
 
         /// <summary>The closing files the quitting path wrote (F3).</summary>
@@ -807,6 +810,153 @@ namespace SeatEvidenceReplay
             Eq(1, RouteCount("c"), "the other request still there");
         }
 
+        // -- fix pass 3, F8: whole-generation recovery and exact-presence spool deletion --
+
+        private static SeatEvidenceCore.Pending P(string route, string body, long first)
+        {
+            return new SeatEvidenceCore.Pending { Route = route, Body = body, FirstUnix = first };
+        }
+
+        private static int BodyCount(string body)
+        {
+            int n = 0;
+            foreach (var l in QueueLines()) if (BodyOf(l) == body) n++;
+            return n;
+        }
+
+        /// <summary>A full queue (QUEUE_CAP requests) on disk as generation 1.</summary>
+        private static List<SeatEvidenceCore.Pending> FullQueue(long now, string tag)
+        {
+            var l = new List<SeatEvidenceCore.Pending>();
+            for (int i = 0; i < 64; i++) l.Add(P("k", "{\"" + tag + "\":" + i.ToString(CultureInfo.InvariantCulture) + "}", now));
+            return l;
+        }
+
+        /// <summary>F8: a request settled by a write that reached only the
+        /// temporary copy is not brought back by the next writer: the newest
+        /// whole generation's removal survives.</summary>
+        private static void StaleRemoval()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var gone = P("e", "{\"settled\":1}", now - SeatEvidenceCore.EXPIRY_S - 10);
+            var kept = P("k", "{\"kept\":1}", now);
+            WriteQueue(new List<SeatEvidenceCore.Pending> { gone, kept }, 1);
+            ApiUp();
+            // the pump settles the expired request; the primary cannot be replaced
+            using (new FileStream(QueueFile(), FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                SendOnce();
+            }
+            Eq(0, ApiClient.Posts.Count, "an expired request is settled, not sent");
+            var t = SeatEvidenceCore.ParseQueue(File.ReadAllText(QueueFile() + ".tmp"), false);
+            Check(t.Whole && t.Items.Count == 1 && t.Items[0].Body == kept.Body, "the temporary copy holds the removal");
+            Eq(true, (bool)Field("_stale"), "memory marked stale");
+            Eq(2, ((System.Collections.IList)Field("_queue")).Count, "memory still holds the settled request");
+            // an unrelated writer, with no session (nothing is sent)
+            ApiClient.Base = "";
+            SeatEvidence.BeginGame(true, true);
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            Eq(1, Logged("record queued"), "the record queued");
+            Eq(0, BodyCount(gone.Body), "the settled request is not brought back");
+            Eq(1, BodyCount(kept.Body), "the other request kept");
+            Eq(2, QueueLines().Length, "the kept request and the record");
+        }
+
+        /// <summary>F8: at a full queue, a request the newest whole generation
+        /// added (its write reached only the temporary copy) survives the next
+        /// writer, and the request that generation evicted stays evicted.</summary>
+        private static void StaleAdditionAtCap()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var full = FullQueue(now, "q");
+            WriteQueue(full, 1);
+            // memory as the launch loaded generation 1
+            var mem = (System.Collections.IList)Field("_queue");
+            foreach (var p in full) mem.Add(p.Clone());
+            SetField("_loaded", true); SetField("_spoolChecked", true); SetField("_gen", 1L);
+            // generation 2, whole only in the temporary copy: the oldest evicted, one added
+            var gen2 = new List<SeatEvidenceCore.Pending>(full);
+            gen2.RemoveAt(0);
+            var added = P("k", "{\"added\":1}", now);
+            gen2.Add(added);
+            WriteQueue(gen2, 2, QueueFile() + ".tmp");
+            SetField("_stale", true);
+            SeatEvidence.BeginGame(true, true);
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            Eq(1, Logged("record queued"), "the record queued");
+            Eq(64, QueueLines().Length, "the queue at its cap");
+            Eq(1, BodyCount(added.Body), "the addition kept at the cap");
+            Eq(0, BodyCount(full[0].Body), "the eviction kept");
+            Eq(0, BodyCount(full[1].Body), "the record evicted the next oldest");
+            Eq(1, RecordCount(), "the record in the file");
+        }
+
+        /// <summary>F8: a closing record at a full queue is admitted (the
+        /// oldest queued request evicted, as Enqueue does) and its file is
+        /// deleted only once the saved queue holds it.</summary>
+        private static void ClosingAtCap()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var full = FullQueue(now, "q");
+            WriteQueue(full, 1);
+            Check(SeatEvidence.SpoolClosing("e", "{\"closing\":1}"), "the closing file written");
+            NextLaunch();
+            ApiUp();
+            SeatEvidence.Tick();
+            Eq(0, SpoolFiles().Length, "the closing file removed once the queue holds it");
+            Eq(64, QueueLines().Length, "the queue at its cap");
+            Eq(1, BodyCount("{\"closing\":1}"), "the closing record in the queue");
+            Eq(0, BodyCount(full[0].Body), "the oldest evicted for it");
+            Eq(1, Logged("oldest queued request(s) dropped for closing records"), "the eviction logged");
+        }
+
+        /// <summary>F8: a closing file whose exact requests are not all in the
+        /// queue the write saved (65 in one file, one past the cap) is kept
+        /// for the next launch, and this launch's later pass (17 files: two
+        /// passes) does not admit it again, so it never evicts the closing
+        /// records whose files were already deleted.</summary>
+        private static void ClosingKeptUnlessHeld()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var many = FullQueue(now, "c");
+            many.Add(P("e", "{\"c\":64}", now));
+            string file = Path.Combine(BepInEx.Paths.ConfigPath, "CompetitiveRounds.seat-evidence.closing-0000000000000000001-0001.jsonl");
+            WriteQueue(many, 1, file);
+            for (int i = 0; i < 16; i++)
+                Check(SeatEvidence.SpoolClosing("e", "{\"s\":" + i.ToString(CultureInfo.InvariantCulture) + "}"), "closing file " + i);
+            NextLaunch();
+            ApiUp();
+            SeatEvidence.Tick();
+            Eq(2, Logged("closing file(s) moved"), "two passes: 16 files, then the 17th");
+            Eq(1, Logged("15 closing file(s) moved"), "the first pass moved the 15 singles it held");
+            Eq(1, Logged(" 1 closing file(s) moved"), "the second pass moved the last single");
+            Eq(64, QueueLines().Length, "the queue at its cap");
+            Eq(0, BodyCount(many[0].Body), "a request of the big file not in the saved queue");
+            Check(File.Exists(file), "the big file kept: not every request it holds was saved");
+            Eq(1, SpoolFiles().Length, "only the big file left");
+            for (int i = 0; i < 16; i++)
+                Eq(1, BodyCount("{\"s\":" + i.ToString(CultureInfo.InvariantCulture) + "}"), "closing record " + i + " in the queue");
+        }
+
+        /// <summary>F4: the opponent sample (a room lookup and a property
+        /// enumeration) runs on the tick only while no battle is live; the
+        /// round-trip sample is taken in combat too.</summary>
+        private static void OpponentSampleOutsideCombat()
+        {
+            PhotonNetwork.CurrentRoom.Players[OPP].CustomProperties["cr_gstats"] = "10|5|3|2|0|60|144|0|0|0|0|40";
+            SeatEvidence.BeginGame(true, true);
+            GameManager.instance.battleOngoing = true;
+            SeatEvidence.Tick();
+            Check(Field("_oppPub") == null, "no opponent sample while combat is live");
+            Eq(true, (bool)Field("_oppSampleDue"), "the opponent sample is due");
+            Check((long)Field("_rttN") >= 1, "the round-trip sample taken in combat");
+            GameManager.instance.battleOngoing = false;
+            SeatEvidence.Tick();
+            var pub = (long[])Field("_oppPub");
+            Check(pub != null && pub[0] == 144, "sampled once no battle is live");
+            Eq(false, (bool)Field("_oppSampleDue"), "taken");
+        }
+
         /// <summary>F1: dmg is 1 only for a nonzero envelope that passes the
         /// game's own predicate and completes without an exception.</summary>
         private static void DamagePredicate()
@@ -879,6 +1029,10 @@ namespace SeatEvidenceReplay
             { "damage_predicate", DamagePredicate },
             // fix pass 2
             { "send_stage", SendStage }, { "stale_merge", StaleMerge },
+            // fix pass 3
+            { "stale_removal", StaleRemoval }, { "stale_addition_at_cap", StaleAdditionAtCap },
+            { "closing_at_cap", ClosingAtCap }, { "closing_kept_unless_held", ClosingKeptUnlessHeld },
+            { "opponent_sample_outside_combat", OpponentSampleOutsideCombat },
         };
 
         private static int Main(string[] args)

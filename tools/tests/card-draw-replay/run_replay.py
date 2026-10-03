@@ -6,7 +6,8 @@ against Stubs.cs, and runs every scripted replay in Program.cs, each in its own
 process: the seal at the dispatch (CD-M1), the room facts frozen before a reset
 or NOT-RUN (CD-M2), a first-phase fault kept (CD-M3), a census per game and the
 pool states (CD-M4), the quitting path's closing file and the tick's combat
-hold (F3), the bounded hook-side buffer (F4).
+hold (F3), the bounded hook-side buffer (F4); fix pass 3: the final census's
+collision (CD-M4), the room predicate and the build lookup on the tick (F4).
 
 Then mutants planted into COPIES of CardDrawEvidence.cs (the tracked file is
 never written): each mutant's target case must FAIL and its control case PASS.
@@ -28,7 +29,9 @@ SOURCE = os.path.join(PLUGIN, "CardDrawEvidence.cs")
 TRACKED = ["CardDrawEvidence.cs", "CardDrawEvidenceCore.cs", "SeatEvidenceCore.cs"]
 
 CASES = ["seal", "first_fault", "orphan_fault", "freeze", "not_run", "census_per_game", "census_states",
-         "quit_spools", "ring_bounded"]
+         "quit_spools", "ring_bounded",
+         # fix pass 3
+         "census_final_collision", "gate_precomputed", "build_on_tick"]
 
 # (name, [(old, new), ...], target case, control case); each old occurs exactly once.
 MUTANTS = [
@@ -50,10 +53,21 @@ MUTANTS = [
     ("census_reused", [("var c = TakeCensus(e.Pool);", "var c = _dCensus != null ? _dCensus : TakeCensus(e.Pool);")], "census_per_game", "seal"),
     ("collision_dropped", [("game.PoolState = !c.Ok ? K.POOL_NOT_RUN : (c.Collision ? K.POOL_COLLISION : K.POOL_OK);",
                             "game.PoolState = !c.Ok ? K.POOL_NOT_RUN : K.POOL_OK;")], "census_states", "seal"),
-    ("pool_ref_unchecked", [("else if (e.Pool != null && !ReferenceEquals(e.Pool, _dPool)) _game.PoolState = K.POOL_CHANGED;", "")],
+    ("pool_ref_unchecked", [("else if (e.Pool != null && !ReferenceEquals(e.Pool, _dPool)) _game.PoolState = K.WorstPool(_game.PoolState, K.POOL_CHANGED);", "")],
      "census_states", "seal"),
-    ("content_unchecked", [("else if (again.Digest != p.Game.Digest && p.Game.PoolState == K.POOL_OK) p.Game.PoolState = K.POOL_CHANGED;", "")],
-     "census_states", "seal"),
+    ("content_unchecked", [("p.Game.PoolState = K.WorstPool(p.Game.PoolState, fin);", "")], "census_states", "seal"),
+    # fix pass 3, CD-M4: the final census's collision is honoured whether or not the digest moved
+    ("final_collision_ignored", [(": (again.Collision ? K.POOL_COLLISION : (again.Digest != p.Game.Digest ? K.POOL_CHANGED : K.POOL_OK));",
+                                  ": (again.Digest != p.Game.Digest ? K.POOL_CHANGED : K.POOL_OK);")], "census_final_collision", "seal"),
+    ("final_overwrites", [("p.Game.PoolState = K.WorstPool(p.Game.PoolState, fin);", "p.Game.PoolState = fin;")], "census_states", "seal"),
+    # fix pass 3, F4: the room predicate and the build lookup are the tick's
+    ("gate_in_hook", [("if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) return;", "if (!GateRoom()) return;")],
+     "gate_precomputed", "seal"),
+    ("gate_new_room_waits", [("if (now < _gateNextMs && string.Equals(room, _gateRoom, StringComparison.Ordinal)) return;",
+                              "if (now < _gateNextMs) return;")], "gate_precomputed", "seal"),
+    ("build_at_dispatch", [("e.Keep = rankedNow || CardDrawEvidenceTestGate.On;",
+                            "e.Keep = rankedNow || CardDrawEvidenceTestGate.On; try { PeerBuild.BuildValue(); } catch { }")],
+     "build_on_tick", "seal"),
     # F3: the quitting path never enters the queue; the tick waits for no combat
     ("quit_queues", [('bool persisted = now ? SeatEvidence.SpoolClosing("k", p.Env) : SeatEvidence.EnqueueCard(p.Env);',
                       "bool persisted = SeatEvidence.EnqueueCard(p.Env);")], "quit_spools", "seal"),

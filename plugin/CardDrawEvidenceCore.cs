@@ -47,6 +47,20 @@ namespace CompetitiveRounds
         /// <summary>pool[2] (CD-M4).</summary>
         internal const string POOL_OK = "ok", POOL_COLLISION = "collision", POOL_CHANGED = "changed", POOL_NOT_RUN = "not_run";
 
+        /// <summary>The pool state two census readings leave (CD-M4): the
+        /// more severe one, in the order not_run, collision, changed, ok (an
+        /// unknown state reads not_run). No reading turns a non-ok state
+        /// back into ok.</summary>
+        internal static string WorstPool(string a, string b)
+        {
+            return PoolRank(a) >= PoolRank(b) ? PoolStateOf(a) : PoolStateOf(b);
+        }
+
+        private static int PoolRank(string s)
+        {
+            return s == POOL_OK ? 0 : (s == POOL_CHANGED ? 1 : (s == POOL_COLLISION ? 2 : 3));
+        }
+
         /// <summary>Application outcomes (CD-M1).</summary>
         internal const int APPLY_DONE = 0, APPLY_SKIPPED = 1, APPLY_FAULTED = 2;
 
@@ -442,24 +456,52 @@ namespace CompetitiveRounds
                  .Add("sc", new long[] { scRule == 0 || scRule == 1 ? scRule : -1, scVerdict >= 0 && scVerdict <= 2 ? scVerdict : -1 })
                  .Add("inc", (long)(Inc & (INC_FIRST | INC_LOST | INC_FAULT)));
                 List<long> h0 = first ? null : Held0[0], h1 = first ? null : Held0[1];
-                // cards: every pool index the record names, ascending
+                // cards (CD-A16): one entry for EVERY non-negative pool index the record keeps.
+                // At most CARDS_CAP indices (the lowest) get metadata; every entry naming another
+                // index is omitted and counted (a hand in omit.hd, a held card in omit.held0, an
+                // application in omit.ap), so no kept reference lacks its card and every check
+                // that needed an omitted entry reads it as omitted.
                 var refs = new SortedSet<long>();
-                foreach (var e in Hd) { var l = (List<object>)e; foreach (var s in (List<long>)l[6]) if (s >= 0) refs.Add(s); foreach (var s in (List<long>)l[8]) if (s >= 0) refs.Add(s); }
+                foreach (var e in Hd) HandRefsOf((List<object>)e, refs);
                 if (h0 != null) foreach (var s in h0) if (s >= 0) refs.Add(s);
                 if (h1 != null) foreach (var s in h1) if (s >= 0) refs.Add(s);
                 foreach (var a in Ap) if (a[1] >= 0) refs.Add(a[1]);
-                var cards = new List<object>();
+                var named = new HashSet<long>();
                 long cardsOmit = 0;
-                foreach (var ix in refs)
+                foreach (var ix in refs) { if (named.Count < CARDS_CAP) named.Add(ix); else cardsOmit++; }
+                long hdDrop = 0, apDrop = 0;
+                long[] heldDrop = { 0, 0 };
+                var hd = new List<object>();
+                foreach (var e in Hd)
                 {
-                    if (cards.Count >= CARDS_CAP) { cardsOmit++; continue; }
+                    var hr = new SortedSet<long>();
+                    HandRefsOf((List<object>)e, hr);
+                    if (hr.IsSubsetOf(named)) hd.Add(e); else hdDrop++;
+                }
+                var heldOut = new List<long>[2];
+                var hsrc = new[] { h0, h1 };
+                for (int r = 0; r < 2; r++)
+                {
+                    if (hsrc[r] == null) continue;
+                    heldOut[r] = new List<long>();
+                    foreach (var s in hsrc[r]) { if (s < 0 || named.Contains(s)) heldOut[r].Add(s); else heldDrop[r]++; }
+                }
+                var ap = new List<object>();
+                foreach (var e in Ap) { if (e[1] < 0 || named.Contains(e[1])) ap.Add(e); else apDrop++; }
+                // the cards the kept entries name (a subset of `named`), ascending
+                var kept = new SortedSet<long>();
+                foreach (var e in hd) HandRefsOf((List<object>)e, kept);
+                for (int r = 0; r < 2; r++) if (heldOut[r] != null) foreach (var s in heldOut[r]) if (s >= 0) kept.Add(s);
+                foreach (long[] a in ap) if (a[1] >= 0) kept.Add(a[1]);
+                var cards = new List<object>();
+                foreach (var ix in kept)
+                {
                     string nm = ix < _canon.Length && _canon[ix] != null ? _canon[ix] : "";
                     if (nm.Length > NAME_CAP) nm = nm.Substring(0, NAME_CAP);
                     cards.Add(new List<object> { ix, nm, (long)(ix < _rar.Length ? _rar[ix] : -1) });
                 }
-                var held = new List<object> { h0 != null ? (object)new List<long>(h0) : null, h1 != null ? (object)new List<long>(h1) : null };
+                var held = new List<object> { heldOut[0] != null ? (object)heldOut[0] : null, heldOut[1] != null ? (object)heldOut[1] : null };
                 var ph = new List<object>(); foreach (var e in Ph) ph.Add((long[])e.Clone());
-                var ap = new List<object>(); foreach (var e in Ap) ap.Add(e);
                 var tot = new List<object>();
                 for (int r = 0; r < 2; r++) { var t = new long[7]; for (int i = 0; i < 7; i++) t[i] = Cnt(Tot[r][i]); tot.Add(t); }
                 var cst = new List<object>();
@@ -468,11 +510,20 @@ namespace CompetitiveRounds
                     var c = cost != null && i < cost.Length && cost[i] != null ? cost[i] : new long[5];
                     var t = new long[5]; for (int j = 0; j < 5; j++) t[j] = Cnt(j < c.Length ? c[j] : 0); cst.Add(t);
                 }
-                o.Add("cards", cards).Add("held0", held).Add("ph", ph).Add("hd", new List<object>(Hd)).Add("ap", ap)
+                o.Add("cards", cards).Add("held0", held).Add("ph", ph).Add("hd", hd).Add("ap", ap)
                  .Add("apx", new long[] { Cnt(ApSkipped), Cnt(ApFaulted) })
                  .Add("tot", tot).Add("cost", cst)
-                 .Add("omit", Omit(cardsOmit, first ? 0 : Held0Omit[0], first ? 0 : Held0Omit[1], PhOmit, HdOmit, ApOmit, SlOmit, SpOmit));
+                 .Add("omit", Omit(cardsOmit, first ? 0 : Held0Omit[0] + heldDrop[0], first ? 0 : Held0Omit[1] + heldDrop[1], PhOmit,
+                                   HdOmit + hdDrop, ApOmit + apDrop, SlOmit, SpOmit));
                 return o;
+            }
+
+            /// <summary>The non-negative pool indexes one hd entry names (its sl
+            /// and its sp).</summary>
+            private static void HandRefsOf(List<object> entry, ISet<long> into)
+            {
+                foreach (var s in (List<long>)entry[6]) if (s >= 0) into.Add(s);
+                foreach (var s in (List<long>)entry[8]) if (s >= 0) into.Add(s);
             }
         }
 

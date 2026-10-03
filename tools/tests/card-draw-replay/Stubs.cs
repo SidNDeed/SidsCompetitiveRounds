@@ -165,7 +165,8 @@ namespace CompetitiveRounds
     {
         internal static bool LocalIsSpectator;
         internal static int Fighters = 2;
-        internal static int ActiveFighterCount() { return Fighters; }
+        internal static int Scans;          // how many room scans ran (F4: the tick's, never a hook's)
+        internal static int ActiveFighterCount() { Scans++; return Fighters; }
     }
 
     internal static class FfaMode { internal static bool EngineActive() { return false; } }
@@ -195,7 +196,11 @@ namespace CompetitiveRounds
 
     internal static class CardRarityLookup { internal static string GetCanonicalName(string n) { return n; } }
 
-    internal static class PeerBuild { internal static string BuildValue() { return "1.41.0|STANDALONE|abc1234"; } }
+    internal static class PeerBuild
+    {
+        internal static int Calls;          // how many build lookups ran (F4: the tick's, never a hook's)
+        internal static string BuildValue() { Calls++; return "1.41.0|STANDALONE|abc1234"; }
+    }
 
     internal static class ApiClient
     {

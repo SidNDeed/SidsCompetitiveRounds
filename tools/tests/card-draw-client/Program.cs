@@ -510,6 +510,76 @@ internal static class Program
         }
     }
 
+    /// <summary>CD-A16 above the cap: 131 distinct referenced indices. The
+    /// lowest CARDS_CAP get metadata; every hand, held card and application
+    /// naming another index is omitted and counted; every kept reference has
+    /// exactly one cards entry and every cards entry is referenced.</summary>
+    private static void CardsOverCap()
+    {
+        var held0 = new List<int>(); var held1 = new List<int>();
+        for (int i = 0; i < 64; i++) held0.Add(i);
+        for (int i = 64; i < 127; i++) held1.Add(i);
+        held1.Add(210);
+        var g = NewGame(220, new IList<int>[] { held0, held1 });
+        g.OpenPhase(0, 1, 0, 0, 0); Spawns(g, new[] { 10, 11, 12 }, 1, null, F0);
+        g.EndPick(L(10, 11, 12), 0, 1, 0, 0, 1, F0, 0); g.DonePicking(0);
+        g.OpenPhase(1, 1, 0, 0, 0); Spawns(g, new[] { 150, 151, 3 }, 1, null, F0);
+        g.EndPick(L(150, 151, 3), 0, 2, 0, 1, 1, F0, 0); g.DonePicking(0);
+        g.Apply(0, 5, 0, 3, 0);
+        g.Apply(1, 200, 0, 4, 0);
+        string text = S.Json(g.Record(null, "", "", 0, 0, null));
+        using (var doc = JsonDocument.Parse(text))
+        {
+            var root = doc.RootElement;
+            True("every kept reference has its card", RefsPresent(root));
+            True("every card is referenced, once", CardsExact(root));
+            Eq("cards: 0..126 (150 was named but only a dropped hand used it)", root.GetProperty("cards").GetArrayLength(), 127);
+            Eq("omit", root.GetProperty("omit").GetRawText(), "{\"cards\":3,\"held0\":[0,1],\"ph\":0,\"hd\":1,\"ap\":1,\"sl\":0,\"sp\":0}");
+            Eq("the hand naming 151 dropped", root.GetProperty("hd").GetArrayLength(), 1);
+            Eq("the held card 210 dropped", root.GetProperty("held0")[1].GetArrayLength(), 63);
+            Eq("the application naming 200 dropped", root.GetProperty("ap").GetRawText(), "[[0,5,0,3]]");
+        }
+        // under the cap nothing is dropped
+        var small = NewGame(220, new IList<int>[] { held0, new List<int> { 64, 210 } });
+        g = small;
+        g.Apply(1, 200, 0, 4, 0);
+        using (var doc = JsonDocument.Parse(S.Json(g.Record(null, "", "", 0, 0, null))))
+        {
+            Eq("under the cap: every reference named", doc.RootElement.GetProperty("cards").GetArrayLength(), 67);
+            Eq("under the cap: nothing omitted", doc.RootElement.GetProperty("omit").GetRawText(),
+               "{\"cards\":0,\"held0\":[0,0],\"ph\":0,\"hd\":0,\"ap\":0,\"sl\":0,\"sp\":0}");
+        }
+    }
+
+    /// <summary>CD-M4: the pool state two census readings leave is the more
+    /// severe one; nothing turns a non-ok state back into ok.</summary>
+    private static void WorstPoolOrder()
+    {
+        string[] order = { K.POOL_OK, K.POOL_CHANGED, K.POOL_COLLISION, K.POOL_NOT_RUN };
+        for (int i = 0; i < order.Length; i++)
+            for (int j = 0; j < order.Length; j++)
+                Eq("worst of " + order[i] + " and " + order[j], K.WorstPool(order[i], order[j]), order[Math.Max(i, j)]);
+        Eq("an unknown state is not_run", K.WorstPool(K.POOL_OK, "other"), K.POOL_NOT_RUN);
+        Eq("an unknown state is not_run (first)", K.WorstPool("other", K.POOL_COLLISION), K.POOL_NOT_RUN);
+    }
+
+    /// <summary>Every cards entry is named by a hand, a held card or an
+    /// application, and no index has two entries.</summary>
+    private static bool CardsExact(JsonElement root)
+    {
+        var need = new HashSet<long>();
+        foreach (var h in root.GetProperty("hd").EnumerateArray()) { foreach (var s in h[6].EnumerateArray()) need.Add(s.GetInt64()); foreach (var s in h[8].EnumerateArray()) need.Add(s.GetInt64()); }
+        foreach (var l in root.GetProperty("held0").EnumerateArray()) if (l.ValueKind == JsonValueKind.Array) foreach (var s in l.EnumerateArray()) need.Add(s.GetInt64());
+        foreach (var a in root.GetProperty("ap").EnumerateArray()) need.Add(a[1].GetInt64());
+        var seen = new HashSet<long>();
+        foreach (var c in root.GetProperty("cards").EnumerateArray())
+        {
+            long ix = c[0].GetInt64();
+            if (!seen.Add(ix) || !need.Contains(ix)) return false;
+        }
+        return true;
+    }
+
     private static bool RefsPresent(JsonElement root)
     {
         var have = new HashSet<long>();
@@ -742,6 +812,9 @@ internal static class Program
         new KeyValuePair<string, Action>("sc_not_run", ScNotRun),
         new KeyValuePair<string, Action>("true_n", TrueN),
         new KeyValuePair<string, Action>("repeated_slot", RepeatedSlot),
+        // fix pass 3
+        new KeyValuePair<string, Action>("cards_over_cap", CardsOverCap),
+        new KeyValuePair<string, Action>("worst_pool", WorstPoolOrder),
     };
 
     private static int Main(string[] args)

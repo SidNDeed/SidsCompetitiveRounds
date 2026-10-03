@@ -37,7 +37,10 @@ CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left",
          "disabled_seat_records", "compat_once_per_launch", "attempt_accounting", "combat_gate", "dispatch_defers",
          "identity_pending", "queue_recovery", "queue_save_fails", "damage_predicate",
          # fix pass 2
-         "send_stage", "stale_merge"]
+         "send_stage", "stale_merge",
+         # fix pass 3
+         "stale_removal", "stale_addition_at_cap", "closing_at_cap", "closing_kept_unless_held",
+         "opponent_sample_outside_combat"]
 
 # (name, old text, new text, target case, control case); old occurs exactly once.
 MUTANTS = [
@@ -112,6 +115,21 @@ MUTANTS = [
     # fix pass 2, F8: a stale memory merges the newest whole copy before any write
     ("stale_ignored", "if (_loaded && !_stale && _spoolChecked) return true;", "if (_loaded && _spoolChecked) return true;",
      "stale_merge", "closing_next_boot"),
+    # fix pass 3, F8: the newest whole generation adopted (additions AND removals, at
+    # the cap); a closing file deleted only when the saved queue holds its requests
+    ("adopt_unions", "            mem.Clear();\n            mem.AddRange(next);",
+     "            foreach (var m in mem) if (Find(next, m.Route, m.Body) < 0) next.Add(m);\n"
+     "            mem.Clear();\n            mem.AddRange(next);", "stale_removal", "closing_next_boot"),
+    ("adopt_skips_at_cap", "if (k < 0) { next.Add(d.Clone()); continue; }",
+     "if (k < 0) { if (mem.Count < QUEUE_CAP) next.Add(d.Clone()); continue; }", "stale_addition_at_cap", "closing_next_boot"),
+    ("closing_skipped_at_cap", "if (evicted) next.RemoveAt(0);\n            next.Add(d.Clone());",
+     "if (evicted) return false;\n            next.Add(d.Clone());", "closing_at_cap", "closing_next_boot"),
+    ("spool_delete_unheld", "if (!held) { _spoolKept.Add(files[i]); continue; }", "if (!held) { _spoolKept.Add(files[i]); }",
+     "closing_kept_unless_held", "closing_next_boot"),
+    ("spool_kept_readmitted", "all.RemoveAll(f => _spoolKept.Contains(f));", "", "closing_kept_unless_held", "closing_next_boot"),
+    # fix pass 3, F4: the opponent sample (room lookup, property enumeration) waits for no combat
+    ("opponent_sampled_in_combat", "SamplePing();\n                        _oppSampleDue = true;",
+     "SamplePing();\n                        SampleOpponent();", "opponent_sample_outside_combat", "victim_block_hit"),
     # F7: no record before the identity completed; no_location only for an empty location
     ("identity_no_wait", "else { StartHashing(); return; }", "else StartHashing();", "identity_pending", "victim_block_hit"),
     ("hash_empty_failed", "if (path.Length == 0) return;", 'if (path.Length == 0) { state = "read_failed"; return; }',
