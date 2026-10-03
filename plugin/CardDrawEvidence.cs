@@ -889,7 +889,8 @@ namespace CompetitiveRounds
                 {
                     if (p.Env == null)
                     {
-                        string stable = SeatEvidence.StableOf(p.Attach);
+                        string stable = null;
+                        try { stable = SeatEvidence.StableOf(p.Attach); } catch { }
                         if (stable == null || !SeatEvidenceCore.IsSteamId(p.Seat) || !SeatEvidenceCore.IsSteamId(p.Other))
                         {
                             _pending.RemoveAt(i);
