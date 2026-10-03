@@ -164,7 +164,21 @@ def _index_module(path):
         visible to the functions in it) is LOCAL and charges no module
         binding: a local `case` is not the module's `case` import. A name no
         enclosing scope binds (or one declared `global`) is a module global,
-        charged as before. Every function-local import target is retained,
+        charged as before.
+
+        A CLASS BODY is read in execution order (combat fix pass 2, M-9): at
+        each name read in it, a class binding counts as certain only when an
+        unconditional statement of the body bound it earlier and no `del`
+        since may have removed it. A certain class binding is the only
+        binding charged; otherwise the class binding AND the module global
+        are both charged (a name a class body binds anywhere is looked up in
+        the class namespace and then in the module's globals, never in an
+        enclosing function), so a read before a late binding, beside a
+        conditional one, or after a delete charges the module binding too. A
+        name the class body never binds resolves as before. Methods, lambdas
+        and comprehensions inside the class still skip its names.
+
+        Every function-local import target is retained,
         on EVERY branch: `from X import n` charges "X:n" wherever it sits,
         and `a.attr` on a local alias charges "X:attr" for each module the
         alias is bound to anywhere in its scope, so a reused alias keeps both
@@ -178,6 +192,26 @@ def _index_module(path):
                 self.parent, self.kind = parent, kind
                 self.bound, self.loads = {}, []
                 self.declared_global, self.declared_nonlocal = set(), set()
+                self.certain = set()        # class body: names certainly bound here
+
+        def load(scope, name, attr):
+            scope.loads.append((name, attr, scope.kind == "class" and name in scope.certain))
+
+        def certain_binds(st):
+            """The names an unconditional class-body statement binds once it ran."""
+            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                return {st.name}
+            if isinstance(st, (ast.Import, ast.ImportFrom)):
+                return set(import_refs(st))
+            if isinstance(st, ast.Assign):
+                targets = st.targets
+            elif isinstance(st, ast.AugAssign) or (isinstance(st, ast.AnnAssign)
+                                                   and st.value is not None):
+                targets = [st.target]
+            else:
+                return set()
+            return {t.id for tg in targets for t in ast.walk(tg)
+                    if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store)}
 
         def bind_name(scope, name, refs=()):
             scope.bound.setdefault(name, set()).update(refs)
@@ -238,6 +272,7 @@ def _index_module(path):
                 inner = Scope(scope, "class")
                 for st in n.body:
                     visit(st, inner)
+                    inner.certain |= certain_binds(st)
                 scopes.append(inner)
                 return
             if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
@@ -273,14 +308,16 @@ def _index_module(path):
                 return
             if isinstance(n, ast.Name):
                 if isinstance(n.ctx, ast.Load) or n.id in scope.declared_global:
-                    scope.loads.append((n.id, None))      # a read, or a write to a global
+                    load(scope, n.id, None)               # a read, or a write to a global
                 else:
                     bind_name(scope, n.id)
+                    if isinstance(n.ctx, ast.Del):
+                        scope.certain.discard(n.id)       # may be gone from here on
                 return
             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
                     and isinstance(n.value.ctx, ast.Load):
-                scope.loads.append((n.value.id, None))
-                scope.loads.append((n.value.id, n.attr))
+                load(scope, n.value.id, None)
+                load(scope, n.value.id, n.attr)
                 return
             if isinstance(n, ast.ExceptHandler) and n.name:
                 bind_name(scope, n.name)
@@ -291,19 +328,28 @@ def _index_module(path):
             for child in ast.iter_child_nodes(n):
                 visit(child, scope)
 
-        def owner(scope, name):
-            """The scope whose binding `name` denotes when read in `scope`,
-            or None for a module global."""
+        def owners(scope, name, certain):
+            """Every scope whose binding `name` may denote when read in
+            `scope` (None for the module global): the first binding scope,
+            and beside a class body's binding that is not certain at the
+            read, the module global (a name a class body binds is looked up
+            in the class namespace and then in the module's globals, never
+            in an enclosing function)."""
+            out = []
             s, first = scope, True
             while s is not None and s.kind != "module":
                 if name in s.declared_global:
-                    return None
+                    break
                 if name in s.bound and name not in s.declared_nonlocal \
                         and (s.kind != "class" or first):
-                    return s
+                    out.append(s)
+                    if s.kind == "class" and not certain:
+                        out.append(None)
+                    return out
                 first = False
                 s = s.parent
-            return None
+            out.append(None)
+            return out
 
         module = Scope(None, "module")
         scopes = [module]
@@ -313,12 +359,12 @@ def _index_module(path):
             if scope.kind != "module":
                 for refs in scope.bound.values():
                     names.update(r for r in refs if not r.endswith(":"))
-            for name, attr in scope.loads:
-                home = owner(scope, name)
-                if home is None:
-                    names.add(name if attr is None else f"{name}.{attr}")
-                elif attr is not None:
-                    names.update(r + attr for r in home.bound[name] if r.endswith(":"))
+            for name, attr, certain in scope.loads:
+                for home in owners(scope, name, certain):
+                    if home is None:
+                        names.add(name if attr is None else f"{name}.{attr}")
+                    elif attr is not None:
+                        names.update(r + attr for r in home.bound[name] if r.endswith(":"))
         return names
 
     def import_target(node, alias):
@@ -2751,6 +2797,91 @@ def test_a_local_shadow_does_not_charge_the_module_binding(tmp_path):
     assert _closure_text(moved, uses) != _closure_text(index, uses)
     assert ("a", "G") in set(_walk_bindings([("a", "writes_global")], index=index))
     assert ("a", "G") in set(_walk_bindings([("a", "nested")], index=index))
+
+
+_CLASS_ORDER_SRC = (
+    "from pydantic import BaseModel\n"
+    "LIMIT = 5\n"
+    "FLAG = True\n"
+    "class Late(BaseModel):\n"
+    "    n: int = LIMIT\n"
+    "    LIMIT = 9\n"
+    "class Cond(BaseModel):\n"
+    "    if FLAG:\n"
+    "        LIMIT = 9\n"
+    "    n: int = LIMIT\n"
+    "class Deleted(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    del LIMIT\n"
+    "    n: int = LIMIT\n"
+    "    LIMIT = 3\n"
+    "class Rebound(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    del LIMIT\n"
+    "    LIMIT = 3\n"
+    "    n: int = LIMIT\n"
+    "class Plain(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    n: int = LIMIT\n"
+    "class Method(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    def method(self):\n"
+    "        return LIMIT\n"
+    "class Lam(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    f = lambda: LIMIT\n"
+    "class Comp(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    xs = [LIMIT for _ in (1,)]\n"
+    "def outer_bound():\n"
+    "    LIMIT = 7\n"
+    "    class Inner(BaseModel):\n"
+    "        n: int = LIMIT\n"
+    "        LIMIT = 9\n"
+    "    return Inner\n"
+    "def outer_free():\n"
+    "    LIMIT = 7\n"
+    "    class Free(BaseModel):\n"
+    "        n: int = LIMIT\n"
+    "    return Free\n")
+
+
+def test_a_class_body_read_charges_every_binding_it_may_denote(tmp_path):
+    """Combat fix pass 2, M-9. A response model's class body runs top to
+    bottom: a read before a late class binding (`Late`), beside a
+    conditional one (`Cond`) or after a `del` (`Deleted`) may denote the
+    module's binding, so the module's `LIMIT` is in that model's closure and
+    an edit to it moves the model's fingerprint text. Controls: a class
+    binding made certain before the read, including after a `del` and a
+    rebind (`Plain`, `Rebound`), charges the module nothing and an edit to
+    the module's `LIMIT` moves nothing; a method, a lambda and a
+    comprehension inside a class still skip its names (`Method`, `Lam`,
+    `Comp`). Inside a function, a read of a name the class binds falls back
+    to the module, never the function (`outer_bound`); a name the class
+    does not bind is the function's own (`outer_free`)."""
+    index = _tmp_index(tmp_path, a=_CLASS_ORDER_SRC)
+    moved = _with_segment(index, "a", "LIMIT", "LIMIT = 6\n")
+    for model, charged in (("Late", True), ("Cond", True), ("Deleted", True), ("Method", True),
+                           ("Lam", True), ("Comp", True), ("Plain", False), ("Rebound", False)):
+        reached = set(_walk_bindings([("a", model)], index=index))
+        assert (("a", "LIMIT") in reached) is charged, (model, sorted(reached))
+        base = _closure_text(index, reached)
+        after = _closure_text(moved, set(_walk_bindings([("a", model)], index=moved)))
+        assert (after != base) is charged, model
+    assert "LIMIT" in index["a"]["outer_bound"][2]
+    assert "LIMIT" not in index["a"]["outer_free"][2]                    # the function's own
+
+
+def test_the_class_order_reading_is_what_the_interpreter_does(tmp_path):
+    """The reading above is the interpreter's: each model built from the
+    same source gives the value of the binding the walk charges."""
+    ns = {}
+    exec(compile(_CLASS_ORDER_SRC.replace("from pydantic import BaseModel\n",
+                                          "BaseModel = object\n"), "a", "exec"), ns)
+    assert ns["Late"].n == 5 and ns["Cond"].n == 9 and ns["Deleted"].n == 5
+    assert ns["Rebound"].n == 3 and ns["Plain"].n == 9
+    assert ns["Method"]().method() == 5 and ns["Lam"].f() == 5 and ns["Comp"].xs == [5]
+    assert ns["outer_bound"]().n == 5 and ns["outer_free"]().n == 7
 
 
 def test_the_tip_witness_local_case_is_not_charged_to_the_sqlalchemy_import():
