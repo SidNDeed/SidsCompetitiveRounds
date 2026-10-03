@@ -3188,7 +3188,7 @@
           ],
           "main",
           "internal_pc_face_back",
-          "5a0c5209db853facd4ee5bf1225b0922bf995696"
+          "938a8cffff0dd5c2b13c6cde25cbd45d8cbc1cf8"
         ],
         [
           "/api/v1/internal/pc/face/preview/{player_ref}/{locale}",
@@ -3278,7 +3278,7 @@
           ],
           "main",
           "pc_portrait_upload",
-          "e7e17b01523851e2fa5a30665f290476162b655e"
+          "1d67472ee8fa553ae1bc3af6fd549ee8bce31dec"
         ],
         [
           "/api/v1/pc/portrait/motion",
