@@ -94,7 +94,7 @@ MUTANTS = [
      "Encoding.UTF8.GetByteCount(recordText) >= RECORD_MAX_BYTES) return null;\n            for (int i = 0; i < recordText.Length; i++) if (recordText[i] > '~' ||", "envelope", "census"),
     ("cut_card_not_recognised", "seat", 'if (p != null && p.Route == "k") return IsCutCardBody(p.Body);', "", "end", "census"),
     ("cut_card_anchor_without_g", "seat", 'const string H = "\\\\\\"schema\\\\\\":1,\\\\\\"g\\\\\\":";', 'const string H = "\\\\\\"schema\\\\\\":1,";', "end", "census"),
-    ("queue_line_drops_card_route", "seat", '(f[4] != "e" && f[4] != "c" && f[4] != "k")', '(f[4] != "e" && f[4] != "c")', "end", "census"),
+    ("queue_line_drops_card_route", "seat", '(route != "e" && route != "c" && route != "k")', '(route != "e" && route != "c")', "end", "census"),
 ]
 
 

@@ -52,9 +52,17 @@ EXPECTED = sorted([
 WIRING = {
     "GameStateWatcher.cs": [("CardDrawEvidence.Dispatch(", 2)],
     "HitEvidence.cs": [("CardDrawEvidence.RoomExit(", 1)],
-    "Plugin.cs": [("CardDrawEvidence.BootLine(", 1), ("CardDrawEvidence.EnsureCensusDump(", 1)],
-    "SeatEvidence.cs": [('ROUTE_CARD = "/api/v1/matches/card-evidence";', 1), ('p.Route == "k" ? ROUTE_CARD', 1),
-                        ("internal static void EnqueueCard(string body)", 1), ("CardDrawEvidence", 0)],
+    # fix pass 1: the card builds run on the tick (F4) above the modDisabled
+    # return, and the quit hook flushes them (no later frame comes)
+    "Plugin.cs": [("CardDrawEvidence.BootLine(", 1), ("CardDrawEvidence.EnsureCensusDump(", 1),
+                  ("CardDrawEvidence.Tick(", 1), ("CardDrawEvidence.FlushOnQuit(", 1)],
+    "SeatEvidence.cs": [('ROUTE_CARD = "/api/v1/matches/card-evidence";', 1), ('route == "k" ? ROUTE_CARD', 1),
+                        ("internal static bool EnqueueCard(string body)", 1), ("CardDrawEvidence", 0)],
+    # fix pass 1, the card path's repeat of the seat pattern: its one queue
+    # call is checked (queued only after the durable replacement, F8), its
+    # builds wait for no live combat (F3) and a completed identity (F7)
+    "CardDrawEvidence.cs": [("SeatEvidence.EnqueueCard(", 1), ("if (!SeatEvidence.EnqueueCard(p.Env))", 1),
+                            ("if (SeatEvidence.CombatLive()) return;", 1), ("if (!IdentityReadyOrStart(now)) return;", 1)],
 }
 
 HEADER = "using System;\nusing HarmonyLib;\n\nnamespace CompetitiveRounds\n{\n"

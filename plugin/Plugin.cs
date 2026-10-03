@@ -513,10 +513,14 @@ namespace CompetitiveRounds
                     catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit-time log copy failed: {ex.Message}"); }
                 };
                 // Seat evidence: a game still live while the game closes is
-                // queued to its file now and sent at the next launch.
+                // captured, then built and queued to its file now (no later
+                // frame comes) and sent at the next launch.
                 UnityEngine.Application.quitting += () =>
                 {
+                    try { PointEvidence.Drain(); } catch { }
                     try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }
+                    try { SeatEvidence.FlushOnQuit(); } catch { }
+                    try { CardDrawEvidence.FlushOnQuit(); } catch { }
                 };
             }
             catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
@@ -3445,12 +3449,18 @@ namespace CompetitiveRounds
             // is exactly the state that disables the mod; it only writes this
             // seat's own queue file.
             try { SeatEvidence.CompatTick(); } catch { }
+            // Evidence work the hooks deferred out of the game's methods: the
+            // point-end lines and push counts first (before GameStateWatcher's
+            // tick captures a record), then seat evidence's own clocks, the
+            // record builds and the queue, then the card draw builds. Above
+            // the return: previously queued evidence sends whatever the mod's
+            // state, under consent, a session, retry timing and no live
+            // combat. No setting in front of any of it.
+            try { PointEvidence.Drain(); } catch { }
+            try { SeatEvidence.Tick(); } catch { }
+            try { CardDrawEvidence.Tick(); } catch { }
 
             if (Plugin.modDisabled) return;
-
-            // Seat evidence: own clocks during a game, and the record queue
-            // (sends only while no battle is live). No setting in front of it.
-            try { SeatEvidence.Tick(); } catch { }
 
             // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }

@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Text;
 using System.Threading;
 using UnityEngine;
 using C = CompetitiveRounds.SeatEvidenceCore;
@@ -495,12 +496,17 @@ namespace CompetitiveRounds
         }
 
         /// <summary>HealthHandler.RPCA_SendTakeDamage prefix: whether the
-        /// damage this envelope carries passes TakeDamage's gate here (the RPC
-        /// path applies with ignoreBlock).</summary>
-        internal static bool DamageGate(HealthHandler hh)
+        /// damage this envelope carries passes the game's own predicate here,
+        /// read before the body: RPCA_SendTakeDamage returns at once on zero
+        /// damage, and TakeDamage applies only nonzero damage to a seat that
+        /// is playing, simulated and not dead (the RPC path passes ignoreBlock,
+        /// so the block term never applies). `nonzero` is the hook's
+        /// `damage != Vector2.zero`.</summary>
+        internal static bool DamageGate(HealthHandler hh, bool nonzero)
         {
             try
             {
+                if (!nonzero) return false;
                 var d = hh != null ? hh.GetComponent<CharacterData>() : null;
                 return d != null && d.isPlaying && !d.dead && d.playerVel != null && d.playerVel.simulated;
             }
@@ -508,10 +514,12 @@ namespace CompetitiveRounds
         }
 
         /// <summary>HealthHandler.RPCA_SendTakeDamage finalizer. On the victim:
-        /// marks dmg on the hit it follows, or counts a damage envelope no hit
-        /// RPC keys (unpair[1]). On the shooter: the local leg inside a direct
-        /// impact gives path 1 its stamp.</summary>
-        internal static void DamageArrived(HealthHandler hh, bool gate)
+        /// marks dmg on the hit it follows (1 only when the prefix's predicate
+        /// held AND the method completed without an exception of its own), or
+        /// counts a damage envelope no hit RPC keys (unpair[1]). On the
+        /// shooter: the local leg inside a direct impact gives path 1 its
+        /// stamp.</summary>
+        internal static void DamageArrived(HealthHandler hh, bool gate, bool completed)
         {
             try
             {
@@ -523,7 +531,7 @@ namespace CompetitiveRounds
                 if (d.view.IsMine)
                 {
                     if (c.Sender == 0 || c.Sender != _oppActor) return;
-                    if (_awaitDamage != null) { _awaitDamage[6] = gate ? 1 : 0; _awaitDamage = null; }
+                    if (_awaitDamage != null) { _awaitDamage[6] = gate && completed ? 1 : 0; _awaitDamage = null; }
                     else _unpairHits++;
                     return;
                 }
@@ -591,6 +599,12 @@ namespace CompetitiveRounds
         private static FieldInfo _peerField, _offField;
         private static bool _offUnreadable;
 
+        /// <summary>From Plugin's persistent tick, ABOVE its modDisabled return
+        /// (queued records pump whatever the mod's state; F5). Own clocks while
+        /// a game is open; then, only while no battle is live in THIS frame
+        /// (F3: read here, not from a flag refreshed later in the frame), the
+        /// work the hooks and the dispatch deferred (F4): the answer of the
+        /// request in flight, the pending record builds, and one send.</summary>
         internal static void Tick()
         {
             try
@@ -606,9 +620,24 @@ namespace CompetitiveRounds
                         Sample();
                     }
                 }
+                if (CombatLive()) return;       // before any load, save, attempt accounting or request setup
+                TakeAnswer(now);
+                BuildCaptures(false);
                 Pump(now);
             }
             catch { }
+        }
+
+        /// <summary>Whether a battle is live in the CURRENT frame: the game's
+        /// own GameManager.battleOngoing read now (FfaMode and vanilla both
+        /// write it), or the diagnostics flag (the spectator path drives it).
+        /// Either one live is live.</summary>
+        internal static bool CombatLive()
+        {
+            bool live = false;
+            try { live = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
+            try { live = live || NetworkReplicaDiagnostics.BattleActive; } catch { }
+            return live;
         }
 
         private static void ReadOffset()
@@ -702,40 +731,88 @@ namespace CompetitiveRounds
 
         // -- build identity (hashed off the main thread at boot) -------------------------------
 
-        private static volatile string _dllSha = "", _dllState = "no_location", _gameSha = "", _gameState = "no_location";
+        /// <summary>The identity state while the boot hash still runs. In memory
+        /// only: a build waits until both identities are completed (F7), so it
+        /// is never written into a record.</summary>
+        internal const string ID_PENDING = "pending";
+
+        private static volatile string _dllSha = "", _dllState = ID_PENDING, _gameSha = "", _gameState = ID_PENDING;
+        private static string _ownPath, _gamePath;
         private static bool _hashStarted;
         private static string _compat = "not_run";
 
         /// <summary>The game DLL's hash and its state, as hashed at boot
-        /// (read-only; the card draw record's deal-profile id).</summary>
+        /// (read-only; the card draw record's deal-profile id). The state is
+        /// ID_PENDING until the hash completed.</summary>
         internal static string GameDllSha { get { return _gameSha; } }
         internal static string GameDllState { get { return _gameState; } }
 
+        /// <summary>Both identities completed: ok, read_failed, or no_location
+        /// for an empty assembly location.</summary>
+        internal static bool IdentityReady { get { return _dllState != ID_PENDING && _gameState != ID_PENDING; } }
+
+        /// <summary>At boot, and from a build that finds the identity still
+        /// pending (a no-op once started). An EMPTY assembly location is final
+        /// at once as no_location; a location that cannot even be asked for is
+        /// read_failed; every other location is hashed on a background thread
+        /// to ok or read_failed. Nothing on the game's thread waits for it.</summary>
         internal static void StartHashing()
         {
             try
             {
                 if (_hashStarted) return;
                 _hashStarted = true;
-                string own = "", game = "";
-                try { own = typeof(SeatEvidence).Assembly.Location ?? ""; } catch { }
-                try { game = typeof(GM_ArmsRace).Assembly.Location ?? ""; } catch { }
-                var t = new Thread(() =>
-                {
-                    string s, st;
-                    Hash(own, out s, out st); _dllSha = s; _dllState = st;
-                    Hash(game, out s, out st); _gameSha = s; _gameState = st;
-                });
+                _ownPath = LocationOf(typeof(SeatEvidence));
+                _gamePath = LocationOf(typeof(GM_ArmsRace));
+                if (_ownPath == null) { _dllSha = ""; _dllState = "read_failed"; }
+                else if (_ownPath.Length == 0) { _dllSha = ""; _dllState = "no_location"; }
+                if (_gamePath == null) { _gameSha = ""; _gameState = "read_failed"; }
+                else if (_gamePath.Length == 0) { _gameSha = ""; _gameState = "no_location"; }
+                if (IdentityReady) return;
+                var t = new Thread(HashPending);
                 t.IsBackground = true;
                 t.Start();
             }
-            catch { }
+            catch { FailPending(); }
+        }
+
+        /// <summary>The assembly's location: "" when it has none, null when
+        /// asking for it failed.</summary>
+        private static string LocationOf(Type t)
+        {
+            try { return t.Assembly.Location ?? ""; } catch { return null; }
+        }
+
+        private static void HashPending()
+        {
+            try
+            {
+                string s, st;
+                if (_dllState == ID_PENDING) { Hash(_ownPath, out s, out st); _dllSha = s; _dllState = st; }
+                if (_gameState == ID_PENDING) { Hash(_gamePath, out s, out st); _gameSha = s; _gameState = st; }
+            }
+            catch { FailPending(); }
+        }
+
+        private static void FailPending()
+        {
+            if (_dllState == ID_PENDING) { _dllSha = ""; _dllState = "read_failed"; }
+            if (_gameState == ID_PENDING) { _gameSha = ""; _gameState = "read_failed"; }
+        }
+
+        /// <summary>The quitting path only (no later frame comes): a hash still
+        /// running is completed on this thread. Both threads compute the same
+        /// value from the same file.</summary>
+        internal static void CompleteIdentityNow()
+        {
+            try { StartHashing(); HashPending(); } catch { FailPending(); }
         }
 
         private static void Hash(string path, out string sha, out string state)
         {
             sha = ""; state = "no_location";
-            if (string.IsNullOrEmpty(path)) return;
+            if (path == null) { state = "read_failed"; return; }
+            if (path.Length == 0) return;
             try { sha = C.Sha256Hex(File.ReadAllBytes(path)); state = "ok"; }
             catch { sha = ""; state = "read_failed"; }
         }
@@ -760,60 +837,71 @@ namespace CompetitiveRounds
 
         private static string _compatOutcome;
         private static List<string> _compatPlugins;
+        private static long _compatNextTryMs;
 
         private static string OwnSteamId()
         {
             try { return Steamworks.SteamUser.GetSteamID().m_SteamID.ToString(CultureInfo.InvariantCulture); } catch { return ""; }
         }
 
-        /// <summary>Above Plugin's modDisabled return: once this seat's Steam id
-        /// is known, the pending compat outcome is signed and persisted (sent by
-        /// the queue on a launch whose api is up). On a seat the finding has
-        /// disabled, the compat sender then makes its one bounded attempt.</summary>
+        /// <summary>Above Plugin's modDisabled return, outside combat: once this
+        /// seat's Steam id is known, the pending compat outcome is signed and
+        /// persisted; it counts as queued only when the queue file holding it
+        /// replaced the old one (F8), otherwise it is kept and tried again
+        /// every 5 s. On a seat the finding has disabled, the session attempt
+        /// then runs (DisabledSeatSession).</summary>
         internal static void CompatTick()
         {
             try
             {
-                if (_compatOutcome != null)
+                if (CombatLive()) return;
+                if (_compatOutcome != null && SwMs >= _compatNextTryMs)
                 {
                     string seat = OwnSteamId();
                     if (C.IsSteamId(seat))
                     {
-                        string outcome = _compatOutcome; _compatOutcome = null;
+                        string outcome = _compatOutcome;
                         string sig = ApiClient.SeatEvidenceSig(C.CompatCanonical(seat, outcome, _compatPlugins));
                         string body = C.CompatBody(seat, outcome, _compatPlugins, sig);
-                        if (body == null) Plugin.Log.LogWarning(TAG + " compat outcome not queued: a field is outside its bound");
-                        else
+                        if (body == null)
                         {
-                            Enqueue("c", body);
+                            _compatOutcome = null;
+                            Plugin.Log.LogWarning(TAG + " compat outcome not queued: a field is outside its bound");
+                        }
+                        else if (Enqueue("c", body))
+                        {
+                            _compatOutcome = null;
                             Plugin.Log.LogInfo(TAG + " compat outcome queued: " + outcome + " plugins=" + _compatPlugins.Count.ToString(CultureInfo.InvariantCulture));
                         }
+                        else _compatNextTryMs = SwMs + 5000;
                     }
                 }
-                CompatSend();
+                DisabledSeatSession();
             }
             catch { }
         }
 
-        // -- the compat sender (V1 6.4) ------------------------------------------------------
+        // -- the disabled seat's session (V1 6.4; F5) ------------------------------------------
 
-        private static int _sendPhase;          // 0 not started, 1 running, 2 finished for this launch
+        private static int _sendPhase;          // 0 not started, 1 obtaining a session, 2 finished for this launch
         private static long _sendStartMs, _nextAuthMs;
 
         /// <summary>A seat the other-plug-in check disabled never initialises
-        /// the api, so the queue's own pump never runs on it. Instead this makes
-        /// ONE bounded attempt (C.COMPAT_SEND_LIMIT_MS) to send the queued compat
-        /// outcome: it points the api at the configured base without starting
-        /// any of its loops, obtains a session through the existing Steam ticket
-        /// exchange, and posts the compat route once. Seat evidence game records
-        /// are never sent from here. Without data consent nothing is sent; an
-        /// outcome not sent stays queued for the next launch.</summary>
-        private static void CompatSend()
+        /// the api, so nothing there obtains a session. When such a seat holds
+        /// ANY queued request (its compat outcome, or game records an earlier
+        /// launch queued) and data consent, this makes ONE bounded attempt
+        /// (C.COMPAT_SEND_LIMIT_MS) per launch to obtain one: it points the api
+        /// at the configured base without starting any of its loops and asks
+        /// for a session through the existing Steam ticket exchange for this
+        /// seat's own id. The sends themselves are the queue's own pump in
+        /// Tick, under exactly the conditions of an enabled seat: consent, a
+        /// session, retry timing and no live combat. Without consent nothing
+        /// is set or asked; past the bound everything stays queued.</summary>
+        private static void DisabledSeatSession()
         {
             if (_sendPhase == 2 || !Plugin.modDisabled) return;
-            Load();
-            bool queued = false;
-            foreach (var q in _queue) if (q.Route == "c") { queued = true; break; }
+            if (!Load()) return;
+            bool queued = _queue.Count > 0;
             if (_sendPhase == 0)
             {
                 if (!queued) return;
@@ -833,16 +921,15 @@ namespace CompetitiveRounds
                 case C.SendStep.Post:
                     _sendPhase = 2;
                     _nextPumpMs = 0;
-                    Pump(SwMs, "c");
-                    Plugin.Log.LogInfo(TAG + " compat outcome: one send attempted while the mod stays disabled");
+                    Plugin.Log.LogInfo(TAG + " session ready: queued requests send while the mod stays disabled");
                     return;
                 case C.SendStep.GiveUp:
                     _sendPhase = 2;
-                    Plugin.Log.LogInfo(TAG + " compat outcome not sent within " + (C.COMPAT_SEND_LIMIT_MS / 1000).ToString(CultureInfo.InvariantCulture) + " s: kept for the next launch");
+                    Plugin.Log.LogInfo(TAG + " no session within " + (C.COMPAT_SEND_LIMIT_MS / 1000).ToString(CultureInfo.InvariantCulture) + " s: queued requests kept for the next launch");
                     return;
                 case C.SendStep.NoConsent:
                     _sendPhase = 2;
-                    Plugin.Log.LogInfo(TAG + " compat outcome not sent: no data consent");
+                    Plugin.Log.LogInfo(TAG + " queued requests not sent: no data consent");
                     return;
                 default:
                     _sendPhase = 2;
@@ -890,15 +977,53 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        // -- the record (built once, after the match report is queued) -------------------------
+        // -- the record: captured at the dispatch, built on a later tick (F4) ------------------
+
+        /// <summary>A game's record as the dispatch captured it: every field
+        /// already in memory, copied. The build identity, the foreign scan, the
+        /// budget, the signature, the queue file and the log line are the
+        /// build's, on the tick.</summary>
+        private sealed class Capture
+        {
+            internal C.Record R;
+            internal string Seat, Other, Stable, Attach, Text, Env;
+            internal bool FromToken;
+        }
+
+        private const int CAPTURE_CAP = 4;
+        private static readonly List<Capture> _captures = new List<Capture>();
+        private static long _nextCaptureTryMs;
+        private static bool _captureFailLogged;
+
+        // fixed refusal texts the dispatch notes for the tick to log
+        private const int NOTES_CAP = 8;
+        private static readonly string[] _notes = new string[NOTES_CAP];
+        private static int _noteCount;
+
+        private static void Note(string text) { if (_noteCount < NOTES_CAP) _notes[_noteCount++] = text; }
+
+        private static void DrainNotes()
+        {
+            int n = _noteCount;
+            _noteCount = 0;
+            for (int i = 0; i < n; i++)
+            {
+                try { Plugin.Log.LogWarning(TAG + _notes[i]); } catch { }
+                _notes[i] = null;
+            }
+        }
 
         /// <summary>From OnGameOver, after ApiClient.ReportMatch returned; from
         /// GameStateWatcher's room-exit branch for a game cut short; from the
         /// quit hook for a game still live while the game closes. Ranked 1v1
         /// games only, both seats. Takes the live window, or a frozen one of
-        /// the same room no older than FROZEN_MS, builds, budgets, signs and
-        /// persists the envelope before any network work. The end kind this
-        /// seat noted rides in the record; none means it saw the game over.</summary>
+        /// the same room no older than FROZEN_MS, and CAPTURES its record in
+        /// memory: copies of the bounded lists and counters, the percentiles,
+        /// the drift fit and the clock rates. Nothing here logs, scans, budgets
+        /// or touches a file; the build (BuildCaptures) does that on the next
+        /// tick outside combat, or at once on the quitting path (FlushOnQuit).
+        /// The end kind this seat noted rides in the record; none means it saw
+        /// the game over.</summary>
         internal static void Dispatch(string seat, string other, string attach, int roundsSelf, int roundsOther, bool rankedNow)
         {
             try
@@ -912,7 +1037,7 @@ namespace CompetitiveRounds
                 string stable = StableOf(attach);
                 if (stable == null || !C.IsSteamId(seat) || !C.IsSteamId(other))
                 {
-                    Plugin.Log.LogWarning(TAG + " no record: game key or seat ids outside the contract");
+                    Note(" no record: game key or seat ids outside the contract");
                     return;
                 }
                 bool fromToken;
@@ -922,7 +1047,6 @@ namespace CompetitiveRounds
                     T0 = t0, T0Src = fromToken ? "m" : "o", Master = _masterAtStart ? 1 : 0, Ranked = _rankedAtStart ? 1 : 0,
                     RoundsSelf = roundsSelf, RoundsOther = roundsOther, End = _end,
                     Build = C.SplitBuild(PeerBuild.BuildValue()) ?? new[] { "", "", "" },
-                    DllSha = _dllSha, DllState = _dllState, GameDllSha = _gameSha, GameDllState = _gameState,
                     Compat = _compat,
                     RttAvg = _rttN > 0 ? _rttSum / _rttN : 0, RttMax = _rttMax,
                     OffsetUpdates = _offUpdates, OffsetStepMax = _offStepMax,
@@ -932,7 +1056,6 @@ namespace CompetitiveRounds
                     OtherBuildV = _oppBuild, OtherCapsV = C.OtherCaps(_oppKeys), OtherPub = _oppPub,
                     FireFloor = _fireFloor, BlkFaults = _blkFaults, UnpairBlocks = _unpairBlocks, UnpairHits = _unpairHits,
                 };
-                long fa, fo; Foreign(out fa, out fo); r.ForeignAsm = fa; r.ForeignOwners = fo;
                 NetworkReplicaDiagnostics.ObsSnapshot o;
                 if (NetworkReplicaDiagnostics.TryGetOpponentGameObs(out o))
                     r.Obs = new long[] { o.Gap300, o.Gap750, o.Gap1500, o.MaxGapMs, o.Excess150, o.MaxExcessMs,
@@ -943,20 +1066,92 @@ namespace CompetitiveRounds
                 r.BlkSent = new List<long[]>(_blkSent.Items); r.HitRecv = new List<long[]>(_hitRecv.Items);
                 r.BlkRecv = new List<long[]>(_blkRecv.Items); r.HitSent = new List<long[]>(_hitSent.Items);
                 r.Omit = new long[] { _blkSent.Omitted, _hitRecv.Omitted, _blkRecv.Omitted, _hitSent.Omitted, 0 };
-                string text = C.Budget(r.ToObj());
-                string sig = ApiClient.SeatEvidenceSig(C.Canonical(seat, other, stable, attach, text));
-                string env = C.Envelope(seat, other, stable, attach, text, sig);
-                if (env == null) { Plugin.Log.LogWarning(TAG + " no record: the envelope is outside the contract"); return; }
-                Enqueue("e", env);
-                Plugin.Log.LogInfo(TAG + " record queued: " + text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, lists "
-                    + r.BlkSent.Count + "/" + r.HitRecv.Count + "/" + r.BlkRecv.Count + "/" + r.HitSent.Count
-                    + ", unpaired " + _unpairBlocks + "/" + _unpairHits + ", t0 " + (fromToken ? "m" : "o")
-                    + ", end " + (r.End ?? "game_over"));
+                if (_captures.Count >= CAPTURE_CAP)
+                {
+                    _captures.RemoveAt(0);
+                    Note(" a captured record was dropped before it was persisted: too many waiting");
+                }
+                _captures.Add(new Capture { R = r, Seat = seat, Other = other, Stable = stable, Attach = attach, FromToken = fromToken });
+                _nextCaptureTryMs = 0;
             }
-            catch (Exception ex)
+            catch
             {
-                try { Plugin.Log.LogWarning(TAG + " no record: " + ex.GetType().Name); } catch { }
+                Note(" no record: the capture failed");
             }
+        }
+
+        /// <summary>Builds and persists the captured records: from Tick (outside
+        /// combat) or from FlushOnQuit (now = true). A build waits for a
+        /// completed build identity (F7; the quitting path completes it on its
+        /// own thread). A record is reported as queued only after the queue
+        /// file holding it replaced the old one (F8); until then it stays
+        /// captured, its built bytes kept, and is tried again every 5 s.</summary>
+        private static void BuildCaptures(bool now)
+        {
+            DrainNotes();
+            if (_captures.Count == 0) return;
+            if (!now && SwMs < _nextCaptureTryMs) return;
+            if (!IdentityReady)
+            {
+                if (now) CompleteIdentityNow();
+                else { StartHashing(); return; }
+            }
+            int i = 0;
+            while (i < _captures.Count)
+            {
+                var c = _captures[i];
+                try
+                {
+                    if (c.Env == null)
+                    {
+                        var r = c.R;
+                        r.DllSha = _dllSha; r.DllState = _dllState; r.GameDllSha = _gameSha; r.GameDllState = _gameState;
+                        long fa, fo; Foreign(out fa, out fo); r.ForeignAsm = fa; r.ForeignOwners = fo;
+                        string text = C.Budget(r.ToObj());
+                        string sig = ApiClient.SeatEvidenceSig(C.Canonical(c.Seat, c.Other, c.Stable, c.Attach, text));
+                        string env = C.Envelope(c.Seat, c.Other, c.Stable, c.Attach, text, sig);
+                        if (env == null)
+                        {
+                            _captures.RemoveAt(i);
+                            Plugin.Log.LogWarning(TAG + " no record: the envelope is outside the contract");
+                            continue;
+                        }
+                        c.Text = text; c.Env = env;
+                    }
+                    if (!Enqueue("e", c.Env))
+                    {
+                        _nextCaptureTryMs = SwMs + 5000;
+                        if (!_captureFailLogged)
+                        {
+                            _captureFailLogged = true;
+                            Plugin.Log.LogWarning(TAG + " record not persisted yet (the queue file was not replaced): kept and tried again");
+                        }
+                        return;
+                    }
+                    _captures.RemoveAt(i);
+                    _captureFailLogged = false;
+                    var q = c.R;
+                    Plugin.Log.LogInfo(TAG + " record queued: " + c.Text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, lists "
+                        + q.BlkSent.Count + "/" + q.HitRecv.Count + "/" + q.BlkRecv.Count + "/" + q.HitSent.Count
+                        + ", unpaired " + q.UnpairBlocks + "/" + q.UnpairHits + ", t0 " + (c.FromToken ? "m" : "o")
+                        + ", end " + (q.End ?? "game_over"));
+                }
+                catch (Exception ex)
+                {
+                    _captures.RemoveAt(i);
+                    try { Plugin.Log.LogWarning(TAG + " no record: " + ex.GetType().Name); } catch { }
+                }
+            }
+        }
+
+        /// <summary>Application.quitting, after GameStateWatcher's quit hook
+        /// captured a game still live: every captured record is built and
+        /// persisted now, on this thread, because no later frame comes. The
+        /// only build that does not wait for a tick, and the only queue write
+        /// that may happen while a battle is live (the process is ending).</summary>
+        internal static void FlushOnQuit()
+        {
+            try { BuildCaptures(true); } catch { }
         }
 
         /// <summary>The stable game key: the attach key without its "_r" + 1-2
@@ -975,89 +1170,198 @@ namespace CompetitiveRounds
         private const int QUEUE_CAP = 64;
         private static readonly List<C.Pending> _queue = new List<C.Pending>();
         private static bool _loaded, _inFlight;
-        private static long _nextPumpMs;
+        private static long _nextPumpMs, _gen;
 
         private static string QueuePath() { return Path.Combine(Paths.ConfigPath, "CompetitiveRounds.seat-evidence.jsonl"); }
 
         private static long UnixNow() { return DateTimeOffset.UtcNow.ToUnixTimeSeconds(); }
 
-        private static void Load()
+        /// <summary>Reads the queue once per launch (F8): the primary AND the
+        /// temporary copy, recovering the newest whole one (C.ChooseCopy). A
+        /// copy that exists but cannot be read leaves the queue unloaded: its
+        /// generation is unknown, so nothing is written over it, and the load
+        /// is tried again later. A request past the expiry or the attempt
+        /// bound is loaded too: the pump settles it (C.SendRefusal) without a
+        /// send, and the write that settles it removes it from the file.</summary>
+        private static bool Load()
         {
-            if (_loaded) return;
-            _loaded = true;
+            if (_loaded) return true;
             try
             {
-                string path = QueuePath(), tmp = path + ".tmp";
-                if (!File.Exists(path) && File.Exists(tmp)) path = tmp;
-                if (!File.Exists(path)) return;
-                long now = UnixNow();
-                foreach (var line in File.ReadAllLines(path))
-                {
-                    var p = C.ParseLine(line);
-                    if (p == null || now - p.FirstUnix >= C.EXPIRY_S) continue;
-                    if (_queue.Count < QUEUE_CAP) _queue.Add(p);
-                }
+                string path = QueuePath();
+                var a = ReadCopy(path, true);
+                var b = ReadCopy(path + ".tmp", false);
+                if ((a.Present && !a.Readable) || (b.Present && !b.Readable)) return false;
+                int which = C.ChooseCopy(a, b);
+                _gen = Math.Max(_gen, Math.Max(a.Generation, b.Generation));
+                _queue.Clear();
+                var src = which == 1 ? a.Items : (which == 2 ? b.Items : null);
+                if (src != null)
+                    foreach (var p in src)
+                        if (_queue.Count < QUEUE_CAP) _queue.Add(p);
+                _loaded = true;
+                return true;
             }
-            catch { }
+            catch { return false; }
         }
 
-        private static void Save()
+        private static C.QueueCopy ReadCopy(string path, bool primary)
+        {
+            if (!File.Exists(path)) return new C.QueueCopy();
+            string text;
+            try { text = File.ReadAllText(path); }
+            catch { return new C.QueueCopy { Present = true }; }
+            return C.ParseQueue(text, primary);
+        }
+
+        /// <summary>Writes `items` as the next generation: the whole text to the
+        /// temporary copy, flushed to disk, then the temporary replaces the
+        /// primary. True only when the replacement completed. A failure leaves
+        /// at worst a newer whole temporary beside the primary, which Load
+        /// prefers; every caller treats a false as "not done".</summary>
+        private static bool Save(List<C.Pending> items)
         {
             try
             {
                 string path = QueuePath(), tmp = path + ".tmp";
-                var lines = new List<string>();
-                foreach (var p in _queue) lines.Add(C.Line(p));
-                File.WriteAllLines(tmp, lines.ToArray());
+                long gen = _gen + 1;
+                _gen = gen;
+                byte[] bytes = new UTF8Encoding(false).GetBytes(C.QueueText(items, gen));
+                using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    fs.Write(bytes, 0, bytes.Length);
+                    fs.Flush(true);
+                }
                 if (File.Exists(path)) File.Delete(path);
                 File.Move(tmp, path);
+                return true;
             }
-            catch { }
+            catch { return false; }
         }
 
         /// <summary>A card draw envelope (route "k"), persisted like the
-        /// others and sent by the same pump, outside combat.</summary>
-        internal static void EnqueueCard(string body)
+        /// others and sent by the same pump, outside combat. False: not
+        /// persisted, the caller keeps it.</summary>
+        internal static bool EnqueueCard(string body)
         {
-            Enqueue("k", body);
+            return Enqueue("k", body);
         }
 
-        /// <summary>Persists the frozen body before any network yield. Every
-        /// retry sends these exact bytes.</summary>
-        private static void Enqueue(string route, string body)
+        /// <summary>Adds a frozen body; every retry sends these exact bytes. It
+        /// counts as queued only when the queue file holding it replaced the
+        /// old one (F8); on false nothing in memory changed and the caller
+        /// keeps the body.</summary>
+        private static bool Enqueue(string route, string body)
         {
-            Load();
-            if (_queue.Count >= QUEUE_CAP) _queue.RemoveAt(0);
-            _queue.Add(new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() });
-            Save();
+            if (!Load()) return false;
+            var next = new List<C.Pending>(_queue);
+            bool evicted = next.Count >= QUEUE_CAP;
+            if (evicted) next.RemoveAt(0);
+            next.Add(new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() });
+            if (!Save(next)) return false;
+            _queue.Clear();
+            _queue.AddRange(next);
+            if (evicted) Plugin.Log.LogInfo(TAG + " queue full: the oldest queued request was dropped");
             _nextPumpMs = 0;
+            return true;
         }
 
-        /// <summary>One send of the oldest due request (of `onlyRoute` when
-        /// given), never during combat and only with a session.</summary>
-        private static void Pump(long nowMs, string onlyRoute = null)
+        private static string RouteOf(string route)
+        {
+            return route == "c" ? ROUTE_COMPAT : (route == "k" ? ROUTE_CARD : ROUTE_RECORD);
+        }
+
+        private static string What(string route)
+        {
+            return route == "c" ? "compat outcome" : (route == "k" ? "card record" : "record");
+        }
+
+        // the request in flight and its answer, as the result callback left it
+        private const long FLIGHT_LIMIT_MS = 60000;
+        private static C.Pending _flight;
+        private static long _flightAtMs;
+        private static volatile bool _answered;
+        private static bool _answerLeft, _answerOk, _answerCarried;
+        private static string _answerText;
+
+        /// <summary>One send of the oldest due request, from Tick only (after
+        /// its current-frame combat check), with data consent and a session.
+        /// The limits are checked before the request is set up, and again by
+        /// BeforeSend immediately before its bytes leave. The result callback
+        /// only stores the answer; TakeAnswer acts on it on a later tick.</summary>
+        private static void Pump(long nowMs)
         {
             if (_inFlight || nowMs < _nextPumpMs) return;
+            if (!Plugin.DataConsentGranted || !ApiClient.SeatEvidenceReady) return;
             _nextPumpMs = nowMs + 5000;
-            Load();
-            if (_queue.Count == 0) return;
-            if (NetworkReplicaDiagnostics.BattleActive) return;     // never during combat
-            if (!ApiClient.SeatEvidenceReady) return;
+            if (!Load()) return;
             long now = UnixNow();
             C.Pending p = null;
             foreach (var q in _queue)
-                if ((onlyRoute == null || q.Route == onlyRoute) && !q.HoldUntilNextLaunch && q.NotBeforeUnix <= now) { p = q; break; }
+                if (!q.HoldUntilNextLaunch && q.NotBeforeUnix <= now) { p = q; break; }
             if (p == null) return;
-            p.Attempts++;
-            Save();
-            _inFlight = true;
-            var sent = p;
-            bool started = ApiClient.SeatEvidencePost(p.Route == "c" ? ROUTE_COMPAT : (p.Route == "k" ? ROUTE_CARD : ROUTE_RECORD), p.Body, (ok, text, carried) =>
+            string refusal = C.SendRefusal(p, now);
+            if (refusal != null) { Settle(p, refusal, 0); return; }
+            _inFlight = true; _flight = p; _flightAtMs = nowMs; _answered = false;
+            var sending = p;
+            bool started = false;
+            try
             {
-                try { Answer(sent, ok, text, carried); } catch { }
-                _inFlight = false;
-            });
-            if (!started) { _inFlight = false; p.Attempts--; Save(); }
+                started = ApiClient.SeatEvidencePost(RouteOf(p.Route), p.Body, () => BeforeSend(sending),
+                    (left, ok, text, carried) =>
+                    {
+                        _answerLeft = left; _answerOk = ok; _answerText = text; _answerCarried = carried;
+                        _answered = true;
+                    });
+            }
+            catch { started = false; }
+            if (!started) { _inFlight = false; _flight = null; _answered = false; }
+        }
+
+        /// <summary>Called by the api's evidence path immediately before the
+        /// bytes leave, after every local gate passed: the limits again, then
+        /// the spent transmission and the next-eligible time are persisted, and
+        /// only when that write completed may the request go (F6). A compat
+        /// outcome is then held for the rest of this launch: one compat-route
+        /// POST per launch (F9).</summary>
+        private static bool BeforeSend(C.Pending p)
+        {
+            try
+            {
+                if (CombatLive()) return false;
+                long now = UnixNow();
+                if (C.SendRefusal(p, now) != null) return false;
+                var t = C.AfterTransmission(p, now);
+                var next = new List<C.Pending>(_queue);
+                int i = next.IndexOf(p);
+                if (i < 0) return false;
+                next[i] = t;
+                if (!Save(next)) return false;
+                p.Attempts = t.Attempts; p.NotBeforeUnix = t.NotBeforeUnix;
+                if (p.Route == "c") p.HoldUntilNextLaunch = true;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Tick, outside combat: acts on the answer the result
+        /// callback stored. A request that went out counts whatever came back;
+        /// one that never left (a gate refused it) changes nothing. A callback
+        /// that never comes (its host went away) frees the slot after
+        /// FLIGHT_LIMIT_MS with the transmission still counted.</summary>
+        private static void TakeAnswer(long nowMs)
+        {
+            if (!_inFlight) return;
+            if (!_answered)
+            {
+                if (nowMs - _flightAtMs > FLIGHT_LIMIT_MS) { _inFlight = false; _flight = null; }
+                return;
+            }
+            var p = _flight;
+            bool left = _answerLeft, ok = _answerOk, carried = _answerCarried;
+            string text = _answerText;
+            _inFlight = false; _flight = null; _answered = false;
+            if (left && p != null && _queue.Contains(p)) Answer(p, ok, text, carried);
         }
 
         private static void Answer(C.Pending p, bool ok, string text, bool carried)
@@ -1067,30 +1371,48 @@ namespace CompetitiveRounds
             long now = UnixNow();
             if (!carried && status != 0)
             {
-                // answered without the session token: says nothing about this record
-                p.Attempts--; p.NotBeforeUnix = now + 60; Save();
+                // answered without the session token: says nothing about this
+                // record; the transmission stays counted
+                p.NotBeforeUnix = now + 60;
+                Save(_queue);
                 return;
             }
             long delay; string reason;
             var act = C.Decide(p, status, body, retryAfter, now, out delay, out reason);
-            string what = p.Route == "c" ? "compat outcome" : (p.Route == "k" ? "card record" : "record");
+            string what = What(p.Route);
             switch (act)
             {
                 case C.Act.Drop:
-                    _queue.Remove(p);
-                    Plugin.Log.LogInfo(TAG + " " + what + " settled: " + reason + " (HTTP " + status.ToString(CultureInfo.InvariantCulture) + ", attempt " + p.Attempts.ToString(CultureInfo.InvariantCulture) + ")");
-                    break;
+                    Settle(p, reason, status);
+                    return;
                 case C.Act.RetryNextLaunch:
                     p.HoldUntilNextLaunch = true;
+                    p.NotBeforeUnix = now;      // the hold is this launch; the next launch may send it
+                    Save(_queue);
                     Plugin.Log.LogInfo(TAG + " " + what + " kept for the next launch: " + reason);
-                    break;
+                    return;
                 default:
                     p.NotBeforeUnix = now + delay;
+                    Save(_queue);
                     if (p.Attempts == 1 || act == C.Act.RefreshAndRetry)
                         Plugin.Log.LogInfo(TAG + " " + what + " retry in " + delay.ToString(CultureInfo.InvariantCulture) + " s: " + reason);
-                    break;
+                    return;
             }
-            Save();
+        }
+
+        /// <summary>A request that is done (recorded, refused, expired or spent)
+        /// leaves the queue once the file without it replaced the old one; if
+        /// that write fails it stays in the file and is held for the rest of
+        /// this launch, and the next launch's identical bytes meet the
+        /// server's already_recorded or the same refusal.</summary>
+        private static void Settle(C.Pending p, string reason, int status)
+        {
+            var next = new List<C.Pending>(_queue);
+            next.Remove(p);
+            if (Save(next)) _queue.Remove(p);
+            else p.HoldUntilNextLaunch = true;
+            Plugin.Log.LogInfo(TAG + " " + What(p.Route) + " settled: " + reason + " (HTTP " + status.ToString(CultureInfo.InvariantCulture)
+                + ", attempt " + p.Attempts.ToString(CultureInfo.InvariantCulture) + ")");
         }
     }
 

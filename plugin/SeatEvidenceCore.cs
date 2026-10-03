@@ -658,14 +658,16 @@ namespace CompetitiveRounds
         internal static bool IsEndKind(string k) { return k != null && Array.IndexOf(END_KINDS, k) >= 0; }
 
         /// <summary>The score a record of a cut game carries (and its attach
-        /// key's round total), following the report that game gets: a seat
-        /// that leaves a game tied at 4 or more each, with no departure of the
-        /// other seat noted, carries the other seat's awarded 5 (the remaining
-        /// seat's report awards it; the macro-evidence rule). Otherwise the
-        /// score as observed.</summary>
+        /// key's round total), following the report that game gets. Only the
+        /// accepted tied state changes it: a seat that leaves a game TIED at 4
+        /// or more each (self == other), with no departure of the other seat
+        /// noted, carries the other seat's awarded 5 (the remaining seat's
+        /// report awards it; the macro-evidence rule). Every other score, a
+        /// lead at match point included, is carried as observed, so the
+        /// rounds and the attach key's total stay the observed ones.</summary>
         internal static int[] CutScore(int self, int other, bool otherLeft)
         {
-            if (!otherLeft && self >= 4 && other >= 4) return new[] { self, 5 };
+            if (!otherLeft && self == other && self >= 4) return new[] { self, 5 };
             return new[] { self, other };
         }
 
@@ -901,7 +903,9 @@ namespace CompetitiveRounds
         internal const long EXPIRY_S = 7L * 24 * 3600;
 
         /// <summary>One queued request: the frozen body, when it was first
-        /// queued (unix s), how many sends it has spent, how many 401 refreshes.</summary>
+        /// queued (unix s), how many transmissions it has spent (only requests
+        /// that left the client count), how many 401 refreshes, and the time it
+        /// may next be sent. All but the launch hold are persisted.</summary>
         internal sealed class Pending
         {
             internal string Route;   // "e" seat evidence, "c" compat outcome, "k" card draw evidence
@@ -911,6 +915,38 @@ namespace CompetitiveRounds
             internal int SessionRetries;
             internal long NotBeforeUnix;
             internal bool HoldUntilNextLaunch;   // in memory only
+
+            internal Pending Clone()
+            {
+                return new Pending { Route = Route, Body = Body, FirstUnix = FirstUnix, Attempts = Attempts, SessionRetries = SessionRetries,
+                                     NotBeforeUnix = NotBeforeUnix, HoldUntilNextLaunch = HoldUntilNextLaunch };
+            }
+        }
+
+        /// <summary>Whether a queued request may be transmitted now: the
+        /// seven-day and 20-attempt limits hold before EVERY transmission,
+        /// whatever answers came before (401 and 404 included) and across
+        /// restarts, because Attempts counts transmissions and is persisted
+        /// before the bytes leave. Null = may be sent; otherwise the reason it
+        /// is settled without a send.</summary>
+        internal static string SendRefusal(Pending p, long nowUnix)
+        {
+            if (nowUnix - p.FirstUnix >= EXPIRY_S) return "expired";
+            if (p.Attempts >= MAX_ATTEMPTS) return "attempts_spent";
+            return null;
+        }
+
+        /// <summary>The request as it is persisted immediately before its bytes
+        /// leave: one more transmission spent, and the next-eligible time a
+        /// failed send would get. A restart while it is in flight therefore
+        /// neither resends it at once nor forgets the attempt; the answer, when
+        /// it comes, sets the real next time.</summary>
+        internal static Pending AfterTransmission(Pending p, long nowUnix)
+        {
+            var t = p.Clone();
+            t.Attempts = p.Attempts + 1;
+            t.NotBeforeUnix = nowUnix + Backoff(t.Attempts);
+            return t;
         }
 
         /// <summary>What to do with a request after an answer. `status` is the
@@ -1039,29 +1075,134 @@ namespace CompetitiveRounds
 
         // -- the queue file line -----------------------------------------------------------------
 
-        internal const string LINE_TAG = "se2";
+        internal const string LINE_TAG = "se3";
+        internal const string LINE_TAG_V2 = "se2";
 
         /// <summary>One persisted request: tag, first-queued unix s, attempts,
-        /// session retries, route, body (JSON escapes every tab and newline, so
-        /// the body never contains either).</summary>
+        /// session retries, next-eligible unix s, route, body (JSON escapes
+        /// every tab and newline, so the body never contains either).</summary>
         internal static string Line(Pending p)
         {
             return LINE_TAG + "\t" + p.FirstUnix.ToString(CultureInfo.InvariantCulture) + "\t"
                    + p.Attempts.ToString(CultureInfo.InvariantCulture) + "\t"
-                   + p.SessionRetries.ToString(CultureInfo.InvariantCulture) + "\t" + p.Route + "\t" + p.Body;
+                   + p.SessionRetries.ToString(CultureInfo.InvariantCulture) + "\t"
+                   + p.NotBeforeUnix.ToString(CultureInfo.InvariantCulture) + "\t" + p.Route + "\t" + p.Body;
         }
 
+        /// <summary>A queue line, or null. "se2" lines (no next-eligible
+        /// field, written by the first builds of this lane) read with 0.</summary>
         internal static Pending ParseLine(string line)
         {
             if (line == null) return null;
-            string[] f = line.Split(new[] { '\t' }, 6);
-            if (f.Length != 6 || f[0] != LINE_TAG || (f[4] != "e" && f[4] != "c" && f[4] != "k") || f[5].Length == 0) return null;
-            long first; int att, ses;
+            string[] f;
+            string notBefore, route, body;
+            if (line.StartsWith(LINE_TAG + "\t", StringComparison.Ordinal))
+            {
+                f = line.Split(new[] { '\t' }, 7);
+                if (f.Length != 7) return null;
+                notBefore = f[4]; route = f[5]; body = f[6];
+            }
+            else if (line.StartsWith(LINE_TAG_V2 + "\t", StringComparison.Ordinal))
+            {
+                f = line.Split(new[] { '\t' }, 6);
+                if (f.Length != 6) return null;
+                notBefore = "0"; route = f[4]; body = f[5];
+            }
+            else return null;
+            if ((route != "e" && route != "c" && route != "k") || body.Length == 0) return null;
+            long first, nb; int att, ses;
             if (!long.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out first)
                 || !int.TryParse(f[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out att)
-                || !int.TryParse(f[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out ses))
+                || !int.TryParse(f[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out ses)
+                || !long.TryParse(notBefore, NumberStyles.Integer, CultureInfo.InvariantCulture, out nb))
                 return null;
-            return new Pending { FirstUnix = first, Attempts = att, SessionRetries = ses, Route = f[4], Body = f[5] };
+            return new Pending { FirstUnix = first, Attempts = att, SessionRetries = ses, NotBeforeUnix = nb, Route = route, Body = body };
+        }
+
+        // -- the queue file (two names can hold it: learning 507) --------------------------------
+
+        /// <summary>The last line of a COMPLETE queue file: generation, line
+        /// count and the FNV-1a hash of the lines above it. Load weighs the
+        /// primary and the temporary copy by it.</summary>
+        internal const string QUEUE_TRAILER = "#se-queue";
+
+        /// <summary>FNV-1a 64 over the body, 16 hex. Not a signature: it tells
+        /// whether the bytes meant to be written all arrived.</summary>
+        internal static string QueueHash(string body)
+        {
+            ulong h = 14695981039346656037UL;
+            for (int i = 0; i < body.Length; i++) { h ^= body[i]; h *= 1099511628211UL; }
+            return h.ToString("x16", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>The whole file: one line per request, then the trailer. An
+        /// empty queue is a file too (the trailer alone), so its generation
+        /// outranks an older copy that still names requests.</summary>
+        internal static string QueueText(IList<Pending> items, long generation)
+        {
+            var sb = new StringBuilder();
+            foreach (var p in items) sb.Append(Line(p)).Append('\n');
+            string body = sb.ToString();
+            return body + QUEUE_TRAILER + "\t" + generation.ToString(CultureInfo.InvariantCulture) + "\t"
+                   + items.Count.ToString(CultureInfo.InvariantCulture) + "\t" + QueueHash(body) + "\n";
+        }
+
+        /// <summary>One copy of the queue as load found it. Whole: its trailer
+        /// verifies, or it is the primary copy with no trailer at all (a build
+        /// older than the trailer); a temporary copy is whole only with a
+        /// verified trailer. Items: every line that parses.</summary>
+        internal sealed class QueueCopy
+        {
+            internal bool Present, Readable, Whole;
+            internal long Generation;
+            internal readonly List<Pending> Items = new List<Pending>();
+        }
+
+        internal static QueueCopy ParseQueue(string text, bool allowLegacy)
+        {
+            var c = new QueueCopy { Present = true, Readable = true };
+            var lines = new List<string>((text ?? "").Replace("\r\n", "\n").Split('\n'));
+            while (lines.Count > 0 && lines[lines.Count - 1].Length == 0) lines.RemoveAt(lines.Count - 1);
+            int bodyLines = lines.Count;
+            bool sawTrailer = bodyLines > 0 && lines[bodyLines - 1].StartsWith(QUEUE_TRAILER + "\t", StringComparison.Ordinal);
+            bool trailed = false;
+            long gen = 0;
+            if (sawTrailer)
+            {
+                string[] t = lines[bodyLines - 1].Split('\t');
+                bodyLines--;
+                var sb = new StringBuilder();
+                for (int i = 0; i < bodyLines; i++) sb.Append(lines[i]).Append('\n');
+                long count;
+                trailed = t.Length == 4
+                          && long.TryParse(t[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out gen)
+                          && long.TryParse(t[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out count)
+                          && count == bodyLines && t[3] == QueueHash(sb.ToString());
+            }
+            for (int i = 0; i < bodyLines; i++)
+            {
+                var p = ParseLine(lines[i]);
+                if (p != null) c.Items.Add(p);
+            }
+            c.Whole = trailed || (allowLegacy && !sawTrailer);
+            c.Generation = trailed ? gen : 0;
+            return c;
+        }
+
+        /// <summary>Which copy load recovers: the whole copy with the higher
+        /// generation (the primary on a tie); with no whole copy, the readable
+        /// primary's parsable lines, else the temporary's (the choice is between
+        /// those requests and none). 0 none, 1 primary, 2 temporary.</summary>
+        internal static int ChooseCopy(QueueCopy primary, QueueCopy temp)
+        {
+            bool pw = primary != null && primary.Present && primary.Readable && primary.Whole;
+            bool tw = temp != null && temp.Present && temp.Readable && temp.Whole;
+            if (pw && tw) return temp.Generation > primary.Generation ? 2 : 1;
+            if (pw) return 1;
+            if (tw) return 2;
+            if (primary != null && primary.Present && primary.Readable && primary.Items.Count > 0) return 1;
+            if (temp != null && temp.Present && temp.Readable && temp.Items.Count > 0) return 2;
+            return 0;
         }
     }
 }

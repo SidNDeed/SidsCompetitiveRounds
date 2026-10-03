@@ -29,8 +29,8 @@ namespace CompetitiveRounds
         /// none). Set and restored by HitEvidence_ExecuteRpcPatch.</summary>
         internal static int RpcSender;
 
-        private static readonly Dictionary<int, HitEvidenceCore.PointTally> _point = new Dictionary<int, HitEvidenceCore.PointTally>();
-        private static readonly Dictionary<int, HitEvidenceCore.GameTally> _game = new Dictionary<int, HitEvidenceCore.GameTally>();
+        private static Dictionary<int, HitEvidenceCore.PointTally> _point = new Dictionary<int, HitEvidenceCore.PointTally>();
+        private static Dictionary<int, HitEvidenceCore.GameTally> _game = new Dictionary<int, HitEvidenceCore.GameTally>();
         private static readonly Dictionary<int, bool> _projAmmo = new Dictionary<int, bool>();
         private static bool _blockedThisPoint;
         private static int _games;
@@ -168,53 +168,123 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        // -- flushes -------------------------------------------------------------
+        // -- flushes: captured while the game waits, logged on the tick (F4) -----
 
-        /// <summary>From PointEvidence.PointEnd, with its point number.</summary>
+        // The point-end and game-end hooks run inside the game's own methods
+        // (the point-decided RPC, StartGame). They only HAND OVER the tallies:
+        // the filled dictionary moves into a preallocated slot and a spare one
+        // takes its place, a fixed number of operations per remote actor and no
+        // allocation once the spares exist (at most FLUSH_CAP + 1 of each kind,
+        // ever). The pairing, the lines and the push into seat evidence run in
+        // Drain, from Plugin's tick.
+        private const int FLUSH_CAP = 16;
+        private static readonly int[] _fNum = new int[FLUSH_CAP];
+        private static readonly Dictionary<int, HitEvidenceCore.PointTally>[] _fPoint = new Dictionary<int, HitEvidenceCore.PointTally>[FLUSH_CAP];
+        private static readonly Dictionary<int, HitEvidenceCore.GameTally>[] _fGame = new Dictionary<int, HitEvidenceCore.GameTally>[FLUSH_CAP];
+        private static int _fCount, _fDropped;
+        private static readonly Stack<Dictionary<int, HitEvidenceCore.PointTally>> _spareP = new Stack<Dictionary<int, HitEvidenceCore.PointTally>>();
+        private static readonly Stack<Dictionary<int, HitEvidenceCore.GameTally>> _spareG = new Stack<Dictionary<int, HitEvidenceCore.GameTally>>();
+
+        private static bool AnyPoint()
+        {
+            foreach (var kv in _point) if (kv.Value.Any) return true;
+            return false;
+        }
+
+        private static bool AnyGame()
+        {
+            foreach (var kv in _game) if (kv.Value.Any) return true;
+            return false;
+        }
+
+        /// <summary>Moves this point's tallies into a slot (or counts a drop
+        /// when every slot is waiting).</summary>
+        private static void HoldPoint(int point)
+        {
+            if (_fCount >= FLUSH_CAP) { _fDropped++; _point.Clear(); return; }
+            _fNum[_fCount] = point; _fPoint[_fCount] = _point; _fGame[_fCount] = null; _fCount++;
+            _point = _spareP.Count > 0 ? _spareP.Pop() : new Dictionary<int, HitEvidenceCore.PointTally>();
+        }
+
+        private static void HoldGame(int game)
+        {
+            if (_fCount >= FLUSH_CAP) { _fDropped++; _game.Clear(); return; }
+            _fNum[_fCount] = game; _fPoint[_fCount] = null; _fGame[_fCount] = _game; _fCount++;
+            _game = _spareG.Count > 0 ? _spareG.Pop() : new Dictionary<int, HitEvidenceCore.GameTally>();
+        }
+
+        /// <summary>From PointEvidence.PointEnd, with its point number:
+        /// captures only.</summary>
         internal static void PointEnd(int point)
         {
             try
             {
-                foreach (var kv in _point)
-                    if (kv.Value.Any) Plugin.Log.LogInfo(HitEvidenceCore.HitRecvLine(point, kv.Key, kv.Value));
+                if (AnyPoint()) HoldPoint(point);
+                else _point.Clear();
             }
             catch { }
-            try { PushToSeatEvidence(); } catch { }
-            _point.Clear();
             _blockedThisPoint = false;
         }
 
         /// <summary>At game over, at the next game's start and at room exit
-        /// (whichever comes first carries the lines; the others find nothing).</summary>
+        /// (whichever comes first carries the lines; the others find nothing).
+        /// Captures only.</summary>
         internal static void GameEnd(int point)
         {
             try
             {
-                bool any = false;
-                foreach (var kv in _point) any |= kv.Value.Any;
-                if (any) PointEnd(point);
-                any = false;
-                foreach (var kv in _game) any |= kv.Value.Any;
-                if (any)
-                {
-                    _games++;
-                    foreach (var kv in _game)
-                    {
-                        if (!kv.Value.Any) continue;
-                        Plugin.Log.LogInfo(HitEvidenceCore.ShotObsLine(_games, kv.Key, kv.Value));
-                        Plugin.Log.LogInfo(HitEvidenceCore.BlockMissLine(_games, kv.Key, kv.Value));
-                    }
-                }
+                if (AnyPoint()) HoldPoint(point);
+                if (AnyGame()) { _games++; HoldGame(_games); }
             }
             catch { }
             _point.Clear(); _game.Clear(); _projAmmo.Clear(); _blockedThisPoint = false;
         }
 
-        /// <summary>Seat evidence's push counts: this point's pairing of the
-        /// damage and knockback messages, per sending actor.</summary>
-        private static void PushToSeatEvidence()
+        /// <summary>From Plugin's tick (through PointEvidence.Drain) and from
+        /// the room-exit reset, outside any game method: the lines and seat
+        /// evidence's push counts for every captured flush, in capture order.</summary>
+        internal static void Drain()
         {
-            foreach (var kv in _point)
+            int n = _fCount;
+            for (int i = 0; i < n; i++)
+            {
+                var p = _fPoint[i];
+                var g = _fGame[i];
+                int num = _fNum[i];
+                _fPoint[i] = null; _fGame[i] = null;
+                try
+                {
+                    if (p != null)
+                    {
+                        foreach (var kv in p)
+                            if (kv.Value.Any) Plugin.Log.LogInfo(HitEvidenceCore.HitRecvLine(num, kv.Key, kv.Value));
+                        PushToSeatEvidence(p);
+                    }
+                    if (g != null)
+                        foreach (var kv in g)
+                        {
+                            if (!kv.Value.Any) continue;
+                            Plugin.Log.LogInfo(HitEvidenceCore.ShotObsLine(num, kv.Key, kv.Value));
+                            Plugin.Log.LogInfo(HitEvidenceCore.BlockMissLine(num, kv.Key, kv.Value));
+                        }
+                }
+                catch { }
+                if (p != null) { p.Clear(); _spareP.Push(p); }
+                if (g != null) { g.Clear(); _spareG.Push(g); }
+            }
+            _fCount = 0;
+            if (_fDropped > 0)
+            {
+                int d = _fDropped; _fDropped = 0;
+                try { Plugin.Log.LogWarning("[HIT-EVIDENCE] " + d + " flushes not logged: every slot was waiting"); } catch { }
+            }
+        }
+
+        /// <summary>Seat evidence's push counts: one point's pairing of the
+        /// damage and knockback messages, per sending actor.</summary>
+        private static void PushToSeatEvidence(Dictionary<int, HitEvidenceCore.PointTally> point)
+        {
+            foreach (var kv in point)
             {
                 var t = kv.Value;
                 if (!t.Any) continue;
@@ -224,9 +294,13 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Room exit, from PoisonSync's tick: the game's last capture,
+        /// its lines and push counts (while the seat evidence window is still
+        /// open), then the window freezes.</summary>
         internal static void ResetForRoomExit(int point)
         {
             GameEnd(point);
+            try { Drain(); } catch { }
             _games = 0;
             RpcSender = 0;
             try { SeatEvidence.RoomExit(); } catch { }
@@ -275,20 +349,22 @@ namespace CompetitiveRounds
     [HarmonyPatch(typeof(HealthHandler), "RPCA_SendTakeDamage")]
     internal static class HitEvidence_DamagePatch
     {
-        /// <summary>Seat evidence: whether this envelope's damage passes
-        /// TakeDamage's gate here, read before the body applies it.</summary>
+        /// <summary>Seat evidence: whether this envelope's nonzero damage
+        /// passes the game's predicate here, read before the body applies it.</summary>
         [HarmonyPrefix]
-        private static void Prefix(HealthHandler __instance, out bool __state)
+        private static void Prefix(HealthHandler __instance, Vector2 damage, out bool __state)
         {
             __state = false;
-            try { __state = SeatEvidence.DamageGate(__instance); } catch { }
+            try { __state = SeatEvidence.DamageGate(__instance, damage != Vector2.zero); } catch { }
         }
 
+        /// <summary>dmg is marked only when the method completed without an
+        /// exception of its own (`__exception == null`).</summary>
         [HarmonyFinalizer]
         private static Exception Finalizer(HealthHandler __instance, Vector2 damage, bool __state, Exception __exception)
         {
             try { HitEvidence.NoteDamage(__instance, damage); } catch { }
-            try { SeatEvidence.DamageArrived(__instance, __state); } catch { }
+            try { SeatEvidence.DamageArrived(__instance, __state, __exception == null); } catch { }
             return __exception;
         }
     }

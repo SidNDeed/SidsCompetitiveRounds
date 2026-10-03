@@ -66,7 +66,19 @@ MUTANTS = [
     ("end_after_build", 'if (IsEndKind(End)) o.Add("end", End);\n                o.Add("build", new List<object> { Build[0], Build[1], Build[2] });',
      'o.Add("build", new List<object> { Build[0], Build[1], Build[2] });\n                if (IsEndKind(End)) o.Add("end", End);', "server", "json"),
     ("cutscore_awards_self", "return new[] { self, 5 };", "return new[] { 5, other };", "end", "json"),
-    ("cutscore_ignores_departure", "if (!otherLeft && self >= 4 && other >= 4)", "if (self >= 4 && other >= 4)", "end", "json"),
+    ("cutscore_ignores_departure", "if (!otherLeft && self == other && self >= 4)", "if (self == other && self >= 4)", "end", "json"),
+    # fix pass 1, F2: only the accepted tied state is awarded
+    ("cutscore_untied", "&& self == other && self >= 4)", "&& self >= 4 && other >= 4)", "end", "json"),
+    # fix pass 1, F6: the limits before every transmission, the count and next time persisted
+    ("refusal_no_expiry", 'if (nowUnix - p.FirstUnix >= EXPIRY_S) return "expired";', "", "refusal", "line"),
+    ("refusal_no_attempt_limit", 'if (p.Attempts >= MAX_ATTEMPTS) return "attempts_spent";', "", "refusal", "line"),
+    ("transmission_not_counted", "t.Attempts = p.Attempts + 1;", "t.Attempts = p.Attempts;", "refusal", "line"),
+    ("transmission_no_next_time", "t.NotBeforeUnix = nowUnix + Backoff(t.Attempts);", "", "refusal", "line"),
+    ("line_next_time_dropped", '+ p.NotBeforeUnix.ToString(CultureInfo.InvariantCulture) + "\\t" + p.Route', '+ "0" + "\\t" + p.Route', "line", "refusal"),
+    # fix pass 1, F8: the trailer verified, the newest whole copy recovered
+    ("queue_hash_unchecked", "&& count == bodyLines && t[3] == QueueHash(sb.ToString());", ";", "queue", "line"),
+    ("queue_primary_always", "if (pw && tw) return temp.Generation > primary.Generation ? 2 : 1;", "if (pw && tw) return 1;", "queue", "line"),
+    ("queue_legacy_refused", "c.Whole = trailed || (allowLegacy && !sawTrailer);", "c.Whole = trailed;", "queue", "line"),
     ("sender_no_limit", "if (elapsedMs > COMPAT_SEND_LIMIT_MS) return SendStep.GiveUp;", "", "sender", "end"),
     ("sender_ignores_consent", "if (!consent) return SendStep.NoConsent;", "", "sender", "end"),
     ("sender_runs_enabled", "if (!disabled || !queued) return SendStep.Stop;", "if (!queued) return SendStep.Stop;", "sender", "end"),

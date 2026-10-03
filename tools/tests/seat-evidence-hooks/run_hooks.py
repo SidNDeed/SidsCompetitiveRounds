@@ -48,10 +48,10 @@ MUTANTS = [
      "HitEvidence_ExecuteRpcPatch", "HitEvidence_DamagePatch"),
     ("rpc_finalizer_no_restore", "HitEvidence.RpcSender = (int)(uint)(__state & 0xFFFFFFFFL);", "",
      "HitEvidence_ExecuteRpcPatch", "HitEvidence_DamagePatch"),
-    ("damage_prefix_unwrapped", "try { __state = SeatEvidence.DamageGate(__instance); } catch { }", "__state = SeatEvidence.DamageGate(__instance);",
-     "HitEvidence_DamagePatch", "HitEvidence_ForcePatch"),
-    ("damage_finalizer_unwrapped", "try { SeatEvidence.DamageArrived(__instance, __state); } catch { }", "SeatEvidence.DamageArrived(__instance, __state);",
-     "HitEvidence_DamagePatch", "HitEvidence_ForcePatch"),
+    ("damage_prefix_unwrapped", "try { __state = SeatEvidence.DamageGate(__instance, damage != Vector2.zero); } catch { }",
+     "__state = SeatEvidence.DamageGate(__instance, damage != Vector2.zero);", "HitEvidence_DamagePatch", "HitEvidence_ForcePatch"),
+    ("damage_finalizer_unwrapped", "try { SeatEvidence.DamageArrived(__instance, __state, __exception == null); } catch { }",
+     "SeatEvidence.DamageArrived(__instance, __state, __exception == null);", "HitEvidence_DamagePatch", "HitEvidence_ForcePatch"),
     ("force_unwrapped", "try { HitEvidence.NoteForce(__instance, force); } catch { }", "HitEvidence.NoteForce(__instance, force);",
      "HitEvidence_ForcePatch", "HitEvidence_DotPatch"),
     ("force_calls_nothing", "try { HitEvidence.NoteForce(__instance, force); } catch { }", "",
@@ -89,6 +89,82 @@ MUTANTS = [
     ("pointend_unwrapped", "try { PointEvidence.GameOverCheck(__instance); } catch { }", "PointEvidence.GameOverCheck(__instance);",
      "PointEndEvidencePatch", "SawPointEvidencePatch"),
 ]
+
+
+BOUND_SOURCES = ["HitEvidence.cs", "SeatEvidence.cs", "PoisonSync.cs", "CardDrawEvidence.cs"]
+
+# The bound check must reach these (or it proves nothing).
+BOUND_REQUIRED = ["HitEvidence.PointEnd", "HitEvidence.GameEnd", "HitEvidence.NoteDamage", "PointEvidence.PointEnd",
+                  "PoisonSync.ReportUnansweredSilences", "SeatEvidence.Dispatch", "SeatEvidence.DamageGate",
+                  "SeatEvidence.DamageArrived", "CardDrawEvidence.Dispatch", "CardDrawEvidence.EnsurePool",
+                  "CardDrawEvidence.Fault"]
+
+# (name, file, old, new, method the check must flag); old occurs once in the file
+BOUND_MUTANTS = [
+    ("pointend_logs", "HitEvidence.cs", "else _point.Clear();", 'else _point.Clear();\n                Plugin.Log.LogInfo("x");', "HitEvidence.PointEnd"),
+    ("pointend_drains", "HitEvidence.cs", "else _point.Clear();", "else _point.Clear();\n                Drain();", "HitEvidence.Drain"),
+    ("hp_line_at_hook", "PoisonSync.cs", "_sawLost.Clear(); _sawFrames = 0;\n                HitEvidence.PointEnd(_point);",
+     "_sawLost.Clear(); _sawFrames = 0;\n                Drain();\n                HitEvidence.PointEnd(_point);", "PointEvidence.DrainOwn"),
+    ("silence_logs_at_hook", "PoisonSync.cs", "_lateView[_lateCount] = kv.Value.ViewId;",
+     'Plugin.Log.LogInfo("late"); _lateView[_lateCount] = kv.Value.ViewId;', "PoisonSync.ReportUnansweredSilences"),
+    ("dispatch_saves", "SeatEvidence.cs", "_captures.Add(new Capture", "Save(_queue); _captures.Add(new Capture", "SeatEvidence.Dispatch"),
+    ("dispatch_scans", "SeatEvidence.cs", "_captures.Add(new Capture",
+     "long fa0, fo0; Foreign(out fa0, out fo0); _captures.Add(new Capture", "SeatEvidence.Foreign"),
+    ("dispatch_builds", "SeatEvidence.cs", "_nextCaptureTryMs = 0;\n            }", "_nextCaptureTryMs = 0;\n                BuildCaptures(false);\n            }",
+     "SeatEvidence.BuildCaptures"),
+    ("census_at_hook", "CardDrawEvidence.cs", "_censusCards = cards;\n            _digest = \"\";",
+     "_censusCards = cards;\n            _digest = \"\";\n            FinishCensus();", "CardDrawEvidence.FinishCensus"),
+    ("card_fault_logs", "CardDrawEvidence.cs", "_faultNote[i] = ex != null ? ex.GetType().Name : \"?\";",
+     "_faultNote[i] = ex != null ? ex.GetType().Name : \"?\"; Plugin.Log.LogWarning(\"f\");", "CardDrawEvidence.Fault"),
+    ("card_dispatch_builds", "CardDrawEvidence.cs", "_nextBuildMs = 0;", "_nextBuildMs = 0; BuildPending(false);", "CardDrawEvidence.BuildPending"),
+]
+
+
+def bound_filter(f, cls):
+    # PoisonSync.cs also holds gameplay patches; only its evidence hooks are entries
+    return not (f == "PoisonSync.cs" and not cls.endswith("EvidencePatch"))
+
+
+def bound_section():
+    """F4: no forbidden operation is reachable from an evidence hook or a
+    game-over dispatch. Base clean and non-vacuous; a comment naming a token
+    is not a finding (negative control); every mutant is flagged at its
+    planted method and nowhere else."""
+    sys.path.insert(0, HERE)
+    import bound_check
+    texts = {f: read(os.path.join(PLUGIN, f)) for f in BOUND_SOURCES}
+    ok = True
+    findings, closure = bound_check.check(texts, bound_filter)
+    missing = [m for m in BOUND_REQUIRED if m not in closure]
+    print("bound check: %d methods reachable from the hooks and dispatches; findings %d; required reached %s"
+          % (len(closure), len(findings), "all" if not missing else "MISSING " + ",".join(missing)))
+    for f in findings:
+        print("  FORBIDDEN in hook-time code: plugin/%s %s uses %s" % f)
+    ok = ok and not findings and not missing
+    ctrl = dict(texts)
+    ctrl["HitEvidence.cs"] = ctrl["HitEvidence.cs"].replace("else _point.Clear();", 'else _point.Clear();\n                // Plugin.Log.LogInfo("x"); File.WriteAllText', 1)
+    cf, _ = bound_check.check(ctrl, bound_filter)
+    print("bound negative control (a token in a comment is not a finding):", "PASS" if not cf else "FAIL %s" % cf)
+    ok = ok and not cf
+    caught = 0
+    for name, f, old, new, want in BOUND_MUTANTS:
+        n = texts[f].count(old)
+        if n != 1:
+            print("BAD bound mutant %s: anchor occurs %d times in %s" % (name, n, f))
+            ok = False
+            continue
+        mt = dict(texts)
+        mt[f] = texts[f].replace(old, new)
+        mf, mclosure = bound_check.check(mt, bound_filter)
+        target = any(x[1] == want for x in mf)
+        # control: nothing the base already reached is flagged except the planted method
+        control = all(x[1] == want or x[1] not in closure for x in mf)
+        hit = target and control
+        caught += hit
+        ok = ok and hit
+        print("%s bound mutant %s: %s flagged=%s; no other base-reached method flagged=%s" % ("CAUGHT" if hit else "MISSED", name, want, target, control))
+    print("bound mutants: %d of %d caught" % (caught, len(BOUND_MUTANTS)))
+    return ok
 
 
 def sha(path):
@@ -177,8 +253,10 @@ def main():
     os.makedirs(WORK, exist_ok=True)
     head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     print("commit", head)
-    before = {f: sha(os.path.join(PLUGIN, f)) for f in SOURCES}
+    before = {f: sha(os.path.join(PLUGIN, f)) for f in sorted(set(SOURCES + BOUND_SOURCES))}
     ok = True
+
+    ok = bound_section() and ok
 
     names, text = generate()
     print("hook classes found:", len(names))
@@ -229,7 +307,7 @@ def main():
         print("%s mutant %s: target %s=%s; control %s=%s" % (
             "CAUGHT" if hit else "MISSED", name, target, "FAIL" if trc else "PASS", control, "PASS" if crc == 0 else "FAIL"))
     print("mutants: %d of %d caught" % (caught, len(MUTANTS)))
-    unchanged = all(sha(os.path.join(PLUGIN, f)) == before[f] for f in SOURCES)
+    unchanged = all(sha(os.path.join(PLUGIN, f)) == before[f] for f in before)
     print("tracked plugin files unchanged:", unchanged)
     ok = ok and unchanged
     print("RESULT", "PASS" if ok else "FAIL")

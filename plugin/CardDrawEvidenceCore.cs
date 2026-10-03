@@ -133,7 +133,10 @@ namespace CompetitiveRounds
         internal sealed class CardGame
         {
             internal readonly int G, Ns, PoolN, OpeningDraws;
-            internal readonly string Digest;
+            /// <summary>The census digest. Set after construction when the
+            /// census was still being computed off the hook (the Unity half's
+            /// tick fills it before any build).</summary>
+            internal string Digest;
             private readonly string[] _canon;
             private readonly int[] _rar;
             internal readonly List<long> Po = new List<long>();

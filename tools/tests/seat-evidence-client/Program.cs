@@ -245,6 +245,72 @@ namespace SeatEvidenceTests
             Eq(2, q.SessionRetries, "session retries persist"); Eq("e", q.Route, "route");
             Check(C.ParseLine("se1\t1\t2\t3\te\tx") == null, "another tag is not ours");
             Check(C.ParseLine("se2\t1\t2\t3\tz\tx") == null, "unknown route");
+            // F6: the next-eligible time persists; a first-build line reads it as 0
+            p.NotBeforeUnix = 1759400777;
+            var r = C.ParseLine(C.Line(p));
+            Eq(1759400777L, r.NotBeforeUnix, "next-eligible time persists");
+            Check(C.Line(p).StartsWith("se3\t"), "written as se3");
+            var v2 = C.ParseLine("se2\t1759400000\t4\t1\tk\t{\"b\":1}");
+            Check(v2 != null, "an se2 line still reads");
+            Eq(4, v2.Attempts, "se2 attempts"); Eq(0L, v2.NotBeforeUnix, "se2 has no next-eligible time"); Eq("k", v2.Route, "se2 route");
+            Check(C.ParseLine("se3\t1\t2\t3\tx\te\tb") == null, "a non-number next-eligible time refused");
+        }
+
+        // F6: the limits hold before EVERY transmission, and a transmission is
+        // counted (with its next-eligible time) before it leaves.
+        private static void Refusal()
+        {
+            var p = new C.Pending { Route = "e", Body = "{}", FirstUnix = 1000, Attempts = 0 };
+            Eq((string)null, C.SendRefusal(p, 1001), "fresh: may send");
+            Eq("expired", C.SendRefusal(p, 1000 + C.EXPIRY_S), "seven days: settled unsent");
+            Eq((string)null, C.SendRefusal(p, 999 + C.EXPIRY_S), "a second earlier: may send");
+            p.Attempts = C.MAX_ATTEMPTS - 1;
+            Eq((string)null, C.SendRefusal(p, 1001), "19 spent: one more");
+            p.Attempts = C.MAX_ATTEMPTS;
+            Eq("attempts_spent", C.SendRefusal(p, 1001), "20 spent: settled unsent, whatever answers came before");
+            var q = new C.Pending { Route = "c", Body = "{}", FirstUnix = 1000, Attempts = 3, SessionRetries = 2, NotBeforeUnix = 5 };
+            var t = C.AfterTransmission(q, 2000);
+            Eq(4, t.Attempts, "the transmission is counted");
+            Eq(2000 + C.Backoff(4), t.NotBeforeUnix, "and its next-eligible time set");
+            Eq(3, q.Attempts, "the original is not changed until the write succeeds");
+            Eq(2, t.SessionRetries, "session retries carried"); Eq("c", t.Route, "route carried"); Eq(1000L, t.FirstUnix, "first carried");
+            var once = C.AfterTransmission(new C.Pending { Route = "e", Body = "{}", FirstUnix = 1000 }, 1500);
+            Check(once.NotBeforeUnix > 1500, "a first transmission also persists a future next-eligible time");
+        }
+
+        // F8: the queue file's trailer, both copies weighed, the newest whole wins.
+        private static void Queue()
+        {
+            var a = new C.Pending { Route = "e", Body = "{\"a\":1}", FirstUnix = 100, Attempts = 1, NotBeforeUnix = 7 };
+            var b = new C.Pending { Route = "k", Body = "{\"b\":2}", FirstUnix = 200 };
+            string one = C.QueueText(new List<C.Pending> { a }, 1);
+            string two = C.QueueText(new List<C.Pending> { a, b }, 2);
+            var p1 = C.ParseQueue(one, true);
+            Check(p1.Whole && p1.Generation == 1 && p1.Items.Count == 1, "a written copy is whole");
+            Eq(7L, p1.Items[0].NotBeforeUnix, "items read back");
+            var empty = C.ParseQueue(C.QueueText(new List<C.Pending>(), 3), false);
+            Check(empty.Whole && empty.Generation == 3 && empty.Items.Count == 0, "an empty queue is a whole copy with a generation");
+            var t2 = C.ParseQueue(two, false);
+            Eq(2, C.ChooseCopy(p1, t2), "the newer whole temporary is recovered");
+            Eq(1, C.ChooseCopy(C.ParseQueue(two, true), C.ParseQueue(one, false)), "the newer whole primary is kept");
+            Eq(1, C.ChooseCopy(p1, C.ParseQueue(C.QueueText(new List<C.Pending>(), 1), false)), "a tie keeps the primary");
+            Eq(2, C.ChooseCopy(p1, empty), "a newer EMPTY temporary outranks an older copy that names requests");
+            // a temporary torn mid-write: trailer intact, a line altered
+            string torn = two.Replace("{\"b\":2}", "{\"b\":3}");
+            Check(torn != two, "the planted damage is there");
+            var tt = C.ParseQueue(torn, false);
+            Check(!tt.Whole, "a hash mismatch is not whole");
+            Eq(1, C.ChooseCopy(p1, tt), "a torn newer temporary loses to the whole primary");
+            // a truncated temporary (no trailer) is never whole
+            var cut = C.ParseQueue(two.Substring(0, two.IndexOf("#se-queue", StringComparison.Ordinal)), false);
+            Check(!cut.Whole, "no trailer: a temporary is not whole");
+            Eq(1, C.ChooseCopy(p1, cut), "the whole primary wins");
+            // a primary written by a build before the trailer
+            var legacy = C.ParseQueue(C.Line(a) + "\n" + "se2\t1\t2\t3\tc\t{}\n", true);
+            Check(legacy.Whole && legacy.Generation == 0 && legacy.Items.Count == 2, "a legacy primary is whole at generation 0");
+            Eq(2, C.ChooseCopy(legacy, t2), "any whole temporary outranks it");
+            Eq(1, C.ChooseCopy(legacy, null), "alone it is recovered");
+            Eq(0, C.ChooseCopy(new C.QueueCopy(), new C.QueueCopy()), "nothing present: nothing");
         }
 
         private static void Build()
@@ -315,7 +381,8 @@ namespace SeatEvidenceTests
             Eq("[4,4]", J(Array.ConvertAll(C.CutScore(4, 4, true), x => (long)x)), "the other seat left first: as observed");
             Eq("[3,4]", J(Array.ConvertAll(C.CutScore(3, 4, false), x => (long)x)), "below match point: as observed");
             Eq("[4,2]", J(Array.ConvertAll(C.CutScore(4, 2, false), x => (long)x)), "not tied: as observed");
-        }
+            Eq("[5,4]", J(Array.ConvertAll(C.CutScore(5, 4, false), x => (long)x)), "F2: a 5-4 is not the tied state: as observed");
+            Eq("[4,5]", J(Array.ConvertAll(C.CutScore(4, 5, false), x => (long)x)), "F2: a 4-5 keeps the observed score");        }
 
         // The compat sender's step (V1 6.4): only a disabled seat with a queued
         // outcome acts; never without consent; gives up after the bound.
@@ -423,6 +490,7 @@ namespace SeatEvidenceTests
             { "congestion", Congestion }, { "buckets", Buckets }, { "cadence", Cadence }, { "ordinals", Ordinals },
             { "window", Window }, { "decide", Decide }, { "line", Line }, { "build", Build },
             { "reservoir", Reservoir }, { "envelope", Envelope }, { "end", End }, { "sender", Sender }, { "cut422", Cut422 },
+            { "refusal", Refusal }, { "queue", Queue },
         };
 
         private static int Main(string[] args)

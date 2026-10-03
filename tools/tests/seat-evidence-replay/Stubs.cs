@@ -161,6 +161,7 @@ public class PlayerManager
     public Player GetPlayerWithActorID(int a) { Player p; return ByActor.TryGetValue(a, out p) ? p : null; }
 }
 public static class TimeHandler { public static float deltaTime; }
+public class GameManager { public static GameManager instance = new GameManager(); public bool battleOngoing; }
 public class BlockTrigger { public enum BlockTriggerType { Default, ShieldCharge, Echo, Empower, None } }
 
 namespace CompetitiveRounds
@@ -211,11 +212,22 @@ namespace CompetitiveRounds
         {
             get { return !string.IsNullOrEmpty(Base) && !string.IsNullOrEmpty(SteamAuth.SessionToken); }
         }
-        internal static bool SeatEvidencePost(string path, string body, Action<bool, string, bool> callback)
+        // The evidence POST as ApiClient.SeatEvidencePost shapes it: false
+        // without a base or consent; a gate inside the api (RefuseInside)
+        // answers "not sent" without asking beforeSend; beforeSend false is
+        // "not sent" too; only then do the bytes "leave" (OnSend runs at that
+        // instant, so a case can read the queue file as it stood).
+        internal static bool RefuseInside;
+        internal static int NotSent;
+        internal static Action OnSend;
+        internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Action<bool, bool, string, bool> callback)
         {
-            if (string.IsNullOrEmpty(Base)) return false;
+            if (string.IsNullOrEmpty(Base) || !Plugin.DataConsentGranted) return false;
+            if (RefuseInside) { NotSent++; callback(false, false, "insecure-transport", false); return true; }
+            if (beforeSend != null && !beforeSend()) { NotSent++; callback(false, false, "not-sent", false); return true; }
+            if (OnSend != null) OnSend();
             Posts.Add(new KeyValuePair<string, string>(path, body));
-            callback(AnswerOk, Answer, true);
+            callback(true, AnswerOk, Answer, true);
             return true;
         }
         internal static void SeatEvidenceCompatBase(string url)

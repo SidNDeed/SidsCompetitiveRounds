@@ -66,6 +66,10 @@ namespace SeatEvidenceReplay
             PhotonNetwork.ServerTimestamp = 1000000;
             _me = Char(1001, ME, true);
             _opp = Char(2001, OPP, false);
+            // the boot hash (F7): a build waits for it, so the world starts with it done
+            SeatEvidence.StartHashing();
+            for (int i = 0; i < 200 && !SeatEvidence.IdentityReady; i++) System.Threading.Thread.Sleep(50);
+            Check(SeatEvidence.IdentityReady, "the boot hash completed");
         }
 
         /// <summary>One RPC executed on this seat, as PhotonNetwork.ExecuteRpc
@@ -94,22 +98,78 @@ namespace SeatEvidenceReplay
             SeatEvidence.HitExit(idx);
         }
 
-        private static void Damage(Ch c)
+        /// <summary>HealthHandler.RPCA_SendTakeDamage under its evidence prefix
+        /// and finalizer: `nonzero` is the envelope's damage, `completed`
+        /// whether the method ran to its end without an exception.</summary>
+        private static void Damage(Ch c, bool nonzero = true, bool completed = true)
         {
-            bool g = SeatEvidence.DamageGate(c.Hh);
-            SeatEvidence.DamageArrived(c.Hh, g);
+            bool g = SeatEvidence.DamageGate(c.Hh, nonzero);
+            SeatEvidence.DamageArrived(c.Hh, g, completed);
         }
 
         // -- the queue file and the record ------------------------------------------------
 
         private static string QueueFile() { return Path.Combine(BepInEx.Paths.ConfigPath, "CompetitiveRounds.seat-evidence.jsonl"); }
 
+        /// <summary>The request lines (the trailer line excluded).</summary>
         private static string[] QueueLines()
         {
-            return File.Exists(QueueFile()) ? File.ReadAllLines(QueueFile()) : new string[0];
+            var all = File.Exists(QueueFile()) ? File.ReadAllLines(QueueFile()) : new string[0];
+            var l = new List<string>();
+            foreach (var x in all) if (x.Length > 0 && !x.StartsWith("#", StringComparison.Ordinal)) l.Add(x);
+            return l.ToArray();
         }
 
-        private static string BodyOf(string line) { return line.Split(new[] { '\t' }, 6)[5]; }
+        private static string[] Fields(string line) { return line.Split(new[] { '\t' }, 7); }
+
+        private static string BodyOf(string line) { return Fields(line)[6]; }
+
+        private static SeatEvidenceCore.QueueCopy ReadQueue()
+        {
+            return SeatEvidenceCore.ParseQueue(File.Exists(QueueFile()) ? File.ReadAllText(QueueFile()) : "", true);
+        }
+
+        /// <summary>Writes the queue file as a launch would have left it.</summary>
+        private static void WriteQueue(List<SeatEvidenceCore.Pending> items, long gen, string path = null)
+        {
+            File.WriteAllText(path ?? QueueFile(), SeatEvidenceCore.QueueText(items, gen));
+        }
+
+        /// <summary>A new launch: the in-memory queue forgotten, the file re-read.</summary>
+        private static void NextLaunch()
+        {
+            ((System.Collections.IList)Field("_queue")).Clear();
+            SetField("_loaded", false);
+            SetField("_nextPumpMs", 0L);
+            SetField("_inFlight", false);
+        }
+
+        /// <summary>One send (the pump's spacing waived) and the tick that
+        /// takes its answer.</summary>
+        private static void SendOnce()
+        {
+            SetField("_nextPumpMs", 0L);
+            SeatEvidence.Tick();
+            SeatEvidence.Tick();
+        }
+
+        private static void ApiUp()
+        {
+            ApiClient.Base = "https://replay.invalid:8444";
+            SteamAuth.SessionToken = "session-for-the-replay";
+        }
+
+        private static int Logged(string text)
+        {
+            int n = 0;
+            foreach (var l in Plugin.Log.Lines) if (l.Contains(text)) n++;
+            return n;
+        }
+
+        private static string QueuedRecord(long firstUnix, int attempts, long notBefore)
+        {
+            return SeatEvidenceCore.Line(new SeatEvidenceCore.Pending { Route = "e", Body = "{\"x\":1}", FirstUnix = firstUnix, Attempts = attempts, NotBeforeUnix = notBefore });
+        }
 
         private static JsonElement LastRecord(out string attach)
         {
@@ -123,16 +183,21 @@ namespace SeatEvidenceReplay
 
         private static string Arr(JsonElement rec, string key) { return rec.GetProperty(key).GetRawText(); }
 
-        private static int RecordCount()
+        private static int RouteCount(string route)
         {
             int n = 0;
-            foreach (var l in QueueLines()) if (l.Split('\t').Length >= 6 && l.Split('\t')[4] == "e") n++;
+            foreach (var l in QueueLines()) { var f = Fields(l); if (f.Length == 7 && f[5] == route) n++; }
             return n;
         }
 
+        private static int RecordCount() { return RouteCount("e"); }
+
+        /// <summary>The game-over dispatch (a capture, F4) and the tick that
+        /// builds and persists its record.</summary>
         private static void Dispatch(int self, int other, string attach)
         {
             SeatEvidence.Dispatch(SEAT, OTHER, attach, self, other, true);
+            SeatEvidence.Tick();
         }
 
         private static object Field(string name)
@@ -332,7 +397,9 @@ namespace SeatEvidenceReplay
             PhotonNetwork.ServerTimestamp = 5000030;
             Rpc(_opp.View.ViewID, 5000000, "RPCAO_DoBlock", OPP, () => DoBlock(_opp, true, BlockTrigger.BlockTriggerType.Default, false, true));
             SeatEvidence.NoteEnd("closing");
-            Dispatch(3, 1, ROOM + "_123456_r4");
+            // the quit hook: the capture, then the flush (no later frame comes)
+            SeatEvidence.Dispatch(SEAT, OTHER, ROOM + "_123456_r4", 3, 1, true);
+            SeatEvidence.FlushOnQuit();
             Eq(0, ApiClient.Posts.Count, "nothing sent while closing");
             var lines = QueueLines();
             Eq(1, lines.Length, "persisted to the queue file");
@@ -340,11 +407,9 @@ namespace SeatEvidenceReplay
             string attach;
             Eq("closing", LastRecord(out attach).GetProperty("end").GetString(), "end kind closing");
             // the next launch: a fresh in-memory queue, the api up with a session
-            ((System.Collections.IList)Field("_queue")).Clear();
-            SetField("_loaded", false);
-            ApiClient.Base = "https://replay.invalid:8444";
-            SteamAuth.SessionToken = "session-for-the-replay";
-            SeatEvidence.Tick();
+            NextLaunch();
+            ApiUp();
+            SendOnce();
             Eq(1, ApiClient.Posts.Count, "sent at the next launch");
             Eq("/api/v1/matches/seat-evidence", ApiClient.Posts[0].Key, "the record route");
             Eq(body, ApiClient.Posts[0].Value, "the identical bytes");
@@ -361,47 +426,312 @@ namespace SeatEvidenceReplay
             SeatEvidence.NoteEnd("lost");
             Dispatch(2, 1, ROOM + "_123456_r3");
             Eq(1, RecordCount(), "the cut game's record is queued");
-            ApiClient.Base = "https://replay.invalid:8444";
-            SteamAuth.SessionToken = "session-for-the-replay";
+            ApiUp();
             ApiClient.AnswerOk = false;
             ApiClient.Answer = "HTTP 422: {\"detail\":\"end\"}";
-            SeatEvidence.Tick();
+            SendOnce();
             Eq(1, ApiClient.Posts.Count, "sent once");
             Eq(1, RecordCount(), "kept in the queue file after the 422");
-            SetField("_nextPumpMs", 0L);
-            SeatEvidence.Tick();
+            SendOnce();
             Eq(1, ApiClient.Posts.Count, "held: not sent again in this launch");
             // the next launch, against a server that now takes the key
-            ((System.Collections.IList)Field("_queue")).Clear();
-            SetField("_loaded", false);
-            SetField("_nextPumpMs", 0L);
+            NextLaunch();
             ApiClient.AnswerOk = true;
             ApiClient.Answer = "{\"status\":\"recorded\"}";
-            SeatEvidence.Tick();
+            SendOnce();
             Eq(2, ApiClient.Posts.Count, "sent again at the next launch");
             Eq(ApiClient.Posts[0].Value, ApiClient.Posts[1].Value, "the identical bytes");
             Eq(0, QueueLines().Length, "dropped from the file after recorded");
         }
 
-        /// <summary>The compat sender on a seat the finding disabled: it points
-        /// the api at the configured base, obtains a session through the Steam
-        /// ticket path for this seat's own id, posts the compat outcome once,
-        /// and never sends a game record.</summary>
+        /// <summary>F5, the seat the finding disabled: it points the api at the
+        /// configured base and obtains a session through the Steam ticket path
+        /// for this seat's own id; then the queue's own pump sends EVERY queued
+        /// request, the game record queued earlier as well as the compat
+        /// outcome, exactly as on an enabled seat.</summary>
         private static void CompatSender()
         {
             SeatEvidence.BeginGame(true, true);
             Dispatch(1, 0, ROOM + "_123456_r1");                    // a queued game record from earlier
+            Eq(1, RecordCount(), "the game record is queued");
             Plugin.modDisabled = true;
             SeatEvidence.NoteCompat("finding", new[] { "other.plugin", "two_2" });
             SteamAuth.GrantAfter = 1;
             for (int i = 0; i < 5; i++) SeatEvidence.CompatTick();
-            Eq("https://replay.invalid:8444", ApiClient.Base, "base set for the one send");
+            Eq("https://replay.invalid:8444", ApiClient.Base, "base set");
             Eq(SEAT, SteamAuth.FallbackIdentity, "the exchange is for this seat's own id");
             Eq(1, SteamAuth.Refreshes, "one ticket request");
-            Eq(1, ApiClient.Posts.Count, "exactly one send");
-            Eq("/api/v1/client/compat-outcome", ApiClient.Posts[0].Key, "the compat route, never a game record");
-            Check(ApiClient.Posts[0].Value.Contains("\"outcome\":\"finding\""), "the finding outcome");
-            Eq(1, RecordCount(), "the game record stays queued");
+            Eq(0, ApiClient.Posts.Count, "the session step sends nothing itself");
+            for (int i = 0; i < 4; i++) SendOnce();
+            Eq(2, ApiClient.Posts.Count, "both queued requests sent");
+            Eq("/api/v1/matches/seat-evidence", ApiClient.Posts[0].Key, "the game record (queued first)");
+            Eq("/api/v1/client/compat-outcome", ApiClient.Posts[1].Key, "then the compat outcome");
+            Check(ApiClient.Posts[1].Value.Contains("\"outcome\":\"finding\""), "the finding outcome");
+            Eq(0, QueueLines().Length, "both settled");
+        }
+
+        /// <summary>F5: a disabled seat with no compat outcome this launch but a
+        /// game record an earlier launch queued still obtains a session and
+        /// sends it.</summary>
+        private static void DisabledSeatRecords()
+        {
+            SeatEvidence.BeginGame(true, true);
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            Eq(1, RecordCount(), "queued by an earlier launch");
+            NextLaunch();
+            Plugin.modDisabled = true;
+            SteamAuth.GrantAfter = 1;
+            for (int i = 0; i < 3; i++) SeatEvidence.CompatTick();
+            Eq(1, SteamAuth.Refreshes, "one ticket request for the queued record");
+            SendOnce();
+            Eq(1, ApiClient.Posts.Count, "the record sends while the mod stays disabled");
+            Eq("/api/v1/matches/seat-evidence", ApiClient.Posts[0].Key, "the record route");
+            Eq(0, RecordCount(), "settled");
+        }
+
+        /// <summary>F9: one compat-route POST per launch; after a failure the
+        /// outcome stays queued and waits for a later launch.</summary>
+        private static void CompatOncePerLaunch()
+        {
+            SeatEvidence.NoteCompat("not_run", new string[0]);
+            SeatEvidence.CompatTick();
+            Eq(1, RouteCount("c"), "the compat outcome is queued");
+            ApiUp();
+            ApiClient.AnswerOk = false;
+            ApiClient.Answer = "HTTP 503: {\"error\":\"seat_evidence_off\"}";
+            SendOnce();
+            Eq(1, ApiClient.Posts.Count, "one compat POST");
+            foreach (SeatEvidenceCore.Pending p in (System.Collections.IList)Field("_queue")) p.NotBeforeUnix = 0;
+            for (int i = 0; i < 3; i++) SendOnce();
+            Eq(1, ApiClient.Posts.Count, "no second compat POST in this launch, even with its retry time waived");
+            Eq(1, RouteCount("c"), "it stays queued after the failure");
+            // a later launch, past its next-eligible time
+            var q = ReadQueue();
+            foreach (var p in q.Items) p.NotBeforeUnix = 0;
+            WriteQueue(q.Items, q.Generation + 1);
+            NextLaunch();
+            ApiClient.AnswerOk = true;
+            ApiClient.Answer = "{\"status\":\"recorded\"}";
+            SendOnce();
+            Eq(2, ApiClient.Posts.Count, "sent again at a later launch");
+            Eq(0, RouteCount("c"), "settled");
+        }
+
+        /// <summary>F6: only requests that leave count; the count and the next
+        /// time are in the file before the bytes leave; the next time holds
+        /// across a restart; the 20-attempt and seven-day limits hold before
+        /// every transmission whatever the answers (404, 401) and restarts.</summary>
+        private static void AttemptAccounting()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            SeatEvidence.BeginGame(true, true);
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            ApiUp();
+            Plugin.Consent = false;
+            SendOnce();
+            Plugin.Consent = true;
+            ApiClient.RefuseInside = true;
+            SendOnce();
+            ApiClient.RefuseInside = false;
+            Eq(0, ApiClient.Posts.Count, "nothing left the client");
+            Eq("0", Fields(QueueLines()[0])[2], "no attempt counted for requests that did not leave");
+            string atSend = null;
+            ApiClient.OnSend = () => { atSend = QueueLines()[0]; };
+            ApiClient.AnswerOk = false;
+            ApiClient.Answer = "Cannot resolve destination host";
+            SendOnce();
+            ApiClient.OnSend = null;
+            Eq(1, ApiClient.Posts.Count, "sent");
+            Check(atSend != null, "the file was read as the bytes left");
+            Eq("1", Fields(atSend)[2], "the file held attempt 1 when the bytes left");
+            Check(long.Parse(Fields(atSend)[4]) > now, "and a future next-eligible time");
+            NextLaunch();
+            SendOnce();
+            Eq(1, ApiClient.Posts.Count, "not before its next-eligible time, across a restart");
+            // 19 spent; a 404 (kept for the next launch); a restart
+            var spent = new SeatEvidenceCore.Pending { Route = "e", Body = "{\"x\":1}", FirstUnix = now - 10, Attempts = 19 };
+            WriteQueue(new List<SeatEvidenceCore.Pending> { spent }, 50);
+            NextLaunch();
+            ApiClient.Answer = "HTTP 404: {}";
+            SendOnce();
+            Eq(2, ApiClient.Posts.Count, "the 20th transmission");
+            NextLaunch();
+            SendOnce(); SendOnce();
+            Eq(2, ApiClient.Posts.Count, "no 21st after a 404 and a restart");
+            Eq(0, QueueLines().Length, "settled as spent");
+            // 19 spent; a 401 (session refresh): no 21st in the same launch either
+            WriteQueue(new List<SeatEvidenceCore.Pending> { spent.Clone() }, 60);
+            NextLaunch();
+            ApiClient.Answer = "HTTP 401: {\"detail\":\"session_required\"}";
+            SendOnce();
+            Eq(3, ApiClient.Posts.Count, "the 20th transmission");
+            foreach (SeatEvidenceCore.Pending p in (System.Collections.IList)Field("_queue")) p.NotBeforeUnix = 0;
+            SendOnce(); SendOnce();
+            Eq(3, ApiClient.Posts.Count, "no 21st after a 401");
+            Eq(0, QueueLines().Length, "settled as spent");
+            // seven days: never sent
+            WriteQueue(new List<SeatEvidenceCore.Pending> { new SeatEvidenceCore.Pending { Route = "e", Body = "{\"x\":1}", FirstUnix = now - SeatEvidenceCore.EXPIRY_S } }, 70);
+            NextLaunch();
+            SendOnce();
+            Eq(3, ApiClient.Posts.Count, "an expired request never leaves");
+            Eq(0, QueueLines().Length, "settled as expired");
+        }
+
+        /// <summary>F3: a battle live in THIS frame (the game's own flag) holds
+        /// every queue action before any load, save, attempt accounting or
+        /// request setup, while the diagnostics flag (refreshed later in the
+        /// frame) is still stale; the diagnostics flag alone holds it too.</summary>
+        private static void CombatGate()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            WriteQueue(new List<SeatEvidenceCore.Pending> { new SeatEvidenceCore.Pending { Route = "e", Body = "{\"x\":1}", FirstUnix = now } }, 3);
+            byte[] before = File.ReadAllBytes(QueueFile());
+            SeatEvidence.BeginGame(true, true);
+            ApiUp();
+            GameManager.instance.battleOngoing = true;
+            NetworkReplicaDiagnostics.BattleActive = false;
+            SeatEvidence.Dispatch(SEAT, OTHER, ROOM + "_123456_r2", 1, 1, true);
+            for (int i = 0; i < 3; i++) SendOnce();
+            Eq(false, (bool)Field("_loaded"), "no load while the battle is live");
+            Check(Convert.ToBase64String(before) == Convert.ToBase64String(File.ReadAllBytes(QueueFile())), "the queue file untouched");
+            Eq(0, ApiClient.Posts.Count, "nothing sent");
+            Eq(0, Logged("record queued"), "no build while the battle is live");
+            GameManager.instance.battleOngoing = false;
+            NetworkReplicaDiagnostics.BattleActive = true;
+            SendOnce();
+            Eq(false, (bool)Field("_loaded"), "the diagnostics flag alone also holds it");
+            Eq(0, ApiClient.Posts.Count, "nothing sent");
+            NetworkReplicaDiagnostics.BattleActive = false;
+            SendOnce();
+            Eq(1, Logged("record queued"), "built once the battle ended");
+            Eq(1, ApiClient.Posts.Count, "and the queue sends");
+        }
+
+        /// <summary>F4: the dispatch only captures: no file, no log line inside
+        /// it (its refusal line too waits); the tick builds, persists and logs.</summary>
+        private static void DispatchDefers()
+        {
+            SeatEvidence.BeginGame(true, true);
+            int logs = Plugin.Log.Lines.Count;
+            SeatEvidence.Dispatch(SEAT, OTHER, ROOM + "_123456_r2", 1, 1, true);
+            Check(!File.Exists(QueueFile()), "no file work inside the dispatch");
+            Eq(logs, Plugin.Log.Lines.Count, "no log line inside the dispatch");
+            SeatEvidence.BeginGame(true, true);
+            SeatEvidence.Dispatch("not-a-seat", OTHER, ROOM + "_123456_r3", 1, 1, true);
+            Eq(logs, Plugin.Log.Lines.Count, "a refusal's line waits for the tick too");
+            SeatEvidence.Tick();
+            Eq(1, RecordCount(), "built and persisted on the tick");
+            Eq(1, Logged("record queued"), "logged on the tick");
+            Eq(1, Logged("no record: game key or seat ids"), "the refusal logged on the tick");
+        }
+
+        /// <summary>F7: no record while the build identity is pending; the
+        /// completed identity rides in it. no_location only for an empty
+        /// location; an unreadable one is read_failed.</summary>
+        private static void IdentityPending()
+        {
+            SetField("_dllState", SeatEvidence.ID_PENDING);
+            SetField("_dllSha", "");
+            SeatEvidence.BeginGame(true, true);
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            SeatEvidence.Tick();
+            Eq(0, RecordCount(), "no record while the identity is pending");
+            SeatEvidence.CompleteIdentityNow();
+            SeatEvidence.Tick();
+            string attach;
+            var rec = LastRecord(out attach);
+            Eq("ok", rec.GetProperty("dll")[1].GetString(), "the completed identity");
+            Eq(64, rec.GetProperty("dll")[0].GetString().Length, "its hash");
+            var hash = typeof(SeatEvidence).GetMethod("Hash", BindingFlags.NonPublic | BindingFlags.Static);
+            Func<string, string> state = path => { var a = new object[] { path, null, null }; hash.Invoke(null, a); return (string)a[2]; };
+            Eq("no_location", state(""), "an empty location");
+            Eq("read_failed", state(null), "a location that could not be asked for");
+            Eq("read_failed", state(Path.Combine(BepInEx.Paths.ConfigPath, "missing.dll")), "an unreadable file");
+            Eq("ok", state(typeof(SeatEvidence).Assembly.Location), "a readable file");
+        }
+
+        /// <summary>F8: the newer whole temporary copy is recovered; a torn
+        /// one never wins over the whole primary.</summary>
+        private static void QueueRecovery()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var a = new SeatEvidenceCore.Pending { Route = "e", Body = "{\"a\":1}", FirstUnix = now };
+            var b = new SeatEvidenceCore.Pending { Route = "k", Body = "{\"b\":1}", FirstUnix = now };
+            string tmp = QueueFile() + ".tmp";
+            WriteQueue(new List<SeatEvidenceCore.Pending> { a }, 1);
+            WriteQueue(new List<SeatEvidenceCore.Pending> { a, b }, 2, tmp);     // a replacement that did not complete
+            SeatEvidence.BeginGame(true, true);
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            var q = ReadQueue();
+            Check(q.Whole, "the file is whole");
+            Eq(3, q.Items.Count, "the newer temporary recovered, then the record added");
+            Eq(3L, q.Generation, "written as the next generation");
+            Check(!File.Exists(tmp), "the temporary replaced the primary");
+            NextLaunch();
+            File.WriteAllText(tmp, SeatEvidenceCore.QueueText(new List<SeatEvidenceCore.Pending> { a, b }, 9).Replace("{\"b\":1}", "{\"b\":2}"));
+            SeatEvidence.BeginGame(true, true);
+            Dispatch(2, 1, ROOM + "_123456_r5");
+            q = ReadQueue();
+            Eq(4, q.Items.Count, "the whole primary kept, the torn temporary ignored, the record added");
+        }
+
+        /// <summary>F8: a record is reported queued only after the queue file
+        /// holding it replaced the old one; until then it stays captured and
+        /// nothing in memory changes.</summary>
+        private static void QueueSaveFails()
+        {
+            WriteQueue(new List<SeatEvidenceCore.Pending>(), 1);
+            SeatEvidence.BeginGame(true, true);
+            using (new FileStream(QueueFile(), FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Dispatch(2, 1, ROOM + "_123456_r3");
+                Eq(0, Logged("record queued"), "not reported queued while the file cannot be read");
+                Eq(1, ((System.Collections.IList)Field("_captures")).Count, "kept captured");
+            }
+            SetField("_nextCaptureTryMs", 0L);
+            SeatEvidence.Tick();
+            Eq(1, Logged("record queued"), "queued once the file could be replaced");
+            Eq(1, RecordCount(), "in the file");
+            string tmp = QueueFile() + ".tmp";
+            SeatEvidence.BeginGame(true, true);
+            using (new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                Dispatch(1, 1, ROOM + "_123456_r2");
+                Eq(1, Logged("record queued"), "a failed replacement is not reported");
+                Eq(1, ((System.Collections.IList)Field("_queue")).Count, "nothing in memory changed");
+                Eq(1, RecordCount(), "the file still holds the old generation");
+                Eq(1, ((System.Collections.IList)Field("_captures")).Count, "kept captured");
+            }
+            File.Delete(tmp);
+            SetField("_nextCaptureTryMs", 0L);
+            SeatEvidence.Tick();
+            Eq(2, Logged("record queued"), "queued after the replacement succeeded");
+            Eq(2, RecordCount(), "both in the file");
+        }
+
+        /// <summary>F1: dmg is 1 only for a nonzero envelope that passes the
+        /// game's own predicate and completes without an exception.</summary>
+        private static void DamagePredicate()
+        {
+            SeatEvidence.BeginGame(true, true);
+            var ph = Proj(901, OPP, false);
+            int ts = 1000600;
+            for (int k = 0; k < 4; k++)
+            {
+                ts += 1000;
+                PhotonNetwork.ServerTimestamp = ts + 10;
+                int pid = 60 + k;
+                Rpc(901, ts, "RPCA_DoHit", OPP, () => Hit(ph, pid, _me, false));
+                if (k == 2) _me.Data.dead = true;
+                Rpc(_me.View.ViewID, ts + 1, "RPCA_SendTakeDamage", OPP, () => Damage(_me, k != 0, k != 1));
+                _me.Data.dead = false;
+            }
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            string attach;
+            var rec = LastRecord(out attach);
+            var dmg = new List<int>();
+            foreach (var e in rec.GetProperty("hit_recv").EnumerateArray()) dmg.Add(e[6].GetInt32());
+            Eq("0,0,0,1", string.Join(",", dmg), "zero damage, a body that threw, a dead victim: 0; a completed nonzero hit: 1");
         }
 
         /// <summary>The compat sender's bounds: nothing without consent (no
@@ -439,6 +769,10 @@ namespace SeatEvidenceReplay
             { "unkeyed_and_nesting", UnkeyedAndNesting }, { "cut_left", CutLeft }, { "cut_guards", CutGuards },
             { "closing_next_boot", ClosingNextBoot }, { "compat_sender", CompatSender }, { "compat_bounds", CompatBounds },
             { "cut_422_kept", Cut422Kept }, { "path1_unstamped", Path1Unstamped },
+            { "disabled_seat_records", DisabledSeatRecords }, { "compat_once_per_launch", CompatOncePerLaunch },
+            { "attempt_accounting", AttemptAccounting }, { "combat_gate", CombatGate }, { "dispatch_defers", DispatchDefers },
+            { "identity_pending", IdentityPending }, { "queue_recovery", QueueRecovery }, { "queue_save_fails", QueueSaveFails },
+            { "damage_predicate", DamagePredicate },
         };
 
         private static int Main(string[] args)

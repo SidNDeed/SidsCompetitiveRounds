@@ -9,7 +9,15 @@ using System.Reflection;
 
 namespace UnityEngine
 {
-    public struct Vector2 { public float x, y; }
+    public struct Vector2
+    {
+        public float x, y;
+        public static Vector2 zero { get { return default(Vector2); } }
+        public static bool operator ==(Vector2 a, Vector2 b) { return a.x == b.x && a.y == b.y; }
+        public static bool operator !=(Vector2 a, Vector2 b) { return !(a == b); }
+        public override bool Equals(object o) { return o is Vector2 && (Vector2)o == this; }
+        public override int GetHashCode() { return 0; }
+    }
     public struct Vector3 { public float x, y, z; }
     public class Component { }
 }
@@ -96,8 +104,8 @@ namespace CompetitiveRounds
     {
         internal static int EnterRpc(Hashtable d, Photon.Realtime.Player s) { throw Planted.Fault(); }
         internal static void ExitRpc(int depth) { throw Planted.Fault(); }
-        internal static bool DamageGate(HealthHandler h) { throw Planted.Fault(); }
-        internal static void DamageArrived(HealthHandler h, bool g) { throw Planted.Fault(); }
+        internal static bool DamageGate(HealthHandler h, bool nonzero) { throw Planted.Fault(); }
+        internal static void DamageArrived(HealthHandler h, bool g, bool completed) { throw Planted.Fault(); }
         internal static int BlockEnter(Block b, bool f, BlockTrigger.BlockTriggerType t, bool o) { throw Planted.Fault(); }
         internal static void BlockExit(int i) { throw Planted.Fault(); }
         internal static void ShotArrived(Component c, int k) { throw Planted.Fault(); }

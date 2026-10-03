@@ -86,6 +86,9 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        // a fault's line, written by the tick (F4: the collector only counts)
+        private static readonly string[] _faultNote = new string[K.COLLECTORS];
+
         private static void Fault(int i, Exception ex)
         {
             try
@@ -93,9 +96,25 @@ namespace CompetitiveRounds
                 _cost[i][3]++;
                 if (_faultLogged[i]) return;
                 _faultLogged[i] = true;
-                Plugin.Log.LogWarning(TAG + " C" + (i + 1).ToString(CultureInfo.InvariantCulture) + " fault (counted, once per game): " + (ex != null ? ex.GetType().Name : "?"));
+                _faultNote[i] = ex != null ? ex.GetType().Name : "?";
             }
             catch { }
+        }
+
+        private static void DrainNotes()
+        {
+            for (int i = 0; i < K.COLLECTORS; i++)
+            {
+                string n = _faultNote[i];
+                if (n == null) continue;
+                _faultNote[i] = null;
+                Plugin.Log.LogWarning(TAG + " C" + (i + 1).ToString(CultureInfo.InvariantCulture) + " fault (counted, once per game): " + n);
+            }
+            if (_noRecordNote != null)
+            {
+                string n = _noRecordNote; _noRecordNote = null;
+                Plugin.Log.LogWarning(TAG + n);
+            }
         }
 
         // -- the six collectors (each: gate at the first line, body in its own try) ---------------
@@ -342,6 +361,7 @@ namespace CompetitiveRounds
             int ns = choice != null ? choice.transform.childCount : 0;
             _game = new K.CardGame(g, ns, VanillaCardSequence.OpeningDraws, _poolRef != null ? _poolRef.Length : 0, _digest, _canon, _rar,
                                    po, new IList<int>[] { held[0], held[1] });
+            _gameDigestPending = _censusCards != null;
         }
 
         private static List<int> HeldOf(Player p)
@@ -357,23 +377,54 @@ namespace CompetitiveRounds
             catch { return null; }
         }
 
-        /// <summary>The census of this seat's own CardChoice.cards (finding
-        /// M4), its digest, the index map and the canonical names; rebuilt only
-        /// when the pool array changes.</summary>
+        // the pool array whose census the tick still has to compute (F4)
+        private static CardInfo[] _censusCards;
+        private static bool _gameDigestPending;
+
+        /// <summary>From C1 (inside StartPick) when the pool array changed:
+        /// only the index map and the canonical names the collectors read, one
+        /// pass over the pool, once per pool array. The census text, its digest,
+        /// the category check, the pool-class read and the census line are
+        /// FinishCensus's, on the tick.</summary>
         private static void EnsurePool(CardChoice choice)
         {
             var cards = choice != null ? choice.cards : null;
             if (cards == null || ReferenceEquals(cards, _poolRef)) return;
-            var census = new List<K.CensusCard>(cards.Length);
-            var cats = new List<KeyValuePair<int, string>>();
             var canon = new string[cards.Length];
             var rar = new int[cards.Length];
             _ix.Clear();
             for (int i = 0; i < cards.Length; i++)
             {
                 var c = cards[i];
-                if (c == null) { census.Add(new K.CensusCard { Name = "" }); canon[i] = ""; rar[i] = -1; continue; }
+                if (c == null) { canon[i] = ""; rar[i] = -1; continue; }
                 if (!_ix.ContainsKey(c)) _ix[c] = i;
+                string nm = c.gameObject.name;
+                try { nm = CardRarityLookup.GetCanonicalName(nm) ?? nm; } catch { }
+                canon[i] = nm;
+                rar[i] = (int)c.rarity;
+            }
+            _canon = canon; _rar = rar;
+            _poolRef = cards;
+            _censusCards = cards;
+            _digest = "";
+        }
+
+        /// <summary>From the tick (outside combat), the census dump and the
+        /// quit flush: the census of the pool array C1 took (finding M4; the
+        /// pool's cards are the game's prefabs, the same objects C1 indexed),
+        /// its digest, the category check and, once per process, the census
+        /// line. A game begun while it was pending takes the digest here.</summary>
+        private static void FinishCensus()
+        {
+            var cards = _censusCards;
+            if (cards == null) return;
+            _censusCards = null;
+            var census = new List<K.CensusCard>(cards.Length);
+            var cats = new List<KeyValuePair<int, string>>();
+            for (int i = 0; i < cards.Length; i++)
+            {
+                var c = cards[i];
+                if (c == null) { census.Add(new K.CensusCard { Name = "" }); continue; }
                 Gun gun = null;
                 try { gun = c.GetComponent<Gun>(); } catch { }
                 census.Add(new K.CensusCard
@@ -382,16 +433,12 @@ namespace CompetitiveRounds
                     Categories = CatNames(c.categories, cats), Blacklisted = CatNames(c.blacklistedCategories, cats),
                     Lock = gun != null && gun.lockGunToDefault,
                 });
-                string nm = c.gameObject.name;
-                try { nm = CardRarityLookup.GetCanonicalName(nm) ?? nm; } catch { }
-                canon[i] = nm;
-                rar[i] = (int)c.rarity;
             }
             _censusText = K.CensusText(census);
             _digest = K.CensusDigest(_censusText);
             _censusCollision = K.CategoryNameCollision(cats);
-            _canon = canon; _rar = rar;
-            _poolRef = cards;
+            if (_game != null && _gameDigestPending) { _game.Digest = _digest; _gameDigestPending = false; }
+            foreach (var p in _pending) if (p.DigestPending) { p.Game.Digest = _digest; p.DigestPending = false; }
             if (!_poolClassLogged)
             {
                 _poolClassLogged = true;
@@ -437,10 +484,29 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>A game's record as the dispatch captured it; built on the tick.</summary>
+        private sealed class Pending
+        {
+            internal K.CardGame Game;
+            internal string Seat, Other, Stable, Attach, End, Text, Env;
+            internal int Rule, Verdict;
+            internal long[][] Cost;
+            internal bool DigestPending;
+        }
+
+        private const int PENDING_CAP = 4;
+        private static readonly List<Pending> _pending = new List<Pending>();
+        private static long _nextBuildMs;
+        private static bool _buildFailLogged;
+        private static string _noRecordNote;
+
         /// <summary>After the seat evidence dispatch (game over, or a game cut
-        /// short). Ranked only, both seats. Builds, budgets, signs and
-        /// persists the envelope before any network work; the queue sends it
-        /// outside combat. The end kind is the one the seat record carries.</summary>
+        /// short). Ranked only, both seats. CAPTURES the game (F4): closes it
+        /// and copies the end kind, the rule and its verdict and the cost
+        /// table. The record is built, budgeted, signed and persisted by Tick
+        /// outside combat (or by FlushOnQuit when the game closes); the queue
+        /// sends it outside combat. The end kind is the one the seat record
+        /// carries.</summary>
         internal static void Dispatch(string seat, string other, string attach, bool rankedNow)
         {
             try
@@ -451,13 +517,12 @@ namespace CompetitiveRounds
                 if (_room.Length == 0 || attach == null || !attach.StartsWith(_room + "_", StringComparison.Ordinal)) return;
                 _taken = true;
                 if (!rankedNow && !CardDrawEvidenceTestGate.On) return;
-                string stable = null, end = null, sha = "", state = "no_location";
+                string stable = null, end = null;
                 try { stable = SeatEvidence.StableOf(attach); } catch { stable = null; }
                 try { end = SeatEvidence.NotedEnd; } catch { end = null; }
-                try { sha = SeatEvidence.GameDllSha; state = SeatEvidence.GameDllState; } catch { sha = ""; state = "no_location"; }
                 if (stable == null || !SeatEvidenceCore.IsSteamId(seat) || !SeatEvidenceCore.IsSteamId(other))
                 {
-                    Plugin.Log.LogWarning(TAG + " no record: game key or seat ids outside the contract");
+                    _noRecordNote = " no record: game key or seat ids outside the contract";
                     return;
                 }
                 game.Close(SharedNow());
@@ -470,20 +535,115 @@ namespace CompetitiveRounds
                 catch { }
                 var cost = new long[K.COLLECTORS][];
                 for (int i = 0; i < K.COLLECTORS; i++) cost[i] = (long[])_cost[i].Clone();
-                string text = K.Budget(game.Record(end, sha, state, rule, verdict, cost));
-                string sig = ApiClient.SeatEvidenceSig(K.Canonical(seat, other, stable, attach, text));
-                string env = K.Envelope(seat, other, stable, attach, text, sig);
-                if (env == null) { Plugin.Log.LogWarning(TAG + " no record: the envelope is outside the contract"); return; }
-                try { SeatEvidence.EnqueueCard(env); }
-                catch (Exception ex) { Plugin.Log.LogWarning(TAG + " no record: queue " + ex.GetType().Name); return; }
-                Plugin.Log.LogInfo(TAG + " record queued: " + text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, phases "
-                    + (game.Tot[0][0] + game.Tot[1][0]).ToString(CultureInfo.InvariantCulture) + ", hands "
-                    + (game.Tot[0][1] + game.Tot[1][1]).ToString(CultureInfo.InvariantCulture) + ", end " + (end ?? "game_over")
-                    + (CardDrawEvidenceTestGate.On ? ", TEST GATE OVERRIDE" : ""));
+                if (_pending.Count >= PENDING_CAP) { _pending.RemoveAt(0); _noRecordNote = " a captured record was dropped before it was persisted: too many waiting"; }
+                _pending.Add(new Pending
+                {
+                    Game = game, Seat = seat, Other = other, Stable = stable, Attach = attach, End = end,
+                    Rule = rule, Verdict = verdict, Cost = cost, DigestPending = _gameDigestPending,
+                });
+                _gameDigestPending = false;
+                _nextBuildMs = 0;
             }
-            catch (Exception ex)
+            catch
             {
-                try { Plugin.Log.LogWarning(TAG + " no record: " + ex.GetType().Name); } catch { }
+                _noRecordNote = " no record: the capture failed";
+            }
+        }
+
+        /// <summary>From Plugin's persistent tick, ABOVE its modDisabled
+        /// return: the deferred lines always; outside combat (current frame)
+        /// the census and the captured records' builds.</summary>
+        internal static void Tick()
+        {
+            try
+            {
+                DrainNotes();
+                if (SeatEvidence.CombatLive()) return;
+                FinishCensus();
+                BuildPending(false);
+            }
+            catch { }
+        }
+
+        /// <summary>Application.quitting, after the seat evidence quit flush:
+        /// every captured record is built and persisted now (no later frame).</summary>
+        internal static void FlushOnQuit()
+        {
+            try { DrainNotes(); FinishCensus(); BuildPending(true); } catch { }
+        }
+
+        /// <summary>Whether the game DLL identity is complete (F7). Not yet:
+        /// the boot hash is started (a no-op once running) and the build
+        /// waits, except on the quitting path, which completes it on this
+        /// thread.</summary>
+        private static bool IdentityReadyOrStart(bool now)
+        {
+            bool ready = false;
+            try { ready = SeatEvidence.IdentityReady; } catch { }
+            if (ready) return true;
+            if (now)
+            {
+                try { SeatEvidence.CompleteIdentityNow(); } catch { }
+                return true;
+            }
+            try { SeatEvidence.StartHashing(); } catch { }
+            return false;
+        }
+
+        /// <summary>Builds and persists the captured records. A build waits for
+        /// the completed game DLL identity (F7). A record is reported as queued
+        /// only after the queue file holding it replaced the old one (F8);
+        /// until then it stays captured, its bytes kept, and is tried again
+        /// every 5 s.</summary>
+        private static void BuildPending(bool now)
+        {
+            if (_pending.Count == 0) return;
+            if (!now && _sw.ElapsedMilliseconds < _nextBuildMs) return;
+            if (!IdentityReadyOrStart(now)) return;
+            int i = 0;
+            while (i < _pending.Count)
+            {
+                var p = _pending[i];
+                try
+                {
+                    if (p.Env == null)
+                    {
+                        if (p.DigestPending) { p.Game.Digest = _digest; p.DigestPending = false; }
+                        string sha = SeatEvidence.GameDllSha, state = SeatEvidence.GameDllState;
+                        string text = K.Budget(p.Game.Record(p.End, sha, state, p.Rule, p.Verdict, p.Cost));
+                        string sig = ApiClient.SeatEvidenceSig(K.Canonical(p.Seat, p.Other, p.Stable, p.Attach, text));
+                        string env = K.Envelope(p.Seat, p.Other, p.Stable, p.Attach, text, sig);
+                        if (env == null)
+                        {
+                            _pending.RemoveAt(i);
+                            Plugin.Log.LogWarning(TAG + " no record: the envelope is outside the contract");
+                            continue;
+                        }
+                        p.Text = text; p.Env = env;
+                    }
+                    if (!SeatEvidence.EnqueueCard(p.Env))
+                    {
+                        _nextBuildMs = _sw.ElapsedMilliseconds + 5000;
+                        if (!_buildFailLogged)
+                        {
+                            _buildFailLogged = true;
+                            Plugin.Log.LogWarning(TAG + " record not persisted yet (the queue file was not replaced): kept and tried again");
+                        }
+                        return;
+                    }
+                    _pending.RemoveAt(i);
+                    _buildFailLogged = false;
+                    var game = p.Game;
+                    Plugin.Log.LogInfo(TAG + " record queued: " + p.Text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, phases "
+                        + (game.Tot[0][0] + game.Tot[1][0]).ToString(CultureInfo.InvariantCulture) + ", hands "
+                        + (game.Tot[0][1] + game.Tot[1][1]).ToString(CultureInfo.InvariantCulture) + ", end " + (p.End ?? "game_over")
+                        + (CardDrawEvidenceTestGate.On ? ", TEST GATE OVERRIDE" : ""));
+                }
+                catch (Exception ex)
+                {
+                    _pending.RemoveAt(i);
+                    try { Plugin.Log.LogWarning(TAG + " no record: " + ex.GetType().Name); } catch { }
+                }
             }
         }
 
@@ -568,9 +728,17 @@ namespace CompetitiveRounds
                 }
                 string state = "", sha = "";
                 try { state = SeatEvidence.GameDllState; sha = SeatEvidence.GameDllSha; } catch { }
-                if (state != "ok" && _sw.ElapsedMilliseconds - _dumpWaitFromMs < DUMP_HASH_WAIT_MS) return;
+                if (state == SeatEvidence.ID_PENDING)
+                {
+                    // the boot hash is still running: wait (bounded), then take
+                    // the identity completed on this thread
+                    if (_sw.ElapsedMilliseconds - _dumpWaitFromMs < DUMP_HASH_WAIT_MS) return;
+                    try { SeatEvidence.CompleteIdentityNow(); } catch { }
+                    try { state = SeatEvidence.GameDllState; sha = SeatEvidence.GameDllSha; } catch { }
+                }
                 _dumpDone = true;
                 EnsurePool(CardChoice.instance);
+                FinishCensus();
                 if (_censusCollision)
                 {
                     Plugin.Log.LogError(TAG + " census dump FAILED: two category objects share a name; nothing written");
