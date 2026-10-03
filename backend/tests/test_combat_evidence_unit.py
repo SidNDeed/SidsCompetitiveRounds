@@ -277,10 +277,19 @@ def test_the_canonical_fixture_set_is_byte_identical_to_the_files_the_client_rep
 
 
 def test_the_canonical_comparison_sees_one_changed_byte(tmp_path):
-    files = fx.canonical_set()
+    """L-6: a copy of the canonical directory passes the on-disk validator
+    (negative control); the same copy with one changed byte in one file is
+    rejected, naming exactly that file."""
+    copy = tmp_path / "canon"
+    shutil.copytree(fx.FIXTURE_DIR, str(copy))
+    assert fx.validate_dir(str(copy)) == []
     name = "a24_owner.out.txt"
-    changed = files[name].replace(b'"consts":1', b'"consts":2')
-    assert changed != files[name]
+    data = (copy / name).read_bytes()
+    changed = data.replace(b'"consts":1', b'"consts":2')
+    assert changed != data
+    (copy / name).write_bytes(changed)
+    assert fx.validate_dir(str(copy)) == [name]
+    assert fx.validate_dir(fx.FIXTURE_DIR) == []
 
 
 # -- the cycle rebuild and the review's case (A17, A24, M5) ------------------------------
@@ -357,18 +366,37 @@ def test_a17_the_rebuild_equals_the_totals_and_sees_a_missing_shot():
     assert "cycles" in cm.rebuild_faults(gone, "s")
 
 
+def _a6_pair(skip=False):
+    """Magazine three. Control: three shots on both seats, every decrement
+    taken. Skip arm: the owner skips its second decrement, so it fires a
+    FOURTH shot the copy counts as over the magazine."""
+    n = 4 if skip else 3
+    owner, meas = fx.empty_record(), fx.empty_record()
+    for r, side in ((owner, "s"), (meas, "o")):
+        r["tb"] = [fx.point()]
+        r["tb_tot"] = fx.tb_tot_of(r["tb"])
+        r["gun_" + side] = [fx.gun()]
+        r["sh_" + side] = [fx.cycle_group(fx.S0, fx.PID0, n, side=side, reload_after=False)]
+    if skip:
+        for e, a0 in zip(owner["sh_s"][0][1], (3, 3, 2, 1)):
+            e[cm.SHOT["s"]["ammo_before"]] = a0
+    return fx.finish(owner, "s"), fx.finish(meas, "o")
+
+
 def test_a6_a_skipped_decrement_shows_reason_bit_one_and_a_non_zero_ammo_difference():
-    owner, meas = fx.a24_pair()
-    skip = fx.clone(owner)
-    for e, a0 in zip(skip["sh_s"][0][1], (3, 3, 2, 1)):
-        e[2] = a0
-    skip["sh_s"][0][1][3][3] = 0
-    d = _owner_dir(cm.pair_view(fx.records(skip, meas)))
-    assert d["cycles"][0]["meas"]["why"] & cm.WHY["over_mag"]
-    assert [s["d_ammo"] for s in d["cycles"][0]["shots"]] == [0, 1, 1, 1]
-    assert d["case"] == "both_differ"
+    owner, meas = _a6_pair()
     control = _owner_dir(cm.pair_view(fx.records(owner, meas)))
-    assert [s["d_ammo"] for s in control["cycles"][0]["shots"]] == [0, 0, 0, 0]
+    (crow,) = control["cycles"]
+    assert crow["meas"]["why"] == 0 and crow["self"]["why"] == 0         # no bit
+    assert [s["d_ammo"] for s in crow["shots"]] == [0, 0, 0]             # no difference
+    assert control["case"] == "both_agree" and len(crow["shots"]) == 3
+    skip, smeas = _a6_pair(skip=True)
+    d = _owner_dir(cm.pair_view(fx.records(skip, smeas)))
+    (row,) = d["cycles"]
+    assert len(row["shots"]) == 4                                        # the extra shot
+    assert row["meas"]["why"] & cm.WHY["over_mag"] == cm.WHY["over_mag"] == 1
+    assert [s["d_ammo"] for s in row["shots"]] == [0, 1, 1, 1]
+    assert d["case"] == "both_differ" and "shot" in d["differs_by"]
 
 
 # -- Q1: the display cases --------------------------------------------------------------
@@ -417,7 +445,9 @@ def test_m2_every_combat_measure_declares_its_version_dependence():
         assert isinstance(e.data, dict) and isinstance(e.data.get("consts"), bool), e.name
     assert {e.name for e in entries if e.data["consts"]} == {
         "b1.hist.compatible", "b1.hist.meas_volleys", "b1.hist.self_volleys", "b3.top.d_perp",
-        "b2.shot.owner_gate_flags", "b2.shot.owner_since"}
+        "b2.shot.owner_gate_flags", "b2.shot.owner_since", "b1.react.err", "b3.tb.gap",
+        "b3.tb.ang_to_me", "b3.hm.ratio_pm", "b3.top.d_along", "b3.top.ang", "rec.a1sum",
+        "b3.tb.min_gap", "b3.hm.max_ratio_pm", "b3.hm.hist", "b3.bounce.meas_gap"}
 
 
 def test_m2_a_mixed_version_pair_is_stored_but_every_cross_record_measure_is_not_run():
@@ -521,6 +551,18 @@ def test_m10_a23_contacts_pair_by_init_identity_and_ordinal_even_when_reordered(
     assert [(r["cord"], r["contact_to_decision"], r["not_run"]) for r in rows] == \
         [(1, 40, None), (0, 30, None)]
     assert rows[0]["since_c"] == 40 and rows[0]["since_ms"] == 30
+    assert rows[0]["own_since"] == -2                         # the wire's "no own window"
+
+
+def test_l4_a23_the_victims_own_since_is_read_and_its_absence_is_none():
+    victim, shooter = _contact_pair([(9, 100, 0, 1500)], [(9, 100, 0, 1530)])
+    victim["b5_c"][0][cm.IX["b5_c"]["own_since"]] = 25
+    view = cm.pair_view(fx.records(victim, shooter))
+    (c,) = cm.combat_subjects(view)["combat.contact"]
+    assert c.row["own_since"] == 25 and cm.m_contact_own_since(c, None) == 25
+    victim["b5_c"][0][cm.IX["b5_c"]["own_since"]] = cm.W["own_since_none"]   # negative mutant
+    (c,) = cm.combat_subjects(cm.pair_view(fx.records(victim, shooter)))["combat.contact"]
+    assert cm.m_contact_own_since(c, None) is None
 
 
 def test_m10_a_duplicated_or_gapped_contact_key_is_ambiguous_and_not_run():
@@ -555,11 +597,19 @@ def test_l1_a9_a_paired_block_carries_its_frame_bound():
 
 
 def test_l1_a10_a_delay_is_measured_against_its_control():
+    """L-2: the injected delay lies inside the control-relative interval the
+    two records' frame bounds give (each seat may see the open up to one of
+    its frames late), never asserted as an exact difference; a zero delay
+    lies outside the delayed interval and inside the control's own."""
     delay = 125
-    (control,) = cm.blocks(*_block_pair(7200, 7260))
-    (delayed,) = cm.blocks(*_block_pair(7200, 7260 + delay))
-    assert delayed["d_open"] - control["d_open"] == delay
-    assert delayed["frame_bound"] == control["frame_bound"]
+    (control,) = cm.blocks(*_block_pair(7200, 7260, fr_s=17, fr_o=16))
+    for jitter, fr_s, fr_o in ((0, 17, 16), (14, 17, 16), (-9, 20, 12)):
+        (delayed,) = cm.blocks(*_block_pair(7200, 7260 + delay + jitter, fr_s=fr_s, fr_o=fr_o))
+        bound = control["frame_bound"] + delayed["frame_bound"]
+        rel = delayed["d_open"] - control["d_open"]
+        assert rel - bound <= delay <= rel + bound
+        assert not rel - bound <= 0 <= rel + bound                       # negative control
+    assert -control["frame_bound"] <= 0 <= control["frame_bound"]
 
 
 # -- L2, L3: stat seam and ramp ------------------------------------------------------
@@ -585,13 +635,62 @@ def test_l3_a20_a_ramped_point_and_a_point_without_ramp():
     assert pts[1]["game_real_pm"] == pts[1]["base"] == 850
     subs = cm.combat_subjects(view)["combat.point"]
     assert sorted(cm.m_point_base(c, None) for c in subs) == [850, 850]
+    m = _measure_fn
+    assert sorted(m("tb.point.ramp")(c, None) for c in subs) == [0, 180]
+
+
+def _point_subjects(**over):
+    rec = fx.empty_record()
+    rec["tb"] = [fx.point(0, **over)]
+    rec["tb_tot"] = fx.tb_tot_of(rec["tb"])
+    (sub,) = cm.combat_subjects(cm.pair_view(fx.records(rec, None)))["combat.point"]
+    return sub
+
+
+def _measure_fn(name):
+    return rm.REGISTRY[name].impl[0]
+
+
+def test_m4_slow_slowed_reload_and_frame_clamp_each_against_its_control():
+    m = _measure_fn
+    control = _point_subjects()
+    slow = _point_subjects(slow=9000, game=42000)
+    assert m("tb.point.slow")(control, None) == 0 and m("tb.point.slow")(slow, None) == 9000
+    assert m("tb.point.game_real")(slow, None) < m("tb.point.game_real")(control, None)
+    clamp = _point_subjects(clamp=250, dt_max_us=50000)
+    assert m("tb.point.clamp")(control, None) == 0 and m("tb.point.clamp")(clamp, None) == 250
+    assert m("tb.point.dt_max_us")(clamp, None) == 50000 > m("tb.point.dt_max_us")(control, None)
+    ramp = _point_subjects(ramp=180)
+    assert m("tb.point.ramp")(ramp, None) == 180 and m("tb.point.ramp")(control, None) == 0
+    # A reload slowed with the game: on the game clock it lasts its stated
+    # length, on the real clock longer. Its control lasts the same on both.
+    owner, meas = fx.a24_pair()
+    slowed_o, slowed_m = fx.clone(owner), fx.clone(meas)
+    for r, gk in ((slowed_o, "sh_s"), (slowed_m, "sh_o")):
+        r[gk][0][0][cm.HDR["rl_r"]] = 2400
+        r["tb"] = [fx.point(slow=9000, game=42000)]
+        r["tb_tot"] = fx.tb_tot_of(r["tb"])
+    for o, me, real in ((owner, meas, 1600), (slowed_o, slowed_m, 2400)):
+        (ref,) = cm.combat_subjects(cm.pair_view(fx.records(o, me)))["combat.refill"]
+        assert m("b2.refill.self_rl_g")(ref, None) == m("b2.refill.meas_rl_g")(ref, None) == 1500
+        assert m("b2.refill.self_rl_r")(ref, None) == m("b2.refill.meas_rl_r")(ref, None) == real
+        assert m("b2.refill.d_rl_r")(ref, None) == 0
 
 
 def test_a21_a_timer_refill_carries_three_clocks_and_a_card_reload_ends_external():
     owner, meas = fx.a24_pair()
     row = _owner_dir(cm.pair_view(fx.records(owner, meas)))["cycles"][0]
     assert list(row["refill"]["end"]["rl_g"]) == [1500, 1500]
+    assert list(row["refill"]["end"]["rl_s"]) == [1500, 1500]
     assert list(row["refill"]["end"]["rl_r"]) == [1600, 1600]
+    assert row["clock"]["d_rl_s"] == 0 and not row["refill"]["differs"]
+    shared = fx.clone(meas)                                   # negative mutant: the shared clock moves
+    shared["sh_o"][0][0][cm.HDR["rl_s"]] = 1450
+    srow = _owner_dir(cm.pair_view(fx.records(owner, shared)))["cycles"][0]
+    assert list(srow["refill"]["end"]["rl_s"]) == [1500, 1450]
+    assert srow["clock"]["d_rl_s"] == 50 and "clock" in srow["differs_by"]
+    (ref,) = cm.combat_subjects(cm.pair_view(fx.records(owner, shared)))["combat.refill"]
+    assert _measure_fn("b2.refill.meas_rl_s")(ref, None) == 1450
     ext = fx.clone(owner)
     ext["sh_s"][0][0][cm.HDR["end"]] = cm.END["external"]
     ext["cx_s"][0][cm.CX["end"]] = cm.END["external"]
@@ -958,6 +1057,16 @@ def test_r1_a_listed_entry_the_caps_say_was_not_collected_is_a_fault():
     assert cm.section_faults(victim) == ["push_s"]
 
 
+def test_l10_an_omitted_count_with_the_capability_clear_is_a_caps_fault():
+    victim, _s = fx.r_sections_pair()
+    victim["caps"] = cm.W["caps"]["chain"] | cm.W["caps"]["death"]       # push not collected
+    victim["push_s"] = []
+    victim["r_tot"][cm.IX["r_tot"]["push_own"]] = 0
+    assert cm.section_faults(victim) == []                               # negative control
+    victim["omit"]["push_s"] = 2
+    assert cm.section_faults(victim) == ["caps_push_s"]
+
+
 def test_r2_owner_velocity_changes_with_causes_and_the_bounce_targets_candidates():
     _v, _s, view = _r_view()
     vel = _by(view, "velocity", B, "owner")
@@ -969,6 +1078,8 @@ def test_r2_owner_velocity_changes_with_causes_and_the_bounce_targets_candidates
     assert (b["target"], b["d_self"], b["d_other"], b["nearer"]) == ("other", 900, 1400, "self")
     assert (b["los_self"], b["los_other"]) == (1, 1)
     assert b["meas"]["gap"] == 110 and b["meas"]["has_retarget"] == 1
+    assert (b["meas"]["s_init"], b["meas"]["s_rel"], b["meas_not_run"]) == (fx.HIT[1], 4200, None)
+    assert vel["meas_unpaired"] == []
     subs = cm.combat_subjects(view)
     assert [cm.m_bounce_target(c, None) for c in subs["combat.bounce"]] == ["other"]
     assert [cm.m_vchange_cause(c, None) for c in subs["combat.vchange"]] == [18]
@@ -988,7 +1099,8 @@ def test_r5_a_boundary_death_with_its_cause_edge_state_and_recent_hit_identities
     assert row["self"]["cause"] == cm.W["death_cause"]["out_of_bounds"]
     assert row["self"]["edge"] == cm.W["edge"]["left"]
     assert (row["self"]["px"], row["self"]["vx"]) == (-4000, -900)
-    assert row["hits"] == [{"pid": 9, "s_init": 4100, "cord": 0, "age": 800, "push_listed": True}]
+    assert row["hits"] == [{"pid": 9, "s_init": 4100, "cord": 0, "age": 800, "push_listed": True,
+                            "push_not_run": None}]
     assert (row["d_px"], row["d_vx"], row["not_run"]) == (-10, 0, None)
     subs = cm.combat_subjects(view)["combat.death"]
     assert [cm.m_death_hits(c, None) for c in subs] == [1]
@@ -1001,3 +1113,538 @@ def test_r_sections_under_mixed_versions_are_not_run():
     assert _by(view, "pushes", A)["rows"][0]["not_run"] == "incompatible"
     assert _by(view, "chains", A)["rows"][0]["msg_transit"] is None
     assert _by(view, "deaths", A, "seat")["rows"][0]["d_px"] is None
+
+
+# -- FIX PASS 1: the refill-event stream (M-2) ------------------------------------------
+
+def _regen_both():
+    """The regeneration case with BOTH seats listing the same one-unit
+    regeneration before the fourth shot: every account agrees."""
+    owner, meas = fx.a24_pair("regen")
+    g = meas["sh_o"][0]
+    g[0][cm.HDR["rg"]], g[0][cm.HDR["nrg"]] = 1, 1
+    g[1][3] = fx.copy_shot(1, 200, 1, 0, 0)
+    g[2] = [fx.regen(3, 1, fx.S0 + 550)]
+    return owner, fx.finish(meas, "o")
+
+
+def test_m2_the_regeneration_total_is_derived_from_the_event_stream():
+    owner, meas = fx.a24_pair()
+    assert cm.rebuild_faults(owner, "s") == []                           # negative control
+    stated = fx.clone(owner)
+    stated["sh_s"][0][0][cm.HDR["rg"]] = 999                             # aggregate, no events
+    (c,) = cm.rebuild_side(stated, "s")
+    assert c["regen"] == 0 and c["regen_stated"] == 999
+    assert c["why"] & cm.WHY["over_mag"]                                 # nothing suppressed
+    assert "regen_total" in cm.rebuild_faults(stated, "s")
+
+
+def test_m2_events_compare_as_multisets_on_kind_amount_stamp_and_three_clocks():
+    owner, meas = _regen_both()
+    d = _owner_dir(cm.pair_view(fx.records(owner, meas)))
+    assert d["case"] == "both_agree", d["differs_by"]                    # negative control
+    (row,) = d["cycles"]
+    assert row["refill"]["owner_only"] == [] == row["refill"]["meas_only"]
+    clock_only = fx.clone(meas)                                          # one clock of one event
+    clock_only["sh_o"][0][2][0][cm.REGEN["gap_r"]] = 170
+    d = _owner_dir(cm.pair_view(fx.records(owner, clock_only)))
+    (row,) = d["cycles"]
+    assert [r["gap_r"] for r in row["refill"]["owner_only"]] == [160]
+    assert [r["gap_r"] for r in row["refill"]["meas_only"]] == [170]
+    assert d["case"] == "both_differ" and d["differs_by"] == ["refill"]
+    stamp_only = fx.clone(meas)
+    stamp_only["sh_o"][0][2][0][cm.REGEN["st"]] = fx.S0 + 560
+    (row,) = _owner_dir(cm.pair_view(fx.records(owner, stamp_only)))["cycles"]
+    assert row["refill"]["differs"] and len(row["refill"]["meas_only"]) == 1
+
+
+def test_m2_a_duplicated_event_is_one_unmatched_listing():
+    owner, meas = _regen_both()
+    dup = fx.clone(owner)
+    g = dup["sh_s"][0]
+    g[2] = g[2] + [list(g[2][0])]
+    g[0][cm.HDR["rg"]], g[0][cm.HDR["nrg"]] = 2, 2
+    (row,) = _owner_dir(cm.pair_view(fx.records(dup, meas)))["cycles"]
+    assert len(row["refill"]["owner_only"]) == 1 and row["refill"]["meas_only"] == []
+    assert row["refill"]["differs"]
+
+
+def test_m2_a_truncated_event_list_is_not_run_never_compared():
+    owner, meas = _regen_both()
+    cut = fx.clone(owner)
+    cut["sh_s"][0][0][cm.HDR["nrg"]] = 2                                 # two counted, one listed
+    cut["sh_s"][0][0][cm.HDR["rg"]] = 2
+    (c,) = cm.rebuild_side(cut, "s")
+    assert c["events_complete"] is False and c["regen"] is None and c["not_run"] == "trimmed"
+    view = cm.pair_view(fx.records(cut, meas))
+    (row,) = _owner_dir(view)["cycles"]
+    assert row["refill"]["not_run"] == "trimmed"
+    assert row["refill"]["owner_only"] is None and row["refill"]["meas_only"] is None
+    (ref,) = cm.combat_subjects(view)["combat.refill"]
+    assert cm.m_refill_owner_only(ref, None) is None
+    assert "regen_total" not in cm.rebuild_faults(cut, "s")             # no total to check
+
+
+# -- FIX PASS 1: Q1 derived from every comparable field (M-6) -----------------------------
+
+def _set_hdr(rec, gk, field, value):
+    rec[gk][0][0][cm.HDR[field]] = value
+
+
+def _one_field(name):
+    """(owner, meas, the classes the one changed field must raise)."""
+    owner, meas = fx.a24_pair()
+    m = fx.clone(meas)
+    if name == "shot_ammo":
+        m["sh_o"][0][1][1][cm.SHOT["o"]["ammo_before"]] = 5
+        return owner, m, ["shot"]
+    if name == "shot_counter":
+        m["sh_o"][0][1][1][cm.SHOT["o"]["counter"]] = 230
+        return owner, m, ["shot"]
+    if name == "cycle_src":
+        _set_hdr(m, "sh_o", "src", cm.W["src"]["card"])
+        return owner, m, ["cycle", "refill"]
+    if name == "clock_rl_r":
+        _set_hdr(m, "sh_o", "rl_r", 1700)
+        return owner, m, ["clock", "refill"]
+    if name == "clock_st_end":
+        _set_hdr(m, "sh_o", "st_end", fx.S0 + 1950)
+        return owner, m, ["clock"]
+    if name == "attacks":
+        m["tot_o"][cm.TOT["atk_msg"]] = 5
+        return owner, m, ["attacks"]
+    if name == "totals":
+        m["tot_o"][cm.TOT["inits_rl"]] = 2
+        return owner, m, ["totals"]
+    if name == "stat":
+        m["gun_o"] = [fx.gun(spr=40)]
+        return owner, m, ["stat"]
+    if name == "refill_event":
+        o2, m2 = _regen_both()
+        m2 = fx.clone(m2)
+        m2["sh_o"][0][2][0][cm.REGEN["gap_g"]] = 151
+        return o2, m2, ["refill"]
+    raise KeyError(name)
+
+
+ONE_FIELD = ("shot_ammo", "shot_counter", "cycle_src", "clock_rl_r", "clock_st_end", "attacks",
+             "totals", "stat", "refill_event")
+
+
+@pytest.mark.parametrize("name", ONE_FIELD)
+def test_m6_one_field_only_differences_each_make_the_case_differ(name):
+    owner, meas, classes = _one_field(name)
+    d = _owner_dir(cm.pair_view(fx.records(owner, meas)))
+    assert d["case"] == "both_differ" and d["differs_by"] == classes, d["differs_by"]
+    (sub,) = [c for c in cm.combat_subjects(cm.pair_view(fx.records(owner, meas)))["combat.direction"]
+              if c.row["owner"] == A]
+    assert cm.m_direction_differs_by(sub, None) == classes
+
+
+def test_m6_the_controls_agree_and_the_clock_deltas_are_exposed():
+    for owner, meas in (fx.a24_pair(), _regen_both()):
+        d = _owner_dir(cm.pair_view(fx.records(owner, meas)))
+        assert d["case"] == "both_agree" and d["differs_by"] == []
+        (row,) = d["cycles"]
+        assert row["clock"] == {"d_rl_g": 0, "d_rl_s": 0, "d_rl_r": 0, "d_st_end": 0, "d_exh": 0,
+                                "d_gaps": [0, None, None]}
+    owner, meas, _c = _one_field("clock_rl_r")
+    (row,) = _owner_dir(cm.pair_view(fx.records(owner, meas)))["cycles"]
+    assert row["clock"]["d_rl_r"] == -100
+
+
+def test_m6_a_stat_difference_without_cycles_is_seen_and_unavailable_inputs_stay_not_run():
+    owner, meas = fx.empty_record(), fx.empty_record()
+    owner["gun_s"], meas["gun_o"] = [fx.gun()], [fx.gun()]
+    assert _owner_dir(cm.pair_view(fx.records(owner, meas)))["case"] == "both_agree"
+    meas["gun_o"] = [fx.gun(cexp=310)]
+    d = _owner_dir(cm.pair_view(fx.records(owner, meas)))
+    assert d["cycles"] == [] and d["case"] == "both_differ" and d["differs_by"] == ["stat"]
+    assert _owner_dir(cm.pair_view(fx.records(*fx.a24_pair("trimmed"))))["case"] == "not_run"
+    mixed = _owner_dir(cm.pair_view(fx.records(*fx.a24_pair("mixed"))))
+    assert mixed["case"] == "not_run" and mixed["totals"]["diff"] is None
+    assert _owner_dir(cm.pair_view(fx.records(fx.a24_pair()[0], None)))["case"] == "only_owner"
+
+
+# -- FIX PASS 1: target bounce pairing and R5 absence (M-8) -------------------------------
+
+def _bounce_pair(meas_rows, own_stamps=(4200,), omit=0):
+    victim, shooter = fx.r_sections_pair()
+    tmpl = shooter["bsel"][0]
+    shooter["bsel"] = []
+    for st in own_stamps:
+        e = list(tmpl)
+        e[cm.IX["bsel"]["stamp"]] = st
+        shooter["bsel"].append(e)
+    shooter["r_tot"][cm.IX["r_tot"]["bsel"]] = len(shooter["bsel"])
+    victim["p3tb"] = [fx.named_row("p3tb", pid=fx.HIT[0], s_init=si, s_rel=sr, gap=gap,
+                                   has_retarget=1, ang_to_me=40) for si, sr, gap in meas_rows]
+    victim["omit"]["p3tb"] = omit
+    view = cm.pair_view(fx.records(victim, shooter))
+    return _by(view, "velocity", B, "owner")
+
+
+def test_m8_bounces_pair_on_the_whole_event_identity_even_reordered():
+    vel = _bounce_pair([(fx.HIT[1], 4600, 120), (fx.HIT[1], 4200, 110)], own_stamps=(4200, 4600))
+    assert [(b["stamp"], b["meas"]["gap"], b["meas_not_run"]) for b in vel["bounces"]] == [
+        (4200, 110, None), (4600, 120, None)]
+    pid_only = _bounce_pair([(fx.HIT[1] + 1, 4200, 110)])               # same pid, other event
+    (b,) = pid_only["bounces"]
+    assert b["meas"] is None and b["meas_not_run"] == "absent"
+    assert [u["not_run"] for u in pid_only["meas_unpaired"]] == ["absent"]
+
+
+def test_m8_a_duplicated_key_on_either_side_is_ambiguous_and_trimmed_is_named():
+    dup = _bounce_pair([(fx.HIT[1], 4200, 110), (fx.HIT[1], 4200, 130)])
+    (b,) = dup["bounces"]
+    assert b["meas"] is None and b["meas_not_run"] == "ambiguous"
+    own_dup = _bounce_pair([(fx.HIT[1], 4200, 110)], own_stamps=(4200, 4200))
+    assert [b["meas_not_run"] for b in own_dup["bounces"]] == ["ambiguous", "ambiguous"]
+    trimmed = _bounce_pair([], omit=1)
+    assert trimmed["bounces"][0]["meas_not_run"] == "trimmed"
+    absent = _bounce_pair([])
+    assert absent["bounces"][0]["meas_not_run"] == "absent"
+    (sub,) = cm.combat_subjects(cm.pair_view(fx.records(*fx.r_sections_pair())))["combat.bounce"]
+    assert cm.m_bounce_meas_gap(sub, None) == 110
+
+
+def _death_hits(**edit):
+    victim, shooter = fx.r_sections_pair()
+    if edit.get("drop_push"):
+        victim["push_s"] = []
+        victim["r_tot"][cm.IX["r_tot"]["push_own"]] = edit.get("omit", 0)
+        victim["omit"]["push_s"] = edit.get("omit", 0)
+    if edit.get("no_push_cap"):
+        victim["caps"] &= ~cm.W["caps"]["push"]
+        victim["push_s"] = []
+        victim["r_tot"][cm.IX["r_tot"]["push_own"]] = 0
+    view = cm.pair_view(fx.records(victim, shooter))
+    (row,) = _by(view, "deaths", A, "seat")["rows"]
+    (sub,) = [c for c in cm.combat_subjects(view)["combat.death"] if c.row["seat"] == A]
+    return row["hits"][0], cm.m_death_push_unlisted(sub, None)
+
+
+def test_m8_r5_absence_only_when_the_retained_push_list_proves_it():
+    assert _death_hits() == ({"pid": 9, "s_init": 4100, "cord": 0, "age": 800,
+                              "push_listed": True, "push_not_run": None}, 0)
+    hit, n = _death_hits(drop_push=True)                                 # whole list, entry absent
+    assert (hit["push_listed"], hit["push_not_run"], n) == (False, None, 1)
+    hit, n = _death_hits(drop_push=True, omit=1)                         # trimmed: unknown
+    assert (hit["push_listed"], hit["push_not_run"], n) == (None, "trimmed", None)
+    hit, n = _death_hits(no_push_cap=True)
+    assert (hit["push_listed"], hit["push_not_run"], n) == (None, "not_collected", None)
+
+
+# -- FIX PASS 1: the steering references, subjects and measures (M-3) ---------------------
+
+def test_m3_the_pinned_homing_and_target_bounce_cases_and_their_mutants():
+    pinned = json.loads(_read(fx.FIXTURE_DIR, "steering.json"))
+    assert pinned == json.loads(json.dumps(fx.steering_set()))
+    by = {h["name"]: h for h in pinned["homing"]}
+    assert by["homing_in_cone"]["entry"][2] > 0                           # the homing term turns it
+    assert by["homing_out_of_cone"]["entry"][2] == 0                      # control: outside the cone
+    for h in pinned["homing"]:
+        assert h["mutant_entry"][2] != h["entry"][2]                      # an added turn is seen
+        assert h["entry"][3] == len(h["packages"]) == len(h["frames"]) // h["sync_every"] + 1
+    wait_ms = cm.W["bounce"]["wait_s"] * cm.PER_MILLE
+    for b in pinned["bounce"]:
+        assert b["entry"]["gap"] >= wait_ms > b["mutant_entry"]["gap"]
+    hit = {b["name"]: b for b in pinned["bounce"]}
+    assert hit["bounce_to_target"]["entry"]["has_retarget"] == 1
+    assert hit["bounce_no_target"]["entry"]["has_retarget"] == 0
+
+
+def test_m3_homing_runs_the_game_steps_in_single_precision():
+    name, state, target, frames, prm, every = fx.HOMING_CASES[0]
+    st, on = cm.homing_step(state, target, frames[0], prm)
+    assert on is True and all(cm.f32(v) == v for v in st.values())
+    off, on2 = cm.homing_step(state, fx.HOMING_CASES[1][2], frames[0], prm)
+    assert on2 is False and off == cm.integrate(state, [frames[0]], prm)
+
+
+def _steer_record(consts=1, omit_tb=0, omit_ht=0):
+    rec = fx.empty_record(consts)
+    pinned = fx.steering_set()
+    h = pinned["homing"][0]["entry"]
+    rec["p3ht"] = [fx.named_row("p3ht", pid=h[0], s_rel=h[1], ratio_pm=h[2], n=h[3])]
+    b = pinned["bounce"][0]["entry"]
+    rec["p3tb"] = [fx.named_row("p3tb", pid=5, s_init=100, s_rel=300, gap=b["gap"],
+                                has_retarget=b["has_retarget"], ang_to_me=b["ang_to_me"])]
+    rec["p3hm"] = [0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
+    rec["omit"]["p3tb"], rec["omit"]["p3ht"] = omit_tb, omit_ht
+    return rec, pinned
+
+
+def test_m3_target_bounce_and_homing_are_versioned_subjects_with_not_run():
+    m = _measure_fn
+    rec, pinned = _steer_record()
+    subs = cm.combat_subjects(cm.pair_view(fx.records(None, rec)))
+    (tb,), (hm,), (b3,) = subs["combat.tbounce"], subs["combat.homing"], subs["combat.b3"]
+    assert m("b3.tb.gap")(tb, None) == pinned["bounce"][0]["entry"]["gap"]
+    assert m("b3.tb.ang_to_me")(tb, None) == pinned["bounce"][0]["entry"]["ang_to_me"]
+    assert m("b3.hm.ratio_pm")(hm, None) == pinned["homing"][0]["entry"][2]
+    assert m("b3.hm.packages")(hm, None) == pinned["homing"][0]["entry"][3]
+    assert m("b3.tb.min_gap")(b3, None) == pinned["bounce"][0]["entry"]["gap"]
+    assert m("b3.hm.max_ratio_pm")(b3, None) == pinned["homing"][0]["entry"][2]
+    for rec2, key in ((_steer_record(omit_tb=1)[0], "b3.tb.min_gap"),
+                      (_steer_record(omit_ht=1)[0], "b3.hm.max_ratio_pm")):
+        (b3t,) = cm.combat_subjects(cm.pair_view(fx.records(None, rec2)))["combat.b3"]
+        assert m(key)(b3t, None) is None                                  # trimmed: NOT-RUN
+    other = _steer_record(consts=2)[0]
+    subs2 = cm.combat_subjects(cm.pair_view(fx.records(None, other)))
+    assert m("b3.tb.gap")(subs2["combat.tbounce"][0], None) is None       # unread version
+    assert m("b3.hm.ratio_pm")(subs2["combat.homing"][0], None) is None
+    empty = cm.combat_subjects(cm.pair_view(fx.records(None, fx.empty_record())))
+    assert empty["combat.tbounce"] == [] and m("b3.tb.min_gap")(empty["combat.b3"][0], None) is None
+
+
+# -- FIX PASS 1: wire to view to subject to measure (M-4) ---------------------------------
+
+def _sums(*names):
+    return ("contrib", names)
+
+
+def _rec_rows(key):
+    return tuple("rec.%s.%s" % (key, f[0]) for f in cm.SPEC[key][1])
+
+
+GUN_FIELDS = tuple(f[0] for f in cm.SPEC["gun_s"][3] if f[0] != "pt")
+COVERAGE = {
+    "schema": [("parse", ())],
+    "consts": [("combat.aim", ("b1.hist.compatible",)), ("combat.record", ("rec.a1sum",))],
+    "caps": [("combat.record", ("rec.caps",))],
+    "t0": [("combat.record", ("rec.t0",))],
+    "t0_src": [("combat.record", ("rec.t0_src",))],
+    "frame_p50_us": [("combat.record", ("rec.frame_p50_us",))],
+    "cost": [("combat.record", ("rec.cost.calls", "rec.cost.total_us", "rec.cost.max_us",
+                                "rec.cost.faults"))],
+    "l_hat": [("combat.record", ("rec.l_hat",))],
+    "tb_tot": [("combat.record", _rec_rows("tb_tot"))],
+    "tb": [("combat.point", ("tb.point.slow", "tb.point.ramp", "tb.point.clamp", "tb.point.frames",
+                             "tb.point.dt_med_us", "tb.point.dt_max_us", "tb.point.real",
+                             "tb.point.game", "tb.point.srv", "tb.point.ps", "tb.point.base",
+                             "tb.point.game_real", "tb.point.srv_real"))],
+    "a1s": [("combat.aim", ("b1.hist.self_volleys",)), _sums("a1s")],
+    "a1p": [_sums("a1p")],
+    "a1m": [("combat.aim", ("b1.hist.meas_volleys",)), _sums("a1m")],
+    "a1n": [_sums("a1n")],
+    "a1sum": [("combat.record", ("rec.a1sum",))],
+    "rx_s": [("combat.react", ("b1.react.aim_on", "b1.react.first", "b1.react.err",
+                               "b1.react.account"))],
+    "rx_o": [("combat.react", ("b1.react.aim_on", "b1.react.first", "b1.react.err",
+                               "b1.react.account"))],
+    "gun_s": [("combat.stat", tuple("b2.stat.self." + f for f in GUN_FIELDS)
+               + tuple("b2.stat.d_" + f for f in GUN_FIELDS) + ("b2.stat.fields_differing",)),
+              ("combat.cycle", ("b2.cycle.rexp", "b2.cycle.mag_plus_regen"))],
+    "gun_o": [("combat.stat", tuple("b2.stat.meas." + f for f in GUN_FIELDS))],
+    "tot_s": [("combat.record", _rec_rows("tot_s")),
+              ("combat.direction", ("b2.atk.d_count", "b2.totals.d_units"))],
+    "tot_o": [("combat.record", _rec_rows("tot_o")),
+              ("combat.direction", ("b2.atk.d_count", "b2.totals.d_units"))],
+    "ivl_s": [("combat.interval", ("b2.ivl.gmin", "b2.ivl.cexp_min", "b2.ivl.vmax", "b2.ivl.vexp",
+                                   "b2.ivl.refreshes", "b2.ivl.account"))],
+    "ivl_o": [("combat.interval", ("b2.ivl.gmin", "b2.ivl.cexp_min", "b2.ivl.vmax", "b2.ivl.vexp",
+                                   "b2.ivl.refreshes", "b2.ivl.account"))],
+    "cx_s": [("combat.record", ("rec.faults", "rec.omitted.cx_s"))],
+    "cx_o": [("combat.record", ("rec.faults", "rec.omitted.cx_o"))],
+    "sh_s": [("combat.cycle", ("b2.cycle.account", "b2.cycle.units", "b2.cycle.in_rl",
+                               "b2.cycle.tail", "b2.cycle.gap_first", "b2.cycle.gap_second",
+                               "b2.cycle.gap_third", "b2.cycle.why", "b2.cycle.end",
+                               "b2.cycle.excess", "b2.cycle.regen", "b2.cycle.regen_stated")),
+             ("combat.shot", ("b2.shot.d_ammo", "b2.shot.d_reloading", "b2.shot.d_counter",
+                              "b2.shot.absent", "b2.shot.owner_gate_flags",
+                              "b2.shot.owner_since")),
+             ("combat.refill", ("b2.refill.self_rl_g", "b2.refill.self_rl_s",
+                                "b2.refill.self_rl_r", "b2.refill.d_rl_g", "b2.refill.d_rl_s",
+                                "b2.refill.d_rl_r", "b2.refill.d_st_end",
+                                "b2.refill.owner_only_units")),
+             ("combat.regen", ("b2.regen.amt", "b2.regen.gap_g", "b2.regen.gap_s",
+                               "b2.regen.gap_r", "b2.regen.stream_whole")),
+             ("combat.direction", ("b2.direction.case", "b2.direction.differs_by"))],
+    "sh_o": [("combat.refill", ("b2.refill.meas_rl_g", "b2.refill.meas_rl_s",
+                                "b2.refill.meas_rl_r", "b2.refill.meas_only_units")),
+             ("combat.shot", ("b2.shot.d_ammo",)), ("combat.cycle", ("b2.cycle.account",)),
+             ("combat.regen", ("b2.regen.amt",))],
+    "p3n": [("combat.b3", ("b3.counts",)), ("combat.record", _rec_rows("p3n"))],
+    "p3dp0": [_sums("p3dp0")],
+    "p3an0": [_sums("p3an0")],
+    "p3dp1": [_sums("p3dp1")],
+    "p3an1": [_sums("p3an1")],
+    "p3hm": [("combat.b3", ("b3.hm.hist",))],
+    "p3self": [("combat.record", _rec_rows("p3self"))],
+    "p3top": [("combat.top", ("b3.top.d_perp", "b3.top.d_along", "b3.top.ang", "b3.top.dt",
+                              "b3.top.speed", "b3.top.mask"))],
+    "p3tb": [("combat.tbounce", ("b3.tb.gap", "b3.tb.has_retarget", "b3.tb.ang_to_me")),
+             ("combat.b3", ("b3.tb.min_gap",)), ("combat.bounce", ("b3.bounce.meas_gap",))],
+    "p3ht": [("combat.homing", ("b3.hm.ratio_pm", "b3.hm.packages")),
+             ("combat.b3", ("b3.hm.max_ratio_pm",))],
+    "b5_tot": [("combat.record", _rec_rows("b5_tot"))],
+    "b5_s": [("combat.block", ("b5.pair.d_open", "b5.pair.d_len", "b5.pair.d_len_g",
+                               "b5.pair.d_pred_lo", "b5.pair.d_pred_hi", "b5.pair.frame_bound",
+                               "b5.ctl.cd", "b5.ctl.gap_prev", "b5.ctl.len_g", "b5.ctl.reopen",
+                               "b5.ctl.scale_pm", "b5.ctl.press", "b5.ctl.fr"))],
+    "b5_o": [("combat.block", ("b5.ctl.cd_c", "b5.ctl.gap_prev_s", "b5.ctl.len_cg",
+                               "b5.ctl.started", "b5.ctl.reopen_c", "b5.ctl.ta", "b5.ctl.o_pred"))],
+    "b5_h": [("combat.contact", ("b5.contact.since_ms", "b5.contact.pred_since",
+                                 "b5.contact.contact_to_decision"))],
+    "b5_c": [("combat.contact", ("b5.contact.since_c", "b5.contact.own_since"))],
+    "b5_r": [("combat.refused", ("b5.refused.since_prev", "b5.refused.cd"))],
+    "r_tot": [("combat.record", _rec_rows("r_tot") + ("rec.faults",))],
+    "push_s": [("combat.push", ("b5.push.mass", "b5.push.d_fx", "b5.push.d_fy", "b5.push.d_vax",
+                                "b5.push.d_vay"))],
+    "push_o": [("combat.push", ("b5.push.d_fx",))],
+    "vchg": [("combat.vchange", ("b3.vchange.cause", "b3.vchange.turn_mrad"))],
+    "bsel": [("combat.bounce", ("b3.bounce.target", "b3.bounce.nearer"))],
+    "ch_s": [("combat.chain", ("b5.chain.hp_to_frame", "b5.chain.msg_transit"))],
+    "ch_o": [("combat.chain", ("b5.chain.dmg_transit", "b5.chain.decision_to_screen"))],
+    "bd_s": [("combat.death", ("death.boundary.cause", "death.boundary.edge",
+                               "death.boundary.recent_hits", "death.boundary.push_unlisted"))],
+    "bd_o": [("combat.death", ("death.boundary.d_px",))],
+    "omit": [("combat.record", ("rec.listed",) + tuple("rec.omitted." + k for k in cm.LISTS))],
+}
+
+
+def full_pair():
+    """(victim seat A, shooter seat B): every wire key populated at least once."""
+    victim, shooter = fx.r_sections_pair()
+    owner, meas = fx.a24_pair("regen")                                 # a refill event listed
+    for k in ("tb", "tb_tot", "gun_s", "sh_s", "cx_s", "tot_s"):
+        victim[k] = owner[k]
+    for k in ("tb", "tb_tot", "gun_o", "sh_o", "cx_o", "tot_o"):
+        shooter[k] = meas[k]
+    rx = fx.named_row("rx_s", onset=3000, aim_on=120, first=260, err=35)
+    victim["rx_s"], victim["rx_o"] = [rx], [list(rx)]
+    iv = fx.named_row("ivl_s", pt=0, gmin=180, cexp_min=300, vmax=4, vexp=3, refreshes=1)
+    victim["ivl_s"], victim["ivl_o"] = [iv], [list(iv)]
+    victim["b5_r"] = [fx.named_row("b5_r", rel=7000, since_prev=400, cd=1000)]
+    bv, bs = _block_pair(7200, 7260)
+    victim["b5_s"], shooter["b5_o"] = bv["b5_s"], bs["b5_o"]
+    cv, cs = _contact_pair([(9, 100, 0, 1500)], [(9, 100, 0, 1530)])
+    victim["b5_c"], shooter["b5_h"] = cv["b5_c"], cs["b5_h"]
+    steer, _p = _steer_record()
+    victim["p3ht"], victim["p3hm"] = steer["p3ht"], steer["p3hm"]
+    victim["p3top"] = [fx.named_row("p3top", pid=3, s_rel=0, d_perp=5, d_along=2, ang=1, dt=117,
+                                    speed=8000, mask=0)]
+    return victim, shooter
+
+
+def test_m4_every_wire_key_reaches_a_registered_measure_on_a_populated_subject():
+    assert set(COVERAGE) == set(cm.KEYS)
+    victim, shooter = full_pair()
+    cm.check_record(victim)
+    cm.check_record(shooter)
+    records = fx.records(victim, shooter)
+    subs = cm.combat_subjects(cm.pair_view(records))
+    sums = {k for c in cm.contributions(records) for k in c["sums"]}
+    for key, routes in COVERAGE.items():
+        for subject, names in routes:
+            if subject == "parse":
+                continue
+            if subject == "contrib":
+                assert set(names) <= sums, key
+                continue
+            assert subs[subject], (key, subject)                          # the view reaches it
+            for n in names:
+                e = rm.REGISTRY.get(n)
+                assert e is not None and e.kind == "measure" and e.subject == subject, (key, n)
+                for ctx in subs[subject]:
+                    e.impl[0](ctx, None)                                  # and it evaluates
+
+
+def test_m4_the_clock_inputs_answer_none_never_minus_one():
+    m = _measure_fn
+    victim, shooter = full_pair()
+    victim["rx_s"][0][cm.IX["rx_s"]["first"]] = -1
+    victim["ivl_s"][0][cm.IX["ivl_s"]["gmin"]] = -1
+    victim["b5_r"][0][cm.IX["b5_r"]["since_prev"]] = -1
+    subs = cm.combat_subjects(cm.pair_view(fx.records(victim, shooter)))
+    own_rx = [c for c in subs["combat.react"] if c.row["account"] == "self"]
+    assert [m("b1.react.first")(c, None) for c in own_rx] == [None]
+    own_iv = [c for c in subs["combat.interval"] if c.row["account"] == "self"]
+    assert [m("b2.ivl.gmin")(c, None) for c in own_iv] == [None]
+    assert [m("b5.refused.since_prev")(c, None) for c in subs["combat.refused"]] == [None]
+    copy_rx = [c for c in subs["combat.react"] if c.row["account"] == "meas"]
+    assert [m("b1.react.first")(c, None) for c in copy_rx] == [260]       # control
+
+
+def test_m4_a_trimmed_list_has_no_listed_count():
+    victim, shooter = full_pair()
+    victim["omit"]["rx_s"] = 3
+    (rec,) = [c for c in cm.combat_subjects(cm.pair_view(fx.records(victim, shooter)))["combat.record"]
+              if c.row["seat"] == A]
+    listed = cm.m_rec_listed(rec, None)
+    assert listed["rx_s"] is None and listed["rx_o"] == 1
+    assert _measure_fn("rec.omitted.rx_s")(rec, None) == 3
+
+
+# -- FIX PASS 1: A22 template multiplicity (L-4) ----------------------------------------
+
+def _template_pair(tmpl_o=2):
+    """One gate call, two emissions, each emission TWO projectiles (template
+    multiplicity two, the gun stat's `tmpl`)."""
+    owner, meas = fx.empty_record(), fx.empty_record()
+    for r in (owner, meas):
+        r["tb"] = [fx.point()]
+        r["tb_tot"] = fx.tb_tot_of(r["tb"])
+    owner["gun_s"] = [fx.gun(mag=6, tmpl=2)]
+    meas["gun_o"] = [fx.gun(mag=6, tmpl=tmpl_o)]
+    owner["sh_s"] = [[fx.hdr(5000, 40, 4, end=cm.END["point"], rl=(-1, -1, -1)),
+                      [fx.own_shot(0, 0, 6, 0, 0, rep=0), fx.own_shot(1, 0, 5, 0, 0, rep=-1),
+                       fx.own_shot(1, 100, 4, 0, 100, rep=1), fx.own_shot(1, 0, 3, 0, 100, rep=-1)],
+                      []]]
+    meas["sh_o"] = [[fx.hdr(5000, 40, 4, end=cm.END["point"], rl=(-1, -1, -1)),
+                     [fx.copy_shot(0, 0, 6, 0, 0, am=20), fx.copy_shot(1, 0, 5, 0, 0, am=-1),
+                      fx.copy_shot(1, 100, 4, 0, 100, am=21), fx.copy_shot(1, 0, 3, 0, 100, am=-1)],
+                     []]]
+    owner["tot_s"] = fx.tot(cycles=1, volleys=2, units=4, gate=1, emit=2)
+    meas["tot_o"] = fx.tot(cycles=1, volleys=2, units=4, atk_msg=2)
+    return owner, meas
+
+
+def test_l4_a22_a_template_multiplicity_above_one_is_units_per_emission():
+    owner, meas = _template_pair()
+    cm.check_record(owner)
+    cm.check_record(meas)
+    assert cm.rebuild_faults(owner, "s") == [] and cm.rebuild_faults(meas, "o") == []
+    d = _owner_dir(cm.pair_view(fx.records(owner, meas)))
+    tmpl = d["stat"][0]["self"]["tmpl"]
+    assert tmpl == 2 and d["cycles"][0]["self"]["units"] == d["attacks"]["owner_emit"] * tmpl
+    assert d["attacks"]["d_emit_msgs"] == 0 and d["case"] == "both_agree"
+    o2, m2 = _template_pair(tmpl_o=1)                                    # negative mutant
+    d2 = _owner_dir(cm.pair_view(fx.records(o2, m2)))
+    assert d2["stat"][0]["diff"]["d_tmpl"] == 1 and d2["case"] == "both_differ"
+    assert d2["differs_by"] == ["stat"]
+
+
+# -- FIX PASS 1: the match report canonical, byte for byte (L-1) ---------------------------
+
+def test_l1_the_match_report_hmac_is_exactly_the_seven_field_canonical(monkeypatch):
+    import hashlib
+    import hmac as _hmac
+    main = _main()
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", fx.KEY)
+    canonical = b"76561190000000001:76561190000000002:5:3:true:76561190000000001:room_cev_l1"
+    assert canonical.count(b":") == 6                                     # seven fields
+
+    def report(sig, **over):
+        vals = dict(p1="76561190000000001", p2="76561190000000002", r1=5, r2=3, ranked=True,
+                    by="76561190000000001", room="room_cev_l1")
+        vals.update(over)
+        return types.SimpleNamespace(
+            player1=types.SimpleNamespace(steam_id=vals["p1"]),
+            player2=types.SimpleNamespace(steam_id=vals["p2"]),
+            p1_rounds_won=vals["r1"], p2_rounds_won=vals["r2"], is_ranked=vals["ranked"],
+            reported_by_steam_id=vals["by"], photon_room_id=vals["room"], hmac_signature=sig)
+
+    def sign(msg):
+        return _hmac.new(fx.KEY.encode(), msg, hashlib.sha256).hexdigest()
+    assert main.verify_hmac(report(sign(canonical))) is True
+    for wrong in (canonical.replace(b":true:", b":True:"),
+                  canonical + b":extra",
+                  canonical.rsplit(b":", 1)[0],
+                  b"76561190000000002:76561190000000001:3:5:true:76561190000000001:room_cev_l1"):
+        assert main.verify_hmac(report(sign(wrong))) is False
+    unranked = canonical.replace(b":true:", b":false:")
+    assert main.verify_hmac(report(sign(unranked), ranked=False)) is True
+    no_room = canonical.rsplit(b":", 1)[0] + b":"
+    assert main.verify_hmac(report(sign(no_room), room=None)) is True

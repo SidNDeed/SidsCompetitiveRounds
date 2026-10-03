@@ -314,8 +314,11 @@ def r_sections_pair(variant="base"):
     shooter["bsel"] = [named_row("bsel", pid=HIT[0], s_init=HIT[1], stamp=4200,
                                  target=W["bounce_target"]["other"], d_self=900, los_self=1,
                                  d_other=1400, los_other=1)]
-    victim["p3tb"] = [named_row("p3tb", pid=HIT[0], s_rel=-100, gap=110, has_retarget=1,
-                                ang_to_me=40)]
+    # The victim's measured target bounce of the shooter's projectile: the
+    # same event identity as the owner's selection (projectile id, init
+    # stamp, the stamp the new velocity was sent under).
+    victim["p3tb"] = [named_row("p3tb", pid=HIT[0], s_init=HIT[1], s_rel=4200, gap=110,
+                                has_retarget=1, ang_to_me=40)]
     death = named_row("bd_s", ord=0, stamp=5100, cause=W["death_cause"]["out_of_bounds"],
                       edge=W["edge"]["left"], px=-4000, py=300, vx=-900, vy=50,
                       h1_pid=HIT[0], h1_s_init=HIT[1], h1_cord=HIT[2], h1_age=800,
@@ -373,6 +376,65 @@ INTEGRATOR_CASES = (
       "allow_stop": False, "sim_gravity": 0}),
 )
 TURN_PER_FRAME = 0.002
+
+# The steering references' canonical cases. Homing: (name, state, target,
+# frames, prm, sync_every); the frames mix lengths under and over the move
+# step's clamp, and drag runs throughout. Target bounce: (name, state at the
+# contact, surface normal, target or None, the measuring seat's position,
+# frames after the contact, prm).
+HOMING_PRM = {"gravity": 0.0, "drag": 0.35, "drag_min": 1.0, "mult": 1.0, "sim": 1.0,
+              "allow_stop": False, "sim_gravity": 0, "amount": 1.0, "scaling_drag": 1.0,
+              "h_drag": 1.0, "force": 55.0}
+HOMING_FRAMES = [0.016, 0.017, 0.033, 0.016, 0.0167, 0.05, 0.016, 0.017, 0.016, 0.0167, 0.033,
+                 0.016]
+HOMING_CASES = (
+    ("homing_in_cone", {"x": 0.0, "y": 0.0, "vx": 50.0, "vy": 5.0}, (20.0, 8.0),
+     HOMING_FRAMES, HOMING_PRM, 3),
+    ("homing_out_of_cone", {"x": 0.0, "y": 0.0, "vx": 50.0, "vy": 5.0}, (-20.0, 8.0),
+     HOMING_FRAMES, HOMING_PRM, 3),
+)
+BOUNCE_PRM = {"gravity": 30.0, "speed_m": 1.0}
+BOUNCE_FRAMES = [0.016, 0.017, 0.033, 0.016, 0.0167, 0.05, 0.016]
+BOUNCE_CASES = (
+    ("bounce_to_target", {"x": 0.0, "y": 0.0, "vx": 30.0, "vy": -40.0}, (0.0, 1.0), (12.0, 3.0),
+     (12.0, 3.0), BOUNCE_FRAMES, BOUNCE_PRM),
+    ("bounce_no_target", {"x": 0.0, "y": 0.0, "vx": 30.0, "vy": -40.0}, (0.0, 1.0), None,
+     (12.0, 3.0), BOUNCE_FRAMES, BOUNCE_PRM),
+)
+
+
+def _hex_state(st):
+    return {k: float.hex(cm.f32(st[k])) for k in ("x", "y", "vx", "vy")}
+
+
+def steering_set():
+    """The steering references' exact encoded outputs: per homing case the
+    owner's sync packages and the encoded `p3ht` entry, beside the entry of
+    the same trace with a turn the homing code does not make added each
+    frame (the mutant); per target-bounce case the encoded `p3tb` fields and
+    the new velocity, beside the same bounce sent without its wait."""
+    out = {"homing": [], "bounce": []}
+    for name, state, target, frames, prm, every in HOMING_CASES:
+        packs = cm.homing_trace(state, target, frames, prm, every)
+        turned = cm.homing_trace(state, target, frames, prm, every, TURN_PER_FRAME)
+        out["homing"].append({
+            "name": name, "state": state, "target": list(target), "frames": frames, "prm": prm,
+            "sync_every": every,
+            "packages": [[float.hex(t), _hex_state(st)] for t, st in packs],
+            "entry": cm.homing_entry(1, 0, packs, prm),
+            "turn_per_frame": TURN_PER_FRAME,
+            "mutant_entry": cm.homing_entry(1, 0, turned, prm)})
+    for name, state, normal, target, me, frames, prm in BOUNCE_CASES:
+        got = cm.target_bounce(state, normal, target, me, frames, prm)
+        early = cm.target_bounce(state, normal, target, me, frames, prm, wait_s=0.0)
+        enc = {k: got[k] for k in ("gap", "has_retarget", "ang_to_me")}
+        out["bounce"].append({
+            "name": name, "state": state, "normal": list(normal),
+            "target": list(target) if target is not None else None, "me": list(me),
+            "frames": frames, "prm": prm, "entry": enc,
+            "velocity": {"vx": float.hex(got["vx"]), "vy": float.hex(got["vy"])},
+            "mutant_entry": {k: early[k] for k in ("gap", "has_retarget", "ang_to_me")}})
+    return out
 
 
 def integrator_set():
@@ -434,7 +496,38 @@ def canonical_set():
                                 + "\n").encode("ascii")
     files["byte_proof.json"] = (json.dumps(cm.byte_proof(), indent=1, sort_keys=True)
                                 + "\n").encode("ascii")
+    files["steering.json"] = (json.dumps(steering_set(), indent=1, sort_keys=True)
+                              + "\n").encode("ascii")
     return files
+
+
+def validate_dir(path):
+    """The on-disk byte-identity check of a canonical fixture directory:
+    the names of every file that is missing, extra or not byte-identical to
+    the generator's output (empty when the directory is canonical). Each
+    budget input is also re-budgeted from the bytes on disk and compared with
+    its output file on disk."""
+    files = canonical_set()
+    bad = set()
+    names = set(os.listdir(path))
+    bad |= names ^ set(files)
+    for name, data in files.items():
+        if name not in names:
+            continue
+        with open(os.path.join(path, name), "rb") as f:
+            if f.read() != data:
+                bad.add(name)
+        if name.endswith(".in.json"):
+            out_name = name[:-len(".in.json")] + ".out.txt"
+            try:
+                with open(os.path.join(path, name), "rb") as f:
+                    rec = json.loads(f.read().decode("ascii"))
+                with open(os.path.join(path, out_name), "rb") as f:
+                    if cm.budget_record(rec).encode("ascii") != f.read():
+                        bad.add(out_name)
+            except (OSError, ValueError, KeyError, TypeError, cm.Refusal):
+                bad.add(name)
+    return sorted(bad)
 
 
 def write_canonical():

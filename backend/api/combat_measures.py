@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import math
 import struct
+from collections import Counter
 
 import review_measures as rm
 
@@ -178,7 +179,8 @@ COMBAT_WIRE = {
                                    ("d_perp", 0, 9999999), ("d_along", -9999999, 9999999),
                                    ("ang", 0, 3142), ("dt", 0, 600000), ("speed", 0, 999999),
                                    ("mask", 0, 255)))),
-        ("p3tb", ("list", 32, 1, (("pid", 0, 2147483647), ("s_rel", -2147483648, 2147483647),
+        ("p3tb", ("list", 32, 1, (("pid", 0, 2147483647), ("s_init", -2147483648, 2147483647),
+                                  ("s_rel", -2147483648, 2147483647),
                                   ("gap", -1, 600000), ("has_retarget", 0, 1), ("ang_to_me", 0, 3142)))),
         ("p3ht", ("list", 16, 1, (("pid", 0, 2147483647), ("s_rel", -2147483648, 2147483647),
                                   ("ratio_pm", 0, 99999), ("n", 0, 99999)))),
@@ -292,6 +294,8 @@ COMBAT_WIRE = {
     "steer_bits": {"homing": 1, "target_bounce": 2, "edge_bounce": 4, "remote": 8, "dodge": 16,
                    "local": 32, "drill": 64, "accelerate": 128},
     "move": {"dt_clamp": 0.02, "speed_floor": 2.0},
+    "homing": {"force_scale": 0.025, "cone_deg": 70.0},
+    "bounce": {"wait_s": 0.1, "nudge": 0.1, "comp_scale": 0.012, "comp_pow": 2.06},
     "centi": 100,
 }
 
@@ -629,13 +633,20 @@ def rebuild_cycle(group, side, gun_list) -> dict:
             shot["am"] = e[S["am"]]
         shots.append(shot)
     n = hdr[HDR["n"]]
-    complete = len(entries) == n and len(regens) == hdr[HDR["nrg"]]
+    # The regeneration total is DERIVED from the event stream, never taken from
+    # the header: the header's own total is kept beside it (`regen_stated`) and
+    # a disagreement is a record fault (rebuild_faults). An event stream the
+    # group no longer lists whole gives no total at all.
+    events_complete = len(regens) == hdr[HDR["nrg"]]
+    complete = len(entries) == n and events_complete
     block = stat_at(gun_list, hdr[HDR["pt"]])
     c = {"s0": hdr[HDR["s0"]], "pid0": hdr[HDR["pid0"]], "pt": hdr[HDR["pt"]], "units": n,
          "listed": len(entries), "complete": complete, "end": hdr[HDR["end"]],
          "src": hdr[HDR["src"]], "amt": hdr[HDR["amt"]], "st_end": hdr[HDR["st_end"]],
          "rl_g": hdr[HDR["rl_g"]], "rl_s": hdr[HDR["rl_s"]], "rl_r": hdr[HDR["rl_r"]],
-         "regen": hdr[HDR["rg"]], "regen_events": hdr[HDR["nrg"]],
+         "regen": sum(r[REGEN["amt"]] for r in regens) if events_complete else None,
+         "regen_stated": hdr[HDR["rg"]], "events_complete": events_complete,
+         "regen_events": hdr[HDR["nrg"]],
          "regens": [{"before_shot": r[REGEN["k"]], "kind": W["regen_kind"], "amt": r[REGEN["amt"]],
                      "st": r[REGEN["st"]], "gap_g": r[REGEN["gap_g"]], "gap_s": r[REGEN["gap_s"]],
                      "gap_r": r[REGEN["gap_r"]]} for r in regens],
@@ -713,6 +724,8 @@ def rebuild_faults(rec: dict, side: str) -> list:
     faults = []
     if len(rec[gk]) + rec["omit"][gk] != tot[TOT["cycles"]]:
         faults.append("cycles")
+    if any(c["events_complete"] and c["regen"] != c["regen_stated"] for c in cycles):
+        faults.append("regen_total")
     if len(rec[ck]) + rec["omit"][ck] != tot[TOT["cx_n"]]:
         faults.append("cx_count")
     whole = rec["omit"][gk] == 0 and all(c["not_run"] is None for c in cycles)
@@ -792,7 +805,8 @@ def _point_row(rec, pt):
             real = e[TB["real"]]
             return {"pt": pt, "ps": e[TB["ps"]], "real": real, "game": e[TB["game"]],
                     "srv": e[TB["srv"]], "slow": e[TB["slow"]], "ramp": e[TB["ramp"]],
-                    "clamp": e[TB["clamp"]], "base": e[TB["base"]],
+                    "clamp": e[TB["clamp"]], "base": e[TB["base"]], "frames": e[TB["frames"]],
+                    "dt_med_us": e[TB["dt_med_us"]], "dt_max_us": e[TB["dt_max_us"]],
                     "game_real_pm": e[TB["game"]] * PER_MILLE // real if real else None,
                     "srv_real_pm": e[TB["srv"]] * PER_MILLE // real if real else None}
     return None
@@ -810,22 +824,51 @@ def _incompatible(rows, out):
     """Two records of different (or unread) measurement versions: every
     comparison across them is NOT-RUN; each account's own fields stay."""
     for r in rows:
-        r["not_run"], r["refill"], r["differs"] = "incompatible", None, False
+        r["not_run"], r["refill"], r["differs"], r["differs_by"] = "incompatible", None, False, []
         r["stat"]["diff"] = None
+        r["clock"] = None
         for s in r["shots"]:
             s.update(d_ammo=None, d_reloading=None, d_counter=None, absent_in=None,
                      not_run="incompatible")
     for st in out["stat"]:
         st["diff"], st["not_run"] = None, "incompatible"
     out["attacks"]["d_emit_msgs"], out["attacks"]["not_run"] = None, "incompatible"
+    out["totals"]["diff"], out["totals"]["not_run"] = None, "incompatible"
+
+
+# Whole-game totals both accounts of one gun derive the same way (the rebuild's
+# own accounting); the owner-only and copy-only counters (gate calls,
+# emissions, attack messages, cycle-summary selections) are not among them.
+TOTALS_COMPARED = ("cycles", "volleys", "units", "inits_rl", "why_over_mag", "why_in_reload",
+                   "why_short_gap", "why_found_reloading", "sum_excess", "gap_minus_rexp_min")
+# Reason bits only the owner's own account can carry.
+WHY_OWNER_ONLY = WHY["gate_reloading"]
+# Cycle fields both accounts state (the header) and derive (the rebuild).
+CYCLE_STATED = ("units", "end", "src", "amt", "regen_events")
+CYCLE_DERIVED = ("mag", "rexp", "regen", "vol", "exh", "tail", "in_rl", "gaps", "excess")
+CLOCKS = ("rl_g", "rl_s", "rl_r")
+
+
+def _mark(row, what):
+    if what not in row["differs_by"]:
+        row["differs_by"].append(what)
+    row["differs"] = True
 
 
 def direction(owner_rec, meas_rec, compatible=True) -> dict:
     """One gun, seen from both seats: the owner's own account (SELF-STATED,
     from its record's own gun) and the other seat's account of the same gun
-    (OTHER-SEAT-MEASURED, from that seat's copy). Either may be absent. The
-    case is `not_run` when both records exist and nothing could be compared
-    (every row missing, trimmed or of another measurement version)."""
+    (OTHER-SEAT-MEASURED, from that seat's copy). Either may be absent.
+
+    The display case is derived from EVERY comparable field: per shot (ammo,
+    reloading, reload counter, presence), per cycle (stated and derived
+    fields, reason bits without the owner-only bit, the refill events and the
+    cycle clocks), the attack count against the emissions, the stat blocks at
+    every point and the whole-game totals. Any difference is `both_differ`
+    and `differs_by` names its classes. `both_agree` needs something compared
+    and nothing differing; with listed cycles that is at least one cycle
+    compared. Otherwise `not_run` (every dependency missing, trimmed or of
+    another measurement version)."""
     self_c = rebuild_side(owner_rec, "s") if owner_rec is not None else None
     meas_c = rebuild_side(meas_rec, "o") if meas_rec is not None else None
     if owner_rec is not None and meas_rec is not None:
@@ -837,7 +880,6 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
     self_shots = {_shot_key(s): s for c in (self_c or []) for s in c["shots"]}
     meas_shots = {_shot_key(s): s for c in (meas_c or []) for s in c["shots"]}
     rows = []
-    differ = False
     primary = meas_c if meas_c is not None else self_c
     covered = set()
     for c in primary:
@@ -861,7 +903,7 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
             seen.add(e[CX["s0"]])
             rows.append({"s0": e[CX["s0"]], "pt": None, "self": None, "meas": None,
                          "summary": {acct: _named(e, SPEC[ck][3])}, "shots": [], "refill": None,
-                         "differs": False, "not_run": "trimmed",
+                         "differs": False, "differs_by": [], "clock": None, "not_run": "trimmed",
                          "stat": {"self": None, "meas": None, "diff": None},
                          "time": {"self": None, "meas": None}})
     out = {"case": case, "case_text": None, "cycles": rows,
@@ -875,7 +917,11 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
                         if owner_rec and meas_rec else None),
         "not_run": None if owner_rec and meas_rec else "missing_record"}
     out["totals"] = {"self": _named(owner_rec["tot_s"], SPEC["tot_s"][1]) if owner_rec else None,
-                     "meas": _named(meas_rec["tot_o"], SPEC["tot_o"][1]) if meas_rec else None}
+                     "meas": _named(meas_rec["tot_o"], SPEC["tot_o"][1]) if meas_rec else None,
+                     "diff": None, "not_run": None if owner_rec and meas_rec else "missing_record"}
+    if owner_rec is not None and meas_rec is not None:
+        out["totals"]["diff"] = {"d_" + f: owner_rec["tot_s"][TOT[f]] - meas_rec["tot_o"][TOT[f]]
+                                 for f in TOTALS_COMPARED}
     out["cx"] = {"self": [_named(e, SPEC["cx_s"][3]) for e in owner_rec["cx_s"]] if owner_rec else None,
                  "meas": [_named(e, SPEC["cx_o"][3]) for e in meas_rec["cx_o"]] if meas_rec else None,
                  "self_omitted": owner_rec["omit"]["cx_s"] if owner_rec else None,
@@ -890,16 +936,26 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
                             "meas": _named(b, SPEC["gun_o"][3]) if b else None,
                             "diff": _stat_diff(a, b),
                             "not_run": None if a is not None and b is not None else "missing_record"})
+    out["differs_by"] = []
     if case is None:
         if not compatible:
             _incompatible(rows, out)
+        found = set()
         for r in rows:
-            if r["differs"]:
-                differ = True
-        compared = any(r["not_run"] is None for r in rows) or not rows
-        if not compatible:
-            compared = False
-        case = "both_differ" if differ else ("both_agree" if compared else "not_run")
+            found.update(r["differs_by"])
+        if out["attacks"]["d_emit_msgs"]:
+            found.add("attacks")
+        if out["totals"]["diff"] and any(out["totals"]["diff"].values()):
+            found.add("totals")
+        if any(st["diff"] and any(st["diff"].values()) for st in out["stat"]):
+            found.add("stat")
+        cycles_compared = any(r["not_run"] is None for r in rows)
+        whole_compared = (out["attacks"]["d_emit_msgs"] is not None
+                          or out["totals"]["diff"] is not None
+                          or any(st["diff"] is not None for st in out["stat"]))
+        compared = cycles_compared if rows else whole_compared
+        out["differs_by"] = sorted(found)
+        case = "both_differ" if found else ("both_agree" if compared else "not_run")
         out["case"] = case
     out["case_text"] = CASE_TEXT[case]
     return out
@@ -919,9 +975,14 @@ def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, p
                 partner = oc
                 break
     row = {"s0": c["s0"], "pt": c["pt"], mine: _cycle_fields(c), theirs: None, "shots": [],
-           "refill": None, "differs": False, "not_run": None}
+           "refill": None, "differs": False, "differs_by": [], "clock": None, "not_run": None}
     if partner is not None:
         row[theirs] = _cycle_fields(partner)
+        # A cycle either account could not rebuild whole (a shot or refill
+        # event trimmed, no stat block) is not a compared cycle: the fields
+        # both state are still set side by side and a difference among them
+        # still counts, but the row never counts toward an agreement.
+        row["not_run"] = c["not_run"] or partner["not_run"]
     elif other_rec is None:
         row["not_run"] = "missing_record"
     elif _trimmed(other_rec, other_gk):
@@ -938,14 +999,14 @@ def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, p
             srow["d_reloading"] = sv["reloading"] - mv["reloading"]
             srow["d_counter"] = sv["counter"] - mv["counter"]
             if srow["d_ammo"] or srow["d_reloading"] or srow["d_counter"]:
-                row["differs"] = True
+                _mark(row, "shot")
         elif other_rec is None:
             srow["not_run"] = "missing_record"
         elif _trimmed(other_rec, other_gk) or (partner is not None and not partner["complete"]):
             srow["not_run"] = "trimmed"
         else:
             srow["absent_in"] = theirs
-            row["differs"] = True
+            _mark(row, "shot")
         row["shots"].append(srow)
     if partner is not None:
         # Shots only the other account lists: NOT-RUN when this account's
@@ -963,29 +1024,65 @@ def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, p
                 srow["not_run"] = "trimmed"
             else:
                 srow["absent_in"] = mine
-                row["differs"] = True
+                _mark(row, "shot")
             row["shots"].append(srow)
+        a, b = (partner, c) if primary_is_meas else (c, partner)
+        _compare_cycles(row, a, b)
     sb = owner_rec and stat_at(owner_rec["gun_s"], c["pt"])
     mb = meas_rec and stat_at(meas_rec["gun_o"], c["pt"])
     row["stat"] = {"self": _named(sb, SPEC["gun_s"][3]) if sb else None,
                    "meas": _named(mb, SPEC["gun_o"][3]) if mb else None,
                    "diff": _stat_diff(sb or None, mb or None)}
     if row["stat"]["diff"] and any(row["stat"]["diff"].values()):
-        row["differs"] = True
+        _mark(row, "stat")
     row["time"] = {"self": _point_row(owner_rec, c["pt"]) if owner_rec else None,
                    "meas": _point_row(meas_rec, c["pt"]) if meas_rec else None}
-    if partner is not None:
-        a, b = (partner, c) if primary_is_meas else (c, partner)
-        row["refill"] = _refill_diff(a, b)
-        if row["refill"]["differs"]:
-            row["differs"] = True
     return row
 
 
+def _clock_delta(a, b):
+    """The difference of two clock readings, None when either seat has none."""
+    return None if a < 0 or b < 0 else a - b
+
+
+def _compare_cycles(row, self_cycle, meas_cycle):
+    """The two accounts of one cycle, field by field: the header fields both
+    state, the fields both derive (when both rebuilds ran), the reason bits
+    without the owner-only bit, the refill events, and the explicit clock
+    deltas (each seat's reload length on its game, shared and real clock,
+    the end stamp, the exhaustion and the gaps after it)."""
+    for f in CYCLE_STATED:
+        if self_cycle[f] != meas_cycle[f]:
+            _mark(row, "cycle")
+    both = self_cycle["not_run"] is None and meas_cycle["not_run"] is None
+    if both:
+        for f in CYCLE_DERIVED:
+            if self_cycle[f] != meas_cycle[f]:
+                _mark(row, "cycle")
+        if (self_cycle["why"] & ~WHY_OWNER_ONLY) != (meas_cycle["why"] & ~WHY_OWNER_ONLY):
+            _mark(row, "cycle")
+    clock = {"d_" + k: _clock_delta(self_cycle[k], meas_cycle[k]) for k in CLOCKS}
+    clock["d_st_end"] = wrap(self_cycle["st_end"] - meas_cycle["st_end"])
+    clock["d_exh"] = (wrap(self_cycle["exh"] - meas_cycle["exh"])
+                      if both and self_cycle["exh"] is not None and meas_cycle["exh"] is not None
+                      else None)
+    clock["d_gaps"] = ([_clock_delta(x, y) for x, y in zip(self_cycle["gaps"], meas_cycle["gaps"])]
+                       if both else None)
+    for k in CLOCKS:
+        if (self_cycle[k] < 0) != (meas_cycle[k] < 0):
+            _mark(row, "clock")
+    if any(v for k, v in clock.items() if k != "d_gaps") or any(clock["d_gaps"] or ()):
+        _mark(row, "clock")
+    row["clock"] = clock
+    row["refill"] = _refill_diff(self_cycle, meas_cycle)
+    if row["refill"]["differs"]:
+        _mark(row, "refill")
+
+
 def _cycle_fields(c):
-    keep = ("units", "listed", "complete", "mag", "regen", "rexp", "vol", "exh", "tail", "in_rl",
-            "gaps", "why", "excess", "end", "src", "amt", "st_end", "rl_g", "rl_s", "rl_r",
-            "regen_events", "regens", "not_run")
+    keep = ("units", "listed", "complete", "mag", "regen", "regen_stated", "rexp", "vol", "exh",
+            "tail", "in_rl", "gaps", "why", "excess", "end", "src", "amt", "st_end", "rl_g", "rl_s",
+            "rl_r", "regen_events", "events_complete", "regens", "not_run")
     return {k: c[k] for k in keep}
 
 
@@ -993,20 +1090,43 @@ def _shot_fields(s):
     return {k: v for k, v in s.items() if k not in ("pid", "stamp")}
 
 
+def _event_key(r):
+    """A refill event's whole identity: the shot it precedes, its kind and
+    amount, its stamp and its length on all three clocks."""
+    return (r["before_shot"], r["kind"], r["amt"], r["st"], r["gap_g"], r["gap_s"], r["gap_r"])
+
+
+def _only_in(rows, others):
+    """The events of `rows` the multiset `others` does not hold (a repeated
+    event counts once per listing)."""
+    left = Counter(_event_key(r) for r in others)
+    out = []
+    for r in rows:
+        k = _event_key(r)
+        if left[k]:
+            left[k] -= 1
+        else:
+            out.append(r)
+    return out
+
+
 def _refill_diff(self_cycle, meas_cycle) -> dict:
     """The refills of one cycle on both seats: how each account says it
-    ended, and every regeneration only one account saw, with its kind,
-    amount, stamp and three-clock interval."""
+    ended, and every regeneration only one account saw, compared as
+    multisets on kind, amount, stamp and all three clocks. When either
+    account's event list is incomplete the event comparison is NOT-RUN
+    (`trimmed`), never an agreement."""
     ends = {k: (self_cycle[k], meas_cycle[k]) for k in ("end", "src", "amt", "rl_g", "rl_s", "rl_r")}
-    def sig(r):
-        return (r["before_shot"], r["amt"])
-    ms = [sig(r) for r in meas_cycle["regens"]]
-    ss = [sig(r) for r in self_cycle["regens"]]
-    owner_only = [r for r in self_cycle["regens"] if sig(r) not in ms]
-    meas_only = [r for r in meas_cycle["regens"] if sig(r) not in ss]
-    differs = (any(a != b for a, b in ((v[0], v[1]) for v in ends.values()))
-               or bool(owner_only) or bool(meas_only))
-    return {"end": ends, "owner_only": owner_only, "meas_only": meas_only, "differs": differs}
+    ends_differ = any(a != b for a, b in ends.values())
+    out = {"end": ends, "owner_only": None, "meas_only": None, "not_run": None,
+           "differs": ends_differ}
+    if not (self_cycle["events_complete"] and meas_cycle["events_complete"]):
+        out["not_run"] = "trimmed"
+        return out
+    out["owner_only"] = _only_in(self_cycle["regens"], meas_cycle["regens"])
+    out["meas_only"] = _only_in(meas_cycle["regens"], self_cycle["regens"])
+    out["differs"] = ends_differ or bool(out["owner_only"]) or bool(out["meas_only"])
+    return out
 
 
 def blocks(victim_rec, shooter_rec) -> list:
@@ -1024,15 +1144,19 @@ def blocks(victim_rec, shooter_rec) -> list:
         key = (e[S["tb"]], e[S["kind"]], e[S["ord"]])
         cand = theirs.get(key, [])
         row = {"tb": key[0], "kind": key[1], "ord": key[2], "d_open": None, "d_len": None,
-               "d_pred": None, "d_pred_lo": None, "d_pred_hi": None, "not_run": None}
+               "d_len_g": None, "d_pred": None, "d_pred_lo": None, "d_pred_hi": None,
+               "self": _named(e, SPEC["b5_s"][3]), "meas": None, "not_run": None}
         if len(cand) != 1:
             row["not_run"] = ("ambiguous" if cand else
                               ("trimmed" if _trimmed(shooter_rec, "b5_o") else "absent"))
         else:
             o = cand[0]
+            row["meas"] = _named(o, SPEC["b5_o"][3])
             fb = e[S["fr"]] + o[O["fr"]]
             row["d_open"] = o[O["open_c"]] - e[S["open"]]
             row["d_len"] = (o[O["len_c"]] - e[S["len"]]) if min(o[O["len_c"]], e[S["len"]]) >= 0 else None
+            row["d_len_g"] = ((o[O["len_cg"]] - e[S["len_g"]])
+                              if min(o[O["len_cg"]], e[S["len_g"]]) >= 0 else None)
             row["d_pred"] = e[S["open"]] - o[O["o_pred"]]
             row["d_pred_lo"], row["d_pred_hi"] = row["d_pred"] - fb, row["d_pred"] + fb
             row["frame_bound"] = fb
@@ -1100,15 +1224,16 @@ def has_cap(rec, name) -> bool:
 
 def section_faults(rec) -> list:
     """Each addendum section against its whole-game count: a section the
-    record says it did not fill must be empty with a zero count; a filled one
-    lists its entries plus its omitted count up to that count."""
+    record says it did not fill must be empty, with a zero count and a zero
+    omitted count; a filled one lists its entries plus its omitted count up to
+    that count."""
     faults = []
     rt = IX["r_tot"]
     for name, parts in W["sections"]:
         for key, count in parts:
             total = rec["r_tot"][rt[count]]
             if not has_cap(rec, name):
-                if rec[key] or total:
+                if rec[key] or total or rec["omit"][key]:
                     faults.append("caps_" + key)
             elif len(rec[key]) + rec["omit"][key] != total:
                 faults.append(key)
@@ -1214,7 +1339,7 @@ def velocity_changes(owner_rec, meas_rec) -> dict:
     every target-bounce selection with the candidates as the owner computed
     them, beside the other seat's measured target-bounce entry for the same
     projectile when it has one."""
-    out = {"changes": [], "bounces": [], "label": LABEL_SELF,
+    out = {"changes": [], "bounces": [], "meas_unpaired": [], "label": LABEL_SELF,
            "not_run": None if has_cap(owner_rec, "vchg") else
            ("missing_record" if owner_rec is None else "not_collected")}
     if out["not_run"] is not None:
@@ -1228,24 +1353,45 @@ def velocity_changes(owner_rec, meas_rec) -> dict:
             "causes": [n for n in names if cause & W["cause"][n]],
             "old": [e[V["ovx"]], e[V["ovy"]]], "new": [e[V["nvx"]], e[V["nvy"]]],
             "turn_mrad": _turn_mrad(e[V["ovx"]], e[V["ovy"]], e[V["nvx"]], e[V["nvy"]])})
-    tb_meas = {}
-    if meas_rec is not None:
-        T = IX["p3tb"]
-        for e in meas_rec["p3tb"]:
-            tb_meas.setdefault(e[T["pid"]], dict(zip([f[0] for f in SPEC["p3tb"][3]], e)))
+    # Each owner selection pairs with the other seat's measured target bounce
+    # of the SAME event: projectile id, init stamp and the bounce's sender
+    # stamp (the owner's selection stamp is the stamp it sends the new
+    # velocity under). A key listed more than once on either side is
+    # ambiguous and pairs with nothing.
+    T = IX["p3tb"]
+    tb_fields = [f[0] for f in SPEC["p3tb"][3]]
+    meas_keys = ([(e[T["pid"]], e[T["s_init"]], e[T["s_rel"]]) for e in meas_rec["p3tb"]]
+                 if meas_rec is not None else [])
+    meas_count = Counter(meas_keys)
+    meas_by = dict(zip(meas_keys, meas_rec["p3tb"])) if meas_rec is not None else {}
+    own_count = Counter((e[Bx["pid"]], e[Bx["s_init"]], e[Bx["stamp"]]) for e in owner_rec["bsel"])
     for e in owner_rec["bsel"]:
         d_self, d_other = e[Bx["d_self"]], e[Bx["d_other"]]
         nearer = None
         if d_self >= 0 and d_other >= 0:
             nearer = "self" if d_self < d_other else ("other" if d_other < d_self else "equal")
         target = e[Bx["target"]]
+        key = (e[Bx["pid"]], e[Bx["s_init"]], e[Bx["stamp"]])
+        meas, why = None, None
+        if meas_rec is None:
+            why = "missing_record"
+        elif own_count[key] != 1 or meas_count[key] > 1:
+            why = "ambiguous"
+        elif meas_count[key] == 1:
+            meas = dict(zip(tb_fields, meas_by[key]))
+        else:
+            why = "trimmed" if _trimmed(meas_rec, "p3tb") else "absent"
         out["bounces"].append({
             "pid": e[Bx["pid"]], "s_init": e[Bx["s_init"]], "stamp": e[Bx["stamp"]],
             "target": next(n for n, v in W["bounce_target"].items() if v == target),
             "d_self": d_self, "los_self": e[Bx["los_self"]],
             "d_other": d_other, "los_other": e[Bx["los_other"]], "nearer": nearer,
-            "meas": tb_meas.get(e[Bx["pid"]]),
-            "meas_not_run": None if meas_rec is not None else "missing_record"})
+            "meas": meas, "meas_not_run": why})
+    # Measured target bounces no owner selection names: shown, never paired.
+    gap = "trimmed" if _trimmed(owner_rec, "bsel") else "absent"
+    out["meas_unpaired"] = [dict(zip(tb_fields, e), not_run="ambiguous" if meas_count[k] > 1 else gap)
+                            for k, e in zip(meas_keys, meas_rec["p3tb"] if meas_rec else [])
+                            if not own_count[k]]
     return out
 
 
@@ -1253,12 +1399,19 @@ def deaths(own_rec, other_rec) -> list:
     """Boundary deaths. Each boundary death of one seat as that seat recorded it, beside
     the other seat's record of the same death (by death ordinal): cause,
     boundary edge, position and velocity before the death, the recent hit
-    and force identities (each resolved against the seat's own push list)."""
+    and force identities (each resolved against the seat's own push list).
+
+    A recent hit's `push_listed` is True when the seat's own push list holds
+    it; False only when that list is whole (collected, nothing omitted), so
+    absence is proven; otherwise None with `push_not_run` naming why
+    (`not_collected`, `trimmed`)."""
     if own_rec is None or not has_cap(own_rec, "death"):
         return []
     D = IX["bd_s"]
     fields = [f[0] for f in SPEC["bd_s"][3]]
     pushes_own = set(_keyed(own_rec["push_s"], IX["push_s"])) if has_cap(own_rec, "push") else None
+    push_gap = ("not_collected" if pushes_own is None else
+                "trimmed" if _trimmed(own_rec, "push_s") else None)
     theirs = {}
     if other_rec is not None:
         for e in other_rec["bd_o"]:
@@ -1272,8 +1425,10 @@ def deaths(own_rec, other_rec) -> list:
             if e[D[p + "pid"]] < 0:
                 continue
             key = (e[D[p + "pid"]], e[D[p + "s_init"]], e[D[p + "cord"]])
+            listed = pushes_own is not None and key in pushes_own
             hits.append({"pid": key[0], "s_init": key[1], "cord": key[2], "age": e[D[p + "age"]],
-                         "push_listed": None if pushes_own is None else key in pushes_own})
+                         "push_listed": True if listed else (None if push_gap else False),
+                         "push_not_run": None if listed else push_gap})
         row = {"self": dict(zip(fields, e)), "meas": None, "hits": hits, "d_px": None,
                "d_py": None, "d_vx": None, "d_vy": None, "not_run": base}
         if base is None:
@@ -1290,6 +1445,30 @@ def deaths(own_rec, other_rec) -> list:
     return rows
 
 
+# The whole-record rows a record states once (never trimmed), by wire key.
+RECORD_ROWS = ("tb_tot", "tot_s", "tot_o", "p3n", "p3self", "b5_tot", "r_tot")
+# The four reaction-and-aim sets, in layout order; `a1sum` holds one row per set.
+A1_SETS = tuple(k for k in KEYS if SPEC[k][0] == "hist" and k.startswith("a"))
+
+
+def _record_row(rec, seat, other, faults):
+    """One record's own whole-game statements: frame time, the latency
+    estimate, the collectors' cost, the whole-game rows, the summaries of the
+    four aim sets, and per list its listed and omitted counts (a list with a
+    non-zero omitted count is trimmed: its listed count is no whole count)."""
+    cost = [_named(e, SPEC["cost"][2]) for e in rec["cost"]]
+    row = {"seat": seat, "other": other, "consts": rec["consts"], "caps": rec["caps"],
+           "t0": rec["t0"], "t0_src": rec["t0_src"],
+           "frame_p50_us": rec["frame_p50_us"], "l_hat": rec["l_hat"],
+           "cost": {f[0]: sum(c[f[0]] for c in cost) for f in SPEC["cost"][2]},
+           "a1sum": {s: _named(e, SPEC["a1sum"][2]) for s, e in zip(A1_SETS, rec["a1sum"])},
+           "listed": {k: len(rec[k]) for k in LISTS}, "omitted": dict(rec["omit"]),
+           "faults": faults}
+    for k in RECORD_ROWS:
+        row[k] = _named(rec[k], SPEC[k][1])
+    return row
+
+
 def pair_view(records: list) -> dict:
     """The public description of one game's combat records. `records` are
     the stored records of ONE stable game key and ONE canonical seat pair:
@@ -1301,7 +1480,8 @@ def pair_view(records: list) -> dict:
     view = {"records": len(records), "paired": two, "seats": [str(s) for s in seats],
             "consts": {str(r["seat"]): r["rec"]["consts"] for r in records},
             "directions": [], "blocks": [], "contacts": [], "points": [], "b3": [], "b1": [],
-            "pushes": [], "chains": [], "velocity": [], "deaths": [], "faults": {}}
+            "pushes": [], "chains": [], "velocity": [], "deaths": [], "react": [], "interval": [],
+            "refused": [], "record": [], "faults": {}}
     for r in records:
         view["faults"][str(r["seat"])] = {"own_gun": rebuild_faults(r["rec"], "s"),
                                          "other_gun": rebuild_faults(r["rec"], "o"),
@@ -1324,8 +1504,8 @@ def pair_view(records: list) -> dict:
         c_rows = contacts(victim["rec"] if victim else None, shooter["rec"] if shooter else None)
         if not compat:
             for r in b_rows:
-                r.update(d_open=None, d_len=None, d_pred=None, d_pred_lo=None, d_pred_hi=None,
-                         not_run="incompatible")
+                r.update(d_open=None, d_len=None, d_len_g=None, d_pred=None, d_pred_lo=None,
+                         d_pred_hi=None, meas=None, not_run="incompatible")
             for r in c_rows:
                 r.update(since_ms=None, pred_since=None, contact_to_decision=None,
                          not_run="incompatible")
@@ -1349,6 +1529,8 @@ def pair_view(records: list) -> dict:
                          not_run="incompatible")
             for b in vel["bounces"]:
                 b.update(meas=None, meas_not_run="incompatible")
+            for b in vel["meas_unpaired"]:
+                b["not_run"] = "incompatible"
         view["pushes"].append({"victim": str(owner), "rows": p_rows,
                                "not_run": _own_section(own_rec, "push")})
         view["chains"].append({"victim": str(owner), "rows": ch_rows,
@@ -1358,15 +1540,30 @@ def pair_view(records: list) -> dict:
                                "not_run": _own_section(own_rec, "death")})
     for r in records:
         rec = r["rec"]
-        view["points"].append({"seat": str(r["seat"]),
+        seat, other = str(r["seat"]), str(r["other"])
+        view["points"].append({"seat": seat,
                                "rows": [_point_row(rec, e[TB["pt"]]) for e in rec["tb"]],
                                "omitted": rec["omit"]["tb"], "label": LABEL_SELF})
-        view["b3"].append({"measuring_seat": str(r["seat"]), "label": LABEL_MEAS,
+        view["b3"].append({"measuring_seat": seat, "subject": other, "label": LABEL_MEAS,
                            "counts": _named(rec["p3n"], SPEC["p3n"][1]),
                            "top": [_named(e, SPEC["p3top"][3]) for e in rec["p3top"]],
                            "target_bounces": [_named(e, SPEC["p3tb"][3]) for e in rec["p3tb"]],
                            "homing_top": [_named(e, SPEC["p3ht"][3]) for e in rec["p3ht"]],
+                           "homing_hist": list(rec["p3hm"]),
+                           "tb_not_run": "trimmed" if rec["omit"]["p3tb"] else None,
+                           "hm_not_run": "trimmed" if rec["omit"]["p3ht"] else None,
                            "omitted": {k: rec["omit"][k] for k in ("p3top", "p3tb", "p3ht")}})
+        view["react"].append({"seat": seat, "other": other,
+                              "own": [_named(e, SPEC["rx_s"][3]) for e in rec["rx_s"]],
+                              "copy": [_named(e, SPEC["rx_o"][3]) for e in rec["rx_o"]],
+                              "omitted": {k: rec["omit"][k] for k in ("rx_s", "rx_o")}})
+        view["interval"].append({"seat": seat, "other": other,
+                                 "own": [_named(e, SPEC["ivl_s"][3]) for e in rec["ivl_s"]],
+                                 "copy": [_named(e, SPEC["ivl_o"][3]) for e in rec["ivl_o"]]})
+        view["refused"].append({"seat": seat, "label": LABEL_SELF,
+                                "rows": [_named(e, SPEC["b5_r"][3]) for e in rec["b5_r"]],
+                                "omitted": rec["omit"]["b5_r"]})
+        view["record"].append(_record_row(rec, seat, other, view["faults"][seat]))
     for owner in seats:
         own = by_seat.get(owner)
         meas = next((r for r in records if r["other"] == owner and r["seat"] != owner), None)
@@ -1413,11 +1610,16 @@ def combat_subjects(view: dict) -> dict:
                 if cyc[account] is not None:
                     add("combat.cycle", dict(cyc[account], account=account, owner=d["owner"],
                                              s0=cyc["s0"], pt=cyc["pt"]))
+                    for ev in cyc[account]["regens"]:
+                        add("combat.regen", dict(ev, account=account, owner=d["owner"],
+                                                 s0=cyc["s0"],
+                                                 events_complete=cyc[account]["events_complete"]))
             for s in cyc["shots"]:
                 add("combat.shot", dict(s, owner=d["owner"], case=d["case"]))
             if cyc["refill"] is not None:
                 add("combat.refill", dict(cyc["refill"], owner=d["owner"], s0=cyc["s0"],
-                                          meas=cyc["meas"], self=cyc["self"]))
+                                          meas=cyc["meas"], self=cyc["self"],
+                                          clock=cyc["clock"]))
         for st in d["stat"]:
             add("combat.stat", dict(st, owner=d["owner"]))
     for p in view["points"]:
@@ -1449,17 +1651,41 @@ def combat_subjects(view: dict) -> dict:
     for d in view["deaths"]:
         for r in d["rows"]:
             add("combat.death", dict(r, seat=d["seat"]))
+    for b in view["b3"]:
+        add("combat.b3", b)
+        for r in b["target_bounces"]:
+            add("combat.tbounce", dict(r, measuring_seat=b["measuring_seat"], subject=b["subject"]))
+        for r in b["homing_top"]:
+            add("combat.homing", dict(r, measuring_seat=b["measuring_seat"], subject=b["subject"]))
+    for x in view["react"]:
+        for account, rows, subject in (("self", x["own"], x["seat"]), ("meas", x["copy"], x["other"])):
+            for r in rows:
+                add("combat.react", dict(r, seat=x["seat"], account=account, subject=subject))
+    for x in view["interval"]:
+        for account, rows, subject in (("self", x["own"], x["seat"]), ("meas", x["copy"], x["other"])):
+            for r in rows:
+                add("combat.interval", dict(r, seat=x["seat"], account=account, subject=subject))
+    for x in view["refused"]:
+        for r in x["rows"]:
+            add("combat.refused", dict(r, seat=x["seat"]))
+    for r in view["record"]:
+        add("combat.record", r)
     return out
 
 
-def cmeasure(name, subject, consts=False):
+def cmeasure(name, subject, consts=False, field=None):
     """Register a combat measure. `consts` declares that the measure reads an
     input whose meaning depends on the record's measurement version: it then
     answers None unless every record it reads is of a version this server
-    reads and, for a two-record input, the same one."""
+    reads and, for a two-record input, the same one. `field` names the input
+    of a generated measure (one function read at several fields): it is part
+    of the entry's data, so each generated entry has its own fingerprint."""
+    data = {"consts": bool(consts)}
+    if field is not None:
+        data["field"] = field
+
     def deco(fn):
-        rm._register(rm.Entry("measure", name, (fn,), subject=subject,
-                              data={"consts": bool(consts)}))
+        rm._register(rm.Entry("measure", name, (fn,), subject=subject, data=data))
         return fn
     return deco
 
@@ -1541,6 +1767,18 @@ def m_cycle_end(ctx, p):
 @cmeasure("b2.cycle.excess", "combat.cycle")
 def m_cycle_excess(ctx, p):
     return _get(ctx, "excess")
+
+
+@cmeasure("b2.cycle.regen", "combat.cycle")
+def m_cycle_regen(ctx, p):
+    """Units regenerated in the cycle, derived from its event stream; None
+    when that stream is not whole."""
+    return _get(ctx, "regen")
+
+
+@cmeasure("b2.cycle.regen_stated", "combat.cycle")
+def m_cycle_regen_stated(ctx, p):
+    return _get(ctx, "regen_stated")
 
 
 @cmeasure("b2.shot.d_ammo", "combat.shot")
@@ -1627,24 +1865,105 @@ def m_stat_fields_differing(ctx, p):
     return None if d is None else sorted(k for k, v in d.items() if v)
 
 
+def _clock(v):
+    """A clock reading, None when the seat has none (the wire's minus one)."""
+    return None if v is None or v < 0 else v
+
+
 @cmeasure("b2.refill.self_rl_g", "combat.refill")
 def m_refill_rl_g(ctx, p):
-    return ctx.row["end"]["rl_g"][0]
+    return _clock(ctx.row["end"]["rl_g"][0])
 
 
 @cmeasure("b2.refill.self_rl_s", "combat.refill")
 def m_refill_rl_s(ctx, p):
-    return ctx.row["end"]["rl_s"][0]
+    return _clock(ctx.row["end"]["rl_s"][0])
+
+
+@cmeasure("b2.refill.self_rl_r", "combat.refill")
+def m_refill_rl_r(ctx, p):
+    return _clock(ctx.row["end"]["rl_r"][0])
+
+
+@cmeasure("b2.refill.meas_rl_g", "combat.refill")
+def m_refill_meas_rl_g(ctx, p):
+    return _clock(ctx.row["end"]["rl_g"][1])
 
 
 @cmeasure("b2.refill.meas_rl_s", "combat.refill")
 def m_refill_meas_rl_s(ctx, p):
-    return ctx.row["end"]["rl_s"][1]
+    return _clock(ctx.row["end"]["rl_s"][1])
+
+
+@cmeasure("b2.refill.meas_rl_r", "combat.refill")
+def m_refill_meas_rl_r(ctx, p):
+    return _clock(ctx.row["end"]["rl_r"][1])
+
+
+def _clock_d(ctx, k):
+    c = ctx.row.get("clock")
+    return None if c is None else c[k]
+
+
+@cmeasure("b2.refill.d_rl_g", "combat.refill")
+def m_refill_d_rl_g(ctx, p):
+    return _clock_d(ctx, "d_rl_g")
+
+
+@cmeasure("b2.refill.d_rl_s", "combat.refill")
+def m_refill_d_rl_s(ctx, p):
+    return _clock_d(ctx, "d_rl_s")
+
+
+@cmeasure("b2.refill.d_rl_r", "combat.refill")
+def m_refill_d_rl_r(ctx, p):
+    return _clock_d(ctx, "d_rl_r")
+
+
+@cmeasure("b2.refill.d_st_end", "combat.refill")
+def m_refill_d_st_end(ctx, p):
+    return _clock_d(ctx, "d_st_end")
 
 
 @cmeasure("b2.refill.owner_only_units", "combat.refill")
 def m_refill_owner_only(ctx, p):
-    return sum(r["amt"] for r in ctx.row["owner_only"])
+    """Units of the regenerations only the owner's account lists; None
+    (NOT-RUN) when either account's event list is incomplete."""
+    o = ctx.row["owner_only"]
+    return None if o is None else sum(r["amt"] for r in o)
+
+
+@cmeasure("b2.refill.meas_only_units", "combat.refill")
+def m_refill_meas_only(ctx, p):
+    o = ctx.row["meas_only"]
+    return None if o is None else sum(r["amt"] for r in o)
+
+
+@cmeasure("b2.regen.amt", "combat.regen")
+def m_regen_amt(ctx, p):
+    return ctx.row["amt"]
+
+
+@cmeasure("b2.regen.gap_g", "combat.regen")
+def m_regen_gap_g(ctx, p):
+    return _clock(ctx.row["gap_g"])
+
+
+@cmeasure("b2.regen.gap_s", "combat.regen")
+def m_regen_gap_s(ctx, p):
+    return _clock(ctx.row["gap_s"])
+
+
+@cmeasure("b2.regen.gap_r", "combat.regen")
+def m_regen_gap_r(ctx, p):
+    return _clock(ctx.row["gap_r"])
+
+
+@cmeasure("b2.regen.stream_whole", "combat.regen")
+def m_regen_whole(ctx, p):
+    """Whether the cycle's refill-event list is whole (every event the
+    header counts is listed)."""
+    return ctx.row["events_complete"]
 
 
 @cmeasure("b2.atk.d_count", "combat.direction")
@@ -1655,6 +1974,19 @@ def m_atk_d_count(ctx, p):
 @cmeasure("b2.direction.case", "combat.direction")
 def m_direction_case(ctx, p):
     return ctx.row["case"]
+
+
+@cmeasure("b2.direction.differs_by", "combat.direction")
+def m_direction_differs_by(ctx, p):
+    """The classes of field the two accounts differ in (shot, cycle, clock,
+    refill, stat, attacks, totals); None unless both accounts were compared."""
+    return ctx.row["differs_by"] if ctx.row["case"] in ("both_agree", "both_differ") else None
+
+
+@cmeasure("b2.totals.d_units", "combat.direction")
+def m_totals_d_units(ctx, p):
+    d = ctx.row["totals"]["diff"]
+    return None if d is None else d["d_units"]
 
 
 @cmeasure("tb.point.game_real", "combat.point")
@@ -1833,6 +2165,152 @@ def m_death_d_px(ctx, p):
     return _get(ctx, "d_px")
 
 
+# -- the remaining descriptive inputs: one entry per field, generated -----------------
+#
+# Each generated entry reads ONE named field of its subject's row; the field
+# is in the entry's data (its own fingerprint). A clock or interval field
+# whose wire value is minus one (the seat has none) answers None. Rows exist
+# only for listed entries: a trimmed list's absence is read through the
+# record subject's `rec.listed.<key>` (None while the list is trimmed) and
+# `rec.omitted.<key>`.
+
+def _gen(name, subject, key, consts=False, clock=False, sub=None):
+    """Register `name` as the value of row field `key` (inside the row's
+    `sub` dict when given)."""
+    def fn(ctx, p):
+        row = ctx.row if sub is None else ctx.row.get(sub)
+        v = None if row is None else row.get(key)
+        if clock and v is not None and v < 0:
+            return None
+        if consts and not _row_consts_ok(ctx, "measuring_seat" if "measuring_seat" in ctx.row
+                                         else "seat"):
+            return None
+        return v
+    cmeasure(name, subject, consts=consts, field=[sub, key, clock])(fn)
+    return fn
+
+
+for _f in ("slow", "ramp", "clamp", "frames", "dt_med_us", "dt_max_us", "real", "game", "srv",
+           "ps"):
+    _gen("tb.point." + _f, "combat.point", _f)
+for _f in ("cd", "gap_prev", "len_g", "reopen", "scale_pm", "press", "fr"):
+    _gen("b5.ctl." + _f, "combat.block", _f, clock=_f in ("gap_prev", "len_g"), sub="self")
+for _f in ("cd_c", "gap_prev_s", "len_cg", "started", "reopen_c", "ta", "o_pred"):
+    _gen("b5.ctl." + _f, "combat.block", _f, clock=_f in ("gap_prev_s", "len_cg"), sub="meas")
+_gen("b5.pair.d_len_g", "combat.block", "d_len_g")
+_gen("b5.pair.frame_bound", "combat.block", "frame_bound")
+_gen("b5.contact.pred_since", "combat.contact", "pred_since")
+_gen("b5.contact.contact_to_decision", "combat.contact", "contact_to_decision")
+_gen("b5.refused.since_prev", "combat.refused", "since_prev", clock=True)
+_gen("b5.refused.cd", "combat.refused", "cd")
+for _f in ("aim_on", "first"):
+    _gen("b1.react." + _f, "combat.react", _f, clock=True)
+_gen("b1.react.err", "combat.react", "err", consts=True)
+_gen("b1.react.account", "combat.react", "account")
+for _f in ("gmin", "cexp_min"):
+    _gen("b2.ivl." + _f, "combat.interval", _f, clock=True)
+for _f in ("vmax", "vexp", "refreshes", "account"):
+    _gen("b2.ivl." + _f, "combat.interval", _f)
+_gen("b3.tb.gap", "combat.tbounce", "gap", consts=True, clock=True)
+_gen("b3.tb.has_retarget", "combat.tbounce", "has_retarget")
+_gen("b3.tb.ang_to_me", "combat.tbounce", "ang_to_me", consts=True)
+_gen("b3.hm.ratio_pm", "combat.homing", "ratio_pm", consts=True)
+_gen("b3.hm.packages", "combat.homing", "n")
+_gen("b3.top.d_along", "combat.top", "d_along", consts=True)
+_gen("b3.top.ang", "combat.top", "ang", consts=True)
+_gen("b3.top.dt", "combat.top", "dt")
+for _k in RECORD_ROWS:
+    for _fd in SPEC[_k][1]:
+        _gen("rec.%s.%s" % (_k, _fd[0]), "combat.record", _fd[0], sub=_k)
+for _fd in SPEC["cost"][2]:
+    _gen("rec.cost." + _fd[0], "combat.record", _fd[0], sub="cost")
+for _k in LISTS:
+    _gen("rec.omitted." + _k, "combat.record", _k, sub="omitted")
+for _f in ("frame_p50_us", "caps", "t0", "t0_src"):
+    _gen("rec." + _f, "combat.record", _f)
+for _fd in SPEC["gun_s"][3]:
+    if _fd[0] == "pt":
+        continue
+    _gen("b2.stat.self." + _fd[0], "combat.stat", _fd[0], sub="self")
+    _gen("b2.stat.meas." + _fd[0], "combat.stat", _fd[0], sub="meas")
+    if "b2.stat.d_" + _fd[0] not in rm.REGISTRY:
+        _gen("b2.stat.d_" + _fd[0], "combat.stat", "d_" + _fd[0], sub="diff")
+_gen("rec.l_hat", "combat.record", "l_hat", clock=True)
+
+
+@cmeasure("rec.listed", "combat.record")
+def m_rec_listed(ctx, p):
+    """Per list: its listed count when the list is whole, None (NOT-RUN)
+    while the budgeter trimmed it."""
+    return {k: (None if ctx.row["omitted"][k] else n) for k, n in ctx.row["listed"].items()}
+
+
+@cmeasure("rec.a1sum", "combat.record", consts=True)
+def m_rec_a1sum(ctx, p):
+    if not _row_consts_ok(ctx, "seat"):
+        return None
+    return ctx.row["a1sum"]
+
+
+@cmeasure("rec.faults", "combat.record")
+def m_rec_faults(ctx, p):
+    """Every rebuild and section fault of the record, flattened and sorted."""
+    f = ctx.row["faults"]
+    return sorted(f["own_gun"] + f["other_gun"] + f["sections"])
+
+
+@cmeasure("b3.tb.min_gap", "combat.b3", consts=True)
+def m_b3_tb_min_gap(ctx, p):
+    """The smallest target-bounce gap the measuring seat listed; None when
+    its list was trimmed or holds no gap."""
+    if ctx.row["tb_not_run"] or not _row_consts_ok(ctx, "measuring_seat"):
+        return None
+    gaps = [r["gap"] for r in ctx.row["target_bounces"] if r["gap"] >= 0]
+    return min(gaps) if gaps else None
+
+
+@cmeasure("b3.hm.max_ratio_pm", "combat.b3", consts=True)
+def m_b3_hm_max_ratio(ctx, p):
+    """The largest homing turn ratio (per mille of the code's bound) the
+    measuring seat listed; None when its list was trimmed or is empty."""
+    if ctx.row["hm_not_run"] or not _row_consts_ok(ctx, "measuring_seat"):
+        return None
+    vals = [r["ratio_pm"] for r in ctx.row["homing_top"]]
+    return max(vals) if vals else None
+
+
+@cmeasure("b3.hm.hist", "combat.b3", consts=True)
+def m_b3_hm_hist(ctx, p):
+    if not _row_consts_ok(ctx, "measuring_seat"):
+        return None
+    return ctx.row["homing_hist"]
+
+
+@cmeasure("b3.counts", "combat.b3")
+def m_b3_counts(ctx, p):
+    return ctx.row["counts"]
+
+
+@cmeasure("b3.bounce.meas_gap", "combat.bounce", consts=True)
+def m_bounce_meas_gap(ctx, p):
+    """The other seat's measured gap of this exact bounce; None when that
+    entry is missing, trimmed, ambiguous or of another version."""
+    m = ctx.row.get("meas")
+    if m is None or m["gap"] < 0 or not _row_consts_ok(ctx, "owner"):
+        return None
+    return m["gap"]
+
+
+@cmeasure("death.boundary.push_unlisted", "combat.death")
+def m_death_push_unlisted(ctx, p):
+    """How many recent hits the seat's own push list proves it lacks; None
+    when the list cannot prove absence (trimmed or not collected)."""
+    hits = ctx.row["hits"]
+    if any(h["push_listed"] is None for h in hits):
+        return None
+    return sum(1 for h in hits if h["push_listed"] is False)
+
+
 # -- contributions (histograms per game, per subject and source) -----------------------
 
 def contributions(records: list) -> list:
@@ -1934,3 +2412,132 @@ def trace(state: dict, frames: list, prm: dict, turn_per_frame: float | None = N
             state = turn(state, turn_per_frame)
         state = integrate(state, [raw], prm)
     return state
+
+
+# -- the steering references: homing and target bounce, frame by frame -------------
+#
+# Both follow the game's code step for step in single precision (each
+# operation rounded as the game's float arithmetic rounds it); angles are
+# taken in double precision and then rounded to single. The canonical
+# fixture set pins their exact encoded outputs, so a client measuring the
+# same steering produces the same entries.
+
+def _angle_deg(ax, ay, bx, by) -> float:
+    """The engine's vector angle: the unsigned angle between two vectors, in degrees;
+    zero when either vector is zero."""
+    if (ax == 0 and ay == 0) or (bx == 0 and by == 0):
+        return 0.0
+    return math.degrees(abs(math.atan2(ax * by - ay * bx, ax * bx + ay * by)))
+
+
+def homing_step(state: dict, target, dt: float, prm: dict):
+    """One frame of a homing projectile, as Homing.Update then
+    MoveTransform.Update compute it (that order is the reference's): when the
+    target lies inside the cone around the flight direction, scaling drag by
+    the angle, the homing drag, the clamped pull toward the target scaled by
+    the projectile's force, its amount and the code's force scale, and the
+    gravity term the homing code adds itself (while homing, the move step
+    skips its own gravity). `prm`: the integrator's keys plus amount,
+    scaling_drag, h_drag and force. Returns (state, homing_on)."""
+    x, y, vx, vy = f32(state["x"]), f32(state["y"]), f32(state["vx"]), f32(state["vy"])
+    d = f32(dt)
+    tx, ty = f32(f32(target[0]) - x), f32(f32(target[1]) - y)
+    ang = f32(_angle_deg(vx, vy, tx, ty))
+    on = ang < W["homing"]["cone_deg"]
+    if on:
+        sd, hd = f32(prm["scaling_drag"]), f32(prm["h_drag"])
+        vx = f32(vx - f32(f32(f32(vx * ang) * d) * sd))
+        vy = f32(vy - f32(f32(f32(vy * ang) * d) * sd))
+        vx = f32(vx - f32(f32(vx * d) * hd))
+        vy = f32(vy - f32(f32(vy * d) * hd))
+        n = f32(math.sqrt(f32(f32(tx * tx) + f32(ty * ty))))
+        cx, cy = (f32(tx / n), f32(ty / n)) if n > 1 else (tx, ty)
+        force, scale, amount = f32(prm["force"]), f32(W["homing"]["force_scale"]), f32(prm["amount"])
+        vx = f32(vx + f32(f32(f32(f32(cx * d) * force) * scale) * amount))
+        vy = f32(vy + f32(f32(f32(f32(cy * d) * force) * scale) * amount))
+        vy = f32(vy + f32(f32(d * f32(prm["gravity"])) * f32(prm["mult"])))
+    moved = integrate({"x": x, "y": y, "vx": vx, "vy": vy}, [dt],
+                      dict(prm, sim_gravity=prm["sim_gravity"] + (1 if on else 0)))
+    return moved, on
+
+
+def homing_trace(state: dict, target, frames: list, prm: dict, sync_every: int,
+                 turn_per_frame: float | None = None) -> list:
+    """The owner's sync packages of a homing projectile: (time, state) at
+    the start and after every `sync_every` frames. `turn_per_frame` adds a
+    turn the homing code does not make before each frame (a synthetic
+    steering for the mutant comparison)."""
+    t, out = f32(0.0), [(f32(0.0), state)]
+    for i, raw in enumerate(frames):
+        if turn_per_frame:
+            state = turn(state, turn_per_frame)
+        state, _on = homing_step(state, target, raw, prm)
+        t = f32(t + f32(raw))
+        if (i + 1) % sync_every == 0:
+            out.append((t, state))
+    return out
+
+
+def homing_entry(pid: int, s_rel: int, packages: list, prm: dict) -> list:
+    """The encoded `p3ht` entry of one projectile from consecutive sync
+    packages: the largest turn rate between two packages as per mille of the
+    code's bound (the pull the homing term can add per second over the
+    speed at the earlier package), rounded half to even, and the number of
+    packages."""
+    bound = prm["force"] * W["homing"]["force_scale"] * prm["amount"]
+    ratios = []
+    for (t0, a), (t1, b) in zip(packages, packages[1:]):
+        dt = t1 - t0
+        speed = math.hypot(a["vx"], a["vy"])
+        if dt <= 0 or speed == 0 or bound == 0:
+            continue
+        rate = math.radians(_angle_deg(a["vx"], a["vy"], b["vx"], b["vy"])) / dt
+        ratios.append(round(rate / (bound / speed) * PER_MILLE))
+    return [pid, s_rel, max(ratios) if ratios else 0, len(packages)]
+
+
+def target_bounce(state: dict, normal, target, me, frames: list, prm: dict,
+                  wait_s: float | None = None):
+    """One target bounce as the game's code runs it: the reflection off the
+    surface (the engine's reflection, then the speed multiplier), the position nudged
+    along the new direction, the projectile held still until the wait has
+    elapsed in game time, then the owner's new velocity toward the target
+    (raised by the upward compensation) at the reflected speed, or the
+    reflected velocity unchanged with no target. `state` is at the contact
+    point; `me` is the measuring seat's position. Returns the encoded
+    entry fields (gap in milliseconds, has_retarget, ang_to_me in
+    milliradians, each rounded half to even) and the new velocity, or None
+    when the frames end before the wait does. `prm`: gravity, speed_m.
+    `wait_s` replaces the code's wait (a synthetic early send for the mutant
+    comparison)."""
+    x, y, vx, vy = f32(state["x"]), f32(state["y"]), f32(state["vx"]), f32(state["vy"])
+    nx, ny = f32(normal[0]), f32(normal[1])
+    k = f32(-f32(f32(f32(nx * vx) + f32(ny * vy)) * 2))
+    vx, vy = f32(f32(k * nx) + vx), f32(f32(k * ny) + vy)
+    sm = f32(prm["speed_m"])
+    vx, vy = f32(vx * sm), f32(vy * sm)
+    speed = f32(math.sqrt(f32(f32(vx * vx) + f32(vy * vy))))
+    nudge = f32(W["bounce"]["nudge"])
+    x = f32(x + f32(f32(vx / speed) * nudge))
+    y = f32(y + f32(f32(vy / speed) * nudge))
+    waited = f32(0.0)
+    wait = f32(W["bounce"]["wait_s"] if wait_s is None else wait_s)
+    for raw in frames:
+        waited = f32(waited + f32(raw))
+        if waited >= wait:
+            break
+    else:
+        return None
+    if target is None:
+        nvx, nvy, has = vx, vy, 0
+    else:
+        dist = abs(f32(f32(target[0]) - x))
+        comp = f32(f32(f32(f32(dist ** f32(W["bounce"]["comp_pow"])) * f32(prm["gravity"])) / speed)
+                   * f32(W["bounce"]["comp_scale"]))
+        ex, ey = f32(f32(target[0]) - x), f32(f32(f32(target[1]) + comp) - y)
+        n = f32(math.sqrt(f32(f32(ex * ex) + f32(ey * ey))))
+        nvx, nvy, has = f32(f32(ex / n) * speed), f32(f32(ey / n) * speed), 1
+    mx, my = f32(me[0]) - x, f32(me[1]) - y
+    ang = abs(math.atan2(nvx * my - nvy * mx, nvx * mx + nvy * my))
+    return {"gap": round(waited * PER_MILLE), "has_retarget": has,
+            "ang_to_me": round(ang * PER_MILLE), "vx": nvx, "vy": nvy}

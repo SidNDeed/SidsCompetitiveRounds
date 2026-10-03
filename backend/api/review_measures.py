@@ -46,7 +46,9 @@ FINGERPRINT_MODULES = ("review_measures", "review_rules", "review_module", "comb
 COMBAT_SUBJECTS = ("combat.direction", "combat.cycle", "combat.shot", "combat.refill",
                    "combat.stat", "combat.point", "combat.block", "combat.contact",
                    "combat.top", "combat.aim", "combat.push", "combat.vchange",
-                   "combat.bounce", "combat.chain", "combat.death")
+                   "combat.bounce", "combat.chain", "combat.death", "combat.regen",
+                   "combat.b3", "combat.tbounce", "combat.homing", "combat.react",
+                   "combat.interval", "combat.refused", "combat.record")
 
 REGISTRY: dict = {}
 BRIDGE: dict = {}

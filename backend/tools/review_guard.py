@@ -102,7 +102,7 @@ PINNED = {
 # changed in it makes the digest differ, and the guard refuses it.
 PINNED_SHA = {
     ("combat_measures", "COMBAT_WIRE"):
-        "fda942f62f14fed7fbe28eb41ae9fb330c1980de23cfe2425807d38198bdc7fd",
+        "cf51bb58df95b57e062ad4dcbfc90c6d34b57469d58012e85108c308561b295f",
 }
 SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge",
             "combat_evidence_accept", "combat_evidence_worker", "combat_evidence_purge"}
