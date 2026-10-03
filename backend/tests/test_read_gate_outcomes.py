@@ -11,11 +11,13 @@ lookup that produced it -- or to the absence of any lookup.
 from __future__ import annotations
 
 import subprocess
+from collections import Counter
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 import read_gate_testkit as K
 import main
@@ -584,15 +586,22 @@ def test_bypassed_route_lookups_charged_at_miss(env, monkeypatch):
 
 
 def test_socket_operator_lookup_charged(env):
-    """The chat socket passes no http middleware: its count's operator lookup
-    is charged to the same bucket, so past it no lookup runs."""
+    """The chat socket passes no http middleware: ws_chat charges its address
+    at connect, before the count's operator lookup (which the connect charge
+    covers: one charge per socket), so past the bucket the socket is closed
+    1013 rate_limited and no lookup runs."""
     env.set_mode("log")
     limit = main._RL_GLOBAL[0]
+    closes = []
     for i in range(limit + 3):
         with env.client.websocket_connect("/api/v1/ws/chat", headers={
                 "X-Mod-Version": K.LIVE_VERSION, "X-Operator-Key": _unissued(i)}) as ws:
-            ws.receive_text()
-    assert env.stub.calls["operator"] == limit
+            try:
+                ws.receive_text()
+            except WebSocketDisconnect as ex:
+                closes.append((i, ex.code, ex.reason))
+    assert closes == [(i, 1013, "rate_limited") for i in range(limit, limit + 3)], closes
+    assert env.stub.calls["operator"] == limit and _charges() == limit
     assert K.census_rows(route=read_gate.SOCKET_TEMPLATE, **{"class": "mod_no_session"})
 
 
@@ -613,6 +622,184 @@ def test_lookup_charge_follows_the_serving_app(env, monkeypatch):
           for i in range(limit + 5)]
     assert st[:limit] == [401] * limit and st[limit:] == [429] * 5, st
     assert env.stub.calls["session"] == limit
+
+
+# -- build round 3 M-new-2: ws_chat's own lookups are charged first -----------
+#
+# ws_chat reads the database for the lockdown snapshot at connect, the session
+# row of each auth frame, and per chat message the lockdown row (process cache),
+# the ban and mute rows, the sender's metadata and the insert. The seam below
+# wraps the gate's StubDB: ws_chat's statements are counted by kind and answered
+# empty (lockdown off, no ban, no mute, no metadata); the gate's own statements
+# go to the StubDB as before.
+
+CHAT_SID = "76561190000000777"
+
+
+class _ChatSeam:
+    def __init__(self, stub):
+        self.stub, self.calls, self.auth_rows = stub, Counter(), {}
+
+    def __call__(self):
+        return _ChatSession(self)
+
+    def total(self):
+        return sum(self.calls.values())
+
+
+class _ChatSession:
+    def __init__(self, seam):
+        self.seam, self.inner = seam, K._StubSession(seam.stub)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def commit(self):
+        pass
+
+    async def rollback(self):
+        pass
+
+    async def execute(self, stmt, params=None):
+        sql, params = str(stmt), params or {}
+        for kind, needle in (("lockdown", "'chat_lockdown'"), ("auth", "SELECT steam_id, verified"),
+                             ("ban", "player_bans"), ("mute", "chat_mutes"), ("meta", "glicko_ratings"),
+                             ("insert", "INSERT INTO chat_messages")):
+            if needle in sql:
+                self.seam.calls[kind] += 1
+                if kind == "lockdown":
+                    return K._Result(scalar="0")
+                if kind == "auth":
+                    return K._Result(row=self.seam.auth_rows.get(params.get("th")))
+                return K._Result()
+        return await self.inner.execute(stmt, params)
+
+
+@pytest.fixture
+def chat(env, monkeypatch):
+    seam = _ChatSeam(env.stub)
+    monkeypatch.setattr(K.database, "async_session", seam)   # what ws_chat's lookups import
+    monkeypatch.setattr(main, "_chat_lockdown_cache", {"value": False, "loaded": False, "at": 0.0, "gen": 0})
+    monkeypatch.setattr(main, "_chat_rate", {})
+    monkeypatch.setattr(main, "_chat_last_msg", {})
+    env.set_mode("log")
+    env.seam = seam
+    return env
+
+
+def _expire_lockdown_cache():
+    main._chat_lockdown_cache.update({"loaded": False, "at": 0.0})
+
+
+def _fill_bucket():
+    """The address's global bucket at its limit, as if other work had used it."""
+    limit = main._RL_GLOBAL[0]
+    dq = main._RL_BUCKETS["testclient|g"]
+    dq.extend([main._rl_time.monotonic()] * (limit - len(dq)))
+
+
+def _chat_frame(i):
+    return '{"steam_id":"%s","display_name":"t","message":"hello %d"}' % (CHAT_SID, i)
+
+
+def _auth_frame(token):
+    return '{"type":"auth","steam_id":"%s","token":"%s"}' % (CHAT_SID, token)
+
+
+def test_ws_anonymous_reconnect_refused_before_any_lookup(chat):
+    """An anonymous socket (version header, no credential) that reconnects is
+    charged at every connect, before its first database access: the first
+    `limit` sockets are admitted and each reads the lockdown snapshot; every
+    socket past the bucket is closed 1013 rate_limited, gets no lock frame,
+    and reads nothing."""
+    limit = main._RL_GLOBAL[0]
+    frames, closes = [], []
+    for i in range(limit + 10):
+        _expire_lockdown_cache()          # so an admitted socket's snapshot is a read
+        with chat.client.websocket_connect("/api/v1/ws/chat",
+                                           headers={"X-Mod-Version": K.LIVE_VERSION}) as ws:
+            try:
+                frames.append(ws.receive_text())
+            except WebSocketDisconnect as ex:
+                closes.append((i, ex.code, ex.reason))
+    assert frames == ['{"type":"lock","locked":0}'] * limit
+    assert closes == [(i, 1013, "rate_limited") for i in range(limit, limit + 10)], closes
+    assert chat.seam.calls == Counter({"lockdown": limit}), chat.seam.calls
+    assert chat.stub.calls["operator"] == 0 and _charges() == limit
+
+
+def test_ws_no_credential_lookup_count_stops_at_the_limit(chat):
+    """No-credential sockets that each send one auth frame (an unknown token)
+    and one chat message: a socket costs three charges (connect, auth frame,
+    message) and six lookups (snapshot, session row, ban, mute, metadata,
+    insert). Once the bucket is spent the count of lookups stops increasing:
+    later sockets are closed at connect having read nothing."""
+    limit = main._RL_GLOBAL[0]
+    admitted = limit // 3
+    closes = []
+    for i in range(admitted + 10):
+        _expire_lockdown_cache()
+        with chat.client.websocket_connect("/api/v1/ws/chat",
+                                           headers={"X-Mod-Version": K.LIVE_VERSION}) as ws:
+            try:
+                ws.receive_text()
+            except WebSocketDisconnect as ex:
+                closes.append((i, ex.code, ex.reason))
+                continue
+            ws.send_text(_auth_frame("unknown-token-%05d" % i))
+            ws.send_text(_chat_frame(i))
+        if i == admitted - 1:
+            at_limit = dict(chat.seam.calls)
+    assert at_limit == {"lockdown": admitted, "auth": admitted, "ban": admitted,
+                        "mute": admitted, "meta": admitted, "insert": admitted}, at_limit
+    assert dict(chat.seam.calls) == at_limit, chat.seam.calls
+    assert closes == [(i, 1013, "rate_limited") for i in range(admitted, admitted + 10)], closes
+    assert _charges() == 3 * admitted == limit
+
+
+def test_ws_auth_frame_and_message_charged_before_their_lookups(chat):
+    """On a socket already admitted, a spent bucket stops the next auth frame's
+    session read and the next message's ban, mute, metadata and insert."""
+    with chat.client.websocket_connect("/api/v1/ws/chat",
+                                       headers={"X-Mod-Version": K.LIVE_VERSION}) as ws:
+        assert ws.receive_text() == '{"type":"lock","locked":0}'
+        _fill_bucket()
+        ws.send_text(_auth_frame("unknown-token-x"))
+        ws.send_text(_chat_frame(1))
+    assert chat.seam.calls == Counter({"lockdown": 1}), chat.seam.calls
+
+
+def test_ws_allowed_sockets_unchanged(chat):
+    """Without a spent bucket a socket behaves as before: the lock frame, a
+    verified auth frame, a message relayed to the other subscriber with the
+    same fields; and the bot's socket (the internal key) is never charged,
+    however often it reconnects."""
+    chat.seam.auth_rows[K.sha(GOOD)] = {"steam_id": CHAT_SID, "verified": True,
+                                        "expires_at": None}
+    hdrs = {"X-Mod-Version": K.LIVE_VERSION}
+    with chat.client.websocket_connect("/api/v1/ws/chat", headers=hdrs) as listener:
+        assert listener.receive_text() == '{"type":"lock","locked":0}'
+        with chat.client.websocket_connect("/api/v1/ws/chat", headers=hdrs) as sender:
+            assert sender.receive_text() == '{"type":"lock","locked":0}'
+            sender.send_text(_auth_frame(GOOD))
+            sender.send_text(_chat_frame(7))
+            got = listener.receive_json()
+    assert {k: got[k] for k in ("source", "steam_id", "display_name", "rating", "title",
+                                "title_color", "message", "channel")} == {
+        "source": "ingame", "steam_id": CHAT_SID, "display_name": "t", "rating": None,
+        "title": None, "title_color": None, "message": "hello 7", "channel": "global"}
+    assert chat.seam.calls["auth"] == 1 and chat.seam.calls["insert"] == 1
+    main._RL_BUCKETS.clear()
+    limit = main._RL_GLOBAL[0]
+    for _ in range(limit + 10):
+        with chat.client.websocket_connect("/api/v1/ws/chat",
+                                           headers={"X-Internal-Key": K.INTERNAL_KEY}) as ws:
+            ws.receive_text()
+            ws.send_text(_chat_frame(8))
+    assert _charges() == 0
 
 
 # -- M5 / requirement 26: the chat socket is counted --------------------------

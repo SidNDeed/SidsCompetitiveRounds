@@ -4456,7 +4456,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:47749 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:47783 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4522,7 +4522,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:47561 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:47595 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4592,7 +4592,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:47464 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:47498 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -20384,6 +20384,22 @@ async def get_recent_multimode_series(
     return {"entries": entries[:limit]}
 
 
+def _ws_chat_charge(ws) -> bool:
+    """Charge the chat socket's address to the per-address limiter before
+    database work the socket is about to cause: True when that work may run.
+    HTTP middleware never runs for a socket, so ws_chat charges here: once
+    at connect, before the socket's first database access, then once per auth
+    frame and once per chat message that passed the connection's spam gate,
+    each before that frame's own lookups. The once-per-connection mark is
+    cleared first because every one of those is a separate unit of database
+    work. A valid internal key is never charged (_rl_charge), so the bot's
+    socket is unaffected."""
+    state = getattr(ws, "state", None)
+    if state is not None:
+        state.rl_charged = False
+    return _rl_charge(ws, force=True) is None
+
+
 @app.websocket("/api/v1/ws/chat")
 async def ws_chat(ws: WebSocket):
     """Mod <-> server chat channel. Messages are broadcast fan-out style."""
@@ -20399,6 +20415,15 @@ async def ws_chat(ws: WebSocket):
         if sent and _parse_version(sent) < _parse_version(MIN_MOD_VERSION_EFFECTIVE):
             await ws.close(code=1008, reason="outdated")
             return
+    # The per-address limiter, before this socket's first database access (the
+    # credential count and the lockdown snapshot below). A refused charge is
+    # accepted and closed 1013 rate_limited -- the read gate's lookup_limited
+    # close -- so the client retries later and the handshake itself answers
+    # 101, not a refusal status; nothing below runs.
+    if not _ws_chat_charge(ws):
+        await ws.accept()
+        await ws.close(code=1013, reason="rate_limited")
+        return
     await chat_manager.connect(ws)
     print(f"[CHAT] subscriber connected (total={chat_manager.count})")
     # Verified reads: the socket's outbound read side is COUNTED in log and
@@ -20441,7 +20466,10 @@ async def ws_chat(ws: WebSocket):
             if data.get("type") == "auth":
                 claim = str(data.get("steam_id", ""))[:20]
                 token = str(data.get("token", ""))[:128]
-                if claim and token:
+                # Each auth frame's session read is charged first; a refused
+                # charge skips the read, so the socket's identity stays what
+                # it was, as after a failed check.
+                if claim and token and _ws_chat_charge(ws):
                     try:
                         from database import async_session
                         async with async_session() as _adb:
@@ -20502,6 +20530,12 @@ async def ws_chat(ws: WebSocket):
             # so spam bursts never turn into DB load.
             if not _chat_spam_ok(id(ws), message):
                 print(f"[CHAT] rate-limited {display_name} ({steam_id})")
+                continue
+            # The address is charged before this message's ban, mute and
+            # metadata reads and its insert; a refused charge drops the
+            # message silently, as the spam gate does.
+            if not _ws_chat_charge(ws):
+                print(f"[CHAT] address rate-limited {display_name} ({steam_id})")
                 continue
             # Banned players can't chat. Silently drop — telling them they're banned would
             # encourage griefing on alts. The mod's queue-join 409 is the primary signal.
