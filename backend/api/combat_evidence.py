@@ -24,7 +24,8 @@ else: no measure, fault, contribution, daily row or finding.
 Outside this lane's own tables (combat_evidence, combat_games,
 combat_contrib, combat_player_daily) the statements here read `matches`,
 `players`, `seat_evidence` and `runtime_settings`, and write
-`seat_evidence_findings` (scope game, dedup key prefixed `combat|`) and,
+`seat_evidence_findings` (scope game, dedup key in the combat namespace:
+prefixed `combat ` with a space, a character no seat evidence key can hold) and,
 through seat_evidence.post_finding, `flagged_matches` only for a rule the
 revision arms. No statement touches a match result, a rating, a reward or
 gold. Every finding is advisory.
@@ -50,12 +51,21 @@ GAMES_PER_PASS = 500
 GAME_EXPIRY_DAYS = 14
 LIST_RETENTION_DAYS = 120
 AGG_RETENTION_DAYS = 365
-DEDUP_PREFIX = "combat|"
+# The combat lane's namespace in seat_evidence_findings. Every combat dedup
+# key starts with these seven characters; a seat evidence dedup key is its
+# stable key (printable ASCII WITHOUT the space, seat_evidence._KEY_CHARS, the
+# only writer's check) then two pair ids, so it can never contain a space and
+# can never equal or start with this prefix. Every combat finding write, read
+# and stale delete uses dedup_key(); the rollback deletes by this prefix.
+DEDUP_PREFIX = "combat "
 ENVELOPE_KEYS = ("contract", "seat_steam_id", "other_steam_id", "stable_game_key",
                  "attach_key", "record", "sig")
-# The lists the purge removes after LIST_RETENTION_DAYS: everything the
-# budgeter may trim. Totals, cycle summaries, stat blocks and histograms stay.
-PURGED_LISTS = tuple(k for k in cm.LISTS if cm.SPEC[k][2] != 0)
+# Retention (the design's decided rule): after LIST_RETENTION_DAYS a record
+# keeps its whole-game totals and rows, its histograms and its cycle
+# summaries (`cx_*`, the only lists the retention rule excepts). Every other
+# raw list is removed, the never-trimmed ones (`gun_*`, `ivl_*`) included.
+RETAINED_LISTS = ("cx_s", "cx_o")
+PURGED_LISTS = tuple(k for k in cm.LISTS if k not in RETAINED_LISTS)
 
 EvidenceRefused = _sev.EvidenceRefused
 
@@ -202,6 +212,17 @@ def _has_lists(rec) -> bool:
     return all(k in rec for k in PURGED_LISTS)
 
 
+def dedup_key(key: str, lo, hi) -> str:
+    """The combat finding key of one game and canonical seat pair, in the
+    combat namespace (DEDUP_PREFIX)."""
+    return "%s%s|%s|%s" % (DEDUP_PREFIX, key, lo, hi)
+
+
+# A game is a candidate when it has work: with no revision, while it is
+# unattached; with one, while it is open, while a record with lists is
+# still unevaluated under this revision, or when it holds MORE records than
+# its last evaluation saw (a record that arrived after a one-sided game was
+# finalized: the game is derived again and its contributions replaced).
 _CANDIDATES = text(
     "SELECT e.stable_game_key k, LEAST(e.seat_player_id, e.other_player_id) lo, "
     "       GREATEST(e.seat_player_id, e.other_player_id) hi, max(e.received_at) rx "
@@ -209,12 +230,15 @@ _CANDIDATES = text(
     "  LEFT JOIN combat_games g ON g.stable_game_key = e.stable_game_key "
     "   AND g.pair_lo = LEAST(e.seat_player_id, e.other_player_id) "
     "   AND g.pair_hi = GREATEST(e.seat_player_id, e.other_player_id) "
-    " WHERE (CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
-    "    OR (CAST(:rev AS varchar) IS NOT NULL AND (g.finalized_at IS NULL "
-    "        OR (g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) AND e.lists_purged_at IS NULL))) "
     " GROUP BY e.stable_game_key, LEAST(e.seat_player_id, e.other_player_id), "
-    "          GREATEST(e.seat_player_id, e.other_player_id) "
-    " ORDER BY min(g.processed_at) NULLS FIRST, rx LIMIT CAST(:lim AS int)")
+    "          GREATEST(e.seat_player_id, e.other_player_id), g.finalized_at, g.match_id, "
+    "          g.evaluated_rev, g.records_n, g.processed_at "
+    "HAVING (CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
+    "    OR (CAST(:rev AS varchar) IS NOT NULL AND (g.finalized_at IS NULL "
+    "        OR (g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) "
+    "            AND bool_or(e.lists_purged_at IS NULL)) "
+    "        OR count(*) > g.records_n)) "
+    " ORDER BY g.processed_at NULLS FIRST, rx LIMIT CAST(:lim AS int)")
 
 
 async def _readiness(db, key, lo, hi, rows, match):
@@ -242,18 +266,24 @@ async def evaluate_game(db, key: str, lo, hi, rs) -> tuple:
         "INSERT INTO combat_games (stable_game_key, pair_lo, pair_hi) "
         "VALUES (:k, :lo, :hi) ON CONFLICT DO NOTHING"), {"k": key, "lo": lo, "hi": hi})
     g = (await db.execute(text(
-        "SELECT readiness_sig, first_seen_at, finalized_at, evaluated_rev, match_id FROM combat_games "
+        "SELECT readiness_sig, first_seen_at, finalized_at, evaluated_rev, match_id, records_n "
+        "  FROM combat_games "
         "WHERE stable_game_key = :k AND pair_lo = :lo AND pair_hi = :hi FOR NO KEY UPDATE"),
         {"k": key, "lo": lo, "hi": hi})).mappings().first()
     rev = rs.rev if rs is not None else None
-    if g["finalized_at"] is not None and (rev is None or g["evaluated_rev"] == rev):
-        return "final", 0, 0, False
     rows = (await db.execute(text(
         "SELECT id, seat_player_id, other_player_id, attach_key, payload, conflict_at "
         "  FROM combat_evidence WHERE stable_game_key = :k "
         "   AND LEAST(seat_player_id, other_player_id) = :lo "
         "   AND GREATEST(seat_player_id, other_player_id) = :hi ORDER BY id"),
         {"k": key, "lo": lo, "hi": hi})).mappings().all()
+    # A finalized game stays final under the same revision UNLESS a record
+    # arrived after its last evaluation: then it is derived again (its
+    # readiness signature names every record), and its contributions and
+    # daily rows are replaced in this transaction.
+    if (g["finalized_at"] is not None and (rev is None or g["evaluated_rev"] == rev)
+            and len(rows) <= g["records_n"]):
+        return "final", 0, 0, False
     if not rows:
         return "empty", 0, 0, False
     keys = sorted({r["attach_key"] for r in rows})
@@ -266,10 +296,19 @@ async def evaluate_game(db, key: str, lo, hi, rs) -> tuple:
         {"keys": keys, "lo": lo, "hi": hi, "lag": _sev.READY_LAG_S})).mappings().first()
     attach = match["photon_room_id"] if match else None
     if rs is None:
+        # No revision: the attachment and its exact coverage (the records
+        # whose attach key IS the match's room, paired when each names the
+        # other) are kept; nothing is derived (no measure, fault,
+        # contribution, daily row or finding).
+        exact = [r for r in rows if match is not None and r["attach_key"] == attach]
+        seats = {r["seat_player_id"] for r in exact}
+        exact_paired = len(exact) == 2 and all(r["other_player_id"] in seats for r in exact)
         await db.execute(text(
-            "UPDATE combat_games SET match_id = :m, attach_key = :a, processed_at = now() "
+            "UPDATE combat_games SET match_id = :m, attach_key = :a, coverage = :cov, "
+            "  processed_at = now() "
             "WHERE stable_game_key = :k AND pair_lo = :lo AND pair_hi = :hi"),
-            {"m": match["id"] if match else None, "a": attach, "k": key, "lo": lo, "hi": hi})
+            {"m": match["id"] if match else None, "a": attach,
+             "cov": "paired" if exact_paired else "one", "k": key, "lo": lo, "hi": hi})
         return ("attached" if match else "waiting"), 0, 0, False
     sig = await _readiness(db, key, lo, hi, rows, match)
     now = datetime.now(timezone.utc)
@@ -316,7 +355,7 @@ async def evaluate_game(db, key: str, lo, hi, rs) -> tuple:
                 final = False
                 sig = None
             else:
-                dedup = "%s%s|%s|%s" % (DEDUP_PREFIX, key, lo, hi)
+                dedup = dedup_key(key, lo, hi)
                 produced = set()
                 for rule, det in findings:
                     fid = await _sev.upsert_finding(db, "game", dedup, rule.id, rev, match["id"], det)
@@ -332,12 +371,13 @@ async def evaluate_game(db, key: str, lo, hi, rs) -> tuple:
     await db.execute(text(
         "UPDATE combat_games SET match_id = :m, attach_key = :a, readiness_sig = :s, "
         "  coverage = :cov, processed_at = now(), record_faults = CAST(:f AS jsonb), "
+        "  records_n = CAST(:n AS int), "
         "  evaluated_rev = COALESCE(CAST(:ev AS varchar), evaluated_rev), "
         "  finalized_at = CASE WHEN :fin THEN COALESCE(finalized_at, now()) ELSE NULL END "
         "WHERE stable_game_key = :k AND pair_lo = :lo AND pair_hi = :hi"),
         {"m": match["id"] if match else None, "a": attach, "s": sig,
          "cov": "paired" if paired else "one", "f": json.dumps(faults), "ev": evaluated,
-         "fin": bool(final), "k": key, "lo": lo, "hi": hi})
+         "fin": bool(final), "n": len(rows), "k": key, "lo": lo, "hi": hi})
     state = "final" if final else ("evaluated" if match else "waiting")
     return state, fired, errors, evaluated is not None
 
@@ -478,15 +518,16 @@ def _not_run_counts(node, out):
     return out
 
 
-def q1_display(view) -> list:
+def q1_display(view, not_run="lists_purged") -> list:
     """The display case of every gun of a game, as the admin read heads it:
     which accounts exist (only the measuring seat's, only the owner's, both
     agreeing, both differing), the case's own wording, both labels, and every
     input that could not be compared, counted by its NOT-RUN reason
     (missing record, trimmed, incompatible version, ambiguous, absent). A
-    game whose lists were purged has no comparison at all and says so."""
+    game whose lists were purged, or whose records cannot be tied to one
+    attachment, has no comparison at all and says which."""
     if view is None:
-        return [{"owner": None, "case": "not_run", "not_run": {"lists_purged": 1}}]
+        return [{"owner": None, "case": "not_run", "not_run": {not_run or "lists_purged": 1}}]
     out = []
     for d in view["directions"]:
         out.append({"owner": d["owner"], "case": d["case"], "case_text": d["case_text"],
@@ -497,22 +538,32 @@ def q1_display(view) -> list:
 
 
 async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dict:
-    """Every combat game under a stable key (or the one attached to a match),
-    one per canonical seat pair: the stored records with their provenance,
-    the attachment, the stored record faults, the findings (rule id and
-    revision), and the pair view computed now. Per gun the view states which
-    case it is (only the measuring seat's record, only the owner's, both
-    agreeing, both differing) and marks every input that is missing,
-    trimmed or of an incompatible measurement version NOT-RUN. Steam ids
-    only; no display name is read."""
+    """Every combat game under a stable key, or exactly the games attached to
+    a match, one per canonical seat pair: the compared records with their
+    provenance, the attachment, the stored record faults, the findings (rule
+    id and revision), and the pair view computed now. Per gun the view states
+    which case it is (only the measuring seat's record, only the owner's,
+    both agreeing, both differing) and marks every input that is missing,
+    trimmed or of an incompatible measurement version NOT-RUN.
+
+    A match read keeps the selected (stable game key, pair) of each attached
+    game: no other pair under the same stable key is read. Within one game
+    only the records whose attach key IS the game's attachment are compared;
+    a record of the same key and pair under another attach key is listed
+    under `other_attachment` (provenance only, never compared). A game with
+    no attachment compares its records only when they share one attach key;
+    otherwise the view is NOT-RUN (`attachment_unresolved`) and every record
+    is listed as provenance. Steam ids only; no display name is read."""
     if match_id is not None:
         games = (await db.execute(text(
             "SELECT stable_game_key, pair_lo, pair_hi FROM combat_games "
-            "WHERE match_id = CAST(:m AS uuid)"), {"m": match_id})).mappings().all()
-        keys = sorted({g["stable_game_key"] for g in games})
+            "WHERE match_id = CAST(:m AS uuid) ORDER BY stable_game_key, pair_lo, pair_hi"),
+            {"m": match_id})).mappings().all()
+        selected = [(g["stable_game_key"], (g["pair_lo"], g["pair_hi"])) for g in games]
     else:
-        keys = [stable_game_key]
+        selected = None
     out = {"review_rules": rs.rev if rs is not None else _sev.rr.health_word(), "games": []}
+    keys = sorted({k for k, _p in selected}) if selected is not None else [stable_game_key]
     for key in keys:
         rows = (await db.execute(text(
             "SELECT e.id, e.attach_key, e.seat_player_id, e.other_player_id, ps.steam_id seat_steam, "
@@ -524,6 +575,9 @@ async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dic
         by_pair = {}
         for r in rows:
             by_pair.setdefault(_sev._norm_pair(r["seat_player_id"], r["other_player_id"]), []).append(r)
+        if selected is not None:
+            wanted = {pair for k, pair in selected if k == key}
+            by_pair = {pair: prow for pair, prow in by_pair.items() if pair in wanted}
         for (lo, hi), prow in sorted(by_pair.items(), key=lambda kv: (str(kv[0][0]), str(kv[0][1]))):
             g = (await db.execute(text(
                 "SELECT match_id, attach_key, coverage, finalized_at, evaluated_rev, record_faults "
@@ -533,20 +587,33 @@ async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dic
             for r in prow:
                 steam[r["seat_player_id"]] = r["seat_steam"]
                 steam[r["other_player_id"]] = r["other_steam"]
+            attach = g["attach_key"] if g else None
+            if attach is not None:
+                compared = [r for r in prow if r["attach_key"] == attach]
+                unresolved = False
+            else:
+                unresolved = len({r["attach_key"] for r in prow}) > 1
+                compared = [] if unresolved else list(prow)
+            others = [r for r in prow if r not in compared]
             records = [{"seat": steam[r["seat_player_id"]], "other": steam[r["other_player_id"]],
-                        "rec": _jsonv(r["payload"])} for r in prow]
+                        "rec": _jsonv(r["payload"])} for r in compared]
             view = None
-            if all(_has_lists(x["rec"]) for x in records):
+            not_run = None
+            if unresolved:
+                not_run = "attachment_unresolved"
+            elif all(_has_lists(x["rec"]) for x in records):
                 view = cm.pair_view(records)
-            dedup = "%s%s|%s|%s" % (DEDUP_PREFIX, key, lo, hi)
+            else:
+                not_run = "lists_purged"
             findings = (await db.execute(text(
                 "SELECT rule_id, rules_rev, details, flag_id FROM seat_evidence_findings "
-                "WHERE scope = 'game' AND dedup_key = :k ORDER BY rule_id"), {"k": dedup})).mappings().all()
+                "WHERE scope = 'game' AND dedup_key = :k ORDER BY rule_id"),
+                {"k": dedup_key(key, lo, hi)})).mappings().all()
             out["games"].append({
                 "stable_game_key": key,
                 "pair": [steam.get(lo), steam.get(hi)],
                 "match_id": str(g["match_id"]) if g and g["match_id"] else None,
-                "attach_key": g["attach_key"] if g else None,
+                "attach_key": attach,
                 "coverage": g["coverage"] if g else None,
                 "final": bool(g and g["finalized_at"]),
                 "evaluated_rev": g["evaluated_rev"] if g else None,
@@ -556,9 +623,16 @@ async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dic
                              "received_at": r["received_at"].isoformat(),
                              "conflict_kind": r["conflict_kind"], "payload_bytes": r["payload_bytes"],
                              "lists_purged": r["lists_purged_at"] is not None,
-                             "record": _jsonv(r["payload"])} for r in prow],
+                             "record": _jsonv(r["payload"])} for r in compared],
+                "other_attachment": [{"seat_steam_id": r["seat_steam"],
+                                      "other_steam_id": r["other_steam"],
+                                      "attach_key": r["attach_key"], "consts": r["consts_version"],
+                                      "received_at": r["received_at"].isoformat(),
+                                      "not_run": ("attachment_unresolved" if unresolved
+                                                  else "other_attachment")} for r in others],
                 "view": view,
-                "display": q1_display(view),
+                "view_not_run": not_run,
+                "display": q1_display(view, not_run),
                 "findings": [{"rule_id": f["rule_id"], "rules_rev": f["rules_rev"],
                               "details": _jsonv(f["details"]),
                               "posted_flag_id": str(f["flag_id"]) if f["flag_id"] else None}

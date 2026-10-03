@@ -14,16 +14,23 @@
 --                        AND canonical unordered seat pair: the attached match
 --                        and the exact attach key it attached by, the
 --                        readiness signature last derived, the coverage, the
---                        rebuild faults, the revision last evaluated under
+--                        rebuild faults, the revision last evaluated under,
+--                        and how many records that evaluation saw (a later
+--                        record makes a finalized game a candidate again)
 --   combat_contrib       per-game contributions, one row per (game, pair,
 --                        subject, source), carrying the contributing record's
---                        measurement version
+--                        measurement version; the subject is a player row and
+--                        its contributions go with it
 --   combat_player_daily  daily rows rolled from the contributions, one per
 --                        (subject, UTC day, source, coverage, measurement
---                        version): versions are never added together
+--                        version): versions are never added together; the
+--                        subject is a player row and its rows go with it
 --
--- Findings reuse seat_evidence_findings (scope 'game', dedup key prefixed
--- 'combat|'), so its CHECK constraint is unchanged.
+-- Findings reuse seat_evidence_findings (scope 'game') under the combat
+-- namespace: every combat dedup key starts with 'combat ' (with a space). A
+-- seat evidence dedup key is its stable key (printable ASCII without the
+-- space, the only writer's check) and two pair ids, so no seat key can equal
+-- or start with it. Its CHECK constraint and every seat row are unchanged.
 --
 -- What is evaluated, and whether a finding is posted, is decided by the
 -- loaded review rules revision, not by any row here. With no revision loaded
@@ -74,6 +81,7 @@ CREATE TABLE IF NOT EXISTS combat_games (
     processed_at     TIMESTAMPTZ  NULL,
     finalized_at     TIMESTAMPTZ  NULL,
     evaluated_rev    VARCHAR(16)  NULL,
+    records_n        INTEGER      NOT NULL DEFAULT 0,
     CONSTRAINT combat_games_pk PRIMARY KEY (stable_game_key, pair_lo, pair_hi),
     CONSTRAINT combat_games_order CHECK (pair_lo < pair_hi),
     CONSTRAINT combat_games_coverage CHECK (coverage IN ('one', 'paired'))
@@ -84,7 +92,7 @@ CREATE TABLE IF NOT EXISTS combat_contrib (
     stable_game_key    VARCHAR(60)  NOT NULL,
     pair_lo            UUID         NOT NULL,
     pair_hi            UUID         NOT NULL,
-    subject_player_id  UUID         NOT NULL,
+    subject_player_id  UUID         NOT NULL REFERENCES players(id) ON DELETE CASCADE,
     source             VARCHAR(8)   NOT NULL DEFAULT 'self',
     coverage           VARCHAR(8)   NOT NULL DEFAULT 'one',
     consts_version     SMALLINT     NOT NULL DEFAULT 0,
@@ -99,7 +107,7 @@ CREATE TABLE IF NOT EXISTS combat_contrib (
 CREATE INDEX IF NOT EXISTS ix_combat_contrib_subject_day ON combat_contrib (subject_player_id, utc_day);
 
 CREATE TABLE IF NOT EXISTS combat_player_daily (
-    subject_player_id  UUID         NOT NULL,
+    subject_player_id  UUID         NOT NULL REFERENCES players(id) ON DELETE CASCADE,
     utc_day            DATE         NOT NULL,
     source             VARCHAR(8)   NOT NULL DEFAULT 'self',
     coverage           VARCHAR(8)   NOT NULL DEFAULT 'one',

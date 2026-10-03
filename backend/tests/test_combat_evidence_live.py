@@ -35,6 +35,7 @@ import combat_measures as cm  # noqa: E402
 import main  # noqa: E402
 import review_rules as rr  # noqa: E402
 import review_testkit as tk  # noqa: E402
+import seat_evidence as se  # noqa: E402
 import test_title_ladder_hooks_live as lh  # noqa: E402
 
 
@@ -214,6 +215,33 @@ def test_migration_369_twice_rollback_and_again(live):
     assert all(on[k] == "1" for k in cp.CEV_SWITCHES)
 
 
+def test_m7_the_rollback_removes_exactly_the_combat_namespace_and_keeps_every_seat_row(live):
+    """M-7: seat evidence findings in the legal key forms nearest the combat
+    namespace (a seat stable key spelled `combat|...`, `combatX`, `combat_`,
+    scope game and sitting) beside combat findings; the 369 rollback removes
+    the combat rows only, every seat row stays byte for byte, and 369 then
+    reapplies whole."""
+    snaps = live.snaps
+    lo, hi = cp._LO, cp._HI
+    assert [d for _s, d, _r in cp.PLANTED_COMBAT] == [ce.dedup_key("X", lo, hi),
+                                                       ce.dedup_key("ranked_k", lo, hi)]
+    for _scope, dedup, _r in cp.PLANTED_SEAT:
+        key = dedup.rsplit("|", 2)[0]
+        assert se._KEY_CHARS.fullmatch(key), key          # a legal seat evidence key
+        assert not dedup.startswith(ce.DEDUP_PREFIX)
+    planted = {r[1] for r in snaps["planted"]["findings"]}
+    kept = {r[1] for r in snaps["planted_rolled"]["findings"]}
+    seat_rows = {d for _s, d, _r in cp.PLANTED_SEAT}
+    combat_rows = {d for _s, d, _r in cp.PLANTED_COMBAT}
+    assert seat_rows | combat_rows <= planted
+    assert seat_rows <= kept and not (combat_rows & kept)
+    before = [r for r in snaps["planted"]["findings"] if r[1] not in combat_rows]
+    assert snaps["planted_rolled"]["findings"] == before                # nothing else moved
+    for t in cp.CEV_TABLES:
+        assert snaps["planted_rolled"][t] is None and snaps["fourth"][t] == []
+    assert snaps["fourth"]["findings"] == snaps["planted_rolled"]["findings"]
+
+
 # -- the route ----------------------------------------------------------------------------
 
 def test_the_session_decides_first_then_the_switch_envelope_signature_and_record(live, signing):
@@ -328,7 +356,29 @@ def test_bar13_no_revision_attaches_and_derives_nothing(live, signing):
     (g,) = games
     assert g["match_id"] == mid and g["attach_key"] == key + "_r8"
     assert g["evaluated_rev"] is None and g["finalized_at"] is None
+    assert g["coverage"] == "paired"                                  # L-8: exact coverage kept
+    assert ce._jsonv(g["record_faults"]) == {}                        # and nothing derived
     assert n == {"combat_contrib": 0, "combat_player_daily": 0} and f == []
+
+
+def test_l8_no_revision_one_exact_record_is_coverage_one(live, signing):
+    a, b = seat(41), seat(42)
+    key = "ranked_cevw_000041"
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b)
+        ta, tb = await _session(sm, a), await _session(sm, b)
+        await _match(sm, ids, a, b, key + "_r8")
+        oa, _mb = _pair_bodies(a, b, key, rounds=8)
+        _oa, mb = _pair_bodies(a, b, key, rounds=7)                 # the other seat, another room
+        await _post(sm, oa, ta)
+        await _post(sm, mb, tb)
+        st = await ce.games_pass(sm, None)
+        return st, await _rows(sm, GAMES_SQL, k=key)
+    st, games = live.run(go())
+    (g,) = games
+    assert not _errors(st) and g["coverage"] == "one" and g["attach_key"] == key + "_r8"
 
 
 def test_bar12_shadow_then_armed_and_bar11_counted_once_then_paired(live, signing, revs):
@@ -522,6 +572,13 @@ def test_the_admin_read_shows_the_display_case_and_a_purged_game_says_so(live, s
     (p,) = after["games"]
     assert p["view"] is None and p["display"][0]["not_run"] == {"lists_purged": 1}
     assert all(r["lists_purged"] for r in p["records"])
+    for r in p["records"]:                                          # L-11: the allowlist
+        rec = r["record"]
+        for k in cm.LISTS:                                          # every raw list but cx_*
+            assert (k in rec) == (k in ("cx_s", "cx_o")), k
+        for k in cm.KEYS:                                           # every total and header kept
+            assert k in rec or k in cm.LISTS, k
+    assert set(ce.PURGED_LISTS) == set(cm.LISTS) - {"cx_s", "cx_o"}
 
 
 def test_exact_attach_identity_compares_only_records_of_the_attached_room(live, signing, revs):
@@ -584,3 +641,204 @@ def test_seat_route_a1_a_cut_game_record_with_end_is_recorded_not_refused(live, 
     code, payload, stored = live.run(go())
     assert (code, payload) == (200, {"status": "recorded"})
     assert stored == "other_left"
+
+
+# -- FIX PASS 1 ---------------------------------------------------------------------------
+
+def test_m1_a_match_read_keeps_its_pair_under_a_shared_stable_key(live, signing, revs):
+    """M-1, same key, two pairs: the read of match AB under stable key K
+    shows AB's game only, never CD's records under the same key."""
+    a, b, c, d = seat(43), seat(44), seat(45), seat(46)
+    key = "ranked_cevw_000043"
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b, c, d)
+        tok = {s: await _session(sm, s) for s in (a, b, c, d)}
+        m_ab = await _match(sm, ids, a, b, key + "_r8")
+        await _match(sm, ids, c, d, key + "_r7")
+        for x, y, rounds in ((a, b, 8), (c, d, 7)):
+            ox, my = _pair_bodies(x, y, key, rounds)
+            await _post(sm, ox, tok[x])
+            await _post(sm, my, tok[y])
+        await ce.games_pass(sm, revs.shadow)
+        async with sm() as db:
+            by_match = await ce.admin_view(db, match_id=str(m_ab), rs=revs.shadow.ruleset)
+            by_key = await ce.admin_view(db, stable_game_key=key, rs=revs.shadow.ruleset)
+        return by_match, by_key, m_ab
+    by_match, by_key, m_ab = live.run(go())
+    (g,) = by_match["games"]
+    assert g["match_id"] == str(m_ab) and sorted(g["pair"]) == sorted([a, b])
+    seats = {r["seat_steam_id"] for r in g["records"]} | {r["other_steam_id"] for r in g["records"]}
+    assert seats == {a, b} and g["other_attachment"] == []
+    assert {x["owner"] for x in g["display"]} == {a, b}
+    assert len(by_key["games"]) == 2                                  # control: the key read has both
+
+
+def test_m1_a_match_read_compares_only_its_attachment_and_names_the_other_room(live, signing, revs):
+    """M-1, same pair, two rooms: only the record whose attach key IS the
+    match's room is compared; the other room's record is provenance only.
+    An unattached pair under two rooms is NOT-RUN, never compared."""
+    a, b, c, d = seat(47), seat(48), seat(49), seat(50)
+    key, loose = "ranked_cevw_000047", "ranked_cevw_000048"
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b, c, d)
+        tok = {s: await _session(sm, s) for s in (a, b, c, d)}
+        mid = await _match(sm, ids, a, b, key + "_r8")
+        oa, _mb = _pair_bodies(a, b, key, rounds=8)
+        _oa, mb = _pair_bodies(a, b, key, rounds=7)
+        await _post(sm, oa, tok[a])
+        await _post(sm, mb, tok[b])
+        oc, _md = _pair_bodies(c, d, loose, rounds=8)                 # no match: never attached
+        _oc, md = _pair_bodies(c, d, loose, rounds=7)
+        await _post(sm, oc, tok[c])
+        await _post(sm, md, tok[d])
+        await ce.games_pass(sm, revs.shadow)
+        async with sm() as db:
+            read = await ce.admin_view(db, match_id=str(mid), rs=revs.shadow.ruleset)
+            unresolved = await ce.admin_view(db, stable_game_key=loose, rs=revs.shadow.ruleset)
+        return read, unresolved
+    read, unresolved = live.run(go())
+    (g,) = read["games"]
+    assert [r["attach_key"] for r in g["records"]] == [key + "_r8"]
+    assert [(r["attach_key"], r["not_run"]) for r in g["other_attachment"]] == [
+        (key + "_r7", "other_attachment")]
+    cases = {x["owner"]: x["case"] for x in g["display"]}
+    assert cases == {a: "only_owner", b: "only_measuring"}           # never a pair across rooms
+    (u,) = unresolved["games"]
+    assert u["view"] is None and u["view_not_run"] == "attachment_unresolved" and u["records"] == []
+    assert u["display"][0]["not_run"] == {"attachment_unresolved": 1}
+    assert sorted(r["not_run"] for r in u["other_attachment"]) == ["attachment_unresolved"] * 2
+
+
+def test_m5_a_record_after_one_sided_finalization_reopens_and_replaces(live, signing, revs):
+    """M-5: a game finalized one-sided (the second seat's record had not
+    arrived within the expiry) is derived again when that record arrives:
+    its contributions and daily rows become paired, counted once."""
+    a, b = seat(51), seat(52)
+    key = "ranked_cevw_000051"
+
+    async def daily(sm, ids):
+        return await _rows(sm, "SELECT subject_player_id, source, coverage, games FROM combat_player_daily "
+                               "WHERE subject_player_id = ANY(CAST(:i AS uuid[])) ORDER BY 1, 2",
+                           i=[str(ids[a]), str(ids[b])])
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b)
+        ta, tb = await _session(sm, a), await _session(sm, b)
+        await _match(sm, ids, a, b, key + "_r8")
+        oa, mb = _pair_bodies(a, b, key)
+        await _post(sm, oa, ta)
+        await ce.games_pass(sm, revs.shadow)
+        await _exec(sm, "UPDATE combat_games SET first_seen_at = now() - make_interval(days => CAST(:d AS int)) "
+                        "WHERE stable_game_key = :k", d=ce.GAME_EXPIRY_DAYS + 1, k=key)
+        s_final = await ce.games_pass(sm, revs.shadow)
+        g1 = await _rows(sm, GAMES_SQL + "", k=key)
+        n1 = await _scalar(sm, "SELECT records_n FROM combat_games WHERE stable_game_key = :k", k=key)
+        d1 = await daily(sm, ids)
+        s_idle = await ce.games_pass(sm, revs.shadow)                 # control: nothing new, nothing redone
+        await _post(sm, mb, tb)                                       # the late second record
+        s_late = await ce.games_pass(sm, revs.shadow)
+        g2 = await _rows(sm, GAMES_SQL, k=key)
+        n2 = await _scalar(sm, "SELECT records_n FROM combat_games WHERE stable_game_key = :k", k=key)
+        d2 = await daily(sm, ids)
+        contrib = await _rows(sm, "SELECT source, coverage FROM combat_contrib WHERE stable_game_key = :k "
+                                  "ORDER BY subject_player_id, source", k=key)
+        s_after = await ce.games_pass(sm, revs.shadow)
+        return s_final, g1, n1, d1, s_idle, s_late, g2, n2, d2, contrib, s_after
+    s_final, g1, n1, d1, s_idle, s_late, g2, n2, d2, contrib, s_after = live.run(go())
+    assert not any(_errors(s) for s in (s_final, s_idle, s_late, s_after))
+    assert g1[0]["finalized_at"] is not None and g1[0]["coverage"] == "one" and n1 == 1
+    assert {(r["source"], r["coverage"], r["games"]) for r in d1} == {("self", "one", 1),
+                                                                      ("meas", "one", 1)}
+    assert s_idle["evaluated"] == 0 and s_idle.get("final", 0) == 0
+    assert s_late["evaluated"] >= 1
+    assert g2[0]["finalized_at"] is not None and g2[0]["coverage"] == "paired" and n2 == 2
+    assert {(r["source"], r["coverage"], r["games"]) for r in d2} == {("self", "paired", 1),
+                                                                      ("meas", "paired", 1)}
+    assert len(d2) == 4 and [r["coverage"] for r in contrib] == ["paired"] * 4
+    assert s_after["evaluated"] == 0
+
+
+def test_m7_combat_and_seat_findings_coexist_under_the_legal_collision_form(live, signing, revs):
+    """M-7: seat evidence rows whose legal stable key is `combat|K` carry the
+    dedup key the combat lane used to write for game K. The combat pass now
+    writes, reads and stale-deletes only its own namespace: both seat rows
+    (same rule id and another rule id) stay exactly as planted, and the admin
+    read shows only the combat finding."""
+    a, b = seat(53), seat(54)
+    key = "ranked_cevw_000053"
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b)
+        ta, tb = await _session(sm, a), await _session(sm, b)
+        mid = await _match(sm, ids, a, b, key + "_r8")
+        lo, hi = sorted([ids[a], ids[b]], key=str)
+        seat_key = "combat|" + key
+        assert se._KEY_CHARS.fullmatch(seat_key)
+        seat_dedup = "%s|%s|%s" % (seat_key, lo, hi)                 # the seat lane's own form
+        for rule in (ID_COMBAT, "r0000s001"):
+            await _exec(sm, "INSERT INTO seat_evidence_findings (scope, dedup_key, rule_id, rules_rev, "
+                            "  details) VALUES ('game', :k, :r, 'r0000seat', CAST(:d AS jsonb))",
+                        k=seat_dedup, r=rule, d=json.dumps({"lane": "seat"}))
+        planted = await _rows(sm, "SELECT id, rule_id, rules_rev, details, changed_at FROM "
+                                  "seat_evidence_findings WHERE dedup_key = :k ORDER BY id", k=seat_dedup)
+        oa, mb = _pair_bodies(a, b, key)
+        await _post(sm, oa, ta)
+        await _post(sm, mb, tb)
+        st = await ce.games_pass(sm, revs.shadow)
+        after = await _rows(sm, "SELECT id, rule_id, rules_rev, details, changed_at FROM "
+                                "seat_evidence_findings WHERE dedup_key = :k ORDER BY id", k=seat_dedup)
+        combat = await _rows(sm, "SELECT dedup_key, rule_id, rules_rev FROM seat_evidence_findings "
+                                 "WHERE dedup_key = :k", k=ce.dedup_key(key, lo, hi))
+        async with sm() as db:
+            read = await ce.admin_view(db, match_id=str(mid), rs=revs.shadow.ruleset)
+        await _exec(sm, "DELETE FROM seat_evidence_findings WHERE dedup_key = :k", k=seat_dedup)
+        return st, planted, after, combat, read, seat_dedup, lo, hi
+    st, planted, after, combat, read, seat_dedup, lo, hi = live.run(go())
+    assert not _errors(st)
+    assert after == planted and len(after) == 2                        # untouched, both rules
+    assert seat_dedup == "combat|%s|%s|%s" % (key, lo, hi)              # the old combat form
+    assert [(r["rule_id"], r["rules_rev"]) for r in combat] == [(ID_COMBAT, revs.shadow.ruleset.rev)]
+    assert combat[0]["dedup_key"].startswith(ce.DEDUP_PREFIX) and " " in combat[0]["dedup_key"]
+    (g,) = read["games"]
+    assert [(f["rule_id"], f["rules_rev"]) for f in g["findings"]] == [
+        (ID_COMBAT, revs.shadow.ruleset.rev)]
+
+
+def test_l9_deleting_a_player_removes_their_aggregate_rows_only(live):
+    """L-9: both aggregate subject columns reference players(id) ON DELETE
+    CASCADE: deleting a player removes that player's contributions and daily
+    rows and no other player's."""
+    a, b = seat(55), seat(56)
+
+    async def go():
+        sm = live.sm
+        ids = await _players(sm, a, b)
+        lo, hi = sorted([ids[a], ids[b]], key=str)
+        for who in (a, b):
+            await _exec(sm, "INSERT INTO combat_contrib (stable_game_key, pair_lo, pair_hi, "
+                            "  subject_player_id, source, utc_day) "
+                            "VALUES ('ranked_cevd_000001', :lo, :hi, :s, 'self', CURRENT_DATE)",
+                        lo=lo, hi=hi, s=ids[who])
+            await _exec(sm, "INSERT INTO combat_player_daily (subject_player_id, utc_day) "
+                            "VALUES (:s, CURRENT_DATE)", s=ids[who])
+        fk = await _rows(sm, "SELECT conrelid::regclass::text t, confdeltype FROM pg_constraint "
+                             "WHERE contype = 'f' AND confrelid = 'players'::regclass "
+                             "  AND conrelid::regclass::text IN ('combat_contrib', 'combat_player_daily') "
+                             "ORDER BY 1")
+        await _exec(sm, "DELETE FROM players WHERE id = :i", i=ids[a])
+        left = {}
+        for t in ("combat_contrib", "combat_player_daily"):
+            left[t] = sorted(str(r["subject_player_id"]) for r in await _rows(
+                sm, "SELECT subject_player_id FROM %s WHERE subject_player_id = ANY(CAST(:i AS uuid[]))" % t,
+                i=[str(ids[a]), str(ids[b])]))
+        return fk, left, ids
+    fk, left, ids = live.run(go())
+    assert [(r["t"], r["confdeltype"]) for r in fk] == [("combat_contrib", "c"),
+                                                        ("combat_player_daily", "c")]
+    assert left == {"combat_contrib": [str(ids[b])], "combat_player_daily": [str(ids[b])]}

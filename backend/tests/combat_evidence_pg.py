@@ -91,7 +91,41 @@ async def build(case, dsn):
     rolled = await snapshot(conn)
     await conn.execute(read_369())
     third = await snapshot(conn)
-    return {"before": before, "first": first, "again": again, "rolled": rolled, "third": third}
+    # The namespace cycle: seat evidence findings in every legal key form that
+    # comes nearest the combat namespace (a seat stable key spelled
+    # `combat|...`, `combat...`, `combat_...`; scope game and sitting) beside
+    # combat findings, then the rollback and 369 once more. The rollback must
+    # remove exactly the combat rows and keep every seat row unchanged.
+    for scope, dedup, rule in PLANTED:
+        await conn.execute(
+            "INSERT INTO seat_evidence_findings (scope, dedup_key, rule_id, rules_rev) "
+            "VALUES ($1, $2, $3, 'r0000plant')", scope, dedup, rule)
+    planted = await snapshot(conn)
+    await conn.execute(read_rollback())
+    planted_rolled = await snapshot(conn)
+    await conn.execute(read_369())
+    fourth = await snapshot(conn)
+    await conn.execute("DELETE FROM seat_evidence_findings WHERE rules_rev = 'r0000plant'")
+    return {"before": before, "first": first, "again": again, "rolled": rolled, "third": third,
+            "planted": planted, "planted_rolled": planted_rolled, "fourth": fourth}
+
+
+# (scope, dedup key, rule id) planted around the namespace cycle. Seat keys
+# are legal seat_evidence stable keys (seat_evidence._KEY_CHARS) followed by
+# the two pair ids; combat keys are built by combat_evidence.dedup_key.
+_LO, _HI = "00000000-0000-0000-0000-00000000000a", "00000000-0000-0000-0000-00000000000b"
+PLANTED_SEAT = (
+    ("game", "combat|X|%s|%s" % (_LO, _HI), "r0000s001"),
+    ("game", "combat|ranked_k|%s|%s" % (_LO, _HI), "r0000s001"),
+    ("game", "combatX|%s|%s" % (_LO, _HI), "r0000s001"),
+    ("game", "combat_|%s|%s" % (_LO, _HI), "r0000s001"),
+    ("sitting", "combat|X|%s|%s" % (_LO, _HI), "r0000s001"),
+)
+PLANTED_COMBAT = (
+    ("game", "combat X|%s|%s" % (_LO, _HI), "r0000s001"),
+    ("game", "combat ranked_k|%s|%s" % (_LO, _HI), "r0000c001"),
+)
+PLANTED = PLANTED_SEAT + PLANTED_COMBAT
 
 
 @contextlib.asynccontextmanager
