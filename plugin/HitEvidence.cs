@@ -185,15 +185,21 @@ namespace CompetitiveRounds
         private static readonly Stack<Dictionary<int, HitEvidenceCore.PointTally>> _spareP = new Stack<Dictionary<int, HitEvidenceCore.PointTally>>();
         private static readonly Stack<Dictionary<int, HitEvidenceCore.GameTally>> _spareG = new Stack<Dictionary<int, HitEvidenceCore.GameTally>>();
 
+        // Hook-path scans are hard-capped (seat evidence fix pass 2, F4): one
+        // tally per actor, and no room holds this many.
+        private const int ACTOR_SCAN_CAP = 64;
+
         private static bool AnyPoint()
         {
-            foreach (var kv in _point) if (kv.Value.Any) return true;
+            var e = _point.GetEnumerator();
+            for (int n = 0; n < ACTOR_SCAN_CAP && e.MoveNext(); n++) if (e.Current.Value.Any) return true;
             return false;
         }
 
         private static bool AnyGame()
         {
-            foreach (var kv in _game) if (kv.Value.Any) return true;
+            var e = _game.GetEnumerator();
+            for (int n = 0; n < ACTOR_SCAN_CAP && e.MoveNext(); n++) if (e.Current.Value.Any) return true;
             return false;
         }
 

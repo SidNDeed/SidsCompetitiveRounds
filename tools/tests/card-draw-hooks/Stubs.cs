@@ -56,7 +56,13 @@ namespace CompetitiveRounds
         internal static void CardAwake(CardInfo c) { throw Planted.Fault("CardAwake", c); }
         internal static void EndPick(int[] ids, int target, int theInt, int pickId) { throw Planted.Fault("EndPick", ids, target, theInt, pickId); }
         internal static void DonePicking() { throw Planted.Fault("DonePicking"); }
-        internal static void PickApplied(ApplyCardStats s, int[] actors, bool runOriginal) { throw Planted.Fault("PickApplied", s, actors, runOriginal); }
-        internal static void OfflinePickApplied(ApplyCardStats s, Player[] players, bool runOriginal) { throw Planted.Fault("OfflinePickApplied", s, players, runOriginal); }
+        internal static void PickApplied(ApplyCardStats s, int[] actors, int outcome) { throw Planted.Fault("PickApplied", s, actors, outcome); }
+        internal static void OfflinePickApplied(ApplyCardStats s, Player[] players, int outcome) { throw Planted.Fault("OfflinePickApplied", s, players, outcome); }
+    }
+
+    // the outcome values the design names (CD-M1)
+    internal static class CardDrawEvidenceCore
+    {
+        internal const int APPLY_DONE = 0, APPLY_SKIPPED = 1, APPLY_FAULTED = 2;
     }
 }

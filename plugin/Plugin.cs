@@ -5491,6 +5491,7 @@ namespace CompetitiveRounds
             // one series: a watch carried across a room edge would be waiting on an
             // actor number that now names somebody else.
             try { DcReportSync.ResetForRoomChange(); } catch { }
+            try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
@@ -6209,6 +6210,7 @@ namespace CompetitiveRounds
             // one series: a watch carried across a room edge would be waiting on an
             // actor number that now names somebody else.
             try { DcReportSync.ResetForRoomChange(); } catch { }
+            try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // A teardown window is bound to the room it was opened in. Without

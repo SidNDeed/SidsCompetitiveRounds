@@ -742,12 +742,16 @@ namespace CompetitiveRounds
             {
                 if (_silence.Count == 0) return;
                 int now = PhotonNetwork.ServerTimestamp;
-                foreach (var kv in _silence)
+                // hard-capped (seat evidence fix pass 2, F4): what does not fit is counted
+                var e = _silence.GetEnumerator();
+                int taken = 0;
+                for (; _lateCount < LATE_CAP && e.MoveNext(); taken++)
                 {
-                    if (_lateCount >= LATE_CAP) { _lateDropped++; continue; }
+                    var kv = e.Current;
                     int fromArm; unchecked { fromArm = now - kv.Value.ArmedTs; }
                     _lateView[_lateCount] = kv.Value.ViewId; _lateFromArm[_lateCount] = fromArm; _lateCount++;
                 }
+                _lateDropped += _silence.Count - taken;
                 _silence.Clear();
             }
             catch { }
@@ -1730,8 +1734,12 @@ namespace CompetitiveRounds
                 _before.Clear();
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null) return;
-                foreach (var p in pm.players)
+                var ps = pm.players;
+                for (int i = 0; i < ps.Count && i < PLAYER_SCAN_CAP; i++)
+                {
+                    var p = ps[i];
                     if (p != null && p.data != null) _before[p.PlayerID] = p.data.health;
+                }
             }
             catch { }
         }
@@ -1744,8 +1752,10 @@ namespace CompetitiveRounds
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null) return;
                 bool any = false;
-                foreach (var p in pm.players)
+                var ps = pm.players;
+                for (int i = 0; i < ps.Count && i < PLAYER_SCAN_CAP; i++)
                 {
+                    var p = ps[i];
                     if (p == null || p.data == null) continue;
                     float was;
                     if (!_before.TryGetValue(p.PlayerID, out was)) continue;
@@ -1766,6 +1776,8 @@ namespace CompetitiveRounds
         // with copies of numbers the game already holds; formatting and the log
         // write run in Drain, from Plugin's tick.
         private const int REC_CAP = 16, ROW_CAP = 16;
+        // hook-path scans are hard-capped (seat evidence fix pass 2, F4); no room holds this many players
+        private const int PLAYER_SCAN_CAP = 64;
         private sealed class Rec
         {
             internal int Point, Rows, Saws, SawFrames;
@@ -1798,16 +1810,18 @@ namespace CompetitiveRounds
                     r.Spectator = RoomActors.LocalIsSpectator;
                     var pm = PlayerManager.instance;
                     if (pm != null && pm.players != null)
-                        foreach (var p in pm.players)
+                        for (int k = 0; k < pm.players.Count && r.Rows < ROW_CAP && k < PLAYER_SCAN_CAP; k++)
                         {
-                            if (p == null || p.data == null || r.Rows >= ROW_CAP) continue;
+                            var p = pm.players[k];
+                            if (p == null || p.data == null) continue;
                             int i = r.Rows++;
                             r.Id[i] = p.PlayerID; r.Team[i] = p.TeamID; r.Hp[i] = p.data.health;
                             r.Max[i] = p.data.MaxHealth; r.Dead[i] = p.data.dead;
                         }
-                    foreach (var kv in _sawLost)
+                    var e = _sawLost.GetEnumerator();
+                    for (; r.Saws < ROW_CAP && e.MoveNext(); )
                     {
-                        if (r.Saws >= ROW_CAP) break;
+                        var kv = e.Current;
                         r.SawId[r.Saws] = kv.Key; r.SawLost[r.Saws] = kv.Value; r.Saws++;
                     }
                 }

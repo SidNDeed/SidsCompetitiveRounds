@@ -125,17 +125,20 @@ internal static class Program
         var rec = g.Record(null, new string('b', 64), "ok", 1, 1, null);
         Eq("hd", rec.Get("hd"), "[[0,0,0,0,0,5,[3,1,4,7,5],5,[],2,2,1,31,1,1003,0,1,0],[1,0,1,1,0,5,[2,8,0,9,6],5,[],3,3,1,-1,-1,2004,0,-1,0]]");
         Eq("ph", rec.Get("ph"), "[[0,0,1,0,0,1,1],[1,1,1,0,0,1,1]]");
-        Eq("ap", rec.Get("ap"), "[[0,4,0,1003,0],[1,9,0,2004,0]]");
+        Eq("ap", rec.Get("ap"), "[[0,4,0,1003],[1,9,0,2004]]");
+        Eq("apx", rec.Get("apx"), "[0,0]");
         Eq("tot", rec.Get("tot"), "[[1,1,5,1,1,0,0],[1,1,5,1,1,0,0]]");
         Eq("cards", rec.Get("cards"), "[[0,\"Card0\",0],[1,\"Card1\",1],[2,\"Card2\",2],[3,\"Card3\",0],[4,\"Card4\",1],[5,\"Card5\",2],[6,\"Card6\",0],[7,\"Card7\",1],[8,\"Card8\",2],[9,\"Card9\",0]]");
-        Eq("pool", rec.Get("pool"), "[10,\"" + DIGEST + "\"]");
-        Eq("prof", rec.Get("prof"), "[\"" + new string('b', 64) + "\",\"ok\"]");
+        Eq("pool", rec.Get("pool"), "[10,\"" + DIGEST + "\",\"ok\"]");
+        Eq("prof", rec.Get("prof"), "[\"" + new string('b', 64) + "\",\"ok\",\"\",\"no_location\",\"\",\"\",\"\",\"cd-sem:2\",\"\"]");
         Eq("sc", rec.Get("sc"), "[1,1]");
+        Eq("inc", rec.Get("inc"), 0L);
         Eq("held0", rec.Get("held0"), "[[],[]]");
         Eq("omit", rec.Get("omit"), "{\"cards\":0,\"held0\":[0,0],\"ph\":0,\"hd\":0,\"ap\":0,\"sl\":0,\"sp\":0}");
         Eq("keys", string.Join(",", rec.Keys), string.Join(",", K.RECORD_KEYS));
+        Eq("keys spelled out", string.Join(",", K.RECORD_KEYS), "schema,g,ns,pool,prof,po,sc,inc,cards,held0,ph,hd,ap,apx,tot,cost,omit");
         var noSha = g.Record(null, "abc", "ok", 0, 0, null);
-        Eq("prof refuses a short sha", noSha.Get("prof"), "[\"\",\"no_location\"]");
+        Eq("prof refuses a short sha", noSha.Get("prof"), "[\"\",\"no_location\",\"\",\"no_location\",\"\",\"\",\"\",\"cd-sem:2\",\"\"]");
     }
 
     private static void NoPick()
@@ -313,11 +316,143 @@ internal static class Program
     private static void Apps()
     {
         var g = NewGame();
-        g.Apply(-1, 3, 1, 0, 1);
-        g.Apply(0, 2, 0, 50, 1);
-        g.Apply(1, 2, 1, -5, 0);
-        Eq("ap", Field(g.Record(null, "", "", 0, 0, null), "ap"), "[[-1,3,1,0,1],[0,2,0,50,1],[1,2,1,-1,0]]");
-        Eq("applications per role", g.AppsTo, new long[] { 1, 1 });
+        // CD-M1: only an application whose original ran and completed is one
+        g.Apply(-1, 3, 1, 0, K.APPLY_SKIPPED);
+        g.Apply(0, 2, 0, 50, K.APPLY_SKIPPED);
+        g.Apply(0, 5, 0, 7, K.APPLY_FAULTED);
+        g.Apply(1, 2, 1, -5, K.APPLY_DONE);
+        g.Apply(-1, 4, 0, 9, K.APPLY_DONE);
+        var rec = g.Record(null, "", "", 0, 0, null);
+        Eq("ap", Field(rec, "ap"), "[[1,2,1,-1],[-1,4,0,9]]");
+        Eq("apx: skipped, faulted", Field(rec, "apx"), "[2,1]");
+        Eq("applications per role", g.AppsTo, new long[] { 0, 1 });
+        Eq("tot applications", Field(rec, "tot"), "[[0,0,0,0,0,0,0],[0,0,0,0,1,0,0]]");
+        Eq("cards named by completed applications only", Field(rec, "cards"), "[[2,\"Card2\",2],[4,\"Card4\",1]]");
+    }
+
+    /// <summary>CD-M1: after the dispatch seals the game no collector report
+    /// changes it.</summary>
+    private static void Seal()
+    {
+        var g = NewGame();
+        g.OpenPhase(0, 1, 0, 0, 0);
+        Spawns(g, new[] { 1, 2 }, 1, null, F0);
+        g.EndPick(L(1, 2), 0, 5, 0, 0, 1, F0, 0);
+        g.Apply(0, 1, 0, 5, K.APPLY_DONE);
+        g.Close(0);
+        g.Seal();
+        string before = Rec(g);
+        g.OpenPhase(1, 1, 0, 0, 0);
+        g.Spawn(3, 1, F0, 0);
+        g.EndPick(L(3), 0, 6, 0, 1, 1, F0, 0);
+        g.DonePicking(0);
+        g.Apply(1, 3, 0, 6, K.APPLY_DONE);
+        g.Apply(1, 3, 0, 6, K.APPLY_SKIPPED);
+        g.Close(0);
+        True("sealed", g.Sealed);
+        Eq("nothing after the seal changes the record", Rec(g), before);
+    }
+
+    /// <summary>CD-M3: a first phase not captured whole emits no player order
+    /// and no held cards (and no held-card omissions); the other bits ride as
+    /// they are.</summary>
+    private static void IncFirst()
+    {
+        var many = new List<int>();
+        for (int i = 0; i < 70; i++) many.Add(i % 10);
+        var g = NewGame(10, new IList<int>[] { many, new List<int> { 3 } }, new List<int> { 0, 1 });
+        g.Inc = K.INC_FIRST | K.INC_FAULT;
+        var rec = g.Record(null, "", "", 0, 0, null);
+        Eq("inc", rec.Get("inc"), 5L);
+        Eq("po not emitted", Field(rec, "po"), "[]");
+        Eq("held0 not emitted", Field(rec, "held0"), "[null,null]");
+        Eq("no held omissions", Field(rec, "omit"), "{\"cards\":0,\"held0\":[0,0],\"ph\":0,\"hd\":0,\"ap\":0,\"sl\":0,\"sp\":0}");
+        Eq("no cards from held", Field(rec, "cards"), "[]");
+        var h = NewGame(10, new IList<int>[] { new List<int> { 1 }, null }, new List<int> { 1, 0 });
+        h.Inc = K.INC_LOST | 8;
+        var r2 = h.Record(null, "", "", 0, 0, null);
+        Eq("only the defined bits", r2.Get("inc"), 2L);
+        Eq("po kept when the first phase was whole", Field(r2, "po"), "[1,0]");
+        Eq("held0 kept", Field(r2, "held0"), "[[1],null]");
+    }
+
+    /// <summary>CD-M4: the pool state rides beside the census digest.</summary>
+    private static void PoolStates()
+    {
+        var g = NewGame();
+        Eq("ok", Field(g.Record(null, "", "", 0, 0, null), "pool"), "[10,\"" + DIGEST + "\",\"ok\"]");
+        g.PoolState = K.POOL_COLLISION;
+        Eq("collision", Field(g.Record(null, "", "", 0, 0, null), "pool"), "[10,\"" + DIGEST + "\",\"collision\"]");
+        g.PoolState = K.POOL_CHANGED;
+        Eq("changed", Field(g.Record(null, "", "", 0, 0, null), "pool"), "[10,\"" + DIGEST + "\",\"changed\"]");
+        g.PoolState = "other";
+        Eq("an unknown state reads not_run", Field(g.Record(null, "", "", 0, 0, null), "pool"), "[10,\"" + DIGEST + "\",\"not_run\"]");
+        var none = new K.CardGame(1, 5, 1, 10, "", Canon(10), Rar(10), null, null);
+        Eq("no census: not_run", Field(none.Record(null, "", "", 0, 0, null), "pool"), "[10,\"\",\"not_run\"]");
+        none.PoolState = K.POOL_OK;
+        Eq("no digest is never ok", Field(none.Record(null, "", "", 0, 0, null), "pool"), "[10,\"\",\"not_run\"]");
+    }
+
+    /// <summary>CD-M5: the immutable identity the record carries.</summary>
+    private static void Prof()
+    {
+        var g = NewGame();
+        var p = new K.Profile { GameSha = new string('c', 64), GameState = "ok", ModSha = new string('d', 64), ModState = "ok",
+                                Build = new[] { "1.41.0", "STANDALONE", "abc1234" }, Rules = "ff=1;sc=1" };
+        Eq("full", Field(g.Record(null, p, 0, 0, null), "prof"),
+           "[\"" + new string('c', 64) + "\",\"ok\",\"" + new string('d', 64) + "\",\"ok\",\"1.41.0\",\"STANDALONE\",\"abc1234\",\"cd-sem:2\",\"ff=1;sc=1\"]");
+        p.ModSha = "short"; p.GameState = "read_failed"; p.Build = new[] { "1 41", "x", "c0mmit\"" }; p.Rules = "a\"b";
+        Eq("refused parts", Field(g.Record(null, p, 0, 0, null), "prof"),
+           "[\"\",\"read_failed\",\"\",\"no_location\",\"\",\"x\",\"\",\"cd-sem:2\",\"\"]");
+        p.Rules = new string('r', 33);
+        Eq("rules over 32 refused", ((List<object>)g.Record(null, p, 0, 0, null).Get("prof"))[8], "");
+        p.Rules = new string('r', 32); p.Build = null;
+        Eq("rules at 32 kept, no build", Field(g.Record(null, p, 0, 0, null), "prof"),
+           "[\"\",\"read_failed\",\"\",\"no_location\",\"\",\"\",\"\",\"cd-sem:2\",\"" + new string('r', 32) + "\"]");
+        Eq("semantics revision", K.SEMANTICS, "cd-sem:2");
+    }
+
+    /// <summary>CD-M2: a rule or verdict that was not read is -1 (NOT-RUN);
+    /// a value outside its set reads -1 too.</summary>
+    private static void ScNotRun()
+    {
+        var g = NewGame();
+        Eq("not read", Field(g.Record(null, "", "", -1, -1, null), "sc"), "[-1,-1]");
+        Eq("outside the set", Field(g.Record(null, "", "", 5, 7, null), "sc"), "[-1,-1]");
+        Eq("rule on, engine fell back", Field(g.Record(null, "", "", 1, 2, null), "sc"), "[1,2]");
+        Eq("rule off", Field(g.Record(null, "", "", 0, 0, null), "sc"), "[0,0]");
+    }
+
+    /// <summary>CD-L3, the record side of bar A8: a hand whose second slot
+    /// repeats its first (the test-only dealer's deal) is recorded as dealt,
+    /// slot by slot, and the repeated card is named once in cards.</summary>
+    private static void RepeatedSlot()
+    {
+        var g = NewGame();
+        g.OpenPhase(0, 1, 0, 0, 0);
+        Spawns(g, new[] { 3, 3, 5, 7, 8 }, 1, null, F0);
+        g.EndPick(L(3, 3, 5, 7, 8), 1, 41, 1, 0, 1, F0, 0);
+        var rec = g.Record(null, "", "", 0, 0, null);
+        Eq("the repeated slot as dealt", ((List<object>)g.Hd[0])[6], "[3,3,5,7,8]");
+        Eq("same spawn order: no sp", ((List<object>)g.Hd[0])[8], "[]");
+        Eq("the card named once", Field(rec, "cards"), "[[3,\"Card3\",0],[5,\"Card5\",2],[7,\"Card7\",1],[8,\"Card8\",2]]");
+    }
+
+    /// <summary>F4: the hook keeps at most 16 slots of an end-pick; the true
+    /// slot count rides in n, the slots it did not keep count as unresolved
+    /// and in omit sl.</summary>
+    private static void TrueN()
+    {
+        var g = NewGame(30);
+        g.OpenPhase(0, 1, 0, 0, 0);
+        var kept = new List<long>();
+        for (int i = 0; i < 16; i++) kept.Add(i);
+        g.EndPick(kept, 20L, 0, 9, 0, 0, 1, F0, 0);
+        var h = (List<object>)g.Hd[0];
+        Eq("n is the true count", h[5], 20L);
+        Eq("16 kept", ((List<long>)h[6]).Count, 16);
+        Eq("the 4 not kept are unresolved", g.Tot[0][5], 4L);
+        Eq("and omitted", Field(g.Record(null, "", "", 0, 0, null), "omit"), "{\"cards\":0,\"held0\":[0,0],\"ph\":0,\"hd\":0,\"ap\":0,\"sl\":4,\"sp\":0}");
     }
 
     /// <summary>A16: an over-cap game is at most 8192 bytes, omit is non-zero,
@@ -393,7 +528,7 @@ internal static class Program
         g.OpenPhase(0, 1, 0, 0, 0);
         g.Spawn(1, 1, F0, 0);
         var rec = g.Record("left", "", "", 0, 0, null);
-        Eq("end follows g", string.Join(",", rec.Keys), "schema,g,end,ns,pool,prof,po,sc,cards,held0,ph,hd,ap,tot,cost,omit");
+        Eq("end follows g", string.Join(",", rec.Keys), "schema,g,end,ns,pool,prof,po,sc,inc,cards,held0,ph,hd,ap,apx,tot,cost,omit");
         Eq("an unknown end kind is not emitted", string.Join(",", g.Record("quit", "", "", 0, 0, null).Keys), string.Join(",", K.RECORD_KEYS));
         string text = K.Budget(rec);
         string env = K.Envelope(SEAT, OTHER, STABLE, ATTACH, text, S.Hmac(Encoding.UTF8.GetBytes(KEY), K.Canonical(SEAT, OTHER, STABLE, ATTACH, text)));
@@ -515,15 +650,40 @@ internal static class Program
         return g;
     }
 
+    private static K.Profile FullProf(string rules = "ff=1;sc=0")
+    {
+        return new K.Profile { GameSha = new string('c', 64), GameState = "ok", ModSha = new string('d', 64), ModState = "ok",
+                               Build = new[] { "1.41.0", "STANDALONE", "abc1234" }, Rules = rules };
+    }
+
+    /// <summary>A game whose first phase was not captured whole (CD-M3), a
+    /// collector fault, a category name collision (CD-M4), an application
+    /// skipped and one that threw (CD-M1), the room facts not read (CD-M2).</summary>
+    private static K.CardGame FirstPhaseLost()
+    {
+        var g = NewGame(12, new IList<int>[] { new List<int> { 1 }, new List<int> { 2 } }, new List<int> { 0, 1 }, 4);
+        g.Inc = K.INC_FIRST | K.INC_FAULT;
+        g.PoolState = K.POOL_COLLISION;
+        g.OpenPhase(1, 1, 2, 1, 0);
+        Spawns(g, new[] { 3, 4, 5 }, 1, null, F0);
+        g.Apply(1, 4, 0, 2004, K.APPLY_SKIPPED);
+        g.Apply(1, 4, 0, 2004, K.APPLY_FAULTED);
+        g.EndPick(L(3, 4, 5), 1, 2004, 1, 1, 1, F0, 0);
+        g.Close(0);
+        g.Seal();
+        return g;
+    }
+
     private static int Fixtures(string dir)
     {
         Directory.CreateDirectory(dir);
         var all = new List<KeyValuePair<string, S.JObj>>
         {
-            new KeyValuePair<string, S.JObj>("full_game", FullGame().Record(null, new string('c', 64), "ok", 0, 0, Cost())),
-            new KeyValuePair<string, S.JObj>("game2_held_samecards", Game2HeldSameCards().Record(null, new string('c', 64), "ok", 1, 1, Cost())),
+            new KeyValuePair<string, S.JObj>("full_game", FullGame().Record(null, FullProf(), 0, 0, Cost())),
+            new KeyValuePair<string, S.JObj>("game2_held_samecards", Game2HeldSameCards().Record(null, FullProf("ff=1;sc=1"), 1, 1, Cost())),
             new KeyValuePair<string, S.JObj>("cut_left", CutLeft().Record("left", "", "read_failed", 0, 0, Cost())),
-            new KeyValuePair<string, S.JObj>("over_cap", BigGame().Record("other_left", new string('c', 64), "ok", 1, 2, Cost())),
+            new KeyValuePair<string, S.JObj>("over_cap", BigGame().Record("other_left", FullProf("ff=1;sc=1"), 1, 2, Cost())),
+            new KeyValuePair<string, S.JObj>("first_phase_lost", FirstPhaseLost().Record("left", FullProf(), -1, -1, Cost())),
         };
         var names = new List<string>();
         foreach (var kv in all)
@@ -574,6 +734,14 @@ internal static class Program
         new KeyValuePair<string, Action>("budget_cards", BudgetCards),
         new KeyValuePair<string, Action>("end", End),
         new KeyValuePair<string, Action>("envelope", Envelope),
+        // fix pass 2
+        new KeyValuePair<string, Action>("seal", Seal),
+        new KeyValuePair<string, Action>("inc_first", IncFirst),
+        new KeyValuePair<string, Action>("pool_states", PoolStates),
+        new KeyValuePair<string, Action>("prof", Prof),
+        new KeyValuePair<string, Action>("sc_not_run", ScNotRun),
+        new KeyValuePair<string, Action>("true_n", TrueN),
+        new KeyValuePair<string, Action>("repeated_slot", RepeatedSlot),
     };
 
     private static int Main(string[] args)

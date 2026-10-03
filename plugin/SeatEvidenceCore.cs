@@ -473,7 +473,9 @@ namespace CompetitiveRounds
         {
             internal const int KEEP = 1024;
             private readonly Dictionary<string, int> _seen = new Dictionary<string, int>();
-            private readonly Queue<string> _order = new Queue<string>();
+            // the prefixes in first-seen order, a fixed ring: one in, at most one out
+            private readonly string[] _ring = new string[KEEP];
+            private int _head, _held;
             internal int Next(long a, long b, long c)
             {
                 string k = a.ToString(CultureInfo.InvariantCulture) + ":" + b.ToString(CultureInfo.InvariantCulture)
@@ -481,11 +483,12 @@ namespace CompetitiveRounds
                 int n;
                 if (_seen.TryGetValue(k, out n)) { _seen[k] = n + 1; return n > 255 ? 255 : n; }
                 _seen[k] = 1;
-                _order.Enqueue(k);
-                while (_order.Count > KEEP) _seen.Remove(_order.Dequeue());
+                if (_held == KEEP) _seen.Remove(_ring[_head]); else _held++;
+                _ring[_head] = k;
+                _head = (_head + 1) % KEEP;
                 return 0;
             }
-            internal void Clear() { _seen.Clear(); _order.Clear(); }
+            internal void Clear() { _seen.Clear(); Array.Clear(_ring, 0, KEEP); _head = 0; _held = 0; }
         }
 
         /// <summary>A hit waiting for its admission: listed only when some block
@@ -494,7 +497,7 @@ namespace CompetitiveRounds
         /// a later block's stamp is known, so recent ones wait here.</summary>
         internal sealed class HitWindow
         {
-            internal const int LO = -100, HI = 900, PENDING_CAP = 64;
+            internal const int LO = -100, HI = 900, PENDING_CAP = 64, RECENT_CAP = 8;
             internal readonly List<long[]> Pending = new List<long[]>();
             internal readonly List<int> RecentBlocks = new List<int>();
 
@@ -502,7 +505,7 @@ namespace CompetitiveRounds
             /// is kept (bounded) for a block stamp that may follow.</summary>
             internal bool Offer(long[] hit, int stamp)
             {
-                for (int i = 0; i < RecentBlocks.Count; i++)
+                for (int i = 0; i < RecentBlocks.Count && i < RECENT_CAP; i++)
                 {
                     int d = WrapDiff(stamp, RecentBlocks[i]);
                     if (d >= LO && d <= HI) return true;
@@ -518,9 +521,9 @@ namespace CompetitiveRounds
             internal List<long[]> Block(int tb, int stampIndex)
             {
                 RecentBlocks.Add(tb);
-                if (RecentBlocks.Count > 8) RecentBlocks.RemoveAt(0);
+                if (RecentBlocks.Count > RECENT_CAP) RecentBlocks.RemoveAt(0);
                 var admitted = new List<long[]>();
-                for (int i = 0; i < Pending.Count; i++)
+                for (int i = 0; i < Pending.Count && i < PENDING_CAP; i++)
                 {
                     int d = WrapDiff((int)Pending[i][stampIndex], tb);
                     if (d >= LO && d <= HI) { admitted.Add(Pending[i]); Pending.RemoveAt(i); i--; }

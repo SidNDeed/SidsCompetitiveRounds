@@ -41,7 +41,7 @@ SOURCE = os.path.join(PLUGIN, "CardDrawEvidence.cs")
 DEFAULT_DECOMPILE = os.path.join(os.path.dirname(REPO), "SidsCompetitiveRounds", "logs-snapshot", "decompiled", "full")
 MARKER = "SCR_CARD_EVIDENCE_TEST_GATE_ON"
 SYMBOL = "SCR_CARD_EVIDENCE_TEST_GATE"
-TRACKED = ["CardDrawEvidence.cs", "GameStateWatcher.cs", "HitEvidence.cs", "Plugin.cs", "SeatEvidence.cs"]
+TRACKED = ["CardDrawEvidence.cs", "GameStateWatcher.cs", "HitEvidence.cs", "Plugin.cs", "SeatEvidence.cs", "CardDrawEvidenceTestDealer.cs"]
 
 EXPECTED = sorted([
     "CardDrawEvidence_StartPickPatch", "CardDrawEvidence_CardAwakePatch", "CardDrawEvidence_EndPickPatch",
@@ -55,19 +55,41 @@ WIRING = {
     # fix pass 1: the card builds run on the tick (F4) above the modDisabled
     # return, and the quit hook flushes them (no later frame comes)
     "Plugin.cs": [("CardDrawEvidence.BootLine(", 1), ("CardDrawEvidence.EnsureCensusDump(", 1),
-                  ("CardDrawEvidence.Tick(", 1), ("CardDrawEvidence.FlushOnQuit(", 1)],
+                  ("CardDrawEvidence.Tick(", 1), ("CardDrawEvidence.FlushOnQuit(", 1),
+                  # fix pass 2, CD-M2: the room facts frozen at both room resets
+                  ("CardDrawEvidence.FreezeRoomFacts(", 2)],
     "SeatEvidence.cs": [('ROUTE_CARD = "/api/v1/matches/card-evidence";', 1), ('route == "k" ? ROUTE_CARD', 1),
-                        ("internal static bool EnqueueCard(string body)", 1), ("CardDrawEvidence", 0)],
-    # fix pass 1, the card path's repeat of the seat pattern: its one queue
-    # call is checked (queued only after the durable replacement, F8), its
-    # builds wait for no live combat (F3) and a completed identity (F7)
-    "CardDrawEvidence.cs": [("SeatEvidence.EnqueueCard(", 1), ("if (!SeatEvidence.EnqueueCard(p.Env))", 1),
+                        ("internal static bool EnqueueCard(string body)", 1), ("internal static bool SpoolClosing(string route, string body)", 1),
+                        ("CardDrawEvidence", 0)],
+    # the card path's repeat of the seat pattern: on the tick its one queue
+    # call is checked (queued only after the durable replacement, F8); on the
+    # quitting path it writes its own closing file and never the queue (F3,
+    # fix pass 2); its builds wait for no live combat (F3) and a completed
+    # identity (F7)
+    "CardDrawEvidence.cs": [("SeatEvidence.EnqueueCard(", 1), ("SeatEvidence.SpoolClosing(", 1),
+                            ('bool persisted = now ? SeatEvidence.SpoolClosing("k", p.Env) : SeatEvidence.EnqueueCard(p.Env);', 1),
                             ("if (SeatEvidence.CombatLive()) return;", 1), ("if (!IdentityReadyOrStart(now)) return;", 1)],
 }
 
+# ordered wiring (regex, exact count): CD-M2, the freeze runs immediately
+# before each room reset clears the rules and the served-slot counter
+WIRING_RE = [
+    ("Plugin.cs", r"try \{ CardDrawEvidence\.FreezeRoomFacts\(\); \} catch \{ \}[^\n]*\n\s*try \{ RoomRules\.ResetLatched\(\); \} catch \{ \}[^\n]*\n\s*try \{ VanillaCardSequence\.OnRoomLeft\(\); \}", 2),
+]
+
+# CD-L3: the repeated-slot dealer, test-only
+DEALER_SOURCE = os.path.join(PLUGIN, "CardDrawEvidenceTestDealer.cs")
+DEALER_SYMBOL = "SCR_CARD_EVIDENCE_TEST_DEALER"
+DEALER_MARKER = "SCR_CARD_EVIDENCE_TEST_DEALER_ON"
+PLUGIN_PROJ = os.path.join(PLUGIN, "CompetitiveRounds.csproj")
+
 HEADER = "using System;\nusing HarmonyLib;\n\nnamespace CompetitiveRounds\n{\n"
 
-PICK_PRE = "private static void Prefix(ApplyCardStats __instance, int[] __0, bool __runOriginal)\n        {\n            try { CardDrawEvidence.PickApplied(__instance, __0, __runOriginal); } catch { }\n        }"
+PICK_POST = "[HarmonyPostfix]\n        private static void Postfix(ApplyCardStats __instance, int[] __0, bool __runOriginal)"
+PICK_CALL = "CardDrawEvidence.PickApplied(__instance, __0, __runOriginal ? CardDrawEvidenceCore.APPLY_DONE : CardDrawEvidenceCore.APPLY_SKIPPED)"
+OFF_CALL = "CardDrawEvidence.OfflinePickApplied(__instance, __0, __runOriginal ? CardDrawEvidenceCore.APPLY_DONE : CardDrawEvidenceCore.APPLY_SKIPPED)"
+PICK_FIN = "try { if (__exception != null) CardDrawEvidence.PickApplied(__instance, __0, CardDrawEvidenceCore.APPLY_FAULTED); } catch { }"
+OFF_FIN = "try { if (__exception != null) CardDrawEvidence.OfflinePickApplied(__instance, __0, CardDrawEvidenceCore.APPLY_FAULTED); } catch { }"
 GATE_ELSE = "#else\n                return false;"
 
 # (name, old, new, target, control); old must occur exactly once in Hooks.g.cs
@@ -80,19 +102,25 @@ MUTANTS = [
      "CardDrawEvidence_EndPickPatch", "CardDrawEvidence_DonePickingPatch"),
     ("donepicking_unwrapped", "try { CardDrawEvidence.DonePicking(); } catch { }", "CardDrawEvidence.DonePicking();",
      "CardDrawEvidence_DonePickingPatch", "CardDrawEvidence_EndPickPatch"),
-    ("pick_unwrapped", "try { CardDrawEvidence.PickApplied(__instance, __0, __runOriginal); } catch { }",
-     "CardDrawEvidence.PickApplied(__instance, __0, __runOriginal);", "CardDrawEvidence_PickPatch", "CardDrawEvidence_OfflinePickPatch"),
-    ("offline_unwrapped", "try { CardDrawEvidence.OfflinePickApplied(__instance, __0, __runOriginal); } catch { }",
-     "CardDrawEvidence.OfflinePickApplied(__instance, __0, __runOriginal);", "CardDrawEvidence_OfflinePickPatch", "CardDrawEvidence_PickPatch"),
-    ("pick_skips_original", PICK_PRE,
-     "private static bool Prefix(ApplyCardStats __instance, int[] __0, bool __runOriginal)\n        {\n            try { CardDrawEvidence.PickApplied(__instance, __0, __runOriginal); } catch { }\n            return false;\n        }",
+    ("pick_unwrapped", "try { " + PICK_CALL + "; } catch { }", PICK_CALL + ";", "CardDrawEvidence_PickPatch", "CardDrawEvidence_OfflinePickPatch"),
+    ("offline_unwrapped", "try { " + OFF_CALL + "; } catch { }", OFF_CALL + ";", "CardDrawEvidence_OfflinePickPatch", "CardDrawEvidence_PickPatch"),
+    # CD-M1: the application is read after the original, never before it
+    ("pick_before_original", PICK_POST, "[HarmonyPrefix]\n        private static void Prefix(ApplyCardStats __instance, int[] __0, bool __runOriginal)",
      "CardDrawEvidence_PickPatch", "CardDrawEvidence_OfflinePickPatch"),
     ("pick_runoriginal_by_ref", "int[] __0, bool __runOriginal)", "int[] __0, ref bool __runOriginal)",
      "CardDrawEvidence_PickPatch", "CardDrawEvidence_OfflinePickPatch"),
     ("endpick_args_swapped", "CardDrawEvidence.EndPick(__0, __1, __2, __3)", "CardDrawEvidence.EndPick(__0, __2, __1, __3)",
      "CardDrawEvidence_EndPickPatch", "CardDrawEvidence_DonePickingPatch"),
-    ("offline_flag_constant", "CardDrawEvidence.OfflinePickApplied(__instance, __0, __runOriginal)", "CardDrawEvidence.OfflinePickApplied(__instance, __0, true)",
+    ("offline_skip_as_done", OFF_CALL, "CardDrawEvidence.OfflinePickApplied(__instance, __0, CardDrawEvidenceCore.APPLY_DONE)",
      "CardDrawEvidence_OfflinePickPatch", "CardDrawEvidence_PickPatch"),
+    ("pick_finalizer_unwrapped", PICK_FIN, PICK_FIN[len("try { "):-len(" } catch { }")], "CardDrawEvidence_PickPatch", "CardDrawEvidence_OfflinePickPatch"),
+    ("offline_finalizer_swallows", OFF_FIN + "\n            return __exception;", OFF_FIN + "\n            return null;",
+     "CardDrawEvidence_OfflinePickPatch", "CardDrawEvidence_PickPatch"),
+    ("pick_fault_as_done", PICK_FIN, PICK_FIN.replace("APPLY_FAULTED", "APPLY_DONE"), "CardDrawEvidence_PickPatch", "CardDrawEvidence_OfflinePickPatch"),
+    ("pick_finalizer_always_reports", PICK_FIN, PICK_FIN.replace("if (__exception != null) ", ""), "CardDrawEvidence_PickPatch",
+     "CardDrawEvidence_OfflinePickPatch"),
+    ("offline_finalizer_dropped", "[HarmonyFinalizer]\n        private static Exception Finalizer(ApplyCardStats __instance, Player[] __0",
+     "private static Exception Finalizer(ApplyCardStats __instance, Player[] __0", "CardDrawEvidence_OfflinePickPatch", "CardDrawEvidence_PickPatch"),
     ("donepicking_calls_nothing", "try { CardDrawEvidence.DonePicking(); } catch { }", "try { } catch { }",
      "CardDrawEvidence_DonePickingPatch", "CardDrawEvidence_EndPickPatch"),
     ("startpick_priority_dropped", "    [HarmonyPriority(Priority.Last)]\n    internal static class CardDrawEvidence_StartPickPatch",
@@ -227,9 +255,12 @@ def attachment(found, decompile):
             continue
         target = param_types(decls[0].group(1))
         decl_line = src.count("\n", 0, decls[0].start()) + 1
-        hm = re.search(r"private static void (?:Prefix|Postfix)\(([^)]*)\)", body)
-        errs = []
-        for p in [x.strip() for x in hm.group(1).split(",") if x.strip()]:
+        hms = list(re.finditer(r"private static (?:void|bool|Exception) (?:Prefix|Postfix|Finalizer)\(([^)]*)\)", body))
+        errs = [] if hms else ["no patch method"]
+        params = [x.strip() for hm in hms for x in hm.group(1).split(",") if x.strip()]
+        for p in params:
+            if p == "Exception __exception":
+                continue
             t, n = p.rsplit(None, 1)
             t = t.replace("ref ", "").replace(" ", "")
             if n == "__instance":
@@ -312,6 +343,13 @@ def main():
             if c != n:
                 wiring_ok = False
                 print("WIRING plugin/%s: %r occurs %d times, want %d" % (f, lit, c, n))
+    for f, rx, n in WIRING_RE:
+        t = read(os.path.join(PLUGIN, f))
+        c = len(re.findall(rx, t))
+        neg = len(re.findall(rx, t.replace("try { CardDrawEvidence.FreezeRoomFacts(); } catch { }", "", 1)))
+        good = c == n and neg == n - 1
+        wiring_ok = wiring_ok and good
+        print("%s ordered wiring plugin/%s: %d of %d sites (negative control, one freeze removed: %d)" % ("OK " if good else "BAD", f, c, n, neg))
     print("shared-file wiring present exactly once per site:", wiring_ok)
     ok = ok and wiring_ok
 
@@ -352,8 +390,45 @@ def main():
     else:
         print("plugin DLL scan NOT RUN (pass --plugin-dll <the Debug compile's DLL>)")
     l3 = l3_probe and not defined and l3_plugin
-    print("L3:", "PASS" if l3 else "FAIL")
+    print("L3 test gate:", "PASS" if l3 else "FAIL")
     ok = ok and l3
+
+    # CD-L3: the repeated-slot dealer is test-only. The whole file sits inside
+    # its own symbol, no configuration defines it, the plugin DLL under test
+    # carries neither marker, and a positive-control plugin build with both
+    # symbols carries both (the scan can see them).
+    dsrc = read(DEALER_SOURCE) if os.path.isfile(DEALER_SOURCE) else ""
+    lines_ = [l for l in dsrc.split("\n") if l.strip()]
+    whole = bool(lines_) and lines_[0].strip() == "#if " + DEALER_SYMBOL and lines_[-1].strip() == "#endif" and dsrc.count("#endif") == 1
+    ddefined = []
+    for root, dirs, files in os.walk(REPO):
+        dirs[:] = [d for d in dirs if d not in (".git", "bin", "obj", "work", "ai-collab", "node_modules")]
+        for fn in files:
+            if fn.endswith((".csproj", ".props", ".targets", ".rsp", ".sln")) or (fn.endswith(".cs") and os.path.dirname(os.path.join(root, fn)) == PLUGIN):
+                p = os.path.join(root, fn)
+                body = open(p, "rb").read().decode("utf-8", "replace")
+                if (fn.endswith(".cs") and re.search(r"#define\s+" + DEALER_SYMBOL, body)) or (not fn.endswith(".cs") and DEALER_SYMBOL in body):
+                    ddefined.append(os.path.relpath(p, REPO))
+    d_absent = False
+    if plugin_dll and os.path.isfile(plugin_dll):
+        pb = open(plugin_dll, "rb").read()
+        d_absent = wide(DEALER_MARKER) not in pb and DEALER_MARKER.encode("ascii") not in pb
+    pos_dir = os.path.join(WORK, "plugin_test_symbols")
+    cmd = ["dotnet", "build", PLUGIN_PROJ, "-c", "Debug", "-t:Rebuild", "-nologo", "-v", "q", "-p:SkipCopyToPlugins=true",
+           "-p:DefineConstants=DEBUG%3BTRACE%3B" + DEALER_SYMBOL + "%3B" + SYMBOL,
+           "-p:OutDir=" + os.path.join(pos_dir, "bin") + os.sep, "-p:IntermediateOutputPath=" + os.path.join(pos_dir, "obj") + os.sep]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    pos_dll = os.path.join(pos_dir, "bin", "CompetitiveRounds.dll")
+    pos = False
+    if r.returncode == 0 and os.path.isfile(pos_dll):
+        qb = open(pos_dll, "rb").read()
+        pos = wide(DEALER_MARKER) in qb and wide(MARKER) in qb
+    else:
+        print(r.stdout[-2000:], r.stderr[-1000:])
+    dl3 = whole and not ddefined and d_absent and pos
+    print("L3 dealer: file wholly inside #if %s=%s; files defining it: %s; plugin DLL carries no dealer marker=%s; positive control (plugin built with both test symbols) carries both markers=%s: %s"
+          % (DEALER_SYMBOL, whole, ddefined if ddefined else "none", d_absent, pos, "PASS" if dl3 else "FAIL"))
+    ok = ok and dl3
 
     caught = 0
     for name, old, new, target, control in MUTANTS:

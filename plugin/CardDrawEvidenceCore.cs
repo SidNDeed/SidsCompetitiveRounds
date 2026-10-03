@@ -34,9 +34,27 @@ namespace CompetitiveRounds
         /// <summary>The record keys in order; "end", when present, follows "g".</summary>
         internal static readonly string[] RECORD_KEYS =
         {
-            "schema", "g", "ns", "pool", "prof", "po", "sc", "cards", "held0", "ph", "hd", "ap", "tot", "cost", "omit",
+            "schema", "g", "ns", "pool", "prof", "po", "sc", "inc", "cards", "held0", "ph", "hd", "ap", "apx", "tot", "cost", "omit",
         };
         internal const int COLLECTORS = 6;
+
+        /// <summary>inc bits (CD-M3): the game's first phase was not captured
+        /// whole (po and held0 are then not emitted); collector events were
+        /// lost (the hook-side buffer was full); a collector faulted. Every bit
+        /// says what this seat did NOT see; none decides anything.</summary>
+        internal const int INC_FIRST = 1, INC_LOST = 2, INC_FAULT = 4;
+
+        /// <summary>pool[2] (CD-M4).</summary>
+        internal const string POOL_OK = "ok", POOL_COLLISION = "collision", POOL_CHANGED = "changed", POOL_NOT_RUN = "not_run";
+
+        /// <summary>Application outcomes (CD-M1).</summary>
+        internal const int APPLY_DONE = 0, APPLY_SKIPPED = 1, APPLY_FAULTED = 2;
+
+        /// <summary>The revision of the record's slot and sampler semantics
+        /// (what ix, sl, sp, src, gen, sq and the census mean). Raised with any
+        /// change to them; the server half keys its registry on it (CD-M5).</summary>
+        internal const string SEMANTICS = "cd-sem:2";
+        internal const int RULES_CAP = 32;
 
         private static long Clamp(long v, long lo, long hi) { return v < lo ? lo : (v > hi ? hi : v); }
         private static long Cnt(long v) { return Clamp(v, 0, BIG); }
@@ -120,10 +138,57 @@ namespace CompetitiveRounds
             internal DealFacts(int gl, long hn, int sq) { Gl = gl; Hn = hn; Sq = sq; }
         }
 
+        /// <summary>The identity the record carries (CD-M5), frozen with the
+        /// game: the game assembly's hash, this mod's own assembly hash (the
+        /// dealer implementation: the vanilla-mode and Same Cards dealers ship
+        /// in it), the mod's build tuple, the record's slot and sampler
+        /// semantics revision (SEMANTICS), and the room's active rules record.
+        /// A state other than "ok" is a hash that was not read; the server half
+        /// derives the profile key from all of it (build notes).</summary>
+        internal sealed class Profile
+        {
+            internal string GameSha = "", GameState = "no_location", ModSha = "", ModState = "no_location";
+            internal string[] Build = { "", "", "" };
+            internal string Rules = "";
+
+            internal List<object> ToList()
+            {
+                bool g = GameState == "ok" && GameSha != null && GameSha.Length == 64;
+                bool m = ModState == "ok" && ModSha != null && ModSha.Length == 64;
+                var b = Build ?? new string[0];
+                return new List<object>
+                {
+                    g ? GameSha : "", HashState(g, GameState), m ? ModSha : "", HashState(m, ModState),
+                    BuildPart(b, 0, 16), BuildPart(b, 1, 16), BuildPart(b, 2, 12), SEMANTICS, Printable(Rules, RULES_CAP),
+                };
+            }
+
+            private static string HashState(bool ok, string state)
+            {
+                return ok ? "ok" : (state == "read_failed" ? "read_failed" : "no_location");
+            }
+
+            private static string BuildPart(string[] b, int i, int max)
+            {
+                string s = i < b.Length ? b[i] : null;
+                return SeatEvidenceCore.IsBuildPart(s, max) ? s : "";
+            }
+        }
+
+        /// <summary>s when it is printable ASCII without '"' and '\' and at
+        /// most max long, else "".</summary>
+        internal static string Printable(string s, int max)
+        {
+            if (s == null || s.Length > max) return "";
+            for (int i = 0; i < s.Length; i++)
+                if (s[i] < ' ' || s[i] > '~' || s[i] == '"' || s[i] == '\\') return "";
+            return s;
+        }
+
         private sealed class Hand
         {
             internal int O, K, W, Wp = -1, Pk = -2, Pi = -1, Vid = -1, Gl = -1, Sq = -1, SenderOk = -1;
-            internal long An, Hn = -1;
+            internal long An, Hn = -1, SlN;
             internal bool HasEndPick, Foreign, CreatorUnknown;
             internal List<long> Sl = new List<long>();
             internal readonly List<long> Spawns = new List<long>();
@@ -133,10 +198,17 @@ namespace CompetitiveRounds
         internal sealed class CardGame
         {
             internal readonly int G, Ns, PoolN, OpeningDraws;
-            /// <summary>The census digest. Set after construction when the
-            /// census was still being computed off the hook (the Unity half's
-            /// tick fills it before any build).</summary>
+            /// <summary>The census digest of the pool this game's indexes name.</summary>
             internal string Digest;
+            /// <summary>POOL_OK, POOL_COLLISION (two category objects share a
+            /// name: the census does not identify the pool), POOL_CHANGED (the
+            /// pool changed during the game) or POOL_NOT_RUN (no census).</summary>
+            internal string PoolState;
+            /// <summary>INC_* bits: what this seat did not capture whole.</summary>
+            internal int Inc;
+            /// <summary>Set at the dispatch: nothing changes the game after it (CD-M1).</summary>
+            internal bool Sealed { get { return _sealed; } }
+            private bool _sealed;
             private readonly string[] _canon;
             private readonly int[] _rar;
             internal readonly List<long> Po = new List<long>();
@@ -146,6 +218,10 @@ namespace CompetitiveRounds
             internal readonly List<object> Hd = new List<object>();
             internal readonly List<long[]> Ap = new List<long[]>();
             internal long PhOmit, HdOmit, ApOmit, SlOmit, SpOmit;
+            /// <summary>Applications that did not complete: the original was
+            /// skipped by a sibling patch, or it threw (CD-M1). Never in ap,
+            /// tot or the applied counts.</summary>
+            internal long ApSkipped, ApFaulted;
             /// <summary>Per role (0 this seat, 1 the other seat): phases, deals,
             /// spawns, picks, applications, unresolved slots, spawn-order
             /// differences, over the whole game (never capped).</summary>
@@ -163,6 +239,7 @@ namespace CompetitiveRounds
                               IList<int> po, IList<int>[] held0)
             {
                 G = g; Ns = ns; OpeningDraws = openingDraws; PoolN = poolN; Digest = digest ?? "";
+                PoolState = Digest.Length == 64 ? POOL_OK : POOL_NOT_RUN;
                 _canon = canon ?? new string[0]; _rar = rar ?? new int[0];
                 if (po != null) for (int i = 0; i < po.Count && i < PO_CAP; i++) Po.Add(Clamp(po[i], -1, 1));
                 for (int r = 0; r < 2; r++)
@@ -187,10 +264,15 @@ namespace CompetitiveRounds
             /// deal facts only then).</summary>
             internal bool WantsFacts { get { return _phaseOpen && _hand == null; } }
 
+            /// <summary>The dispatch: an open deal is closed first (Close),
+            /// then nothing a later collector reports changes the game.</summary>
+            internal void Seal() { _sealed = true; }
+
             /// <summary>StartPick on this seat: a new phase; a deal still open
             /// in the previous phase closes with no pick (pk -2).</summary>
             internal void OpenPhase(int w, int picks, int rs, int ro, int sharedNow)
             {
+                if (_sealed) return;
                 CloseHand(sharedNow);
                 _phaseOrd++;
                 _phaseW = w == 0 || w == 1 ? w : -1;
@@ -220,7 +302,7 @@ namespace CompetitiveRounds
             /// local source card (finding L2: still a spawn).</summary>
             internal void Spawn(int ix, int creator, DealFacts f, int sharedNow)
             {
-                if (!_phaseOpen) return;
+                if (_sealed || !_phaseOpen) return;
                 if (_hand == null) OpenHand(f);
                 if (creator == 0) { _hand.Foreign = true; return; }
                 if (creator < 0) _hand.CreatorUnknown = true;
@@ -229,18 +311,27 @@ namespace CompetitiveRounds
                 if (_hand.W >= 0) Tot[_hand.W][2]++;
             }
 
-            /// <summary>RPCA_DoEndPick: the hand in slot order (pool index per
-            /// card id, -1 unresolved), the picked card's position in it (-1
-            /// absent), its view id, theInt, the role pickId names, and whether
-            /// the sender was the picker's controller (1/0, -1 unknown).</summary>
+            /// <summary>RPCA_DoEndPick with every slot given (n = slots.Count).</summary>
             internal void EndPick(IList<long> slots, int pi, int vid, int pk, int wp, int senderOk, DealFacts f, int sharedNow)
             {
-                if (!_phaseOpen) return;
+                EndPick(slots, slots != null ? slots.Count : 0, pi, vid, pk, wp, senderOk, f, sharedNow);
+            }
+
+            /// <summary>RPCA_DoEndPick: the hand in slot order (pool index per
+            /// card id, -1 unresolved) as the hook kept it, the first SL_CAP of
+            /// n slots (F4: the hook copies a hard-capped snapshot), the picked
+            /// card's position (-1 absent), its view id, theInt, the role pickId
+            /// names, and whether the sender was the picker's controller (1/0,
+            /// -1 unknown).</summary>
+            internal void EndPick(IList<long> slots, long n, int pi, int vid, int pk, int wp, int senderOk, DealFacts f, int sharedNow)
+            {
+                if (_sealed || !_phaseOpen) return;
                 if (_hand == null) OpenHand(f);
                 var h = _hand;
                 h.HasEndPick = true;
                 h.Sl = new List<long>();
-                if (slots != null) foreach (var s in slots) h.Sl.Add(Ix(s));
+                if (slots != null) for (int i = 0; i < slots.Count; i++) h.Sl.Add(Ix(slots[i]));
+                h.SlN = n > h.Sl.Count ? n : h.Sl.Count;
                 h.Pi = pi; h.Vid = vid; h.Pk = pk; h.Wp = wp == 0 || wp == 1 ? wp : -1;
                 h.SenderOk = senderOk == 0 || senderOk == 1 ? senderOk : -1;
                 if (h.W >= 0) Tot[h.W][3]++;
@@ -251,26 +342,34 @@ namespace CompetitiveRounds
             /// closes with no pick.</summary>
             internal void DonePicking(int sharedNow)
             {
-                if (!_phaseOpen) return;
+                if (_sealed || !_phaseOpen) return;
                 CloseHand(sharedNow);
                 if (_phase != null) _phase[6] = 1;
                 _phaseOpen = false;
             }
 
             /// <summary>One card application to one player. kind 0 RPCA_Pick, 1
-            /// OFFLINE_Pick; ro 1 when a sibling prefix had already set
-            /// __runOriginal false.</summary>
-            internal void Apply(int w, int ix, int kind, int vid, int ro)
+            /// OFFLINE_Pick. outcome: APPLY_DONE the original ran and completed
+            /// (the only kind recorded in ap, tot and the applied counts),
+            /// APPLY_SKIPPED a sibling patch skipped it, APPLY_FAULTED it threw.</summary>
+            internal void Apply(int w, int ix, int kind, int vid, int outcome)
             {
+                if (_sealed) return;
+                if (outcome != APPLY_DONE)
+                {
+                    if (outcome == APPLY_SKIPPED) ApSkipped++; else ApFaulted++;
+                    return;
+                }
                 int r = w == 0 || w == 1 ? w : -1;
                 if (r >= 0) { AppsTo[r]++; Tot[r][4]++; }
-                if (Ap.Count < AP_CAP) Ap.Add(new long[] { r, Ix(ix), kind == 1 ? 1 : 0, Clamp(vid, -1, int.MaxValue), ro == 1 ? 1 : 0 });
+                if (Ap.Count < AP_CAP) Ap.Add(new long[] { r, Ix(ix), kind == 1 ? 1 : 0, Clamp(vid, -1, int.MaxValue) });
                 else ApOmit++;
             }
 
             /// <summary>Game end on this seat: an open deal closes with no pick.</summary>
             internal void Close(int sharedNow)
             {
+                if (_sealed) return;
                 CloseHand(sharedNow);
                 _phaseOpen = false;
             }
@@ -280,11 +379,13 @@ namespace CompetitiveRounds
                 var h = _hand;
                 if (h == null) return;
                 _hand = null;
-                var sl = h.HasEndPick ? h.Sl : new List<long>(h.Spawns);
+                // the end-pick's slots as kept (at most n of them), else the spawns
+                var sl = h.HasEndPick ? h.Sl : h.Spawns;
+                long n = h.HasEndPick ? h.SlN : h.Spawns.Count;
                 // a hand seen only by its end-pick (no spawn reached this seat) has no spawn order to differ
-                bool same = h.Spawns.Count == 0 || SameList(h.Spawns, sl);
-                long unres = 0;
-                foreach (var s in sl) if (s < 0) unres++;
+                bool same = h.Spawns.Count == 0 || (h.Spawns.Count == n && SamePrefix(h.Spawns, sl));
+                long unres = n - sl.Count;      // slots the hook did not keep were not resolved
+                for (int i = 0; i < sl.Count; i++) if (sl[i] < 0) unres++;
                 long src = -1;
                 int gen = -1;
                 if (h.W == 0)
@@ -303,34 +404,49 @@ namespace CompetitiveRounds
                 }
                 if (Hd.Count >= HD_CAP) { HdOmit++; return; }
                 var slOut = new List<long>();
-                for (int i = 0; i < sl.Count; i++) { if (i < SL_CAP) slOut.Add(sl[i]); else SlOmit++; }
+                for (int i = 0; i < sl.Count && i < SL_CAP; i++) slOut.Add(sl[i]);
+                SlOmit += n - slOut.Count;
                 var spOut = new List<long>();
                 if (!same) for (int i = 0; i < h.Spawns.Count; i++) { if (i < SL_CAP) spOut.Add(h.Spawns[i]); else SpOmit++; }
                 Hd.Add(new List<object>
                 {
-                    Clamp(h.O, 0, 999), Clamp(h.K, 0, 999), (long)h.W, (long)h.Wp, Clamp(h.An, -1, BIG), Clamp(sl.Count, 0, BIG), slOut,
+                    Clamp(h.O, 0, 999), Clamp(h.K, 0, 999), (long)h.W, (long)h.Wp, Clamp(h.An, -1, BIG), Clamp(n, 0, BIG), slOut,
                     Clamp(h.Spawns.Count, 0, BIG), spOut, Clamp(h.Pk, -2, 999), Clamp(h.Pi, -1, 999), (long)ds, src, (long)h.Sq,
                     Clamp(h.Vid, -1, int.MaxValue), (long)h.Gl, (long)gen, Clamp(h.Hn, -1, BIG),
                 });
             }
 
-            /// <summary>The record (untrimmed): every list as recorded, `omit`
-            /// holding the recording caps. Budget() trims it to the limit.</summary>
+            /// <summary>The record with only the game assembly's identity read
+            /// (every other profile part unread).</summary>
             internal SeatEvidenceCore.JObj Record(string end, string profSha, string profState, int scRule, int scVerdict, long[][] cost)
+            {
+                return Record(end, new Profile { GameSha = profSha, GameState = profState }, scRule, scVerdict, cost);
+            }
+
+            /// <summary>The record (untrimmed): every list as recorded, `omit`
+            /// holding the recording caps. Budget() trims it to the limit.
+            /// scRule / scVerdict -1: not read (NOT-RUN; CD-M2). With INC_FIRST
+            /// the first phase was not captured whole: po and held0, which only
+            /// it reads, are emitted empty / null (CD-M3).</summary>
+            internal SeatEvidenceCore.JObj Record(string end, Profile prof, int scRule, int scVerdict, long[][] cost)
             {
                 var o = new SeatEvidenceCore.JObj();
                 o.Add("schema", (long)SCHEMA).Add("g", Clamp(G, 0, 9999));
                 if (SeatEvidenceCore.IsEndKind(end)) o.Add("end", end);
-                bool shaOk = profState == "ok" && profSha != null && profSha.Length == 64;
+                bool first = (Inc & INC_FIRST) != 0;
+                bool digestOk = Digest != null && Digest.Length == 64;
                 o.Add("ns", Clamp(Ns, 0, 99))
-                 .Add("pool", new List<object> { Clamp(PoolN, 0, 9999), Digest })
-                 .Add("prof", new List<object> { shaOk ? profSha : "", shaOk ? "ok" : (profState == "read_failed" ? "read_failed" : "no_location") })
-                 .Add("po", new List<long>(Po))
-                 .Add("sc", new long[] { scRule == 1 ? 1 : 0, scVerdict >= 0 && scVerdict <= 2 ? scVerdict : 0 });
+                 .Add("pool", new List<object> { Clamp(PoolN, 0, 9999), digestOk ? Digest : "", digestOk ? PoolStateOf(PoolState) : POOL_NOT_RUN })
+                 .Add("prof", (prof ?? new Profile()).ToList())
+                 .Add("po", first ? new List<long>() : new List<long>(Po))
+                 .Add("sc", new long[] { scRule == 0 || scRule == 1 ? scRule : -1, scVerdict >= 0 && scVerdict <= 2 ? scVerdict : -1 })
+                 .Add("inc", (long)(Inc & (INC_FIRST | INC_LOST | INC_FAULT)));
+                List<long> h0 = first ? null : Held0[0], h1 = first ? null : Held0[1];
                 // cards: every pool index the record names, ascending
                 var refs = new SortedSet<long>();
                 foreach (var e in Hd) { var l = (List<object>)e; foreach (var s in (List<long>)l[6]) if (s >= 0) refs.Add(s); foreach (var s in (List<long>)l[8]) if (s >= 0) refs.Add(s); }
-                for (int r = 0; r < 2; r++) if (Held0[r] != null) foreach (var s in Held0[r]) if (s >= 0) refs.Add(s);
+                if (h0 != null) foreach (var s in h0) if (s >= 0) refs.Add(s);
+                if (h1 != null) foreach (var s in h1) if (s >= 0) refs.Add(s);
                 foreach (var a in Ap) if (a[1] >= 0) refs.Add(a[1]);
                 var cards = new List<object>();
                 long cardsOmit = 0;
@@ -341,7 +457,7 @@ namespace CompetitiveRounds
                     if (nm.Length > NAME_CAP) nm = nm.Substring(0, NAME_CAP);
                     cards.Add(new List<object> { ix, nm, (long)(ix < _rar.Length ? _rar[ix] : -1) });
                 }
-                var held = new List<object> { Held0[0] != null ? (object)new List<long>(Held0[0]) : null, Held0[1] != null ? (object)new List<long>(Held0[1]) : null };
+                var held = new List<object> { h0 != null ? (object)new List<long>(h0) : null, h1 != null ? (object)new List<long>(h1) : null };
                 var ph = new List<object>(); foreach (var e in Ph) ph.Add((long[])e.Clone());
                 var ap = new List<object>(); foreach (var e in Ap) ap.Add(e);
                 var tot = new List<object>();
@@ -353,10 +469,16 @@ namespace CompetitiveRounds
                     var t = new long[5]; for (int j = 0; j < 5; j++) t[j] = Cnt(j < c.Length ? c[j] : 0); cst.Add(t);
                 }
                 o.Add("cards", cards).Add("held0", held).Add("ph", ph).Add("hd", new List<object>(Hd)).Add("ap", ap)
+                 .Add("apx", new long[] { Cnt(ApSkipped), Cnt(ApFaulted) })
                  .Add("tot", tot).Add("cost", cst)
-                 .Add("omit", Omit(cardsOmit, Held0Omit[0], Held0Omit[1], PhOmit, HdOmit, ApOmit, SlOmit, SpOmit));
+                 .Add("omit", Omit(cardsOmit, first ? 0 : Held0Omit[0], first ? 0 : Held0Omit[1], PhOmit, HdOmit, ApOmit, SlOmit, SpOmit));
                 return o;
             }
+        }
+
+        private static string PoolStateOf(string s)
+        {
+            return s == POOL_OK || s == POOL_COLLISION || s == POOL_CHANGED ? s : POOL_NOT_RUN;
         }
 
         internal static SeatEvidenceCore.JObj Omit(long cards, long held0a, long held0b, long ph, long hd, long ap, long sl, long sp)
@@ -365,10 +487,11 @@ namespace CompetitiveRounds
                 .Add("ph", Cnt(ph)).Add("hd", Cnt(hd)).Add("ap", Cnt(ap)).Add("sl", Cnt(sl)).Add("sp", Cnt(sp));
         }
 
-        private static bool SameList(List<long> a, List<long> b)
+        /// <summary>a's first b.Count entries equal b's.</summary>
+        private static bool SamePrefix(List<long> a, List<long> b)
         {
-            if (a.Count != b.Count) return false;
-            for (int i = 0; i < a.Count; i++) if (a[i] != b[i]) return false;
+            if (a.Count < b.Count) return false;
+            for (int i = 0; i < b.Count; i++) if (a[i] != b[i]) return false;
             return true;
         }
 

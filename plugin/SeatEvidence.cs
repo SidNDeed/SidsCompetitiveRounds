@@ -130,13 +130,15 @@ namespace CompetitiveRounds
         // -- per-game state (all bounded) ------------------------------------------------
 
         private static C.AgeStats _ageView = new C.AgeStats(11), _ageRpc = new C.AgeStats(12), _ageHit = new C.AgeStats(13), _ageBlk = new C.AgeStats(14);
-        private static readonly C.SampleLog _samples = new C.SampleLog();
+        // The collectors a dispatch hands to its capture (F4): never cleared,
+        // only replaced, so a capture's references stay exactly as the game left them.
+        private static C.SampleLog _samples = new C.SampleLog();
         private static C.Cadence _cad = new C.Cadence();
-        private static readonly C.EventList _blkSent = new C.EventList(), _hitRecv = new C.EventList(), _blkRecv = new C.EventList(), _hitSent = new C.EventList();
+        private static C.EventList _blkSent = new C.EventList(), _hitRecv = new C.EventList(), _blkRecv = new C.EventList(), _hitSent = new C.EventList();
         private static readonly C.Ordinals _ordBlkSent = new C.Ordinals(), _ordBlkRecv = new C.Ordinals(), _ordHitRecv = new C.Ordinals(), _ordHitSent = new C.Ordinals();
         private static readonly C.HitWindow _winRecv = new C.HitWindow(), _winSent = new C.HitWindow();
         private static readonly long[] _shots = new long[3], _imp = new long[3], _dec = new long[2], _push = new long[7];
-        private static readonly HashSet<int> _impDistinct = new HashSet<int>();
+        private static HashSet<int> _impDistinct = new HashSet<int>();
         private const int IMP_DISTINCT_CAP = 8192;
         private static long _fireFloor, _blkFaults, _unpairBlocks, _unpairHits;
         private static int _lastFireStamp; private static bool _hasFireStamp;
@@ -173,19 +175,28 @@ namespace CompetitiveRounds
         {
             _open = false; _oppActor = 0; _masterAtStart = false; _rankedAtStart = false;
             _frozen = false; _frozenAtMs = 0; _room = ""; _end = null;
-            _ageView = new C.AgeStats(11); _ageRpc = new C.AgeStats(12); _ageHit = new C.AgeStats(13); _ageBlk = new C.AgeStats(14);
-            _samples.Clear(); _cad = new C.Cadence();
-            foreach (var l in new[] { _blkSent, _hitRecv, _blkRecv, _hitSent }) { l.Items.Clear(); l.Omitted = 0; }
+            Handover();
             _ordBlkSent.Clear(); _ordBlkRecv.Clear(); _ordHitRecv.Clear(); _ordHitSent.Clear();
             _winRecv.Clear(); _winSent.Clear();
             Array.Clear(_shots, 0, 3); Array.Clear(_imp, 0, 3); Array.Clear(_dec, 0, 2); Array.Clear(_push, 0, 7);
-            _impDistinct.Clear();
             _fireFloor = _blkFaults = _unpairBlocks = _unpairHits = 0; _hasFireStamp = false;
             _mine.Clear(); _opp.Clear();
             _ownOpenPending = false; _awaitDamage = null;
             _rttSum = _rttN = _rttMax = 0; _offUpdates = _offStepMax = 0; _offHas = false;
             _oppBuild = ""; _oppKeys = new List<string>(); _oppPub = null;
             _nextSampleMs = 0;
+        }
+
+        /// <summary>Fresh collectors in place of the game's: O(1), no copy and
+        /// no clear (F4). The old ones belong to whoever took them (a capture),
+        /// or to nobody.</summary>
+        private static void Handover()
+        {
+            _ageView = new C.AgeStats(11); _ageRpc = new C.AgeStats(12); _ageHit = new C.AgeStats(13); _ageBlk = new C.AgeStats(14);
+            _samples = new C.SampleLog(); _cad = new C.Cadence();
+            _blkSent = new C.EventList(); _hitRecv = new C.EventList(); _blkRecv = new C.EventList(); _hitSent = new C.EventList();
+            _impDistinct = new HashSet<int>();
+            _oppKeys = new List<string>();
         }
 
         // -- RPC context (PhotonNetwork.ExecuteRpc prefix / finalizer) ---------------------
@@ -413,7 +424,8 @@ namespace CompetitiveRounds
 
         private static void Admit(C.HitWindow w, C.EventList list, int tb)
         {
-            foreach (var e in w.Block(tb, 1)) list.Add(e);
+            var a = w.Block(tb, 1);
+            for (int i = 0; i < a.Count && i < C.HitWindow.PENDING_CAP; i++) list.Add(a[i]);
         }
 
         // -- hits ---------------------------------------------------------------------------
@@ -747,6 +759,12 @@ namespace CompetitiveRounds
         internal static string GameDllSha { get { return _gameSha; } }
         internal static string GameDllState { get { return _gameState; } }
 
+        /// <summary>This mod DLL's own hash and its state, as hashed at boot
+        /// (read-only; the card draw record's dealer-implementation identity,
+        /// CD-M5). ID_PENDING until the hash completed.</summary>
+        internal static string OwnDllSha { get { return _dllSha; } }
+        internal static string OwnDllState { get { return _dllState; } }
+
         /// <summary>Both identities completed: ok, read_failed, or no_location
         /// for an empty assembly location.</summary>
         internal static bool IdentityReady { get { return _dllState != ID_PENDING && _gameState != ID_PENDING; } }
@@ -979,15 +997,26 @@ namespace CompetitiveRounds
 
         // -- the record: captured at the dispatch, built on a later tick (F4) ------------------
 
-        /// <summary>A game's record as the dispatch captured it: every field
-        /// already in memory, copied. The build identity, the foreign scan, the
-        /// budget, the signature, the queue file and the log line are the
+        /// <summary>A game's record as the dispatch captured it (F4): the
+        /// scalars and fixed-size counters copied, and the game's own variable
+        /// collectors (age reservoirs, the sample log, the cadence, the event
+        /// lists, the other seat's key list) TAKEN, not copied: the dispatch
+        /// hands fresh ones to the live state, so these are never written
+        /// again. Every aggregation over them (percentiles, age buckets, drift,
+        /// cadence, the other seat's capabilities, the list copies), the
+        /// key and seat id validation, the build identity, the foreign scan,
+        /// the budget, the signature, the queue file and the log line are the
         /// build's, on the tick.</summary>
         private sealed class Capture
         {
             internal C.Record R;
-            internal string Seat, Other, Stable, Attach, Text, Env;
-            internal bool FromToken;
+            internal string Seat, Other, Attach, BuildValue, Stable, Text, Env;
+            internal bool FromToken, Aggregated;
+            internal C.AgeStats AgeView, AgeRpc, AgeHit, AgeBlk;
+            internal C.SampleLog Samples;
+            internal C.Cadence Cad;
+            internal C.EventList BlkSent, HitRecv, BlkRecv, HitSent;
+            internal List<string> OppKeys;
         }
 
         private const int CAPTURE_CAP = 4;
@@ -1017,13 +1046,15 @@ namespace CompetitiveRounds
         /// GameStateWatcher's room-exit branch for a game cut short; from the
         /// quit hook for a game still live while the game closes. Ranked 1v1
         /// games only, both seats. Takes the live window, or a frozen one of
-        /// the same room no older than FROZEN_MS, and CAPTURES its record in
-        /// memory: copies of the bounded lists and counters, the percentiles,
-        /// the drift fit and the clock rates. Nothing here logs, scans, budgets
-        /// or touches a file; the build (BuildCaptures) does that on the next
-        /// tick outside combat, or at once on the quitting path (FlushOnQuit).
-        /// The end kind this seat noted rides in the record; none means it saw
-        /// the game over.</summary>
+        /// the same room no older than FROZEN_MS, and CAPTURES it in O(1):
+        /// scalars and fixed-size counters copied, the variable collectors
+        /// taken by reference and replaced (Handover), so nothing in this call
+        /// grows with the game's length (F4). It validates nothing that needs
+        /// a loop, aggregates nothing, logs, scans, budgets and touches no
+        /// file; the build (BuildCaptures) does all of that on the next tick
+        /// outside combat, or on the quitting path (FlushOnQuit). The end kind
+        /// this seat noted rides in the record; none means it saw the game
+        /// over.</summary>
         internal static void Dispatch(string seat, string other, string attach, int roundsSelf, int roundsOther, bool rankedNow)
         {
             try
@@ -1034,26 +1065,17 @@ namespace CompetitiveRounds
                 if (!live && !frozen) return;
                 _open = false; _frozen = false;
                 if (!rankedNow) return;
-                string stable = StableOf(attach);
-                if (stable == null || !C.IsSteamId(seat) || !C.IsSteamId(other))
-                {
-                    Note(" no record: game key or seat ids outside the contract");
-                    return;
-                }
                 bool fromToken;
                 int t0 = GameStateWatcher.SeatEvidenceT0(out fromToken);
                 var r = new C.Record
                 {
                     T0 = t0, T0Src = fromToken ? "m" : "o", Master = _masterAtStart ? 1 : 0, Ranked = _rankedAtStart ? 1 : 0,
                     RoundsSelf = roundsSelf, RoundsOther = roundsOther, End = _end,
-                    Build = C.SplitBuild(PeerBuild.BuildValue()) ?? new[] { "", "", "" },
                     Compat = _compat,
                     RttAvg = _rttN > 0 ? _rttSum / _rttN : 0, RttMax = _rttMax,
                     OffsetUpdates = _offUpdates, OffsetStepMax = _offStepMax,
                     ClkPpm = ClockPpm(), MonoSend = SwMs,
-                    AgeView = _ageView.Four(), AgeRpc = _ageRpc.Four(), AgeHit = _ageHit.Three(), AgeBlk = _ageBlk.Three(),
-                    AgeB = _samples.AgeBuckets(t0), DriftV = _samples.DriftTriple(t0), Cad = _cad.Five(),
-                    OtherBuildV = _oppBuild, OtherCapsV = C.OtherCaps(_oppKeys), OtherPub = _oppPub,
+                    OtherBuildV = _oppBuild, OtherPub = _oppPub,
                     FireFloor = _fireFloor, BlkFaults = _blkFaults, UnpairBlocks = _unpairBlocks, UnpairHits = _unpairHits,
                 };
                 NetworkReplicaDiagnostics.ObsSnapshot o;
@@ -1063,15 +1085,20 @@ namespace CompetitiveRounds
                 Array.Copy(_shots, r.Shots, 3);
                 r.Imp = new long[] { _imp[0], _imp[1], _impDistinct.Count };
                 Array.Copy(_dec, r.Dec, 2); Array.Copy(_push, r.Push, 7);
-                r.BlkSent = new List<long[]>(_blkSent.Items); r.HitRecv = new List<long[]>(_hitRecv.Items);
-                r.BlkRecv = new List<long[]>(_blkRecv.Items); r.HitSent = new List<long[]>(_hitSent.Items);
                 r.Omit = new long[] { _blkSent.Omitted, _hitRecv.Omitted, _blkRecv.Omitted, _hitSent.Omitted, 0 };
+                var cap = new Capture
+                {
+                    R = r, Seat = seat, Other = other, Attach = attach, FromToken = fromToken, BuildValue = PeerBuild.BuildValue(),
+                    AgeView = _ageView, AgeRpc = _ageRpc, AgeHit = _ageHit, AgeBlk = _ageBlk, Samples = _samples, Cad = _cad,
+                    BlkSent = _blkSent, HitRecv = _hitRecv, BlkRecv = _blkRecv, HitSent = _hitSent, OppKeys = _oppKeys,
+                };
+                Handover();
                 if (_captures.Count >= CAPTURE_CAP)
                 {
                     _captures.RemoveAt(0);
                     Note(" a captured record was dropped before it was persisted: too many waiting");
                 }
-                _captures.Add(new Capture { R = r, Seat = seat, Other = other, Stable = stable, Attach = attach, FromToken = fromToken });
+                _captures.Add(cap);
                 _nextCaptureTryMs = 0;
             }
             catch
@@ -1080,20 +1107,46 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The build's first step, on the tick (F4): the game key and
+        /// seat ids validated, the build tuple split, and every aggregation
+        /// over the collectors the dispatch took. False: outside the contract,
+        /// no record.</summary>
+        private static bool Aggregate(Capture c)
+        {
+            if (c.Aggregated) return true;
+            string stable = StableOf(c.Attach);
+            if (stable == null || !C.IsSteamId(c.Seat) || !C.IsSteamId(c.Other)) return false;
+            var r = c.R;
+            int t0 = r.T0;
+            r.Build = C.SplitBuild(c.BuildValue) ?? new[] { "", "", "" };
+            r.AgeView = c.AgeView.Four(); r.AgeRpc = c.AgeRpc.Four(); r.AgeHit = c.AgeHit.Three(); r.AgeBlk = c.AgeBlk.Three();
+            r.AgeB = c.Samples.AgeBuckets(t0); r.DriftV = c.Samples.DriftTriple(t0); r.Cad = c.Cad.Five();
+            r.OtherCapsV = C.OtherCaps(c.OppKeys);
+            r.BlkSent = new List<long[]>(c.BlkSent.Items); r.HitRecv = new List<long[]>(c.HitRecv.Items);
+            r.BlkRecv = new List<long[]>(c.BlkRecv.Items); r.HitSent = new List<long[]>(c.HitSent.Items);
+            c.Stable = stable; c.Aggregated = true;
+            c.AgeView = c.AgeRpc = c.AgeHit = c.AgeBlk = null; c.Samples = null; c.Cad = null;
+            c.BlkSent = c.HitRecv = c.BlkRecv = c.HitSent = null; c.OppKeys = null;
+            return true;
+        }
+
         /// <summary>Builds and persists the captured records: from Tick (outside
-        /// combat) or from FlushOnQuit (now = true). A build waits for a
+        /// combat) or from FlushOnQuit (quitting = true). A build waits for a
         /// completed build identity (F7; the quitting path completes it on its
-        /// own thread). A record is reported as queued only after the queue
-        /// file holding it replaced the old one (F8); until then it stays
-        /// captured, its built bytes kept, and is tried again every 5 s.</summary>
-        private static void BuildCaptures(bool now)
+        /// own thread). On the tick a record is reported as queued only after
+        /// the queue file holding it replaced the old one (F8); until then it
+        /// stays captured, its built bytes kept, and is tried again every 5 s.
+        /// On the quitting path it never enters the queue (F3): it is written
+        /// to its own closing file (SpoolClosing), which the next launch's
+        /// first load, outside combat, moves into the queue.</summary>
+        private static void BuildCaptures(bool quitting)
         {
             DrainNotes();
             if (_captures.Count == 0) return;
-            if (!now && SwMs < _nextCaptureTryMs) return;
+            if (!quitting && SwMs < _nextCaptureTryMs) return;
             if (!IdentityReady)
             {
-                if (now) CompleteIdentityNow();
+                if (quitting) CompleteIdentityNow();
                 else { StartHashing(); return; }
             }
             int i = 0;
@@ -1104,6 +1157,12 @@ namespace CompetitiveRounds
                 {
                     if (c.Env == null)
                     {
+                        if (!Aggregate(c))
+                        {
+                            _captures.RemoveAt(i);
+                            Plugin.Log.LogWarning(TAG + " no record: game key or seat ids outside the contract");
+                            continue;
+                        }
                         var r = c.R;
                         r.DllSha = _dllSha; r.DllState = _dllState; r.GameDllSha = _gameSha; r.GameDllState = _gameState;
                         long fa, fo; Foreign(out fa, out fo); r.ForeignAsm = fa; r.ForeignOwners = fo;
@@ -1118,7 +1177,8 @@ namespace CompetitiveRounds
                         }
                         c.Text = text; c.Env = env;
                     }
-                    if (!Enqueue("e", c.Env))
+                    bool persisted = quitting ? SpoolClosing("e", c.Env) : Enqueue("e", c.Env);
+                    if (!persisted)
                     {
                         _nextCaptureTryMs = SwMs + 5000;
                         if (!_captureFailLogged)
@@ -1131,7 +1191,8 @@ namespace CompetitiveRounds
                     _captures.RemoveAt(i);
                     _captureFailLogged = false;
                     var q = c.R;
-                    Plugin.Log.LogInfo(TAG + " record queued: " + c.Text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, lists "
+                    Plugin.Log.LogInfo(TAG + (quitting ? " record kept for the next launch: " : " record queued: ")
+                        + c.Text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, lists "
                         + q.BlkSent.Count + "/" + q.HitRecv.Count + "/" + q.BlkRecv.Count + "/" + q.HitSent.Count
                         + ", unpaired " + q.UnpairBlocks + "/" + q.UnpairHits + ", t0 " + (c.FromToken ? "m" : "o")
                         + ", end " + (q.End ?? "game_over"));
@@ -1145,10 +1206,11 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Application.quitting, after GameStateWatcher's quit hook
-        /// captured a game still live: every captured record is built and
-        /// persisted now, on this thread, because no later frame comes. The
-        /// only build that does not wait for a tick, and the only queue write
-        /// that may happen while a battle is live (the process is ending).</summary>
+        /// captured a game still live: every captured record is built now, on
+        /// this thread, because no later frame comes, and written to its own
+        /// closing file, NOT the queue (F3): no queue load, save, attempt or
+        /// request happens here, whether or not a battle is live in this frame.
+        /// The next launch's first queue load moves it into the queue.</summary>
         internal static void FlushOnQuit()
         {
             try { BuildCaptures(true); } catch { }
@@ -1170,36 +1232,136 @@ namespace CompetitiveRounds
         private const int QUEUE_CAP = 64;
         private static readonly List<C.Pending> _queue = new List<C.Pending>();
         private static bool _loaded, _inFlight;
+        // a write that did not replace the primary (F8): memory may be older or
+        // newer than the newest whole copy on disk, so the next load merges both
+        private static bool _stale;
+        // closing files the first load found and has not yet seen promoted (F3)
+        private static bool _spoolChecked;
         private static long _nextPumpMs, _gen;
 
         private static string QueuePath() { return Path.Combine(Paths.ConfigPath, "CompetitiveRounds.seat-evidence.jsonl"); }
 
+        private const string SPOOL_PREFIX = "CompetitiveRounds.seat-evidence.closing-";
+        private const int SPOOL_CAP = 16;
+        private static int _spoolSeq;
+
         private static long UnixNow() { return DateTimeOffset.UtcNow.ToUnixTimeSeconds(); }
 
-        /// <summary>Reads the queue once per launch (F8): the primary AND the
-        /// temporary copy, recovering the newest whole one (C.ChooseCopy). A
-        /// copy that exists but cannot be read leaves the queue unloaded: its
-        /// generation is unknown, so nothing is written over it, and the load
-        /// is tried again later. A request past the expiry or the attempt
-        /// bound is loaded too: the pump settles it (C.SendRefusal) without a
-        /// send, and the write that settles it removes it from the file.</summary>
+        /// <summary>The identity of a queued request: its route and its frozen
+        /// bytes. Every lookup and every merge goes by it, never by the object.</summary>
+        private static int Find(List<C.Pending> list, string route, string body)
+        {
+            for (int i = 0; i < list.Count; i++)
+                if (list[i].Route == route && list[i].Body == body) return i;
+            return -1;
+        }
+
+        /// <summary>The disk copy merged into memory, request by request: a
+        /// request either side holds is kept, and where both hold it the
+        /// larger attempt and session counts and the later next-eligible time
+        /// win (the launch hold is memory's). Memory's objects are updated in
+        /// place; requests only the disk holds are appended in its order.</summary>
+        private static void MergeInto(List<C.Pending> mem, IList<C.Pending> disk)
+        {
+            for (int i = 0; i < disk.Count; i++)
+            {
+                var d = disk[i];
+                int k = Find(mem, d.Route, d.Body);
+                if (k < 0) { if (mem.Count < QUEUE_CAP) mem.Add(d.Clone()); continue; }
+                var m = mem[k];
+                if (d.Attempts > m.Attempts) m.Attempts = d.Attempts;
+                if (d.SessionRetries > m.SessionRetries) m.SessionRetries = d.SessionRetries;
+                if (d.NotBeforeUnix > m.NotBeforeUnix) m.NotBeforeUnix = d.NotBeforeUnix;
+                if (d.FirstUnix < m.FirstUnix) m.FirstUnix = d.FirstUnix;
+            }
+        }
+
+        /// <summary>Every queue writer calls this first. It reads the primary
+        /// AND the temporary copy, recovering the newest whole one
+        /// (C.ChooseCopy), on the first call of a launch and again after any
+        /// write that did not replace the primary (F8): that copy is merged
+        /// into memory (MergeInto), so no writer ever writes from a memory
+        /// older than the newest whole copy. A copy that exists but cannot be
+        /// read leaves the queue unloaded: its generation is unknown, so
+        /// nothing is written over it, and the load is tried again later. On
+        /// the first load of a launch the closing files the previous launch's
+        /// quitting path wrote (F3) are merged in too, and deleted only after
+        /// a write that replaced the primary holds them. A request past the
+        /// expiry or the attempt bound is loaded too: the pump settles it
+        /// (C.SendRefusal) without a send, and the write that settles it
+        /// removes it from the file.</summary>
         private static bool Load()
         {
-            if (_loaded) return true;
+            if (_loaded && !_stale && _spoolChecked) return true;
             try
             {
-                string path = QueuePath();
-                var a = ReadCopy(path, true);
-                var b = ReadCopy(path + ".tmp", false);
-                if ((a.Present && !a.Readable) || (b.Present && !b.Readable)) return false;
-                int which = C.ChooseCopy(a, b);
-                _gen = Math.Max(_gen, Math.Max(a.Generation, b.Generation));
-                _queue.Clear();
-                var src = which == 1 ? a.Items : (which == 2 ? b.Items : null);
-                if (src != null)
-                    foreach (var p in src)
-                        if (_queue.Count < QUEUE_CAP) _queue.Add(p);
-                _loaded = true;
+                if (!_loaded || _stale)
+                {
+                    string path = QueuePath();
+                    var a = ReadCopy(path, true);
+                    var b = ReadCopy(path + ".tmp", false);
+                    if ((a.Present && !a.Readable) || (b.Present && !b.Readable)) return false;
+                    int which = C.ChooseCopy(a, b);
+                    _gen = Math.Max(_gen, Math.Max(a.Generation, b.Generation));
+                    var src = which == 1 ? a.Items : (which == 2 ? b.Items : null);
+                    if (src != null) MergeInto(_queue, src);
+                    _loaded = true;
+                    _stale = false;
+                }
+                if (!_spoolChecked) PromoteSpool();
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>The closing files (F3), at most SPOOL_CAP per call: every
+        /// whole one merged into the queue, then the queue written; the files
+        /// are deleted only when that write replaced the primary, so a failed
+        /// write keeps them for the next try (a merge of a request the queue
+        /// already holds changes nothing). A file that is not whole can never
+        /// become whole (its writer is gone) and is deleted with the rest.</summary>
+        private static void PromoteSpool()
+        {
+            string[] files;
+            try { files = Directory.GetFiles(Paths.ConfigPath, SPOOL_PREFIX + "*.jsonl"); }
+            catch { return; }
+            if (files.Length == 0) { _spoolChecked = true; return; }
+            Array.Sort(files, StringComparer.Ordinal);
+            int n = Math.Min(files.Length, SPOOL_CAP);
+            var next = new List<C.Pending>(_queue);
+            for (int i = 0; i < n; i++)
+            {
+                var c = ReadCopy(files[i], false);
+                if (c.Present && !c.Readable) return;       // held by something: try again later
+                if (c.Whole) MergeInto(next, c.Items);
+            }
+            if (Save(next) != SAVED) return;
+            _queue.Clear();
+            _queue.AddRange(next);
+            for (int i = 0; i < n; i++) { try { File.Delete(files[i]); } catch { } }
+            _spoolChecked = files.Length <= n;
+            _nextPumpMs = 0;
+            Plugin.Log.LogInfo(TAG + " " + n.ToString(CultureInfo.InvariantCulture) + " closing file(s) moved into the queue");
+        }
+
+        /// <summary>The quitting path's only write (F3): one request in a new
+        /// file of its own, in the queue file's format with its trailer,
+        /// flushed to disk. Never the queue file, never a load: the next
+        /// launch's first load merges it (PromoteSpool). False: not written.</summary>
+        internal static bool SpoolClosing(string route, string body)
+        {
+            try
+            {
+                if (body == null || (route != "e" && route != "k" && route != "c")) return false;
+                var p = new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() };
+                string name = SPOOL_PREFIX + DateTime.UtcNow.Ticks.ToString("D19", CultureInfo.InvariantCulture) + "-"
+                              + (++_spoolSeq).ToString("D4", CultureInfo.InvariantCulture) + ".jsonl";
+                byte[] bytes = new UTF8Encoding(false).GetBytes(C.QueueText(new List<C.Pending> { p }, 1));
+                using (var fs = new FileStream(Path.Combine(Paths.ConfigPath, name), FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    fs.Write(bytes, 0, bytes.Length);
+                    fs.Flush(true);
+                }
                 return true;
             }
             catch { return false; }
@@ -1214,18 +1376,25 @@ namespace CompetitiveRounds
             return C.ParseQueue(text, primary);
         }
 
+        /// <summary>What a queue write left on disk (F6, F8). SAVED: the
+        /// temporary copy replaced the primary. IN_TEMP: it did not, but the
+        /// temporary copy holding exactly this generation is whole on disk,
+        /// and as the newest whole copy a later load recovers it. ABSENT: no
+        /// whole copy of this generation exists (read back after the failure).
+        /// UNKNOWN: the read-back itself failed.</summary>
+        private const int SAVED = 2, IN_TEMP = 1, ABSENT = 0, UNKNOWN = -1;
+
         /// <summary>Writes `items` as the next generation: the whole text to the
         /// temporary copy, flushed to disk, then the temporary replaces the
-        /// primary. True only when the replacement completed. A failure leaves
-        /// at worst a newer whole temporary beside the primary, which Load
-        /// prefers; every caller treats a false as "not done".</summary>
-        private static bool Save(List<C.Pending> items)
+        /// primary. Anything short of SAVED marks memory stale (F8) and reads
+        /// both copies back to say whether this generation is on disk anyway.</summary>
+        private static int Save(List<C.Pending> items)
         {
+            string path = QueuePath(), tmp = path + ".tmp";
+            long gen = _gen + 1;
+            _gen = gen;
             try
             {
-                string path = QueuePath(), tmp = path + ".tmp";
-                long gen = _gen + 1;
-                _gen = gen;
                 byte[] bytes = new UTF8Encoding(false).GetBytes(C.QueueText(items, gen));
                 using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None))
                 {
@@ -1234,9 +1403,20 @@ namespace CompetitiveRounds
                 }
                 if (File.Exists(path)) File.Delete(path);
                 File.Move(tmp, path);
-                return true;
+                return SAVED;
             }
-            catch { return false; }
+            catch { }
+            _stale = true;
+            try
+            {
+                var a = ReadCopy(path, true);
+                var b = ReadCopy(tmp, false);
+                if ((a.Present && !a.Readable) || (b.Present && !b.Readable)) return UNKNOWN;
+                if (a.Whole && a.Generation == gen) return SAVED;
+                if (b.Whole && b.Generation == gen) return IN_TEMP;
+                return ABSENT;
+            }
+            catch { return UNKNOWN; }
         }
 
         /// <summary>A card draw envelope (route "k"), persisted like the
@@ -1250,15 +1430,21 @@ namespace CompetitiveRounds
         /// <summary>Adds a frozen body; every retry sends these exact bytes. It
         /// counts as queued only when the queue file holding it replaced the
         /// old one (F8); on false nothing in memory changed and the caller
-        /// keeps the body.</summary>
+        /// keeps the body. A body the queue already holds (an earlier try whose
+        /// write reached only the temporary copy, merged back by Load) is not
+        /// added twice.</summary>
         private static bool Enqueue(string route, string body)
         {
             if (!Load()) return false;
             var next = new List<C.Pending>(_queue);
-            bool evicted = next.Count >= QUEUE_CAP;
-            if (evicted) next.RemoveAt(0);
-            next.Add(new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() });
-            if (!Save(next)) return false;
+            bool evicted = false;
+            if (Find(next, route, body) < 0)
+            {
+                evicted = next.Count >= QUEUE_CAP;
+                if (evicted) next.RemoveAt(0);
+                next.Add(new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() });
+            }
+            if (Save(next) != SAVED) return false;
             _queue.Clear();
             _queue.AddRange(next);
             if (evicted) Plugin.Log.LogInfo(TAG + " queue full: the oldest queued request was dropped");
@@ -1278,7 +1464,7 @@ namespace CompetitiveRounds
 
         // the request in flight and its answer, as the result callback left it
         private const long FLIGHT_LIMIT_MS = 60000;
-        private static C.Pending _flight;
+        private static string _flightRoute, _flightBody;
         private static long _flightAtMs;
         private static volatile bool _answered;
         private static bool _answerLeft, _answerOk, _answerCarried;
@@ -1301,13 +1487,13 @@ namespace CompetitiveRounds
                 if (!q.HoldUntilNextLaunch && q.NotBeforeUnix <= now) { p = q; break; }
             if (p == null) return;
             string refusal = C.SendRefusal(p, now);
-            if (refusal != null) { Settle(p, refusal, 0); return; }
-            _inFlight = true; _flight = p; _flightAtMs = nowMs; _answered = false;
-            var sending = p;
+            if (refusal != null) { Settle(p.Route, p.Body, refusal, 0); return; }
+            _inFlight = true; _flightRoute = p.Route; _flightBody = p.Body; _flightAtMs = nowMs; _answered = false;
+            string route = p.Route, body = p.Body;
             bool started = false;
             try
             {
-                started = ApiClient.SeatEvidencePost(RouteOf(p.Route), p.Body, () => BeforeSend(sending),
+                started = ApiClient.SeatEvidencePost(RouteOf(route), body, () => BeforeSend(route, body),
                     (left, ok, text, carried) =>
                     {
                         _answerLeft = left; _answerOk = ok; _answerText = text; _answerCarried = carried;
@@ -1315,28 +1501,36 @@ namespace CompetitiveRounds
                     });
             }
             catch { started = false; }
-            if (!started) { _inFlight = false; _flight = null; _answered = false; }
+            if (!started) { _inFlight = false; _flightRoute = _flightBody = null; _answered = false; }
         }
 
-        /// <summary>Called by the api's evidence path immediately before the
-        /// bytes leave, after every local gate passed: the limits again, then
-        /// the spent transmission and the next-eligible time are persisted, and
-        /// only when that write completed may the request go (F6). A compat
-        /// outcome is then held for the rest of this launch: one compat-route
-        /// POST per launch (F9).</summary>
-        private static bool BeforeSend(C.Pending p)
+        /// <summary>Called by the api's evidence path immediately before
+        /// SendWebRequest, after the request is completely built and every
+        /// local gate passed: the limits again, then the spent transmission
+        /// and the next-eligible time are persisted (F6). The request goes
+        /// exactly when that increment may be on disk: written (SAVED), whole
+        /// in the temporary copy a later load recovers (IN_TEMP), or not
+        /// knowable (UNKNOWN). Only when the read-back shows no copy holds it
+        /// (ABSENT) is the send refused, leaving memory as it was, so no
+        /// recoverable spent attempt ever exists for a request that did not
+        /// go. A compat outcome is then held for the rest of this launch: one
+        /// compat-route POST per launch (F9).</summary>
+        private static bool BeforeSend(string route, string body)
         {
             try
             {
                 if (CombatLive()) return false;
+                if (!Load()) return false;
+                int i = Find(_queue, route, body);
+                if (i < 0) return false;
+                var p = _queue[i];
                 long now = UnixNow();
                 if (C.SendRefusal(p, now) != null) return false;
                 var t = C.AfterTransmission(p, now);
                 var next = new List<C.Pending>(_queue);
-                int i = next.IndexOf(p);
-                if (i < 0) return false;
                 next[i] = t;
-                if (!Save(next)) return false;
+                int stage = Save(next);
+                if (stage == ABSENT) return false;
                 p.Attempts = t.Attempts; p.NotBeforeUnix = t.NotBeforeUnix;
                 if (p.Route == "c") p.HoldUntilNextLaunch = true;
                 return true;
@@ -1354,18 +1548,24 @@ namespace CompetitiveRounds
             if (!_inFlight) return;
             if (!_answered)
             {
-                if (nowMs - _flightAtMs > FLIGHT_LIMIT_MS) { _inFlight = false; _flight = null; }
+                if (nowMs - _flightAtMs > FLIGHT_LIMIT_MS) { _inFlight = false; _flightRoute = _flightBody = null; }
                 return;
             }
-            var p = _flight;
+            string route = _flightRoute, body = _flightBody;
             bool left = _answerLeft, ok = _answerOk, carried = _answerCarried;
             string text = _answerText;
-            _inFlight = false; _flight = null; _answered = false;
-            if (left && p != null && _queue.Contains(p)) Answer(p, ok, text, carried);
+            _inFlight = false; _flightRoute = _flightBody = null; _answered = false;
+            if (left && route != null) Answer(route, body, ok, text, carried);
         }
 
-        private static void Answer(C.Pending p, bool ok, string text, bool carried)
+        private static void Answer(string route, string bodyKey, bool ok, string text, bool carried)
         {
+            // a copy that cannot be read is never written over: the request
+            // keeps the next-eligible time its transmission persisted
+            if (!Load()) return;
+            int i = Find(_queue, route, bodyKey);
+            if (i < 0) return;
+            var p = _queue[i];
             int status, retryAfter; string body;
             C.ParseAnswer(ok, text, out status, out body, out retryAfter);
             long now = UnixNow();
@@ -1383,7 +1583,7 @@ namespace CompetitiveRounds
             switch (act)
             {
                 case C.Act.Drop:
-                    Settle(p, reason, status);
+                    Settle(route, bodyKey, reason, status);
                     return;
                 case C.Act.RetryNextLaunch:
                     p.HoldUntilNextLaunch = true;
@@ -1402,14 +1602,18 @@ namespace CompetitiveRounds
 
         /// <summary>A request that is done (recorded, refused, expired or spent)
         /// leaves the queue once the file without it replaced the old one; if
-        /// that write fails it stays in the file and is held for the rest of
-        /// this launch, and the next launch's identical bytes meet the
-        /// server's already_recorded or the same refusal.</summary>
-        private static void Settle(C.Pending p, string reason, int status)
+        /// that write fails it stays in memory, held for the rest of this
+        /// launch, and the next launch's identical bytes meet the server's
+        /// already_recorded or the same refusal.</summary>
+        private static void Settle(string route, string body, string reason, int status)
         {
+            if (!Load()) return;
+            int i = Find(_queue, route, body);
+            if (i < 0) return;
+            var p = _queue[i];
             var next = new List<C.Pending>(_queue);
-            next.Remove(p);
-            if (Save(next)) _queue.Remove(p);
+            next.RemoveAt(i);
+            if (Save(next) == SAVED) _queue.RemoveAt(i);
             else p.HoldUntilNextLaunch = true;
             Plugin.Log.LogInfo(TAG + " " + What(p.Route) + " settled: " + reason + " (HTTP " + status.ToString(CultureInfo.InvariantCulture)
                 + ", attempt " + p.Attempts.ToString(CultureInfo.InvariantCulture) + ")");

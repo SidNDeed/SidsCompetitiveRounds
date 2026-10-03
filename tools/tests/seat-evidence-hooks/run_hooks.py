@@ -91,13 +91,15 @@ MUTANTS = [
 ]
 
 
-BOUND_SOURCES = ["HitEvidence.cs", "SeatEvidence.cs", "PoisonSync.cs", "CardDrawEvidence.cs"]
+BOUND_SOURCES = ["HitEvidence.cs", "SeatEvidence.cs", "PoisonSync.cs", "CardDrawEvidence.cs", "SeatEvidenceCore.cs",
+                 "CardDrawEvidenceCore.cs"]
 
 # The bound check must reach these (or it proves nothing).
 BOUND_REQUIRED = ["HitEvidence.PointEnd", "HitEvidence.GameEnd", "HitEvidence.NoteDamage", "PointEvidence.PointEnd",
                   "PoisonSync.ReportUnansweredSilences", "SeatEvidence.Dispatch", "SeatEvidence.DamageGate",
-                  "SeatEvidence.DamageArrived", "CardDrawEvidence.Dispatch", "CardDrawEvidence.EnsurePool",
-                  "CardDrawEvidence.Fault"]
+                  "SeatEvidence.DamageArrived", "CardDrawEvidence.Dispatch", "CardDrawEvidence.C1",
+                  "CardDrawEvidence.Push", "CardDrawEvidence.Fault", "CardDrawEvidence.FirstPhase", "SeatEvidence.Handover",
+                  "SeatEvidenceCore.Block", "SeatEvidenceCore.Offer", "SeatEvidenceCore.Next"]
 
 # (name, file, old, new, method the check must flag); old occurs once in the file
 BOUND_MUTANTS = [
@@ -107,16 +109,25 @@ BOUND_MUTANTS = [
      "_sawLost.Clear(); _sawFrames = 0;\n                Drain();\n                HitEvidence.PointEnd(_point);", "PointEvidence.DrainOwn"),
     ("silence_logs_at_hook", "PoisonSync.cs", "_lateView[_lateCount] = kv.Value.ViewId;",
      'Plugin.Log.LogInfo("late"); _lateView[_lateCount] = kv.Value.ViewId;', "PoisonSync.ReportUnansweredSilences"),
-    ("dispatch_saves", "SeatEvidence.cs", "_captures.Add(new Capture", "Save(_queue); _captures.Add(new Capture", "SeatEvidence.Dispatch"),
-    ("dispatch_scans", "SeatEvidence.cs", "_captures.Add(new Capture",
-     "long fa0, fo0; Foreign(out fa0, out fo0); _captures.Add(new Capture", "SeatEvidence.Foreign"),
+    ("dispatch_saves", "SeatEvidence.cs", "_captures.Add(cap);", "Save(_queue); _captures.Add(cap);", "SeatEvidence.Dispatch"),
+    ("dispatch_scans", "SeatEvidence.cs", "_captures.Add(cap);",
+     "long fa0, fo0; Foreign(out fa0, out fo0); _captures.Add(cap);", "SeatEvidence.Foreign"),
+    # F4: the aggregation (buckets, drift, cadence, percentiles) is the tick's
+    ("dispatch_aggregates", "SeatEvidence.cs", "_captures.Add(cap);", "Aggregate(cap); _captures.Add(cap);", "SeatEvidence.Aggregate"),
+    # F4: every hook-side loop is hard-capped
+    ("admit_uncapped", "SeatEvidence.cs", "i < a.Count && i < C.HitWindow.PENDING_CAP", "i < a.Count", "SeatEvidence.Admit"),
+    ("card_slots_uncapped", "CardDrawEvidence.cs", "for (int i = 0; i < n && i < K.SL_CAP; i++) e.Slots[i]",
+     "for (int i = 0; i < n; i++) e.Slots[i]", "CardDrawEvidence.C3"),
+    ("card_close_at_dispatch", "CardDrawEvidence.cs", "e.Inc = _hookInc | (_hookLost > 0 ? K.INC_LOST : 0);",
+     "e.Inc = _hookInc | (_hookLost > 0 ? K.INC_LOST : 0); if (_game != null) _game.Close(-1);", "CardDrawEvidenceCore.Close"),
     ("dispatch_builds", "SeatEvidence.cs", "_nextCaptureTryMs = 0;\n            }", "_nextCaptureTryMs = 0;\n                BuildCaptures(false);\n            }",
      "SeatEvidence.BuildCaptures"),
-    ("census_at_hook", "CardDrawEvidence.cs", "_censusCards = cards;\n            _digest = \"\";",
-     "_censusCards = cards;\n            _digest = \"\";\n            FinishCensus();", "CardDrawEvidence.FinishCensus"),
+    ("census_at_hook", "CardDrawEvidence.cs", "e.Pool = choice.cards;", "e.Pool = choice.cards; TakeCensus(e.Pool);",
+     "CardDrawEvidence.TakeCensus"),
     ("card_fault_logs", "CardDrawEvidence.cs", "_faultNote[i] = ex != null ? ex.GetType().Name : \"?\";",
      "_faultNote[i] = ex != null ? ex.GetType().Name : \"?\"; Plugin.Log.LogWarning(\"f\");", "CardDrawEvidence.Fault"),
-    ("card_dispatch_builds", "CardDrawEvidence.cs", "_nextBuildMs = 0;", "_nextBuildMs = 0; BuildPending(false);", "CardDrawEvidence.BuildPending"),
+    ("card_dispatch_builds", "CardDrawEvidence.cs", "_hookTaken = true;", "_hookTaken = true; BuildPending(false);", "CardDrawEvidence.BuildPending"),
+    ("card_dispatch_drains", "CardDrawEvidence.cs", "_hookTaken = true;", "_hookTaken = true; DrainEvents();", "CardDrawEvidence.DrainBegin"),
 ]
 
 

@@ -35,7 +35,9 @@ CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left",
          "closing_next_boot", "compat_sender", "compat_bounds", "cut_422_kept", "path1_unstamped",
          # fix pass 1
          "disabled_seat_records", "compat_once_per_launch", "attempt_accounting", "combat_gate", "dispatch_defers",
-         "identity_pending", "queue_recovery", "queue_save_fails", "damage_predicate"]
+         "identity_pending", "queue_recovery", "queue_save_fails", "damage_predicate",
+         # fix pass 2
+         "send_stage", "stale_merge"]
 
 # (name, old text, new text, target case, control case); old occurs exactly once.
 MUTANTS = [
@@ -62,7 +64,8 @@ MUTANTS = [
     ("end_dropped", "End = _end,", "End = null,", "cut_left", "victim_block_hit"),
     ("end_last_wins", "&& _end == null && C.IsEndKind(kind)", "&& C.IsEndKind(kind)", "cut_guards", "cut_left"),
     ("clear_end_noop", "try { if (_open) _end = null; } catch { }", "", "cut_guards", "cut_left"),
-    ("closing_not_persisted", "if (!Save(next)) return false;\n            _queue.Clear();", "_queue.Clear();", "closing_next_boot", "combat_gate"),
+    ("closing_not_persisted", "fs.Write(bytes, 0, bytes.Length);\n                    fs.Flush(true);\n                }\n                return true;",
+     "fs.Flush(true);\n                }\n                return true;", "closing_next_boot", "combat_gate"),
     ("sender_never_auths", "if (SwMs >= _nextAuthMs) { _nextAuthMs = SwMs + 1000; SteamAuth.MaybeRefresh(); }", "",
      "compat_sender", "closing_next_boot"),
     ("sender_no_identity", "try { SteamAuth.FallbackIdentity = OwnSteamId(); } catch { }", "", "compat_sender", "compat_bounds"),
@@ -84,19 +87,31 @@ MUTANTS = [
     # F4: the dispatch only captures
     ("dispatch_builds_inline", "_nextCaptureTryMs = 0;\n            }", "_nextCaptureTryMs = 0;\n                BuildCaptures(false);\n            }",
      "dispatch_defers", "victim_block_hit"),
-    ("dispatch_logs_inline", 'Note(" no record: game key or seat ids outside the contract");',
-     'Plugin.Log.LogWarning(TAG + " no record: game key or seat ids outside the contract");', "dispatch_defers", "victim_block_hit"),
+    ("dispatch_logs_inline", "_captures.Add(cap);", 'Plugin.Log.LogWarning(TAG + " captured"); _captures.Add(cap);',
+     "dispatch_defers", "victim_block_hit"),
+    # fix pass 2, F4: the dispatch takes the collectors and aggregates nothing
+    ("dispatch_aggregates_inline", "_captures.Add(cap);", "Aggregate(cap); _captures.Add(cap);", "dispatch_defers", "victim_block_hit"),
+    ("dispatch_no_handover", "Handover();\n                if (_captures.Count >= CAPTURE_CAP)", "if (_captures.Count >= CAPTURE_CAP)",
+     "dispatch_defers", "victim_block_hit"),
     # F5: queued evidence pumps whatever the mod's state
     ("disabled_session_compat_only", "bool queued = _queue.Count > 0;",
      'bool queued = false; foreach (var qq in _queue) if (qq.Route == "c") queued = true;', "disabled_seat_records", "compat_sender"),
     ("pump_skips_disabled", "if (_inFlight || nowMs < _nextPumpMs) return;", "if (Plugin.modDisabled || _inFlight || nowMs < _nextPumpMs) return;",
      "disabled_seat_records", "closing_next_boot"),
     # F6: only what leaves counts; persisted before it leaves; the limits before every send
-    ("attempt_not_persisted", "if (!Save(next)) return false;\n                p.Attempts = t.Attempts;", "p.Attempts = t.Attempts;",
-     "attempt_accounting", "closing_next_boot"),
-    ("pump_no_refusal", "if (refusal != null) { Settle(p, refusal, 0); return; }", "", "attempt_accounting", "closing_next_boot"),
-    ("unsent_answered", "if (left && p != null && _queue.Contains(p)) Answer(p, ok, text, carried);",
-     "if (p != null && _queue.Contains(p)) Answer(p, ok, text, carried);", "attempt_accounting", "closing_next_boot"),
+    ("attempt_not_persisted", "int stage = Save(next);", "int stage = SAVED;", "attempt_accounting", "closing_next_boot"),
+    ("pump_no_refusal", "if (refusal != null) { Settle(p.Route, p.Body, refusal, 0); return; }", "", "attempt_accounting", "closing_next_boot"),
+    ("unsent_answered", "if (left && route != null) Answer(route, body, ok, text, carried);",
+     "if (route != null) Answer(route, body, ok, text, carried);", "attempt_accounting", "closing_next_boot"),
+    # fix pass 2, F6: the pre-send write's stage decides the send
+    ("absent_still_sends", "if (stage == ABSENT) return false;", "", "send_stage", "closing_next_boot"),
+    ("in_temp_refused", "if (stage == ABSENT) return false;", "if (stage != SAVED) return false;", "send_stage", "closing_next_boot"),
+    # fix pass 2, F3: the quitting path never enters the queue
+    ("quit_uses_queue", 'bool persisted = quitting ? SpoolClosing("e", c.Env) : Enqueue("e", c.Env);',
+     'bool persisted = Enqueue("e", c.Env);', "closing_next_boot", "combat_gate"),
+    # fix pass 2, F8: a stale memory merges the newest whole copy before any write
+    ("stale_ignored", "if (_loaded && !_stale && _spoolChecked) return true;", "if (_loaded && _spoolChecked) return true;",
+     "stale_merge", "closing_next_boot"),
     # F7: no record before the identity completed; no_location only for an empty location
     ("identity_no_wait", "else { StartHashing(); return; }", "else StartHashing();", "identity_pending", "victim_block_hit"),
     ("hash_empty_failed", "if (path.Length == 0) return;", 'if (path.Length == 0) { state = "read_failed"; return; }',
@@ -106,10 +121,10 @@ MUTANTS = [
     # F8: the newest whole copy; queued only after the durable replacement
     ("load_primary_always", "int which = C.ChooseCopy(a, b);", "int which = a.Present ? 1 : C.ChooseCopy(a, b);",
      "queue_recovery", "closing_next_boot"),
-    ("queue_commit_before_save", "if (!Save(next)) return false;\n            _queue.Clear();", "Save(next);\n            _queue.Clear();",
+    ("queue_commit_before_save", "if (Save(next) != SAVED) return false;\n            _queue.Clear();", "Save(next);\n            _queue.Clear();",
      "queue_save_fails", "closing_next_boot"),
-    ("capture_dropped_on_failure", 'if (!Enqueue("e", c.Env))\n                    {',
-     'if (!Enqueue("e", c.Env))\n                    {\n                        _captures.RemoveAt(i);', "queue_save_fails", "closing_next_boot"),
+    ("capture_dropped_on_failure", "if (!persisted)\n                    {",
+     "if (!persisted)\n                    {\n                        _captures.RemoveAt(i);", "queue_save_fails", "closing_next_boot"),
     # F9: one compat POST per launch
     ("compat_twice", 'if (p.Route == "c") p.HoldUntilNextLaunch = true;', "", "compat_once_per_launch", "closing_next_boot"),
 ]
@@ -188,6 +203,46 @@ def f10_section():
     return ok
 
 
+F6_GATE = "bool go = false;\n                try { go = beforeSend == null || beforeSend(); } catch { go = false; }\n                if (!go) { answer(false, false, \"not-sent\", false); yield break; }"
+F6_SEND = "yield return request.SendWebRequest();"
+F6_BETWEEN = "try { MarkApiAttempt(); } catch { }"
+
+
+def f6_order_ok(body):
+    """beforeSend runs once, after the request is completely built (the last
+    header and the timeout set), and only the contained attempt mark stands
+    between its true and SendWebRequest."""
+    if body is None:
+        return False
+    body = body.replace("\r\n", "\n")
+    if body.count(F6_GATE) != 1 or body.count(F6_SEND) != 1 or body.count("beforeSend(") != 1:
+        return False
+    g = body.index(F6_GATE)
+    s = body.index(F6_SEND)
+    built = [body.rfind('SetRequestHeader("X-Session-Token"'), body.rfind("request.timeout = 20;"), body.rfind("request.uploadHandler")]
+    if any(b < 0 or b > g for b in built) or s < g:
+        return False
+    return body[g + len(F6_GATE):s].strip() == F6_BETWEEN
+
+
+def f6_section():
+    """F6: the pre-send write runs immediately before the bytes leave.
+    Negative controls: the gate moved above the request's build, and a
+    statement planted between the gate and the send, are each flagged."""
+    text = read(os.path.join(PLUGIN, "ApiClient.cs"))
+    raw = method_body(text, "private static IEnumerator SeatEvidencePostRaw(")
+    good = f6_order_ok(raw)
+    norm = raw.replace("\r\n", "\n") if raw else ""
+    moved = norm.replace(F6_GATE + "\n", "", 1).replace("request.timeout = 20;", "request.timeout = 20;", 1)
+    moved = moved.replace("request.downloadHandler = new DownloadHandlerBuffer();", F6_GATE + "\n                request.downloadHandler = new DownloadHandlerBuffer();", 1)
+    neg1 = bool(raw) and not f6_order_ok(moved)
+    neg2 = bool(raw) and not f6_order_ok(norm.replace(F6_BETWEEN, F6_BETWEEN + "\n                yield return null;", 1))
+    ok = good and neg1 and neg2
+    print("%s F6 send order: beforeSend after the build, only the attempt mark before SendWebRequest=%s; negative controls flagged: gate before build=%s, statement between=%s"
+          % ("OK " if ok else "BAD", good, neg1, neg2))
+    return ok
+
+
 def sha(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
@@ -258,6 +313,7 @@ def main():
         print("%s wiring %s: %s; negative control flagged=%s" % ("OK " if good and control else "BAD", f, what, control))
     print("wiring checks: %d of %d" % (wired, len(WIRING)))
     ok = f10_section() and ok
+    ok = f6_section() and ok
 
     raw = open(SE, "rb").read().decode("utf-8")
     nl = "\r\n" if "\r\n" in raw else "\n"

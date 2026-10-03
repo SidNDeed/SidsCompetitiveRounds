@@ -48,6 +48,10 @@ MUTANTS = [
     ("bucket_truncates", "if ((x % d != 0) && (x < 0)) q--;", "", "buckets", "cadence"),
     ("cadence_counts_reorder", "if (gap <= 0) return;", "if (gap == 0) return;", "cadence", "buckets"),
     ("ordinal_uncapped", "return n > 255 ? 255 : n;", "return n;", "ordinals", "window"),
+    # fix pass 2, F4: the hook-side structures are hard-capped
+    ("ordinals_never_forget", "if (_held == KEEP) _seen.Remove(_ring[_head]); else _held++;", "if (_held < KEEP) _held++;", "ordinals", "window"),
+    ("recent_uncapped", "if (RecentBlocks.Count > RECENT_CAP) RecentBlocks.RemoveAt(0);", "", "window_caps", "window"),
+    ("pending_uncapped", "if (Pending.Count > PENDING_CAP) Pending.RemoveAt(0);", "", "window_caps", "window"),
     ("window_hi_exclusive", "if (d >= LO && d <= HI) return true;", "if (d >= LO && d < HI) return true;", "window", "ordinals"),
     ("decide_conflict_retried", 'if (status == 409 && body.Contains("\\"conflict\\"")) { reason = "conflict"; return Act.Drop; }', "", "decide", "line"),
     ("decide_sixth_401", "if (p.SessionRetries >= MAX_SESSION_RETRIES)", "if (p.SessionRetries > MAX_SESSION_RETRIES)", "decide", "line"),

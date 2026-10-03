@@ -140,8 +140,21 @@ namespace SeatEvidenceReplay
         {
             ((System.Collections.IList)Field("_queue")).Clear();
             SetField("_loaded", false);
+            SetField("_stale", false);
+            SetField("_spoolChecked", false);
             SetField("_nextPumpMs", 0L);
             SetField("_inFlight", false);
+        }
+
+        /// <summary>The closing files the quitting path wrote (F3).</summary>
+        private static string[] SpoolFiles()
+        {
+            return Directory.GetFiles(BepInEx.Paths.ConfigPath, "CompetitiveRounds.seat-evidence.closing-*.jsonl");
+        }
+
+        private static int Attempts(System.Collections.IList q, int i)
+        {
+            return ((SeatEvidenceCore.Pending)q[i]).Attempts;
         }
 
         /// <summary>One send (the pump's spacing waived) and the tick that
@@ -397,18 +410,32 @@ namespace SeatEvidenceReplay
             PhotonNetwork.ServerTimestamp = 5000030;
             Rpc(_opp.View.ViewID, 5000000, "RPCAO_DoBlock", OPP, () => DoBlock(_opp, true, BlockTrigger.BlockTriggerType.Default, false, true));
             SeatEvidence.NoteEnd("closing");
-            // the quit hook: the capture, then the flush (no later frame comes)
+            // the quit hook while a battle is live in this frame (F3): the
+            // capture, then the flush (no later frame comes)
+            GameManager.instance.battleOngoing = true;
             SeatEvidence.Dispatch(SEAT, OTHER, ROOM + "_123456_r4", 3, 1, true);
             SeatEvidence.FlushOnQuit();
+            GameManager.instance.battleOngoing = false;
             Eq(0, ApiClient.Posts.Count, "nothing sent while closing");
-            var lines = QueueLines();
-            Eq(1, lines.Length, "persisted to the queue file");
-            string body = BodyOf(lines[0]);
-            string attach;
-            Eq("closing", LastRecord(out attach).GetProperty("end").GetString(), "end kind closing");
-            // the next launch: a fresh in-memory queue, the api up with a session
+            Eq(false, (bool)Field("_loaded"), "no queue load on the quitting path");
+            Check(!File.Exists(QueueFile()) && !File.Exists(QueueFile() + ".tmp"), "no queue write on the quitting path");
+            var spool = SpoolFiles();
+            Eq(1, spool.Length, "the record in its own closing file");
+            var sc = SeatEvidenceCore.ParseQueue(File.ReadAllText(spool[0]), false);
+            Check(sc.Whole && sc.Items.Count == 1, "the closing file is whole");
+            Eq(0, sc.Items[0].Attempts, "no attempt counted on the quitting path");
+            string body = sc.Items[0].Body;
+            var env = JsonDocument.Parse(body).RootElement;
+            Eq("closing", JsonDocument.Parse(env.GetProperty("record").GetString()).RootElement.GetProperty("end").GetString(), "end kind closing");
+            // the next launch: a fresh in-memory queue, the api up with a session;
+            // its first load, outside combat, moves the closing file into the queue
             NextLaunch();
             ApiUp();
+            SeatEvidence.Tick();
+            Eq(0, SpoolFiles().Length, "the closing file removed once the queue holds it");
+            Eq(1, QueueLines().Length, "moved into the queue file");
+            Eq(body, BodyOf(QueueLines()[0]), "its bytes unchanged");
+            SetField("_nextPumpMs", 0L);
             SendOnce();
             Eq(1, ApiClient.Posts.Count, "sent at the next launch");
             Eq("/api/v1/matches/seat-evidence", ApiClient.Posts[0].Key, "the record route");
@@ -616,6 +643,12 @@ namespace SeatEvidenceReplay
             SeatEvidence.Dispatch(SEAT, OTHER, ROOM + "_123456_r2", 1, 1, true);
             Check(!File.Exists(QueueFile()), "no file work inside the dispatch");
             Eq(logs, Plugin.Log.Lines.Count, "no log line inside the dispatch");
+            // F4: the collectors are taken by reference and replaced, nothing aggregated
+            var cap = ((System.Collections.IList)Field("_captures"))[0];
+            Func<string, object> cf = n => cap.GetType().GetField(n, BindingFlags.NonPublic | BindingFlags.Instance).GetValue(cap);
+            Eq(false, (bool)cf("Aggregated"), "nothing aggregated inside the dispatch");
+            Check(cf("HitRecv") != null && !ReferenceEquals(cf("HitRecv"), Field("_hitRecv")), "the event list taken and a fresh one handed over");
+            Check(cf("Samples") != null && !ReferenceEquals(cf("Samples"), Field("_samples")), "the sample log taken and a fresh one handed over");
             SeatEvidence.BeginGame(true, true);
             SeatEvidence.Dispatch("not-a-seat", OTHER, ROOM + "_123456_r3", 1, 1, true);
             Eq(logs, Plugin.Log.Lines.Count, "a refusal's line waits for the tick too");
@@ -709,6 +742,71 @@ namespace SeatEvidenceReplay
             Eq(2, RecordCount(), "both in the file");
         }
 
+        /// <summary>F6: the pre-send write decides the send. No copy holds the
+        /// spent attempt (ABSENT): nothing leaves and no recoverable attempt
+        /// exists. The attempt is whole only in the temporary copy (IN_TEMP):
+        /// the request leaves, and the next load recovers that attempt.</summary>
+        private static void SendStage()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            WriteQueue(new List<SeatEvidenceCore.Pending> { new SeatEvidenceCore.Pending { Route = "e", Body = "{\"x\":1}", FirstUnix = now } }, 5);
+            ApiUp();
+            string tmp = QueueFile() + ".tmp";
+            // ABSENT: the temporary copy cannot be created (a directory stands in its place)
+            Directory.CreateDirectory(tmp);
+            SendOnce();
+            Eq(0, ApiClient.Posts.Count, "nothing left when no copy holds the spent attempt");
+            Eq("0", Fields(QueueLines()[0])[2], "the file holds no spent attempt");
+            Eq(0, Attempts((System.Collections.IList)Field("_queue"), 0), "memory holds no spent attempt");
+            Directory.Delete(tmp);
+            // IN_TEMP: the temporary copy is written, the primary cannot be replaced
+            SetField("_inFlight", false);
+            string atSend = null;
+            using (new FileStream(QueueFile(), FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                ApiClient.OnSend = () => { atSend = File.ReadAllText(tmp); };
+                ApiClient.AnswerOk = false;
+                ApiClient.Answer = "Cannot resolve destination host";
+                SendOnce();
+                ApiClient.OnSend = null;
+            }
+            Eq(1, ApiClient.Posts.Count, "sent: the spent attempt is whole in the temporary copy");
+            var t = SeatEvidenceCore.ParseQueue(atSend ?? "", false);
+            Check(t.Whole && t.Items.Count == 1 && t.Items[0].Attempts == 1, "the temporary copy held attempt 1 when the bytes left");
+            NextLaunch();
+            SeatEvidence.Tick();
+            var q = (System.Collections.IList)Field("_queue");
+            Eq(1, q.Count, "one request after the restart");
+            Check(Attempts(q, 0) >= 1, "the attempt recovered from the temporary copy");
+        }
+
+        /// <summary>F8: after a write that did not replace the primary, the
+        /// next writer merges the newest whole copy first: a record whose
+        /// write reached only the temporary copy is kept by an unrelated
+        /// writer's write, and its own retry does not add it twice.</summary>
+        private static void StaleMerge()
+        {
+            WriteQueue(new List<SeatEvidenceCore.Pending>(), 1);
+            SeatEvidence.BeginGame(true, true);
+            using (new FileStream(QueueFile(), FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Dispatch(2, 1, ROOM + "_123456_r3");
+            }
+            Eq(0, Logged("record queued"), "not reported queued: the primary was not replaced");
+            Eq(true, (bool)Field("_stale"), "memory marked stale");
+            Eq(0, ((System.Collections.IList)Field("_queue")).Count, "memory unchanged");
+            // an unrelated writer, before the record's own retry
+            SeatEvidence.NoteCompat("not_run", new string[0]);
+            SeatEvidence.CompatTick();
+            Eq(1, RouteCount("c"), "the other writer's request written");
+            Eq(1, RecordCount(), "and the record from the temporary copy kept");
+            SetField("_nextCaptureTryMs", 0L);
+            SeatEvidence.Tick();
+            Eq(1, Logged("record queued"), "the retry reports it queued");
+            Eq(1, RecordCount(), "not added twice");
+            Eq(1, RouteCount("c"), "the other request still there");
+        }
+
         /// <summary>F1: dmg is 1 only for a nonzero envelope that passes the
         /// game's own predicate and completes without an exception.</summary>
         private static void DamagePredicate()
@@ -779,6 +877,8 @@ namespace SeatEvidenceReplay
             { "attempt_accounting", AttemptAccounting }, { "combat_gate", CombatGate }, { "dispatch_defers", DispatchDefers },
             { "identity_pending", IdentityPending }, { "queue_recovery", QueueRecovery }, { "queue_save_fails", QueueSaveFails },
             { "damage_predicate", DamagePredicate },
+            // fix pass 2
+            { "send_stage", SendStage }, { "stale_merge", StaleMerge },
         };
 
         private static int Main(string[] args)

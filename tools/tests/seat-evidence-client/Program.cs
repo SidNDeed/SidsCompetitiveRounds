@@ -185,6 +185,24 @@ namespace SeatEvidenceTests
             Eq(0, o.Next(5, 1, 0), "another kind"); Eq(2, o.Next(5, 0, 0), "third");
             for (int i = 0; i < 300; i++) o.Next(9, 9, 9);
             Eq(255, o.Next(9, 9, 9), "capped at 255");
+            // F4: a fixed ring of KEEP prefixes; the oldest is forgotten first
+            var r = new C.Ordinals();
+            r.Next(1, 0, 0); r.Next(1, 0, 0);
+            for (int i = 0; i < C.Ordinals.KEEP - 1; i++) r.Next(1000 + i, 0, 0);
+            Eq(2, r.Next(1, 0, 0), "held while the ring has room");
+            r.Next(5000, 0, 0);
+            Eq(0, r.Next(1, 0, 0), "the oldest prefix forgotten once the ring is full");
+        }
+
+        /// <summary>F4: the window's lists are hard-capped.</summary>
+        private static void WindowCaps()
+        {
+            var w = new C.HitWindow();
+            for (int i = 0; i < 10; i++) w.Block(100000 * (i + 1), 1);
+            Eq(C.HitWindow.RECENT_CAP, w.RecentBlocks.Count, "recent blocks capped");
+            for (int i = 0; i < 70; i++) w.Offer(new long[] { 0, 5000000 + i, 0, 0, 0, 0, 0, -1 }, 5000000 + i);
+            Eq(C.HitWindow.PENDING_CAP, w.Pending.Count, "pending hits capped");
+            Eq(64, w.Block(5000000, 1).Count, "one block admits at most the cap");
         }
 
         private static void Window()
@@ -487,7 +505,7 @@ namespace SeatEvidenceTests
         private static readonly Dictionary<string, Action> Cases = new Dictionary<string, Action>
         {
             { "json", Json }, { "budget", Budget }, { "entries", Entries }, { "drift", Drift },
-            { "congestion", Congestion }, { "buckets", Buckets }, { "cadence", Cadence }, { "ordinals", Ordinals },
+            { "congestion", Congestion }, { "buckets", Buckets }, { "cadence", Cadence }, { "ordinals", Ordinals }, { "window_caps", WindowCaps },
             { "window", Window }, { "decide", Decide }, { "line", Line }, { "build", Build },
             { "reservoir", Reservoir }, { "envelope", Envelope }, { "end", End }, { "sender", Sender }, { "cut422", Cut422 },
             { "refusal", Refusal }, { "queue", Queue },

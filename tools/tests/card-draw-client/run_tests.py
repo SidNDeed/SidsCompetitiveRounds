@@ -40,7 +40,11 @@ GOLDEN = os.path.join(HERE, "fixtures")
 FIXTURE_KEY = b"fixture-key-not-a-secret"
 LIMIT = 8192
 
-RECORD_KEYS = ["schema", "g", "ns", "pool", "prof", "po", "sc", "cards", "held0", "ph", "hd", "ap", "tot", "cost", "omit"]
+RECORD_KEYS = ["schema", "g", "ns", "pool", "prof", "po", "sc", "inc", "cards", "held0", "ph", "hd", "ap", "apx", "tot", "cost", "omit"]
+POOL_STATES = ("ok", "collision", "changed", "not_run")
+HASH_STATES = ("ok", "no_location", "read_failed")
+SEMANTICS = "cd-sem:2"
+BUILD_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-")
 OMIT_KEYS = ["cards", "held0", "ph", "hd", "ap", "sl", "sp"]
 ENVELOPE_KEYS = ["contract", "seat_steam_id", "other_steam_id", "stable_game_key", "attach_key", "record", "sig"]
 END_KINDS = ("left", "other_left", "lost", "closing")
@@ -54,12 +58,38 @@ MUTANTS = [
      'return SeatEvidenceCore.Sha256Hex(Encoding.ASCII.GetBytes(censusText ?? "")).Substring(0, 16);', "census", "opening"),
     ("collision_same_object", "core", "if (id != kv.Key) return true;", "return true;", "census", "opening"),
     ("an_wrong_role", "core", "An = _phaseW >= 0 ? AppsTo[_phaseW] : -1,", "An = _phaseW >= 0 ? AppsTo[1 - _phaseW] : -1,", "held", "census"),
+    # -- fix pass 2 --
+    # CD-M1: sealed at the dispatch; only completed applications
+    ("seal_ignored", "core", "internal void Seal() { _sealed = true; }", "internal void Seal() { }", "seal", "census"),
+    ("skipped_recorded", "core", "if (outcome != APPLY_DONE)", "if (outcome == APPLY_FAULTED)", "apps", "census"),
+    ("faulted_recorded", "core", "if (outcome != APPLY_DONE)", "if (outcome == APPLY_SKIPPED)", "apps", "census"),
+    ("apx_dropped", "core", ".Add(\"apx\", new long[] { Cnt(ApSkipped), Cnt(ApFaulted) })", ".Add(\"apx\", new long[] { 0, 0 })", "apps", "census"),
+    # CD-M3: a first phase not captured whole emits no po / held0
+    ("inc_first_po_kept", "core", '.Add("po", first ? new List<long>() : new List<long>(Po))', '.Add("po", new List<long>(Po))', "inc_first", "census"),
+    ("inc_first_held_kept", "core", "List<long> h0 = first ? null : Held0[0], h1 = first ? null : Held0[1];",
+     "List<long> h0 = Held0[0], h1 = Held0[1];", "inc_first", "census"),
+    ("inc_masked", "core", "(long)(Inc & (INC_FIRST | INC_LOST | INC_FAULT))", "(long)(Inc & INC_FIRST)", "inc_first", "census"),
+    # CD-M4: the pool state
+    ("pool_state_dropped", "core", "digestOk ? PoolStateOf(PoolState) : POOL_NOT_RUN", "digestOk ? POOL_OK : POOL_NOT_RUN", "pool_states", "census"),
+    ("pool_ok_without_digest", "core", "digestOk ? PoolStateOf(PoolState) : POOL_NOT_RUN", "PoolStateOf(PoolState)", "pool_states", "census"),
+    # CD-M5: the identity
+    ("prof_semantics_missing", "core", "SEMANTICS, Printable(Rules, RULES_CAP),", "\"\", Printable(Rules, RULES_CAP),", "prof", "census"),
+    ("prof_mod_unchecked", "core", 'bool m = ModState == "ok" && ModSha != null && ModSha.Length == 64;', 'bool m = ModState == "ok";', "prof", "census"),
+    ("prof_rules_uncapped", "core", "Printable(Rules, RULES_CAP),", "Rules ?? \"\",", "prof", "census"),
+    ("prof_fixture_semantics", "core", 'internal const string SEMANTICS = "cd-sem:2";', 'internal const string SEMANTICS = "cd-sem:1";', "fixtures", "census"),
+    # CD-M2: NOT-RUN
+    ("sc_unbounded", "core", "scVerdict >= 0 && scVerdict <= 2 ? scVerdict : -1", "scVerdict", "sc_not_run", "census"),
+    # F4: the true slot count beside the kept slots
+    # CD-L3: a repeated slot is recorded as dealt
+    ("repeat_deduped", "core", "_hand.Spawns.Add(Ix(ix));", "if (!_hand.Spawns.Contains(Ix(ix))) _hand.Spawns.Add(Ix(ix));", "repeated_slot", "census"),
+    ("n_from_kept", "core", "long n = h.HasEndPick ? h.SlN : h.Spawns.Count;", "long n = sl.Count;", "true_n", "census"),
     ("gl_dropped", "core", "Gl = f.Gl == 0 || f.Gl == 1 ? f.Gl : -1,", "Gl = -1,", "held", "census"),
     ("sq_other_seat", "core", "Sq = _phaseW == 0 && f.Sq >= 0 ? f.Sq : -1,", "Sq = f.Sq,", "src_gen", "census"),
     ("foreign_counted", "core", "if (creator == 0) { _hand.Foreign = true; return; }", "if (creator == 0) { _hand.Foreign = true; }", "foreign", "census"),
     ("unresolved_spawn_dropped", "core", "_hand.Spawns.Add(Ix(ix));", "if (ix >= 0) _hand.Spawns.Add(Ix(ix));", "unresolved", "census"),
-    ("slots_from_spawns", "core", "var sl = h.HasEndPick ? h.Sl : new List<long>(h.Spawns);", "var sl = new List<long>(h.Spawns);", "spawn_order", "census"),
-    ("same_without_spawns", "core", "bool same = h.Spawns.Count == 0 || SameList(h.Spawns, sl);", "bool same = SameList(h.Spawns, sl);", "endpick_only", "census"),
+    ("slots_from_spawns", "core", "var sl = h.HasEndPick ? h.Sl : h.Spawns;", "var sl = h.Spawns;", "spawn_order", "census"),
+    ("same_without_spawns", "core", "bool same = h.Spawns.Count == 0 || (h.Spawns.Count == n && SamePrefix(h.Spawns, sl));",
+     "bool same = h.Spawns.Count == n && SamePrefix(h.Spawns, sl);", "endpick_only", "census"),
     ("ds_sender_ignored", "core", "if (h.Foreign || (h.HasEndPick && h.SenderOk == 0)) ds = 0;", "if (h.Foreign) ds = 0;", "sender", "census"),
     ("ds_unknown_trusted", "core", "else if (h.CreatorUnknown || !h.HasEndPick || h.SenderOk < 0) ds = -1;", "else if (!h.HasEndPick) ds = -1;", "sender", "census"),
     ("nopick_as_absent", "core", "Wp = -1, Pk = -2,", "Wp = -1, Pk = -1,", "nopick", "census"),
@@ -67,15 +97,15 @@ MUTANTS = [
     ("src_counts", "core", "if (d == 1) mask |= 1L << i;", "if (d == 1) mask += 1;", "src_gen", "census"),
     ("src_tolerates_jump", "core", "else if (d != 0) return -1;", "", "src_gen", "census"),
     ("gen_opening_bound", "core", "return sq <= openingDraws ? 1 : 2;", "return sq < openingDraws ? 1 : 2;", "src_gen", "census"),
-    ("sl_uncapped", "core", "if (i < SL_CAP) slOut.Add(sl[i]); else SlOmit++;", "slOut.Add(sl[i]);", "caps", "census"),
-    ("n_capped", "core", "Clamp(sl.Count, 0, BIG), slOut,", "(long)slOut.Count, slOut,", "caps", "census"),
+    ("sl_uncapped", "core", "for (int i = 0; i < sl.Count && i < SL_CAP; i++) slOut.Add(sl[i]);", "for (int i = 0; i < sl.Count; i++) slOut.Add(sl[i]);", "caps", "census"),
+    ("n_capped", "core", "Clamp(n, 0, BIG), slOut,", "(long)slOut.Count, slOut,", "caps", "census"),
     ("held_cap_uncounted", "core", "else Held0Omit[r]++;", "", "held", "census"),
     ("tot_capped", "core", "if (_phaseW >= 0) Tot[_phaseW][0]++;", "if (_phaseW >= 0 && _phase != null) Tot[_phaseW][0]++;", "caps", "census"),
     ("apps_not_counted", "core", "if (r >= 0) { AppsTo[r]++; Tot[r][4]++; }", "if (r >= 0) { Tot[r][4]++; }", "apps", "census"),
-    ("ro_dropped", "core", "ro == 1 ? 1 : 0 });", "0 });", "apps", "census"),
+    ("kind_dropped", "core", "kind == 1 ? 1 : 0, Clamp(vid, -1, int.MaxValue) });", "0, Clamp(vid, -1, int.MaxValue) });", "apps", "census"),
     ("name_uncapped", "core", "if (nm.Length > NAME_CAP) nm = nm.Substring(0, NAME_CAP);", "", "caps", "census"),
     ("po_uncapped", "core", "i < po.Count && i < PO_CAP;", "i < po.Count;", "po", "census"),
-    ("prof_without_sha", "core", 'bool shaOk = profState == "ok" && profSha != null && profSha.Length == 64;', 'bool shaOk = profState == "ok";', "opening", "census"),
+    ("prof_without_sha", "core", 'bool g = GameState == "ok" && GameSha != null && GameSha.Length == 64;', 'bool g = GameState == "ok";', "opening", "census"),
     ("end_any_text", "core", 'if (SeatEvidenceCore.IsEndKind(end)) o.Add("end", end);', 'if (end != null) o.Add("end", end);', "end", "census"),
     ("cards_unsorted", "core", "var refs = new SortedSet<long>();", "var refs = new HashSet<long>();", "opening", "census"),
     ("cards_miss_spawn_refs", "core", "foreach (var s in (List<long>)l[8]) if (s >= 0) refs.Add(s); }", "}", "spawn_order", "census"),
@@ -205,16 +235,36 @@ def validate_record(text):
         return errs
     if rec["schema"] != 1:
         errs.append("schema")
-    if not (isinstance(rec["pool"], list) and len(rec["pool"]) == 2 and len(rec["pool"][1]) in (0, 64)):
+    pool = rec["pool"]
+    if not (isinstance(pool, list) and len(pool) == 3 and len(pool[1]) in (0, 64) and pool[2] in POOL_STATES
+            and (pool[2] == "not_run" or len(pool[1]) == 64)):
         errs.append("pool")
-    if not (len(rec["prof"]) == 2 and rec["prof"][1] in ("ok", "no_location", "read_failed")
-            and (len(rec["prof"][0]) == 64) == (rec["prof"][1] == "ok")):
-        errs.append("prof")
+    prof = rec["prof"]
+    if not (isinstance(prof, list) and len(prof) == 9):
+        errs.append("prof arity")
+    else:
+        for i in (0, 2):
+            if not (prof[i + 1] in HASH_STATES and (len(prof[i]) == 64) == (prof[i + 1] == "ok")
+                    and (prof[i] == "" or all(c in "0123456789abcdef" for c in prof[i]))):
+                errs.append("prof hash %d" % i)
+        for i, cap in ((4, 16), (5, 16), (6, 12)):
+            if len(prof[i]) > cap or not set(prof[i]) <= BUILD_CHARS:
+                errs.append("prof build %d" % i)
+        if prof[7] != SEMANTICS:
+            errs.append("prof semantics")
+        if len(prof[8]) > 32 or any(c < " " or c > "~" or c in '"\\' for c in prof[8]):
+            errs.append("prof rules")
     if len(rec["po"]) > 8 or any(p not in (-1, 0, 1) for p in rec["po"]):
         errs.append("po")
-    if len(rec["sc"]) != 2:
+    if not (len(rec["sc"]) == 2 and rec["sc"][0] in (-1, 0, 1) and rec["sc"][1] in (-1, 0, 1, 2)):
         errs.append("sc")
-    widths = {"cards": 3, "ph": 7, "hd": 18, "ap": 5}
+    if not (isinstance(rec["inc"], int) and 0 <= rec["inc"] <= 7):
+        errs.append("inc")
+    elif rec["inc"] & 1 and (rec["po"] != [] or rec["held0"] != [None, None] or rec["omit"]["held0"] != [0, 0]):
+        errs.append("inc first: po / held0 emitted for a first phase not captured")
+    if not (len(rec["apx"]) == 2 and all(isinstance(v, int) and v >= 0 for v in rec["apx"])):
+        errs.append("apx")
+    widths = {"cards": 3, "ph": 7, "hd": 18, "ap": 4}
     caps = {"cards": 128, "ph": 40, "hd": 40, "ap": 64}
     for k, w in widths.items():
         if len(rec[k]) > caps[k]:

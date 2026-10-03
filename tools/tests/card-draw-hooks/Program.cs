@@ -57,6 +57,7 @@ namespace CompetitiveRounds
             var pre = Marked(t, "HarmonyPrefix");
             var post = Marked(t, "HarmonyPostfix");
             var fin = Marked(t, "HarmonyFinalizer");
+            if (AFTER.Contains(t.Name)) { AfterOriginal(t, want.Item1, pre, post, fin); return; }
             if (pre.Count + post.Count != 1 || fin.Count != 0) throw new Exception("expected exactly one prefix or postfix and no finalizer");
             var m = pre.Count == 1 ? pre[0] : post[0];
             if (m.ReturnType != typeof(void)) throw new Exception(m.Name + " returns a value (a prefix could skip the original)");
@@ -81,6 +82,57 @@ namespace CompetitiveRounds
                     bool same = a[i] != null && a[i].GetType().IsValueType ? a[i].Equals(Planted.Args[i]) : ReferenceEquals(a[i], Planted.Args[i]);
                     if (!same) throw new Exception("argument " + i + " (" + ps[i].Name + ") not forwarded in place");
                 }
+            }
+        }
+
+        // CD-M1: the application hooks read AFTER the original: a postfix that
+        // reports APPLY_DONE when the original ran and APPLY_SKIPPED when a
+        // sibling prefix skipped it, and a finalizer that reports APPLY_FAULTED
+        // for an original that threw and returns that exception unchanged
+        private static readonly HashSet<string> AFTER = new HashSet<string> { "CardDrawEvidence_PickPatch", "CardDrawEvidence_OfflinePickPatch" };
+        private const int APPLY_DONE = 0, APPLY_SKIPPED = 1, APPLY_FAULTED = 2;
+
+        private static void AfterOriginal(Type t, string collector, List<MethodInfo> pre, List<MethodInfo> post, List<MethodInfo> fin)
+        {
+            if (pre.Count != 0 || post.Count != 1 || fin.Count != 1) throw new Exception("expected one postfix and one finalizer and no prefix");
+            var m = post[0];
+            if (m.ReturnType != typeof(void)) throw new Exception("the postfix returns a value");
+            var ps = m.GetParameters();
+            if (ps.Length != 3 || ps[2].Name != "__runOriginal") throw new Exception("the postfix reads (__instance, __0, __runOriginal)");
+            foreach (var p in ps) if (p.ParameterType.IsByRef) throw new Exception("parameter " + p.Name + " is by reference (the hook could write it)");
+            foreach (bool ran in new[] { true, false })
+            {
+                var a = new object[3];
+                for (int i = 0; i < 3; i++) a[i] = Arg(ps[i], i, ran);
+                int before = Planted.Calls;
+                m.Invoke(null, a);
+                if (Planted.Calls != before + 1) throw new Exception("postfix: the collector was called " + (Planted.Calls - before) + " times");
+                if (Planted.Collector != collector) throw new Exception("postfix called " + Planted.Collector + ", not " + collector);
+                if (Planted.Args.Length != 3 || !ReferenceEquals(Planted.Args[0], a[0]) || !ReferenceEquals(Planted.Args[1], a[1]))
+                    throw new Exception("postfix: the instance and the targets not forwarded in place");
+                int want = ran ? APPLY_DONE : APPLY_SKIPPED;
+                if (!(Planted.Args[2] is int) || (int)Planted.Args[2] != want)
+                    throw new Exception("postfix with __runOriginal=" + ran + " reported " + Planted.Args[2] + ", not " + want);
+            }
+            var f = fin[0];
+            if (f.ReturnType != typeof(Exception)) throw new Exception("the finalizer does not return the exception");
+            var fs = f.GetParameters();
+            if (fs.Length != 3 || fs[2].Name != "__exception" || fs[2].ParameterType != typeof(Exception)) throw new Exception("the finalizer reads (__instance, __0, __exception)");
+            foreach (var p in fs) if (p.ParameterType.IsByRef) throw new Exception("finalizer parameter " + p.Name + " is by reference");
+            foreach (bool threw in new[] { true, false })
+            {
+                var a = new object[] { Arg(fs[0], 0, true), Arg(fs[1], 1, true), threw ? new InvalidCastException("the original threw") : null };
+                int before = Planted.Calls;
+                object back = f.Invoke(null, a);   // a TargetInvocationException here is a fault that escaped
+                if (!ReferenceEquals(back, a[2])) throw new Exception("the finalizer did not return the original's exception unchanged");
+                if (!threw)
+                {
+                    if (Planted.Calls != before) throw new Exception("the finalizer reported an original that did not throw");
+                    continue;
+                }
+                if (Planted.Calls != before + 1 || Planted.Collector != collector) throw new Exception("the finalizer did not report the fault to " + collector);
+                if (!ReferenceEquals(Planted.Args[0], a[0]) || !ReferenceEquals(Planted.Args[1], a[1])) throw new Exception("finalizer: arguments not forwarded in place");
+                if (!(Planted.Args[2] is int) || (int)Planted.Args[2] != APPLY_FAULTED) throw new Exception("the finalizer reported " + Planted.Args[2] + ", not APPLY_FAULTED");
             }
         }
 

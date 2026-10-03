@@ -2984,8 +2984,8 @@ namespace CompetitiveRounds
         /// <summary>One POST of frozen bytes on the evidence routes' own bare
         /// path (SeatEvidencePostRaw). False: nothing was started (no base, no
         /// host, no data consent). beforeSend runs after every local gate
-        /// passed and immediately before the bytes leave; false from it means
-        /// the request is not sent. callback(left, ok, text, carriedToken):
+        /// passed and the request is completely built, immediately before
+        /// SendWebRequest; false from it means the request is not sent. callback(left, ok, text, carriedToken):
         /// left says whether the request went out at all; text is the body, or
         /// "HTTP code: body" plus a Retry-After line on a refusal;
         /// carriedToken says whether the session token went out.</summary>
@@ -3018,9 +3018,6 @@ namespace CompetitiveRounds
             {
                 answer(false, false, "no-session", false); yield break;
             }
-            bool go = false;
-            try { go = beforeSend == null || beforeSend(); } catch { go = false; }
-            if (!go) { answer(false, false, "not-sent", false); yield break; }
             byte[] raw = Encoding.UTF8.GetBytes(body ?? "");
             using (var request = new UnityWebRequest(url, "POST"))
             {
@@ -3030,7 +3027,13 @@ namespace CompetitiveRounds
                 request.SetRequestHeader("X-Mod-Version", Plugin.ModVersion ?? "0.0.0");
                 request.SetRequestHeader("X-Session-Token", token);
                 request.timeout = 20;
-                MarkApiAttempt();
+                // F6: the request is completely built before beforeSend persists
+                // the spent transmission; between a true from it and
+                // SendWebRequest only the contained attempt mark runs.
+                bool go = false;
+                try { go = beforeSend == null || beforeSend(); } catch { go = false; }
+                if (!go) { answer(false, false, "not-sent", false); yield break; }
+                try { MarkApiAttempt(); } catch { }
                 yield return request.SendWebRequest();
                 if (HandleVersionGate(request)) { answer(true, false, "outdated", true); yield break; }
                 HandleSessionReject(request, token);
