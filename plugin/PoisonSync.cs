@@ -699,14 +699,17 @@ namespace CompetitiveRounds
         // point end. One record per actor, the earliest silence kept, so the
         // lines are bounded by the [POISON-SILENT] lines themselves.
         private struct SilenceRec { internal int ViewId, ArmedTs, ReportedTs; }
-        private static readonly Dictionary<int, SilenceRec> _silence = new Dictionary<int, SilenceRec>();
+        // The point-end hook reads and clears this map (seat evidence fix pass 4,
+        // F4): a CappedMap of LATE_CAP actors, so the reset is bounded by the cap;
+        // a new actor at the cap is refused and counted (DrainLateSilences logs it).
+        private static readonly SeatEvidenceCore.CappedMap<int, SilenceRec> _silence = new SeatEvidenceCore.CappedMap<int, SilenceRec>(LATE_CAP);
 
         private static void NoteSilence(int actor, int viewId, int armedTs)
         {
             try
             {
                 if (_silence.ContainsKey(actor)) return;
-                _silence[actor] = new SilenceRec { ViewId = viewId, ArmedTs = armedTs, ReportedTs = PhotonNetwork.ServerTimestamp };
+                _silence.Set(actor, new SilenceRec { ViewId = viewId, ArmedTs = armedTs, ReportedTs = PhotonNetwork.ServerTimestamp });
             }
             catch { }
         }
@@ -770,6 +773,9 @@ namespace CompetitiveRounds
                 int d = _lateDropped; _lateDropped = 0;
                 Plugin.Log.LogWarning("[POISON-LATE] " + d + " unanswered silences not logged: every slot was waiting");
             }
+            int refused = _silence.TakeRefused();
+            if (refused > 0)
+                Plugin.Log.LogWarning("[POISON-LATE] " + refused + " silence(s) not kept: " + LATE_CAP + " actors already held");
         }
 
         // Revive fence: verdicts whose stream began before the victim's most
@@ -1702,8 +1708,12 @@ namespace CompetitiveRounds
     /// (lifesteal) is not netted against it: only drops are counted.</summary>
     internal static class PointEvidence
     {
-        private static readonly Dictionary<int, float> _sawLost = new Dictionary<int, float>();
-        private static readonly Dictionary<int, float> _before = new Dictionary<int, float>();
+        // Written by the Saw.Update bracket and read and cleared by the point-end
+        // hook (seat evidence fix pass 4, F4): CappedMaps, so a new player id at
+        // the cap is refused and counted (DrainOwn logs it) and every reset is
+        // bounded by the cap. ROW_CAP is what one point-end record carries.
+        private static readonly SeatEvidenceCore.CappedMap<int, float> _sawLost = new SeatEvidenceCore.CappedMap<int, float>(ROW_CAP);
+        private static readonly SeatEvidenceCore.CappedMap<int, float> _before = new SeatEvidenceCore.CappedMap<int, float>(PLAYER_SCAN_CAP);
         private static int _sawFrames;
         private static int _point;
 
@@ -1738,7 +1748,7 @@ namespace CompetitiveRounds
                 for (int i = 0; i < ps.Count && i < PLAYER_SCAN_CAP; i++)
                 {
                     var p = ps[i];
-                    if (p != null && p.data != null) _before[p.PlayerID] = p.data.health;
+                    if (p != null && p.data != null) _before.Set(p.PlayerID, p.data.health);
                 }
             }
             catch { }
@@ -1763,8 +1773,7 @@ namespace CompetitiveRounds
                     if (lost <= 0f) continue;
                     float sum;
                     _sawLost.TryGetValue(p.PlayerID, out sum);
-                    _sawLost[p.PlayerID] = sum + lost;
-                    any = true;
+                    if (_sawLost.Set(p.PlayerID, sum + lost)) any = true;
                 }
                 if (any) _sawFrames++;
                 _before.Clear();
@@ -1876,6 +1885,9 @@ namespace CompetitiveRounds
                 int d = _recDropped; _recDropped = 0;
                 Plugin.Log.LogWarning("[HP-POINT-END] " + d + " point ends not logged: every slot was waiting");
             }
+            int refused = _sawLost.TakeRefused() + _before.TakeRefused();
+            if (refused > 0)
+                Plugin.Log.LogWarning("[SAW-POINT] " + refused + " player id(s) not kept: the saw maps hold " + ROW_CAP + " / " + PLAYER_SCAN_CAP);
         }
     }
 

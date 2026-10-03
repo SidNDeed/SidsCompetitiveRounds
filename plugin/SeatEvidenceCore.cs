@@ -465,6 +465,57 @@ namespace CompetitiveRounds
             internal void Add(long[] e) { if (Items.Count < LIST_CAP) Items.Add(e); else Omitted++; }
         }
 
+        /// <summary>A map a hook writes (seat evidence fix pass 4, F4): created at
+        /// its cap's capacity, so no insert resizes it; a NEW key at the cap is
+        /// refused and counted in Refused, never inserted; an existing key is
+        /// always updated. Clear is bounded by the cap because the map never
+        /// holds more than Cap keys. The holder logs Refused on the tick.</summary>
+        internal sealed class CappedMap<TKey, TValue>
+        {
+            private readonly Dictionary<TKey, TValue> _d;
+            internal readonly int Cap;
+            internal int Refused;
+
+            internal CappedMap(int cap)
+            {
+                Cap = cap < 1 ? 1 : cap;
+                _d = new Dictionary<TKey, TValue>(Cap);
+            }
+
+            internal int Count { get { return _d.Count; } }
+
+            internal bool TryGetValue(TKey key, out TValue value) { return _d.TryGetValue(key, out value); }
+
+            internal bool ContainsKey(TKey key) { return _d.ContainsKey(key); }
+
+            /// <summary>Whether `key` may be set: present, or a new key below the
+            /// cap. A new key at the cap is counted as refused.</summary>
+            internal bool Admit(TKey key)
+            {
+                if (_d.Count < Cap || _d.ContainsKey(key)) return true;
+                Refused++;
+                return false;
+            }
+
+            /// <summary>Sets an existing key, or adds a new one below the cap; a
+            /// new key at the cap is refused (counted) and false returned.</summary>
+            internal bool Set(TKey key, TValue value)
+            {
+                if (_d.Count >= Cap && !_d.ContainsKey(key)) { Refused++; return false; }
+                _d[key] = value;
+                return true;
+            }
+
+            internal bool Remove(TKey key) { return _d.Remove(key); }
+
+            internal void Clear() { if (_d.Count > 0) _d.Clear(); }
+
+            /// <summary>The refusals since the last call, then zero.</summary>
+            internal int TakeRefused() { int r = Refused; Refused = 0; return r; }
+
+            public Dictionary<TKey, TValue>.Enumerator GetEnumerator() { return _d.GetEnumerator(); }
+        }
+
         /// <summary>ord: the 0-based count of earlier events with the same key
         /// prefix on this seat ((tb, kind) for blocks, (path, stamp, pid) for
         /// hits), capped at 255. Bounded memory: the oldest prefixes are
@@ -472,23 +523,25 @@ namespace CompetitiveRounds
         internal sealed class Ordinals
         {
             internal const int KEEP = 1024;
-            private readonly Dictionary<string, int> _seen = new Dictionary<string, int>();
+            // created at KEEP's capacity and never above KEEP keys (fix pass 4, F4): the
+            // oldest prefix leaves BEFORE a new one enters, so no insert resizes it
+            private readonly Dictionary<string, int> _seen = new Dictionary<string, int>(KEEP);
             // the prefixes in first-seen order, a fixed ring: one in, at most one out
             private readonly string[] _ring = new string[KEEP];
-            private int _head, _held;
+            private int _head;
             internal int Next(long a, long b, long c)
             {
                 string k = a.ToString(CultureInfo.InvariantCulture) + ":" + b.ToString(CultureInfo.InvariantCulture)
                            + ":" + c.ToString(CultureInfo.InvariantCulture);
                 int n;
                 if (_seen.TryGetValue(k, out n)) { _seen[k] = n + 1; return n > 255 ? 255 : n; }
+                if (_seen.Count >= KEEP) _seen.Remove(_ring[_head]);
                 _seen[k] = 1;
-                if (_held == KEEP) _seen.Remove(_ring[_head]); else _held++;
                 _ring[_head] = k;
                 _head = (_head + 1) % KEEP;
                 return 0;
             }
-            internal void Clear() { _seen.Clear(); Array.Clear(_ring, 0, KEEP); _head = 0; _held = 0; }
+            internal void Clear() { _seen.Clear(); Array.Clear(_ring, 0, KEEP); _head = 0; }
         }
 
         /// <summary>A hit waiting for its admission: listed only when some block
@@ -523,11 +576,18 @@ namespace CompetitiveRounds
                 RecentBlocks.Add(tb);
                 if (RecentBlocks.Count > RECENT_CAP) RecentBlocks.RemoveAt(0);
                 var admitted = new List<long[]>();
-                for (int i = 0; i < Pending.Count && i < PENDING_CAP; i++)
+                // one forward pass (fix pass 4, F4: the index never steps back): the
+                // admitted hits leave, the others close up in arrival order
+                int n = Pending.Count < PENDING_CAP ? Pending.Count : PENDING_CAP, kept = 0;
+                for (int i = 0; i < PENDING_CAP; i++)
                 {
-                    int d = WrapDiff((int)Pending[i][stampIndex], tb);
-                    if (d >= LO && d <= HI) { admitted.Add(Pending[i]); Pending.RemoveAt(i); i--; }
+                    if (i >= n) break;
+                    var h = Pending[i];
+                    int d = WrapDiff((int)h[stampIndex], tb);
+                    if (d >= LO && d <= HI) admitted.Add(h);
+                    else Pending[kept++] = h;
                 }
+                if (kept < n) Pending.RemoveRange(kept, n - kept);
                 return admitted;
             }
 
@@ -1153,7 +1213,9 @@ namespace CompetitiveRounds
         /// <summary>One copy of the queue as load found it. Whole: its trailer
         /// verifies, or it is the primary copy with no trailer at all (a build
         /// older than the trailer); a temporary copy is whole only with a
-        /// verified trailer. Items: every line that parses.</summary>
+        /// verified trailer. Items: every line that parses, whole or not (a
+        /// closing file that is not whole still yields them; PromoteSpool
+        /// admits them and never deletes that file, fix pass 4, F8).</summary>
         internal sealed class QueueCopy
         {
             internal bool Present, Readable, Whole;

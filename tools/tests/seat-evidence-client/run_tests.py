@@ -49,9 +49,20 @@ MUTANTS = [
     ("cadence_counts_reorder", "if (gap <= 0) return;", "if (gap == 0) return;", "cadence", "buckets"),
     ("ordinal_uncapped", "return n > 255 ? 255 : n;", "return n;", "ordinals", "window"),
     # fix pass 2, F4: the hook-side structures are hard-capped
-    ("ordinals_never_forget", "if (_held == KEEP) _seen.Remove(_ring[_head]); else _held++;", "if (_held < KEEP) _held++;", "ordinals", "window"),
+    ("ordinals_never_forget", "if (_seen.Count >= KEEP) _seen.Remove(_ring[_head]);", "", "ordinals", "window"),
     ("recent_uncapped", "if (RecentBlocks.Count > RECENT_CAP) RecentBlocks.RemoveAt(0);", "", "window_caps", "window"),
     ("pending_uncapped", "if (Pending.Count > PENDING_CAP) Pending.RemoveAt(0);", "", "window_caps", "window"),
+    # fix pass 4, F4: the capped map refuses and counts a new key at the cap, never a present one
+    ("capped_map_inserts_past_cap", "if (_d.Count >= Cap && !_d.ContainsKey(key)) { Refused++; return false; }", "", "capped_map", "window"),
+    ("capped_map_uncounted", "{ Refused++; return false; }", "{ return false; }", "capped_map", "window"),
+    ("capped_map_refuses_present", "if (_d.Count >= Cap && !_d.ContainsKey(key))", "if (_d.Count >= Cap)", "capped_map", "window"),
+    ("capped_map_admit_uncounted", "if (_d.Count < Cap || _d.ContainsKey(key)) return true;\n                Refused++;",
+     "if (_d.Count < Cap || _d.ContainsKey(key)) return true;", "capped_map", "window"),
+    ("capped_map_cap_zero", "Cap = cap < 1 ? 1 : cap;", "Cap = cap;", "capped_map", "window"),
+    # fix pass 4, F4: one forward pass keeps both lists in arrival order
+    ("block_order_admitted", "if (d >= LO && d <= HI) admitted.Add(h);", "if (d >= LO && d <= HI) admitted.Insert(0, h);", "window_block_order", "ordinals"),
+    ("block_order_pending", "if (kept < n) Pending.RemoveRange(kept, n - kept);", "if (kept < n) Pending.RemoveRange(0, n - kept);",
+     "window_block_order", "ordinals"),
     ("window_hi_exclusive", "if (d >= LO && d <= HI) return true;", "if (d >= LO && d < HI) return true;", "window", "ordinals"),
     ("decide_conflict_retried", 'if (status == 409 && body.Contains("\\"conflict\\"")) { reason = "conflict"; return Act.Drop; }', "", "decide", "line"),
     ("decide_sixth_401", "if (p.SessionRetries >= MAX_SESSION_RETRIES)", "if (p.SessionRetries > MAX_SESSION_RETRIES)", "decide", "line"),

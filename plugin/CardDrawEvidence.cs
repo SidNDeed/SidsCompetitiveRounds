@@ -83,6 +83,11 @@ namespace CompetitiveRounds
         private static string _gateRoom = "";
         private static long _gateNextMs;
         private const long GATE_EVERY_MS = 250;
+        // CD-M3 (fix pass 4): the last phase the gate skipped, keyed to its physical
+        // game (game number and room); consumed by the next HookBegin
+        private static bool _skipSet;
+        private static int _skipG;
+        private static string _skipRoom = "";
         private const int EV_PHASE = 1, EV_SPAWN = 2, EV_ENDPICK = 3, EV_DONE = 4, EV_APPLY = 5, EV_SEAL = 6;
 
         /// <summary>One collector call as the hook copied it. Preallocated and
@@ -198,10 +203,26 @@ namespace CompetitiveRounds
         /// game also copies the player order and the held cards.</summary>
         internal static void PhaseStarted(CardChoice choice)
         {
-            if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) return;
+            if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) { Skipped(); return; }
             long t0 = Stopwatch.GetTimestamp();
             try { C1(choice); } catch (Exception ex) { Fault(0, ex); }
             Cost(0, t0);
+        }
+
+        /// <summary>CD-M3 (fix pass 4): a phase the gate skipped (its room not yet
+        /// evaluated by the tick, or not a fighter room then), keyed to its
+        /// physical game. A later phase of the same game is then never taken as
+        /// the first. A fault here marks the next game's first phase instead
+        /// (the orphan bit).</summary>
+        private static void Skipped()
+        {
+            try
+            {
+                _skipG = VanillaCardSequence.Game;
+                _skipRoom = RoomName();
+                _skipSet = true;
+            }
+            catch { _skipSet = false; _hookOrphan = true; }
         }
 
         /// <summary>C2, CardInfo.Awake postfix: a network card spawn while a
@@ -352,7 +373,11 @@ namespace CompetitiveRounds
         private static void HookBegin(int g, string room)
         {
             _hookOpen = true; _hookG = g; _hookRoom = room ?? "";
-            _hookTaken = false; _hookExited = false; _hookPhase = false; _hookFirstDone = false;
+            // CD-M3 (fix pass 4): a phase of THIS physical game the gate skipped: no
+            // later phase is taken as the first, so DrainBegin marks INC_FIRST
+            bool skipped = _skipSet && _skipG == g && string.Equals(_skipRoom, _hookRoom, StringComparison.Ordinal);
+            _skipSet = false;
+            _hookTaken = false; _hookExited = false; _hookPhase = false; _hookFirstDone = skipped;
             _hookInc = _hookOrphan ? K.INC_FIRST : 0;
             _hookOrphan = false;
             _hookLost = 0;
@@ -421,6 +446,9 @@ namespace CompetitiveRounds
         private static void RefreshGate()
         {
             string room = RoomName();
+            // CD-M3 (fix pass 4): a skipped phase's mark is kept across every refresh
+            // that affirms its room, and dropped when the room changes
+            if (_skipSet && !string.Equals(room, _skipRoom, StringComparison.Ordinal)) _skipSet = false;
             long now = _sw.ElapsedMilliseconds;
             if (now < _gateNextMs && string.Equals(room, _gateRoom, StringComparison.Ordinal)) return;
             _gateNextMs = now + GATE_EVERY_MS;

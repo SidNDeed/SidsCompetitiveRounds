@@ -29,9 +29,16 @@ namespace CompetitiveRounds
         /// none). Set and restored by HitEvidence_ExecuteRpcPatch.</summary>
         internal static int RpcSender;
 
-        private static Dictionary<int, HitEvidenceCore.PointTally> _point = new Dictionary<int, HitEvidenceCore.PointTally>();
-        private static Dictionary<int, HitEvidenceCore.GameTally> _game = new Dictionary<int, HitEvidenceCore.GameTally>();
-        private static readonly Dictionary<int, bool> _projAmmo = new Dictionary<int, bool>();
+        // Hook-owned maps (seat evidence fix pass 4, F4): each is a CappedMap,
+        // created at its cap, so no insert resizes it; a new key at the cap is
+        // refused and counted (Drain logs the counts on the tick); every reset
+        // or hand-over is bounded by the cap. No room holds this many remote
+        // actors.
+        private const int ACTOR_KEY_CAP = 16;
+        private static SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally> _point = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>(ACTOR_KEY_CAP);
+        private static SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally> _game = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>(ACTOR_KEY_CAP);
+        private static readonly SeatEvidenceCore.CappedMap<int, bool> _projAmmo = new SeatEvidenceCore.CappedMap<int, bool>(HitEvidenceCore.PROJ_CAP);
+        private static int _refusedPoint, _refusedGame;   // refusals of maps handed over or dropped, until Drain logs them
         private static bool _blockedThisPoint;
         private static int _games;
 
@@ -59,14 +66,20 @@ namespace CompetitiveRounds
         private static HitEvidenceCore.PointTally P(int actor)
         {
             HitEvidenceCore.PointTally t;
-            if (!_point.TryGetValue(actor, out t)) { t = new HitEvidenceCore.PointTally(); _point[actor] = t; }
+            if (_point.TryGetValue(actor, out t)) return t;
+            if (!_point.Admit(actor)) return null;
+            t = new HitEvidenceCore.PointTally();
+            _point.Set(actor, t);
             return t;
         }
 
         private static HitEvidenceCore.GameTally G(int actor)
         {
             HitEvidenceCore.GameTally t;
-            if (!_game.TryGetValue(actor, out t)) { t = new HitEvidenceCore.GameTally(); _game[actor] = t; }
+            if (_game.TryGetValue(actor, out t)) return t;
+            if (!_game.Admit(actor)) return null;
+            t = new HitEvidenceCore.GameTally();
+            _game.Set(actor, t);
             return t;
         }
 
@@ -80,8 +93,10 @@ namespace CompetitiveRounds
                 CharacterData data;
                 if (damage == Vector2.zero || !RemoteSender(out actor) || !LocalVictim(hh, out data)) return;
                 bool converted = data.stats != null && data.stats.secondsToTakeDamageOver != 0f;
-                P(actor).AddDirect(Time.realtimeSinceStartup, damage.magnitude, converted);
+                var p = P(actor);
+                if (p != null) p.AddDirect(Time.realtimeSinceStartup, damage.magnitude, converted);
                 var g = G(actor);
+                if (g == null) return;
                 g.Direct++;
                 float since = data.block != null ? data.block.sinceBlock : float.PositiveInfinity;
                 g.Buckets[(int)HitEvidenceCore.Bucket(_blockedThisPoint, since)]++;
@@ -97,7 +112,8 @@ namespace CompetitiveRounds
                 CharacterData data;
                 if (!RemoteSender(out actor) || !LocalVictim(hh, out data)) return;
                 bool inert = !data.isPlaying || data.playerVel == null || !data.playerVel.simulated;
-                P(actor).AddForce(Time.realtimeSinceStartup, force.magnitude, inert);
+                var p = P(actor);
+                if (p != null) p.AddForce(Time.realtimeSinceStartup, force.magnitude, inert);
             }
             catch { }
         }
@@ -115,7 +131,8 @@ namespace CompetitiveRounds
                 var dv = damagingPlayer.data != null ? damagingPlayer.data.view : null;
                 int actor = dv != null ? dv.OwnerActorNr : 0;
                 if (actor == 0 || actor == LocalActor()) return;
-                P(actor).AddDot(damage.magnitude);
+                var p = P(actor);
+                if (p != null) p.AddDot(damage.magnitude);
             }
             catch { }
         }
@@ -140,9 +157,10 @@ namespace CompetitiveRounds
                 int actor;
                 if (init == null || !RemoteSender(out actor)) return;
                 var g = G(actor);
-                if (kind == 0) g.SpawnAmmo++; else if (kind == 1) g.SpawnNoAmmo++; else g.SpawnSeparate++;
+                if (g != null) { if (kind == 0) g.SpawnAmmo++; else if (kind == 1) g.SpawnNoAmmo++; else g.SpawnSeparate++; }
                 var pv = init.GetComponent<PhotonView>();
-                if (pv != null && _projAmmo.Count < HitEvidenceCore.PROJ_CAP) _projAmmo[pv.ViewID] = kind == 0;
+                if (pv == null) return;
+                _projAmmo.Set(pv.ViewID, kind == 0);
             }
             catch { }
         }
@@ -163,7 +181,8 @@ namespace CompetitiveRounds
                 if (target == null || !target.IsMine || target.GetComponent<CharacterData>() == null) return;
                 bool ammo;
                 _projAmmo.TryGetValue(projectile, out ammo);
-                G(actor).AddImpact(projectile, wasBlocked, ammo);
+                var g = G(actor);
+                if (g != null) g.AddImpact(projectile, wasBlocked, ammo);
             }
             catch { }
         }
@@ -179,11 +198,11 @@ namespace CompetitiveRounds
         // Drain, from Plugin's tick.
         private const int FLUSH_CAP = 16;
         private static readonly int[] _fNum = new int[FLUSH_CAP];
-        private static readonly Dictionary<int, HitEvidenceCore.PointTally>[] _fPoint = new Dictionary<int, HitEvidenceCore.PointTally>[FLUSH_CAP];
-        private static readonly Dictionary<int, HitEvidenceCore.GameTally>[] _fGame = new Dictionary<int, HitEvidenceCore.GameTally>[FLUSH_CAP];
+        private static readonly SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>[] _fPoint = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>[FLUSH_CAP];
+        private static readonly SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>[] _fGame = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>[FLUSH_CAP];
         private static int _fCount, _fDropped;
-        private static readonly Stack<Dictionary<int, HitEvidenceCore.PointTally>> _spareP = new Stack<Dictionary<int, HitEvidenceCore.PointTally>>();
-        private static readonly Stack<Dictionary<int, HitEvidenceCore.GameTally>> _spareG = new Stack<Dictionary<int, HitEvidenceCore.GameTally>>();
+        private static readonly Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>> _spareP = new Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>>(FLUSH_CAP + 1);
+        private static readonly Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>> _spareG = new Stack<SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>>(FLUSH_CAP + 1);
 
         // Hook-path scans are hard-capped (seat evidence fix pass 2, F4): one
         // tally per actor, and no room holds this many.
@@ -207,16 +226,16 @@ namespace CompetitiveRounds
         /// when every slot is waiting).</summary>
         private static void HoldPoint(int point)
         {
-            if (_fCount >= FLUSH_CAP) { _fDropped++; _point.Clear(); return; }
+            if (_fCount >= FLUSH_CAP) { _fDropped++; _refusedPoint += _point.TakeRefused(); _point.Clear(); return; }
             _fNum[_fCount] = point; _fPoint[_fCount] = _point; _fGame[_fCount] = null; _fCount++;
-            _point = _spareP.Count > 0 ? _spareP.Pop() : new Dictionary<int, HitEvidenceCore.PointTally>();
+            _point = _spareP.Count > 0 ? _spareP.Pop() : new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>(ACTOR_KEY_CAP);
         }
 
         private static void HoldGame(int game)
         {
-            if (_fCount >= FLUSH_CAP) { _fDropped++; _game.Clear(); return; }
+            if (_fCount >= FLUSH_CAP) { _fDropped++; _refusedGame += _game.TakeRefused(); _game.Clear(); return; }
             _fNum[_fCount] = game; _fPoint[_fCount] = null; _fGame[_fCount] = _game; _fCount++;
-            _game = _spareG.Count > 0 ? _spareG.Pop() : new Dictionary<int, HitEvidenceCore.GameTally>();
+            _game = _spareG.Count > 0 ? _spareG.Pop() : new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>(ACTOR_KEY_CAP);
         }
 
         /// <summary>From PointEvidence.PointEnd, with its point number:
@@ -226,7 +245,7 @@ namespace CompetitiveRounds
             try
             {
                 if (AnyPoint()) HoldPoint(point);
-                else _point.Clear();
+                else { _refusedPoint += _point.TakeRefused(); _point.Clear(); }
             }
             catch { }
             _blockedThisPoint = false;
@@ -243,6 +262,7 @@ namespace CompetitiveRounds
                 if (AnyGame()) { _games++; HoldGame(_games); }
             }
             catch { }
+            _refusedPoint += _point.TakeRefused(); _refusedGame += _game.TakeRefused();
             _point.Clear(); _game.Clear(); _projAmmo.Clear(); _blockedThisPoint = false;
         }
 
@@ -275,8 +295,9 @@ namespace CompetitiveRounds
                         }
                 }
                 catch { }
-                if (p != null) { p.Clear(); _spareP.Push(p); }
-                if (g != null) { g.Clear(); _spareG.Push(g); }
+                // a spare goes back only while the pool is below its bound (FLUSH_CAP + 1 of each kind)
+                if (p != null) { _refusedPoint += p.TakeRefused(); p.Clear(); if (_spareP.Count <= FLUSH_CAP) _spareP.Push(p); }
+                if (g != null) { _refusedGame += g.TakeRefused(); g.Clear(); if (_spareG.Count <= FLUSH_CAP) _spareG.Push(g); }
             }
             _fCount = 0;
             if (_fDropped > 0)
@@ -284,11 +305,22 @@ namespace CompetitiveRounds
                 int d = _fDropped; _fDropped = 0;
                 try { Plugin.Log.LogWarning("[HIT-EVIDENCE] " + d + " flushes not logged: every slot was waiting"); } catch { }
             }
+            int a = _refusedPoint + _point.TakeRefused(), b = _refusedGame + _game.TakeRefused(), c = _projAmmo.TakeRefused();
+            _refusedPoint = 0; _refusedGame = 0;
+            if (a > 0 || b > 0 || c > 0)
+            {
+                try
+                {
+                    Plugin.Log.LogWarning("[HIT-EVIDENCE] keys refused at the caps: " + a + " point tally actor(s), " + b
+                        + " game tally actor(s) (cap " + ACTOR_KEY_CAP + "), " + c + " projectile(s) (cap " + HitEvidenceCore.PROJ_CAP + ")");
+                }
+                catch { }
+            }
         }
 
         /// <summary>Seat evidence's push counts: one point's pairing of the
         /// damage and knockback messages, per sending actor.</summary>
-        private static void PushToSeatEvidence(Dictionary<int, HitEvidenceCore.PointTally> point)
+        private static void PushToSeatEvidence(SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally> point)
         {
             foreach (var kv in point)
             {

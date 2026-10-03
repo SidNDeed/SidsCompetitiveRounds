@@ -386,6 +386,42 @@ namespace CardDrawReplay
             Eq(2, SeatEvidence.Queued.Count, "collected once the tick evaluated the room");
         }
 
+        /// <summary>CD-M3 (fix pass 4): a phase the gate skipped marks every later
+        /// capture of the SAME physical game incomplete: a phase before the
+        /// gate, then the gate, then a later phase of that game. A skip in an
+        /// earlier game of the room marks nothing in the next game.</summary>
+        private static void GateSameGameTransition()
+        {
+            // an earlier game's skipped phase: the next game in that room is whole
+            PhotonNetwork.CurrentRoom.Name = "ranked_room2";
+            VanillaCardSequence.GameValue = 1;
+            Phase(0);
+            CardDrawEvidence.Tick();
+            VanillaCardSequence.GameValue = 2;
+            Phase(0);
+            Pick(Hand(0, 1, 2, 3, 4, 5), 0, 0);
+            CardDrawEvidence.Dispatch(SEAT, OTHER, "ranked_room2_123456_r3", true);
+            CardDrawEvidence.Tick();
+            Eq(1, SeatEvidence.Queued.Count, "the next game recorded");
+            Eq(0, Last().GetProperty("inc").GetInt32(), "a skip in an earlier game marks nothing");
+            // the same game: its first phase before the gate, a later phase after it
+            PhotonNetwork.CurrentRoom.Name = "ranked_room3";
+            VanillaCardSequence.GameValue = 3;
+            Phase(0);
+            CardDrawEvidence.Tick();
+            Phase(1);
+            var h = Hand(1, 1, 2, 3, 4, 5);
+            Pick(h, 0, 1);
+            CardDrawEvidence.Dispatch(SEAT, OTHER, "ranked_room3_123456_r3", true);
+            CardDrawEvidence.Tick();
+            Eq(2, SeatEvidence.Queued.Count, "the later phase recorded");
+            var r = Last();
+            Eq(1, r.GetProperty("inc").GetInt32(), "the first phase marked not captured, nothing else");
+            Eq("[]", Raw(r, "po"), "no player order from a later phase");
+            Eq("[null,null]", Raw(r, "held0"), "no held cards from a later phase");
+            Eq(1, r.GetProperty("hd").GetArrayLength(), "the later phase's hand kept");
+        }
+
         /// <summary>F4: the build lookup (reflection) is the tick's: no hook
         /// and no dispatch looks it up, and the record carries it.</summary>
         private static void BuildOnTick()
@@ -412,6 +448,8 @@ namespace CardDrawReplay
             // fix pass 3
             { "census_final_collision", CensusFinalCollision }, { "gate_precomputed", GatePrecomputed },
             { "build_on_tick", BuildOnTick }, { "census_initial_collision", CensusInitialCollision },
+            // fix pass 4
+            { "gate_same_game_transition", GateSameGameTransition },
         };
 
         private static int Main(string[] args)

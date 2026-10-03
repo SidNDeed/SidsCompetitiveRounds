@@ -40,7 +40,9 @@ CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left",
          "send_stage", "stale_merge",
          # fix pass 3
          "stale_removal", "stale_addition_at_cap", "closing_at_cap", "closing_kept_unless_held",
-         "opponent_sample_outside_combat"]
+         "opponent_sample_outside_combat",
+         # fix pass 4
+         "closing_no_trailer", "closing_bad_trailer"]
 
 # (name, old text, new text, target case, control case); old occurs exactly once.
 MUTANTS = [
@@ -127,6 +129,15 @@ MUTANTS = [
     ("spool_delete_unheld", "if (!held) { _spoolKept.Add(files[i]); continue; }", "if (!held) { _spoolKept.Add(files[i]); }",
      "closing_kept_unless_held", "closing_next_boot"),
     ("spool_kept_readmitted", "all.RemoveAll(f => _spoolKept.Contains(f));", "", "closing_kept_unless_held", "closing_next_boot"),
+    # fix pass 4, F8: a closing file that is not whole: its parsable requests admitted, the saved check
+    # unsatisfied until the saved queue holds every one, the file never deleted and never listed again
+    ("spool_nonwhole_not_admitted", "foreach (var d in c.Items) if (AdmitClosing(next, d)) evicted++;",
+     "if (c.Whole) foreach (var d in c.Items) if (AdmitClosing(next, d)) evicted++;", "closing_no_trailer", "closing_at_cap"),
+    ("spool_nonwhole_deleted", "if (!c.Whole) { if (SetAside(files[i])) aside++; else _spoolKept.Add(files[i]); continue; }",
+     "if (!c.Whole) { File.Delete(files[i]); continue; }", "closing_bad_trailer", "closing_at_cap"),
+    ("spool_nonwhole_left_listed", "if (!c.Whole) { if (SetAside(files[i])) aside++; else _spoolKept.Add(files[i]); continue; }",
+     "if (!c.Whole) { _spoolKept.Add(files[i]); continue; }", "closing_no_trailer", "closing_at_cap"),
+    ("spool_check_starts_satisfied", "bool held = false;", "bool held = true;", "closing_kept_unless_held", "closing_at_cap"),
     # fix pass 3, F4: the opponent sample (room lookup, property enumeration) waits for no combat
     ("opponent_sampled_in_combat", "SamplePing();\n                        _oppSampleDue = true;",
      "SamplePing();\n                        SampleOpponent();", "opponent_sample_outside_combat", "victim_block_hit"),

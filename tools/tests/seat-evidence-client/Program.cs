@@ -194,7 +194,56 @@ namespace SeatEvidenceTests
             Eq(0, r.Next(1, 0, 0), "the oldest prefix forgotten once the ring is full");
         }
 
-        /// <summary>F4: the window's lists are hard-capped.</summary>
+        /// <summary>Fix pass 4, F4: a hook-written map refuses a NEW key at its
+        /// cap and counts the refusal; an existing key is always updated; the
+        /// cap is at least one; Clear and TakeRefused reset.</summary>
+        private static void CappedMapCase()
+        {
+            var m = new C.CappedMap<int, int>(3);
+            Check(m.Set(1, 10) && m.Set(2, 20) && m.Set(3, 30), "three keys below the cap are set");
+            Check(!m.Set(4, 40), "a new key at the cap is refused");
+            Eq(3, m.Count, "never above the cap");
+            int v;
+            Check(!m.TryGetValue(4, out v) && !m.ContainsKey(4), "the refused key is absent");
+            Check(m.Set(2, 21), "an existing key at the cap is updated");
+            Check(m.TryGetValue(2, out v) && v == 21, "the update is kept");
+            Check(m.Admit(3), "a present key is admitted at the cap");
+            Check(!m.Admit(5), "a new key is not admitted at the cap");
+            Eq(2, m.Refused, "both refusals counted (one set, one admit)");
+            Eq(2, m.TakeRefused(), "the refusals taken");
+            Eq(0, m.Refused, "zero after taking");
+            Check(m.Remove(1) && m.Set(6, 60), "a freed slot takes a new key");
+            Eq(0, m.Refused, "no refusal below the cap");
+            int n = 0;
+            foreach (var kv in m) n++;
+            Eq(3, n, "enumerates exactly what it holds");
+            m.Clear();
+            Eq(0, m.Count, "cleared");
+            Check(m.Set(7, 70), "usable after a clear");
+            var z = new C.CappedMap<int, int>(0);
+            Eq(1, z.Cap, "the cap is at least one");
+            Check(z.Set(1, 1) && !z.Set(2, 2), "a cap of one holds one key");
+        }
+
+        /// <summary>Fix pass 4, F4: a block admits in one forward pass; the
+        /// admitted hits come back in arrival order and the rest stay pending,
+        /// in arrival order.</summary>
+        private static void WindowBlockOrder()
+        {
+            var w = new C.HitWindow();
+            long[] st = { 2000, 9950, 3000, 10500, 4000, 10900, 5000 };
+            foreach (var s in st) Check(!w.Offer(new long[] { 0, s, 0, 0, 0, 0, 0, -1 }, (int)s), "no block yet: " + s + " waits");
+            var a = w.Block(10000, 1);
+            Eq(3, a.Count, "the three hits inside the window admitted");
+            Eq(9950L, a[0][1], "admitted 1st"); Eq(10500L, a[1][1], "admitted 2nd"); Eq(10900L, a[2][1], "admitted 3rd");
+            Eq(4, w.Pending.Count, "the four outside stay pending");
+            Eq(2000L, w.Pending[0][1], "pending 1st"); Eq(3000L, w.Pending[1][1], "pending 2nd");
+            Eq(4000L, w.Pending[2][1], "pending 3rd"); Eq(5000L, w.Pending[3][1], "pending 4th");
+            Eq(0, w.Block(10000, 1).Count, "nothing admitted twice");
+            Eq(4, w.Pending.Count, "a block that admits nothing leaves pending whole");
+        }
+
+        /// <summary>Fix pass 2, F4: the window's lists are hard-capped.</summary>
         private static void WindowCaps()
         {
             var w = new C.HitWindow();
@@ -508,7 +557,7 @@ namespace SeatEvidenceTests
             { "congestion", Congestion }, { "buckets", Buckets }, { "cadence", Cadence }, { "ordinals", Ordinals }, { "window_caps", WindowCaps },
             { "window", Window }, { "decide", Decide }, { "line", Line }, { "build", Build },
             { "reservoir", Reservoir }, { "envelope", Envelope }, { "end", End }, { "sender", Sender }, { "cut422", Cut422 },
-            { "refusal", Refusal }, { "queue", Queue },
+            { "refusal", Refusal }, { "queue", Queue }, { "capped_map", CappedMapCase }, { "window_block_order", WindowBlockOrder },
         };
 
         private static int Main(string[] args)

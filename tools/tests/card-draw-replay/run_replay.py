@@ -31,7 +31,9 @@ TRACKED = ["CardDrawEvidence.cs", "CardDrawEvidenceCore.cs", "SeatEvidenceCore.c
 CASES = ["seal", "first_fault", "orphan_fault", "freeze", "not_run", "census_per_game", "census_states",
          "quit_spools", "ring_bounded",
          # fix pass 3
-         "census_final_collision", "gate_precomputed", "build_on_tick", "census_initial_collision"]
+         "census_final_collision", "gate_precomputed", "build_on_tick", "census_initial_collision",
+         # fix pass 4
+         "gate_same_game_transition"]
 
 # (name, [(old, new), ...], target case, control case); each old occurs exactly once.
 MUTANTS = [
@@ -61,7 +63,7 @@ MUTANTS = [
                                   ": (again.Digest != p.Game.Digest ? K.POOL_CHANGED : K.POOL_OK);")], "census_final_collision", "seal"),
     ("final_overwrites", [("p.Game.PoolState = K.WorstPool(p.Game.PoolState, fin);", "p.Game.PoolState = fin;")], "census_states", "seal"),
     # fix pass 3, F4: the room predicate and the build lookup are the tick's
-    ("gate_in_hook", [("if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) return;", "if (!GateRoom()) return;")],
+    ("gate_in_hook", [("if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) { Skipped(); return; }", "if (!GateRoom()) return;")],
      "gate_precomputed", "seal"),
     ("gate_new_room_waits", [("if (now < _gateNextMs && string.Equals(room, _gateRoom, StringComparison.Ordinal)) return;",
                               "if (now < _gateNextMs) return;")], "gate_precomputed", "seal"),
@@ -74,6 +76,14 @@ MUTANTS = [
     ("tick_in_combat", [("if (SeatEvidence.CombatLive()) return;", "")], "quit_spools", "seal"),
     # F4: the bounded buffer counts what it lost and keeps a slot for the seal
     ("lost_uncounted", [("{ _hookLost++; return null; }", "{ return null; }")], "ring_bounded", "seal"),
+    # fix pass 4, CD-M3: a skipped phase marks the rest of its own physical game, and only that game
+    ("skip_unmarked", [("if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) { Skipped(); return; }", "if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) return;")],
+     "gate_same_game_transition", "seal"),
+    ("skip_dropped_by_refresh", [("if (_skipSet && !string.Equals(room, _skipRoom, StringComparison.Ordinal)) _skipSet = false;",
+                                  "_skipSet = false;")], "gate_same_game_transition", "seal"),
+    ("skip_marks_next_game", [("bool skipped = _skipSet && _skipG == g && ", "bool skipped = _skipSet && ")],
+     "gate_same_game_transition", "seal"),
+    ("skip_later_phase_first", [("_hookFirstDone = skipped;", "_hookFirstDone = false;")], "gate_same_game_transition", "seal"),
     ("seal_slot_not_kept", [("if (_evCount >= EV_CAP - (kind == EV_SEAL ? 0 : 1))", "if (_evCount >= EV_CAP)")], "ring_bounded", "seal"),
 ]
 

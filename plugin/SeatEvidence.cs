@@ -1336,8 +1336,9 @@ namespace CompetitiveRounds
         /// nothing is written over it, and the load is tried again later. On
         /// the first load of a launch the closing files the previous launch's
         /// quitting path wrote (F3) are admitted too, and each is deleted only
-        /// after a write that replaced the primary holds its exact request
-        /// (PromoteSpool). A request past the
+        /// after a write that replaced the primary holds its exact request; a
+        /// file without a verified trailer is never deleted (PromoteSpool,
+        /// F8). A request past the
         /// expiry or the attempt bound is loaded too: the pump settles it
         /// (C.SendRefusal) without a send, and the write that settles it
         /// removes it from the file.</summary>
@@ -1376,8 +1377,13 @@ namespace CompetitiveRounds
         /// fails stays on disk; whichever later pass lists it admits it again,
         /// which adds nothing the queue already holds. A failed write keeps
         /// every file, and the next load tries again. A file that is not
-        /// whole can never become whole (its writer is gone) and is deleted
-        /// after the successful write.</summary>
+        /// whole (no trailer, or one that does not verify: its writer was cut
+        /// off) is never deleted (fix pass 4, F8): its parsable requests are
+        /// admitted as a whole file's are, the saved check starts unsatisfied
+        /// for every file, and once the saved queue holds every parsable
+        /// request the file is set aside unchanged (UNVERIFIED_SUFFIX), out of
+        /// this listing, so no later launch admits it again; until then it
+        /// stays where it is for the next launch.</summary>
         private static void PromoteSpool()
         {
             string[] files;
@@ -1399,25 +1405,46 @@ namespace CompetitiveRounds
                 var c = ReadCopy(files[i], false);
                 if (c.Present && !c.Readable) return;       // held by something: try again later
                 copies[i] = c;
-                if (c.Whole) foreach (var d in c.Items) if (AdmitClosing(next, d)) evicted++;
+                // every parsable request, whole file or not (F8): a line that parses is a whole request
+                foreach (var d in c.Items) if (AdmitClosing(next, d)) evicted++;
             }
             if (Save(next) != SAVED) return;
             _queue.Clear();
             _queue.AddRange(next);
-            int moved = 0;
+            int moved = 0, aside = 0;
             for (int i = 0; i < n; i++)
             {
                 var c = copies[i];
                 if (!c.Present) continue;
-                bool held = true;
-                if (c.Whole) foreach (var d in c.Items) if (Find(next, d.Route, d.Body) < 0) { held = false; break; }
+                // the saved check starts UNSATISFIED (F8): it passes only when the saved
+                // queue holds every exact parsable request of the file
+                bool held = false;
+                int found = 0;
+                foreach (var d in c.Items) { if (Find(next, d.Route, d.Body) < 0) break; found++; }
+                if (found == c.Items.Count) held = true;
                 if (!held) { _spoolKept.Add(files[i]); continue; }
+                // not whole: never deleted, set aside unchanged (F8)
+                if (!c.Whole) { if (SetAside(files[i])) aside++; else _spoolKept.Add(files[i]); continue; }
                 try { File.Delete(files[i]); moved++; } catch { }
             }
             _spoolChecked = files.Length <= n;
             _nextPumpMs = 0;
             Plugin.Log.LogInfo(TAG + " " + moved.ToString(CultureInfo.InvariantCulture) + " closing file(s) moved into the queue");
+            if (aside > 0) Plugin.Log.LogInfo(TAG + " " + aside.ToString(CultureInfo.InvariantCulture)
+                                              + " closing file(s) without a verified trailer: their parsable requests saved, the file kept as *" + UNVERIFIED_SUFFIX);
             if (evicted > 0) Plugin.Log.LogInfo(TAG + " queue full: " + evicted.ToString(CultureInfo.InvariantCulture) + " oldest queued request(s) dropped for closing records");
+        }
+
+        // a closing file that is not whole, once its parsable requests are saved (F8)
+        private const string UNVERIFIED_SUFFIX = ".unverified";
+
+        /// <summary>Fix pass 4, F8: a closing file that is not whole, every
+        /// parsable request of it in the saved queue, renamed out of the
+        /// promotion's listing with its bytes unchanged; never deleted. False:
+        /// not renamed (it then stays for the next launch).</summary>
+        private static bool SetAside(string path)
+        {
+            try { File.Move(path, path + UNVERIFIED_SUFFIX); return true; } catch { return false; }
         }
 
         /// <summary>The quitting path's only write (F3): one request in a new

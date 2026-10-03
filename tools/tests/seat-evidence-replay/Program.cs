@@ -938,6 +938,74 @@ namespace SeatEvidenceReplay
                 Eq(1, BodyCount("{\"s\":" + i.ToString(CultureInfo.InvariantCulture) + "}"), "closing record " + i + " in the queue");
         }
 
+        /// <summary>Fix pass 4, F8: a closing file whose text a write cut off.</summary>
+        private static string ClosingPath() { return Path.Combine(BepInEx.Paths.ConfigPath, "CompetitiveRounds.seat-evidence.closing-0000000000000000001-0001.jsonl"); }
+
+        /// <summary>Fix pass 4, F8: the promotion, then an unrelated successful
+        /// save, then the next launch: the file's parsable requests are in the
+        /// saved queue and the file itself survives unchanged (set aside, out
+        /// of the listing), never deleted, never admitted twice.</summary>
+        private static void ClosingNotWhole(string text, string what)
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var q = P("k", "{\"q\":1}", now);
+            WriteQueue(new List<SeatEvidenceCore.Pending> { q }, 1);
+            string file = ClosingPath();
+            File.WriteAllText(file, text);
+            var parsed = SeatEvidenceCore.ParseQueue(text, false);
+            Check(!parsed.Whole && parsed.Items.Count == 2, what + ": not whole, two parsable requests");
+            NextLaunch();
+            ApiUp();
+            SeatEvidence.Tick();
+            Eq(1, BodyCount("{\"u\":1}"), what + ": the first parsable request in the saved queue");
+            Eq(1, BodyCount("{\"u\":2}"), what + ": the second parsable request in the saved queue");
+            Eq(1, BodyCount(q.Body), what + ": the queued request kept");
+            Check(File.Exists(file + ".unverified") && File.ReadAllText(file + ".unverified") == text, what + ": the file kept unchanged");
+            Eq(0, SpoolFiles().Length, what + ": out of the promotion's listing");
+            Eq(1, Logged("closing file(s) without a verified trailer"), what + ": set aside, logged");
+            // an unrelated successful save
+            SeatEvidence.BeginGame(true, true);
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            Eq(1, Logged("record queued"), what + ": the unrelated record queued");
+            Eq(1, RecordCount() - 2, what + ": the record saved beside the two closing requests");
+            Eq(1, BodyCount("{\"u\":1}"), what + ": still saved after the unrelated save");
+            Eq(1, BodyCount("{\"u\":2}"), what + ": still saved after the unrelated save");
+            Check(File.Exists(file + ".unverified") && File.ReadAllText(file + ".unverified") == text, what + ": the file survives the unrelated save");
+            // the next launch lists nothing to admit again
+            NextLaunch();
+            SeatEvidence.Tick();
+            Eq(0, SpoolFiles().Length, what + ": nothing listed at the next launch");
+            Check(BodyCount("{\"u\":1}") <= 1 && BodyCount("{\"u\":2}") <= 1, what + ": never admitted twice");
+        }
+
+        private static List<SeatEvidenceCore.Pending> TwoClosing()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            return new List<SeatEvidenceCore.Pending> { P("e", "{\"u\":1}", now), P("e", "{\"u\":2}", now) };
+        }
+
+        /// <summary>Fix pass 4, F8: parsable lines, no trailer, a torn last line.</summary>
+        private static void ClosingNoTrailer()
+        {
+            string t = SeatEvidenceCore.QueueText(TwoClosing(), 1);
+            string body = t.Substring(0, t.LastIndexOf(SeatEvidenceCore.QUEUE_TRAILER, StringComparison.Ordinal));
+            // a third request's line, cut after its second field (where a write stopped)
+            var third = new List<SeatEvidenceCore.Pending> { P("e", "{\"u\":3}", DateTimeOffset.UtcNow.ToUnixTimeSeconds()) };
+            string l3 = SeatEvidenceCore.QueueText(third, 1);
+            string torn = l3.Substring(0, l3.IndexOf('\t', l3.IndexOf('\t') + 1));
+            Check(SeatEvidenceCore.ParseLine(torn) == null, "the torn line does not parse");
+            ClosingNotWhole(body + torn, "no trailer");
+        }
+
+        /// <summary>Fix pass 4, F8: parsable lines under a trailer that does not verify.</summary>
+        private static void ClosingBadTrailer()
+        {
+            string t = SeatEvidenceCore.QueueText(TwoClosing(), 1);
+            int h = t.LastIndexOf('\t') + 1;
+            string bad = t.Substring(0, h) + (t[h] == '0' ? '1' : '0') + t.Substring(h + 1);
+            ClosingNotWhole(bad, "invalid trailer");
+        }
+
         /// <summary>F4: the opponent sample (a room lookup and a property
         /// enumeration) runs on the tick only while no battle is live; the
         /// round-trip sample is taken in combat too.</summary>
@@ -1033,6 +1101,8 @@ namespace SeatEvidenceReplay
             { "stale_removal", StaleRemoval }, { "stale_addition_at_cap", StaleAdditionAtCap },
             { "closing_at_cap", ClosingAtCap }, { "closing_kept_unless_held", ClosingKeptUnlessHeld },
             { "opponent_sample_outside_combat", OpponentSampleOutsideCombat },
+            // fix pass 4
+            { "closing_no_trailer", ClosingNoTrailer }, { "closing_bad_trailer", ClosingBadTrailer },
         };
 
         private static int Main(string[] args)

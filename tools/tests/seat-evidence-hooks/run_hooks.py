@@ -99,7 +99,10 @@ BOUND_REQUIRED = ["HitEvidence.PointEnd", "HitEvidence.GameEnd", "HitEvidence.No
                   "PoisonSync.ReportUnansweredSilences", "SeatEvidence.Dispatch", "SeatEvidence.DamageGate",
                   "SeatEvidence.DamageArrived", "CardDrawEvidence.Dispatch", "CardDrawEvidence.C1",
                   "CardDrawEvidence.Push", "CardDrawEvidence.Fault", "CardDrawEvidence.FirstPhase", "SeatEvidence.Handover",
-                  "SeatEvidenceCore.Block", "SeatEvidenceCore.Offer", "SeatEvidenceCore.Next",
+                  "SeatEvidenceCore.HitWindow.Block", "SeatEvidenceCore.HitWindow.Offer", "SeatEvidenceCore.Ordinals.Next",
+                  # fix pass 4 (F4): the capped maps, a constructor and a receiver getter are walked
+                  "SeatEvidenceCore.CappedMap.Set", "SeatEvidenceCore.CappedMap.Admit", "SeatEvidenceCore..ctor:CappedMap",
+                  "SeatEvidenceCore.CappedMap.Count", "PointEvidence.SawAfter",
                   # fix pass 3: the walk crosses into the rest of the plugin (methods and property getters)
                   "FfaCardSequence.DrawIndexOf", "VanillaCardSequence.SharedSlotsServed",
                   "NetworkReplicaDiagnostics.TryGetOpponentGameObs", "RoomActors.LocalIsSpectator"]
@@ -108,7 +111,7 @@ BOUND_REQUIRED = ["HitEvidence.PointEnd", "HitEvidence.GameEnd", "HitEvidence.No
 BOUND_MULTI = [
     # the room predicate back in the phase hook: its scan is three calls down, in another file
     ("gate_scan_in_hook", [("CardDrawEvidence.cs",
-                            "if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) return;",
+                            "if (!_gateOk || !string.Equals(_gateRoom, RoomName(), StringComparison.Ordinal)) { Skipped(); return; }",
                             "if (!GateRoom()) return;")], "RoomActors.ActiveFighters"),
     # the reflected build lookup back in either dispatch
     ("card_build_lookup_at_dispatch", [("CardDrawEvidence.cs", "e.Keep = rankedNow || CardDrawEvidenceTestGate.On;",
@@ -126,12 +129,65 @@ BOUND_MULTI = [
     # the dispatch's diagnostics read loses its cap
     ("diag_scan_uncapped", [("NetworkReplicaDiagnostics.cs", "for (int i = 0; i < ACTOR_SCAN_CAP && en.MoveNext(); i++)",
                              "while (en.MoveNext())")], "NetworkReplicaDiagnostics.TryGetOpponentGameObs"),
+    # fix pass 4 (F4): the walk follows a receiver's property getter; an uncapped insert planted there is flagged
+    ("getter_uncapped_insert", [("SeatEvidenceCore.cs", "internal int Count { get { return _d.Count; } }",
+                                 "internal int Count { get { return _d.Count; } }\n"
+                                 "            private readonly List<int> _probe = new List<int>();\n"
+                                 "            internal int Probe { get { _probe.Add(1); return 0; } }"),
+                                ("HitEvidence.cs", "if (!_point.Admit(actor)) return null;",
+                                 "if (!_point.Admit(actor) || _point.Probe < 0) return null;")],
+     "SeatEvidenceCore.CappedMap.Probe"),
+    # ... and a constructor a hook-reached "new" runs
+    ("ctor_uncapped_insert", [("SeatEvidenceCore.cs", "_d = new Dictionary<TKey, TValue>(Cap);",
+                               "_d = new Dictionary<TKey, TValue>(Cap); _probe.Add(cap);"),
+                              ("SeatEvidenceCore.cs", "internal int Count { get { return _d.Count; } }",
+                               "internal int Count { get { return _d.Count; } }\n"
+                               "            private readonly List<int> _probe = new List<int>();")],
+     "SeatEvidenceCore..ctor:CappedMap"),
+    # a for header that names a cap while a count is the loop's actual limit
+    ("for_names_cap_bounded_by_count", [("SeatEvidenceCore.cs",
+                                         "for (int i = 0; i < PENDING_CAP; i++)\n                {\n                    if (i >= n) break;",
+                                         "for (int i = 0, c = PENDING_CAP; i < Pending.Count; i++)\n                {")],
+     "SeatEvidenceCore.HitWindow.Block"),
+    ("for_cap_in_a_disjunct", [("SeatEvidenceCore.cs", "for (int i = 0; i < PENDING_CAP; i++)\n                {\n                    if (i >= n) break;",
+                                "for (int i = 0; i < Pending.Count || i < PENDING_CAP; i++)\n                {\n                    if (i >= n) break;")],
+     "SeatEvidenceCore.HitWindow.Block"),
+    # the capped counter stepped back inside the body
+    ("capped_loop_steps_back", [("SeatEvidenceCore.cs", "else Pending[kept++] = h;", "else { Pending[kept++] = h; i--; }")],
+     "SeatEvidenceCore.HitWindow.Block"),
+    # the cap guards themselves
+    ("capped_map_set_unguarded", [("SeatEvidenceCore.cs",
+                                   "if (_d.Count >= Cap && !_d.ContainsKey(key)) { Refused++; return false; }\n", "")],
+     "SeatEvidenceCore.CappedMap.Set"),
+    ("ordinals_insert_before_evict", [("SeatEvidenceCore.cs", "if (_seen.Count >= KEEP) _seen.Remove(_ring[_head]);\n", "")],
+     "SeatEvidenceCore.Ordinals.Next"),
+    # the four named carriers back on a raw Dictionary
+    ("point_raw_dictionary", [("HitEvidence.cs",
+                               "private static SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally> _point = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.PointTally>(ACTOR_KEY_CAP);",
+                               "private static Dictionary<int, HitEvidenceCore.PointTally> _point = new Dictionary<int, HitEvidenceCore.PointTally>();"),
+                              ("HitEvidence.cs", "_point.Set(actor, t);", "_point[actor] = t;")], "HitEvidence.P"),
+    ("game_raw_dictionary", [("HitEvidence.cs",
+                              "private static SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally> _game = new SeatEvidenceCore.CappedMap<int, HitEvidenceCore.GameTally>(ACTOR_KEY_CAP);",
+                              "private static Dictionary<int, HitEvidenceCore.GameTally> _game = new Dictionary<int, HitEvidenceCore.GameTally>();"),
+                             ("HitEvidence.cs", "_game.Set(actor, t);", "_game[actor] = t;")], "HitEvidence.G"),
+    ("silence_raw_dictionary", [("PoisonSync.cs",
+                                 "private static readonly SeatEvidenceCore.CappedMap<int, SilenceRec> _silence = new SeatEvidenceCore.CappedMap<int, SilenceRec>(LATE_CAP);",
+                                 "private static readonly Dictionary<int, SilenceRec> _silence = new Dictionary<int, SilenceRec>();"),
+                                ("PoisonSync.cs", "_silence.Set(actor, new SilenceRec", "_silence[actor] = (new SilenceRec")],
+     "PoisonSync.NoteSilence"),
+    ("sawlost_raw_dictionary", [("PoisonSync.cs",
+                                 "private static readonly SeatEvidenceCore.CappedMap<int, float> _sawLost = new SeatEvidenceCore.CappedMap<int, float>(ROW_CAP);",
+                                 "private static readonly Dictionary<int, float> _sawLost = new Dictionary<int, float>();"),
+                                ("PoisonSync.cs", "if (_sawLost.Set(p.PlayerID, sum + lost)) any = true;",
+                                 "_sawLost[p.PlayerID] = sum + lost; any = true;")], "PointEvidence.SawAfter"),
 ]
 
 # (name, file, old, new, method the check must flag); old occurs once in the file
 BOUND_MUTANTS = [
-    ("pointend_logs", "HitEvidence.cs", "else _point.Clear();", 'else _point.Clear();\n                Plugin.Log.LogInfo("x");', "HitEvidence.PointEnd"),
-    ("pointend_drains", "HitEvidence.cs", "else _point.Clear();", "else _point.Clear();\n                Drain();", "HitEvidence.Drain"),
+    ("pointend_logs", "HitEvidence.cs", "else { _refusedPoint += _point.TakeRefused(); _point.Clear(); }",
+     'else { _refusedPoint += _point.TakeRefused(); _point.Clear(); Plugin.Log.LogInfo("x"); }', "HitEvidence.PointEnd"),
+    ("pointend_drains", "HitEvidence.cs", "else { _refusedPoint += _point.TakeRefused(); _point.Clear(); }",
+     "else { _refusedPoint += _point.TakeRefused(); _point.Clear(); Drain(); }", "HitEvidence.Drain"),
     ("hp_line_at_hook", "PoisonSync.cs", "_sawLost.Clear(); _sawFrames = 0;\n                HitEvidence.PointEnd(_point);",
      "_sawLost.Clear(); _sawFrames = 0;\n                Drain();\n                HitEvidence.PointEnd(_point);", "PointEvidence.DrainOwn"),
     ("silence_logs_at_hook", "PoisonSync.cs", "_lateView[_lateCount] = kv.Value.ViewId;",
@@ -146,7 +202,7 @@ BOUND_MUTANTS = [
     ("card_slots_uncapped", "CardDrawEvidence.cs", "for (int i = 0; i < n && i < K.SL_CAP; i++) e.Slots[i]",
      "for (int i = 0; i < n; i++) e.Slots[i]", "CardDrawEvidence.C3"),
     ("card_close_at_dispatch", "CardDrawEvidence.cs", "e.Inc = _hookInc | (_hookLost > 0 ? K.INC_LOST : 0);",
-     "e.Inc = _hookInc | (_hookLost > 0 ? K.INC_LOST : 0); if (_game != null) _game.Close(-1);", "CardDrawEvidenceCore.Close"),
+     "e.Inc = _hookInc | (_hookLost > 0 ? K.INC_LOST : 0); if (_game != null) _game.Close(-1);", "CardDrawEvidenceCore.CardGame.Close"),
     ("dispatch_builds", "SeatEvidence.cs", "_nextCaptureTryMs = 0;\n            }", "_nextCaptureTryMs = 0;\n                BuildCaptures(false);\n            }",
      "SeatEvidence.BuildCaptures"),
     ("census_at_hook", "CardDrawEvidence.cs", "e.Pool = choice.cards;", "e.Pool = choice.cards; TakeCensus(e.Pool);",
@@ -187,11 +243,21 @@ def bound_section():
           "findings %d; required reached %s"
           % (len(texts), len(closure), len(outside), len(findings), "all" if not missing else "MISSING " + ",".join(missing)))
     print("  reached outside the evidence files:", ", ".join(outside))
+    # fix pass 4 (F4): the hook-owned collection sweep, and the framework-named properties the walk does not
+    # follow through an undeclared receiver (Count, Length, Key, Value, Keys, Values, Current)
+    print("  hook-owned collection sweep (file, field, reached operations, insert sites, insert sites guarded by a cap):")
+    for row in bound_check.LAST_SWEEP:
+        print("    plugin/%s %s: %d, %d, %d" % row)
+    print("  plugin properties with a framework name, not followed through an undeclared receiver:",
+          ", ".join(bound_check.LAST_FRAMEWORK_NAMED))
+    if not bound_check.LAST_SWEEP or any(r[3] != r[4] for r in bound_check.LAST_SWEEP):
+        ok = False
     for f in findings:
         print("  FORBIDDEN in hook-time code: plugin/%s %s uses %s" % f)
     ok = ok and not findings and not missing
     ctrl = dict(texts)
-    ctrl["HitEvidence.cs"] = ctrl["HitEvidence.cs"].replace("else _point.Clear();", 'else _point.Clear();\n                // Plugin.Log.LogInfo("x"); File.WriteAllText', 1)
+    ctrl["HitEvidence.cs"] = ctrl["HitEvidence.cs"].replace("else { _refusedPoint += _point.TakeRefused(); _point.Clear(); }",
+                                                      'else { _refusedPoint += _point.TakeRefused(); _point.Clear(); /* Plugin.Log.LogInfo("x"); File.WriteAllText; _point.Add(1); */ }', 1)
     cf, _ = bound_check.check(ctrl, bound_filter)
     print("bound negative control (a token in a comment is not a finding):", "PASS" if not cf else "FAIL %s" % cf)
     ok = ok and not cf
