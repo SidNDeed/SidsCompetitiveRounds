@@ -827,7 +827,8 @@ def test_l9_deleting_a_player_removes_their_aggregate_rows_only(live):
                         lo=lo, hi=hi, s=ids[who])
             await _exec(sm, "INSERT INTO combat_player_daily (subject_player_id, utc_day) "
                             "VALUES (:s, CURRENT_DATE)", s=ids[who])
-        fk = await _rows(sm, "SELECT conrelid::regclass::text t, confdeltype FROM pg_constraint "
+        fk = await _rows(sm, "SELECT conrelid::regclass::text t, confdeltype::text confdeltype "
+                             "FROM pg_constraint "
                              "WHERE contype = 'f' AND confrelid = 'players'::regclass "
                              "  AND conrelid::regclass::text IN ('combat_contrib', 'combat_player_daily') "
                              "ORDER BY 1")
