@@ -3049,6 +3049,11 @@ namespace CompetitiveRounds
         private static readonly SeatEvidenceCore.CappedMap<int, float> _before = new SeatEvidenceCore.CappedMap<int, float>(PLAYER_SCAN_CAP);
         private static int _sawFrames;
         private static int _point;
+        /// <summary>Merge pass 6 (G1-L1): how many rounds this seat's spectator
+        /// observer took (Spectator_ObserveNextRound_Patch counts each one it
+        /// latched). Never reset; PointEndEvidencePatch compares it before and
+        /// after one RPCA_NextRound call.</summary>
+        internal static int ObservedRounds;
 
         internal static int Point { get { return _point; } }
 
@@ -3059,12 +3064,15 @@ namespace CompetitiveRounds
             _sawLost.Clear(); _before.Clear(); _sawFrames = 0; _point = 0;
         }
 
-        /// <summary>Item D's per-game flush when this point decided the game.</summary>
+        /// <summary>Item D's per-game flush when this point decided the game:
+        /// under the FFA engine its own game-over latch, otherwise vanilla's
+        /// round counts (HitEvidenceCore.GameDecided, merge pass 6, G1-L2).</summary>
         internal static void GameOverCheck(GM_ArmsRace gm)
         {
             try
             {
-                if (gm != null && (gm.p1Rounds >= gm.roundsToWinGame || gm.p2Rounds >= gm.roundsToWinGame))
+                if (gm != null && HitEvidenceCore.GameDecided(FfaMode.EngineActive(), FfaMode.GameOverFiredForEvidence,
+                                                              gm.p1Rounds, gm.p2Rounds, gm.roundsToWinGame))
                     HitEvidence.GameEnd(_point);
             }
             catch { }
@@ -3243,13 +3251,43 @@ namespace CompetitiveRounds
     }
 
     /// <summary>C2's trigger: the point-decided broadcast, which runs in every
-    /// mode (FFA's prefix replaces the body, postfixes still run).</summary>
+    /// mode (FFA's prefix replaces the body, postfixes still run). Only a call
+    /// that took a point ends the evidence point (merge pass 6, G1-L1): the
+    /// prefix reads vanilla's isTransitioning, the spectator observer's count
+    /// of rounds taken and FfaMode's count of points taken before any other
+    /// prefix runs, and the postfix hands those and the counts after the call
+    /// to HitEvidenceCore.PointTaken. A duplicate broadcast (vanilla's
+    /// isTransitioning guard, the spectator latch, FfaMode's own gate) or one
+    /// FfaLateEntry refused ends nothing.</summary>
     [HarmonyPatch(typeof(GM_ArmsRace), "RPCA_NextRound", new Type[] { typeof(int), typeof(int), typeof(int), typeof(int), typeof(int), typeof(int) })]
     internal static class PointEndEvidencePatch
     {
-        [HarmonyPostfix]
-        private static void After(GM_ArmsRace __instance)
+        internal struct Before { internal bool Transitioning; internal int FfaTaken, Observed; }
+
+        // Above Priority.First: the spectator observer prefix (Priority.First)
+        // moves the count this reads, so this must read it first.
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.First + 1)]
+        private static void Snap(GM_ArmsRace __instance, out Before __state)
         {
+            __state = default(Before);
+            try { __state.Transitioning = __instance.isTransitioning; } catch { }
+            try { __state.Observed = PointEvidence.ObservedRounds; } catch { }
+            try { __state.FfaTaken = FfaMode.NextRoundsTaken; } catch { }
+        }
+
+        [HarmonyPostfix]
+        private static void After(GM_ArmsRace __instance, Before __state, bool __runOriginal)
+        {
+            bool taken = false;
+            try
+            {
+                taken = HitEvidenceCore.PointTaken(__runOriginal, __state.Transitioning,
+                    __state.FfaTaken, FfaMode.NextRoundsTaken,
+                    __state.Observed, PointEvidence.ObservedRounds);
+            }
+            catch { }
+            if (!taken) return;
             try { PointEvidence.PointEnd(); } catch { }
             try { PointEvidence.GameOverCheck(__instance); } catch { }
         }

@@ -104,6 +104,32 @@ namespace HitEvidenceTests
             Check(HitEvidenceCore.ShotObsLine(1, 2, new HitEvidenceCore.GameTally()).EndsWith("observed_hit_pct=na"), "no spawn: na");
         }
 
+        // Merge pass 6, G1-L1: a duplicate or refused RPCA_NextRound ends no point.
+        private static void PointGate()
+        {
+            // vanilla: the body ran with isTransitioning false -> a point; true -> its duplicate guard returned
+            Check(HitEvidenceCore.PointTaken(true, false, 7, 7, 3, 3), "vanilla point");
+            Check(!HitEvidenceCore.PointTaken(true, true, 7, 7, 3, 3), "vanilla duplicate");
+            // a prefix skipped the body (FFA engine or spectator) and nothing else took it
+            Check(!HitEvidenceCore.PointTaken(false, false, 7, 7, 3, 3), "skipped body, no path");
+            // FFA: the engine's taken count moved -> a point; a refused master or a duplicate leaves it
+            Check(HitEvidenceCore.PointTaken(false, false, 7, 8, 3, 3), "ffa point");
+            Check(!HitEvidenceCore.PointTaken(false, false, 8, 8, 3, 3), "ffa refused or duplicate");
+            Check(HitEvidenceCore.PointTaken(false, false, int.MaxValue, int.MinValue, 3, 3), "ffa count wraps");
+            // spectator: the observer's count moved -> a point; a latched observer leaves it
+            Check(HitEvidenceCore.PointTaken(false, false, 7, 7, 3, 4), "spectator point");
+            Check(!HitEvidenceCore.PointTaken(false, false, 7, 7, 4, 4), "spectator duplicate");
+        }
+
+        // Merge pass 6, G1-L2: the FFA game ends on the engine's latch, not vanilla's rounds.
+        private static void GameGate()
+        {
+            Check(HitEvidenceCore.GameDecided(true, true, 0, 0, 5), "ffa game over, vanilla rounds untouched");
+            Check(!HitEvidenceCore.GameDecided(true, false, 5, 0, 5), "ffa not over whatever vanilla rounds say");
+            Check(HitEvidenceCore.GameDecided(false, false, 5, 2, 5) && HitEvidenceCore.GameDecided(false, false, 1, 5, 5), "vanilla game over");
+            Check(!HitEvidenceCore.GameDecided(false, true, 4, 4, 5), "vanilla not over");
+        }
+
         // [PEER-BUILD] (merge pass 5): every key is listed, sorted; only the
         // version/variant/capability keys print a value; an account id in any
         // other key never reaches the line.
@@ -175,6 +201,7 @@ namespace HitEvidenceTests
             var cases = new Dictionary<string, Action>
             {
                 { "bucket", Bucket }, { "pair", Pair }, { "impacts", Impacts }, { "tally", Tally }, { "lines", Lines }, { "peer", Peer },
+                { "pointgate", PointGate }, { "gamegate", GameGate },
             };
             var run = args.Length > 0 ? new List<string>(args) : new List<string>(cases.Keys);
             int failed = 0;

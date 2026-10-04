@@ -242,6 +242,16 @@ namespace CompetitiveRounds
         private static bool isTransitioning = false;
         private static bool pointLatched = false;      // master's point-resolution latch (find 17)
         private static bool gameOverFired = false;
+        /// <summary>Evidence only (merge pass 6, G1-L1): how many
+        /// RPCA_NextRound calls HandleNextRound took past its gate on this
+        /// seat. Never reset; PointEndEvidencePatch compares it before and
+        /// after one call to tell a taken point from a duplicate or a refused
+        /// broadcast.</summary>
+        internal static int NextRoundsTaken;
+        /// <summary>Evidence only (merge pass 6, G1-L2): the engine's game-over
+        /// latch, which PointEvidence.GameOverCheck reads in place of
+        /// vanilla's round counts.</summary>
+        internal static bool GameOverFiredForEvidence { get { return gameOverFired; } }
         private static bool freshGameCancelFired = false;
         private static float matchStartRealtime = 0f;
         // A rolling rebuild applies card stats silently, then publishes one
@@ -1739,6 +1749,7 @@ namespace CompetitiveRounds
             if (RoomActors.LocalIsSpectator) return;
             if (isTransitioning || gameOverFired) return;
             isTransitioning = true;
+            unchecked { NextRoundsTaken++; }
             // V11 item 13: one more point in this game (the load's k).
             try { FfaLateEntry.OnNextRound(); } catch { }
             pointLatched = false;

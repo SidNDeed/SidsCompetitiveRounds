@@ -55,6 +55,8 @@ namespace HarmonyLib
     public class HarmonyPrefix : Attribute { }
     public class HarmonyPostfix : Attribute { }
     public class HarmonyFinalizer : Attribute { }
+    public class HarmonyPriority : Attribute { public HarmonyPriority(int priority) { } }
+    public static class Priority { public const int First = 800; }
     public static class AccessTools
     {
         public static MethodInfo Method(Type t, string name, Type[] args = null)
@@ -70,7 +72,7 @@ public class HealthHandler : UnityEngine.Component { }
 public class Block : UnityEngine.Component { public float sinceBlock; }
 public class ProjectileHit : UnityEngine.Component { }
 public class ProjectileInit : UnityEngine.Component { }
-public class GM_ArmsRace : UnityEngine.Component { }
+public class GM_ArmsRace : UnityEngine.Component { public bool isTransitioning; }
 public class Saw : UnityEngine.Component { }
 public class Player : UnityEngine.Component { }
 public class BlockTrigger { public enum BlockTriggerType { Default, ShieldCharge, Echo, Empower, None } }
@@ -122,5 +124,20 @@ namespace CompetitiveRounds
         internal static void SawAfter() { throw Planted.Fault(); }
         internal static void PointEnd() { throw Planted.Fault(); }
         internal static void GameOverCheck(GM_ArmsRace gm) { throw Planted.Fault(); }
+        internal static int ObservedRounds;   // merge pass 6: a plain count, read by the point-end hook
+    }
+
+    // Merge pass 6 (G1-L1, G1-L2): not collectors. The point-end hook's
+    // snapshot reads and its decision are plain values here, and the decision
+    // says a point was taken and the FFA engine is on, so the hooks reach the
+    // collectors above, which throw.
+    internal static class FfaMode
+    {
+        internal static int NextRoundsTaken;
+        internal static bool EngineActive() { return true; }
+    }
+    internal static class HitEvidenceCore
+    {
+        internal static bool PointTaken(bool a, bool b, int c, int d, int e, int f) { return true; }
     }
 }

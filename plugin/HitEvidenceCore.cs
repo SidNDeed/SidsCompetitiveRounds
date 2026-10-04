@@ -193,5 +193,37 @@ namespace CompetitiveRounds
               .Append(" never_blocked_point=").Append(g.Buckets[(int)BlockBucket.Never]);
             return sb.ToString();
         }
+
+        /// <summary>Merge pass 6, G1-L1: whether one RPCA_NextRound call
+        /// decided a point on this seat, from what the point-end hook read
+        /// before the call (its prefix) and after it (its postfix). One of
+        /// three paths takes a point: vanilla's body ran and found
+        /// isTransitioning false (its own duplicate guard returns at once when
+        /// it is true); FfaMode.HandleNextRound passed its gate (its count of
+        /// points taken moved); or a spectator seat's observer took a new
+        /// round (its count of rounds taken moved: it counts only a round it
+        /// latched, and a latched observer returns before counting). A call
+        /// that none of them took is a duplicate or a refused broadcast and
+        /// must not end the evidence point.</summary>
+        internal static bool PointTaken(bool ranOriginal, bool vanillaWasTransitioning,
+                                        int ffaTakenBefore, int ffaTakenAfter,
+                                        int observedBefore, int observedAfter)
+        {
+            if (ffaTakenAfter != ffaTakenBefore) return true;
+            if (observedAfter != observedBefore) return true;
+            return ranOriginal && !vanillaWasTransitioning;
+        }
+
+        /// <summary>Merge pass 6, G1-L2: whether a point this seat took ended
+        /// the game. Under the FFA engine the game is over when FfaMode's own
+        /// game-over latch is set after the call (the engine keeps its round
+        /// scores to itself, so vanilla's p1Rounds and p2Rounds say nothing
+        /// there); otherwise when either side reached roundsToWinGame.</summary>
+        internal static bool GameDecided(bool ffaEngine, bool ffaGameOver,
+                                         int p1Rounds, int p2Rounds, int roundsToWinGame)
+        {
+            if (ffaEngine) return ffaGameOver;
+            return p1Rounds >= roundsToWinGame || p2Rounds >= roundsToWinGame;
+        }
     }
 }

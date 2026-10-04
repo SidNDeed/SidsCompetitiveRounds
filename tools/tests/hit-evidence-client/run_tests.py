@@ -29,6 +29,13 @@ MUTANTS = [
      "if (blocked) { ImpactsBlocked++; Hit.Add(projectile); return; }", "impacts", "pair"),
     ("tally_cap_silent", "else Unchecked++;\n            }\n\n            internal void AddForce",
      "\n            }\n\n            internal void AddForce", "tally", "bucket"),
+    # merge pass 6: G1-L1 (a duplicate or refused point broadcast ends no point), G1-L2 (the FFA game end)
+    ("pointgate_ignores_transitioning", "return ranOriginal && !vanillaWasTransitioning;", "return ranOriginal;", "pointgate", "gamegate"),
+    ("pointgate_ffa_any_call", "if (ffaTakenAfter != ffaTakenBefore) return true;", "if (ffaTakenAfter >= ffaTakenBefore) return true;",
+     "pointgate", "gamegate"),
+    ("pointgate_spectator_any_call", "if (observedAfter != observedBefore) return true;",
+     "if (observedAfter >= observedBefore) return true;", "pointgate", "gamegate"),
+    ("gamegate_ffa_reads_vanilla_rounds", "if (ffaEngine) return ffaGameOver;", "", "gamegate", "pointgate"),
 ]
 
 # Merge pass 5: mutants of plugin/PeerBuildCore.cs (the [PEER-BUILD] line),

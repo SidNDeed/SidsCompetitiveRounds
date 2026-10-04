@@ -29,6 +29,7 @@ EXPECTED = sorted([
     "HitEvidence_ExecuteRpcPatch", "HitEvidence_DamagePatch", "HitEvidence_ForcePatch", "HitEvidence_DotPatch",
     "HitEvidence_BlockPatch", "HitEvidence_SpawnAmmoPatch", "HitEvidence_SpawnNoAmmoPatch",
     "HitEvidence_SpawnSeparatePatch", "HitEvidence_ImpactPatch", "HitEvidence_StartGamePatch",
+    "HitEvidence_FfaDoStartGamePatch",
     "SeatEvidence_RpcSendPatch", "SeatEvidence_DoBlockPatch", "SeatEvidence_TryBlockMePatch",
     "SawPointEvidencePatch", "PointEndEvidencePatch",
 ])
@@ -88,6 +89,16 @@ MUTANTS = [
      "SawPointEvidencePatch", "PointEndEvidencePatch"),
     ("pointend_unwrapped", "try { PointEvidence.GameOverCheck(__instance); } catch { }", "PointEvidence.GameOverCheck(__instance);",
      "PointEndEvidencePatch", "SawPointEvidencePatch"),
+    # merge pass 6 (G1-L1, G1-L2): the point-end prefix and the FFA game-start flush
+    ("pointend_prefix_skips", "private static void Snap(GM_ArmsRace __instance, out Before __state)",
+     "private static bool Snap(GM_ArmsRace __instance, out Before __state) { SnapBody(__instance, out __state); return false; }\n"
+     "        private static void SnapBody(GM_ArmsRace __instance, out Before __state)",
+     "PointEndEvidencePatch", "SawPointEvidencePatch"),
+    ("ffa_dostart_unwrapped", "try { if (FfaMode.EngineActive()) HitEvidence.GameEnd(PointEvidence.Point); } catch { }",
+     "if (FfaMode.EngineActive()) HitEvidence.GameEnd(PointEvidence.Point);", "HitEvidence_FfaDoStartGamePatch", "HitEvidence_StartGamePatch"),
+    ("ffa_dostart_swallows", "try { if (FfaMode.EngineActive()) HitEvidence.GameEnd(PointEvidence.Point); } catch { }\n            return __exception;",
+     "try { if (FfaMode.EngineActive()) HitEvidence.GameEnd(PointEvidence.Point); } catch { }\n            return null;",
+     "HitEvidence_FfaDoStartGamePatch", "HitEvidence_StartGamePatch"),
 ]
 
 

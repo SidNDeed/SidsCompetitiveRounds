@@ -265,6 +265,8 @@ namespace CompetitiveRounds
                 // rounds are never eaten.
                 if (SpectatorSync.RoundObservationLatched) return false;
                 SpectatorSync.LatchRoundObservation();
+                // evidence only (merge pass 6, G1-L1): one more round this observer took
+                unchecked { PointEvidence.ObservedRounds++; }
             }
             catch { }
             try

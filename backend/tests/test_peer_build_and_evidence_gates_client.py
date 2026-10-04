@@ -122,7 +122,8 @@ def test_the_six_beta_bug_lines_have_no_gate_in_front():
                        (hit, ["HitEvidence_ExecuteRpcPatch", "HitEvidence_DamagePatch", "HitEvidence_ForcePatch",
                               "HitEvidence_DotPatch", "HitEvidence_BlockPatch", "HitEvidence_SpawnAmmoPatch",
                               "HitEvidence_SpawnNoAmmoPatch", "HitEvidence_SpawnSeparatePatch",
-                              "HitEvidence_ImpactPatch", "HitEvidence_StartGamePatch"])):
+                              "HitEvidence_ImpactPatch", "HitEvidence_StartGamePatch",
+                              "HitEvidence_FfaDoStartGamePatch"])):
         for n in names:
             head = src[:src.index("internal static class " + n)]
             assert head.rstrip().splitlines()[-1].lstrip().startswith("[HarmonyPatch"), n + " is not a [HarmonyPatch] class"

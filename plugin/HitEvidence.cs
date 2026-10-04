@@ -531,4 +531,24 @@ namespace CompetitiveRounds
             return __exception;
         }
     }
+
+    /// <summary>Merge pass 6, G1-L2: the same flush at DoStartGame under the
+    /// FFA engine. A same-room FFA rematch reaches DoStartGame directly
+    /// (IDoRematch, learning #138) without StartGame, and FfaMode replaces
+    /// DoStartGame for game 1 and every rematch, so a game whose end this
+    /// seat did not see still flushes before the next one counts. A
+    /// finalizer, so it runs when a prefix (FfaMode's, the spectator's)
+    /// skipped the body. Not outside the FFA engine: vanilla's RoundTransition
+    /// calls DoStartGame after every round of a game, and a flush there would
+    /// split one game's tallies by round.</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "DoStartGame")]
+    internal static class HitEvidence_FfaDoStartGamePatch
+    {
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Exception __exception)
+        {
+            try { if (FfaMode.EngineActive()) HitEvidence.GameEnd(PointEvidence.Point); } catch { }
+            return __exception;
+        }
+    }
 }

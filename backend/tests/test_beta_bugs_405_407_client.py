@@ -137,12 +137,41 @@ def test_point_end_lines_and_saw_bracket():
     assert '[HarmonyPatch(typeof(GM_ArmsRace), "RPCA_NextRound"' in patch
     # each postfix step runs inside its own guard (poison V4 B7), in the seat evidence form
     # try { } catch { }, which is HookGuard.Run's own body
-    assert "try { PointEvidence.PointEnd(); } catch { }" in _member(src, "internal static class PointEndEvidencePatch")
+    pe = _member(src, "internal static class PointEndEvidencePatch")
+    assert "try { PointEvidence.PointEnd(); } catch { }" in pe
+    # merge pass 6, G1-L1: only a call that took a point ends one. The prefix
+    # reads before every other prefix (the spectator observer's is First), and
+    # the postfix returns before the point end unless HitEvidenceCore.PointTaken
+    # (executed by tools/tests/hit-evidence-client, case pointgate) says so.
+    snap = _member(pe, "private static void Snap(GM_ArmsRace __instance, out Before __state)")
+    assert "[HarmonyPrefix]\n        [HarmonyPriority(Priority.First + 1)]\n        private static void Snap(" in pe.replace("\r\n", "\n")
+    for read in ("try { __state.Transitioning = __instance.isTransitioning; } catch { }",
+                 "try { __state.Observed = PointEvidence.ObservedRounds; } catch { }",
+                 "try { __state.FfaTaken = FfaMode.NextRoundsTaken; } catch { }"):
+        assert snap.count(read) == 1, read
+    after = _member(pe, "private static void After(GM_ArmsRace __instance, Before __state, bool __runOriginal)")
+    assert after.count("taken = HitEvidenceCore.PointTaken(__runOriginal, __state.Transitioning,") == 1
+    assert after.count("if (!taken) return;") == 1
+    assert after.index("if (!taken) return;") < after.index("PointEvidence.PointEnd();") \
+        < after.index("PointEvidence.GameOverCheck(__instance);")
+    spec = _member(_read(PLUGIN / "SpectatorPatches.cs"), "internal static class Spectator_ObserveNextRound_Patch")
+    assert spec.count("unchecked { PointEvidence.ObservedRounds++; }") == 1
+    assert "if (SpectatorSync.RoundObservationLatched) return false;\n                SpectatorSync.LatchRoundObservation();\n" \
+        "                // evidence only (merge pass 6, G1-L1): one more round this observer took\n" \
+        "                unchecked { PointEvidence.ObservedRounds++; }" in spec
+    ffa = _read(PLUGIN / "FfaMode.cs")
+    nr = _member(ffa, "public static void HandleNextRound(GM_ArmsRace gm, int winnerTeam)").replace("\r\n", "\n")
+    assert nr.count("unchecked { NextRoundsTaken++; }") == 1
+    assert "if (isTransitioning || gameOverFired) return;\n            isTransitioning = true;\n            unchecked { NextRoundsTaken++; }" in nr
     saw = _member(src, "internal static class SawPointEvidencePatch")
     assert "PointEvidence.SawBefore();" in saw and "PointEvidence.SawAfter();" in saw
     assert "[HarmonyFinalizer]" in saw and "return __exception;" in saw
     end = _member(src, "internal static void PointEnd()")
-    assert end.count('"[HP-POINT-END] point="') == 1 and end.count('"[SAW-POINT] point="') == 1
+    # seat evidence fix pass 4 (F4): the hook captures the numbers, the tick's
+    # DrainOwn writes the two lines (re-pointed in merge pass 6)
+    own = _member(src, "private static void DrainOwn()")
+    assert own.count('"[HP-POINT-END] point="') == 1 and own.count('"[SAW-POINT] point="') == 1
+    assert '"[HP-POINT-END]' not in end and "Plugin.Log" not in end
     assert ".health" in end and ".MaxHealth" in end
 
 
@@ -200,14 +229,20 @@ def test_hit_evidence_hooks_only_count():
         for call in ("DoDamage(", "TakeDamage(", "TakeForce(", "Heal(", "RaiseEvent(", ".RPC(", "sinceBlock ="):
             assert call not in body, call
         # a knockback write is <body>.AddForce( (playerVel, a rigidbody); the
-        # tally's own AddForce is called on P(actor), a call result
-        assert not re.search(r"[A-Za-z_\]]\.AddForce\(", body), "evidence applies a force"
+        # tally's own AddForce is called on the tally P(actor) returns, held in
+        # p since seat evidence fix pass 4 (re-pointed in merge pass 6)
+        calls = re.findall(r"[A-Za-z_\]]\w*\.AddForce\(", body)
+        tally = ["p.AddForce("] if "var p = P(actor);\n                if (p != null) p.AddForce(" in body else []
+        assert calls == tally, ("evidence applies a force", calls)
 
 
 def test_hit_evidence_attributes_by_sender_and_counts_the_local_player_only():
     src = _read(HIT)
     sender = _member(src, "internal static class HitEvidence_ExecuteRpcPatch")
-    assert "__state = HitEvidence.RpcSender;" in sender and "HitEvidence.RpcSender = __state;" in sender
+    # one long __state carries the previous sender and the seat evidence frame
+    # depth since the seat evidence merge (re-pointed in merge pass 6)
+    assert "int prev = HitEvidence.RpcSender;" in sender and "__state = (long)(uint)prev | ((long)depth << 32);" in sender
+    assert "HitEvidence.RpcSender = (int)(uint)(__state & 0xFFFFFFFFL);" in sender
     for name in ("internal static void NoteDamage(", "internal static void NoteForce("):
         body = _member(src, name)
         assert "RemoteSender(out actor)" in body and "LocalVictim(hh, out data)" in body, name
@@ -227,14 +262,29 @@ def test_hit_evidence_flushes_per_point_and_per_game():
     assert _member(ev, "internal static void PointEnd()").count("HitEvidence.PointEnd(_point);") == 1
     assert "HitEvidence.ResetForRoomExit(_point);" in _member(ev, "internal static void ResetForRoomExit()")
     over = _member(ev, "internal static void GameOverCheck(GM_ArmsRace gm)")
-    assert "gm.p1Rounds >= gm.roundsToWinGame || gm.p2Rounds >= gm.roundsToWinGame" in over
+    # merge pass 6, G1-L2: the FFA engine's own game-over latch, not vanilla's
+    # rounds (HitEvidenceCore.GameDecided, executed by case gamegate)
+    assert "HitEvidenceCore.GameDecided(FfaMode.EngineActive(), FfaMode.GameOverFiredForEvidence," in over
+    assert "gm.p1Rounds, gm.p2Rounds, gm.roundsToWinGame))" in over
     assert "HitEvidence.GameEnd(_point);" in over
     assert "try { PointEvidence.GameOverCheck(__instance); } catch { }" in \
         _member(poison, "internal static class PointEndEvidencePatch")
     src = _read(HIT)
     start = _member(src, "internal static class HitEvidence_StartGamePatch")
     assert "HitEvidence.GameEnd(PointEvidence.Point);" in start
+    # merge pass 6, G1-L2: a same-room FFA rematch reaches DoStartGame without
+    # StartGame; the flush there is a finalizer (it runs when FfaMode's or the
+    # spectator's prefix skipped the body) and runs under the FFA engine only
+    assert '[HarmonyPatch(typeof(GM_ArmsRace), "DoStartGame")]\n    internal static class HitEvidence_FfaDoStartGamePatch' \
+        in src.replace("\r\n", "\n")
+    fs = _member(src, "internal static class HitEvidence_FfaDoStartGamePatch")
+    assert "[HarmonyFinalizer]" in fs and "return __exception;" in fs
+    assert fs.count("try { if (FfaMode.EngineActive()) HitEvidence.GameEnd(PointEvidence.Point); } catch { }") == 1
     point = _member(src, "internal static void PointEnd(int point)")
     assert "_point.Clear();" in point and "_blockedThisPoint = false;" in point
     game = _member(src, "internal static void GameEnd(int point)")
-    assert "_game.Clear();" in game and "HitEvidenceCore.ShotObsLine(" in game and "HitEvidenceCore.BlockMissLine(" in game
+    # F4: GameEnd hands the tallies over; Drain, from the tick, writes the lines
+    # (re-pointed in merge pass 6)
+    assert "_game.Clear();" in game and "HoldGame(_games);" in game and "Plugin.Log" not in game
+    drain = _member(src, "internal static void Drain()")
+    assert "HitEvidenceCore.ShotObsLine(" in drain and "HitEvidenceCore.BlockMissLine(" in drain
