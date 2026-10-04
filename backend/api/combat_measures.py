@@ -841,8 +841,9 @@ TOTALS_COMPARED = ("cycles", "volleys", "units", "inits_rl", "why_over_mag", "wh
 WHY_OWNER_ONLY = WHY["gate_reloading"]
 # Every wire field of a shot group's header and the cycle field it becomes.
 # Both accounts state every one of them: `s0` pairs the two accounts' cycles
-# (a cycle with no partner of the same `s0` is absent on the other side),
-# the clocks compare through the clock deltas, and the rest field by field.
+# (one to one, or the pairing is ambiguous and every cycle NOT-RUN; a cycle
+# with no partner of the same `s0` is never absent on the other side), the
+# clocks compare through the clock deltas, and the rest field by field.
 CYCLE_HEADER = {"s0": "s0", "pid0": "pid0", "n": "units", "pt": "pt", "end": "end",
                 "src": "src", "amt": "amt", "st_end": "st_end", "rl_g": "rl_g", "rl_s": "rl_s",
                 "rl_r": "rl_r", "rg": "regen_stated", "nrg": "regen_events"}
@@ -881,20 +882,27 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
     bit, the refill events and the cycle clocks), the attack count against
     the emissions, the stat blocks at every point and the whole-game totals.
 
-    The two accounts' cycles pair by `s0`, one to one, or not at all:
-    an `s0` or a shot identity listed twice on one side,
-    or a shot both sides list in cycles of different `s0`, leaves the match
-    ambiguous (`_pairing_fault`), and then every cycle of both accounts is
-    shown on its own row, NOT-RUN `ambiguous`, none compared, none absent.
-    No cycle is ever left out because another row holds one of its shots. A
-    cycle with no partner is absent from the other account only when the
-    absence gate (`absence`) says that account's list proves it, else
-    NOT-RUN; it is never an agreement. Any difference is `both_differ` and
-    `differs_by` names its classes. `both_agree` needs a complete bijection
-    (no ambiguity, both cycle lists whole against their whole-game cycle
-    counts, every row holding both accounts' cycle), at least one cycle
-    compared when cycles are listed (else a whole-game comparison), and
-    nothing differing. Otherwise `not_run` (every dependency missing,
+    The two accounts' cycles pair by `s0`, one to one, or not at all
+    (a bijection or NOT-RUN): an `s0` or a shot identity listed
+    twice on one side, a cycle left unmatched on either side (an `s0` the
+    other account does not list), or a shot both sides list in cycles of
+    different `s0`, leaves the match ambiguous (`_pairing_fault`), and then
+    every cycle of both accounts is shown on its own row, NOT-RUN
+    `ambiguous`, none compared, none absent. No cycle is ever left out
+    because another row holds one of its shots, and no cycle is ever absent
+    from the other account: a cycle without a partner is NOT-RUN, never a
+    difference and never an agreement. With one record only, each of its
+    cycles is shown on its own row, NOT-RUN `missing_record`. Inside a
+    matched pair a shot one account lists and the other does not is absent
+    there only when the absence gate (`absence`) says that account's list
+    proves it. Whether the case is definitive (`both_agree`,
+    `both_differ`) or `not_run` is decided by ONE function, `_verdict`:
+    definitive only from a complete bijection (no pairing fault, both cycle
+    lists whole against their whole-game cycle counts, every row holding
+    both accounts' cycle); then any difference is `both_differ` and
+    `differs_by` names its classes, and `both_agree` needs at least one
+    cycle compared when cycles are listed (else a whole-game comparison)
+    and nothing differing. Otherwise `not_run` (every dependency missing,
     trimmed, ambiguous or of another measurement version)."""
     self_c = rebuild_side(owner_rec, "s") if owner_rec is not None else None
     meas_c = rebuild_side(meas_rec, "o") if meas_rec is not None else None
@@ -907,21 +915,17 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
     pairing = (_pairing_fault(self_c, meas_c)
                if self_c is not None and meas_c is not None else None)
     rows = []
-    if pairing is not None:
+    if self_c is None or meas_c is None or pairing is not None:
+        why = pairing if pairing is not None else "missing_record"
         for acct, cycles in (("meas", meas_c), ("self", self_c)):
-            for c in cycles:
-                rows.append(_lone_row(c, acct, owner_rec, meas_rec, pairing))
+            for c in cycles or ():
+                rows.append(_lone_row(c, acct, owner_rec, meas_rec, why))
     else:
-        primary = meas_c if meas_c is not None else self_c
-        other_by = {c["s0"]: c for c in (self_c if primary is meas_c else meas_c) or []}
-        for c in primary:
-            rows.append(_cycle_row(c, owner_rec, meas_rec, other_by.get(c["s0"]),
-                                   primary is meas_c))
-        if meas_c is not None and self_c is not None:
-            paired = {c["s0"] for c in meas_c}
-            for c in self_c:
-                if c["s0"] not in paired:
-                    rows.append(_cycle_row(c, owner_rec, meas_rec, None, False))
+        # No pairing fault: the two `s0` sets are equal and each `s0` is
+        # listed once per side, so every cycle has exactly one partner.
+        other_by = {c["s0"]: c for c in self_c}
+        for c in meas_c:
+            rows.append(_cycle_row(c, owner_rec, meas_rec, other_by[c["s0"]], True))
     # A cycle a kept summary names but whose shot group neither record still
     # lists: shown from its summary, every per-shot comparison NOT-RUN.
     seen = {r["s0"] for r in rows}
@@ -981,36 +985,59 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
             found.add("totals")
         if any(st["diff"] and any(st["diff"].values()) for st in out["stat"]):
             found.add("stat")
-        # The complete bijection an agreement needs: one-to-one pairing, both
-        # cycle lists whole against their whole-game cycle counts (the same
-        # gate an absence passes), and every row holding both accounts.
-        bijection = (pairing is None and absence(owner_rec, "sh_s") == ABSENT
-                     and absence(meas_rec, "sh_o") == ABSENT
-                     and all(r["self"] is not None and r["meas"] is not None for r in rows))
-        cycles_compared = any(r["not_run"] is None for r in rows)
         whole_compared = (out["attacks"]["d_emit_msgs"] is not None
                           or out["totals"]["diff"] is not None
                           or any(st["diff"] is not None for st in out["stat"]))
-        compared = bijection and (cycles_compared if rows else whole_compared)
-        out["differs_by"] = sorted(found)
-        case = "both_differ" if found else ("both_agree" if compared else "not_run")
+        case = _verdict(owner_rec, meas_rec, pairing, rows, found, whole_compared)
+        # A difference is named only where the case is definitive.
+        out["differs_by"] = sorted(found) if case == "both_differ" else []
         out["case"] = case
     out["case_text"] = CASE_TEXT[case]
     return out
 
 
+def _verdict(owner_rec, meas_rec, pairing, rows, found, whole_compared) -> str:
+    """The ONE decision between a definitive display case (`both_agree`,
+    `both_differ`) and NOT-RUN for a gun both records hold. Definitive only from a complete bijection: no pairing fault (so
+    every cycle of either account sits in exactly one row beside its
+    partner of the same `s0`), both cycle lists whole against their
+    whole-game cycle counts (the absence gate), and every row holding both
+    accounts' cycle. Without it the case is `not_run`, whatever differs: no
+    difference found elsewhere (a whole-game total, a stat block) makes a
+    gun definitive over cycles that did not pair. With it, any difference
+    (`found`) is `both_differ`; nothing differing is `both_agree` when at
+    least one cycle was compared (with no cycle listed, when a whole-game
+    comparison ran), else `not_run`. A unit test reads this module's
+    source and fails on a definitive case produced anywhere else."""
+    bijection = (pairing is None and absence(owner_rec, "sh_s") == ABSENT
+                 and absence(meas_rec, "sh_o") == ABSENT
+                 and all(r["self"] is not None and r["meas"] is not None for r in rows))
+    if not bijection:
+        return "not_run"
+    if found:
+        return "both_differ"
+    compared = any(r["not_run"] is None for r in rows) if rows else whole_compared
+    if not compared:
+        return "not_run"
+    return "both_agree"
+
+
 def _pairing_fault(self_c, meas_c):
     """Why the two accounts' cycles of one gun do not pair one to one by
-    `s0`, or None when they do. Ambiguous: an `s0` listed
-    twice on one side, a shot identity (pid, stamp) listed twice on one side
-    (in one cycle or two), or a shot both sides list in cycles of different
-    `s0` (the two pairings disagree). With no fault, every shot both sides
+    `s0`, or None when they do. Ambiguous: an `s0` listed twice on one side,
+    a shot identity (pid, stamp) listed twice on one side (in one cycle or
+    two), a cycle left unmatched on either side (an `s0` one account lists
+    and the other does not), or a shot both sides list in cycles of
+    different `s0` (the two pairings disagree). With no fault, the two `s0`
+    sets are equal, each listed once per side, and every shot both sides
     list lies in a pair of cycles of the same `s0`."""
     for side in (self_c, meas_c):
         s0s = [c["s0"] for c in side]
         keys = [_shot_key(s) for c in side for s in c["shots"]]
         if len(set(s0s)) != len(s0s) or len(set(keys)) != len(keys):
             return "ambiguous"
+    if {c["s0"] for c in self_c} != {c["s0"] for c in meas_c}:
+        return "ambiguous"
     home = {_shot_key(s): c["s0"] for c in self_c for s in c["shots"]}
     for c in meas_c:
         for s in c["shots"]:
@@ -1053,8 +1080,10 @@ def _lone_row(c, acct, owner_rec, meas_rec, why):
 
 def _cycle_row(c, owner_rec, meas_rec, partner, primary_is_meas):
     """One cycle of the primary account beside `partner`, the other
-    account's cycle of the same `s0` (None when it lists none), under a
-    one-to-one pairing. Every absence below is the gate's (`absence`)."""
+    account's cycle of the same `s0`, under a one-to-one pairing: every
+    cycle passed here has its partner (a cycle without one never reaches
+    this row; `direction` shows it on its own, NOT-RUN). Every shot absence
+    below is the gate's (`absence`); no cycle is ever absent."""
     mine = "meas" if primary_is_meas else "self"
     theirs = "self" if primary_is_meas else "meas"
     other_rec = owner_rec if primary_is_meas else meas_rec
@@ -1064,23 +1093,13 @@ def _cycle_row(c, owner_rec, meas_rec, partner, primary_is_meas):
     row = {"s0": c["s0"], "pt": c["pt"], mine: _cycle_fields(c), theirs: None, "shots": [],
            "refill": None, "differs": False, "differs_by": [], "clock": None, "not_run": None,
            "absent_in": None}
-    if partner is not None:
-        row[theirs] = _cycle_fields(partner)
-        # A cycle either account could not rebuild whole (a shot or refill
-        # event trimmed, no stat block) is not a compared cycle: the fields
-        # both state are still set side by side and a difference among them
-        # still counts, but the row never counts toward an agreement.
-        row["not_run"] = c["not_run"] or partner["not_run"]
-    else:
-        why = absence(other_rec, other_gk)
-        if why == ABSENT:
-            # The other record lists its groups whole, as many as its
-            # whole-game cycle count, and none has this `s0`.
-            row["absent_in"] = theirs
-            _mark(row, "cycle")
-        else:
-            row["not_run"] = why
-    other_map = {_shot_key(s): s for s in partner["shots"]} if partner is not None else {}
+    row[theirs] = _cycle_fields(partner)
+    # A cycle either account could not rebuild whole (a shot or refill
+    # event trimmed, no stat block) is not a compared cycle: the fields
+    # both state are still set side by side and a difference among them
+    # still counts, but the row never counts toward an agreement.
+    row["not_run"] = c["not_run"] or partner["not_run"]
+    other_map = {_shot_key(s): s for s in partner["shots"]}
     for s in c["shots"]:
         o = other_map.get(_shot_key(s))
         srow = {"pid": s["pid"], "stamp": s["stamp"], mine: _shot_fields(s), theirs: None,
@@ -1101,25 +1120,24 @@ def _cycle_row(c, owner_rec, meas_rec, partner, primary_is_meas):
             else:
                 srow["not_run"] = why
         row["shots"].append(srow)
-    if partner is not None:
-        # Shots only the other account lists: absent here only when this
-        # account's list and this cycle prove it.
-        listed = {_shot_key(s) for s in c["shots"]}
-        for s in partner["shots"]:
-            if _shot_key(s) in listed:
-                continue
-            srow = {"pid": s["pid"], "stamp": s["stamp"], mine: None, theirs: _shot_fields(s),
-                    "not_run": None, "absent_in": None}
-            srow.update({d: None for d in SHOT_COMPARED.values()})
-            why = absence(own_rec, own_gk, c)
-            if why == ABSENT:
-                srow["absent_in"] = mine
-                _mark(row, "shot")
-            else:
-                srow["not_run"] = why
-            row["shots"].append(srow)
-        a, b = (partner, c) if primary_is_meas else (c, partner)
-        _compare_cycles(row, a, b)
+    # Shots only the other account lists: absent here only when this
+    # account's list and this cycle prove it.
+    listed = {_shot_key(s) for s in c["shots"]}
+    for s in partner["shots"]:
+        if _shot_key(s) in listed:
+            continue
+        srow = {"pid": s["pid"], "stamp": s["stamp"], mine: None, theirs: _shot_fields(s),
+                "not_run": None, "absent_in": None}
+        srow.update({d: None for d in SHOT_COMPARED.values()})
+        why = absence(own_rec, own_gk, c)
+        if why == ABSENT:
+            srow["absent_in"] = mine
+            _mark(row, "shot")
+        else:
+            srow["not_run"] = why
+        row["shots"].append(srow)
+    a, b = (partner, c) if primary_is_meas else (c, partner)
+    _compare_cycles(row, a, b)
     _stat_time(row, c, owner_rec, meas_rec)
     return row
 
@@ -1951,8 +1969,10 @@ def m_cycle_pid0(ctx, p):
 
 @cmeasure("b2.cycle.partner_absent", "combat.cycle")
 def m_cycle_partner_absent(ctx, p):
-    """Which account lacks this cycle (its `s0`) while listing its groups
-    whole, or None."""
+    """Which account lacks this cycle (its `s0`), or None. Now always
+    None: a cycle one account does not list leaves the pairing
+    ambiguous and every cycle NOT-RUN, never absent. Kept so that a rules
+    revision naming it reads NOT-RUN rather than an unknown measure."""
     return _get(ctx, "partner_absent_in")
 
 

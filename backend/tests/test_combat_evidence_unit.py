@@ -13,6 +13,7 @@ Every record and every rule here is synthetic and built inside the tests."""
 
 import ast
 import inspect
+import itertools
 import json
 import os
 import re
@@ -1363,32 +1364,30 @@ def test_f2_m6_first_of_emission_and_the_header_identity_are_exposed_per_row():
 
 
 def test_f2_m6_a_missing_cycle_partner_is_absent_or_not_run_never_agreement():
+    """Fix pass 4 (M-6): a cycle with no partner is NEVER absent and never
+    a difference, whatever the other record's list and counter say: the
+    pairing is ambiguous and every cycle NOT-RUN. The record this control
+    used to accept as a definitive absence (no group listed, none counted,
+    so the list is whole) is the reviewer's [A] against [] and now reads
+    NOT-RUN `ambiguous`, as do the contradictory and trimmed records."""
     owner, meas = fx.a24_pair()
     gone = fx.clone(meas)
     gone["sh_o"] = []
     gone["tot_o"][cm.TOT["cycles"]] = 0                                 # none listed, none counted
-    d = _owner_dir(cm.pair_view(fx.records(owner, gone)))
-    (row,) = [r for r in d["cycles"] if r["self"] is not None]
-    assert row["absent_in"] == "meas" and "cycle" in row["differs_by"]
-    assert d["case"] == "both_differ" and "cycle" in d["differs_by"]
-    # Fix pass 3 (M-8): the record this control used before, no group listed
-    # while its whole-game count says one, contradicts itself: NOT-RUN
-    # `inconsistent`, never absent, never a difference, never an agreement.
     contra = fx.clone(meas)
-    contra["sh_o"] = []
-    d = _owner_dir(cm.pair_view(fx.records(owner, contra)))
-    (row,) = [r for r in d["cycles"] if r["self"] is not None]
-    assert row["not_run"] == "inconsistent" and row["absent_in"] is None
-    assert row["differs_by"] == [] and d["case"] == "not_run", (d["case"], d["differs_by"])
+    contra["sh_o"] = []                                                 # none listed, one counted
     trimmed = fx.clone(contra)
     trimmed["omit"]["sh_o"] = 1
-    d = _owner_dir(cm.pair_view(fx.records(owner, trimmed)))
-    (row,) = [r for r in d["cycles"] if r["self"] is not None]
-    assert row["not_run"] == "trimmed" and row["absent_in"] is None
-    assert "cycle" not in row["differs_by"] and d["case"] != "both_agree"
+    for m in (gone, contra, trimmed):
+        d = _owner_dir(cm.pair_view(fx.records(owner, m)))
+        (row,) = [r for r in d["cycles"] if r["self"] is not None]
+        assert d["pairing"] == "ambiguous" and row["not_run"] == "ambiguous"
+        assert row["absent_in"] is None and row["differs_by"] == []
+        assert all(s["absent_in"] is None for s in row["shots"])
+        assert d["case"] == "not_run" and d["differs_by"] == [], (d["case"], d["differs_by"])
     (sub,) = [c for c in cm.combat_subjects(cm.pair_view(fx.records(owner, gone)))["combat.cycle"]
               if c.row["owner"] == A]
-    assert cm.m_cycle_partner_absent(sub, None) == "meas"
+    assert cm.m_cycle_partner_absent(sub, None) is None
     d = _owner_dir(cm.pair_view(fx.records(owner, meas)))                # control: partnered
     assert d["case"] == "both_agree" and all(r["absent_in"] is None for r in d["cycles"])
 
@@ -1681,9 +1680,8 @@ def _gate_proof(source):
 # Every call of the gate, generated from the source, and the test whose
 # contradictory-count (or uncounted) control covers it.
 _GATE_CONTROLS = {
-    ("direction", "owner_rec, 'sh_s'"): "test_f3_m6_an_agreement_needs_a_complete_bijection",
-    ("direction", "meas_rec, 'sh_o'"): "test_f3_m6_an_agreement_needs_a_complete_bijection",
-    ("_cycle_row", "other_rec, other_gk"): "test_f3_m8_cycle_absence_needs_the_counter_pair",
+    ("_verdict", "owner_rec, 'sh_s'"): "test_f3_m6_an_agreement_needs_a_complete_bijection",
+    ("_verdict", "meas_rec, 'sh_o'"): "test_f3_m6_an_agreement_needs_a_complete_bijection",
     ("_cycle_row", "other_rec, other_gk, partner"): "test_f3_m8_shot_absence_needs_the_counter_pair",
     ("_cycle_row", "own_rec, own_gk, c"): "test_f3_m8_shot_absence_needs_the_counter_pair",
     ("blocks", "shooter_rec, 'b5_o'"): "test_f2_m8_a_list_without_a_counter_never_proves_absence",
@@ -1710,9 +1708,9 @@ def test_f3_m8_every_absence_passes_through_the_one_gate():
     assert set(sites) == set(_GATE_CONTROLS), sorted(set(sites) ^ set(_GATE_CONTROLS))
     for name in set(_GATE_CONTROLS.values()):
         assert callable(globals().get(name)), name
-    old = "        why = absence(other_rec, other_gk)\n"
+    old = "            why = absence(other_rec, other_gk, partner)\n"
     assert _CM_SOURCE.count(old) == 1
-    planted = _CM_SOURCE.replace(old, "        why = list_gap(other_rec, other_gk) or \"absent\"\n")
+    planted = _CM_SOURCE.replace(old, "            why = list_gap(other_rec, other_gk) or \"absent\"\n")
     _s, found = _gate_proof(planted)
     assert {v.split(": ", 1)[1] for v in found} >= {
         "list_gap outside the gate", "the literal absent", "absent_in set without the gate"}, found
@@ -1737,20 +1735,21 @@ def _cycle_absence(side, counted):
 
 @pytest.mark.parametrize("side", ["meas", "self"])
 def test_f3_m8_cycle_absence_needs_the_counter_pair(side):
-    """A cycle the other account does not list is absent there only when
-    that account's groups are whole against its whole-game cycle count; a
-    list that contradicts its count (none listed, one counted) proves
-    nothing: NOT-RUN `inconsistent`, no absence, no difference, no
-    agreement. Both accounts."""
-    d, row, partner_absent = _cycle_absence(side, 0)                   # control: none counted
-    assert row["absent_in"] == side and "cycle" in row["differs_by"]
-    assert all(s["absent_in"] == side for s in row["shots"]) and row["shots"]
-    assert d["case"] == "both_differ" and partner_absent == [side]
-    d, row, partner_absent = _cycle_absence(side, 1)                   # one counted, none listed
-    assert row["not_run"] == "inconsistent" and row["absent_in"] is None
-    assert row["differs_by"] == [] and partner_absent == [None]
-    assert all(s["not_run"] == "inconsistent" and s["absent_in"] is None for s in row["shots"])
-    assert d["case"] == "not_run" and d["differs_by"] == []
+    """Fix pass 4 (M-6 over M-8): a cycle the other account does not list
+    is never absent there, with the counter pair consistent (none listed,
+    none counted: the list is whole) or contradictory (none listed, one
+    counted): the pairing is ambiguous, every cycle and shot NOT-RUN
+    `ambiguous`, no absence, no difference, no agreement. Both accounts.
+    The cycle-level absence the counter gate used to decide no longer
+    exists; shot-level absence inside a matched pair still passes it
+    (`test_f3_m8_shot_absence_needs_the_counter_pair`)."""
+    for counted in (0, 1):
+        d, row, partner_absent = _cycle_absence(side, counted)
+        assert d["pairing"] == "ambiguous" and row["not_run"] == "ambiguous", counted
+        assert row["absent_in"] is None and row["differs_by"] == [] and partner_absent == [None]
+        assert row["shots"]
+        assert all(s["not_run"] == "ambiguous" and s["absent_in"] is None for s in row["shots"])
+        assert d["case"] == "not_run" and d["differs_by"] == []
 
 
 def _shot_pair(variant="base", tot_s_cycles=1, tot_o_cycles=1):
@@ -1885,8 +1884,10 @@ def test_f3_m6_a_shot_identity_in_two_cycles_is_ambiguous():
 def test_f3_m6_an_agreement_needs_a_complete_bijection():
     """`both_agree` only from a one-to-one pairing of both accounts' WHOLE
     cycle lists (each against its whole-game cycle count). A cycle one side
-    trimmed, or the same cycle trimmed on both sides, leaves the compared
-    cycles agreeing and the case NOT-RUN. Both sides of the gate."""
+    trimmed leaves it unmatched: the pairing is ambiguous and all three
+    cycles NOT-RUN (fix pass 4). The same cycle trimmed on both sides pairs
+    the rest one to one, the compared cycle agrees, and the case is still
+    NOT-RUN: both lists must be whole. Both sides of the gate."""
     owner = _cycles_rec("s", [_group(0, "s"), _group(1, "s")])
     meas = _cycles_rec("o", [_group(0, "o"), _group(1, "o")])
     assert _owner_dir(cm.pair_view(fx.records(owner, meas)))["case"] == "both_agree"   # control
@@ -1896,15 +1897,221 @@ def test_f3_m6_an_agreement_needs_a_complete_bijection():
         out[gk] = out[gk][:1]
         out["omit"][gk] = 1                                          # the totals stay whole
         return out
-    for o, m, nrows in ((owner, cut(meas, "sh_o"), 2), (cut(owner, "sh_s"), meas, 2),
-                        (cut(owner, "sh_s"), cut(meas, "sh_o"), 1)):
+    for o, m in ((owner, cut(meas, "sh_o")), (cut(owner, "sh_s"), meas)):
         d = _owner_dir(cm.pair_view(fx.records(o, m)))
-        assert len(d["cycles"]) == nrows and d["cycles"][0]["not_run"] is None
-        assert [r["not_run"] for r in d["cycles"][1:]] == ["trimmed"] * (nrows - 1)
+        assert len(d["cycles"]) == 3
+        assert [r["not_run"] for r in d["cycles"]] == ["ambiguous"] * 3
         assert d["differs_by"] == [] and d["case"] == "not_run", (d["case"], d["differs_by"])
+    d = _owner_dir(cm.pair_view(fx.records(cut(owner, "sh_s"), cut(meas, "sh_o"))))
+    assert d["pairing"] is None and len(d["cycles"]) == 1 and d["cycles"][0]["not_run"] is None
+    assert d["differs_by"] == [] and d["case"] == "not_run", (d["case"], d["differs_by"])
+    # A difference in the compared cycle does not make the case definitive
+    # while a list is trimmed: no `both_differ` without the bijection.
+    diff_m = cut(meas, "sh_o")
+    diff_m["sh_o"][0][0][cm.HDR["pid0"]] += 1
+    d = _owner_dir(cm.pair_view(fx.records(cut(owner, "sh_s"), diff_m)))
+    assert "cycle" in d["cycles"][0]["differs_by"]
+    assert d["differs_by"] == [] and d["case"] == "not_run", (d["case"], d["differs_by"])
 
 
-# -- FIX PASS 2: the purge states the allowlist the constants apply (L-6) -----------------
+# -- FIX PASS 4: an unmatched cycle on either side is NOT-RUN; one verdict (M-6) ----------
+
+def test_f4_m6_the_reviewers_unmatched_cycle_case_is_not_run():
+    """Owner cycles [A, B] against measured [A], each list consistent with
+    its own whole-game counter and every identity unique. Before fix pass 4
+    B was absent from the measured account and the case `both_differ`. Now
+    B is unmatched: the pairing is ambiguous, all three cycles NOT-RUN, no
+    absence, no difference, no agreement. The mirror ([A] against [A, B])
+    reads the same. Control: [A, B] against [A, B] agrees."""
+    for owner_groups, meas_groups in (([_group(0, "s"), _group(1, "s")], [_group(0, "o")]),
+                                      ([_group(0, "s")], [_group(0, "o"), _group(1, "o")])):
+        d = _cycles_dir(owner_groups, meas_groups)
+        _all_ambiguous(d)
+        assert d["case"] == "not_run" and d["differs_by"] == [] and len(d["cycles"]) == 3
+    d = _cycles_dir([_group(0, "s"), _group(1, "s")], [_group(0, "o"), _group(1, "o")])
+    assert d["pairing"] is None and d["case"] == "both_agree"
+
+
+_DEFINITIVE = ("both_agree", "both_differ")
+_CE_SOURCE = open(ce.__file__, encoding="utf-8").read()
+
+
+def _verdict_proof(source):
+    """Every place `source` could produce a definitive display case,
+    generated from the source, outside the one verdict. Allowed: a
+    definitive literal returned by `_verdict`, a key of the `CASE_TEXT`
+    table, and an operand of a comparison (a read). A `case` written
+    anywhere (a name, a "case" key, a `case=` keyword) must hold a
+    non-definitive literal, a `_verdict(...)` call, a copy of an existing
+    `...["case"]`, or the name `case` whose every binding in that function
+    is one of those. `CASE_TEXT` may only be indexed (its keys are never
+    iterated into a case)."""
+    tree = ast.parse(source)
+    parent = {}
+    for n in ast.walk(tree):
+        for ch in ast.iter_child_nodes(n):
+            parent[ch] = n
+
+    def fn_of(n):
+        while n in parent:
+            n = parent[n]
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return n
+        return None
+
+    def ok_value(v, fn):
+        if isinstance(v, ast.Constant):
+            return v.value not in _DEFINITIVE
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "_verdict":
+            return True
+        if isinstance(v, ast.Subscript) and isinstance(v.slice, ast.Constant) \
+                and v.slice.value == "case":
+            return True
+        if isinstance(v, ast.Name) and v.id == "case" and fn is not None:
+            binds = [p for p in ast.walk(fn) if isinstance(p, ast.Assign)
+                     and any(isinstance(t, ast.Name) and t.id == "case" for t in p.targets)]
+            return bool(binds) and all(ok_value(p.value, fn) for p in binds)
+        return False
+
+    out = []
+    for n in ast.walk(tree):
+        f = fn_of(n)
+        where = "line %d (%s)" % (getattr(n, "lineno", 0), f.name if f else "module")
+        p = parent.get(n)
+        if isinstance(n, ast.Constant) and n.value in _DEFINITIVE:
+            in_verdict = f is not None and f.name == "_verdict" and isinstance(p, ast.Return)
+            case_key = (isinstance(p, ast.Dict) and any(k is n for k in p.keys)
+                        and isinstance(parent.get(p), ast.Assign)
+                        and [getattr(t, "id", None) for t in parent[p].targets] == ["CASE_TEXT"])
+            read = isinstance(p, ast.Compare) or (
+                isinstance(p, (ast.Tuple, ast.List, ast.Set))
+                and isinstance(parent.get(p), ast.Compare))
+            if not (in_verdict or case_key or read):
+                out.append(where + ": a definitive case outside the verdict")
+        if isinstance(n, ast.Name) and n.id == "CASE_TEXT" and isinstance(n.ctx, ast.Load):
+            if not (isinstance(p, ast.Subscript) and p.value is n):
+                out.append(where + ": CASE_TEXT read other than by index")
+        writes = []
+        if isinstance(n, ast.Assign):
+            for t in n.targets:
+                if isinstance(t, ast.Name) and t.id == "case":
+                    writes.append(n.value)
+                if isinstance(t, ast.Subscript) and isinstance(t.slice, ast.Constant) \
+                        and t.slice.value == "case":
+                    writes.append(n.value)
+        if isinstance(n, ast.Dict):
+            writes += [v for k, v in zip(n.keys, n.values)
+                       if isinstance(k, ast.Constant) and k.value == "case"]
+        if isinstance(n, ast.keyword) and n.arg == "case":
+            writes.append(n.value)
+        for v in writes:
+            if not ok_value(v, f):
+                out.append(where + ": a case written from " + ast.unparse(v))
+    return out
+
+
+def test_f4_m6_every_definitive_case_comes_from_the_one_verdict():
+    """Fix pass 4, M-6: `_verdict` is the one function that decides
+    definitive (`both_agree`, `both_differ`) or NOT-RUN. Every definitive
+    case the measures and the display produce is enumerated from their
+    source and must come from it; `_verdict` returns a definitive case only
+    after its bijection predicate. Negative controls: two planted bypasses
+    (one in the measure, one in the display) are each found."""
+    assert _verdict_proof(_CM_SOURCE) == []
+    assert _verdict_proof(_CE_SOURCE) == []
+    fn = next(n for n in ast.parse(_CM_SOURCE).body
+              if isinstance(n, ast.FunctionDef) and n.name == "_verdict")
+    first = fn.body[1] if isinstance(fn.body[0], ast.Expr) else fn.body[0]
+    assert isinstance(first, ast.Assign) and first.targets[0].id == "bijection"
+    guard = fn.body[fn.body.index(first) + 1]
+    assert ast.unparse(guard) == "if not bijection:\n    return 'not_run'"
+    old = "        case = _verdict(owner_rec, meas_rec, pairing, rows, found, whole_compared)\n"
+    assert _CM_SOURCE.count(old) == 1
+    planted = _CM_SOURCE.replace(old, "        case = 'both_differ' if found else "
+                                      "_verdict(owner_rec, meas_rec, pairing, rows, found, "
+                                      "whole_compared)\n")
+    assert any("a definitive case outside the verdict" in v for v in _verdict_proof(planted))
+    assert any("a case written from" in v for v in _verdict_proof(planted))
+    old = '"case": d["case"], "case_text"'
+    assert _CE_SOURCE.count(old) == 1
+    planted = _CE_SOURCE.replace(old, '"case": "both_agree" if d["case"] == "not_run" '
+                                      'else d["case"], "case_text"')
+    assert _verdict_proof(planted), "the display bypass was not found"
+
+
+# The small space: four cycle kinds (two `s0` marks by two shot-identity
+# sets: a kind's three shots are those of its identity set, under its `s0`).
+_KINDS = [(s0, ids) for s0 in (0, 1) for ids in (0, 1)]
+
+
+def _kind_group(kind, side):
+    s0, ids = kind
+    return _group(ids, side, s0_shift=10000 * (s0 - ids))
+
+
+def _oracle_bijection(owner, meas, owner_ok, meas_ok):
+    """The bijection, from the abstract description alone: each `s0` and
+    each identity set listed once per side, the two `s0` sets equal, every
+    identity set both sides list under the same `s0`, both counters
+    consistent."""
+    for side in (owner, meas):
+        if len({k[0] for k in side}) != len(side) or len({k[1] for k in side}) != len(side):
+            return False, False
+    if {k[0] for k in owner} != {k[0] for k in meas}:
+        return False, False
+    home = {ids: s0 for s0, ids in owner}
+    if any(home.get(ids, s0) != s0 for s0, ids in meas):
+        return False, False
+    return True, owner_ok and meas_ok
+
+
+def test_f4_m6_definitive_implies_bijection_over_the_small_space():
+    """Fix pass 4, M-6, generated: EVERY owner and measured cycle multiset of
+    up to two cycles over the four kinds (15 per side), each side's
+    whole-game cycle counter consistent or contradicting its list: 900
+    cases. Asserted per case, against an oracle that reads only the
+    abstract description: the pairing is ambiguous exactly when the
+    one-to-one match fails; the case is definitive exactly when the
+    complete bijection holds (definitive implies bijection, and the space
+    is not vacuous); without the bijection the case is `not_run`, nothing
+    is named as differing and no cycle is absent; every listed cycle is
+    shown; identical accounts under the bijection agree."""
+    sides = [m for r in range(3) for m in itertools.combinations_with_replacement(_KINDS, r)]
+    assert len(sides) == 15
+    n = definitive = ambiguous = 0
+    for o_kinds in sides:
+        for m_kinds in sides:
+            for o_ok in (True, False):
+                for m_ok in (True, False):
+                    owner = _cycles_rec("s", [_kind_group(k, "s") for k in o_kinds])
+                    meas = _cycles_rec("o", [_kind_group(k, "o") for k in m_kinds])
+                    cm.check_record(owner)
+                    cm.check_record(meas)
+                    if not o_ok:
+                        owner["tot_s"][cm.TOT["cycles"]] += 1
+                    if not m_ok:
+                        meas["tot_o"][cm.TOT["cycles"]] += 1
+                    d = _owner_dir(cm.pair_view(fx.records(owner, meas)))
+                    one_to_one, bij = _oracle_bijection(list(o_kinds), list(m_kinds), o_ok, m_ok)
+                    tag = (o_kinds, m_kinds, o_ok, m_ok, d["case"], d["pairing"])
+                    n += 1
+                    assert (d["pairing"] is None) is one_to_one, tag
+                    assert (d["case"] in _DEFINITIVE) is bij, tag
+                    assert all(r["absent_in"] is None for r in d["cycles"]), tag
+                    if not bij:
+                        assert d["case"] == "not_run" and d["differs_by"] == [], tag
+                    if not one_to_one:
+                        ambiguous += 1
+                        for r in d["cycles"]:
+                            assert r["not_run"] == "ambiguous" and r["differs_by"] == [], tag
+                            assert all(s["absent_in"] is None for s in r["shots"]), tag
+                    for acct, kinds in (("self", o_kinds), ("meas", m_kinds)):
+                        assert sum(1 for r in d["cycles"] if r[acct] is not None) == len(kinds), tag
+                    if bij and sorted(o_kinds) == sorted(m_kinds):
+                        assert d["case"] == "both_agree", tag
+                    definitive += d["case"] in _DEFINITIVE
+    assert n == 900 and definitive and ambiguous and n - ambiguous - definitive, \
+        (n, definitive, ambiguous)
 
 def test_f2_l6_the_purge_wording_is_the_allowlist_the_constants_apply():
     doc = " ".join(ce.purge_pass.__doc__.split())
