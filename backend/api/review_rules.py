@@ -45,6 +45,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import card_measures as cm
 import review_measures as rm
 
 CONTRACT_BOUNDS = {
@@ -86,7 +87,7 @@ CLOSURE_DOMAIN = b"scr-review-whole-closure\n"
 # The code half of every revision's closure, by file: the vocabulary (every
 # entry and every sitting template) and this loader. A revision's closure
 # names at least these; it may name more files of this directory.
-CODE_REQUIRED = ("review_measures.py", "review_rules.py")
+CODE_REQUIRED = ("card_measures.py", "review_measures.py", "review_rules.py")
 
 _HEX = re.compile(r"[a-f\d]+")
 _REV_DIR = re.compile(r"rules-[a-f\d]{%d}" % _BOUNDS["rev_hex"])
@@ -348,6 +349,10 @@ class Ruleset:
     def sitting_rules(self):
         return [r for r in self.rules if r.scope == "sitting"]
 
+    @property
+    def card_rules(self):
+        return [r for r in self.rules if r.scope == "card"]
+
     def rule(self, rule_id):
         return next((r for r in self.rules if r.id == rule_id), None)
 
@@ -359,6 +364,12 @@ class Ruleset:
 
     def run_selftest(self, cases, deadline):
         return self.core["core.game"].impl[-1](self, cases, deadline)
+
+    def evaluate_card(self, subjects, budget=None):
+        return self.core["core.card"].impl[0](self, subjects, budget)
+
+    def card_case(self, case, budget):
+        return self.core["core.card"].impl[-1](self, case, budget)
 
     def render_line(self, rule, items):
         return self.core["core.render"].impl[0](rule, items)
@@ -622,11 +633,11 @@ def compile_rules(doc, bind, data) -> Ruleset:
                            and isinstance(s[0], str) and _RULE_LABEL.fullmatch(s[0]) for s in show)
                 or len({s[0] for s in show}) != len(show)):
             raise Refused("malformed", "show")
-        if r.scope == "game":
+        if r.scope in ("game", "card"):
             if set(raw) != RULE_KEYS | {"subject", "when"}:
                 raise Refused("malformed", "rule keys")
             r.subject = raw["subject"]
-            if r.subject not in ("seat", "game"):
+            if r.subject not in (("seat", "game") if r.scope == "game" else cm.CARD_SUBJECTS):
                 raise Refused("malformed", "subject")
             r.when = _compile_pred(raw["when"], bind, r.subject, data)
             r.sitting = None
@@ -647,6 +658,10 @@ def compile_rules(doc, bind, data) -> Ruleset:
         rs.rules.append(r)
     for name in CORE_ENTRIES:
         rs.core[name] = bind(name, "core")
+    # The card evaluator is bound only by a revision that has card rules, so a
+    # revision written before it existed loads unchanged.
+    if rs.card_rules:
+        rs.core[CARD_CORE] = bind(CARD_CORE, "core")
     families = {n for n, k in bind.kinds.items() if k == "params"}
     if not families <= set(rs.params):
         raise Refused("malformed", "measure_params missing a family a measure needs")
@@ -840,11 +855,80 @@ def sitting_selftest(rs):
                 raise Refused("selftest", "sitting binds")
 
 
+def evaluate_card(rs, subjects, budget=None):
+    """Every card rule of `rs` over the card subjects of one game (or of the
+    windows of one pass): `subjects` maps a card subject to its rows
+    (card_measures.card_subjects). Returns (findings, notes, fired, errors):
+    findings are (rule, [(row key, item)]) for flag rules that fired on at
+    least one row; notes are (rule, rendered line) for note rules."""
+    memo = {}
+    findings, notes, fired, errors = [], [], [], 0
+    for rule in rs.card_rules:
+        try:
+            items = []
+            for ctx in subjects.get(rule.subject, ()):
+                if eval_pred(rule.when, ctx, memo, rs, budget) is True:
+                    items.append((ctx.i, {label: _measure_value(m, ctx, memo, rs)
+                                          for label, m in rule.show}))
+        except _WorkExceeded:
+            raise
+        except Exception:                 # noqa: BLE001 -- one rule cannot stop another
+            errors += 1
+            continue
+        if not items:
+            continue
+        fired.append(rule.id)
+        if rule.effect == "flag":
+            findings.append((rule, items))
+        else:
+            notes.append((rule, rs.render_line(rule, [it for _k, it in items])))
+    return findings, notes, fired, errors
+
+
+def card_case(rs, case, budget):
+    """One synthetic card case: census dumps, records (text), the series
+    Same Cards rule and window sums, through the public view and the bound
+    evaluator. Returns the fired rule ids, or None when the case is not one
+    the view accepts."""
+    if not isinstance(case, dict) or set(case) != {"census", "records", "sc", "windows"}:
+        return None
+    try:
+        registry = {}
+        for dump in case["census"]:
+            c = cm.census_from_dump(dump)
+            registry[c.digest] = c
+        records = []
+        for r in case["records"]:
+            if not isinstance(r, dict) or set(r) != {"seat", "other", "record", "conflict"}:
+                return None
+            records.append({"seat": r["seat"], "other": r["other"], "conflict": r["conflict"],
+                            "rec": cm.parse_record_text(r["record"])})
+        view = cm.card_view(records, registry, case["sc"], rs.params.get(cm.WEIGHTS))
+        windows = [cm.window_row(w) for w in case["windows"]]
+    except (cm.Refusal, TypeError, KeyError, ValueError, IndexError):
+        return None
+    _f, _n, fired, errors = evaluate_card(rs, cm.card_subjects(view, windows), budget)
+    return None if errors else fired
+
+
 def run_selftest(rs, cases, deadline):
-    """Each synthetic case must fire exactly the rule ids it lists."""
+    """Each synthetic case must fire exactly the rule ids it lists. A case
+    keyed `card` runs through the card evaluator, which only a revision with
+    card rules binds."""
     budget = _Budget(_BOUNDS["work_max"])
     for case in cases:
         _check_time(deadline)
+        if isinstance(case, dict) and set(case) == {"card", "fire"}:
+            if CARD_CORE not in rs.core:
+                raise Refused("malformed", "selftest case")
+            try:
+                fired = rs.card_case(case["card"], budget)
+            except _WorkExceeded:
+                raise Refused("work", "selftest work")
+            if fired is None or not isinstance(case["fire"], list) \
+                    or sorted(fired) != sorted(case["fire"]):
+                raise Refused("selftest")
+            continue
         if not isinstance(case, dict) or set(case) != {"records", "match", "registry", "fire"}:
             raise Refused("malformed", "selftest case")
         registry = {tuple(t) for t in case["registry"]}
@@ -859,6 +943,7 @@ def run_selftest(rs, cases, deadline):
 
 
 CORE_ENTRIES = ("core.game", "core.render", "core.sitting")
+CARD_CORE = "core.card"
 
 
 def _register_core():
@@ -867,6 +952,7 @@ def _register_core():
     rm._register(rm.Entry("core", "core.render", (render_line, render_item, _render_value)))
     rm._register(rm.Entry("core", "core.sitting", (sitting_items, sitting_statement, norm_pair,
                                                    _py, _bound_lookup, sitting_selftest)))
+    rm._register(rm.Entry("core", CARD_CORE, (evaluate_card, card_case)))
 
 
 if __name__ != "__main__" and "core.game" not in rm.REGISTRY:

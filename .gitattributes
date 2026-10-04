@@ -1,2 +1,4 @@
 # Evidence files are compared byte for byte with the runs they record: no line-ending conversion.
 backend/tests/evidence/** -text
+# The card draw fixtures are the client lane's generated files, accepted byte for byte.
+backend/tests/fixtures/card_evidence/** -text

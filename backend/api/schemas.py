@@ -1027,6 +1027,11 @@ class HealthResponse(BaseModel):
     # default, so building the answer without it raises instead of silently
     # leaving the key out. Absent on any build before the lane.
     seat_evidence: int
+    # card_evidence: whether this build serves the card draw evidence lane
+    # (main._card_evidence_health_word; 1 = the three card routes are
+    # registered on the app, else 0). Derived on every request; equal on both
+    # roles; no default, as above. Absent on any build before the lane.
+    card_evidence: int
     # review_eval: 8 hex of the review code's file digest
     # (review_rules.review_eval: review_measures.py and review_rules.py, by
     # file). Equal on both roles; the build discriminator through the edge.
