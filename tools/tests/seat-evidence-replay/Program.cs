@@ -194,7 +194,12 @@ namespace SeatEvidenceReplay
             string body = BodyOf(lines[lines.Length - 1]);
             var env = JsonDocument.Parse(body).RootElement;
             attach = env.GetProperty("attach_key").GetString();
-            return JsonDocument.Parse(env.GetProperty("record").GetString()).RootElement;
+            var rec = JsonDocument.Parse(env.GetProperty("record").GetString()).RootElement;
+            // contract A2, on every record a replay builds: hit_recv is path 0
+            // only (path 1 is shooter-only) and a path-0 key has pid 0
+            foreach (var e in rec.GetProperty("hit_recv").EnumerateArray())
+                Check(e[0].GetInt64() == 0 && e[2].GetInt64() == 0, "A2: a built record lists hit_recv " + e.GetRawText());
+            return rec;
         }
 
         private static string Arr(JsonElement rec, string key) { return rec.GetProperty(key).GetRawText(); }

@@ -71,6 +71,13 @@ MUTANTS = [
      "path1_unstamped", "shooter_paths"),
     ("victim_lists_path1", "else _unpairHits++;",
      "else _hitRecv.Add(C.HitRecvEntry(1, c.Stamp, 0, 0, ServerNow(), false, gate, -1));", "victim_block_hit", "shooter_paths"),
+    # merge pass 6, contract A2 on every built record (LastRecord): the victim's own
+    # hit_recv producer writing path 1, or a pid, must fail damage_predicate, a case
+    # whose own assertions read only the dmg element of hit_recv
+    ("victim_entry_path1", "var e = C.HitRecvEntry(0, c.Stamp, 0, _ordHitRecv.Next(0, c.Stamp, 0),",
+     "var e = C.HitRecvEntry(1, c.Stamp, 0, _ordHitRecv.Next(0, c.Stamp, 0),", "damage_predicate", "compat_sender"),
+    ("victim_entry_pid", "var e = C.HitRecvEntry(0, c.Stamp, 0, _ordHitRecv.Next(0, c.Stamp, 0),",
+     "var e = C.HitRecvEntry(0, c.Stamp, 7, _ordHitRecv.Next(0, c.Stamp, 0),", "damage_predicate", "compat_sender"),
     ("nesting_no_restore", "if (before >= 0) _ctxDepth = before;", "", "unkeyed_and_nesting", "victim_block_hit"),
     ("roomexit_discards", "if (_open) { _open = false; _frozen = true; _frozenAtMs = SwMs; }", "_open = false;",
      "cut_left", "victim_block_hit"),

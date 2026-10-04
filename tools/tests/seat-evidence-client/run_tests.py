@@ -21,10 +21,23 @@ through it (every fixture record, and b7_states.json, the state space), the
 refused combinations (b7_negative.json) must each be refused with the field
 the contract names, and each rule of b7_check has a mutant. The server's own
 check_record then reads the record with hit_sent cut back to nine elements.
-CONFORMANCE AGAINST THE REAL SERVER PARSER IS OWED until the server lane
-lands the amendment; this run does not establish it.
 
-    python tools/tests/seat-evidence-client/run_tests.py [--server-root DIR]
+Contract A2 (hit_recv is path 0 only; a path-0 key has pid 0) is checked by
+a2_check on every fixture record, by the field names the amended server
+uses (hit_recv.path, hit_recv.pid), with two core mutants.
+
+The AMENDED server (the seat evidence server lane, B7 and A2 in its own
+parser; --amended-root, default the sibling scr-wt-seat-evidence-server-v2,
+read by path, never written) is then run on the unmutated build: its
+parse_envelope + parse_record must accept every fixture record with the
+client's exact bytes and verify_sig its signature, and the client's budgeter
+over its shared budget fixture (backend/tests/fixtures/seat_evidence_budget.json)
+must produce the fixture's sha256 and byte count. A missing amended tree is
+a FAIL, never a skip. The fixtures the unmutated build writes must equal the
+committed set in server_fixtures/ byte for byte (pinned_check), so the files
+handed to the server lane are the files this run checked.
+
+    python tools/tests/seat-evidence-client/run_tests.py [--server-root DIR] [--amended-root DIR]
 """
 import hashlib
 import importlib.util
@@ -40,6 +53,8 @@ PROJ = os.path.join(HERE, "SeatEvidenceTests.csproj")
 CORE = os.path.join(REPO, "plugin", "SeatEvidenceCore.cs")
 WORK = os.path.join(HERE, "work")
 DEFAULT_SERVER = os.path.join(os.path.dirname(REPO), "scr-wt-seat-evidence-server")
+DEFAULT_AMENDED = os.path.join(os.path.dirname(REPO), "scr-wt-seat-evidence-server-v2")
+PINNED = os.path.join(HERE, "server_fixtures")
 FIXTURE_KEY = "fixture-key-not-a-secret"
 
 # (name, old text, new text, target case, control case). Each old text must
@@ -57,7 +72,13 @@ MUTANTS = [
      "server", "json"),
     ("lastreset_unkeyed_labelled_none", "return new LastReset(ms, 0, -1, 0, UNKEYED);", "return new LastReset(ms, 0, -1, 0, NONE);",
      "server", "json"),
-    ("lastreset_unkeyed_written_none", "return new LastReset(ms, 0, -1, 0, UNKEYED);", "return new LastReset(-1, 0, -1, 0, NONE);",
+    # merge pass 6, contract A2: the hit_recv entry factory writing path 1, or a
+    # pid, must be refused by a2_check in the fixture comparison
+    ("hit_recv_entry_path1", "return new long[] { Clamp(path, 0, 1), stamp, Clamp(pid, 0, I32_MAX), Clamp(ord, 0, 255), arr,",
+     "return new long[] { 1, stamp, Clamp(pid, 0, I32_MAX), Clamp(ord, 0, 255), arr,", "server", "json"),
+    ("hit_recv_entry_pid", "return new long[] { Clamp(path, 0, 1), stamp, Clamp(pid, 0, I32_MAX), Clamp(ord, 0, 255), arr,",
+     "return new long[] { Clamp(path, 0, 1), stamp, 7, Clamp(ord, 0, 255), arr,", "server", "json"),
+    ("lastreset_unkeyed_written_none","return new LastReset(ms, 0, -1, 0, UNKEYED);", "return new LastReset(-1, 0, -1, 0, NONE);",
      "b7", "json"),
     ("lastreset_key_ignored", "if (hasLast) return new LastReset(", "if (false) return new LastReset(", "b7", "json"),
     ("lastreset_keyed_without_key", "(int)Clamp(lastKind, 0, 9), (int)Clamp(lastOrd, 0, 255), KEYED);",
@@ -251,6 +272,19 @@ def b7_fixture_check(d, off=()):
     return ok and good, lines
 
 
+def a2_check(rec):
+    """None when every hit_recv entry has path 0 and pid 0 (contract A2: the
+    victim never lists a path-1 hit; a path-0 key carries pid 0), else the
+    field the amended server names for the first entry that breaks it."""
+    for e in rec.get("hit_recv", []) if isinstance(rec, dict) else []:
+        if isinstance(e, list) and len(e) > 2:
+            if e[0] != 0:
+                return "hit_recv.path"
+            if e[2] != 0:
+                return "hit_recv.pid"
+    return None
+
+
 def amended_parse(sev, env):
     """parse_record with amendment A1 and the amended B7: an "end" key, when
     present, must sit right after "rounds" and name a known kind; every
@@ -261,6 +295,9 @@ def amended_parse(sev, env):
     if not isinstance(rec, dict):
         sev.check_record(rec)
         return rec
+    f = a2_check(rec)
+    if f is not None:
+        raise sev.EvidenceRefused(422, f)
     hs = rec.get("hit_sent")
     if isinstance(hs, list):
         for e in hs:
@@ -305,6 +342,7 @@ def server_check(sev, dll, tag, verbose):
             env = sev.parse_envelope(json.loads(open(p(".envelope.json"), encoding="ascii").read()))
             rec = amended_parse(sev, env)
             n_hs = len(rec.get("hit_sent", []))
+            n_hr = len(rec.get("hit_recv", []))
             try:
                 sev.parse_record(env)
                 note = ", unamended server: accepts"
@@ -313,8 +351,8 @@ def server_check(sev, dll, tag, verbose):
             sig_ok = sev.verify_sig(FIXTURE_KEY, env)
             text_ok = env["record_bytes"] == mine
             good = same and sig_ok and text_ok
-            lines.append("%s %s: %d bytes, %sbudget_record equal=%s, parse+check ok (B7 amended: %d hit_sent entries admitted), verify_sig=%s, envelope record equal=%s%s"
-                         % ("OK " if good else "BAD", name, len(mine), "A1 " if has_end else "", same, n_hs, sig_ok, text_ok, note))
+            lines.append("%s %s: %d bytes, %sbudget_record equal=%s, parse+check ok (A2: %d hit_recv entries path 0 pid 0; B7 amended: %d hit_sent entries admitted), verify_sig=%s, envelope record equal=%s%s"
+                         % ("OK " if good else "BAD", name, len(mine), "A1 " if has_end else "", same, n_hr, n_hs, sig_ok, text_ok, note))
             ok = ok and good
         except Exception as ex:  # a refusal names its field
             lines.append("BAD %s: %s %s" % (name, type(ex).__name__, getattr(ex, "field", ex)))
@@ -336,10 +374,81 @@ def server_check(sev, dll, tag, verbose):
     return ok, lines
 
 
+def pinned_check():
+    """The committed server-comparison fixtures (server_fixtures/, the set the
+    server lane copies into backend/tests/fixtures/seat_evidence_client_b7/)
+    equal, file for file and byte for byte, what the unmutated build just
+    wrote into work/base/fixtures. A difference in either direction FAILS."""
+    d = os.path.join(WORK, "base", "fixtures")
+    have, made = set(os.listdir(PINNED)), set(os.listdir(d))
+    ok = have == made and len(have) > 0
+    for f in sorted(have | made):
+        a = sha(os.path.join(PINNED, f)) if f in have else "absent"
+        b = sha(os.path.join(d, f)) if f in made else "absent"
+        ok = ok and a == b
+        print("%s pinned %s: committed %s built %s" % ("OK " if a == b else "BAD", f, a[:16], b[:16]))
+    return ok
+
+
+def amended_check(root, dll):
+    """The amended server's own parser and budget fixture over the unmutated
+    build's fixtures (written by server_check into work/base/fixtures).
+    Prints one line per check; True only when every one holds."""
+    api = os.path.join(root, "backend", "api")
+    path = os.path.join(api, "seat_evidence.py")
+    bfx = os.path.join(root, "backend", "tests", "fixtures", "seat_evidence_budget.json")
+    if not (os.path.isfile(path) and os.path.isfile(bfx)):
+        print("BAD amended server: %s or its budget fixture is missing (not run)" % path)
+        return False
+    shead = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    before = (sha(path), sha(bfx))
+    sys.path.insert(0, api)                       # its sibling imports (review_measures, review_rules)
+    try:
+        spec = importlib.util.spec_from_file_location("amended_seat_evidence", path)
+        sev = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sev)
+    finally:
+        sys.path.remove(api)
+    print("amended server", shead, path, "sha256", before[0])
+    ok = True
+    d = os.path.join(WORK, "base", "fixtures")
+    names = open(os.path.join(d, "cases.txt"), encoding="ascii").read().split()
+    for name in names:
+        p = lambda ext: os.path.join(d, name + ext)  # noqa: E731
+        mine = open(p(".record.txt"), "rb").read()
+        try:
+            env = sev.parse_envelope(json.loads(open(p(".envelope.json"), encoding="ascii").read()))
+            rec = sev.parse_record(env)            # the whole check: A2 and the amended B7 included
+            good = env["record_bytes"] == mine and sev.verify_sig(FIXTURE_KEY, env)
+            print("%s amended %s: parse_record accepts, %d hit_recv, %d hit_sent, record bytes equal and signature verified=%s"
+                  % ("OK " if good else "BAD", name, len(rec["hit_recv"]), len(rec["hit_sent"]), good))
+        except Exception as ex:
+            good = False
+            print("BAD amended %s: refused %s %s" % (name, type(ex).__name__, getattr(ex, "field", ex)))
+        ok = ok and good
+    fx = json.loads(open(bfx, encoding="utf-8").read())
+    out = os.path.join(WORK, "base", "budget_fixture.record.txt")
+    rc, txt = run(dll, ["budgetfile", bfx, out])
+    if rc != 0:
+        print("BAD budget fixture: budgetfile exit %d %s" % (rc, txt[-300:]))
+        return False
+    got = open(out, "rb").read()
+    good = hashlib.sha256(got).hexdigest() == fx["sha256"] and len(got) == fx["bytes"]
+    print("%s budget fixture %s: the client budgeter writes %d bytes sha256 %s; the fixture pins %d bytes sha256 %s"
+          % ("OK " if good else "BAD", os.path.basename(bfx), len(got), hashlib.sha256(got).hexdigest(), fx["bytes"], fx["sha256"]))
+    ok = ok and good
+    unchanged = (sha(path), sha(bfx)) == before
+    print("amended server module and budget fixture unchanged:", unchanged)
+    return ok and unchanged and len(names) > 0
+
+
 def main():
     root = DEFAULT_SERVER
     if "--server-root" in sys.argv:
         root = sys.argv[sys.argv.index("--server-root") + 1]
+    amended_root = DEFAULT_AMENDED
+    if "--amended-root" in sys.argv:
+        amended_root = sys.argv[sys.argv.index("--amended-root") + 1]
     os.makedirs(WORK, exist_ok=True)
     head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     shead = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
@@ -361,8 +470,12 @@ def main():
     print("\n".join(lines))
     print("server comparison:", "PASS" if sok else "FAIL")
     ok = ok and sok
-    print("NOTE: B7 is checked by b7_check (written from the amended contract); the server module above predates the"
-          " amendment, so conformance against the real server parser is OWED until the server lane lands it.")
+    fok = pinned_check()
+    print("committed server fixtures:", "PASS" if fok else "FAIL")
+    ok = ok and fok
+    aok = amended_check(amended_root, dll)
+    print("amended server conformance:", "PASS" if aok else "FAIL")
+    ok = ok and aok
 
     # one mutant per rule of b7_check: that rule switched off must let a refused combination through (target:
     # the refused list FAILS) while every state-space entry stays admitted (control PASSES)

@@ -55,7 +55,9 @@ namespace SeatEvidenceTests
             for (int i = 0; i < n; i++)
             {
                 r.BlkSent.Add(C.BlkSentEntry(s + i * 997, i % 4, i % 3, i % 2 == 0 ? 0 : -200));
-                r.HitRecv.Add(C.HitRecvEntry(i % 2, s + i * 991, i % 2 == 1 ? 1000000 + i : 0, i % 5, s + i * 993, i % 3 == 0, i % 2 == 0, i % 7 == 0 ? -1 : 120 + i));
+                // contract A2: hit_recv is path 0 only, and a path-0 key has pid 0
+                // (the one shape SeatEvidence.cs writes); path 1 is shooter-only
+                r.HitRecv.Add(C.HitRecvEntry(0, s + i * 991, 0, i % 5, s + i * 993, i % 3 == 0, i % 2 == 0, i % 7 == 0 ? -1 : 120 + i));
                 r.BlkRecv.Add(C.BlkRecvEntry(s + i * 983, i % 4, i % 2, s + i * 989, i % 2 == 0));
                 // amended B7: the three valid states only, in turn (never since_ms and last_* varied apart)
                 var lr = i % 3 == 0 ? C.LastReset.Of(false, 0.4f, i % 2 == 0, s + i * 971, 0, i % 2)              // none
@@ -657,6 +659,48 @@ namespace SeatEvidenceTests
             return l;
         }
 
+        /// <summary>The server's shared budget fixture: reads its "input" object
+        /// (keys in file order; every integer as long, an all-integer array as
+        /// long[], an array of such arrays as List&lt;long[]&gt;) and writes the
+        /// bytes this seat's budgeter produces from it, for run_tests.py to
+        /// compare with the fixture's own sha256 and byte count.</summary>
+        private static void BudgetFile(string inPath, string outPath)
+        {
+            using (var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(inPath, Encoding.UTF8)))
+            {
+                var input = doc.RootElement.GetProperty("input");
+                File.WriteAllText(outPath, C.Budget((C.JObj)FromJson(input)), new UTF8Encoding(false));
+            }
+        }
+
+        private static object FromJson(System.Text.Json.JsonElement e)
+        {
+            switch (e.ValueKind)
+            {
+                case System.Text.Json.JsonValueKind.Object:
+                    var o = new C.JObj();
+                    foreach (var p in e.EnumerateObject()) o.Add(p.Name, FromJson(p.Value));
+                    return o;
+                case System.Text.Json.JsonValueKind.Array:
+                    var items = new List<object>();
+                    bool ints = true, rows = true;
+                    foreach (var x in e.EnumerateArray())
+                    {
+                        var v = FromJson(x);
+                        items.Add(v);
+                        ints = ints && v is long;
+                        rows = rows && v is long[];
+                    }
+                    if (items.Count > 0 && ints) return items.ConvertAll(v => (long)v).ToArray();
+                    if (rows) return items.ConvertAll(v => (long[])v);
+                    return items;
+                case System.Text.Json.JsonValueKind.Number: return e.GetInt64();
+                case System.Text.Json.JsonValueKind.String: return e.GetString();
+                case System.Text.Json.JsonValueKind.Null: return null;
+                default: throw new ArgumentException("not a record value: " + e.ValueKind);
+            }
+        }
+
         private static readonly Dictionary<string, Action> Cases = new Dictionary<string, Action>
         {
             { "json", Json }, { "budget", Budget }, { "entries", Entries }, { "b7", B7 }, { "drift", Drift },
@@ -669,6 +713,7 @@ namespace SeatEvidenceTests
         private static int Main(string[] args)
         {
             if (args.Length == 2 && args[0] == "fixtures") { Fixtures(args[1]); return 0; }
+            if (args.Length == 3 && args[0] == "budgetfile") { BudgetFile(args[1], args[2]); return 0; }
             var run = args.Length == 0 ? new List<string>(Cases.Keys) : new List<string>(args);
             int failed = 0;
             foreach (var name in run)
