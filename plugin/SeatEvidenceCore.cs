@@ -858,14 +858,14 @@ namespace CompetitiveRounds
             return new long[] { tb, Clamp(kind, 0, 9), Clamp(ord, 0, 255), ta, started ? 1 : 0 };
         }
 
-        /// <summary>hit_sent: [path, stamp, pid, ord, since_ms, blocked, last_tb,
-        /// last_kind, last_ord]; [0, -1, 0] for last_* when no block reset the copy.</summary>
-        internal static long[] HitSentEntry(int path, int stamp, long pid, int ord, long sinceMs, bool blocked,
-                                            bool hasLast, int lastTb, int lastKind, int lastOrd)
+        /// <summary>hit_sent: [path, stamp, pid, ord, since_ms, blocked, last_tb, last_kind, last_ord, reset]; the
+        /// five B7 fields come only from a LastReset (amended B7, 2026-10-04; LastReset at the end of this class).</summary>
+        internal static long[] HitSentEntry(int path, int stamp, long pid, int ord,
+                                            LastReset r, bool blocked)
         {
             return new long[] { Clamp(path, 0, 1), stamp, Clamp(pid, 0, I32_MAX), Clamp(ord, 0, 255),
-                                sinceMs < 0 ? -1 : Clamp(sinceMs, 0, MS_BOUND), blocked ? 1 : 0,
-                                hasLast ? lastTb : 0, hasLast ? Clamp(lastKind, 0, 9) : -1, hasLast ? Clamp(lastOrd, 0, 255) : 0 };
+                                r.Since, blocked ? 1 : 0,
+                                r.Tb, r.Kind, r.Ord, r.Reset };
         }
 
         /// <summary>A Block.sinceBlock reading (seconds, TimeHandler clock) as
@@ -1268,6 +1268,47 @@ namespace CompetitiveRounds
             if (primary != null && primary.Present && primary.Readable && primary.Items.Count > 0) return 1;
             if (temp != null && temp.Present && temp.Readable && temp.Items.Count > 0) return 2;
             return 0;
+        }
+
+        // -- B7: the last-reset state of a hit_sent entry (contract B7, amended 2026-10-04) --
+
+        /// <summary>The victim copy's last-reset state at a hit decision, as the
+        /// five B7 fields of a hit_sent entry: since_ms, last_tb, last_kind,
+        /// last_ord and reset (entry index 9). Three states, nothing else:
+        ///   reset 0 NONE    : no reset seen;            since_ms -1,    last_* [0,-1,0]
+        ///   reset 1 KEYED   : the last reset had a key; since_ms 0..MS, last_* that key (kind 0..9)
+        ///   reset 2 UNKEYED : the last reset had none;  since_ms 0..MS, last_* [0,-1,0]
+        /// The constructor is private and Of is the only factory, so every
+        /// hit_sent entry carries one of these three triples by construction;
+        /// since_ms and last_kind are stored plus one, so even default(LastReset)
+        /// reads as NONE (-1, [0,-1,0], 0), never as a refused combination.</summary>
+        internal struct LastReset
+        {
+            internal const int NONE = 0, KEYED = 1, UNKEYED = 2;
+            private readonly long _sinceP1;
+            private readonly int _kindP1;
+            internal readonly int Tb, Ord, Reset;
+            internal long Since { get { return _sinceP1 - 1; } }
+            internal int Kind { get { return _kindP1 - 1; } }
+
+            private LastReset(long since, int tb, int kind, int ord, int reset)
+            {
+                _sinceP1 = since + 1; Tb = tb; _kindP1 = kind + 1; Ord = ord; Reset = reset;
+            }
+
+            /// <summary>`everReset`: a reset of this copy's sinceBlock was seen
+            /// this game. `sinceBlockS`: the copy's Block.sinceBlock now (the
+            /// caller passes a real reading; NaN, a copy without a Block, is
+            /// read as NONE, and the one caller returns before that case).
+            /// `hasLast`: the last reset seen carried a block key, (lastTb,
+            /// lastKind, lastOrd). A key without a seen reset is NONE.</summary>
+            internal static LastReset Of(bool everReset, float sinceBlockS, bool hasLast, int lastTb, int lastKind, int lastOrd)
+            {
+                long ms = SinceMs(everReset, sinceBlockS);
+                if (ms < 0) return new LastReset(-1, 0, -1, 0, NONE);
+                if (hasLast) return new LastReset(ms, lastTb, (int)Clamp(lastKind, 0, 9), (int)Clamp(lastOrd, 0, 255), KEYED);
+                return new LastReset(ms, 0, -1, 0, UNKEYED);
+            }
         }
     }
 }

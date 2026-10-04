@@ -57,7 +57,11 @@ namespace SeatEvidenceTests
                 r.BlkSent.Add(C.BlkSentEntry(s + i * 997, i % 4, i % 3, i % 2 == 0 ? 0 : -200));
                 r.HitRecv.Add(C.HitRecvEntry(i % 2, s + i * 991, i % 2 == 1 ? 1000000 + i : 0, i % 5, s + i * 993, i % 3 == 0, i % 2 == 0, i % 7 == 0 ? -1 : 120 + i));
                 r.BlkRecv.Add(C.BlkRecvEntry(s + i * 983, i % 4, i % 2, s + i * 989, i % 2 == 0));
-                r.HitSent.Add(C.HitSentEntry(0, s + i * 977, 0, i % 3, i % 4 == 0 ? -1 : 250 + i, i % 2 == 0, i % 3 != 0, s + i * 971, 0, i % 2));
+                // amended B7: the three valid states only, in turn (never since_ms and last_* varied apart)
+                var lr = i % 3 == 0 ? C.LastReset.Of(false, 0.4f, i % 2 == 0, s + i * 971, 0, i % 2)              // none
+                       : i % 3 == 1 ? C.LastReset.Of(true, 0.25f + i * 0.001f, true, s + i * 971, i % 4, i % 2)    // keyed
+                       : C.LastReset.Of(true, 0.25f + i * 0.001f, false, s + i * 971, i % 4, i % 2);               // unkeyed
+                r.HitSent.Add(C.HitSentEntry(0, s + i * 977, 0, i % 3, lr, i % 2 == 0));
                 r.AgeB.Add(new long[] { i - 1, i, i + 1, 300 + i, 40 + i, 70 + i });
             }
             r.BlkFaults = 1; r.UnpairBlocks = 3; r.UnpairHits = 4;
@@ -93,13 +97,78 @@ namespace SeatEvidenceTests
         {
             Eq("[5,9,255,600000]", J(C.BlkSentEntry(5, 12, 400, 700000)), "blk_sent clamps");
             Eq("[1,7,0,0,-9,0,1,-1]", J(C.HitRecvEntry(1, 7, -3, 0, -9, false, true, -5)), "hit_recv: own_since -1, pid floor 0");
-            Eq("[0,7,0,2,-1,1,0,-1,0]", J(C.HitSentEntry(0, 7, 0, 2, -1, true, false, 99, 3, 4)), "hit_sent: last_* [0,-1,0] when none");
-            Eq("[0,7,0,2,299,0,99,3,4]", J(C.HitSentEntry(0, 7, 0, 2, 299, false, true, 99, 3, 4)), "hit_sent: last_* named");
+            Eq("[0,7,0,2,-1,1,0,-1,0,0]", J(C.HitSentEntry(0, 7, 0, 2, C.LastReset.Of(false, 0.2999f, false, 99, 3, 4), true)), "hit_sent: none");
+            Eq("[0,7,0,2,299,0,99,3,4,1]", J(C.HitSentEntry(0, 7, 0, 2, C.LastReset.Of(true, 0.2999f, true, 99, 3, 4), false)), "hit_sent: keyed");
+            Eq("[1,7,9,2,299,0,0,-1,0,2]", J(C.HitSentEntry(1, 7, 9, 2, C.LastReset.Of(true, 0.2999f, false, 99, 3, 4), false)), "hit_sent: unkeyed");
+            Eq("[0,7,0,2,-1,0,0,-1,0,0]", J(C.HitSentEntry(0, 7, 0, 2, C.LastReset.Of(false, 0.2999f, true, 99, 3, 4), false)), "hit_sent: a key without a seen reset is none");
             Eq(-1L, C.SinceMs(false, 0.1f), "never reset reads -1");
             Eq(299L, C.SinceMs(true, 0.2999f), "floor ms");
             Eq(300L, C.SinceMs(true, 0.3f), "0.3 s reads 300");
             Eq(600000L, C.SinceMs(true, 10000f), "clamped");
             Eq(0L, C.SinceMs(true, 0f), "a fresh reset reads 0");
+        }
+
+        // -- amended B7 (contract AMENDMENT 2026-10-04): the state space ---------------
+
+        private static readonly float[] B7_SINCE = { float.NaN, -0.5f, 0f, 0.0004f, 0.05f, 0.2999f, 0.3f, 599.9999f, 600f, 10000f, float.PositiveInfinity };
+        private static readonly int[] B7_TB = { int.MinValue, 0, 1, 2000000, int.MaxValue };
+        private static readonly int[] B7_KIND = { -5, -1, 0, 1, 3, 9, 10 };
+        private static readonly int[] B7_ORD = { -1, 0, 1, 255, 256 };
+
+        /// <summary>Every input of LastReset.Of over the grid above, with the
+        /// entry HitSentEntry writes for it (path 0 and path 1 alternating).</summary>
+        private static List<KeyValuePair<string, long[]>> B7Space()
+        {
+            var l = new List<KeyValuePair<string, long[]>>();
+            int n = 0;
+            foreach (bool er in new[] { false, true })
+                foreach (float s in B7_SINCE)
+                    foreach (bool hl in new[] { false, true })
+                        foreach (int tb in B7_TB)
+                            foreach (int k in B7_KIND)
+                                foreach (int o in B7_ORD)
+                                {
+                                    var e = C.HitSentEntry(n % 2, 1000 + n, n % 2 == 1 ? 7 : 0, n % 4, C.LastReset.Of(er, s, hl, tb, k, o), n % 3 == 0);
+                                    l.Add(new KeyValuePair<string, long[]>(er + "|" + s.ToString("R", System.Globalization.CultureInfo.InvariantCulture)
+                                                                           + "|" + hl + "|" + tb + "|" + k + "|" + o, e));
+                                    n++;
+                                }
+            return l;
+        }
+
+        /// <summary>The state each input must map to, stated from the copy's
+        /// state (not from the code): a reset seen with a readable sinceBlock
+        /// is keyed when the last reset carried a key, unkeyed when it did not;
+        /// anything else is none. Every entry of the space is exactly the
+        /// state's triple, and every state occurs.</summary>
+        private static void B7()
+        {
+            var seen = new int[3];
+            foreach (var kv in B7Space())
+            {
+                var f = kv.Key.Split('|');
+                bool er = f[0] == "True", hl = f[2] == "True";
+                float s = float.Parse(f[1], System.Globalization.CultureInfo.InvariantCulture);
+                int tb = int.Parse(f[3]), k = int.Parse(f[4]), o = int.Parse(f[5]);
+                var e = kv.Value;
+                Eq(10, e.Length, "ten elements: " + kv.Key);
+                bool readable = er && !float.IsNaN(s);
+                long want = !readable ? 0 : hl ? 1 : 2;
+                Eq(want, e[9], "reset for " + kv.Key);
+                seen[(int)e[9]]++;
+                if (want == 0) Eq("[-1,0,-1,0]", J(new[] { e[4], e[6], e[7], e[8] }), "none: -1 and the sentinel, " + kv.Key);
+                else
+                {
+                    long ms = s <= 0f ? 0 : Math.Min(600000L, (long)Math.Floor((double)s * 1000.0));
+                    if (float.IsPositiveInfinity(s)) ms = 600000;
+                    Eq(ms, e[4], "since_ms read for " + kv.Key);
+                    if (want == 1)
+                        Eq(J(new long[] { tb, Math.Max(0, Math.Min(9, k)), Math.Max(0, Math.Min(255, o)) }), J(new[] { e[6], e[7], e[8] }), "keyed: the key, " + kv.Key);
+                    else Eq("[0,-1,0]", J(new[] { e[6], e[7], e[8] }), "unkeyed: the sentinel, " + kv.Key);
+                }
+            }
+            Check(seen[0] > 0 && seen[1] > 0 && seen[2] > 0, "every state occurs: " + seen[0] + "/" + seen[1] + "/" + seen[2]);
+            Eq("[0,7,0,0,-1,0,0,-1,0,0]", J(C.HitSentEntry(0, 7, 0, 0, default(C.LastReset), false)), "default(LastReset) reads as none");
         }
 
         // B9 drift: the sign is POSITIVE when the other seat's stamps run fast;
@@ -548,12 +617,49 @@ namespace SeatEvidenceTests
             string cbody = C.CompatBody("76561198000000001", "not_run", plugins, C.Hmac(key, ccanon));
             File.WriteAllText(Path.Combine(dir, "compat.json"), cbody, new UTF8Encoding(false));
             File.WriteAllText(Path.Combine(dir, "cases.txt"), lines.ToString(), new UTF8Encoding(false));
-            Console.WriteLine("fixtures written: " + cases.Count + " records + compat");
+            // amended B7: every entry the client writes over the state space (all must be admitted) ...
+            var space = new List<object>();
+            foreach (var kv in B7Space()) space.Add(kv.Value);
+            File.WriteAllText(Path.Combine(dir, "b7_states.json"), C.Json(space), new UTF8Encoding(false));
+            // ... and the refused combinations, each with the field the amended contract names (first failing rule)
+            File.WriteAllText(Path.Combine(dir, "b7_negative.json"), C.Json(B7Negative()), new UTF8Encoding(false));
+            Console.WriteLine("fixtures written: " + cases.Count + " records + compat + b7 " + space.Count + " states, " + B7Negative().Count + " refused");
+        }
+
+        /// <summary>The refused hit_sent combinations of the amended B7, written
+        /// from the contract text as [field, entry]: every rule at least twice,
+        /// the rule order where two rules fail, and the entry bound.</summary>
+        private static List<object> B7Negative()
+        {
+            Func<long, long, long, long, long, long[]> E = (since, tb, kind, ord, reset) => new long[] { 0, 7, 0, 0, since, 0, tb, kind, ord, reset };
+            var l = new List<object>();
+            Action<string, long[]> N = (f, e) => l.Add(new List<object> { f, e });
+            N("hit_sent.reset_none_since", E(0, 0, -1, 0, 0));
+            N("hit_sent.reset_none_since", E(600000, 0, -1, 0, 0));
+            N("hit_sent.reset_none_since", E(250, 5, 2, 1, 0));          // both rules fail: since first
+            N("hit_sent.reset_none_last", E(-1, 5, 2, 1, 0));
+            N("hit_sent.reset_none_last", E(-1, 0, 0, 0, 0));
+            N("hit_sent.reset_none_last", E(-1, 0, -1, 3, 0));           // a sentinel with an ordinal is not the sentinel
+            N("hit_sent.reset_none_last", E(-1, 7, -1, 0, 0));
+            N("hit_sent.reset_keyed_since", E(-1, 5, 2, 1, 1));
+            N("hit_sent.reset_keyed_since", E(-1, 0, -1, 0, 1));         // both rules fail: since first
+            N("hit_sent.reset_keyed_last", E(250, 0, -1, 0, 1));
+            N("hit_sent.reset_keyed_last", E(0, 7, -1, 2, 1));
+            N("hit_sent.reset_unkeyed_since", E(-1, 0, -1, 0, 2));
+            N("hit_sent.reset_unkeyed_since", E(-1, 5, 2, 1, 2));        // both rules fail: since first
+            N("hit_sent.reset_unkeyed_last", E(250, 5, 2, 1, 2));
+            N("hit_sent.reset_unkeyed_last", E(50, 0, 0, 0, 2));
+            N("hit_sent.reset_unkeyed_last", E(50, 0, -1, 4, 2));
+            N("hit_sent", new long[] { 0, 2000500, 0, 0, 50, 1, 0, -1, 0 });   // the round 5 entry, nine elements
+            N("hit_sent", E(50, 0, -1, 0, 3));
+            N("hit_sent", E(50, 0, -1, 0, -1));
+            N("hit_sent", new long[] { 0, 7, 0, 0, 50, 0, 0, -1, 0, 2, 0 });
+            return l;
         }
 
         private static readonly Dictionary<string, Action> Cases = new Dictionary<string, Action>
         {
-            { "json", Json }, { "budget", Budget }, { "entries", Entries }, { "drift", Drift },
+            { "json", Json }, { "budget", Budget }, { "entries", Entries }, { "b7", B7 }, { "drift", Drift },
             { "congestion", Congestion }, { "buckets", Buckets }, { "cadence", Cadence }, { "ordinals", Ordinals }, { "window_caps", WindowCaps },
             { "window", Window }, { "decide", Decide }, { "line", Line }, { "build", Build },
             { "reservoir", Reservoir }, { "envelope", Envelope }, { "end", End }, { "sender", Sender }, { "cut422", Cut422 },

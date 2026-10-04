@@ -408,8 +408,8 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>Block.DoBlock / TryBlockMe finalizers: a reset with no block
-        /// key (a blocked impact), so the copy's last_* no longer names a block.</summary>
+        /// <summary>Block.DoBlock / TryBlockMe finalizers: a reset with no block key (a blocked impact): the
+        /// copy's last reset is now UNKEYED (B7 reset 2: since_ms counts from it, last_* [0,-1,0]).</summary>
         internal static void UnkeyedReset(Block b)
         {
             try
@@ -431,7 +431,7 @@ namespace CompetitiveRounds
 
         // -- hits ---------------------------------------------------------------------------
 
-        private struct HitFrame { internal bool Live, Path1, HasStamp, Blocked, HasLast; internal int Pid, Stamp, LastTb, LastKind, LastOrd; internal long Since; }
+        private struct HitFrame { internal bool Live, Path1, HasStamp, Blocked; internal int Pid, Stamp; internal C.LastReset Reset; }
         private const int HF_CAP = 8;
         private static readonly HitFrame[] _hf = new HitFrame[HF_CAP];
         private static int _hfDepth;
@@ -471,21 +471,21 @@ namespace CompetitiveRounds
                     _awaitDamage = wasBlocked ? null : e;
                     return -1;
                 }
-                if (!pv.IsMine || _oppActor == 0 || target.OwnerActorNr != _oppActor) return -1;
-                long since = C.SinceMs(_opp.EverReset, data.block != null ? data.block.sinceBlock : float.NaN);
+                if (!pv.IsMine || _oppActor == 0 || target.OwnerActorNr != _oppActor || data.block == null) return -1;
+                var lr = C.LastReset.Of(_opp.EverReset, data.block.sinceBlock, _opp.HasLast, _opp.LastTb, _opp.LastKind, _opp.LastOrd);
                 if (rpc)
                 {
                     _dec[0]++;
                     if (wasBlocked) _dec[1]++;
-                    var e = C.HitSentEntry(0, c.Stamp, 0, _ordHitSent.Next(0, c.Stamp, 0), since, wasBlocked,
-                                           _opp.HasLast, _opp.LastTb, _opp.LastKind, _opp.LastOrd);
+                    var e = C.HitSentEntry(0, c.Stamp, 0, _ordHitSent.Next(0, c.Stamp, 0),
+                                           lr, wasBlocked);
                     if (_winSent.Offer(e, c.Stamp)) _hitSent.Add(e);
                     return -1;
                 }
                 int idx = _hfDepth;
                 if (idx < 0 || idx >= HF_CAP) { _unpairHits++; return -1; }
-                _hf[idx] = new HitFrame { Live = true, Path1 = true, Pid = pid, Since = since, Blocked = wasBlocked,
-                                          HasLast = _opp.HasLast, LastTb = _opp.LastTb, LastKind = _opp.LastKind, LastOrd = _opp.LastOrd };
+                _hf[idx] = new HitFrame { Live = true, Path1 = true, Pid = pid, Blocked = wasBlocked,
+                                          Reset = lr };
                 _hfDepth = idx + 1;
                 return idx;
             }
@@ -501,8 +501,8 @@ namespace CompetitiveRounds
                 _hfDepth = idx;
                 if (!f.Live) return;
                 if (!f.HasStamp) { _unpairHits++; return; }
-                var e = C.HitSentEntry(1, f.Stamp, f.Pid, _ordHitSent.Next(1, f.Stamp, f.Pid), f.Since, f.Blocked,
-                                       f.HasLast, f.LastTb, f.LastKind, f.LastOrd);
+                var e = C.HitSentEntry(1, f.Stamp, f.Pid, _ordHitSent.Next(1, f.Stamp, f.Pid),
+                                       f.Reset, f.Blocked);
                 if (_winSent.Offer(e, f.Stamp)) _hitSent.Add(e);
             }
             catch { }

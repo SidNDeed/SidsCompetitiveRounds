@@ -13,6 +13,17 @@ file is never written) and require each mutant's target to FAIL and its
 control case to PASS. The target "server" is the comparison above. Exit 0
 only when everything holds.
 
+Amended B7 (SEAT-EVIDENCE-CONTRACT-V2.md, AMENDMENT 2026-10-04: `reset` at
+hit_sent index 9, none / keyed / unkeyed). The server module this compares
+against predates the amendment, so B7 is checked by b7_check below, written
+from the amended contract text; every hit_sent entry the client emits goes
+through it (every fixture record, and b7_states.json, the state space), the
+refused combinations (b7_negative.json) must each be refused with the field
+the contract names, and each rule of b7_check has a mutant. The server's own
+check_record then reads the record with hit_sent cut back to nine elements.
+CONFORMANCE AGAINST THE REAL SERVER PARSER IS OWED until the server lane
+lands the amendment; this run does not establish it.
+
     python tools/tests/seat-evidence-client/run_tests.py [--server-root DIR]
 """
 import hashlib
@@ -39,7 +50,23 @@ MUTANTS = [
      "if (longest < 0 || lists[i].Count >= lists[longest].Count) longest = i;", "budget", "json"),
     ("budget_removes_first", "lists[longest].RemoveAt(lists[longest].Count - 1);\n                entryLen[longest].RemoveAt(entryLen[longest].Count - 1);",
      "lists[longest].RemoveAt(0);\n                entryLen[longest].RemoveAt(0);", "server", "json"),
-    ("hitsent_last_kind_zero", "hasLast ? Clamp(lastKind, 0, 9) : -1", "hasLast ? Clamp(lastKind, 0, 9) : 0", "entries", "json"),
+    # fix pass 5, amended B7: one factory maps the copy's state to the five fields
+    ("hitsent_last_kind_zero", "if (ms < 0) return new LastReset(-1, 0, -1, 0, NONE);", "if (ms < 0) return new LastReset(-1, 0, 0, 0, NONE);",
+     "entries", "json"),
+    ("lastreset_none_with_since", "if (ms < 0) return new LastReset(-1, 0, -1, 0, NONE);", "if (ms < 0) return new LastReset(0, 0, -1, 0, NONE);",
+     "server", "json"),
+    ("lastreset_unkeyed_labelled_none", "return new LastReset(ms, 0, -1, 0, UNKEYED);", "return new LastReset(ms, 0, -1, 0, NONE);",
+     "server", "json"),
+    ("lastreset_unkeyed_written_none", "return new LastReset(ms, 0, -1, 0, UNKEYED);", "return new LastReset(-1, 0, -1, 0, NONE);",
+     "b7", "json"),
+    ("lastreset_key_ignored", "if (hasLast) return new LastReset(", "if (false) return new LastReset(", "b7", "json"),
+    ("lastreset_keyed_without_key", "(int)Clamp(lastKind, 0, 9), (int)Clamp(lastOrd, 0, 255), KEYED);",
+     "-1, (int)Clamp(lastOrd, 0, 255), KEYED);", "server", "json"),
+    ("lastreset_unkeyed_keeps_tb", "return new LastReset(ms, 0, -1, 0, UNKEYED);", "return new LastReset(ms, lastTb, -1, 0, UNKEYED);",
+     "server", "json"),
+    ("hitsent_reset_dropped", "r.Tb, r.Kind, r.Ord, r.Reset };", "r.Tb, r.Kind, r.Ord };", "server", "json"),
+    ("lastreset_default_since_zero", "internal long Since { get { return _sinceP1 - 1; } }", "internal long Since { get { return _sinceP1; } }",
+     "b7", "json"),
     ("since_rounds", "double ms = Math.Floor((double)sinceBlockS * 1000.0);", "double ms = Math.Round((double)sinceBlockS * 1000.0);", "entries", "decide"),
     ("since_no_never", "if (!everReset || float.IsNaN(sinceBlockS)) return -1;", "if (float.IsNaN(sinceBlockS)) return -1;", "entries", "json"),
     ("drift_most_delayed", "if (!bestY.TryGetValue(b, out cur) || y > cur)", "if (!bestY.TryGetValue(b, out cur) || y < cur)", "congestion", "drift"),
@@ -157,26 +184,109 @@ def amended_budget(sev, full):
     return text[:at] + ins + text[at:]
 
 
+# -- amended B7, written from SEAT-EVIDENCE-CONTRACT-V2.md (section 2.4 hit_sent row and B7 AMENDMENT 2026-10-04) --
+# hit_sent = [path, stamp, pid, ord, since_ms, blocked, last_tb, last_kind, last_ord, reset], exactly ten integers;
+# reset 0 none (since -1, last [0,-1,0]), 1 keyed (since 0..600000, last_kind 0..9), 2 unkeyed (since 0..600000,
+# last [0,-1,0]); every other combination refused, the FIRST failing rule named, in the contract's order.
+I32 = (-2 ** 31, 2 ** 31 - 1)
+HIT_SENT_BOUNDS = [(0, 1), I32, (0, 2 ** 31 - 1), (0, 255), (-1, 600000), (0, 1), I32, (-1, 9), (0, 255), (0, 2)]
+SENTINEL = [0, -1, 0]
+B7_RULES = ["shape", "reset_none_since", "reset_none_last", "reset_keyed_since", "reset_keyed_last",
+            "reset_unkeyed_since", "reset_unkeyed_last"]
+
+
+def _is_int(v, lo, hi):
+    return isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi
+
+
+def b7_check(e, off=()):
+    """None when the amended contract admits the entry, else the field it
+    names. `off` switches rules off (the per-rule mutants only)."""
+    if "shape" not in off:
+        if not isinstance(e, list) or len(e) != 10 or not all(_is_int(v, lo, hi) for v, (lo, hi) in zip(e, HIT_SENT_BOUNDS)):
+            return "hit_sent"
+    if not isinstance(e, list) or len(e) < 10:
+        return None                               # shape switched off: nothing further to read
+    since, last, reset = e[4], list(e[6:9]), e[9]
+    if reset == 0:
+        if "reset_none_since" not in off and since >= 0:
+            return "hit_sent.reset_none_since"
+        if "reset_none_last" not in off and last != SENTINEL:
+            return "hit_sent.reset_none_last"
+    elif reset == 1:
+        if "reset_keyed_since" not in off and since == -1:
+            return "hit_sent.reset_keyed_since"
+        if "reset_keyed_last" not in off and last[1] == -1:
+            return "hit_sent.reset_keyed_last"
+    elif reset == 2:
+        if "reset_unkeyed_since" not in off and since == -1:
+            return "hit_sent.reset_unkeyed_since"
+        if "reset_unkeyed_last" not in off and last != SENTINEL:
+            return "hit_sent.reset_unkeyed_last"
+    return None
+
+
+def b7_fixture_check(d, off=()):
+    """(ok, lines) over the B7 fixtures in d: every state-space entry
+    admitted, every refused combination refused with exactly its field."""
+    lines, ok = [], True
+    states = json.loads(open(os.path.join(d, "b7_states.json"), encoding="ascii").read())
+    bad = [(i, e, b7_check(e, off)) for i, e in enumerate(states) if b7_check(e, off) is not None]
+    per = [0, 0, 0]
+    for e in states:
+        if isinstance(e, list) and len(e) == 10 and e[9] in (0, 1, 2):
+            per[e[9]] += 1
+    good = not bad and len(states) > 0 and all(per)
+    lines.append("%s b7 states: %d entries admitted=%d (none %d, keyed %d, unkeyed %d)%s" % (
+        "OK " if good else "BAD", len(states), len(states) - len(bad), per[0], per[1], per[2],
+        "" if not bad else "; first refused #%d %s: %s" % (bad[0][0], bad[0][1], bad[0][2])))
+    ok = ok and good
+    neg = json.loads(open(os.path.join(d, "b7_negative.json"), encoding="ascii").read())
+    wrong = [(f, e, b7_check(e, off)) for f, e in neg if b7_check(e, off) != f]
+    named = sorted(set(f for f, _ in neg))
+    good = not wrong and set("hit_sent." + r for r in B7_RULES[1:]) <= set(named) and "hit_sent" in named
+    lines.append("%s b7 refused: %d combinations, each refused with its field: %s; fields %s%s" % (
+        "OK " if good else "BAD", len(neg), not wrong, ",".join(named),
+        "" if not wrong else "; first wrong %s want %s got %s" % (wrong[0][1], wrong[0][0], wrong[0][2])))
+    return ok and good, lines
+
+
 def amended_parse(sev, env):
-    """parse_record with amendment A1: an "end" key, when present, must sit
-    right after "rounds" and name a known kind; the rest is the reference's
-    own check_record, unchanged."""
+    """parse_record with amendment A1 and the amended B7: an "end" key, when
+    present, must sit right after "rounds" and name a known kind; every
+    hit_sent entry must pass b7_check (the amended contract); the rest is the
+    reference's own check_record, unchanged, over the record with hit_sent
+    cut back to the nine elements that module knows."""
     rec = json.loads(env["record_text"], parse_float=sev._refuse_float, parse_constant=sev._refuse_float)
-    if isinstance(rec, dict) and "end" in rec:
+    if not isinstance(rec, dict):
+        sev.check_record(rec)
+        return rec
+    hs = rec.get("hit_sent")
+    if isinstance(hs, list):
+        for e in hs:
+            f = b7_check(e)
+            if f is not None:
+                raise sev.EvidenceRefused(422, f)
+    view = dict(rec)
+    if isinstance(hs, list):
+        view["hit_sent"] = [e[:9] for e in hs]
+    if "end" in rec:
         keys = list(rec.keys())
         if keys.index("end") != keys.index("rounds") + 1 or rec["end"] not in END_KINDS:
             raise sev.EvidenceRefused(422, "end")
-        sev.check_record({k: v for k, v in rec.items() if k != "end"})
+        sev.check_record({k: v for k, v in view.items() if k != "end"})
     else:
-        sev.check_record(rec)
+        sev.check_record(view)
     return rec
 
 
 def server_check(sev, dll, tag, verbose):
     """The comparison against the server's own functions. Returns (ok, lines).
-    A record without "end" goes through the server's functions unchanged; one
-    with "end" through the amendment-A1 wrappers above (and the line says
-    what the unamended server answers)."""
+    budget_record (shape-agnostic) is compared unchanged, through the A1
+    wrapper when "end" is present; every record is read through amended_parse
+    (A1 and the amended B7 over every hit_sent entry) and each line says what
+    the unamended server answers; then the B7 state-space and refused-
+    combination fixtures go through b7_fixture_check."""
     d = os.path.join(WORK, tag, "fixtures")
     if os.path.isdir(d):
         shutil.rmtree(d)
@@ -193,21 +303,18 @@ def server_check(sev, dll, tag, verbose):
             ref = (amended_budget(sev, full) if has_end else sev.budget_record(full)).encode("ascii")
             same = ref == mine
             env = sev.parse_envelope(json.loads(open(p(".envelope.json"), encoding="ascii").read()))
-            note = ""
-            if has_end:
-                amended_parse(sev, env)
-                try:
-                    sev.parse_record(env)
-                    note = ", unamended server: accepts"
-                except Exception as ex:  # expected until the server adopts A1
-                    note = ", unamended server: refuses %s" % getattr(ex, "field", ex)
-            else:
+            rec = amended_parse(sev, env)
+            n_hs = len(rec.get("hit_sent", []))
+            try:
                 sev.parse_record(env)
+                note = ", unamended server: accepts"
+            except Exception as ex:  # expected until the server adopts A1 and the amended B7
+                note = ", unamended server: refuses %s" % getattr(ex, "field", ex)
             sig_ok = sev.verify_sig(FIXTURE_KEY, env)
             text_ok = env["record_bytes"] == mine
             good = same and sig_ok and text_ok
-            lines.append("%s %s: %d bytes, %sbudget_record equal=%s, parse+check ok, verify_sig=%s, envelope record equal=%s%s"
-                         % ("OK " if good else "BAD", name, len(mine), "A1 " if has_end else "", same, sig_ok, text_ok, note))
+            lines.append("%s %s: %d bytes, %sbudget_record equal=%s, parse+check ok (B7 amended: %d hit_sent entries admitted), verify_sig=%s, envelope record equal=%s%s"
+                         % ("OK " if good else "BAD", name, len(mine), "A1 " if has_end else "", same, n_hs, sig_ok, text_ok, note))
             ok = ok and good
         except Exception as ex:  # a refusal names its field
             lines.append("BAD %s: %s %s" % (name, type(ex).__name__, getattr(ex, "field", ex)))
@@ -220,6 +327,12 @@ def server_check(sev, dll, tag, verbose):
     except Exception as ex:
         lines.append("BAD compat: %s %s" % (type(ex).__name__, getattr(ex, "field", ex)))
         ok = False
+    try:
+        bok, blines = b7_fixture_check(d)
+    except Exception as ex:
+        bok, blines = False, ["BAD b7 fixtures: %s %s" % (type(ex).__name__, ex)]
+    lines.extend(blines)
+    ok = ok and bok
     return ok, lines
 
 
@@ -248,6 +361,25 @@ def main():
     print("\n".join(lines))
     print("server comparison:", "PASS" if sok else "FAIL")
     ok = ok and sok
+    print("NOTE: B7 is checked by b7_check (written from the amended contract); the server module above predates the"
+          " amendment, so conformance against the real server parser is OWED until the server lane lands it.")
+
+    # one mutant per rule of b7_check: that rule switched off must let a refused combination through (target:
+    # the refused list FAILS) while every state-space entry stays admitted (control PASSES)
+    bd = os.path.join(WORK, "base", "fixtures")
+    rcaught = 0
+    for rule in B7_RULES:
+        try:
+            _, rl = b7_fixture_check(bd, off=(rule,))
+            states_ok, neg_ok = rl[0].startswith("OK "), rl[1].startswith("OK ")
+        except Exception as ex:
+            states_ok, neg_ok, rl = False, True, ["error %s" % ex, ""]
+        hit = (not neg_ok) and states_ok
+        rcaught += hit
+        ok = ok and hit
+        print("%s b7 rule mutant %s off: target refused-list=%s; control states=%s" % (
+            "CAUGHT" if hit else "MISSED", rule, "FAIL" if not neg_ok else "PASS", "PASS" if states_ok else "FAIL"))
+    print("b7 rule mutants: %d of %d caught" % (rcaught, len(B7_RULES)))
 
     raw = open(CORE, "rb").read().decode("utf-8")
     nl = "\r\n" if "\r\n" in raw else "\n"

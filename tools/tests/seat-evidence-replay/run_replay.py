@@ -42,7 +42,9 @@ CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left",
          "stale_removal", "stale_addition_at_cap", "closing_at_cap", "closing_kept_unless_held",
          "opponent_sample_outside_combat",
          # fix pass 4
-         "closing_no_trailer", "closing_bad_trailer"]
+         "closing_no_trailer", "closing_bad_trailer",
+         # fix pass 5: amended B7 (reset at hit_sent index 9)
+         "last_reset_states"]
 
 # (name, old text, new text, target case, control case); old occurs exactly once.
 MUTANTS = [
@@ -53,6 +55,14 @@ MUTANTS = [
     ("fault_uncounted", "if (f.Kind == 0 && !started) _blkFaults++;", "", "shooter_paths", "victim_block_hit"),
     ("unkeyed_keeps_last", "copy.EverReset = true; copy.HasLast = false;", "copy.EverReset = true;",
      "shooter_paths", "victim_block_hit"),
+    # fix pass 5, amended B7: the copy's true last-reset state reaches the wire in every transition
+    ("unkeyed_window_keeps_last", "else if (f.Kind != -1) copy.HasLast = false;", "", "last_reset_states", "victim_block_hit"),
+    ("shooter_reads_own_copy", "var lr = C.LastReset.Of(_opp.EverReset,", "var lr = C.LastReset.Of(_mine.EverReset,",
+     "last_reset_states", "victim_block_hit"),
+    ("path1_reset_reread_at_exit", "f.Reset, f.Blocked);", "C.LastReset.Of(false, 0f, false, 0, 0, 0), f.Blocked);",
+     "last_reset_states", "victim_block_hit"),
+    ("unkeyed_reset_uncounted", "copy.EverReset = true; copy.HasLast = false;", "copy.HasLast = false;",
+     "last_reset_states", "victim_block_hit"),
     ("own_block_any_target", "target != RpcTarget.Others || ", "", "victim_block_hit", "shooter_paths"),
     ("victim_dmg_unmarked", "_awaitDamage[6] = gate && completed ? 1 : 0;", "_awaitDamage[6] = 0;", "victim_block_hit", "shooter_paths"),
     ("path1_unstamped_listed", "if (!f.HasStamp) { _unpairHits++; return; }", "if (!f.HasStamp) { _unpairHits++; }",

@@ -298,14 +298,80 @@ namespace SeatEvidenceReplay
             var rec = LastRecord(out attach);
             Eq("[[2000000,0,0,2000050,1],[2000000,3,0,2000060,1],[2001000,0,0,2001020,0]]", Arr(rec, "blk_recv"),
                "blk_recv: kind 0, its Echo as kind 3 on the root, a block whose reset did not run");
-            Eq("[[0,2000300,0,0,200,0,2000000,3,0],[1,2000400,78,0,250,0,2000000,3,0],[0,2000500,0,0,50,1,0,-1,0]]",
-               Arr(rec, "hit_sent"), "hit_sent: path 0 and path 1 keys, last_* named then cleared by the unkeyed reset");
+            Eq("[[0,2000300,0,0,200,0,2000000,3,0,1],[1,2000400,78,0,250,0,2000000,3,0,1],[0,2000500,0,0,50,1,0,-1,0,2]]",
+               Arr(rec, "hit_sent"), "hit_sent: path 0 and path 1 keys, keyed (reset 1), then unkeyed (reset 2) after the unkeyed reset");
+            B7Holds(rec);
             Eq(1L, rec.GetProperty("blk_faults").GetInt64(), "blk_faults");
             Eq("[0,1]", Arr(rec, "unpair"), "unpair: the path-1 hit with no damage envelope");
             Eq("[2,1]", Arr(rec, "dec"), "dec counts path-0 decisions");
             bool path1 = false;
             foreach (var e in rec.GetProperty("hit_sent").EnumerateArray()) if (e[0].GetInt32() == 1) path1 = true;
             Check(path1, "D2: the shooter lists its one-sided path-1 entry");
+        }
+
+        /// <summary>Amended B7 (contract AMENDMENT 2026-10-04) on every hit_sent
+        /// entry of a record: ten elements; reset 0 none = since_ms -1 and
+        /// [0,-1,0]; 1 keyed = since_ms 0 or more and last_kind 0..9; 2 unkeyed
+        /// = since_ms 0 or more and [0,-1,0]. Nothing else.</summary>
+        private static void B7Holds(JsonElement rec)
+        {
+            foreach (var e in rec.GetProperty("hit_sent").EnumerateArray())
+            {
+                string t = e.GetRawText();
+                Eq(10, e.GetArrayLength(), "ten elements: " + t);
+                long since = e[4].GetInt64(), tb = e[6].GetInt64(), kind = e[7].GetInt64(), ord = e[8].GetInt64(), reset = e[9].GetInt64();
+                bool sentinel = tb == 0 && kind == -1 && ord == 0;
+                bool ok = reset == 0 ? since == -1 && sentinel
+                        : reset == 1 ? since >= 0 && kind >= 0 && kind <= 9
+                        : reset == 2 && since >= 0 && sentinel;
+                Check(ok, "B7 refuses " + t);
+            }
+        }
+
+        /// <summary>Round 5 M6/B7: the copy's last-reset state on the wire, in
+        /// every transition. A hit before any reset is none; after a keyed
+        /// block RPC it is keyed with that block; after a blocked impact's
+        /// unkeyed reset (the reviewer's scenario) it is unkeyed with since_ms
+        /// counting from that reset, on path 0 and path 1; a later keyed block
+        /// makes it keyed again; a block window neither path keys makes it
+        /// unkeyed again; a copy with no Block is not decided here.</summary>
+        private static void LastResetStates()
+        {
+            SeatEvidence.BeginGame(true, true);
+            var mine = Proj(801, ME, true);
+            _opp.Block.sinceBlock = 3.0f;                                                    // no reset seen this game
+            Rpc(801, 4000150, "RPCA_DoHit", ME, () => Hit(mine, 1, _opp, false));            // none
+            _opp.Block.sinceBlock = 0f;
+            SeatEvidence.UnkeyedReset(_opp.Block);                                            // a blocked impact, the first reset
+            _opp.Block.sinceBlock = 0.07f;
+            Rpc(801, 4000180, "RPCA_DoHit", ME, () => Hit(mine, 3, _opp, true));             // unkeyed, path 0 (round 5)
+            PhotonNetwork.ServerTimestamp = 4000250;
+            Rpc(_opp.View.ViewID, 4000200, "RPCAO_DoBlock", OPP, () => DoBlock(_opp, true, BlockTrigger.BlockTriggerType.Default, false, true));
+            _opp.Block.sinceBlock = 0.1f;
+            Rpc(801, 4000300, "RPCA_DoHit", ME, () => Hit(mine, 2, _opp, false));            // keyed on (4000200, 0, 0)
+            _opp.Block.sinceBlock = 0f;
+            SeatEvidence.UnkeyedReset(_opp.Block);                                            // a blocked impact after a keyed one
+            _opp.Block.sinceBlock = 0.05f;
+            Hit(mine, 4, _opp, false, () => Rpc(_opp.View.ViewID, 4000450, "RPCA_SendTakeDamage", ME, () => Damage(_opp)));   // unkeyed, path 1
+            PhotonNetwork.ServerTimestamp = 4000550;
+            Rpc(_opp.View.ViewID, 4000500, "RPCAO_DoBlock", OPP, () => DoBlock(_opp, true, BlockTrigger.BlockTriggerType.Default, false, true));
+            _opp.Block.sinceBlock = 0.125f;
+            Rpc(801, 4000600, "RPCA_DoHit", ME, () => Hit(mine, 5, _opp, false));            // keyed again on (4000500, 0, 0)
+            DoBlock(_opp, false, BlockTrigger.BlockTriggerType.Default, false, true);         // a window neither path keys
+            _opp.Block.sinceBlock = 0.3f;
+            Rpc(801, 4000700, "RPCA_DoHit", ME, () => Hit(mine, 6, _opp, false));            // unkeyed again
+            _opp.Data.block = null;
+            Rpc(801, 4000750, "RPCA_DoHit", ME, () => Hit(mine, 7, _opp, false));            // no Block: no state, not decided
+            _opp.Data.block = _opp.Block;
+            Dispatch(2, 1, ROOM + "_123456_r4");
+            string attach;
+            var rec = LastRecord(out attach);
+            Eq("[[0,4000150,0,0,-1,0,0,-1,0,0],[0,4000180,0,0,70,1,0,-1,0,2],[0,4000300,0,0,100,0,4000200,0,0,1],"
+               + "[1,4000450,4,0,50,0,0,-1,0,2],[0,4000600,0,0,125,0,4000500,0,0,1],[0,4000700,0,0,300,0,0,-1,0,2]]",
+               Arr(rec, "hit_sent"), "hit_sent: none, unkeyed (first reset), keyed, unkeyed (path 1), keyed, unkeyed (window)");
+            Eq("[5,1]", Arr(rec, "dec"), "dec: the five path-0 decisions on a copy with a Block");
+            Eq("[1,0]", Arr(rec, "unpair"), "unpair: the window neither path keys");
+            B7Holds(rec);
         }
 
         /// <summary>A path-1 hit with no damage envelope has no stamp: it counts
@@ -1087,7 +1153,7 @@ namespace SeatEvidenceReplay
 
         private static readonly Dictionary<string, Action> Cases = new Dictionary<string, Action>
         {
-            { "victim_block_hit", VictimBlockHit }, { "shooter_paths", ShooterPaths },
+            { "victim_block_hit", VictimBlockHit }, { "shooter_paths", ShooterPaths }, { "last_reset_states", LastResetStates },
             { "unkeyed_and_nesting", UnkeyedAndNesting }, { "cut_left", CutLeft }, { "cut_guards", CutGuards },
             { "closing_next_boot", ClosingNextBoot }, { "compat_sender", CompatSender }, { "compat_bounds", CompatBounds },
             { "cut_422_kept", Cut422Kept }, { "path1_unstamped", Path1Unstamped },
