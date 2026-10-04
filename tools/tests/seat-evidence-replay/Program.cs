@@ -1063,6 +1063,103 @@ namespace SeatEvidenceReplay
             ClosingNotWhole(body + torn, "no trailer");
         }
 
+        /// <summary>Merge pass 6, item 2: a stand-in server that answers every
+        /// evidence route (record "e", card record "k", compat outcome "c") with
+        /// not-found, with a refusal and with no answer, against a queue at its
+        /// cap, pumped three times as often as it holds requests. Required:
+        /// not-found sends each request once per launch and keeps it; a game
+        /// at the cap adds one record (the oldest evicted) and one send; a
+        /// refusal sends each once and settles it; no answer sends each once
+        /// per next-eligible time and MAX_ATTEMPTS times in all; nothing goes
+        /// while a battle is live; closing files are admitted at most SPOOL_CAP
+        /// per pass and the queue never holds more than QUEUE_CAP.</summary>
+        private static void StandinBounds()
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            const BindingFlags S = BindingFlags.NonPublic | BindingFlags.Static;
+            int cap = (int)typeof(SeatEvidence).GetField("QUEUE_CAP", S).GetRawConstantValue();
+            int spoolCap = (int)typeof(SeatEvidence).GetField("SPOOL_CAP", S).GetRawConstantValue();
+            Eq(64, cap, "the queue cap this case fills");
+            Func<int, List<SeatEvidenceCore.Pending>> full = tag =>
+            {
+                var l = new List<SeatEvidenceCore.Pending>();
+                for (int i = 0; i < cap; i++)
+                    l.Add(new SeatEvidenceCore.Pending { Route = i % 8 == 7 ? "c" : (i % 2 == 0 ? "e" : "k"),
+                                                         Body = "{\"t\":" + tag + ",\"n\":" + i + "}", FirstUnix = now - 10 });
+                return l;
+            };
+            Action pumpMany = () => { for (int i = 0; i < 3 * cap; i++) SendOnce(); };
+            ApiUp();
+            ApiClient.AnswerOk = false;
+
+            // 1. not-found on every route
+            ApiClient.Answer = "HTTP 404: {\"detail\":\"Not Found\"}";
+            WriteQueue(full(1), 10);
+            NextLaunch();
+            pumpMany();
+            Eq(cap, ApiClient.Posts.Count, "not-found: each queued request once in this launch");
+            Eq(cap, QueueLines().Length, "not-found: every request kept for the next launch");
+            NextLaunch();
+            pumpMany();
+            Eq(2 * cap, ApiClient.Posts.Count, "not-found: each once more in the next launch, no more");
+            SeatEvidence.BeginGame(true, true);
+            Dispatch(2, 1, ROOM + "_123456_r3");
+            Eq(cap, QueueLines().Length, "a game at the cap: the queue stays at its cap");
+            pumpMany();
+            Eq(2 * cap + 1, ApiClient.Posts.Count, "not-found: the game's record once in this launch");
+            NextLaunch();
+            GameManager.instance.battleOngoing = true;
+            pumpMany();
+            Eq(2 * cap + 1, ApiClient.Posts.Count, "nothing is sent while a battle is live");
+            GameManager.instance.battleOngoing = false;
+
+            // 2. a refusal on every route: each once, then settled
+            ApiClient.Posts.Clear();
+            ApiClient.Answer = "HTTP 400: {\"detail\":\"malformed\"}";
+            WriteQueue(full(2), 20);
+            NextLaunch();
+            pumpMany();
+            Eq(cap, ApiClient.Posts.Count, "refusal: each request once");
+            Eq(0, QueueLines().Length, "refusal: every request settled");
+            NextLaunch();
+            pumpMany();
+            Eq(cap, ApiClient.Posts.Count, "refusal: nothing in the next launch");
+
+            // 3. no answer: once per next-eligible time, MAX_ATTEMPTS in all
+            ApiClient.Posts.Clear();
+            ApiClient.Answer = "Cannot resolve destination host";
+            WriteQueue(full(3), 30);
+            NextLaunch();
+            pumpMany();
+            Eq(cap, ApiClient.Posts.Count, "no answer: each once until its next-eligible time");
+            for (int round = 0; round < SeatEvidenceCore.MAX_ATTEMPTS + 2; round++)
+            {
+                NextLaunch();
+                SendOnce();     // the load; nothing is due yet
+                foreach (SeatEvidenceCore.Pending p in (System.Collections.IList)Field("_queue")) p.NotBeforeUnix = 0;
+                pumpMany();
+            }
+            Eq(cap * SeatEvidenceCore.MAX_ATTEMPTS, ApiClient.Posts.Count, "no answer: MAX_ATTEMPTS transmissions per request in all");
+            Eq(0, QueueLines().Length, "no answer: every request settled as spent");
+
+            // 4. closing files on a full queue: SPOOL_CAP per pass, the queue at its cap
+            ApiClient.Posts.Clear();
+            ApiClient.Answer = "HTTP 404: {\"detail\":\"Not Found\"}";
+            WriteQueue(full(4), 40);
+            NextLaunch();
+            for (int i = 0; i < spoolCap + 4; i++) Check(SeatEvidence.SpoolClosing("e", "{\"closing\":" + i + "}"), "closing file written");
+            Eq(spoolCap + 4, SpoolFiles().Length, "the closing files");
+            var load = typeof(SeatEvidence).GetMethod("Load", S);
+            Check((bool)load.Invoke(null, null), "the first load of the launch");
+            Eq(4, SpoolFiles().Length, "one pass admits SPOOL_CAP closing files");
+            Eq(cap, QueueLines().Length, "the queue stays at its cap");
+            Check((bool)load.Invoke(null, null), "the next load");
+            Eq(0, SpoolFiles().Length, "the next pass admits the rest");
+            Eq(cap, QueueLines().Length, "the queue still at its cap");
+            SendOnce();
+            Eq(1, ApiClient.Posts.Count, "one send per pump");
+        }
+
         /// <summary>Fix pass 4, F8: parsable lines under a trailer that does not verify.</summary>
         private static void ClosingBadTrailer()
         {
@@ -1169,6 +1266,8 @@ namespace SeatEvidenceReplay
             { "opponent_sample_outside_combat", OpponentSampleOutsideCombat },
             // fix pass 4
             { "closing_no_trailer", ClosingNoTrailer }, { "closing_bad_trailer", ClosingBadTrailer },
+            // merge pass 6, item 2
+            { "standin_bounds", StandinBounds },
         };
 
         private static int Main(string[] args)

@@ -44,7 +44,9 @@ CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left",
          # fix pass 4
          "closing_no_trailer", "closing_bad_trailer",
          # fix pass 5: amended B7 (reset at hit_sent index 9)
-         "last_reset_states"]
+         "last_reset_states",
+         # merge pass 6, item 2: the stand-in server's not-found, refusal and no-answer bounds
+         "standin_bounds"]
 
 # (name, old text, new text, target case, control case); old occurs exactly once.
 MUTANTS = [
@@ -166,6 +168,10 @@ MUTANTS = [
      "if (!persisted)\n                    {\n                        _captures.RemoveAt(i);", "queue_save_fails", "closing_next_boot"),
     # F9: one compat POST per launch
     ("compat_twice", 'if (p.Route == "c") p.HoldUntilNextLaunch = true;', "", "compat_once_per_launch", "closing_next_boot"),
+    # merge pass 6, item 2: the stand-in server's bounds
+    ("pump_ignores_launch_hold", "if (!q.HoldUntilNextLaunch && q.NotBeforeUnix <= now) { p = q; break; }",
+     "if (q.NotBeforeUnix <= now) { p = q; break; }", "standin_bounds", "victim_block_hit"),
+    ("spool_pass_uncapped", "int n = Math.Min(files.Length, SPOOL_CAP);", "int n = files.Length;", "standin_bounds", "victim_block_hit"),
 ]
 
 # Wiring the replays cannot reach: (file, what, anchors that must each occur
