@@ -78,7 +78,12 @@ _BINDING_INDEX = {}
 # statement touches is read generically (`_class_touched`): every name it
 # stores or deletes and every identifier field of every node in it, the
 # identifier fields read from the interpreter's own node signatures, so a
-# node type added by a later Python is charged by default.
+# node type added by a later Python is charged by default. What a modelled
+# assignment binds EXACTLY is read by lexical ownership (combat fix pass 4,
+# `_class_target_names`): the current scope's Name, Starred, Tuple and List
+# target elements only, never a name inside a subscript or attribute target
+# or in a nested scope; an oracle test runs generated class bodies in the
+# interpreter and proves the walk charges every module read it observes.
 
 # Top-level class-body statements whose binding the walk models exactly.
 _CLASS_EXACT = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom,
@@ -188,6 +193,28 @@ def _class_touched(st):
             continue
         stack.extend(ast.iter_child_nodes(n))
     return out
+
+
+def _class_target_names(target):
+    """The names an assignment target binds in the CURRENT scope, by
+    lexical ownership (combat fix pass 4, M-9): a Name stored into, and the
+    elements of a Starred, Tuple or List target, recursively. Nothing else:
+    never a name inside a subscript or attribute target's expressions (an
+    object is stored into, the class namespace is not), and never a name
+    in a nested scope those expressions open (a comprehension target binds
+    in the comprehension, a lambda parameter in the lambda). A walrus there
+    binds in the class, but it is no target element: `_class_touched` sees
+    it and the walk charges it."""
+    if isinstance(target, ast.Name):
+        return {target.id} if isinstance(target.ctx, ast.Store) else set()
+    if isinstance(target, ast.Starred):
+        return _class_target_names(target.value)
+    if isinstance(target, (ast.Tuple, ast.List)):
+        out = set()
+        for elt in target.elts:
+            out |= _class_target_names(elt)
+        return out
+    return set()
 
 
 def _is_script_guard(node):
@@ -343,8 +370,10 @@ def _index_module(path):
             if isinstance(st, ast.AnnAssign) and st.value is None:
                 return set()                      # an annotation alone binds nothing
             targets = getattr(st, "targets", None) or [st.target]
-            return {t.id for tg in targets for t in ast.walk(tg)
-                    if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store)}
+            out = set()
+            for tg in targets:
+                out |= _class_target_names(tg)
+            return out
 
         def bind_name(scope, name, refs=()):
             scope.bound.setdefault(name, set()).update(refs)
@@ -3116,6 +3145,18 @@ _CLASS_BOUND_SRC = (
     "class Glob(BaseModel):\n"
     "    global LIMIT\n"
     "    n: int = LIMIT\n"
+    "class CompTarget(BaseModel):\n"
+    "    table[[LIMIT for LIMIT in (0,)][0]] = 1\n"
+    "    n = LIMIT\n"
+    "    LIMIT = 9\n"
+    "class GenTarget(BaseModel):\n"
+    "    [table[next(LIMIT for LIMIT in (0,))], c] = 1, 2\n"
+    "    n = LIMIT\n"
+    "    LIMIT = 9\n"
+    "class LambdaTarget(BaseModel):\n"
+    "    table[(lambda LIMIT=0: LIMIT)()] = 1\n"
+    "    n = LIMIT\n"
+    "    LIMIT = 9\n"
     "def outer_nonlocal():\n"
     "    LIMIT = 7\n"
     "    class NonLocal(BaseModel):\n"
@@ -3153,7 +3194,10 @@ _CLASS_FIELD_CONTROLS = {
 # read; a read after an exception alias, after the statement and inside it)
 # and a match capture, a loop target and a walrus.
 _CLASS_CHARGED_ROWS = (("AugOnly", True), ("Aug", True), ("Exc", True), ("ExcFinally", True),
-                       ("Capture", True), ("Loop", True), ("Walrus", True))
+                       ("Capture", True), ("Loop", True), ("Walrus", True),
+                       # fix pass 4: the reviewer's comprehension target inside a
+                       # subscript target, verbatim, and two siblings
+                       ("CompTarget", True), ("GenTarget", True), ("LambdaTarget", True))
 
 
 def test_every_ast_name_field_is_modelled_with_a_control_or_charged():
@@ -3236,5 +3280,143 @@ def test_the_class_bound_rows_are_what_the_interpreter_does():
     for model in ("AttrStore", "SubStore", "Unpack", "Keyword", "Pattern", "Param"):
         assert ns[model].n == 9, model
     assert ns["Glob"].n == 5 and ns["outer_nonlocal"]().n == 7
+    for model in ("CompTarget", "GenTarget", "LambdaTarget"):            # fix pass 4
+        assert ns[model].n == 5 and ns[model].LIMIT == 9, model
     edited = run(_CLASS_BOUND_SRC.replace("LIMIT = 5\n", "LIMIT = 6\n", 1))
     assert edited["AugOnly"].LIMIT == 7 and edited["Exc"].n == 6 and edited["ExcFinally"].m == 6
+    for model in ("CompTarget", "GenTarget", "LambdaTarget"):
+        assert edited[model].n == 6, model
+
+
+# ── Combat fix pass 4, M-9: lexical ownership, proved against the interpreter ──
+
+# Sub-expressions that carry the name LIMIT in every role it can take inside
+# an expression: a comprehension, generator or dict-comprehension target
+# (bound in that nested scope), a read inside a comprehension or a lambda (of
+# the module's, the class's names are not visible there), a lambda parameter,
+# an attribute name, a string subscript key, a keyword.
+_ORACLE_SUBS = {
+    "plain": "0",
+    "comp_bind": "[LIMIT for LIMIT in (0,)][0]",
+    "comp_read": "[LIMIT for _ in (0,)][0]",
+    "gen_bind": "next(LIMIT for LIMIT in (0,))",
+    "dictcomp_bind": "len({LIMIT: 0 for LIMIT in (0,)})",
+    "lambda_param": "(lambda LIMIT=0: LIMIT)()",
+    "lambda_read": "(lambda: LIMIT)()",
+    "attribute": "ns.LIMIT",
+    "subscript": "table['LIMIT']",
+    "keyword": "dict(LIMIT=0)['LIMIT']",
+}
+
+# Each statement form the walk models exactly (_CLASS_EXACT: assignment in
+# every target shape, annotated assignment with a value, def, async def,
+# class, import, from-import), the sub-expression `{e}` placed in its value,
+# its subscript or attribute target, its annotation, defaults, decorator or
+# bases. Continuation lines carry their own indentation.
+_ORACLE_STMTS = {
+    "assign_name": "LIMIT = {e}",
+    "assign_other": "other = {e}",
+    "assign_subscript": "table[{e}] = 1",
+    "assign_attribute": "(ns, {e})[0].attr = 1",
+    "assign_attr_value": "ns.LIMIT = {e}",
+    "assign_tuple": "LIMIT, other = {e}, 1",
+    "assign_list_sub": "[table[{e}], other] = 1, 2",
+    "assign_starred": "[LIMIT, *rest] = ({e}, 1)",
+    "assign_starred_sub": "[other, *table[{e}]] = (1, 2)",
+    "assign_chain": "LIMIT = other = {e}",
+    "annassign_name": "LIMIT: int = {e}",
+    "annassign_subscript": "table[{e}]: int = 1",
+    "annassign_attribute": "(ns, {e})[0].attr: int = 1",
+    "annassign_annotation": "other: ({e}) = 1",
+    "def_name": "def LIMIT(a={e}):\n        return a",
+    "def_other": "def g(a={e}):\n        return a",
+    "def_decorated": "@(lambda f: ({e}, f)[1])\n    def LIMIT():\n        pass",
+    "asyncdef_name": "async def LIMIT(a={e}):\n        return a",
+    "class_name": "class LIMIT((object, {e})[0]):\n        pass",
+    "class_other": "class K((object, {e})[0]):\n        x = {e}",
+    "import_name": "import os as LIMIT",
+    "from_import": "from os import sep as LIMIT",
+    "import_other": "import os",
+}
+
+_ORACLE_HELPERS = ("class NS:\n"
+                   "    LIMIT = 0\n"
+                   "ns = NS()\n"
+                   "table = {'LIMIT': 0}\n")
+
+# The reviewer's class body, verbatim (round 4, M-9).
+_ORACLE_REVIEWER = ("    table[[LIMIT for LIMIT in (0,)][0]] = 1\n"
+                    "    n = LIMIT\n"
+                    "    LIMIT = 9\n")
+
+
+def _oracle_family():
+    """[(label, class body)] for every statement form, every sub-expression
+    (once for a form without one), with and without an earlier class
+    binding, with and without a later one; each body reads LIMIT after the
+    statement."""
+    out = []
+    for sname, stmt in _ORACLE_STMTS.items():
+        subs = _ORACLE_SUBS.items() if "{e}" in stmt else [("none", "")]
+        for xname, e in subs:
+            for pre in ("", "    LIMIT = 7\n"):
+                for late in ("", "    LIMIT = 9\n"):
+                    body = pre + "    " + stmt.replace("{e}", e) + "\n    n = LIMIT\n" + late
+                    out.append(((sname, xname, bool(pre), bool(late)), body))
+    return out
+
+
+class _ModuleReads(dict):
+    """A builtins mapping that records every name looked up in it. The
+    module-level LIMIT lives here instead of in the module's globals, so
+    every read the interpreter makes past the class namespace and the
+    globals (a class-body read, a comprehension's or a lambda's) is seen."""
+
+    def __init__(self, values):
+        super().__init__(values)
+        self.seen = set()
+
+    def __getitem__(self, key):
+        self.seen.add(key)
+        return super().__getitem__(key)
+
+
+def _interpreter_reads_module_limit(body):
+    """True when executing the class body reads the module's LIMIT."""
+    import builtins
+    rec = _ModuleReads(dict(vars(builtins), LIMIT=5))
+    glb = {"__builtins__": rec}
+    exec(compile(_ORACLE_HELPERS, "a", "exec", dont_inherit=True), glb)
+    rec.seen.clear()
+    exec(compile("class C:\n" + body, "a", "exec", dont_inherit=True), glb)
+    return "LIMIT" in rec.seen
+
+
+def test_the_walk_charges_every_module_read_the_interpreter_makes(tmp_path):
+    """Combat fix pass 4, M-9, the ORACLE. A generated family of class
+    bodies (every statement form the walk models exactly, every
+    sub-expression carrying the name LIMIT, with and without an earlier and
+    a later class binding) is executed by the interpreter with the module's
+    LIMIT behind a recording mapping, and the walk's charge for each class
+    is compared with what the interpreter actually read: the walk must
+    charge a SUPERSET. The reviewer's body verbatim is one member and reads
+    the module. Controls: the recorder sees a plain read and not a read
+    after a class binding, and the family has both outcomes."""
+    family = _oracle_family()
+    assert len(family) == (20 * len(_ORACLE_SUBS) + 3) * 4 == 812
+    assert any(body == _ORACLE_REVIEWER for _label, body in family)
+    src = "LIMIT = 5\n" + _ORACLE_HELPERS + "".join(
+        "class C%d:\n%s" % (k, body) for k, (_label, body) in enumerate(family))
+    index = _tmp_index(tmp_path, a=src)
+    missed, reads = [], 0
+    for k, (label, body) in enumerate(family):
+        read = _interpreter_reads_module_limit(body)
+        reads += read
+        if read and "LIMIT" not in index["a"]["C%d" % k][2]:
+            missed.append(label)
+        if body == _ORACLE_REVIEWER:
+            assert read, "the reviewer's body reads the module's LIMIT"
+    assert missed == [], missed[:20]
+    assert 0 < reads < len(family), reads
+    assert _interpreter_reads_module_limit("    other = 0\n    n = LIMIT\n")
+    assert not _interpreter_reads_module_limit("    LIMIT = 7\n    n = LIMIT\n")
