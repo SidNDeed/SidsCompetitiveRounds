@@ -744,7 +744,9 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # the re-pin dry run
     # seat evidence V2 (claude/seat-evidence-server-v2): +4 (the seat record and compat outcome routes, the
     # admin seat-evidence view and the release digest registration; 388 before)
-    assert len(manifest) == 392
+    # card draw evidence (claude/card-draw-server): +3 (the card record route, the admin card-evidence view
+    # and the card-pool census registration; 392 before)
+    assert len(manifest) == 395
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -765,7 +767,8 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # their shared 382 is 387: the lane's 4 plus the Discord fix's 1 (all statically-nonconsumer), confirmed
     # by the re-pin dry run
     # seat evidence V2 (claude/seat-evidence-server-v2): +4, all statically-nonconsumer (387 before)
-    assert len(static) == 391
+    # card draw evidence (claude/card-draw-server): +3, all statically-nonconsumer (391 before)
+    assert len(static) == 394
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
