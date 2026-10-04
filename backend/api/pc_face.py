@@ -1503,22 +1503,33 @@ def _draw_badge_name(image: Image.Image, name: str, rgb: tuple[int, int, int],
 # ── the top card's art (board row 33): one optional, private bundle ──────────
 # The game draws the top card's own picture beside its name: the client
 # overlays CardSnapshot's thumbnail (the live-rendered ROUNDS card cropped to
-# its corner band) height-fitted into [94,646,172,750] over an opaque backing
-# at [92,646,172,750] (plugin/PlayerCardsUI.cs, PlaceTopCard). The server
+# its corner band) fitted, aspect kept, into a box over an opaque backing of
+# the same rect (plugin/PlayerCardsUI.cs, PlaceTopCard, on the 1.41.0 client).
+# The layout's rects.badge_art_back and rects.badge_art ARE that client's
+# rects, and they are the only statement of the geometry on the server: the
+# patch size, the fitted box, the draw position, the bundle's admission and
+# the /health word pc_art_rect are all derived from them (card_art_rect).
+# The client must cover the server's patch exactly (bug 408: a patch larger
+# than the client's overlay showed around it as a second copy). The server
 # cannot run Unity, so the bundle carries that overlay pre-composed: one
-# 80x104 opaque patch per vanilla card, harvested once from the shipped
-# client on the seat and fitted offline, so a render only pastes.
+# opaque patch per vanilla card, harvested once from the shipped client on
+# the seat and fitted offline, so a render only pastes.
 #
 # The bundle is NOT in the repository (it is game-derived art). The api
 # container gets it as a READ-ONLY bind mount at assets/pc/cards, staged per
 # box outside the build context; a clone, a test process and a box without
 # the mount simply have no bundle. A bundle is a directory holding exactly
 # index.json (format, the certifying tool version, the harvest provenance,
-# and canonical card name -> file, sha256, width, height, source thumbnail
+# the geometry it was cut for, and canonical card name -> file, sha256,
+# width, height, source thumbnail
 # sha256 and rect, in the one canonical serialization), BUNDLE-DIGEST (the
 # sha256 of those index bytes) and one PNG per name. It is ONE optional
 # renderer input: accepted only when the provenance is present and English
-# with the measured backing, the tool version is current, and EVERY expected
+# with the measured backing, the tool version is current, the geometry it was
+# cut for is exactly the loaded layout's (card_art_geometry: a bundle cut for
+# another rect, or one that names no geometry, is refused whole, so a box
+# whose code and bundle disagree draws NO art rather than a misplaced patch),
+# and EVERY expected
 # name, slug binding, hash, chunk set, header, mode, opacity, backing and
 # content floor checks out, and otherwise not used at all -- never partly. An absent or
 # invalid bundle keeps the fingerprint valid and every face rendering, with
@@ -1526,7 +1537,6 @@ def _draw_badge_name(image: Image.Image, name: str, rgb: tuple[int, int, int],
 # a pack (the pack writer asks _pc_require_renderer BEFORE it takes payment).
 _CARD_ART_DIRNAME = "cards"        # the mount point under assets/pc, fixed by the compose file
 _CARD_ART_PATH = _ASSETS_PATH / _CARD_ART_DIRNAME
-CARD_ART_W, CARD_ART_H = 80, 104
 CARD_ART_INDEX = "index.json"
 CARD_ART_DIGEST_FILE = "BUNDLE-DIGEST"
 CARD_ART_FORMAT = 2
@@ -1585,12 +1595,49 @@ def card_art_backing_rgb() -> tuple[int, int, int]:
     return tuple(int(v) for v in LAYOUT["colours"]["badge_art_back"])
 
 
+def card_art_rect() -> tuple[int, int, int, int]:
+    """The art patch's rect on the 750x1050 face: rects.badge_art_back of the
+    layout this process loaded, read at every call (never copied into a
+    constant, so nothing on the server can state the geometry a second way)."""
+    return tuple(int(v) for v in LAYOUT["rects"]["badge_art_back"])
+
+
+def card_art_size() -> tuple[int, int]:
+    """(width, height) of one patch at card scale: the art rect's size."""
+    x0, y0, x1, y1 = card_art_rect()
+    return x1 - x0, y1 - y0
+
+
+def card_art_geometry() -> tuple[tuple[str, tuple[int, ...]], ...]:
+    """The geometry a bundle is cut for, as the loaded layout states it: the
+    patch rect and the art box the thumbnail is fitted into. Hashable, so
+    the bundle reader can be keyed on it (#744). A bundle's index carries the
+    same two rects under "geometry" (card_art_geometry_record) and is
+    accepted only when they are these."""
+    return (("badge_art", tuple(int(v) for v in LAYOUT["rects"]["badge_art"])),
+            ("badge_art_back", card_art_rect()))
+
+
+def card_art_geometry_record(geometry=None) -> dict:
+    """The index.json form of a geometry: {rect name: [x0, y0, x1, y1]}."""
+    return {name: list(rect) for name, rect in (geometry or card_art_geometry())}
+
+
+def card_art_rect_word() -> str:
+    """The /health word pc_art_rect: the art rect of the layout this process
+    loaded, as "x0,y0,x1,y1". Release-train plumbing (#306): it tells a box
+    on this geometry from a box on another one even when both draw their own
+    bundle healthily, and nothing else reads it."""
+    return ",".join(str(v) for v in card_art_rect())
+
+
 def card_art_fit_box(src_w: int, src_h: int) -> tuple[int, int, int, int]:
-    """Where a src_w x src_h thumbnail lands inside the 80x104 patch: fitted
-    into the art box (columns 2..80, the client's preserveAspect box), aspect
-    kept, centred. The bundle tool composes with this box and the content
-    check measures inside it, so both read one rule."""
-    back = LAYOUT["rects"]["badge_art_back"]
+    """Where a src_w x src_h thumbnail lands inside the patch: fitted into the
+    art box (rects.badge_art relative to rects.badge_art_back, the client's
+    preserveAspect box), aspect kept, centred. The bundle tool composes with
+    this box and the content check measures inside it, so both read one
+    rule."""
+    back = card_art_rect()
     art = LAYOUT["rects"]["badge_art"]
     x0, y0, x1, y1 = art[0] - back[0], art[1] - back[1], art[2] - back[0], art[3] - back[1]
     bw, bh = x1 - x0, y1 - y0
@@ -1660,9 +1707,11 @@ def card_art_check_provenance(index: dict) -> None:
 
 def card_art_write_bundle(dest_dir, patches: dict, sources: dict, provenance: dict,
                           tool_version: int = CARD_ART_TOOL_VERSION) -> str:
-    """Write a bundle directory from {canonical name: 80x104 RGBA image}: one
+    """Write a bundle directory from {canonical name: RGBA image of
+    card_art_size()}: one
     canonically encoded PNG per name (IHDR/IDAT/IEND only, so no text chunk,
-    path or time can ride in), index.json in its canonical serialization, and
+    path or time can ride in), index.json in its canonical serialization
+    (with the geometry the patches were cut for), and
     BUNDLE-DIGEST last. `sources` maps each name to its harvest record
     ({"source_sha256", "source_rect": [x, y, w, h]}); `provenance` is the
     harvest's block (card_art_check_provenance's keys). The directory must
@@ -1670,11 +1719,12 @@ def card_art_write_bundle(dest_dir, patches: dict, sources: dict, provenance: di
     tests' synthetic bundles both write through this, so the format has one
     writer as it has one reader."""
     root = Path(dest_dir)
+    width, height = card_art_size()
     root.mkdir(parents=True, exist_ok=False)
     cards = {}
     for name in sorted(patches):
         image = patches[name]
-        if image.size != (CARD_ART_W, CARD_ART_H):
+        if image.size != (width, height):
             raise ValueError("card_art_size")
         data = _encode_rgba(image)
         stem = card_art_slug(name)
@@ -1683,10 +1733,11 @@ def card_art_write_bundle(dest_dir, patches: dict, sources: dict, provenance: di
         (root / f"{stem}.png").write_bytes(data)
         src = sources[name]
         cards[name] = {"file": f"{stem}.png", "sha256": hashlib.sha256(data).hexdigest(),
-                       "width": CARD_ART_W, "height": CARD_ART_H,
+                       "width": width, "height": height,
                        "source_sha256": str(src["source_sha256"]),
                        "source_rect": [int(v) for v in src["source_rect"]]}
     index_bytes = card_art_index_bytes({"format": CARD_ART_FORMAT, "tool_version": int(tool_version),
+                                        "geometry": card_art_geometry_record(),
                                         "provenance": dict(provenance), "cards": cards})
     (root / CARD_ART_INDEX).write_bytes(index_bytes)
     digest = hashlib.sha256(index_bytes).hexdigest()
@@ -1752,18 +1803,20 @@ def _card_art_refuse(reason: str) -> CardArtBundle:
 
 def _card_art_decode(data: bytes) -> Image.Image:
     """One patch's pixels: the container walked (every CRC), the chunk set
-    exactly IHDR/IDAT/IEND, the header 80x104 8-bit RGBA non-interlaced, a
-    PNG that decodes in full to RGBA at that size, and every pixel opaque."""
+    exactly IHDR/IDAT/IEND, the header card_art_size() 8-bit RGBA
+    non-interlaced, a PNG that decodes in full to RGBA at that size, and every
+    pixel opaque."""
+    width, height = card_art_size()
     chunks = png_chunks(data)
     if any(kind not in _PNG_OUTPUT_CHUNKS for kind, _ in chunks):
         raise ValueError("card_art_chunks")
-    if png_ihdr(data) != (CARD_ART_W, CARD_ART_H, 8, 6, 0):
+    if png_ihdr(data) != (width, height, 8, 6, 0):
         raise ValueError("card_art_header")
     with Image.open(io.BytesIO(data)) as source:
         if (source.format or "").upper() != "PNG":
             raise ValueError("card_art_format")
         source.load()
-        if source.mode != "RGBA" or source.size != (CARD_ART_W, CARD_ART_H):
+        if source.mode != "RGBA" or source.size != (width, height):
             raise ValueError("card_art_mode")
         image = Image.frombytes("RGBA", source.size, source.tobytes())
     if image.getchannel("A").getextrema() != (255, 255):
@@ -1774,13 +1827,14 @@ def _card_art_decode(data: bytes) -> Image.Image:
 def card_art_check_entry_shape(name: str, entry) -> None:
     """One index entry's shape, or ValueError: exactly the entry keys, the
     file bound to its name by the slug rule (so two names cannot trade files
-    in the index), a sha256, the 80x104 size, and the harvest record (the raw
-    thumbnail's sha256 and its source rect)."""
+    in the index), a sha256, the card_art_size() size, and the harvest record
+    (the raw thumbnail's sha256 and its source rect)."""
+    width, height = card_art_size()
     if not isinstance(entry, dict) or set(entry) != _CARD_ART_ENTRY_KEYS:
         raise ValueError("entry keys")
     if (not isinstance(entry["file"], str) or not _CARD_ART_FILE_RE.match(entry["file"])
             or not isinstance(entry["sha256"], str) or not _CARD_ART_SHA_RE.match(entry["sha256"])
-            or entry["width"] != CARD_ART_W or entry["height"] != CARD_ART_H):
+            or entry["width"] != width or entry["height"] != height):
         raise ValueError("entry shape")
     if entry["file"] != card_art_slug(name) + ".png":
         raise ValueError(f"file {entry['file']!r} is not the name's slug {card_art_slug(name)!r}")
@@ -1830,10 +1884,14 @@ def card_art_check_entry(assets_dir: Path, entry: dict) -> tuple[bytes, Image.Im
 
 
 @functools.lru_cache(maxsize=4)
-def _card_art_bundle_at(assets_dir: str, names: tuple[str, ...], _stamps: tuple) -> CardArtBundle:
+def _card_art_bundle_at(assets_dir: str, names: tuple[str, ...], geometry: tuple,
+                        _stamps: tuple) -> CardArtBundle:
     """Read and validate the whole bundle, or refuse the whole bundle. Keyed
-    on the directory, the expected names and the directory's stamps, never on
-    a module global read inside (#744)."""
+    on the directory, the expected names, the layout's art geometry
+    (card_art_geometry) and the directory's stamps, never on a module global
+    read inside (#744). Every size and box check below reads the layout, and
+    the geometry gate has just required the bundle's geometry to equal the
+    `geometry` key, so the key covers them."""
     root = Path(assets_dir)
     try:
         if not root.is_dir():
@@ -1853,9 +1911,17 @@ def _card_art_bundle_at(assets_dir: str, names: tuple[str, ...], _stamps: tuple)
         if not isinstance(index, dict) or index.get("format") != CARD_ART_FORMAT:
             return _card_art_refuse(f"index.json format {index.get('format') if isinstance(index, dict) else None!r}"
                                     f" is not {CARD_ART_FORMAT} (a bundle older than the provenance checks)")
+        # The geometry gate (bug 408). A bundle is cut for one patch rect and
+        # one art box; drawn under any other layout it would be pasted at the
+        # wrong size or place, so a bundle whose recorded geometry is not the
+        # loaded layout's -- or that records none, as every bundle before this
+        # gate did -- is refused whole and the face draws NO art.
+        if index.get("geometry") != card_art_geometry_record(geometry):
+            return _card_art_refuse(f"geometry: the bundle was cut for {index.get('geometry')!r}, "
+                                    f"the layout is {card_art_geometry_record(geometry)!r}")
         if not isinstance(index.get("provenance"), dict):
             return _card_art_refuse("provenance: no provenance block")
-        if (set(index) != {"format", "tool_version", "provenance", "cards"}
+        if (set(index) != {"format", "tool_version", "geometry", "provenance", "cards"}
                 or not isinstance(index.get("cards"), dict)):
             return _card_art_refuse("index.json shape")
         if card_art_index_bytes(index) != index_bytes:
@@ -1910,7 +1976,8 @@ _CARD_ART_LOGGED: set = set()
 def card_art_bundle() -> CardArtBundle:
     """The bundle as the renderer uses it right now (one validated reading per
     distinct directory state). The first reading of each state logs one line."""
-    bundle = _card_art_bundle_at(str(_CARD_ART_PATH), card_art_names(), _card_art_stamps(_CARD_ART_PATH))
+    bundle = _card_art_bundle_at(str(_CARD_ART_PATH), card_art_names(), card_art_geometry(),
+                                 _card_art_stamps(_CARD_ART_PATH))
     note = (bundle.status, bundle.digest, bundle.reason)
     if note not in _CARD_ART_LOGGED:
         _CARD_ART_LOGGED.add(note)
@@ -1945,8 +2012,7 @@ def card_art_drawn(spec: dict) -> bool:
     resolver, the same name. The X-Face-Art and composite art headers."""
     name = top_card_name(spec)
     patch = card_art_patch(name, "card") if name else None
-    back = LAYOUT["rects"]["badge_art_back"]
-    return patch is not None and patch.size == (back[2] - back[0], back[3] - back[1])
+    return patch is not None and patch.size == card_art_size()
 
 
 _CARD_ART_MISSING_LOGGED: set = set()
@@ -1960,8 +2026,9 @@ def _draw_badge_art(image: Image.Image, top_name: str, scale: float, size: str) 
     the name rect's overlap included, exactly as the in-game overlay does.
     Nothing is drawn when the accepted bundle has no patch for the name: the
     badge then stands as before (fill, frame, name). A patch whose size is
-    not the scaled rect's (a layout edited without its bundle) is not drawn
-    either -- never an exception out of a render; the self-test then reads 0.
+    not the scaled rect's is not drawn either -- never an exception out of a
+    render; the self-test then reads 0. (A bundle cut for another layout
+    never gets here: the reader's geometry gate refuses it whole.)
     Returns whether a patch was pasted."""
     patch = card_art_patch(top_name, size)
     if patch is None:
@@ -1970,7 +2037,7 @@ def _draw_badge_art(image: Image.Image, top_name: str, scale: float, size: str) 
             _CARD_ART_MISSING_LOGGED.add(top_name)
             print(f"[PC-ART] no art for top card {top_name!r} - badge drawn without art")
         return False
-    box = _scale_rect(LAYOUT["rects"]["badge_art_back"], scale)
+    box = _scale_rect(card_art_rect(), scale)
     if patch.size != (box[2] - box[0], box[3] - box[1]):
         if ("<size>", size) not in _CARD_ART_MISSING_LOGGED:
             _CARD_ART_MISSING_LOGGED.add(("<size>", size))
@@ -2443,14 +2510,14 @@ def _card_art_selftest_spec(top_name: str) -> dict:
 
 
 @functools.lru_cache(maxsize=4)
-def _card_art_selftest_at(_identity: bytes) -> dict:
+def _card_art_selftest_at(_identity: bytes, _geometry: tuple) -> dict:
     bundle = card_art_bundle()
     if bundle.status != "accepted":
         return {"word": 1, "status": bundle.status, "reason": bundle.reason, "checked": 0}
     sizes = (("card", 1.0, (CARD_W, CARD_H)), ("tile", 0.5, (TILE_W, TILE_H)))
     for name in sorted(bundle.patches):
         for size, scale, edge in sizes:
-            box = _scale_rect(LAYOUT["rects"]["badge_art_back"], scale)
+            box = _scale_rect(card_art_rect(), scale)
             canvas = Image.new("RGBA", edge, (0, 0, 0, 0))
             want = card_art_patch(name, size)
             if want is None or not _draw_badge_art(canvas, name, scale, size):
@@ -2461,7 +2528,7 @@ def _card_art_selftest_at(_identity: bytes) -> dict:
                         "checked": 0}
     first = sorted(bundle.patches)[0]
     for size, scale, _edge in sizes:
-        box = _scale_rect(LAYOUT["rects"]["badge_art_back"], scale)
+        box = _scale_rect(card_art_rect(), scale)
         want = card_art_patch(first, size).tobytes()
         with Image.open(io.BytesIO(render_face(_card_art_selftest_spec(first), {}, None, size))) as drawn:
             got = drawn.convert("RGBA").crop(box).tobytes()
@@ -2482,8 +2549,9 @@ def card_art_selftest() -> dict:
     """{"word": 3|1|0, ...} for the bundle as it stands: 3 = accepted and every
     entry proved drawn, 1 = no usable bundle (absent or invalid; the base face
     serves), 0 = an accepted bundle the renderer did not draw as it accepted
-    it. Cached per bundle identity; the api warms it at boot."""
-    return _card_art_selftest_at(card_art_bundle().identity)
+    it. Cached per bundle identity and layout geometry (#744); the api warms
+    it at boot."""
+    return _card_art_selftest_at(card_art_bundle().identity, card_art_geometry())
 
 
 def render_back() -> bytes:

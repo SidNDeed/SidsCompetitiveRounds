@@ -635,6 +635,7 @@ def test_priming_waits_for_its_deadline_and_the_attempt_finishes_behind_it(monke
 def test_the_sweep_word_is_earned_by_completed_work(monkeypatch):
     st = main._PC_STEAM_SWEEP_STATE
     monkeypatch.setitem(st, "clean_at", None)
+    monkeypatch.setitem(st, "started_at", None)   # a loop start stamped earlier ages into `stale` (v4.1 §2)
     monkeypatch.setitem(st, "error", None)
     monkeypatch.setattr(main, "IS_REPLICA", False)
     monkeypatch.delenv("PC_STEAM_SWEEP", raising=False)

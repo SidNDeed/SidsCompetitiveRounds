@@ -361,15 +361,19 @@ def test_a_patch_that_is_not_art_is_refused(good, damage, why):
     content and backing checks can refuse."""
     name = pc_face.card_art_names()[-3]
     patch = fx.synthetic_patch(name)
-    box = pc_face.card_art_fit_box(78, 104)
+    box = fx.synthetic_box()
+    bw, bh = box[2] - box[0], box[3] - box[1]
     if damage == "black":
         patch.paste((0, 0, 0, 255), box)
     elif damage == "specks":
         patch.paste((0, 0, 0, 255), box)
-        for i in range(0, 78 * 104, 25):
-            patch.putpixel((box[0] + i % 78, i // 78), (255, 255, 255, 255))
+        for i in range(0, bw * bh, 25):
+            patch.putpixel((box[0] + i % bw, box[1] + i // bw), (255, 255, 255, 255))
     else:
-        patch.putpixel((0, 50), (200, 10, 10, 255))
+        # A pixel of the backing margin the fitted card leaves (the real
+        # thumbnail shape leaves rows above and below it).
+        assert box[1] > 0
+        patch.putpixel((bw // 2, box[1] - 1), (200, 10, 10, 255))
     fx.rewrite_entry(good, name, pc_face._encode_rgba(patch))
     _refused(why)
 
