@@ -21,6 +21,7 @@ namespace CompetitiveRounds
         internal const string GameSummaryDiagKey = "NetworkReplicaDiagnostics-game-summary";
 
         private const int MaxTrackedActors = 32;
+        private const int ACTOR_SCAN_CAP = MaxTrackedActors;
         private const int MaxActorsPerSummary = 10;
         private const int MaxDistinctOrphanViews = 4096;
         private const int MaxMeasuredGapMs = 60000;
@@ -140,6 +141,8 @@ namespace CompetitiveRounds
         /// (RecordMovementSample).</summary>
         private static void CommitTiming(ActorStats actor, int actorNumber, int networkTime, long arrivalTick, out GapSample sample)
         {
+            // Seat evidence: the batch's sender stamp, for age, age_b, drift and cadence.
+            try { SeatEvidence.NoteView(actorNumber, networkTime); } catch { }
             GapSample roomSample;
             actor.Room.Record(networkTime, arrivalTick, out roomSample);
             sample = roomSample;
@@ -190,9 +193,17 @@ namespace CompetitiveRounds
             o = default(ObsSnapshot);
             try
             {
+                // a hard-capped scan (the seat evidence dispatch reads this at game over: F4);
+                // Actors never holds more than MaxTrackedActors entries
                 ActorStats best = null;
-                foreach (ActorStats a in Actors.Values)
-                    if (best == null || a.Game.Views > best.Game.Views) best = a;
+                using (var en = Actors.Values.GetEnumerator())
+                {
+                    for (int i = 0; i < ACTOR_SCAN_CAP && en.MoveNext(); i++)
+                    {
+                        ActorStats a = en.Current;
+                        if (best == null || a.Game.Views > best.Game.Views) best = a;
+                    }
+                }
                 if (best == null || best.Game.Views == 0) return false;
                 TimingWindow w = best.Game;
                 o.Gap300 = w.Gaps.Gap300; o.Gap750 = w.Gaps.Gap750; o.Gap1500 = w.Gaps.Gap1500;

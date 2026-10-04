@@ -1,0 +1,4 @@
+# Build output and mutant copies. run_replay.py regenerates all of it.
+bin/
+obj/
+work/

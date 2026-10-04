@@ -512,6 +512,16 @@ namespace CompetitiveRounds
                     }
                     catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit-time log copy failed: {ex.Message}"); }
                 };
+                // Seat evidence: a game still live while the game closes is
+                // captured, then built and queued to its file now (no later
+                // frame comes) and sent at the next launch.
+                UnityEngine.Application.quitting += () =>
+                {
+                    try { PointEvidence.Drain(); } catch { }
+                    try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }
+                    try { SeatEvidence.FlushOnQuit(); } catch { }
+                    try { CardDrawEvidence.FlushOnQuit(); } catch { }
+                };
             }
             catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
 
@@ -1358,6 +1368,8 @@ namespace CompetitiveRounds
                     }
                 }
                 Log.LogInfo($"[HARMONY] Patches applied: {applied} ok, {failed} failed");
+                // Card draw evidence (B4): one line naming its six patches as attached.
+                try { CardDrawEvidence.BootLine(); } catch { }
             }
             catch (Exception ex)
             {
@@ -3432,6 +3444,22 @@ namespace CompetitiveRounds
             // reads the room and writes only this seat's own statement.
             try { PeerBuild.StageBuildProp("tick"); PeerBuild.Tick(); } catch { }
 
+            // Seat evidence: a pending compat outcome is signed and persisted
+            // once the Steam id is known. Above the return because a finding
+            // is exactly the state that disables the mod; it only writes this
+            // seat's own queue file.
+            try { SeatEvidence.CompatTick(); } catch { }
+            // Evidence work the hooks deferred out of the game's methods: the
+            // point-end lines and push counts first (before GameStateWatcher's
+            // tick captures a record), then seat evidence's own clocks, the
+            // record builds and the queue, then the card draw builds. Above
+            // the return: previously queued evidence sends whatever the mod's
+            // state, under consent, a session, retry timing and no live
+            // combat. No setting in front of any of it.
+            try { PointEvidence.Drain(); } catch { }
+            try { SeatEvidence.Tick(); } catch { }
+            try { CardDrawEvidence.Tick(); } catch { }
+
             if (Plugin.modDisabled) return;
 
             // Menu injection runs independently
@@ -3521,6 +3549,9 @@ namespace CompetitiveRounds
             // [SC-SELFTEST] (room rules §6): the vanilla-mode Same Cards seams
             // against the live game, once per process, only with its cfg lever.
             try { VanillaCardSequence.EnsureSelfTest(); } catch { }
+            // [CARD-EV] census dump (B4): this seat's pool census, once per
+            // process, only with its cfg lever, never in a room.
+            try { CardDrawEvidence.EnsureCensusDump(); } catch { }
 
             // SCR Broadcast director + §2c identity fence (design §3a). Runs
             // from THIS persistent tick — never a coroutine host that
@@ -3655,6 +3686,9 @@ namespace CompetitiveRounds
         {
             Plugin.Log.LogInfo("[PERSIST] Delayed initialization starting...");
 
+            // Seat evidence: hash this DLL and the game's off the main thread.
+            try { SeatEvidence.StartHashing(); } catch { }
+
             // ── Other mods check (Chainloader is complete by now) ──
             try
             {
@@ -3673,6 +3707,13 @@ namespace CompetitiveRounds
                         foreach (var m in otherMods)
                             Plugin.Log.LogError($"[COMPAT]   - {m}");
                         Plugin.Log.LogError("[COMPAT] Mod DISABLED to ensure competitive integrity.");
+                        try
+                        {
+                            var guids = new List<string>();
+                            foreach (var kvp in plugins) if (kvp.Key != Plugin.ModId) guids.Add(kvp.Key);
+                            SeatEvidence.NoteCompat("finding", guids);
+                        }
+                        catch { }
                         Plugin.modDisabled = true;
                         Plugin.compatCheckComplete = true;
                         // Awake already staged the poison-authority capability, and
@@ -3718,10 +3759,13 @@ namespace CompetitiveRounds
                     }
                 }
                 Plugin.Log.LogInfo("[COMPAT] No other mods detected — OK");
+                try { SeatEvidence.NoteCompat("pass", null); } catch { }
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[COMPAT] Could not check other mods: {ex.Message}");
+                // A check that threw reports not_run, never pass.
+                try { SeatEvidence.NoteCompat("not_run", null); } catch { }
             }
             Plugin.compatCheckComplete = true;
             // r3 find 4: releases the injector's activation gate. Everything
@@ -5453,6 +5497,7 @@ namespace CompetitiveRounds
             // one series: a watch carried across a room edge would be waiting on an
             // actor number that now names somebody else.
             try { DcReportSync.ResetForRoomChange(); } catch { }
+            try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
@@ -6171,6 +6216,7 @@ namespace CompetitiveRounds
             // one series: a watch carried across a room edge would be waiting on an
             // actor number that now names somebody else.
             try { DcReportSync.ResetForRoomChange(); } catch { }
+            try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // A teardown window is bound to the room it was opened in. Without

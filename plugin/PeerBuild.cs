@@ -76,6 +76,15 @@ namespace CompetitiveRounds
                 var local = PhotonNetwork.LocalPlayer;
                 if (local == null) return;
                 string v = BuildValue();
+                // L7 (seat evidence contract V2): the published cr_build is the
+                // complete version|variant|commit inside its limits (16/16/12).
+                // A tuple outside them is refused here, never cut.
+                if (SeatEvidenceCore.SplitBuild(v) == null)
+                {
+                    _stageFailed = true;
+                    Plugin.Log.LogWarning("[BUILD-PROP] not staged: the build tuple is outside its limits (" + v.Length + " chars)");
+                    return;
+                }
                 local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable { { PeerBuildCore.BuildProp, v } });
                 _staged = true;
                 Plugin.Log.LogInfo("[BUILD-PROP] staged " + PeerBuildCore.BuildProp + "=" + v + " pre-join (" + source + ", state=" + st + ")");

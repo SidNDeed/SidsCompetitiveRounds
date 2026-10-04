@@ -786,14 +786,17 @@ namespace CompetitiveRounds
         // point end. One record per actor, the earliest silence kept, so the
         // lines are bounded by the [POISON-SILENT] lines themselves.
         private struct SilenceRec { internal int ViewId, ArmedTs, ReportedTs; }
-        private static readonly Dictionary<int, SilenceRec> _silence = new Dictionary<int, SilenceRec>();
+        // The point-end hook reads and clears this map (seat evidence fix pass 4,
+        // F4): a CappedMap of LATE_CAP actors, so the reset is bounded by the cap;
+        // a new actor at the cap is refused and counted (DrainLateSilences logs it).
+        private static readonly SeatEvidenceCore.CappedMap<int, SilenceRec> _silence = new SeatEvidenceCore.CappedMap<int, SilenceRec>(LATE_CAP);
 
         private static void NoteSilence(int actor, int viewId, int armedTs)
         {
             try
             {
                 if (_silence.ContainsKey(actor)) return;
-                _silence[actor] = new SilenceRec { ViewId = viewId, ArmedTs = armedTs, ReportedTs = PhotonNetwork.ServerTimestamp };
+                _silence.Set(actor, new SilenceRec { ViewId = viewId, ArmedTs = armedTs, ReportedTs = PhotonNetwork.ServerTimestamp });
             }
             catch { }
         }
@@ -814,23 +817,52 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>Point end: every silence still unanswered, once, then
-        /// forgotten (the revive that follows restarts every stream).</summary>
+        // Unanswered silences captured at a point end (F4): preallocated, the
+        // line is written by DrainLateSilences on Plugin's tick.
+        private const int LATE_CAP = 32;
+        private static readonly int[] _lateView = new int[LATE_CAP], _lateFromArm = new int[LATE_CAP];
+        private static int _lateCount, _lateDropped;
+
+        /// <summary>Point end (inside the point-decided hook): every silence
+        /// still unanswered is captured once, then forgotten (the revive that
+        /// follows restarts every stream). Captures only.</summary>
         internal static void ReportUnansweredSilences()
         {
             try
             {
                 if (_silence.Count == 0) return;
                 int now = PhotonNetwork.ServerTimestamp;
-                foreach (var kv in _silence)
+                // hard-capped (seat evidence fix pass 2, F4): what does not fit is counted
+                var e = _silence.GetEnumerator();
+                int taken = 0;
+                for (; _lateCount < LATE_CAP && e.MoveNext(); taken++)
                 {
+                    var kv = e.Current;
                     int fromArm; unchecked { fromArm = now - kv.Value.ArmedTs; }
-                    Plugin.Log.LogInfo("[POISON-LATE] no verdict after silence by the point end: view=" + kv.Value.ViewId
-                        + " delay_from_arm_ms=" + fromArm);
+                    _lateView[_lateCount] = kv.Value.ViewId; _lateFromArm[_lateCount] = fromArm; _lateCount++;
                 }
+                _lateDropped += _silence.Count - taken;
                 _silence.Clear();
             }
             catch { }
+        }
+
+        /// <summary>From PointEvidence.Drain, on Plugin's tick.</summary>
+        internal static void DrainLateSilences()
+        {
+            int n = _lateCount;
+            _lateCount = 0;
+            for (int i = 0; i < n; i++)
+                Plugin.Log.LogInfo("[POISON-LATE] no verdict after silence by the point end: view=" + _lateView[i]
+                    + " delay_from_arm_ms=" + _lateFromArm[i]);
+            if (_lateDropped > 0)
+            {
+                int d = _lateDropped; _lateDropped = 0;
+                Plugin.Log.LogWarning("[POISON-LATE] " + d + " unanswered silences not logged: every slot was waiting");
+            }
+            int refused = _silence.TakeRefused();
+            if (refused > 0)
+                Plugin.Log.LogWarning("[POISON-LATE] " + refused + " silence(s) not kept: " + LATE_CAP + " actors already held");
         }
 
         // Revive fence: verdicts whose stream began before the victim's most
@@ -3009,8 +3041,12 @@ namespace CompetitiveRounds
     /// (lifesteal) is not netted against it: only drops are counted.</summary>
     internal static class PointEvidence
     {
-        private static readonly Dictionary<int, float> _sawLost = new Dictionary<int, float>();
-        private static readonly Dictionary<int, float> _before = new Dictionary<int, float>();
+        // Written by the Saw.Update bracket and read and cleared by the point-end
+        // hook (seat evidence fix pass 4, F4): CappedMaps, so a new player id at
+        // the cap is refused and counted (DrainOwn logs it) and every reset is
+        // bounded by the cap. ROW_CAP is what one point-end record carries.
+        private static readonly SeatEvidenceCore.CappedMap<int, float> _sawLost = new SeatEvidenceCore.CappedMap<int, float>(ROW_CAP);
+        private static readonly SeatEvidenceCore.CappedMap<int, float> _before = new SeatEvidenceCore.CappedMap<int, float>(PLAYER_SCAN_CAP);
         private static int _sawFrames;
         private static int _point;
 
@@ -3018,6 +3054,7 @@ namespace CompetitiveRounds
 
         internal static void ResetForRoomExit()
         {
+            Drain();                                // what the hooks captured, while the window is open
             HitEvidence.ResetForRoomExit(_point);   // item D: a game cut short still reports what arrived
             _sawLost.Clear(); _before.Clear(); _sawFrames = 0; _point = 0;
         }
@@ -3040,8 +3077,12 @@ namespace CompetitiveRounds
                 _before.Clear();
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null) return;
-                foreach (var p in pm.players)
-                    if (p != null && p.data != null) _before[p.PlayerID] = p.data.health;
+                var ps = pm.players;
+                for (int i = 0; i < ps.Count && i < PLAYER_SCAN_CAP; i++)
+                {
+                    var p = ps[i];
+                    if (p != null && p.data != null) _before.Set(p.PlayerID, p.data.health);
+                }
             }
             catch { }
         }
@@ -3054,8 +3095,10 @@ namespace CompetitiveRounds
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null) return;
                 bool any = false;
-                foreach (var p in pm.players)
+                var ps = pm.players;
+                for (int i = 0; i < ps.Count && i < PLAYER_SCAN_CAP; i++)
                 {
+                    var p = ps[i];
                     if (p == null || p.data == null) continue;
                     float was;
                     if (!_before.TryGetValue(p.PlayerID, out was)) continue;
@@ -3063,8 +3106,7 @@ namespace CompetitiveRounds
                     if (lost <= 0f) continue;
                     float sum;
                     _sawLost.TryGetValue(p.PlayerID, out sum);
-                    _sawLost[p.PlayerID] = sum + lost;
-                    any = true;
+                    if (_sawLost.Set(p.PlayerID, sum + lost)) any = true;
                 }
                 if (any) _sawFrames++;
                 _before.Clear();
@@ -3072,35 +3114,113 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        // One point end as the hook captured it (F4): preallocated slots, filled
+        // with copies of numbers the game already holds; formatting and the log
+        // write run in Drain, from Plugin's tick.
+        private const int REC_CAP = 16, ROW_CAP = 16;
+        // hook-path scans are hard-capped (seat evidence fix pass 2, F4); no room holds this many players
+        private const int PLAYER_SCAN_CAP = 64;
+        private sealed class Rec
+        {
+            internal int Point, Rows, Saws, SawFrames;
+            internal bool Spectator;
+            internal readonly int[] Id = new int[ROW_CAP], Team = new int[ROW_CAP], SawId = new int[ROW_CAP];
+            internal readonly float[] Hp = new float[ROW_CAP], Max = new float[ROW_CAP], SawLost = new float[ROW_CAP];
+            internal readonly bool[] Dead = new bool[ROW_CAP];
+        }
+        private static readonly Rec[] _recs = NewRecs();
+        private static int _recCount, _recDropped;
+
+        private static Rec[] NewRecs()
+        {
+            var r = new Rec[REC_CAP];
+            for (int i = 0; i < REC_CAP; i++) r[i] = new Rec();
+            return r;
+        }
+
+        /// <summary>The point-decided hook: captures only.</summary>
         internal static void PointEnd()
         {
             try
             {
                 _point++;
-                var sb = new System.Text.StringBuilder();
-                var pm = PlayerManager.instance;
-                if (pm != null && pm.players != null)
-                    foreach (var p in pm.players)
-                    {
-                        if (p == null || p.data == null) continue;
-                        sb.Append(" p").Append(p.PlayerID).Append("(team ").Append(p.TeamID).Append(")=")
-                          .Append(p.data.health.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)).Append('/')
-                          .Append(p.data.MaxHealth.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture))
-                          .Append(p.data.dead ? " dead" : "");
-                    }
-                Plugin.Log.LogInfo("[HP-POINT-END] point=" + _point + " spectator=" + (RoomActors.LocalIsSpectator ? 1 : 0) + sb);
-                if (_sawLost.Count > 0)
+                if (_recCount >= REC_CAP) _recDropped++;
+                else
                 {
-                    var s = new System.Text.StringBuilder();
-                    foreach (var kv in _sawLost)
-                        s.Append(" p").Append(kv.Key).Append('=').Append(kv.Value.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture));
-                    Plugin.Log.LogInfo("[SAW-POINT] point=" + _point + " frames=" + _sawFrames + " lost" + s);
+                    var r = _recs[_recCount++];
+                    r.Point = _point; r.Rows = 0; r.Saws = 0; r.SawFrames = _sawFrames;
+                    r.Spectator = RoomActors.LocalIsSpectator;
+                    var pm = PlayerManager.instance;
+                    if (pm != null && pm.players != null)
+                        for (int k = 0; k < pm.players.Count && r.Rows < ROW_CAP && k < PLAYER_SCAN_CAP; k++)
+                        {
+                            var p = pm.players[k];
+                            if (p == null || p.data == null) continue;
+                            int i = r.Rows++;
+                            r.Id[i] = p.PlayerID; r.Team[i] = p.TeamID; r.Hp[i] = p.data.health;
+                            r.Max[i] = p.data.MaxHealth; r.Dead[i] = p.data.dead;
+                        }
+                    var e = _sawLost.GetEnumerator();
+                    for (; r.Saws < ROW_CAP && e.MoveNext(); )
+                    {
+                        var kv = e.Current;
+                        r.SawId[r.Saws] = kv.Key; r.SawLost[r.Saws] = kv.Value; r.Saws++;
+                    }
                 }
                 _sawLost.Clear(); _sawFrames = 0;
                 HitEvidence.PointEnd(_point);
                 PoisonSync.ReportUnansweredSilences();
             }
             catch { }
+        }
+
+        /// <summary>From Plugin's tick, ABOVE its modDisabled return and before
+        /// GameStateWatcher's tick (so a game's last push counts reach seat
+        /// evidence before its record is captured), from the quit hook, and
+        /// from the room-exit reset: every captured point end's lines, then
+        /// item D's, then the late-verdict lines.</summary>
+        internal static void Drain()
+        {
+            try { DrainOwn(); } catch { }
+            try { HitEvidence.Drain(); } catch { }
+            try { PoisonSync.DrainLateSilences(); } catch { }
+        }
+
+        private static void DrainOwn()
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            int n = _recCount;
+            _recCount = 0;
+            for (int k = 0; k < n; k++)
+            {
+                var r = _recs[k];
+                try
+                {
+                    var sb = new System.Text.StringBuilder();
+                    for (int i = 0; i < r.Rows; i++)
+                        sb.Append(" p").Append(r.Id[i]).Append("(team ").Append(r.Team[i]).Append(")=")
+                          .Append(r.Hp[i].ToString("0.00", inv)).Append('/')
+                          .Append(r.Max[i].ToString("0.00", inv))
+                          .Append(r.Dead[i] ? " dead" : "");
+                    Plugin.Log.LogInfo("[HP-POINT-END] point=" + r.Point + " spectator=" + (r.Spectator ? 1 : 0) + sb);
+                    if (r.Saws > 0)
+                    {
+                        var s = new System.Text.StringBuilder();
+                        for (int i = 0; i < r.Saws; i++)
+                            s.Append(" p").Append(r.SawId[i]).Append('=').Append(r.SawLost[i].ToString("0.00", inv));
+                        Plugin.Log.LogInfo("[SAW-POINT] point=" + r.Point + " frames=" + r.SawFrames + " lost" + s);
+                    }
+                }
+                catch { }
+            }
+            if (_recDropped > 0)
+            {
+                int d = _recDropped; _recDropped = 0;
+                Plugin.Log.LogWarning("[HP-POINT-END] " + d + " point ends not logged: every slot was waiting");
+            }
+            int refused = _sawLost.TakeRefused() + _before.TakeRefused();
+            if (refused > 0)
+                Plugin.Log.LogWarning("[SAW-POINT] " + refused + " player id(s) not kept: the saw maps hold " + ROW_CAP + " / " + PLAYER_SCAN_CAP);
         }
     }
 
@@ -3112,12 +3232,12 @@ namespace CompetitiveRounds
     internal static class SawPointEvidencePatch
     {
         [HarmonyPrefix]
-        private static void Before() { PointEvidence.SawBefore(); }
+        private static void Before() { try { PointEvidence.SawBefore(); } catch { } }
 
         [HarmonyFinalizer]
         private static Exception After(Exception __exception)
         {
-            PointEvidence.SawAfter();
+            try { PointEvidence.SawAfter(); } catch { }
             return __exception;
         }
     }

@@ -433,6 +433,11 @@ namespace CompetitiveRounds
         private static string sharedGameToken = "";
         private static string previousGameToken = "";
         private static int matchStartServerTimestamp;
+        // Seat evidence B5: the master's numeric T0 from cr_game_token, held by
+        // BOTH seats once the shared token is adopted (the master keeps the
+        // value it published; the non-master adopts the published one).
+        private static int sharedGameT0;
+        private static bool sharedGameT0Set;
 
         // Game over
         private static bool gameOverReported = false;
@@ -3813,6 +3818,18 @@ namespace CompetitiveRounds
                     // on its own it labelled team_ and ovt_ exits "RANKED" too.
                     string matchType = RoomModeLabels.ModeLabel(photonRoomId, matchIsRanked);
 
+                    // Seat evidence: how this seat saw the game end. The other
+                    // seat's departure, when noted, was noted first and is kept.
+                    try
+                    {
+                        string seEnd = opponentDCReported ? "other_left" : "left";
+                        string seCause;
+                        if (!opponentDCReported && TransportExit.TryGetFreshInvoluntary(TransportExit.NowSeconds(), out seCause))
+                            seEnd = "lost";
+                        SeatEvidence.NoteEnd(seEnd);
+                    }
+                    catch { }
+
                     // If this client is the leaver while the opponent already
                     // has a reportable DC-win lead, preserve its exact local
                     // macro sample before ResetMatchState clears the counters.
@@ -3898,6 +3915,12 @@ namespace CompetitiveRounds
                             Plugin.Log.LogInfo(
                                 $"[POLL] exit followed an involuntary disconnect cause={dcCause} toast={(toasted ? "shown" : "declined")}");
                     }
+
+                    // Seat evidence: a game that got no game over here (the
+                    // DC-win branches above went through OnGameOver, which
+                    // dispatched) still yields this seat's record of what it
+                    // collected up to the exit.
+                    if (!gameOverReported) SeatEvidenceCut(localRounds, oppRounds);
                 }
 
                 Plugin.Log.LogInfo("[POLL] Left room");
@@ -4341,12 +4364,14 @@ namespace CompetitiveRounds
                     if (playerCount >= 2 && opponentDCReported)
                     {
                         opponentDCReported = false;
+                        try { SeatEvidence.ClearEnd(); } catch { }
                         Plugin.Log.LogInfo("[POLL] Opponent returned to the room — cleared stale DC latch");
                     }
 
                     if (opponentWasPresent && playerCount <= 1 && !opponentDCReported)
                     {
                         opponentDCReported = true;
+                        try { SeatEvidence.NoteEnd("other_left"); } catch { }
                         // The 1v1 DC-win report is finalised from the
                         // room-LEAVE handler below, where the players are
                         // already gone — this is the last frame that still
@@ -5207,6 +5232,8 @@ namespace CompetitiveRounds
                 if (!PhotonNetwork.CurrentRoom.SetCustomProperties(props))
                     return;
                 sharedGameToken = token;
+                sharedGameT0 = matchStartServerTimestamp;
+                sharedGameT0Set = true;
             }
             catch { }
         }
@@ -5220,6 +5247,8 @@ namespace CompetitiveRounds
                 previousGameToken = sharedGameToken;
             sharedGameToken = "";
             matchStartServerTimestamp = 0;
+            sharedGameT0 = 0;
+            sharedGameT0Set = false;
             if (!oneVOneMatchAtStart) return;
             // Record the common Photon clock even if this client has not yet
             // observed both capability properties. The master may already see
@@ -5257,6 +5286,10 @@ namespace CompetitiveRounds
                         // one Unity main thread can enter the match >10s later
                         // even though Photon delivered the correct room token.
                         sharedGameToken = parts[0];
+                        // B5: adopt the master's T0 with its token (the
+                        // number used to be parsed and discarded).
+                        sharedGameT0 = publishedAt;
+                        sharedGameT0Set = true;
                         return;
                     }
                 }
@@ -5801,6 +5834,9 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
+
+            // Seat evidence (contract V2): open this game's window. Contained.
+            try { SeatEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
 
             // Spawn the cosmetic trail for this match (if the player owns one).
             TrailCosmetic.OnMatchStart();
@@ -6789,6 +6825,22 @@ namespace CompetitiveRounds
                     // Sept 6 item c: opaque room-occupancy id, outside the HMAC canonical.
                     sessionUuid: SessionUuid
                 );
+            }
+
+            // Seat evidence (contract V2): built AFTER the match report above is
+            // queued, ranked 1v1 only, both seats, and contained like the other
+            // telemetry: it can never delay or drop the report.
+            if (!isOfflineMatch)
+            {
+                try
+                {
+                    SeatEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId,
+                        localTeamId == 0 ? p1Rounds : p2Rounds, localTeamId == 0 ? p2Rounds : p1Rounds,
+                        matchIsRanked && oneVOneMatchAtStart);
+                }
+                catch { }
+                // Card draw evidence (B4): after the seat record, same gate.
+                try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
             }
 
             // Evaluate achievements before clearing match state
@@ -8912,6 +8964,8 @@ namespace CompetitiveRounds
             sharedGameToken = "";
             previousGameToken = "";
             matchStartServerTimestamp = 0;
+            sharedGameT0 = 0;
+            sharedGameT0Set = false;
             wasGameInProgress = false;
             pcolorRoomApplied = false;
             // Room over — drop the Tab-board card baselines (bug #64); the Player
@@ -9064,6 +9118,50 @@ namespace CompetitiveRounds
         }
         public static bool LeavingForRanked { get; set; } = false;
         public static string LocalSteamId => localSteamId;
+
+        /// <summary>Seat evidence: this game's T0. With the shared token adopted
+        /// it is the master's published value (fromToken); otherwise this seat's
+        /// own start stamp. Raw int32 Photon server time.</summary>
+        internal static int SeatEvidenceT0(out bool fromToken)
+        {
+            fromToken = sharedGameT0Set && !string.IsNullOrEmpty(sharedGameToken);
+            return fromToken ? sharedGameT0 : matchStartServerTimestamp;
+        }
+
+        /// <summary>Seat evidence for a game that got no game over on this seat
+        /// (a leave, a drop, or the game closing): the record of what this seat
+        /// collected up to the end, with the end kind it noted. Its score and
+        /// attach key follow the report the game gets (SeatEvidenceCore.CutScore:
+        /// only the round TOTAL enters the key). Contained: it never changes the
+        /// exit's own handling.</summary>
+        private static void SeatEvidenceCut(int localRounds, int oppRounds)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(photonRoomId)
+                    && photonRoomId.IndexOf("offline", StringComparison.OrdinalIgnoreCase) >= 0) return;
+                int[] s = SeatEvidenceCore.CutScore(localRounds, oppRounds, opponentDCReported);
+                SeatEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), s[0], s[1],
+                    matchIsRanked && oneVOneMatchAtStart);
+                // Card draw evidence (B4): the same game cut short, same attach key.
+                try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
+            }
+            catch { }
+        }
+
+        /// <summary>Application.quitting: a game still live while the game
+        /// closes is queued to the seat-evidence file now (end "closing") and
+        /// sent at the next launch.</summary>
+        internal static void SeatEvidenceOnQuit()
+        {
+            try
+            {
+                if (!isTracking || gameOverReported) return;
+                SeatEvidence.NoteEnd("closing");
+                SeatEvidenceCut(localTeamId == 0 ? p1Rounds : p2Rounds, localTeamId == 0 ? p2Rounds : p1Rounds);
+            }
+            catch { }
+        }
         public static string LocalDisplayName => localDisplayName;
         public static string OpponentDisplayName => opponentDisplayName;
         public static string OpponentSteamId => opponentSteamId;

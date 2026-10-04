@@ -569,6 +569,16 @@ namespace CompetitiveRounds
         /// index did not advance, that player would re-see Sk later and their
         /// draw k would differ from everyone else's — the invariant the whole
         /// feature exists for, broken by an edge case).</summary>
+        /// <summary>Read-only copy of a player's consumed draw index (the k of
+        /// their latest deal), or -1 when none was consumed this game. Card
+        /// draw evidence records it for an own deal; it never extends or
+        /// advances the sequence.</summary>
+        internal static int DrawIndexOf(int playerId)
+        {
+            int v;
+            return _drawIndex.TryGetValue(playerId, out v) ? v : -1;
+        }
+
         public static void ConsumeOffers(List<int> pickerIds)
         {
             if (pickerIds == null) return;

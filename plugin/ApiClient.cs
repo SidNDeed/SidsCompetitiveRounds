@@ -2957,6 +2957,92 @@ namespace CompetitiveRounds
             catch { return ""; }
         }
 
+        // ── Seat evidence (contract V2) ──────────────────────────
+        // Its own canonical strings ("seat-evidence:v2:...", "compat-outcome:v1:...")
+        // signed under the match-report key. The 7-field match canonical above is
+        // not touched, not reused and not extended.
+
+        internal static string SeatEvidenceSig(string canonical) { return ComputeHmacHex(canonical); }
+
+        /// <summary>The compat sender on a seat the other-plug-in check
+        /// disabled (Initialize never runs there): sets the base the one compat
+        /// send and its Steam ticket exchange use, and starts nothing else (no
+        /// probe, loop, outbox or fetch). An already initialised base is kept.</summary>
+        internal static void SeatEvidenceCompatBase(string url)
+        {
+            if (!string.IsNullOrEmpty(baseUrl) || string.IsNullOrEmpty(url)) return;
+            baseUrl = url.TrimEnd('/');
+        }
+
+        /// <summary>The api is configured and this seat holds a session token
+        /// (the seat-evidence routes answer 401 without one).</summary>
+        internal static bool SeatEvidenceReady
+        {
+            get { return !string.IsNullOrEmpty(baseUrl) && !string.IsNullOrEmpty(SteamAuth.SessionToken) && Plugin.Instance != null; }
+        }
+
+        /// <summary>One POST of frozen bytes on the evidence routes' own bare
+        /// path (SeatEvidencePostRaw). False: nothing was started (no base, no
+        /// host, no data consent). beforeSend runs after every local gate
+        /// passed and the request is completely built, immediately before
+        /// SendWebRequest; false from it means the request is not sent. callback(left, ok, text, carriedToken):
+        /// left says whether the request went out at all; text is the body, or
+        /// "HTTP code: body" plus a Retry-After line on a refusal;
+        /// carriedToken says whether the session token went out.</summary>
+        internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Action<bool, bool, string, bool> callback)
+        {
+            if (string.IsNullOrEmpty(baseUrl) || Plugin.Instance == null || !Plugin.DataConsentGranted) return false;
+            Plugin.Instance.StartCoroutine(SeatEvidencePostRaw(baseUrl + path, body, beforeSend, callback));
+            return true;
+        }
+
+        /// <summary>The evidence routes' POST (F10): it carries the contract
+        /// body and exactly the contract's application headers, Content-Type,
+        /// X-Mod-Version and X-Session-Token, and nothing else (the shared
+        /// StampVersionHeader also stamps the locale, so it is not used here;
+        /// every other route keeps the shared path). The session token is
+        /// required: on a transport that may not carry it the request is not
+        /// sent. The same consent, sensitive-transport, version-gate and
+        /// session-refusal handling as the shared path.</summary>
+        private static IEnumerator SeatEvidencePostRaw(string url, string body, Func<bool> beforeSend, Action<bool, bool, string, bool> callback)
+        {
+            Action<bool, bool, string, bool> answer = (left, ok, text, carried) => { try { callback(left, ok, text, carried); } catch { } };
+            if (ConsentBlocksRequest(url)) { answer(false, false, "no-consent", false); yield break; }
+            bool refused = false;
+            if (SensitiveTransportBlocked(url, body, (ok0, text0) => refused = true) || refused)
+            {
+                answer(false, false, "insecure-transport", false); yield break;
+            }
+            string token = SteamAuth.SessionToken;
+            if (string.IsNullOrEmpty(token) || !CredentialedTransportAllowed(url))
+            {
+                answer(false, false, "no-session", false); yield break;
+            }
+            byte[] raw = Encoding.UTF8.GetBytes(body ?? "");
+            using (var request = new UnityWebRequest(url, "POST"))
+            {
+                if (raw.Length > 0) request.uploadHandler = new UploadHandlerRaw(raw);
+                request.downloadHandler = new DownloadHandlerBuffer();
+                request.SetRequestHeader("Content-Type", "application/json");
+                request.SetRequestHeader("X-Mod-Version", Plugin.ModVersion ?? "0.0.0");
+                request.SetRequestHeader("X-Session-Token", token);
+                request.timeout = 20;
+                // F6: the request is completely built before beforeSend persists
+                // the spent transmission; between a true from it and
+                // SendWebRequest only the contained attempt mark runs.
+                bool go = false;
+                try { go = beforeSend == null || beforeSend(); } catch { go = false; }
+                if (!go) { answer(false, false, "not-sent", false); yield break; }
+                try { MarkApiAttempt(); } catch { }
+                yield return request.SendWebRequest();
+                if (HandleVersionGate(request)) { answer(true, false, "outdated", true); yield break; }
+                HandleSessionReject(request, token);
+                bool success = request.result == UnityWebRequest.Result.Success;
+                NoteResult(success, request.responseCode);
+                answer(true, success, success ? request.downloadHandler.text : FormatRequestError(request), true);
+            }
+        }
+
         // Security A2: admin canonicals sign with the SEPARATE admin secret
         // from the local BepInEx config (never compiled into the DLL). Empty
         // secret -> empty signature -> clean server-side 403; the one-time log
@@ -24255,7 +24341,7 @@ namespace CompetitiveRounds
                 ended = true;
                 try { onEnded?.Invoke(outcome); } catch (Exception ex) { Plugin.Log.LogWarning($"[STEAM-AUTH] ticket end hook threw: {ex.Message}"); }
             };
-            string sid = MatchTracker.LocalSteamId;
+            string sid = SteamAuth.Identity();
             if (string.IsNullOrEmpty(sid) || sid == "unknown" || Plugin.Instance == null) { end("not sent: no identity"); return; }
             // F1 (Codex r3): never exchange a Steam ticket over plaintext to a
             // PUBLIC host — the returned 24h bearer would be capturable in
