@@ -118,6 +118,9 @@ namespace CompetitiveRounds
         // -- per-game collectors -------------------------------------------------------------------
 
         private const int RECENT_CAP = W.RECENT_HITS;
+        /// <summary>Rows of each deferred ring one tick works off (component scans, sight casts and path
+        /// integration are spread over frames; a ring that fills counts its drops).</summary>
+        private const int TICK_ROWS_CAP = 16;
         internal const int ANCHOR_CAP = 256, RING_CAP = 128, POS_CAP = 64, PING_CAP = 600, TOP_CAP = 32, HT_CAP = 16;
 
         /// <summary>One gun copy's live state on this seat (own main gun or the
@@ -1099,7 +1102,7 @@ namespace CompetitiveRounds
 
         private static void DrainMasks(Game g)
         {
-            for (int n = 0; n < RING_CAP; n++)
+            for (int n = 0; n < TICK_ROWS_CAP; n++)
             {
                 int i = g.Mask.PopSlot();
                 if (i < 0) return;
@@ -1140,7 +1143,7 @@ namespace CompetitiveRounds
             long sw = SwMs;
             if (sw - _lHatAtMs > 5000 || _lHatCache < 0) { _lHatCache = LHatMs(g); _lHatAtMs = sw; }
             int lhat = _lHatCache < 0 ? 0 : _lHatCache;
-            for (int n = 0; n < RING_CAP; n++)
+            for (int n = 0; n < TICK_ROWS_CAP; n++)
             {
                 int o = g.Aim.PopRow();
                 if (o < 0) return;
@@ -1189,7 +1192,7 @@ namespace CompetitiveRounds
 
         private static void DrainResiduals(Game g)
         {
-            for (int n = 0; n < RING_CAP; n++)
+            for (int n = 0; n < TICK_ROWS_CAP; n++)
             {
                 int o = g.Res.PopRow();
                 if (o < 0) return;
@@ -1373,7 +1376,7 @@ namespace CompetitiveRounds
             om[E.OmitPos("p3ht")] = Math.Max(0, CountDistinctHoming(g) - g.HtN);
             om[E.OmitPos("b5_s")] = g.B5s.Omitted; om[E.OmitPos("b5_o")] = g.B5o.Omitted; om[E.OmitPos("b5_h")] = g.B5h.Omitted;
             om[E.OmitPos("b5_c")] = g.B5c.Omitted; om[E.OmitPos("b5_r")] = g.B5r.Omitted;
-            for (int i = 0; i < om.Length; i++) om[i] = E.Clamp(om[i], 0, 99999999);
+            E.ClampToLayout(r);
             return r;
         }
 

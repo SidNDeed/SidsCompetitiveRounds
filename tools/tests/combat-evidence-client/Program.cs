@@ -198,11 +198,26 @@ namespace CombatEvidenceTests
             long[] want = { L(j["limit"]), L(j["never_trimmed_max"]), L(j["group_max"]), L(j["point_max"]), L(j["protected_floor"]) };
             long[] got = E.ByteProof();
             Ok(got.SequenceEqual(want), "byte proof [" + string.Join(",", got) + "] equals the server's [" + string.Join(",", want) + "]");
+            // the layout backstop: out-of-bound values are clamped and the record passes the check;
+            // a record already at its widest is left byte-identical
+            var wide = E.MaxWidthRecord();
+            string before = E.Dumps(wide);
+            E.ClampToLayout(wide);
+            var bad = E.Empty();
+            ((List<long[]>)bad["cost"])[0][1] = long.MaxValue;
+            ((long[])bad["a1s"])[0] = -5;
+            bad["l_hat"] = long.MinValue;
+            ((List<long[]>)bad["tb"]).Add(Enumerable.Repeat(long.MaxValue, W.LO[E.Ix("tb")].Length).ToArray());
+            bool refusedFirst = E.Check(bad) != null;
+            E.ClampToLayout(bad);
+            Ok(E.Dumps(wide) == before && refusedFirst && E.Check(bad) == null,
+               "layout backstop: a widest record unchanged; an out-of-bound record refused, then clamped and accepted");
         }
 
         private static void Sign(string dir)
         {
-            var outs = Directory.GetFiles(dir, "*.out.txt").ToDictionary(p => C.Sha256Hex(File.ReadAllBytes(p)), p => ReadAscii(p));
+            var outs = new Dictionary<string, string>();
+            foreach (var p in Directory.GetFiles(dir, "*.out.txt")) outs[C.Sha256Hex(File.ReadAllBytes(p))] = ReadAscii(p);
             foreach (JObject e in A(Parse(ReadAscii(Path.Combine(dir, "sign.json")))))
             {
                 string sha = (string)e["record_sha256"];

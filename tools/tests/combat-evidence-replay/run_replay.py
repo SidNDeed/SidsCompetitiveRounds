@@ -172,7 +172,7 @@ def main():
         print("VACUOUS: no record exercised", vacuous)
     ok = ok and not ser and not reb and not vacuous
 
-    core = open(CORE, "rb").read().decode("utf-8")
+    core = open(CORE, "rb").read().decode("utf-8").replace("\r\n", "\n")
     caught = 0
     for name, old, new in MUTANTS:
         if core.count(old) != 1:

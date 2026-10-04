@@ -249,6 +249,45 @@ namespace CompetitiveRounds
             return null;
         }
 
+        /// <summary>Every numeric field clamped into its layout bounds, in place. Each
+        /// collector already clamps what it writes; this is the backstop before the
+        /// check, so a bound written differently at a collector never costs the record.</summary>
+        internal static void ClampToLayout(Rec r)
+        {
+            for (int i = 0; i < N; i++)
+            {
+                object v = r.V[i];
+                switch (W.KIND[i])
+                {
+                    case W.K_INT: r.V[i] = Clamp((long)v, W.LO[i][0], W.HI[i][0]); break;
+                    case W.K_ROW: ClampRow((long[])v, W.LO[i], W.HI[i]); break;
+                    case W.K_ROWS:
+                    case W.K_LIST:
+                        foreach (var row in (List<long[]>)v) ClampRow(row, W.LO[i], W.HI[i]);
+                        break;
+                    case W.K_HIST:
+                    case W.K_OMIT:
+                        var h = (long[])v;
+                        for (int k = 0; k < h.Length; k++) h[k] = Clamp(h[k], W.LO[i][0], W.HI[i][0]);
+                        break;
+                    case W.K_GROUPS:
+                        foreach (var g in (List<Group>)v)
+                        {
+                            ClampRow(g.H, W.HLO[i], W.HHI[i]);
+                            foreach (var s in g.S) ClampRow(s, W.SLO[i], W.SHI[i]);
+                            foreach (var s in g.R) ClampRow(s, W.RLO[i], W.RHI[i]);
+                        }
+                        break;
+                }
+            }
+        }
+
+        private static void ClampRow(long[] a, long[] lo, long[] hi)
+        {
+            if (a == null || a.Length != lo.Length) return;
+            for (int k = 0; k < a.Length; k++) a[k] = Clamp(a[k], lo[k], hi[k]);
+        }
+
         // -- the budgeter (the server's budget_record, line for line) -------------------------
 
         private static int Popcount(long v) { int c = 0; for (int b = 0; b < 64; b++) if (((v >> b) & 1) != 0) c++; return c; }

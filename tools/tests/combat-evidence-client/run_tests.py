@@ -110,7 +110,7 @@ def main():
         print(out)
         ok = ok and rc == 0
 
-    core = open(CORE, "rb").read().decode("utf-8")
+    core = open(CORE, "rb").read().decode("utf-8").replace("\r\n", "\n")
     caught = 0
     for name, old, new, target, control in MUTANTS:
         n = core.count(old)
