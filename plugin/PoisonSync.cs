@@ -116,6 +116,7 @@ using Photon.Realtime;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
 using UnityEngine;
 
 namespace CompetitiveRounds
@@ -126,11 +127,29 @@ namespace CompetitiveRounds
         //
         // The KEY carries the protocol version. cr_pois1 meant "I speak the
         // room-global-mode protocol" and must NEVER be reused — a client
-        // advertising that key answers a different question. Any future
-        // SEMANTIC change gets cr_pois3 plus a MIN_MOD_VERSION raise; additive
-        // wire fields are fine within a key because unknown trailing elements
-        // are ignored by the length checks below.
+        // advertising that key answers a different question. Additive wire
+        // fields are fine within a key because unknown trailing elements are
+        // ignored by the length checks below, and unknown kinds are dropped.
+        //
+        // cr_pois3 (convergence v3, bugs 406/407) is ADDITIVE: it is staged in
+        // the same pre-join write as cr_pois2, needs no MIN_MOD_VERSION raise,
+        // and is read per decision. v3 adds a room-common life epoch on the
+        // stream (TYPE 6 LIFE), an end-of-stream catch-up (TYPE 3),
+        // the drill-window start claim (TYPE 2) and the activation handshake
+        // (TYPE 4/5). The header and ticks stay today's bytes to everyone;
+        // the life epoch rides its own LIFE message (TYPE 6). A victim opens a
+        // v3 stream (its LIFE message at the start; its summary at the end, to
+        // the LIFE addressees still present and to actors acknowledged since),
+        // and a seat sends or accepts a claim, only while V3On() holds
+        // (amendment A2b): the current master's activation over
+        // exactly the fighters this seat sees, every fighter carrying integer
+        // cr_pois3=1 and acknowledged, no join, leave or cr_pois3 change
+        // observed since. Rooms stay open. Every v3-only message is addressed
+        // to named, acknowledged (or, for the handshake, cr_pois3-carrying)
+        // actors, so an actor not yet seen to join never receives one; a
+        // header without its LIFE message is handled by today's path.
         internal const string CapabilityProp = "cr_pois2";
+        internal const string CapabilityPropV3 = "cr_pois3";
         private const int CapabilityValue = 1;
         private const byte EventCode = 47;          // Photon custom codes are 0-199
         private const byte Protocol = 2;
@@ -209,6 +228,54 @@ namespace CompetitiveRounds
         /// we cannot deliver would make every peer wait on verdicts we never send,
         /// manufacturing the exact ghost-HP bug this file exists to remove.</summary>
         internal static bool PatchesLive;
+
+        /// <summary>Every patch v3 depends on, each flag set by that class's own
+        /// Harmony cleanup only when the whole class attached (#83; Plugin
+        /// patches class by class and goes on after a failure, so a class that
+        /// failed leaves its flag false): the scheduler (PatchesLive), the RPC
+        /// send-stamp bracket, the ProjectileHit.Hit bracket, the
+        /// RayHitPoison.DoHitEffect arm, the Phoenix boundary, the RPCA_Die
+        /// catch-up flush, the point boundary (PointEndEvidencePatch) and the
+        /// revive fence (PoisonReviveFencePatch), plus the DoDamage room-rule
+        /// gate whose predicate the correction funnel shares (DamageRulesGate:
+        /// without its prefix a regular tick and a corrective one would follow
+        /// different rules). A seat advertises cr_pois3=1, and uses v3 (V3On,
+        /// its acknowledgement), only while every one is live. The source check
+        /// test_poison_convergence_client.check_v3_live_names_every_dependency
+        /// derives this set from the code.</summary>
+        internal static bool RpcStampLive, HitBracketLive, PoisonArmLive, PhoenixBoundaryLive, DeathFlushLive,
+            PointBoundaryLive, ReviveFenceLive;
+        internal static bool V3PatchesLive
+        {
+            get
+            {
+                return PatchesLive
+                    && RpcStampLive
+                    && HitBracketLive
+                    && PoisonArmLive
+                    && PhoenixBoundaryLive
+                    && DeathFlushLive
+                    && PointBoundaryLive
+                    && ReviveFenceLive
+                    && VanillaFixSupport.IsAttached("DamageRulesGate");
+            }
+        }
+
+        /// <summary>The v3 dependencies that did not attach, for the boot line.</summary>
+        private static string V3PatchesMissing()
+        {
+            var m = new List<string>();
+            if (!PatchesLive) m.Add("PoisonDotScheduler");
+            if (!RpcStampLive) m.Add("PoisonRpcStamp");
+            if (!HitBracketLive) m.Add("PoisonHitBracket");
+            if (!PoisonArmLive) m.Add("PoisonArm");
+            if (!PhoenixBoundaryLive) m.Add("PoisonPhoenixBoundary");
+            if (!DeathFlushLive) m.Add("PoisonDeathFlush");
+            if (!PointBoundaryLive) m.Add("PointEndEvidence");
+            if (!ReviveFenceLive) m.Add("PoisonReviveFence");
+            if (!VanillaFixSupport.IsAttached("DamageRulesGate")) m.Add("DamageRulesGate");
+            return m.Count == 0 ? "none" : string.Join(",", m.ToArray());
+        }
 
         private static bool _staged;
         private static bool _stageFailedPermanently;
@@ -314,13 +381,24 @@ namespace CompetitiveRounds
                 var local = PhotonNetwork.LocalPlayer;
                 if (local == null) return;
 
+                // cr_pois3 rides the SAME hashtable, so the two keys arrive
+                // together in the join op. It is 1 only when every v3 patch
+                // attached (V3PatchesLive): a seat that cannot stamp the epoch,
+                // record a point or revive fence, bracket the hit, arm the
+                // claim, flush a stopped stream or refuse a tick by the room
+                // rules must read as v3-incapable.
+                int v3 = V3PatchesLive ? CapabilityValue : 0;
                 local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
                 {
-                    { CapabilityProp, CapabilityValue }
+                    { CapabilityProp, CapabilityValue },
+                    { CapabilityPropV3, v3 }
                 });
                 _staged = true;
                 Plugin.Log.LogInfo("[POISON-CAP] staged " + CapabilityProp + "=" + CapabilityValue
-                    + " pre-join (" + source + ", state=" + st + ")");
+                    + " " + CapabilityPropV3 + "=" + v3
+                    + " pre-join (" + source + ", state=" + st + "); v3 can activate in an open room: "
+                    + (v3 == CapabilityValue ? "yes (acknowledged fighters)" : "no (a v3 patch did not attach)")
+                    + "; v3 patches missing: " + V3PatchesMissing());
             }
             catch (Exception ex)
             {
@@ -345,9 +423,10 @@ namespace CompetitiveRounds
                 if (local == null) return;
                 local.SetCustomProperties(new ExitGames.Client.Photon.Hashtable
                 {
-                    { CapabilityProp, 0 }
+                    { CapabilityProp, 0 },
+                    { CapabilityPropV3, 0 }
                 });
-                Plugin.Log.LogWarning("[POISON-CAP] revoked " + CapabilityProp
+                Plugin.Log.LogWarning("[POISON-CAP] revoked " + CapabilityProp + " and " + CapabilityPropV3
                     + " — mod disabled, falling back to vanilla poison entirely");
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[POISON-CAP] revoke failed: " + ex.Message); }
@@ -455,8 +534,14 @@ namespace CompetitiveRounds
                     return;
                 }
 
+                // v3: deferred ticks are filled on the first frame their replica
+                // is live, not at the next one-second scan.
+                FillPendingAll();
+
                 if (Time.unscaledTime - _lastScan < 1f) return;
                 _lastScan = Time.unscaledTime;
+
+                V3Upkeep();
 
                 int n = RawNonSpectatorCount();   // census basis: see ScanRoster (r8 find 2)
                 if (n != _lastRosterCount)
@@ -660,6 +745,8 @@ namespace CompetitiveRounds
             public int Applied;
             // Creation order, for the spectator-seat eviction below.
             public int Seq;
+            // v3 evidence: this seat owns the victim's view.
+            public bool Own;
         }
         private static readonly Dictionary<long, StreamRec> _streams = new Dictionary<long, StreamRec>();
 
@@ -849,8 +936,1078 @@ namespace CompetitiveRounds
                 _rosterRoom = "";
                 _lastRosterChange = -999f;
                 _recSeq = 0;
+                // v3: every held record retires with its evidence line, then
+                // all room state goes (actor numbers and view ids are per room).
+                _ledger.Clear();
+                DrainRetired();
+                try { RetireOpenV3(-1, "room-exit"); } catch { }   // the room is gone: no one to send a catch-up or a tick to
+                _openV3.Clear();
+                _retainer.Clear();
+                _todayKeys.Clear();
+                _todayKeyCount = 0;
+                _todaySaturated = false;
+                try { _claims.FlushRate(NowMs(), true); DrainClaimLines(); } catch { }   // M2: no aggregate is lost at exit
+                _claims.Clear();
+                _act.Clear();
+                _epochBroken = false;
+                _v3LogLines = 0;
+                _v3LastState = null;
+                _lastActivateSent = -999f;
+                _v3LastRoomEvent = -999f;
+                _v3RetakeDue = false;
+                _inbox.Clear();
+                _hitStack.Clear();
+                _skipLines = 0;
+                _prefixFaults = 0;
+                _refusedLines = 0;
             }
             catch { }
+        }
+
+        // ── Convergence v3 (bugs 406/407): the shell around PoisonLedgerCore ──
+        //
+        // Every decision is made in PoisonLedgerCore.cs (pure; executed by
+        // tools/tests/poison-ledger). This section feeds it what the game and
+        // the network say and carries out what it returns. Record:
+        // POISON-CONVERGENCE-AMENDMENTS-V3.md (local notes).
+        //
+        //  Every v3-only message is ADDRESSED (TargetActors), never sent to a
+        //  receiver group, so an actor this seat has not seen join is never an
+        //  addressee. The stream header and ticks stay today's bytes to all.
+        //  TYPE 2 claim:    2, PROTO, victimViewId, projViewId, claimId, hitTs,
+        //                   nPoison(byte), epochTs, epochSet   (9, to the victim's owner, acknowledged)
+        //  TYPE 3 summary:  3, PROTO, viewId, streamId, epochTs, epochSet,
+        //                   sliceX, sliceY, colR, colG, colB, attackerPlayerId,
+        //                   lethal, damageSource, ticks, committed(byte[]),
+        //                   blocked(byte[]), seq               (18, to the stream's holders: its LIFE
+        //                                                       addressees and the actors it was replayed to)
+        //  TYPE 4 activate: 4, PROTO, aid, fighters(int[]), pointTs, pointSet
+        //                                                      (6, master to present cr_pois3 actors)
+        //  TYPE 5 ack:      5, PROTO, aid, masterActor         (4, to present cr_pois3 actors)
+        //  TYPE 6 life:     6, PROTO, viewId, streamId, epochTs, epochSet
+        //                                                      (6, to acknowledged actors, just
+        //                                                       before that stream's header)
+        // The released build (v1.40.3, PoisonSync.cs:837 and :844-846) drops
+        // every one of these silently before any indexed read; addressing
+        // keeps them off it anyway.
+        private const byte TypeClaim = V3Wire.TypeClaim;
+        private const byte TypeSummary = V3Wire.TypeSummary;
+        private const byte TypeActivate = V3Wire.TypeActivate;
+        private const byte TypeAck = V3Wire.TypeAck;
+        private const byte TypeLife = V3Wire.TypeLife;
+
+        private static readonly PoisonLedgerCore _ledger = new PoisonLedgerCore();
+        private static readonly ClaimCore _claims = new ClaimCore();
+        private static readonly ActivationCore _act = new ActivationCore();
+        private static readonly EpochInbox _inbox = new EpochInbox();
+        private static readonly PointRetainer _retainer = new PointRetainer();
+        private static readonly LedgerApplier _applier = new LedgerApplier();
+
+        // A boundary RPC seen without its send stamp leaves this seat unable to
+        // name lives the way the others do: every record it holds for the
+        // views that boundary ends retires at once (V4 B4), and for the rest of
+        // the room it stamps no LIFE message, sends and accepts no claim, sends
+        // no replay, ignores summaries and handles every header by today's path.
+        private static bool _epochBroken;
+        private const int V3LineCap = 24;
+        private static int _v3LogLines;
+        private static string _v3LastState;
+        private static int _activateSeq;
+        private static float _lastActivateSent = -999f;
+        private static float _v3LastRoomEvent = -999f;
+        private static bool _v3RetakeDue;
+
+        private static long NowMs() { return (long)(Time.realtimeSinceStartup * 1000f); }
+
+        private static int LocalActor()
+        {
+            try { return PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1; }
+            catch { return -1; }
+        }
+
+        /// <summary>Bounded v3 state lines (per room).</summary>
+        private static void V3Line(string text)
+        {
+            if (_v3LogLines >= V3LineCap) return;
+            _v3LogLines++;
+            Plugin.Log.LogInfo("[POISON-LEDGER] " + text);
+        }
+
+        private static int[] PresentActors()
+        {
+            var keep = new List<int>(4);
+            try
+            {
+                var list = PhotonNetwork.PlayerList;
+                if (list != null)
+                    for (int i = 0; i < list.Length; i++)
+                        if (list[i] != null) keep.Add(list[i].ActorNumber);
+            }
+            catch { }
+            return keep.ToArray();
+        }
+
+        /// <summary>The players the game is scoring (RoomActors.ActiveFighters:
+        /// spectators and unkept actors excluded), as actor numbers.</summary>
+        private static int[] Fighters()
+        {
+            var keep = new List<int>(4);
+            try
+            {
+                var f = RoomActors.ActiveFighters();
+                if (f != null)
+                    for (int i = 0; i < f.Length; i++)
+                        if (f[i] != null) keep.Add(f[i].ActorNumber);
+            }
+            catch { }
+            return keep.ToArray();
+        }
+
+        /// <summary>Raw replicated read of cr_pois3 on a present actor
+        /// (spectators included): integer 1 or not capable.</summary>
+        private static bool HasCap3(int actor)
+        {
+            try
+            {
+                var list = PhotonNetwork.PlayerList;
+                if (list == null) return false;
+                for (int i = 0; i < list.Length; i++)
+                {
+                    var p = list[i];
+                    if (p == null || p.ActorNumber != actor) continue;
+                    object v;
+                    return p.CustomProperties != null && p.CustomProperties.TryGetValue(CapabilityPropV3, out v)
+                        && v is int && (int)v == CapabilityValue;
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>THE v3 GATE (amendments A2b, V4 B1), re-read at every
+        /// decision: a LIFE message, a claim send, a claim accept. On only while
+        /// this seat holds the current master's activation over exactly the
+        /// fighters it sees, bound to this seat's point epoch, every fighter
+        /// carries cr_pois3=1 and has acknowledged it, and no join, leave or
+        /// cr_pois3 change has been observed since. The next point boundary
+        /// kills it here. Rooms stay open; spectators neither block nor are
+        /// required.</summary>
+        internal static bool V3On(out string why)
+        {
+            why = "unknown";
+            try
+            {
+                if (!V3PatchesLive) { why = "patches"; return false; }
+                if (Plugin.modDisabled) { why = "mod-disabled"; return false; }
+                if (_epochBroken) { why = "epoch-broken"; return false; }
+                if (!PhotonNetwork.InRoom || PhotonNetwork.OfflineMode || PhotonNetwork.CurrentRoom == null)
+                { why = "no-room"; return false; }
+                return _act.Evaluate(Fighters(), HasCap3, NowMs(), _ledger.PointEpoch, out why);
+            }
+            catch (Exception ex) { why = "error:" + ex.GetType().Name; return false; }
+        }
+
+        /// <summary>Photon room callbacks (Plugin.OnPlayerEnteredRoom,
+        /// OnPlayerLeftRoom): every entry or departure, spectators included,
+        /// turns v3 off on this seat until a fresh acknowledged activation.</summary>
+        internal static void V3RoomEvent(string kind, Photon.Realtime.Player p)
+        {
+            try
+            {
+                string why = kind + " actor=" + ClaimLine.N(p != null ? p.ActorNumber : -1);
+                bool was = _act.Live;
+                _act.OnRoomEvent(why);
+                _v3LastRoomEvent = Time.unscaledTime;
+                if (was) V3Line("v3 off why=" + why + " (a fresh activation is needed)");
+            }
+            catch { }
+        }
+
+        /// <summary>Plugin.OnPlayerPropertiesUpdate: a cr_pois3 change on any
+        /// actor is a room event for v3.</summary>
+        internal static void V3PropsChanged(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changed)
+        {
+            try
+            {
+                if (changed != null && changed.ContainsKey(CapabilityPropV3)) V3RoomEvent("cap-change", target);
+            }
+            catch { }
+        }
+
+        /// <summary>Once a second: the state line and the master's activation
+        /// offer, bound to its point epoch. A point boundary kills the
+        /// activation on every seat (V3On); the master then offers over the new
+        /// point without waiting out the 10 s spacing.</summary>
+        private static void V3Upkeep()
+        {
+            try
+            {
+                // M2: every sender's claims-past-the-rate aggregate whose second
+                // has ended is written now, so none waits on that sender's next claim.
+                try { _claims.FlushRate(NowMs(), false); DrainClaimLines(); } catch { }
+                string why;
+                bool on = V3On(out why);
+                string state = on ? "v3 " + why : "v3 off why=" + why;
+                if (state != _v3LastState) { _v3LastState = state; V3Line(state); }
+
+                if (!PhotonNetwork.IsMasterClient || _epochBroken || !V3PatchesLive) return;
+                if (_act.Live && !_v3RetakeDue) return;
+                bool settled = Time.unscaledTime - _v3LastRoomEvent >= RosterQuarantineSeconds
+                    && Time.unscaledTime - _lastRosterChange >= RosterQuarantineSeconds;
+                int[] fighters = Fighters();
+                if (!V3Targets.ShouldOffer(fighters, HasCap3, settled)) return;
+                if (!_v3RetakeDue && Time.unscaledTime - _lastActivateSent < 10f) return;
+                _v3RetakeDue = false;
+                _lastActivateSent = Time.unscaledTime;
+                int aid = ++_activateSeq;
+                int[] to = V3Targets.Capable(PresentActors(), HasCap3);
+                LifeEpoch point = _ledger.PointEpoch;
+                bool ok = RaiseTo(V3Wire.Activate(aid, fighters, point), to);
+                V3Line("activation " + (ok ? "sent" : "send-failed") + " a=" + aid + " fighters=" + fighters.Length
+                    + " point=" + point + " addressees=" + to.Length);
+            }
+            catch { }
+        }
+
+        /// <summary>Every v3-only send: addressed to the named actors only.</summary>
+        private static bool RaiseTo(object[] payload, int[] targets)
+        {
+            try
+            {
+                if (targets == null || targets.Length == 0) return false;
+                var o = new RaiseEventOptions { TargetActors = targets };
+                return PhotonNetwork.RaiseEvent(EventCode, payload, o, SendOptions.SendReliable);
+            }
+            catch (Exception ex)
+            {
+                if (!ClaimStartFault("raise", ex))   // fix pass 4: inside a claim's start, its line counts it
+                    Plugin.Log.LogWarning("[POISON-AUTH] raise threw: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static void OnActivate(int sender, object[] a)
+        {
+            try
+            {
+                if (a.Length < 6 || !(a[2] is int) || !(a[3] is int[]) || !(a[4] is int) || !(a[5] is bool)) return;
+                int aid = (int)a[2];
+                var fighters = (int[])a[3];
+                var point = (bool)a[5] ? LifeEpoch.At((int)a[4]) : default(LifeEpoch);
+                int master = PhotonNetwork.MasterClient != null ? PhotonNetwork.MasterClient.ActorNumber : -1;
+                if (!_act.OnActivate(sender, master, aid, fighters, point, NowMs()))
+                {
+                    V3Line("activation ignored a=" + aid + " from=" + sender + " (not the master)");
+                    return;
+                }
+                // V4 B1: a seat holding no boundary, or an older one, takes the
+                // master's point epoch (the send stamp that boundary RPC carries
+                // on every seat); a seat holding a newer one does not acknowledge.
+                if (point.Set) _ledger.AdoptPoint(point.Ts);
+                bool ack = !_epochBroken && V3PatchesLive && _act.ShouldAck(Fighters(), HasCap3, _ledger.PointEpoch);
+                bool sent = ack && RaiseTo(V3Wire.Ack(aid, sender), V3Targets.Capable(PresentActors(), HasCap3));
+                if (sent) _act.NoteSelfAck();
+                V3Line("activation received a=" + aid + " from=" + sender + " fighters=" + fighters.Length
+                    + " point=" + point + " ack=" + (ack ? (sent ? "sent" : "send-failed") : "refused"));
+            }
+            catch { }
+        }
+
+        private static void OnAck(int sender, object[] a)
+        {
+            try
+            {
+                if (a.Length < 4 || !(a[2] is int) || !(a[3] is int)) return;
+                // V4 B3: the first acknowledgement of this activation from an
+                // actor gets the replay of this seat's retained streams.
+                if (_act.OnAck(sender, (int)a[3], (int)a[2])) ReplayTo(sender);
+            }
+            catch { }
+        }
+
+        /// <summary>A LIFE message: only the view's owner names its stream's life.</summary>
+        private static void OnLife(int sender, object[] a)
+        {
+            try
+            {
+                if (a.Length < 6 || !(a[2] is int) || !(a[3] is int) || !(a[4] is int) || !(a[5] is bool)) return;
+                var view = PhotonView.Find((int)a[2]);
+                if (view == null || view.Owner == null || view.Owner.ActorNumber != sender) return;
+                _inbox.Note((int)a[2], (int)a[3], (bool)a[5] ? LifeEpoch.At((int)a[4]) : default(LifeEpoch));
+            }
+            catch { }
+        }
+
+        /// <summary>V4 B1: this seat creates a NEW v3 record (from a LIFE-led
+        /// header or a summary) only after acknowledging an activation bound to
+        /// its current point epoch, for a life in that point, and never after
+        /// a boundary without its stamp.</summary>
+        private static bool AcceptNewV3(LifeEpoch life)
+        {
+            if (_epochBroken) return false;
+            LifeEpoch point = _ledger.PointEpoch;
+            return _act.AcceptsAt(point) && _ledger.InPoint(life);
+        }
+
+        // V4 B3: every stream this seat took by today's path, per view, until
+        // that view's next revive here. A summary for such a stream is refused,
+        // so no catch-up ever lands on top of today's path. Past TodayKeyCap
+        // keys the seat stops recording and refuses every summary for a stream
+        // it does not already hold, for the rest of the room.
+        private const int TodayKeyCap = 8192;
+        private static readonly Dictionary<int, HashSet<int>> _todayKeys = new Dictionary<int, HashSet<int>>();
+        private static int _todayKeyCount;
+        private static bool _todaySaturated;
+
+        private static void NoteTodayPath(int view, int stream)
+        {
+            HashSet<int> set;
+            if (_todayKeys.TryGetValue(view, out set) && set.Contains(stream)) return;
+            if (_todayKeyCount >= TodayKeyCap) { _todaySaturated = true; return; }
+            if (set == null) { set = new HashSet<int>(); _todayKeys[view] = set; }
+            set.Add(stream);
+            _todayKeyCount++;
+        }
+
+        private static bool TodayPathHeld(int view, int stream)
+        {
+            if (_todaySaturated) return true;
+            HashSet<int> set;
+            return _todayKeys.TryGetValue(view, out set) && set.Contains(stream);
+        }
+
+        private static void ForgetTodayPath(int view)
+        {
+            HashSet<int> set;
+            if (!_todayKeys.TryGetValue(view, out set)) return;
+            _todayKeyCount -= set.Count;
+            _todayKeys.Remove(view);
+        }
+
+        /// <summary>The ledger's view of "this replica can take a tick now":
+        /// the gates that silently eat a DoDamage call (HealthHandler.cs:269)
+        /// and, on a fighter seat, EndScreenKill's refusal window.</summary>
+        private static bool LiveReplica(PhotonView view)
+        {
+            try
+            {
+                if (view == null) return false;
+                var cd = view.GetComponent<CharacterData>();
+                var hh = view.GetComponent<HealthHandler>();
+                if (cd == null || hh == null) return false;
+                if (!cd.isPlaying || cd.dead || hh.isRespawning) return false;
+                if (!RoomActors.LocalIsSpectator && EndScreenKillPatch.RefusesNow()) return false;
+                return true;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>Header data from a TYPE 0 (offset 5) or TYPE 3 (offset 6).</summary>
+        private static StreamRec RecFrom(object[] a, int o, bool own)
+        {
+            return new StreamRec
+            {
+                Slice = new Vector2((float)a[o], (float)a[o + 1]),
+                Color = new Color((float)a[o + 2], (float)a[o + 3], (float)a[o + 4], 1f),
+                AttackerId = (int)a[o + 5],
+                Lethal = (bool)a[o + 6],
+                DamageSource = (byte)a[o + 7],
+                Seq = ++_recSeq,
+                Own = own,
+            };
+        }
+
+        private static void OnSummaryV3(PhotonView view, object[] a, int viewId, int streamId)
+        {
+            if (_epochBroken) return;
+            if (_streams.ContainsKey(StreamKey(viewId, streamId))) return;   // today's path owns it here
+            if (!(a[4] is int) || !(a[5] is bool) || !(a[14] is int)) return;
+            var epoch = (bool)a[5] ? LifeEpoch.At((int)a[4]) : default(LifeEpoch);
+            // V4 B1/B3: a summary creates a record only under an acknowledged
+            // activation of this seat's point, for a life in that point, and
+            // never for a stream this seat took by today's path.
+            if (_ledger.Find(viewId, streamId) == null
+                && (TodayPathHeld(viewId, streamId) || !AcceptNewV3(epoch))) return;
+            var held = _ledger.OnSummary(viewId, streamId, epoch, (int)a[14], a[15] as byte[], a[16] as byte[],
+                RecFrom(a, 6, view.IsMine), LiveReplica(view), _applier);
+            if (held == null) LedgerRefused(viewId, streamId);
+            DrainRetired();
+        }
+
+        /// <summary>The header data a v3 stream's summary carries.</summary>
+        private sealed class SummaryData
+        {
+            internal float SliceX, SliceY, R, G, B;
+            internal int AttackerId, DamageSource;
+            internal bool Lethal;
+        }
+
+        /// <summary>The open v3 streams this seat is the authority for, from
+        /// the header until the close summary. Each is also kept by _retainer
+        /// (V4 B3) and replayed to late acknowledgers while its life and point
+        /// are the view's current ones. A stream leaves here at its close, or
+        /// retired (StreamSend.Retire: a failed header, a fence this seat could
+        /// not record, room exit), after which nothing more is sent for it.</summary>
+        private static readonly Dictionary<long, StreamSend> _openV3 = new Dictionary<long, StreamSend>();
+
+        /// <summary>One summary of a kept stream, as it stands now, to the
+        /// given actors. False when nothing was sent.</summary>
+        private static bool SendSummary(Kept k, int[] to)
+        {
+            var d = k.Payload as SummaryData;
+            if (d == null || to == null || to.Length == 0) return false;
+            int ticks = k.Ticks;
+            return RaiseTo(V3Wire.Summary(k.View, k.Stream, k.Life, d.SliceX, d.SliceY, d.R, d.G, d.B, d.AttackerId,
+                d.Lethal, (byte)d.DamageSource, ticks, PoisonLedgerCore.Mask(k.Committed, ticks),
+                PoisonLedgerCore.Mask(k.Blocked, ticks), _nextSeq++), to);
+        }
+
+        /// <summary>Sends the stream's close summary once, to its holders still
+        /// present (never this seat), and keeps the stream for replay. Called
+        /// at every exit of AuthoritativeDot and, for a coroutine stopped by
+        /// dot.StopAllCoroutines() (RPCA_Die, RPCA_Die_Phoenix, Revive), by
+        /// FlushOpenV3 from those methods' postfixes.</summary>
+        private static void CloseV3(long key)
+        {
+            try
+            {
+                StreamSend s;
+                if (!_openV3.TryGetValue(key, out s)) return;
+                _openV3.Remove(key);
+                Kept k = s.Kept;
+                if (k == null || s.Retired) return;
+                int[] to = PointRetainer.CloseTargets(k, PresentActors(), LocalActor());
+                if (to.Length == 0) return;
+                if (!SendSummary(k, to))
+                    Plugin.Log.LogWarning("[POISON-AUTH] SUMMARY SEND FAILED v" + k.View + "/s" + k.Stream
+                        + " — no catch-up for seats that missed this stream");
+            }
+            catch { }
+        }
+
+        /// <summary>V4 B3: an actor acknowledged this seat's activation for the
+        /// first time. It gets, once, a summary of every stream of this seat's
+        /// own views in their CURRENT life and this point that it neither holds
+        /// nor handled by today's path, and is a holder of each from then on. A
+        /// stream whose send failed leaves it a non-holder, so its
+        /// acknowledgement of a later activation in this point retries it.</summary>
+        private static void ReplayTo(int actor)
+        {
+            try
+            {
+                int self = LocalActor();
+                if (_epochBroken || actor == self) return;
+                LifeEpoch point = _ledger.PointEpoch;
+                if (!_act.BoundTo(point)) return;
+                int sent = 0, failed = 0;
+                foreach (int view in _retainer.Views())
+                {
+                    LifeEpoch life;
+                    if (!_ledger.FenceOf(view, out life)) continue;
+                    foreach (var k in _retainer.ReplayFor(actor, self, view, point, life))
+                    {
+                        if (SendSummary(k, new[] { actor })) sent++;
+                        else { PointRetainer.Unmark(k, actor); failed++; }
+                    }
+                }
+                if (sent + failed > 0)
+                    V3Line("replay to=" + actor + " point=" + point + " sent=" + sent + " failed=" + failed);
+            }
+            catch { }
+        }
+
+        /// <summary>The view's DamageOverTime coroutines were just stopped:
+        /// close every open v3 stream of that view.</summary>
+        internal static void FlushOpenV3(int viewId)
+        {
+            try
+            {
+                if (_openV3.Count == 0) return;
+                var keys = new List<long>();
+                foreach (var kv in _openV3) if (kv.Value.View == viewId) keys.Add(kv.Key);
+                foreach (long k in keys) CloseV3(k);
+            }
+            catch { }
+        }
+
+        /// <summary>Fix pass 2 (H2 and the send sweep): this seat's open v3
+        /// streams of the view (every view when view &lt; 0) are retired -- out
+        /// of the retained state, no summary, no replay -- and their coroutines
+        /// send no later tick (AuthoritativeDot reads StreamSend.MaySendTick):
+        /// once this seat has retired its own record of a stream, it raises
+        /// nothing more for that stream.</summary>
+        private static void RetireOpenV3(int view, string why)
+        {
+            if (_openV3.Count == 0) return;
+            var keys = new List<long>();
+            foreach (var kv in _openV3) if (view < 0 || kv.Value.View == view) keys.Add(kv.Key);
+            foreach (long k in keys)
+            {
+                _openV3[k].Retire(_retainer, why);
+                _openV3.Remove(k);
+            }
+        }
+
+        private static int _refusedLines;
+        private static void LedgerRefused(int viewId, int streamId)
+        {
+            if (_refusedLines >= 10) return;
+            _refusedLines++;
+            Plugin.Log.LogWarning("[POISON-LEDGER] v" + viewId + "/s" + streamId
+                + " refused: this seat already holds the per-view ceiling of open records");
+        }
+
+        /// <summary>One evidence line per v3 record, at its retirement.</summary>
+        private static void DrainRetired()
+        {
+            try
+            {
+                var log = _ledger.RetiredLog;
+                if (log.Count == 0) return;
+                bool spect = false;
+                try { spect = RoomActors.LocalIsSpectator; } catch { }
+                foreach (var r in log)
+                {
+                    var p = r.Payload as StreamRec;
+                    Plugin.Log.LogInfo("[POISON-LEDGER] v" + r.View + "/s" + r.Stream
+                        + " epoch=" + r.Life
+                        + " own=" + (p != null && p.Own ? 1 : 0)
+                        + " spectator=" + (spect ? 1 : 0)
+                        + " cls0=" + ClassLetter(r.Cls0)
+                        + " committed=" + r.Committed.Count
+                        + " blocked=" + r.Blocked.Count
+                        + " applied=" + r.Applied.Count
+                        + " filled=" + r.Filled
+                        + " catchup=" + r.CatchUp
+                        + " pending_dropped=" + r.PendingDropped
+                        + " after_signal=" + r.AfterSignal
+                        + " summary=" + (r.SummarySeen ? 1 : 0)
+                        + " dups=" + r.Duplicates
+                        + " exceptions=" + r.Exceptions
+                        + " retired=" + r.Retired);
+                }
+                log.Clear();
+            }
+            catch { }
+        }
+
+        private static string ClassLetter(LifeClass c)
+        {
+            return c == LifeClass.Current ? "C" : c == LifeClass.Next ? "N" : c == LifeClass.Ending ? "E" : "S";
+        }
+
+        /// <summary>Per frame: corrective application of deferred ticks for
+        /// every view whose replica is live again.</summary>
+        private static void FillPendingAll()
+        {
+            try
+            {
+                if (_ledger.Count == 0) return;
+                foreach (int v in _ledger.ViewsWithPending())
+                {
+                    var view = PhotonView.Find(v);
+                    if (view == null) continue;
+                    _ledger.Fill(v, LiveReplica(view), _applier);
+                }
+                DrainRetired();
+            }
+            catch { }
+        }
+
+        /// <summary>The revive fence (HealthHandler.Revive's postfix). H2: a
+        /// fault while recording it retires every v3 record of the view now
+        /// (PoisonLedgerCore.Fence, then EpochBroken), before any tick of the
+        /// next life can move health.</summary>
+        internal static void OnLocalRevive(int viewId)
+        {
+            bool recorded = false;
+            try { recorded = _ledger.Fence(viewId, () => { _ledger.OnRevive(viewId); return true; }); } catch { }
+            if (!recorded) EpochBroken("revive fence not recorded: fault", viewId);
+            try { DrainRetired(); } catch { }
+            try { ForgetTodayPath(viewId); } catch { }
+        }
+
+        /// <summary>V4 B4 and fix pass 2 (H2): a fence this seat could not
+        /// record -- a boundary without its stamp, a fault while recording one,
+        /// or a boundary or revive method that threw. Every record held for
+        /// the views it ends (view &lt; 0: every view) retires now, pending ticks
+        /// dropped; this seat's own open v3 streams of those views are retired
+        /// (nothing more is sent for them); and no v3 record is created again
+        /// in this room.</summary>
+        private static void EpochBroken(string why, int view)
+        {
+            try { RetireOpenV3(view, "epoch-broken"); } catch { }
+            try { _ledger.Break(view); _inbox.Clear(); DrainRetired(); } catch { }
+            if (_epochBroken) return;
+            _epochBroken = true;
+            V3Line("epoch-broken for this room: " + why + " (held records retired; today's rules from here)");
+        }
+
+        /// <summary>A hook's finalizer saw its method throw, so the fence that
+        /// method carries may not have been recorded (H2): EpochBroken for the
+        /// view (every view when the view cannot be read).</summary>
+        internal static void FenceNotRecorded(string why, HealthHandler hh)
+        {
+            int view = -1;
+            try { var v = hh != null ? hh.GetComponent<PhotonView>() : null; if (v != null) view = v.ViewID; } catch { view = -1; }
+            EpochBroken(why, view);
+        }
+
+        /// <summary>The same for a fence that names every view (the point boundary).</summary>
+        internal static void FenceNotRecorded(string why)
+        {
+            EpochBroken(why, -1);
+        }
+
+        /// <summary>The master's point-over, stamped with PUN's own send stamp
+        /// for that RPC (one value on every seat). H2: the fence is recorded
+        /// through PoisonLedgerCore.Fence, so a missing stamp or a fault while
+        /// recording it retires every held v3 record now.</summary>
+        internal static void NotePointBoundary(GM_ArmsRace gm)
+        {
+            bool inRoom = true;   // a fault reading the room state still records (or breaks): fail closed
+            try { inRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+            if (!inRoom) return;
+            int ts = 0;
+            bool stamped = false;
+            bool recorded = false;
+            try
+            {
+                recorded = _ledger.Fence(-1, () =>
+                {
+                    stamped = gm != null && gm.view != null && PoisonRpcStampPatch.TryFor(gm.view.ViewID, out ts);
+                    if (stamped) _ledger.NotePointBoundary(ts);
+                    return stamped;
+                });
+            }
+            catch { }
+            if (!recorded)
+            {
+                if (!stamped) EpochBroken("point-over without its RPC stamp", -1);
+                else EpochBroken("point-over fence not recorded: fault", -1);
+                return;
+            }
+            // Every seat's activation, bound to the previous point, is
+            // dead from here (V3On); the master offers over this one at
+            // its next scan, without the 10 s spacing.
+            try { if (PhotonNetwork.IsMasterClient) _v3RetakeDue = true; } catch { }
+        }
+
+        /// <summary>A Phoenix death of the view: its boundary, recorded through
+        /// PoisonLedgerCore.Fence (a missing stamp or a fault retires the view's
+        /// held v3 records, every view's when the view cannot be read).</summary>
+        internal static void NotePhoenixBoundary(HealthHandler hh)
+        {
+            bool inRoom = true;
+            try { inRoom = PhotonNetwork.InRoom && !PhotonNetwork.OfflineMode; } catch { }
+            if (!inRoom) return;
+            PhotonView v = null;
+            bool looked = false, recorded = false;
+            try
+            {
+                v = hh != null ? hh.GetComponent<PhotonView>() : null;
+                looked = true;
+                int vid = v != null ? v.ViewID : -1;
+                recorded = _ledger.Fence(vid, () =>
+                {
+                    int ts;
+                    if (v == null || !PoisonRpcStampPatch.TryFor(v.ViewID, out ts)) return false;
+                    _ledger.NotePhoenixBoundary(v.ViewID, ts);
+                    return true;
+                });
+            }
+            catch { }
+            if (recorded) return;
+            if (!looked) EpochBroken("Phoenix fence not recorded: view lookup fault", -1);
+            else EpochBroken("Phoenix without its RPC stamp", v != null ? v.ViewID : -1);
+        }
+
+        /// <summary>The ledger's two ways to move health. Regular is today's
+        /// application; Corrective is the funnel.</summary>
+        private sealed class LedgerApplier : ILedgerApplier
+        {
+            public void Regular(PoisonLedgerCore.Rec r, int tick)
+            {
+                var view = PhotonView.Find(r.View);
+                var rec = r.Payload as StreamRec;
+                if (view == null || rec == null) return;
+                rec.Accepted++;
+                ApplyCommitted(view, rec, r.View, r.Stream, tick, true);
+            }
+
+            public void Corrective(PoisonLedgerCore.Rec r, int tick)
+            {
+                var view = PhotonView.Find(r.View);
+                var rec = r.Payload as StreamRec;
+                if (view == null || rec == null) return;
+                ApplyCorrective(view, rec);
+            }
+        }
+
+        private static Player FindPlayer(int playerId)
+        {
+            try
+            {
+                if (playerId >= 0 && PlayerManager.instance != null)
+                    foreach (var p in PlayerManager.instance.players)
+                        if (p != null && p.PlayerID == playerId) return p;
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>THE CORRECTION FUNNEL (amendment A3), the only way a late
+        /// tick moves health, on fighter and spectator seats alike. It lowers
+        /// this replica's health by the slice, never below min(health, 1), and
+        /// arms the victim's own health-bar segment. It does not call DoDamage,
+        /// so no DealtDamage chain runs (no lifesteal, refresh or card effect
+        /// that spawns objects or deals more damage), no WasDealtDamage, no
+        /// StopAllCoroutines and no RPC; it cannot raise a death and cannot
+        /// raise health. A tick DamageRulesGate refuses is consumed.</summary>
+        private static void ApplyCorrective(PhotonView view, StreamRec rec)
+        {
+            var cd = view.GetComponent<CharacterData>();
+            var hh = view.GetComponent<HealthHandler>();
+            if (cd == null || hh == null) return;
+            if (DamageRulesGate.Refuses(hh, FindPlayer(rec.AttackerId))) return;
+            float pre = cd.health;
+            float floor = pre < 1f ? pre : 1f;
+            float nh = pre - rec.Slice.magnitude;
+            cd.health = nh < floor ? floor : nh;
+            if (cd.health < pre)
+            {
+                rec.Applied++;
+                try
+                {
+                    var bar = view.GetComponentInChildren<HealthBar>(true);
+                    if (bar != null) bar.TakeDamage(default, false);
+                }
+                catch { }
+            }
+        }
+
+        // ── The start claim (amendments A5, A6, A8, A9) ──────────────────
+
+        /// <summary>One ProjectileHit.Hit call on this seat: whether it runs the
+        /// hit locally without broadcasting it (the drill window,
+        /// ProjectileHit.cs:187 reads sendCollisions), and which victims it
+        /// has already armed a claim for.</summary>
+        private sealed class HitFrame
+        {
+            internal ProjectileHit Hit;
+            internal bool LocalOnly;
+            internal readonly Dictionary<int, int> Armed = new Dictionary<int, int>();
+        }
+        private static readonly List<HitFrame> _hitStack = new List<HitFrame>();
+        private static int _currentArmClaim;
+        private static int _claimStartDepth;
+        private static int _skipLines;
+        private static int _prefixFaults;
+        private static int _startContained;      // fix pass 4: faults contained inside the running claim start
+        private static string _startFirstFault;  // that start's first fault of any kind, "where:Type"
+
+        internal static void HitEnter(ProjectileHit ph)
+        {
+            try
+            {
+                var f = new HitFrame { Hit = ph };
+                f.LocalOnly = ph != null && ph.view != null && ph.view.IsMine && !ph.sendCollisions;
+                _hitStack.Add(f);
+            }
+            catch { }
+        }
+
+        internal static void HitExit(ProjectileHit ph)
+        {
+            try
+            {
+                for (int i = _hitStack.Count - 1; i >= 0; i--)
+                    if (ReferenceEquals(_hitStack[i].Hit, ph)) { _hitStack.RemoveRange(i, _hitStack.Count - i); return; }
+            }
+            catch { }
+        }
+
+        private static HitFrame FrameFor(ProjectileHit ph)
+        {
+            for (int i = _hitStack.Count - 1; i >= 0; i--)
+                if (ReferenceEquals(_hitStack[i].Hit, ph)) return _hitStack[i];
+            return null;
+        }
+
+        /// <summary>RayHitPoison.DoHitEffect's prefix. On the VICTIM's seat, a
+        /// broadcast hit by another seat's bullet takes the shared TryStart and
+        /// loses only its poison to a claim that already started the pair. On
+        /// the SHOOTER's seat, a hit this seat ran locally without
+        /// broadcasting arms one claim per Hit call and victim. False skips
+        /// this poison effect only: when TryStart refused it, or when a fault
+        /// came before that decision with a claim already started in this
+        /// room (PrefixFaultDecision). The skip line and the arming run after
+        /// the decision under HookGuard.Prefix (V4 B7), so no fault in them
+        /// reverses it.</summary>
+        internal static bool PoisonEffectEnter(RayHitPoison fx, HitInfo hit, out int prevArm)
+        {
+            prevArm = _currentArmClaim;
+            ProjectileHit ph = null;
+            PhotonView pv = null, vv = null;
+            return HookGuard.Prefix(
+                () =>
+                {
+                    if (fx == null || hit == null || hit.transform == null) return true;
+                    ph = fx.GetComponentInParent<ProjectileHit>();
+                    vv = hit.transform.GetComponent<PhotonView>();
+                    if (ph == null || vv == null) return true;
+                    pv = ph.view;
+                    if (vv.IsMine && pv != null && !pv.IsMine && _claimStartDepth == 0)
+                        return _claims.TryStart(ph.GetInstanceID(), vv.ViewID, StartPath.Broadcast);
+                    return true;
+                },
+                ex => PrefixFaultDecision(ex),
+                run =>
+                {
+                    if (!run)
+                    {
+                        // Fix pass 4 (M2): inside a claim's own start the decision
+                        // is always "run", so a skip there comes only from a
+                        // contained prefix fault, which that claim's line counts.
+                        if (_claimStartDepth > 0) return;
+                        if (_skipLines < 20)
+                        {
+                            _skipLines++;
+                            Plugin.Log.LogInfo("[POISON-CLAIM] broadcast poison skipped proj="
+                                + ClaimLine.N(pv != null ? pv.ViewID : -1) + " victim=" + ClaimLine.N(vv != null ? vv.ViewID : -1)
+                                + ": a claim already started this bullet's poison on this victim");
+                        }
+                        return;
+                    }
+                    ArmEffect(ph, pv, vv, hit);
+                });
+        }
+
+        /// <summary>The arm marker for the streams this poison effect starts
+        /// (V4 B8): a local-only arm's claim id on the shooter's seat, else
+        /// SilentArm.Broadcast. A claim's own start (inside OnClaim) keeps the
+        /// marker it found.</summary>
+        private static void ArmEffect(ProjectileHit ph, PhotonView pv, PhotonView vv, HitInfo hit)
+        {
+            if (_claimStartDepth > 0) return;
+            _currentArmClaim = SilentArm.Broadcast;
+            if (ph == null || vv == null) return;
+            HitFrame f = FrameFor(ph);
+            if (f == null || !f.LocalOnly || vv.IsMine) return;
+            if (hit.transform.GetComponent<DamageOverTime>() == null) return;
+            int armed;
+            if (f.Armed.TryGetValue(vv.ViewID, out armed)) { _currentArmClaim = armed; return; }
+            armed = ShooterArm(ph, pv, vv);
+            f.Armed[vv.ViewID] = armed;
+            _currentArmClaim = armed;
+        }
+
+        internal static void PoisonEffectExit(int prevArm) { _currentArmClaim = prevArm; }
+
+        /// <summary>The poison-effect prefix faulted before its start decision
+        /// (V4 B5): skip when a claim already started in this room, else run as
+        /// vanilla with the seat saturated so no claim starts after it. Fix
+        /// pass 4 (M2): inside a claim's own start the fault is that claim's,
+        /// counted on its one line (ClaimStartFault), and writes no room line;
+        /// elsewhere (a broadcast or local hit, no received claim) the room
+        /// line stays, capped at 20 per room.</summary>
+        internal static bool PrefixFaultDecision(Exception ex)
+        {
+            bool run;
+            try { run = _claims.FaultBeforeStart(); } catch { run = false; }
+            try
+            {
+                if (ClaimStartFault("prefix", ex)) return run;
+                _prefixFaults++;
+                if (_prefixFaults <= 20)   // bounded like the skip lines; n counts every fault
+                    Plugin.Log.LogWarning("[POISON-CLAIM] poison prefix faulted before its start decision: "
+                        + (run ? "ran, claims off" : "skipped") + " n=" + ClaimLine.N(_prefixFaults));
+            }
+            catch { }
+            return run;
+        }
+
+        /// <summary>One local-only poison arm: exactly one terminal line with
+        /// its tuple, on every path (V4 B6). A fault before the decision still
+        /// consumes a claim id and names the fault.</summary>
+        private static int ShooterArm(ProjectileHit ph, PhotonView pv, PhotonView vv)
+        {
+            int claimId = 0, projView = -1, victimView = -1;
+            string outcome;
+            try
+            {
+                projView = pv != null ? pv.ViewID : -1;
+                victimView = vv.ViewID;
+                string why;
+                bool on = V3On(out why);
+                LifeEpoch ep;
+                bool known = _ledger.FenceOf(victimView, out ep);
+                int owner = vv.Owner != null ? vv.Owner.ActorNumber : -1;
+                bool ownerAcked = owner > 0 && _act.IsAcked(owner);
+                string drop = _claims.ShooterArm(on, why, ownerAcked, known, ph.GetInstanceID(), victimView, NowMs(),
+                    out claimId);
+                if (drop != null) outcome = ClaimLine.Outcome(drop);
+                else
+                {
+                    int nPoison = 0;
+                    try { nPoison = ph.GetComponentsInChildren<RayHitPoison>(true).Length; } catch { }
+                    bool sent = owner > 0 && RaiseTo(V3Wire.Claim(victimView, projView, claimId,
+                        PhotonNetwork.ServerTimestamp, (byte)Math.Min(nPoison, 255), ep), new[] { owner });
+                    outcome = sent ? "sent" : "send-failed";
+                }
+            }
+            catch (Exception ex)
+            {
+                string fault = "fault:" + ex.GetType().Name;
+                if (claimId == 0) _claims.ShooterArm(false, fault, false, false, 0, victimView, 0, out claimId);
+                outcome = ClaimLine.Outcome(fault);
+            }
+            try { Plugin.Log.LogInfo(ClaimLine.Arm(LocalActor(), claimId, projView, victimView, outcome)); } catch { }
+            return claimId;
+        }
+
+        /// <summary>The victim's seat: one claim event from the dispatcher
+        /// (OnEvent hands every current-protocol claim here, a truncated one
+        /// included: M1). ClaimCore.Receive takes the per-sender rate admission
+        /// first, before any per-claim step (M2); an admitted claim gets exactly
+        /// one line with its tuple and one named terminal result (V4 B6), and a
+        /// claim past the rate is counted in that sender's per-second aggregate
+        /// line. The fill below is the fact collection Handle runs after the
+        /// claim id is consumed, so a fault in it is that id's terminal result
+        /// "fault:&lt;type&gt;" and a repeat of the id is "dup".</summary>
+        private static void OnClaim(int sender, object[] a)
+        {
+            PhotonView vv = null;
+            RayHitPoison[] poisons = null;
+            try
+            {
+                _claims.Receive(sender, a, NowMs(), c =>
+                {
+                    string why;
+                    c.GateOn = V3On(out why);
+                    c.GateWhy = why;
+                    c.SenderAcked = _act.IsAcked(sender);
+                    vv = PhotonView.Find(c.VictimView);
+                    c.VictimFound = vv != null;
+                    c.VictimIsMine = vv != null && vv.IsMine;
+                    PhotonView pv = PhotonView.Find(c.ProjView);
+                    ProjectileHit ph = pv != null ? pv.GetComponent<ProjectileHit>() : null;
+                    c.ProjFound = ph != null;
+                    c.ProjOwner = pv != null && pv.Owner != null ? pv.Owner.ActorNumber : -1;
+                    poisons = ph != null ? ph.GetComponentsInChildren<RayHitPoison>(true) : null;
+                    c.PoisonChildren = poisons != null ? poisons.Length : 0;
+                    c.ProjInstance = ph != null ? ph.GetInstanceID() : 0;
+                    c.Live = vv != null && LiveReplica(vv);
+                    LifeEpoch ve;
+                    c.VictimFenceKnown = _ledger.FenceOf(c.VictimView, out ve);
+                    c.VictimEpoch = ve;
+                }, claimId => StartClaim(claimId, vv, poisons));
+            }
+            catch { }
+            DrainClaimLines();
+        }
+
+        /// <summary>Writes the claim evidence lines ClaimCore queued, in order.</summary>
+        private static void DrainClaimLines()
+        {
+            try
+            {
+                foreach (string line in _claims.Lines) Plugin.Log.LogInfo(line);
+            }
+            catch { }
+            try { _claims.Lines.Clear(); } catch { }
+        }
+
+        /// <summary>A started claim runs the bullet's poison effects on this
+        /// victim; the outcome (ClaimLine.Started) counts the streams it opened
+        /// with their first and last id, the children it ran, the children
+        /// that threw, the faults contained inside the start (a child's prefix,
+        /// the DOT scheduler, a stream's or tick sound's first step) and the
+        /// first fault of any kind, in a bounded field of the claim's one line.</summary>
+        private static string StartClaim(int claimId, PhotonView vv, RayHitPoison[] poisons)
+        {
+            // Fix pass 3/4 (M2): no fault inside the start writes a line of its
+            // own; the claim's one recv line carries the counts and the first
+            // fault's place and type (ClaimLine.Started, bounded).
+            int first = _nextStream, children = 0, threw = 0, contained = 0;
+            string firstFault = null;
+            int outerContained = _startContained;
+            string outerFirst = _startFirstFault;
+            _startContained = 0;
+            _startFirstFault = null;
+            try
+            {
+                try
+                {
+                    _claimStartDepth++;
+                    try
+                    {
+                        var hit = new HitInfo { transform = vv.transform, point = vv.transform.position };
+                        foreach (var c in poisons)
+                        {
+                            if (c == null) continue;
+                            children++;
+                            try { c.DoHitEffect(hit); }
+                            catch (Exception ex) { threw++; NoteFirstFault("child", ex); }
+                        }
+                    }
+                    finally { _claimStartDepth--; }
+                }
+                catch (Exception ex) { return ClaimLine.StartFault(ex.GetType().Name); }
+                contained = _startContained;
+                firstFault = _startFirstFault;
+            }
+            finally
+            {
+                _startContained = outerContained;
+                _startFirstFault = outerFirst;
+            }
+            return ClaimLine.Started(_nextStream - first, first, children, threw, contained, firstFault);
+        }
+
+        /// <summary>Fix pass 4 (M2): a fault contained inside a claim's own
+        /// start (a child's prefix, the DOT scheduler, a stream's or tick
+        /// sound's first step) is that claim's: counted for its one recv line
+        /// and never written on a line of its own. False outside a claim's
+        /// start: the caller keeps its own evidence.</summary>
+        internal static bool ClaimStartFault(string where, Exception ex)
+        {
+            if (_claimStartDepth <= 0) return false;
+            _startContained++;
+            NoteFirstFault(where, ex);
+            return true;
+        }
+
+        private static void NoteFirstFault(string where, Exception ex)
+        {
+            if (_startFirstFault == null) _startFirstFault = where + ":" + (ex != null ? ex.GetType().Name : "unknown");
+        }
+
+        /// <summary>Fix pass 4 (M2): a coroutine started inside a claim's own
+        /// start has its steps contained, so a fault in its first step (run
+        /// synchronously by StartCoroutine, inside the start) is counted on the
+        /// claim's line instead of being logged by Unity. A later step's fault
+        /// is logged as Unity would log it. Outside a claim's start the
+        /// coroutine is returned unchanged.</summary>
+        internal static IEnumerator ClaimContained(IEnumerator e, string where)
+        {
+            return _claimStartDepth > 0 && e != null ? StartContained(e, where) : e;
+        }
+
+        private static IEnumerator StartContained(IEnumerator e, string where)
+        {
+            while (true)
+            {
+                bool more;
+                try { more = e.MoveNext(); }
+                catch (Exception ex)
+                {
+                    if (!ClaimStartFault(where, ex)) UnityEngine.Debug.LogException(ex);
+                    yield break;
+                }
+                if (!more) yield break;
+                yield return e.Current;
+            }
         }
 
         // ── Tick sound ────────────────────────────────────────────────────
@@ -946,7 +2103,8 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[POISON-AUTH] raise threw: " + ex.Message);
+                if (!ClaimStartFault("raise", ex))   // fix pass 4: inside a claim's start, its line counts it
+                    Plugin.Log.LogWarning("[POISON-AUTH] raise threw: " + ex.Message);
                 return false;
             }
         }
@@ -973,15 +2131,29 @@ namespace CompetitiveRounds
             try
             {
                 var a = e.CustomData as object[];
-                if (a == null || a.Length < 7) return;
+                // Kind and protocol are the first two elements: a shorter
+                // payload is not a message of this protocol. A longer one of a
+                // known kind reaches that kind's own length check (M1: a
+                // truncated claim reaches OnClaim and gets its claim line).
+                if (a == null || a.Length < 2) return;
                 if (!(a[0] is byte) || !(a[1] is byte)) return;
                 if ((byte)a[1] != Protocol) return;
 
                 byte kind = (byte)a[0];
+                // v3 messages that are not the victim's own verdicts: the start
+                // claim (sender = the shooter, checked in OnClaim), the
+                // activation handshake (sender = master, or an acknowledging
+                // actor) and LIFE (sender = the view's owner, checked in OnLife).
+                if (kind == TypeClaim) { OnClaim(e.Sender, a); return; }
+                if (kind == TypeActivate) { OnActivate(e.Sender, a); return; }
+                if (kind == TypeAck) { OnAck(e.Sender, a); return; }
+                if (kind == TypeLife) { OnLife(e.Sender, a); return; }
+
                 // Length must be validated for THIS kind before any indexed read
                 // below — the seq read alone is at index 14 on a header.
                 if (kind == TypeHeader) { if (a.Length < 15) return; }
                 else if (kind == TypeTick) { if (a.Length < 7) return; }
+                else if (kind == TypeSummary) { if (a.Length < 18) return; }
                 else return;
 
                 int viewId = (int)a[2];
@@ -1008,18 +2180,39 @@ namespace CompetitiveRounds
                 // on top of a vanilla loop it is also running.
                 if (!CapableVictim(view)) return;
 
-                int seq = (int)a[kind == TypeHeader ? 14 : 6];
+                int seq = (int)a[kind == TypeHeader ? 14 : (kind == TypeSummary ? 17 : 6)];
                 int last;
                 if (_lastSeq.TryGetValue(e.Sender, out last) && !SeqAfter(seq, last)) return;
                 _lastSeq[e.Sender] = seq;
-                NoteVerdictAfterSilence(e.Sender, viewId, streamId, kind == TypeHeader ? 0 : (int)a[4]);
+                NoteVerdictAfterSilence(e.Sender, viewId, streamId, kind == TypeHeader ? 0 : (kind == TypeTick ? (int)a[4] : -1));
 
                 long key = StreamKey(viewId, streamId);
                 StreamRec rec;
 
+                // v3 catch-up: the victim's end-of-stream summary (A1).
+                if (kind == TypeSummary) { OnSummaryV3(view, a, viewId, streamId); return; }
+
                 if (kind == TypeHeader)
                 {
+                    // v3: this seat holds the stream's LIFE message (sent to it
+                    // just before this header) and accepts a new record (V4 B1:
+                    // an acknowledged activation of its point, a life in that
+                    // point, no unstamped boundary seen). The stream goes to the
+                    // ledger, which replaces the revive fence below with the
+                    // room-common life fence. Otherwise today's path.
+                    LifeEpoch epoch;
+                    if (_inbox.Take(viewId, streamId, out epoch) && AcceptNewV3(epoch))
+                    {
+                        _lastHeardServerTs[e.Sender] = PhotonNetwork.ServerTimestamp;
+                        var held = _ledger.OnHeader(viewId, streamId, epoch, (bool)a[13],
+                            RecFrom(a, 5, view.IsMine), LiveReplica(view), _applier);
+                        if (held == null) LedgerRefused(viewId, streamId);
+                        DrainRetired();
+                        return;
+                    }
+
                     int startTs = (int)a[4];
+                    NoteTodayPath(viewId, streamId);   // V4 B3: never caught up on top of today's path
 
                     // Revive fence. A verdict raised just before a death can
                     // arrive just after the revive and would otherwise damage a
@@ -1050,6 +2243,14 @@ namespace CompetitiveRounds
                     return;
                 }
 
+                if (_ledger.Find(viewId, streamId) != null)
+                {
+                    _lastHeardServerTs[e.Sender] = PhotonNetwork.ServerTimestamp;
+                    _ledger.OnTick(viewId, streamId, (int)a[4], (bool)a[5], LiveReplica(view), _applier);
+                    DrainRetired();
+                    return;
+                }
+
                 if (!_streams.TryGetValue(key, out rec))
                 {
                     // Reliable delivery means this is not a lost header — it was
@@ -1068,7 +2269,16 @@ namespace CompetitiveRounds
         {
             if (blocked) { rec.Blocked++; return; }   // consumed, no damage — the vanilla semantic
             rec.Accepted++;
+            ApplyCommitted(view, rec, viewId, streamId, tick, false);
+        }
 
+        /// <summary>One committed tick, on time: today's application. The v3
+        /// ledger calls it for a tick it releases while the replica is live
+        /// (v3=true changes only the spectator path's room-rule refusal, which
+        /// then shares DamageRulesGate's own predicate).</summary>
+        private static void ApplyCommitted(PhotonView view, StreamRec rec,
+                                           int viewId, int streamId, int tick, bool v3)
+        {
             var hh = view.GetComponent<HealthHandler>();
             if (hh == null)
             {
@@ -1116,8 +2326,16 @@ namespace CompetitiveRounds
                     // renders nothing: no health change, no bar tick, no
                     // lifesteal credit. Consumed (not deferred): the tick is
                     // accounted for exactly as on a fighter seat.
+                    // v3 streams (amendments 4.8): the spectator consumes every
+                    // tick DamageRulesGate refuses on the fighter seats
+                    // (quarantine and sudden death too), not friendly fire alone.
                     bool ffSuppressed = false;
-                    try { ffSuppressed = cds != null && RoomRules.SuppressTeammateDamage(attacker, view.GetComponent<Player>()); }
+                    try
+                    {
+                        ffSuppressed = cds != null && (v3
+                            ? DamageRulesGate.Refuses(hh, attacker)
+                            : RoomRules.SuppressTeammateDamage(attacker, view.GetComponent<Player>()));
+                    }
                     catch { ffSuppressed = false; }
                     if (cds != null && !ffSuppressed)
                     {
@@ -1305,12 +2523,62 @@ namespace CompetitiveRounds
             int tick = 0, blockedCount = 0, failedSends = 0;
             bool honor = HonorBlock();
 
+            // v3 (amendments A1, A2b, A4, V4 B1/B3): decided ONCE per stream,
+            // here, by the victim, and carried by its LIFE message. It needs the
+            // activation (V3On, bound to this seat's point), this seat's own
+            // life epoch for its view lying in that point, a free slot under
+            // the bound on concurrently open v3 streams, and room in the
+            // retained state for this life.
+            string v3Why;
+            LifeEpoch epoch = default(LifeEpoch);
+            bool v3 = V3On(out v3Why);
+            if (v3 && !_ledger.FenceOf(viewId, out epoch)) v3 = false;
+            if (v3 && !_ledger.InPoint(epoch)) v3 = false;
+            if (v3)
+            {
+                long now = NowMs();
+                long span = (long)(time / Mathf.Max(TimeHandler.timeScale, 0.01f) * 1000f) + 1000L;
+                if (!_ledger.AdmitV3Stream(now, now + span)) v3 = false;
+            }
+            // The LIFE addressees: acknowledged actors present now, this seat
+            // included (its own echo goes through its ledger too).
+            int[] presentAtStart = PresentActors();
+            int[] lifeTargets = v3 ? _act.AckedPresent(presentAtStart) : null;
+            if (v3 && Array.IndexOf(lifeTargets, LocalActor()) < 0) v3 = false;
+            long openKey = StreamKey(viewId, stream);
+            Kept ov = null;
+            if (v3)
+            {
+                ov = _retainer.Begin(viewId, stream, _ledger.PointEpoch, epoch, lifeTargets, presentAtStart,
+                    new SummaryData
+                    {
+                        SliceX = slice.x, SliceY = slice.y, R = color.r, G = color.g, B = color.b,
+                        AttackerId = attackerId, Lethal = lethal, DamageSource = damageSource,
+                    });
+                if (ov == null) v3 = false;
+            }
+            // The stream's send sequence (fix pass 2, H1): LIFE, header, ticks,
+            // close; a header that was not sent, or a fence this seat could not
+            // record, retires it and nothing more is sent for it.
+            var send = new StreamSend(viewId, ov);
+            if (ov != null) _openV3[openKey] = send;
+
             while (damageDealt < damageToDeal)
             {
-                if (host == null || data == null || view == null) yield break;
+                // A v3 stream sends its catch-up at every exit (CloseV3); a
+                // stop by dot.StopAllCoroutines() is closed by FlushOpenV3.
+                if (host == null || data == null || view == null) { CloseV3(openKey); yield break; }
                 // Narrow the emit-then-die race to sub-frame. Receivers also
                 // no-op via DoDamage's own guard, but not emitting is cheaper.
-                if (data.dead || !data.isPlaying) yield break;
+                if (data.dead || !data.isPlaying) { CloseV3(openKey); yield break; }
+                // A retired stream sends no later tick (it is out of _openV3
+                // and the retained state already, so no summary or replay).
+                if (!send.MaySendTick)
+                {
+                    Plugin.Log.LogWarning("[POISON-AUTH] STREAM RETIRED v" + viewId + "/s" + stream + " at t" + tick
+                        + " why=" + send.RetiredWhy + " — nothing more is sent for it");
+                    yield break;
+                }
 
                 damageDealt += dpt;
 
@@ -1329,6 +2597,20 @@ namespace CompetitiveRounds
                 if (blocked) blockedCount++;
 
                 bool sent;
+                // v3: the LIFE message goes first, addressed to the acknowledged
+                // actors only, on the same reliable channel as the header that
+                // follows; the header itself is today's 15 elements to all. If
+                // LIFE cannot be sent the stream is today's everywhere.
+                if (tick == 0 && send.V3)
+                {
+                    bool lifeSent = RaiseTo(V3Wire.Life(viewId, stream, epoch), lifeTargets);
+                    if (!send.AfterLife(_retainer, lifeSent))
+                    {
+                        _openV3.Remove(openKey);
+                        v3 = false;
+                    }
+                }
+
                 if (tick == 0)
                 {
                     sent = Raise(new object[]
@@ -1337,6 +2619,11 @@ namespace CompetitiveRounds
                         slice.x, slice.y, color.r, color.g, color.b,
                         attackerId, lethal, (byte)damageSource, blocked, _nextSeq++
                     });
+                    // H1: a header that was not sent created no record anywhere,
+                    // so the stream is retired: no later tick, no summary and no
+                    // replay for it (the only other ways a record is created),
+                    // and every seat leaves its health unchanged.
+                    if (!send.AfterHeader(_retainer, sent)) _openV3.Remove(openKey);
                 }
                 else
                 {
@@ -1361,19 +2648,30 @@ namespace CompetitiveRounds
                 if (blocked)
                     Plugin.Log.LogInfo("[POISON-AUTH] BLOCK v" + viewId + "/s" + stream + "/t" + tick
                         + " sinceBlock=" + sinceBlock.ToString("0.000") + " dmg=" + dpt.ToString("0.00"));
+                // The catch-up names only ticks that went out: a failed send was
+                // lost for every seat, the victim's own echo included.
+                send.AfterTick(tick, blocked, sent);
 
                 tick++;
                 yield return new WaitForSeconds(interval / TimeHandler.timeScale);
             }
 
+            CloseV3(openKey);
+
             StreamRec rec;
             _streams.TryGetValue(StreamKey(viewId, stream), out rec);
+            var lrec = v3 ? _ledger.Find(viewId, stream) : null;
+            int recvAccepted = lrec != null ? lrec.Committed.Count : (rec != null ? rec.Accepted : -1);
+            int recvBlocked = lrec != null ? lrec.Blocked.Count : (rec != null ? rec.Blocked : -1);
+            var lpay = lrec != null ? lrec.Payload as StreamRec : null;
+            int hpApplied = lpay != null ? lpay.Applied : (rec != null ? rec.Applied : -1);
             Plugin.Log.LogInfo("[POISON-SYNC] COMPLETE v" + viewId + "/s" + stream
-                + " honor=" + honor + " sent=" + tick + " blocked=" + blockedCount
+                + " honor=" + honor + " v3=" + (v3 ? 1 : 0) + " epoch=" + (v3 ? epoch.ToString() : "-")
+                + " sent=" + tick + " blocked=" + blockedCount
                 + " failedSends=" + failedSends
-                + " recvAccepted=" + (rec != null ? rec.Accepted : -1)
-                + " recvBlocked=" + (rec != null ? rec.Blocked : -1)
-                + " hpApplied=" + (rec != null ? rec.Applied : -1));
+                + " recvAccepted=" + recvAccepted
+                + " recvBlocked=" + recvBlocked
+                + " hpApplied=" + hpApplied);
         }
 
         /// <summary>A replica's PURE OBSERVER for the victim's stream. It applies
@@ -1447,6 +2745,10 @@ namespace CompetitiveRounds
             int actor = view.Owner != null ? view.Owner.ActorNumber : -1;
             int anchor = PhotonNetwork.ServerTimestamp;
             int boundaryGenAtArm = _boundaryGen;
+            // Bar P1 (V4 B8): armed by a local-only poison arm (its claim id),
+            // inside a poison effect of a broadcast hit (SilentArm.Broadcast),
+            // or outside any poison effect (0: Decay or another caller).
+            int armClaim = _currentArmClaim;
 
             // Bug 221 ("knockback but no damage, both clients"): all three
             // production [POISON-SILENT] events sat directly on point
@@ -1525,7 +2827,8 @@ namespace CompetitiveRounds
                                 + " actor=" + actor + " within " + SilenceReportMs
                                 + "ms of a damage-over-time stream — sender/path/receiver undetermined; "
                                 + "damage state on other seats unknown. Correlate across seats before "
-                                + "blaming the victim's client.");
+                                + "blaming the victim's client."
+                                + " arm=" + SilentArm.Label(armClaim));
                             NoteSilence(actor, viewId, anchor);
 
                         }
@@ -1547,12 +2850,38 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void AfterRevive(HealthHandler __instance)
         {
-            try
-            {
-                var v = __instance != null ? __instance.GetComponent<PhotonView>() : null;
-                if (v != null) PoisonSync.ResetForView(v.ViewID);
-            }
-            catch { }
+            // Each step contains its own faults (V4 B7): none reaches Revive,
+            // and a failing step after the view lookup never skips the next.
+            // id stays -2 when the lookup faulted: the revive fence cannot be
+            // recorded for an unknown view, so every view's v3 state retires
+            // (H2); -1 is a body with no PhotonView, which no v3 state names.
+            int id = -2;
+            HookGuard.Run(() => { var v = __instance != null ? __instance.GetComponent<PhotonView>() : null; id = v != null ? v.ViewID : -1; });
+            HookGuard.Run(() => { if (id == -2) PoisonSync.FenceNotRecorded("revive fence not recorded: view lookup fault"); });
+            if (id < 0) return;
+            HookGuard.Run(() => PoisonSync.FlushOpenV3(id));     // v3: Revive stopped this view's streams
+            HookGuard.Run(() => PoisonSync.OnLocalRevive(id));   // v3 life fence (records of other lives retire)
+            HookGuard.Run(() => PoisonSync.ResetForView(id));    // today's records and fence, unchanged
+        }
+
+        /// <summary>H2: Revive (or a postfix after it) threw, so the postfix
+        /// above may not have recorded the fence: the view's v3 state retires.
+        /// Returns the exception it was given.</summary>
+        [HarmonyFinalizer]
+        private static Exception Threw(HealthHandler __instance, Exception __exception)
+        {
+            HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("revive threw", __instance); });
+            return __exception;
+        }
+
+        /// <summary>#83: v3 uses the revive fence only while this class attached
+        /// (PoisonSync.V3PatchesLive).</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) PoisonSync.ReviveFenceLive = true;
+            return exception;
         }
     }
 
@@ -1620,8 +2949,8 @@ namespace CompetitiveRounds
                 // paths that return false and therefore suppress vanilla's own loop.
                 object snd = (__args != null && __args.Length > 5) ? __args[5] : null;
                 if (snd != null)
-                    __instance.StartCoroutine(PoisonSync.LocalTickSound(
-                        __instance, data, snd, PoisonSync.Quantise(damage.magnitude), time, interval));
+                    __instance.StartCoroutine(PoisonSync.ClaimContained(PoisonSync.LocalTickSound(
+                        __instance, data, snd, PoisonSync.Quantise(damage.magnitude), time, interval), "sound"));
 
                 // Hosted on the DamageOverTime component deliberately: vanilla's
                 // RPCA_Die, RPCA_Die_Phoenix and Revive all call
@@ -1633,16 +2962,20 @@ namespace CompetitiveRounds
                     return false;
                 }
 
-                __instance.StartCoroutine(PoisonSync.AuthoritativeDot(
+                __instance.StartCoroutine(PoisonSync.ClaimContained(PoisonSync.AuthoritativeDot(
                     __instance, data, view, damage, time, interval, color,
-                    damagingPlayer, lethal, (int)damageSource));
+                    damagingPlayer, lethal, (int)damageSource), "stream"));
                 return false;
             }
             catch (Exception ex)
             {
                 // A capable victim must NEVER silently end up with no damage at
                 // all. Falling through to vanilla is the self-healing direction.
-                Plugin.Log.LogError("[POISON-SYNC] scheduler failed, using vanilla: " + ex.Message);
+                // Fix pass 4 (M2): inside a claim's own start the fault is
+                // counted on that claim's line instead of a line of its own.
+                bool claims = false;
+                try { claims = PoisonSync.ClaimStartFault("scheduler", ex); } catch { }
+                if (!claims) Plugin.Log.LogError("[POISON-SYNC] scheduler failed, using vanilla: " + ex.Message);
                 return true;
             }
         }
@@ -1795,6 +3128,215 @@ namespace CompetitiveRounds
     internal static class PointEndEvidencePatch
     {
         [HarmonyPostfix]
-        private static void After(GM_ArmsRace __instance) { PointEvidence.PointEnd(); PointEvidence.GameOverCheck(__instance); }
+        private static void After(GM_ArmsRace __instance)
+        {
+            HookGuard.Run(() => PointEvidence.PointEnd());
+            HookGuard.Run(() => PointEvidence.GameOverCheck(__instance));
+            HookGuard.Run(() => PoisonSync.NotePointBoundary(__instance));   // v3: the room-common boundary stamp
+        }
+
+        /// <summary>H2: RPCA_NextRound (or a postfix after it) threw, so the
+        /// postfix above may not have recorded this seat's point fence: every
+        /// held v3 record retires and no v3 record is created again in the
+        /// room. Returns the exception it was given.</summary>
+        [HarmonyFinalizer]
+        private static Exception Threw(Exception __exception)
+        {
+            HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw"); });
+            return __exception;
+        }
+
+        /// <summary>#83: v3 uses the point fence only while this class attached
+        /// (PoisonSync.V3PatchesLive).</summary>
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) PoisonSync.PointBoundaryLive = true;
+            return exception;
+        }
+    }
+
+    /// <summary>Convergence v3 (A1): the view id and PUN send stamp of the RPC
+    /// this seat is executing. PUN writes the sender's ServerTimestamp into
+    /// every RPC (key 2) and an RpcTarget.All sender executes that same
+    /// hashtable locally, so a boundary RPC carries one stamp on every seat.
+    /// The prefix records, the finalizer restores the enclosing value (RPCs
+    /// nest); neither changes the call.</summary>
+    [HarmonyPatch]
+    internal static class PoisonRpcStampPatch
+    {
+        private struct Frame { internal bool Has; internal int View; internal int Ts; }
+        private static Frame _cur;
+
+        /// <summary>The executing RPC's send stamp, only when that RPC targets
+        /// this view (so a direct call nested in another RPC never borrows
+        /// that RPC's stamp).</summary>
+        internal static bool TryFor(int viewId, out int ts)
+        {
+            ts = _cur.Ts;
+            return _cur.Has && _cur.View == viewId;
+        }
+
+        private static MethodBase TargetMethod()
+        {
+            var m = AccessTools.Method(typeof(PhotonNetwork), "ExecuteRpc",
+                new[] { typeof(ExitGames.Client.Photon.Hashtable), typeof(Photon.Realtime.Player) });
+            if (m == null) throw new Exception("PhotonNetwork.ExecuteRpc(Hashtable, Player) not found - poison v3 has no boundary stamp");
+            return m;
+        }
+
+        [HarmonyPrefix]
+        private static void Prefix(ExitGames.Client.Photon.Hashtable __0, out Frame __state)
+        {
+            __state = _cur;
+            var f = new Frame();
+            try
+            {
+                object v, t;
+                if (__0 != null && __0.TryGetValue((byte)0, out v) && v is int
+                    && __0.TryGetValue((byte)2, out t) && t is int)
+                { f.Has = true; f.View = (int)v; f.Ts = (int)t; }
+            }
+            catch { }
+            _cur = f;
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(Frame __state, Exception __exception)
+        {
+            _cur = __state;
+            return __exception;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) PoisonSync.RpcStampLive = true;
+            return exception;
+        }
+    }
+
+    /// <summary>Convergence v3 (A1): a Phoenix death is a boundary for its
+    /// view. Both steps contain their own faults (V4 B7): the lookup and the
+    /// flush can never replace RPCA_Die_Phoenix's own completion.</summary>
+    [HarmonyPatch(typeof(HealthHandler), "RPCA_Die_Phoenix")]
+    internal static class PoisonPhoenixBoundaryPatch
+    {
+        [HarmonyPostfix]
+        private static void After(HealthHandler __instance)
+        {
+            HookGuard.Run(() => PoisonSync.NotePhoenixBoundary(__instance));
+            HookGuard.Run(() =>
+            {
+                var v = __instance != null ? __instance.GetComponent<PhotonView>() : null;
+                if (v != null) PoisonSync.FlushOpenV3(v.ViewID);   // the method stopped this view's streams
+            });
+        }
+
+        /// <summary>H2: RPCA_Die_Phoenix (or a postfix after it) threw, so the
+        /// postfix above may not have recorded the view's boundary: the view's
+        /// v3 state retires. Returns the exception it was given.</summary>
+        [HarmonyFinalizer]
+        private static Exception Threw(HealthHandler __instance, Exception __exception)
+        {
+            HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("Phoenix threw", __instance); });
+            return __exception;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) PoisonSync.PhoenixBoundaryLive = true;
+            return exception;
+        }
+    }
+
+    /// <summary>Convergence v3 (A1): RPCA_Die stops the view's damage-over-time
+    /// coroutines (HealthHandler.cs:377) before any stream reaches its own
+    /// exit, so the victim's seat sends those streams' catch-up here.</summary>
+    [HarmonyPatch(typeof(HealthHandler), "RPCA_Die")]
+    internal static class PoisonDeathFlushPatch
+    {
+        [HarmonyPostfix]
+        private static void After(HealthHandler __instance)
+        {
+            HookGuard.Run(() =>
+            {
+                var v = __instance != null ? __instance.GetComponent<PhotonView>() : null;
+                if (v != null) PoisonSync.FlushOpenV3(v.ViewID);
+            });
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) PoisonSync.DeathFlushLive = true;
+            return exception;
+        }
+    }
+
+    /// <summary>Convergence v3 (A9): brackets ProjectileHit.Hit so the poison
+    /// arm below knows whether THIS call runs the hit locally without
+    /// broadcasting it (view.IsMine and sendCollisions false, the field
+    /// ProjectileHit.cs:187 reads; nothing in :146-186 writes it). Records
+    /// only; the finalizer pops and returns the exception it was given.</summary>
+    [HarmonyPatch(typeof(ProjectileHit), "Hit")]
+    internal static class PoisonHitBracketPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(ProjectileHit __instance) { HookGuard.Run(() => PoisonSync.HitEnter(__instance)); }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(ProjectileHit __instance, Exception __exception)
+        {
+            HookGuard.Run(() => PoisonSync.HitExit(__instance));
+            return __exception;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) PoisonSync.HitBracketLive = true;
+            return exception;
+        }
+    }
+
+    /// <summary>Convergence v3 (A5, A9, V4 B7): the poison effect's own
+    /// entry. The claim is raised only here, so only from an actually entered
+    /// RayHitPoison.DoHitEffect; the victim seat's shared TryStart is taken
+    /// here too. Returning false skips this one poison effect, and only when
+    /// TryStart refused it or a fault came before that decision with a claim
+    /// already started in this room (PrefixFaultDecision). PoisonEffectEnter
+    /// runs under HookGuard.Prefix, so no later fault reverses either.</summary>
+    [HarmonyPatch(typeof(RayHitPoison), "DoHitEffect")]
+    internal static class PoisonArmPatch
+    {
+        [HarmonyPrefix]
+        private static bool Prefix(RayHitPoison __instance, HitInfo hit, out int __state)
+        {
+            __state = 0;
+            try { return PoisonSync.PoisonEffectEnter(__instance, hit, out __state); }
+            catch (Exception ex) { return PoisonSync.PrefixFaultDecision(ex); }
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(int __state, Exception __exception)
+        {
+            HookGuard.Run(() => PoisonSync.PoisonEffectExit(__state));
+            return __exception;
+        }
+
+        [HarmonyCleanup]
+        private static Exception Cleanup(MethodBase original, Exception exception)
+        {
+            if (original != null) return exception;
+            if (exception == null) PoisonSync.PoisonArmLive = true;
+            return exception;
+        }
     }
 }

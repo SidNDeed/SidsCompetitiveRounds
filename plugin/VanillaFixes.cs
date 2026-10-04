@@ -1516,6 +1516,15 @@ namespace CompetitiveRounds
     [HarmonyPatch]
     internal static class EndScreenKillPatch
     {
+        /// <summary>The DoDamage refusal's own condition, one function for the
+        /// prefix below and PoisonSync's live-replica test (convergence v3): a
+        /// healthRemoval hit is refused while it holds. Reads state only.</summary>
+        internal static bool RefusesNow()
+        {
+            if (!VanillaFixSupport.AnyGameScope()) return false;
+            return GameManager.instance != null && !GameManager.instance.battleOngoing;
+        }
+
         [HarmonyPrefix]
         [HarmonyPatch(
             typeof(HealthHandler),
@@ -1537,32 +1546,29 @@ namespace CompetitiveRounds
             Vector2 damage,
             bool healthRemoval)
         {
-            try
-            {
-                if (!healthRemoval) return true;
-                // AnyGameScope since #151. battleOngoing is driven false by
-                // RPCA_NextRound (an All-RPC) on every client, and the transition ends
-                // in RevivePlayers() -> health reset everywhere, so any mixed-roster
-                // disagreement inside the window is erased before combat resumes.
-                // Widening strictly REDUCES the number of clients that apply
-                // transition-window ticks.
-                if (!VanillaFixSupport.AnyGameScope()) return true;
-                if (GameManager.instance == null || GameManager.instance.battleOngoing) return true;
-
-                VanillaFixSupport.DiagLimited(
-                    "EndScreenKill-damage",
-                    "EndScreenKill blocked transition DoT player=" +
-                    VanillaFixSupport.PlayerId(__instance) +
-                    " damage=" + VanillaFixSupport.Float(damage.magnitude) +
-                    " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
-                    20);
-                return false;
-            }
-            catch (Exception ex)
-            {
-                VanillaFixSupport.LogError("EndScreenKill.DoDamage", ex);
-                return true;
-            }
+            // AnyGameScope since #151. battleOngoing is driven false by
+            // RPCA_NextRound (an All-RPC) on every client, and the transition ends
+            // in RevivePlayers() -> health reset everywhere, so any mixed-roster
+            // disagreement inside the window is erased before combat resumes.
+            // Widening strictly REDUCES the number of clients that apply
+            // transition-window ticks.
+            // V4 B7: the evidence line runs after the decision under
+            // HookGuard.Prefix, so a fault in it never turns a refusal into a
+            // run (a fault in the decision itself still runs the method).
+            return HookGuard.Prefix(
+                () => !healthRemoval || !RefusesNow(),
+                ex => { VanillaFixSupport.LogError("EndScreenKill.DoDamage", ex); return true; },
+                run =>
+                {
+                    if (run) return;
+                    VanillaFixSupport.DiagLimited(
+                        "EndScreenKill-damage",
+                        "EndScreenKill blocked transition DoT player=" +
+                        VanillaFixSupport.PlayerId(__instance) +
+                        " damage=" + VanillaFixSupport.Float(damage.magnitude) +
+                        " frame=" + Time.frameCount.ToString(CultureInfo.InvariantCulture),
+                        20);
+                });
         }
 
         [HarmonyPrefix]
@@ -4921,6 +4927,18 @@ namespace CompetitiveRounds
         })]
     internal static class DamageRulesGate
     {
+        /// <summary>Would DoDamage on this victim from this attacker be refused
+        /// by the three rules below? PoisonSync's convergence v3 calls it where
+        /// it moves health without DoDamage (the spectator display path and the
+        /// correction funnel), so those seats consume exactly the ticks every
+        /// fighter seat's DoDamage refuses. It is the prefix itself, so the
+        /// two can never disagree; a refusal writes the prefix's own bounded
+        /// evidence line and nothing else.</summary>
+        internal static bool Refuses(HealthHandler victim, Player damagingPlayer)
+        {
+            return !BeforeDoDamage(victim, damagingPlayer);
+        }
+
         [HarmonyPrefix]
         private static bool BeforeDoDamage(HealthHandler __instance, Player damagingPlayer)
         {
