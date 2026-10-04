@@ -1208,7 +1208,31 @@ def test_the_helper_closure_stays_affordable():
     # and position 355 of 395 is POST /api/v1/spectate/grant at 111 (unmoved
     # on main). 111 is main's bound, which the merged tree carries; the
     # median and worst bounds stay (22 against 24, 370 against 380).
-    assert code_p90 <= 111, f"p90 code closure {code_p90} of {total}"
+    #
+    # v1.41.0 merge pass 6 (2026-10-04), main e9a3f1e1 (the five-tier title
+    # ladders server half and the card art geometry) into the beta at
+    # b5664f9f: the same walk, the same route seeds (this file's, copied into
+    # each tree beside its own backend/api),
+    #
+    #   tree                         routes   code median / p90 / worst   all median / p90 / worst
+    #   base 14127702                   387   22 / 105 / 370              76 / 197 / 503
+    #   beta b5664f9f                   395   22 / 111 / 370              94 / 210 / 526
+    #   main e9a3f1e1                   387   22 / 109 / 377              76 / 199 / 510
+    #   the merge c9bc5b87              395   22 / 115 / 387              94 / 210 / 533
+    #
+    # Route by route, every code count at the merge is the beta's plus
+    # main's minus the base's (the beta's, for its eight routes main does
+    # not have) except three: GET /api/v1/health (+13 over that sum: main's
+    # five-tier catalogue builders in title_ladders, reached on the merged
+    # tree only), GET /api/v1/pc/face/preview (a beta route; +9 of main's
+    # card art geometry and catalogue bindings, -2 for the two CARD_ART_W/H
+    # constants main removed) and POST /api/v1/matches (+1, the merge's own
+    # _ladder_add_late_gold, which carries main's late Gold Rush gold through
+    # the beta's one slayer/streak commit). Position 356 of 395 is POST
+    # /api/v1/spectate/grant at 115 (105 base, 111 beta, 109 main: additive).
+    # The bound moves to 122, ~6% over the measurement, for that reason and
+    # no other; the median bound stays (22 against 24).
+    assert code_p90 <= 122, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1255,7 +1279,14 @@ def test_the_helper_closure_stays_affordable():
     # runs card_art_selftest, which draws a face to prove the layer. The
     # bound moves to 380, ~6% over the measurement, for that reason and no
     # other; the median and p90 bounds stay.
-    assert code_worst <= 380, f"worst code closure {code_worst} of {total}"
+    #
+    # v1.41.0 merge pass 6 (2026-10-04, the table at the p90 bound above):
+    # the worst is GET /api/v1/health at 387 on the merge (366 on the beta,
+    # 273 on main e9a3f1e1, whose own worst is 377): the beta's 366 plus
+    # main's +8 over the base, plus the 13 five-tier catalogue bindings in
+    # title_ladders that only the merged tree's /health reaches. The bound
+    # moves to 410, ~6% over the measurement, for that reason and no other.
+    assert code_worst <= 410, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
