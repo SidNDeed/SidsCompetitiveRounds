@@ -1899,6 +1899,18 @@ def test_f3_m6_a_shot_identity_in_two_cycles_is_ambiguous():
                     [_group(0, "o", s0_shift=5000), _group(1, "o")])
     _all_ambiguous(d)
     assert d["case"] == "not_run"
+    # Fix pass 4: the same two faults with EQUAL `s0` sets on both sides, so
+    # the unmatched-cycle clause cannot be what finds them: one identity set
+    # listed under both of the owner's cycles while the copy lists two
+    # others; and two identity sets swapped between the two `s0` marks.
+    for owner_kinds, meas_kinds in ((((0, 0), (1, 0)), ((0, 1), (1, 2))),
+                                    (((0, 0), (1, 1)), ((0, 1), (1, 0)))):
+        d = _cycles_dir([_kind_group(k, "s") for k in owner_kinds],
+                        [_kind_group(k, "o") for k in meas_kinds])
+        assert {r["s0"] for r in d["cycles"] if r["self"]} == \
+            {r["s0"] for r in d["cycles"] if r["meas"]}
+        _all_ambiguous(d)
+        assert d["case"] == "not_run"
 
 
 def test_f3_m6_an_agreement_needs_a_complete_bijection():
@@ -2059,9 +2071,12 @@ def test_f4_m6_every_definitive_case_comes_from_the_one_verdict():
     assert _verdict_proof(planted), "the display bypass was not found"
 
 
-# The small space: four cycle kinds (two `s0` marks by two shot-identity
+# The small space: six cycle kinds (two `s0` marks by three shot-identity
 # sets: a kind's three shots are those of its identity set, under its `s0`).
-_KINDS = [(s0, ids) for s0 in (0, 1) for ids in (0, 1)]
+# Three identity sets, so that a duplicate identity on one side can sit
+# beside a copy whose two cycles hold two OTHER sets (each pairing fault
+# then has a case only its own clause finds).
+_KINDS = [(s0, ids) for s0 in (0, 1) for ids in (0, 1, 2)]
 
 
 def _kind_group(kind, side):
@@ -2087,8 +2102,8 @@ def _oracle_bijection(owner, meas, owner_ok, meas_ok):
 
 def test_f4_m6_definitive_implies_bijection_over_the_small_space():
     """Fix pass 4, M-6, generated: EVERY owner and measured cycle multiset of
-    up to two cycles over the four kinds (15 per side), each side's
-    whole-game cycle counter consistent or contradicting its list: 900
+    up to two cycles over the six kinds (28 per side), each side's
+    whole-game cycle counter consistent or contradicting its list: 3136
     cases. Asserted per case, against an oracle that reads only the
     abstract description: the pairing is ambiguous exactly when the
     one-to-one match fails; the case is definitive exactly when the
@@ -2097,7 +2112,7 @@ def test_f4_m6_definitive_implies_bijection_over_the_small_space():
     is named as differing and no cycle is absent; every listed cycle is
     shown; identical accounts under the bijection agree."""
     sides = [m for r in range(3) for m in itertools.combinations_with_replacement(_KINDS, r)]
-    assert len(sides) == 15
+    assert len(sides) == 28
     n = definitive = ambiguous = 0
     for o_kinds in sides:
         for m_kinds in sides:
@@ -2130,7 +2145,7 @@ def test_f4_m6_definitive_implies_bijection_over_the_small_space():
                     if bij and sorted(o_kinds) == sorted(m_kinds):
                         assert d["case"] == "both_agree", tag
                     definitive += d["case"] in _DEFINITIVE
-    assert n == 900 and definitive and ambiguous and n - ambiguous - definitive, \
+    assert n == 3136 and definitive and ambiguous and n - ambiguous - definitive, \
         (n, definitive, ambiguous)
 
 def test_f2_l6_the_purge_wording_is_the_allowlist_the_constants_apply():
