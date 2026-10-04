@@ -521,6 +521,7 @@ namespace CompetitiveRounds
                     try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }
                     try { SeatEvidence.FlushOnQuit(); } catch { }
                     try { CardDrawEvidence.FlushOnQuit(); } catch { }
+                    try { CombatEvidence.FlushOnQuit(); } catch { }
                 };
             }
             catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
@@ -3459,6 +3460,7 @@ namespace CompetitiveRounds
             try { PointEvidence.Drain(); } catch { }
             try { SeatEvidence.Tick(); } catch { }
             try { CardDrawEvidence.Tick(); } catch { }
+            try { CombatEvidence.Tick(); } catch { }
 
             if (Plugin.modDisabled) return;
 

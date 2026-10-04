@@ -35,6 +35,7 @@ namespace CompetitiveRounds
         private const string ROUTE_RECORD = "/api/v1/matches/seat-evidence";
         private const string ROUTE_COMPAT = "/api/v1/client/compat-outcome";
         private const string ROUTE_CARD = "/api/v1/matches/card-evidence";
+        private const string ROUTE_COMBAT = "/api/v1/matches/combat-evidence";
 
         private static readonly Stopwatch _sw = Stopwatch.StartNew();
         internal static long SwMs { get { return _sw.ElapsedMilliseconds; } }
@@ -242,6 +243,17 @@ namespace CompetitiveRounds
         internal static void ExitRpc(int before)
         {
             if (before >= 0) _ctxDepth = before;
+        }
+
+        /// <summary>Combat evidence: the innermost RPC frame as EnterRpc copied
+        /// it (read-only; nothing is taken or changed). False: none, or no stamp.</summary>
+        internal static bool RpcTop(out int stamp, out int sender, out int viewId, out string method)
+        {
+            stamp = 0; sender = 0; viewId = 0; method = null;
+            int top = _ctxDepth - 1;
+            if (top < 0 || top >= CTX_CAP || !_ctx[top].HasStamp) return false;
+            stamp = _ctx[top].Stamp; sender = _ctx[top].Sender; viewId = _ctx[top].ViewId; method = _ctx[top].Method;
+            return true;
         }
 
         /// <summary>The innermost RPC frame when it runs `method` on `viewId`
@@ -1455,7 +1467,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (body == null || (route != "e" && route != "k" && route != "c")) return false;
+                if (body == null || (route != "e" && route != "k" && route != "c" && route != "x")) return false;
                 var p = new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() };
                 string name = SPOOL_PREFIX + DateTime.UtcNow.Ticks.ToString("D19", CultureInfo.InvariantCulture) + "-"
                               + (++_spoolSeq).ToString("D4", CultureInfo.InvariantCulture) + ".jsonl";
@@ -1530,6 +1542,14 @@ namespace CompetitiveRounds
             return Enqueue("k", body);
         }
 
+        /// <summary>A combat evidence envelope (route "x"), persisted like the
+        /// others and sent by the same pump, outside combat. False: not
+        /// persisted, the caller keeps it.</summary>
+        internal static bool EnqueueCombat(string body)
+        {
+            return Enqueue("x", body);
+        }
+
         /// <summary>Adds a frozen body; every retry sends these exact bytes. It
         /// counts as queued only when the queue file holding it replaced the
         /// old one (F8); on false nothing in memory changed and the caller
@@ -1557,12 +1577,12 @@ namespace CompetitiveRounds
 
         private static string RouteOf(string route)
         {
-            return route == "c" ? ROUTE_COMPAT : (route == "k" ? ROUTE_CARD : ROUTE_RECORD);
+            return route == "c" ? ROUTE_COMPAT : (route == "k" ? ROUTE_CARD : (route == "x" ? ROUTE_COMBAT : ROUTE_RECORD));
         }
 
         private static string What(string route)
         {
-            return route == "c" ? "compat outcome" : (route == "k" ? "card record" : "record");
+            return route == "c" ? "compat outcome" : (route == "k" ? "card record" : (route == "x" ? "combat record" : "record"));
         }
 
         // the request in flight and its answer, as the result callback left it
@@ -1740,6 +1760,7 @@ namespace CompetitiveRounds
         private static void Postfix(PhotonView __0, string __1, RpcTarget __2)
         {
             try { SeatEvidence.BlockSent(__0, __1, __2); } catch { }
+            try { CombatEvidence.RpcSent(__0, __1, __2); } catch { }
         }
     }
 
