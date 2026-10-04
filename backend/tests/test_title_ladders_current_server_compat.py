@@ -47,6 +47,12 @@ PLUGIN = os.path.join(ROOT, "plugin")
 PROJ_DIR = os.path.join(ROOT, "tools", "tests", "title-ladders-compat")
 PROJ = os.path.join(PROJ_DIR, "TitleLaddersCompat.csproj")
 FIXTURE = os.path.join(os.path.dirname(__file__), "fixtures", "title_ladders_current_answer.json")
+# Merge pass 6: the five-tier server half has landed (main e9a3f1e1). This is
+# its real answer, asked of main.app's route on a schema built from migrations
+# 331 and 365 for an account that owns no rung, steam_id replaced by the same
+# placeholder; every other key and value is the server's. test_title_ladder_
+# route_live.py checks the route still answers exactly these key sets.
+FIXTURE_FIVE = os.path.join(os.path.dirname(__file__), "fixtures", "title_ladders_five_tier_answer.json")
 
 # The members copied out of the plugin, by the text that starts each one.
 API_MEMBERS = [
@@ -147,17 +153,15 @@ def _extracted():
     return "\n".join(out)
 
 
-def _answer():
-    with open(FIXTURE, encoding="utf-8") as f:
+def _answer(path=FIXTURE):
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def _variants():
-    """Every answer file the client is run over, by file name."""
-    cur = _answer()
-    v = {"current.json": cur}
-
-    owned = json.loads(json.dumps(cur))
+def _own(answer):
+    """The answer with rungs owned and worn: rat started (tiers 1 and 2 held,
+    tier 2 worn), cat held at the top, dog holding only a middle rung."""
+    owned = json.loads(json.dumps(answer))
     for ln in owned["ladders"]:
         rs = ln["rungs"]
         if ln["line"] == "rat":      # started: tiers 1 and 2 held, the tier-2 rung worn
@@ -174,7 +178,18 @@ def _variants():
             rs[2]["owned"] = True
             ln["games"] = rs[2]["threshold"]
     owned["active_line"] = "rat"
+    return owned
+
+
+def _variants():
+    """Every answer file the client is run over, by file name."""
+    cur = _answer()
+    v = {"current.json": cur}
+    owned = _own(cur)
     v["owned.json"] = owned
+    five = _answer(FIXTURE_FIVE)
+    v["five.json"] = five
+    v["fiveowned.json"] = _own(five)
 
     nosku = json.loads(json.dumps(owned))
     del nosku["ladders"][0]["rungs"][3]["sku"]
@@ -261,7 +276,8 @@ def test_bodies_with_no_ladders_read_as_no_board(run):
         assert len(a) == 1 and a[0]["null"] == "True", (f, out)
 
 
-@pytest.mark.parametrize("file", ["current.json", "owned.json", "newserver.json"])
+@pytest.mark.parametrize("file", ["current.json", "owned.json", "newserver.json",
+                                  "five.json", "fiveowned.json"])
 def test_every_rung_shown_is_a_rung_the_server_sent_and_none_is_dropped(run, file):
     """Line for line and rung for rung, in the server's order: no rung is
     added, none is dropped, every line renders, and the listing rows folded
@@ -287,7 +303,7 @@ def test_a_rung_without_a_sku_is_dropped_and_no_other_is(run):
         assert _split(x["skus"]) == [r["sku"] for r in ln["rungs"] if "sku" in r], (ln["line"], x["skus"])
 
 
-@pytest.mark.parametrize("file", ["owned.json", "newserver.json"])
+@pytest.mark.parametrize("file", ["owned.json", "newserver.json", "fiveowned.json"])
 def test_every_title_the_player_holds_is_shown_and_held(run, file):
     """Every owned rung is parsed as owned on a rendered line; the held tier is
     the highest owned tier; the rung that names it is owned, and is the worn
@@ -344,6 +360,53 @@ def test_the_new_server_keys_pass_through_and_change_only_the_wording(run):
             want = " in a row" if ln["unit"] == "streak" else " games"
             assert want in x["progress"] and " series" not in x["progress"], (ln["line"], x["progress"])
             assert ("Current run: 3" in x["progress"]) == (ln["streak"] == 3), (ln["line"], x["progress"])
+
+
+UNIT_WORDS = {"games": " games", "wins": " wins", "losses": " losses", "gold": " gold",
+              "streak": " wins in a row"}
+
+
+@pytest.mark.parametrize("file", ["five.json", "fiveowned.json"])
+def test_the_landed_five_tier_answer_reads_in_its_own_units(run, file):
+    """The five-tier server's REAL answer (merge pass 6): every line renders,
+    every appended key reaches the line as the server sent it, a held line
+    counts in the line's own unit (never "series"), a line the server sends a
+    streak for prints its run, and an unheld line reads Not started."""
+    _, rows, out = run
+    ans = _variants()[file]
+    plan = _rows(rows, "PLAN", file)[0]
+    assert plan["unrendered"] == "0", plan
+    for x, ln in zip(_lines(rows, file), ans["ladders"]):
+        for k in ("unit", "group", "kind", "modes", "condition"):
+            assert x[k] == ln[k], (ln["line"], k, x[k], ln[k])
+        assert _split(x["reached"]) == [r["sku"] for r in ln["rungs"] if r["reached"]], (ln["line"], x["reached"])
+        assert x["has_streak"] == ("True" if ln["streak"] is not None else "False"), (ln["line"], x)
+        if x["held"] == "0":
+            assert x["progress"].startswith("Not started"), (ln["line"], x["progress"])
+            continue
+        assert UNIT_WORDS[ln["unit"]] in x["progress"] and " series" not in x["progress"], (
+            ln["line"], ln["unit"], x["progress"])
+        assert ("Current run: %s" % ln["streak"] in x["progress"]) == (ln["streak"] is not None), (
+            ln["line"], x["progress"])
+
+
+def test_the_five_tier_fixture_carries_the_appended_keys_and_no_account_id():
+    """The five-tier fixture is the five-tier shape (the current fixture's keys
+    plus the ones that build appends) and carries no 17-digit value."""
+    with open(FIXTURE_FIVE, encoding="utf-8") as f:
+        raw = f.read()
+    assert not re.search(r"\d{17}", raw)
+    a = json.loads(raw)
+    assert set(a) == {"steam_id", "active_line", "ladders"} and a["steam_id"] == "STEAM-ID-PLACEHOLDER"
+    assert len(a["ladders"]) == 32
+    for ln in a["ladders"]:
+        assert set(ln) == {"line", "name", "games", "tier", "max_tier", "next_tier", "next_threshold",
+                           "next_names", "games_to_next", "rungs",
+                           "group", "kind", "unit", "modes", "condition", "streak"}, ln["line"]
+        assert ln["unit"] in UNIT_WORDS, (ln["line"], ln["unit"])
+        for r in ln["rungs"]:
+            assert set(r) == {"tier", "sku", "item_id", "name", "description", "rarity", "preview_color",
+                              "threshold", "price", "owned", "active", "reached"}, (ln["line"], r.get("sku"))
 
 
 def test_the_section_reads_only_these_appended_keys():

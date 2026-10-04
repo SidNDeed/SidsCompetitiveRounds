@@ -50,6 +50,7 @@ the route sent to, for the evidence log.
 
 import asyncio
 import io
+import json
 import os
 import re
 import sys
@@ -367,6 +368,24 @@ def test_pg_a_player_with_no_titles_gets_every_line_with_nothing_owned():
     _assert_read_only(sql, [["players"], ["shop_items", "player_items"],
                             ["shop_items"], ["title_ladder_progress"]])
     assert after == before, (before, after)
+
+
+def test_pg_the_client_compat_fixture_is_what_the_route_answers():
+    """fixtures/title_ladders_five_tier_answer.json is the answer the client's
+    title ladders checks run over (test_title_ladders_current_server_compat,
+    merge pass 6). It must stay what this route answers for the account that
+    owns no rung -- every key and value, steam_id aside -- or those checks
+    prove the client against an answer no server gives."""
+    _require_live_pg()
+    with io.open(os.path.join(HERE, "fixtures", "title_ladders_five_tier_answer.json"),
+                 encoding="utf-8") as fh:
+        fixture = json.load(fh)
+    _ids, _owned, _before, _after, answers = _run(_case([_url(BARE)]))
+    status, body, _sql = answers[0]
+    assert status == 200, (status, body)
+    assert fixture["steam_id"] == "STEAM-ID-PLACEHOLDER" and body["steam_id"] == BARE
+    body = dict(body, steam_id=fixture["steam_id"])
+    assert body == fixture
 
 
 def test_pg_an_unknown_steam_id_is_the_routes_own_404():
