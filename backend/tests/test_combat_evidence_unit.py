@@ -1477,6 +1477,22 @@ def test_f2_m8_a_list_without_a_counter_never_proves_absence():
     assert cm.blocks(victim, shooter)[0]["not_run"] == "trimmed"
 
 
+@pytest.mark.parametrize("cap, key, field, measured", [
+    ("push", "pushes", "victim", "d_fx"),
+    ("chain", "chains", "victim", "msg_transit"),
+    ("death", "deaths", "seat", "d_px")])
+def test_f2_m8_a_list_under_a_cleared_capability_is_never_compared(cap, key, field, measured):
+    """The other seat's list is read only when its capability says the list
+    was collected: with the bit clear, an entry the list still holds for the
+    same identity is NOT-RUN `not_collected` and nothing is measured."""
+    victim, shooter = fx.r_sections_pair()
+    (row,) = _by(cm.pair_view(fx.records(victim, shooter)), key, A, field)["rows"]
+    assert row["not_run"] is None and row[measured] is not None          # control: compared
+    shooter["caps"] &= ~cm.W["caps"][cap]
+    (row,) = _by(cm.pair_view(fx.records(victim, shooter)), key, A, field)["rows"]
+    assert row["not_run"] == "not_collected" and row[measured] is None
+
+
 def test_f2_m8_p3tb_against_p3n_target():
     assert _bounce_pair([])["bounces"][0]["meas_not_run"] == "absent"   # control: 0 counted
     assert _bounce_pair([], target=1)["bounces"][0]["meas_not_run"] == "inconsistent"
