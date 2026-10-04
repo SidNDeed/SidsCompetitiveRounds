@@ -235,7 +235,7 @@ namespace CompetitiveRounds
         /// failed leaves its flag false): the scheduler (PatchesLive), the RPC
         /// send-stamp bracket, the ProjectileHit.Hit bracket, the
         /// RayHitPoison.DoHitEffect arm, the Phoenix boundary, the RPCA_Die
-        /// catch-up flush, the point boundary (PointEndEvidencePatch) and the
+        /// catch-up flush, the point boundary (PoisonPointBoundaryPatch) and the
         /// revive fence (PoisonReviveFencePatch), plus the DoDamage room-rule
         /// gate whose predicate the correction funnel shares (DamageRulesGate:
         /// without its prefix a regular tick and a corrective one would follow
@@ -271,7 +271,7 @@ namespace CompetitiveRounds
             if (!PoisonArmLive) m.Add("PoisonArm");
             if (!PhoenixBoundaryLive) m.Add("PoisonPhoenixBoundary");
             if (!DeathFlushLive) m.Add("PoisonDeathFlush");
-            if (!PointBoundaryLive) m.Add("PointEndEvidence");
+            if (!PointBoundaryLive) m.Add("PoisonPointBoundary");
             if (!ReviveFenceLive) m.Add("PoisonReviveFence");
             if (!VanillaFixSupport.IsAttached("DamageRulesGate")) m.Add("DamageRulesGate");
             return m.Count == 0 ? "none" : string.Join(",", m.ToArray());
@@ -3250,8 +3250,25 @@ namespace CompetitiveRounds
         [HarmonyPostfix]
         private static void After(GM_ArmsRace __instance)
         {
-            HookGuard.Run(() => PointEvidence.PointEnd());
-            HookGuard.Run(() => PointEvidence.GameOverCheck(__instance));
+            try { PointEvidence.PointEnd(); } catch { }
+            try { PointEvidence.GameOverCheck(__instance); } catch { }
+        }
+    }
+
+    /// <summary>Convergence v3: the room-common point boundary, on the same
+    /// point-decided broadcast. A class of its own, apart from
+    /// PointEndEvidencePatch: an evidence hook's code is held to the seat
+    /// evidence bound (it writes no log line and loops only under a cap), and
+    /// the v3 fence it calls is not evidence code. It reads the executing RPC's
+    /// send stamp (PoisonRpcStampPatch), the room state and its own ledger,
+    /// none of which PointEndEvidencePatch's postfix writes, so the order of
+    /// the two postfixes does not change its input.</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "RPCA_NextRound", new Type[] { typeof(int), typeof(int), typeof(int), typeof(int), typeof(int), typeof(int) })]
+    internal static class PoisonPointBoundaryPatch
+    {
+        [HarmonyPostfix]
+        private static void After(GM_ArmsRace __instance)
+        {
             HookGuard.Run(() => PoisonSync.NotePointBoundary(__instance));   // v3: the room-common boundary stamp
         }
 

@@ -387,7 +387,7 @@ def check_header_failure_retires(src):
 
 
 FENCE_FINALIZERS = (
-    ("PointEndEvidencePatch", "private static Exception Threw(Exception __exception)",
+    ("PoisonPointBoundaryPatch", "private static Exception Threw(Exception __exception)",
      'if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw");'),
     ("PoisonReviveFencePatch", "private static Exception Threw(HealthHandler __instance, Exception __exception)",
      'if (__exception != null) PoisonSync.FenceNotRecorded("revive threw", __instance);'),
@@ -867,7 +867,7 @@ def test_v3_live_turns_red(term):
 
 HOOKS = {
     "PoisonReviveFencePatch.AfterRevive": (PS, None, "private static void AfterRevive(HealthHandler __instance)"),
-    "PointEndEvidencePatch.After": (PS, "internal static class PointEndEvidencePatch",
+    "PoisonPointBoundaryPatch.After": (PS, "internal static class PoisonPointBoundaryPatch",
                                     "private static void After(GM_ArmsRace __instance)"),
     "PoisonRpcStampPatch.Prefix": (PS, None,
                                    "private static void Prefix(ExitGames.Client.Photon.Hashtable __0, out Frame __state)"),
@@ -890,7 +890,7 @@ HOOKS = {
     "PoisonSync.V3PropsChanged": (PS, None, "internal static void V3PropsChanged("),
     "EndScreenKillPatch.BeforeTransitionDamage": (VF, None, "private static bool BeforeTransitionDamage("),
     # fix pass 2 (H2): the fence finalizers
-    "PointEndEvidencePatch.Threw": (PS, "internal static class PointEndEvidencePatch",
+    "PoisonPointBoundaryPatch.Threw": (PS, "internal static class PoisonPointBoundaryPatch",
                                     "private static Exception Threw(Exception __exception)"),
     "PoisonReviveFencePatch.Threw": (PS, "internal static class PoisonReviveFencePatch",
                                      "private static Exception Threw(HealthHandler __instance, Exception __exception)"),
@@ -1017,7 +1017,7 @@ def check_hook(src, name):
 HOOK_MUTANTS = {
     "PoisonReviveFencePatch.AfterRevive": (PS, "HookGuard.Run(() => PoisonSync.OnLocalRevive(id));",
                                            "PoisonSync.OnLocalRevive(id);"),
-    "PointEndEvidencePatch.After": (PS, "HookGuard.Run(() => PoisonSync.NotePointBoundary(__instance));",
+    "PoisonPointBoundaryPatch.After": (PS, "HookGuard.Run(() => PoisonSync.NotePointBoundary(__instance));",
                                     "PoisonSync.NotePointBoundary(__instance);"),
     "PoisonRpcStampPatch.Prefix": (PS, "            catch { }\n            _cur = f;", "            catch { throw; }\n            _cur = f;"),
     "PoisonRpcStampPatch.Finalizer": (PS, "            _cur = __state;\n            return __exception;",
@@ -1053,7 +1053,7 @@ HOOK_MUTANTS = {
         "            try { if (healthRemoval && RefusesNow()) { VanillaFixSupport.DiagLimited(\"k\", \"m\", 20); return false; } }\n"
         "            catch { return true; }\n"
         "            return HookGuard.Prefix(\n                () => !healthRemoval || !RefusesNow(),"),
-    "PointEndEvidencePatch.Threw": (
+    "PoisonPointBoundaryPatch.Threw": (
         PS, 'HookGuard.Run(() => { if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw"); });',
         'if (__exception != null) PoisonSync.FenceNotRecorded("point-over threw");'),
     "PoisonReviveFencePatch.Threw": (
