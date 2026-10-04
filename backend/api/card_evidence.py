@@ -179,8 +179,14 @@ async def _registry(db, digests) -> dict:
         "SELECT census FROM card_pool_registry WHERE digest = ANY(CAST(:d AS varchar[]))"),
         {"d": sorted(digests)})).all()
     out = {}
+    keys = list(cm.W["dump_keys"])
     for (doc,) in rows:
-        c = cm.census_from_dump(se._jsonv(doc))
+        # jsonb keeps no key order: the stored dump is put back in the file's
+        # order (same key set, nothing added) before the whole check runs again
+        doc = se._jsonv(doc)
+        if isinstance(doc, dict) and set(doc) == set(keys):
+            doc = {kk: doc[kk] for kk in keys}
+        c = cm.census_from_dump(doc)
         out[c.digest] = c
     return out
 
@@ -292,10 +298,12 @@ async def _recompute_daily(db, keys) -> None:
         await db.execute(text(
             "INSERT INTO card_player_daily (subject_player_id, day, source, coverage, deal_profile, "
             "  rules_rev, games, " + ", ".join(_DAILY_COLS) + ") "
-            "SELECT CAST(:s AS uuid), :d, :src, :cov, :p, :rev, "
+            "SELECT CAST(:s AS uuid), CAST(:d AS date), CAST(:src AS varchar), CAST(:cov AS varchar), "
+            "  CAST(:p AS varchar), CAST(:rev AS varchar), "
             "  count(DISTINCT (c.stable_game_key, c.pair_lo, c.pair_hi)), " + sums + " "
-            "  FROM card_contrib c WHERE c.subject_player_id = CAST(:s AS uuid) AND c.utc_day = :d "
-            "   AND c.source = :src AND c.coverage = :cov AND c.deal_profile = :p AND c.rules_rev = :rev "
+            "  FROM card_contrib c WHERE c.subject_player_id = CAST(:s AS uuid) AND c.utc_day = CAST(:d AS date) "
+            "   AND c.source = CAST(:src AS varchar) AND c.coverage = CAST(:cov AS varchar) "
+            "   AND c.deal_profile = CAST(:p AS varchar) AND c.rules_rev = CAST(:rev AS varchar) "
             "HAVING count(*) > 0"), b)
 
 
@@ -523,11 +531,13 @@ async def purge_pass(session_factory) -> dict:
             "      AND LEAST(e.seat_player_id, e.other_player_id) = g.pair_lo "
             "      AND GREATEST(e.seat_player_id, e.other_player_id) = g.pair_hi)"))).rowcount
         d = {"d": lim["derived_retention_days"]}
-        out["derived"] = sum((await db.execute(text(q), d)).rowcount for q in (
-            "DELETE FROM card_contrib WHERE utc_day < (now() - make_interval(days => CAST(:d AS int)))::date",
-            "DELETE FROM card_player_daily WHERE day < (now() - make_interval(days => CAST(:d AS int)))::date",
-            "DELETE FROM card_hand_outside WHERE computed_at < now() - make_interval(days => CAST(:d AS int))",
-            "DELETE FROM card_phase_outside WHERE computed_at < now() - make_interval(days => CAST(:d AS int))"))
+        out["derived"] = 0
+        for q in (
+                "DELETE FROM card_contrib WHERE utc_day < (now() - make_interval(days => CAST(:d AS int)))::date",
+                "DELETE FROM card_player_daily WHERE day < (now() - make_interval(days => CAST(:d AS int)))::date",
+                "DELETE FROM card_hand_outside WHERE computed_at < now() - make_interval(days => CAST(:d AS int))",
+                "DELETE FROM card_phase_outside WHERE computed_at < now() - make_interval(days => CAST(:d AS int))"):
+            out["derived"] += (await db.execute(text(q), d)).rowcount
         await db.commit()
     return out
 
