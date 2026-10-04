@@ -15213,9 +15213,16 @@ _QUEUE_PARENT_LOCK_TABLES = frozenset(
 )
 
 
-async def _lock_queue_rows_ordered(db: AsyncSession, table: str, player_ids) -> None:
+async def _lock_queue_rows_ordered(db: AsyncSession, table: str, player_ids, *,
+                                   before_each=None) -> None:
     """Take FOR UPDATE locks on the given queue rows in a deterministic GLOBAL
     order (ascending player_id), one statement per row.
+
+    `before_each`, when given, is awaited before each row's statement: a caller
+    under one deadline re-arms its lock_timeout and statement_timeout there
+    from what is left of that deadline, so the row waits together spend one
+    budget (merge pass 6, R2-C-L1; _asm_reform_formation). The order and the
+    statements are the same with or without it.
 
     Why this exists: queue_poll and queue_ready both used to lock the CALLER's
     row first and then the opponent's. Two players polling at the same instant
@@ -15246,6 +15253,8 @@ async def _lock_queue_rows_ordered(db: AsyncSession, table: str, player_ids) -> 
         if pid is not None and pid not in seen:
             seen.append(pid)
     for pid in sorted(seen, key=str):
+        if before_each is not None:
+            await before_each()
         await db.execute(
             text(f"SELECT 1 FROM {table} WHERE player_id = :pid FOR UPDATE"),
             {"pid": pid},
@@ -56661,7 +56670,15 @@ async def _asm_reform_formation(db, lobby_id, trigger):
     from what is left before the lobby row and queue rows are taken, so no
     wait here runs on the session defaults. A spent budget, or a lock or
     statement timeout, rolls back and returns None like any other refusal.
-    The COMMIT itself is not bounded (R39), as on the routes."""
+    The COMMIT itself is not bounded (R39), as on the routes.
+
+    One budget across the row waits (merge pass 6, R2-C-L1): the queue rows
+    are locked one statement per row, and the timeouts are re-armed from what
+    is left before each of them (_lock_queue_rows_ordered's before_each), so
+    the lobby row and the queue rows wait out one remainder between them, not
+    one each. Before the COMMIT the time spent is checked as on the routes:
+    over ASM_TXN_DEADLINE_S, it rolls back (stage=precommit) instead of
+    committing late."""
     t0 = time.monotonic()
     try:
         for attempt in range(1, FORMATION_MAX_ATTEMPTS + 1):
@@ -56675,10 +56692,15 @@ async def _asm_reform_formation(db, lobby_id, trigger):
             qids = (await db.execute(text(
                 "SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
                 {"lid": lobby_id})).scalars().all()
-            await _lock_queue_rows_ordered(db, "ffa_queue", qids)
+
+            async def _rearm():
+                await _asm_begin(db, t0, stage="queue")
+            await _lock_queue_rows_ordered(db, "ffa_queue", qids, before_each=_rearm)
             await ctx.reload()
             await _ffa_assembly_verdict(ctx, trigger)
             if ctx.reform_due is None:
+                if _asm_elapsed_ms(t0) > ASM_TXN_DEADLINE_S * 1000:
+                    raise _AsmDeadline("precommit")
                 await db.commit()
                 ctx.emit()
                 if ctx.refund_flush:
@@ -58261,8 +58283,15 @@ _ASM_RELEASE_LEASE_SQL = (
     "DELETE FROM queue_leases WHERE player_id = :pid AND mode = 'ffa' AND group_id = :lid")
 # How many REFORM hops a release follows from the lobby it names (R2-H1-L1):
 # FORMATION_MAX_ATTEMPTS bounds one trigger's attempts, not a chain, so the
-# chain gets its own small bound.
-_ASM_RELEASE_CARRY_HOPS = 4
+# chain gets its own bound. A REFORM carries only READY and SPAWNING seats,
+# and the verdict decides one only with a PENDING or LEFT seat present
+# (_ffa_assembly_verdict), so L' has fewer seats than L; a REFORM carries at
+# least FFA_MIN_PLAYERS seats (_asm_apply_decision dissolves below that) and
+# no lobby holds more than FFA_MAX_PLAYERS, so one chain has at most
+# FFA_MAX_PLAYERS - FFA_MIN_PLAYERS edges (merge pass 6: the earlier bound of
+# 4 was shorter than a valid chain). A chain still going at the bound is
+# answered 409, never 200 (_asm_release_work).
+_ASM_RELEASE_CARRY_HOPS = FFA_MAX_PLAYERS - FFA_MIN_PLAYERS
 
 
 async def _asm_release_work(ctx, pid, arg) -> dict:
@@ -58295,7 +58324,8 @@ async def _asm_release_work(ctx, pid, arg) -> dict:
     _ASM_RELEASE_CARRY_HOPS): L''s row lock after L's (the REFORM's own order),
     the caller's queue row, then the same marker, queue row and lease
     statements fenced to L'. So a 200 never leaves the player seated in a
-    lobby its own release was racing."""
+    lobby its own release was racing: a chain still carrying the player after
+    _ASM_RELEASE_CARRY_HOPS lobbies answers 409 release_carry_chain."""
     req, held = arg
     me = ctx.seat_of(pid)
     row = (await ctx.db.execute(text(
@@ -58326,6 +58356,14 @@ async def _asm_release_work(ctx, pid, arg) -> dict:
         await _asm_release_row(ctx.db, nxt, pid)
         dropped.append(nxt)
         nxt = nrow["reformed_to"] if seat["verdict"] == "carried" else None
+    if nxt is not None:
+        # Longer than any chain the REFORM rules can form (see the bound): the
+        # player may still sit in nxt, so this answers what happened instead
+        # of 200, and _asm_run rolls this step back (the pre-step's marker and
+        # lease for the URL's lobby stay committed).
+        print(f"[FFA-ASM] lobby {_asm_id8(ctx.lid)} release slot={me['slot']} why={req.why} "
+              f"carry chain longer than {_ASM_RELEASE_CARRY_HOPS} hops at {_asm_id8(nxt)}")
+        raise HTTPException(409, "release_carry_chain")
     ctx.log(f"release slot={me['slot']} why={req.why} lease={held['lease']} "
             f"row={0 if row is None else 1} mark={held['mark']}"
             + (f" carried_dropped={','.join(_asm_id8(x) for x in dropped)}" if dropped else ""))

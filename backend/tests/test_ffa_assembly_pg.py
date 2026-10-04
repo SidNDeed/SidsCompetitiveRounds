@@ -543,6 +543,148 @@ def test_s12g_the_post_commit_reform_runs_under_a_route_deadline(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_s12j_the_post_commit_reform_spends_one_budget_across_queue_rows(monkeypatch):
+    """Merge pass 6, R2-C-L1: _asm_reform_formation locks the lobby's queue
+    rows one statement per row, and the lobby row and those rows wait out ONE
+    remainder of ASM_TXN_DEADLINE_S between them, not one each. Two other
+    transactions hold the first two queue rows (in the lock order) FOR UPDATE,
+    the first for 2.0 s and the second for 6 s. The formation waits the first
+    out, then has about 1 s left for the second: it gives up within
+    ASM_TXN_DEADLINE_S + 0.5 s, prints its deadline line, returns None and
+    writes nothing. Without the re-arm before each row the second wait gets
+    the whole remainder armed before the lobby row (about 2.9 s) and the call
+    ends near 4.9 s. The clock here is the real monotonic clock (shifted far
+    past process start, as Env's frozen one is), because the bound is a time."""
+    import time as _time
+
+    async def body(env):
+        env.mp.setattr(main.time, "monotonic", lambda: _time.monotonic() + 1000000.0)
+        lob = await env.lobby(5, t=40.0)
+        await env.ready_all(lob, [0, 1, 2, 3])
+        order = sorted(lob.pids, key=str)
+        held = [asyncio.Event(), asyncio.Event()]
+
+        async def hold(pid, ev, secs):
+            async with env.sm() as h:
+                await h.execute(main.text("SELECT 1 FROM ffa_queue WHERE player_id = :p FOR UPDATE"),
+                                {"p": pid})
+                ev.set()
+                await asyncio.sleep(secs)
+                await h.rollback()
+        holders = [asyncio.ensure_future(hold(order[0], held[0], 2.0)),
+                   asyncio.ensure_future(hold(order[1], held[1], 6.0))]
+        await asyncio.wait_for(asyncio.gather(held[0].wait(), held[1].wait()), 10)
+
+        async def form():
+            async with env.sm() as db:
+                return await main._asm_reform_formation(db, lob.lid, "leave")
+        started = _time.monotonic()
+        ans = await asyncio.wait_for(env._call(form), 30)
+        elapsed = _time.monotonic() - started
+        await asyncio.wait_for(asyncio.gather(*holders), 10)
+        assert ans.body is None, ("S12j no decision while a queue row is held", ans.body)
+        assert elapsed >= 1.5, ("S12j premise: the first held queue row was waited for", elapsed)
+        assert elapsed < main.ASM_TXN_DEADLINE_S + 0.5, ("S12j one budget across the row waits", elapsed)
+        assert env.asm_lines("reform formation deadline stage="), ("S12j deadline line", env.asm_lines())
+        row = await env.lobby_row(lob)
+        assert row["status"] == "active" and row["reformed_to"] is None, ("S12j nothing written", row)
+    run_env(monkeypatch, body)
+
+
+def test_s12k_the_post_commit_reform_does_not_commit_past_its_deadline(monkeypatch):
+    """Merge pass 6, R2-C-L1: before its COMMIT, _asm_reform_formation checks
+    the time spent as the routes do. Nothing is held; the verdict itself is
+    followed by a wait of ASM_TXN_DEADLINE_S + 0.3 s (no statement runs in
+    it, so no timeout fires). The formation must roll back with its
+    stage=precommit deadline line, return None and write nothing: L is still
+    active and no L' exists. Real monotonic clock, shifted as in S12j."""
+    import time as _time
+
+    async def body(env):
+        env.mp.setattr(main.time, "monotonic", lambda: _time.monotonic() + 1000000.0)
+        lob = await env.lobby(5, t=40.0)
+        await env.ready_all(lob, [0, 1, 2, 3])
+        real_verdict = main._ffa_assembly_verdict
+
+        async def slow_verdict(ctx, trigger):
+            out = await real_verdict(ctx, trigger)
+            await asyncio.sleep(main.ASM_TXN_DEADLINE_S + 0.3)
+            return out
+        env.mp.setattr(main, "_ffa_assembly_verdict", slow_verdict)
+
+        async def form():
+            async with env.sm() as db:
+                return await main._asm_reform_formation(db, lob.lid, "leave")
+        ans = await asyncio.wait_for(env._call(form), 30)
+        env.mp.setattr(main, "_ffa_assembly_verdict", real_verdict)
+        assert ans.body is None, ("S12k no decision committed past the deadline", ans.body)
+        assert env.asm_lines("reform formation deadline stage=precommit"), ("S12k precommit line", env.asm_lines())
+        row = await env.lobby_row(lob)
+        assert row["status"] == "active" and row["reformed_to"] is None, ("S12k nothing written", row)
+    run_env(monkeypatch, body)
+
+
+async def _carried_lob(env, lob):
+    """The lobby a REFORM of `lob` formed, as a Lob (its seats in slot order)."""
+    new = (await env.lobby_row(lob))["reformed_to"]
+    rows = await env.conn.fetch(
+        "SELECT s.slot, s.player_id, p.steam_id FROM ffa_assembly_seats s"
+        "  JOIN players p ON p.id = s.player_id WHERE s.lobby_id = $1 ORDER BY s.slot", new)
+    assert [r["slot"] for r in rows] == list(range(len(rows))), ("carried slots", rows)
+    nl = cf_asm.Lob(new, [r["steam_id"] for r in rows], [r["player_id"] for r in rows],
+                    lob.region, lob.admission, lob.gated)
+    env.lobbies.append(nl)
+    return nl
+
+
+def test_s12i_the_release_follows_every_hop_of_a_valid_chain(monkeypatch):
+    """Merge pass 6, R2-H1-L1: a REFORM chain is as long as the FFA player
+    bounds allow (each REFORM carries fewer seats than its lobby held, never
+    fewer than FFA_MIN_PLAYERS, from at most FFA_MAX_PLAYERS), so the release
+    follows FFA_MAX_PLAYERS - FFA_MIN_PLAYERS hops. Five REFORMs carry seat 0
+    from a lobby of ten to L5; a stale release of L then:
+      - with the bound set to the earlier 4, answers 409 release_carry_chain
+        and leaves the chain as it was (never 200 while the player sits in L5);
+      - with the real bound, answers 200 and the player is released in every
+        lobby of the chain, L5 included, with no queue row and no lease."""
+    async def body(env):
+        assert main._ASM_RELEASE_CARRY_HOPS == main.FFA_MAX_PLAYERS - main.FFA_MIN_PLAYERS, \
+            "S12i the bound is the player bounds' difference"
+        lob = await env.lobby(main.FFA_MAX_PLAYERS, t=40.0)
+        pid = lob.pids[0]
+        chain, cur = [], lob
+        for hop in range(5):
+            a = await _post(env, cur, 0, list(range(cur.n - 1)))
+            assert a["status"] == "reformed", ("S12i premise: hop reformed", hop, a)
+            assert (await env.seat(cur, 0))["verdict"] == "carried", ("S12i premise: carried", hop)
+            cur = await _carried_lob(env, cur)
+            assert cur.pids[0] == pid, ("S12i premise: the player is slot 0 again", hop)
+            await env.at(cur, 40.0)
+            chain.append(cur)
+
+        async def seated():
+            return [(await env.conn.fetchval(
+                "SELECT released_at IS NULL FROM ffa_assembly_seats WHERE lobby_id = $1 AND player_id = $2",
+                lc.lid, pid)) for lc in chain]
+
+        env.mp.setattr(main, "_ASM_RELEASE_CARRY_HOPS", 4)
+        r = await env.release(lob, 0, "fence_expired")
+        assert r.status == 409, ("S12i a chain past the bound is not answered 200", r)
+        assert (await seated()) == [True] * 5, ("S12i the 409 rolled the drops back", await seated())
+        assert env.asm_lines("carry chain longer than 4 hops"), "S12i the 409 is printed"
+        env.mp.setattr(main, "_ASM_RELEASE_CARRY_HOPS", main.FFA_MAX_PLAYERS - main.FFA_MIN_PLAYERS)
+        r = await env.release(lob, 0, "fence_expired")
+        assert r.status == 200, ("S12i the release answered 200", r)
+        assert (await seated()) == [False] * 5, ("S12i released in every lobby of the chain", await seated())
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM ffa_queue WHERE player_id = $1", pid) == 0, "S12i no queue row"
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM queue_leases WHERE player_id = $1", pid) == 0, "S12i no lease"
+        assert env.asm_lines("carried_dropped=" + ",".join(str(lc.lid)[:8] for lc in chain)), \
+            ("S12i the five drops are printed", env.asm_lines("carried_dropped"))
+    run_env(monkeypatch, body)
+
+
 def test_s12e_a_formation_committed_before_discovery_is_left_whole(monkeypatch):
     """H1, second ordering. (i) Seat 1's release pre-step commits and a 2v2
     lobby create for the same player commits before the REFORM's discovery.
