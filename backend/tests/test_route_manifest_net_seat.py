@@ -9,6 +9,7 @@ from hashlib import sha1
 import ast
 import inspect
 import contextlib
+import re
 import sys
 import textwrap
 import json
@@ -63,6 +64,130 @@ API_DIR = (Path(__file__).parents[1] / "api").resolve()
 
 _DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _BINDING_INDEX = {}
+
+# ── Class bodies: the conservative bound (combat fix pass 3, M-9) ─────────
+#
+# A class-body read is charged to the class binding alone only when the walk
+# KNOWS the name is bound there: a top-level statement of a type it models
+# exactly (_CLASS_EXACT) bound it earlier, and no later statement may have
+# touched it. Every other construct that binds or unbinds a name in a class
+# body -- augmented assignment (which reads the name first), an exception
+# alias (unbound again when its handler ends), `del`, a loop or `with`
+# target, a walrus, a match capture, and any node type not listed here --
+# clears that certainty and CHARGES the module-level name as a load. What a
+# statement touches is read generically (`_class_touched`): every name it
+# stores or deletes and every identifier field of every node in it, the
+# identifier fields read from the interpreter's own node signatures, so a
+# node type added by a later Python is charged by default.
+
+# Top-level class-body statements whose binding the walk models exactly.
+_CLASS_EXACT = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Import, ast.ImportFrom,
+                ast.Assign, ast.AnnAssign)
+
+# (node type, identifier or context field) the walk models as binding NOTHING
+# in the class namespace, each with the reason; every entry has a control in
+# _CLASS_FIELD_CONTROLS below. Every other identifier field is charged.
+_CLASS_NOT_BINDING = {
+    ("Attribute", "attr"): "an attribute of an object; the name read is a load",
+    ("Attribute", "ctx"): "a store into an object, not into the class namespace",
+    ("Subscript", "ctx"): "a store into an object, not into the class namespace",
+    ("List", "ctx"): "a container target; each name in it is a Name, charged",
+    ("Tuple", "ctx"): "a container target; each name in it is a Name, charged",
+    ("Starred", "ctx"): "a container target; each name in it is a Name, charged",
+    ("keyword", "arg"): "a call's keyword",
+    ("ImportFrom", "module"): "the source module; the bound names are read from the aliases",
+    ("MatchClass", "kwd_attrs"): "attribute names a class pattern matches",
+    ("arg", "arg"): "a parameter of a nested function or lambda, bound in that scope",
+    ("Global", "names"): "a declaration the walk reads into its declared-global set",
+    ("Nonlocal", "names"): "a declaration the walk reads into its declared-nonlocal set",
+}
+
+
+def _ast_name_fields():
+    """{node type name: (field, ...)} for EVERY node type whose signature the
+    interpreter states (each node class's docstring is its ASDL line): the
+    fields of type `identifier` or `expr_context`, possibly none. A node type
+    missing here has no readable signature."""
+    out = {}
+    for name in dir(ast):
+        cls = getattr(ast, name)
+        if not (isinstance(cls, type) and issubclass(cls, ast.AST)):
+            continue
+        sig = (cls.__doc__ or "").strip().split("\n")[0]
+        m = re.fullmatch(r"(\w+)(?:\((.*)\))?", sig)
+        if not m or m.group(1) != name:
+            continue
+        out[name] = tuple(part.split()[1] for part in (m.group(2) or "").split(",")
+                          if len(part.split()) == 2
+                          and part.split()[0].rstrip("?*") in ("identifier", "expr_context"))
+    return out
+
+
+_AST_NAME_FIELDS = _ast_name_fields()
+
+
+def _class_touched(st):
+    """Every name a class-body statement may bind or unbind in the class
+    namespace, read generically: each Name it stores or deletes, the local
+    names its imports bind, and the value of every identifier field of every
+    node in it, except the fields _CLASS_NOT_BINDING models as binding
+    nothing. A node type the signatures do not describe has every string
+    field read as an identifier. The bodies and parameters of nested
+    functions, lambdas and classes (their own scopes) and comprehension
+    targets are not read; their decorators, defaults, annotations, bases and
+    first iterables are, since the class body evaluates those. An annotation
+    alone (`x: int`) binds nothing and its target is not read."""
+    out, stack = set(), [st]
+    while stack:
+        n = stack.pop()
+        kind = type(n).__name__
+        if isinstance(n, ast.Name):
+            if not isinstance(getattr(n, "ctx", None), ast.Load):
+                out.add(n.id)
+            continue
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            out.update(a.asname or a.name.split(".")[0] for a in getattr(n, "names", ())
+                       if a.name != "*")
+            continue
+        fields = _AST_NAME_FIELDS.get(kind)
+        for field, value in ast.iter_fields(n):
+            if fields is not None and field not in fields:
+                continue
+            if (kind, field) in _CLASS_NOT_BINDING:
+                continue
+            if isinstance(value, str):
+                out.add(value)
+            elif isinstance(value, list):
+                out.update(v for v in value if isinstance(v, str))
+        if isinstance(n, ast.AnnAssign) and getattr(n, "value", None) is None:
+            stack.extend(x for x in (getattr(n, "annotation", None),) if x is not None)
+            target = getattr(n, "target", None)
+            if target is not None and not isinstance(target, ast.Name):
+                stack.append(target)
+            continue
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            args = getattr(n, "args", None)
+            heads = list(getattr(n, "decorator_list", ())) + list(getattr(n, "type_params", ()))
+            if getattr(n, "returns", None) is not None:
+                heads.append(n.returns)
+            if args is not None:
+                heads += list(args.defaults) + [d for d in args.kw_defaults if d is not None]
+                heads += [a.annotation for a in (args.posonlyargs + args.args + args.kwonlyargs
+                                                 + [args.vararg, args.kwarg])
+                          if a is not None and a.annotation is not None]
+            stack.extend(heads)
+            continue
+        if isinstance(n, ast.ClassDef):
+            stack.extend(list(getattr(n, "decorator_list", ())) + list(getattr(n, "bases", ()))
+                         + list(getattr(n, "keywords", ())) + list(getattr(n, "type_params", ())))
+            continue
+        if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            gens = getattr(n, "generators", None)
+            if gens:
+                stack.append(gens[0].iter)
+            continue
+        stack.extend(ast.iter_child_nodes(n))
+    return out
 
 
 def _is_script_guard(node):
@@ -178,6 +303,14 @@ def _index_module(path):
         name the class body never binds resolves as before. Methods, lambdas
         and comprehensions inside the class still skip its names.
 
+        Certainty is CONSERVATIVE (combat fix pass 3, M-9): only a top-level
+        statement of a type in _CLASS_EXACT makes a binding certain. Every
+        name any statement may touch beyond that (`_class_touched`: an
+        augmented assignment's target, an exception alias, a `del`, a loop,
+        `with` or walrus target, a match capture, an identifier of a node
+        type the walk does not model) loses certainty before the statement
+        and is charged as a load there, so its module binding is charged.
+
         Every function-local import target is retained,
         on EVERY branch: `from X import n` charges "X:n" wherever it sits,
         and `a.attr` on a local alias charges "X:attr" for each module the
@@ -198,18 +331,18 @@ def _index_module(path):
             scope.loads.append((name, attr, scope.kind == "class" and name in scope.certain))
 
         def certain_binds(st):
-            """The names an unconditional class-body statement binds once it ran."""
+            """The names a top-level class-body statement of a type the walk
+            models exactly (_CLASS_EXACT) binds once it ran; none for any
+            other statement."""
+            if not isinstance(st, _CLASS_EXACT):
+                return set()
             if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 return {st.name}
             if isinstance(st, (ast.Import, ast.ImportFrom)):
                 return set(import_refs(st))
-            if isinstance(st, ast.Assign):
-                targets = st.targets
-            elif isinstance(st, ast.AugAssign) or (isinstance(st, ast.AnnAssign)
-                                                   and st.value is not None):
-                targets = [st.target]
-            else:
-                return set()
+            if isinstance(st, ast.AnnAssign) and st.value is None:
+                return set()                      # an annotation alone binds nothing
+            targets = getattr(st, "targets", None) or [st.target]
             return {t.id for tg in targets for t in ast.walk(tg)
                     if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store)}
 
@@ -271,8 +404,19 @@ def _index_module(path):
                 bind_name(scope, n.name)
                 inner = Scope(scope, "class")
                 for st in n.body:
+                    # The conservative bound (fix pass 3): every name the
+                    # statement may touch beyond what it is modelled to bind
+                    # exactly loses certainty BEFORE the statement runs and
+                    # is charged as a load, so its module binding is in.
+                    exact = certain_binds(st)
+                    touched = _class_touched(st) - exact
+                    for name in sorted(touched):
+                        inner.certain.discard(name)
+                        bind_name(inner, name)
+                        load(inner, name, None)
                     visit(st, inner)
-                    inner.certain |= certain_binds(st)
+                    inner.certain -= touched
+                    inner.certain |= exact
                 scopes.append(inner)
                 return
             if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
@@ -310,9 +454,7 @@ def _index_module(path):
                 if isinstance(n.ctx, ast.Load) or n.id in scope.declared_global:
                     load(scope, n.id, None)               # a read, or a write to a global
                 else:
-                    bind_name(scope, n.id)
-                    if isinstance(n.ctx, ast.Del):
-                        scope.certain.discard(n.id)       # may be gone from here on
+                    bind_name(scope, n.id)                # a `del` in a class body: charged above
                 return
             if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
                     and isinstance(n.value.ctx, ast.Load):
@@ -2851,10 +2993,12 @@ def test_a_class_body_read_charges_every_binding_it_may_denote(tmp_path):
     bottom: a read before a late class binding (`Late`), beside a
     conditional one (`Cond`) or after a `del` (`Deleted`) may denote the
     module's binding, so the module's `LIMIT` is in that model's closure and
-    an edit to it moves the model's fingerprint text. Controls: a class
-    binding made certain before the read, including after a `del` and a
-    rebind (`Plain`, `Rebound`), charges the module nothing and an edit to
-    the module's `LIMIT` moves nothing; a method, a lambda and a
+    an edit to it moves the model's fingerprint text. Control: a class
+    binding made certain before the read (`Plain`) charges the module
+    nothing and an edit to the module's `LIMIT` moves nothing. Fix pass 3:
+    a `del` CHARGES the module binding where it stands (the conservative
+    class-body bound), so `Rebound` (delete, rebind, read) is charged too,
+    a deliberate over-approximation. A method, a lambda and a
     comprehension inside a class still skip its names (`Method`, `Lam`,
     `Comp`). Inside a function, a read of a name the class binds falls back
     to the module, never the function (`outer_bound`); a name the class
@@ -2862,7 +3006,7 @@ def test_a_class_body_read_charges_every_binding_it_may_denote(tmp_path):
     index = _tmp_index(tmp_path, a=_CLASS_ORDER_SRC)
     moved = _with_segment(index, "a", "LIMIT", "LIMIT = 6\n")
     for model, charged in (("Late", True), ("Cond", True), ("Deleted", True), ("Method", True),
-                           ("Lam", True), ("Comp", True), ("Plain", False), ("Rebound", False)):
+                           ("Lam", True), ("Comp", True), ("Plain", False), ("Rebound", True)):
         reached = set(_walk_bindings([("a", model)], index=index))
         assert (("a", "LIMIT") in reached) is charged, (model, sorted(reached))
         base = _closure_text(index, reached)
@@ -2893,3 +3037,204 @@ def test_the_tip_witness_local_case_is_not_charged_to_the_sqlalchemy_import():
     witness = table["_moderation_case_act"]
     assert "case" in witness[1] and "case" not in witness[2]
     assert "case_id" not in witness[2]                     # a parameter is local too
+
+
+# ── Combat fix pass 3, M-9: the conservative class-body bound ────────────
+
+_CLASS_BOUND_SRC = (
+    "from pydantic import BaseModel\n"
+    "LIMIT = 5\n"
+    "class NS:\n"
+    "    pass\n"
+    "ns = NS()\n"
+    "table = {}\n"
+    "def f(**kw):\n"
+    "    return kw\n"
+    "class AugOnly(BaseModel):\n"
+    "    LIMIT += 1\n"
+    "class Aug(BaseModel):\n"
+    "    LIMIT += 1\n"
+    "    n: int = LIMIT\n"
+    "class Exc(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    try:\n"
+    "        raise ValueError\n"
+    "    except ValueError as LIMIT:\n"
+    "        pass\n"
+    "    n: int = LIMIT\n"
+    "class ExcFinally(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    try:\n"
+    "        raise ValueError\n"
+    "    except ValueError as LIMIT:\n"
+    "        pass\n"
+    "    finally:\n"
+    "        m = LIMIT\n"
+    "class Capture(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    match 0:\n"
+    "        case LIMIT:\n"
+    "            pass\n"
+    "    n: int = LIMIT\n"
+    "class Loop(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    for LIMIT in (1,):\n"
+    "        pass\n"
+    "    n: int = LIMIT\n"
+    "class Walrus(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    x = (LIMIT := 3)\n"
+    "    n: int = LIMIT\n"
+    "class AttrStore(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    ns.LIMIT = 1\n"
+    "    n: int = LIMIT\n"
+    "class SubStore(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    table['LIMIT'] = 1\n"
+    "    n: int = LIMIT\n"
+    "class Unpack(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    [a, *b] = (1, 2)\n"
+    "    c, d = 3, 4\n"
+    "    n: int = LIMIT\n"
+    "class Keyword(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    x = f(LIMIT=1)\n"
+    "    n: int = LIMIT\n"
+    "class Pattern(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    match 0:\n"
+    "        case NS(LIMIT=1):\n"
+    "            pass\n"
+    "    n: int = LIMIT\n"
+    "class Param(BaseModel):\n"
+    "    LIMIT = 9\n"
+    "    def method(self, LIMIT=LIMIT):\n"
+    "        return LIMIT\n"
+    "    n: int = LIMIT\n"
+    "class Glob(BaseModel):\n"
+    "    global LIMIT\n"
+    "    n: int = LIMIT\n"
+    "def outer_nonlocal():\n"
+    "    LIMIT = 7\n"
+    "    class NonLocal(BaseModel):\n"
+    "        nonlocal LIMIT\n"
+    "        n: int = LIMIT\n"
+    "    return NonLocal\n")
+
+# Walker-only rows (the interpreter cannot import a module named LIMIT).
+_CLASS_WALK_ONLY_SRC = (
+    "LIMIT = 5\n"
+    "class FromModule:\n"
+    "    LIMIT = 9\n"
+    "    from LIMIT import thing\n"
+    "    n = LIMIT\n")
+
+# Each identifier or context field the walk models as binding nothing, with
+# the binding that controls it: (source, model, module LIMIT charged?).
+_CLASS_FIELD_CONTROLS = {
+    ("Attribute", "attr"): ("bound", "AttrStore", False),
+    ("Attribute", "ctx"): ("bound", "AttrStore", False),
+    ("Subscript", "ctx"): ("bound", "SubStore", False),
+    ("List", "ctx"): ("bound", "Unpack", False),
+    ("Tuple", "ctx"): ("bound", "Unpack", False),
+    ("Starred", "ctx"): ("bound", "Unpack", False),
+    ("keyword", "arg"): ("bound", "Keyword", False),
+    ("ImportFrom", "module"): ("walk", "FromModule", False),
+    ("MatchClass", "kwd_attrs"): ("bound", "Pattern", False),
+    ("arg", "arg"): ("bound", "Param", False),
+    ("Global", "names"): ("bound", "Glob", True),               # the declared global: the module's
+    ("Nonlocal", "names"): ("bound", "outer_nonlocal", False),  # the function's own
+}
+
+# The charged constructs, read through the same response-model check: the
+# reviewer's two scenarios (an augmented assignment, with and without a later
+# read; a read after an exception alias, after the statement and inside it)
+# and a match capture, a loop target and a walrus.
+_CLASS_CHARGED_ROWS = (("AugOnly", True), ("Aug", True), ("Exc", True), ("ExcFinally", True),
+                       ("Capture", True), ("Loop", True), ("Walrus", True))
+
+
+def test_every_ast_name_field_is_modelled_with_a_control_or_charged():
+    """Combat fix pass 3, M-9. The node types that can bind or unbind a name
+    are ENUMERATED from the interpreter (every node signature with an
+    `identifier` or `expr_context` field); each (type, field) is either
+    modelled as binding nothing, with a control row, or charged: a node of
+    that type carrying the identifier is touched by `_class_touched`, which
+    the walk charges. A node type the signatures do not describe is charged
+    on every string field (the default for a future construct); a described
+    non-identifier string (a constant) is not."""
+    generated = {(kind, field) for kind, fields in _AST_NAME_FIELDS.items() for field in fields}
+    known = {("Name", "id"), ("Name", "ctx"), ("ExceptHandler", "name"), ("MatchAs", "name"),
+             ("MatchStar", "name"), ("MatchMapping", "rest"), ("FunctionDef", "name"),
+             ("ClassDef", "name"), ("alias", "name"), ("alias", "asname")}
+    assert known <= generated, sorted(known - generated)        # the signatures were read
+    assert set(_CLASS_NOT_BINDING) <= generated, sorted(set(_CLASS_NOT_BINDING) - generated)
+    assert set(_CLASS_NOT_BINDING) == set(_CLASS_FIELD_CONTROLS)
+    charged = sorted(generated - set(_CLASS_NOT_BINDING))
+    assert charged, "nothing charged"
+    for kind, field in charged:
+        node = getattr(ast, kind)()
+        if field == "ctx":
+            for ctx in (ast.Store(), ast.Del()):
+                node.id, node.ctx = "PROBE", ctx
+                assert "PROBE" in _class_touched(node), (kind, field, ctx)
+            node.ctx = ast.Load()
+            assert "PROBE" not in _class_touched(node)                  # a read binds nothing
+            continue
+        setattr(node, field, "PROBE")
+        if kind == "Name":
+            node.ctx = ast.Store()
+        assert "PROBE" in _class_touched(node), (kind, field)
+    for kind, field in _CLASS_NOT_BINDING:
+        if field != "ctx":
+            node = getattr(ast, kind)()
+            setattr(node, field, "PROBE")
+            assert "PROBE" not in _class_touched(node), (kind, field)
+
+    class FutureBinder(ast.stmt):
+        _fields = ("label",)
+    assert "FutureBinder" not in _AST_NAME_FIELDS
+    assert _class_touched(FutureBinder(label="PROBE")) == {"PROBE"}
+    assert _class_touched(ast.Constant(value="PROBE")) == set()         # described, no identifier
+
+
+@pytest.mark.parametrize("model, charged", list(_CLASS_CHARGED_ROWS)
+                         + [(row[1], row[2]) for row in _CLASS_FIELD_CONTROLS.values()])
+def test_a_class_body_construct_charges_the_module_binding_unless_modelled(tmp_path, model,
+                                                                           charged):
+    """Combat fix pass 3, M-9, response-model controls. Each model binds
+    `LIMIT` in its body and then runs one construct: the charged constructs
+    put the module's `LIMIT` in the model's closure, and an edit to it moves
+    the model's fingerprint text; the constructs modelled as binding nothing
+    leave a certain class binding certain, and the edit moves nothing (a
+    declared global reads the module's, a declared nonlocal the function's)."""
+    walk_only = any(row[1] == model and row[0] == "walk" for row in _CLASS_FIELD_CONTROLS.values())
+    index = _tmp_index(tmp_path, a=_CLASS_WALK_ONLY_SRC if walk_only else _CLASS_BOUND_SRC)
+    assert ("LIMIT" in index["a"][model][2]) is charged, (model, sorted(index["a"][model][2]))
+    reached = set(_walk_bindings([("a", model)], index=index))
+    assert (("a", "LIMIT") in reached) is charged, (model, sorted(reached))
+    moved = _with_segment(index, "a", "LIMIT", "LIMIT = 6\n")
+    after = _closure_text(moved, set(_walk_bindings([("a", model)], index=moved)))
+    assert (after != _closure_text(index, reached)) is charged, model
+
+
+def test_the_class_bound_rows_are_what_the_interpreter_does():
+    """The same source run: the charged rows read the module's `LIMIT` (5)
+    where the reviewer's scenarios say they do, and an edit to it changes
+    the value; the modelled rows read the class's (9)."""
+    def run(src):
+        ns = {}
+        exec(compile(src.replace("from pydantic import BaseModel\n", "BaseModel = object\n"),
+                     "a", "exec"), ns)
+        return ns
+    ns = run(_CLASS_BOUND_SRC)
+    assert ns["AugOnly"].LIMIT == 6 and ns["Aug"].n == 6
+    assert ns["Exc"].n == 5 and ns["ExcFinally"].m == 5
+    assert ns["Capture"].n == 0 and ns["Loop"].n == 1 and ns["Walrus"].n == 3
+    for model in ("AttrStore", "SubStore", "Unpack", "Keyword", "Pattern", "Param"):
+        assert ns[model].n == 9, model
+    assert ns["Glob"].n == 5 and ns["outer_nonlocal"]().n == 7
+    edited = run(_CLASS_BOUND_SRC.replace("LIMIT = 5\n", "LIMIT = 6\n", 1))
+    assert edited["AugOnly"].LIMIT == 7 and edited["Exc"].n == 6 and edited["ExcFinally"].m == 6
