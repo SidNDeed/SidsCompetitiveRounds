@@ -1291,6 +1291,21 @@ def test_the_helper_closure_stays_affordable():
     # convention of every entry above; the median and worst bounds stay (76
     # against 90, 459 against 460).
     #
+    # Title ladders (board row 29), rebuilt on main 5062f4c4 (2026-10-01),
+    # the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   main 5062f4c4                         387   76 / 178 / 461
+    #   lane (title ladders on 5062f4c4)      387   76 / 182 / 466
+    #
+    # The 39th route from the top is POST /api/v1/pc/portrait at 182 on both
+    # trees; POST /api/v1/tournaments/{tournament_id}/unsignup moves 178 ->
+    # 182 above it, gaining the catalogue bindings (LADDERS, LINES,
+    # rungs_at_tier, threshold) the ladder module's per-tier helpers read.
+    # The rated-game routes gain the per-game evaluator they run, and the
+    # 2v2 settlement routes lose the hook (the settlement plays no game).
+    # Inside the bound of 185 by 3, so the bound stays.
+    #
     # Discord card render parity (2026-10-01): 76 / 171 / 461 over the 383
     # routes of main 0e75199, 76 / 177 / 490 over the lane tip. A rank
     # effect again: two routes that sat at or below main's p90 crossed it --

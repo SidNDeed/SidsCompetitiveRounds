@@ -945,13 +945,15 @@ class HealthResponse(BaseModel):
     # (#441: the value a broken feature reports must not look like success).
     # Absent on any build before this batch, which is how the old build reads.
     pc_card_themes: str | None = None
-    # ladder_hook: how many of the four rated completion paths credit the worn
-    # title ladder in this build (main._LADDER_HOOK; 4 = submit_match,
-    # submit_team_match, _complete_team_series_with_ratings and
-    # submit_ffa_match each call title_ladders.record_completed_games, v1.41.0
-    # item 12). DERIVED from those four functions' compiled code when main is
-    # imported, never written down, so a build that lost a site's call reads
-    # less than 4 (#342). The release train's build discriminator for the
+    # ladder_hook: how many of the ranked game-reporting paths credit the worn
+    # title ladder in this build (main._LADDER_HOOK). 3 since the title ladders
+    # build (board row 29): submit_match, submit_team_match and
+    # submit_ffa_match each call title_ladders.record_completed_games once per
+    # game; it read 4 on the series-unit build (v1.41.0 item 12), whose fourth
+    # site, _complete_team_series_with_ratings, plays no game. DERIVED from
+    # those functions' compiled code when main is imported, never written
+    # down, so a build that lost a site's call reads less (#342). The release
+    # train's build discriminator for the
     # ladder-hook batch, which adds no route and no key to a GET answer both
     # builds serve; equal on both boxes by construction, and read by nothing
     # else (#306). Declared without a default, so building the answer without
@@ -1000,6 +1002,15 @@ class HealthResponse(BaseModel):
     # without it raises instead of silently leaving the key out. Absent on
     # any build before that batch, which is how the old build reads.
     pc_motion: int
+    # title_ladders: how many ladders the catalogue this build serves holds
+    # (main._title_ladders_health_word -> title_ladders.LADDERS): 32 on the
+    # five-tier build (board row 29). DERIVED on every request from the list
+    # the read route and the hook read, never written down (#342). The build
+    # discriminator for the title ladders batch, which adds no route; equal on
+    # both boxes by construction and read by nothing else (#306). Declared
+    # without a default, so building the answer without it raises instead of
+    # silently leaving the key out. Absent on any build before that batch.
+    title_ladders: int
     # janitor_selftest: the verdict of this api process's boot janitor SQL
     # self-test (main._janitor_selftest_marker; 1 = it ran and every statement
     # passed, 0 = it ran and did not pass, 2 = skipped on the read replica,

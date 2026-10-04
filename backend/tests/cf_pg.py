@@ -4,9 +4,12 @@ per case, built as the ladder suite builds its own.
 The build (test_title_ladder_hooks_live._build, reused step for step): the
 DDL of every numbered migration is replayed, the ORM makes the tables no
 migration makes, the mapped tables are widened, and the DDL is replayed again;
-then 331 runs whole. Two differences, both on purpose:
+then the held-out migrations run whole, in this order: 331, then
+365_title_ladders_five_tiers.sql (it rewrites 331's tables, so a replay
+cannot run it before 331 exists; the ladder suite runs it the same way),
+then 355. Two differences, both on purpose:
 
-  - 355_ffa_assembly.sql is held out of both replays and run WHOLE at the end,
+  - 355_ffa_assembly.sql is held out of both replays and run WHOLE last,
     inside its own BEGIN/COMMIT, so every case runs the migration this lane
     ships as its FIRST apply. A case that builds with with_355=False applies
     it itself (the migration's own dry run and re-run).
@@ -53,7 +56,12 @@ OPTOUT = os.environ.get(OPTOUT_VAR) == "1"
 SQL_DIR = os.path.normpath(os.path.join(HERE, "..", "sql"))
 M331 = lh.MIGRATION
 M355 = os.path.join(SQL_DIR, "355_ffa_assembly.sql")
-HELD_OUT = frozenset({os.path.basename(M331), os.path.basename(M355)})
+# 365 (the five-tier ladder catalogue) rewrites 331's tables, so it is held
+# out with 331 and run whole right after it, as the ladder suite does: a
+# statement-by-statement replay cannot run it before 331 exists.
+M365 = lh.MIGRATION_365
+HELD_OUT = frozenset({os.path.basename(M331), os.path.basename(M355),
+                      os.path.basename(M365)})
 
 
 def require_live_pg():
@@ -114,8 +122,8 @@ async def _replay_refused(conn, statements):
 
 
 async def build(case, *, with_355=True, dsn=None, faithful=False):
-    """Into case.schema, on case.conn: replay, ORM, widen, replay, 331, and
-    355 when asked. Not sealed: the caller seals after its own DDL.
+    """Into case.schema, on case.conn: replay, ORM, widen, replay, 331, 365,
+    and 355 when asked. Not sealed: the caller seals after its own DDL.
 
     faithful=True replays every statement ONCE where it can run: the second
     pass re-runs only the statements the first pass refused (the ones that
@@ -147,6 +155,7 @@ async def build(case, *, with_355=True, dsn=None, faithful=False):
             "the second DDL pass failed on statements outside REPLAY_KNOWN: %r"
             % unexpected[:5])
     await conn.execute(io.open(M331, encoding="utf-8").read())
+    await conn.execute(io.open(M365, encoding="utf-8").read())
     if with_355:
         await apply_355(conn)
 

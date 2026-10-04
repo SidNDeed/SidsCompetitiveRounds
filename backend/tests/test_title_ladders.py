@@ -1,11 +1,14 @@
-"""Animal title ladders — the catalogue, the rules, and the migration, executed.
+"""Title ladders — the catalogue, the rules, and the migrations, executed.
 
 Three things this file is here to stop:
 
-  * the module and migration 331 drifting apart. 331 is GENERATED from
-    ``title_ladders.LADDERS``; ``test_migration_rows_match_module`` re-derives
-    every row from the module and compares, so a hand-edit of either side is a
-    test failure rather than a table that disagrees with the API reading it.
+  * the module and its migration drifting apart. Migration 331 created the
+    tables and the first animal catalogue; 365 (the five-tier catalogue) is
+    GENERATED from ``title_ladders.LADDERS``, and
+    ``test_migration_rows_match_module`` re-derives every one of its rows
+    from the module and compares, so a hand-edit of either side is a test
+    failure rather than a table that disagrees with the API reading it. The
+    structural tests of 331 itself still read 331.
   * a rung tier going quietly wrong at a boundary. Every threshold is probed
     at threshold-1 and at threshold, and the boundary test carries a mutation
     control so it cannot pass vacuously.
@@ -14,16 +17,17 @@ Three things this file is here to stop:
     ``/shop/items`` appends and what the purchase path refuses, the rungs
     become invisible to their owners and buyable by anyone — #151, exactly.
 
-It also carries the per-MODE hook-coverage check: all four completion sites
-carry the hook, exactly one awaited call inside each — never "one call per
-function" as a global rule, which is the check that passes while a whole mode
-goes unhooked — and each call passes the reference EXPECTED_REFERENCE names:
-the series id, or for FFA the lobby id, since one lobby is one sitting. 1v2
-is the fifth symbol and is asserted the other way round: it must exist and
-must NOT be hooked, because it reports unrated. Beside it, two whole-file
-checks: main.py names the hook exactly four times, one awaited call in each
-of the four functions -- so no fifth call, ffa_queue_leave's close above all,
-can sit outside the spans the per-mode check reads -- and no module but
+It also carries the per-MODE hook-coverage check: all three ranked
+game-reporting sites carry the hook, exactly one awaited call inside each —
+never "one call per function" as a global rule, which is the check that
+passes while a whole mode goes unhooked — and each call passes the reference
+EXPECTED_REFERENCE names: the GAME's own id (board row 29: ladders count
+games, not series). 1v2 and the after-the-fact 2v2 settlement are asserted
+the other way round: each must exist and must NOT be hooked -- 1v2 reports
+unrated, and the settlement plays no game. Beside it, two whole-file checks:
+main.py names the hook exactly three times, one awaited call in each of the
+three functions -- so no fourth call, ffa_queue_leave's close above all, can
+sit outside the spans the per-mode check reads -- and no module but
 title_ladders.py carries SQL that writes the two ladder tables.
 """
 
@@ -47,41 +51,40 @@ import main  # noqa: E402  (late-imported by the hook; patched in the behavioura
 API_DIR = os.path.abspath(os.path.join(HERE, "..", "api"))
 SQL_DIR = os.path.abspath(os.path.join(HERE, "..", "sql"))
 MIGRATION = os.path.join(SQL_DIR, "331_animal_title_ladders.sql")
+MIGRATION_365 = os.path.join(SQL_DIR, "365_title_ladders_five_tiers.sql")
 MAIN_PY = os.path.join(API_DIR, "main.py")
 MODULE_PY = os.path.join(API_DIR, "title_ladders.py")
 
-# The completion sites, re-derived by SYMBOL. 2v2 has TWO: the ordinary report
-# and the forfeit/disconnect settlement that runs after the fact.
+# The ranked game-reporting sites, re-derived by SYMBOL: one per mode.
 COMPLETION_SITES = {
     "1v1": "submit_match",
     "2v2": "submit_team_match",
-    "2v2-settled": "_complete_team_series_with_ratings",
     "ffa": "submit_ffa_match",
 }
 
-# 1v2 is a completion site that must NOT be hooked, and it is kept here rather
-# than deleted for that reason. A mode dropped from the dict above is
-# indistinguishable from a mode nobody got round to, which is precisely the
-# failure the coverage check exists to catch — so the exclusion is written
-# down and asserted in both directions: the symbol must still exist, and it
-# must carry no hook. See test_ovt_is_excluded_while_it_reports_unrated.
+# Sites that must NOT be hooked, kept here rather than deleted for that
+# reason. A mode dropped from the dict above is indistinguishable from a mode
+# nobody got round to, which is precisely the failure the coverage check
+# exists to catch -- so each exclusion is written down and asserted in both
+# directions: the symbol must still exist, and it must carry no hook. 1v2
+# reports unrated (test_ovt_is_excluded_while_it_reports_unrated). The 2v2
+# settlement completes a series after the fact and plays no game; it was a
+# site while ladders counted series.
 EXCLUDED_SITES = {
     "ovt": "submit_ovt_match",
+    "2v2-settled": "_complete_team_series_with_ratings",
 }
 HOOK = "record_completed_games"
 
-# The reference each site's call passes, as ast.unparse renders it (design V3
-# section 12.3). The credit key is (player_id, reference_id), so this IS the
-# unit of credit: the series at 1v1 and at both 2v2 paths -- the same string
-# at both, so the key collapses them -- and for FFA the LOBBY, because one
-# lobby is one sitting however many games it plays (main.py's ffa_lobbies
-# model). str(match_id) there would be a per-game key: a two-game rated lobby
-# would credit twice.
+# The reference each site's call passes, as ast.unparse renders it. The
+# credit key is (player_id, reference_id), so this IS the unit of credit: the
+# GAME's own row id at every mode (board row 29). A series id there would make
+# a two-game series credit once; a lobby id would make a two-game FFA sitting
+# credit once.
 EXPECTED_REFERENCE = {
-    "1v1": "str(series.id)",
-    "2v2": "str(series_uuid)",
-    "2v2-settled": "str(series_uuid)",
-    "ffa": "str(lobby_uuid)",
+    "1v1": "str(match.id)",
+    "2v2": "str(new_match.id)",
+    "ffa": "str(match_id)",
 }
 
 
@@ -92,28 +95,34 @@ def _read(path):
 
 # ── The catalogue ──────────────────────────────────────────────────
 
-def test_eight_lines_with_unique_skus():
-    assert len(tl.LADDERS) == 8
-    assert len({ld["line"] for ld in tl.LADDERS}) == 8
+def test_thirty_two_ladders_with_unique_skus():
+    assert len(tl.LADDERS) == 32 == tl.ladder_count()
+    assert len({ld["line"] for ld in tl.LADDERS}) == 32
     skus = [r["sku"] for r in tl.ALL_RUNGS]
     assert len(skus) == len(set(skus)), "duplicate ladder sku"
-    assert len(skus) == 48
-    for sku in skus:
-        assert sku.startswith("title_ladder_"), sku
-        assert len(sku) <= 64, sku   # shop_items.sku is VARCHAR(64)
+    assert len(skus) == 160
+    for r in tl.ALL_RUNGS:
+        assert r["existing"] or r["sku"].startswith("title_ladder_"), r["sku"]
+        assert r["sku"].startswith("title_"), r["sku"]
+        assert len(r["sku"]) <= 64, r["sku"]   # shop_items.sku is VARCHAR(64)
 
 
-def test_ladder_skus_do_not_collide_with_any_existing_title():
-    """A rung must not re-use a sku another migration already owns: the
-    INSERT is ON CONFLICT DO NOTHING, so a collision would silently leave the
-    OTHER item's name and price wearing a ladder's identity."""
+def test_a_reused_sku_is_exactly_one_marked_existing():
+    """A rung re-uses a sku another migration already owns ONLY where the
+    catalogue says so (the existing shop title becomes that rung, its
+    owners with it). 365's INSERT is ON CONFLICT DO UPDATE, so an unmarked
+    collision would silently rename some other item into a ladder."""
     existing = set()
     for name in sorted(os.listdir(SQL_DIR)):
-        if not name.endswith(".sql") or name.startswith("331_"):
+        if not name.endswith(".sql") or name[:4] in ("331_", "365_", "366_"):
             continue
         existing.update(re.findall(r"'(title_[a-z0-9_]+)'", _read(os.path.join(SQL_DIR, name))))
     clash = existing.intersection(r["sku"] for r in tl.ALL_RUNGS)
-    assert not clash, f"ladder skus already used elsewhere: {sorted(clash)}"
+    marked = {r["sku"] for r in tl.ALL_RUNGS if r["existing"]}
+    assert clash == marked, (
+        "reused but not marked existing: %s; marked existing but defined "
+        "nowhere else: %s" % (sorted(clash - marked), sorted(marked - clash)))
+    assert not tl.RETIRED_SKUS & set(tl.ALL_SKUS), "a retired title is a ladder rung"
 
 
 def test_tiers_are_contiguous_from_one():
@@ -123,14 +132,15 @@ def test_tiers_are_contiguous_from_one():
         assert tl.max_tier(ld["line"]) == tiers[-1]
 
 
-def test_rat_is_the_one_line_with_two_rungs_on_a_tier():
-    """Rat 4 is King AND Queen; nothing else shares a tier. Every consumer
-    reads a tier as a list because of this one case, so if it ever stops
-    being true the list handling stops being exercised."""
-    pairs = {(r["line"], r["tier"]) for r in tl.ALL_RUNGS
-             if len(tl.rungs_at_tier(r["line"], r["tier"])) > 1}
-    assert pairs == {("rat", 4)}
-    assert [r["name"] for r in tl.rungs_at_tier("rat", 4)] == ["Rat King", "Rat Queen"]
+def test_every_ladder_is_five_tiers_of_one_rung():
+    """Five tiers, one rung each (board row 29). Rat's King/Queen pair at
+    tier 4 is gone; consumers still read a tier as a list, which a single
+    rung satisfies."""
+    for ld in tl.LADDERS:
+        assert [r["tier"] for r in ld["rungs"]] == [1, 2, 3, 4, 5], ld["line"]
+        for t in tl.TIERS:
+            assert len(tl.rungs_at_tier(ld["line"], t)) == 1, (ld["line"], t)
+    assert [r["name"] for r in tl.rungs_at_tier("rat", 4)] == ["Rat Lord"]
 
 
 def test_thresholds_start_at_zero_and_strictly_increase():
@@ -157,11 +167,15 @@ def test_entry_rung_is_in_the_ordinary_pool_and_the_rest_are_granted_only():
     for r in tl.ALL_RUNGS:
         if r["tier"] == 1:
             assert r["rotation_pool"] is None, r["sku"]
-            assert r["price"] == tl.ENTRY_PRICE, r["sku"]
+            if r["existing"]:
+                # An existing title keeps the price it was sold at.
+                assert r["price"] > 0, r["sku"]
+            else:
+                assert r["price"] == tl.ENTRY_PRICE, r["sku"]
         else:
             assert r["rotation_pool"] == tl.HIDDEN_POOL, r["sku"]
             assert r["price"] == 0, r["sku"]
-    assert len(tl.ENTRY_SKUS) == 8
+    assert len(tl.ENTRY_SKUS) == 32
 
 
 def test_rarity_and_colour_are_populated_and_known():
@@ -204,16 +218,19 @@ def test_tier_for_games_boundary_has_a_mutation_control():
     assert tl.tier_for_games(line, original) == tier
 
 
-def test_next_rung_is_none_at_the_top_and_names_the_pair():
-    assert tl.next_rung("rat", 3)["names"] == ["Rat King", "Rat Queen"]
+def test_next_rung_is_none_at_the_top_and_names_the_next():
+    assert tl.next_rung("rat", 3)["names"] == ["Rat Lord"]
     assert tl.next_rung("rat", 3)["tier"] == 4
     assert tl.next_rung("rat", tl.max_tier("rat")) is None
     assert tl.next_rung("cat", tl.max_tier("cat")) is None
-    assert tl.next_rung("cat", 1)["threshold"] == 10
+    assert tl.next_rung("cat", 1)["threshold"] == 15
 
 
 def test_line_of_sku_only_answers_for_rungs():
-    assert tl.line_of_sku("title_ladder_shark_6") == "shark"
+    assert tl.line_of_sku("title_ladder_shark_5") == "shark"
+    assert tl.line_of_sku("title_ladder_shark_6") is None   # dropped by 365
+    assert tl.line_of_sku("title_tracker") == "tracker"     # an existing title, now a rung
+    assert tl.line_of_sku("title_regicide") is None         # retired by 366
     assert tl.line_of_sku("title_grandmaster") is None
     assert tl.line_of_sku(None) is None
     assert tl.line_of_sku("") is None
@@ -269,26 +286,20 @@ def _sql_tuples(sql, header):
 
 
 def test_migration_rows_match_module():
-    sql = _read(MIGRATION)
+    sql = _read(MIGRATION_365)
     items = _sql_tuples(
         sql,
         "INSERT INTO shop_items (sku, kind, name, description, price, rarity, "
         "rotation_pool, catalog_ready, preview_color) VALUES")
     ladders = _sql_tuples(sql, "INSERT INTO title_ladders (sku, line, tier, threshold) VALUES")
 
-    # catalog_ready is FALSE for exactly the rungs the public shop would
-    # list, i.e. the ones with no rotation_pool. shop_items.catalog_ready is
-    # NOT NULL DEFAULT TRUE (147:26, confirmed against the live schema) and the
-    # BEFORE INSERT gate that forces FALSE only fires for kind='face'
-    # (148:353), so without the explicit column these eight 1000-gold entry
-    # rungs go on sale the moment the migration is applied -- for a ladder
-    # that cannot advance until the progression hook is wired. Migrations are
-    # pre-authorized independently of code SHAs, so this is pinned here rather
-    # than left to the migration's header prose.
+    # catalog_ready is TRUE for every rung in 365: the hook is per game and
+    # wired, so tier 1 goes on sale (board row 29) and the hidden-pool rungs
+    # stay reachable to their owners. 331 landed the entry rungs FALSE while
+    # the hook was unwired; 365 is the release that opens them.
     want_items = [[r["sku"], "title", r["name"], r["description"], str(r["price"]),
                    r["rarity"], "NULL" if r["rotation_pool"] is None else r["rotation_pool"],
-                   "FALSE" if r["rotation_pool"] is None else "TRUE",
-                   r["preview_color"]] for r in tl.ALL_RUNGS]
+                   "TRUE", r["preview_color"]] for r in tl.ALL_RUNGS]
     want_ladders = [[r["sku"], r["line"], str(r["tier"]), str(r["threshold"])]
                     for r in tl.ALL_RUNGS]
 
@@ -304,7 +315,7 @@ def test_migration_row_comparison_is_not_vacuous():
     just the sku: the sku alone occurs FIRST in the shop_items block, and
     mutating that one left this control passing against an unchanged ladders
     list -- the control caught its own weak mutation on the first run."""
-    sql = _read(MIGRATION)
+    sql = _read(MIGRATION_365)
     mutated = sql.replace("('title_ladder_rat_1', 'rat', 1, 0)",
                           "('title_ladder_rat_1', 'rat', 2, 0)", 1)
     assert mutated != sql, "the mutation target has moved; this control is inert"
@@ -435,8 +446,11 @@ def test_the_readiness_guard_is_not_vacuous():
 def test_migration_number_is_free():
     """331 is this item's reserved number and must not already be taken by a
     file another session wrote tonight."""
-    same = [n for n in os.listdir(SQL_DIR) if n.startswith("331_")]
-    assert same == ["331_animal_title_ladders.sql"], same
+    for prefix, name in (("331_", "331_animal_title_ladders.sql"),
+                         ("365_", "365_title_ladders_five_tiers.sql"),
+                         ("366_", "366_title_refunds_voidshot_kingslayer.sql")):
+        same = [n for n in os.listdir(SQL_DIR) if n.startswith(prefix)]
+        assert same == [name], same
 
 
 def test_progress_is_a_delta_never_an_absolute_write():
@@ -450,13 +464,18 @@ def test_progress_is_a_delta_never_an_absolute_write():
     value and the write that stores it.
     """
     src = _read(MODULE_PY)
-    writes = re.findall(r"SET\s+games\s*=\s*([^,\r\n]+)", src)
-    assert writes, "nothing writes the games counter any more"
+    # Two shapes are a delta off the stored value: `games + :d`, and the Apex
+    # best run's `GREATEST(stored games, stored run + 1)` -- a maximum over
+    # the stored value, which can only hold or raise it.
+    writes = re.findall(r'(?:SET\s+|^\s*"\s*)games\s*=\s*([^\r\n]+)', src, re.M)
+    assert len(writes) == 2, writes
     for rhs in writes:
-        assert re.match(r"title_ladder_progress\.games\s*\+\s*1\b", rhs.strip()), (
+        rhs = rhs.strip().rstrip('"').strip()
+        assert (re.match(r"title_ladder_progress\.games\s*\+\s*CAST\(:d AS integer\)", rhs)
+                or re.match(r"GREATEST\(title_ladder_progress\.games,\s*$", rhs)), (
             "absolute write to the games counter: SET games = %r. Every "
             "mutation of a counter is a delta off the stored value (#326)."
-            % rhs.strip())
+            % rhs)
 
 
 # ── The contract with main.py ──────────────────────────────────────
@@ -561,14 +580,15 @@ def test_every_completion_symbol_exists():
 
 
 def test_hook_coverage_is_per_mode_once_anything_is_wired():
-    """Every rated completion path credits the ladder, exactly once.
+    """Every ranked game-reporting path credits the ladder, exactly once.
 
     The check that must never be written is "exactly one call per function":
-    it passes with 2v2's forfeit path unhooked, because that path is a
-    DIFFERENT function. The check here is all FOUR spans carry the hook, and
-    each span carries it exactly once — plus the excluded 1v2 span carrying
-    none, since an unrated mode crediting a rated-only ladder is the same
-    class of defect pointing the other way."""
+    it passes with a whole mode unhooked, because that mode is a DIFFERENT
+    function. The check here is all THREE spans carry the hook, and each span
+    carries it exactly once — plus the excluded spans carrying none: an
+    unrated mode crediting a ranked-only ladder, or a settlement that plays no
+    game crediting a per-game one, is the same class of defect pointing the
+    other way."""
     src = _read(MAIN_PY)
     # This used to skip while the hooks were unwired. They are wired, so a
     # main.py that no longer names the hook is a regression, not a state to
@@ -598,19 +618,20 @@ def test_hook_coverage_is_per_mode_once_anything_is_wired():
     assert not incomplete, (
         f"the ladder credit is missing mode= or reference_id= at: {incomplete}. "
         f"reference_id is the dedupe key: without it the PRIMARY KEY on "
-        f"title_ladder_credits cannot collapse the two 2v2 completion paths "
-        f"and one series credits twice.")
+        f"title_ladder_credits cannot refuse a re-reported game and one game "
+        f"credits twice.")
     mismatched = reference_mismatches(counts)
     assert not mismatched, "\n".join(mismatched)
 
     wrongly_hooked = [f"{mode}:{fn}" for mode, fn in EXCLUDED_SITES.items()
                       if hook_calls_in("\n".join(_function_span(lines, fn)))]
     assert not wrongly_hooked, (
-        f"an EXCLUDED completion site credits the ladder: {wrongly_hooked}. "
-        f"1v2 reports is_ranked=false, so crediting it contradicts the "
-        f"rated-only contract in title_ladders' docstring. If 1v2 is now "
-        f"meant to count, that is a design decision: move it into "
-        f"COMPLETION_SITES and say so in the module docstring.")
+        f"an EXCLUDED site credits the ladder: {wrongly_hooked}. 1v2 reports "
+        f"is_ranked=false, and the 2v2 settlement plays no game, so crediting "
+        f"either contradicts the ranked-game contract in title_ladders' "
+        f"docstring. If one is now meant to count, that is a design "
+        f"decision: move it into COMPLETION_SITES and say so in the module "
+        f"docstring.")
 
 
 def _top_level_owner(top):
@@ -652,27 +673,26 @@ def hook_references(source):
     return refs
 
 
-def test_main_py_holds_exactly_the_four_hook_calls():
-    """Whole file, not per span: main.py names the hook exactly four times,
-    each the awaited callee inside one of the four COMPLETION_SITES
-    functions, one per function -- no fifth call anywhere, and no alias,
+def test_main_py_holds_exactly_the_three_hook_calls():
+    """Whole file, not per span: main.py names the hook exactly three times,
+    each the awaited callee inside one of the three COMPLETION_SITES
+    functions, one per function -- no fourth call anywhere, and no alias,
     import or getattr string that could make one.
 
-    The per-mode coverage test reads only the four spans and the excluded
-    one, so a call planted anywhere else passes it. ffa_queue_leave is the
+    The per-mode coverage test reads only the three spans and the excluded
+    ones, so a call planted anywhere else passes it. ffa_queue_leave is the
     case in point (design V3 section 12.4): when the departures reach all but
-    one member it writes the lobby 'completed', and it stays unhooked -- the
-    sitting's credit, if it earned one, was written by submit_ffa_match under
-    the lobby key, by the first accepted rated game that rated each player,
-    and deduped across the later ones. It is named here so that the claim
-    does not rest on COMPLETION_SITES staying as it is."""
+    one member it writes the lobby 'completed', and it stays unhooked -- every
+    rated game the lobby played was credited by submit_ffa_match under that
+    game's own id. It is named here so that the claim does not rest on
+    COMPLETION_SITES staying as it is."""
     source = _read(MAIN_PY)
     refs = hook_references(source)
     found = sorted((owner, kind) for owner, _line, kind in refs)
     expected = sorted((fn, "awaited call") for fn in COMPLETION_SITES.values())
-    assert len(set(COMPLETION_SITES.values())) == 4, COMPLETION_SITES
+    assert len(set(COMPLETION_SITES.values())) == 3, COMPLETION_SITES
     assert found == expected, (
-        "main.py must name %s exactly four times, one awaited call in each of "
+        "main.py must name %s exactly three times, one awaited call in each of "
         "%s; it names it at:\n  %s" % (
             HOOK, sorted(COMPLETION_SITES.values()),
             "\n  ".join("%s line %d: %s" % r for r in sorted(refs))))
@@ -682,9 +702,9 @@ def test_main_py_holds_exactly_the_four_hook_calls():
         "unhooked-close assertion below would be asserting nothing")
     in_leave = [r for r in refs if r[0] == "ffa_queue_leave"]
     assert not in_leave, (
-        "ffa_queue_leave credits the ladder at %r. Its close is not a "
-        "completion: the sitting was credited by the rated games that played "
-        "it, under the lobby key (design V3 section 12.4)." % in_leave)
+        "ffa_queue_leave credits the ladder at %r. Its close is not a game: "
+        "every rated game of the lobby was credited by submit_ffa_match under "
+        "its own id." % in_leave)
 
 
 LADDER_TABLES = ("title_ladder_credits", "title_ladder_progress")
@@ -745,9 +765,6 @@ async def submit_match(db):
 async def submit_team_match(db):
     await title_ladders.record_completed_games(db, [1], mode="2v2", reference_id="b")
 
-async def _complete_team_series_with_ratings(db):
-    await title_ladders.record_completed_games(db, [1], mode="2v2-settled", reference_id="b")
-
 async def submit_ffa_match(db):
     await title_ladders.record_completed_games(db, [1], mode="ffa", reference_id="c")
 
@@ -756,12 +773,12 @@ async def ffa_queue_leave(db):
 """
 
 
-def test_the_whole_file_scan_sees_the_four_and_each_kind_of_fifth():
-    """Control: the fake file reads as the four awaited calls; a fifth in
+def test_the_whole_file_scan_sees_the_three_and_each_kind_of_fourth():
+    """Control: the fake file reads as the three awaited calls; a fourth in
     ffa_queue_leave, a module-level alias, an import and a getattr string
     are each reported as what they are."""
-    four = sorted((o, k) for o, _l, k in hook_references(FAKE_MAIN))
-    assert four == sorted((fn, "awaited call") for fn in COMPLETION_SITES.values()), four
+    three = sorted((o, k) for o, _l, k in hook_references(FAKE_MAIN))
+    assert three == sorted((fn, "awaited call") for fn in COMPLETION_SITES.values()), three
     planted = {
         "fifth call": ("    await db.commit()\n",
                        "    await title_ladders.record_completed_games(db, [1], mode='ffa', reference_id='c')\n"
@@ -781,7 +798,7 @@ def test_the_whole_file_scan_sees_the_four_and_each_kind_of_fifth():
         src = FAKE_MAIN.replace(old, new, 1)
         assert src != FAKE_MAIN, label
         got = sorted((o, k) for o, _l, k in hook_references(src))
-        assert got == sorted(four + [extra]), (label, got)
+        assert got == sorted(three + [extra]), (label, got)
 
 
 def test_the_table_writer_scan_sees_a_write_and_skips_prose():
@@ -808,7 +825,7 @@ def test_the_table_writer_scan_sees_a_write_and_skips_prose():
 
 # ── Line endings ───────────────────────────────────────────────────
 
-@pytest.mark.parametrize("path", [MODULE_PY, MIGRATION, os.path.abspath(__file__)])
+@pytest.mark.parametrize("path", [MODULE_PY, MIGRATION, MIGRATION_365, os.path.abspath(__file__)])
 def test_tracked_source_is_pure_crlf(path):
     """Tracked .py/.sql in this repo is CRLF; a text-mode rewrite converts a
     whole file and shows up as a diff of every line (#675/#592). Counted in
@@ -845,9 +862,13 @@ class _Res:
     def one(self):
         return self._rows[0]
 
+    def all(self):
+        return list(self._rows)
+
 
 class _LadderDB:
-    """Answers the five statements `record_completed_games` issues."""
+    """Answers the statements `record_completed_games` issues for a
+    games-kind ladder (the held-rung read answers: nothing else held)."""
 
     def __init__(self, *, sku, games, tier, credits_available=1):
         self.sku, self.games, self.tier = sku, games, tier
@@ -860,6 +881,8 @@ class _LadderDB:
         self.log.append((sql, params))
         if "FROM players p" in sql:
             return _Res([(object(), self.sku)])
+        if "FROM player_items" in sql:
+            return _Res([])
         if "title_ladder_credits" in sql:
             # The PK is the gate: the first insert for a (player, reference_id)
             # wins and every later one returns nothing.
@@ -887,7 +910,7 @@ def _grant_all_but(missing):
 def test_the_hook_advances_a_tier_when_every_rung_is_granted(monkeypatch):
     """Control for the two tests below: the happy path must actually move."""
     monkeypatch.setattr(main, "_grant_title_item", _grant_all_but(set()))
-    db = _LadderDB(sku="title_ladder_rat_1", games=10, tier=1)
+    db = _LadderDB(sku="title_ladder_rat_1", games=15, tier=1)   # 15 => tier 2
 
     events = _run(tl.record_completed_games(db, ["p1"], mode="1v1", reference_id="g1"))
 
@@ -907,7 +930,7 @@ def test_a_tier_is_never_advanced_past_a_rung_that_was_not_granted(monkeypatch):
     """
     rung2 = tl.rungs_at_tier("rat", 2)[0]["sku"]
     monkeypatch.setattr(main, "_grant_title_item", _grant_all_but({rung2}))
-    db = _LadderDB(sku="title_ladder_rat_1", games=10, tier=1)
+    db = _LadderDB(sku="title_ladder_rat_1", games=15, tier=1)   # 15 => tier 2
 
     events = _run(tl.record_completed_games(db, ["p1"], mode="1v1", reference_id="g1"))
 
@@ -929,7 +952,8 @@ def test_a_multi_tier_jump_stops_at_the_last_rung_actually_granted(monkeypatch):
     """
     rung3 = tl.rungs_at_tier("rat", 3)[0]["sku"]
     monkeypatch.setattr(main, "_grant_title_item", _grant_all_but({rung3}))
-    db = _LadderDB(sku="title_ladder_rat_1", games=30, tier=1)   # 30 => tier 3
+    db = _LadderDB(sku="title_ladder_rat_1", games=40, tier=1)   # 40 => tier 3
+    assert tl.tier_for_games("rat", 40) == 3, "the fixture no longer jumps two tiers"
 
     events = _run(tl.record_completed_games(db, ["p1"], mode="1v1", reference_id="g1"))
 
@@ -1028,32 +1052,30 @@ def test_the_grant_helper_reports_success_when_the_player_already_owns_it():
 
 
 def test_one_reference_id_credits_once_however_many_times_it_arrives(monkeypatch):
-    """The unit of credit is the reference_id, and that is a SERIES.
+    """The unit of credit is the reference_id, and that is a GAME.
 
-    2v2 completes in two different places and either can also be retried, so
-    one series can reach this hook several times. `title_ladder_credits`'
-    PRIMARY KEY (player_id, reference_id) is what makes that safe -- and it is
-    also why the unit cannot be an individual game while both 2v2 sites pass
-    the team series id, which is the contradiction Codex found in the prose.
+    A report can be retried, so one game can reach this hook more than once.
+    `title_ladder_credits`' PRIMARY KEY (player_id, reference_id) is what
+    makes that safe.
 
     Binding the DEDUPE rather than the wording: the wording can be edited, the
     behaviour is what a future wiring author will actually get.
     """
     monkeypatch.setattr(main, "_grant_title_item", _grant_all_but(set()))
-    db = _LadderDB(sku="title_ladder_rat_1", games=10, tier=1, credits_available=1)
+    db = _LadderDB(sku="title_ladder_rat_1", games=15, tier=1, credits_available=1)
 
-    first = _run(tl.record_completed_games(db, ["p1"], mode="2v2", reference_id="series-7"))
-    second = _run(tl.record_completed_games(db, ["p1"], mode="2v2", reference_id="series-7"))
+    first = _run(tl.record_completed_games(db, ["p1"], mode="2v2", reference_id="game-7"))
+    second = _run(tl.record_completed_games(db, ["p1"], mode="2v2", reference_id="game-7"))
 
     assert len(first) == 1, "the first arrival did not credit at all: %s" % (first,)
     assert second == [], (
         "the same reference_id credited twice; the PK is the only thing "
-        "standing between a forfeit-settled 2v2 series and a double credit")
+        "standing between a re-reported game and a double credit")
 
     progress_writes = [p for sql, p in db.log
                        if "INSERT INTO title_ladder_progress" in sql]
     assert len(progress_writes) == 1, (
-        "the games counter was incremented %d times for one series"
+        "the games counter was incremented %d times for one game"
         % len(progress_writes))
 
 
@@ -1155,10 +1177,9 @@ def reference_mismatches(counts):
         for call in calls:
             if want is None or call["reference"] != want:
                 out.append(
-                    "%s passes reference_id %r; the credit key needs %r%s" % (
-                        site, call["reference"], want,
-                        " -- the FFA unit is the SITTING: one lobby, however "
-                        "many games it plays, is one credit" if mode == "ffa" else ""))
+                    "%s passes reference_id %r; the credit key needs %r -- the "
+                    "unit is the GAME: every ranked game credits once" % (
+                        site, call["reference"], want))
     return out
 
 
@@ -1230,11 +1251,11 @@ def test_the_coverage_scanner_reads_an_indented_span():
 # The 1v1 site's shape: a constant placeholder for the except clause, the
 # real reference assigned inside the try, and the call passing the name.
 LREF_SITE = """
-async def submit_series(db, series, p1, p2):
-    if series.is_ranked:
+async def submit_series(db, match, p1, p2):
+    if match.is_ranked:
         _lref = "?"
         try:
-            _lref = str(series.id)
+            _lref = str(match.id)
             async with db.begin_nested():
                 await title_ladders.record_completed_games(
                     db, [p1.id, p2.id], mode="1v1", reference_id=_lref)
@@ -1258,10 +1279,10 @@ async def submit_ffa(db, report, id_by_steam, unrated, rated, lobby_uuid, match_
 
 
 def test_the_scanner_follows_a_name_to_its_one_real_assignment():
-    """`_lref = "?"` is a constant and is skipped; `_lref = str(series.id)`
-    is the one real assignment, so the call's reference is str(series.id)."""
+    """`_lref = "?"` is a constant and is skipped; `_lref = str(match.id)`
+    is the one real assignment, so the call's reference is str(match.id)."""
     calls = hook_calls_in(LREF_SITE)
-    assert [c["reference"] for c in calls] == ["str(series.id)"], calls
+    assert [c["reference"] for c in calls] == ["str(match.id)"], calls
     assert reference_mismatches({"1v1:submit_series": calls}) == []
 
 
@@ -1270,8 +1291,8 @@ def test_the_scanner_refuses_a_name_assigned_twice():
     something a static reading can know, so the reference is None and the
     site is reported rather than guessed."""
     src = LREF_SITE.replace(
-        "            _lref = str(series.id)\n",
-        "            _lref = str(series.id)\n            _lref = str(series.other)\n")
+        "            _lref = str(match.id)\n",
+        "            _lref = str(match.id)\n            _lref = str(match.other)\n")
     assert src != LREF_SITE
     calls = hook_calls_in(src)
     assert [c["reference"] for c in calls] == [None], calls
@@ -1281,24 +1302,25 @@ def test_the_scanner_refuses_a_name_assigned_twice():
 def test_the_scanner_refuses_a_name_bound_any_other_way():
     """A loop target, and an unassigned name: both resolve to None."""
     looped = LREF_SITE.replace(
-        "            _lref = str(series.id)\n",
-        "            for _lref in (str(series.id),):\n                pass\n")
-    unassigned = LREF_SITE.replace("            _lref = str(series.id)\n", "")
+        "            _lref = str(match.id)\n",
+        "            for _lref in (str(match.id),):\n                pass\n")
+    unassigned = LREF_SITE.replace("            _lref = str(match.id)\n", "")
     assert looped != LREF_SITE and unassigned != LREF_SITE
     assert [c["reference"] for c in hook_calls_in(looped)] == [None]
     assert [c["reference"] for c in hook_calls_in(unassigned)] == [None]
 
 
-def test_the_reference_check_reports_a_per_game_ffa_key():
-    """#391, both directions: an FFA-shaped site passing str(match_id) -- a
-    per-game key, the round-2 finding -- is reported, naming ffa and the
-    sitting; the same site passing str(lobby_uuid) passes."""
+def test_the_reference_check_reports_a_per_sitting_ffa_key():
+    """Both directions, inverted by board row 29: an FFA-shaped site passing
+    str(lobby_uuid) -- the sitting key the series-unit build used, which
+    would credit a two-game lobby once -- is reported, naming ffa and the
+    game; the same site passing str(match_id) passes."""
     per_game = hook_calls_in(FFA_SITE.replace("REFERENCE", "str(match_id)"))
     sitting = hook_calls_in(FFA_SITE.replace("REFERENCE", "str(lobby_uuid)"))
-    bad = reference_mismatches({"ffa:submit_ffa_match": per_game})
+    bad = reference_mismatches({"ffa:submit_ffa_match": sitting})
     assert len(bad) == 1 and "ffa:submit_ffa_match" in bad[0], bad
-    assert "'str(match_id)'" in bad[0] and "SITTING" in bad[0], bad
-    assert reference_mismatches({"ffa:submit_ffa_match": sitting}) == []
+    assert "'str(lobby_uuid)'" in bad[0] and "GAME" in bad[0], bad
+    assert reference_mismatches({"ffa:submit_ffa_match": per_game}) == []
 
 
 
@@ -1547,10 +1569,20 @@ CREATE TABLE player_items (
 
 
 async def _live_schema(conn, schema, migration_sql):
+    """`migration_sql` is one file's text or a list of them, applied in
+    order."""
     await conn.execute('CREATE SCHEMA "%s"' % schema)
     await conn.execute('SET search_path TO "%s"' % schema)
     await conn.execute(LADDER_PREREQ)
-    await conn.execute(migration_sql)
+    for sql in ([migration_sql] if isinstance(migration_sql, str) else migration_sql):
+        await conn.execute(sql)
+
+
+def _331_then_365():
+    """The production order: the tables and first catalogue, then the
+    five-tier catalogue the module describes."""
+    return [io.open(MIGRATION, encoding="utf-8").read(),
+            io.open(MIGRATION_365, encoding="utf-8").read()]
 
 
 def _ladder_schema_name():
@@ -1592,13 +1624,15 @@ def test_the_migration_applies_against_a_real_server():
                 await conn.close()
 
     rungs, items, on_sale, hidden = _run(_go())
-    assert rungs == len(tl.ALL_SKUS) == 48, (rungs, len(tl.ALL_SKUS))
+    # 331's own catalogue (eight animal lines, 48 rows), as it shipped; the
+    # module now describes 365's, so these are literals.
+    assert rungs == 48, rungs
     assert items == 48, items
     assert on_sale == 0, (
         "%d entry rung(s) came out of a clean apply on sale for 1000 gold. 331 "
         "lands them unlisted; opening them for sale is a decision of its own, "
         "not a side effect of the migration" % on_sale)
-    assert hidden == len(tl.GRANTED_ONLY_SKUS) == 40, (hidden, len(tl.GRANTED_ONLY_SKUS))
+    assert hidden == 40, hidden
 
 
 def _ladder_engine(schema):
@@ -1632,12 +1666,12 @@ async def _credit_twice(schema, migration_sql, *, reference_ids):
                 "UPDATE players SET active_title_id = "
                 "  (SELECT id FROM shop_items WHERE sku = 'title_ladder_rat_1') "
                 " WHERE id = :pid"), {"pid": pid})
-            # Nine games in already: the tenth crosses rat's tier-2 threshold,
-            # so a second credit for the same series would move a real rung
-            # rather than just a counter.
+            # Fourteen games in already: the fifteenth crosses rat's tier-2
+            # threshold, so a second credit for the same game would move a
+            # real rung rather than just a counter.
             await db.execute(_text(
                 "INSERT INTO title_ladder_progress (player_id, line, games, tier) "
-                "VALUES (:pid, 'rat', 9, 1)"), {"pid": pid})
+                "VALUES (:pid, 'rat', 14, 1)"), {"pid": pid})
             await db.commit()
 
             events = []
@@ -1662,48 +1696,45 @@ async def _credit_twice(schema, migration_sql, *, reference_ids):
             await conn.close()
 
 
-def test_one_series_credits_once_against_the_real_primary_key():
+def test_one_game_credits_once_against_the_real_primary_key():
     """THE DEDUPE, DRIVEN THROUGH POSTGRESQL.
 
-    2v2 settles in two places and a report can be retried, so one series
-    reaches this hook more than once by construction. `title_ladder_credits`
-    PRIMARY KEY (player_id, reference_id) plus `ON CONFLICT DO NOTHING
-    RETURNING 1` is the whole gate: the writer that wins the insert is the one
-    that increments.
+    A report can be retried, so one game reaches this hook more than once by
+    construction. `title_ladder_credits` PRIMARY KEY (player_id, reference_id)
+    plus `ON CONFLICT DO NOTHING RETURNING 1` is the whole gate: the writer
+    that wins the insert is the one that increments.
 
     Changing that `DO NOTHING` to a `DO UPDATE` makes the second arrival
     return a row, credit again, and -- with the player seeded one game short
-    of the threshold -- hand out a rung for a series they played once. The
+    of the threshold -- hand out a rung for a game they played once. The
     fake-session version of this test cannot see that mutation, because the
     fake decides for itself what the second insert returns.
     """
     _require_live_pg()
-    sql = io.open(MIGRATION, encoding="utf-8").read()
     events, games, credits = _run(_credit_twice(
-        _ladder_schema_name(), sql, reference_ids=["series-7", "series-7"]))
+        _ladder_schema_name(), _331_then_365(), reference_ids=["game-7", "game-7"]))
 
     assert credits == 1, (
         "the same reference_id produced %d credit rows; the PRIMARY KEY is the "
-        "only thing between a forfeit-settled 2v2 series and a double credit"
+        "only thing between a re-reported game and a double credit"
         % credits)
-    assert games == 10, (
-        "the games counter reached %d for ONE series -- the second arrival was "
+    assert games == 15, (
+        "the games counter reached %d for ONE game -- the second arrival was "
         "not refused" % games)
     assert len(events[0]) == 1 and events[0][0]["to_tier"] == 2, events[0]
     assert events[1] == [], (
         "the repeat arrival emitted an upgrade event: %s" % (events[1],))
 
 
-def test_two_different_series_each_credit_once():
+def test_two_different_games_each_credit_once():
     """The positive control. Without it, the test above is satisfied by a hook
     that refuses every credit after the first for any reason at all."""
     _require_live_pg()
-    sql = io.open(MIGRATION, encoding="utf-8").read()
     events, games, credits = _run(_credit_twice(
-        _ladder_schema_name(), sql, reference_ids=["series-7", "series-8"]))
+        _ladder_schema_name(), _331_then_365(), reference_ids=["game-7", "game-8"]))
 
     assert credits == 2, credits
-    assert games == 11, games
+    assert games == 16, games
     assert len(events[0]) == 1, events[0]
 
 
@@ -1744,7 +1775,11 @@ def test_the_exemption_covers_every_cosmetic_except_a_granted_only_rung():
     # and it is an exemption, not a grant: a normal account owns nothing by it
     assert main._auto_owned(PLAIN_STEAM, "title_gold") is False
     assert main._auto_owned(None, "title_gold") is False
-    assert len(tl.GRANTED_ONLY_SKUS) == 40, len(tl.GRANTED_ONLY_SKUS)
+    assert len(tl.GRANTED_ONLY_SKUS) == 128, len(tl.GRANTED_ONLY_SKUS)
+    # A retired title is not auto-owned either: 366 refunded it, and the
+    # exemption must not hand it back by sku.
+    for sku in sorted(tl.RETIRED_SKUS):
+        assert main._auto_owned(OWNER_STEAM, sku) is False, sku
 
 
 class _Row:
@@ -1911,7 +1946,8 @@ async def _live_listing(schema, migration_sql, *, steam_id, grant_skus=(), extra
         try:
             await conn.execute('SET search_path TO "%s"' % schema)
             await conn.execute(_FILL_DEFAULTS)
-            await conn.execute(migration_sql)
+            for sql in ([migration_sql] if isinstance(migration_sql, str) else migration_sql):
+                await conn.execute(sql)
         finally:
             await conn.close()
 
@@ -1947,14 +1983,14 @@ async def _live_listing(schema, migration_sql, *, steam_id, grant_skus=(), extra
 
 
 def test_the_privileged_listing_shows_no_unearned_rung():
-    """THE LISTING HALF, RUN. All forty granted-only rungs are in the table
+    """THE LISTING HALF, RUN. All 128 granted-only rungs are in the table
     and the exempt account owns none of them, so none may be listed. Listing
     them turns a ladder into a dropdown -- and each one would arrive marked
     `owned`, because the same exemption decides that flag."""
     _require_live_pg()
-    sql = io.open(MIGRATION, encoding="utf-8").read()
-    pool, listed = _run(_live_listing(_ladder_schema_name(), sql, steam_id=OWNER_STEAM))
-    assert pool == 40, ("the fixture did not seed the hidden pool: %d rows" % pool)
+    pool, listed = _run(_live_listing(_ladder_schema_name(), _331_then_365(),
+                                      steam_id=OWNER_STEAM))
+    assert pool == 128, ("the fixture did not seed the hidden pool: %d rows" % pool)
     leaked = sorted(sku for sku in listed if sku in tl.GRANTED_ONLY_SKUS)
     assert leaked == [], ("%d unearned rung(s) listed to the exempt account: %s"
                           % (len(leaked), leaked[:3]))
@@ -1965,9 +2001,8 @@ def test_the_privileged_listing_still_shows_a_rung_that_was_granted():
     listing that dropped the achievement pool entirely -- which would hide an
     owner's earned rung and take its Set Active button with it (v1.32)."""
     _require_live_pg()
-    sql = io.open(MIGRATION, encoding="utf-8").read()
     earned = _a_granted_only_rung()
-    _pool, listed = _run(_live_listing(_ladder_schema_name(), sql,
+    _pool, listed = _run(_live_listing(_ladder_schema_name(), _331_then_365(),
                                        steam_id=OWNER_STEAM, grant_skus=[earned]))
     assert earned in listed, "an earned rung was not listed to its owner"
     assert listed[earned]["owned"] is True
@@ -1979,8 +2014,8 @@ def test_the_privileged_listing_still_shows_the_rest_of_the_hidden_pool():
     row that is NOT a ladder rung -- a slayer or podium title -- is still
     listed to the exempt account, owned, exactly as before."""
     _require_live_pg()
-    sql = io.open(MIGRATION, encoding="utf-8").read()
-    _pool, listed = _run(_live_listing(_ladder_schema_name(), sql, steam_id=OWNER_STEAM,
+    _pool, listed = _run(_live_listing(_ladder_schema_name(), _331_then_365(),
+                                       steam_id=OWNER_STEAM,
                                        extra_pool_sku="title_slayer_probe"))
     assert "title_slayer_probe" in listed, "the exemption stopped covering the hidden pool"
     assert listed["title_slayer_probe"]["owned"] is True
