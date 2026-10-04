@@ -5,8 +5,8 @@ every value that decides an outcome belongs to the rules revision, which is
 not part of this repository. This guard checks that, as a transitive analysis
 over the source of every tree it is given:
 
-  * JUDGING modules (review_measures, review_rules, review_module,
-    review_module_runner, and any local module one of them imports) are
+  * JUDGING modules (review_measures, review_rules, and any local module
+    one of them imports) are
     scanned whole: code, module-level constants, string constants (SQL and
     text included) and comments;
   * seat_evidence is scanned from its REVIEW ROOTS (every function that
@@ -44,6 +44,17 @@ Within that reach it refuses:
   env      an environment read other than the allowlisted keys;
   pinned   a pinned bound whose value differs from its pin.
 
+Every value above is judged WHERE IT IS USED, following its binding within
+the module: a constant assigned once to a name (module level or function
+local) and used later, a class attribute (`self.X`, `cls.X`, `Klass.X`), a
+value of a literal dict (`D["k"]`), a parameter default, and a function whose
+every return is one constant (`f()`) each stand for their value at the use, so
+`LIMIT = 1` ... `x > LIMIT` is judged as `x > 1`, `strict = True` ... `if
+strict:` as `if True:`, and `KIND = "k"` ... `x == KIND` as `x == "k"`. A
+parameter default is followed only when it is a boolean. A
+PINNED name is judged by its pin, not at its uses; a name bound more than once
+(a counter, a loop variable) is not a constant.
+
 Modes:
   python backend/tools/review_guard.py tree <repo dir>
   python backend/tools/review_guard.py range <repo dir> <base> <tip>
@@ -66,7 +77,7 @@ import sys
 import tokenize
 
 API = "backend/api/"
-JUDGING = ("review_measures", "review_rules", "review_module", "review_module_runner")
+JUDGING = ("review_measures", "review_rules")
 ROOTED = {"seat_evidence": None, "main": ("review_worker_loop", "review_worker_pass",
                                           "review_rules_refresh_loop", "_review_pass_line")}
 REVIEW_NAMES = {"rm", "rr", "_review_rules", "review_measures", "review_rules"}
@@ -99,8 +110,9 @@ SELECTORS = frozenset({
     "1", "REVISION", "__main__", "__pycache__", "abs", "absent", "add", "all", "any", "b",
     "build", "core.game", "data", "dirty", "edges", "eq", "expr", "filters", "flag", "game",
     "ge", "gt", "honoured", "int", "json", "label", "le", "list", "literal", "lt", "m",
-    "missing", "ne", "not", "note", "nt", "num", "open", "params", "pointer", "post_rows",
-    "probe", "read", "refused", "rel", "reporter", "row", "seat", "serve", "side", "sitting",
+    "missing", "ne", "not", "note", "nt", "num", "open", "params", "pointer", "posix",
+    "post_rows", "read", "refused", "rel", "reporter", "row", "rules-none", "seat", "side",
+    "sitting",
     "sub", "unhonoured", "v", "validate", "window_days", "{", "}"})
 
 # Contract bounds and scheduling: pinned BY VALUE. A deciding value added to
@@ -116,14 +128,8 @@ PINNED = {
         "line_max": 400, "places_default": 3, "round_places": 4, "render_items_max": 6,
         "id_hex": 8, "rev_hex": 12, "nonce_bytes": 16, "digest_hex": 64, "data_name_max": 40,
         "pointer_bytes_max": 64, "frame_bytes": 8, "format": 1},
-    ("review_module", "CONTRACT_BOUNDS"): {"api": 1, "call_s": 2, "poll_ms": 10,
-                                           "reply_bytes_max": 65536, "status_bytes_max": 65536,
-                                           "heartbeat_stale_s": 10, "reason_max": 32,
-                                           "rev_hex": 12, "fp_hex": 64, "id_bytes": 8},
-    ("review_module_runner", "CONTRACT_BOUNDS"): {
-        "api": 1, "call_s": 2, "poll_ms": 10, "beat_s": 1, "request_bytes_max": 1048576,
-        "reply_bytes_max": 65536, "files_max": 64, "file_bytes_max": 8388608, "frame_bytes": 8,
-        "rev_hex": 12, "fp_hex": 64, "connect_s": 3, "argc": 4, "exit_usage": 2},
+    ("review_rules", "_NT"): {"read": 0x80000000, "share": 0x7, "existing": 3,
+                              "no_follow": 0x00200000, "buffer": 32768},
     ("seat_evidence", "SEATS"): 2,
     ("review_measures", "SEATS"): 2,
     ("review_rules", "PAIR"): 2,
@@ -141,12 +147,14 @@ PINNED = {
 }
 SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge"}
 SETTINGS_READER = ("seat_evidence", "setting")
-ENV_KEYS = {"SCR_REVIEW_ROOT", "SCR_REVIEW_MODULE_EXCHANGE", "SYSTEMROOT"}
+ENV_KEYS = {"SCR_REVIEW_ROOT", "SYSTEMROOT"}
 
 # Identifiers that carry a digit and decide nothing: match-row columns of the
-# two seats, their SQL aliases, digest and encoding names.
+# two seats, their SQL aliases, digest and encoding names, the Windows
+# system library the non-following open calls.
 _SAFE_TEXT = re.compile(
     r"\bp[12]_\w+|\bplayer[12](?:_id)?\b|\b[ps][12]\b|sha256\b|\butf-8\b|\bint(?:32|64)\b"
+    r"|\bkernel32\b"
     r"|\bnoqa: ?[A-Z]+\d+(?:, ?[A-Z]+\d+)*")
 _STANDALONE = re.compile(r"(?<![\w.])[01](?![\w.])")
 _DIGIT = re.compile(r"\d")
@@ -205,6 +213,194 @@ class _Scan:
         for name, node in self.assigns.items():
             if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
                 self.str_consts[name] = node.value.value
+        self._bind_module()
+
+    # -- bindings followed to their uses --
+    _NONE = object()
+
+    @staticmethod
+    def _constlike(v):
+        """The value of a constant expression: a number (folded), a string, a
+        boolean, or a literal dict of string keys to such values."""
+        if v is None:
+            return _Scan._NONE
+        n = _fold(v)
+        if n is not None:
+            return n
+        if isinstance(v, ast.Constant) and isinstance(v.value, (str, bool)):
+            return v.value
+        if isinstance(v, ast.Dict) and v.keys and all(
+                isinstance(k, ast.Constant) and isinstance(k.value, str) for k in v.keys):
+            vals = [_Scan._constlike(x) for x in v.values]
+            if all(x is not _Scan._NONE and not isinstance(x, dict) for x in vals):
+                return {k.value: x for k, x in zip(v.keys, vals)}
+        return _Scan._NONE
+
+    @staticmethod
+    def _stores(nodes):
+        """name -> number of times the statements bind it (assignment,
+        augmented assignment, loop or with target, import, def, parameter)."""
+        out = {}
+
+        def hit(n):
+            out[n] = out.get(n, 0) + 1
+        for top in nodes:
+            for n in ast.walk(top):
+                if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                    hit(n.id)
+                elif isinstance(n, ast.arg):
+                    hit(n.arg)
+                elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                    hit(n.name)
+                elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                    for a in n.names:
+                        hit((a.asname or a.name).split(".")[0])
+        return out
+
+    def _bind_module(self):
+        top_stores = {}
+        for node in self.tree.body:
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                for k, c in self._stores([node]).items():
+                    top_stores[k] = top_stores.get(k, 0) + c
+        self.module_consts = {}
+        for name, node in self.assigns.items():
+            if (self.mod, name) in PINNED or top_stores.get(name, 0) != 1:
+                continue
+            v = self._constlike(node.value)
+            if v is not self._NONE:
+                self.module_consts[name] = v
+        self.class_consts = {}
+        clash = set()
+        for node in self.tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            body_stores = self._stores([s for s in node.body
+                                        if isinstance(s, (ast.Assign, ast.AnnAssign, ast.AugAssign))])
+            for s in node.body:
+                if isinstance(s, ast.Assign) and len(s.targets) == 1 and isinstance(s.targets[0], ast.Name):
+                    name = s.targets[0].id
+                    v = self._constlike(s.value)
+                    if v is self._NONE or body_stores.get(name, 0) != 1:
+                        continue
+                    if name in self.class_consts and self.class_consts[name] != v:
+                        clash.add(name)
+                    self.class_consts[name] = v
+        for name in clash:
+            del self.class_consts[name]
+        self.class_names = {n.name for n in self.tree.body if isinstance(n, ast.ClassDef)}
+        self.ret_consts = {}
+        for node in ast.walk(self.tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                rets = [r for r in self._own(node) if isinstance(r, ast.Return)]
+                vals = [self._constlike(r.value) for r in rets]
+                if vals and all(x is not self._NONE and not isinstance(x, dict) for x in vals) \
+                        and all(x == vals[0] and type(x) is type(vals[0]) for x in vals):
+                    self.ret_consts[node.name] = vals[0]
+        self._locals_cache = {}
+
+    @staticmethod
+    def _own(fn):
+        """The nodes of a function's own body (not of a nested def or lambda)."""
+        out, todo = [], list(fn.body)
+        while todo:
+            n = todo.pop()
+            out.append(n)
+            for c in ast.iter_child_nodes(n):
+                if not isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                    todo.append(c)
+        return out
+
+    def _locals(self, fn):
+        """(constants, every bound name) of one function: a local assigned once
+        to a constant, or a parameter with a BOOLEAN default never rebound in
+        the body (a switch whose default decides a branch; a number default is
+        a starting value every caller may move, not a decision)."""
+        if id(fn) in self._locals_cache:
+            return self._locals_cache[id(fn)]
+        own = self._own(fn)
+        stores = self._stores([n for n in own if isinstance(n, ast.stmt)] + [fn.args])
+        consts = {}
+        for n in own:
+            if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+                name = n.targets[0].id
+                v = self._constlike(n.value)
+                if v is not self._NONE and stores.get(name, 0) == 1:
+                    consts[name] = v
+        a = fn.args
+        pos = a.posonlyargs + a.args
+        for arg, d in list(zip(pos[len(pos) - len(a.defaults):], a.defaults)) + \
+                list(zip(a.kwonlyargs, a.kw_defaults)):
+            v = self._constlike(d)
+            if isinstance(v, bool) and stores.get(arg.arg, 0) == 1:
+                consts[arg.arg] = v
+        out = (consts, set(stores))
+        self._locals_cache[id(fn)] = out
+        return out
+
+    def _enclosing_fns(self, node, parents):
+        p = parents.get(id(node))
+        out = []
+        while p is not None:
+            if isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                out.append(p)
+            p = parents.get(id(p))
+        return out
+
+    def resolve(self, node, parents):
+        """The constant a Load of a name, attribute, dict entry or constant
+        function stands for here, or _NONE."""
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            for fn in self._enclosing_fns(node, parents):
+                if isinstance(fn, ast.Lambda):
+                    if node.id in {x.arg for x in fn.args.args}:
+                        return self._NONE
+                    continue
+                consts, bound = self._locals(fn)
+                if node.id in consts:
+                    return consts[node.id]
+                if node.id in bound:
+                    return self._NONE
+            return self.module_consts.get(node.id, self._NONE)
+        if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load) \
+                and isinstance(node.value, ast.Name) \
+                and (node.value.id in ("self", "cls") or node.value.id in self.class_names):
+            return self.class_consts.get(node.attr, self._NONE)
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load) \
+                and isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+            d = self.resolve(node.value, parents)
+            if isinstance(d, dict):
+                return d.get(node.slice.value, self._NONE)
+            return self._NONE
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and not node.args and not node.keywords:
+            if any(node.func.id in self._locals(fn)[1] for fn in self._enclosing_fns(node, parents)
+                   if not isinstance(fn, ast.Lambda)):
+                return self._NONE
+            return self.ret_consts.get(node.func.id, self._NONE)
+        return self._NONE
+
+    def _alias(self, node, parents):
+        """Judge a followed binding at its use."""
+        v = self.resolve(node, parents)
+        if v is self._NONE or isinstance(v, (dict, str)):
+            return                                   # strings: judged in _compare
+        p = parents.get(id(node))
+        if isinstance(v, bool):
+            if (isinstance(p, (ast.If, ast.IfExp, ast.While)) and p.test is node) \
+                    or isinstance(p, ast.BoolOp) \
+                    or (isinstance(p, ast.UnaryOp) and isinstance(p.op, ast.Not)):
+                self.add(node.lineno, "bool")
+            elif isinstance(p, ast.Compare):
+                ops = p.ops
+                if not all(isinstance(o, (ast.Is, ast.IsNot)) for o in ops):
+                    self.add(node.lineno, "bool")
+            return
+        if isinstance(p, ast.Subscript) and p.slice is node and isinstance(v, int) \
+                and -1 <= v <= INDEX_MAX:
+            return
+        if not self._number_ok(v, node, parents):
+            self.add(node.lineno, "number")
 
     def add(self, line, cls):
         self.findings.append((self.label, line, cls))
@@ -259,8 +455,11 @@ class _Scan:
                     if nid not in index_ok and not self._number_ok(v, node, parents):
                         self.add(node.lineno, "number")
                     continue
+            if isinstance(node, (ast.Name, ast.Attribute, ast.Subscript, ast.Call)) \
+                    and not isinstance(getattr(node, "ctx", ast.Load()), (ast.Store, ast.Del)):
+                self._alias(node, parents)
             if isinstance(node, ast.Compare):
-                self._compare(node)
+                self._compare(node, parents)
             elif isinstance(node, (ast.If, ast.IfExp, ast.While)):
                 t = node.test
                 if isinstance(t, ast.Constant) and isinstance(t.value, bool) \
@@ -317,7 +516,7 @@ class _Scan:
             return v in STRUCTURAL["call"]
         return v in STRUCTURAL["plain"]
 
-    def _compare(self, node):
+    def _compare(self, node, parents=None):
         operands = [node.left] + list(node.comparators)
         for i, op in enumerate(node.ops):
             pair = (operands[i], operands[i + 1])
@@ -334,6 +533,8 @@ class _Scan:
             for x in pair:
                 if isinstance(x, ast.Constant) and isinstance(x.value, str):
                     strings.append(x.value)
+                elif parents is not None and isinstance(self.resolve(x, parents), str):
+                    strings.append(self.resolve(x, parents))         # a followed binding
                 elif isinstance(op, (ast.In, ast.NotIn)) and x is pair[1] \
                         and isinstance(x, (ast.Tuple, ast.List, ast.Set)):
                     strings.extend(e.value for e in x.elts

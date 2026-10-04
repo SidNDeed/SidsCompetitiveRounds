@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(REPO, "backend", "tools"))
 
 import review_guard as g  # noqa: E402
 
-MODULES = ("review_measures", "review_rules", "review_module", "review_module_runner", "seat_evidence")
+MODULES = ("review_measures", "review_rules", "seat_evidence")
 
 
 def _copy(tmp):
@@ -72,8 +72,8 @@ MUTANTS = [
     ("env", "review_rules", "def rules_root() -> str:\n",
      'def rules_root() -> str:\n    os.environ.get("SCR_SYNTHETIC_SLACK")\n', "env"),
     ("pinned", "review_rules", '"work_max": 200000,', '"work_max": 200000, "slack": 0,', "pinned"),
-    ("hoisted_rooted", "seat_evidence", "async def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:\n",
-     "SYNTHETIC_FLOOR = 7\n\n\nasync def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:\n"
+    ("hoisted_rooted", "seat_evidence", "async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n",
+     "SYNTHETIC_FLOOR = 7\n\n\nasync def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n"
      "    _unused = SYNTHETIC_FLOOR\n", "number"),
     ("setting", "seat_evidence", 'if await setting(db, "seat_evidence_worker") != "1":\n            return {"off": 1}\n        cands',
      'if await setting(db, "review_post_synthetic") != "1":\n            return {"off": 1}\n        cands', "setting"),
@@ -123,8 +123,8 @@ def test_a_module_imported_by_a_rooted_function_is_followed(tmp_path):
     repo, dst = _copy(tmp_path)
     with open(os.path.join(dst, "synthetic_cut.py"), "w", encoding="utf-8") as f:
         f.write("CUT = 7\n")
-    _edit(dst, "seat_evidence", "async def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:\n",
-          "async def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:\n"
+    _edit(dst, "seat_evidence", "async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n",
+          "async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:\n"
           "    from synthetic_cut import CUT  # noqa: F401\n")
     classes, findings = _classes(repo)
     assert any("synthetic_cut.py" in label and c == "number" for label, _l, c in findings)
@@ -229,3 +229,68 @@ def test_m5_no_number_is_structural_everywhere():
     assert not hasattr(g, "ALLOWED_NUMBERS")
     assert set(g.STRUCTURAL) == {"compare_any", "compare_eq", "binop", "wrap", "augassign", "call",
                                  "plain"}
+
+
+# -- round 2 M5: a decision is judged at its USE, following the binding --------------
+# Each alias form hoists the deciding value out of the comparison; the planted
+# form is refused and its control (the same binding used structurally, or a
+# binding that is not a constant) is not. `top` goes in at module level,
+# `body` replaces the measure's return line.
+V = 'v = ctx.r["rec"]["imp"][2]\n@@'
+ALIASES = [
+    ("module_constant",
+     ("SYNTHETIC_CUT = 1\n", V + "return v if v > SYNTHETIC_CUT else None\n"),
+     ("SYNTHETIC_CUT = 1\n", V + "return v if v == SYNTHETIC_CUT else None\n"), "number"),
+    ("local_constant",
+     ("", "cut = 1\n@@" + V + "return v if v > cut else None\n"),
+     ("", "cut = 1\n@@" + V + "return v if v == cut else None\n"), "number"),
+    ("class_attribute",
+     ("class _Synthetic:\n    CUT = 1\n", V + "return v if v > _Synthetic.CUT else None\n"),
+     ("class _Synthetic:\n    CUT = 1\n", V + "return v if v == _Synthetic.CUT else None\n"), "number"),
+    ("self_attribute",
+     ("class _Synthetic:\n    CUT = 1\n\n    def keep(self, v):\n        return v if v > self.CUT else None\n",
+      'return ctx.r["rec"]["imp"][2]\n'),
+     ("class _Synthetic:\n    CUT = 1\n\n    def keep(self, v):\n        return v if v == self.CUT else None\n",
+      'return ctx.r["rec"]["imp"][2]\n'), "number"),
+    ("dict_value",
+     ('SYNTHETIC_CUTS = {"cut": 1}\n', V + 'return v if v > SYNTHETIC_CUTS["cut"] else None\n'),
+     ('SYNTHETIC_CUTS = {"cut": 1}\n', V + 'return v if v == SYNTHETIC_CUTS["cut"] else None\n'), "number"),
+    ("string_alias",
+     ('SYNTHETIC_KIND = "synthetic_kind"\n',
+      'return None if ctx.r.get("kind") == SYNTHETIC_KIND else ctx.r["rec"]["imp"][2]\n'),
+     ('SYNTHETIC_KIND = "seat"\n',
+      'return None if ctx.r.get("kind") == SYNTHETIC_KIND else ctx.r["rec"]["imp"][2]\n'), "select"),
+    ("local_boolean",
+     ("", "strict = True\n@@" + 'return ctx.r["rec"]["imp"][2] if strict else None\n'),
+     ("", "strict = bool(ctx.two)\n@@" + 'return ctx.r["rec"]["imp"][2] if strict else None\n'), "bool"),
+    ("default_boolean",
+     ("def _synthetic(v, strict=True):\n    return v if strict else None\n", 'return ctx.r["rec"]["imp"][2]\n'),
+     ("def _synthetic(v, strict):\n    return v if strict else None\n", 'return ctx.r["rec"]["imp"][2]\n'),
+     "bool"),
+    ("returned_boolean",
+     ("def _synthetic_strict():\n    return True\n",
+      'return ctx.r["rec"]["imp"][2] if _synthetic_strict() else None\n'),
+     ("def _synthetic_strict():\n    return bool(REGISTRY)\n",
+      'return ctx.r["rec"]["imp"][2] if _synthetic_strict() else None\n'), "bool"),
+]
+
+
+@pytest.mark.parametrize("name,planted,control,cls", ALIASES, ids=[a[0] for a in ALIASES])
+def test_m5_round2_an_aliased_decision_is_judged_at_its_use(tmp_path, name, planted, control, cls):
+    for (top, body), want in ((planted, [cls]), (control, [])):
+        repo, dst = _copy(tmp_path / ("planted" if want else "control"))
+        ind = _measure_indent(dst)
+        _edit(dst, "review_measures", ind + MEASURE, ind + body.replace("@@", ind))
+        if top:
+            _edit(dst, "review_measures", "REGISTRY: dict = {}\n", "REGISTRY: dict = {}\n\n\n" + top + "\n\n")
+        assert _classes(repo)[0] == want, (name, want, _classes(repo)[1])
+
+
+def test_m5_round2_a_rebound_name_is_not_a_constant(tmp_path):
+    """Control for the binding rule: a name bound twice is a variable."""
+    repo, dst = _copy(tmp_path)
+    ind = _measure_indent(dst)
+    _edit(dst, "review_measures", ind + MEASURE,
+          ind + "cut = 1\n" + ind + "cut = ctx.i\n" + ind + V.replace("@@", ind)
+          + "return v if v > cut else None\n")
+    assert _classes(repo)[0] == []

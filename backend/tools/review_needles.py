@@ -22,6 +22,26 @@ environment variable SCR_REVIEW_PRIVATE_STORE:
             store's owner lists by hand)
   basename  the names of the store's own private files (not its revision
             directories: a revision id is public, the health word says it)
+  value     every DECIDING VALUE of every revision in the store (measure
+            parameters, rule literals, sitting arguments), each matched in the
+            forms that re-publish it: beside its own key (`late margin ... N`,
+            `N ... window_days`, either order, one line), and for a value of
+            magnitude VALUE_MIN_BARE or more (or a fraction) also beside a
+            comparison sign (`> N`, `N <=`, never a shift `<<`) or after a
+            threshold noun (`threshold N`, `cutoff of N`, `floor N`), with
+            its unit (`N ms`, `N-day`), or slash-joined to another value of
+            the same rule (`N/M`); every form stays on one line. Prose
+            quantifiers (`at most N words`) are not comparisons here: they
+            are everywhere in briefs. 0, 1, -1 and booleans are structural,
+            never needles. The value class applies to DOCUMENTS: a message,
+            and in scan-dir and packet every file that is not source code
+            (anything but CODE_EXT, and all of a packet's docs/); source
+            code in a commit or a packet is the
+            no-tunables guard's (review_guard.py). A public text that merely
+            coincides with a value (a contract mechanic) is exempted only by
+            its exact phrase, listed by hand in the store's
+            tests/public.txt; the phrase is cut from the text before
+            the value needles run, so the same value anywhere else still hits.
 
 Modes:
   staged   <repo>                   added lines and staged blobs, staged paths
@@ -37,13 +57,21 @@ Modes:
            copies one document from outside the repository into docs/,
            admitted only when its bytes hash to the pinned digest (a document
            edited after its digest was pinned is refused). Anything not on the
-           list (a brief, a note, a single number) cannot enter. The assembled
-           packet is then scanned like a directory.
+           list (a brief, a note, a single number) cannot enter. The packet
+           then gets PACKET-MANIFEST.txt (the sha256 and path of every other
+           file) and the whole directory, manifest included, is scanned; the
+           report names the manifest's sha256.
+  packet-verify <out dir> <manifest sha256>
+           the packet exactly as assembled: the manifest hashes to the pinned
+           digest and the directory holds exactly the files it lists, each
+           with its listed bytes; a file added, removed or changed after the
+           scan is refused.
 
-Exit 0 clean, 1 found (or a packet refused), 2 usage, 3 no verdict (the
-store variable names a store that cannot be read or holds no revision), 4
-unarmed (the store variable is unset). 3 and 4 are REFUSALS: no scan ran, and
-neither is ever a pass.
+Exit 0 clean, 1 found (or a packet refused), 2 usage, 3 no verdict (any
+read of the store failed -- the store itself, a revision, its data listing,
+the needles list, the basename listing -- or it holds no revision), 4 unarmed
+(the store variable is unset). 3 and 4 are REFUSALS: no scan ran, and neither
+is ever a pass.
 """
 
 from __future__ import annotations
@@ -61,6 +89,16 @@ FRAGMENT_MIN = 3
 WORDING_GAP = 80
 BASENAME_MIN = 12
 DATA_STEM_MIN = 8
+VALUE_MIN_BARE = 10
+VALUE_NEAR = 24
+MANIFEST = "PACKET-MANIFEST.txt"
+# source code the value class leaves to the no-tunables guard
+CODE_EXT = (".py", ".cs", ".sql", ".yml", ".yaml", ".csproj", ".sh", ".ps1", ".json")
+# what states a decision before a value: a comparison sign (never a shift)
+# or a threshold noun
+_SIGN = r"(?:(?<![<>])[<>]=?(?![<>])|\u2265|\u2264)"
+_CMP = (r"(?:%s|\b(?:threshold|cut-?off|floor|ceiling|boundary|margin|limit)"
+        r"(?:[ \t](?:of|is|at))?[ \t]?[=:]?)" % _SIGN)
 # Names the public loader and build tool themselves use: not private.
 PUBLIC_NAMES = {"REVISIONS.tsv", "selftest.json"}
 _REV_DIR = re.compile(r"rules-[0-9a-f]{12}")
@@ -74,11 +112,17 @@ class NoVerdict(Exception):
 def derive(store: str) -> dict:
     """{class: set(needles)} from the private store."""
     out = {"rule_id": set(), "nonce": set(), "wording": set(), "listed": set(), "basename": set(),
-           "data": set()}
+           "data": set(), "value": set()}
     try:
-        names = sorted(os.listdir(store))
-    except OSError as e:
+        return _derive(store, out)
+    except NoVerdict:
+        raise
+    except (OSError, ValueError) as e:              # every read of the store: one refusal path
         raise NoVerdict(type(e).__name__)
+
+
+def _derive(store, out):
+    names = sorted(os.listdir(store))
     revisions = 0
     for name in names:
         path = os.path.join(store, name)
@@ -105,20 +149,148 @@ def derive(store: str) -> dict:
                 stem = dn.rsplit(".", 1)[0]
                 if len(stem) >= DATA_STEM_MIN:
                     out["data"].add(stem)
+            out["value"] |= _value_needles(doc)
     if not revisions:
         raise NoVerdict("no revision")
     tests = os.path.join(store, "tests")
     listed = os.path.join(tests, "needles.txt")
-    if os.path.exists(listed):
+    if os.path.lexists(listed):
         with open(listed, encoding="utf-8") as f:
             out["listed"] = {ln.strip() for ln in f if ln.strip() and not ln.startswith("#")}
+    public = os.path.join(tests, "public.txt")
+    _PUBLIC.clear()
+    if os.path.lexists(public):
+        with open(public, encoding="utf-8") as f:
+            _PUBLIC.extend(sorted({ln.rstrip("\n") for ln in f
+                                   if ln.strip() and not ln.startswith("#")}, key=len, reverse=True))
     for base in (store, tests):
-        if os.path.isdir(base):
+        if os.path.lexists(base):
             for name in os.listdir(base):
                 if (os.path.isfile(os.path.join(base, name)) and "." in name
                         and len(name) >= BASENAME_MIN and name not in PUBLIC_NAMES):
                     out["basename"].add(name)
     return out
+
+
+def _num_tokens(v) -> list:
+    """The decimal renderings of a deciding number (none for 0, 1, -1 or a
+    boolean: those are structural)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return []
+    if isinstance(v, float) and v.is_integer():
+        v = int(v)
+    if v in (0, 1, -1):
+        return []
+    if isinstance(v, int):
+        return [str(v)]
+    toks = {repr(v), "%g" % v}
+    toks |= {t[1:] for t in toks if t.startswith("0.")}
+    toks |= {"-" + t[2:] for t in toks if t.startswith("-0.")}
+    return sorted(toks)
+
+
+def _measure_keys(node) -> list:
+    out = []
+    if isinstance(node, dict):
+        if set(node) == {"m"} and isinstance(node["m"], str):
+            out.append(node["m"].rsplit(".", 1)[-1])
+        for v in node.values():
+            out += _measure_keys(v)
+    elif isinstance(node, list):
+        for v in node:
+            out += _measure_keys(v)
+    return out
+
+
+def _pred_values(node, items, group):
+    """(key, value, group) for every literal of a predicate, keyed by the
+    measures its comparison reads."""
+    if isinstance(node, dict):
+        args = node.get("args")
+        if isinstance(args, dict):
+            keys = _measure_keys(args) or [""]
+            for a in args.values():
+                if isinstance(a, dict) and set(a) == {"v"}:
+                    vals = a["v"] if isinstance(a["v"], list) else [a["v"]]
+                    for v in vals:
+                        items += [(k, v, group) for k in keys]
+        for v in node.values():
+            _pred_values(v, items, group)
+    elif isinstance(node, list):
+        for v in node:
+            _pred_values(v, items, group)
+
+
+def _value_items(doc) -> list:
+    """(key, value, group) for every deciding value of a rules document: the
+    measure parameters, the rule literals and the sitting arguments."""
+    items = []
+    for fam, ps in (doc.get("measure_params") or {}).items():
+        if isinstance(ps, dict):
+            items += [(k, v, fam) for k, v in ps.items()]
+    for r in doc.get("rules") or []:
+        if not isinstance(r, dict):
+            continue
+        group = str(r.get("id"))
+        _pred_values(r.get("when"), items, group)
+        s = r.get("sitting")
+        if isinstance(s, dict) and isinstance(s.get("args"), dict):
+            items += [(k, v, group) for k, v in s["args"].items()]
+    return items
+
+
+UNIT_WORDS = ("ms", "s", "days", "day", "pct")
+
+
+def _key_pattern(key: str) -> str:
+    """A key as prose or code writes it (`late_margin_ms`, `late margin`,
+    `late-margin ms`): words joined by a space, underscore or hyphen, a
+    trailing unit word optional. An empty key (a literal no measure names)
+    has no pattern."""
+    words = [w for w in re.split(r"[_\W]+", key) if w]
+    unit = ""
+    if len(words) > 1 and words[-1] in UNIT_WORDS:
+        unit = r"(?:[ _-]?%s)?" % re.escape(words.pop())
+    return r"[ _-]?".join(re.escape(w) for w in words) + unit if words else ""
+
+
+def _value_needles(doc) -> set:
+    """Regular-expression needles (class `value`) for every deciding value."""
+    out = set()
+    by_group = {}
+    for key, v, group in _value_items(doc):
+        toks = _num_tokens(v)
+        if not toks:
+            continue
+        num = r"(?<![\w.])(?:%s)(?![\w]|\.\d)" % "|".join(re.escape(t) for t in toks)
+        kp = _key_pattern(key)
+        if kp:
+            out.add(r"(?i)\b%s\b[^\n]{0,%d}?%s" % (kp, VALUE_NEAR, num))
+            out.add(r"(?i)%s[^\n]{0,%d}?\b%s\b" % (num, VALUE_NEAR, kp))
+        bare = isinstance(v, float) and not float(v).is_integer() or abs(v) >= VALUE_MIN_BARE
+        if bare:
+            out.add(r"(?i)%s[ \t]{0,3}%s" % (_CMP, num))
+            out.add(r"%s[ \t]{0,3}%s" % (num, _SIGN))
+            if key.endswith("ms"):
+                out.add(r"%s[ \t]?ms\b" % num)
+            if key.endswith("days"):
+                out.add(r"(?i)%s[ \t-]?days?\b" % num)
+            by_group.setdefault(group, set()).add("|".join(re.escape(t) for t in toks))
+    for group, alts in by_group.items():
+        if len(alts) > 1:
+            one = "|".join(sorted(alts))
+            out.add(r"(?<![\w.])(?:%s)[ \t]?/[ \t]?(?:%s)(?![\w]|\.\d)" % (one, one))
+    return {("re", p) for p in out}
+
+
+_RX = {}
+_PUBLIC = []        # exact public phrases cut before the value needles run
+
+
+def _rx(p):
+    if p not in _RX:
+        _RX[p] = re.compile(p)
+    return _RX[p]
 
 
 def _data_refs(node) -> set:
@@ -148,13 +320,21 @@ def _sequence(frags):
     return _SEQ[frags]
 
 
-def count(text: str, needles: dict, *, paths_only=False) -> dict:
-    """{class: number of needles of that class present in text}."""
+def count(text: str, needles: dict, *, paths_only=False, values=False) -> dict:
+    """{class: number of needles of that class present in text}. The value
+    class applies only when `values` (documents, not code)."""
     found = {}
+    public_cut = text
+    if values:
+        for phrase in _PUBLIC:
+            public_cut = public_cut.replace(phrase, " ")
     for cls, items in needles.items():
         if paths_only and cls != "basename":
             continue
-        n = sum(1 for s in items if s and (_sequence(s).search(text) if isinstance(s, tuple)
+        if cls == "value" and not values:
+            continue
+        n = sum(1 for s in items if s and (_rx(s[1]).search(public_cut) if cls == "value"
+                                           else _sequence(s).search(text) if isinstance(s, tuple)
                                            else s in text))
         if n:
             found[cls] = found.get(cls, 0) + n
@@ -212,9 +392,39 @@ def scan_dir(d, needles):
         for name in files:
             p = os.path.join(top, name)
             _merge(found, count(os.path.relpath(p, d), needles, paths_only=True))
+            rel = os.path.relpath(p, d).replace(os.sep, "/")
+            doc = rel.startswith("docs/") or not rel.endswith(CODE_EXT)
             with open(p, "rb") as f:
-                _merge(found, count(_blob_text(f.read()), needles))
+                _merge(found, count(_blob_text(f.read()), needles, values=doc))
     return found
+
+
+def _manifest_lines(out_dir) -> list:
+    rows = []
+    for top, _dirs, files in os.walk(out_dir):
+        for name in files:
+            p = os.path.join(top, name)
+            rel = os.path.relpath(p, out_dir).replace(os.sep, "/")
+            if rel == MANIFEST:
+                continue
+            with open(p, "rb") as f:
+                rows.append("%s  %s" % (hashlib.sha256(f.read()).hexdigest(), rel))
+    return sorted(rows, key=lambda r: r.split("  ", 1)[1])
+
+
+def packet_verify(out_dir, want) -> dict:
+    """{} when out_dir is exactly the packet its manifest pins, else a refusal."""
+    try:
+        with open(os.path.join(out_dir, MANIFEST), "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {"refused": "manifest_unreadable"}
+    if hashlib.sha256(raw).hexdigest() != want:
+        return {"refused": "manifest_digest_differs"}
+    listed = raw.decode("utf-8", "replace").splitlines()
+    if _manifest_lines(out_dir) != listed:
+        return {"refused": "packet_differs_from_its_manifest"}
+    return {}
 
 
 def packet(repo, commit, allowlist, out_dir, needles):
@@ -274,17 +484,26 @@ def packet(repo, commit, allowlist, out_dir, needles):
     entries = sum(len(files) for _t, _d, files in os.walk(out_dir))
     if entries != len(paths) + len(docs):
         return {"refused": "extra_entries"}
-    return scan_dir(out_dir, needles)
+    if MANIFEST in {os.path.basename(d) for d, _h in docs} or MANIFEST in paths:
+        return {"refused": "manifest_name_taken"}
+    body = ("\n".join(_manifest_lines(out_dir)) + "\n").encode("utf-8")
+    with open(os.path.join(out_dir, MANIFEST), "wb") as f:
+        f.write(body)
+    found = scan_dir(out_dir, needles)
+    found["manifest"] = hashlib.sha256(body).hexdigest()
+    return found
 
 
 def report(label, found, n=None):
     if "refused" in found:
         print("review_needles: %s refused (%s)" % (label, found["refused"]))
         return 1
+    manifest = found.pop("manifest", None)
     total = sum(found.values())
     detail = ", ".join("%s=%d" % (k, found[k]) for k in sorted(found)) or "none"
-    print("review_needles: %s %d found (%s)%s" % (label, total, detail,
-                                                 "" if n is None else " over %d commit(s)" % n))
+    print("review_needles: %s %d found (%s)%s%s" % (label, total, detail,
+                                                   "" if n is None else " over %d commit(s)" % n,
+                                                   "" if manifest is None else " manifest " + manifest))
     return 1 if total else 0
 
 
@@ -309,11 +528,13 @@ def main(argv):
         return report("range", found, n)
     if cmd == "message" and len(rest) == 1:
         with open(rest[0], encoding="utf-8", errors="replace") as f:
-            return report("message", count(f.read(), needles))
+            return report("message", count(f.read(), needles, values=True))
     if cmd == "scan-dir" and len(rest) == 1:
         return report("dir", scan_dir(rest[0], needles))
     if cmd == "packet" and len(rest) == 4:
         return report("packet", packet(rest[0], rest[1], rest[2], rest[3], needles))
+    if cmd == "packet-verify" and len(rest) == 2:
+        return report("packet-verify", packet_verify(rest[0], rest[1]))
     print(__doc__.split("Modes:")[1].split("Exit 0")[0].rstrip())
     return 2
 

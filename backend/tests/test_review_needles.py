@@ -221,3 +221,123 @@ def test_m4_a_packet_admits_a_pinned_document_and_refuses_an_edited_one(world, t
     allow.write_text("doc %s %s\n" % (doc, hashlib.sha256(doc.read_bytes()).hexdigest()))
     assert rn.main(["packet", repo, base, str(allow), str(tmp_path / "p3")]) == 1
     assert "rule_id=1" in capsys.readouterr().out
+
+
+# -- round 2 M5: every read of the store refuses through the one path (exit 3) -----
+
+def _store_case(store, how):
+    tests = os.path.join(store, "tests")
+    if how == "needles_list":
+        os.remove(os.path.join(tests, "needles.txt"))
+        os.mkdir(os.path.join(tests, "needles.txt"))            # open() fails
+    elif how == "public_list":
+        os.mkdir(os.path.join(tests, "public.txt"))             # open() fails
+    elif how == "basename_listing":
+        import shutil
+        shutil.rmtree(tests)
+        with open(tests, "w", encoding="utf-8") as f:           # listdir() fails
+            f.write("x")
+    elif how == "revision_rules":
+        rdir = [os.path.join(store, x) for x in os.listdir(store) if x.startswith("rules-")][0]
+        with open(os.path.join(rdir, "rules.json"), "w", encoding="utf-8") as f:
+            f.write("{")                                       # parse fails
+
+
+@pytest.mark.parametrize("how", ["needles_list", "public_list", "basename_listing", "revision_rules"])
+def test_m5_every_store_read_failure_refuses_with_3(world, tmp_path, capsys, how):
+    store, _repo, _base = world
+    d = tmp_path / "clean"
+    d.mkdir()
+    (d / "a.txt").write_text("public\n")
+    assert rn.main(["scan-dir", str(d)]) == 0                         # control: armed, readable
+    _store_case(store, how)
+    assert rn.main(["scan-dir", str(d)]) == 3
+    assert "no verdict" in capsys.readouterr().out.splitlines()[-1]
+
+
+# -- round 2 M4: the deciding values are needles; the packet is manifest-pinned ------
+
+VALUE_PLANTS = [
+    ("key_beside", "the late margin was 111 in that revision\n"),
+    ("key_after", "a window of 222 window_ms\n"),
+    ("threshold", "a threshold of 1777 decides it\n"),
+    ("sign", "flag it when the count is > 333\n"),
+    ("unit", "the edge span is 444 ms long\n"),
+    ("fraction_pair", "the step band is 0.41/2.3\n"),
+]
+
+
+@pytest.mark.parametrize("name,text", VALUE_PLANTS, ids=[p[0] for p in VALUE_PLANTS])
+def test_m4_a_planted_deciding_value_is_found(world, tmp_path, capsys, name, text):
+    d = tmp_path / "scratch"
+    d.mkdir()
+    (d / "doc.md").write_text("generic prose about the evaluator\n")
+    assert rn.main(["scan-dir", str(d)]) == 0                         # control
+    (d / "doc.md").write_text("generic prose\n" + text)
+    assert rn.main(["scan-dir", str(d)]) == 1
+    out = capsys.readouterr().out.splitlines()[-1]
+    assert "value=" in out and text.strip() not in out
+
+
+def test_m4_control_values_without_a_deciding_form_and_code_are_not_value_hits(world, tmp_path):
+    d = tmp_path / "scratch"
+    d.mkdir()
+    (d / "doc.md").write_text("at most 300 words; 111 rows in 7 files; 1777 is a year; 0 or 1 or -1\n")
+    assert rn.main(["scan-dir", str(d)]) == 0
+    (d / "code.py").write_text("if x > 333:\n    pass\n")             # source code: the guard's job
+    assert rn.main(["scan-dir", str(d)]) == 0
+
+
+def test_m4_a_message_carrying_a_value_is_found(world, tmp_path, capsys):
+    msg = tmp_path / "msg.txt"
+    msg.write_text("subject\n\nset the late margin to 111\n")
+    assert rn.main(["message", str(msg)]) == 1
+    assert "value=1" in capsys.readouterr().out
+
+
+def test_m4_a_public_phrase_is_exempt_only_exactly(world, tmp_path):
+    store, _repo, _base = world
+    with open(os.path.join(store, "tests", "public.txt"), "w", encoding="utf-8") as f:
+        f.write("# public mechanics\nretry at most > 333 times\n")
+    d = tmp_path / "scratch"
+    d.mkdir()
+    (d / "doc.md").write_text("the client may retry at most > 333 times\n")
+    assert rn.main(["scan-dir", str(d)]) == 0
+    (d / "doc.md").write_text("the client may retry at most > 333 times; flag when > 333\n")
+    assert rn.main(["scan-dir", str(d)]) == 1
+
+
+def test_m4_a_pinned_document_carrying_a_value_is_found_in_the_packet(world, tmp_path, capsys):
+    import hashlib
+    _store, repo, base = world
+    doc = tmp_path / "notes.md"
+    doc.write_text("the review found a threshold of 1777\n")
+    allow = tmp_path / "allow.txt"
+    allow.write_text("a.txt\ndoc %s %s\n" % (doc, hashlib.sha256(doc.read_bytes()).hexdigest()))
+    assert rn.main(["packet", repo, base, str(allow), str(tmp_path / "p")]) == 1
+    assert "value=1" in capsys.readouterr().out
+
+
+def test_m4_the_packet_manifest_pins_it_and_refuses_any_later_change(world, tmp_path, capsys):
+    import hashlib
+    _store, repo, base = world
+    doc = tmp_path / "notes.md"
+    doc.write_text("generic description of the evidence\n")
+    allow = tmp_path / "allow.txt"
+    allow.write_text("a.txt\ndoc %s %s\n" % (doc, hashlib.sha256(doc.read_bytes()).hexdigest()))
+    out = tmp_path / "packet"
+    assert rn.main(["packet", repo, base, str(allow), str(out)]) == 0
+    line = capsys.readouterr().out.strip().splitlines()[-1]
+    digest = line.rsplit(" manifest ", 1)[1]
+    assert hashlib.sha256((out / rn.MANIFEST).read_bytes()).hexdigest() == digest
+    assert sorted(os.listdir(out)) == ["PACKET-MANIFEST.txt", "a.txt", "docs"]
+    assert rn.main(["packet-verify", str(out), digest]) == 0              # control
+    (out / "added.txt").write_text("added after the scan\n")
+    assert rn.main(["packet-verify", str(out), digest]) == 1
+    assert "packet_differs_from_its_manifest" in capsys.readouterr().out
+    os.remove(out / "added.txt")
+    assert rn.main(["packet-verify", str(out), digest]) == 0
+    (out / "a.txt").write_text("changed after the scan\n")
+    assert rn.main(["packet-verify", str(out), digest]) == 1
+    assert rn.main(["packet-verify", str(out), "0" * 64]) == 1
+    assert "manifest_digest_differs" in capsys.readouterr().out.splitlines()[-1]
