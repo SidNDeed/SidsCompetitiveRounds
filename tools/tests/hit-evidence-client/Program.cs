@@ -115,15 +115,20 @@ namespace HitEvidenceTests
                 { "cr_pois2", "1" }, { "cr_gstats", "9|9|9" }, { "cr_dc2", "2" },
             };
             Eq("[PEER-BUILD] actor=3 keys=6 ours=4 list=cr_build,cr_dc2,cr_gstats,cr_pois2,playerID,u_id"
-               + " cr_build=1.41.0|standalone|0c36c644e658 cr_dc2=2 cr_dc3=- cr_ffacfg=- cr_grow2=- cr_msv2=- cr_pois2=1"
-               + " cr_prox1=- cr_saw1=- cr_wcd1=-",
+               + " cr_build=1.41.0|standalone|0c36c644e658 cr_dc2=2 cr_dc3=- cr_ffacfg=- cr_game_token_v=- cr_grow2=-"
+               + " cr_msv2=- cr_pois2=1 cr_pois3=- cr_prox1=- cr_saw1=- cr_wcd1=-",
                PeerBuildCore.Line(3, props), "PEER-BUILD");
+            // Merge pass 6, R-L1: the shared token's version and poison v3 are capabilities, so their values print.
+            var caps = new Dictionary<string, string>(props) { { "cr_game_token_v", "2" }, { "cr_pois3", "1" } };
+            Check(PeerBuildCore.Line(3, caps).Contains(" cr_game_token_v=2 ") && PeerBuildCore.Line(3, caps).Contains(" cr_pois3=1 "),
+                  "capability values");
+            Check(PeerBuildCore.Values(props) != PeerBuildCore.Values(caps), "a capability change changes the values");
             Check(!PeerBuildCore.Line(3, props).Contains("ACCOUNT-ID-MARKER"), "no account id");
             Check(!PeerBuildCore.Line(3, props).Contains("9|9|9"), "no other value");
             // A seat with none of our keys still gets its line, saying so.
             var vanilla = new Dictionary<string, string> { { "playerID", "2" }, { "u_id", "x" } };
             Eq("[PEER-BUILD] actor=2 keys=2 ours=none list=playerID,u_id cr_build=- cr_dc2=- cr_dc3=- cr_ffacfg=-"
-               + " cr_grow2=- cr_msv2=- cr_pois2=- cr_prox1=- cr_saw1=- cr_wcd1=-",
+               + " cr_game_token_v=- cr_grow2=- cr_msv2=- cr_pois2=- cr_pois3=- cr_prox1=- cr_saw1=- cr_wcd1=-",
                PeerBuildCore.Line(2, vanilla), "PEER-BUILD vanilla");
             Check(PeerBuildCore.Line(5, new Dictionary<string, string>()).Contains(" keys=0 ours=none list=- "), "empty seat");
             // Tokens: unsafe characters masked, long ones cut.
@@ -136,10 +141,33 @@ namespace HitEvidenceTests
             var newBuild = new Dictionary<string, string>(props);
             newBuild["cr_build"] = "1.41.1|standalone|aaaaaaaaaaaa";
             Check(PeerBuildCore.Values(props) != PeerBuildCore.Values(newBuild), "a new build changes the values");
-            // The key list is capped.
+            // Merge pass 6, R-L2: every key name is listed, on continuation lines past KEYS_PER_LINE.
             var many = new Dictionary<string, string>();
-            for (int i = 0; i < PeerBuildCore.MAX_KEYS + 3; i++) many["k" + i.ToString("000")] = "v";
-            Check(PeerBuildCore.Line(1, many).Contains(",+3 "), "capped key list");
+            int n = 2 * PeerBuildCore.KEYS_PER_LINE + 3;
+            for (int i = 0; i < n; i++) many["k" + i.ToString("000")] = "v";
+            string[] ml = PeerBuildCore.Line(1, many).Split('\n');
+            Check(ml.Length == 3 && ml[0].Contains(" lines=3 ") && ml[1].StartsWith("[PEER-BUILD] actor=1 list(2/3)=")
+                  && ml[2].StartsWith("[PEER-BUILD] actor=1 list(3/3)=k064,k065,k066"), "continuation lines");
+            bool every = true;
+            for (int i = 0; i < n; i++)
+            {
+                string k = "k" + i.ToString("000");
+                int hits = 0;
+                foreach (var l in ml)
+                    foreach (var part in l.Split(' ', '=', ','))
+                        if (part == k) hits++;
+                if (hits != 1) every = false;
+            }
+            Check(every, "every key listed once");
+            Check(PeerBuildCore.Line(1, new Dictionary<string, string> { { "k000", "v" } }).Split('\n').Length == 1, "one line");
+            // A long key prints its head, length and hash: two names differing past KEY_HEAD print differently.
+            string longA = new string('a', 90) + "1", longB = new string('a', 90) + "2";
+            Check(PeerBuildCore.KeyToken(longA) != PeerBuildCore.KeyToken(longB), "long keys stay distinct");
+            Check(PeerBuildCore.KeyToken(longA).StartsWith(new string('a', PeerBuildCore.KEY_HEAD) + "~91#"), "long key form");
+            Eq("cr_build", PeerBuildCore.KeyToken("cr_build"), "a short safe key prints whole");
+            Eq(new string('k', PeerBuildCore.MAX_KEY), PeerBuildCore.KeyToken(new string('k', PeerBuildCore.MAX_KEY)), "a key at MAX_KEY prints whole");
+            Check(PeerBuildCore.KeyToken("a b") != PeerBuildCore.KeyToken("a\tb") && PeerBuildCore.KeyToken("a b").StartsWith("a?b#"),
+                  "masked keys stay distinct");
         }
 
         private static int Main(string[] args)

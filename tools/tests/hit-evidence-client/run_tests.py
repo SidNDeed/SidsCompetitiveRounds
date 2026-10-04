@@ -41,6 +41,10 @@ PEER_MUTANTS = [
     ("peer_no_none_fact", "ours > 0 ? ours.ToString(System.Globalization.CultureInfo.InvariantCulture) : \"none\"",
      "ours.ToString(System.Globalization.CultureInfo.InvariantCulture)", "peer", "lines"),
     ("peer_build_value_dropped", "BuildProp, \"cr_dc2\"", "\"cr_dc2\"", "peer", "lines"),
+    # merge pass 6: R-L1 (a capability value dropped) and R-L2 (keys left out, long keys merged)
+    ("peer_game_token_cap_dropped", "\"cr_game_token_v\", ", "", "peer", "lines"),
+    ("peer_continuation_dropped", "for (int l = 1; l < lines; l++)", "for (int l = 1; l < 1; l++)", "peer", "lines"),
+    ("peer_long_key_unhashed", "if (masked || s.Length > MAX_KEY)\n", "if (masked)\n", "peer", "lines"),
 ]
 
 

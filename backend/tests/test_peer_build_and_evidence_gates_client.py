@@ -166,11 +166,15 @@ def test_peer_build_prints_once_per_seat_per_room_and_again_on_change():
 
 
 def test_peer_build_value_keys_are_the_build_statement_and_the_capability_keys():
+    # Merge pass 6 (R-L1): every cr_ constant whose NAME says capability,
+    # spelled Capability (CapabilityPropV3 included) or _CAP_ (the shared game
+    # token's GAME_TOKEN_CAP_PROP_KEY), whatever follows it in the name.
     caps = set()
     for p in PLUGIN.glob("*.cs"):
-        for m in re.finditer(r'const string (?:\w*CapabilityProp) = "(cr_\w+)"', _code(_read(p))):
+        for m in re.finditer(r'const string \w*(?:Capability|_CAP_)\w* = "(cr_\w+)"', _code(_read(p))):
             caps.add(m.group(1))
-    assert len(caps) >= 9, caps
+    assert len(caps) >= 11, caps
+    assert {"cr_pois3", "cr_game_token_v"} <= caps, caps
     core = _code(_read(PEERCORE))
     block = core[core.index("internal static readonly string[] ValueKeys ="):]
     block = block[:block.index("};")]
