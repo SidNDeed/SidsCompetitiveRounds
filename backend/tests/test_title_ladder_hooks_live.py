@@ -2145,3 +2145,40 @@ def test_pg_rd3_late_one_v_one_gold_reaches_gold_rush(opened, monkeypatch, sourc
             assert again == [] and replay["progress"] == after["progress"], (again, replay)
             assert replay["credits"] == after["credits"]
     _run(_go())
+
+
+def test_pg_m6_slayer_and_streak_late_gold_share_the_one_commit(opened, monkeypatch):
+    """Merge pass 6 (main e9a3f1e1 into the v1.41.0 lane). The lane grants
+    Slayer and the streak tiers re-verified under the player locks and
+    commits them ONCE; the slayer supplement is added without a commit and
+    the streak supplement rides that one commit. Both sources forced in one
+    series: each has its own late credit, and P1's Gold Rush count equals
+    every play gold row the ledger holds for P1 -- so neither source's gold
+    is dropped, counted twice, or filed under the other."""
+    _require_live_pg()
+    line = "gold_rush"
+    _force_late(monkeypatch, "slayer")
+    _force_late(monkeypatch, "streak")
+
+    async def _go():
+        async with _case() as (schema, sm):
+            _ids, refs, _lines = await _late_series(sm, opened, "LB")
+            after, _ = await _look(schema)
+            play, ach = await _play_ledger(schema)
+            assert ach.get(P1, 0) > 0, ach
+            games, _tier = after["progress"][(P1, line)]
+            assert games == play[P1], ("late gold miscounted", games, play)
+            for source in ("slayer", "streak"):
+                key = tl.late_reference(refs[1], source)
+                assert (P1, key, line, "1v1") in after["credits"], (source, after["credits"])
+    _run(_go())
+
+
+def test_m6_the_lanes_rating_pass_handler_puts_the_note_back():
+    """The lane savepoints submit_match's rating pass and its handler
+    continues, so after a rolled-back pass the achievement-gold note is
+    returned to the mark taken before it (merge pass 6, edit (c))."""
+    src = io.open(MAIN_PY, encoding="utf-8").read()
+    i = src.index('print(f"Series Glicko update error: {ex}")')
+    assert "_ladder_achievement_restore(db, _ladder_late_mark)" in src[i:i + 600]
+    assert src.count("_ladder_achievement_restore(db, _ladder_late_mark)") == 1

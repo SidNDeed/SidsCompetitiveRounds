@@ -9639,10 +9639,10 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             await _ladder_commit_with_late_gold(db, match.id, _ladder_late_mark, "rating")
         except Exception as ex:
             print(f"Series Glicko update error: {ex}")
-            # The lane's savepoint rolled this pass back (or its commit failed), so
-            # no achievement gold it noted was paid: the Gold Rush note returns to
-            # the mark taken before it, and the slayer block below counts only
-            # its own payouts.
+            # The savepoint rolled this pass back (or its commit failed), so no
+            # achievement gold it noted was paid: the Gold Rush note returns to
+            # the mark taken before the pass, and holds only gold that was paid.
+            # (The slayer block below measures from marks of its own.)
             _ladder_achievement_restore(db, _ladder_late_mark)
 
         # ── Auto-grant slayer achievements (Sid Slayer / Stan Slayer) ──
