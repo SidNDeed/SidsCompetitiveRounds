@@ -336,6 +336,9 @@ def test_engine_opening_is_exempt_and_engine_later_applies_on_every_slot():
     assert h(base, 1) == 0 and h(base, 2) == 0
     opening = k.fixture_census("game2_held_samecards", cats={1: ["X"]}, black={3: ["X"]})
     assert h(opening, 1) == 0                                   # opening draw: no held check
+    opening1 = k.fixture_census("game2_held_samecards", cats={2: ["X"]}, black={3: ["X"]})
+    assert h(opening1, 1) == 0                                  # ... on a slot after the first too
+    assert h(k.fixture_census("game2_held_samecards", cats={9: ["X"]}, black={3: ["X"]}), 2) == 1  # control
     later0 = k.fixture_census("game2_held_samecards", cats={8: ["X"]}, black={3: ["X"]})
     assert h(later0, 2) == 1                                    # engine slot 0 is checked
     # a candidate named as a held card, not allowMultiple: refused on a vanilla
@@ -524,6 +527,7 @@ def test_a_pool_with_an_unsupported_rarity_reads_not_run():
     rec = k.on_census(k.fixture_record("full_game"), c)
     h = k.hand(k.view([("a", "b", rec)], [c], None, k.WEIGHTS), 0)
     assert h["b4.hand.w0"] is None and h["b4.hand.eligible"] == 0
+    assert cm.expectation(c, [0, 1], [], 0, k.WEIGHTS) is None   # the measure's own guard, not only the view's
     assert cm.contributions(k.view([("a", "b", rec)], [c], None, k.WEIGHTS), k.WEIGHTS)[0]["hands"] == 0
     c = k.fixture_census("full_game")
     rec = k.on_census(k.fixture_record("full_game"), c)

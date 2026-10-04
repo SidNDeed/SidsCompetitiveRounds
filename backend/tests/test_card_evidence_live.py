@@ -346,8 +346,10 @@ def test_m9_with_no_revision_the_pass_attaches_and_derives_nothing(live):
         after = await _scalar(sm, "SELECT count(*) FROM seat_evidence_findings WHERE dedup_key LIKE 'card|%'")
         return s, g, d, mid, before, after
     s, g, d, mid, before, after = live.run(go())
-    assert not _errors(s) and s["evaluated"] == 0
+    assert not _errors(s) and s["evaluated"] == 0 and "fault" not in s
+    assert set(s) <= {"evaluated", "fired", "rule_errors", "attached", "waiting"}, s
     assert g[0]["match_id"] == mid and g[0]["evaluated_rev"] is None and g[0]["finalized_at"] is None
+    assert g[0]["derive_fault"] is None
     assert d == {"card_hand_outside": 0, "card_phase_outside": 0, "card_contrib": 0, "card_player_daily": 0}
     assert before == after
 
