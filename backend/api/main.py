@@ -39,7 +39,6 @@ from database import get_asm_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 import seat_evidence as _sev
 import review_rules as _review_rules
-import review_module as _review_module
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
@@ -7177,7 +7176,6 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               seat_evidence=_seat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
-                              review_module=_review_module.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -7211,7 +7209,6 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               seat_evidence=_seat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
-                              review_module=_review_module.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),

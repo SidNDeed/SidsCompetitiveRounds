@@ -11,10 +11,12 @@ Mechanics (public): a rules REVISION is an immutable directory
 `rules.json`, `selftest.json`, optional `data/` tables and `REVISION`. The
 root's `current` pointer (a relative link, or a one-line file naming the
 directory) selects the live revision. The loader bounds the inventory, the
-bytes, the work and the wall time BEFORE parsing, recomputes the digest, binds
-every referenced vocabulary entry by fingerprint (review_measures), runs the
-revision's own self-test, and only then publishes the new state in one
-assignment. The health word is the revision id, `absent` or `refused` and
+bytes, the work and the wall time BEFORE parsing, recomputes the digest,
+checks that the code the revision was built against is byte for byte the code
+running (code_fingerprint: every code file the revision's `closure` names, the
+loader's own file always among them), binds every referenced vocabulary entry
+by name, runs the revision's own self-test, and only then publishes the new
+state in one assignment. The health word is the revision id, `absent` or `refused` and
 nothing else; the refusal class goes to the log once per change.
 
 Predicates are three-valued (Kleene): a measure that cannot be computed is
@@ -79,11 +81,18 @@ POINTER = "current"
 NONE_TARGET = "rules-none"
 TOP_FILES = ("rules.json", "selftest.json", "REVISION")
 DOMAIN = b"scr-review-rules-revision\n"
+CODE_DOMAIN = b"scr-review-code-closure\n"
+CLOSURE_DOMAIN = b"scr-review-whole-closure\n"
+# The code half of every revision's closure, by file: the vocabulary (every
+# entry and every sitting template) and this loader. A revision's closure
+# names at least these; it may name more files of this directory.
+CODE_REQUIRED = ("review_measures.py", "review_rules.py")
 
 _HEX = re.compile(r"[a-f\d]+")
 _REV_DIR = re.compile(r"rules-[a-f\d]{%d}" % _BOUNDS["rev_hex"])
 _RULE_ID = re.compile(r"r[a-f\d]{%d}" % _BOUNDS["id_hex"])
 _DATA_NAME = re.compile(r"[a-z_]{1,%d}\.(json|txt)" % _BOUNDS["data_name_max"])
+_CODE_NAME = re.compile(r"[a-z_]{1,%d}\.py" % _BOUNDS["data_name_max"])
 _RULE_LABEL = re.compile(r"[a-z_]\w{0,%d}" % (rm.CONTRACT_BOUNDS["label_max"] * PAIR))
 _STRATA = re.compile(r"[a-z_]{1,%d}" % rm.CONTRACT_BOUNDS["label_max"])
 _PLACE = re.compile(r"\{([a-z_]\w*)(?::(\d))?(\|none)?\}")
@@ -109,9 +118,13 @@ def revision_digest(files: dict) -> str:
     file (sorted by relative POSIX path) the path length, the path, the
     content length and the content. Lengths are fixed-width, so no two
     different inventories frame to the same bytes."""
+    return _framed(DOMAIN, files)
+
+
+def _framed(domain: bytes, files: dict) -> str:
     w = _BOUNDS["frame_bytes"]
     h = hashlib.sha256()
-    h.update(DOMAIN)
+    h.update(domain)
     h.update(len(files).to_bytes(w, "big"))
     for path in sorted(files):
         p = path.encode("utf-8")
@@ -141,22 +154,97 @@ def _entries(path: str, deadline: float, plan: list):
             yield ent.name, os.path.join(path, ent.name)
 
 
-_OPEN_FLAGS = os.O_RDONLY | (os.O_BINARY if os.name == "nt" else os.O_NOFOLLOW)
+_REPARSE = stat.FILE_ATTRIBUTE_REPARSE_POINT
+
+
+def _reparse(st) -> bool:
+    """A Windows reparse point (a symbolic link or a junction): lstat reports
+    a junction as a plain directory, so its attribute is checked as well."""
+    return os.name == "nt" and bool(st.st_file_attributes & _REPARSE)
+
+
+# CreateFileW arguments: GENERIC_READ; share read, write and delete;
+# OPEN_EXISTING; FILE_FLAG_OPEN_REPARSE_POINT (open a link ITSELF, never its
+# target); the final-path buffer in characters. Platform constants, pinned.
+_NT = {"read": 0x80000000, "share": 0x7, "existing": 3, "no_follow": 0x00200000,
+       "buffer": 32768}
+_K32 = None          # the Windows calls, when this platform has them
+if os.name == "nt":
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        _k = ctypes.WinDLL("kernel32", use_last_error=True)
+        _k.CreateFileW.restype = wintypes.HANDLE
+        _k.CreateFileW.argtypes = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                   wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                   wintypes.HANDLE)
+        _k.GetFinalPathNameByHandleW.restype = wintypes.DWORD
+        _k.GetFinalPathNameByHandleW.argtypes = (wintypes.HANDLE, wintypes.LPWSTR,
+                                                 wintypes.DWORD, wintypes.DWORD)
+        _k.CloseHandle.argtypes = (wintypes.HANDLE,)
+        _K32 = _k
+    except (ImportError, OSError, AttributeError):
+        _K32 = None
+
+
+def _nt_final(path: str, final: str) -> bool:
+    """Whether the path a handle resolved to is the path that was asked for
+    (any junction or link on the way would make them differ)."""
+    for pre, rep in (("\\\\?\\UNC\\", "\\\\"), ("\\\\?\\", "")):
+        if final.startswith(pre):
+            final = rep + final[len(pre):]
+            break
+    return os.path.normcase(final) == os.path.normcase(os.path.abspath(path))
+
+
+def _open_nofollow(path: str) -> int:
+    """A read-only descriptor on `path` that never follows a link, on every
+    platform this loader supports. POSIX: O_NOFOLLOW (a link in the last
+    component fails the open) and O_NONBLOCK (a FIFO or device cannot block
+    the open; the caller then refuses anything that is not a regular file).
+    Windows: CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT, so a link is
+    opened as itself and refused as a reparse point, and the final path of
+    the handle must equal the path asked for, so a junction anywhere on the
+    way is refused too. Any other platform, or a Windows without the calls,
+    refuses activation (class `platform`) instead of reading through a
+    following handle."""
+    if os.name == "posix":
+        try:
+            return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError as e:
+            raise Refused("unreadable", type(e).__name__)
+    if os.name != "nt" or _K32 is None:
+        raise Refused("platform", "no non-following open on this platform")
+    h = _K32.CreateFileW(path, _NT["read"], _NT["share"], None, _NT["existing"],
+                         _NT["no_follow"], None)
+    if h is None or h == wintypes.HANDLE(-1).value:
+        raise Refused("unreadable", "OSError")
+    try:
+        buf = ctypes.create_unicode_buffer(_NT["buffer"])
+        n = _K32.GetFinalPathNameByHandleW(h, buf, _NT["buffer"], 0)
+        if n == 0 or n >= _NT["buffer"]:
+            raise Refused("unreadable", "final path")
+        if not _nt_final(path, buf.value):
+            raise Refused("inventory", "final path")
+        fd = msvcrt.open_osfhandle(h, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        _K32.CloseHandle(h)
+        raise
+    return fd
 
 
 def _read_verified(path: str, ident: tuple, size: int, cap: int) -> bytes:
     """Read one planned file through a handle opened without following a
-    link, after proving that the handle IS the file the inventory planned:
-    a regular file with the same device, inode and size as the lstat that
-    admitted it. A path replaced between the two (a rename over it, a link
-    swapped in) is refused, never read."""
-    try:
-        fd = os.open(path, _OPEN_FLAGS)
-    except OSError as e:
-        raise Refused("unreadable", type(e).__name__)
+    link (_open_nofollow), after proving that the handle IS the file the
+    inventory planned: a regular file, not a reparse point, with the same
+    device, inode and size as the lstat that admitted it. A path replaced
+    between the two (a rename over it, a link or junction swapped in) is
+    refused, never read."""
+    fd = _open_nofollow(path)
     try:
         fs = os.fstat(fd)
-        if (not stat.S_ISREG(fs.st_mode) or (fs.st_dev, fs.st_ino) != ident
+        if (not stat.S_ISREG(fs.st_mode) or _reparse(fs) or (fs.st_dev, fs.st_ino) != ident
                 or fs.st_size != size):
             raise Refused("inventory", "file changed before read")
         chunks, left = [], cap + 1
@@ -187,20 +275,20 @@ def _inventory(rdir: str, deadline: float) -> dict:
         st = os.lstat(rdir)
     except OSError as e:
         raise Refused("unreadable", type(e).__name__)
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+    if stat.S_ISLNK(st.st_mode) or _reparse(st) or not stat.S_ISDIR(st.st_mode):
         raise Refused("inventory", "not a directory")
     plan = []
     try:
         for name, path in _entries(rdir, deadline, plan):
             s = os.lstat(path)
-            if stat.S_ISLNK(s.st_mode):
+            if stat.S_ISLNK(s.st_mode) or _reparse(s):
                 raise Refused("inventory", "link")
             if name == "data":
                 if not stat.S_ISDIR(s.st_mode):
                     raise Refused("inventory", "data")
                 for dn, dp in _entries(path, deadline, plan):
                     ds = os.lstat(dp)
-                    if (stat.S_ISLNK(ds.st_mode) or not stat.S_ISREG(ds.st_mode)
+                    if (stat.S_ISLNK(ds.st_mode) or _reparse(ds) or not stat.S_ISREG(ds.st_mode)
                             or not _DATA_NAME.fullmatch(dn)):
                         raise Refused("inventory", "data entry")
                     plan.append(("data/" + dn, dp, ds.st_size, _BOUNDS["data_bytes_max"],
@@ -248,7 +336,9 @@ class Ruleset:
         self.vocabulary = {}
         self.core = {}
         self.data = {}
-        self.module_fps = {}
+        self.code_fp = None
+        self.closure_fp = None
+        self.closure_files = 0
 
     @property
     def game_rules(self):
@@ -261,10 +351,11 @@ class Ruleset:
     def rule(self, rule_id):
         return next((r for r in self.rules if r.id == rule_id), None)
 
-    # Evaluation always runs through the core entries the revision BOUND, so a
-    # retained older core version keeps evaluating an older revision exactly.
-    def evaluate_game(self, records, match, registry, module=None, budget=None):
-        return self.core["core.game"].impl[0](self, records, match, registry, module, budget)
+    # Evaluation runs through the core entries the revision bound by name; the
+    # code they run is the code the revision was built against, byte for byte
+    # (load_dir refuses a revision whose code closure differs).
+    def evaluate_game(self, records, match, registry, budget=None):
+        return self.core["core.game"].impl[0](self, records, match, registry, budget)
 
     def run_selftest(self, cases, deadline):
         return self.core["core.game"].impl[-1](self, cases, deadline)
@@ -293,10 +384,12 @@ def _finite(v) -> bool:
 
 
 class _Binder:
-    """Resolves a vocabulary name for a revision. In load mode the revision's
-    own `vocabulary` map names the fingerprint and review_measures.resolve
-    finds the current or a retained version (else: stale). In build mode the
-    current registry is bound and its fingerprint recorded."""
+    """Resolves a vocabulary name for a revision. In load mode the name must be
+    one the revision's `vocabulary` lists and an entry of this build (a name
+    this build lacks makes the revision stale). In build mode the current
+    registry is bound and the names used are recorded. What the entries
+    COMPUTE is bound once for the whole revision, by file (code_fingerprint),
+    never per entry."""
 
     def __init__(self, vocab, build=False):
         self.vocab = vocab
@@ -307,32 +400,14 @@ class _Binder:
     def __call__(self, name, kind=None):
         if not isinstance(name, str):
             raise Refused("malformed", "entry name")
-        if name.startswith("module."):
-            if self.build:
-                fp = (self.vocab or {}).get(name)
-                if not isinstance(fp, str) or len(fp) != _BOUNDS["digest_hex"]:
-                    raise Refused("malformed", "module entry needs a bound fingerprint")
-            else:
-                fp = self.vocab.get(name)
-                if not isinstance(fp, str) or len(fp) != _BOUNDS["digest_hex"] or not _HEX.fullmatch(fp):
-                    raise Refused("malformed", "module entry binding")
-            self.used[name] = fp
-            self.kinds[name] = "module"
-            return ("module", name, fp)
-        if self.build:
-            entry = rm.REGISTRY.get(name)
-            if entry is None:
-                raise Refused("malformed", "unknown entry")
-        else:
-            fp = self.vocab.get(name)
-            if not isinstance(fp, str):
-                raise Refused("malformed", "unbound entry")
-            entry = rm.resolve_entry(name, fp)
-            if entry is None:
-                raise Refused("stale", "entry fingerprint")
+        if not self.build and name not in self.vocab:
+            raise Refused("malformed", "unbound entry")
+        entry = rm.REGISTRY.get(name)
+        if entry is None:
+            raise Refused("malformed" if self.build else "stale", "unknown entry")
         if kind is not None and entry.kind not in ((kind,) if isinstance(kind, str) else kind):
             raise Refused("malformed", "entry kind")
-        self.used[name] = entry.fp
+        self.used[name] = entry.kind
         self.kinds[name] = entry.kind
         return entry
 
@@ -342,12 +417,11 @@ def _compile_expr(node, bind, subject):
         raise Refused("malformed", "expression")
     (k, v), = node.items()
     if k == "m":
-        e = bind(v, "measure") if not str(v).startswith("module.") else bind(v)
-        if not isinstance(e, tuple):
-            if e.subject != subject:
-                raise Refused("malformed", "measure subject")
-            if e.family is not None:
-                bind(e.family, "params")
+        e = bind(v, "measure")
+        if e.subject != subject:
+            raise Refused("malformed", "measure subject")
+        if e.family is not None:
+            bind(e.family, "params")
         return ("m", e)
     if k == "v":
         if not (_finite(v) or isinstance(v, (str, bool)) or v is None
@@ -471,8 +545,7 @@ def _compile_sitting(node, bind0):
 
 
 def _bound_lookup(refs):
-    """SQL data entries exactly as the revision bound them (current or
-    retained), never a later version under the same name."""
+    """SQL data entries exactly as the revision bound them by name."""
     def R(name, kind):
         e = refs[name]
         if e.kind != kind:
@@ -502,7 +575,7 @@ RULE_KEYS = {"id", "scope", "effect", "post", "post_since", "line", "show"}
 
 def compile_rules(doc, bind, data) -> Ruleset:
     """Validate and compile a parsed rules.json under `bind`."""
-    if not isinstance(doc, dict) or set(doc) != {"format", "nonce", "vocabulary",
+    if not isinstance(doc, dict) or set(doc) != {"format", "nonce", "vocabulary", "closure",
                                                  "measure_params", "rules"}:
         raise Refused("malformed", "top level")
     if doc["format"] != _BOUNDS["format"]:
@@ -511,7 +584,7 @@ def compile_rules(doc, bind, data) -> Ruleset:
     if (not isinstance(nonce, str) or len(nonce) != _BOUNDS["nonce_bytes"] * PAIR
             or not _HEX.fullmatch(nonce)):
         raise Refused("malformed", "nonce")
-    if not isinstance(doc["vocabulary"], dict):
+    if not isinstance(doc["vocabulary"], list):
         raise Refused("malformed", "vocabulary")
     rs = Ruleset()
     rs.data = data
@@ -593,12 +666,6 @@ class _Budget:
 
 
 def _measure_value(m, ctx, memo, rs):
-    if isinstance(m, tuple):          # a module measure (choice two, the sandboxed service)
-        _kind, name, fp = m
-        mod = ctx.module
-        if mod is None or mod.fingerprint(name) != fp:
-            return None
-        return mod.compute(name, ctx, rs.params.get(name, {}))
     key = (m.name, ctx.i)
     if key not in memo:
         fam = rs.params.get(m.family) if m.family else None
@@ -645,15 +712,15 @@ def eval_pred(node, ctx, memo, rs, budget):
     return out
 
 
-def evaluate_game(rs, records, match, registry, module=None, budget=None):
+def evaluate_game(rs, records, match, registry, budget=None):
     """Every game rule of `rs` over one game's records (one or two). Returns
     (findings, fired, errors): findings are (rule, details) for flag rules
     that fired on at least one subject, with the rendered lines of any note
     rule that fired attached; fired is every rule id that fired."""
     cache = {}
-    seats = [rm.Ctx(records, i, match, registry, rs.params, cache, module)
+    seats = [rm.Ctx(records, i, match, registry, rs.params, cache)
              for i in range(len(records))]
-    game = [rm.Ctx(records, None, match, registry, rs.params, cache, module)]
+    game = [rm.Ctx(records, None, match, registry, rs.params, cache)]
     memo = {}
     findings, notes, fired, errors = [], [], [], 0
     for rule in rs.game_rules:
@@ -806,8 +873,70 @@ if __name__ != "__main__" and "core.game" not in rm.REGISTRY:
     _register_core()
 
 
+def _code_files(names, api_dir=None) -> dict:
+    """The code half of a revision's closure, BY FILE: each named file's bytes,
+    with CRLF read as LF so a Windows and a Linux checkout of one commit
+    digest alike. Each name is read from the file its module was imported
+    from (this loader's own file for itself), else from this directory; with
+    `api_dir` every name is read from that directory instead (the build tool's
+    controls). Dynamic reach does not matter: every byte of every named file
+    is in the digest."""
+    here = os.path.abspath(__file__)
+    files = {}
+    for name in names:
+        if api_dir is not None:
+            path = os.path.join(api_dir, name)
+        elif name == os.path.basename(here):
+            path = here
+        else:
+            mod = sys.modules.get(os.path.splitext(name)[0])
+            path = (mod.__file__ if mod is not None and mod.__file__
+                    else os.path.join(os.path.dirname(here), name))
+        try:
+            with open(path, "rb") as f:
+                raw = f.read(_BOUNDS["rules_bytes_max"] + 1)
+        except OSError as e:
+            raise Refused("unreadable", "code file " + type(e).__name__)
+        if len(raw) > _BOUNDS["rules_bytes_max"]:
+            raise Refused("inventory", "code file bytes")
+        files["code/" + name] = raw.replace(b"\r\n", b"\n")
+    return files
+
+
+def code_fingerprint(names=CODE_REQUIRED, api_dir=None) -> str:
+    """The framed digest of the code files a revision binds (_code_files)."""
+    return _framed(CODE_DOMAIN, _code_files(names, api_dir))
+
+
+def closure_fingerprint(code_files: dict, revision_files: dict) -> str:
+    """The whole closure of a revision, by file: every code file it binds and
+    every file the loader reads for it (rules, self-test, data tables), the
+    REVISION seal excepted (it is a digest of the others)."""
+    files = dict(code_files)
+    files.update({"revision/" + k: v for k, v in revision_files.items() if k != "REVISION"})
+    return _framed(CLOSURE_DOMAIN, files)
+
+
+def _closure_names(closure) -> list:
+    if (not isinstance(closure, dict) or set(closure) != {"code", "fp"}
+            or not isinstance(closure["code"], list)
+            or len(closure["code"]) > _BOUNDS["files_max"]
+            or not all(isinstance(n, str) and _CODE_NAME.fullmatch(n) for n in closure["code"])
+            or closure["code"] != sorted(set(closure["code"]))
+            or not set(CODE_REQUIRED) <= set(closure["code"])
+            or not isinstance(closure["fp"], str) or len(closure["fp"]) != _BOUNDS["digest_hex"]
+            or not _HEX.fullmatch(closure["fp"])):
+        raise Refused("malformed", "closure")
+    return closure["code"]
+
+
 def review_eval() -> str:
-    return rm.review_eval()
+    """The public discriminator of the running review code: the leading hex
+    of code_fingerprint over the required files (no revision content)."""
+    try:
+        return code_fingerprint()[: rm.CONTRACT_BOUNDS["eval_hex"]]
+    except Refused:
+        return "refused"
 
 
 # -- loading -------------------------------------------------------------------
@@ -841,8 +970,14 @@ def load_dir(rdir: str, *, deadline: float | None = None) -> Ruleset:
     except (ValueError, UnicodeDecodeError):
         raise Refused("malformed", "json")
     _check_time(deadline)
-    binder = _Binder(doc.get("vocabulary") if isinstance(doc, dict) else None)
-    if not isinstance(binder.vocab, dict):
+    names = _closure_names(doc.get("closure") if isinstance(doc, dict) else None)
+    code = _code_files(names)
+    code_fp = _framed(CODE_DOMAIN, code)
+    if code_fp != doc["closure"]["fp"]:
+        raise Refused("stale", "code closure")
+    binder = _Binder(doc.get("vocabulary"))
+    if (not isinstance(binder.vocab, list) or not all(isinstance(n, str) for n in binder.vocab)
+            or binder.vocab != sorted(set(binder.vocab))):
         raise Refused("malformed", "vocabulary")
     rs = compile_rules(doc, binder, data)
     if set(binder.used) != set(binder.vocab):
@@ -854,7 +989,10 @@ def load_dir(rdir: str, *, deadline: float | None = None) -> Ruleset:
     rs.run_sitting_selftest()
     rs.rev = digest[: _BOUNDS["rev_hex"]]
     rs.digest = digest
-    rs.vocabulary = dict(binder.vocab)
+    rs.vocabulary = list(binder.vocab)
+    rs.code_fp = code_fp
+    rs.closure_fp = closure_fingerprint(code, files)
+    rs.closure_files = len(code) + len(files) - 1
     return rs
 
 
@@ -885,9 +1023,10 @@ def _pointer_target(base):
         return None
     if stat.S_ISLNK(st.st_mode):
         target = os.readlink(p)
-    elif stat.S_ISREG(st.st_mode) and st.st_size <= _BOUNDS["pointer_bytes_max"]:
-        with open(p, "rb") as f:
-            target = f.read(_BOUNDS["pointer_bytes_max"]).decode("ascii", "replace").strip()
+    elif (stat.S_ISREG(st.st_mode) and not _reparse(st)
+          and st.st_size <= _BOUNDS["pointer_bytes_max"]):
+        raw = _read_verified(p, (st.st_dev, st.st_ino), st.st_size, _BOUNDS["pointer_bytes_max"])
+        target = raw.decode("ascii", "replace").strip()
     else:
         raise Refused("pointer")
     if target == NONE_TARGET:
@@ -988,16 +1127,16 @@ def build_revision(draft: str, store: str, reason: str) -> str:
                 data_files["data/" + dn] = f.read()
     doc = dict(doc)
     doc["nonce"] = secrets.token_hex(_BOUNDS["nonce_bytes"])
-    module_vocab = {k: v for k, v in (doc.get("vocabulary") or {}).items() if k.startswith("module.")}
-    doc["vocabulary"] = {}
+    doc["vocabulary"] = []
+    doc["closure"] = {"code": sorted(CODE_REQUIRED), "fp": code_fingerprint()}
     data = {}
     for rel, raw in data_files.items():
         name, ext = rel.split("/", 1)[1].rsplit(".", 1)
         text = raw.decode("utf-8")
         data[name] = json.loads(text) if ext == "json" else [ln for ln in text.splitlines() if ln.strip()]
-    binder = _Binder(module_vocab, build=True)
+    binder = _Binder(None, build=True)
     compile_rules(doc, binder, data)
-    doc["vocabulary"] = dict(sorted(binder.used.items()))
+    doc["vocabulary"] = sorted(binder.used)
     files = {"rules.json": _canon(doc), "selftest.json": _canon(selftest)}
     files.update(data_files)
     digest = revision_digest(files)

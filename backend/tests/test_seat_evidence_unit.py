@@ -95,16 +95,22 @@ EVENT_CASES = [
     ("blk_sent", [1, 0, 0, 200], "blk_sent.own_open"),
     ("hit_recv", [1, 5, 7, 0, 5, 0, 1, -1], "hit_recv.path"),
     ("hit_recv", [0, 5, 7, 0, 5, 0, 1, -1], "hit_recv.pid"),
-    ("hit_sent", [0, 5, 7, 0, 10, 0, 0, -1, 0], "hit_sent.pid"),
-    ("hit_sent", [0, 5, 0, 0, 10, 0, 3, -1, 0], "hit_sent.last"),
-    ("hit_sent", [0, 5, 0, 0, 10, 0, 0, -1, 4], "hit_sent.last"),
+    ("hit_sent", [0, 5, 7, 0, -1, 0, 0, -1, 0], "hit_sent.pid"),
+    ("hit_sent", [0, 5, 0, 0, -1, 0, 3, -1, 0], "hit_sent.last"),
+    ("hit_sent", [0, 5, 0, 0, -1, 0, 0, -1, 4], "hit_sent.last"),
+    # round 2 M8: since_ms is -1 if and only if last_* is the no-block tuple
+    ("hit_sent", [0, 5, 0, 0, -1, 0, 9, 2, 3], "hit_sent.since_unset_with_block"),
+    ("hit_sent", [0, 5, 0, 0, 10, 0, 0, -1, 0], "hit_sent.since_set_without_block"),
+    ("hit_sent", [0, 5, 0, 0, 0, 0, 0, -1, 0], "hit_sent.since_set_without_block"),
 ]
 EVENT_CONTROLS = [
     ("blk_sent", [1, 0, 0, 0]), ("blk_sent", [1, 0, 0, -200]),
     ("hit_recv", [0, 5, 0, 0, 5, 0, 1, -1]),
-    ("hit_sent", [1, 5, 7, 0, 10, 0, 0, -1, 0]),
-    ("hit_sent", [0, 5, 0, 0, 10, 0, 0, -1, 0]),
+    ("hit_sent", [1, 5, 7, 0, -1, 0, 0, -1, 0]),
+    # the two valid since/last pairs: no block (-1 with [0,-1,0]) and a named block
+    ("hit_sent", [0, 5, 0, 0, -1, 0, 0, -1, 0]),
     ("hit_sent", [0, 5, 0, 0, 10, 0, 9, 2, 3]),
+    ("hit_sent", [0, 5, 0, 0, 0, 0, 9, 2, 3]),
 ]
 
 
@@ -119,6 +125,61 @@ def test_m8_an_event_breaking_an_invariant_is_refused_by_name(field, entry, name
 @pytest.mark.parametrize("field,entry", EVENT_CONTROLS)
 def test_m8_control_the_legal_forms_pass(field, entry):
     se.check_record(fx.base_record(**{field: [entry]}))
+
+
+# -- round 2 new L: the optional `end` key (amendment A1) -------------------------
+
+END_VALUES = ("left", "other_left", "lost", "closing")
+
+
+def _with_end(value, after="rounds"):
+    rec = fx.base_record()
+    out = {}
+    for k, v in rec.items():
+        out[k] = v
+        if k == after:
+            out["end"] = value
+    return out
+
+
+@pytest.mark.parametrize("value", END_VALUES)
+def test_end_each_closed_value_in_its_exact_place_is_accepted(value):
+    rec = _with_end(value)
+    assert list(rec).index("end") == list(rec).index("rounds") + 1
+    se.check_record(rec)
+
+
+def test_end_control_absent_is_accepted_and_byte_identical_to_v2():
+    rec = fx.base_record()
+    assert "end" not in rec
+    se.check_record(rec)
+
+
+@pytest.mark.parametrize("value", ["", "won", "LEFT", 1, None, ["left"]])
+def test_end_a_value_outside_the_closed_set_is_refused_by_name(value):
+    with pytest.raises(se.EvidenceRefused) as e:
+        se.check_record(_with_end(value))
+    assert (e.value.status, e.value.field) == (422, "end")
+
+
+@pytest.mark.parametrize("after", ["schema", "build", "omit"])
+def test_end_out_of_its_place_is_refused(after):
+    with pytest.raises(se.EvidenceRefused) as e:
+        se.check_record(_with_end("lost", after=after))
+    assert (e.value.status, e.value.field) == (422, "key_order")
+
+
+def test_end_survives_the_budgeter_and_the_envelope_parse_in_place():
+    rec = _with_end("closing")
+    body = fx.envelope(rec)
+    text = body["record"]
+    assert '"rounds":[5,3],"end":"closing","build"' in text           # the budgeter keeps it in place
+    env = se.parse_envelope(body)
+    parsed = se.parse_record(env)
+    assert parsed["end"] == "closing" and list(parsed) == list(rec)
+    assert env["record_text"] == text                                # stored bytes = sent bytes
+    plain = fx.envelope(fx.base_record())["record"]
+    assert '"end"' not in plain and plain == text.replace(',"end":"closing"', "")
 
 
 def test_the_relayed_build_holds_the_complete_46_character_tuple():
@@ -192,8 +253,7 @@ LANE_WRITES = {"seat_evidence", "seat_evidence_games", "seat_evidence_findings",
 _WRITE = re.compile(r"\b(?:INSERT\s+INTO|(?<!DO\s)(?<!FOR\s)UPDATE|DELETE\s+FROM"
                     r"|TRUNCATE(?:\s+TABLE)?|ALTER\s+TABLE)"
                     r"\s+(?:ONLY\s+)?([A-Za-z_][A-Za-z0-9_]*)")
-REVIEW_MODULES = ("seat_evidence.py", "review_measures.py", "review_rules.py",
-                  "review_module.py", "review_module_runner.py")
+REVIEW_MODULES = ("seat_evidence.py", "review_measures.py", "review_rules.py")
 
 
 def written_tables(source: str) -> set:
@@ -350,14 +410,14 @@ def test_the_health_words_are_declared_required():
     import schemas
     fields = schemas.HealthResponse.model_fields
     assert fields["seat_evidence"].annotation is int and fields["seat_evidence"].is_required()
-    for k in ("review_eval", "review_rules", "review_module"):
+    for k in ("review_eval", "review_rules"):
         assert fields[k].annotation is str and fields[k].is_required(), k
 
 
 def test_both_health_arms_carry_the_review_words():
     main = _main()
     src = inspect.getsource(main.health_check)
-    for k in ("seat_evidence=", "review_eval=", "review_rules=", "review_module="):
+    for k in ("seat_evidence=", "review_eval=", "review_rules="):
         assert src.count(k) == 2, k
 
 

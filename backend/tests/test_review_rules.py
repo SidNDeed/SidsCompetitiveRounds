@@ -2,9 +2,9 @@
 (review_testkit). Bars: A3 (absent), A4 (five refusal classes, each logged
 once), A5 (a resealed self-test mutant refuses; the unaltered revision loads),
 A6 (re-pointing reaches a running process), A7 (a two-seat measure and its
-negation on a one-sided game), the per-entry fingerprints and the bridge
-(design report finding 2), the bounded inventory and work (finding 9), and
-the absent-module arm of choice two."""
+negation on a one-sided game), the code closure bound BY FILE (round 2 M2),
+the bounded inventory and work (finding 9), and the non-following reads
+(round 2 L3)."""
 
 import copy
 import json
@@ -120,20 +120,16 @@ def test_a4_digest_mismatch(fresh, tmp_path, capsys):
     _refused_once(fresh, "rules-" + rev, "digest", capsys)
 
 
-def _changed_entry(name):
-    """The same entry with an implementation that computes something else."""
-    cur = rm.REGISTRY[name]
-
-    def changed(ctx, p):
-        return ctx.r["rec"]["imp"][1]
-    return rm.Entry(cur.kind, name, (changed,), subject=cur.subject, family=cur.family), cur
-
-
-def test_a4_stale_vocabulary(fresh, tmp_path, capsys, monkeypatch):
+def test_a4_stale_code_closure(fresh, tmp_path, capsys, monkeypatch):
     rdir, rev = _built(tmp_path)
     _into_root(fresh, rdir)
-    new, _old = _changed_entry("seat.observed_hits")
-    monkeypatch.setitem(rm.REGISTRY, "seat.observed_hits", new)
+    real = rr._code_files
+
+    def one_byte_more(names, api_dir=None):
+        files = real(names, api_dir)
+        files["code/review_measures.py"] += b"#"
+        return files
+    monkeypatch.setattr(rr, "_code_files", one_byte_more)
     _refused_once(fresh, "rules-" + rev, "stale", capsys)
 
 
@@ -221,7 +217,7 @@ def test_the_vocabulary_must_be_exactly_the_entries_used(tmp_path):
     p = os.path.join(rdir, "rules.json")
     with open(p, encoding="utf-8") as f:
         doc = json.load(f)
-    doc["vocabulary"]["seat.compat"] = rm.REGISTRY["seat.compat"].fp
+    doc["vocabulary"] = sorted(doc["vocabulary"] + ["seat.compat"])
     with open(p, "w", encoding="utf-8") as f:
         json.dump(doc, f)
     new, _ = tk.reseal(rdir)
@@ -230,66 +226,151 @@ def test_the_vocabulary_must_be_exactly_the_entries_used(tmp_path):
     assert e.value.cls == "malformed"
 
 
-# -- finding 2: fingerprints and the bridge ----------------------------------------------
+# -- round 2 M2: the closure is bound BY FILE ---------------------------------------
+# The bound fingerprint is the framed digest of every code file the revision's
+# `closure` names (review_measures.py and the loader review_rules.py at least)
+# and, for the whole-closure fingerprint, every file the loader reads for the
+# revision. Dynamic reach is irrelevant: any byte of any file in the closure
+# moves it; a file outside the closure does not.
 
-def test_a_comment_or_docstring_change_keeps_the_fingerprint_and_a_body_change_moves_it():
-    def one(ctx, p):
-        """a docstring"""
-        return ctx.i  # a comment
-
-    def two(ctx, p):
-        return ctx.i
-
-    def three(ctx, p):
-        return ctx.r
-
-    fp = rm._fn_fp
-    assert fp(one) == fp(two) != fp(three)
+API_DIR = os.path.join(HERE, "..", "api")
 
 
-def test_the_bridge_keeps_an_old_revision_loading_while_both_builds_are_live(tmp_path, monkeypatch):
-    r1, rev1 = _built(tmp_path, name="old")
-    before = rm.review_eval()
-    new, old = _changed_entry("seat.observed_hits")
-    monkeypatch.setitem(rm.REGISTRY, "seat.observed_hits", new)
-    with pytest.raises(rr.Refused) as e:
-        rr.load_dir(r1)
-    assert e.value.cls == "stale"
-    monkeypatch.setitem(rm.BRIDGE, ("seat.observed_hits", old.fp), old)
-    rs1 = rr.load_dir(r1)
-    # the old revision evaluates with the version it bound, not the current one
-    g = tk.game(tk.rec(other_pub=[60, 45, 100, 40, 30, 25]))
-    f, fired, _ = rs1.evaluate_game(g, tk.MATCH, tk.registry_of(g))
-    assert tk.ID_PUB in fired
-    item = next(d for r, d in f if r.id == tk.ID_PUB)["items"][0]
-    assert item["observed"] == g[0]["rec"]["imp"][2]
-    # a revision built on the new box binds the new version and loads there
-    # (its self-test states what the new version computes on the same cases)
-    doc = tk.synthetic_doc()
-    doc["nonce"] = "0" * 32
-    rs_new = rr.compile_rules(doc, rr._Binder({}, build=True), {})
-    cases = [dict(c, fire=sorted(set(rs_new.evaluate_game(
-                 c["records"], c["match"], {tuple(t) for t in c["registry"]})[1])))
-             for c in tk.quiet_cases()]
-    assert cases != tk.quiet_cases()            # the new version changes what fires
-    r2, _rev2 = _built(tmp_path, cases=cases, name="new")
-    rs2 = rr.load_dir(r2)
-    assert rs2.vocabulary["seat.observed_hits"] == new.fp != old.fp
-    assert rm.review_eval() != before
-    # and the old box (no new version, no bridge) refuses the new revision
-    monkeypatch.setitem(rm.REGISTRY, "seat.observed_hits", old)
-    monkeypatch.delitem(rm.BRIDGE, ("seat.observed_hits", old.fp))
-    with pytest.raises(rr.Refused) as e:
-        rr.load_dir(r2)
-    assert e.value.cls == "stale"
-    assert rm.review_eval() == before
+def _api_copy(tmp_path, name, extra=()):
+    d = tmp_path / ("api-" + name)
+    d.mkdir()
+    for m in rr.CODE_REQUIRED + tuple(extra):
+        shutil.copy(os.path.join(API_DIR, m), str(d))
+    return d
 
 
-def test_review_eval_covers_every_entry_and_the_bridge(monkeypatch):
-    base = rm.review_eval()
+def _change(path, old, new):
+    src = path.read_bytes()
+    if b"\r\n" in src:                      # the checkout's line ending
+        old, new = old.replace("\n", "\r\n"), new.replace("\n", "\r\n")
+    assert src.count(old.encode()) == 1, (path, old)
+    path.write_bytes(src.replace(old.encode(), new.encode()))
+
+
+def _revision_files(rdir):
+    import time
+    return rr._inventory(rdir, time.monotonic() + rr._BOUNDS["deadline_s"])
+
+
+def _closure(api_dir, rdir):
+    return rr.closure_fingerprint(rr._code_files(rr.CODE_REQUIRED, str(api_dir)), _revision_files(rdir))
+
+
+def test_m2_a_loaded_revision_binds_every_file_of_its_closure(tmp_path):
+    rdir, _ = _built(tmp_path)
+    rs = rr.load_dir(rdir)
+    with open(os.path.join(rdir, "rules.json"), encoding="utf-8") as f:
+        doc = json.load(f)
+    assert doc["closure"] == {"code": sorted(rr.CODE_REQUIRED), "fp": rr.code_fingerprint()}
+    assert rs.code_fp == rr.code_fingerprint()
+    revision = _revision_files(rdir)
+    assert rs.closure_files == len(rr.CODE_REQUIRED) + len(revision) - 1   # REVISION is the seal
+    assert rs.closure_fp == rr.closure_fingerprint(rr._code_files(rr.CODE_REQUIRED), revision)
+    assert rr.review_eval() == rr.code_fingerprint()[: rm.CONTRACT_BOUNDS["eval_hex"]]
+
+
+# Each change is to a file IN the closure; none is reached by a static call
+# graph from a bound entry's own body.
+M2_CLOSURE_CHANGES = [
+    ("dynamic_method", "review_rules.py",
+     '        return [r for r in self.rules if r.scope == "game"]\n',
+     '        return [r for r in self.rules if r.scope == "game"][::-1]\n'),
+    ("budget_tick", "review_rules.py", "        self.left -= 1\n", "        self.left -= 0\n"),
+    ("module_constant", "review_measures.py", "WINDOW_KINDS = (0, 2, 3)\n", "WINDOW_KINDS = (0, 2)\n"),
+    ("sql_template", "review_measures.py", "review_sitting_dirty", "review_sitting_dirty "),
+    ("unreferenced_code", "review_measures.py", "SEATS = 2      # the two seats of a game\n",
+     "SEATS = 2      # the two seats of a game\n\n\ndef _never_called():\n    return None\n"),
+    ("comment_only", "review_measures.py", "# -- registration helpers",
+     "# a comment\n# -- registration helpers"),
+]
+
+
+@pytest.mark.parametrize("change", M2_CLOSURE_CHANGES, ids=[c[0] for c in M2_CLOSURE_CHANGES])
+def test_m2_any_change_to_a_closure_code_file_moves_the_fingerprint(tmp_path, change):
+    rdir, _ = _built(tmp_path)
+    same = _api_copy(tmp_path, "same")
+    base = _closure(same, rdir)
+    assert base == rr.load_dir(rdir).closure_fp                  # control: the copy IS the code
+    name, fname, old, new = change
+    d = _api_copy(tmp_path, name)
+    if name == "sql_template":
+        src = (d / fname).read_bytes()
+        assert src.count(old.encode()) >= 1
+        (d / fname).write_bytes(src.replace(old.encode(), new.encode(), 1))
+    else:
+        _change(d / fname, old, new)
+    assert _closure(d, rdir) != base
+    assert rr.code_fingerprint(api_dir=str(d)) != rr.code_fingerprint(api_dir=str(same))
+
+
+def test_m2_a_template_and_an_unreferenced_file_of_the_revision_move_it(tmp_path):
+    rdir, _ = _built(tmp_path)
+    same = _api_copy(tmp_path, "same")
+    base = _closure(same, rdir)
+    # a rule's line template
+    doc = copy.deepcopy(tk.synthetic_doc())
+    doc["rules"][0]["line"] = doc["rules"][0]["line"] + " "
+    r2, _ = _built(tmp_path, doc, name="template")
+    # an unreferenced data table
+    r3 = os.path.join(str(tmp_path), "unref", os.path.basename(rdir))
+    shutil.copytree(rdir, r3)
+    os.mkdir(os.path.join(r3, "data"))
+    with open(os.path.join(r3, "data", "never_named.txt"), "w", encoding="utf-8") as f:
+        f.write("x\n")
+    r3, _ = tk.reseal(r3)
+    assert rr.load_dir(r3).closure_files == rr.load_dir(rdir).closure_files + 1
+    fps = {base, _closure(same, r2), _closure(same, r3)}
+    assert len(fps) == 3
+
+
+def test_m2_control_a_file_outside_the_closure_and_line_endings_do_not_move_it(tmp_path):
+    rdir, _ = _built(tmp_path)
+    same = _api_copy(tmp_path, "same", extra=("seat_evidence.py",))
+    base = _closure(same, rdir)
+    d = _api_copy(tmp_path, "outside", extra=("seat_evidence.py",))
+    _change(d / "seat_evidence.py", "import json\n", "import json  # outside the closure\n")
+    assert _closure(d, rdir) == base
+    e = _api_copy(tmp_path, "eol")
+    for m in rr.CODE_REQUIRED:
+        raw = (e / m).read_bytes().replace(b"\r\n", b"\n")
+        (e / m).write_bytes(raw.replace(b"\n", b"\r\n") if b"\r\n" not in (same / m).read_bytes() else raw)
+    assert _closure(e, rdir) == base
+
+
+def test_m2_a_revision_naming_too_few_code_files_or_a_bad_name_is_malformed(tmp_path):
+    for i, closure in enumerate(({"code": ["review_rules.py"], "fp": rr.code_fingerprint()},
+                    {"code": ["../review_rules.py", "review_measures.py"], "fp": "0" * 64},
+                    {"code": sorted(rr.CODE_REQUIRED), "fp": "zz"},
+                    {"code": sorted(rr.CODE_REQUIRED)})):
+        rdir, _ = _built(tmp_path, name="c" + str(i))
+        p = os.path.join(rdir, "rules.json")
+        with open(p, encoding="utf-8") as f:
+            doc = json.load(f)
+        doc["closure"] = closure
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(doc, f)
+        new, _ = tk.reseal(rdir)
+        with pytest.raises(rr.Refused) as e:
+            rr.load_dir(new)
+        assert (e.value.cls, str(e.value)) == ("malformed", "malformed: closure"), closure
+
+
+def test_review_eval_is_the_code_digest_and_moves_with_a_code_byte(tmp_path, monkeypatch):
+    base = rr.review_eval()
     assert len(base) == rm.CONTRACT_BOUNDS["eval_hex"]
-    monkeypatch.setitem(rm.BRIDGE, ("seat.compat", "f" * 64), rm.REGISTRY["seat.compat"])
-    assert rm.review_eval() != base
+    real = rr._code_files
+
+    def changed(names, api_dir=None):
+        files = real(names, api_dir)
+        files["code/review_rules.py"] += b"#"
+        return files
+    monkeypatch.setattr(rr, "_code_files", changed)
+    assert rr.review_eval() != base
 
 
 # -- evaluation ---------------------------------------------------------------------------
@@ -358,27 +439,30 @@ def test_rendering_places_none_lists_and_the_item_bound(tmp_path):
         rr._compile_template("a } b", {"x"})
 
 
-def test_a_module_measure_is_unknown_without_a_module_and_nothing_else_changes(tmp_path):
+def test_a_measure_name_this_build_lacks_is_refused_at_build_and_stale_at_load(tmp_path):
+    """Choice two is absent: no private module can supply a measure. A rule
+    naming one is refused when built, and a revision that names one (built
+    elsewhere) is stale here; nothing is evaluated with it."""
     doc = tk.synthetic_doc()
-    doc["vocabulary"] = {"module.synthetic_extra": "a" * 64}
     doc["rules"].append({"id": "r0000a0dd", "scope": "game", "subject": "seat", "effect": "flag",
                          "post": False, "post_since": None,
                          "when": tk.cmp(tk.M("module.synthetic_extra"), "gt", tk.V(-1)),
                          "show": [["seat", "seat.index"]], "line": "m {seat}"})
-    rdir, _ = _built(tmp_path, doc)
-    rs = rr.load_dir(rdir)
-    g = tk.game()
-    _f, fired, errors = rs.evaluate_game(g, tk.MATCH, tk.registry_of(g))
-    assert "r0000a0dd" not in fired and errors == 0 and tk.ID_NOT_GAP in fired
-
-    class Mod:
-        def fingerprint(self, name):
-            return "a" * 64
-
-        def compute(self, name, ctx, params):
-            return 1
-    _f, fired, _ = rs.evaluate_game(g, tk.MATCH, tk.registry_of(g), module=Mod())
-    assert "r0000a0dd" in fired
+    with pytest.raises(rr.Refused) as e:
+        tk.build_revision(tmp_path, doc, name="with-module")
+    assert (e.value.cls, str(e.value)) == ("malformed", "malformed: unknown entry")
+    rdir, _ = _built(tmp_path, name="plain")
+    p = os.path.join(rdir, "rules.json")
+    with open(p, encoding="utf-8") as f:
+        built = json.load(f)
+    built["rules"].append(dict(doc["rules"][-1]))
+    built["vocabulary"] = sorted(built["vocabulary"] + ["module.synthetic_extra"])
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(built, f)
+    new, _ = tk.reseal(rdir)
+    with pytest.raises(rr.Refused) as e:
+        rr.load_dir(new)
+    assert (e.value.cls, str(e.value)) == ("stale", "stale: unknown entry")
 
 
 def test_the_sitting_statement_has_typed_binds_and_no_lateral(tmp_path):
@@ -421,15 +505,14 @@ def test_the_build_never_overwrites_and_leaves_no_staging_behind(tmp_path):
 
 
 
-# -- M-2: transitive fingerprints, module-qualified dependencies included ----------
-# A revision is built by this (unaltered) tree; the same revision is then
-# loaded by a COPY of the review modules with one change, in a fresh process
-# (fingerprints are taken at import). A semantic change to a class or function
-# a bound entry reaches through a module-qualified name refuses the revision
-# as stale; a comment-only change and the unaltered copy load it.
+# -- M-2 (round 2): a loader in a fresh process over a COPY of the code --------------
+# A revision is built by this (unaltered) tree, then loaded by a copy of the
+# closure's code files with one change, in a fresh process. Any change to a
+# file of the closure refuses the revision as stale, whatever reaches it
+# (a receiver method, the work budget, a module constant, a comment); the
+# unaltered copy, the same files with the other line ending, and a change to
+# a file outside the closure load it.
 
-API_DIR = os.path.join(HERE, "..", "api")
-COPIED = ("review_measures", "review_rules", "review_module")
 LOAD = ("import sys; sys.path.insert(0, sys.argv[1]); import review_rules as rr\n"
         "try:\n    rr.load_dir(sys.argv[2]); print('loaded')\n"
         "except rr.Refused as e:\n    print('refused ' + e.cls)\n")
@@ -437,45 +520,48 @@ LOAD = ("import sys; sys.path.insert(0, sys.argv[1]); import review_rules as rr\
 
 def _load_with_copy(tmp_path, rdir, edit=None):
     import subprocess
-    d = tmp_path / ("api-" + (edit[0] if edit else "same"))
-    d.mkdir()
-    for m in COPIED:
-        shutil.copy(os.path.join(API_DIR, m + ".py"), str(d))
+    d = _api_copy(tmp_path, "run-" + (edit[0] if edit else "same"), extra=("seat_evidence.py",))
     if edit:
-        _name, mod, old, new = edit
-        path = d / (mod + ".py")
-        src = path.read_text(encoding="utf-8")
-        assert src.count(old) == 1, (mod, old)
-        path.write_text(src.replace(old, new), encoding="utf-8")
-    out = subprocess.run([sys.executable, "-c", LOAD, str(d), rdir], capture_output=True,
+        _name, fname, old, new = edit
+        if old is None:
+            raw = (d / fname).read_bytes()
+            (d / fname).write_bytes(raw.replace(b"\r\n", b"\n") if b"\r\n" in raw
+                                    else raw.replace(b"\n", b"\r\n"))
+        else:
+            _change(d / fname, old, new)
+    out = subprocess.run([sys.executable, "-B", "-c", LOAD, str(d), rdir], capture_output=True,
                          text=True, timeout=120)
     assert out.returncode == 0, out.stderr
     return out.stdout.strip().splitlines()[-1]
 
 
 M2_MUTANTS = [
-    ("ctx", "review_measures", "        self.pair_other = self.other if self.two else None\n",
+    ("ctx", "review_measures.py", "        self.pair_other = self.other if self.two else None\n",
      "        self.pair_other = self.other\n"),
-    ("sitting_binds", "review_measures", '        binds["post_follow"] = args["post_rows"] - 1\n',
+    ("sitting_binds", "review_measures.py", '        binds["post_follow"] = args["post_rows"] - 1\n',
      '        binds["post_follow"] = args["post_rows"]\n'),
+    ("game_rules", "review_rules.py", '        return [r for r in self.rules if r.scope == "game"]\n',
+     '        return [r for r in self.rules if r.scope == "game"][::-1]\n'),
+    ("render_line", "review_rules.py", "        return self.core[\"core.render\"].impl[0](rule, items)\n",
+     "        return self.core[\"core.render\"].impl[0](rule, items[::-1])\n"),
+    ("budget_tick", "review_rules.py", "        self.left -= 1\n", "        self.left -= 0\n"),
+    ("comment", "review_measures.py", "# -- registration helpers", "# a comment\n# -- registration helpers"),
 ]
 M2_CONTROLS = [
-    ("ctx_comment", "review_measures", "        self.pair_other = self.other if self.two else None\n",
-     "        self.pair_other = self.other if self.two else None  # synthetic comment\n"),
-    ("sitting_binds_comment", "review_measures", '        binds["post_follow"] = args["post_rows"] - 1\n',
-     '        # synthetic comment\n        binds["post_follow"] = args["post_rows"] - 1\n'),
+    ("line_endings", "review_measures.py", None, None),
+    ("outside", "seat_evidence.py", "import json\n", "import json  # outside the closure\n"),
 ]
 
 
 @pytest.mark.parametrize("edit", M2_MUTANTS, ids=[m[0] for m in M2_MUTANTS])
-def test_m2_a_semantic_change_a_bound_entry_reaches_is_stale(tmp_path, edit):
+def test_m2_any_change_to_a_closure_file_is_stale(tmp_path, edit):
     rdir, _ = _built(tmp_path)
     assert _load_with_copy(tmp_path, rdir) == "loaded"            # the unaltered copy
     assert _load_with_copy(tmp_path, rdir, edit) == "refused stale"
 
 
 @pytest.mark.parametrize("edit", M2_CONTROLS, ids=[m[0] for m in M2_CONTROLS])
-def test_m2_control_a_comment_only_change_still_loads(tmp_path, edit):
+def test_m2_control_line_endings_or_a_file_outside_the_closure_still_load(tmp_path, edit):
     rdir, _ = _built(tmp_path)
     assert _load_with_copy(tmp_path, rdir, edit) == "loaded"
 
@@ -555,6 +641,113 @@ def test_l3_a_file_changed_between_admission_and_read_is_refused(tmp_path, monke
     with pytest.raises(rr.Refused) as e:
         rr.load_dir(rdir)
     assert e.value.cls == "inventory" and "changed" in str(e.value)
+
+
+# -- round 2 L3: every platform reads through a NON-FOLLOWING handle ---------------
+# POSIX: O_NOFOLLOW | O_NONBLOCK. Windows: CreateFileW with
+# FILE_FLAG_OPEN_REPARSE_POINT, the final path of the handle verified. Any
+# platform without such an open refuses activation (class `platform`).
+
+def _planned(path):
+    st = os.lstat(path)
+    return (st.st_dev, st.st_ino), st.st_size
+
+
+def _junction(target, link):
+    """A directory junction (Windows; no privilege needed) or a directory
+    symbolic link (POSIX)."""
+    if os.name == "nt":
+        import _winapi
+        _winapi.CreateJunction(target, link)
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def test_l3_control_a_plain_file_reads(tmp_path):
+    p = tmp_path / "plain.txt"
+    p.write_bytes(b"abc")
+    ident, size = _planned(str(p))
+    assert rr._read_verified(str(p), ident, size, 64) == b"abc"
+
+
+def test_l3_a_substituted_directory_on_the_way_is_refused(tmp_path):
+    """The planned path reaches the same file through a junction (Windows) or
+    a directory link (POSIX): the read is refused, never served."""
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "a.txt").write_bytes(b"abc")
+    _junction(str(real), str(tmp_path / "via"))
+    p = str(tmp_path / "via" / "a.txt")
+    ident, size = _planned(p)
+    if os.name == "nt":
+        with pytest.raises(rr.Refused) as e:
+            rr._read_verified(p, ident, size, 64)
+        assert str(e.value) == "inventory: final path"
+    else:
+        pytest.skip("POSIX: O_NOFOLLOW guards the last component; a linked directory "
+                    "inside a revision is refused by the inventory (the next test)")
+
+
+def test_l3_a_junction_or_link_as_the_data_directory_is_refused(tmp_path):
+    rdir, rev = _built(tmp_path)
+    assert rr.load_dir(rdir).rev == rev                            # control
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "t.txt").write_text("x", encoding="utf-8")
+    _junction(str(elsewhere), os.path.join(rdir, "data"))
+    with pytest.raises(rr.Refused) as e:
+        rr.load_dir(rdir)
+    assert str(e.value) == "inventory: link"
+
+
+def test_l3_a_file_link_is_refused_where_the_platform_allows_one(tmp_path):
+    p = tmp_path / "target.txt"
+    p.write_bytes(b"abc")
+    link = tmp_path / "link.txt"
+    try:
+        os.symlink(str(p), str(link))
+    except OSError:
+        pytest.skip("this seat may not create a file symbolic link; the refusal test covers it")
+    st = os.stat(str(link))                     # planned as the TARGET's identity
+    with pytest.raises(rr.Refused):
+        rr._read_verified(str(link), (st.st_dev, st.st_ino), st.st_size, 64)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a FIFO is a POSIX object")
+def test_l3_a_fifo_never_blocks_the_open_and_is_refused(tmp_path):
+    p = str(tmp_path / "fifo")
+    os.mkfifo(p)
+    ident, size = _planned(p)
+    with pytest.raises(rr.Refused) as e:
+        rr._read_verified(p, ident, size, 64)
+    assert e.value.cls == "inventory"
+
+
+def test_l3_without_a_non_following_open_activation_refuses_by_name(tmp_path, monkeypatch):
+    rdir, rev = _built(tmp_path)
+    assert rr.load_dir(rdir).rev == rev                            # control
+    if os.name == "nt":
+        monkeypatch.setattr(rr, "_K32", None)
+    else:
+        monkeypatch.setattr(rr.os, "name", "other")
+    with pytest.raises(rr.Refused) as e:
+        rr.load_dir(rdir)
+    assert (e.value.cls, str(e.value)) == ("platform", "platform: no non-following open on this platform")
+
+
+def test_l3_the_pointer_file_is_read_through_the_same_handle(fresh, tmp_path, monkeypatch):
+    rdir, rev = _built(tmp_path)
+    _into_root(fresh, rdir)
+    tk.point(fresh, "rules-" + rev)
+    seen = []
+    real = rr._open_nofollow
+
+    def spy(path):
+        seen.append(os.path.basename(path))
+        return real(path)
+    monkeypatch.setattr(rr, "_open_nofollow", spy)
+    assert rr.refresh_rules().word == rev
+    assert seen[0] == rr.POINTER and "rules.json" in seen
 
 
 # -- L-4: refusal logging carries the target identity ------------------------------

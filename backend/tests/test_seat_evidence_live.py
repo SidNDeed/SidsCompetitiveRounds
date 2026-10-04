@@ -31,7 +31,6 @@ sys.path.insert(0, HERE)
 
 import main  # noqa: E402
 import models  # noqa: E402
-import review_measures as rm  # noqa: E402
 import review_rules as rr  # noqa: E402
 import review_testkit as tk  # noqa: E402
 import seat_evidence as se  # noqa: E402
@@ -549,8 +548,7 @@ def _broken(store, rev, how):
     if how == "stale":
         p = os.path.join(dst, "rules.json")
         doc = json.load(open(p, encoding="utf-8"))
-        first = sorted(doc["vocabulary"])[0]
-        doc["vocabulary"][first] = "0" * 64
+        doc["closure"]["fp"] = "0" * 64
         with open(p, "w", encoding="utf-8") as f:
             json.dump(doc, f)
     return tk.reseal(dst)[0]

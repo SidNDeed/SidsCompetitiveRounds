@@ -43,7 +43,6 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text
 
 import review_measures as rm
-import review_module as rmod
 import review_rules as rr
 
 CONTRACT = 2
@@ -162,6 +161,8 @@ RECORD_SPEC = (
     ("master", B01),
     ("ranked", B01),
     ("rounds", _A(_I(0, 9), _I(0, 9))),
+    # amendment A1: OPTIONAL, and when present exactly here (after rounds)
+    ("end", _ENUM("left", "other_left", "lost", "closing")),
     ("build", _A(_S(_BUILD_PART, 16), _S(_BUILD_PART, 16), _S(_BUILD_PART, 12))),
     ("dll", DLL),
     ("game_dll", DLL),
@@ -194,15 +195,19 @@ RECORD_SPEC = (
     ("omit", _O(tuple((k, CNT) for k in LIST_ORDER))),
 )
 RECORD_KEYS = tuple(k for k, _ in RECORD_SPEC)
+OPTIONAL_KEYS = ("end",)
 
 
 # The event invariants the contract states beyond each element's own range
 # (section 2.4 and amendment A2): `own_open` has exactly two states; a path-0
 # hit carries no projectile identity; a received hit is always path 0 (a
 # path-1 hit is one-sided by construction and is counted in `unpair`, never
-# listed); and the no-block tuple of a sent hit is exactly [0, -1, 0].
+# listed); the no-block tuple of a sent hit is exactly [0, -1, 0]; and a
+# sent hit's `since_ms` is -1 IF AND ONLY IF its last_* is that tuple (no
+# block ever reset the copy's sinceBlock exactly when no block is named).
 OWN_OPEN_STATES = (0, -200)
 NO_BLOCK = (0, -1, 0)
+NO_SINCE = -1
 
 
 def check_events(rec) -> None:
@@ -220,23 +225,30 @@ def check_events(rec) -> None:
     for e in rec["hit_sent"]:
         if e[0] == 0 and e[2] != 0:
             raise EvidenceRefused(422, "hit_sent.pid")
-        if e[7] == NO_BLOCK[1] and (e[6], e[7], e[8]) != NO_BLOCK:
+        no_block = (e[6], e[7], e[8]) == NO_BLOCK
+        if e[7] == NO_BLOCK[1] and not no_block:
             raise EvidenceRefused(422, "hit_sent.last")
+        if e[4] == NO_SINCE and not no_block:
+            raise EvidenceRefused(422, "hit_sent.since_unset_with_block")
+        if no_block and e[4] != NO_SINCE:
+            raise EvidenceRefused(422, "hit_sent.since_set_without_block")
 
 
 def check_record(rec) -> None:
     """Raise EvidenceRefused(422, <key>) for the first key outside its bound,
-    or a key set / key order other than the contract's; then the event
-    invariants (check_events), each refused under its own field name."""
+    or a key set / key order other than the contract's (an OPTIONAL key is
+    either absent or in its exact place); then the event invariants
+    (check_events), each refused under its own field name."""
     if not isinstance(rec, dict):
         raise EvidenceRefused(422, "record")
     keys = list(rec.keys())
-    if keys != list(RECORD_KEYS):
-        missing = [k for k in RECORD_KEYS if k not in rec]
+    want = [k for k in RECORD_KEYS if k not in OPTIONAL_KEYS or k in rec]
+    if keys != want:
+        missing = [k for k in want if k not in rec]
         extra = [k for k in keys if k not in RECORD_KEYS]
         raise EvidenceRefused(422, (missing or extra or ["key_order"])[0])
     for key, check in RECORD_SPEC:
-        if not check(rec[key]):
+        if key in rec and not check(rec[key]):
             raise EvidenceRefused(422, key)
     for name in ("dll", "game_dll"):
         sha, state = rec[name]
@@ -327,9 +339,10 @@ def _dumps(obj) -> str:
 
 def budget_record(rec: dict, limit: int = RECORD_MAX_BYTES) -> str:
     """The reference budgeter. `rec` holds every section-2 key in order with
-    full lists; returns the record text, <= limit bytes, with `omit` counting
-    every entry it dropped. Deterministic: the same input gives the same bytes."""
-    out = {k: rec[k] for k in RECORD_KEYS}
+    full lists (an OPTIONAL key only when present, kept in its place); returns
+    the record text, <= limit bytes, with `omit` counting every entry it
+    dropped. Deterministic: the same input gives the same bytes."""
+    out = {k: rec[k] for k in RECORD_KEYS if k in rec or k not in OPTIONAL_KEYS}
     omit = {k: int(rec["omit"].get(k, 0)) for k in LIST_ORDER}
     for k in LIST_ORDER:
         lst = list(out[k])
@@ -484,7 +497,7 @@ def attached_records(rows, match) -> tuple:
             [r for r in rows if r["attach_key"] != room])
 
 
-async def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple:
+async def evaluate_one(db, key: str, lo, hi, registry, rs) -> tuple:
     """One game, in the caller's transaction. Attaches the records to their
     ranked match (one ended at least READY_LAG_S ago); each record is
     evaluated only against the match its own attach key names exactly
@@ -551,10 +564,10 @@ async def evaluate_one(db, key: str, lo, hi, registry, rs, module=None) -> tuple
         if any(not _has_lists(r["rec"]) for r in records):
             final = True          # lists purged: nothing left to compare
         else:
-            # Off the event loop: a module measure (choice two) waits on its
-            # exchange with a bounded deadline per call.
+            # Off the event loop: evaluation is CPU work bounded by the
+            # revision's work cap.
             findings, _fired, errors = await asyncio.to_thread(
-                rs.evaluate_game, records, dict(match), registry, module)
+                rs.evaluate_game, records, dict(match), registry)
             dedup = "%s|%s|%s" % (key, lo, hi)
             produced = set()
             for rule, det in findings:
@@ -592,7 +605,6 @@ async def games_pass(session_factory, state=None, limit: int = GAMES_PER_PASS) -
     cannot hold back the rest. `state` is review_rules' published state; its
     ruleset is None unless a revision is loaded."""
     rs = state.ruleset if state is not None else None
-    module = rmod.current_module() if rs is not None else None
     stats = {"evaluated": 0, "fired": 0, "rule_errors": 0}
     async with session_factory() as db:
         if await setting(db, "seat_evidence_worker") != "1":
@@ -603,7 +615,7 @@ async def games_pass(session_factory, state=None, limit: int = GAMES_PER_PASS) -
     for key, lo, hi, _rx in cands:
         async with session_factory() as db:
             try:
-                st, fired, errors, done = await evaluate_one(db, key, lo, hi, registry, rs, module)
+                st, fired, errors, done = await evaluate_one(db, key, lo, hi, registry, rs)
                 await db.commit()
             except Exception as exc:          # noqa: BLE001 -- counted, next game
                 await db.rollback()

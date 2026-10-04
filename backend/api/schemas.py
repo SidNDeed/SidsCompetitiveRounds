@@ -1027,19 +1027,15 @@ class HealthResponse(BaseModel):
     # default, so building the answer without it raises instead of silently
     # leaving the key out. Absent on any build before the lane.
     seat_evidence: int
-    # review_eval: 8 hex over the public review vocabulary's per-entry
-    # fingerprints (review_measures.review_eval). Equal on both roles; the
-    # build discriminator through the edge. No default, as above.
+    # review_eval: 8 hex of the review code's file digest
+    # (review_rules.review_eval: review_measures.py and review_rules.py, by
+    # file). Equal on both roles; the build discriminator through the edge.
+    # No default, as above.
     review_eval: str
     # review_rules: the loaded review rules revision id, or "absent" (none
     # staged) or "refused" (the staged one failed a check). It reads the id
     # only, never anything about the revision's contents. No default.
     review_rules: str
-    # review_module: the running review module's revision id (12 hex), or
-    # "absent" (the sandboxed module service is not running, the default) or
-    # "refused" (it runs but failed a check, its heartbeat is stale, or a
-    # computation timed out). The refusal class goes to the log only. No default.
-    review_module: str
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

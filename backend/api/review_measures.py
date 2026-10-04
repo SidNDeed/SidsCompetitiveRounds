@@ -8,28 +8,18 @@ is a parameter that revision supplies. This module holds no such value; the
 no-tunables guard (backend/tools/review_guard.py) refuses one here, whether it
 is written inline, hoisted, imported, or carried in text.
 
-Every entry has a semantic FINGERPRINT over its implementation and,
-transitively, over every function, class, compiled pattern and constant it
-reaches -- by a bare name or qualified by a fingerprinted module (`rm.Ctx`,
-`rm.sitting_binds`). A revision binds the
-fingerprint of every entry it uses, so a changed implementation makes a
-revision built against the old one stale (refused) instead of silently
-reinterpreted. BRIDGE holds older entry versions a live revision may still
-bind while both builds are deployed; an entry leaves BRIDGE only once no
-staged revision uses it.
+A revision names the entries it uses and binds the digest of its whole
+code closure BY FILE (review_rules.code_fingerprint): this file, which holds
+every entry and every sitting template, and the loader's own file. Any byte
+change in either makes a revision built against the old files stale (refused)
+instead of silently reinterpreted; what a change reaches, and how, does not
+matter.
 
 Sitting operators are SQL templates over the measure registry. Every number
 in them is a typed bind (CAST(:x AS ...), make_interval); no LATERAL.
 """
 
 from __future__ import annotations
-
-import ast
-import hashlib
-import inspect
-import json
-import re
-import textwrap
 
 # Public contract bounds (the guard pins each name and value).
 CONTRACT_BOUNDS = {
@@ -43,18 +33,15 @@ CONTRACT_BOUNDS = {
 # Which raised-block kinds open a window: a fact of the client contract.
 WINDOW_KINDS = (0, 2, 3)
 
-FINGERPRINT_MODULES = ("review_measures", "review_rules", "review_module")
-
 REGISTRY: dict = {}
 SEATS = 2      # the two seats of a game
-BRIDGE: dict = {}
 
 
 class Entry:
     """One vocabulary entry. kind: measure | operator | side | row | reporter
     | population | sitting | params | core."""
 
-    __slots__ = ("kind", "name", "impl", "subject", "family", "args", "outputs", "data", "_fp")
+    __slots__ = ("kind", "name", "impl", "subject", "family", "args", "outputs", "data")
 
     def __init__(self, kind, name, impl=(), *, subject=None, family=None, args=(),
                  outputs=(), data=None):
@@ -66,13 +53,6 @@ class Entry:
         self.args = tuple(args)
         self.outputs = tuple(outputs)
         self.data = data
-        self._fp = None
-
-    @property
-    def fp(self) -> str:
-        if self._fp is None:
-            self._fp = entry_fingerprint(self)
-        return self._fp
 
 
 def _register(entry: Entry) -> Entry:
@@ -80,142 +60,6 @@ def _register(entry: Entry) -> Entry:
         raise ValueError("duplicate review vocabulary entry: " + entry.name)
     REGISTRY[entry.name] = entry
     return entry
-
-
-def resolve_entry(name: str, fp: str):
-    """The entry a revision bound: the current one if its fingerprint matches,
-    else a retained BRIDGE version, else None (the revision is stale)."""
-    cur = REGISTRY.get(name)
-    if cur is not None and cur.fp == fp:
-        return cur
-    return BRIDGE.get((name, fp))
-
-
-# -- semantic fingerprints -----------------------------------------------------
-
-def _simple(v) -> bool:
-    if v is None or isinstance(v, (bool, int, float, str)):
-        return True
-    if isinstance(v, (tuple, list, frozenset)):
-        return all(_simple(x) for x in v)
-    if isinstance(v, dict):
-        return all(isinstance(k, str) and _simple(x) for k, x in v.items())
-    return False
-
-
-def _const_tag(v) -> str:
-    text = json.dumps(v if not isinstance(v, frozenset) else sorted(v), sort_keys=True, default=repr)
-    return "const_" + type(v).__name__ + "_" + hashlib.sha256(text.encode()).hexdigest()
-
-
-def _strip_docs(node):
-    """Drop the docstring of the node and of every function and class inside
-    it: documentation never moves a fingerprint."""
-    for n in ast.walk(node):
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            n.decorator_list = []
-            body = n.body
-            if (body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant)
-                    and isinstance(body[0].value.value, str)):
-                n.body = body[1:] or [ast.Pass()]
-    return node
-
-
-class _Refs(ast.NodeTransformer):
-    """Replaces every reference the code makes -- a bare name, or a name
-    qualified by a fingerprinted module (`rm.Ctx`, `rm.sitting_binds`) -- by
-    a tag over what it refers to, so a change in anything reached moves the
-    fingerprint of everything that reaches it."""
-
-    def __init__(self, names, seen):
-        self.names = names
-        self.seen = seen
-
-    def _tagged(self, v, n):
-        tag = _ref_tag(v, self.seen)
-        if tag is None:
-            return None
-        return ast.copy_location(ast.Name(id=tag, ctx=ast.Load()), n)
-
-    def visit_Name(self, n):
-        if isinstance(n.ctx, ast.Load) and n.id in self.names:
-            out = self._tagged(self.names[n.id], n)
-            if out is not None:
-                return out
-        return n
-
-    def visit_Attribute(self, n):
-        base = n.value
-        if (isinstance(n.ctx, ast.Load) and isinstance(base, ast.Name) and base.id in self.names
-                and inspect.ismodule(self.names[base.id])
-                and self.names[base.id].__name__ in FINGERPRINT_MODULES
-                and n.attr in self.names[base.id].__dict__):
-            out = self._tagged(self.names[base.id].__dict__[n.attr], n)
-            if out is not None:
-                return out
-        self.generic_visit(n)
-        return n
-
-
-def _fn_dump(fn, seen) -> str:
-    node = _strip_docs(ast.parse(textwrap.dedent(inspect.getsource(fn))).body[0])
-    node.name = "fn"
-    return ast.dump(_Refs(fn.__globals__, seen).visit(node), include_attributes=False)
-
-
-def _cls_fp(cls, seen) -> str:
-    """A class's fingerprint: its normalised source (every method, slot and
-    class attribute) with every reference resolved as for a function."""
-    if cls in seen:
-        return "cycle"
-    node = _strip_docs(ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0])
-    node.name = "cls"
-    names = inspect.getmodule(cls).__dict__
-    dumped = ast.dump(_Refs(names, seen | {cls}).visit(node), include_attributes=False)
-    return hashlib.sha256(dumped.encode()).hexdigest()
-
-
-def _ref_tag(v, seen):
-    if inspect.isfunction(v) and v.__module__ in FINGERPRINT_MODULES:
-        return "fn_" + _fn_fp(v, seen)
-    if inspect.isclass(v) and v.__module__ in FINGERPRINT_MODULES:
-        return "cls_" + _cls_fp(v, seen)
-    if isinstance(v, re.Pattern):
-        return _const_tag([v.pattern, v.flags])
-    if _simple(v):
-        return _const_tag(v)
-    return None
-
-
-def _fn_fp(fn, seen=frozenset()) -> str:
-    if fn in seen:
-        return "cycle"
-    return hashlib.sha256(_fn_dump(fn, seen | {fn}).encode()).hexdigest()
-
-
-def entry_fingerprint(e: Entry) -> str:
-    """Canonical over kind, name, declared signature, data and the normalised
-    implementation of every function the entry runs: a comment or a rename
-    leaves it unchanged; any change to what the entry computes moves it."""
-    doc = {"kind": e.kind, "name": e.name, "subject": e.subject, "family": e.family,
-           "args": [list(a) if isinstance(a, tuple) else a for a in e.args],
-           "outputs": list(e.outputs), "data": e.data,
-           "impl": [_fn_fp(f) for f in e.impl]}
-    return hashlib.sha256(json.dumps(doc, sort_keys=True).encode()).hexdigest()
-
-
-def entry_manifest() -> list:
-    """Sorted (name, fingerprint) of every current entry and every retained
-    BRIDGE version."""
-    rows = {(n, e.fp) for n, e in REGISTRY.items()}
-    rows |= set(BRIDGE.keys())
-    return sorted(rows)
-
-
-def review_eval() -> str:
-    """The public vocabulary's digest: derived on every call."""
-    text = "\n".join("%s %s" % r for r in entry_manifest())
-    return hashlib.sha256(text.encode()).hexdigest()[: CONTRACT_BOUNDS["eval_hex"]]
 
 
 # -- registration helpers ------------------------------------------------------
@@ -426,16 +270,15 @@ class Ctx:
     only when both records name each other (a two-record game)."""
 
     __slots__ = ("records", "i", "r", "other", "pair_other", "two", "match", "registry",
-                 "params", "cache", "module")
+                 "params", "cache")
 
-    def __init__(self, records, i, match, registry, params, cache, module=None):
+    def __init__(self, records, i, match, registry, params, cache):
         self.records = records
         self.i = i
         self.match = match
         self.registry = registry
         self.params = params
         self.cache = cache
-        self.module = module
         by_seat = {r["seat"]: r for r in records}
         self.two = len(records) == SEATS and all(r["other"] in by_seat for r in records)
         self.r = records[i] if i is not None else None

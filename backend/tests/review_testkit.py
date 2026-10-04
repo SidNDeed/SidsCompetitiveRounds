@@ -46,7 +46,7 @@ def synthetic_doc():
     its negation, a note, and one sitting rule."""
     gap = cmp({"abs": {"sub": [M("seat.decided_hits"), M("seat.other_received_hits")]}}, "gt", V(7))
     return {
-        "format": 1, "nonce": "", "vocabulary": {},
+        "format": 1, "nonce": "", "vocabulary": [], "closure": {},
         "measure_params": {
             "params.case_table": {"pair_lo_ms": -77, "pair_hi_ms": 777, "late_margin_ms": 111,
                                   "window_ms": 222},
