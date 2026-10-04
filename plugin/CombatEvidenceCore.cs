@@ -24,17 +24,21 @@ namespace CompetitiveRounds
         internal static readonly int[] LIST_IX = ListIndices();
         private static readonly Dictionary<string, int> _ix = Index();
 
+        /// <summary>The bound of the two loops over the layout's keys (the layout has
+        /// W.KEYS.Length of them; the harness's proof mode asserts they fit).</summary>
+        internal const int KEY_CAP = 64;
+
         private static Dictionary<string, int> Index()
         {
             var d = new Dictionary<string, int>(W.KEYS.Length);
-            for (int i = 0; i < W.KEYS.Length; i++) d[W.KEYS[i]] = i;
+            for (int i = 0; i < W.KEYS.Length && i < KEY_CAP; i++) d[W.KEYS[i]] = i;
             return d;
         }
 
         private static int[] ListIndices()
         {
             var l = new List<int>();
-            for (int i = 0; i < W.KEYS.Length; i++) if (W.KIND[i] == W.K_LIST || W.KIND[i] == W.K_GROUPS) l.Add(i);
+            for (int i = 0; i < W.KEYS.Length && i < KEY_CAP; i++) if (W.KIND[i] == W.K_LIST || W.KIND[i] == W.K_GROUPS) l.Add(i);
             return l.ToArray();
         }
 

@@ -10,6 +10,8 @@ combat_evidence, read by path, never written), which is the oracle:
   * proof, sign, integrator, steering: the byte proof, the signing canonical
     and HMAC, the single-precision flight bit for bit and its residuals, the
     homing and target bounce references;
+  * units: crafted budget ties, protected reason bits, the shot cap, the key
+    loop bound (cases the fixtures do not reach);
   * accountant: every fixture group replayed through the client's cycle
     accountant reproduces the fixture's groups (at the caps), cycle
     summaries, omit counts and totals.
@@ -33,13 +35,13 @@ PROJ = os.path.join(HERE, "CombatEvidenceTests.csproj")
 CORE = os.path.join(REPO, "plugin", "CombatEvidenceCore.cs")
 WORK = os.path.join(HERE, "work")
 DEFAULT_SERVER = os.path.join(os.path.dirname(REPO), "scr-wt-combat-evidence-server")
-MODES = ["fixtures", "proof", "sign", "integrator", "steering", "accountant"]
+MODES = ["fixtures", "proof", "sign", "integrator", "steering", "accountant", "units"]
 
 # (name, old text, new text, target mode, control mode); old occurs exactly once in the core
 MUTANTS = [
     ("budget_tie_latest", "if (Count(r, k) > 0 && (best == null || Count(r, k) > Count(r, best))) best = k;",
-     "if (Count(r, k) > 0 && (best == null || Count(r, k) >= Count(r, best))) best = k;", "fixtures", "integrator"),
-    ("protected_fewest_bits_reversed", "bool less = !found || kw < bw ||", "bool less = !found || kw > bw ||", "fixtures", "steering"),
+     "if (Count(r, k) > 0 && (best == null || Count(r, k) >= Count(r, best))) best = k;", "units", "integrator"),
+    ("protected_fewest_bits_reversed", "bool less = !found || kw < bw ||", "bool less = !found || kw > bw ||", "units", "steering"),
     ("protected_latest_reversed", "long kw = Popcount(e[CX_WHY]), ke = CxExcess(e), ki = -i, kp = -p;",
      "long kw = Popcount(e[CX_WHY]), ke = CxExcess(e), ki = i, kp = -p;", "fixtures", "accountant"),
     ("widest_always_hi", "return lo.ToString(CultureInfo.InvariantCulture).Length >= hi.ToString(CultureInfo.InvariantCulture).Length ? lo : hi;",
@@ -60,7 +62,7 @@ MUTANTS = [
      "if (Own) { Tot[TotIx(\"emit\")]++; }", "accountant", "fixtures"),
     ("regen_k_late", "_regs[o] = Clamp(_n, 0, 99999);", "_regs[o] = Clamp(_n + 1, 0, 99999);", "accountant", "sign"),
     ("cx_cap_overrun", "if (_nCx < _cxCap)", "if (_nCx <= _cxCap)", "accountant", "integrator"),
-    ("shot_cap_overrun", "if (_listed && _nShots[_gi] < _shotCap)", "if (_listed && _nShots[_gi] <= _shotCap)", "accountant", "proof"),
+    ("shot_cap_overrun", "if (_listed && _nShots[_gi] < _shotCap)", "if (_listed && _nShots[_gi] <= _shotCap)", "units", "proof"),
 ]
 
 

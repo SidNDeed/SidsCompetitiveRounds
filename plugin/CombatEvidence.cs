@@ -213,9 +213,12 @@ namespace CompetitiveRounds
 
         // -- shared helpers (fixed cost) ------------------------------------------------------------
 
-        private static bool RpcTop(out int stamp, out int sender, out int viewId, out string method)
+        /// <summary>The RPC on top of the shared send stack; a fault is counted on the
+        /// caller's row and reads as "no RPC on top".</summary>
+        private static bool RpcTop(int row, out int stamp, out int sender, out int viewId, out string method)
         {
-            return SeatEvidence.RpcTop(out stamp, out sender, out viewId, out method);
+            try { return SeatEvidence.RpcTop(out stamp, out sender, out viewId, out method); }
+            catch (Exception ex) { Fault(row, ex); stamp = 0; sender = 0; viewId = 0; method = null; return false; }
         }
 
         private static GunState GunOf(Gun gun)
@@ -356,7 +359,7 @@ namespace CompetitiveRounds
             }
             // the other seat's gun on this seat: a received attack message runs Attack(0, forced) inside Shoot
             int stamp, sender, view; string method;
-            if (RpcTop(out stamp, out sender, out view, out method) && method == "Shoot" && sender == _oppActor)
+            if (RpcTop(N1, out stamp, out sender, out view, out method) && method == "Shoot" && sender == _oppActor)
             {
                 if (s.MsgPending) s.Acct.AddNoInit();
                 s.MsgPending = true; s.MsgStamp = stamp;
@@ -424,7 +427,7 @@ namespace CompetitiveRounds
             var pv = init.GetComponent<PhotonView>();
             if (pv == null) return 0;
             int stamp, sender, view; string method;
-            if (!RpcTop(out stamp, out sender, out view, out method) || view != pv.ViewID || method != INIT_METHODS[kind]) return 0;
+            if (!RpcTop(K2, out stamp, out sender, out view, out method) || view != pv.ViewID || method != INIT_METHODS[kind]) return 0;
             var s = GunOfActor(sender);
             if (s == null || senderID != sender) return 0;
             bool own = s == g.Own;
@@ -563,7 +566,7 @@ namespace CompetitiveRounds
             var pv = ph.GetComponent<PhotonView>();
             if (pv == null) return;
             int stamp, sender, view; string method;
-            if (!RpcTop(out stamp, out sender, out view, out method) || method != "RPCA_DoHit" || view != pv.ViewID) return;
+            if (!RpcTop(K3, out stamp, out sender, out view, out method) || method != "RPCA_DoHit" || view != pv.ViewID) return;
             int pid = pv.ViewID;
             if (sender == _oppActor && pv.OwnerActorNr == _oppActor)
             {
@@ -686,7 +689,7 @@ namespace CompetitiveRounds
             }
             if (data.view.OwnerActorNr != _oppActor) return;
             int stamp, sender, view; string method;
-            if (!RpcTop(out stamp, out sender, out view, out method) || sender != _oppActor || view != data.view.ViewID
+            if (!RpcTop(K4, out stamp, out sender, out view, out method) || sender != _oppActor || view != data.view.ViewID
                 || (method != "RPCAO_DoBlock" && method != "RPCA_DoBlock")) return;
             int now = ServerNow();
             g.B5tot[1]++;
@@ -718,7 +721,7 @@ namespace CompetitiveRounds
             {
                 var data = b != null ? b.GetComponent<CharacterData>() : null;
                 if (data != null && data.view != null && data.view.IsMine)
-                    state = 1 | (!(b.counter < b.Cooldown()) ? 2 : 0) | ((long)Math.Round(Math.Min(b.counter, 600f) * 1000.0) << 2);
+                    state = 1L | (!(b.counter < b.Cooldown()) ? 2L : 0L) | ((long)Math.Round(Math.Min(b.counter, 600f) * 1000.0) << 2);
             }
             catch (Exception ex) { Fault(N6, ex); }
             Cost(N6, t0);
@@ -814,7 +817,7 @@ namespace CompetitiveRounds
             int pid = r.view.ViewID, slot, sInit = 0;
             long gap = -1;
             int stamp, sender, view; string method;
-            bool keyed = RpcTop(out stamp, out sender, out view, out method) && sender == _oppActor;
+            bool keyed = RpcTop(N3, out stamp, out sender, out view, out method) && sender == _oppActor;
             if (g.Slot.TryGetValue(pid, out slot) && g.ALive[slot])
             {
                 sInit = g.ASInit[slot];
@@ -912,7 +915,8 @@ namespace CompetitiveRounds
             var g = _g;
             if (g == null) return;
             ResolvePlayers();
-            bool live = SeatEvidence.CombatLive();
+            bool live;
+            try { live = SeatEvidence.CombatLive(); } catch (Exception ex) { Fault(T, ex); return; }
             float scale = TimeHandler.timeScale, baseScale = TimeHandler.instance != null ? TimeHandler.instance.baseTimeScale : 1f;
             int now = ServerNow();
             if (live && !g.PointLive) PointStart(g, now, baseScale);
@@ -1426,9 +1430,9 @@ namespace CompetitiveRounds
                 var c = _captures[i];
                 try
                 {
+                    string stable = c.Env == null ? SeatEvidence.StableOf(c.Attach) : null;
                     if (c.Env == null)
                     {
-                        string stable = SeatEvidence.StableOf(c.Attach);
                         if (stable == null || !C.IsSteamId(c.Seat) || !C.IsSteamId(c.Other))
                         {
                             _captures.RemoveAt(i);

@@ -481,7 +481,7 @@ namespace CombatEvidenceTests
             var tb = new List<long[]>();
             long stamp = rnd.Next(-2000000000, 2000000000), pid = 1000 + rnd.Next(5000);
             if (seed % 7 == 3) stamp = int.MaxValue - 3000;   // the stamp clock wraps inside a cycle
-            int points = big ? 2 : 1 + rnd.Next(4);
+            int points = big ? 3 : 1 + rnd.Next(4);   // big: over the group cap per gun
             for (int pt = 0; pt < points; pt++)
             {
                 PointStart(own, rnd, pt, rnd.Next(2) == 0); PointStart(opp, rnd, pt, rnd.Next(2) == 0);
@@ -530,6 +530,65 @@ namespace CombatEvidenceTests
             Ok(clean == n, "synthetic games: " + n + " written, " + clean + " pass the layout check after the budget");
         }
 
+        /// <summary>Crafted cases the fixtures cannot reach: a tie between two tier-one
+        /// lists, two protected groups that differ only in reason bits, one cycle over
+        /// the shot cap, and the key loop bound. With an OUT path the two budget cases
+        /// are written (name, whole, limit, client output) for the replay harness to
+        /// compare with the server's budget_record(whole, limit).</summary>
+        private static void Units(string outPath)
+        {
+            var sb = new StringBuilder();
+            Ok(E.KEY_CAP >= W.KEYS.Length, "the key loop bound " + E.KEY_CAP + " covers the layout's " + W.KEYS.Length + " keys");
+
+            // T1: two tier-one lists with equal counts, one entry over the limit: the named order decides
+            string k0 = W.TIER_ORDER[0][0], k1 = W.TIER_ORDER[0][1];
+            var r1 = E.Empty();
+            for (int n = 0; n < 2; n++) { ((List<long[]>)r1[k0]).Add(E.ZeroRow(E.Ix(k0))); ((List<long[]>)r1[k1]).Add(E.ZeroRow(E.Ix(k1))); }
+            string w1 = E.Dumps(r1);
+            int lim1 = w1.Length - 1;
+            string o1 = E.Budget(r1, lim1);
+            var b1 = ToRec((JObject)Parse(o1));
+            Ok(b1.Omit[E.OmitPos(k0)] == 1 && b1.Omit[E.OmitPos(k1)] == 0 && ((List<long[]>)b1[k1]).Count == 2,
+               "tier tie: " + k0 + " and " + k1 + " both at 2; the first named loses one entry (omit " + b1.Omit[E.OmitPos(k0)] + ", " + b1.Omit[E.OmitPos(k1)] + ")");
+            sb.Append("tier_tie\t").Append(w1).Append('\t').Append(lim1).Append('\t').Append(o1).Append('\n');
+
+            // T2: two protected groups of one gun, reason bits 1 and 2, nothing else removable: the fewer bits goes
+            string gk = W.PROTECT[0][0], ck = W.PROTECT[0][1];
+            int hS0 = Array.IndexOf(W.HNAMES[E.Ix(gk)], "s0"), cS0 = Array.IndexOf(W.FIELDS[E.Ix(ck)], "s0"),
+                cWhy = Array.IndexOf(W.FIELDS[E.Ix(ck)], "why");
+            var r2 = E.Empty();
+            long[] s0s = { 100, 200 }, whys = { 1, 3 };
+            for (int n = 0; n < 2; n++)
+            {
+                var grp = E.MaxWidthGroup(gk).Copy(1, 0);
+                grp.H = (long[])grp.H.Clone();
+                grp.H[hS0] = s0s[n];
+                ((List<E.Group>)r2[gk]).Add(grp);
+                var cx = E.ZeroRow(E.Ix(ck));
+                cx[cS0] = s0s[n]; cx[cWhy] = whys[n];
+                ((List<long[]>)r2[ck]).Add(cx);
+            }
+            string pre = E.Check(r2);
+            string w2 = E.Dumps(r2);
+            int lim2 = w2.Length - 1;
+            string o2 = E.Budget(r2, lim2);
+            var left = (List<E.Group>)ToRec((JObject)Parse(o2))[gk];
+            Ok(pre == null && left.Count == 1 && left[0].H[hS0] == 200,
+               "protected groups: the one with fewer reason bits is removed first (layout check " + (pre ?? "clean") + ", left "
+               + left.Count + (left.Count > 0 ? ", s0 " + left[0].H[hS0] : "") + ")");
+            sb.Append("protected_bits\t").Append(w2).Append('\t').Append(lim2).Append('\t').Append(o2).Append('\n');
+
+            // T3: one cycle over the shot cap lists exactly the cap
+            int cap = W.SHOT_CAP[E.Ix("sh_s")];
+            var a = new E.GunAccount(true) { Mag = 1000, Rexp = 1000 };
+            for (int n = 0; n < cap + 8; n++) a.AddShot(1000 + n, 10 * n, 1000 - n, false, -1, 0, -1, 0, -1);
+            a.CloseCycle(W.END_POINT, W.SRC_NONE, -1, 10 * (cap + 8), -1, -1, -1);
+            var gs = a.Groups();
+            Ok(gs.Count == 1 && gs[0].S.Count == cap, "a cycle of " + (cap + 8) + " shots lists " + (gs.Count == 1 ? gs[0].S.Count : -1) + " (cap " + cap + ")");
+
+            if (outPath != null) File.WriteAllBytes(outPath, Encoding.ASCII.GetBytes(sb.ToString()));
+        }
+
         private static int Main(string[] args)
         {
             if (args.Length < 2) { Console.WriteLine("usage: CombatEvidenceTests MODE DIR|OUT [N]"); return 2; }
@@ -544,8 +603,9 @@ namespace CombatEvidenceTests
                     case "integrator": Integrator(dir); break;
                     case "steering": Steering(dir); break;
                     case "accountant": Accountant(dir); break;
+                    case "units": Units(args.Length > 2 ? args[2] : null); break;
                     case "replay": ReplayOut(dir, args.Length > 2 ? int.Parse(args[2], CultureInfo.InvariantCulture) : 60); break;
-                    case "all": Fixtures(dir); Proof(dir); Sign(dir); Integrator(dir); Steering(dir); Accountant(dir); break;
+                    case "all": Fixtures(dir); Proof(dir); Sign(dir); Integrator(dir); Steering(dir); Accountant(dir); Units(null); break;
                     default: Console.WriteLine("unknown mode " + mode); return 2;
                 }
             }

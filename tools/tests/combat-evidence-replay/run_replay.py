@@ -132,6 +132,7 @@ def judge(cm, rows, stats=None):
                     for wname, bit in cm.WHY.items():
                         stats["why_" + wname] += (c["why"] & bit) != 0
             stats["over_bound_whole"] += len(full) > cm.W["record_max_bytes"]
+            stats["whole_group_omit"] += sum(whole["omit"]["sh_" + s] > 0 for s in ("s", "o"))
     return ser, reb
 
 
@@ -159,7 +160,7 @@ def main():
         print("BASE: the client wrote no records")
         return 1
     stats = {k: 0 for k in ("cycles", "cx", "whole_totals_branch", "omitted_groups", "not_run", "tail", "regen", "exhausted",
-                            "over_bound_whole")}
+                            "over_bound_whole", "whole_group_omit")}
     for wname in cm.WHY:
         stats["why_" + wname] = 0
     ser, reb = judge(cm, rows, stats)
@@ -171,6 +172,21 @@ def main():
     if vacuous:
         print("VACUOUS: no record exercised", vacuous)
     ok = ok and not ser and not reb and not vacuous
+
+    # the client's crafted budget cases (units mode) against the server's budget_record(whole, limit)
+    upath = os.path.join(WORK, "units.tsv")
+    r = subprocess.run(["dotnet", dll, "units", WORK, upath], capture_output=True, text=True)
+    print("  client:", r.stdout.strip().replace("\n", "\n  client: "))
+    crafted = 0
+    if r.returncode == 0 and os.path.isfile(upath):
+        for line in open(upath, "rb").read().decode("ascii").split("\n"):
+            if line:
+                name, whole_text, limit, out = line.split("\t")
+                same = cm.budget_record(json.loads(whole_text), int(limit)) == out
+                crafted += same
+                print("  crafted %s: the server's budget_record(whole, %s) equals the client's output: %s" % (name, limit, same))
+    print("crafted budget cases equal to the server: %d of 2" % crafted)
+    ok = ok and r.returncode == 0 and crafted == 2
 
     core = open(CORE, "rb").read().decode("utf-8").replace("\r\n", "\n")
     caught = 0
