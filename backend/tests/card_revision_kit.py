@@ -166,13 +166,41 @@ def on_census(rec, c) -> dict:
     return out
 
 
-def fixture_census(name, **attrs):
-    """A census describing a fixture's pool: its record's card names (from the
-    untrimmed input) at their indexes."""
+def fixture_census(name, names=None, rarity=None, **attrs):
+    """A census describing a fixture's pool: its record's card names and
+    rarities (from the untrimmed input) at their indexes, with `names` and
+    `rarity` overriding single indexes."""
     inp = fixture_input(name)
-    names = {c[0]: c[1] for c in inp["cards"]}
-    rarity = {c[0]: c[2] for c in inp["cards"] if 0 <= c[2] < len(cm.RARITIES)}
-    return census(census_cards(inp["pool"][0], names=names, rarity=rarity, **attrs), slots=inp["ns"])
+    nm = {c[0]: c[1] for c in inp["cards"]}
+    nm.update(names or {})
+    ra = {c[0]: c[2] for c in inp["cards"] if 0 <= c[2] < len(cm.RARITIES)}
+    ra.update(rarity or {})
+    return census(census_cards(inp["pool"][0], names=nm, rarity=ra, **attrs), slots=inp["ns"])
+
+
+def renamed(rec, names):
+    """The record with some of its `cards` entries renamed (index -> name)."""
+    out = copy.deepcopy(rec)
+    out["cards"] = [[c[0], names.get(c[0], c[1]), c[2]] for c in out["cards"]]
+    return out
+
+
+def mirror(rec):
+    """The other seat's record of the same game, all-vanilla deals: roles
+    swapped, the measured hands now own (no engine slot), the own ones now
+    measured (source unknown)."""
+    r = copy.deepcopy(rec)
+    flip = lambda w: 1 - w if w in (0, 1) else w  # noqa: E731
+    r["po"] = [flip(x) for x in r["po"]]
+    r["held0"] = [r["held0"][1], r["held0"][0]]
+    r["ph"] = [[e[0], flip(e[1]), e[2], e[4], e[3], e[5], e[6]] for e in r["ph"]]
+    for e, mine in zip(r["hd"], rec["hd"]):
+        e[2], e[3] = flip(e[2]), flip(e[3])
+        e[12], e[13], e[16] = -1, -1, -1
+        if mine[2] == 1:
+            e[12], e[16] = 0, 0
+    r["ap"] = [[flip(a[0]), a[1], a[2], a[3]] for a in r["ap"]]
+    return r
 
 
 def view(records, registry=None, sc=None, weights=None):
