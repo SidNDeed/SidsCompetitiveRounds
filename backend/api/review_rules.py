@@ -49,6 +49,7 @@ from decimal import Decimal
 
 import review_boot as rb
 import review_measures as rm
+import identity_clock_measures as icm
 
 CONTRACT_BOUNDS = {
     "files_max": 64,
@@ -87,11 +88,13 @@ DOMAIN = b"scr-review-rules-revision\n"
 CODE_DOMAIN = b"scr-review-code-closure\n"
 CLOSURE_DOMAIN = b"scr-review-whole-closure\n"
 # The code half of every revision's closure, by file: the vocabulary (every
-# entry and every sitting template), this loader, and the source-only loading
-# path that executes both (review_boot). A revision's closure names at least
-# these; any further file it names must be one review_boot executes
-# (review_boot.SOURCE_ONLY), or the load refuses.
-CODE_REQUIRED = ("review_boot.py", "review_measures.py", "review_rules.py")
+# entry and every sitting template), this loader, the source-only loading
+# path that executes them (review_boot) and the identity-clock measures the
+# rules call. A revision's closure names at least these; any further file it
+# names must be one review_boot executes (review_boot.SOURCE_ONLY), or the
+# load refuses.
+CODE_REQUIRED = ("identity_clock_measures.py", "review_boot.py", "review_measures.py",
+                 "review_rules.py")
 
 _HEX = re.compile(r"[a-f\d]+")
 _REV_DIR = re.compile(r"rules-[a-f\d]{%d}" % _BOUNDS["rev_hex"])
@@ -353,6 +356,10 @@ class Ruleset:
     def sitting_rules(self):
         return [r for r in self.rules if r.scope == "sitting"]
 
+    @property
+    def identity_rules(self):
+        return [r for r in self.rules if r.scope == "identity"]
+
     def rule(self, rule_id):
         return next((r for r in self.rules if r.id == rule_id), None)
 
@@ -364,6 +371,17 @@ class Ruleset:
 
     def run_selftest(self, cases, deadline):
         return self.core["core.game"].impl[-1](self, cases, deadline)
+
+    # Identity-clock rules run through the identity core the revision bound;
+    # a revision with no identity rule binds none and evaluates nothing here.
+    def evaluate_identity(self, records, regs, budget=None):
+        core = self.core.get(IDENTITY_CORE)
+        if core is None:
+            return [], [], 0
+        return core.impl[0](self, records, regs, budget)
+
+    def run_identity_selftest(self, cases, deadline):
+        return self.core[IDENTITY_CORE].impl[-1](self, cases, deadline)
 
     def render_line(self, rule, items):
         return self.core["core.render"].impl[0](rule, items)
@@ -636,6 +654,15 @@ def compile_rules(doc, bind, data) -> Ruleset:
             r.when = _compile_pred(raw["when"], bind, r.subject, data)
             r.sitting = None
             r.show = [(s[0], _compile_expr({"m": s[1]}, bind, r.subject)[1]) for s in show]
+        elif r.scope == "identity":
+            if set(raw) != RULE_KEYS | {"subject", "when"}:
+                raise Refused("malformed", "rule keys")
+            r.subject = raw["subject"]
+            if r.subject not in icm.ICM_SUBJECTS:
+                raise Refused("malformed", "subject")
+            r.when = _compile_pred(raw["when"], bind, r.subject, data)
+            r.sitting = None
+            r.show = [(s[0], _compile_expr({"m": s[1]}, bind, r.subject)[1]) for s in show]
         elif r.scope == "sitting":
             if set(raw) != RULE_KEYS | {"sitting"}:
                 raise Refused("malformed", "rule keys")
@@ -652,6 +679,8 @@ def compile_rules(doc, bind, data) -> Ruleset:
         rs.rules.append(r)
     for name in CORE_ENTRIES:
         rs.core[name] = bind(name, "core")
+    if rs.identity_rules:
+        rs.core[IDENTITY_CORE] = bind(IDENTITY_CORE, "core")
     families = {n for n, k in bind.kinds.items() if k == "params"}
     if not families <= set(rs.params):
         raise Refused("malformed", "measure_params missing a family a measure needs")
@@ -864,6 +893,81 @@ def run_selftest(rs, cases, deadline):
 
 
 CORE_ENTRIES = ("core.game", "core.render", "core.sitting")
+IDENTITY_CORE = "core.identity"
+
+
+def evaluate_identity(rs, records, regs, budget=None):
+    """Every identity rule of `rs` over one game's identity-clock records (one
+    or two, of one stable key and one seat pair), with the registries the
+    worker read. The rows each rule's subject ranges over come from the
+    public subject builder. Returns (findings, fired, errors) exactly as
+    evaluate_game does."""
+    subjects = icm.icm_subjects(records, regs)
+    memo = {}
+    findings, notes, fired, errors = [], [], [], 0
+    for rule in rs.identity_rules:
+        try:
+            items = []
+            for ctx in subjects.get(rule.subject, ()):
+                if eval_pred(rule.when, ctx, memo, rs, budget) is True:
+                    items.append({label: _measure_value(m, ctx, memo, rs) for label, m in rule.show})
+        except _WorkExceeded:
+            raise
+        except Exception:                 # noqa: BLE001 -- one rule cannot stop another
+            errors += 1
+            continue
+        if not items:
+            continue
+        fired.append(rule.id)
+        if rule.effect == "flag":
+            findings.append((rule, {"items": items}))
+        else:
+            notes.append(rs.render_line(rule, items))
+    if notes:
+        for _rule, det in findings:
+            det["notes"] = list(notes)
+    return findings, fired, errors
+
+
+_RELEASE_TUPLE = ("version", "variant", "commit", "dll_sha256")
+
+
+def _identity_regs(raw):
+    if not isinstance(raw, dict) or set(raw) != {"release", "game_files"}:
+        raise Refused("malformed", "selftest registries")
+    # A release row is the registry tuple with an optional last item, the
+    # source it was registered under (default `release`).
+    width = len(_RELEASE_TUPLE)
+    release = {}
+    for t in raw["release"]:
+        if not isinstance(t, list):
+            raise Refused("malformed", "selftest registries")
+        key, rest = tuple(t[:width]), t[width:]
+        if len(key) != width or rest[1:]:
+            raise Refused("malformed", "selftest registries")
+        release[key] = rest[0] if rest else "release"
+    return {"release": release,
+            "game_files": {tuple(t) for t in raw["game_files"]}}
+
+
+def run_identity_selftest(rs, cases, deadline):
+    """Each synthetic identity case must fire exactly the identity rule ids it
+    lists, with no rule error (a malformed record raises inside a measure and
+    is counted as one)."""
+    budget = _Budget(_BOUNDS["work_max"])
+    for case in cases:
+        _check_time(deadline)
+        if (not isinstance(case, dict) or set(case) != {"identity", "registries", "fire"}
+                or not isinstance(case["identity"], list)):
+            raise Refused("malformed", "selftest case")
+        regs = _identity_regs(case["registries"])
+        try:
+            _f, fired, errors = rs.evaluate_identity(case["identity"], regs, budget=budget)
+        except _WorkExceeded:
+            raise Refused("work", "selftest work")
+        if errors or sorted(fired) != sorted(case["fire"]):
+            raise Refused("selftest")
+    _check_time(deadline)
 
 
 def _register_core():
@@ -872,6 +976,9 @@ def _register_core():
     rm._register(rm.Entry("core", "core.render", (render_line, render_item, _render_value)))
     rm._register(rm.Entry("core", "core.sitting", (sitting_items, sitting_statement, norm_pair,
                                                    _py, _bound_lookup, sitting_selftest)))
+    rm._register(rm.Entry("core", IDENTITY_CORE, (evaluate_identity, eval_pred, eval_expr,
+                                                  _measure_value, icm.icm_subjects,
+                                                  _identity_regs, run_identity_selftest)))
 
 
 if __name__ != "__main__" and "core.game" not in rm.REGISTRY:
@@ -1016,7 +1123,13 @@ def load_dir(rdir: str, *, deadline: float | None = None) -> Ruleset:
     if (not isinstance(selftest, dict) or set(selftest) != {"cases"}
             or not isinstance(selftest["cases"], list) or len(selftest["cases"]) > _BOUNDS["cases_max"]):
         raise Refused("malformed", "selftest")
-    rs.run_selftest(selftest["cases"], deadline)
+    identity_cases = [c for c in selftest["cases"] if isinstance(c, dict) and "identity" in c]
+    game_cases = [c for c in selftest["cases"] if not (isinstance(c, dict) and "identity" in c)]
+    rs.run_selftest(game_cases, deadline)
+    if identity_cases and not rs.identity_rules:
+        raise Refused("malformed", "identity selftest cases without an identity rule")
+    if rs.identity_rules:
+        rs.run_identity_selftest(identity_cases, deadline)
     rs.run_sitting_selftest()
     rs.rev = digest[: _BOUNDS["rev_hex"]]
     rs.digest = digest

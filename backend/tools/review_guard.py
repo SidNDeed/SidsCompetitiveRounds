@@ -121,8 +121,8 @@ import sys
 import tokenize
 
 API = "backend/api/"
-JUDGING = ("review_measures", "review_rules")
-ROOTED = {"seat_evidence": None, "main": ("review_worker_loop", "review_worker_pass",
+JUDGING = ("review_measures", "review_rules", "identity_clock_measures")
+ROOTED = {"seat_evidence": None, "identity_clock_evidence": None, "main": ("review_worker_loop", "review_worker_pass",
                                           "review_rules_refresh_loop", "_review_pass_line")}
 REVIEW_NAMES = {"rm", "rr", "_review_rules", "review_measures", "review_rules"}
 REVIEW_PARAMS = {"rs", "state", "ruleset"}
@@ -155,7 +155,7 @@ SELECTORS = frozenset({
     "build", "core.game", "data", "dirty", "edges", "eq", "expr", "filters", "flag", "game",
     "ge", "gt", "honoured", "int", "json", "label", "le", "list", "literal", "lt", "m",
     "missing", "ne", "not", "note", "nt", "num", "open", "params", "pointer", "posix",
-    "post_rows", "read", "refused", "rel", "reporter", "row", "rules-none", "seat", "side",
+    "post_rows", "read", "refused", "identity", "rel", "reporter", "row", "rules-none", "seat", "side",
     "sitting",
     "sub", "unhonoured", "v", "validate", "window_days", "{", "}",
     # reached through followed bindings since fix pass 3 (the resolver now
@@ -205,9 +205,23 @@ PINNED = {
     ("main", "REVIEW_FIRST_PASS_S"): 90,
     ("main", "REVIEW_PURGE_EVERY_S"): 72000,
     ("main", "REVIEW_REFRESH_S"): 60,
+    ("identity_clock_evidence", "ICE_GAME_EXPIRY_DAYS"): 14,
+    ("identity_clock_evidence", "ICE_LIST_RETENTION_DAYS"): 120,
+    ("identity_clock_evidence", "ICE_GAMES_PER_PASS"): 500,
+    ("identity_clock_evidence", "ICE_FIT_ROWS_MAX"): 500,
+    ("identity_clock_evidence", "ICE_SEATS"): 2,
+    ("identity_clock_measures", "ICM_UNITS"): {"ppm": 1000000, "cppm": 100, "s_ms": 1000},
+    ("identity_clock_measures", "ICM_CODES"): {
+        "pass": 0, "finding": 1, "not_run": 2, "ok": 0, "no_file": 1, "read_failed": 2,
+        "not_yet": 3, "origin_game": 0, "origin_core": 1, "origin_plugins": 2,
+        "origin_patchers": 3, "origin_other": 4, "origin_none": 5, "origin_unreadable": 6,
+        "boot": 0, "start": 1, "pick": 2, "over": 3, "unknown": -1},
+    ("identity_clock_measures", "ICM_GAME"): {"move_step_ms": 20, "hold_frames": 10},
 }
-SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge"}
-SETTINGS_READER = ("seat_evidence", "setting")
+SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge",
+            "identity_clock_evidence_accept", "identity_clock_evidence_worker",
+            "identity_clock_evidence_purge"}
+SETTINGS_READERS = {("seat_evidence", "setting"), ("identity_clock_evidence", "ice_setting")}
 ENV_KEYS = {"SCR_REVIEW_ROOT", "SYSTEMROOT"}
 
 # Identifiers that carry a digit and decide nothing: match-row columns of the
@@ -1375,7 +1389,7 @@ class _Scan:
                     t = v.decode("latin-1") if isinstance(v, bytes) else v
                     if text_bad(t):
                         self.add(node.lineno, "text")
-                    if "runtime_settings" in t and (self.mod, self._fn_of(node)) != SETTINGS_READER:
+                    if "runtime_settings" in t and (self.mod, self._fn_of(node)) not in SETTINGS_READERS:
                         self.add(node.lineno, "setting")
             elif isinstance(node, ast.JoinedStr):
                 pass  # its literal parts are Constants, checked above
@@ -1484,7 +1498,7 @@ class _Scan:
         if name in _DECODERS and node.args and isinstance(node.args[0], (ast.List, ast.Tuple)) \
                 and name == "len":
             self.add(node.lineno, "call")
-        if name == "setting" and len(node.args) >= 2:
+        if name in ("setting", "ice_setting") and len(node.args) >= 2:
             k = node.args[1]
             key = k.value if isinstance(k, ast.Constant) else self.str_consts.get(getattr(k, "id", ""))
             if key not in SWITCHES:

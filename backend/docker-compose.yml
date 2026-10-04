@@ -164,6 +164,13 @@ services:
       # staged /health reads review_rules=absent, records are stored, and
       # nothing is evaluated or opened.
       - ${SCR_REVIEW_DIR:-/opt/competitive-rounds/private/review}:/app/private/review:ro
+      # The offline range list (conn_ranges.py): staged per box under
+      # /opt/competitive-rounds/private/ranges/ the same way, one immutable
+      # ranges-<id> directory per revision and a `current` pointer, the
+      # PARENT mounted READ-ONLY. With nothing staged /health reads
+      # conn_ranges=absent and every post's class is `unknown`. The api never
+      # fetches a list; staging one is an operator step.
+      - ${SCR_RANGES_DIR:-/opt/competitive-rounds/private/ranges}:/app/private/ranges:ro
     ports:
       - "${API_PORT:-8443}:8000"
     security_opt:

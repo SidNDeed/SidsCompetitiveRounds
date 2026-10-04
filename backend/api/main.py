@@ -39,6 +39,8 @@ from database import get_asm_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
 import review_boot, seat_evidence as _sev   # review_boot FIRST: the review closure executes from source only
 import review_rules as _review_rules
+import identity_clock_evidence as _ice
+import conn_ranges as _conn_ranges
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
@@ -3838,6 +3840,11 @@ async def lifespan(app: FastAPI):
         # review_rules reads the same id on both boxes.
         tasks.append(asyncio.create_task(
             _supervised("review_rules_refresh", review_rules_refresh_loop)))
+        # The offline range list (identity-clock connection class): both
+        # roles, read-only (the mounted ranges directory, no table, no
+        # network), loaded only by this loop so no request ever compiles it.
+        tasks.append(asyncio.create_task(
+            _supervised("conn_ranges_refresh", conn_ranges_refresh_loop)))
         if IS_REPLICA:
             # Every loop below this line WRITES -- queue/lobby DELETEs, series
             # cancels, gold movement, tournament progression, runtime_settings
@@ -4605,6 +4612,22 @@ async def review_rules_refresh_loop():
         await asyncio.sleep(REVIEW_REFRESH_S)
 
 
+CONN_RANGES_REFRESH_S = 60
+
+
+async def conn_ranges_refresh_loop():
+    """Re-read the range-list pointer on both roles, off the event loop. A
+    changed target is validated and compiled completely inside its resource
+    bounds and published in one assignment (conn_ranges.refresh_ranges);
+    requests and /health only ever read the published state."""
+    while True:
+        try:
+            await asyncio.to_thread(_conn_ranges.refresh_ranges)
+        except Exception as e:
+            print(f"[RANGES] refresh error: {type(e).__name__}", flush=True)
+        await asyncio.sleep(CONN_RANGES_REFRESH_S)
+
+
 def _review_pass_line(word, games, sittings) -> str:
     def n(d, k):
         return int(d.get(k, 0)) if isinstance(d, dict) else 0
@@ -4624,8 +4647,11 @@ async def review_worker_pass(session_factory, purge: bool):
     games = await _sev.games_pass(session_factory, state)
     sittings = await _sev.sitting_pass(session_factory, state)
     purged = await _sev.purge_pass(session_factory) if purge else None
+    identity = await _ice.ice_games_pass(session_factory, state)
+    identity_purged = await _ice.ice_purge_pass(session_factory) if purge else None
     print(_review_pass_line(state.word, games, sittings), flush=True)
     print(f"[SEAT-EVIDENCE] games={games} sittings={sittings} purge={purged}", flush=True)
+    print(f"[IDENTITY-CLOCK] games={identity} purge={identity_purged}", flush=True)
     return state.word, games, sittings, purged
 
 
@@ -7582,6 +7608,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               seat_evidence=_seat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
+                              identity_clock_evidence=_identity_clock_health_word(),
+                              conn_ranges=_conn_ranges.ranges_health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -7628,6 +7656,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               seat_evidence=_seat_evidence_health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
+                              identity_clock_evidence=_identity_clock_health_word(),
+                              conn_ranges=_conn_ranges.ranges_health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
@@ -8875,14 +8905,95 @@ async def admin_register_release_digest(
     variant: str = Query(..., max_length=16),
     commit: str = Query("", max_length=12),
     dll_sha256: str = Query(..., max_length=64),
+    source: str = Query("release", max_length=16),
     db: AsyncSession = Depends(get_db),
 ):
     """Register one released build's tuple for the build comparison. The
-    digest must be of the uploaded release asset."""
-    target = f"{version}|{variant}|{commit}|{dll_sha256}"
+    digest must be of the uploaded release asset. `source` is `release`
+    (the default) or `beta` (a tester build the maintainer names)."""
+    # The signed target names the source only when it is not the default, so
+    # every existing release registration signs exactly as before.
+    target = f"{version}|{variant}|{commit}|{dll_sha256}" + ("" if source == "release" else f"|{source}")
     await _require_admin(db, admin_steam_id, "release_digest", target, hmac_signature)
     try:
-        return await _sev.register_digest(db, version, variant, commit, dll_sha256)
+        return await _sev.register_digest(db, version, variant, commit, dll_sha256, source)
+    except _sev.EvidenceRefused as r:
+        return _sev_refusal(r)
+
+
+@app.post("/api/v1/matches/identity-clock-evidence", tags=["Matches"])
+async def submit_identity_clock_evidence(request: Request, db: AsyncSession = Depends(get_db)):
+    """One seat's identity, clock and connection record for one ranked game.
+
+    Session first: 401 unless the request carries a verified session for the
+    seat the body names, before any other work. Then the switch, the
+    envelope, the signature, the record's bounds, the clock header (never a
+    refusal), and the connection class of the api path: the client address
+    the rate limiter keys on is classified in memory against the offline
+    range list already loaded, and only the class word and the list's
+    revision id are kept. The address itself is not written, logged or sent
+    anywhere. This route writes the identity_clock_evidence table and nothing
+    else; evaluation runs later in review_worker_loop."""
+    seat, body = await _sev_claimed_seat(request)
+    if not seat or not await _strict_steam_session_ok(request, seat, db):
+        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+    try:
+        if await _ice.ice_setting(db, "identity_clock_evidence_accept", "0") != "1":
+            return JSONResponse(status_code=503, content={"error": "identity_clock_evidence_off"})
+        env = _ice.ice_parse_envelope(body)
+        if not _ice.ice_verify_sig(MATCH_HMAC_SECRET, env):
+            return JSONResponse(status_code=403, content={"detail": "signature"})
+        rec = _ice.ice_parse_record(env)
+        clock = _ice.ice_parse_clock(request.headers.get(_ice.CLOCK_HEADER), rec)
+        conn_class, conn_word = _conn_ranges.classify_address(_rl_client_address(request))
+        rows = (await db.execute(
+            select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
+        )).all()
+        by_steam = {r.steam_id: r.id for r in rows}
+        if env["seat"] not in by_steam or env["other"] not in by_steam:
+            return JSONResponse(status_code=409, content={"status": "not_ready"})
+        return await _ice.ice_store_record(db, env, rec, by_steam[env["seat"]],
+                                           by_steam[env["other"]], _sev_header_version(request),
+                                           clock, conn_class, conn_word)
+    except _sev.EvidenceRefused as r:
+        return _sev_refusal(r)
+
+
+@app.get("/api/v1/admin/identity-clock-evidence", tags=["Admin"])
+async def admin_identity_clock_evidence(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    match_id: UUID | None = Query(None),
+    stable_game_key: str | None = Query(None, max_length=60),
+    db: AsyncSession = Depends(get_db),
+):
+    """The reviewer's view of one game's identity-clock records beside each
+    other: the census and check runs, the clock fits of both seats, the
+    points of both seats side by side, the connection class words, the
+    stored findings and the provenance labels. Admin only."""
+    if (match_id is None) == (stable_game_key is None):
+        raise HTTPException(400, "Give exactly one of match_id or stable_game_key")
+    target = str(match_id) if match_id is not None else stable_game_key
+    await _require_admin(db, admin_steam_id, "identity_clock_evidence", target, hmac_signature)
+    return await _ice.ice_admin_view(db, match_id=str(match_id) if match_id else None,
+                                     stable_game_key=stable_game_key)
+
+
+@app.post("/api/v1/admin/game-file-digests", tags=["Admin"])
+async def admin_register_game_file_digest(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    file_id: int = Query(..., ge=0, le=255),
+    game_version: str = Query(..., max_length=16),
+    sha256: str = Query(..., max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Register one public game-file fact (a listed file's digest from a clean
+    install, under the game version it belongs to)."""
+    target = f"{file_id}|{game_version}|{sha256}"
+    await _require_admin(db, admin_steam_id, "game_file_digest", target, hmac_signature)
+    try:
+        return await _ice.ice_register_game_file(db, file_id, game_version, sha256)
     except _sev.EvidenceRefused as r:
         return _sev_refusal(r)
 
@@ -70606,6 +70717,20 @@ _SEAT_EVIDENCE_ROUTES = (submit_seat_evidence, submit_compat_outcome, admin_seat
 def _seat_evidence_health_word() -> int:
     registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
     return 1 if all(id(fn) in registered for fn in _SEAT_EVIDENCE_ROUTES) else 0
+
+
+# Identity-clock evidence: `identity_clock_evidence` on /health is 1 when this
+# app registers all three identity-clock routes, else 0. Derived on every
+# call from the routing table (equal on both roles by construction), probed
+# by the release train and read by nothing else. The range list's own word is
+# `conn_ranges` (conn_ranges.ranges_health_word).
+_IDENTITY_CLOCK_ROUTES = (submit_identity_clock_evidence, admin_identity_clock_evidence,
+                          admin_register_game_file_digest)
+
+
+def _identity_clock_health_word() -> int:
+    registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
+    return 1 if all(id(fn) in registered for fn in _IDENTITY_CLOCK_ROUTES) else 0
 
 
 def _pc_motion_health_word() -> int:

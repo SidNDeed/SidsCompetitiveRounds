@@ -878,18 +878,24 @@ async def store_compat(db, c: dict, player_id, mod_version) -> dict:
     return {"status": "recorded" if got else "already_recorded"}
 
 
-async def register_digest(db, version, variant, commit, sha) -> dict:
+RELEASE_SOURCES = ("release", "beta")
+
+
+async def register_digest(db, version, variant, commit, sha, source="release") -> dict:
     """Admin registration of one release tuple (the uploaded release asset's
-    digest is the authority, never a local rebuild)."""
+    digest is the authority, never a local rebuild). `source` is `release`,
+    or `beta` for a tester build the maintainer names."""
+    if source not in RELEASE_SOURCES:
+        raise EvidenceRefused(422, "release_source")
     if not (isinstance(version, str) and _BUILD_PART.fullmatch(version) and 0 < len(version) <= 16
             and isinstance(variant, str) and _BUILD_PART.fullmatch(variant) and 0 < len(variant) <= 16
             and isinstance(commit, str) and _BUILD_PART.fullmatch(commit) and len(commit) <= 12
             and isinstance(sha, str) and _HEX64.fullmatch(sha)):
         raise EvidenceRefused(422, "release_tuple")
     got = (await db.execute(text(
-        "INSERT INTO mod_release_digests (version, variant, commit_sha, dll_sha256) "
-        "VALUES (:v, :var, :c, :s) ON CONFLICT DO NOTHING RETURNING version"),
-        {"v": version, "var": variant, "c": commit, "s": sha})).first()
+        "INSERT INTO mod_release_digests (version, variant, commit_sha, dll_sha256, source) "
+        "VALUES (:v, :var, :c, :s, :src) ON CONFLICT DO NOTHING RETURNING version"),
+        {"v": version, "var": variant, "c": commit, "s": sha, "src": source})).first()
     await db.commit()
     return {"status": "registered" if got else "already_registered"}
 
