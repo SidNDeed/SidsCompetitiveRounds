@@ -1366,11 +1366,21 @@ def test_f2_m6_a_missing_cycle_partner_is_absent_or_not_run_never_agreement():
     owner, meas = fx.a24_pair()
     gone = fx.clone(meas)
     gone["sh_o"] = []
+    gone["tot_o"][cm.TOT["cycles"]] = 0                                 # none listed, none counted
     d = _owner_dir(cm.pair_view(fx.records(owner, gone)))
     (row,) = [r for r in d["cycles"] if r["self"] is not None]
     assert row["absent_in"] == "meas" and "cycle" in row["differs_by"]
     assert d["case"] == "both_differ" and "cycle" in d["differs_by"]
-    trimmed = fx.clone(gone)
+    # Fix pass 3 (M-8): the record this control used before, no group listed
+    # while its whole-game count says one, contradicts itself: NOT-RUN
+    # `inconsistent`, never absent, never a difference, never an agreement.
+    contra = fx.clone(meas)
+    contra["sh_o"] = []
+    d = _owner_dir(cm.pair_view(fx.records(owner, contra)))
+    (row,) = [r for r in d["cycles"] if r["self"] is not None]
+    assert row["not_run"] == "inconsistent" and row["absent_in"] is None
+    assert row["differs_by"] == [] and d["case"] == "not_run", (d["case"], d["differs_by"])
+    trimmed = fx.clone(contra)
     trimmed["omit"]["sh_o"] = 1
     d = _owner_dir(cm.pair_view(fx.records(owner, trimmed)))
     (row,) = [r for r in d["cycles"] if r["self"] is not None]
@@ -1457,8 +1467,21 @@ def test_m8_r5_absence_only_when_the_retained_push_list_proves_it():
 # -- FIX PASS 2: absence only from a list whole against its whole-game counter (M-8) ------
 
 def test_f2_m8_every_absence_list_has_a_whole_game_counter():
-    used = {"push_o", "ch_o", "p3tb", "bsel", "push_s", "bd_o"}
-    assert used <= set(cm.WHOLE_COUNTERS)
+    """Generated (fix pass 3): every list the absence gate is asked about,
+    read from the source's own calls of the gate, has a whole-game counter,
+    or is one the layout gives none (`b5_o`, `b5_h`: always `uncounted`).
+    The cycle lists the gate is asked about by variable are the two shot
+    group lists, counted by each gun's whole-game `cycles` total."""
+    sites, _violations = _gate_proof(_CM_SOURCE)
+    keys = set()
+    for _fn, args in sites:
+        arg = ast.parse("f(%s)" % args, mode="eval").body.args[1]
+        keys.add(arg.value if isinstance(arg, ast.Constant) else ("var", arg.id))
+    named = {k for k in keys if isinstance(k, str)}
+    assert named - set(cm.WHOLE_COUNTERS) == {"b5_o", "b5_h"}, sorted(named)
+    assert {k for k in keys if not isinstance(k, str)} == {("var", "other_gk"), ("var", "own_gk")}
+    assert cm.WHOLE_COUNTERS["sh_s"] == ("tot_s", "cycles", None)
+    assert cm.WHOLE_COUNTERS["sh_o"] == ("tot_o", "cycles", None)
     for key, (row, field, _cap) in cm.WHOLE_COUNTERS.items():
         assert field in cm.IX[row], key
     assert not {"b5_o", "b5_h"} & set(cm.WHOLE_COUNTERS)                # the layout names none
@@ -1526,6 +1549,359 @@ def test_f2_m8_the_other_seats_lists_against_their_counters(key, view_key, field
     shooter["r_tot"][cm.IX["r_tot"][count]] = 1
     (row,) = _by(cm.pair_view(fx.records(victim, shooter)), view_key, A, field)["rows"]
     assert row["not_run"] == "inconsistent"
+
+
+# -- FIX PASS 3: every absence through the one gate (M-8) ---------------------------------
+
+_CM_SOURCE = open(cm.__file__, encoding="utf-8").read()
+
+
+def _gate_proof(source):
+    """(sites, violations) for the combat measures source. `sites`: every
+    call of the absence gate, as (enclosing function, its arguments as
+    written), generated from the source. `violations`: every absence the
+    source produces that the gate does not decide -- the name ABSENT read
+    anywhere but the gate's own return or a comparison against a gate
+    result; the literal "absent" anywhere but the definition of ABSENT; an
+    `absent_in` account or a `push_listed` False set anywhere but under a
+    branch taken only when a gate result IS ABSENT; and `list_gap` (the
+    gate's own input) called anywhere but in the gate."""
+    tree = ast.parse(source)
+    parent = {}
+    for n in ast.walk(tree):
+        for ch in ast.iter_child_nodes(n):
+            parent[ch] = n
+
+    def fn_of(n):
+        while n in parent:
+            n = parent[n]
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return n
+        return None
+
+    def is_gate_call(e):
+        return isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id == "absence"
+
+    cache = {}
+
+    def gate_names(fn):
+        """Names whose every binding in `fn` is `name = absence(...)`."""
+        if fn not in cache:
+            good, bad = set(), set()
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Name) and not isinstance(n.ctx, ast.Load):
+                    p = parent[n]
+                    if isinstance(p, ast.Assign) and p.targets == [n] and is_gate_call(p.value):
+                        good.add(n.id)
+                    else:
+                        bad.add(n.id)
+            cache[fn] = good - bad
+        return cache[fn]
+
+    def polarity(test, fn):
+        """The branch ("body"/"orelse") a gate comparison takes when the gate
+        said ABSENT, or None when `test` is no such comparison."""
+        if not (isinstance(test, ast.Compare) and len(test.ops) == 1
+                and isinstance(test.ops[0], (ast.Eq, ast.NotEq))):
+            return None
+        a, b = test.left, test.comparators[0]
+        for x, y in ((a, b), (b, a)):
+            gated = is_gate_call(y) or (isinstance(y, ast.Name) and fn is not None
+                                        and y.id in gate_names(fn))
+            if isinstance(x, ast.Name) and x.id == "ABSENT" and gated:
+                return "body" if isinstance(test.ops[0], ast.Eq) else "orelse"
+        return None
+
+    def dominated(marker, fn):
+        child, n = marker, parent.get(marker)
+        while n is not None and n is not fn:
+            if isinstance(n, (ast.If, ast.IfExp)):
+                pol = polarity(n.test, fn)
+                body = n.body if isinstance(n, ast.If) else [n.body]
+                orelse = n.orelse if isinstance(n, ast.If) else [n.orelse]
+                if pol == "body" and any(child is x for x in body):
+                    return True
+                if pol == "orelse" and any(child is x for x in orelse):
+                    return True
+            child, n = n, parent.get(n)
+        return False
+
+    def keyed(n):
+        """(key, value) pairs a node writes: a subscript store (also inside
+        a tuple or list target, paired by position when the value is a
+        tuple or list of the same length, else with the whole value), a
+        dict entry, a keyword argument."""
+        if isinstance(n, ast.Assign):
+            out = []
+            for t in n.targets:
+                pairs = [(t, n.value)]
+                if isinstance(t, (ast.Tuple, ast.List)):
+                    same = (isinstance(n.value, (ast.Tuple, ast.List))
+                            and len(n.value.elts) == len(t.elts))
+                    pairs = list(zip(t.elts, n.value.elts if same else [n.value] * len(t.elts)))
+                out += [(x.slice.value, v) for x, v in pairs
+                        if isinstance(x, ast.Subscript) and isinstance(x.slice, ast.Constant)]
+            return out
+        if isinstance(n, ast.Dict):
+            return [(k.value, v) for k, v in zip(n.keys, n.values) if isinstance(k, ast.Constant)]
+        if isinstance(n, ast.keyword) and n.arg:
+            return [(n.arg, n.value)]
+        return []
+
+    sites, violations = [], []
+    for n in ast.walk(tree):
+        f = fn_of(n)
+        where = "line %d (%s)" % (getattr(n, "lineno", 0), f.name if f else "module")
+        if is_gate_call(n):
+            sites.append((f.name if f else None, ", ".join(ast.unparse(a) for a in n.args)))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "list_gap" \
+                and (f is None or f.name != "absence"):
+            violations.append(where + ": list_gap outside the gate")
+        if isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value == "absent":
+            p = parent.get(n)
+            if not (f is None and isinstance(p, ast.Assign) and len(p.targets) == 1
+                    and isinstance(p.targets[0], ast.Name) and p.targets[0].id == "ABSENT"):
+                violations.append(where + ": the literal absent")
+        if isinstance(n, ast.Name) and n.id == "ABSENT" and isinstance(n.ctx, ast.Load):
+            p = parent.get(n)
+            if not ((f is not None and f.name == "absence" and isinstance(p, ast.BoolOp))
+                    or (isinstance(p, ast.Compare) and polarity(p, f))):
+                violations.append(where + ": ABSENT read outside a gate comparison")
+        for key, value in keyed(n):
+            if key == "absent_in" and not (isinstance(value, ast.Constant) and value.value is None):
+                if not dominated(n if isinstance(n, ast.Assign) else value, f):
+                    violations.append(where + ": absent_in set without the gate")
+            if key == "push_listed":
+                for c in ast.walk(value):
+                    if isinstance(c, ast.Constant) and c.value is False and not dominated(c, f):
+                        violations.append(where + ": push_listed False without the gate")
+    return sites, violations
+
+
+# Every call of the gate, generated from the source, and the test whose
+# contradictory-count (or uncounted) control covers it.
+_GATE_CONTROLS = {
+    ("direction", "owner_rec, 'sh_s'"): "test_f3_m6_an_agreement_needs_a_complete_bijection",
+    ("direction", "meas_rec, 'sh_o'"): "test_f3_m6_an_agreement_needs_a_complete_bijection",
+    ("_cycle_row", "other_rec, other_gk"): "test_f3_m8_cycle_absence_needs_the_counter_pair",
+    ("_cycle_row", "other_rec, other_gk, partner"): "test_f3_m8_shot_absence_needs_the_counter_pair",
+    ("_cycle_row", "own_rec, own_gk, c"): "test_f3_m8_shot_absence_needs_the_counter_pair",
+    ("blocks", "shooter_rec, 'b5_o'"): "test_f2_m8_a_list_without_a_counter_never_proves_absence",
+    ("contacts", "shooter_rec, 'b5_h'"): "test_f2_m8_a_list_without_a_counter_never_proves_absence",
+    ("pushes", "shooter_rec, 'push_o'"): "test_f2_m8_the_other_seats_lists_against_their_counters",
+    ("chains", "shooter_rec, 'ch_o'"): "test_f2_m8_the_other_seats_lists_against_their_counters",
+    ("deaths", "other_rec, 'bd_o'"): "test_f2_m8_the_other_seats_lists_against_their_counters",
+    ("velocity_changes", "meas_rec, 'p3tb'"): "test_f2_m8_p3tb_against_p3n_target",
+    ("velocity_changes", "owner_rec, 'bsel'"): "test_f2_m8_bsel_against_r_tot_bsel",
+    ("deaths", "own_rec, 'push_s'"): "test_f2_m8_push_s_against_r_tot_push_own",
+}
+
+
+def test_f3_m8_every_absence_passes_through_the_one_gate():
+    """Every absence verdict the module produces (the ABSENT string, an
+    `absent_in` account, a `push_listed` False) is decided by `absence`,
+    which reads `list_gap` (record, capability, zero omit, the list against
+    its whole-game counter). The call sites are GENERATED from the source
+    and must equal the controls table, each control a test of this file.
+    Negative controls: two planted bypasses are each found."""
+    sites, violations = _gate_proof(_CM_SOURCE)
+    assert violations == [], violations
+    assert len(sites) == len(set(sites)), sites
+    assert set(sites) == set(_GATE_CONTROLS), sorted(set(sites) ^ set(_GATE_CONTROLS))
+    for name in set(_GATE_CONTROLS.values()):
+        assert callable(globals().get(name)), name
+    old = "        why = absence(other_rec, other_gk)\n"
+    assert _CM_SOURCE.count(old) == 1
+    planted = _CM_SOURCE.replace(old, "        why = list_gap(other_rec, other_gk) or \"absent\"\n")
+    _s, found = _gate_proof(planted)
+    assert {v.split(": ", 1)[1] for v in found} >= {
+        "list_gap outside the gate", "the literal absent", "absent_in set without the gate"}, found
+    old = "(False if push_why == ABSENT else None)"
+    assert _CM_SOURCE.count(old) == 1
+    _s, found = _gate_proof(_CM_SOURCE.replace(old, "(False if push_why != \"trimmed\" else None)"))
+    assert [v.split(": ", 1)[1] for v in found] == ["push_listed False without the gate"], found
+
+
+def _cycle_absence(side, counted):
+    """The A24 pair with one account's groups gone, its whole-game cycle
+    count set to `counted`."""
+    owner, meas = fx.a24_pair()
+    rec, gk, tk = (meas, "sh_o", "tot_o") if side == "meas" else (owner, "sh_s", "tot_s")
+    rec[gk] = []
+    rec[tk][cm.TOT["cycles"]] = counted
+    view = cm.pair_view(fx.records(owner, meas))
+    (row,) = _owner_dir(view)["cycles"]
+    subs = [c for c in cm.combat_subjects(view)["combat.cycle"] if c.row["owner"] == A]
+    return _owner_dir(view), row, [cm.m_cycle_partner_absent(c, None) for c in subs]
+
+
+@pytest.mark.parametrize("side", ["meas", "self"])
+def test_f3_m8_cycle_absence_needs_the_counter_pair(side):
+    """A cycle the other account does not list is absent there only when
+    that account's groups are whole against its whole-game cycle count; a
+    list that contradicts its count (none listed, one counted) proves
+    nothing: NOT-RUN `inconsistent`, no absence, no difference, no
+    agreement. Both accounts."""
+    d, row, partner_absent = _cycle_absence(side, 0)                   # control: none counted
+    assert row["absent_in"] == side and "cycle" in row["differs_by"]
+    assert all(s["absent_in"] == side for s in row["shots"]) and row["shots"]
+    assert d["case"] == "both_differ" and partner_absent == [side]
+    d, row, partner_absent = _cycle_absence(side, 1)                   # one counted, none listed
+    assert row["not_run"] == "inconsistent" and row["absent_in"] is None
+    assert row["differs_by"] == [] and partner_absent == [None]
+    assert all(s["not_run"] == "inconsistent" and s["absent_in"] is None for s in row["shots"])
+    assert d["case"] == "not_run" and d["differs_by"] == []
+
+
+def _shot_pair(variant="base", tot_s_cycles=1, tot_o_cycles=1):
+    """The A24 pair with the copy's fourth projectile of another id: each
+    account lists one shot of the cycle the other does not. Returns the row
+    and those two shots, keyed by the account that lists each."""
+    owner, meas = fx.a24_pair(variant)
+    if variant == "base":
+        meas["sh_o"][0][1][3][cm.SHOT["o"]["dpid"]] = 2
+    owner["tot_s"][cm.TOT["cycles"]] = tot_s_cycles
+    meas["tot_o"][cm.TOT["cycles"]] = tot_o_cycles
+    (row,) = _owner_dir(cm.pair_view(fx.records(owner, meas)))["cycles"]
+    only = {("self" if s["self"] is not None else "meas"): s for s in row["shots"]
+            if (s["self"] is None) != (s["meas"] is None)}
+    return row, only
+
+
+@pytest.mark.parametrize("contradict", ["self", "meas"])
+def test_f3_m8_shot_absence_needs_the_counter_pair(contradict):
+    """A shot one account lists and the other's partnered cycle does not is
+    absent there only when that account's groups are whole against its
+    cycle count AND the partner lists every shot its header counts. The
+    account whose list contradicts its count proves nothing about what it
+    lacks; the other account's absence stands. Both sides of the gate: the
+    primary cycle's own shots and the partner-only shots."""
+    row, only = _shot_pair()                                            # control: both whole
+    assert only["self"]["absent_in"] == "meas" and only["meas"]["absent_in"] == "self"
+    assert "shot" in row["differs_by"]
+    other = "meas" if contradict == "self" else "self"
+    row, only = (_shot_pair(tot_s_cycles=2) if contradict == "self"
+                 else _shot_pair(tot_o_cycles=2))
+    assert only[other]["not_run"] == "inconsistent" and only[other]["absent_in"] is None
+    assert only[contradict]["absent_in"] == other and only[contradict]["not_run"] is None
+    row, only = _shot_pair("short")                 # the copy's cycle lists three of its four
+    assert list(only) == ["self"] and only["self"]["not_run"] == "trimmed"
+    assert only["self"]["absent_in"] is None
+
+
+# -- FIX PASS 3: the cycle match is a bijection or NOT-RUN (M-6) --------------------------
+
+def _group(i, side, s0_shift=0, pid_shift=0, pt=0):
+    """Cycle `i` of a generated game on one side: three single-projectile
+    volleys. Optionally under another `s0` with the SAME shot identities
+    (the first entry's offset undoes the shift), other projectile ids, or
+    another point."""
+    g = fx.cycle_group(fx.S0 + 10000 * i, fx.PID0 + 100 * i + pid_shift, 3, side=side,
+                       reload_after=False)
+    g[0][cm.HDR["pt"]] = pt
+    if s0_shift:
+        g[0][cm.HDR["s0"]] += s0_shift
+        g[1][0][cm.SHOT[side]["dt"]] = -s0_shift
+    return g
+
+
+def _cycles_rec(side, groups):
+    rec = fx.empty_record()
+    rec["tb"] = [fx.point()]
+    rec["tb_tot"] = fx.tb_tot_of(rec["tb"])
+    rec["gun_" + side] = [fx.gun()]
+    rec["sh_" + side] = [fx.clone(g) for g in groups]
+    return fx.finish(rec, side)
+
+
+def _cycles_dir(owner_groups, meas_groups):
+    owner, meas = _cycles_rec("s", owner_groups), _cycles_rec("o", meas_groups)
+    cm.check_record(owner)
+    cm.check_record(meas)
+    d = _owner_dir(cm.pair_view(fx.records(owner, meas)))
+    for acct, rec, side in (("self", owner, "s"), ("meas", meas, "o")):   # no cycle suppressed
+        listed = sorted((c["s0"], c["pt"], c["pid0"]) for c in cm.rebuild_side(rec, side))
+        shown = sorted((r[acct]["s0"], r[acct]["pt"], r[acct]["pid0"]) for r in d["cycles"]
+                       if r[acct] is not None)
+        assert shown == listed, (acct, shown, listed)
+    return d
+
+
+def _all_ambiguous(d):
+    assert d["pairing"] == "ambiguous"
+    for r in d["cycles"]:
+        assert r["not_run"] == "ambiguous" and r["absent_in"] is None and r["differs_by"] == []
+        assert all(s["not_run"] == "ambiguous" and s["absent_in"] is None for s in r["shots"])
+    assert "cycle" not in d["differs_by"] and "shot" not in d["differs_by"]
+    assert d["case"] != "both_agree"
+
+
+def test_f3_m6_reordered_cycles_pair_one_to_one():
+    d = _cycles_dir([_group(0, "s"), _group(1, "s")], [_group(1, "o"), _group(0, "o")])
+    assert d["pairing"] is None and d["case"] == "both_agree", (d["case"], d["differs_by"])
+    assert len(d["cycles"]) == 2
+    assert all(r["self"] is not None and r["meas"] is not None for r in d["cycles"])
+
+
+def test_f3_m6_a_duplicate_s0_is_ambiguous_and_no_cycle_is_dropped():
+    """An `s0` listed twice on one side (the two cycles' projectiles are
+    different, so only the `s0` repeats), on either side: every cycle of
+    both accounts is shown, all NOT-RUN `ambiguous`."""
+    for owner_groups, meas_groups in (
+            ([_group(0, "s"), _group(1, "s")],
+             [_group(0, "o"), _group(1, "o"), _group(1, "o", pid_shift=50)]),
+            ([_group(0, "s"), _group(1, "s"), _group(1, "s", pid_shift=50)],
+             [_group(0, "o"), _group(1, "o")])):
+        d = _cycles_dir(owner_groups, meas_groups)
+        _all_ambiguous(d)
+        assert len(d["cycles"]) == len(owner_groups) + len(meas_groups)
+
+
+def test_f3_m6_the_reviewers_multiplicity_case_is_ambiguous_never_agreement():
+    """Owner cycles [A, B] against measured [A, A], B with A's `s0` and shot
+    identities and another point. Before fix pass 3 the measured A paired
+    with the owner's A twice, B was suppressed because its shots were
+    covered, and the case was `both_agree`."""
+    d = _cycles_dir([_group(0, "s"), _group(0, "s", pt=1)], [_group(0, "o"), _group(0, "o")])
+    _all_ambiguous(d)
+    assert d["case"] == "not_run" and len(d["cycles"]) == 4
+    assert sorted(r["self"]["pt"] for r in d["cycles"] if r["self"] is not None) == [0, 1]
+
+
+def test_f3_m6_a_shot_identity_in_two_cycles_is_ambiguous():
+    """One projectile in two cycles of different `s0`: on one side (the
+    other side lists neither), and across the sides (each side lists it
+    under its own `s0`)."""
+    d = _cycles_dir([_group(0, "s"), _group(1, "s")],
+                    [_group(0, "o"), _group(1, "o"), _group(2, "o"),
+                     _group(2, "o", s0_shift=5000)])
+    _all_ambiguous(d)
+    d = _cycles_dir([_group(0, "s"), _group(1, "s")],
+                    [_group(0, "o", s0_shift=5000), _group(1, "o")])
+    _all_ambiguous(d)
+    assert d["case"] == "not_run"
+
+
+def test_f3_m6_an_agreement_needs_a_complete_bijection():
+    """`both_agree` only from a one-to-one pairing of both accounts' WHOLE
+    cycle lists (each against its whole-game cycle count). A cycle one side
+    trimmed, or the same cycle trimmed on both sides, leaves the compared
+    cycles agreeing and the case NOT-RUN. Both sides of the gate."""
+    owner = _cycles_rec("s", [_group(0, "s"), _group(1, "s")])
+    meas = _cycles_rec("o", [_group(0, "o"), _group(1, "o")])
+    assert _owner_dir(cm.pair_view(fx.records(owner, meas)))["case"] == "both_agree"   # control
+
+    def cut(rec, gk):
+        out = fx.clone(rec)
+        out[gk] = out[gk][:1]
+        out["omit"][gk] = 1                                          # the totals stay whole
+        return out
+    for o, m, nrows in ((owner, cut(meas, "sh_o"), 2), (cut(owner, "sh_s"), meas, 2),
+                        (cut(owner, "sh_s"), cut(meas, "sh_o"), 1)):
+        d = _owner_dir(cm.pair_view(fx.records(o, m)))
+        assert len(d["cycles"]) == nrows and d["cycles"][0]["not_run"] is None
+        assert [r["not_run"] for r in d["cycles"][1:]] == ["trimmed"] * (nrows - 1)
+        assert d["differs_by"] == [] and d["case"] == "not_run", (d["case"], d["differs_by"])
 
 
 # -- FIX PASS 2: the purge states the allowlist the constants apply (L-6) -----------------

@@ -816,10 +816,6 @@ def _shot_key(s):
     return (s["pid"], s["stamp"])
 
 
-def _trimmed(rec, key) -> bool:
-    return rec is not None and rec["omit"][key] > 0
-
-
 def _incompatible(rows, out):
     """Two records of different (or unread) measurement versions: every
     comparison across them is NOT-RUN; each account's own fields stay."""
@@ -884,13 +880,22 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
     of CYCLE_HEADER, the derived fields, reason bits without the owner-only
     bit, the refill events and the cycle clocks), the attack count against
     the emissions, the stat blocks at every point and the whole-game totals.
-    A cycle whose partner the other record does not list, with that record's
-    list whole, is absent there (a difference); with the list trimmed it is
-    NOT-RUN; it is never an agreement. Any difference is `both_differ`
-    and `differs_by` names its classes. `both_agree` needs something compared
-    and nothing differing; with listed cycles that is at least one cycle
-    compared. Otherwise `not_run` (every dependency missing, trimmed or of
-    another measurement version)."""
+
+    The two accounts' cycles pair by `s0`, one to one, or not at all:
+    an `s0` or a shot identity listed twice on one side,
+    or a shot both sides list in cycles of different `s0`, leaves the match
+    ambiguous (`_pairing_fault`), and then every cycle of both accounts is
+    shown on its own row, NOT-RUN `ambiguous`, none compared, none absent.
+    No cycle is ever left out because another row holds one of its shots. A
+    cycle with no partner is absent from the other account only when the
+    absence gate (`absence`) says that account's list proves it, else
+    NOT-RUN; it is never an agreement. Any difference is `both_differ` and
+    `differs_by` names its classes. `both_agree` needs a complete bijection
+    (no ambiguity, both cycle lists whole against their whole-game cycle
+    counts, every row holding both accounts' cycle), at least one cycle
+    compared when cycles are listed (else a whole-game comparison), and
+    nothing differing. Otherwise `not_run` (every dependency missing,
+    trimmed, ambiguous or of another measurement version)."""
     self_c = rebuild_side(owner_rec, "s") if owner_rec is not None else None
     meas_c = rebuild_side(meas_rec, "o") if meas_rec is not None else None
     if owner_rec is not None and meas_rec is not None:
@@ -899,20 +904,24 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
         case = "only_measuring"
     else:
         case = "only_owner"
-    self_shots = {_shot_key(s): s for c in (self_c or []) for s in c["shots"]}
-    meas_shots = {_shot_key(s): s for c in (meas_c or []) for s in c["shots"]}
+    pairing = (_pairing_fault(self_c, meas_c)
+               if self_c is not None and meas_c is not None else None)
     rows = []
-    primary = meas_c if meas_c is not None else self_c
-    covered = set()
-    for c in primary:
-        rows.append(_cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots,
-                               primary is meas_c))
-        covered.update(_shot_key(s) for s in c["shots"])
-    if meas_c is not None and self_c is not None:
-        for c in self_c:
-            if not any(_shot_key(s) in covered for s in c["shots"]):
-                rows.append(_cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots,
-                                       meas_shots, False))
+    if pairing is not None:
+        for acct, cycles in (("meas", meas_c), ("self", self_c)):
+            for c in cycles:
+                rows.append(_lone_row(c, acct, owner_rec, meas_rec, pairing))
+    else:
+        primary = meas_c if meas_c is not None else self_c
+        other_by = {c["s0"]: c for c in (self_c if primary is meas_c else meas_c) or []}
+        for c in primary:
+            rows.append(_cycle_row(c, owner_rec, meas_rec, other_by.get(c["s0"]),
+                                   primary is meas_c))
+        if meas_c is not None and self_c is not None:
+            paired = {c["s0"] for c in meas_c}
+            for c in self_c:
+                if c["s0"] not in paired:
+                    rows.append(_cycle_row(c, owner_rec, meas_rec, None, False))
     # A cycle a kept summary names but whose shot group neither record still
     # lists: shown from its summary, every per-shot comparison NOT-RUN.
     seen = {r["s0"] for r in rows}
@@ -929,7 +938,7 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
                          "absent_in": None,
                          "stat": {"self": None, "meas": None, "diff": None},
                          "time": {"self": None, "meas": None}})
-    out = {"case": case, "case_text": None, "cycles": rows,
+    out = {"case": case, "case_text": None, "cycles": rows, "pairing": pairing,
            "self_label": LABEL_SELF, "meas_label": LABEL_MEAS,
            "self_present": owner_rec is not None, "meas_present": meas_rec is not None}
     out["attacks"] = {
@@ -972,11 +981,17 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
             found.add("totals")
         if any(st["diff"] and any(st["diff"].values()) for st in out["stat"]):
             found.add("stat")
+        # The complete bijection an agreement needs: one-to-one pairing, both
+        # cycle lists whole against their whole-game cycle counts (the same
+        # gate an absence passes), and every row holding both accounts.
+        bijection = (pairing is None and absence(owner_rec, "sh_s") == ABSENT
+                     and absence(meas_rec, "sh_o") == ABSENT
+                     and all(r["self"] is not None and r["meas"] is not None for r in rows))
         cycles_compared = any(r["not_run"] is None for r in rows)
         whole_compared = (out["attacks"]["d_emit_msgs"] is not None
                           or out["totals"]["diff"] is not None
                           or any(st["diff"] is not None for st in out["stat"]))
-        compared = cycles_compared if rows else whole_compared
+        compared = bijection and (cycles_compared if rows else whole_compared)
         out["differs_by"] = sorted(found)
         case = "both_differ" if found else ("both_agree" if compared else "not_run")
         out["case"] = case
@@ -984,19 +999,68 @@ def direction(owner_rec, meas_rec, compatible=True) -> dict:
     return out
 
 
-def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, primary_is_meas):
-    other_c = self_c if primary_is_meas else meas_c
+def _pairing_fault(self_c, meas_c):
+    """Why the two accounts' cycles of one gun do not pair one to one by
+    `s0`, or None when they do. Ambiguous: an `s0` listed
+    twice on one side, a shot identity (pid, stamp) listed twice on one side
+    (in one cycle or two), or a shot both sides list in cycles of different
+    `s0` (the two pairings disagree). With no fault, every shot both sides
+    list lies in a pair of cycles of the same `s0`."""
+    for side in (self_c, meas_c):
+        s0s = [c["s0"] for c in side]
+        keys = [_shot_key(s) for c in side for s in c["shots"]]
+        if len(set(s0s)) != len(s0s) or len(set(keys)) != len(keys):
+            return "ambiguous"
+    home = {_shot_key(s): c["s0"] for c in self_c for s in c["shots"]}
+    for c in meas_c:
+        for s in c["shots"]:
+            if home.get(_shot_key(s), c["s0"]) != c["s0"]:
+                return "ambiguous"
+    return None
+
+
+def _stat_time(row, c, owner_rec, meas_rec, compared=True):
+    """The stat blocks in force at the cycle's point on both seats (their
+    difference a `stat` difference only on a compared row) and both seats'
+    time base at that point."""
+    sb = owner_rec and stat_at(owner_rec["gun_s"], c["pt"])
+    mb = meas_rec and stat_at(meas_rec["gun_o"], c["pt"])
+    row["stat"] = {"self": _named(sb, SPEC["gun_s"][3]) if sb else None,
+                   "meas": _named(mb, SPEC["gun_o"][3]) if mb else None,
+                   "diff": _stat_diff(sb or None, mb or None) if compared else None}
+    if row["stat"]["diff"] and any(row["stat"]["diff"].values()):
+        _mark(row, "stat")
+    row["time"] = {"self": _point_row(owner_rec, c["pt"]) if owner_rec else None,
+                   "meas": _point_row(meas_rec, c["pt"]) if meas_rec else None}
+
+
+def _lone_row(c, acct, owner_rec, meas_rec, why):
+    """One cycle of one account shown on its own, every comparison NOT-RUN
+    `why` (the pairing is ambiguous): nothing compared, nothing absent."""
+    row = {"s0": c["s0"], "pt": c["pt"], "self": None, "meas": None, "shots": [],
+           "refill": None, "differs": False, "differs_by": [], "clock": None, "not_run": why,
+           "absent_in": None}
+    row[acct] = _cycle_fields(c)
+    for s in c["shots"]:
+        srow = {"pid": s["pid"], "stamp": s["stamp"], "self": None, "meas": None,
+                "not_run": why, "absent_in": None}
+        srow[acct] = _shot_fields(s)
+        srow.update({d: None for d in SHOT_COMPARED.values()})
+        row["shots"].append(srow)
+    _stat_time(row, c, owner_rec, meas_rec, compared=False)
+    return row
+
+
+def _cycle_row(c, owner_rec, meas_rec, partner, primary_is_meas):
+    """One cycle of the primary account beside `partner`, the other
+    account's cycle of the same `s0` (None when it lists none), under a
+    one-to-one pairing. Every absence below is the gate's (`absence`)."""
     mine = "meas" if primary_is_meas else "self"
     theirs = "self" if primary_is_meas else "meas"
     other_rec = owner_rec if primary_is_meas else meas_rec
     other_gk = "sh_s" if primary_is_meas else "sh_o"
-    other_map = self_shots if primary_is_meas else meas_shots
-    partner = None
-    if other_c is not None:
-        for oc in other_c:
-            if oc["s0"] == c["s0"]:
-                partner = oc
-                break
+    own_rec = meas_rec if primary_is_meas else owner_rec
+    own_gk = "sh_o" if primary_is_meas else "sh_s"
     row = {"s0": c["s0"], "pt": c["pt"], mine: _cycle_fields(c), theirs: None, "shots": [],
            "refill": None, "differs": False, "differs_by": [], "clock": None, "not_run": None,
            "absent_in": None}
@@ -1007,15 +1071,16 @@ def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, p
         # both state are still set side by side and a difference among them
         # still counts, but the row never counts toward an agreement.
         row["not_run"] = c["not_run"] or partner["not_run"]
-    elif other_rec is None:
-        row["not_run"] = "missing_record"
-    elif _trimmed(other_rec, other_gk):
-        row["not_run"] = "trimmed"
     else:
-        # The other record lists its groups whole and none has this `s0`:
-        # the cycle is absent from that account, never an agreement.
-        row["absent_in"] = theirs
-        _mark(row, "cycle")
+        why = absence(other_rec, other_gk)
+        if why == ABSENT:
+            # The other record lists its groups whole, as many as its
+            # whole-game cycle count, and none has this `s0`.
+            row["absent_in"] = theirs
+            _mark(row, "cycle")
+        else:
+            row["not_run"] = why
+    other_map = {_shot_key(s): s for s in partner["shots"]} if partner is not None else {}
     for s in c["shots"]:
         o = other_map.get(_shot_key(s))
         srow = {"pid": s["pid"], "stamp": s["stamp"], mine: _shot_fields(s), theirs: None,
@@ -1028,43 +1093,34 @@ def _cycle_row(c, owner_rec, meas_rec, self_c, meas_c, self_shots, meas_shots, p
                 srow[d] = int(sv[f]) - int(mv[f])
             if any(srow[d] for d in SHOT_COMPARED.values()):
                 _mark(row, "shot")
-        elif other_rec is None:
-            srow["not_run"] = "missing_record"
-        elif _trimmed(other_rec, other_gk) or (partner is not None and not partner["complete"]):
-            srow["not_run"] = "trimmed"
         else:
-            srow["absent_in"] = theirs
-            _mark(row, "shot")
+            why = absence(other_rec, other_gk, partner)
+            if why == ABSENT:
+                srow["absent_in"] = theirs
+                _mark(row, "shot")
+            else:
+                srow["not_run"] = why
         row["shots"].append(srow)
     if partner is not None:
-        # Shots only the other account lists: NOT-RUN when this account's
-        # cycle is incomplete or its list was trimmed, else absent here.
+        # Shots only the other account lists: absent here only when this
+        # account's list and this cycle prove it.
         listed = {_shot_key(s) for s in c["shots"]}
-        own_rec = meas_rec if primary_is_meas else owner_rec
-        own_gk = "sh_o" if primary_is_meas else "sh_s"
         for s in partner["shots"]:
             if _shot_key(s) in listed:
                 continue
             srow = {"pid": s["pid"], "stamp": s["stamp"], mine: None, theirs: _shot_fields(s),
                     "not_run": None, "absent_in": None}
             srow.update({d: None for d in SHOT_COMPARED.values()})
-            if not c["complete"] or _trimmed(own_rec, own_gk):
-                srow["not_run"] = "trimmed"
-            else:
+            why = absence(own_rec, own_gk, c)
+            if why == ABSENT:
                 srow["absent_in"] = mine
                 _mark(row, "shot")
+            else:
+                srow["not_run"] = why
             row["shots"].append(srow)
         a, b = (partner, c) if primary_is_meas else (c, partner)
         _compare_cycles(row, a, b)
-    sb = owner_rec and stat_at(owner_rec["gun_s"], c["pt"])
-    mb = meas_rec and stat_at(meas_rec["gun_o"], c["pt"])
-    row["stat"] = {"self": _named(sb, SPEC["gun_s"][3]) if sb else None,
-                   "meas": _named(mb, SPEC["gun_o"][3]) if mb else None,
-                   "diff": _stat_diff(sb or None, mb or None)}
-    if row["stat"]["diff"] and any(row["stat"]["diff"].values()):
-        _mark(row, "stat")
-    row["time"] = {"self": _point_row(owner_rec, c["pt"]) if owner_rec else None,
-                   "meas": _point_row(meas_rec, c["pt"]) if meas_rec else None}
+    _stat_time(row, c, owner_rec, meas_rec)
     return row
 
 
@@ -1177,7 +1233,7 @@ def blocks(victim_rec, shooter_rec) -> list:
                "self": _named(e, SPEC["b5_s"][3]), "meas": None, "not_run": None}
         if len(cand) != 1:
             row["not_run"] = ("ambiguous" if cand else
-                              (list_gap(shooter_rec, "b5_o") or "absent"))
+                              absence(shooter_rec, "b5_o"))
         else:
             o = cand[0]
             row["meas"] = _named(o, SPEC["b5_o"][3])
@@ -1221,7 +1277,7 @@ def contacts(victim_rec, shooter_rec) -> list:
         elif shooter_rec is None:
             row["not_run"] = "missing_record"
         elif k not in by_key:
-            row["not_run"] = list_gap(shooter_rec, "b5_h") or "absent"
+            row["not_run"] = absence(shooter_rec, "b5_h")
         else:
             h = by_key[k]
             row["since_ms"] = h[H["since_ms"]]
@@ -1272,10 +1328,15 @@ def section_faults(rec) -> list:
 # Every retained list an absence is decided from, with the never-trimmed
 # whole-game counter that counts each entry the seat saw (row, field) and the
 # capability that fills the list (None: always filled). An addendum section's
-# lists count in `r_tot`; the measured target bounces count in `p3n.target`.
+# lists count in `r_tot`; the measured target bounces count in `p3n.target`;
+# each gun's cycle groups count in its whole-game `cycles` total.
 WHOLE_COUNTERS = {key: ("r_tot", count, name) for name, parts in W["sections"]
                   for key, count in parts}
 WHOLE_COUNTERS["p3tb"] = ("p3n", "target", None)
+WHOLE_COUNTERS["sh_s"] = ("tot_s", "cycles", None)
+WHOLE_COUNTERS["sh_o"] = ("tot_o", "cycles", None)
+# The one absence verdict; `absence` is the only function that returns it.
+ABSENT = "absent"
 
 
 def list_gap(rec, key):
@@ -1299,6 +1360,23 @@ def list_gap(rec, key):
     if len(rec[key]) != rec[row][IX[row][field]]:
         return "inconsistent"
     return None
+
+
+def absence(rec, key, group=None) -> str:
+    """The one gate an absence verdict passes through:
+    ABSENT when the list `key` of `rec` proves that an entry it does not
+    hold is absent from that seat's account, otherwise the NOT-RUN reason
+    it cannot (`list_gap`: the record missing, the list not collected,
+    trimmed, uncounted, or contradicting its whole-game counter). For a
+    shot, `group` is the cycle that would list it, which must also list
+    every shot its header counts, else `trimmed`. A unit test (the one
+    gate's) reads this module's source for every absence it produces (the ABSENT verdict, an
+    `absent_in` account, a `push_listed` False) and fails on any not
+    decided here."""
+    gap = list_gap(rec, key)
+    if gap is None and group is not None and not group["complete"]:
+        gap = "trimmed"
+    return gap or ABSENT
 
 
 def _own_section(rec, name):
@@ -1342,7 +1420,7 @@ def pushes(victim_rec, shooter_rec) -> list:
             if (k[0], k[1]) in bad:
                 row["not_run"] = "ambiguous"
             elif k not in by_key:
-                row["not_run"] = list_gap(shooter_rec, "push_o") or "absent"
+                row["not_run"] = absence(shooter_rec, "push_o")
             else:
                 o = by_key[k]
                 row["meas"] = dict(zip(fields, o))
@@ -1377,7 +1455,7 @@ def chains(victim_rec, shooter_rec) -> list:
             if (k[0], k[1]) in bad:
                 row["not_run"] = "ambiguous"
             elif k not in by_key:
-                row["not_run"] = list_gap(shooter_rec, "ch_o") or "absent"
+                row["not_run"] = absence(shooter_rec, "ch_o")
             else:
                 o = by_key[k]
                 row["dec_to_msg"] = wrap(o[O["t_msg"]] - o[O["t_dec"]])
@@ -1441,7 +1519,7 @@ def velocity_changes(owner_rec, meas_rec) -> dict:
         elif meas_count[key] == 1:
             meas = dict(zip(tb_fields, meas_by[key]))
         else:
-            why = list_gap(meas_rec, "p3tb") or "absent"
+            why = absence(meas_rec, "p3tb")
         out["bounces"].append({
             "pid": e[Bx["pid"]], "s_init": e[Bx["s_init"]], "stamp": e[Bx["stamp"]],
             "target": next(n for n, v in W["bounce_target"].items() if v == target),
@@ -1449,7 +1527,7 @@ def velocity_changes(owner_rec, meas_rec) -> dict:
             "d_other": d_other, "los_other": e[Bx["los_other"]], "nearer": nearer,
             "meas": meas, "meas_not_run": why})
     # Measured target bounces no owner selection names: shown, never paired.
-    gap = list_gap(owner_rec, "bsel") or "absent"
+    gap = absence(owner_rec, "bsel")
     out["meas_unpaired"] = [dict(zip(tb_fields, e), not_run="ambiguous" if meas_count[k] > 1 else gap)
                             for k, e in zip(meas_keys, meas_rec["p3tb"] if meas_rec else [])
                             if not own_count[k]]
@@ -1463,16 +1541,16 @@ def deaths(own_rec, other_rec) -> list:
     and force identities (each resolved against the seat's own push list).
 
     A recent hit's `push_listed` is True when the seat's own push list holds
-    it; False only when that list proves absence (`list_gap`: collected,
-    nothing omitted, as many entries as `r_tot.push_own` counts); otherwise
-    None with `push_not_run` naming why (`not_collected`, `trimmed`,
-    `inconsistent`)."""
+    it; False only when the absence gate says that list proves absence
+    (`absence`: collected, nothing omitted, as many entries as
+    `r_tot.push_own` counts); otherwise None with `push_not_run` naming why
+    (`not_collected`, `trimmed`, `inconsistent`)."""
     if own_rec is None or not has_cap(own_rec, "death"):
         return []
     D = IX["bd_s"]
     fields = [f[0] for f in SPEC["bd_s"][3]]
     pushes_own = set(_keyed(own_rec["push_s"], IX["push_s"])) if has_cap(own_rec, "push") else None
-    push_gap = list_gap(own_rec, "push_s")
+    push_why = absence(own_rec, "push_s")
     theirs = {}
     if other_rec is not None:
         for e in other_rec["bd_o"]:
@@ -1488,15 +1566,16 @@ def deaths(own_rec, other_rec) -> list:
             key = (e[D[p + "pid"]], e[D[p + "s_init"]], e[D[p + "cord"]])
             listed = pushes_own is not None and key in pushes_own
             hits.append({"pid": key[0], "s_init": key[1], "cord": key[2], "age": e[D[p + "age"]],
-                         "push_listed": True if listed else (None if push_gap else False),
-                         "push_not_run": None if listed else push_gap})
+                         "push_listed": (True if listed else
+                                         (False if push_why == ABSENT else None)),
+                         "push_not_run": None if listed or push_why == ABSENT else push_why})
         row = {"self": dict(zip(fields, e)), "meas": None, "hits": hits, "d_px": None,
                "d_py": None, "d_vx": None, "d_vy": None, "not_run": base}
         if base is None:
             cand = theirs.get(e[D["ord"]], [])
             if len(cand) != 1:
                 row["not_run"] = ("ambiguous" if cand else
-                                  (list_gap(other_rec, "bd_o") or "absent"))
+                                  absence(other_rec, "bd_o"))
             else:
                 o = cand[0]
                 row["meas"] = dict(zip(fields, o))
