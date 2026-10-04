@@ -113,7 +113,8 @@ def test_an_imported_local_module_is_followed_and_scanned_whole(tmp_path):
     repo, dst = _copy(tmp_path)
     with open(os.path.join(dst, "synthetic_values.py"), "w", encoding="utf-8") as f:
         f.write("FLOOR = 7\n")
-    _edit(dst, "review_measures", "import textwrap\n", "import textwrap\n\nimport synthetic_values\n")
+    _edit(dst, "review_measures", "from __future__ import annotations\n",
+          "from __future__ import annotations\n\nimport synthetic_values\n")
     classes, findings = _classes(repo)
     assert "number" in classes
     assert any("synthetic_values.py" in label for label, _l, _c in findings)

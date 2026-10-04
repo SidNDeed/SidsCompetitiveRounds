@@ -130,7 +130,7 @@ def test_finding4_a_packet_admits_only_allowlisted_public_sources(world, tmp_pat
     allow.write_text("a.txt\n")
     out = tmp_path / "packet"
     assert rn.main(["packet", repo, base, str(allow), str(out)]) == 0
-    assert sorted(os.listdir(out)) == ["a.txt"]
+    assert sorted(os.listdir(out)) == ["PACKET-MANIFEST.txt", "a.txt"]
     # a brief holding only a private number and generic prose has no
     # needle to find -- it is refused because it is not an allowlisted source
     brief = tmp_path / "brief.md"
@@ -212,7 +212,8 @@ def test_m4_a_packet_admits_a_pinned_document_and_refuses_an_edited_one(world, t
     allow.write_text("a.txt\ndoc %s %s\n" % (doc, digest))
     out = tmp_path / "packet"
     assert rn.main(["packet", repo, base, str(allow), str(out)]) == 0
-    assert sorted(os.listdir(out)) == ["a.txt", "docs"] and os.listdir(out / "docs") == ["notes.md"]
+    assert sorted(os.listdir(out)) == ["PACKET-MANIFEST.txt", "a.txt", "docs"]
+    assert os.listdir(out / "docs") == ["notes.md"]
     doc.write_text("generic description of the evidence, edited\n")
     assert rn.main(["packet", repo, base, str(allow), str(tmp_path / "p2")]) == 1
     assert "doc_digest_differs" in capsys.readouterr().out
