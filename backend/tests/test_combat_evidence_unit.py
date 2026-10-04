@@ -225,17 +225,25 @@ def test_m6_a_measure_that_needs_an_omitted_cycle_reads_not_run():
     view = cm.pair_view(fx.records(o, m))
     d = _owner_dir(view)
     rows = d["cycles"]
-    # one row per cycle a record still names (24 kept summaries); the 25th is
-    # carried only by the totals and the omitted count
-    assert len(rows) == 24 and len({r["s0"] for r in rows}) == 24
+    # 24 distinct cycles a record still names (24 kept summaries); the 25th
+    # is carried only by the totals and the omitted count
+    assert len({r["s0"] for r in rows}) == 24
     assert d["cx"]["meas_omitted"] == 1 and d["totals"]["meas"]["cycles"] == 25
+    # Fix pass 4 (M-6): the two records list different subsets of the 25
+    # cycles, so cycles are left unmatched: the pairing is ambiguous, every
+    # listed cycle of both records on its own row, NOT-RUN `ambiguous`; a
+    # cycle only a kept summary names is shown from it, NOT-RUN `trimmed`.
+    assert d["pairing"] == "ambiguous" and d["case"] == "not_run"
+    listed = [r for r in rows if r["self"] is not None or r["meas"] is not None]
+    assert len(listed) == len(o["sh_s"]) + len(m["sh_o"])
+    assert all(r["not_run"] == "ambiguous" for r in listed)
     trimmed = [r for r in rows if r["not_run"] == "trimmed"]
-    assert trimmed, "an over-cap pair has cycles one record no longer lists"
-    for r in trimmed:
-        assert all(s["not_run"] == "trimmed" and s["d_ammo"] is None for s in r["shots"])
+    assert trimmed, "an over-cap pair has cycles neither record still lists"
+    for r in rows:
+        assert all(s["not_run"] is not None and s["d_ammo"] is None for s in r["shots"])
     ctx = cm.combat_subjects(view)["combat.shot"]
     values = [cm.m_shot_d_ammo(c, None) for c in ctx]
-    assert None in values and 0 in values
+    assert values and set(values) == {None}
 
 
 def test_the_budgeter_takes_tier_one_then_two_then_three():
@@ -348,8 +356,10 @@ def test_a24_variant_a_trimmed_group_gives_not_run_never_a_pass():
     view = cm.pair_view(fx.records(owner, meas))
     d = _owner_dir(view)
     (row,) = d["cycles"]
-    assert row["not_run"] == "trimmed" and row["meas"] is None
-    assert all(s["not_run"] == "trimmed" and s["d_ammo"] is None for s in row["shots"])
+    # Fix pass 4 (M-6): the copy's trimmed group leaves the owner's cycle
+    # without a partner: NOT-RUN `ambiguous`, never absent, never a pass.
+    assert row["not_run"] == "ambiguous" and row["meas"] is None and row["absent_in"] is None
+    assert all(s["not_run"] == "ambiguous" and s["d_ammo"] is None for s in row["shots"])
     assert d["case"] == "not_run"
     assert d["cx"]["meas"][0]["why"] == fx.A24_WHY_COPY       # the summary is kept in full
     owner2, meas2 = fx.a24_pair("short")
@@ -425,7 +435,8 @@ def test_q1_the_five_display_cases():
     assert gun(only_owner)["not_run"].get("missing_record", 0) >= 1
     assert gun(agree)["case"] == "both_agree" and gun(agree)["not_run"] == {}
     assert gun(differ)["case"] == "both_differ"
-    assert gun(trimmed)["case"] == "not_run" and gun(trimmed)["not_run"]["trimmed"] >= 4
+    # fix pass 4 (M-6): the trimmed group leaves a cycle unmatched: `ambiguous`
+    assert gun(trimmed)["case"] == "not_run" and gun(trimmed)["not_run"]["ambiguous"] >= 4
     for disp in (only_meas, only_owner, agree, differ, trimmed):
         assert gun(disp)["case_text"] == cm.CASE_TEXT[gun(disp)["case"]]
     assert ce.q1_display(None) == [{"owner": None, "case": "not_run",
@@ -1285,7 +1296,9 @@ def _bump(spec_row, v):
 def _header_class(field):
     """The class a one-field header difference must raise."""
     cyc = cm.CYCLE_HEADER[field]
-    if cyc == "s0" or cyc in cm.CYCLE_STATED:
+    if cyc == "s0":
+        return "unmatched"          # fix pass 4: the cycle loses its partner, NOT-RUN
+    if cyc in cm.CYCLE_STATED:
         return "cycle"
     if cyc in cm.CLOCKS or cyc == "st_end":
         return "clock"
@@ -1335,6 +1348,13 @@ def test_f2_m6_every_one_field_difference_makes_the_case_differ(side, part, row,
     target[i] = _bump(row, target[i])
     pair = (rec, meas) if side == "s" else (owner, rec)
     d = _owner_dir(cm.pair_view(fx.records(*pair)))
+    if cls == "unmatched":
+        # Fix pass 4 (M-6): a changed `s0` leaves the cycle without a partner
+        # on both sides: the pairing is ambiguous and the case NOT-RUN, never
+        # an agreement and never a definitive difference.
+        assert d["pairing"] == "ambiguous" and d["case"] == "not_run", (row[0], d["case"])
+        assert all(r["not_run"] == "ambiguous" for r in d["cycles"]) and d["differs_by"] == []
+        return
     assert d["case"] == "both_differ" and cls in d["differs_by"], (row[0], d["case"], d["differs_by"])
 
 
