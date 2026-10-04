@@ -425,6 +425,93 @@ def test_the_expectation_matches_the_sampler_with_the_rejection_rule():
         assert abs(sq[r] - var[r]) < 0.08 * max(var[r], 0.1), (r, sq, var)
 
 
+def _hand_break(edit, census_attrs=None, weights=k.WEIGHTS):
+    """Hand 0 of the full game after `edit(entry, rec)`: its row, and whether
+    the worker would write a card_hand_outside row for it."""
+    c = k.fixture_census("full_game", **(census_attrs or {}))
+    rec = k.on_census(k.fixture_record("full_game"), c)
+    edit(rec["hd"][0], rec)
+    v = k.view([("a", "b", rec)], [c], "off", weights)
+    row = v["hands"][0][0]
+    return row, bool(ce._nonzero(row, ce._HAND_KEYS))
+
+
+def _phase_break(edit):
+    rec = k.fixture_record("full_game")
+    edit(rec["ph"][0], rec)
+    row = k.view([("a", "b", rec)])["phases"][0][0]
+    return row, bool(ce._nonzero(row, ce._PHASE_KEYS))
+
+
+def _set(i, value):
+    def edit(e, _rec):
+        e[i] = value(e) if callable(value) else value
+    return edit
+
+
+HAND_BREAKS = [                       # (rule, measure, the edit of hand 0, census overrides, weights)
+    ("R1", "b4.hand.size", _set(5, lambda e: e[5] + 1), None, k.WEIGHTS),
+    ("R2", "b4.hand.notpool", lambda e, r: None, "rename", k.WEIGHTS),
+    ("R2", "b4.hand.unres", _set(6, lambda e: [e[6][0], -1] + e[6][2:]), None, k.WEIGHTS),
+    ("R3", "b4.hand.dup", _set(6, lambda e: [e[6][0], e[6][0]] + e[6][2:]), None, k.WEIGHTS),
+    ("R7", "b4.hand.spx", _set(7, lambda e: e[7] + 1), None, k.WEIGHTS),
+    ("R7", "b4.hand.spo", _set(8, lambda e: list(reversed(e[6]))), None, k.WEIGHTS),
+    ("R8", "b4.pick.out", _set(10, -1), None, k.WEIGHTS),
+    ("R8", "b4.pick.slot", _set(9, lambda e: (e[10] + 1) % len(e[6])), None, k.WEIGHTS),
+    ("R8", "b4.pick.who", _set(3, lambda e: 1 - e[2]), None, k.WEIGHTS),
+    ("R9", "b4.hand.w0", lambda e, r: None, None, "zero"),
+]
+
+
+@pytest.mark.parametrize("rule,measure,edit,census,weights", HAND_BREAKS,
+                         ids=[b[0] + "-" + b[1] for b in HAND_BREAKS])
+def test_each_rule_breaking_hand_reads_one_and_writes_a_row_its_control_neither(
+        rule, measure, edit, census, weights):
+    control, control_row = _hand_break(lambda e, r: None)
+    assert control[measure] == 0 and not control_row, (rule, measure, control[measure])
+    attrs = None
+    if census == "rename":
+        first = k.fixture_record("full_game")["hd"][0][6][0]
+        attrs = {"names": {first: "SomeOtherCard"}}
+    if weights == "zero":
+        rar = k.fixture_census("full_game").cards[k.fixture_record("full_game")["hd"][0][6][0]][1]
+        weights = dict(k.WEIGHTS, **{cm.RARITIES[rar]: 0})
+    broken, broken_row = _hand_break(edit, attrs, weights)
+    assert broken[measure] is not None and broken[measure] >= 1 and broken_row, (rule, measure, broken[measure])
+
+
+PHASE_BREAKS = [
+    ("R5", "b4.ph.dvp", _set(5, lambda e: e[2] + 1)),
+    ("R5", "b4.ph.notdone", _set(6, 0)),
+]
+
+
+@pytest.mark.parametrize("rule,measure,edit", PHASE_BREAKS, ids=[b[0] + "-" + b[1] for b in PHASE_BREAKS])
+def test_each_phase_rule_breaking_phase_reads_one_and_writes_a_row_its_control_neither(rule, measure, edit):
+    control, control_row = _phase_break(lambda e, r: None)
+    assert control[measure] == 0 and not control_row, (rule, measure, control[measure])
+    broken, broken_row = _phase_break(edit)
+    assert broken[measure] is not None and broken[measure] >= 1 and broken_row, (rule, measure, broken[measure])
+
+
+def test_the_expectation_equals_hand_computed_values():
+    # three cards, one per rarity, synthetic weights; hand [0, 1], nothing held
+    census = k.census(k.census_cards(3))
+    w = [k.WEIGHTS[r] for r in cm.RARITIES]
+    p0 = [x / sum(w) for x in w]                                  # slot 0: the whole pool
+    p1 = [0.0, w[1] / (w[1] + w[2]), w[2] / (w[1] + w[2])]        # slot 1: card 0 drawn already
+    obs, exp, var = cm.expectation(census, [0, 1], [], 0, k.WEIGHTS)
+    assert obs == [1, 1, 0]
+    for r in range(len(cm.RARITIES)):
+        assert abs(exp[r] - (p0[r] + p1[r])) < 1e-12
+        assert abs(var[r] - (p0[r] * (1 - p0[r]) + p1[r] * (1 - p1[r]))) < 1e-12
+    # control: a held card whose blacklist names card 1's category takes card 1 out of slot 1
+    held_census = k.census(k.census_cards(4, cats={1: ["X"]}, black={3: ["X"]}))
+    _o, exp_h, _v = cm.expectation(held_census, [0, 2], [3], 0, k.WEIGHTS)
+    _o, exp_n, _v = cm.expectation(held_census, [0, 2], [], 0, k.WEIGHTS)
+    assert exp_h != exp_n
+
+
 def test_an_over_weighted_model_does_not_match_the_sampler():
     census = k.census(k.census_cards(12, multi={1: 0}, cats={4: ["X"], 7: ["X"]}, black={1: ["X"]}))
     wrong = dict(k.WEIGHTS, rare=k.WEIGHTS["rare"] * 4)
