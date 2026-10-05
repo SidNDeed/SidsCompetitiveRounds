@@ -115,6 +115,16 @@
                         dwell each, the other views' places and dwells, the
                         skip rule, and the one log line per metric shown.
 
+      FfaNumberingRules.cs  the FFA game-number rules (RJ-DRIFT): which number
+                        a seat keys a report, a pick phase and a live-points
+                        send with, and when it has none. Its SelfTest runs the
+                        unit cases and the SittingModel walks, which drive
+                        FfaReportRules' GameKeySnapshot and ElectReporter
+                        through relaunches, late joins, spectators, drops and
+                        master handoffs. numbering_controls.py mutates the
+                        rule functions one at a time against copies of these
+                        files and checks each control's FAIL set.
+
     net10.0 because that is the runtime installed on the build seat, matching
     the h2h harness; RollForward keeps the next SDK rotation from turning this
     into a green-looking nothing.
@@ -158,6 +168,7 @@
     <Compile Include="../../plugin/SessionReportRules.cs" />
     <Compile Include="SessionReportRulesSelfTest.cs" />
     <Compile Include="../../plugin/ShowcaseRules.cs" />
+    <Compile Include="../../plugin/FfaNumberingRules.cs" />
   </ItemGroup>
 
 </Project>

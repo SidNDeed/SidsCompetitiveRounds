@@ -5380,6 +5380,9 @@ namespace CompetitiveRounds
             // so any unconsumed map-scale publish ticket dies here — before
             // the spectator-transfer block below, which can return early.
             try { FfaMapScale.OnMasterClientSwitched(); } catch { }
+            // RJ-DRIFT change 3: a handoff invalidates N1's ticket (this
+            // seat's memory of its own confirmed cr_ffa_cyc write).
+            try { FfaMode.OnMasterClientSwitched(); } catch { }
             // V11 item 13: the switch's telemetry (EVT_MASTER), then the
             // authority fence. A fenced master hands the role on itself, so
             // the spectator hand-off below runs only when the fence did not.

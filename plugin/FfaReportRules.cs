@@ -225,40 +225,72 @@ namespace CompetitiveRounds
         /// which is a second settlement of rating, XP, gold and wagers. So the
         /// later value is dropped, not stored.
         ///
-        /// A negative number is not a value. PublishedGameNumber returns -1
-        /// for "no readable number", and -1 must leave the snapshot EMPTY
-        /// rather than taken, so that a seat which could not read the property
-        /// at the edge stays ineligible instead of keying "_r-1".</summary>
+        /// A negative number is not a value. -1 means "none", and it must
+        /// leave the snapshot EMPTY rather than taken, so that a seat with no
+        /// number at the edge stays ineligible instead of keying "_r-1".
+        ///
+        /// ARMED BY A ROOM OBJECT (RJ-DRIFT N0). Clear(room) is the start
+        /// edge's call and records the Room object it ran in. Freeze takes a
+        /// value, and Frozen and Candidate return one, only while that same
+        /// Room object is current (FfaNumberingRules.SnapshotArmed, reference
+        /// identity). A seat with no start edge in the current Room object —
+        /// a mid-game entrant, a seat back from a drop, a fresh process —
+        /// therefore freezes nothing and cannot file. The Room is an opaque
+        /// reference here, so this file stays free of Photon.
+        ///
+        /// The snapshot stores F (the key number) and the CANDIDATE it was
+        /// judged from together, under the same arm and the same first-write
+        /// rule: the carry at the edge reads the stored candidate and never
+        /// re-reads the room property.</summary>
         internal sealed class GameKeySnapshot
         {
             private int _frozen = -1;
+            private int _candidate = -1;
+            private object _armedIn;
 
-            /// <summary>The number taken, or -1 when nothing has been.</summary>
-            internal int Frozen { get { return _frozen; } }
-
-            /// <summary>Take this game's number. Returns what is now held, so
-            /// the caller logs the value that will be keyed rather than the
-            /// one it offered.</summary>
-            internal int Freeze(int publishedNow)
+            /// <summary>The number taken, or -1 when nothing has been or the
+            /// snapshot is not armed in <paramref name="room"/>.</summary>
+            internal int Frozen(object room)
             {
-                if (_frozen >= 0) return _frozen;          // first write wins
-                if (publishedNow >= 0) _frozen = publishedNow;
+                return FfaNumberingRules.SnapshotArmed(_armedIn, room) ? _frozen : -1;
+            }
+
+            /// <summary>The candidate stored with F, or -1 (same arm).</summary>
+            internal int Candidate(object room)
+            {
+                return FfaNumberingRules.SnapshotArmed(_armedIn, room) ? _candidate : -1;
+            }
+
+            /// <summary>Take this game's F and candidate. Returns the F now
+            /// held, so the caller logs the value that will be keyed rather
+            /// than the one it offered; -1 when the snapshot is not armed in
+            /// <paramref name="room"/>, which takes nothing.</summary>
+            internal int Freeze(int f, int candidate, object room)
+            {
+                if (!FfaNumberingRules.SnapshotArmed(_armedIn, room)) return -1;
+                if (_frozen >= 0 || _candidate >= 0) return _frozen;   // first write wins
+                if (candidate >= 0) _candidate = candidate;
+                if (f >= 0) _frozen = f;
                 return _frozen;
             }
 
-            /// <summary>Drop the number at the START of a game, so game N's
-            /// number can never key game N+1.</summary>
-            internal void Clear()
+            /// <summary>Drop the numbers at the START of a game, so game N's
+            /// number can never key game N+1, and arm the snapshot in the Room
+            /// object this start ran in.</summary>
+            internal void Clear(object room)
             {
                 _frozen = -1;
+                _candidate = -1;
+                _armedIn = room;
             }
 
             /// <summary>This seat's key for the game it froze, or null when it
-            /// froze nothing — in which case it is ineligible and the caller
-            /// must not substitute anything.</summary>
-            internal string Key(string roomName)
+            /// froze nothing (or is not armed in <paramref name="room"/>) — in
+            /// which case it is ineligible and the caller must not substitute
+            /// anything.</summary>
+            internal string Key(string roomName, object room)
             {
-                return ReportRoomId(roomName, _frozen);
+                return ReportRoomId(roomName, Frozen(room));
             }
         }
 
@@ -397,6 +429,11 @@ namespace CompetitiveRounds
                 Check(r, "the key is a pure function of its inputs", a == b, "a=" + a + " b=" + b);
             }
 
+            // One Room token arms every snapshot instance below (RJ-DRIFT N0):
+            // a snapshot takes and returns a value only while the Room object
+            // that armed it is current, and these cases run inside one.
+            object R = new object();
+
             // 3. THE ROLLOVER. This is the r2 HIGH, driven end to end: the
             //    host publishes N+1 while a lagging elector is still handling
             //    game N. The lagging seat froze N at the game-over edge and
@@ -418,17 +455,19 @@ namespace CompetitiveRounds
 
                 var prompt = new GameKeySnapshot();
                 var lagging = new GameKeySnapshot();
-                prompt.Freeze(published);                 // the prompt seat's game-over edge
-                lagging.Freeze(published);                // the lagging seat's edge, same instant
+                prompt.Clear(R);                          // both seats' start edges
+                lagging.Clear(R);
+                prompt.Freeze(published, published, R);   // the prompt seat's game-over edge
+                lagging.Freeze(published, published, R);  // the lagging seat's edge, same instant
                 published = 8;                            // the host opens the next cycle
                 string keyLive = ReportRoomId(room, published);   // what a LATE read would key
 
                 Check(r, "a rollover after the freeze cannot change the key",
-                      prompt.Key(room) == lagging.Key(room)
-                      && prompt.Key(room) == room + "_r7"
-                      && prompt.Key(room) != keyLive
-                      && prompt.Frozen == frozenAtGameOver,
-                      "prompt=" + prompt.Key(room) + " lagging=" + lagging.Key(room)
+                      prompt.Key(room, R) == lagging.Key(room, R)
+                      && prompt.Key(room, R) == room + "_r7"
+                      && prompt.Key(room, R) != keyLive
+                      && prompt.Frozen(R) == frozenAtGameOver,
+                      "prompt=" + prompt.Key(room, R) + " lagging=" + lagging.Key(room, R)
                       + " live=" + keyLive);
             }
 
@@ -442,11 +481,12 @@ namespace CompetitiveRounds
             //     WHERE it was called from.
             {
                 var s = new GameKeySnapshot();
-                s.Freeze(7);
-                s.Freeze(8);
+                s.Clear(R);
+                s.Freeze(7, 7, R);
+                s.Freeze(8, 8, R);
                 Check(r, "a later freeze cannot move a key already taken",
-                      s.Key(room) == room + "_r7" && s.Frozen == 7,
-                      "key=" + s.Key(room));
+                      s.Key(room, R) == room + "_r7" && s.Frozen(R) == 7,
+                      "key=" + s.Key(room, R));
             }
 
             // 3d. NEGATIVE CONTROL for 3/3c: a snapshot that took the ROLLED
@@ -454,12 +494,14 @@ namespace CompetitiveRounds
             //     measuring the freeze and not a key that ignores its input.
             {
                 var late = new GameKeySnapshot();
-                late.Freeze(8);
+                late.Clear(R);
+                late.Freeze(8, 8, R);
                 var onTime = new GameKeySnapshot();
-                onTime.Freeze(7);
+                onTime.Clear(R);
+                onTime.Freeze(7, 7, R);
                 Check(r, "a seat that froze after the rollover files a different game",
-                      late.Key(room) != onTime.Key(room) && late.Key(room) == room + "_r8",
-                      late.Key(room) + " vs " + onTime.Key(room));
+                      late.Key(room, R) != onTime.Key(room, R) && late.Key(room, R) == room + "_r8",
+                      late.Key(room, R) + " vs " + onTime.Key(room, R));
             }
 
             // 3e. THE GAME-START CLEAR. Game N's number must not key game N+1:
@@ -467,11 +509,12 @@ namespace CompetitiveRounds
             //     same fail-closed answer a seat that never froze gets.
             {
                 var s = new GameKeySnapshot();
-                s.Freeze(7);
-                s.Clear();
+                s.Clear(R);
+                s.Freeze(7, 7, R);
+                s.Clear(R);
                 Check(r, "a cleared snapshot files nothing",
-                      s.Key(room) == null && !CanFile(s.Key(room)) && s.Frozen == -1,
-                      "key=" + (s.Key(room) ?? "<null>") + " frozen=" + s.Frozen);
+                      s.Key(room, R) == null && !CanFile(s.Key(room, R)) && s.Frozen(R) == -1,
+                      "key=" + (s.Key(room, R) ?? "<null>") + " frozen=" + s.Frozen(R));
             }
 
             // 3b. NEGATIVE CONTROL for case 3. The rollover is only harmless

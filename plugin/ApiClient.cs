@@ -20659,6 +20659,12 @@ namespace CompetitiveRounds
                         FfaAssembly.PrejoinAtJoin = true;
                     else if (PhotonNetwork.LocalPlayer != null)
                         PhotonNetwork.LocalPlayer.SetCustomProperties(prejoin);
+                    // RJ-DRIFT change 11 (N9): record the join target
+                    // and its key together; the pre-join fence stages
+                    // the advert for exactly this target. A re-form's
+                    // target is recorded here too: the key is a function
+                    // of the target alone (StagedAdvertKey).
+                    FfaMode.RecordAdvertTarget(room);
                 }
                 catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join SetCustomProperties: {ex.Message}"); }
                 try { NametagStyler.PublishToPhoton(); } catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pre-join nametag publish: {ex.Message}"); }
