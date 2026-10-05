@@ -405,17 +405,20 @@ def test_the_report_number_snapshot_is_the_object_the_harness_runs():
         "freeze")
     freeze = " ".join(code_of(PLUGIN / "FfaMode.cs",
                               "internal static int FreezeReportGameNumber()").split())
-    assert "_reportGame.Freeze(PublishedGameNumber())" in freeze, (
+    # Merge pass 7 (the rejoin drift lane, RJ-DRIFT N0/N1): the snapshot now
+    # takes F with its candidate and is armed per Room object; the same three
+    # requirements are read from that shape.
+    assert "_reportGame.Freeze(f, cand, room)" in freeze, (
         "the freeze no longer goes through the snapshot object")
     clear = " ".join(code_of(PLUGIN / "FfaMode.cs",
                              "internal static void ClearReportGameNumber()").split())
-    assert "_reportGame.Clear()" in clear
+    assert "_reportGame.Clear(PhotonNetwork.CurrentRoom)" in clear
 
     snap = code_of(PLUGIN / "FfaReportRules.cs",
-                   "internal int Freeze(int publishedNow)")
+                   "internal int Freeze(int f, int candidate, object room)")
     flat = " ".join(snap.split())
-    assert "if (_frozen >= 0) return _frozen;" in flat, (
+    assert "if (_frozen >= 0 || _candidate >= 0) return _frozen;" in flat, (
         "first-write-wins is gone: a second freeze after the host rolls over "
         "would move a key that has already been taken")
-    assert "if (publishedNow >= 0) _frozen = publishedNow;" in flat, (
+    assert "if (f >= 0) _frozen = f;" in flat, (
         "an unreadable number is being stored as if it were one")

@@ -97,9 +97,13 @@ FfaMode.cs	FfaMode	ClearLastDamageSources	players	R	clears kill-credit memory on
 FfaMode.cs	FfaMode	CollectMatchPointTeams	players	N	HUD match-point label (CompetitiveUI.cs:1095)	
 FfaMode.cs	FfaMode	CurrentLeader	players	N	crown cosmetic (Plugin.cs:5926)	
 FfaMode.cs	FfaMode	Dictionary	Leavers	R	the leaver ledger's declaration (FfaMode.cs:238); its writer and every reader are census rows of their own	
+FfaMode.cs	FfaMode	DriftGateNow	OtherActiveFighters	V	RJ-DRIFT N6: the drift gate reads the peers' adverts over OtherActiveFighters(), the kept view	
+FfaMode.cs	FfaMode	EvaluateFollow	IsMasterClient	R	RJ-DRIFT N15: the Photon master never follows a master game; a local identity choice that sends nothing (the pick phase's sends read MasterMaySend())	
+FfaMode.cs	FfaMode	EvaluatePhaseEpoch	IsMasterClient	R	RJ-DRIFT N19(b)/(i): the Photon master holds no live epoch read from the room (it issues one only at a send under MasterMaySend()); a local hold, no send	
 FfaMode.cs	FfaMode	FfaDoStartGame	MasterMaySend	F	master-driven game start; MasterMaySend() and the kind-s start barrier (row 48)	
+FfaMode.cs	FfaMode	FfaPickPhase	IsMasterClient	R	RJ-DRIFT N19(b)/(i): a seat that is not the Photon master evaluates the room's epoch at entry and in the manifest wait; a local read, no send	
 FfaMode.cs	FfaMode	FfaPickPhase	KeptPlayers	V	pickers over KeptPlayers() (surface 1)	
-FfaMode.cs	FfaMode	FfaPickPhase	MasterMaySend	F	every master branch of the pick phase reads MasterMaySend() (row 48)	
+FfaMode.cs	FfaMode	FfaPickPhase	MasterMaySend	F	every master send of the pick phase (the cycle write, the opener, the reopen, the drift detector, the close) reads MasterMaySend() (row 48); its IsMasterClient reads are the epoch model's local follower test (own row)	
 FfaMode.cs	FfaMode	FfaTransition	MasterMaySend	F	the master's boundary (MasterBoundary) runs only under MasterMaySend()	
 FfaMode.cs	FfaMode	HandleNextRound	ActiveFighterCount	V	rematch minimum and the anchor-team fallback read the kept view (row 51); while LocalSitsOut() the minimum counts PresentNonSpectators() (V8, V7-F1)		LocalSitsOut
 FfaMode.cs	FfaMode	HandleNextRound	AlivePlayers	V	rematch minimum and the anchor-team fallback read the kept view (row 51)	
@@ -108,10 +112,16 @@ FfaMode.cs	FfaMode	HandleNextRound	MasterMaySend	F	master-only server call; Mast
 FfaMode.cs	FfaMode	HandleNextRound	PresentNonSpectators	V	LocalSitsOut() selects: a client that sits out counts the present seats, every other the kept view (row 51)	
 FfaMode.cs	FfaMode	HandlePlayerDied	AlivePlayers	V	alive count via AlivePlayers() (surface 6); while LocalSitsOut() it returns before DoSlowDown (V8, V7-F1)		LocalSitsOut
 FfaMode.cs	FfaMode	HandlePlayerDied	MasterMaySend	F	master point latch and RPCA_NextRound (FfaMode.cs:1344-1408); MasterMaySend()	
+FfaMode.cs	FfaMode	HeldNow	ActiveFighters	V	RJ-DRIFT N1 HELD: the fighters' room games over ActiveFighters(), the kept view	
 FfaMode.cs	FfaMode	LocalPlayer	players	N	finds the local body (IsMine) only	
+FfaMode.cs	FfaMode	MasterActorNow	MasterClient	R	RJ-DRIFT N19: the present master's actor number, compared with an epoch's issuer; a read, no send	
+FfaMode.cs	FfaMode	MasterGameNow	IsMasterClient	R	RJ-DRIFT N2/N15: on the master its own room game (it cannot see its own witness before the echo, #428), else the master's witness; a read, no send	
+FfaMode.cs	FfaMode	MasterGameNow	MasterClient	R	RJ-DRIFT N2/N15: the master's witness, read for the carry and the follow test; a read, no send	
 FfaMode.cs	FfaMode	MasterPublishConfig	MasterMaySend	F	NEW V7 site: master config publish (FfaMode.cs:89-93); MasterMaySend()	
+FfaMode.cs	FfaMode	NoEpochReason	IsMasterClient	N	log text only (the [FFA-NUM] reason this seat holds no epoch)	
 FfaMode.cs	FfaMode	OnGameStart	ActiveFighterCount	V	the game_start line's count is the kept view's (telemetry)	
 FfaMode.cs	FfaMode	OnGameStart	Leavers	R	a reset and the per-game carry: each recorded leave's tallies zeroed and gamePointsAtLeave set to -1 (FfaMode.cs:1084-1100); it adds no entry	
+FfaMode.cs	FfaMode	OnMasterClientSwitched	OnMasterClientSwitched	R	RJ-DRIFT change 3: the handoff callback clears this seat's own cycle-write ticket; local state, no send	
 FfaMode.cs	FfaMode	OnRoomLeft	Leavers	R	a reset on leaving the room (FfaMode.cs:1172)	
 FfaMode.cs	FfaMode	PurgeDepartedPlayers	players	R	removes destroyed entries from the raw list; must see every entry	
 FfaMode.cs	FfaMode	RawAnchorFallback	GetPlayersInTeam	R	vanilla indexes GetPlayersInTeam(anchor)[0] on the raw list, so an anchor it lacks falls back to a raw body; display only	
@@ -134,6 +144,18 @@ FfaMode.cs	GMArmsRace_NextRound_Ffa_Patch	Prefix	MasterKept	F	item 13 receivers:
 FfaMode.cs	LineRangeEffect_FfaOwnerExclusion_Patch	Prefix	KeptPlayers	V	NEW V7 site: line-range victims over KeptPlayers() (row 51)	
 FfaMode.cs	NCH_OnPlayerLeftRoom_Ffa_Patch	Prefix	ActiveFighterCount	V	cascade count via ActiveFighterCount(), the kept view	
 FfaMode.cs	PlayerManager_PlayerDied_Ffa_Patch	Prefix	KeptPlayers	V	NEW V7 site: the vanilla PlayerDied alive count over KeptPlayers() (row 51)	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	ActiveFighters	ActiveFighters	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	CheckLeavers	Leavers	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	DriftGateNow	ActiveFighters	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	HeldNow	ActiveFighters	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	OnRoomLeft	Leavers	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	RecordLeaver	Leavers	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	RecordLeaver	RecordLeaver	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	Relaunch	Leavers	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	RemoveFromRoom	RecordLeaver	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	StartCurrent	Leavers	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Model	StartNew	Leavers	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
+FfaNumberingRules.cs	FfaNumberingRules.SittingModel.Seat	Dictionary	Leavers	N	the harness model's own simulated seats (FfaNumberingRules.SittingModel): no room, no Photon player, no send	
 GameStateWatcher.cs	GameStateWatcher	BothPlayersSupportSharedGameToken	ActiveFighters	N	two-fighter shared-token consensus (1v1 rooms)	
 GameStateWatcher.cs	GameStateWatcher	BuildTeamReportPayload	ActiveFighters	N	2v2 report payload (team rooms)	
 GameStateWatcher.cs	GameStateWatcher	BuildTeamReportPayload	players	N	2v2 report payload (team rooms)	

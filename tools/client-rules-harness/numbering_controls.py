@@ -30,11 +30,31 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 
-PLUGIN_FILES = [
-    "LogScrub.cs", "TopStripBand.cs", "FfaReportRules.cs", "RosterCensusRules.cs",
-    "BinderSortRules.cs", "TitleLadderRules.cs", "FfaNumberingRules.cs",
-]
-HARNESS_FILES = ["Main.cs", "TitleLadderRulesSelfTest.cs", "client-rules-harness.csproj"]
+def _compile_set():
+    """The work copy is the harness project's own compile set, read from its
+    Compile items: every ../../plugin/ file and every harness-local file, plus
+    the project itself. (Merge pass 7 of the v1.41.0 lane: the harness there
+    compiles fourteen suites, so a fixed list of the numbering suite's seven
+    rule files no longer builds.) Refuses when a required file is missing."""
+    proj = os.path.join(HERE, "client-rules-harness.csproj")
+    with open(proj, encoding="utf-8") as f:
+        text = f.read()
+    plugin, harness = [], []
+    for inc in re.findall(r'<Compile Include="([^"]+)"', text):
+        inc = inc.replace("\\", "/")
+        if inc.startswith("../../plugin/") and "/" not in inc[len("../../plugin/"):]:
+            plugin.append(inc[len("../../plugin/"):])
+        elif "/" not in inc:
+            harness.append(inc)
+        else:
+            raise ValueError("compile item outside plugin/ and the harness folder: %r" % inc)
+    for need in ("FfaNumberingRules.cs", "FfaReportRules.cs"):
+        if need not in plugin:
+            raise ValueError("the harness project does not compile %s" % need)
+    return plugin, harness + ["client-rules-harness.csproj"]
+
+
+PLUGIN_FILES, HARNESS_FILES = _compile_set()
 
 # ── case ids ────────────────────────────────────────────────────────────
 

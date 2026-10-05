@@ -203,41 +203,59 @@ def test_the_inertness_comment_names_the_freeze_call_sites_that_exist():
     assert sites >= 3, "expected at least three freeze call sites, found %d" % sites
 
 
-# ── 2. every drift adoption re-stamps the witness ─────────────────────────
+# ── 2. the witness is the room game, written at the start edge ────────────
+#
+# Merge pass 7 brought the rejoin drift lane (RJ-DRIFT, design V11). Its N4
+# (change 7) makes the witness this seat's ROOM game, or -1 when it holds
+# none, never the counter; its change 10 removes the re-stamp at a drift
+# adoption, since no adoption moves a room game. The three tests below state
+# that required behaviour; the earlier ones required the re-stamp.
 
-def test_both_adoption_sites_republish_the_witness():
-    """Two sites move (game, cycle) and only one of them goes through the
-    adoptIdentity funnel -- the manifest-wait site bypasses it by design, with
-    a comment saying so. A re-stamp in the funnel alone covers one of the two.
-    """
-    body = code_of(_plugin("FfaMode.cs"),
-                   "private static IEnumerator FfaPickPhase(GM_ArmsRace gm, int roundWinnerTeam)")
-    calls = body.count("RepublishGameWitness(")
-    assert calls == 2, (
-        "expected a witness re-stamp at both adoption sites, found %d" % calls)
-    # Each one sits with the gameNumber assignment it belongs to: a re-stamp
-    # that ran before the assignment would publish the number being left.
-    for chunk in body.split("RepublishGameWitness(")[:-1]:
-        assert "gameNumber = " in chunk, (
-            "a witness re-stamp is not preceded by a gameNumber assignment")
+PICK_PHASE = "private static IEnumerator FfaPickPhase(GM_ArmsRace gm, int roundWinnerTeam)"
 
 
-def test_the_witness_republisher_reads_the_counter_live():
-    """A parameter would be a second copy of the game number with nothing
-    forcing it to agree with the one the adoption just assigned."""
-    body = code_of(_plugin("FfaMode.cs"),
-                   "internal static void RepublishGameWitness(string why)")
-    assert "h[PropGameWitness] = gameNumber;" in body, body
-    assert "PropGameWitness" in body and "SetCustomProperties" in body
+def test_no_drift_adoption_re_stamps_the_witness():
+    """RJ-DRIFT change 10. Control: put a RepublishGameWitness( call (or any
+    PropGameWitness write) back into the pick phase -> red."""
+    ffa = _plugin("FfaMode.cs")
+    body = code_of(ffa, PICK_PHASE)
+    assert "RepublishGameWitness(" not in body and "PropGameWitness" not in body, (
+        "the pick phase re-stamps the witness at an adoption again")
+    assert "RepublishGameWitness(" not in code_of(ffa), (
+        "a witness re-stamper is back in FfaMode")
+
+
+def test_the_witness_is_the_room_game_never_the_counter():
+    """RJ-DRIFT N4 (change 7): the in-room publish reads FfaMode.RoomGame
+    through FfaNumberingRules.WitnessToPublish, never FfaMode.GameNumber.
+    Control: publish FfaMode.GameNumber again -> red."""
+    watcher = code_of(_plugin("GameStateWatcher.cs"))
+    flat = " ".join(watcher.split())
+    assert "int witness = FfaNumberingRules.WitnessToPublish(FfaMode.RoomGame);" in flat, (
+        "the witness is not taken from the room game")
+    assert "clearProps[FfaMode.PropGameWitness] = witness;" in flat, (
+        "the in-room publish does not write that value")
+    for line in watcher.splitlines():
+        if "PropGameWitness]" in line and "=" in line.split("PropGameWitness]", 1)[1][:3]:
+            assert "GameNumber" not in line, "the counter reaches the witness: " + line.strip()
 
 
 def test_the_witness_property_has_one_key_and_two_writers():
-    """The first publish batches the witness with the card clear so the two
-    cannot disagree; the re-stamp is the second writer. Both must name the
-    same constant -- a literal in either place is how the two halves drift."""
+    """Two writers name the same constant: the in-room publish, batched with
+    the card clear so the two cannot disagree, and the pre-join fence's stage
+    (RJ-DRIFT change 16, outside any room). A literal in either place is how
+    the two halves drift. Control: add a third `[PropGameWitness] =` write
+    anywhere in the plugin -> red."""
     watcher = _plugin("GameStateWatcher.cs")
     ffa = _plugin("FfaMode.cs")
-    assert 'clearProps[FfaMode.PropGameWitness] = FfaMode.GameNumber;' in watcher
+    writes = []
+    plugin_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "plugin"))
+    for name in sorted(n for n in os.listdir(plugin_dir) if n.endswith(".cs")):
+        for line in code_of(_plugin(name)).splitlines():
+            if re.search(r"\[(?:FfaMode\.)?PropGameWitness\]\s*=(?!=)", line):
+                writes.append((name, " ".join(line.split())))
+    assert sorted(w[0] for w in writes) == ["FfaMode.cs", "GameStateWatcher.cs"], writes
+    assert ("FfaMode.cs", "h[PropGameWitness] = FfaNumberingRules.WitnessAtJoin(WitnessedGameOf(local));") in writes, writes
     assert ffa.count('PropGameWitness = "cr_ffa_gw"') == 1
     for src, name in ((watcher, "GameStateWatcher.cs"), (ffa, "FfaMode.cs")):
         body = code_of(src)
@@ -364,11 +382,19 @@ def test_an_unreadable_number_makes_the_seat_ineligible_and_mints_nothing():
 
 
 def test_the_snapshot_is_the_hosts_published_number_and_is_cleared_per_match():
-    body = code_of(_plugin("FfaMode.cs"), "internal static int FreezeReportGameNumber()")
-    assert "PublishedGameNumber()" in body, (
-        "the snapshot is not taken from the number the host published")
-    assert "gameNumber" not in body, (
-        "the snapshot falls back to this seat's local counter")
+    # Merge pass 7 (RJ-DRIFT N1): the freeze takes N1's candidate (the valid
+    # ticket's game, else the published number read back) and keeps it only
+    # when the room HOLDS it; the published number is read in CandidateNow.
+    ffa = _plugin("FfaMode.cs")
+    body = code_of(ffa, "internal static int FreezeReportGameNumber()")
+    assert "CandidateNow(" in body and "HeldNow(" in body, (
+        "the snapshot is not taken from N1's candidate and its HELD test")
+    cand = code_of(ffa, "private static int CandidateNow(out bool byTicket)")
+    assert "PublishedGameNumber()" in cand, (
+        "the candidate is not taken from the number the host published")
+    for span in (body, cand):
+        assert "gameNumber" not in span, (
+            "the snapshot falls back to this seat's local counter")
     started = code_of(_plugin("GameStateWatcher.cs"),
                       "public static void OnFfaMatchStarted()")
     assert "FfaMode.ClearReportGameNumber()" in started, (
