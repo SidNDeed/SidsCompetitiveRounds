@@ -361,7 +361,10 @@ def main():
     raw = open(CORE, "rb").read().decode("utf-8")
     nl = "\r\n" if "\r\n" in raw else "\n"
     caught = 0
-    for name, pairs, target, control in MUTANTS:
+    quick = "--quick" in sys.argv
+    if quick:
+        print("QUICK run: mutants and scan mutants not run (a quick run is never the run of record)")
+    for name, pairs, target, control in ([] if quick else MUTANTS):
         text = raw
         bad = False
         for old, new in pairs:
@@ -394,7 +397,7 @@ def main():
 
     enl = "\r\n" if "\r\n" in evid else "\n"
     s_caught = 0
-    for name, old, new in SCAN_MUTANTS:
+    for name, old, new in ([] if quick else SCAN_MUTANTS):
         o, n = old.replace("\n", enl), new.replace("\n", enl)
         if evid.count(o) != 1:
             print("BAD scan mutant %s: anchor occurs %d times" % (name, evid.count(o)))
