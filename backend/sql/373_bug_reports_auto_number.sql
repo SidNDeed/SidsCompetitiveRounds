@@ -1,4 +1,4 @@
--- 350_bug_reports_auto_number.sql
+-- 373_bug_reports_auto_number.sql
 --
 -- Automatic uploads stop spending human bug numbers (v1.41.0 Item 3 hotfix,
 -- 2026-09-20).
@@ -43,14 +43,13 @@
 -- have left the wave B/C lane's own copy permanently unapplied. So this is a
 -- separate file, and it rides the same sql-only precursor commit.
 --
--- AND THE TWO COPIES OF 336 ARE NOT BYTE-IDENTICAL, WHICH THIS FILE USED TO
--- GUARANTEE THEY WERE. The hotfix copy is 22,384 bytes; the lane's is 19,445;
--- they agree up to line 216 and diverge at 217, where the post-check was
--- rebuilt to OFFER rows to the CHECK rather than read the constraint's
--- rendered text. The hotfix copy is a strict SUPERSET: both create the same
--- three objects -- the `kind` column, its `bug_reports_kind_known` CHECK and
--- its `'report'` default -- and only the self-verification differs. Lane
--- adoption of this copy is filed in the notes (section 9).
+-- AND MORE THAN ONE COPY OF 336 HAS EXISTED. The copy production applied is
+-- main's (the wave B/C re-cut); this hotfix branch carried an earlier copy
+-- whose post-check differed, and at its merge of main (2026-10-05) took
+-- main's file unchanged, because an applied migration is not edited. Every
+-- copy creates the same three objects -- the `kind` column, its
+-- `bug_reports_kind_known` CHECK and its `'report'` default -- and only the
+-- self-verification ever differed.
 --
 -- SO THIS FILE DOES NOT DEPEND ON WHICH COPY RAN. Its precondition below asks
 -- for the three OBJECTS by name and refuses by name when one is missing,
@@ -59,11 +58,11 @@
 -- thing that actually matters to this file is the schema it inherits (#302,
 -- #351).
 --
--- NUMBERING (#553). The v1.41.0 lane has reserved 330-344 across its item
--- briefs -- 336 and 337 in the tree, 338/339/340/341/342/343/344 in the
--- briefs, several of them twice over. 350 is clear of all of it with room to
--- spare. If the lane later wants 350, THIS file is the one that renumbers:
--- it is unshipped until the hotfix deploys, and the lane's briefs are older.
+-- NUMBERING (#553). This file was 350 until 2026-10-05. Renumbered at the
+-- hotfix's merge of main, after main had reached 366, so that it sorts after
+-- every migration production has applied. Measured then: main's highest 366;
+-- 367-370 and 372 held by other open lanes' branches and 371 left free for
+-- one of them; 373 the first number no branch, worktree or brief claimed.
 --
 -- EVERY GUARD IN THIS FILE IS SCOPED TO current_schema(). The preconditions
 -- used to read `information_schema.columns` with no schema predicate, so on a
@@ -114,7 +113,7 @@ BEGIN;
 -- against, and each one is named separately so a partial shape says WHICH
 -- part is missing instead of failing later as a bare UndefinedColumn or, in
 -- the default's case, not failing at all until a row arrives.
-DO $m350g$
+DO $m373g$
 DECLARE
     v_default text;
     v_target  oid;
@@ -147,13 +146,13 @@ BEGIN
     -- (#276 -- the unhandled case refuses).
     v_target := to_regclass('bug_reports');
     IF v_target IS NULL THEN
-        RAISE EXCEPTION '350: no relation named bug_reports is visible on the search_path (current_schema() is %), so neither the guards below nor the DDL in this file has a target. Apply 336_bug_reports_kind.sql to this database first', current_schema();
+        RAISE EXCEPTION '373: no relation named bug_reports is visible on the search_path (current_schema() is %), so neither the guards below nor the DDL in this file has a target. Apply 336_bug_reports_kind.sql to this database first', current_schema();
     END IF;
     SELECT n.nspname INTO v_schema
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE c.oid = v_target;
     IF v_schema IS DISTINCT FROM current_schema() THEN
-        RAISE EXCEPTION '350: the unqualified name bug_reports resolves to %.bug_reports while current_schema() is %, so the guards in this file and its ALTER statements would not be looking at the same relation. Put the schema that owns bug_reports first on the path (SET search_path TO %) and apply this file again', v_schema, current_schema(), v_schema;
+        RAISE EXCEPTION '373: the unqualified name bug_reports resolves to %.bug_reports while current_schema() is %, so the guards in this file and its ALTER statements would not be looking at the same relation. Put the schema that owns bug_reports first on the path (SET search_path TO %) and apply this file again', v_schema, current_schema(), v_schema;
     END IF;
 
     IF NOT EXISTS (
@@ -161,7 +160,7 @@ BEGIN
          WHERE table_schema = current_schema()
            AND table_name = 'bug_reports' AND column_name = 'kind'
     ) THEN
-        RAISE EXCEPTION '350: bug_reports.kind is missing from schema %, so the shape 336 installs is not on this database. Apply 336_bug_reports_kind.sql first; this file constrains the automatic rows that column identifies', current_schema();
+        RAISE EXCEPTION '373: bug_reports.kind is missing from schema %, so the shape 336 installs is not on this database. Apply 336_bug_reports_kind.sql first; this file constrains the automatic rows that column identifies', current_schema();
     END IF;
 
     -- The CHECK. Without it `kind` is a free-text column: 'auto' would carry
@@ -176,7 +175,7 @@ BEGIN
          WHERE conname = 'bug_reports_kind_known'
            AND conrelid = v_target
     ) THEN
-        RAISE EXCEPTION '350: %.bug_reports.kind exists but the bug_reports_kind_known CHECK does not, so the column admits any string and kind = ''auto'' is not a fact the schema enforces. Apply 336_bug_reports_kind.sql (either copy) before this file', current_schema();
+        RAISE EXCEPTION '373: %.bug_reports.kind exists but the bug_reports_kind_known CHECK does not, so the column admits any string and kind = ''auto'' is not a fact the schema enforces. Apply 336_bug_reports_kind.sql (either copy) before this file', current_schema();
     END IF;
 
     -- The DEFAULT. Every row written by code that does not name the column --
@@ -208,9 +207,9 @@ BEGIN
      WHERE table_schema = current_schema()
        AND table_name = 'bug_reports' AND column_name = 'kind';
     IF v_default IS DISTINCT FROM c_336_default THEN
-        RAISE EXCEPTION '350: bug_reports.kind must carry exactly the default 336 installs, %, and it reads % instead. A default that merely mentions ''report'' is not the same fact: rows written by code that does not name the column would take a value this file''s CHECK was not written against. Apply 336_bug_reports_kind.sql (either copy), or repair the default with ALTER TABLE bug_reports ALTER COLUMN kind SET DEFAULT ''report'', before this file', c_336_default, COALESCE(v_default, 'NULL');
+        RAISE EXCEPTION '373: bug_reports.kind must carry exactly the default 336 installs, %, and it reads % instead. A default that merely mentions ''report'' is not the same fact: rows written by code that does not name the column would take a value this file''s CHECK was not written against. Apply 336_bug_reports_kind.sql (either copy), or repair the default with ALTER TABLE bug_reports ALTER COLUMN kind SET DEFAULT ''report'', before this file', c_336_default, COALESCE(v_default, 'NULL');
     END IF;
-END $m350g$;
+END $m373g$;
 
 -- ── 1. the descending sequence automatic rows draw from ──────────────────────
 --
@@ -314,7 +313,7 @@ CREATE SEQUENCE IF NOT EXISTS bug_reports_auto_number_seq
 -- (R7-M3). `pg_class.relpersistence` is 'p' for a logged relation, 'u' for an
 -- unlogged one and 't' for a temporary one; only 'p' survives crash recovery
 -- with its position and reaches a standby, so only 'p' is adopted.
-DO $m350s$
+DO $m373s$
 DECLARE
     v_typid     oid;
     v_start     bigint;
@@ -343,7 +342,7 @@ DECLARE
         to_regclass(quote_ident(current_schema()) || '.bug_reports_auto_number_seq');
 BEGIN
     IF v_autoseq IS NULL THEN
-        RAISE EXCEPTION '350: schema % does not carry bug_reports_auto_number_seq after the CREATE above, so there is no shape to inspect', current_schema();
+        RAISE EXCEPTION '373: schema % does not carry bug_reports_auto_number_seq after the CREATE above, so there is no shape to inspect', current_schema();
     END IF;
 
     SELECT array_agg(attname::text ORDER BY attnum) INTO v_columns
@@ -351,14 +350,14 @@ BEGIN
      WHERE attrelid = 'pg_catalog.pg_sequence'::regclass
        AND attnum > 0 AND NOT attisdropped;
     IF v_columns IS DISTINCT FROM c_pg_sequence_columns THEN
-        RAISE EXCEPTION '350: pg_catalog.pg_sequence has % column(s), %, and this file judges exactly the % it declares, %; unjudged: %, absent: %. A sequence attribute this block does not read is part of the shape nobody checked, so nothing is adopted over it', cardinality(v_columns), v_columns, cardinality(c_pg_sequence_columns), c_pg_sequence_columns, ARRAY(SELECT unnest(v_columns) EXCEPT SELECT unnest(c_pg_sequence_columns)), ARRAY(SELECT unnest(c_pg_sequence_columns) EXCEPT SELECT unnest(v_columns));
+        RAISE EXCEPTION '373: pg_catalog.pg_sequence has % column(s), %, and this file judges exactly the % it declares, %; unjudged: %, absent: %. A sequence attribute this block does not read is part of the shape nobody checked, so nothing is adopted over it', cardinality(v_columns), v_columns, cardinality(c_pg_sequence_columns), c_pg_sequence_columns, ARRAY(SELECT unnest(v_columns) EXCEPT SELECT unnest(c_pg_sequence_columns)), ARRAY(SELECT unnest(c_pg_sequence_columns) EXCEPT SELECT unnest(v_columns));
     END IF;
 
     SELECT relpersistence INTO v_persistence
       FROM pg_class
      WHERE oid = v_autoseq;
     IF v_persistence IS DISTINCT FROM c_logged THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with relpersistence %, not % (logged); an unlogged sequence is reset by crash recovery and is not carried to a standby, while the logged bug_reports rows keep every negative number it had handed out, so after a crash or a promotion the writer would draw into numbers that are taken. Make it logged with ALTER SEQUENCE bug_reports_auto_number_seq SET LOGGED, then apply this file again', current_schema(), coalesce(v_persistence::text, '(no row)'), c_logged;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq exists in schema % with relpersistence %, not % (logged); an unlogged sequence is reset by crash recovery and is not carried to a standby, while the logged bug_reports rows keep every negative number it had handed out, so after a crash or a promotion the writer would draw into numbers that are taken. Make it logged with ALTER SEQUENCE bug_reports_auto_number_seq SET LOGGED, then apply this file again', current_schema(), coalesce(v_persistence::text, '(no row)'), c_logged;
     END IF;
 
     SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcache, seqcycle
@@ -367,25 +366,25 @@ BEGIN
      WHERE seqrelid = v_autoseq;
 
     IF v_typid IS DISTINCT FROM 'bigint'::regtype::oid THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with data type %, not bigint; its range would run out while bug_reports.bug_number can still hold the number, and every upload past that point would 503', current_schema(), format_type(v_typid, NULL);
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq exists in schema % with data type %, not bigint; its range would run out while bug_reports.bug_number can still hold the number, and every upload past that point would 503', current_schema(), format_type(v_typid, NULL);
     END IF;
     IF v_increment IS DISTINCT FROM c_auto_increment THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with increment %, not %; a sequence that does not descend by one hands out numbers into the human range, which the CHECK this file adds below then refuses -- 503s with no explanation', current_schema(), v_increment, c_auto_increment;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq exists in schema % with increment %, not %; a sequence that does not descend by one hands out numbers into the human range, which the CHECK this file adds below then refuses -- 503s with no explanation', current_schema(), v_increment, c_auto_increment;
     END IF;
     IF v_max IS DISTINCT FROM c_auto_max THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with MAXVALUE %, not %; the ceiling is what keeps every automatic number negative and out of the human range', current_schema(), v_max, c_auto_max;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq exists in schema % with MAXVALUE %, not %; the ceiling is what keeps every automatic number negative and out of the human range', current_schema(), v_max, c_auto_max;
     END IF;
     IF v_min IS DISTINCT FROM c_auto_min THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with MINVALUE %, not %; the range this file configures is what makes exhaustion something nobody has to think about, and a shorter one exhausts into a 503 on every upload', current_schema(), v_min, c_auto_min;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq exists in schema % with MINVALUE %, not %; the range this file configures is what makes exhaustion something nobody has to think about, and a shorter one exhausts into a 503 on every upload', current_schema(), v_min, c_auto_min;
     END IF;
     IF v_cycle THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % and CYCLES; on exhaustion it would hand out a number it has already given away, and bug_reports.bug_number is UNIQUE, so the upload would fail on the index instead of on the counter', current_schema();
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq exists in schema % and CYCLES; on exhaustion it would hand out a number it has already given away, and bug_reports.bug_number is UNIQUE, so the upload would fail on the index instead of on the counter', current_schema();
     END IF;
     IF v_cache IS DISTINCT FROM c_auto_cache THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % with CACHE %, not %; a session''s first draw then moves the stored position past the whole run it caches, so every reading of where the sequence stands -- block 1c, the post-check, the release train -- judges a position no writer has handed out. Set it with ALTER SEQUENCE bug_reports_auto_number_seq CACHE %, then apply this file again', current_schema(), v_cache, c_auto_cache, c_auto_cache;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq exists in schema % with CACHE %, not %; a session''s first draw then moves the stored position past the whole run it caches, so every reading of where the sequence stands -- block 1c, the post-check, the release train -- judges a position no writer has handed out. Set it with ALTER SEQUENCE bug_reports_auto_number_seq CACHE %, then apply this file again', current_schema(), v_cache, c_auto_cache, c_auto_cache;
     END IF;
     IF v_start < v_min OR v_start > v_max THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % starting at %, which is outside its own range % .. %; a restart would put it there and the next draw would fail', current_schema(), v_start, v_min, v_max;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq exists in schema % starting at %, which is outside its own range % .. %; a restart would put it there and the next draw would fail', current_schema(), v_start, v_min, v_max;
     END IF;
     -- THE START, BY IDENTITY AND NOT BY RANGE. The test above answers "could
     -- this sequence be restarted at all"; this one answers "is this the
@@ -404,7 +403,7 @@ BEGIN
     -- anywhere but -1 is not the one this file configures, and a RESTART with
     -- no value returns it to that start rather than to -1.
     IF v_start IS DISTINCT FROM c_auto_start THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq exists in schema % starting at %, not %; it is inside its own range, so it draws, but a sequence configured to begin somewhere else was set up by something other than this file, and a RESTART with no value returns it to %, not to %. Near MINVALUE that start is also a short distance from exhaustion; anywhere else it is still not the sequence this file configures', current_schema(), v_start, c_auto_start, v_start, c_auto_start;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq exists in schema % starting at %, not %; it is inside its own range, so it draws, but a sequence configured to begin somewhere else was set up by something other than this file, and a RESTART with no value returns it to %, not to %. Near MINVALUE that start is also a short distance from exhaustion; anywhere else it is still not the sequence this file configures', current_schema(), v_start, c_auto_start, v_start, c_auto_start;
     END IF;
 
     -- WHAT THIS BLOCK JUDGED, handed to block 1c. Everything above is about
@@ -417,12 +416,12 @@ BEGIN
     -- ALL SEVEN ATTRIBUTES AND THE PERSISTENCE, in the catalogue's column
     -- order: a reading of fewer than every column 1b judged is a comparison
     -- that cannot see a change to the ones it left out.
-    PERFORM set_config('m350.shape_1b',
+    PERFORM set_config('m373.shape_1b',
                        format('%s/%s/%s/%s/%s/%s/%s/%s', v_typid, v_start,
                               v_increment, v_max, v_min, v_cache, v_cycle,
                               v_persistence),
                        true);
-END $m350s$;
+END $m373s$;
 
 -- Owned by the column, so DROP TABLE cleans it up -- the same relationship
 -- 086 set up for the human sequence. A column may own more than one sequence;
@@ -473,7 +472,7 @@ ALTER SEQUENCE bug_reports_auto_number_seq OWNED BY bug_reports.bug_number;
 -- ONE POLICY, ONE COPY. `c_floor` and `c_accounted_sql` below are the whole
 -- policy: the floor, and the query that turns a sequence relation into the
 -- accounted next value. The post-check applies them through
--- `m350.floor` / `m350.accounted_sql`, and the release train reads these two
+-- `m373.floor` / `m373.accounted_sql`, and the release train reads these two
 -- declarations out of THIS FILE at the reviewed commit, byte for byte, and
 -- applies them to each box; it restates neither. So a state this file has
 -- accepted and committed is one the train accepts: the same predicate, over
@@ -496,7 +495,7 @@ ALTER SEQUENCE bug_reports_auto_number_seq OWNED BY bug_reports.bug_number;
 -- a position whose next values are already held by rows -- a restart back to
 -- -1 over rows already numbered -1, -2, ... -- hands the writer a unique
 -- violation for each of them. That is refused by name as well.
-DO $m350n$
+DO $m373n$
 DECLARE
     v_typid     oid;
     v_start     bigint;
@@ -533,7 +532,7 @@ DECLARE
         to_regclass(quote_ident(current_schema()) || '.bug_reports_auto_number_seq');
 BEGIN
     IF v_autoseq IS NULL THEN
-        RAISE EXCEPTION '350: schema % does not carry bug_reports_auto_number_seq, so there is no position to read', current_schema();
+        RAISE EXCEPTION '373: schema % does not carry bug_reports_auto_number_seq, so there is no position to read', current_schema();
     END IF;
 
     -- A mode that conflicts with nextval's RowExclusiveLock, held by THIS
@@ -548,7 +547,7 @@ BEGIN
            AND mode IN ('ShareLock', 'ShareRowExclusiveLock',
                         'ExclusiveLock', 'AccessExclusiveLock')
     ) THEN
-        RAISE EXCEPTION '350: this transaction holds no lock on bug_reports_auto_number_seq in schema % that blocks nextval, so the position read below could move before COMMIT; ALTER SEQUENCE ... OWNED BY takes that lock and must run before this block', current_schema();
+        RAISE EXCEPTION '373: this transaction holds no lock on bug_reports_auto_number_seq in schema % that blocks nextval, so the position read below could move before COMMIT; ALTER SEQUENCE ... OWNED BY takes that lock and must run before this block', current_schema();
     END IF;
 
     -- THE DECLARED COLUMN LIST AND THE PERSISTENCE, refused by name HERE as
@@ -560,13 +559,13 @@ BEGIN
      WHERE attrelid = 'pg_catalog.pg_sequence'::regclass
        AND attnum > 0 AND NOT attisdropped;
     IF v_columns IS DISTINCT FROM c_pg_sequence_columns THEN
-        RAISE EXCEPTION '350: under the lock, pg_catalog.pg_sequence has % column(s), %, and this file judges exactly the % it declares, %; unjudged: %, absent: %', cardinality(v_columns), v_columns, cardinality(c_pg_sequence_columns), c_pg_sequence_columns, ARRAY(SELECT unnest(v_columns) EXCEPT SELECT unnest(c_pg_sequence_columns)), ARRAY(SELECT unnest(c_pg_sequence_columns) EXCEPT SELECT unnest(v_columns));
+        RAISE EXCEPTION '373: under the lock, pg_catalog.pg_sequence has % column(s), %, and this file judges exactly the % it declares, %; unjudged: %, absent: %', cardinality(v_columns), v_columns, cardinality(c_pg_sequence_columns), c_pg_sequence_columns, ARRAY(SELECT unnest(v_columns) EXCEPT SELECT unnest(c_pg_sequence_columns)), ARRAY(SELECT unnest(c_pg_sequence_columns) EXCEPT SELECT unnest(v_columns));
     END IF;
     SELECT relpersistence INTO v_persistence
       FROM pg_class
      WHERE oid = v_autoseq;
     IF v_persistence IS DISTINCT FROM c_logged THEN
-        RAISE EXCEPTION '350: under the lock, bug_reports_auto_number_seq in schema % has relpersistence %, not % (logged); its position would not survive crash recovery or reach a standby, while the rows it numbered would', current_schema(), coalesce(v_persistence::text, '(no row)'), c_logged;
+        RAISE EXCEPTION '373: under the lock, bug_reports_auto_number_seq in schema % has relpersistence %, not % (logged); its position would not survive crash recovery or reach a standby, while the rows it numbered would', current_schema(), coalesce(v_persistence::text, '(no row)'), c_logged;
     END IF;
 
     SELECT seqtypid, seqstart, seqincrement, seqmax, seqmin, seqcache, seqcycle
@@ -574,12 +573,12 @@ BEGIN
       FROM pg_sequence
      WHERE seqrelid = v_autoseq;
     IF v_cache IS DISTINCT FROM c_auto_cache THEN
-        RAISE EXCEPTION '350: under the lock, bug_reports_auto_number_seq in schema % has CACHE %, not %; the position read below would not be the one the writer continues from', current_schema(), v_cache, c_auto_cache;
+        RAISE EXCEPTION '373: under the lock, bug_reports_auto_number_seq in schema % has CACHE %, not %; the position read below would not be the one the writer continues from', current_schema(), v_cache, c_auto_cache;
     END IF;
     v_shape := format('%s/%s/%s/%s/%s/%s/%s/%s', v_typid, v_start, v_increment,
                       v_max, v_min, v_cache, v_cycle, v_persistence);
-    IF v_shape IS DISTINCT FROM current_setting('m350.shape_1b', true) THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq in schema % reads as % under the lock, but block 1b judged %; the sequence this file would adopt is not the one it checked', current_schema(), v_shape, coalesce(current_setting('m350.shape_1b', true), '(no reading)');
+    IF v_shape IS DISTINCT FROM current_setting('m373.shape_1b', true) THEN
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq in schema % reads as % under the lock, but block 1b judged %; the sequence this file would adopt is not the one it checked', current_schema(), v_shape, coalesce(current_setting('m373.shape_1b', true), '(no reading)');
     END IF;
 
     -- `is_called` false: the next draw returns `last_value` itself (a fresh
@@ -604,7 +603,7 @@ BEGIN
     v_accounted := v_next::numeric + c_postcheck_draws * v_increment;
 
     IF v_accounted < c_floor THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq in schema % would stand at % once this file commits (next value % now, last_value %, is_called %, less the % value(s) its post-check draws), below the adoption floor %: fewer than 2^62 of its % .. % range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above % and below every negative bug_number in use, then apply this file again', current_schema(), v_accounted, v_next, v_last, v_called, c_postcheck_draws, c_floor, v_min, v_max, c_floor - c_postcheck_draws * v_increment;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq in schema % would stand at % once this file commits (next value % now, last_value %, is_called %, less the % value(s) its post-check draws), below the adoption floor %: fewer than 2^62 of its % .. % range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above % and below every negative bug_number in use, then apply this file again', current_schema(), v_accounted, v_next, v_last, v_called, c_postcheck_draws, c_floor, v_min, v_max, c_floor - c_postcheck_draws * v_increment;
     END IF;
 
     EXECUTE format('SELECT max(bug_number) FROM %I.bug_reports WHERE bug_number <= $1',
@@ -612,20 +611,20 @@ BEGIN
        INTO v_held
       USING v_next;
     IF v_held IS NOT NULL THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq in schema % would hand out % next, but bug_reports already holds bug number % at or below it; bug_number is UNIQUE, so the writer would draw into a number that is taken and that upload would fail. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value below every negative bug_number in use, then apply this file again', current_schema(), v_next, v_held;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq in schema % would hand out % next, but bug_reports already holds bug number % at or below it; bug_number is UNIQUE, so the writer would draw into a number that is taken and that upload would fail. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value below every negative bug_number in use, then apply this file again', current_schema(), v_next, v_held;
     END IF;
 
     -- Handed to the post-check, whose FIRST DRAW must return exactly this:
     -- the reading is bound to the thing it describes (#732).
-    PERFORM set_config('m350.next_1c', v_next::text, true);
+    PERFORM set_config('m373.next_1c', v_next::text, true);
     -- AND THE POLICY WITH IT: the accounted value this block judged, and the
     -- two declarations it judged it by. The post-check reads the position it
-    -- leaves through `m350.accounted_sql` and applies `m350.floor` to it, so
+    -- leaves through `m373.accounted_sql` and applies `m373.floor` to it, so
     -- the second application of the policy is this one's text, not a copy.
-    PERFORM set_config('m350.accounted_1c', v_accounted::text, true);
-    PERFORM set_config('m350.floor', c_floor::text, true);
-    PERFORM set_config('m350.accounted_sql', c_accounted_sql, true);
-END $m350n$;
+    PERFORM set_config('m373.accounted_1c', v_accounted::text, true);
+    PERFORM set_config('m373.floor', c_floor::text, true);
+    PERFORM set_config('m373.accounted_sql', c_accounted_sql, true);
+END $m373n$;
 
 -- ── 2. the one-directional CHECK ─────────────────────────────────────────────
 --
@@ -633,7 +632,7 @@ END $m350n$;
 -- lookup rather than a swallowed exception: swallowing duplicate_object here
 -- would also swallow a constraint that exists under this name with a
 -- DIFFERENT definition, which is the one case worth failing on.
-DO $m350c$
+DO $m373c$
 DECLARE
     v_strays bigint;
     -- THE SAME RELATION THE GUARD BLOCK INSPECTED, named the same way. A
@@ -657,14 +656,14 @@ BEGIN
                        current_schema())
            INTO v_strays;
         IF v_strays > 0 THEN
-            RAISE EXCEPTION '350: % automatic row(s) already hold a non-negative bug number. Renumber them onto bug_reports_auto_number_seq (UPDATE bug_reports SET bug_number = nextval(''bug_reports_auto_number_seq'') WHERE kind = ''auto'' AND bug_number >= 0) before applying this file; adding the constraint over them would abort with an unexplained check violation', v_strays;
+            RAISE EXCEPTION '373: % automatic row(s) already hold a non-negative bug number. Renumber them onto bug_reports_auto_number_seq (UPDATE bug_reports SET bug_number = nextval(''bug_reports_auto_number_seq'') WHERE kind = ''auto'' AND bug_number >= 0) before applying this file; adding the constraint over them would abort with an unexplained check violation', v_strays;
         END IF;
 
         ALTER TABLE bug_reports
             ADD CONSTRAINT bug_reports_auto_number_negative
             CHECK (kind <> 'auto' OR bug_number < 0);
     END IF;
-END $m350c$;
+END $m373c$;
 
 -- ── 3. post-check, exercised rather than read ────────────────────────────────
 --
@@ -672,7 +671,7 @@ END $m350c$;
 -- constraint's rendered text tells you which literals it quotes, not what it
 -- admits. So the predicate is OFFERED rows, and every refusal it must make is
 -- paired with an acceptance it must not refuse (#391).
-DO $m350p$
+DO $m373p$
 DECLARE
     v_def       text;
     v_admitted  boolean;
@@ -713,7 +712,7 @@ DECLARE
         to_regclass(quote_ident(current_schema()) || '.bug_reports_number_seq');
 BEGIN
     IF v_target IS NULL OR v_autoseq IS NULL OR v_humanseq IS NULL THEN
-        RAISE EXCEPTION '350: schema % does not carry all three of bug_reports, bug_reports_auto_number_seq and bug_reports_number_seq after this file ran, so its post-check has nothing to exercise', current_schema();
+        RAISE EXCEPTION '373: schema % does not carry all three of bug_reports, bug_reports_auto_number_seq and bug_reports_number_seq after this file ran, so its post-check has nothing to exercise', current_schema();
     END IF;
     -- The human sequence's position, read BEFORE anything else in this block.
     -- The last assertion compares it with the position afterwards: the whole
@@ -729,7 +728,7 @@ BEGIN
      WHERE conname = 'bug_reports_auto_number_negative'
        AND conrelid = v_target;
     IF v_def IS NULL THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_negative is missing; nothing would stop an automatic upload from taking a human bug number again';
+        RAISE EXCEPTION '373: bug_reports_auto_number_negative is missing; nothing would stop an automatic upload from taking a human bug number again';
     END IF;
 
     -- The shape was asserted attribute by attribute in its own block above,
@@ -755,13 +754,13 @@ BEGIN
     v_a := nextval(v_autoseq);
     v_b := nextval(v_autoseq);
     IF NOT (v_a < 0 AND v_b < v_a) THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq yielded % then %, which is not a descending negative run', v_a, v_b;
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq yielded % then %, which is not a descending negative run', v_a, v_b;
     END IF;
     -- AND THE FIRST DRAW IS THE POSITION 1c ADOPTED. 1c read it under the
     -- lock this transaction still holds; any other first value means the
     -- reading judged something other than what the sequence continues from.
-    IF v_a IS DISTINCT FROM current_setting('m350.next_1c', true)::bigint THEN
-        RAISE EXCEPTION '350: the first draw from bug_reports_auto_number_seq returned % but block 1c read the next value as %; the position this file judged is not the one the sequence continues from', v_a, coalesce(current_setting('m350.next_1c', true), '(no reading)');
+    IF v_a IS DISTINCT FROM current_setting('m373.next_1c', true)::bigint THEN
+        RAISE EXCEPTION '373: the first draw from bug_reports_auto_number_seq returned % but block 1c read the next value as %; the position this file judged is not the one the sequence continues from', v_a, coalesce(current_setting('m373.next_1c', true), '(no reading)');
     END IF;
 
     -- THE POSITION THIS FILE LEAVES, MADE EXACT (R7-M1). `nextval` pre-logs
@@ -785,20 +784,20 @@ BEGIN
     -- first while 1c's own test stands; it is here so the train's predicate,
     -- over the train's reading, is applied once before COMMIT and not first
     -- after it.
-    EXECUTE format(current_setting('m350.accounted_sql', true),
+    EXECUTE format(current_setting('m373.accounted_sql', true),
                    format('%I.%I', current_schema(), 'bug_reports_auto_number_seq'))
        INTO v_left;
-    IF v_left IS DISTINCT FROM current_setting('m350.accounted_1c', true) THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq stands at % through the adoption policy after the post-check, but block 1c accounted for %; the position this file leaves is not the one it judged', coalesce(v_left, '(no reading)'), coalesce(current_setting('m350.accounted_1c', true), '(no reading)');
+    IF v_left IS DISTINCT FROM current_setting('m373.accounted_1c', true) THEN
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq stands at % through the adoption policy after the post-check, but block 1c accounted for %; the position this file leaves is not the one it judged', coalesce(v_left, '(no reading)'), coalesce(current_setting('m373.accounted_1c', true), '(no reading)');
     END IF;
-    IF v_left::bigint < current_setting('m350.floor', true)::bigint THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_seq stands at % after the post-check, below the adoption floor %', v_left, current_setting('m350.floor', true);
+    IF v_left::bigint < current_setting('m373.floor', true)::bigint THEN
+        RAISE EXCEPTION '373: bug_reports_auto_number_seq stands at % after the post-check, below the adoption floor %', v_left, current_setting('m373.floor', true);
     END IF;
 
     -- FROM THE TARGET RELATION, named explicitly. `LIKE bug_reports` takes
     -- whichever one the search_path resolves, and the probe below would then
     -- be offering rows to a constraint this file never installed.
-    EXECUTE format('CREATE TEMP TABLE m350_number_probe (LIKE %s INCLUDING '
+    EXECUTE format('CREATE TEMP TABLE m373_number_probe (LIKE %s INCLUDING '
                    'DEFAULTS INCLUDING CONSTRAINTS) ON COMMIT DROP',
                    v_target::regclass::text);
 
@@ -806,42 +805,42 @@ BEGIN
     --    is the defect itself, offered to the constraint.
     v_admitted := TRUE;
     BEGIN
-        INSERT INTO m350_number_probe (steam_id, description, kind, bug_number)
-             VALUES ('0', '350 post-check probe', 'auto', 999000001);
+        INSERT INTO m373_number_probe (steam_id, description, kind, bug_number)
+             VALUES ('0', '373 post-check probe', 'auto', 999000001);
     EXCEPTION
         WHEN check_violation THEN
             v_admitted := FALSE;
     END;
     IF v_admitted THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_negative is defined as % and ADMITS an automatic row holding a positive bug number -- the counter players read by number is still being spent by machine uploads', v_def;
+        RAISE EXCEPTION '373: bug_reports_auto_number_negative is defined as % and ADMITS an automatic row holding a positive bug number -- the counter players read by number is still being spent by machine uploads', v_def;
     END IF;
 
     -- 2. CONTROL A: an automatic row with a negative number must be ACCEPTED,
     --    or the refusal above passed because the constraint refuses every
     --    automatic row and the feature cannot write at all.
     BEGIN
-        INSERT INTO m350_number_probe (steam_id, description, kind, bug_number)
-             VALUES ('0', '350 post-check control', 'auto', -999000001);
+        INSERT INTO m373_number_probe (steam_id, description, kind, bug_number)
+             VALUES ('0', '373 post-check control', 'auto', -999000001);
     EXCEPTION WHEN check_violation THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_negative is defined as % and REFUSES a correctly numbered automatic row; every automatic upload would 503', v_def;
+        RAISE EXCEPTION '373: bug_reports_auto_number_negative is defined as % and REFUSES a correctly numbered automatic row; every automatic upload would 503', v_def;
     END;
 
     -- 3. CONTROL B: the human side is untouched. A report row with an ordinary
     --    positive number must be accepted -- if this ever fails, the bug form
     --    is down and this file did it.
     BEGIN
-        INSERT INTO m350_number_probe (steam_id, description, kind, bug_number)
-             VALUES ('0', '350 post-check control', 'report', 999000002);
+        INSERT INTO m373_number_probe (steam_id, description, kind, bug_number)
+             VALUES ('0', '373 post-check control', 'report', 999000002);
     EXCEPTION WHEN check_violation THEN
-        RAISE EXCEPTION '350: bug_reports_auto_number_negative is defined as % and REFUSES an ordinary player-filed report; no player could file a bug report', v_def;
+        RAISE EXCEPTION '373: bug_reports_auto_number_negative is defined as % and REFUSES an ordinary player-filed report; no player could file a bug report', v_def;
     END;
 
-    DROP TABLE m350_number_probe;
+    DROP TABLE m373_number_probe;
 
     EXECUTE format('SELECT last_value FROM %s', v_humanseq::text)
        INTO v_human_after;
     IF v_human_after <> v_human_before THEN
-        RAISE EXCEPTION '350: this migration advanced the human bug-number sequence from % to %, which is the exact thing it exists to stop', v_human_before, v_human_after;
+        RAISE EXCEPTION '373: this migration advanced the human bug-number sequence from % to %, which is the exact thing it exists to stop', v_human_before, v_human_after;
     END IF;
 
     EXECUTE format('SELECT COUNT(*) FROM %s WHERE kind = ''auto''',
@@ -854,8 +853,8 @@ BEGIN
     -- true -- but a line an operator reads as a measurement has to be one
     -- (#732), and a variable read into and never used is where the next
     -- untrue one starts.
-    RAISE NOTICE '350: in schema %, bug_reports_auto_number_seq is %, increment %, range % .. %, cache %, cycle %, relpersistence %, starting at %, adopted at next value % (read under the lock by block 1c), and descends (% then %); it is left at next value % through the adoption policy, at or above the floor %; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
-        current_schema(), format_type(v_typid, NULL), v_increment, v_min, v_max, v_cache, v_cycle, v_persistence, v_start, current_setting('m350.next_1c', true), v_a, v_b, v_left, current_setting('m350.floor', true), v_human_after, v_autos;
-END $m350p$;
+    RAISE NOTICE '373: in schema %, bug_reports_auto_number_seq is %, increment %, range % .. %, cache %, cycle %, relpersistence %, starting at %, adopted at next value % (read under the lock by block 1c), and descends (% then %); it is left at next value % through the adoption policy, at or above the floor %; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at %; % automatic row(s) present, all negative by construction',
+        current_schema(), format_type(v_typid, NULL), v_increment, v_min, v_max, v_cache, v_cycle, v_persistence, v_start, current_setting('m373.next_1c', true), v_a, v_b, v_left, current_setting('m373.floor', true), v_human_after, v_autos;
+END $m373p$;
 
 COMMIT;
