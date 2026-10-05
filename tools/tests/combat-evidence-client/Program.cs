@@ -373,16 +373,12 @@ namespace CombatEvidenceTests
             return true;
         }
 
-        /// <summary>The fixture's group as the client lists it: the caps of step
-        /// one, and the counter of a shot taken while not reloading written -1
-        /// (design 2.2: rc is -1 when not reloading; the server's synthetic
-        /// fixtures carry a counter there, which the rebuild never reads).</summary>
-        private static E.Group AsListed(E.Group g, int i, bool own)
+        /// <summary>The fixture's group as the client lists it: at the caps of step
+        /// one, otherwise verbatim (since the server's fix pass 5, f1b8f28a, the
+        /// fixtures carry counter -1 on a non-reloading shot, as design 2.2 and the
+        /// client do).</summary>        private static E.Group AsListed(E.Group g, int i, bool own)
         {
-            int rlx = Array.IndexOf(W.SNAMES[i], "reloading"), cx = Array.IndexOf(W.SNAMES[i], "counter");
-            var o = g.Copy(W.SHOT_CAP[i], W.REGEN_CAP[i]);
-            o.S = o.S.Select(s => { var c = (long[])s.Clone(); if (c[rlx] == 0) c[cx] = -1; return c; }).ToList();
-            return o;
+            return g.Copy(W.SHOT_CAP[i], W.REGEN_CAP[i]);
         }
 
         private static void Accountant(string dir)
