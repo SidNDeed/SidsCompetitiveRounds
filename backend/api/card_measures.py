@@ -9,17 +9,21 @@ and end-pick messages, the other seat's hands (MEAS). This module holds:
   * the census layout of a registered card pool and its checker;
   * the deal-profile identity a record carries;
   * the view: every hand, phase, record, pair of hands and game as rows of
-    public measures, each one a count or a stated value. A measure whose
-    inputs were not captured whole, were trimmed, or need a census that is
-    not registered for the record's own game build is unknown (None): it
-    never fires and is counted as not run;
-  * the rarity expectation of a hand under weights a revision supplies.
+    public measures, each one a count or a stated value. Each measure names
+    in NEEDS the coverage facts of a record it depends on (a list kept whole,
+    the first phase captured, no collector lost or faulted); when one of them
+    is false the measure is unknown (None), as is one that needs a census not
+    registered for the record's own game build. An unknown measure never
+    fires and is counted as not run;
+  * the rarity expectation of a hand under the weights a revision supplies
+    for the record's own deal profile.
 
 Nothing here decides anything. Which measure opens a review item, at what
 value, over which window and with what words is a rules revision that is
 not part of this repository (review_rules). The weights are the
-`params.card_weights` family of that revision and the window is
-`params.card_window`; without them no expectation and no window is computed.
+`params.card_weights` family of that revision, one weight set per deal
+profile identity, and the window is `params.card_window`; a record whose
+profile has no weight set there gets no expectation and no contribution.
 """
 
 from __future__ import annotations
@@ -91,11 +95,21 @@ I32_LO, I32_HI = W["int32"]
 
 CARD_SUBJECTS = ("card.hand", "card.phase", "card.record", "card.game", "card.pair", "card.window")
 # The two measure-parameter families a revision may supply: the per-rarity
-# weights the expectation uses, and the window the daily sums are read over.
+# weights the expectation uses, one set per deal profile identity (the family
+# is keyed by profile: review_rules reads PROFILE_KEYED on its entry), and the
+# window the daily sums are read over.
 WEIGHTS = "params.card_weights"
 WINDOW = "params.card_window"
 WINDOW_KEY = "window_days"
 WINDOW_SUBJECT = CARD_SUBJECTS[-1]
+PROFILE_KEYED = ("deal_profile",)
+
+# The coverage facts a record states about itself: no collector lost or
+# faulted and the semantics known (whole), the first phase captured (first),
+# and each list `omit` counts kept whole (its own name: cards, held0, ph, hd,
+# ap, sl, sp). NEEDS (below the vocabulary) names the facts each measure
+# depends on.
+COVER = ("whole", "first") + W["omit_keys"]
 
 _HEX = re.compile(r"[\da-f]+", re.ASCII)
 _BUILD_PART = re.compile(r"[A-Za-z\d._+\-]*", re.ASCII)
@@ -428,6 +442,26 @@ def deal_profile(rec) -> str:
     return hashlib.sha256(dumps([rec["prof"], rec["pool"][1], rec["ns"]]).encode("ascii")).hexdigest()
 
 
+def profile_complete(rec) -> bool:
+    """Whether the record's deal profile identity is whole: the game build and
+    the mod build both hashed (state ok), the pool digest read (state ok) and
+    the semantics word one this layout knows. Without that the profile names
+    no single deal and no weight set may be applied to it."""
+    prof = rec["prof"]
+    _count, digest, state = rec["pool"]
+    return (prof[1] == WORD["ok"] and prof[3] == WORD["ok"] and state == WORD["ok"]
+            and bool(digest) and prof[7] in W["semantics"])
+
+
+def profile_weights(rec, family):
+    """The weight set the revision supplies for exactly this record's deal
+    profile, or None: no family, an incomplete identity, or a profile the
+    family does not name. Another profile's weights are never used."""
+    if not family or not profile_complete(rec):
+        return None
+    return family.get(deal_profile(rec))
+
+
 # -- the view ----------------------------------------------------------------------
 
 def _bits(mask, width) -> list:
@@ -461,7 +495,7 @@ class Census:
 class RecFacts:
     """One stored record and what the view may rely on in it."""
 
-    def __init__(self, i, r, registry):
+    def __init__(self, i, r, registry, weights=None):
         rec = r["rec"]
         self.i = i
         self.rec = rec
@@ -473,6 +507,14 @@ class RecFacts:
         self.sem_ok = rec["prof"][7] in W["semantics"]
         self.lossy = bool(inc & INC["lost"]) or bool(inc & INC["fault"]) or not self.sem_ok
         self.first_lost = bool(inc & INC["first"])
+        # a cut game: the record carries the optional termination word
+        self.cut = len(rec) != len(W["keys"]) - len(W["optional"])
+        self.ok = {"whole": not self.lossy, "first": not self.first_lost}
+        for key in W["omit_keys"]:
+            v = self.omit[key]
+            self.ok[key] = not any(v) if isinstance(v, list) else v == 0
+        self.profile = deal_profile(rec)
+        self.weights = profile_weights(rec, weights)
         self.names = {c[0]: c[1] for c in rec["cards"]}
         self.rars = {c[0]: c[-1] for c in rec["cards"]}
         count, digest, state = rec["pool"]
@@ -655,9 +697,10 @@ PICK_RULES = ("b4.pick.out", "b4.pick.slot", "b4.pick.who")
 PHASE_RULES = ("b4.ph.dvp", "b4.ph.picker", "b4.ph.notdone")
 
 
-def _hand_row(rf, f, other_rf, dealer_self, series_sc, weights):
+def _hand_row(rf, f, other_rf, dealer_self, series_sc):
     """One hand entry of one record, as measures."""
     rec = rf.rec
+    weights = rf.weights
     n, sl, w = f["n"], f["sl"], f["w"]
     complete = len(sl) == n and not rf.lossy
     resolved = complete and all(x >= 0 for x in sl)
@@ -704,15 +747,18 @@ def _hand_row(rf, f, other_rf, dealer_self, series_sc, weights):
     row["b4.pick.slot"] = None if rf.lossy else int(pk >= 0 and pk != pi)
     row["b4.pick.who"] = None if (wp < 0 or w < 0 or rf.lossy) else int(wp != w)
     row["b4.hand.picked"] = None if rf.lossy else int(pk != W["pk_none"])
+    _gate(row, rf.ok)
     row["b4.hand.notrun"] = sum(1 for k in HAND_RULES if row[k] is None)
     vanilla = gens is not None and all(g == GEN["vanilla"] for g in gens)
-    eligible = (census is not None and resolved and held is not None and vanilla
+    weighed = weights is not None and covered(rf.ok, CONTRIB_NEEDS)
+    eligible = (weighed and census is not None and resolved and held is not None and vanilla
                 and all(row[k] == 0 for k in HAND_RULES))
     exp = expectation(census, sl, held, f["gl"], weights) if eligible else None
     row["b4.hand.eligible"] = int(exp is not None)
+    _gate(row, rf.ok)
     meta = {"recorder": rf.seat, "dealer": rf.player(w), "w": w, "o": f["o"], "k": f["k"], "n": n,
-            "exp": exp, "vid": f["vid"], "profile": deal_profile(rec), "census": census,
-            "held": held, "gens": gens}
+            "exp": exp, "vid": f["vid"], "profile": rf.profile, "census": census,
+            "held": held, "gens": gens, "weighed": weighed}
     return row, meta
 
 
@@ -727,7 +773,10 @@ def _phase_rows(rf):
         row = {"b4.ph.recorder": rf.i, "b4.ph.phase": o, "b4.ph.role": w,
                "b4.ph.last": int(idx == len(ph) - 1)}
         row["b4.ph.dvp"] = None if rf.lossy else nd - picks
-        row["b4.ph.notdone"] = None if rf.lossy else int(not done and idx != len(ph) - 1)
+        # only a record that states its game was cut exempts its last phase;
+        # in an ordinary game the last phase is measured like every other
+        exempt = rf.cut and idx == len(ph) - 1
+        row["b4.ph.notdone"] = None if rf.lossy else int(not done and not exempt)
         picker = None
         if not rf.lossy and w >= 0:
             if o < W["players"]:
@@ -742,17 +791,48 @@ def _phase_rows(rf):
                     elif drs == 0 and dro == 1:
                         picker = int(w != 0)
         row["b4.ph.picker"] = picker
+        _gate(row, rf.ok)
         rows.append((row, {"recorder": rf.seat, "o": o, "w": w}))
     return rows
 
 
-def _record_row(rf, hand_rows, series_sc):
+def _report_surplus(rf, role, report):
+    """The record's picked cards of the player in `role` against that
+    player's match report rows (match_cards card names): (record's surplus,
+    report's surplus), counted per name. (None, None) when no report was read
+    for the match, or when a pick of that player is not named in the record
+    (picked slot unknown, unresolved or outside the hand)."""
+    if report is None:
+        return None, None
+    mine = {}
+    for e in rf.rec["hd"]:
+        f = _hand_fields(e)
+        if f["w"] != role or f["pk"] == W["pk_none"]:
+            continue
+        pk, sl = f["pk"], f["sl"]
+        name = rf.names.get(sl[pk]) if 0 <= pk < len(sl) and sl[pk] >= 0 else None
+        if name is None:
+            return None, None
+        mine[name] = mine.get(name, 0) + 1
+    theirs = {}
+    for name in report.get(rf.player(role)) or ():
+        theirs[name] = theirs.get(name, 0) + 1
+    return (sum(max(c - theirs.get(nm, 0), 0) for nm, c in mine.items()),
+            sum(max(c - mine.get(nm, 0), 0) for nm, c in theirs.items()))
+
+
+def _record_row(rf, hand_rows, series_sc, report=None):
     rec = rf.rec
     row = {"b4.rec.index": rf.i, "b4.rec.inc": rec["inc"], "b4.rec.conflict": int(rf.conflict),
            "b4.rec.unreg": None if not rf.digest else int(not rf.registered),
            "b4.rec.census": int(rf.census is not None),
-           "b4.rec.hands": len(hand_rows), "b4.rec.cut": int(len(rec) != len(W["keys"]) - len(W["optional"])),
-           "b4.rec.notrun_hands": sum(1 for h in hand_rows if h["b4.hand.notrun"])}
+           "b4.rec.hands": len(hand_rows), "b4.rec.cut": int(rf.cut),
+           "b4.rec.notrun_hands": sum(1 for h in hand_rows if h["b4.hand.notrun"]),
+           "b4.rec.uncovered": sum(1 for key in COVER if not rf.ok[key])}
+    for role, part in enumerate((WORD["self"], WORD["meas"])):
+        ours, theirs = _report_surplus(rf, role, report)
+        row["b4.report.picks." + part + ".rec"] = ours
+        row["b4.report.picks." + part + ".rep"] = theirs
     if rf.ap_ok and rf.hd_ok and not rf.ap_unknown:
         picked = {(e[2], e[14]) for e in rec["hd"] if e[9] >= 0 and e[14] >= 0}
         row["b4.app.unpaired"] = sum(1 for w, _ix, kind, vid in rec["ap"]
@@ -765,6 +845,7 @@ def _record_row(rf, hand_rows, series_sc):
         row["b4.sc.rule"] = None
     else:
         row["b4.sc.rule"] = int(rule != int(series_sc == WORD["on"]))
+    _gate(row, rf.ok)
     return row
 
 
@@ -798,14 +879,15 @@ def _locally_rejected(census, name, held, gl, earlier):
     return _rejects_local(census, cand, held, gl)
 
 
-def card_view(records, registry, series_sc=None, weights=None) -> dict:
+def card_view(records, registry, series_sc=None, weights=None, report=None) -> dict:
     """Every row the card rules and the admin read see for one game: hands,
     phases, records, pairs of hands, the game. `records` are dicts with
     seat, other, rec and conflict; `registry` maps a pool digest to a Census;
     `series_sc` is the series row's frozen Same Cards rule (on, off or None
-    when unknown); `weights` the revision's weight family (None: no
-    expectation)."""
-    facts = [RecFacts(i, r, registry) for i, r in enumerate(records)]
+    when unknown); `weights` the revision's weight family, one weight set per
+    deal profile (None: no expectation); `report` the match report's picked
+    card names per player id (None: not read, the report measures NOT-RUN)."""
+    facts = [RecFacts(i, r, registry, weights) for i, r in enumerate(records)]
     by_seat = {rf.seat: rf for rf in facts}
     two = len(facts) == W["players"] and all(rf.other in by_seat for rf in facts)
     hands, phases, recs, pairs = [], [], [], []
@@ -824,14 +906,14 @@ def card_view(records, registry, series_sc=None, weights=None) -> dict:
             dealer_self = None
             if f["w"] == 1 and other_rf is not None and f["vid"] >= 0:
                 dealer_self = self_entries.get((rf.other, f["o"], f["k"], f["vid"]))
-            row, meta = _hand_row(rf, f, other_rf if f["w"] == 1 else None, dealer_self, series_sc,
-                                  weights)
+            row, meta = _hand_row(rf, f, other_rf if f["w"] == 1 else None, dealer_self, series_sc)
             rows.append((row, meta))
         hands.extend(rows)
         per_rec_rows.append(rows)
         phases.extend(_phase_rows(rf))
     for rf, rows in zip(facts, per_rec_rows):
-        recs.append((_record_row(rf, [r for r, _m in rows], series_sc), {"recorder": rf.seat}))
+        recs.append((_record_row(rf, [r for r, _m in rows], series_sc, report), {"recorder": rf.seat}))
+    both = _merged(facts)
     game = {"b4.game.records": len(facts), "b4.game.paired": int(two)}
     if two:
         a, b = facts
@@ -861,6 +943,7 @@ def card_view(records, registry, series_sc=None, weights=None) -> dict:
             prow["b4.pair.spawn"] = None if (a.lossy or b.lossy) else int(ea["sp_n"] != eb["sp_n"])
             na, nb = _held_names(a, x[1]["held"]), _held_names(b, y[1]["held"])
             prow["b4.pair.held"] = None if na is None or nb is None else int(na != nb)
+            _gate(prow, both)
             pairs.append((prow, {"dealer": key[0], "o": key[1], "k": key[2]}))
         complete = a.hd_ok and b.hd_ok
         game["b4.pair.n"] = paired
@@ -869,8 +952,11 @@ def card_view(records, registry, series_sc=None, weights=None) -> dict:
         game["b4.pair.n"] = None
         game["b4.pair.unpair"] = None
     game.update(_same_cards(facts, per_rec_rows, two, series_sc))
+    _gate(game, both)
+    uncovered = [{"recorder": rf.seat, "not_whole": [key for key in COVER if not rf.ok[key]]}
+                 for rf in facts]
     return {"hands": hands, "phases": phases, "records": recs, "pairs": pairs, "game": game,
-            "two": two, "facts": facts}
+            "two": two, "facts": facts, "uncovered": uncovered}
 
 
 def _own_hands(rf, rows, gen):
@@ -951,19 +1037,20 @@ def _same_cards(facts, per_rec_rows, two, series_sc) -> dict:
 
 # -- contributions and the window ------------------------------------------------------
 
-def contributions(view, weights) -> list:
+def contributions(view) -> list:
     """Per recorder and dealer: hands and slots that entered the expectation,
     hands that could not (not run), and per rarity the observed count and the
     fixed-point expected count and variance. Source is SELF for the
     recorder's own hands and MEAS for the other seat's; coverage is paired
-    when both records name each other. Empty without weights."""
-    if weights is None:
-        return []
+    when both records name each other. A record contributes no row at all
+    unless the revision has a weight set for its own deal profile and every
+    coverage fact CONTRIB_NEEDS names is true: a record with a list cut or
+    trimmed is never added as a smaller clean sample."""
     fix = W["fixed_point"]
     coverage = WORD["paired"] if view["two"] else WORD["one"]
     out = {}
     for row, meta in view["hands"]:
-        if meta["dealer"] is None:
+        if meta["dealer"] is None or not meta["weighed"]:
             continue
         source = WORD["self"] if meta["w"] == 0 else WORD["meas"]
         key = (meta["recorder"], meta["dealer"], source, meta["profile"])
@@ -1005,6 +1092,10 @@ def window_row(agg) -> dict:
 
 # -- the vocabulary -----------------------------------------------------------------
 
+REPORT_PICKS = tuple("b4.report.picks." + part + "." + side
+                     for part in (WORD["self"], WORD["meas"]) for side in ("rec", "rep"))
+
+
 class CardCtx:
     """One row of one card subject; `i` keys the evaluator's memo."""
 
@@ -1032,8 +1123,9 @@ MEASURES = {
                  + ("b4.hand.ds0",) + PICK_RULES + ("b4.hand.picked", "b4.hand.notrun", "b4.hand.eligible"),
     "card.phase": ("b4.ph.recorder", "b4.ph.phase", "b4.ph.role", "b4.ph.last") + PHASE_RULES,
     "card.record": ("b4.rec.index", "b4.rec.inc", "b4.rec.conflict", "b4.rec.unreg",
-                    "b4.rec.census", "b4.rec.hands", "b4.rec.cut", "b4.rec.notrun_hands", "b4.app.unpaired",
-                    "b4.app.offline", "b4.sc.rule"),
+                    "b4.rec.census", "b4.rec.hands", "b4.rec.cut", "b4.rec.notrun_hands", "b4.rec.uncovered",
+                    "b4.app.unpaired", "b4.app.offline", "b4.sc.rule")
+                   + REPORT_PICKS,
     "card.game": ("b4.game.records", "b4.game.paired", "b4.pair.n", "b4.pair.unpair",
                   "b4.sc.norule", "b4.sc.open", "b4.sc.k"),
     "card.pair": ("b4.pair.phase", "b4.pair.deal", "b4.pair.slot", "b4.pair.pick",
@@ -1043,6 +1135,68 @@ MEASURES = {
                    + tuple("b4.rar." + part + "." + name for part in ("obs", "exp", "var", "dev")
                            for name in RARITIES),
 }
+
+
+# -- the coverage catalog ------------------------------------------------------------
+#
+# Every measure and the coverage facts (COVER) of a record it depends on. A
+# measure whose fact is false reads None (NOT-RUN) on every row; a pair or
+# game measure needs the fact on every record of the game. The window
+# measures are sums of contributions, and a contribution needs EVERY fact: a
+# record that lost, cut or trimmed anything contributes no row at all, so no
+# capped game ever enters a window as a smaller clean sample. Identifiers and
+# the not-run counts need none.
+
+_HAND = ("whole", "hd")
+_SLOTS = _HAND + ("sl",)
+_NAMED = _SLOTS + ("cards",)
+_HELD = _NAMED + ("first", "held0", "ap")
+_PHASE = ("whole", "ph")
+CONTRIB_NEEDS = COVER
+
+NEEDS = {
+    "b4.hand.recorder": (), "b4.hand.meas": (), "b4.hand.phase": (), "b4.hand.deal": (),
+    "b4.hand.n": (), "b4.hand.n_exp": (), "b4.hand.n_reg": (),
+    "b4.hand.size": _HAND, "b4.hand.unres": _SLOTS, "b4.hand.notpool": _NAMED,
+    "b4.hand.dup": _SLOTS, "b4.hand.heldrej": _HELD, "b4.hand.w0": _NAMED,
+    "b4.hand.spx": _HAND, "b4.hand.spo": _HAND + ("sp",), "b4.hand.ds0": _HAND,
+    "b4.pick.out": _HAND, "b4.pick.slot": _HAND, "b4.pick.who": _HAND,
+    "b4.hand.picked": _HAND, "b4.hand.notrun": (), "b4.hand.eligible": CONTRIB_NEEDS,
+    "b4.ph.recorder": (), "b4.ph.phase": (), "b4.ph.role": (), "b4.ph.last": ("ph",),
+    "b4.ph.dvp": _PHASE, "b4.ph.picker": _PHASE + ("first",), "b4.ph.notdone": _PHASE,
+    "b4.rec.index": (), "b4.rec.inc": (), "b4.rec.conflict": (), "b4.rec.unreg": (),
+    "b4.rec.census": (), "b4.rec.hands": ("hd",), "b4.rec.cut": (), "b4.rec.notrun_hands": ("hd",),
+    "b4.rec.uncovered": (), "b4.app.unpaired": ("whole", "hd", "ap"), "b4.app.offline": ("whole", "ap"),
+    "b4.sc.rule": (),
+    "b4.game.records": (), "b4.game.paired": (), "b4.pair.n": _HAND, "b4.pair.unpair": _HAND,
+    "b4.sc.norule": _HAND, "b4.sc.open": _NAMED + ("first",), "b4.sc.k": _HELD,
+    "b4.pair.phase": (), "b4.pair.deal": (), "b4.pair.slot": _NAMED, "b4.pair.pick": _NAMED,
+    "b4.pair.spawn": _HAND, "b4.pair.held": _HELD,
+}
+NEEDS.update({name: _NAMED + ("first",) for name in REPORT_PICKS})
+NEEDS.update({name: CONTRIB_NEEDS for name in MEASURES[WINDOW_SUBJECT]})
+
+
+def covered(ok, needs) -> bool:
+    return all(ok[key] for key in needs)
+
+
+def _gate(row, ok) -> None:
+    """Every measure of `row` whose coverage facts are not all true: None."""
+    for name in row:
+        if row[name] is not None and not covered(ok, NEEDS[name]):
+            row[name] = None
+
+
+def _merged(facts) -> dict:
+    """A coverage fact of the game: true only when every record states it."""
+    return {key: all(rf.ok[key] for rf in facts) for key in COVER}
+
+
+def coverage_table() -> list:
+    """The catalog as rows (subject, measure, the facts it needs), each
+    measure of MEASURES once, in vocabulary order."""
+    return [(subject, name, NEEDS[name]) for subject, names in MEASURES.items() for name in names]
 
 
 def _reader(name):
@@ -1055,7 +1209,7 @@ def _register_card_vocabulary():
     for subject, names in MEASURES.items():
         for name in names:
             rm._register(rm.Entry("measure", name, (_reader(name),), subject=subject))
-    rm._register(rm.Entry("params", WEIGHTS, data=list(RARITIES)))
+    rm._register(rm.Entry("params", WEIGHTS, data=list(RARITIES), args=PROFILE_KEYED))
     rm._register(rm.Entry("params", WINDOW, data=[WINDOW_KEY]))
 
 

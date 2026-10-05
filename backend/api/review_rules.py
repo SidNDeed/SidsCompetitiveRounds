@@ -584,6 +584,17 @@ def _parse_time(v):
 RULE_KEYS = {"id", "scope", "effect", "post", "post_since", "line", "show"}
 
 
+def _param_values(values, entry) -> bool:
+    """One value set of a measure-parameter family: exactly its keys, finite."""
+    return (isinstance(values, dict) and set(values) == set(entry.data)
+            and all(_finite(x) for x in values.values()))
+
+
+def _digest_id(p) -> bool:
+    """A full lowercase hex sha256 (a deal profile identity)."""
+    return isinstance(p, str) and len(p) == _BOUNDS["digest_hex"] and _HEX.fullmatch(p) is not None
+
+
 def compile_rules(doc, bind, data) -> Ruleset:
     """Validate and compile a parsed rules.json under `bind`."""
     if not isinstance(doc, dict) or set(doc) != {"format", "nonce", "vocabulary", "closure",
@@ -604,8 +615,16 @@ def compile_rules(doc, bind, data) -> Ruleset:
         raise Refused("malformed", "measure_params")
     for family, values in params.items():
         entry = bind(family, "params")
-        if (not isinstance(values, dict) or set(values) != set(entry.data)
-                or not all(_finite(x) for x in values.values())):
+        if entry.args:
+            # a family keyed by deal profile identity (card_measures
+            # PROFILE_KEYED): one full value set per full-digest profile id,
+            # so a game is only ever measured with its own profile's values
+            if not isinstance(values, dict) or not all(
+                    _digest_id(p) and _param_values(v, entry) for p, v in values.items()):
+                raise Refused("malformed", "measure_params values")
+            rs.params[family] = {p: dict(v) for p, v in values.items()}
+            continue
+        if not _param_values(values, entry):
             raise Refused("malformed", "measure_params values")
         rs.params[family] = dict(values)
     rules = doc["rules"]

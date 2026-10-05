@@ -21,14 +21,23 @@ this repository. With no valid revision the pass attaches records and purges,
 writes no derived row and opens nothing.
 
 Outside this lane's own tables, statements here read `matches`,
-`ranked_series`, `players` and `runtime_settings`, and write only
-`seat_evidence_findings` and, through seat_evidence.post_finding,
-`flagged_matches` (advisory rows, `flag_reason = 'review'`,
-`auto_invalidated = false`, only for a rule the revision arms). The lane's own
-tables are `card_evidence`, `card_pool_registry`, `card_games`,
-`card_hand_outside`, `card_phase_outside`, `card_contrib` and
-`card_player_daily`. No statement here touches a match result, a rating, gold,
-`match_cards` or `card_offers`; a test scans every statement of this module.
+`ranked_series`, `players`, `match_cards` (the report projection, read only)
+and `runtime_settings`, and write only `seat_evidence_findings` (rows of the
+card evidence domain only, `domain = 'card'`) and, through
+seat_evidence.post_finding, `flagged_matches` (advisory rows,
+`flag_reason = 'review'`, `auto_invalidated = false`, only for a rule the
+revision arms). The lane's own tables are `card_evidence`,
+`card_pool_registry`, `card_games`, `card_hand_outside`,
+`card_phase_outside`, `card_contrib` and `card_player_daily`. No statement
+here writes a match result, a rating, gold, `match_cards` or `card_offers`;
+a test scans every statement of this module.
+
+A card finding's key is built so that it can never equal a seat finding's:
+it is `card` and a SPACE, then the game or window fields, and no seat
+finding key can hold a space (a stable game key is printable ASCII without
+the space, `"` and the backslash; the other parts are ids and dates). Its
+rows also carry their own domain, and every card statement on the shared
+table names that domain.
 """
 
 from __future__ import annotations
@@ -126,8 +135,12 @@ async def store_record(db, env: dict, rec: dict, seat_id, other_id, header_versi
             return {"status": "already_recorded"}
         kind = ("attach_key" if prior["attach_key"] != env["attach"]
                 else "other_seat" if prior["other_player_id"] != other_id else "payload")
+        # The marker's time is read after this row's lock is held: the
+        # worker reads a game's records FOR SHARE, so an evaluation that did
+        # not see this marker committed before this statement ran, and the
+        # marker is later than its processed_at (the candidate query wakes it).
         await db.execute(text(
-            "UPDATE card_evidence SET conflict_at = COALESCE(conflict_at, now()), "
+            "UPDATE card_evidence SET conflict_at = COALESCE(conflict_at, clock_timestamp()), "
             "  conflict_kind = COALESCE(conflict_kind, :ck) WHERE id = :i"),
             {"ck": kind, "i": prior["id"]})
         await db.commit()
@@ -193,9 +206,10 @@ async def _registry(db, digests) -> dict:
 
 # Games waiting for work, least recently processed first. With a revision:
 # every game not yet final; every game holding its lists whose last evaluation
-# was under another revision; every game with a record received, or a census
-# registered for one of its records, after it was last processed. With none:
-# only games not yet attached to their match.
+# was under another revision; every game with a record received, a conflict
+# marked on one of its records, or a census registered for one of its
+# records, after it was last processed. With none: only games not yet
+# attached to their match.
 _CANDIDATES = text(
     "SELECT e.stable_game_key k, LEAST(e.seat_player_id, e.other_player_id) lo, "
     "       GREATEST(e.seat_player_id, e.other_player_id) hi, max(e.received_at) rx "
@@ -207,7 +221,8 @@ _CANDIDATES = text(
     " WHERE (CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
     "    OR (CAST(:rev AS varchar) IS NOT NULL AND (g.finalized_at IS NULL "
     "        OR (e.lists_purged_at IS NULL AND (g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) "
-    "            OR e.received_at > g.processed_at OR p.registered_at > g.processed_at)))) "
+    "            OR e.received_at > g.processed_at OR e.conflict_at > g.processed_at "
+    "            OR p.registered_at > g.processed_at)))) "
     " GROUP BY e.stable_game_key, LEAST(e.seat_player_id, e.other_player_id), "
     "          GREATEST(e.seat_player_id, e.other_player_id) "
     " ORDER BY min(g.processed_at) NULLS FIRST, rx LIMIT CAST(:lim AS int)")
@@ -241,6 +256,22 @@ def _signature(match, rows, named_ids, registry) -> str:
         ",".join("%d:%d:%d" % (r["id"], 1 if r["conflict_at"] else 0, 1 if r["id"] in named_ids else 0)
                  for r in rows),
         hashlib.sha256(regs.encode("ascii")).hexdigest())
+
+
+async def _report(db, match_id):
+    """The match report's picked card names per player (str player id), as
+    match_cards holds them for this match; None when the match has no
+    match_cards row (no report to compare). A read: nothing here writes
+    match data or changes a report."""
+    rows = (await db.execute(text(
+        "SELECT player_id, card_name FROM match_cards WHERE match_id = :m ORDER BY id"),
+        {"m": match_id})).all()
+    if not rows:
+        return None
+    out = {}
+    for player, name in rows:
+        out.setdefault(str(player), []).append(name)
+    return out
 
 
 def _nonzero(row, keys) -> dict:
@@ -309,17 +340,17 @@ async def _recompute_daily(db, keys) -> None:
 
 async def _write_contrib(db, key, lo, hi, view, rs, match) -> list:
     """Replace this game's contributions under this revision and recompute
-    every daily row they touched, before and after. Returns the new keys."""
+    every daily row they touched, before and after. Returns every touched key,
+    the retired ones as well as the new ones, so each window either side of
+    the change is evaluated (and its findings cleaned) again."""
     rev = rs.rev
-    weights = rs.params.get(cm.WEIGHTS)
     day = match["ended_at"].astimezone(timezone.utc).date()
     old = (await db.execute(text(
         "DELETE FROM card_contrib WHERE " + _WHERE_GAME + " AND rules_rev = :rev "
         "RETURNING subject_player_id, utc_day, source, coverage, deal_profile"),
         {"k": key, "lo": lo, "hi": hi, "rev": rev})).all()
     touched = {(str(r[0]), r[1], r[2], r[3], r[4], rev) for r in old}
-    new = []
-    for c in cm.contributions(view, weights):
+    for c in cm.contributions(view):
         vals = {"k": key, "lo": lo, "hi": hi, "r": c["recorder"], "s": c["subject"],
                 "src": c["source"], "cov": c["coverage"], "p": c["profile"], "rev": rev, "d": day,
                 "m": match["id"], "hands": c["hands"], "slots": c["slots"],
@@ -333,11 +364,9 @@ async def _write_contrib(db, key, lo, hi, view, rs, match) -> list:
             + ", ".join(_DAILY_COLS) + ") "
             "VALUES (:k, :lo, :hi, CAST(:r AS uuid), CAST(:s AS uuid), :src, :cov, :p, :rev, :d, :m, "
             + ", ".join(":" + c_ for c_ in _DAILY_COLS) + ")"), vals)
-        nk = (c["subject"], day, c["source"], c["coverage"], c["profile"], rev)
-        touched.add(nk)
-        new.append(nk)
+        touched.add((c["subject"], day, c["source"], c["coverage"], c["profile"], rev))
     await _recompute_daily(db, touched)
-    return new
+    return sorted(touched)
 
 
 async def _windows(db, keys, rs) -> list:
@@ -364,19 +393,63 @@ async def _windows(db, keys, rs) -> list:
     return out
 
 
+def game_key(key, lo, hi) -> str:
+    """A card game's finding key (scope game): `card`, a space, the game."""
+    return "card %s|%s|%s" % (key, lo, hi)
+
+
+def window_key(subject, source, coverage, profile, day) -> str:
+    """A card window's finding key (scope sitting): `card win`, a space, the
+    window. Two spaces, so it never equals a game key either."""
+    return "card win %s|%s|%s|%s|%s" % (subject, source, coverage, profile, day)
+
+
+async def upsert_card_finding(db, scope, dedup_key, rule_id, rules_rev, match_id, details) -> int:
+    """seat_evidence.upsert_finding for the card domain: one row per (domain
+    card, scope, key, rule); a repeat with the same details leaves changed_at
+    alone. The conflict target is the unique index over the domain column,
+    which this lane's migration adds to the shared table."""
+    det = se._dumps(se.bounded_details(details))
+    row = (await db.execute(text(
+        "INSERT INTO seat_evidence_findings (domain, scope, dedup_key, rule_id, rules_rev, match_id, details) "
+        "VALUES ('card', :s, :k, :rid, :rev, CAST(:m AS uuid), CAST(:d AS jsonb)) "
+        "ON CONFLICT (domain, scope, dedup_key, rule_id) DO UPDATE SET "
+        "  details = EXCLUDED.details, rules_rev = EXCLUDED.rules_rev, "
+        "  match_id = COALESCE(EXCLUDED.match_id, seat_evidence_findings.match_id), "
+        "  changed_at = CASE WHEN seat_evidence_findings.details = EXCLUDED.details "
+        "                    THEN seat_evidence_findings.changed_at ELSE now() END, "
+        "  computed_at = now() "
+        "RETURNING id"), {"s": scope, "k": dedup_key, "rid": rule_id, "rev": rules_rev,
+                          "m": None if match_id is None else str(match_id), "d": det})).first()
+    return int(row[0])
+
+
 async def _post_findings(db, findings, dedup_of, rs, match_id) -> tuple:
-    """Upsert one finding per (dedup key, rule) the evaluation produced, post
-    those the revision arms, and remove this game's unposted findings it no
-    longer produces. Returns (count, produced dedup keys)."""
+    """Upsert one finding per (dedup key, rule) the evaluation produced and
+    post those the revision arms. Returns (count, produced (scope, key, rule
+    id))."""
     grouped = {}
     for rule, items in findings:
         for k, item in items:
             grouped.setdefault((dedup_of(k), rule), []).append(item)
     for (dedup, rule), items in sorted(grouped.items(), key=lambda x: (x[0][0][1], x[0][1].id)):
         scope, key = dedup
-        fid = await se.upsert_finding(db, scope, key, rule.id, rs.rev, match_id, {"items": items})
+        fid = await upsert_card_finding(db, scope, key, rule.id, rs.rev, match_id, {"items": items})
         await se.post_finding(db, fid, rs)
-    return len(grouped), {(d[1], rule.id) for (d, rule) in grouped}
+    return len(grouped), {(d[0], d[1], rule.id) for (d, rule) in grouped}
+
+
+async def _retire_findings(db, mine, produced) -> None:
+    """Remove each unposted card finding of the keys this evaluation owns
+    (`mine`: (scope, key)) that it did not produce, whatever revision stamped
+    it: a rule a newer revision dropped, or whose value no longer holds, leaves
+    no stale row. Only the card domain, only these keys."""
+    for scope, key in mine:
+        keep = sorted(rid for (s, dk, rid) in produced if s == scope and dk == key)
+        await db.execute(text(
+            "DELETE FROM seat_evidence_findings WHERE domain = 'card' AND scope = :s AND dedup_key = :k "
+            "AND flag_id IS NULL AND NOT (rule_id = ANY(CAST(:ids AS varchar[])))"),
+            {"s": scope, "k": key, "ids": keep or [""]})
 
 
 async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
@@ -403,7 +476,7 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
         "SELECT id, seat_player_id, other_player_id, attach_key, payload, pool_digest, conflict_at, "
         "       received_at FROM card_evidence "
         "WHERE stable_game_key = :k AND LEAST(seat_player_id, other_player_id) = :lo "
-        "  AND GREATEST(seat_player_id, other_player_id) = :hi ORDER BY id"), b)).mappings().all()
+        "  AND GREATEST(seat_player_id, other_player_id) = :hi ORDER BY id FOR SHARE"), b)).mappings().all()
     if not rows:
         return "empty", 0, 0, False
     keys = sorted({r["attach_key"] for r in rows})
@@ -431,9 +504,10 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
         if any(not _has_lists(r["rec"]) for r in records):
             final = True          # lists purged: nothing left to derive
         else:
+            report = await _report(db, match["id"])
             try:
                 view = await asyncio.to_thread(cm.card_view, records, registry, match["sc"],
-                                               rs.params.get(cm.WEIGHTS))
+                                               rs.params.get(cm.WEIGHTS), report)
             except Exception as exc:          # noqa: BLE001 -- recorded on the game, next game
                 view = None
                 fault = type(exc).__name__
@@ -444,24 +518,19 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
                 windows = [cm.window_row(agg) for _k, agg in wins]
                 subjects = cm.card_subjects(view, windows)
                 findings, notes, _fired, errors = await asyncio.to_thread(rs.evaluate_card, subjects)
-                game_dedup = "card|%s|%s|%s" % (key, lo, hi)
+                game_dedup = ("game", game_key(key, lo, hi))
 
                 def dedup_of(k):
                     if k[0] == cm.WINDOW_SUBJECT:
                         s, d, src, cov, p = wins[k[1]][0]
-                        return ("sitting", "card|win|%s|%s|%s|%s|%s" % (s, src, cov, p, d))
-                    return ("game", game_dedup)
+                        return ("sitting", window_key(s, src, cov, p, d))
+                    return game_dedup
                 if notes:
                     findings = [(rule, [(k, dict(it, notes=[ln for _r, ln in notes])) for k, it in items])
                                 for rule, items in findings]
                 fired, produced = await _post_findings(db, findings, dedup_of, rs, match["id"])
-                mine = [game_dedup] + [dedup_of((cm.WINDOW_SUBJECT, j))[1] for j in range(len(wins))]
-                for d in mine:
-                    keep = sorted(rid for (dk, rid) in produced if dk == d)
-                    await db.execute(text(
-                        "DELETE FROM seat_evidence_findings WHERE dedup_key = :k AND flag_id IS NULL "
-                        "AND rules_rev = :rev AND NOT (rule_id = ANY(CAST(:ids AS varchar[])))"),
-                        {"k": d, "rev": rev, "ids": keep or [""]})
+                mine = [game_dedup] + [dedup_of((cm.WINDOW_SUBJECT, j)) for j in range(len(wins))]
+                await _retire_findings(db, mine, produced)
                 evaluated = rev
     await db.execute(text(
         "UPDATE card_games SET match_id = :m, series_sc = :sc, signature = :s, processed_at = now(), "
@@ -550,7 +619,8 @@ def _jsonable(view) -> dict:
             "phases": [row for row, _m in view["phases"]],
             "records": [row for row, _m in view["records"]],
             "pairs": [row for row, _m in view["pairs"]],
-            "game": view["game"]}
+            "game": view["game"],
+            "not_run_because": view["uncovered"]}
 
 
 async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dict:
@@ -601,8 +671,9 @@ async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dic
             view_rows = named if match is not None else prs
             records = [r for r in _records(view_rows) if _has_lists(r["rec"])]
             registry = await _registry(db, {r["pool_digest"] for r in prs if r["pool_digest"]})
+            report = await _report(db, match["id"]) if match is not None else None
             view = cm.card_view(records, registry, g["series_sc"] if g else None,
-                                rs.params.get(cm.WEIGHTS) if rs is not None else None)
+                                rs.params.get(cm.WEIGHTS) if rs is not None else None, report)
             b = {"k": key, "lo": lo, "hi": hi}
             hand = (await db.execute(text(
                 "SELECT recorder_player_id, dealer_player_id, phase, deal, rules_rev, measures "
@@ -616,8 +687,8 @@ async def admin_view(db, *, match_id=None, stable_game_key=None, rs=None) -> dic
                 + " ORDER BY rules_rev, subject_player_id, source"), b)).mappings().all()
             findings = (await db.execute(text(
                 "SELECT rule_id, rules_rev, details, flag_id FROM seat_evidence_findings "
-                "WHERE scope = 'game' AND dedup_key = :d ORDER BY rule_id"),
-                {"d": "card|%s|%s|%s" % (key, lo, hi)})).mappings().all()
+                "WHERE domain = 'card' AND scope = 'game' AND dedup_key = :d ORDER BY rule_id"),
+                {"d": game_key(key, lo, hi)})).mappings().all()
             out["games"].append({
                 "stable_game_key": key,
                 "match_id": str(match["id"]) if match else None,
