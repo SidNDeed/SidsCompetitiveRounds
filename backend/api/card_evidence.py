@@ -59,6 +59,10 @@ EvidenceRefused = se.EvidenceRefused
 # Scheduling and retention bounds (operational; pinned by value in the guard).
 CARD_LIMITS = {"games_per_pass": 500, "expiry_days": 14, "list_retention_days": 120,
                "derived_retention_days": 400, "unregistered_days": 30, "admin_rows": 50}
+# The bound on visits that raise (operational; pinned by value in the guard):
+# how many in a row park a game under one revision, and the width of the
+# recorded error word (card_games.derive_fault).
+CARD_FAULT_LIMITS = {"attempts": 5, "word_chars": 40}
 SWITCHES = ("card_evidence_accept", "card_evidence_worker", "card_evidence_purge")
 LIST_KEYS = ("cards", "held0", "ph", "hd", "ap")
 _PRINTABLE = re.compile(r"[ -~]+")
@@ -211,6 +215,14 @@ async def _registry(db, digests) -> dict:
 # holding its lists with a record received, a conflict marked on one of its
 # records, or a census registered for one of its records, after it was last
 # processed. With none: only games not yet attached to their match.
+# Either way not a parked game: one whose visits under this revision (or
+# with none) raised CARD_FAULT_LIMITS["attempts"] times in a row, unless a
+# record was received, a conflict marked or a census registered for it
+# after its last visit. A visit that raises is recorded on the game (its
+# error class, the attempt count, the revision, the visit time: _fault) and
+# the pass moves on; nothing about it is finalized or stamped evaluated. A
+# visit that completes clears the count; a new revision or new input ends
+# the parking.
 _CANDIDATES = text(
     "SELECT e.stable_game_key k, LEAST(e.seat_player_id, e.other_player_id) lo, "
     "       GREATEST(e.seat_player_id, e.other_player_id) hi, max(e.received_at) rx "
@@ -219,11 +231,15 @@ _CANDIDATES = text(
     "   AND g.pair_lo = LEAST(e.seat_player_id, e.other_player_id) "
     "   AND g.pair_hi = GREATEST(e.seat_player_id, e.other_player_id) "
     "  LEFT JOIN card_pool_registry p ON p.digest = e.pool_digest "
-    " WHERE (CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
+    " WHERE ((CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
     "    OR (CAST(:rev AS varchar) IS NOT NULL AND (g.finalized_at IS NULL "
     "        OR g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) "
     "        OR (e.lists_purged_at IS NULL AND (e.received_at > g.processed_at "
     "            OR e.conflict_at > g.processed_at OR p.registered_at > g.processed_at)))) "
+    "   ) AND NOT (COALESCE(g.fault_attempts, 0) >= CAST(:cap AS int) "
+    "        AND g.fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) "
+    "        AND NOT COALESCE(e.received_at > g.processed_at OR e.conflict_at > g.processed_at "
+    "                         OR p.registered_at > g.processed_at, false)) "
     " GROUP BY e.stable_game_key, LEAST(e.seat_player_id, e.other_player_id), "
     "          GREATEST(e.seat_player_id, e.other_player_id) "
     " ORDER BY min(g.processed_at) NULLS FIRST, rx LIMIT CAST(:lim AS int)")
@@ -578,7 +594,8 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
                                        "lag": se.READY_LAG_S})).mappings().first()
     if rs is None:
         await db.execute(text(
-            "UPDATE card_games SET match_id = :m, series_sc = :sc, processed_at = now() WHERE "
+            "UPDATE card_games SET match_id = :m, series_sc = :sc, processed_at = now(), "
+            "  fault_attempts = 0, fault_rev = NULL WHERE "
             + _WHERE_GAME), dict(b, m=match["id"] if match else None, sc=match["sc"] if match else None))
         return ("attached" if match else "waiting"), 0, 0, False
     named, other_key = se.attached_records(rows, match)
@@ -587,7 +604,8 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
     sig = _signature(match, rows, named_ids, registry)
     expired = g["first_seen_at"] < datetime.now(timezone.utc) - timedelta(days=lim["expiry_days"])
     if sig == g["signature"] and g["evaluated_rev"] == rev and not (expired and match is not None):
-        await db.execute(text("UPDATE card_games SET processed_at = now() WHERE " + _WHERE_GAME), b)
+        await db.execute(text("UPDATE card_games SET processed_at = now(), fault_attempts = 0, "
+                              "fault_rev = NULL WHERE " + _WHERE_GAME), b)
         return "unchanged", 0, 0, False
     final = match is not None and ((len(named) >= cm.W["players"] and not other_key) or expired)
     fired = errors = 0
@@ -618,40 +636,99 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
     # a final game is stamped with the revision that visited it, derived or
     # not, so the candidate query visits it again only under another one
     stamp = evaluated or (rev if final and fault is None else None)
+    # a view that raised counts as a faulted visit (_FAULT_COUNT); a visit
+    # without one clears the count
     await db.execute(text(
         "UPDATE card_games SET match_id = :m, series_sc = :sc, signature = :s, processed_at = now(), "
         "  derive_fault = :fault, evaluated_rev = COALESCE(CAST(:ev AS varchar), evaluated_rev), "
-        "  finalized_at = CASE WHEN :f THEN COALESCE(finalized_at, now()) ELSE NULL END "
-        "WHERE " + _WHERE_GAME),
+        "  finalized_at = CASE WHEN :f THEN COALESCE(finalized_at, now()) ELSE NULL END, "
+        + _FAULT_COUNT + "WHERE " + _WHERE_GAME),
         dict(b, m=match["id"] if match else None, sc=match["sc"] if match else None,
              s=sig if fault is None else None, fault=fault, ev=stamp,
-             f=bool(final) and fault is None))
+             f=bool(final) and fault is None, rev=rev))
     state = "final" if final and fault is None else ("evaluated" if evaluated else
                                                      ("fault" if fault else "waiting"))
     return state, fired, errors, evaluated is not None
 
 
+# A faulted visit on the game row: the count grows while the faults are under
+# one revision (or none) and starts again under another; a visit without a
+# fault clears it.
+_FAULT_COUNT = (
+    "  fault_attempts = CASE WHEN CAST(:fault AS varchar) IS NULL THEN 0 "
+    "    WHEN fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) THEN fault_attempts + 1 ELSE 1 END, "
+    "  fault_rev = CASE WHEN CAST(:fault AS varchar) IS NULL THEN NULL ELSE CAST(:rev AS varchar) END ")
+
+# The games parked under the revision of the last card pass (see the
+# candidate query); before this worker's first pass, and on a box that runs
+# no worker, the unknown value. Shown on /health as card_evidence_parked.
+PARKED_UNKNOWN = -1
+_PARKED = {"n": PARKED_UNKNOWN}
+
+# Test hook: when set, called with each candidate's key before it is
+# visited, inside its transaction (a raise there is a faulted visit). Never
+# set outside the tests.
+_VISIT_HOOK = None
+
+
+def parked() -> int:
+    return _PARKED["n"]
+
+
+async def _fault(session_factory, key, lo, hi, rev, word) -> None:
+    """Record a visit that raised, in a transaction of its own (the visit's
+    was rolled back): the error class, the attempt count, the revision and
+    the visit time. Nothing is finalized, signed or stamped evaluated."""
+    async with session_factory() as db:
+        b = {"k": key, "lo": lo, "hi": hi}
+        await db.execute(text(
+            "INSERT INTO card_games (stable_game_key, pair_lo, pair_hi) VALUES (:k, :lo, :hi) "
+            "ON CONFLICT DO NOTHING"), b)
+        await db.execute(text(
+            "UPDATE card_games SET derive_fault = :fault, processed_at = now(), " + _FAULT_COUNT
+            + "WHERE " + _WHERE_GAME), dict(b, fault=word[:CARD_FAULT_LIMITS["word_chars"]], rev=rev))
+        await db.commit()
+
+
 async def games_pass(session_factory, state=None, limit: int = None) -> dict:
-    """The card games waiting for work, each in its own transaction."""
+    """The card games waiting for work, each in its own transaction. A visit
+    that raises is rolled back, recorded on its game (_fault) and counted,
+    and the pass moves on to the next game; the parked count is read at the
+    end of the pass."""
     rs = state.ruleset if state is not None else None
+    rev = rs.rev if rs else None
     stats = {"evaluated": 0, "fired": 0, "rule_errors": 0}
     async with session_factory() as db:
         if await setting(db, "card_evidence_worker") != "1":
             return {"off": 1}
         cands = (await db.execute(_CANDIDATES, {
-            "lim": limit or CARD_LIMITS["games_per_pass"], "rev": rs.rev if rs else None})).all()
+            "lim": limit or CARD_LIMITS["games_per_pass"], "rev": rev,
+            "cap": CARD_FAULT_LIMITS["attempts"]})).all()
     for key, lo, hi, _rx in cands:
         async with session_factory() as db:
             try:
+                if _VISIT_HOOK is not None:
+                    _VISIT_HOOK(key)
                 st, fired, errors, done = await evaluate_card_game(db, key, lo, hi, rs)
                 await db.commit()
-            except Exception as exc:          # noqa: BLE001 -- counted, next game
+            except Exception as exc:          # noqa: BLE001 -- recorded on the game, next game
                 await db.rollback()
                 st, fired, errors, done = "error:" + type(exc).__name__, 0, 0, False
+        if st.startswith("error:"):
+            try:
+                await _fault(session_factory, key, lo, hi, rev, st)
+            except Exception:                 # noqa: BLE001 -- counted; the game is visited again
+                stats["fault_unrecorded"] = stats.get("fault_unrecorded", 0) + 1
         stats[st] = stats.get(st, 0) + 1
         stats["evaluated"] += 1 if done else 0
         stats["fired"] += fired
         stats["rule_errors"] += errors
+    async with session_factory() as db:
+        _PARKED["n"] = int((await db.execute(text(
+            "SELECT count(*) FROM card_games WHERE fault_attempts >= CAST(:cap AS int) "
+            "AND fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar)"),
+            {"cap": CARD_FAULT_LIMITS["attempts"], "rev": rev})).scalar())
+    stats["parked"] = _PARKED["n"]
     return stats
 
 

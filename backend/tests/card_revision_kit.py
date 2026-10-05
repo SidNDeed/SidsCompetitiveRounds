@@ -336,3 +336,34 @@ def build_card_revision(tmp, doc=None, cases=None, name="card"):
 def load(store, rev):
     rs = rr.load_dir(os.path.join(store, "rules-" + rev))
     return rr.State(rs.rev, rs)
+
+
+# fix pass 3 (M2): every revision shape the loader accepts, as (draft,
+# self-test cases, has card rules). Seat rules only, card rules only, both,
+# card rules with each optional card family absent, card families with no
+# card rule, and an empty draft.
+def revision_shapes():
+    import review_testkit as tk
+    seat, card = tk.synthetic_doc(), card_doc()
+    both = dict(seat, rules=seat["rules"] + card["rules"],
+                measure_params=dict(seat["measure_params"], **card["measure_params"]))
+    no_win = (ID_WIN,)
+    return {
+        "seat-only": (seat, tk.quiet_cases(), False),
+        "card-only": (card, quiet_card_cases(), True),
+        "both": (both, tk.quiet_cases() + quiet_card_cases(), True),
+        "card-no-window": (card_doc(window=False, drop=no_win), quiet_card_cases(), True),
+        "card-no-weights": (card_doc(weights=False), quiet_card_cases(), True),
+        "card-no-families": (card_doc(weights=False, window=False, drop=no_win), quiet_card_cases(), True),
+        "card-families-no-rules": (dict(card, rules=[]), [], False),
+        "empty": (dict(seat, rules=[], measure_params={}), [], False),
+    }
+
+
+def build_shapes(tmp):
+    """Each shape built and loaded: name -> State."""
+    out = {}
+    for name, (doc, cases, _card) in revision_shapes().items():
+        store, rev = build_card_revision(tmp, doc, cases, name="shape-" + name)
+        out[name] = load(store, rev)
+    return out

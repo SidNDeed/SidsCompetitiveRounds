@@ -1573,3 +1573,106 @@ def test_m1_fix3_the_dynamic_method_sees_a_read_moved_into_a_measure():
     finally:
         cm._hand_row = orig
     assert "sl" in got.dyn["b4.hand.phase"]
+
+
+# -- M2: every revision shape the loader accepts, at every evaluator entry point ------------
+
+_SHAPES = {}
+
+
+def _shapes(tmp_path_factory):
+    if not _SHAPES:
+        _SHAPES.update(k.build_shapes(tmp_path_factory.mktemp("shapes")))
+    return _SHAPES
+
+
+SHAPE_NAMES = sorted(k.revision_shapes())
+
+
+@pytest.mark.parametrize("shape", SHAPE_NAMES)
+def test_m2_each_revision_shape_at_each_evaluator_entry_point(shape, tmp_path_factory):
+    """The unit cells of the revision-shape table: the card evaluator, the
+    card case, the card view the worker derives with the revision's weights,
+    the window read without a window family, and the seat evaluator the same
+    published state runs in the review pass. A shape without card rules
+    evaluates to an empty result, never an error."""
+    import asyncio
+    import review_testkit as tk
+    st = _shapes(tmp_path_factory)[shape]
+    rs = st.ruleset
+    _doc, _cases, has_card = k.revision_shapes()[shape]
+    assert (rr.CARD_CORE in rs.core) == has_card == bool(rs.card_rules)
+    v = k.view([("a", "b", k.dup_record())], None, None, rs.params.get(cm.WEIGHTS))
+    windows = [cm.window_row(dict(c, games=1)) for c in cm.contributions(v)]
+    findings, notes, fired, errors = rs.evaluate_card(cm.card_subjects(v, windows))
+    assert errors == 0
+    if has_card:
+        assert k.ID_DUP in fired                                   # control: the card evaluator ran
+    else:
+        assert (findings, notes, fired, errors) == ([], [], [], 0)
+    case = k.quiet_card_cases()[1]["card"]
+    got = rs.card_case(case, None)
+    assert got == ([k.ID_DUP] if has_card else None)
+    if cm.WINDOW not in rs.params:
+        assert asyncio.run(ce._windows(None, [("s", None, "self", "one", "p", rs.rev)], rs)) == ([], set())
+    records = tk.game()
+    _f, _seat_fired, seat_errors = rs.evaluate_game(records, tk.MATCH, tk.registry_of(records))
+    assert seat_errors == 0
+
+
+@pytest.mark.parametrize("shape", [s for s in SHAPE_NAMES if not k.revision_shapes()[s][2]])
+def test_m2_a_shape_without_card_rules_refuses_a_card_self_test_case_at_build(shape, tmp_path):
+    doc, cases, _card = k.revision_shapes()[shape]
+    with pytest.raises(rr.Refused):
+        k.build_card_revision(tmp_path, doc, cases + k.quiet_card_cases(), name="with-card-case")
+    k.build_card_revision(tmp_path, doc, cases, name="control")    # control: the shape itself builds
+
+
+def test_m2_the_shape_table_covers_every_shape_the_loader_accepts():
+    """The table's rows: seat rules present or not, card rules present or
+    not, and with card rules each optional card family present or not."""
+    shapes = k.revision_shapes()
+    rows = set()
+    for name, (doc, _c, has_card) in shapes.items():
+        seat = any(r["scope"] != "card" for r in doc["rules"])
+        fams = tuple(sorted(f for f in (cm.WEIGHTS, cm.WINDOW) if f in doc["measure_params"]))
+        rows.add((seat, has_card, fams))
+    every = {(s, c, f) for s in (False, True) for c in (False, True)
+             for f in ((), (cm.WEIGHTS,), (cm.WINDOW,), tuple(sorted((cm.WEIGHTS, cm.WINDOW))))}
+    print("revision shapes: %d built, %d of %d (seat, card, families) rows" % (len(shapes), len(rows), len(every)))
+    assert len(rows) == len(shapes)
+    # the rows not built are the same code path as a built one: the seat
+    # rules are never read by the card worker, and the card families are
+    # read only through rs.params (each family present and absent is built)
+    assert {(c, f) for _s, c, f in rows} >= {(True, f) for _s, _c, f in every}
+
+
+# -- M2: the liveness bound ------------------------------------------------------------------
+
+def test_m2_the_fault_bound_is_pinned_and_the_fault_word_fits_its_column():
+    assert ce.CARD_FAULT_LIMITS["attempts"] > 0
+    sql = _read(BACKEND, "sql", "370_card_evidence.sql")
+    width = int(re.search(r"derive_fault\s+VARCHAR\((\d+)\)", sql).group(1))
+    assert ce.CARD_FAULT_LIMITS["word_chars"] == width
+    assert "fault_attempts INTEGER NOT NULL DEFAULT 0" in sql and "fault_rev VARCHAR(16) NULL" in sql
+    rev_width = int(re.search(r"evaluated_rev\s+VARCHAR\((\d+)\)", sql).group(1))
+    assert "fault_rev VARCHAR(%d)" % rev_width in sql
+
+
+def test_m2_the_parked_word_is_required_and_on_both_arms():
+    import schemas
+    f = schemas.HealthResponse.model_fields["card_evidence_parked"]
+    assert f.annotation is int and f.is_required()
+    assert inspect.getsource(_main().health_check).count("card_evidence_parked=_cev.parked()") == 2
+    assert ce.parked() == ce.PARKED_UNKNOWN < 0                    # no pass has run in this process
+
+
+def test_m2_a_visit_that_raises_is_recorded_and_the_pass_moves_on():
+    src = inspect.getsource(ce.games_pass)
+    assert "await _fault(session_factory, key, lo, hi, rev, st)" in src
+    q = ce._CANDIDATES.text
+    assert "NOT (COALESCE(g.fault_attempts, 0) >= CAST(:cap AS int)" in q
+    assert "g.fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar)" in q
+    # nothing is finalized, signed or stamped evaluated by the fault record
+    f = inspect.getsource(ce._fault)
+    assert "finalized_at" not in f and "evaluated_rev" not in f and "signature" not in f

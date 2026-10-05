@@ -1032,6 +1032,13 @@ class HealthResponse(BaseModel):
     # registered on the app, else 0). Derived on every request; equal on both
     # roles; no default, as above. Absent on any build before the lane.
     card_evidence: int
+    # card_evidence_parked: how many card games the worker's last card pass
+    # left parked under its revision (card_evidence.parked: visits that
+    # raised up to the attempt bound, skipped until new input or another
+    # revision). Read from this process's memory, so it answers on both arms;
+    # card_evidence.PARKED_UNKNOWN before this worker's first pass and on a
+    # box that runs no worker. No default, as above.
+    card_evidence_parked: int
     # review_eval: 8 hex of the review code's file digest
     # (review_rules.review_eval: review_measures.py and review_rules.py, by
     # file). Equal on both roles; the build discriminator through the edge.

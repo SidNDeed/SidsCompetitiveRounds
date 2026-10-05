@@ -107,6 +107,11 @@ CREATE TABLE IF NOT EXISTS card_games (
     CONSTRAINT card_games_pk PRIMARY KEY (stable_game_key, pair_lo, pair_hi),
     CONSTRAINT card_games_order CHECK (pair_lo < pair_hi)
 );
+-- A visit that raised: how many in a row, under which revision (NULL: none).
+-- The worker skips a game whose count reached its bound under the current
+-- revision until new input arrives or the revision changes.
+ALTER TABLE card_games ADD COLUMN IF NOT EXISTS fault_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE card_games ADD COLUMN IF NOT EXISTS fault_rev VARCHAR(16) NULL;
 CREATE INDEX IF NOT EXISTS ix_card_games_match ON card_games (match_id);
 
 CREATE TABLE IF NOT EXISTS card_hand_outside (

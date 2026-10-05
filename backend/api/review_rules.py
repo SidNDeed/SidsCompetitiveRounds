@@ -365,11 +365,23 @@ class Ruleset:
     def run_selftest(self, cases, deadline):
         return self.core["core.game"].impl[-1](self, cases, deadline)
 
+    # A revision with no card rules binds no card evaluator (see load). It
+    # evaluates no card rule: the result is empty (no finding, note, fired
+    # rule or rule error), and the card worker derives, retires what another
+    # revision wrote and stamps this revision as for any other. Its self-test
+    # refuses a card case before asking (run_selftest); asked directly, a
+    # card case is one it cannot run (None).
     def evaluate_card(self, subjects, budget=None):
-        return self.core["core.card"].impl[0](self, subjects, budget)
+        entry = self.core.get(CARD_CORE)
+        if entry is None:
+            return [], [], [], 0
+        return entry.impl[0](self, subjects, budget)
 
     def card_case(self, case, budget):
-        return self.core["core.card"].impl[-1](self, case, budget)
+        entry = self.core.get(CARD_CORE)
+        if entry is None:
+            return None
+        return entry.impl[-1](self, case, budget)
 
     def render_line(self, rule, items):
         return self.core["core.render"].impl[0](rule, items)
@@ -681,11 +693,13 @@ def compile_rules(doc, bind, data) -> Ruleset:
         rs.rules.append(r)
     for name in CORE_ENTRIES:
         rs.core[name] = bind(name, "core")
-    # The card evaluator is bound only by a revision that has card rules. A
-    # revision sealed before card_measures.py joined the code closure is not
-    # loaded as it stands: load_dir refuses it as stale (code closure), and it
-    # must be rebuilt and resealed against this code; rebuilt without card
-    # rules, it binds no card entry.
+    # The card evaluator is bound only by a revision that has card rules;
+    # rebuilt without card rules, a revision binds no card entry. A missing
+    # required closure file is malformed: closure (a revision sealed before
+    # card_measures.py joined the code closure lacks it); stale: code closure
+    # is for a complete name set whose fingerprint changed. Either way the
+    # revision is not loaded as it stands and must be rebuilt and resealed
+    # against this code.
     if rs.card_rules:
         rs.core[CARD_CORE] = bind(CARD_CORE, "core")
     families = {n for n, k in bind.kinds.items() if k == "params"}

@@ -74,11 +74,13 @@ def revs(tmp_path_factory):
     _s, nowindow = k.build_card_revision(tmp, k.card_doc(window=False, drop=(k.ID_WIN,)), name="nowindow")
     _s, noprofile = k.build_card_revision(tmp, k.card_doc(weights={"ab" * 32: dict(k.WEIGHTS)}),
                                           name="noprofile")
+    # fix pass 3 (M2): every revision shape the loader accepts
+    shapes = k.build_shapes(tmp)
     return types.SimpleNamespace(shadow=k.load(store, shadow), armed=k.load(store, armed),
                                  again=k.load(store, again), conflict=k.load(store, conflict),
                                  picks=k.load(store, picks), moved=k.load(store, moved),
                                  dropped=k.load(store, dropped), nowindow=k.load(store, nowindow),
-                                 noprofile=k.load(store, noprofile))
+                                 noprofile=k.load(store, noprofile), shapes=shapes)
 
 
 @pytest.fixture
@@ -1103,3 +1105,183 @@ def test_m7_a_conflict_that_waits_on_the_evaluations_row_lock_is_later_than_it_a
     assert status == 409
     assert marker > processed
     assert woken > processed and k.ID_CONFLICT in {f["rule_id"] for f in found}
+
+
+# == fix pass 3 ===========================================================================
+
+# -- M2: every revision shape through the review pass (the worker cells of the table) ------
+
+async def _fresh_game(sm, tag):
+    a, b = _steams()
+    ids = await _players(sm, a, b)
+    key = "ranked_cards%s_000001" % tag
+    ra, rb, c = _pair()
+    await _register(sm, k.census_dump(c.cards))
+    await _store(sm, ids, a, b, key, ra)
+    await _store(sm, ids, b, a, key, rb)
+    await _match(sm, ids, a, b, key + "_r5", sc="off")
+    return key, [await _pair_of(sm, key)], [ids[a], ids[b]]
+
+
+SHAPES = sorted(k.revision_shapes())
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_m2_every_revision_shape_runs_the_review_pass_derives_and_matches_the_oracle(live, revs, shape,
+                                                                                   monkeypatch):
+    """A fresh game through main.review_worker_pass (the seat pass, then the
+    card pass, on one published state) under each revision shape: no visit
+    raises, the game is derived, stamped with the revision and final, its
+    stored findings equal the from-scratch oracle (empty for a shape with no
+    card rules), and the admin read answers under the revision."""
+    state = revs.shapes[shape]
+    has_card = k.revision_shapes()[shape][2]
+    monkeypatch.setattr(main._review_rules, "refresh_rules", lambda: state)
+    cards = {}
+    orig = ce.games_pass
+
+    async def spy(sm, st=None, limit=None):
+        cards["stats"] = await orig(sm, st, limit)
+        return cards["stats"]
+    monkeypatch.setattr(main._cev, "games_pass", spy)
+
+    async def go():
+        sm = live.sm
+        key, games, dealers = await _fresh_game(sm, "h%d" % SHAPES.index(shape))
+        word, seat_games, sittings, _p = await main.review_worker_pass(sm, False)
+        g = (await _rows(sm, GAME, k=key))[0]
+        derived = await _derived(sm, key)
+        async with sm() as db:
+            adm = await ce.admin_view(db, stable_game_key=key, rs=state.ruleset)
+        return (word, seat_games, sittings, g, derived, await _stored(sm, games, dealers),
+                await _from_scratch(sm, state, games, dealers), adm)
+    word, seat_games, sittings, g, derived, stored, want, adm = live.run(go())
+    assert word == state.word
+    for stats in (seat_games, sittings, cards["stats"]):
+        assert not _errors(stats) and not stats.get("fault_unrecorded"), (shape, stats)
+    assert cards["stats"]["parked"] == 0
+    assert g["derive_fault"] is None and g["evaluated_rev"] == state.ruleset.rev and g["finalized_at"]
+    assert derived["card_hand_outside"] > 0                     # derivation proceeded
+    assert stored == want
+    assert bool(want) == has_card                               # control: a card shape fires here
+    assert adm["review_rules"] == state.ruleset.rev and adm["games"]
+
+
+ZERO = [s for s in SHAPES if not k.revision_shapes()[s][2]]
+
+
+@pytest.mark.parametrize("shape", ZERO)
+def test_m2_a_card_aware_revision_then_one_without_card_rules_retires_every_prior_finding(live, revs, shape):
+    """R1 (card rules) writes game and window findings; R2 has no card rules.
+    After R2's pass the stored unposted findings equal R2's from-scratch
+    oracle -- none -- and the game is stamped with R2."""
+    second = revs.shapes[shape]
+    tag = "z%d" % ZERO.index(shape)
+    before, after, want, stamped, contrib, (p1, ev, p2) = live.run(
+        _two_revisions(live.sm, revs.shadow, second, tag))
+    r1, r2 = revs.shadow.ruleset.rev, second.ruleset.rev
+    assert any(kk[0] == "sitting" for kk in before) and any(kk[0] == "game" for kk in before)  # control
+    assert want == {} and after == want
+    assert stamped <= {r2} and r1 not in contrib
+    assert ev == r2 and p2 == p1
+
+
+# -- M2: a visit that raises does not hold the queue head --------------------------------------
+
+def test_m2_a_raising_evaluator_is_recorded_and_the_queue_advances_then_heals(live, revs, monkeypatch):
+    """Two fresh games whose card evaluation raises (the evaluator, under a
+    test hook that names the game being visited). With one game per pass the
+    second pass visits the second game, not the first again. Each faulted
+    visit is recorded (error class, count, revision) and nothing is
+    finalized or stamped; at the bound both are parked: the next pass skips
+    them and the health count shows them. New input wakes one for one more
+    visit; another revision restarts the count; a revision whose evaluator
+    does not raise evaluates both and clears the count."""
+    cap = ce.CARD_FAULT_LIMITS["attempts"]
+    faulty, other_faulty, healed = revs.again, revs.moved, revs.shadow
+    targets = set()
+    current = {}
+
+    def hook(key):
+        current["k"] = key
+
+    def raising(rs_obj):
+        orig = rs_obj.evaluate_card
+
+        def evaluate_card(subjects, budget=None):
+            if current.get("k") in targets:
+                raise RuntimeError("synthetic evaluator fault")
+            return orig(subjects, budget)
+        return evaluate_card
+    monkeypatch.setattr(ce, "_VISIT_HOOK", hook)
+    monkeypatch.setattr(faulty.ruleset, "evaluate_card", raising(faulty.ruleset))
+    monkeypatch.setattr(other_faulty.ruleset, "evaluate_card", raising(other_faulty.ruleset))
+    sel = ("SELECT stable_game_key k, fault_attempts n, fault_rev r, derive_fault f, finalized_at fin, "
+           "evaluated_rev ev, processed_at p FROM card_games WHERE stable_game_key = ANY(CAST(:ks AS varchar[]))")
+
+    async def rows(keys):
+        return {r["k"]: r for r in await _rows(live.sm, sel, ks=keys)}
+
+    async def go():
+        sm = live.sm
+        await ce.games_pass(sm, faulty)        # every earlier game visited under this revision first
+        ka, _ga, _da = await _fresh_game(sm, "fa")
+        kb, _gb, _db = await _fresh_game(sm, "fb")
+        targets.update({ka, kb})
+        keys = [ka, kb]
+        out = {}
+        s1 = await ce.games_pass(sm, faulty, limit=1)
+        out["after1"] = await rows(keys)
+        s2 = await ce.games_pass(sm, faulty, limit=1)
+        out["after2"] = await rows(keys)
+        out["stats12"] = (s1, s2)
+        passes = 0
+        while passes < cap + 3:
+            r = await rows(keys)
+            if all(r[x]["n"] >= cap for x in keys):
+                break
+            await ce.games_pass(sm, faulty)
+            passes += 1
+        out["parked"] = await rows(keys)
+        out["parked_count"] = ce.parked()
+        s_skip = await ce.games_pass(sm, faulty)
+        out["skipped"] = await rows(keys)
+        out["skip_stats"] = s_skip
+        await _exec(sm, "UPDATE card_evidence SET conflict_at = now() WHERE stable_game_key = :k", k=ka)
+        await ce.games_pass(sm, faulty)
+        out["woken"] = await rows(keys)
+        await ce.games_pass(sm, other_faulty)
+        out["other_rev"] = await rows(keys)
+        targets.clear()
+        heal = await ce.games_pass(sm, healed)
+        out["healed"] = await rows(keys)
+        out["heal_stats"] = heal
+        out["heal_count"] = ce.parked()
+        return keys, out
+    (ka, kb), out = live.run(go())
+    a1, b1 = out["after1"][ka], out["after1"].get(kb)
+    first = ka if a1["n"] == 1 else kb
+    second = kb if first == ka else ka
+    assert out["after1"][first]["n"] == 1 and (out["after1"].get(second) is None
+                                                or out["after1"][second]["n"] == 0)
+    assert out["after2"][second]["n"] == 1 and out["after2"][first]["n"] == 1     # the queue advanced
+    s1, s2 = out["stats12"]
+    assert s1.get("error:RuntimeError") == 1 and s2.get("error:RuntimeError") == 1
+    for x in (ka, kb):
+        r = out["after2"][x]
+        assert r["f"] == "error:RuntimeError" and r["r"] == faulty.ruleset.rev
+        assert r["fin"] is None and r["ev"] is None                               # nothing finalized
+    p = out["parked"]
+    assert all(p[x]["n"] == cap for x in (ka, kb))
+    assert out["parked_count"] == 2
+    sk = out["skipped"]
+    assert all(sk[x]["p"] == p[x]["p"] and sk[x]["n"] == cap for x in (ka, kb))   # not visited
+    assert out["skip_stats"]["parked"] == 2
+    w = out["woken"]
+    assert w[ka]["n"] == cap + 1 and w[kb]["n"] == cap                             # new input: one visit
+    o = out["other_rev"]
+    assert all(o[x]["n"] == 1 and o[x]["r"] == other_faulty.ruleset.rev for x in (ka, kb))
+    h = out["healed"]
+    assert all(h[x]["n"] == 0 and h[x]["r"] is None and h[x]["f"] is None for x in (ka, kb))
+    assert all(h[x]["ev"] == healed.ruleset.rev and h[x]["fin"] for x in (ka, kb))
+    assert not _errors(out["heal_stats"]) and out["heal_count"] == 0
