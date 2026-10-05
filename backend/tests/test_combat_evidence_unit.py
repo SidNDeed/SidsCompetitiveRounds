@@ -101,7 +101,7 @@ def test_m3_a_budgeted_record_near_the_bound_parses_whole():
     (lambda r: r.update(extra=1), "extra"),
     (lambda r: r.pop("omit"), "omit"),
     (lambda r: r["sh_s"][0][0].__setitem__(cm.HDR["n"], 3), "sh_s"),
-    (lambda r: r["sh_s"][0][1].append(fx.own_shot(1, 1, 0, 0, 0)), "sh_s"),
+    (lambda r: r["sh_s"][0][1].append(fx.own_shot(1, 1, 0, 0, fx.NOT_RELOADING)), "sh_s"),
     (lambda r: r["gun_s"].extend([fx.gun()] * 10), "gun_s"),
 ])
 def test_the_layout_refuses_a_record_outside_it(mutate, field):
@@ -283,6 +283,41 @@ def test_the_canonical_fixture_set_is_byte_identical_to_the_files_the_client_rep
                 rec = json.loads(f.read().decode("ascii"))
             with open(os.path.join(fx.FIXTURE_DIR, name[:-len(".in.json")] + ".out.txt"), "rb") as f:
                 assert cm.budget_record(rec).encode("ascii") == f.read(), name
+
+
+def _shot_entries(rec):
+    """(group key, reloading, counter) of every shot entry a record lists."""
+    out = []
+    for key, side in (("sh_s", "s"), ("sh_o", "o")):
+        for group in rec[key]:
+            for e in group[1]:
+                out.append((key, e[cm.SHOT[side]["reloading"]], e[cm.SHOT[side]["counter"]]))
+    return out
+
+
+def test_f5_f1_every_canonical_non_reloading_shot_carries_counter_minus_one():
+    """Combat fix pass 5, F1. The design's shot counter is the reload counter
+    while the gun reloads and -1 when it does not. Read from every record the
+    canonical generators build (every budget input, both accounts) and from
+    the records on disk: each non-reloading shot carries -1. Not vacuous: the
+    set lists non-reloading shots and reloading ones, and a reloading shot
+    keeps its counter."""
+    seen = {0: 0, 1: 0}
+    records = list(fx.budget_inputs().items())
+    for name in sorted(os.listdir(fx.FIXTURE_DIR)):
+        if name.endswith(".in.json"):
+            with open(os.path.join(fx.FIXTURE_DIR, name), "rb") as f:
+                records.append((name, json.loads(f.read().decode("ascii"))))
+    for owner, meas in (fx.a24_pair(v) for v in ("base", "regen", "trimmed", "short", "mixed")):
+        records += [("a24 owner", owner), ("a24 meas", meas)]
+    for name, rec in records:
+        for key, rl, counter in _shot_entries(rec):
+            seen[rl] = seen.get(rl, 0) + 1
+            if rl == 0:
+                assert counter == fx.NOT_RELOADING, (name, key, counter)
+            else:
+                assert counter >= 0, (name, key, counter)
+    assert seen[0] > 0 and seen[1] > 0, seen
 
 
 def test_the_canonical_comparison_sees_one_changed_byte(tmp_path):
@@ -514,9 +549,11 @@ def _charged_pair():
     meas["gun_o"] = [fx.gun(mag=6)]
     # one accepted gate call, two repeats: two emissions, two attack messages
     owner["sh_s"] = [[fx.hdr(5000, 40, 2, end=cm.END["point"], rl=(-1, -1, -1)),
-                      [fx.own_shot(0, 0, 6, 0, 0, rep=0), fx.own_shot(1, 100, 5, 0, 100, rep=1)], []]]
+                      [fx.own_shot(0, 0, 6, 0, fx.NOT_RELOADING, rep=0),
+                       fx.own_shot(1, 100, 5, 0, fx.NOT_RELOADING, rep=1)], []]]
     meas["sh_o"] = [[fx.hdr(5000, 40, 2, end=cm.END["point"], rl=(-1, -1, -1)),
-                     [fx.copy_shot(0, 0, 6, 0, 0, am=20), fx.copy_shot(1, 100, 5, 0, 100, am=21)], []]]
+                     [fx.copy_shot(0, 0, 6, 0, fx.NOT_RELOADING, am=20),
+                      fx.copy_shot(1, 100, 5, 0, fx.NOT_RELOADING, am=21)], []]]
     owner["tot_s"] = fx.tot(cycles=1, volleys=2, units=2, gate=1, emit=2)
     meas["tot_o"] = fx.tot(cycles=1, volleys=2, units=2, atk_msg=2)
     return owner, meas
@@ -1141,7 +1178,7 @@ def _regen_both():
     owner, meas = fx.a24_pair("regen")
     g = meas["sh_o"][0]
     g[0][cm.HDR["rg"]], g[0][cm.HDR["nrg"]] = 1, 1
-    g[1][3] = fx.copy_shot(1, 200, 1, 0, 0)
+    g[1][3] = fx.copy_shot(1, 200, 1, 0, fx.NOT_RELOADING)
     g[2] = [fx.regen(3, 1, fx.S0 + 550)]
     return owner, fx.finish(meas, "o")
 
@@ -1217,7 +1254,7 @@ def _one_field(name):
         m["sh_o"][0][1][1][cm.SHOT["o"]["ammo_before"]] = 5
         return owner, m, ["shot"]
     if name == "shot_counter":
-        m["sh_o"][0][1][1][cm.SHOT["o"]["counter"]] = 230
+        m["sh_o"][0][1][3][cm.SHOT["o"]["counter"]] = 230        # the reloading shot (F1)
         return owner, m, ["shot"]
     if name == "cycle_src":
         _set_hdr(m, "sh_o", "src", cm.W["src"]["card"])
@@ -2100,7 +2137,7 @@ def _oracle_bijection(owner, meas, owner_ok, meas_ok):
     return True, owner_ok and meas_ok
 
 
-def test_f4_m6_definitive_implies_bijection_over_the_small_space():
+def test_f4_m6_definitive_implies_bijection_over_the_small_space(capsys):
     """Fix pass 4, M-6, generated: EVERY owner and measured cycle multiset of
     up to two cycles over the six kinds (28 per side), each side's
     whole-game cycle counter consistent or contradicting its list: 3136
@@ -2147,6 +2184,10 @@ def test_f4_m6_definitive_implies_bijection_over_the_small_space():
                     definitive += d["case"] in _DEFINITIVE
     assert n == 3136 and definitive and ambiguous and n - ambiguous - definitive, \
         (n, definitive, ambiguous)
+    with capsys.disabled():                    # fix pass 5: the size, printed by the run itself
+        print("\nPROOF SIZE f4_m6 exhaustive: %d cases (%d sides of up to two cycles per "
+              "account), %d definitive, %d ambiguous, %d neither"
+              % (n, len(sides), definitive, ambiguous, n - ambiguous - definitive))
 
 def test_f2_l6_the_purge_wording_is_the_allowlist_the_constants_apply():
     doc = " ".join(ce.purge_pass.__doc__.split())
@@ -2422,12 +2463,14 @@ def _template_pair(tmpl_o=2):
     owner["gun_s"] = [fx.gun(mag=6, tmpl=2)]
     meas["gun_o"] = [fx.gun(mag=6, tmpl=tmpl_o)]
     owner["sh_s"] = [[fx.hdr(5000, 40, 4, end=cm.END["point"], rl=(-1, -1, -1)),
-                      [fx.own_shot(0, 0, 6, 0, 0, rep=0), fx.own_shot(1, 0, 5, 0, 0, rep=-1),
-                       fx.own_shot(1, 100, 4, 0, 100, rep=1), fx.own_shot(1, 0, 3, 0, 100, rep=-1)],
+                      [fx.own_shot(0, 0, 6, 0, fx.NOT_RELOADING, rep=0), fx.own_shot(1, 0, 5, 0, fx.NOT_RELOADING, rep=-1),
+                       fx.own_shot(1, 100, 4, 0, fx.NOT_RELOADING, rep=1),
+                       fx.own_shot(1, 0, 3, 0, fx.NOT_RELOADING, rep=-1)],
                       []]]
     meas["sh_o"] = [[fx.hdr(5000, 40, 4, end=cm.END["point"], rl=(-1, -1, -1)),
-                     [fx.copy_shot(0, 0, 6, 0, 0, am=20), fx.copy_shot(1, 0, 5, 0, 0, am=-1),
-                      fx.copy_shot(1, 100, 4, 0, 100, am=21), fx.copy_shot(1, 0, 3, 0, 100, am=-1)],
+                     [fx.copy_shot(0, 0, 6, 0, fx.NOT_RELOADING, am=20), fx.copy_shot(1, 0, 5, 0, fx.NOT_RELOADING, am=-1),
+                      fx.copy_shot(1, 100, 4, 0, fx.NOT_RELOADING, am=21),
+                      fx.copy_shot(1, 0, 3, 0, fx.NOT_RELOADING, am=-1)],
                      []]]
     owner["tot_s"] = fx.tot(cycles=1, volleys=2, units=4, gate=1, emit=2)
     meas["tot_o"] = fx.tot(cycles=1, volleys=2, units=4, atk_msg=2)

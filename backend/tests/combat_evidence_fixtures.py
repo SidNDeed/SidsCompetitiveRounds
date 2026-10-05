@@ -115,6 +115,12 @@ def hdr(s0, pid0, n, *, pt=0, end=END["timer"], src=0, amt=-1, st_end=0, rl=(150
     return [s0, pid0, n, pt, end, src, amt, st_end, rl[0], rl[1], rl[2], rg, nrg]
 
 
+# A shot entry's `counter` (the design's `rc`) is the gun's reload counter
+# before the shot while it is reloading, and -1 when it is not (combat fix
+# pass 5, F1): every synthetic non-reloading shot below carries this value.
+NOT_RELOADING = -1
+
+
 def own_shot(dpid, dt, ammo, rl, counter, rep=0, since=-1, fl=FL["use_ammo"]):
     return [dpid, dt, ammo, rl, counter, rep, since, fl]
 
@@ -170,12 +176,12 @@ def a24_pair(variant="base"):
     fourth_own = own_shot(1, 200, 0, 1, 100, fl=FL["use_ammo"] | FL["reloading"])
     if variant == "regen":
         regens = [regen(3, 1, S0 + 550)]
-        fourth_own = own_shot(1, 200, 1, 0, 0)
+        fourth_own = own_shot(1, 200, 1, 0, NOT_RELOADING)
     owner["sh_s"] = [[hdr(S0, PID0, 4, st_end=S0 + 1900, rg=len(regens), nrg=len(regens)),
-                      [own_shot(0, 0, 3, 0, 0), own_shot(1, 200, 2, 0, 200),
-                       own_shot(1, 200, 1, 0, 400), fourth_own], regens]]
-    copy_entries = [copy_shot(0, 0, 3, 0, 0), copy_shot(1, 200, 2, 0, 200),
-                    copy_shot(1, 200, 1, 0, 400), copy_shot(1, 200, 0, 1, 100)]
+                      [own_shot(0, 0, 3, 0, NOT_RELOADING), own_shot(1, 200, 2, 0, NOT_RELOADING),
+                       own_shot(1, 200, 1, 0, NOT_RELOADING), fourth_own], regens]]
+    copy_entries = [copy_shot(0, 0, 3, 0, NOT_RELOADING), copy_shot(1, 200, 2, 0, NOT_RELOADING),
+                    copy_shot(1, 200, 1, 0, NOT_RELOADING), copy_shot(1, 200, 0, 1, 100)]
     if variant == "short":
         copy_entries = copy_entries[:3]
     meas["sh_o"] = [[hdr(S0, PID0, 4, st_end=S0 + 1900), copy_entries, []]]
@@ -223,13 +229,12 @@ def cycle_group(s0, pid0, n, mag=3, *, side="s", step=200, reload_after=True):
     ammo = mag
     for j in range(n):
         rl = 1 if (reload_after and ammo <= 0) else 0
+        counter = step * j if rl else NOT_RELOADING
         if side == "s":
-            entries.append(own_shot(0 if j == 0 else 1, 0 if j == 0 else step, ammo, rl,
-                                    0 if j == 0 else step * j,
+            entries.append(own_shot(0 if j == 0 else 1, 0 if j == 0 else step, ammo, rl, counter,
                                     fl=FL["use_ammo"] | (FL["reloading"] if rl else 0)))
         else:
-            entries.append(copy_shot(0 if j == 0 else 1, 0 if j == 0 else step, ammo, rl,
-                                     0 if j == 0 else step * j))
+            entries.append(copy_shot(0 if j == 0 else 1, 0 if j == 0 else step, ammo, rl, counter))
         ammo -= 1
     return [hdr(s0, pid0, n, st_end=s0 + 1900), entries, []]
 
@@ -350,6 +355,11 @@ def max_width_protected(n_groups=4):
         for i in range(n_groups):
             g = cm.max_width_group("sh_" + side)
             g[0][cm.HDR["s0"]] = lo + i
+            # Each widest shot is a RELOADING one (the same width as 0): its
+            # widest counter is then a reload counter, as the design requires
+            # of any shot whose counter is not -1 (combat fix pass 5, F1).
+            for e in g[1]:
+                e[cm.SHOT[side]["reloading"]] = 1
             groups.append(g)
         rec["sh_" + side] = groups
     return rec
