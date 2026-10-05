@@ -2021,14 +2021,17 @@ def test_the_privileged_listing_still_shows_the_rest_of_the_hidden_pool():
     assert listed["title_slayer_probe"]["owned"] is True
 
 
-# ── The release migration, EXECUTED ────────────────────────────────
+# ── The superseded release migration, EXECUTED ─────────────────────
 #
-# 342 flips catalog_ready on the eight tier-1 rungs. Reading it proves
-# nothing: the statement it runs fires a BEFORE UPDATE trigger that neither
-# the migration text nor the ORM mentions (#714), and its idempotence is a
-# property of that trigger's guard rather than of the SQL. So it is RUN, both
-# halves, against a live throwaway Postgres (#313/#340) -- 331 first, then 342
-# twice.
+# 342 is superseded by 365 and 366 (the five-tier catalogue, every tier-1
+# rung on sale) and is an explicit no-op. What it must do now is nothing, on
+# any database it can meet: the 331 catalogue it was written against, and the
+# production shape after 365 and 366 (160 rungs, 32 entry rungs on sale).
+# "Nothing" is MEASURED, not read from the file: every table in the schema,
+# row count plus a content digest plus each row's version (xmin, which moves
+# on a rewrite to the same value), the relation inventory and the constraint
+# and index OIDs -- before 342, after it, and after it again. A negative
+# control puts an UPDATE back and requires the same measurement to see it.
 #
 #   TITLE_LADDER_TEST_PG_DSN=postgresql://postgres@127.0.0.1:55432/laddertest
 #       python -m pytest backend/tests/test_title_ladders.py
@@ -2089,9 +2092,9 @@ if DSN:
     _refuse_unless_throwaway(DSN)
 
 needs_pg = pytest.mark.skipif(
-    not DSN, reason="%s unset; live release-migration check" % DSN_VAR)
+    not DSN, reason="%s unset; live migration-342 check" % DSN_VAR)
 
-# The minimum real schema 331 and 342 touch, taken from the migrations that
+# The minimum real schema 331 touches, taken from the migrations that
 # own each piece rather than from the ORM -- models.py declares neither the
 # trigger nor catalog_ready's default, and a schema rebuilt from it would be a
 # test of a database that exists nowhere (#714).
@@ -2195,13 +2198,11 @@ async def _connect():
     return await asyncpg.connect(DSN.replace("postgresql+asyncpg://", "postgresql://"))
 
 
-async def _fresh(conn, apply_release=True):
-    """A clean schema, then 331, then (by default) 342."""
+async def _fresh(conn):
+    """A clean schema, then 331."""
     await conn.execute(DROP_ALL)
     await conn.execute(FIXTURE_DDL)
     await conn.execute(_read(MIGRATION))
-    if apply_release:
-        await conn.execute(_read(RELEASE_MIGRATION))
 
 
 async def _ready_entry_skus(conn):
@@ -2211,19 +2212,126 @@ async def _ready_entry_skus(conn):
     return [r["sku"] for r in rows]
 
 
+sys.path.insert(0, HERE)
+import title_ladders_lane_schema as _lane   # noqa: E402
+
+MIGRATION_366 = os.path.join(SQL_DIR, "366_title_refunds_voidshot_kingslayer.sql")
+
+
+def _331_shape_sql():
+    """The database 342 was written against: 331's eight-ladder catalogue."""
+    return FIXTURE_DDL + "\n" + _read(MIGRATION)
+
+
+def _production_shape_sql():
+    """The database 342 meets now: the production-faithful schema (the
+    primary's own catalogue, title_ladders_lane_schema) with 331, then 365,
+    the census 366 refunds, then 366 -- the order production applied them."""
+    return (_lane.prereq_sql() + "\n" + _read(MIGRATION_365) + "\n"
+            + _lane.CENSUS_SEED + "\n" + _read(MIGRATION_366))
+
+
+async def _catalogue_shape(conn):
+    """(rungs, entry rungs, entry rungs on sale in the ordinary pool)."""
+    return tuple(await conn.fetchrow(
+        "SELECT (SELECT count(*) FROM title_ladders), "
+        "       (SELECT count(*) FROM title_ladders WHERE tier = 1), "
+        "       (SELECT count(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
+        "         WHERE tl.tier = 1 AND si.catalog_ready IS TRUE "
+        "           AND si.rotation_pool IS NULL AND si.price > 0)"))
+
+
+async def _whole_state(conn):
+    """Everything in the private schema a migration could change.
+
+    Per table: the row count, a digest of every row's content, and a digest
+    of every row's content WITH its version (xmin) -- an UPDATE that writes a
+    row back unchanged leaves the content digest alone and moves the version
+    digest. Then the relations, constraints, indexes, functions and triggers
+    by OID, so a drop-and-recreate to the same definition is seen too.
+    """
+    tables = [r["relname"] for r in await conn.fetch(
+        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        " WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p') ORDER BY 1")]
+    state = {}
+    for name in tables:
+        row = await conn.fetchrow(
+            "SELECT count(*) AS n, "
+            "       md5(COALESCE(string_agg(r_::text, chr(10) ORDER BY r_::text), '')) AS content, "
+            "       md5(COALESCE(string_agg(r_::text || chr(9) || r_.xmin::text, chr(10) "
+            "                               ORDER BY r_::text, r_.xmin::text), '')) AS versions "
+            '  FROM "%s" r_' % name)
+        state[("table", name)] = (row["n"], row["content"], row["versions"])
+    for row in await conn.fetch(
+            "SELECT 'relation' AS what, c.relname AS name, c.relkind::text || ':' || c.oid::text AS ident "
+            "  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            " WHERE n.nspname = current_schema() "
+            "UNION ALL "
+            "SELECT 'constraint', co.conname || '@' || co.conrelid::text, co.oid::text "
+            "  FROM pg_constraint co JOIN pg_namespace n ON n.oid = co.connamespace "
+            " WHERE n.nspname = current_schema() "
+            "UNION ALL "
+            "SELECT 'function', p.proname, p.oid::text || ':' || md5(p.prosrc) "
+            "  FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace "
+            " WHERE n.nspname = current_schema() "
+            "UNION ALL "
+            "SELECT 'trigger', tg.tgname || '@' || tg.tgrelid::text, tg.oid::text || ':' || tg.tgenabled::text "
+            "  FROM pg_trigger tg JOIN pg_class c ON c.oid = tg.tgrelid "
+            "  JOIN pg_namespace n ON n.oid = c.relnamespace "
+            " WHERE n.nspname = current_schema() AND NOT tg.tgisinternal"):
+        state[(row["what"], row["name"])] = row["ident"]
+    return state
+
+
+async def _apply_342(setup_sql, migration_sql=None, times=2):
+    """A private schema built by `setup_sql`; then the catalogue's shape and
+    the whole state, before 342 and after each application."""
+    migration_sql = _read(RELEASE_MIGRATION) if migration_sql is None else migration_sql
+    schema = "m342_%s" % uuid.uuid4().hex[:10]
+    conn = await _connect()
+    try:
+        await conn.execute('CREATE SCHEMA "%s"' % schema)
+        await conn.execute('SET search_path TO "%s"' % schema)
+        await conn.execute(setup_sql)
+        shape = await _catalogue_shape(conn)
+        states = [await _whole_state(conn)]
+        for _ in range(times):
+            await conn.execute(migration_sql)
+            states.append(await _whole_state(conn))
+        return shape, states
+    finally:
+        try:
+            await conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % schema)
+        finally:
+            await conn.close()
+
+
+def _differences(before, after):
+    return sorted("%s %s" % key for key in set(before) | set(after)
+                  if before.get(key) != after.get(key))
+
+
+def _with_statement_before_commit(statement):
+    """342's own text with one statement put back in front of its COMMIT."""
+    text = _read(RELEASE_MIGRATION)
+    head, sep, tail = text.rpartition("COMMIT;")
+    assert sep, "342 has no COMMIT; to put a statement in front of"
+    return head + statement + "\n" + sep + tail
+
+
 @needs_pg
 def test_331_alone_leaves_every_entry_rung_off_sale():
-    """The precondition 342 exists to change, measured rather than assumed.
-    If this ever comes back non-empty, 342 is not the thing putting the rungs
-    on sale and its post-check would be passing on someone else's work."""
+    """331's own state, measured rather than assumed: its eight entry rungs
+    are off sale. It is the state the 331 arm of the no-op test below starts
+    from, and the reason its negative control can see the old flip at all.
+    365 is what puts entry rungs on sale now, not 342."""
     async def go():
         conn = await _connect()
         try:
-            await _fresh(conn, apply_release=False)
+            await _fresh(conn)
             assert await _ready_entry_skus(conn) == []
             # ...and the granted-only rungs are ALREADY ready. What hides them
-            # is the pool, not this flag -- a 342 post-check written against
-            # their readiness would assert something that was never true.
+            # is the pool, not this flag.
             hidden_ready = await conn.fetchval(
                 "SELECT COUNT(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
                 " WHERE tl.tier > 1 AND si.catalog_ready IS TRUE")
@@ -2234,111 +2342,70 @@ def test_331_alone_leaves_every_entry_rung_off_sale():
 
 
 @needs_pg
-def test_342_puts_exactly_the_eight_entry_rungs_on_sale():
-    async def go():
-        conn = await _connect()
-        try:
-            await _fresh(conn)
-            ready = await _ready_entry_skus(conn)
-            # The entry rungs of the catalogue 331 wrote, read from the
-            # table: tl.ENTRY_SKUS describes main's five-tier catalogue (365,
-            # 32 entry rungs), which this fixture does not apply.
-            entry = [r["sku"] for r in await conn.fetch(
-                "SELECT sku FROM title_ladders WHERE tier = 1 ORDER BY sku")]
-            # Compared by SKU, not by count: "8 rows are ready" is also true
-            # of any other 8.
-            assert ready == entry
-            assert len(entry) == 8
-            # One line each -- a WHERE that widened or narrowed shows up here
-            # as a line with two entry rungs, or with none.
-            ready_lines = sorted(r["line"] for r in await conn.fetch(
-                "SELECT line FROM title_ladders WHERE sku = ANY($1::text[])", ready))
-            all_lines = sorted(r["line"] for r in await conn.fetch(
-                "SELECT DISTINCT line FROM title_ladders"))
-            assert ready_lines == all_lines
-            # The other 40 stay granted-only, which is the pool and the price.
-            leaked = await conn.fetchval(
-                "SELECT COUNT(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
-                " WHERE tl.tier > 1 AND (si.rotation_pool IS DISTINCT FROM 'achievement' "
-                "                        OR si.price <> 0)")
-            assert leaked == 0, leaked
-            priced = await conn.fetchval(
-                "SELECT COUNT(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
-                " WHERE tl.tier = 1 AND si.price <> 1000")
-            assert priced == 0, priced
-        finally:
-            await conn.close()
-    _run_pg(go())
+def test_342_changes_nothing_on_the_331_catalogue():
+    """The catalogue 342 was written against (48 rungs, 8 entry rungs, none
+    on sale). Applied once and again, every table, relation, function and
+    trigger in the schema is identical to before."""
+    shape, states = _run_pg(_apply_342(_331_shape_sql()))
+    assert shape == (48, 8, 0), shape
+    assert ("table", "shop_items") in states[0] and ("table", "title_ladders") in states[0]
+    assert _differences(states[0], states[1]) == [], "342's first application changed the database"
+    assert _differences(states[1], states[2]) == [], "342's second application changed the database"
 
 
 @needs_pg
-def test_342_stamps_released_at_through_the_trigger():
-    """Nothing in 342 writes released_at; the trigger from 148 does, and only
-    on a FALSE->TRUE transition. A missing stamp means the trigger is gone,
-    and this release left no record of having happened."""
-    async def go():
-        conn = await _connect()
-        try:
-            await _fresh(conn)
-            unstamped = await conn.fetchval(
-                "SELECT COUNT(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
-                " WHERE tl.tier = 1 AND si.released_at IS NULL")
-            assert unstamped == 0
-        finally:
-            await conn.close()
-    _run_pg(go())
+def test_342_changes_nothing_on_the_production_catalogue():
+    """The catalogue production holds (365 and 366 applied: 160 rungs, 32
+    entry rungs, all 32 on sale in the ordinary pool; measured read-only on
+    the primary 2026-10-05). Applied once and again: identical."""
+    shape, states = _run_pg(_apply_342(_production_shape_sql()))
+    assert shape == (160, 32, 32), shape
+    for name in ("shop_items", "title_ladders", "title_ladder_progress",
+                 "title_ladder_credits", "players", "player_items", "gold_transactions"):
+        assert ("table", name) in states[0], name
+    assert _differences(states[0], states[1]) == [], "342's first application changed the database"
+    assert _differences(states[1], states[2]) == [], "342's second application changed the database"
 
 
 @needs_pg
-def test_342_applied_twice_changes_nothing():
-    """Idempotence as the operator will meet it: apply, snapshot every column
-    the file can reach, apply again, compare. released_at is the one that
-    would move silently."""
-    async def go():
-        conn = await _connect()
-        try:
-            await _fresh(conn)
-            snap = ("SELECT sku, catalog_ready, released_at, price, rotation_pool "
-                    "  FROM shop_items WHERE sku LIKE $1 ORDER BY sku")
-            pattern = LADDER_SKU_PREFIX + "%"
-            before = [tuple(r) for r in await conn.fetch(snap, pattern)]
-            assert len(before) == 48
-            await conn.execute(_read(RELEASE_MIGRATION))
-            after = [tuple(r) for r in await conn.fetch(snap, pattern)]
-            assert after == before, "a second application of 342 moved a row"
-        finally:
-            await conn.close()
-    _run_pg(go())
+def test_the_measurement_sees_an_update_put_back_into_342():
+    """The negative control. Without it the two tests above would pass on a
+    measurement that sees nothing. Two UPDATEs put back in front of 342's
+    COMMIT, each on the shape where it moves something:
+      * the old flip of the entry rungs, on the 331 catalogue (eight rows
+        change content);
+      * a rewrite of every ladder row to its own value, on the production
+        catalogue (content identical, every row version moved).
+    """
+    flip = ("UPDATE shop_items si SET catalog_ready = TRUE FROM title_ladders tl "
+            " WHERE tl.sku = si.sku AND tl.tier = 1 AND si.catalog_ready IS DISTINCT FROM TRUE;")
+    _shape, states = _run_pg(_apply_342(_331_shape_sql(), _with_statement_before_commit(flip), times=1))
+    assert ["table shop_items"] == _differences(states[0], states[1]), \
+        _differences(states[0], states[1])
+
+    rewrite = "UPDATE title_ladders SET tier = tier;"
+    _shape, states = _run_pg(_apply_342(_production_shape_sql(),
+                                        _with_statement_before_commit(rewrite), times=1))
+    assert ["table title_ladders"] == _differences(states[0], states[1]), \
+        _differences(states[0], states[1])
+    n0, content0, versions0 = states[0][("table", "title_ladders")]
+    n1, content1, versions1 = states[1][("table", "title_ladders")]
+    assert (n0, content0) == (n1, content1), "a same-value rewrite changed content"
+    assert versions0 != versions1, "the version digest did not see a rewrite"
 
 
 @needs_pg
-def test_342_refuses_a_catalogue_that_is_not_all_there():
-    """The guard, exercised. A partial 331 must abort the release rather than
-    put whichever rungs happen to exist on sale -- at which point "exactly 8
-    are ready" would be satisfied by a different 8."""
-    import asyncpg
-
-    async def go():
-        conn = await _connect()
-        try:
-            await _fresh(conn, apply_release=False)
-            await conn.execute(
-                "DELETE FROM title_ladders WHERE sku = 'title_ladder_shark_6'")
-            with pytest.raises(asyncpg.exceptions.RaiseError) as exc:
-                await conn.execute(_read(RELEASE_MIGRATION))
-            assert "47" in str(exc.value), str(exc.value)
-            # The file's own BEGIN is still open and aborted -- its COMMIT
-            # was never reached. That is the correct outcome and it is also
-            # why the connection needs winding back before it can be read:
-            # the ROLLBACK here is the test's housekeeping, and it is ALSO
-            # what proves the abort was a real transaction abort rather than
-            # a RAISE the migration somehow recovered from.
-            await conn.execute("ROLLBACK")
-            # ...and nothing was flipped.
-            assert await _ready_entry_skus(conn) == []
-        finally:
-            await conn.close()
-    _run_pg(go())
+def test_342_refuses_nothing_whatever_the_catalogue_holds():
+    """342 reads no table, so no catalogue makes it refuse: 331 with a rung
+    missing, and an empty ladder table, each apply cleanly and change
+    nothing. (The file it replaced RAISEd on anything but 48 rungs, which on
+    production's 160 would have aborted a release.)"""
+    for extra in ("DELETE FROM title_ladders WHERE sku = 'title_ladder_shark_6';",
+                  "DELETE FROM title_ladders;"):
+        shape, states = _run_pg(_apply_342(_331_shape_sql() + "\n" + extra))
+        assert shape[0] in (47, 0), shape
+        assert _differences(states[0], states[1]) == [], (extra, "first application")
+        assert _differences(states[1], states[2]) == [], (extra, "second application")
 
 
 def test_the_release_migration_is_pure_crlf():
@@ -2349,6 +2416,21 @@ def test_the_release_migration_is_pure_crlf():
     raw = open(RELEASE_MIGRATION, "rb").read()
     crlf, cr, lf = raw.count(b"\r\n"), raw.count(b"\r"), raw.count(b"\n")
     assert cr == crlf == lf, "342: CRLF=%d CR=%d LF=%d" % (crlf, cr, lf)
+
+
+def test_the_superseded_migration_issues_nothing_but_its_transaction():
+    """The static half, which needs no database: with its comments removed,
+    342 is BEGIN, SELECT 1, COMMIT and nothing else -- so any statement put
+    back (an UPDATE, a guard, a RAISE) fails here whether or not the database
+    it would meet has rows for it to touch. The header says why, naming the
+    two migrations that supersede it."""
+    text = _read(RELEASE_MIGRATION)
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("--"))
+    statements = [" ".join(part.split()) for part in code.split(";") if part.strip()]
+    assert statements == ["BEGIN", "SELECT 1", "COMMIT"], statements
+    header = text.split("BEGIN;")[0]
+    assert "SUPERSEDED BY 365 AND 366" in header
+    assert "changes nothing on any database" in header
 
 
 def test_the_live_migration_tests_are_all_still_gated():
