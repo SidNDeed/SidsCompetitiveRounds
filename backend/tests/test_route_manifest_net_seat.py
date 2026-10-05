@@ -65,6 +65,75 @@ API_DIR = (Path(__file__).parents[1] / "api").resolve()
 _DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _BINDING_INDEX = {}
 
+# ── The fingerprint closure is a BOUND (combat fix pass 6, M-9) ───────────
+#
+# Through fix pass 5 the closure walk was precise: a data binding was followed
+# only into other data bindings (to keep `app = FastAPI(...)` from dragging
+# most of the app into every route), a name bound twice kept its FIRST kind,
+# and a name looked up by string had no rule at all. Each review round found
+# the next place that precision was wrong. Precision is given up instead,
+# wherever it cannot be proven:
+#
+#   (a) the walk follows every name every reached binding can read, whatever
+#       the kind of either end (`_walk_bindings`);
+#   (b) a name bound more than once at module scope carries every one of its
+#       bindings: the union of their kinds, their sources and their
+#       references (`_index_module.bind`), and a module-level object changed
+#       in place (an item or attribute store, a method call, a `global`
+#       write) carries the code that changes it (`_MUT`, and `mutators`
+#       inside `_index_module`);
+#   (c) a lookup by string is never resolved. Any binding that names a
+#       dynamic source below, in any form (a bare name, an alias's value, a
+#       qualified name, an import, a container element, a default), makes
+#       its whole module DYNAMICALLY OPEN, and a closure that reaches any
+#       binding of an open module (by any path: an alias, a container, a
+#       call) is charged the WHOLE SOURCE OF EVERY MODULE of
+#       backend/api (`_dynamic_charge`). The gate never refuses for it: the
+#       charge is the rule, applied the same way everywhere.
+#
+# The whole tree rather than the open module and its imports: a module
+# object in hand (`sys.modules`, `__import__`, an argument) reaches modules
+# the open one never imports, so nothing narrower is a bound.
+
+_DYN = "!dyn:"          # a reference token: the dynamic source a binding names
+_MUT = "!mut:"          # a reference token: a module binding changed in place
+_WHOLE = "<module>"     # the seam key of one module's whole source
+
+# The fields whose strings are evaluated by name (a string annotation, a
+# string bound of a type parameter): read as the expression they spell.
+_ANNOTATION_FIELDS = frozenset({"annotation", "returns", "bound"})
+_ANNOTATION_TEXT = "annotation_text"
+
+# Names that look a binding up (or rebind one) by string, wherever they are
+# written: a bare name, a default, a container element, a keyword value.
+_DYNAMIC_NAMES = frozenset({
+    "globals", "locals", "vars", "dir", "getattr", "setattr", "delattr", "hasattr",
+    "eval", "exec", "compile", "__import__", "__builtins__", "__loader__", "__spec__",
+    "breakpoint",
+})
+# Attribute names that reach a namespace or look a name up by string, on ANY
+# base (a module, a frame, a function, a call result), and the same names
+# imported from anywhere (`from operator import attrgetter`).
+_DYNAMIC_ATTRS = frozenset({
+    "__dict__", "__getattribute__", "__getattr__", "__setattr__", "__delattr__",
+    "__globals__", "__builtins__", "__subclasses__", "f_globals", "f_locals",
+    "f_builtins", "f_back", "tb_frame", "gi_frame", "cr_frame", "ag_frame",
+    "modules", "_getframe", "_current_frames", "import_module", "reload", "find_spec",
+    "module_from_spec", "spec_from_file_location", "exec_module", "load_module",
+    "attrgetter", "methodcaller", "getmembers", "getmembers_static", "getattr_static",
+    "currentframe", "stack", "getouterframes", "getinnerframes", "trace", "locate",
+    "resolve_name", "get_type_hints", "ForwardRef", "_eval_type", "evaluate_forward_ref",
+    "format", "format_map", "vformat", "dictConfig", "fileConfig", "run_module",
+    "run_path", "get_referents", "get_referrers", "get_objects", "find_class",
+    "entry_points", "iter_entry_points", "load_entry_point",
+})
+# Modules any import of which (the module, or any name from it) is a dynamic
+# source: each exists to reach a namespace or load code by name.
+_DYNAMIC_MODULES = frozenset({
+    "builtins", "importlib", "inspect", "runpy", "pkgutil", "pydoc", "gc", "ctypes",
+    "pickle", "marshal", "code", "codeop", "zipimport",
+})
+
 # ── Class bodies: the conservative bound (combat fix pass 3, M-9) ─────────
 #
 # A class-body read is charged to the class binding alone only when the walk
@@ -316,7 +385,12 @@ _NOT_CHARGED = {
     ("TypeVar", "name"): ("bind", "a type parameter: binds in its annotation scope"),
     ("ParamSpec", "name"): ("bind", "a type parameter: binds in its annotation scope"),
     ("TypeVarTuple", "name"): ("bind", "a type parameter: binds in its annotation scope"),
-    ("Constant", "value"): ("literal", "a literal: a string constant is text, not a name"),
+    # Fix pass 6: excluded ONLY because a string becomes a name in two ways
+    # and both are charged elsewhere -- a lookup by string names a dynamic
+    # source (rule c: the whole tree), and a string annotation is read as the
+    # expression it spells (_ANNOTATION_FIELDS).
+    ("Constant", "value"): ("literal", "a literal: text, a name only through a dynamic source "
+                                       "(rule c) or as a string annotation (read as code)"),
     ("Constant", "kind"): ("literal", "the `u` prefix of a string literal"),
     ("MatchSingleton", "value"): ("literal", "True, False or None in a pattern"),
     ("Assign", "type_comment"): ("literal", _TYPE_COMMENT),
@@ -520,9 +594,24 @@ def _index_module(path, references_of=None):
                 self.bound, self.loads = {}, []
                 self.declared_global, self.declared_nonlocal = set(), set()
                 self.certain = set()        # class body: names certainly bound here
+                self.changes = []           # fix pass 6: names this scope may change in place
 
         def load(scope, name, attr):
             scope.loads.append((name, attr, scope.kind == "class" and name in scope.certain))
+
+        dynamic = set()                     # fix pass 6 (c): the dynamic sources named
+
+        def changes(scope, n):
+            """Fix pass 6 (b): the object a name denotes is changed in place
+            where it is the base of an item or attribute store or delete, or
+            of a method call (`X[k] = v`, `X.a += 1`, `X.update(...)`): which
+            calls change their object cannot be proven, so every one is
+            charged. Recorded against the name; resolved with the loads."""
+            base = n
+            while isinstance(base, (ast.Attribute, ast.Subscript, ast.Starred)):
+                base = base.value
+            if isinstance(base, ast.Name) and base is not n:
+                scope.changes.append(base.id)
 
         def certain_binds(st):
             """The names a top-level class-body statement of a type the walk
@@ -556,8 +645,10 @@ def _index_module(path, references_of=None):
                 for alias in sub.names:
                     if alias.name == "*":
                         continue
+                    # Fix pass 6 (c): a relative import denotes a module the
+                    # walk cannot name; it is a dynamic source, never nothing.
                     refs = ({f"{sub.module}:{alias.name}"}
-                            if sub.module and not sub.level else set())
+                            if sub.module and not sub.level else {_DYN + "relative import"})
                     out.setdefault(alias.asname or alias.name, set()).update(refs)
             return out
 
@@ -592,6 +683,21 @@ def _index_module(path, references_of=None):
             if not isinstance(n, ast.AST):
                 return                                    # None, an int, a bool: no name
             kind = type(n).__name__
+            if kind == "Constant" and isinstance(n.value, str) and (env or {}).get(_ANNOTATION_TEXT):
+                # Fix pass 6 (c): a string in an annotation is evaluated by
+                # NAME (typing, pydantic and FastAPI resolve it against the
+                # module's globals), so it is read as the expression it spells.
+                try:
+                    spelled = ast.parse(n.value.strip(), mode="eval").body
+                except (SyntaxError, ValueError):
+                    spelled = None
+                if spelled is not None:
+                    visit(spelled, scope, env)
+            if kind in ("Attribute", "Subscript") \
+                    and isinstance(getattr(n, "ctx", None), (ast.Store, ast.Del)):
+                changes(scope, n)                         # fix pass 6 (b)
+            if kind == "Call" and isinstance(getattr(n, "func", None), (ast.Attribute, ast.Subscript)):
+                changes(scope, n.func)                    # fix pass 6 (b)
             places = dict(env or {})
             opens = _OPENS.get(kind)
             if opens is not None or kind == "TypeAlias":
@@ -620,6 +726,7 @@ def _index_module(path, references_of=None):
                 if row is not None:
                     role, names = row[0], _strings(value)
                     if role == "attr":
+                        dynamic.update("." + name for name in names if name in _DYNAMIC_ATTRS)
                         base = getattr(n, "value", None)
                         if isinstance(base, ast.Name) and isinstance(base.ctx, ast.Load):
                             for name in names:
@@ -634,13 +741,23 @@ def _index_module(path, references_of=None):
                         scope.declared_global.update(names)
                     elif role == "nonlocal":
                         scope.declared_nonlocal.update(names)
+                    elif kind == "MatchClass":
+                        # A class pattern reads each keyword attribute off the
+                        # subject, as `a.attr` would: the same names are sources.
+                        dynamic.update("." + name for name in names if name in _DYNAMIC_ATTRS)
                     continue                     # "label", "literal", "import": nothing read
                 for name in _strings(value):
+                    if name in _DYNAMIC_NAMES:
+                        dynamic.add(name)        # fix pass 6 (c): read, bound or passed on
                     if stored and name not in scope.declared_global:
                         bind_name(scope, name)   # a `del` in a class body: charged above
                     else:
                         load(scope, name, None)  # a read, or a write to a global
+                        if stored:
+                            scope.changes.append(name)   # fix pass 6 (b): a `global` write
                 place = _FIELD_SCOPE.get((kind, field), "here")
+                child = {**(env or {}), _ANNOTATION_TEXT: True} \
+                    if field in _ANNOTATION_FIELDS else env
                 if place == "class_body":
                     class_body(places["class_body"],
                                [st for st in (value or ()) if isinstance(st, ast.AST)])
@@ -649,7 +766,7 @@ def _index_module(path, references_of=None):
                         visit(g, places["generators"],
                               {"iter": scope if i == 0 else places["generators"]})
                 else:
-                    visit(value, places.get(place, scope), env)
+                    visit(value, places.get(place, scope), child)
 
         def owners(scope, name, certain):
             """Every scope whose binding `name` may denote when read in
@@ -685,25 +802,32 @@ def _index_module(path, references_of=None):
         names = set()
         for scope in scopes:
             if scope.kind != "module":
+                # Fix pass 6: every target of a local import is kept, a module
+                # ("X:") too: a module object in hand is a dynamic source (c).
                 for refs in scope.bound.values():
-                    names.update(r for r in refs if not r.endswith(":"))
+                    names.update(refs)
             for name, attr, certain in scope.loads:
                 for home in owners(scope, name, certain):
                     if home is None:
                         names.add(name if attr is None else f"{name}.{attr}")
                     elif attr is not None:
                         names.update(r + attr for r in home.bound[name] if r.endswith(":"))
+            for name in scope.changes:
+                if None in owners(scope, name, False):
+                    names.add(_MUT + name)
+        names.update(_DYN + source for source in dynamic)
         return names
 
     def import_target(node, alias):
         """What one module-level import alias denotes, as a reference: "X:"
         for a module, "X:n" for a name imported from one. A relative or star
-        import denotes nothing the walk can name."""
+        import denotes a module the walk cannot name: a dynamic source (fix
+        pass 6, c), never nothing."""
         if isinstance(node, ast.Import):
             return {alias.name.split(".")[0] + ":"}
         if node.module and not node.level and alias.name != "*":
             return {f"{node.module}:{alias.name}"}
-        return set()
+        return {_DYN + ("star import" if alias.name == "*" else "relative import")}
 
     def header_refs(node):
         """r2 (Sept 6): the names a block HEADER references -- the `if` test,
@@ -749,8 +873,11 @@ def _index_module(path, references_of=None):
         own = referenced(node) if own_refs is None else own_refs
         text, refs = guard + segment(node), set(own) | set(guard_refs)
         if name in table:
+            # Fix pass 6 (b): EVERY alternative. The kind is the union of the
+            # kinds the name is bound as ("data+def"), never the first one.
             prev_kind, prev_text, prev_refs = table[name]
-            table[name] = (prev_kind, prev_text + text, prev_refs | refs)
+            kinds = set(prev_kind.split("+")) | {kind}
+            table[name] = ("+".join(sorted(kinds)), prev_text + text, prev_refs | refs)
         else:
             table[name] = (kind, text, refs)
 
@@ -775,10 +902,10 @@ def _index_module(path, references_of=None):
                 # `DBAPIError` import moved no fingerprint at all, while the
                 # deadlock path naming it stopped being a rollback-and-retry.
                 #
-                # Given their own kind so the affordability bound can count
-                # them separately: a route references ~40 imported names, which
-                # inflates the CLOSURE without inflating the DRIFT, because
-                # import lines change far more rarely than code does.
+                # Given their own kind, which `_resolve` reads to follow an
+                # import into the binding it imports (the closure-size bound
+                # that also counted them separately was deleted in combat fix
+                # pass 6).
                 #
                 # Each alias carries what IT denotes ("X:" or "X:n"), not the
                 # whole statement's names, so `from X import a, b` does not
@@ -827,12 +954,36 @@ def _index_module(path, references_of=None):
                 # object it stores into; each such binding carries the whole
                 # statement and its references. A statement that binds no
                 # name (a call, an assert) is no binding of anything.
-                for name in sorted(_class_touched(node) | _store_bases(node)):
+                bound = _class_touched(node) | _store_bases(node)
+                for name in sorted(bound):
                     bind(name, "data", node, guard, guard_refs)
+                if not bound:
+                    # Fix pass 6 (b): a statement that binds nothing may
+                    # still change an object in place (`CONFIG.update(...)`,
+                    # `app.include_router(...)`) or name a dynamic source.
+                    # It is indexed under a key no code can spell, reached
+                    # through what it changes (below) and read by (c).
+                    bind(f"<stmt@{node.lineno}>", "stmt", node, guard, guard_refs)
+
+    def mutators():
+        """Fix pass 6 (b): a module binding changed in place (`_MUT`) by
+        another binding's code -- a function's item store, method call or
+        `global` write, a module-level statement's -- carries that code as a
+        reference, so a route that reads the object reaches every place that
+        may change it. An import is changed by nothing of ours."""
+        for name, (_kind, _text, refs) in sorted(table.items()):
+            for ref in refs:
+                if not ref.startswith(_MUT):
+                    continue
+                target = ref[len(_MUT):]
+                if target in table and target != name and table[target][0] != "import":
+                    kind, text, target_refs = table[target]
+                    table[target] = (kind, text, target_refs | {name})
 
     if references_of is not None:
         return referenced(references_of)
     visit(ast.parse(source).body)
+    mutators()
     return {name: (kind, text, frozenset(refs))
             for name, (kind, text, refs) in table.items()}
 
@@ -869,8 +1020,14 @@ def _segment(module, name):
     The memo is keyed, so a control evicts one key and restores it."""
     key = (module, name)
     if key not in _SEGMENT_MEMO:
-        binding = _binding_index().get(module, {}).get(name)
-        _SEGMENT_MEMO[key] = "" if binding is None else binding[1]
+        if name == _WHOLE:
+            # Fix pass 6 (c): one module's whole source, the unit of the
+            # dynamic charge, through the same seam as every binding.
+            path = API_DIR / f"{module}.py"
+            _SEGMENT_MEMO[key] = path.read_text(encoding="utf-8") if path.is_file() else ""
+        else:
+            binding = _binding_index().get(module, {}).get(name)
+            _SEGMENT_MEMO[key] = "" if binding is None else binding[1]
     return _SEGMENT_MEMO[key]
 
 
@@ -928,16 +1085,24 @@ def _binding_key(obj):
 def _walk_bindings(seeds, index=None):
     """{(module, name): kind} for every binding the seeds reach, seeds included.
 
-    THREE TIERS, and the middle one is what keeps this affordable. A def or
-    class is EXPANDED THROUGH -- every name inside it is followed. A data
-    binding is followed only into OTHER DATA BINDINGS. An import is a leaf,
-    except for the guards that SELECT it (Group 2 review, Sept 6).
+    ONE RULE, whatever the kind (combat fix pass 6, M-9 (a)): every reached
+    binding is followed into every binding each of its references denotes --
+    data into a def or a class (`CALL = helper` reaches `helper`), a def into
+    data, a class into anything, an import into the binding it imports from
+    one of our modules, and the guards that select an import (Group 2 review,
+    Sept 6).
 
-    The middle tier is the whole cost control, not a compromise: letting a data
-    binding follow names of any kind makes `app = FastAPI(...)` a hub that every
-    route decorator references, and the measured median closure goes from 20 to
-    179 -- every route dragging in most of the app, a fingerprint that certifies
-    nothing because it always moves.
+    DELETED in fix pass 6: the middle tier, which followed a data binding only
+    into other data bindings. It was the walk's cost control -- `app =
+    FastAPI(...)` is a data binding every route decorator references, and
+    following it puts most of the app in every route's closure -- and the
+    review of round 6 showed what it cost: a data binding holding a callable
+    (`CALL = helper`) hid the helper and everything it reads. Its control
+    (test_a_data_binding_does_not_drag_in_the_whole_app) is deleted with it.
+    Nothing replaces it as a cost control: the closure is now a bound, a route
+    that reaches the app's hub carries the app, and the measured cost is
+    recorded where the closure-size test was deleted (see the note in place of
+    test_the_helper_closure_stays_affordable).
 
     Data-into-data was missing until r15 found what it cost: a data binding
     COMPOSED from other data bindings showed only the NAME of what it composed.
@@ -981,11 +1146,8 @@ def _walk_bindings(seeds, index=None):
         # ("X:n"); that is how a route reaches a helper in another module.
         for ref in refs:
             for target in _resolve(index, module, ref):
-                if target in reached:
-                    continue
-                if kind == "data" and index[target[0]][target[1]][0] != "data":
-                    continue
-                frontier.append(target)
+                if target not in reached:
+                    frontier.append(target)
     return reached
 
 
@@ -1001,27 +1163,102 @@ def _resolve(index, module, ref):
                 from an imported constant still reaches that constant.
 
     Anything else -- a builtin, a local, a name `module` does not bind --
-    denotes no binding of ours."""
+    denotes no binding of ours, EXCEPT in a module with a star import, whose
+    names the walk cannot list: there it denotes the star import (fix pass 6,
+    c). A name bound more than once is read through EVERY alternative: an
+    import among its kinds is followed whatever else binds it (fix pass 6,
+    b)."""
     table = index.get(module, {})
+    if ref.startswith(("!", "<")):
+        return [] if not ref.startswith("<") or ref not in table else [(module, ref)]
     if ":" in ref:
         target, _, name = ref.partition(":")
         return [(target, name)] if name and name in index.get(target, {}) else []
     if "." in ref:
         base, _, attr = ref.partition(".")
         binding = table.get(base)
-        if binding is None or binding[0] != "import":
+        if binding is None:
+            return [(module, "*")] if "*" in table else []
+        if "import" not in binding[0].split("+"):
             return []
         return [(r[:-1], attr) for r in sorted(binding[2])
                 if r.endswith(":") and attr in index.get(r[:-1], {})]
     binding = table.get(ref)
     if binding is None:
-        return []
+        return [(module, "*")] if "*" in table else []
     keys = [(module, ref)]
-    if binding[0] == "import":
+    if "import" in binding[0].split("+"):
         for r in sorted(binding[2]):
-            if ":" in r:
+            if ":" in r and not r.startswith("!"):
                 keys.extend(_resolve(index, module, r))
     return keys
+
+
+def _dynamic_source(index, ref):
+    """The dynamic source one reference names (combat fix pass 6, M-9 (c)),
+    or None: a name or attribute of `_DYNAMIC_NAMES` / `_DYNAMIC_ATTRS` the
+    walk saw in any form (`_DYN` tokens), an import of a `_DYNAMIC_MODULES`
+    module or of any such name from anywhere, a relative or star import, and
+    a module object of ours in hand (`import X`, module-level or local: once
+    held it can be read by string by any code it is passed to)."""
+    if ref.startswith(_DYN):
+        return ref[len(_DYN):]
+    if ref.startswith(("!", "<")):
+        return None
+    if ":" in ref:
+        target, _, name = ref.partition(":")
+        if target.split(".")[0] in _DYNAMIC_MODULES or name in _DYNAMIC_NAMES \
+                or name in _DYNAMIC_ATTRS:
+            return ref
+        return f"the module object {target}" if not name and target in index else None
+    if "." in ref:
+        return ref if ref.partition(".")[2] in _DYNAMIC_ATTRS else None
+    return ref if ref in _DYNAMIC_NAMES else None
+
+
+_OPEN_MEMO = {}
+
+
+def _open_modules(index):
+    """{module: (binding, source)}: every module DYNAMICALLY OPEN under rule
+    (c), with its first witness in sorted order. One binding naming a dynamic
+    source opens its whole module: a lookup or a write by string reaches any
+    name of it, whichever binding the code that does it belongs to."""
+    if index is _BINDING_INDEX and _OPEN_MEMO:
+        return _OPEN_MEMO
+    opened = {}
+    for module in sorted(index):
+        for name in sorted(index[module]):
+            sources = sorted(filter(None, (_dynamic_source(index, ref)
+                                           for ref in index[module][name][2])))
+            if sources:
+                opened[module] = (name, sources[0])
+                break
+    if index is _BINDING_INDEX:
+        _OPEN_MEMO.update(opened)
+    return opened
+
+
+def _dynamic_charge(index, reached):
+    """[(module, witness binding, source)] for every open module whose
+    bindings the closure reaches: non-empty means the fingerprint carries the
+    whole source of every module (rule (c), the one rule; the gate never
+    refuses instead)."""
+    opened = _open_modules(index)
+    return [(module,) + opened[module]
+            for module in sorted({module for module, _name in reached}) if module in opened]
+
+
+def _fingerprint_of(index, reached, segment_of):
+    """The reviewed surface as text, ONE definition for the gate, the re-pin
+    and every synthetic proof: every reached binding's source in a fixed
+    order, then -- when the closure reaches an open module (rule (c)) -- the
+    whole source of every module of the tree, each through `segment_of`
+    (`_segment` for the app, so the mutation controls edit what it reads)."""
+    text = "".join(segment_of(module, name) for module, name in sorted(reached))
+    if _dynamic_charge(index, reached):
+        text += "".join(segment_of(module, _WHOLE) for module in sorted(index))
+    return text
 
 
 def _route_seeds(route):
@@ -1068,8 +1305,8 @@ _CLOSURE_CACHE = {}
 
 
 def _reached(seeds):
-    """Memoised: the same seeds are asked for by the manifest build, by the
-    affordability bound and by several assertions below."""
+    """Memoised: the same seeds are asked for by the manifest build and by
+    several assertions below."""
     key = tuple(seeds)
     cached = _CLOSURE_CACHE.get(key)
     if cached is None:
@@ -1080,9 +1317,10 @@ def _reached(seeds):
 
 def _fingerprint_text(seeds):
     """The reviewed surface as text: every reached binding's segment, in a
-    fixed order so the fingerprint does not depend on walk order."""
-    return "".join(_segment(module, name)
-                   for module, name in sorted(_reached(seeds)))
+    fixed order so the fingerprint does not depend on walk order, and the
+    whole tree's source when the closure reaches an open module (fix pass 6,
+    `_fingerprint_of`)."""
+    return _fingerprint_of(_binding_index(), _reached(seeds), _segment)
 
 
 def _helper_closure(endpoint):
@@ -1495,537 +1733,26 @@ def test_a_helper_in_another_module_moves_its_routes_fingerprint():
     )
 
 
-def test_the_helper_closure_stays_affordable():
-    """A fingerprint that pulls half the app in drifts on every commit, and a
-    gate that always fires is a gate nobody reads.
-
-    MEASURED when these bounds were set (Sept 4 batch, r14 M7) at the shipped
-    two-tier rule: median 15, p90 49, worst 190 (/api/v1/matches) of 1282
-    indexed bindings, with the walk itself taking 0.1 s once the index is built
-    (~5.3 s, once per process). The bounds below sat above those with room, so
-    this fails on a walk that has gone wrong rather than on ordinary growth;
-    the worst-route bounds, and the two p90 bounds (on the card trading lane
-    and, independently and to the same values, at the Discord collection
-    landing, then at the merge of the two), have since moved for measured
-    growth in bindings routes really run, each move recorded with its
-    measurement at its assertion.
-
-    The second tier is exactly what these numbers pay for. Expanding data
-    bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
-    every route decorator references, and the same measurement gives median
-    179 / worst 279 -- every route dragging in most of the app, which is a
-    fingerprint that certifies nothing because it always moves."""
-    routes = [r for r in main.app.routes
-              if isinstance(r, APIRoute) and r.path.startswith("/api/v1/")]
-    assert routes
-    total = sum(len(names) for names in _binding_index().values())
-
-    def percentiles(counts):
-        counts = sorted(counts)
-        return (counts[len(counts) // 2],
-                counts[min(len(counts) - 1, int(len(counts) * 0.9))],
-                counts[-1])
-
-    reached = [_reached(_route_seeds(route)) for route in routes]
-    code_median, code_p90, code_worst = percentiles(
-        sum(1 for kind in r.values() if kind != "import") for r in reached)
-    all_median, all_p90, all_worst = percentiles(len(r) for r in reached)
-
-    # The CODE tier is the one that drifts, and the r15 repairs left its bounds
-    # alone: measured 20 / 55 / 198 with data-into-data expansion, against
-    # 16 / 48 / 191 before it.
-    assert code_median <= 24, f"median code closure {code_median} of {total}"
-    # Discord collection landing (2026-09-26): the p90 moved for measured
-    # growth. The same walk with the same route seeds over each tree:
-    #
-    #   tree                               routes   code median / p90 / worst
-    #   main 9a1dd9d                          365   21 / 69 / 326
-    #   lane 5868131                          369   21 / 73 / 326
-    #   LAND-1 74af3f6 (7541261 merged)       369   21 / 73 / 326
-    #   LAND-2 852f4be through 9f52e03        369   21 / 76 / 326
-    #
-    # Main alone passes and the lane alone passes; the landed tree is the sum
-    # of the two landings. The p90 is a rank statistic -- the value at sorted
-    # position int(0.9 * n) -- and it moved while the route AT that position
-    # did not: GET /api/v1/admin/quarantine/triage/{mode}/{group_id} measures
-    # 76 on every tree above. What moved is how many routes sit above 75: 37
-    # of 369 on the landed tree, exactly the count that puts position 332 on
-    # that route (main: 33 of 365; the lane: 35 of 369). Four of the 37 are
-    # the lane's new internal routes: the collection binder (117) and its page
-    # image (280), the pack list (123) and its strip image (280), the two
-    # images reaching the card-face rendering their tiles are composited from.
-    # Two crossed 75 on main's title-ladder hook: POST
-    # /api/v1/team/series/{series_id}/report-dc 72 -> 80 and POST
-    # /api/v1/admin/team/series/{series_id}/resolve 74 -> 82, each +8 in
-    # title_ladders (record_completed_games, the three lookups it runs and the
-    # four rung tables they read) -- the ladder credit their completion paths
-    # now give. Every one is a binding its route really runs, and the median
-    # has not moved, which is where a walk gone wrong shows first (the hub
-    # case in the docstring measured median 179).
-    #
-    # The bound moves to 80, 5% over the measurement -- the ~5-6% headroom the
-    # worst bounds keep over theirs; the median and worst bounds stay.
-    #
-    # Card trading LAND (2026-09-27): measured 21 / 76 / 326 of 2654 indexed
-    # bindings over 372 routes at the merge of main 9a1dd9d into the trading
-    # lane, against 21 / 73 / 326 over the lane tip 93227a8 (372 routes) and
-    # 21 / 69 / 326 over main 9a1dd9d (365 routes), the same walk with the
-    # same route seeds over each tree's own backend/api. Neither side passes
-    # 75; the composition does. The ladder hook gives two routes at the
-    # lane's p90 rank the eight title_ladders bindings a rated completion
-    # really runs (POST /api/v1/team/series/{series_id}/report-dc 72 -> 80,
-    # POST /api/v1/admin/team/series/{series_id}/resolve 74 -> 82), both rise
-    # past the rank, and the 90th percentile becomes the next route up, GET
-    # /api/v1/admin/quarantine/triage/{mode}/{group_id} at 76, unchanged
-    # itself. On main alone the rank sits lower (69); the five player trade
-    # routes above it are what put it in this band.
-    #
-    # The bound moves to 80 -- ~5% over the measurement, the headroom the
-    # other moves in this test gave -- for that reason and no other; the
-    # median and worst bounds stay.
-    #
-    # The two moves above were made independently, one on each side of the
-    # merge of main 36e8493 into the card trading lane (2026-09-27), and both
-    # chose 80.
-    #
-    # Card trading LAND, second merge (2026-09-27): measured 22 / 82 / 326
-    # of 2716 indexed bindings over 376 routes at the merge of main 36e8493
-    # into the trading lane (9a5b081), against 21 / 76 / 326 over the lane
-    # tip a666517 (372 routes) and over main 36e8493 (369 routes), the same
-    # walk with the same route seeds over each tree's own backend/api.
-    # Neither side passes 80; the composition does, by rank alone. The p90
-    # is the value at sorted position int(0.9 * n), the 38th route from the
-    # top at n = 376. Each side adds routes far above it -- the lane its five
-    # player trade routes (132 to 158), main its four collection routes (117
-    # to 280) -- and each side alone keeps 76 at its rank (37 and 36 routes
-    # above 76); the merged tree carries all nine, 38 routes sit above 80,
-    # and the 38th from the top is POST
-    # /api/v1/admin/team/series/{series_id}/resolve at 82, 82 on both sides
-    # too. No count is the merge's own: every route measures what it
-    # measures on the side that has it (the six that differ from main are
-    # the lane's trading reads, at their lane counts).
-    #
-    # The bound moves to 86 -- ~5% over the measurement, the headroom the
-    # moves above gave -- for that reason and no other; the median (22) and
-    # worst bounds stay.
-    #
-    # Connect-failure lane (2026-09-27): the p90 moved for measured growth.
-    # The same walk with the same route seeds over each tree's own
-    # backend/api:
-    #
-    #   tree                               routes   code median / p90 / worst
-    #   main 9a1dd9d                          365   21 / 69 / 326
-    #   lane f25c084 (api code)               369   21 / 76 / 326
-    #
-    # The p90 is a rank statistic, the value at sorted position int(0.9 * n),
-    # and it moved while no route near that position did: 37 of 369 routes
-    # sit above 75 on the lane (33 of 365 on main), which puts position 332
-    # on GET /api/v1/admin/quarantine/triage/{mode}/{group_id}, 76 on both
-    # trees. The four that crossed are the lane's three new assembly routes
-    # (POST /api/v1/ffa/lobby/{lobby_id}/connect 268, .../assembly 266 and
-    # .../release 93) and POST /api/v1/ffa/queue/leave, 53 -> 234: the leave
-    # now runs the assembly leave plan (the gone test and its witness census,
-    # the dissolve with the closers' record, and the re-form, which locks the
-    # next roster through the start's own _ffa_lock_roster, with its region
-    # pick, wager binding and titles). Every one is a binding its route
-    # really runs, and the median has not moved.
-    #
-    # The bound moves to 80, ~5% over the measurement; the median and worst
-    # bounds stay.
-    #
-    # Connect-failure LAND, merge main d889294 into the lane (2026-09-29):
-    # the same walk with the same route seeds over each tree's own
-    # backend/api:
-    #
-    #   tree                               routes   code median / p90 / worst
-    #   fork 9a1dd9d                          365   21 / 69 / 326
-    #   main d889294                          377   21 / 82 / 326
-    #   lane be70f04                          369   21 / 76 / 326
-    #   merge a234c91 (measured at 8652bdf)   381   22 / 83 / 326
-    #
-    # Neither side passes 83; the composition does, by rank alone. At
-    # n = 381 the p90 is the 39th route from the top and 38 routes sit above
-    # 83 on the merged tree: main's nine trade and collection routes (117 to
-    # 280) and the lane's four (POST /api/v1/ffa/lobby/{lobby_id}/connect
-    # 268, .../assembly 266, .../release 93, and POST
-    # /api/v1/ffa/queue/leave, 53 on main and 234 on the lane) are above it
-    # together for the first time. The route at the rank is GET
-    # /api/v1/spectate/games, 83 on both sides too. No count is the merge's
-    # own: checked route by route, every count at the merge is main's plus
-    # the lane's minus the fork's (or the one side's, for a route only one
-    # side has); the median moves 21 -> 22 the same way, by rank, under its
-    # bound of 24.
-    #
-    # The bound moves to 88 -- ~6% over the measurement, the headroom the
-    # moves above gave -- for that reason and no other; the median and
-    # worst bounds stay.
-    #
-    # Connect-failure LAND, sitting 2, merge claude/janitor-selftest 17ca44d
-    # (main cd8d846, the dance cards) into the lane (2026-09-30): the same
-    # walk with the same route seeds over each tree's own backend/api:
-    #
-    #   tree                               routes   code median / p90 / worst
-    #   base 82c0da6                          377   21 / 82 / 326
-    #   lane e966ed7                          381   22 / 83 / 326
-    #   trunk 17ca44d                         382   22 / 83 / 326
-    #   merge c8ffa2f                         386   22 / 90 / 326
-    #
-    # Again the rank alone: at n = 386 the p90 is the 39th route from the
-    # top. The trunk's five dance motion routes (the motion PNG 285, the
-    # motion preview GIF 282, GET /api/v1/pc-face/motion 125, POST
-    # /api/v1/pc/portrait/motion 118, POST /api/v1/pc/dance 32) now sit in
-    # the ranking beside the lane's four (connect 268, assembly 266, release
-    # 93, POST /api/v1/admin/ffa-g3-seats 14): four of the trunk's five are
-    # above the lane's rank and three of the lane's four above the trunk's,
-    # and the route at the rank is now GET /api/v1/ovt/queue/poll/{steam_id}
-    # at 90 (90 on both sides), with the lane's release at 93 just above it.
-    # Checked route by route, every count at the merge is the trunk's plus
-    # the lane's minus the base's (or the one side's, for a route only one
-    # side has): the merge adds no binding of its own. The bound moves to 95,
-    # ~6% over the measurement, for that reason and no other; the median and
-    # worst bounds stay (22 against 24, 326 against 335).
-    #
-    # Discord fix round 4 LAND (2026-09-30): measured 22 / 88 / 328 of 2940
-    # indexed bindings over 383 routes at the lane tip after its merges of
-    # main 82c0da6 and cd8d846, against 22 / 85 / 328 over the lane before
-    # them (ceddd3d, 377 routes) and 22 / 83 / 326 over main cd8d846 (382
-    # routes), the same walk with the same route seeds over each tree's own
-    # backend/api. Neither side passes 86; the composition does. The p90 is
-    # the value at sorted position int(0.9 * n), the 39th route from the top
-    # at n = 383. The lane's tournament routes keep their lane counts, above
-    # main's (signup 95 / 88, unsignup 90 / 82, time-vote 85 / 82, play-now
-    # 83 / 79, spectate/games 87 / 83: the row-32 start rule and round 4's
-    # one eligibility predicate), and main's dance cards add five routes and
-    # take POST /api/v1/pc/portrait from 86 to 88 (its motion writer); the
-    # 39th from the top is that route, at 88, 88 on main. Every count is the
-    # one its side measures; the only composed count, GET /api/v1/health (83:
-    # both sides' health words), sits below the rank.
-    #
-    # The bound moves to 92 -- ~5% over the measurement, the headroom the
-    # moves above gave -- for that reason and no other; the median (22) and
-    # worst bounds stay.
-    #
-    # Connect-failure LAND, sitting 3, merge main 0e751993 (the Discord fix)
-    # into the lane (2026-09-30): the same walk with the same route seeds over
-    # each tree's own backend/api:
-    #
-    #   tree                               routes   code median / p90 / worst
-    #   base 69a3599b                         382   22 / 83 / 326
-    #   lane a7e3d385                         386   22 / 90 / 326
-    #   trunk 0e751993                        383   22 / 88 / 328
-    #   merge                                 387   22 / 95 / 328
-    #
-    # At n = 387 the p90 is sorted position 348, and it holds POST
-    # /api/v1/tournaments/{tournament_id}/signup at 95, the trunk's own count
-    # (88 on the lane and the base); the lane's release (93) and the trunk's
-    # unsignup (90) sit just below it. Route by route, every count at the
-    # merge is the trunk's plus the lane's minus the base's (or the one side's,
-    # for a route only one side has) except four lane routes, each +4 over
-    # the lane: POST /api/v1/ffa/queue/leave, .../connect, .../assembly and
-    # GET /api/v1/ffa/queue/poll/{steam_id}. Those four reach
-    # tournaments._build_current_response, which the trunk changed to reach
-    # _eligible_slot_tallies, _ELIGIBLE_SLOT_TALLY_SQL, _ELIGIBLE_ENTRANT_SQL
-    # and MIN_SLOT_NOTICE_HOURS; the trunk's copies of those routes do not
-    # reach it, so the four bindings appear only when both sides are present.
-    # None of the four routes is at the rank. The bound moves to 100, ~5% over
-    # the measurement, for that reason and no other; the median and worst
-    # bounds stay (22 against 24, 328 against 335).
-    #
-    # Discord card render parity LAND, merge main 5062f4c4 (the
-    # connect-failure landing) into the lane (2026-10-01): the same walk with
-    # the same route seeds over each tree's own backend/api:
-    #
-    #   tree                               routes   code median / p90 / worst
-    #   base 0e751993                         383   22 / 88 / 328
-    #   lane fb9081c2                         383   22 / 90 / 370
-    #   trunk 5062f4c4                        387   22 / 95 / 328
-    #   merge                                 387   22 / 105 / 370
-    #
-    # Route by route, every count at the merge is the trunk's plus the lane's
-    # minus the base's (the trunk's, for its four new routes); no binding
-    # appears only when both sides are present. A rank effect: two routes
-    # that sat below the trunk's p90 crossed it with the lane's card art
-    # layer -- GET /api/v1/health 89 -> 265 (the pc_card_art self-test draws a
-    # face) and POST /api/v1/pc/portrait 88 -> 126 (the lane's card art
-    # bindings it reaches) -- so position 348 moves two ranks up the trunk's own ordering,
-    # from POST /api/v1/tournaments/{tournament_id}/signup (95, unmoved) to
-    # POST /api/v1/spectate/grant (105, unmoved on every tree). 39 routes sit
-    # above 100 on the merge, 35 on the trunk. The bound moves to 111, ~6%
-    # over the measurement, for that reason and no other; the median and
-    # worst bounds stay (22 against 24, 370 against 380).
-    assert code_p90 <= 111, f"p90 code closure {code_p90} of {total}"
-    # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
-    # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
-    # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
-    # shared SteamID64 check (is_individual_id and its three constants, +4, in
-    # place of the two id regexes, -2) and the pool membership word with its
-    # Steam id clause (+2). That moved the worst bound to 300.
-    #
-    # Sept 14 batch merge (2026-09-15): measured 21 / 64 / 315 of 2319 indexed
-    # bindings, the worst still POST /api/v1/pc/packs/open. The same walk with
-    # the same route seeds over MAIN's backend/api gives 21 / 64 / 282, so the
-    # merge's own delta is +33 on the worst route and 0 on the median and p90.
-    #
-    # All 33 are bindings that DID NOT EXIST on main, and nothing main reached
-    # stopped being reached: 18 in pc_face (the autograph layout -- _autograph_box,
-    # _hex_rgb, _sign_case/_fill/_ink_height/_layout/_mask/_pieces/_style/_width
-    # and the eight _SIGN_* constants) and 15 in the new pc_signature module
-    # (signature_style, _hex and the style tables it decides from). That is the
-    # signed-print face work, which this route runs when an opened pack mints a
-    # signed print.
-    #
-    # It is NOT the pool predicate, and the pool predicate cannot move this
-    # number: the clause the merge added to _PC_POOL_MEMBER_SQL
-    # (`p.mod_seen_at IS NOT NULL`) is literal SQL inside a data binding and
-    # names nothing the walk can follow. The +2 the v4.13 note above counts is
-    # the two data bindings themselves, and there are still exactly two.
-    #
-    # The bound moves to 335 -- the same ~6% headroom over the measurement that
-    # 300 gave over 282 -- so it goes on failing a walk that has gone wrong (the
-    # data-into-data hub case measured worst 279 at MEDIAN 179, i.e. a runaway
-    # shows up in the median long before it shows up here) rather than on a
-    # feature module a route genuinely runs. The median and p90 bounds stay.
-    #
-    # Discord card render parity (2026-10-01): the same walk with the same
-    # route seeds measured 22 / 88 / 328 of 2949 over main 0e75199's
-    # backend/api and 22 / 90 / 357 of 2988 over the lane tip, the worst still
-    # POST /api/v1/pc/packs/open. Its +29 are all bindings that did not exist
-    # on main, all in pc_face -- the card art layer (_draw_badge_art,
-    # card_art_bundle/_patch/_names/_check_entry/_index_bytes, the bundle
-    # reader's _card_art_* helpers, the CardArtBundle record, top_card_name,
-    # _kit_pngs and the CARD_ART_* / _CARD_ART_* constants) -- and nothing
-    # main reached stopped being reached. 26 routes moved, none shrank: the
-    # face, strip, grid, motion and pack routes by 25 to 41 each, and GET
-    # /api/v1/health by 163 (87 -> 250), because the pc_card_art health word
-    # runs card_art_selftest, which draws a face to prove the layer. The
-    # bound moves to 380, ~6% over the measurement, for that reason and no
-    # other; the median and p90 bounds stay.
-    assert code_worst <= 380, f"worst code closure {code_worst} of {total}"
-
-    # Imports are counted separately rather than folded in or waved through.
-    # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
-    # honest, because a route really does reference ~40 imported names. What
-    # they do not triple is the DRIFT: an import line changes far more rarely
-    # than the code around it. A walk that has gone wrong still has to fail
-    # here, so the bound is real and not merely raised to fit.
-    #
-    # Binding-resolved closure (2026-10-02): until then a bare name was
-    # resolved in every indexed module and an attribute by its last part alone,
-    # so the combat evidence lane's two modules -- importing text, datetime,
-    # hashlib, hmac and json, and defining a `dumps` that every `json.dumps`
-    # matched -- grew 386 of 391 existing routes and took this median from 86
-    # (base 43a6316c) to 92. Each reference now resolves to the binding it
-    # denotes (`_resolve`). The same walk measures 45 / 137 / 457 all kinds and
-    # 22 / 88 / 369 code over base 43a6316c (391 routes) AND over the lane tip
-    # (393 routes): identical, and the only existing routes whose closure moved
-    # are the two whose code the lane changed (health and the seat record).
-    # The difference from 86 is what the old walk charged by name alone: on
-    # the lane tip it dropped 243 code and data bindings, each a same-named
-    # binding the route's code does not name (main._PNG_MAX_CHUNKS reached
-    # through pc_face's own, title_ladders.router through tournaments' own),
-    # and reached 24 it had missed: imported helpers it treated as leaves
-    # (region_pick's selection rule behind main's import of
-    # pick_region_for_group). The bound stays.
-    assert all_median <= 90, f"median closure {all_median} of {total}"
-    # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
-    # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
-    # the same walk with the same route seeds over main 7541261's backend/api.
-    # The same walk over this tree WITHOUT the seven trade routes gives
-    # 72 / 140 / 457 again, so the move is those seven routes and nothing
-    # else. (The code tier: p90 69 -> 73, median 21 and worst 326 unmoved,
-    # all under the bounds above, which stay.)
-    #
-    # The five player trade routes reach 229 to 257 bindings each, 83 of them
-    # in the face modules, and they enter those modules through the bindings
-    # GET /api/v1/pc/collection enters them through (_pc_print_dict,
-    # _pc_face_inputs, _pc_labels, _pc_face_ctx, _pc_locale, _pc_renderer_fp;
-    # the same 83 face-module bindings): a trade answers with the binder's
-    # own print projection. The two admin trade routes reach 91 and 73. Seven
-    # routes join a population of 365, five of them above the old p90, and
-    # the 90th percentile moves from 140 to 151.
-    #
-    # The bound moves to 160 -- ~6% over the measurement, the headroom 335
-    # gave over 315 and 300 over 282 at the code-worst moves -- for that
-    # reason and no other. A walk that has gone wrong still fails at the
-    # median bounds first (the data-into-data hub case measured median 179),
-    # and those stay, as does the worst bound.
-    #
-    # Discord collection landing (2026-09-26): the same walk, whole closure:
-    #
-    #   tree                               routes   median / p90 / worst
-    #   main 9a1dd9d                          365   72 / 140 / 457
-    #   lane 5868131                          369   73 / 150 / 457
-    #   LAND-1 74af3f6 (7541261 merged)       369   73 / 151 / 457
-    #   LAND-2 852f4be through 9f52e03        369   73 / 151 / 457
-    #
-    # The same rank effect as the code p90 above, and it crossed at the first
-    # landing: 37 of 369 routes sit above 150 on the landed tree (main: 33 of
-    # 365; the lane: 36 of 369), which puts position 332 on POST
-    # /api/v1/ovt/matches, 151 on every tree above. Four of the 37 are the
-    # lane's new internal routes (216, 410, 222, 409); the one that crossed on
-    # main is POST /api/v1/team/series/{series_id}/report-dc, 146 -> 153 on
-    # the lead-forfeit hotfix -- seven code bindings, _team_game_crossed_two
-    # with the four helpers and two constants beside it, the per-game
-    # evidence that route now settles from. The bound moves to 160, 6% over
-    # the measurement; the median and worst bounds stay.
-    #
-    # The two moves above were made independently, one on each side of the
-    # merge of main 36e8493 into the card trading lane (2026-09-27), and both
-    # chose 160.
-    #
-    # Card trading LAND, second merge (2026-09-27): measured 75 / 164 / 459
-    # over the same 376 routes of the merge 9a5b081, against 75 / 153 / 459
-    # over the lane tip a666517 and 73 / 151 / 457 over main 36e8493. The
-    # same rank effect as the code p90: 38 routes sit above 160 on the
-    # merged tree, nine of them the two sides' new routes, and the 38th from
-    # the top is POST /api/v1/team/series/{series_id}/report-dc at 164 (162
-    # on main; the +2 is models.deferred and models.text, the two import
-    # bindings F63's Player mapping added, which every route reaching the
-    # model reaches). The bound moves to 174, ~6% over the measurement; the
-    # median and worst bounds stay (the worst route, POST
-    # /api/v1/pc/packs/open, measures 459 against 460).
-    #
-    # Connect-failure lane (2026-09-27), the same walk, whole closure:
-    #
-    #   tree                               routes   median / p90 / worst
-    #   main 9a1dd9d                          365   72 / 140 / 457
-    #   lane f25c084 (api code)               369   73 / 151 / 457
-    #
-    # The same rank effect as the code p90 above: 37 of 369 routes sit above
-    # 150 (33 of 365 on main), which puts position 332 on POST
-    # /api/v1/ovt/matches, 151 on both trees. The four that crossed are the
-    # same four: connect 377, assembly 375, release 152, and POST
-    # /api/v1/ffa/queue/leave 118 -> 341. The bound moves to 160, ~6% over
-    # the measurement; the median and worst bounds stay.
-    #
-    # Connect-failure LAND, merge main d889294 into the lane (2026-09-29),
-    # the same walk, whole closure:
-    #
-    #   tree                               routes   median / p90 / worst
-    #   fork 9a1dd9d                          365   72 / 140 / 457
-    #   main d889294                          377   75 / 165 / 459
-    #   lane be70f04                          369   73 / 151 / 457
-    #   merge a234c91 (measured at 8652bdf)   381   76 / 167 / 459
-    #
-    # The same rank effect as the code p90 above: 37 routes sit above 167 on
-    # the merged tree, and the 39th from the top is GET
-    # /api/v1/spectate/games (with POST
-    # /api/v1/tournaments/{tournament_id}/matches/{match_id}/play-now) at
-    # 167, 167 on main too and 165 on the lane. Above it sit main's nine new
-    # routes and the lane's connect (379), assembly (377) and POST
-    # /api/v1/ffa/queue/leave (343; 120 on main), beside GET
-    # /api/v1/ffa/queue/poll/{steam_id} (377 on the merge, 183 on main).
-    # Every count on a route both sides have is main's plus the lane's minus
-    # the fork's; the lane's four new routes each measure 1 or 2 above their
-    # lane counts (connect 377 -> 379, assembly 375 -> 377, release
-    # 152 -> 153, POST /api/v1/admin/ffa-g3-seats 54 -> 55): models.text on
-    # all four and models.deferred on connect and assembly, the import
-    # bindings main's Player mapping added, which every route reaching the
-    # model reaches. The bound moves to 177, ~6% over the measurement; the
-    # median and worst bounds stay (the worst route measures 459 against
-    # 460).
-    #
-    # Connect-failure LAND, sitting 2, merge claude/janitor-selftest 17ca44d
-    # (main cd8d846) into the lane (2026-09-30), the same walk, whole
-    # closure:
-    #
-    #   tree                               routes   median / p90 / worst
-    #   base 82c0da6                          377   75 / 165 / 459
-    #   lane e966ed7                          381   76 / 167 / 459
-    #   trunk 17ca44d                         382   76 / 167 / 459
-    #   merge c8ffa2f                         386   76 / 175 / 459
-    #
-    # The same rank effect: the trunk's five motion routes (397, 394, 216,
-    # 204, 100) and the lane's four (connect 379, assembly 377, release 153,
-    # admin G3 seats 55) are in one ranking, and the 39th from the top is
-    # POST /api/v1/admin/team/series/{series_id}/resolve at 175, 175 on both
-    # sides. Every count on a route both sides have is the trunk's plus the
-    # lane's minus the base's. The measurement is inside the old bound of
-    # 177 by 2; the bound moves to 185, ~6% over it, the headroom
-    # convention of every entry above; the median and worst bounds stay (76
-    # against 90, 459 against 460).
-    #
-    # Discord card render parity (2026-10-01): 76 / 171 / 461 over the 383
-    # routes of main 0e75199, 76 / 177 / 490 over the lane tip. A rank
-    # effect again: two routes that sat at or below main's p90 crossed it --
-    # GET /api/v1/health 137 -> 332 (the pc_card_art self-test draws a face)
-    # and GET /api/v1/internal/pc/face/back 157 -> 183 (the face module's art
-    # layer) -- so position 344 moves from GET /api/v1/spectate/games (171,
-    # unmoved) to POST /api/v1/ffa/lobby/start (177, unmoved). 40 routes sit
-    # above 174 on the tip, 38 on main. The lane's bound was 188, ~6% over
-    # that measurement; the median bound stayed.
-    #
-    # Discord card render parity LAND, merge main 5062f4c4 (the
-    # connect-failure landing) into the lane (2026-10-01), the same walk,
-    # whole closure:
-    #
-    #   tree                               routes   median / p90 / worst
-    #   base 0e751993                         383   76 / 171 / 461
-    #   lane fb9081c2                         383   76 / 177 / 503
-    #   trunk 5062f4c4                        387   76 / 178 / 461
-    #   merge                                 387   76 / 197 / 503
-    #
-    # Every count at the merge is the trunk's plus the lane's minus the
-    # base's (the trunk's, for its four new routes). The same rank effect as
-    # the code p90 above: GET /api/v1/health (139 on the trunk, 347 on the
-    # merge) and GET /api/v1/internal/pc/face/back (157 -> 197) crossed the
-    # trunk's p90, so position 348 is now the face back route itself at 197; POST /api/v1/spectate/grant (200,
-    # unmoved on every tree) sits one rank above it. 39 routes sit above 185
-    # on the merge, 36 on the trunk. The bound moves to 209, ~6% over the
-    # measurement, for that reason and no other; the median and worst bounds
-    # stay (76 against 90, 503 against 520).
-    assert all_p90 <= 209, f"p90 closure {all_p90} of {total}"
-    # Steam pictures (2026-09-12): a pack open now primes the subjects'
-    # Steam pictures, and that chain (claim, feed, download, the bound write
-    # and its blob locks) is ~20 real bindings on top of the face path the
-    # route already reached -- measured 383 on /api/v1/pc/packs/open. The
-    # bound moves to 400 for that reason and no other; p90 and the median
-    # stay where they were.
-    # Player Cards v4.13 (2026-09-15): the same route measured 394 on e894c45
-    # and 401 on the v4.13 fold -- the code bindings above plus the three
-    # import lines they are reached through (steamid64 in main, pc_steam and
-    # pc_portrait); p90 126 -> 129, median 64. That moved the bound to 420.
-    # Sept 14 batch merge (2026-09-15): the same route measured 439, against 401
-    # for the same walk over MAIN's backend/api -- +38, and median 65 / p90 129
-    # both unmoved. Of the 38, 33 are the signed-print face code bindings
-    # accounted for at the code bound above; 4 are the import lines they arrive
-    # through (main._pcsig, pc_face.ImageFilter, pc_face._SIGN_RAINBOW,
-    # pc_signature.Iterable); and 1 is main.case -- sqlalchemy's `case`, already
-    # imported, newly reached because the new signature code writes the bare
-    # name `case` and the walk folds in EVERY module that binds a shared name.
-    # That last one widens the reviewed surface rather than narrowing it, which
-    # is the only direction this gate may be wrong in. The bound moves to 460,
-    # the same ~5% headroom 420 gave over 401 and 400 gave over 383.
-    # Discord fix (2026-09-28): the same route measured 459 at the lane base
-    # 64885ef, 460 at the round-1 tip d4a284d and 461 at round 2's 12952d5 -
-    # one code binding per round, each one the route really runs:
-    # main._pc_open_for (round 1: the open path this route and the bot's
-    # POST /api/v1/internal/pc/packs/open share, keyed by the purchase's
-    # nonce) and main._pc_committed_answer (round 2: the recorded outcome a
-    # replayed key, a pack voided at open and /pc/packs/result answer, so no
-    # work after a purchase commits can fail its answer). Code tier 326 ->
-    # 327 -> 328, under its bound; median 75 and p90 164 -> 166 under
-    # theirs. The bound moves to 484, the same ~5% headroom 460 gave over
-    # 439, for that reason and no other.
-    # Discord card render parity (2026-10-01): the same route measured 461 on
-    # main 0e75199 and 490 on the lane tip -- +29, exactly the 29 card art
-    # code bindings accounted for at the code bound above, with no import
-    # line added. The bound moves to 520, ~6% over the measurement, for that
-    # reason and no other.
-    # Seat evidence V2 (claude/seat-evidence-server-v2, 2026-10-02): the same
-    # route measured 503 at the base 14127702 and 526 on the lane -- +23, and
-    # all 23 are IMPORT leaves: the five new modules (seat_evidence and the
-    # four review modules) each bind stdlib names every route already
-    # references (json, os, hashlib, datetime, timezone, time, math, hmac,
-    # uuid, secrets, stat, text), and the walk folds in every module that binds
-    # a shared name. No code binding of the new modules reaches an existing
-    # route: after the review modules' generic function names were made
-    # distinctive, the code tier moves only on the four new routes and
-    # /api/v1/health (median 22 / p90 97 / worst 370, all under their bounds).
-    # Whole closure over 391 routes: median 76 -> 86, p90 197 -> 196. The
-    # bound moves to 556, ~6% over the measurement, for that reason and no
-    # other; the median and p90 bounds stay.
-    assert all_worst <= 556, f"worst closure {all_worst} of {total}"
+# DELETED in combat fix pass 6 (M-9 (a) and (c)): test_the_helper_closure_
+# stays_affordable. It bounded the closure a route's fingerprint covers
+# (median, p90 and worst, code and all kinds), so that a walk gone wrong --
+# one pulling most of the app into every route -- failed here rather than
+# turning the manifest into a gate that moves on every commit. Its bounds
+# were held by the data-only stop the walk no longer has.
+#
+# The closure is now a bound by design, and that is exactly what it
+# measures: every reached binding is followed into everything it reads, and
+# `app = FastAPI(...)` reaches every route registered on it (a decorator
+# call on a module global changes that global in place, and the code that
+# changes an object is part of it). Measured over this tree: every one of the
+# 393 /api/v1/ routes reaches all 3410 indexed bindings (3008 of them code),
+# against 45 / 137 / 458 all kinds and 22 / 92 / 370 code (median / p90 /
+# worst) under the previous walk, and every route is also charged the whole
+# tree under rule (c), because its closure reaches a module that names a
+# dynamic source. A size bound over that is either above the whole index,
+# and cannot fail, or below it, and always fails, so the test is deleted
+# rather than re-pinned; the cost is a decision for the integrator, not a
+# number this file moves to fit.
 
 
 def _route_covering(module, name):
@@ -2342,7 +2069,12 @@ def test_the_admission_rule_is_computed_for_every_module_not_just_main():
                     for handler in getattr(node, "handlers", []):
                         collect(handler.body)
                 else:
-                    expected.update(stored(node))
+                    names = stored(node)
+                    expected.update(names)
+                    if not names:
+                        # Fix pass 6 (b): a statement that binds nothing is
+                        # indexed under a key no code can spell.
+                        expected.add(f"<stmt@{node.lineno}>")
 
         collect(tree.body)
         assert set(index[stem]) == expected, (
@@ -2783,20 +2515,17 @@ def test_a_data_binding_composed_from_another_moves_the_fingerprint():
     assert _route_fingerprint(covering[0]) == before
 
 
-def test_a_data_binding_does_not_drag_in_the_whole_app():
-    """The other half of the same rule, and the reason it is worth a test.
-
-    Data-into-data is safe only because it stops at data. `app = FastAPI(...)`
-    is a data binding that every route decorator references; letting it follow
-    the def it names would put most of the app inside every route's
-    fingerprint, which is the failure mode the affordability bound exists to
-    catch."""
-    index = _binding_index()
-    assert index["main"]["app"][0] == "data"
-    reached = _reached({("main", "app")})
-    assert all(kind == "data" for kind in reached.values()), sorted(
-        key for key, kind in reached.items() if kind != "data"
-    )[:5]
+# DELETED in combat fix pass 6 (M-9 (a)): test_a_data_binding_does_not_drag_in_
+# the_whole_app. It enforced the walk's data-only stop -- a data binding
+# followed only into other data bindings -- which existed to keep `app =
+# FastAPI(...)`, referenced by every route decorator, from putting most of
+# the app in every route's closure. The stop also hid every callable a data
+# binding holds (`CALL = helper`), so it is gone, and the walk follows every
+# reference whatever its kind. What replaces the control is the property
+# proof (test_f6_every_transitive_edit_moves_the_fingerprint_or_charges_the_
+# tree) and its negative control (an edit nothing reads moves nothing), and
+# the cost is measured, not prevented (the note in place of the deleted
+# test_the_helper_closure_stays_affordable).
 
 
 def test_the_manifest_records_the_order_requests_are_matched_in():
@@ -3086,32 +2815,16 @@ def test_an_unrelated_module_with_common_imports_moves_no_route():
     assert named == {"json.dumps", "text", "router"}, sorted(named)
 
 
-def test_a_real_route_whose_code_names_another_helper_grows():
-    """Positive control on the real app: one real route's handler, re-indexed
-    with one more line naming a seat evidence helper through main's own import
-    of that module, reaches that helper and its fingerprint text moves."""
-    index = {module: dict(table) for module, table in _binding_index().items()}
-    target = ("seat_evidence", "budget_record")
-    for route in main.app.routes:
-        if not (isinstance(route, APIRoute) and route.path.startswith("/api/v1/")):
-            continue
-        seeds = _route_seeds(route)
-        key = _binding_key(route.endpoint)
-        if key and key[0] == "main" and target not in _reached(seeds):
-            break
-    else:
-        raise AssertionError("no main route without the helper")
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmp:
-        path = Path(tmp) / "main_mutant.py"
-        path.write_text(_segment(*key).rstrip("\r\n") + "\n    _sev.budget_record\n",
-                        encoding="utf-8")
-        index["main"][key[1]] = _index_module(path)[key[1]]
-    before = _reached(seeds)
-    after = _walk_bindings(seeds, index=index)
-    assert target in after and set(before) < set(after), route.path
-    text = lambda idx, reached: "".join(idx[m][n][1] for m, n in sorted(reached))  # noqa: E731
-    assert text(index, after) != text(_binding_index(), before)
+# DELETED in combat fix pass 6 (M-9 (a)): test_a_real_route_whose_code_
+# names_another_helper_grows. It looked for a main route whose closure did
+# NOT yet reach seat_evidence.budget_record, added a line naming it, and
+# asserted the closure grew. Under the kind-agnostic walk every route already
+# reaches every indexed binding (the measurement is in the note in place of
+# test_the_helper_closure_stays_affordable), so no such route exists and
+# "grows" cannot be observed on the real app. The positive control on the
+# real app is test_f6_a_transitive_edit_turns_the_gate_red_on_the_app; the
+# growth itself is proved on generated module chains by
+# test_f6_every_transitive_edit_moves_the_fingerprint_or_charges_the_tree.
 
 
 def _closure_text(index, reached):
@@ -3303,6 +3016,13 @@ _CLASS_BOUND_SRC = (
     "    pass\n"
     "ns = NS()\n"
     "table = {}\n"
+    # Combat fix pass 6: SubStore writes into a dict of its own. Under rule
+    # (b) a module object carries every statement that changes it, and three
+    # charged constructs below (CompTarget, GenTarget, LambdaTarget) write into
+    # `table` with keys computed from LIMIT, so a SubStore sharing `table`
+    # reaches LIMIT through them -- the bound working, not the construct this
+    # row tests (a subscript store binds nothing in the class body).
+    "sub_table = {}\n"
     "def f(**kw):\n"
     "    return kw\n"
     "class AugOnly(BaseModel):\n"
@@ -3346,7 +3066,7 @@ _CLASS_BOUND_SRC = (
     "    n: int = LIMIT\n"
     "class SubStore(BaseModel):\n"
     "    LIMIT = 9\n"
-    "    table['LIMIT'] = 1\n"
+    "    sub_table['LIMIT'] = 1\n"
     "    n: int = LIMIT\n"
     "class Unpack(BaseModel):\n"
     "    LIMIT = 9\n"
@@ -4392,3 +4112,515 @@ def test_f5_a_type_parameter_is_local_to_its_annotation_scope(tmp_path):
         assert "LIMIT" not in index["a"][name][2], (name, sorted(index["a"][name][2]))
         assert ("a", "LIMIT") not in set(_walk_bindings([("a", name)], index=index)), name
     assert "LIMIT" not in _interpreter_reads(_TYPE_PARAM_SRC.split("\n", 1)[1])
+
+
+# ── Combat fix pass 6, M-9: the closure as a bound, proved as a property ──
+#
+# The proof is not a list of forms. Modules are GENERATED in which a route
+# reaches a helper through chains of the constructs below (aliases of any
+# depth, every alternative of a rebinding, containers, in-place changes,
+# dynamic sources and their qualified forms, imports across modules); each
+# tree is imported and run, then a transitive dependency of the route (the
+# helper's body, the module value it reads) is EDITED and run again. Every
+# edit changes what the route returns, and the gate's own fingerprint rule
+# (`_fingerprint_of`) must move for every one. Negative control: in a tree
+# whose closure reaches no open module, an edit to a binding nothing reads
+# moves nothing, so the bound is not simply always red.
+
+
+def _f6_tree_fingerprint(root, index, seeds):
+    """The gate's fingerprint rule over a synthetic tree: binding sources from
+    `index`, a module's whole source from its file."""
+    def segment_of(module, name):
+        if name == _WHOLE:
+            return (root / f"{module}.py").read_text(encoding="utf-8")
+        return index[module][name][1]
+    reached = _walk_bindings(seeds, index=index)
+    text = _fingerprint_of(index, reached, segment_of)
+    return sha1(text.encode("utf-8")).hexdigest(), bool(_dynamic_charge(index, reached))
+
+
+class _F6Chain:
+    """One generated tree: module f6m0 holds the helper, the value it reads
+    and a binding nothing reads; each link adds statements to the current
+    module and returns the expression that now denotes the helper; a
+    cross-module link moves on to a new module that imports the last."""
+
+    def __init__(self):
+        self.mods = {"f6m0": ["LIMIT = 1", "def helper():", "    return LIMIT",
+                              "UNUSED = 1", "def unused():", "    return UNUSED"]}
+        self.cur = "f6m0"
+
+    def add(self, *lines):
+        self.mods[self.cur].extend(lines)
+
+    def named(self, prev, k):
+        """A module-level name for the helper (a lookup by string needs one)."""
+        self.add(f"N{k} = {prev}")
+        return f"N{k}"
+
+    def move(self, prev, k):
+        name, old = self.named(prev, k), self.cur
+        self.cur = f"f6m{len(self.mods)}"
+        self.mods[self.cur] = []
+        return name, old
+
+
+def _f6_dyn(build):
+    def link(c, k, prev):
+        return build(c, k, c.named(prev, k))
+    return link
+
+
+def _f6_cross(build):
+    def link(c, k, prev):
+        name, old = c.move(prev, k)
+        return build(c, k, name, old)
+    return link
+
+
+def _f6_add(lines, expr):
+    def link(c, k, prev):
+        c.add(*(line.format(k=k, p=prev) for line in lines))
+        return expr.format(k=k, p=prev)
+    return link
+
+
+# construct -> (kind of construct, link). Each link's runtime-selected
+# alternative is the one that carries the helper.
+_F6_LINKS = {
+    # aliases, containers, calls returning the helper (rule a)
+    "alias": ("alias", _f6_add(["A{k} = {p}"], "A{k}")),
+    "dict": ("container", _f6_add(["A{k} = {{'f': {p}}}"], "A{k}['f']")),
+    "tuple": ("container", _f6_add(["A{k} = ({p},)"], "A{k}[0]")),
+    "def_return": ("call", _f6_add(["def A{k}():", "    return {p}"], "A{k}()")),
+    "lambda": ("call", _f6_add(["A{k} = lambda: {p}"], "A{k}()")),
+    "class_attr": ("alias", _f6_add(["class A{k}:", "    f = staticmethod({p})"], "A{k}.f")),
+    "default_arg": ("call", _f6_add(["def A{k}(f={p}):", "    return f"], "A{k}()")),
+    "decorator": ("call", _f6_add(["def D{k}(fn):", "    return lambda: {p}", "@D{k}",
+                                   "def A{k}():", "    return None"], "A{k}()")),
+    # every alternative of a rebinding, mixed kinds, any control flow (rule b)
+    "rebind_data_def": ("rebind", _f6_add(["A{k} = None", "def A{k}():", "    return {p}"],
+                                          "A{k}()")),
+    "rebind_def_data": ("rebind", _f6_add(["def A{k}():", "    return None",
+                                           "A{k} = lambda: {p}"], "A{k}()")),
+    "rebind_if": ("rebind", _f6_add(["if False:", "    A{k} = None", "else:",
+                                     "    def A{k}():", "        return {p}"], "A{k}()")),
+    "rebind_try": ("rebind", _f6_add(["try:", "    A{k} = None", "    raise KeyError",
+                                      "except KeyError:", "    def A{k}():",
+                                      "        return {p}"], "A{k}()")),
+    "rebind_for": ("rebind", _f6_add(["for A{k} in (None, {p}):", "    pass"], "A{k}")),
+    "rebind_while": ("rebind", _f6_add(["A{k} = None", "while A{k} is None:",
+                                        "    A{k} = {p}"], "A{k}")),
+    "rebind_with": ("rebind", _f6_add(["import contextlib",
+                                       "with contextlib.nullcontext({p}) as A{k}:",
+                                       "    pass"], "A{k}")),
+    "rebind_del": ("rebind", _f6_add(["def A{k}():", "    return None", "del A{k}",
+                                      "A{k} = {p}"], "A{k}")),
+    "augmented": ("rebind", _f6_add(["A{k} = [None]", "A{k} += [{p}]"], "A{k}[-1]")),
+    "annotated": ("rebind", _f6_add(["A{k}: object = {p}"], "A{k}")),
+    "walrus": ("rebind", _f6_add(["(A{k} := {p})"], "A{k}")),
+    "match": ("rebind", _f6_add(["match 0:", "    case _:", "        A{k} = {p}"], "A{k}")),
+    # an object changed in place by other code (rule b)
+    "method_call": ("in_place", _f6_add(["A{k} = {{}}", "A{k}.update(f={p})"], "A{k}['f']")),
+    "item_store_fn": ("in_place", _f6_add(["A{k} = {{}}", "def S{k}():",
+                                           "    A{k}['f'] = {p}", "S{k}()"], "A{k}['f']")),
+    "global_write_fn": ("in_place", _f6_add(["A{k} = None", "def S{k}():", "    global A{k}",
+                                             "    A{k} = {p}", "S{k}()"], "A{k}")),
+    "attr_store": ("in_place", _f6_add(["class A{k}:", "    pass",
+                                        "A{k}.f = staticmethod({p})"], "A{k}.f")),
+    # across modules (rule a: an import into the imported module's binding)
+    "from_import": ("cross", _f6_cross(lambda c, k, n, old: (
+        c.add(f"from {old} import {n} as A{k}"), f"A{k}")[1])),
+    "from_import_guarded": ("cross", _f6_cross(lambda c, k, n, old: (
+        c.add("try:", f"    from {old} import {n} as A{k}", "except ImportError:",
+              f"    A{k} = None"), f"A{k}")[1])),
+    "from_import_rebind": ("cross", _f6_cross(lambda c, k, n, old: (
+        c.add(f"A{k} = None", f"from {old} import {n} as A{k}"), f"A{k}")[1])),
+    "local_import": ("cross", _f6_cross(lambda c, k, n, old: (
+        c.add(f"def A{k}():", f"    from {old} import {n}", f"    return {n}"), f"A{k}()")[1])),
+    "import_attr": ("cross", _f6_cross(lambda c, k, n, old: (
+        c.add(f"import {old}"), f"{old}.{n}")[1])),
+    "import_as_attr": ("cross", _f6_cross(lambda c, k, n, old: (
+        c.add(f"import {old} as M{k}"), f"M{k}.{n}")[1])),
+    "module_alias": ("cross", _f6_cross(lambda c, k, n, old: (
+        c.add(f"import {old} as M{k}", f"A{k} = M{k}"), f"A{k}.{n}")[1])),
+    "rebind_import_kind": ("cross", _f6_cross(lambda c, k, n, old: (
+        c.add(f"M{k} = None", f"import {old} as M{k}"), f"M{k}.{n}")[1])),
+    # lookups by string, direct, aliased, qualified, in containers, from calls,
+    # across modules (rule c)
+    "globals_alias": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add(f"L{k} = globals"), f"L{k}()['{n}']")[1])),
+    "globals_direct": ("dynamic", _f6_dyn(lambda c, k, n: f"globals()['{n}']")),
+    "builtins_globals": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import builtins"), f"builtins.globals()['{n}']")[1])),
+    "builtins_alias": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add(f"import builtins as B{k}"), f"B{k}.globals()['{n}']")[1])),
+    "builtins_attr_alias": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import builtins", f"G{k} = builtins.globals"), f"G{k}()['{n}']")[1])),
+    "getattr_module": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import sys"), f"getattr(sys.modules[__name__], '{n}')")[1])),
+    "getattr_alias": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import sys", f"GA{k} = getattr"), f"GA{k}(sys.modules[__name__], '{n}')")[1])),
+    "vars_module": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import sys"), f"vars(sys.modules[__name__])['{n}']")[1])),
+    "eval": ("dynamic", _f6_dyn(lambda c, k, n: f"eval('{n}')")),
+    "eval_alias": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add(f"E{k} = eval"), f"E{k}('{n}')")[1])),
+    "exec": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add(f"def X{k}():", "    out = {}", f"    exec(\"out['r'] = {n}\")",
+              "    return out['r']"), f"X{k}()")[1])),
+    "dunder_dict": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import sys"), f"sys.modules[__name__].__dict__['{n}']")[1])),
+    "dunder_import": ("dynamic", _f6_dyn(lambda c, k, n: f"__import__(__name__).__dict__['{n}']")),
+    "attrgetter": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import operator", "import sys"),
+        f"operator.attrgetter('{n}')(sys.modules[__name__])")[1])),
+    "attrgetter_from": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add(f"from operator import attrgetter as AG{k}", "import sys"),
+        f"AG{k}('{n}')(sys.modules[__name__])")[1])),
+    "methodcaller": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import operator", "import sys"),
+        f"operator.methodcaller('__getattribute__', '{n}')(sys.modules[__name__])")[1])),
+    "importlib": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import importlib"), f"importlib.import_module(__name__).{n}")[1])),
+    "frame_globals": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add("import sys"), f"sys._getframe(0).f_globals['{n}']")[1])),
+    "composed_name": ("dynamic", _f6_dyn(lambda c, k, n: f"globals()['{n[0]}' + '{n[1:]}']")),
+    "dyn_container": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add(f"DC{k} = {{'g': globals}}"), f"DC{k}['g']()['{n}']")[1])),
+    "dyn_call": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add(f"def F{k}():", "    return globals"), f"F{k}()()['{n}']")[1])),
+    "module_locals": ("dynamic", _f6_dyn(lambda c, k, n: (
+        c.add(f"LOC{k} = locals()"), f"LOC{k}['{n}']")[1])),
+    "cross_dict": ("dynamic", _f6_cross(lambda c, k, n, old: (
+        c.add("import sys"), f"sys.modules['{old}'].__dict__['{n}']")[1])),
+    "cross_getattr": ("dynamic", _f6_cross(lambda c, k, n, old: (
+        c.add("import sys"), f"getattr(sys.modules['{old}'], '{n}')")[1])),
+}
+
+# The reviewer's bodies (round 6): the callable data alias (verbatim), the
+# aliased `globals` lookup (verbatim, as a module), and the mixed data/def
+# rebinding the report names without a body (built from its description).
+_F6_REVIEWER = {
+    "reviewer_callable_alias": (
+        "LIMIT = 1\n"
+        "\n"
+        "def helper():\n"
+        "    return LIMIT\n"
+        "\n"
+        "CALL = helper\n"
+        "\n"
+        "def route():\n"
+        "    return CALL()\n"),
+    "reviewer_aliased_globals": (
+        "LIMIT = 1\n"
+        "LOOKUP = globals\n"
+        "def route():\n"
+        "    return LOOKUP()['LIMIT']\n"),
+    "reviewer_mixed_rebinding": (
+        "LIMIT = 1\n"
+        "def helper():\n"
+        "    return LIMIT\n"
+        "CALL = None\n"
+        "def CALL():\n"
+        "    return helper()\n"
+        "def route():\n"
+        "    return CALL()\n"),
+}
+
+_F6_RANDOM = 1200
+_F6_EDITS = (("value", "LIMIT = 1\n", "LIMIT = 2\n"),
+             ("body", "    return LIMIT\n", "    return LIMIT + 10\n"))
+_F6_UNREAD = ("UNUSED = 1\n", "UNUSED = 2\n")
+
+
+def _f6_build(chain):
+    """{module: source} for a chain of construct names: the route is the
+    last module's, calling what the chain's expression denotes."""
+    c, prev = _F6Chain(), "helper"
+    for k, construct in enumerate(chain):
+        prev = _F6_LINKS[construct][1](c, k, prev)
+    c.add("def route():", f"    return ({prev})()")
+    return {name: "\n".join(lines) + "\n" for name, lines in c.mods.items()}, c.cur
+
+
+def _f6_cases():
+    """(label, constructs, {module: source}, route module): the reviewer's
+    bodies, every construct alone, and seeded random chains of two to six
+    links (each construct drawn uniformly at every link)."""
+    import random
+    names = sorted(_F6_LINKS)
+    cases = [(label, (), {"f6m0": src}, "f6m0") for label, src in sorted(_F6_REVIEWER.items())]
+    chains = [(n,) for n in names]
+    rng = random.Random(6)
+    chains += [tuple(rng.choice(names) for _ in range(rng.randint(2, 6)))
+               for _ in range(_F6_RANDOM)]
+    for chain in chains:
+        mods, route = _f6_build(chain)
+        cases.append(("+".join(chain), chain, mods, route))
+    return cases
+
+
+def _f6_run(root, mods, route):
+    """Import every module of the tree in order and return what its route
+    returns; the modules are removed again so the next tree is fresh."""
+    import importlib
+    order = sorted(mods, key=lambda name: int(name.removeprefix("f6m")) if name[3:].isdigit()
+                   else 0)
+    sys.path.insert(0, str(root))
+    importlib.invalidate_caches()
+    try:
+        for name in order:
+            importlib.import_module(name)
+        return sys.modules[route].route()
+    finally:
+        sys.path.remove(str(root))
+        for name in order:
+            sys.modules.pop(name, None)
+
+
+def _f6_write(root, mods):
+    root.mkdir(parents=True)
+    for name, src in mods.items():
+        (root / f"{name}.py").write_text(src, encoding="utf-8")
+    return {name: _index_module(root / f"{name}.py") for name in mods}
+
+
+def _f6_check(tmp, n, mods, route):
+    """(missed edits, effective edits, control run, control failed, charged)."""
+    base_root = tmp / f"c{n}" / "base"
+    index = _f6_write(base_root, mods)
+    before = _f6_run(base_root, mods, route)
+    fp, charged = _f6_tree_fingerprint(base_root, index, [(route, "route")])
+    missed = effective = 0
+    home = "f6m0"
+    for label, old, new in _F6_EDITS:
+        if old not in mods[home]:
+            continue
+        assert mods[home].count(old) == 1, (label, mods[home])
+        edited = dict(mods, **{home: mods[home].replace(old, new)})
+        root = tmp / f"c{n}" / label
+        moved_index = _f6_write(root, edited)
+        after = _f6_run(root, edited, route)
+        assert after != before, ("an edit the route does not see", label, mods)
+        effective += 1
+        moved, _ = _f6_tree_fingerprint(root, moved_index, [(route, "route")])
+        missed += moved == fp
+    control = failed = 0
+    if not charged and _F6_UNREAD[0] in mods[home]:
+        root = tmp / f"c{n}" / "unread"
+        edited = dict(mods, **{home: mods[home].replace(*_F6_UNREAD)})
+        unread_index = _f6_write(root, edited)
+        assert _f6_run(root, edited, route) == before
+        control = 1
+        failed = _f6_tree_fingerprint(root, unread_index, [(route, "route")])[0] != fp
+    return missed, effective, control, failed, charged
+
+
+def test_f6_every_transitive_edit_moves_the_fingerprint_or_charges_the_tree(tmp_path, capsys):
+    """Combat fix pass 6, M-9 (d): the property. For every generated tree,
+    every edit to a transitive dependency of the route (each one changes
+    what the route returns, asserted by running it) moves the gate's
+    fingerprint; the reviewer's three bodies are members. Negative control:
+    where the closure reaches no open module, an edit to a binding nothing
+    reads moves nothing."""
+    import collections
+    per_kind, per_construct = collections.Counter(), collections.Counter()
+    missed = effective = controls = failed = charged = 0
+    misses = []
+    cases = _f6_cases()
+    for n, (label, chain, mods, route) in enumerate(cases):
+        m, e, c, f, ch = _f6_check(tmp_path, n, mods, route)
+        missed, effective, controls, failed = missed + m, effective + e, controls + c, failed + f
+        charged += ch
+        if m:
+            misses.append(label)
+        for construct in set(chain):
+            per_construct[construct] += 1
+        for kind in {_F6_LINKS[construct][0] for construct in chain}:
+            per_kind[kind] += 1
+    assert set(per_construct) == set(_F6_LINKS)
+    assert all(label in {case[0] for case in cases} for label in _F6_REVIEWER)
+    with capsys.disabled():
+        print("\nPROOF SIZE f6_m9 oracle: %d trees generated and run (%d reviewer bodies, %d "
+              "single constructs, %d random chains of 2 to 6 links), %d transitive edits each "
+              "changing the route's result, %d missed; %d trees charged the whole tree; "
+              "negative controls %d run, %d moved"
+              % (len(cases), len(_F6_REVIEWER), len(_F6_LINKS), _F6_RANDOM,
+                 effective, missed, charged, controls, failed))
+        print("PROOF SIZE f6_m9 per kind: " + ", ".join(
+            "%s %d" % kv for kv in sorted(per_kind.items())))
+        print("PROOF SIZE f6_m9 per construct: " + ", ".join(
+            "%s %d" % kv for kv in sorted(per_construct.items())))
+    assert missed == 0, misses[:20]
+    assert failed == 0
+    assert controls > 0 and effective > 0
+
+
+def test_f6_the_reviewer_alias_reaches_its_helper_and_its_value(tmp_path):
+    """Combat fix pass 6, M-9 (a): the round 6 failure scenario verbatim. A
+    data binding holding a callable is followed into the callable and on to
+    what it reads; no dynamic source is involved, so the closure itself
+    carries both, and an edit to either moves the fingerprint text."""
+    index = _tmp_index(tmp_path, a=_F6_REVIEWER["reviewer_callable_alias"])
+    reached = set(_walk_bindings([("a", "route")], index=index))
+    assert {("a", "CALL"), ("a", "helper"), ("a", "LIMIT")} <= reached, sorted(reached)
+    assert not _dynamic_charge(index, reached)
+    for name, text in (("helper", "def helper():\n    return LIMIT + 1\n"), ("LIMIT", "LIMIT = 2\n")):
+        moved = _with_segment(index, "a", name, text)
+        assert _closure_text(moved, reached) != _closure_text(index, reached), name
+
+
+def test_f6_every_alternative_of_a_rebinding_is_read(tmp_path):
+    """Combat fix pass 6, M-9 (b): a name bound as data first and as an
+    import of one of ours later carries both kinds, and `M.helper` resolves
+    through the import alternative (the first-kind merge made it a data
+    binding and resolved nothing). The kind is the union, in a fixed order."""
+    index = _tmp_index(
+        tmp_path,
+        a=("M = None\n"
+           "import b as M\n"
+           "def route():\n"
+           "    return M.helper()\n"),
+        b="def helper():\n    return 1\n")
+    assert index["a"]["M"][0] == "data+import"
+    assert ("b", "helper") in set(_walk_bindings([("a", "route")], index=index))
+
+
+def test_f6_an_object_changed_in_place_carries_the_code_that_changes_it(tmp_path):
+    """Combat fix pass 6, M-9 (b): a module object changed in place -- by a
+    module-level method call, by a function's item store or `global` write
+    -- carries that code, so a route that reads the object reaches it."""
+    index = _tmp_index(
+        tmp_path,
+        a=("LIMIT = 1\n"
+           "TABLE = {}\n"
+           "TABLE.update(n=LIMIT)\n"
+           "CACHE = {}\n"
+           "def fill():\n"
+           "    CACHE['n'] = LIMIT\n"
+           "FLAG = None\n"
+           "def set_flag():\n"
+           "    global FLAG\n"
+           "    FLAG = LIMIT\n"
+           "def route():\n"
+           "    return TABLE, CACHE, FLAG\n"))
+    reached = set(_walk_bindings([("a", "route")], index=index))
+    assert {("a", "fill"), ("a", "set_flag"), ("a", "<stmt@3>"), ("a", "LIMIT")} <= reached, \
+        sorted(reached)
+
+
+def test_f6_a_string_annotation_is_read_as_what_it_names(tmp_path):
+    """Combat fix pass 6, M-9 (c): a string annotation is evaluated by name
+    (typing, pydantic, FastAPI), so the walk reads it as the expression it
+    spells; a string anywhere else stays text (`Constant.value`)."""
+    index = _tmp_index(
+        tmp_path,
+        a=("Model = int\n"
+           "Other = str\n"
+           "def route(x: \"list[Model]\") -> \"Other\":\n"
+           "    return 'Model'\n"
+           "def text_only():\n"
+           "    return 'Other'\n"))
+    assert {"Model", "Other"} <= index["a"]["route"][2]
+    assert "Other" not in index["a"]["text_only"][2]
+
+
+def test_f6_a_dynamic_source_opens_its_module_and_charges_the_whole_tree(tmp_path):
+    """Combat fix pass 6, M-9 (c): every listed source, in each form the walk
+    names (a bare name, an alias, a qualified name, an import of the module
+    or of the name, a module object of ours, a relative import, an attribute,
+    a frame, a class pattern's keyword attribute), opens the
+    module it is written in; a closure that reaches an open module is
+    charged every module's source, a module it never imports included."""
+    forms = {
+        "aliased": "LOOKUP = globals\n",
+        "qualified": "import builtins\nG = builtins.globals\n",
+        "imported_name": "from operator import attrgetter\n",
+        "imported_module": "import importlib\n",
+        "module_object": "import b\n",
+        "relative": "from . import b\n",
+        "attribute": "def f(m):\n    return m.__dict__\n",
+        "frame": "import sys\ndef f():\n    return sys._getframe(0).f_globals\n",
+        "class_pattern": "def f(m):\n    match m:\n        case object(__dict__=d):\n"
+                         "            return d\n",
+    }
+    for label, src in forms.items():
+        root = tmp_path / label
+        root.mkdir()
+        (root / "a.py").write_text(src + "def route():\n    return 1\n", encoding="utf-8")
+        (root / "b.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+        (root / "c.py").write_text("LIMIT = 1\n", encoding="utf-8")
+        index = {p.stem: _index_module(p) for p in sorted(root.glob("*.py"))}
+        assert "a" in _open_modules(index), label
+        fp, charged = _f6_tree_fingerprint(root, index, [("a", "route")])
+        assert charged, label
+        (root / "c.py").write_text("LIMIT = 2\n", encoding="utf-8")
+        assert _f6_tree_fingerprint(root, index, [("a", "route")])[0] != fp, label
+    root = tmp_path / "clean"
+    root.mkdir()
+    (root / "a.py").write_text("from b import helper\ndef route():\n    return helper()\n",
+                               encoding="utf-8")
+    (root / "b.py").write_text("def helper():\n    return 1\n", encoding="utf-8")
+    index = {p.stem: _index_module(p) for p in sorted(root.glob("*.py"))}
+    assert _open_modules(index) == {}
+
+
+def test_f6_rule_c_does_not_depend_on_the_review_guard(tmp_path, monkeypatch):
+    """Combat fix pass 6, M-9 (e): the guard's direct-call matcher is not part
+    of the manifest's rule. With a stub guard installed that catches nothing,
+    the aliased lookup the round names (`LOOKUP = globals`) still charges the
+    whole tree and an edit to the value it reads by string moves the route;
+    no function of the rule names the guard."""
+    import types
+    stub = types.ModuleType("review_guard")
+    stub.scan_tree = lambda *args, **kwargs: []
+    stub.range_mode = stub.tree_mode = lambda *args, **kwargs: 0
+    monkeypatch.setitem(sys.modules, "review_guard", stub)
+    src = _F6_REVIEWER["reviewer_aliased_globals"]
+    assert sys.modules["review_guard"].scan_tree(lambda path: src, None, "") == []
+    for fn in (_index_module, _walk_bindings, _resolve, _dynamic_source, _open_modules,
+               _dynamic_charge, _fingerprint_of, _fingerprint_text):
+        assert "review_guard" not in inspect.getsource(fn), fn.__name__
+    (tmp_path / "a.py").write_text(src, encoding="utf-8")
+    index = {"a": _index_module(tmp_path / "a.py")}
+    fp, charged = _f6_tree_fingerprint(tmp_path, index, [("a", "route")])
+    assert charged and ("a", "LIMIT") not in set(_walk_bindings([("a", "route")], index=index))
+    (tmp_path / "a.py").write_text(src.replace("LIMIT = 1", "LIMIT = 2"), encoding="utf-8")
+    index = {"a": _index_module(tmp_path / "a.py")}
+    assert _f6_tree_fingerprint(tmp_path, index, [("a", "route")])[0] != fp
+
+
+def test_f6_a_transitive_edit_turns_the_gate_red_on_the_app():
+    """Combat fix pass 6, M-9: on the real app, before any dry run. A route
+    whose closure reaches an open module carries every module's source, so
+    an edit to a module outside its static closure turns its recorded
+    fingerprint red; a route whose closure reaches no open module (if any)
+    turns red on an edit to a transitive helper. Red means: differs from the
+    value the unedited tree gives, which the drift test above holds equal to
+    the committed manifest."""
+    routes = [r for r in main.app.routes
+              if isinstance(r, APIRoute) and r.path.startswith("/api/v1/")]
+    index = _binding_index()
+    charged = [r for r in routes if _dynamic_charge(index, _reached(_route_seeds(r)))]
+    assert charged, "no route reaches an open module"
+    route = charged[0]
+    outside = sorted(set(index) - {m for m, _n in _reached(_route_seeds(route))})
+    target = outside[0] if outside else sorted(index)[0]
+    before = _route_fingerprint(route)
+    with _mutated_segment(target, _WHOLE):
+        assert _route_fingerprint(route) != before, (route.path, target)
+    assert _route_fingerprint(route) == before
+    for route in routes:
+        reached = _reached(_route_seeds(route))
+        if _dynamic_charge(index, reached):
+            continue
+        seeds = set(_route_seeds(route))
+        helpers = sorted(key for key in reached if key not in seeds)
+        if not helpers:
+            continue
+        before = _route_fingerprint(route)
+        with _mutated_segment(*helpers[-1]):
+            assert _route_fingerprint(route) != before, (route.path, helpers[-1])
+        break
