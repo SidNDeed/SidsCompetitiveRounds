@@ -159,7 +159,8 @@ namespace CompetitiveRounds
 
         private static bool InCombat()
         {
-            try { return GameManager.instance != null && GameManager.instance.battleOngoing; } catch { return false; }
+            // cost accounting only: a failed read counts the cost as in combat (never hidden)
+            try { return GameManager.instance != null && GameManager.instance.battleOngoing; } catch { return true; }
         }
 
         private static void Cost(int i, long t0)

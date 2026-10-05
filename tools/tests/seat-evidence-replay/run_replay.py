@@ -43,6 +43,8 @@ CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left",
          "opponent_sample_outside_combat",
          # fix pass 4
          "closing_no_trailer", "closing_bad_trailer",
+         # identity-clock fix pass 2: the positive identity quit flush
+         "identity_closing_next_boot",
          # fix pass 5: amended B7 (reset at hit_sent index 9)
          "last_reset_states"]
 
@@ -95,9 +97,11 @@ MUTANTS = [
     ("gate_ignores_zero", "if (!nonzero) return false;", "", "damage_predicate", "shooter_paths"),
     ("gate_ignores_dead", "d.isPlaying && !d.dead && d.playerVel", "d.isPlaying && d.playerVel", "damage_predicate", "shooter_paths"),
     # F3: current-frame combat state, before any load
-    ("combat_stale_flag", "try { live = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }", "",
-     "combat_gate", "victim_block_hit"),
-    ("combat_after_load", "if (CombatLive()) return;       // before any load", "Load(); if (CombatLive()) return;       // before any load",
+    ("combat_stale_flag", "return C.CombatRead.Of(() => GameManager.instance != null && GameManager.instance.battleOngoing,",
+     "return C.CombatRead.Of(() => false,", "combat_gate", "victim_block_hit"),
+    # identity-clock fix pass 2: the positive quit flush needs the closing file persisted
+    ("identity_closing_not_persisted", "fs.Write(bytes, 0, bytes.Length);\n                    fs.Flush(true);\n                }\n                return true;",
+     "fs.Flush(true);\n                }\n                return true;", "identity_closing_next_boot", "combat_gate"),    ("combat_after_load", "if (CombatLive()) return;       // before any load", "Load(); if (CombatLive()) return;       // before any load",
      "combat_gate", "victim_block_hit"),
     # F4: the dispatch only captures
     ("dispatch_builds_inline", "_nextCaptureTryMs = 0;\n            }", "_nextCaptureTryMs = 0;\n                BuildCaptures(false);\n            }",

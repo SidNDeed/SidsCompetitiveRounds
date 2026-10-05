@@ -1470,6 +1470,9 @@ namespace CompetitiveRounds
         // no series of theirs is. Recomputed with the score.
         private static string _cachedSeriesStatus = "unknown";
         private const double SERIES_READ_FRESH_S = 60.0;
+        // the read generation the cached status was computed from: any read
+        // completed since (a failed one included) recomputes it at once
+        private static long _seriesGenSeen = -1;
 
         private static void TickLease()
         {
@@ -1738,8 +1741,10 @@ namespace CompetitiveRounds
         /// FFA / feed lag).</summary>
         private static string ComputeSeriesScore()
         {
-            if (Time.realtimeSinceStartup - _seriesScoreCachedAt < 5f) return _cachedSeriesScore;
+            long gen = ApiClient.ActiveSeriesReadGen;
+            if (IdentityClockCore.SeriesCacheFresh(Time.realtimeSinceStartup - _seriesScoreCachedAt, 5.0, gen, _seriesGenSeen)) return _cachedSeriesScore;
             _seriesScoreCachedAt = Time.realtimeSinceStartup;
+            _seriesGenSeen = gen;
             _cachedSeriesScore = "";
             _cachedSeriesStatus = "unknown";
             try

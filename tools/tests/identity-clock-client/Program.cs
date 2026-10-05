@@ -188,7 +188,7 @@ internal static class Program
             fs.File("G/game.dll", 10);
             var s = new I.Survey(fs, files, "P", "Q", "G/game.dll");
             s.Request(1);
-            for (int k = 0; k < 100000 && s.ResultFor(1) == null; k++) s.Step(false, long.MaxValue, () => 0);
+            for (int k = 0; k < 100000 && s.ResultFor(1) == null; k++) s.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
             res = s.ResultFor(1);
         }
         List<object> gdig; C.JObj ldir; int ds; string md;
@@ -321,6 +321,10 @@ internal static class Program
         if (On("stream")) StreamCases();
         if (On("series")) Series();
         if (On("budget")) BudgetCases();
+        if (On("combat3")) Combat3();
+        if (On("adapter")) Adapter();
+        if (On("flush")) Flush();
+        if (On("seriesshape")) SeriesShape();
     }
 
     private static void Privacy()
@@ -360,7 +364,7 @@ internal static class Program
         var files = new List<I.FileTarget>();
         var s = new I.Survey(fs, files, "P", "Q", "");
         s.Request(1);
-        for (int k = 0; k < 1000 && s.ResultFor(1) == null; k++) s.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 1000 && s.ResultFor(1) == null; k++) s.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         List<object> gdig; C.JObj ldir; int ds; string md;
         I.SurveyFields(s.ResultFor(1), files, priv, out gdig, out ldir, out ds, out md);
         var rec = I.Record(1, true, new List<I.Cost>(), proc, runs, asmN, asm, gdig, I.L(0L, "", (long)ds, md), ldir, hpAll, hp,
@@ -386,6 +390,13 @@ internal static class Program
         for (int i = 0; i < 10; i++) proc.Boot(70000 + i, I.PASS, null, priv);
         I.ChkAndPlug(proc, new I.GameRuns(), out chk, out plug);
         Check("boot", "kept_bounded_ordinal_below_boots", chk.Count == I.ProcLedger.BOOT_KEEP && (long)((List<object>)chk[chk.Count - 1])[1] < proc.Boots);
+        // L1: the first BOOT_KEEP occurrences stay in full (an earlier one is
+        // never replaced by a later one); the rest are stated by boots
+        bool firstKept = true;
+        for (int i = 0; i < chk.Count; i++) firstKept &= (long)((List<object>)chk[i])[1] == i;
+        Check("boot", "earliest_kept_never_replaced", firstKept && (long)((List<object>)chk[0])[2] == 3100 && (long)((List<object>)chk[1])[2] == 65000, C.Json(chk));
+        e = (List<object>)proc.Entry();
+        Check("boot", "omitted_stated_by_boots", (long)e[1] == 12 && (long)e[1] - chk.Count == 12 - I.ProcLedger.BOOT_KEEP, C.Json(e));
     }
 
     private static void OutcomeCases()
@@ -454,7 +465,7 @@ internal static class Program
         for (; frames < 200000 && s.ResultFor(1) == null; frames++)
         {
             combat = (frames / 7) % 3 != 0;             // two thirds of the frames are combat
-            int n = s.Step(combat, 2000, () => 0);
+            int n = s.Step(combat ? C.CombatRead.LIVE : C.CombatRead.NOT_LIVE, 2000, () => 0);
             if (n > maxUnits) maxUnits = n;
         }
         Check("gate", "zero_disk_calls_in_combat", fs.OpsInCombat == 0, "ops in combat " + fs.OpsInCombat);
@@ -470,7 +481,7 @@ internal static class Program
         var files = new List<I.FileTarget>();
         var s = new I.Survey(fs, files, plugins, patchers, "");
         s.Request(1);
-        for (int k = 0; k < 200000 && s.ResultFor(1) == null; k++) s.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 200000 && s.ResultFor(1) == null; k++) s.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         r = s.ResultFor(1);
         List<object> gdig; C.JObj ldir; int ds; string md;
         I.SurveyFields(r, files, new I.Privacy(null), out gdig, out ldir, out ds, out md);
@@ -523,12 +534,12 @@ internal static class Program
         List<I.FileTarget> files;
         var s = BigSurvey(fs, out files);
         s.Request(1);
-        for (int k = 0; k < 5; k++) s.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 5; k++) s.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         s.Request(1);
         Check("flight", "same_gen_continues", s.Abandoned == 0 && s.RunningGen == 1);
         s.Request(2);
         Check("flight", "older_abandoned_single_job", s.Abandoned == 1 && s.RunningGen == 2);
-        for (int k = 0; k < 200000 && s.ResultFor(2) == null; k++) s.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 200000 && s.ResultFor(2) == null; k++) s.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         Check("flight", "only_newest_published", s.ResultFor(2) != null && s.ResultFor(1) == null && !s.Running);
     }
 
@@ -538,7 +549,7 @@ internal static class Program
         List<I.FileTarget> files;
         var s = BigSurvey(fs, out files);
         s.Request(2);
-        for (int k = 0; k < 200000 && s.ResultFor(2) == null; k++) s.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 200000 && s.ResultFor(2) == null; k++) s.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         var late = new I.SurveyResult { Gen = 1 };
         bool took = s.TryPublish(late);
         Check("stale", "late_older_refused", !took && s.StaleRefused == 1 && s.ResultFor(2) != null && s.ResultFor(1) == null);
@@ -553,11 +564,11 @@ internal static class Program
         var files = new List<I.FileTarget> { new I.FileTarget { Id = 0, Path = "G/a.dll" } };
         var s = new I.Survey(fs, files, "", "", "");
         s.Request(1);
-        for (int k = 0; k < 100000 && s.ResultFor(1) == null; k++) s.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 100000 && s.ResultFor(1) == null; k++) s.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         string d1 = (string)((List<object>)s.ResultFor(1).Gdig[0])[1];
         var b = fs.Files["G/a.dll"]; b[500] ^= 0x5A;   // same length; the fake disk has no times at all
         s.Request(2);
-        for (int k = 0; k < 100000 && s.ResultFor(2) == null; k++) s.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 100000 && s.ResultFor(2) == null; k++) s.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         var r2 = s.ResultFor(2);
         string d2 = r2 != null ? (string)((List<object>)r2.Gdig[0])[1] : "";
         string want; using (var h = SHA256.Create()) want = I.Hex(h.ComputeHash(b));
@@ -585,7 +596,7 @@ internal static class Program
         fs2.OpenFail.Add("G/a.dll");
         var s = new I.Survey(fs2, files, "", "", "G/game.dll");
         s.Request(1);
-        for (int k = 0; k < 1000 && s.ResultFor(1) == null; k++) s.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 1000 && s.ResultFor(1) == null; k++) s.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         I.SurveyFields(s.ResultFor(1), files, new I.Privacy(null), out gdig, out ldir, out ds, out md);
         Check("l4", "open_failure_read_failed", (long)((List<object>)gdig[0])[2] == I.READ_FAILED && (long)((List<object>)gdig[1])[2] == I.NO_FILE, C.Json(gdig));
         Check("l4", "aload_missing_no_file", ds == I.NO_FILE && md == "", ds.ToString());
@@ -594,14 +605,14 @@ internal static class Program
         fs3.File("G/game.dll", 10); fs3.OpenFail.Add("G/game.dll");
         var s3 = new I.Survey(fs3, new List<I.FileTarget>(), "", "", "G/game.dll");
         s3.Request(1);
-        for (int k = 0; k < 1000 && s3.ResultFor(1) == null; k++) s3.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 1000 && s3.ResultFor(1) == null; k++) s3.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         Check("l4", "aload_unopenable_read_failed", s3.ResultFor(1) != null && s3.ResultFor(1).AloadDiskState == I.READ_FAILED);
         // a game assembly that is not a PE image is read_failed
         var fs4 = new FakeFs();
         fs4.File("G/game.dll", 300);
         var s4 = new I.Survey(fs4, new List<I.FileTarget>(), "", "", "G/game.dll");
         s4.Request(1);
-        for (int k = 0; k < 1000 && s4.ResultFor(1) == null; k++) s4.Step(false, long.MaxValue, () => 0);
+        for (int k = 0; k < 1000 && s4.ResultFor(1) == null; k++) s4.Step(C.CombatRead.NOT_LIVE,long.MaxValue, () => 0);
         Check("l4", "aload_not_pe_read_failed", s4.ResultFor(1) != null && s4.ResultFor(1).AloadDiskState == I.READ_FAILED);
     }
 
@@ -709,33 +720,190 @@ internal static class Program
         Check("budget", "keys_in_order", text.StartsWith("{\"schema\":1,\"consts\":1,") && text.IndexOf("\"omit\":{\"asm\":", StringComparison.Ordinal) > 0);
     }
 
-    // -- perf: the survey over this seat's own files (read only) ---------------------------
-
-    private sealed class RealFs : I.IFs
+    /// <summary>M1, three states: a throwing game-state read, a throwing
+    /// diagnostic read, and both, each make the frame UNKNOWN; in every case
+    /// the survey does zero steps and touches no disk, and a disk call made
+    /// while the state is unknown is COUNTED by the witness (never silently 0).</summary>
+    private static void Combat3()
     {
-        public int List(string dir, int max, List<I.FsEntry> into)
+        Func<bool> thr = () => { throw new InvalidOperationException(); };
+        Func<bool> no = () => false, yes = () => true;
+        Check("combat3", "both_not_live", C.CombatRead.Of(no, no) == C.CombatRead.NOT_LIVE);
+        Check("combat3", "game_live", C.CombatRead.Of(yes, no) == C.CombatRead.LIVE && C.CombatRead.Of(yes, thr) == C.CombatRead.LIVE);
+        Check("combat3", "diag_live", C.CombatRead.Of(no, yes) == C.CombatRead.LIVE && C.CombatRead.Of(thr, yes) == C.CombatRead.LIVE);
+        Check("combat3", "unknown_counts_as_live", C.CombatRead.Live(C.CombatRead.UNKNOWN) && C.CombatRead.Live(C.CombatRead.LIVE) && !C.CombatRead.Live(C.CombatRead.NOT_LIVE));
+        var cases = new[] { new[] { thr, no }, new[] { no, thr }, new[] { thr, thr } };
+        string[] names = { "game_read_throws", "diag_read_throws", "both_throw" };
+        for (int c = 0; c < cases.Length; c++)
         {
-            try
-            {
-                var d = new DirectoryInfo(dir);
-                if (!d.Exists) return 1;
-                foreach (var e in d.EnumerateFileSystemInfos())
-                {
-                    if (into.Count > max) break;
-                    into.Add(new I.FsEntry { Path = e.FullName, IsDir = (e.Attributes & FileAttributes.Directory) != 0, IsReparse = (e.Attributes & FileAttributes.ReparsePoint) != 0 });
-                }
-                return 0;
-            }
-            catch { return 2; }
+            var g = cases[c][0]; var d = cases[c][1];
+            Func<int> state = () => C.CombatRead.Of(g, d);
+            var fs = new FakeFs();
+            var wit = new I.WitnessFs(fs, state);
+            List<I.FileTarget> files;
+            var s = BigSurveyOn(fs, wit, out files);
+            s.Request(1);
+            int units = 0;
+            for (int k = 0; k < 500; k++) units += s.Step(state(), 2000, () => 0);
+            Check("combat3", names[c] + "_unknown", state() == C.CombatRead.UNKNOWN);
+            Check("combat3", names[c] + "_zero_steps", units == 0 && s.StepsWorked == 0 && fs.Ops == 0 && s.UnknownSkips == 500,
+                  "units " + units + " ops " + fs.Ops + " unknown skips " + s.UnknownSkips);
+            // the witness itself, on a disk call made while the state is unknown
+            var into = new List<I.FsEntry>();
+            wit.List("P", 10, into);
+            Check("combat3", names[c] + "_witness_counts_unknown", wit.Unknown == 1 && wit.InCombat == 0, "unknown " + wit.Unknown + " in combat " + wit.InCombat);
         }
-        public Stream Open(string path, out bool missing)
-        {
-            missing = string.IsNullOrEmpty(path) || !File.Exists(path);
-            if (missing) return null;
-            try { return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096); } catch { return null; }
-        }
-        public string AsmName(string path) { try { return System.Reflection.AssemblyName.GetAssemblyName(path).Name; } catch { return null; } }
+        // the witness counts a live frame as in combat, a not-live one as neither
+        bool live = true;
+        var w2 = new I.WitnessFs(new FakeFs(), () => C.CombatRead.Of(() => live, () => false));
+        w2.List("P", 10, new List<I.FsEntry>());
+        live = false;
+        w2.List("P", 10, new List<I.FsEntry>());
+        Check("combat3", "witness_live_counted_not_live_not", w2.InCombat == 1 && w2.Unknown == 0);
+        // a step under a state read that turns unknown mid-run does nothing from then on
+        bool fail = false;
+        Func<int> st2 = () => C.CombatRead.Of(() => { if (fail) throw new Exception(); return false; }, () => false);
+        var fs3 = new FakeFs();
+        List<I.FileTarget> f3;
+        var s3 = BigSurveyOn(fs3, new I.WitnessFs(fs3, st2), out f3);
+        s3.Request(1);
+        for (int k = 0; k < 3; k++) s3.Step(st2(), 2000, () => 0);
+        long opsBefore = fs3.Ops;
+        Check("combat3", "mid_run_still_running", s3.Running && s3.ResultFor(1) == null);
+        fail = true;
+        for (int k = 0; k < 50; k++) s3.Step(st2(), 2000, () => 0);
+        Check("combat3", "turns_unknown_stops", opsBefore > 0 && fs3.Ops == opsBefore && s3.UnknownSkips == 50);
     }
+
+    private static I.Survey BigSurveyOn(FakeFs fs, I.IFs disk, out List<I.FileTarget> files)
+    {
+        files = new List<I.FileTarget>();
+        for (int i = 0; i < 17; i++) { string f = "G/f" + i + ".dll"; fs.File(f, 400000); files.Add(new I.FileTarget { Id = i, Path = f }); }
+        fs.Dir("P", 40, "P/sub", 30);
+        fs.Dir("Q", 2, null, 0);
+        fs.File("G/game.dll", 10);
+        return new I.Survey(disk, files, "P", "Q", "G/game.dll");
+    }
+
+    /// <summary>M1 and L4 on the PRODUCTION adapter (I.DiskFs) over real
+    /// temporary files: not-found is no_file, an access or I/O failure is
+    /// read_failed, and a loader root that is itself a junction is refused.</summary>
+    private static void Adapter()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "scr-ic-adapter-" + Guid.NewGuid().ToString("N").Substring(0, 8));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var fs = new I.DiskFs();
+            bool missing;
+            var none = fs.Open(Path.Combine(root, "absent.dll"), out missing);
+            Check("adapter", "open_not_found_missing", none == null && missing);
+            var none2 = fs.Open(Path.Combine(root, "nofolder", "absent.dll"), out missing);
+            Check("adapter", "open_folder_not_found_missing", none2 == null && missing);
+            string locked = Path.Combine(root, "locked.dll");
+            File.WriteAllBytes(locked, new byte[64]);
+            using (var hold = new FileStream(locked, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+            {
+                var s = fs.Open(locked, out missing);
+                Check("adapter", "open_sharing_failure_not_missing", s == null && !missing);
+                // through the survey: the locked target is read_failed, the absent one no_file
+                var tf = new List<I.FileTarget> { new I.FileTarget { Id = 0, Path = locked }, new I.FileTarget { Id = 1, Path = Path.Combine(root, "absent.dll") } };
+                var sv = new I.Survey(fs, tf, "", "", "");
+                sv.Request(1);
+                for (int k = 0; k < 1000 && sv.ResultFor(1) == null; k++) sv.Step(C.CombatRead.NOT_LIVE, long.MaxValue, () => 0);
+                List<object> gd; C.JObj ld; int dst; string mdd;
+                I.SurveyFields(sv.ResultFor(1), tf, new I.Privacy(null), out gd, out ld, out dst, out mdd);
+                Check("adapter", "survey_locked_read_failed_absent_no_file", (long)((List<object>)gd[0])[2] == I.READ_FAILED && (long)((List<object>)gd[1])[2] == I.NO_FILE, C.Json(gd));
+            }
+            var ok = fs.Open(locked, out missing);
+            Check("adapter", "open_ok", ok != null && !missing);
+            if (ok != null) ok.Dispose();
+            Check("adapter", "open_directory_not_missing", fs.Open(root, out missing) == null && !missing);
+            Check("adapter", "list_not_found_1", fs.List(Path.Combine(root, "nodir"), 10, new List<I.FsEntry>()) == 1);
+            Check("adapter", "list_a_file_2", fs.List(locked, 10, new List<I.FsEntry>()) == 2);
+            string real = Path.Combine(root, "real");
+            Directory.CreateDirectory(real);
+            File.WriteAllBytes(Path.Combine(real, "inside.dll"), new byte[10]);
+            var into = new List<I.FsEntry>();
+            Check("adapter", "list_real_0", fs.List(real, 10, into) == 0 && into.Count == 1);
+            string junction = Path.Combine(root, "junction");
+            var p = Process.Start(new ProcessStartInfo("cmd.exe", "/c mklink /J \"" + junction + "\" \"" + real + "\"") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true });
+            p.WaitForExit(10000);
+            bool made = Directory.Exists(junction) && (File.GetAttributes(junction) & FileAttributes.ReparsePoint) != 0;
+            Check("adapter", "junction_made", made);
+            var into2 = new List<I.FsEntry>();
+            Check("adapter", "root_junction_refused", fs.List(junction, 10, into2) == I.LIST_REFUSED_REPARSE && into2.Count == 0);
+            // through the survey: the loader root a junction is read_failed with nothing listed
+            var s2 = new I.Survey(fs, new List<I.FileTarget>(), junction, real, "");
+            s2.Request(1);
+            for (int k = 0; k < 1000 && s2.ResultFor(1) == null; k++) s2.Step(C.CombatRead.NOT_LIVE, long.MaxValue, () => 0);
+            List<object> gdig; C.JObj ldir; int ds; string md;
+            I.SurveyFields(s2.ResultFor(1), new List<I.FileTarget>(), new I.Privacy(null), out gdig, out ldir, out ds, out md);
+            var pp = Part(ldir, "plugins"); var pq = Part(ldir, "patchers");
+            Check("adapter", "survey_root_junction_read_failed", (long)pp[0] == I.READ_FAILED && (long)pp[1] == 0 && ((List<object>)pp[3]).Count == 0, C.Json(pp));
+            Check("adapter", "survey_real_root_listed", (long)pq[0] == I.OK && (long)pq[1] == 1, C.Json(pq));
+            try { Directory.Delete(junction); } catch { }
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
+    /// <summary>The quit flush loop (production FlushOnQuit runs it): a live
+    /// capture is built and handed to the spool once; one line per capture;
+    /// ONE summary line after the loop, a quit with no capture included.</summary>
+    private static void Flush()
+    {
+        var info = new List<string>(); var warn = new List<string>();
+        var spooled = new List<string>();
+        I.EnvBuilder<string> build = (string c, out string text) => { text = "rec-" + c; return c == "bad" ? null : "env-" + c; };
+        var caps = new List<string> { "g1" };
+        int kept = I.FlushCaptures(caps, 4, build, e => { spooled.Add(e); return true; }, (c, t) => c + ":" + t, info.Add, warn.Add, () => { });
+        Check("flush", "live_capture_spooled_once", kept == 1 && spooled.Count == 1 && spooled[0] == "env-g1" && caps.Count == 0);
+        Check("flush", "kept_line_then_summary", info.Count == 2 && info[0].Contains("record kept for the next launch: g1:rec-g1")
+              && info[1].Contains("quit flush ran: 1 capture(s), 1 kept"), string.Join(" | ", info));
+        info.Clear(); warn.Clear(); spooled.Clear();
+        I.FlushCaptures(new List<string>(), 4, build, e => { spooled.Add(e); return true; }, (c, t) => c, info.Add, warn.Add, () => { });
+        Check("flush", "no_capture_summary_only", info.Count == 1 && info[0].Contains("quit flush ran: 0 capture(s), 0 kept") && spooled.Count == 0);
+        info.Clear(); warn.Clear();
+        int faults = 0;
+        kept = I.FlushCaptures(new List<string> { "bad", "g2", "g3" }, 4, build, e => e != "env-g3", (c, t) => c, info.Add, warn.Add, () => faults++);
+        Check("flush", "each_outcome_logged", kept == 1 && warn.Count == 2 && warn[0].Contains("outside the contract") && warn[1].Contains("closing file was not written")
+              && info[info.Count - 1].Contains("quit flush ran: 3 capture(s), 1 kept"), string.Join(" | ", warn));
+        info.Clear(); warn.Clear();
+        I.EnvBuilder<string> thrower = (string c, out string text) => { throw new InvalidOperationException(); };
+        I.FlushCaptures(new List<string> { "x" }, 4, thrower, e => true, (c, t) => c, info.Add, warn.Add, () => faults++);
+        Check("flush", "throw_counted_and_summarized", faults == 1 && warn.Count == 1 && info.Count == 1 && info[0].Contains("1 capture(s), 0 kept"));
+        var many = new List<string> { "a", "b", "c", "d", "e", "f" };
+        info.Clear();
+        I.FlushCaptures(many, 4, build, e => true, (c, t) => c, info.Add, warn.Add, () => { });
+        Check("flush", "capped", many.Count == 2 && info[info.Count - 1].Contains("4 capture(s), 4 kept"));
+    }
+
+    /// <summary>L13: the series body parsed structurally; a malformed body is
+    /// never a complete read; a completed read (failed included) invalidates
+    /// the cached status at once.</summary>
+    private static void SeriesShape()
+    {
+        Check("seriesshape", "empty_list", I.SeriesBodyShape("{\"series\":[]}") == 0);
+        Check("seriesshape", "two_objects", I.SeriesBodyShape("{\"series\": [ {\"series_id\":\"a\",\"x\":[1,{\"y\":\"]\"}]}, {\"series_id\":\"b\"} ], \"n\": 2}") == 2);
+        Check("seriesshape", "other_keys_first", I.SeriesBodyShape("{\"a\":{\"series\":5},\"series\":[{\"series_id\":\"z\"}]}") == 1);
+        string[] bad = { null, "", "series", "<html>series</html>", "{\"series\":", "{\"series\":{}}", "[\"series\"]", "{\"x\":\"series\"}",
+                         "{\"series\":[1]}", "{\"series\":[{}]} trailing", "{\"series\":[{\"a\":1},]}", "{\"series\":[{\"a\":1}]", "{}",
+                         "{\"series\":[],\"series\":[]}", "{\"detail\":\"\\\"series\\\" unavailable\"}" };
+        bool allBad = true; string which = "";
+        foreach (var b in bad) if (I.SeriesBodyShape(b) != -1) { allBad = false; which += "[" + b + "]"; }
+        Check("seriesshape", "malformed_refused", allBad, which);
+        // a malformed body is never a complete read, so never "none"
+        bool parsed = I.SeriesBodyShape("{\"detail\":\"series\"}") >= 0;
+        Check("seriesshape", "malformed_never_none", I.SeriesStatus(true, false, true, parsed, 1, 60) == "unknown");
+        Check("seriesshape", "cache_fresh_same_gen", I.SeriesCacheFresh(1, 5, 7, 7));
+        Check("seriesshape", "cache_invalid_after_any_read", !I.SeriesCacheFresh(1, 5, 8, 7));
+        Check("seriesshape", "cache_invalid_when_old", !I.SeriesCacheFresh(5, 5, 7, 7) && !I.SeriesCacheFresh(-1, 5, 7, 7));
+    }
+
+    // -- perf: the survey over this seat's own files (read only), through the production adapter
 
     private static int Perf(string managed, string core, string plugins, string patchers, string root, string gameAsm)
     {
@@ -752,14 +920,14 @@ internal static class Program
         Func<long> us = () => sw.ElapsedTicks * 1000000L / Stopwatch.Frequency;
         for (int rep = 0; rep < 3; rep++)
         {
-            var s = new I.Survey(new RealFs(), files, plugins, patchers, gameAsm);
+            var s = new I.Survey(new I.DiskFs(), files, plugins, patchers, gameAsm);
             s.Request(1);
             var steps = new List<long>();
             long start = us();
             while (s.ResultFor(1) == null && steps.Count < 100000)
             {
                 long t = us();
-                s.Step(false, 2000, us);
+                s.Step(C.CombatRead.NOT_LIVE,2000, us);
                 steps.Add(us() - t);
             }
             long total = us() - start;

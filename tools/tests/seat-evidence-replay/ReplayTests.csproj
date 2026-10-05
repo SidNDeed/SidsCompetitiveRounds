@@ -25,6 +25,9 @@
   <ItemGroup>
     <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs" />
     <Compile Include="$(SeatEvidenceSource)" />
+    <!-- the identity-clock quit flush loop (FlushCaptures), run by the
+         identity_closing_next_boot case against the real SpoolClosing -->
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\IdentityClockCore.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
   </ItemGroup>

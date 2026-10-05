@@ -36,6 +36,8 @@ WORK = os.path.join(HERE, "work")
 SERVER = os.environ.get("IC_SERVER_TREE", os.path.join(os.path.dirname(REPO), "scr-wt-identity-clock-server"))
 SAPI = os.path.join(SERVER, "backend", "api")
 SFIX = os.path.join(SERVER, "backend", "tests", "fixtures", "identity_clock")
+CFIX = os.path.join(HERE, "fixtures")
+SEATCORE = os.path.join(REPO, "plugin", "SeatEvidenceCore.cs")
 KEY = "test-hmac-key-seat-evidence"
 GAME = "C:/Program Files (x86)/Steam/steamapps/common/ROUNDS"
 NEEDLES = ("qxuser", "qxhost7")
@@ -45,12 +47,14 @@ def sha(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
 
-def build(tag, core):
+def build(tag, core, seat_core=None):
     out = os.path.join(WORK, tag)
     cmd = ["dotnet", "build", PROJ, "-c", "Release", "-nologo", "-v", "q",
            "-p:IntermediateOutputPath=" + os.path.join(out, "obj") + os.sep,
            "-p:OutDir=" + os.path.join(out, "bin") + os.sep,
            "-p:CoreSource=" + core]
+    if seat_core:
+        cmd.append("-p:SeatCoreSource=" + seat_core)
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout[-3000:], r.stderr[-2000:])
@@ -75,12 +79,29 @@ def server():
     return ice, se
 
 
+def out_dir(dll, what):
+    """Each build writes its outputs beside its own binary: a mutant's run never
+    overwrites the base build's outputs."""
+    return os.path.join(os.path.dirname(os.path.dirname(dll)), what)
+
+
 def fixtures_check(dll, ice):
-    out = os.path.join(WORK, "fixtures-out")
+    out = out_dir(dll, "fixtures-out")
     rc, text = run(dll, ["fixtures", SFIX, KEY, out])
     lines = [text]
     ok = rc == 0
     for name in ("base", "over_cap"):
+        # E1: the client's envelope BYTES equal the carried envelope fixture's
+        # bytes, and the carried fixture is the server's envelope.json in
+        # compact form (re-derived here from the server tree)
+        carried = open(os.path.join(CFIX, name + ".envelope.json"), "rb").read()
+        derived = json.dumps(json.load(open(os.path.join(SFIX, name, "envelope.json"), encoding="utf-8")),
+                             separators=(",", ":")).encode("ascii")
+        cbytes = open(os.path.join(out, name + ".envelope.json"), "rb").read()
+        lines.append("  %s envelope raw bytes %s carried fixture (%d / %d bytes, sha256 %s); carried == server envelope.json compact: %s" % (
+            name, "EQUAL to" if cbytes == carried else "DIFFER from", len(cbytes), len(carried),
+            hashlib.sha256(carried).hexdigest()[:16], carried == derived))
+        ok = ok and cbytes == carried and carried == derived
         want = open(os.path.join(SFIX, name, "record.txt"), "rb").read()
         got = open(os.path.join(out, name + ".record.txt"), "rb").read()
         same = want == got
@@ -101,7 +122,7 @@ def fixtures_check(dll, ice):
 
 
 def replay_check(dll, ice, se):
-    out = os.path.join(WORK, "replay-out")
+    out = out_dir(dll, "replay-out")
     rc, text = run(dll, ["replay", KEY, out])
     lines = [text]
     ok = rc == 0
@@ -137,7 +158,7 @@ def replay_check(dll, ice, se):
 
 
 def clock_check(dll, ice):
-    out = os.path.join(WORK, "clock-out")
+    out = out_dir(dll, "clock-out")
     rc, _ = run(dll, ["clock", out])
     rows = json.load(open(os.path.join(out, "clock.json"), encoding="utf-8"))
     fix = json.load(open(os.path.join(SFIX, "clock_headers.json"), encoding="utf-8"))
@@ -264,11 +285,15 @@ def api_header_contained():
     return t.count("try { ch = clockHeader(); } catch { ch = null; }") == 1
 
 
-def quit_wiring(plugin_text, evid_text):
+FLUSH_CALL = ('I.FlushCaptures(_captures, CAPTURE_CAP, BuildAtQuit, env => SeatEvidence.SpoolClosing("i", env), RecordLine,')
+
+
+def quit_wiring(plugin_text, evid_text, core_text):
     """A game that ends by quitting keeps its record: the quit handler captures the live game
     (SeatEvidenceOnQuit, whose cut path runs IdentityClockEvidence.Dispatch) BEFORE the
-    identity flush runs, and the flush writes each capture to the closing file under route i
-    and logs every outcome. Returns the list of problems (empty when wired)."""
+    identity flush runs, and the flush (FlushOnQuit -> the core's FlushCaptures, whose loop the
+    `flush` unit group executes) writes each capture to the closing file under route i and logs
+    every outcome. Returns the list of problems (empty when wired)."""
     probs = []
     i_cap = plugin_text.find("try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }")
     i_quit = plugin_text.rfind("Application.quitting += () =>", 0, max(i_cap, 0))
@@ -282,18 +307,29 @@ def quit_wiring(plugin_text, evid_text):
     else:
         b, e = body_after(evid_text, s)
         body = evid_text[b:e]
-        if body.count('SeatEvidence.SpoolClosing("i", env)') != 1:
-            probs.append("FlushOnQuit does not write the closing file under route i")
+        if body.count(FLUSH_CALL) != 1 or body.count("SpoolClosing(") != 1 or "EnqueueIdentity" in body:
+            probs.append("FlushOnQuit does not run the core flush writing the closing file under route i")
+        bq = evid_text.find("private static string BuildAtQuit(Capture c, out string text)")
+        bb = evid_text[slice(*body_after(evid_text, bq))] if bq >= 0 else ""
+        if bq < 0 or "BuildEnv(c, out text)" not in bb:
+            probs.append("BuildAtQuit missing or does not build the envelope")
+        for part, txt in (("FlushOnQuit", body), ("BuildAtQuit", bb)):
+            if "RequestSurvey" in txt or "_survey.Step" in txt:
+                probs.append(part + " starts disk survey work")
+    f = core_text.find("internal static int FlushCaptures<T>(")
+    if f < 0:
+        probs.append("IdentityClockCore.cs: FlushCaptures missing")
+    else:
+        b, e = body_after(core_text, f)
+        body = core_text[b:e]
         if body.count("no record at quit") < 3 or "record kept for the next launch" not in body:
-            probs.append("FlushOnQuit does not log every outcome")
+            probs.append("FlushCaptures does not log every outcome")
         # The summary line sits after the capture loop, so a quit with no live game logs too.
         i_sum = body.find('" quit flush ran: "')
-        i_loop = body.find("while (_captures.Count > 0")
+        i_loop = body.find("while (caps.Count > 0")
         loop_end = body_after(body, i_loop)[1] if i_loop >= 0 else -1
-        if i_sum < 0 or i_loop < 0 or i_sum < loop_end:
-            probs.append("FlushOnQuit leaves no line on a quit with no capture")
-        if "RequestSurvey" in body or "_survey.Step" in body:
-            probs.append("FlushOnQuit starts disk survey work")
+        if i_sum < 0 or i_loop < 0 or i_sum < loop_end or body.count("quit flush ran") != 1:
+            probs.append("FlushCaptures leaves no line on a quit with no capture")
     gsw = open(os.path.join(REPO, "plugin", "GameStateWatcher.cs"), encoding="utf-8").read()
     q = gsw.find("internal static void SeatEvidenceOnQuit()")
     if q < 0 or "SeatEvidenceCut(" not in gsw[q:q + 600]:
@@ -308,7 +344,30 @@ def quit_wiring(plugin_text, evid_text):
 # (name, [(old, new), ...], target, control); target/control: a unit group, "fixtures" or "replay"
 
 MUTANTS = [
-    ("m1_combat_gate_removed", [("if (combatLive) { CombatSkips++; return 0; }", "if (combatLive) { CombatSkips++; }")], "gate", "trunc"),
+    ("m1_combat_gate_removed", [("if (C.CombatRead.Live(combatState)) { CombatSkips++; return 0; }",
+                                 "if (C.CombatRead.Live(combatState)) { CombatSkips++; }")], "gate", "trunc"),
+    # M1 three states: unknown read as not live, at the survey's own gate
+    ("m1_survey_unknown_runs", [("if (C.CombatRead.Live(combatState)) { CombatSkips++; return 0; }",
+                                 "if (combatState == C.CombatRead.LIVE) { CombatSkips++; return 0; }")], "combat3", "gate"),
+    # the witness reusing a swallowing read: an unknown frame is not counted
+    ("m1_witness_swallows_unknown", [("else if (s == C.CombatRead.UNKNOWN) Unknown++;", "")], "combat3", "gate"),
+    ("m1_witness_read_swallowed", [("try { s = _state(); } catch { s = C.CombatRead.UNKNOWN; }\n                if (s == C.CombatRead.LIVE)",
+                                    "try { s = _state(); } catch { s = C.CombatRead.UNKNOWN; }\n                if (s == C.CombatRead.UNKNOWN) s = C.CombatRead.NOT_LIVE;\n                if (s == C.CombatRead.LIVE)")],
+     "combat3", "gate"),
+    ("m1_root_reparse_listed", [("if ((a & FileAttributes.ReparsePoint) != 0) return LIST_REFUSED_REPARSE;", "")], "adapter", "trunc"),
+    ("l4_adapter_all_missing", [("catch (Exception ex) { missing = NotFound(ex); return null; }",
+                                 "catch (Exception ex) { missing = true; return null; }")], "adapter", "trunc"),
+    ("l4_adapter_none_missing", [("catch (Exception ex) { missing = NotFound(ex); return null; }",
+                                  "catch (Exception ex) { missing = false; return null; }")], "adapter", "trunc"),
+    ("l1_drop_oldest", [("if (BootRuns.Count < BOOT_KEEP) BootRuns.Add(r);",
+                         "BootRuns.Add(r); if (BootRuns.Count > BOOT_KEEP) BootRuns.RemoveAt(0);")], "boot", "outcome"),
+    ("l13_shape_trailing_ignored", [("return TrailOk(body, i) ? found : -1;", "return found;")], "seriesshape", "series"),
+    ("l13_shape_elements_unchecked", [("if (i >= n || body[i] != '{') return -1;\n                            if (!SkipValue(body, ref i)) return -1;",
+                                       "if (!SkipValue(body, ref i)) return -1;")], "seriesshape", "series"),
+    ("l13_cache_gen_ignored", [("return ageS >= 0 && ageS < maxS && readGen == genSeen;", "return ageS >= 0 && ageS < maxS;")], "seriesshape", "series"),
+    ("flush_summary_removed", [('" quit flush ran: "', '" quit flush: "')], "flush", "boot"),
+    ("flush_summary_in_loop", [('" quit flush ran: "', '" quit flush: "'), ("tried++;", 'tried++; info(" quit flush ran: ");')], "flush", "boot"),
+    ("flush_spool_ignored", [("if (spool(env)) { kept++;", "if (spool(env) || true) { kept++;")], "flush", "boot"),
     ("m1_step_unbounded", [("while (_job != null && n < STEP_UNITS_MAX)", "while (_job != null)")], "gate", "trunc"),
     ("m1_reparse_followed", [("if (e.IsReparse) continue;", "if (false) continue;")], "reparse", "trunc"),
     ("m1_truncation_unflagged", [("if (_dlls.Count > PartCap) _partTrunc = true;", "if (false) _partTrunc = true;")], "trunc", "reparse"),
@@ -334,6 +393,49 @@ MUTANTS = [
     ("budget_tie_order", [("foreach (var k in TRIM) { int n = TrimLen(o, k); if (n > best)",
                            "foreach (var k in TRIM) { int n = TrimLen(o, k); if (n >= best)")], "fixtures", "units:budget"),
 ]
+
+# Mutants of plugin/SeatEvidenceCore.cs (the three-state combat read itself).
+SEAT_MUTANTS = [
+    ("m1_unknown_is_not_live", [("internal static bool Live(int state) { return state != NOT_LIVE; }",
+                                 "internal static bool Live(int state) { return state == LIVE; }")], "combat3", "trunc"),
+    ("m1_failed_read_not_live", [("return gOk && dOk ? NOT_LIVE : UNKNOWN;", "return NOT_LIVE;")], "combat3", "trunc"),
+]
+
+# Wiring scans over the production callers (text the harness cannot execute):
+# (name, file, required text, count, mutant old, mutant new)
+WIRING = [
+    ("seat_combatlive_three_state", "SeatEvidence.cs", "return C.CombatRead.Live(CombatState());", 1,
+     "return C.CombatRead.Live(CombatState());", "try { return C.CombatRead.Of(() => GameManager.instance != null && GameManager.instance.battleOngoing, () => false) == C.CombatRead.LIVE; } catch { return false; }"),
+    ("seat_state_two_reads", "SeatEvidence.cs", "return C.CombatRead.Of(() => GameManager.instance != null && GameManager.instance.battleOngoing,", 1,
+     "return C.CombatRead.Of(() => GameManager.instance != null && GameManager.instance.battleOngoing,", "return C.CombatRead.Of(() => { try { return GameManager.instance != null && GameManager.instance.battleOngoing; } catch { return false; } },"),
+    ("ic_tick_unknown_on_throw", "IdentityClockEvidence.cs", "try { state = SeatEvidence.CombatState(); } catch { state = C.CombatRead.UNKNOWN; }", 1,
+     "catch { state = C.CombatRead.UNKNOWN; }", "catch { state = C.CombatRead.NOT_LIVE; }"),
+    ("ic_tick_step_given_state", "IdentityClockEvidence.cs", "_survey.Step(state, SURVEY_STEP_US, () => SwUs);", 1,
+     "_survey.Step(state, SURVEY_STEP_US, () => SwUs);", "_survey.Step(C.CombatRead.NOT_LIVE, SURVEY_STEP_US, () => SwUs);"),
+    ("ic_witness_three_state", "IdentityClockEvidence.cs", "_disk = new I.WitnessFs(new I.DiskFs(), SeatEvidence.CombatState);", 1,
+     "SeatEvidence.CombatState);", "() => SeatEvidence.CombatLive() ? C.CombatRead.LIVE : C.CombatRead.NOT_LIVE);"),
+    ("api_series_shape", "ApiClient.cs", "parsed = shape >= 0 && shape == list.Count;", 1,
+     "parsed = shape >= 0 && shape == list.Count;", "parsed = true;"),
+    ("api_failed_read_moves_gen", "ApiClient.cs", "if (!ok) { ActiveSeriesReadOk = false; ActiveSeriesReadGen++; return; }", 1,
+     "if (!ok) { ActiveSeriesReadOk = false; ActiveSeriesReadGen++; return; }", "if (!ok) { ActiveSeriesReadOk = false; return; }"),
+    ("broadcast_cache_gen", "BroadcastMode.cs", "if (IdentityClockCore.SeriesCacheFresh(Time.realtimeSinceStartup - _seriesScoreCachedAt, 5.0, gen, _seriesGenSeen)) return _cachedSeriesScore;", 1,
+     "IdentityClockCore.SeriesCacheFresh(Time.realtimeSinceStartup - _seriesScoreCachedAt, 5.0, gen, _seriesGenSeen)", "Time.realtimeSinceStartup - _seriesScoreCachedAt < 5.0"),
+]
+# Text that must NOT occur (the swallowing two-state read in the identity lane).
+FORBIDDEN = [("IdentityClockEvidence.cs", "SeatEvidence.CombatLive("),
+             ("IdentityClockEvidence.cs", "IoInCombat++"),
+             ("ApiClient.cs", "JsonUtility.FromJson<ActiveSeries")]
+
+
+def wiring_check(texts):
+    probs = []
+    for name, f, req, cnt, _, _ in WIRING:
+        if texts[f].count(req) != cnt:
+            probs.append("%s: %s holds %r %d times, wants %d" % (name, f, req[:70], texts[f].count(req), cnt))
+    for f, bad in FORBIDDEN:
+        if bad in texts[f]:
+            probs.append("%s holds %r" % (f, bad))
+    return probs
 
 SCAN_MUTANTS = [
     ("hook_unwrapped", "try { IdentityClockEvidence.PointStart(); } catch { }", "IdentityClockEvidence.PointStart();"),
@@ -365,6 +467,8 @@ def main():
     core_sha = sha(CORE)
     print("plugin/IdentityClockCore.cs sha256", core_sha)
     print("plugin/IdentityClockEvidence.cs sha256", sha(EVID))
+    seat_sha = sha(SEATCORE)
+    print("plugin/SeatEvidenceCore.cs sha256", seat_sha)
     ice, se = server()
     ok = True
 
@@ -399,33 +503,68 @@ def main():
     ok = ok and cok
 
     plugin_text = open(os.path.join(REPO, "plugin", "Plugin.cs"), encoding="utf-8").read()
-    qprobs = quit_wiring(plugin_text, evid)
+    core_text = open(CORE, encoding="utf-8").read()
+    qprobs = quit_wiring(plugin_text, evid, core_text)
     for p in qprobs:
         print("  " + p)
     print("quit flush wiring check:", "PASS" if not qprobs else "FAIL")
     ok = ok and not qprobs
     # its mutants: the flush unregistered, and the flush writing the queue instead of the closing file
-    q1 = quit_wiring(plugin_text.replace("try { IdentityClockEvidence.FlushOnQuit(); } catch { }", ""), evid)
-    q2 = quit_wiring(plugin_text, evid.replace('SeatEvidence.SpoolClosing("i", env)', "SeatEvidence.EnqueueIdentity(env)"))
+    q1 = quit_wiring(plugin_text.replace("try { IdentityClockEvidence.FlushOnQuit(); } catch { }", ""), evid, core_text)
+    q2 = quit_wiring(plugin_text, evid.replace('SeatEvidence.SpoolClosing("i", env)', "SeatEvidence.EnqueueIdentity(env)"), core_text)
     print("quit mutant flush_unregistered %s, flush_to_queue %s" % ("CAUGHT" if q1 else "MISSED", "CAUGHT" if q2 else "MISSED"))
     # the summary line removed, and the summary line logged only inside the capture loop
-    q3 = quit_wiring(plugin_text, evid.replace('" quit flush ran: "', '" quit flush: "'))
-    q4 = quit_wiring(plugin_text, evid.replace('" quit flush ran: "', '" quit flush: "').replace(
-        "tried++;", 'tried++; Plugin.Log.LogInfo(TAG + " quit flush ran: ");'))
-    print("quit mutant summary_removed %s, summary_in_loop %s" % ("CAUGHT" if q3 else "MISSED", "CAUGHT" if q4 else "MISSED"))
-    ok = ok and bool(q1) and bool(q2) and bool(q3) and bool(q4)
+    q3 = quit_wiring(plugin_text, evid, core_text.replace('" quit flush ran: "', '" quit flush: "'))
+    q4 = quit_wiring(plugin_text, evid, core_text.replace('" quit flush ran: "', '" quit flush: "').replace(
+        "tried++;", 'tried++; info(" quit flush ran: ");'))
+    q5 = quit_wiring(plugin_text, evid.replace("try { CheckRun(I.MOMENT_OVER, false); } finally", "try { CheckRun(I.MOMENT_OVER, false); RequestSurvey(c.G); } finally"), core_text)
+    print("quit mutant summary_removed %s, summary_in_loop %s, survey_at_quit %s" % (
+        "CAUGHT" if q3 else "MISSED", "CAUGHT" if q4 else "MISSED", "CAUGHT" if q5 else "MISSED"))
+    ok = ok and bool(q1) and bool(q2) and bool(q3) and bool(q4) and bool(q5)
+
+    # M1/L13 wiring of the production callers, with one mutant per scan
+    texts = {}
+    for f in ("SeatEvidence.cs", "IdentityClockEvidence.cs", "ApiClient.cs", "BroadcastMode.cs"):
+        texts[f] = open(os.path.join(REPO, "plugin", f), encoding="utf-8").read()
+    wprobs = wiring_check(texts)
+    for p in wprobs:
+        print("  " + p)
+    print("caller wiring check (%d scans, %d forbidden texts): %s" % (len(WIRING), len(FORBIDDEN), "PASS" if not wprobs else "FAIL"))
+    ok = ok and not wprobs
+    w_caught = 0
+    for name, f, _, _, old, new in WIRING:
+        if texts[f].count(old) != 1:
+            print("BAD wiring mutant %s: anchor occurs %d times" % (name, texts[f].count(old)))
+            ok = False
+            continue
+        mt = dict(texts)
+        mt[f] = texts[f].replace(old, new)
+        hit = bool(wiring_check(mt))
+        print("wiring mutant %-30s %s" % (name, "CAUGHT" if hit else "MISSED"))
+        w_caught += 1 if hit else 0
+        ok = ok and hit
+    mt = dict(texts)
+    mt["IdentityClockEvidence.cs"] = texts["IdentityClockEvidence.cs"] + "\n// if (SeatEvidence.CombatLive()) return;\n"
+    hit = bool(wiring_check(mt))
+    print("wiring mutant %-30s %s" % ("ic_swallowing_read_used", "CAUGHT" if hit else "MISSED"))
+    ok = ok and hit
+    print("wiring mutants: %d of %d caught (control: the unmutated scan has %d problems)" % (w_caught + (1 if hit else 0), len(WIRING) + 1, len(wprobs)))
 
     raw = open(CORE, "rb").read().decode("utf-8")
+    seat_raw = open(SEATCORE, "rb").read().decode("utf-8")
     nl = "\r\n" if "\r\n" in raw else "\n"
+    snl = "\r\n" if "\r\n" in seat_raw else "\n"
     caught = 0
     quick = "--quick" in sys.argv
     if quick:
         print("QUICK run: mutants and scan mutants not run (a quick run is never the run of record)")
-    for name, pairs, target, control in ([] if quick else MUTANTS):
-        text = raw
+    all_mutants = [(m, "core") for m in MUTANTS] + [(m, "seat") for m in SEAT_MUTANTS]
+    for (name, pairs, target, control), which in ([] if quick else all_mutants):
+        text = raw if which == "core" else seat_raw
+        nl_ = nl if which == "core" else snl
         bad = False
         for old, new in pairs:
-            o, n = old.replace("\n", nl), new.replace("\n", nl)
+            o, n = old.replace("\n", nl_), new.replace("\n", nl_)
             if text.count(o) != 1:
                 print("BAD mutant %s: anchor occurs %d times: %s" % (name, text.count(o), old[:60]))
                 bad = True
@@ -436,9 +575,14 @@ def main():
             continue
         mdir = os.path.join(WORK, "mut-" + name)
         os.makedirs(mdir, exist_ok=True)
-        mcore = os.path.join(mdir, "IdentityClockCore.cs")
-        open(mcore, "wb").write(text.encode("utf-8"))
-        mdll = build("mut-" + name, mcore)
+        if which == "core":
+            mcore = os.path.join(mdir, "IdentityClockCore.cs")
+            open(mcore, "wb").write(text.encode("utf-8"))
+            mdll = build("mut-" + name, mcore)
+        else:
+            mseat = os.path.join(mdir, "SeatEvidenceCore.cs")
+            open(mseat, "wb").write(text.encode("utf-8"))
+            mdll = build("mut-" + name, CORE, mseat)
         if mdll is None:
             print("mutant %s: BUILD FAILED" % name)
             ok = False
@@ -450,7 +594,7 @@ def main():
             caught += 1
         else:
             ok = False
-    print("mutants: %d of %d caught with passing controls" % (caught, len(MUTANTS)))
+    print("mutants: %d of %d caught with passing controls" % (caught, len(all_mutants)))
 
     enl = "\r\n" if "\r\n" in evid else "\n"
     s_caught = 0
@@ -480,8 +624,8 @@ def main():
         print(out)
         ok = ok and rc == 0
 
-    unchanged = sha(CORE) == core_sha
-    print("core unchanged by the run (sha before == sha after):", unchanged)
+    unchanged = sha(CORE) == core_sha and sha(SEATCORE) == seat_sha
+    print("cores unchanged by the run (sha before == sha after):", unchanged)
     ok = ok and unchanged
     code = 0 if ok else 1
     print("EXIT", code)

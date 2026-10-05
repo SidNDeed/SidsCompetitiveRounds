@@ -186,7 +186,8 @@ namespace CompetitiveRounds
     }
 
     // The identity-clock lane's clock reader, which SeatEvidence's pump hands
-    // the evidence POST for route "i" only (no replay case queues route "i").
+    // the evidence POST for route "i" only (identity_closing_next_boot queues
+    // route "i"; the replay asserts the queue, not that POST's header).
     internal static class IdentityClockEvidence
     {
         internal static string ClockHeaderNow() { return null; }

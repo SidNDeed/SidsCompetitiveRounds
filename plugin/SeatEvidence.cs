@@ -645,16 +645,24 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>Whether a battle is live in the CURRENT frame: the game's
+        /// <summary>The CURRENT frame's combat state (C.CombatRead): the game's
         /// own GameManager.battleOngoing read now (FfaMode and vanilla both
-        /// write it), or the diagnostics flag (the spectator path drives it).
-        /// Either one live is live.</summary>
+        /// write it) and the diagnostics flag (the spectator path drives it).
+        /// Either one live is LIVE; a read that fails makes the frame UNKNOWN
+        /// unless the other read says live.</summary>
+        internal static int CombatState()
+        {
+            return C.CombatRead.Of(() => GameManager.instance != null && GameManager.instance.battleOngoing,
+                                   () => NetworkReplicaDiagnostics.BattleActive);
+        }
+
+        /// <summary>Whether this frame must do no main-thread evidence work:
+        /// a live battle or an unknown combat state. Every caller (this
+        /// class's ticks and send gate, the card-draw tick) does main-thread
+        /// work, so UNKNOWN counts as live for all of them.</summary>
         internal static bool CombatLive()
         {
-            bool live = false;
-            try { live = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
-            try { live = live || NetworkReplicaDiagnostics.BattleActive; } catch { }
-            return live;
+            return C.CombatRead.Live(CombatState());
         }
 
         private static void ReadOffset()

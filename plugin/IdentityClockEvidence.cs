@@ -28,12 +28,13 @@ namespace CompetitiveRounds
     /// starts a coroutine or uses the game's random generator.
     ///
     /// The disk survey (gdig, ldir, aload) runs ONLY on this tick and ONLY in a
-    /// frame where no battle is live (SeatEvidence.CombatLive, read in the same
-    /// frame): there is no worker thread, so no survey or hashing work can
+    /// frame positively read as not live (SeatEvidence.CombatState, three
+    /// states, read in the same frame; a failed read is UNKNOWN and does no
+    /// work): there is no worker thread, so no survey or hashing work can
     /// overlap combat; each tick does at most a bounded number of bounded
-    /// units. The io_in_combat counter is the witness: every disk call
-    /// re-reads the battle state itself and counts a call made while a battle
-    /// is live (it must stay 0).</summary>
+    /// units. The witness (io_in_combat, io_unknown): every disk call re-reads
+    /// the three-state combat state itself and counts a call made while a
+    /// battle is live or the state is unknown (both must stay 0).</summary>
     internal static class IdentityClockEvidence
     {
         private const string TAG = "[IDENTITY-CLOCK]";
@@ -53,7 +54,6 @@ namespace CompetitiveRounds
 
         private static I.ProcLedger _proc;
         private static I.Privacy _priv;
-        internal static long IoInCombat;
 
         private static I.ProcLedger Proc
         {
@@ -459,19 +459,21 @@ namespace CompetitiveRounds
             long now = SwUs;
             long frameUs = _lastTickUs > 0 ? now - _lastTickUs : 0;
             _lastTickUs = now;
-            // A failed combat read counts as combat: no survey step runs on it.
-            bool combat;
-            try { combat = SeatEvidence.CombatLive(); } catch { combat = true; }
+            // The three-state read: live or UNKNOWN is combat here (no survey
+            // step, no build); only a positively not-live frame does work.
+            int state;
+            try { state = SeatEvidence.CombatState(); } catch { state = C.CombatRead.UNKNOWN; }
+            bool combat = C.CombatRead.Live(state);
             long t0 = SwUs;
             try { Slice(frameUs, combat); } catch { _cost[T2].Fault(); }
             _cost[T2].Add(SwUs - t0);
-            if (combat) { if (_survey != null) _survey.Step(true, 0, () => SwUs); return; }
+            if (combat) { if (_survey != null) _survey.Step(state, 0, () => SwUs); return; }
             long t1 = SwUs;
             try
             {
                 if (_survey != null && _survey.Running)
                 {
-                    _survey.Step(false, SURVEY_STEP_US, () => SwUs);
+                    _survey.Step(state, SURVEY_STEP_US, () => SwUs);
                     _cost[C2].Add(SwUs - t1);
                 }
             }
@@ -562,7 +564,8 @@ namespace CompetitiveRounds
                     _files = FileList(game, root);
                     string gameAsm = "";
                     try { gameAsm = typeof(GameManager).Assembly.Location; } catch { }
-                    _survey = new I.Survey(new DiskFs(), _files, SafePath(() => Paths.PluginPath), SafePath(() => Paths.PatcherPluginPath), gameAsm);
+                    _disk = new I.WitnessFs(new I.DiskFs(), SeatEvidence.CombatState);
+                    _survey = new I.Survey(_disk, _files, SafePath(() => Paths.PluginPath), SafePath(() => Paths.PatcherPluginPath), gameAsm);
                 }
                 _survey.Request(g.Gen);
             }
@@ -592,49 +595,13 @@ namespace CompetitiveRounds
             return l;
         }
 
-        /// <summary>The survey's disk: each call re-reads the battle state and
-        /// counts a call made during a live battle (the witness; it must stay 0).</summary>
-        private sealed class DiskFs : I.IFs
-        {
-            private static void Witness() { try { if (SeatEvidence.CombatLive()) IoInCombat++; } catch { } }
-
-            public int List(string dir, int max, List<I.FsEntry> into)
-            {
-                Witness();
-                try
-                {
-                    var d = new DirectoryInfo(dir);
-                    if (!d.Exists) return 1;
-                    foreach (var e in d.EnumerateFileSystemInfos())
-                    {
-                        if (into.Count > max) break;
-                        var a = e.Attributes;
-                        into.Add(new I.FsEntry { Path = e.FullName, IsDir = (a & FileAttributes.Directory) != 0, IsReparse = (a & FileAttributes.ReparsePoint) != 0 });
-                    }
-                    return 0;
-                }
-                catch { return 2; }
-            }
-
-            public Stream Open(string path, out bool missing)
-            {
-                Witness();
-                missing = false;
-                try
-                {
-                    if (string.IsNullOrEmpty(path) || !File.Exists(path)) { missing = true; return null; }
-                    if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) return null;
-                    return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096);
-                }
-                catch { return null; }
-            }
-
-            public string AsmName(string path)
-            {
-                Witness();
-                try { return AssemblyName.GetAssemblyName(path).Name; } catch { return null; }
-            }
-        }
+        /// <summary>The survey's disk: the production adapter (I.DiskFs) under
+        /// the witness (I.WitnessFs), which reads the three-state combat
+        /// state itself before every disk call; its InCombat and Unknown
+        /// counts are io_in_combat and io_unknown, both must stay 0.</summary>
+        private static I.WitnessFs _disk;
+        internal static long IoInCombat { get { return _disk != null ? _disk.InCombat : 0; } }
+        internal static long IoUnknown { get { return _disk != null ? _disk.Unknown : 0; } }
 
         // -- dispatch and build (G1) ----------------------------------------------------------------
 
@@ -708,7 +675,8 @@ namespace CompetitiveRounds
             var g = c.G;
             return text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, points " + g.Book.PtO.Count
                 + ", survey " + (_survey != null && _survey.ResultFor(g.Gen) != null ? "complete" : "not_yet")
-                + ", io_in_combat " + IoInCombat.ToString(CultureInfo.InvariantCulture);
+                + ", io_in_combat " + IoInCombat.ToString(CultureInfo.InvariantCulture)
+                + ", io_unknown " + IoUnknown.ToString(CultureInfo.InvariantCulture);
         }
 
         /// <summary>Application.quitting, after GameStateWatcher's quit hook
@@ -718,47 +686,30 @@ namespace CompetitiveRounds
         /// (SeatEvidence.SpoolClosing, never the queue); the next launch's
         /// first queue load moves it in. The game-over census runs here if the
         /// tick had not run it; a survey that had not finished for that game
-        /// stays not_yet (no disk survey is started at quit). Every capture
-        /// leaves one log line: kept, or why there is no record.</summary>
+        /// stays not_yet (no disk survey is started at quit). The loop is
+        /// I.FlushCaptures: every capture leaves one log line (kept, or why
+        /// there is no record) and every quit one summary line.</summary>
         internal static void FlushOnQuit()
         {
-            int n = 0, tried = 0, kept = 0;
             try
             {
-                while (_captures.Count > 0 && n++ < CAPTURE_CAP)
-                {
-                    var c = _captures[0];
-                    _captures.RemoveAt(0);
-                    tried++;
-                    try
-                    {
-                        if (!c.CensusDone)
-                        {
-                            c.CensusDone = true;
-                            var keep = _g; _g = c.G;
-                            try { CheckRun(I.MOMENT_OVER, false); } finally { _g = keep; }
-                        }
-                        string text;
-                        string env = BuildEnv(c, out text);
-                        if (env == null) { Plugin.Log.LogWarning(TAG + " no record at quit: the game key, seat ids or envelope are outside the contract"); continue; }
-                        if (SeatEvidence.SpoolClosing("i", env)) { kept++; Plugin.Log.LogInfo(TAG + " record kept for the next launch: " + RecordLine(c, text)); }
-                        else Plugin.Log.LogWarning(TAG + " no record at quit: the closing file was not written");
-                    }
-                    catch (Exception ex)
-                    {
-                        _cost[G1].Fault();
-                        try { Plugin.Log.LogWarning(TAG + " no record at quit: " + ex.GetType().Name); } catch { }
-                    }
-                }
+                I.FlushCaptures(_captures, CAPTURE_CAP, BuildAtQuit, env => SeatEvidence.SpoolClosing("i", env), RecordLine,
+                                s => Plugin.Log.LogInfo(TAG + s), s => Plugin.Log.LogWarning(TAG + s), () => _cost[G1].Fault());
             }
             catch { }
-            // Every quit leaves one line, a quit with no live game included.
-            try
+        }
+
+        /// <summary>One capture at quit: the game-over census if the tick had
+        /// not run it, then the envelope.</summary>
+        private static string BuildAtQuit(Capture c, out string text)
+        {
+            if (!c.CensusDone)
             {
-                Plugin.Log.LogInfo(TAG + " quit flush ran: " + tried.ToString(CultureInfo.InvariantCulture) + " capture(s), "
-                                   + kept.ToString(CultureInfo.InvariantCulture) + " kept for the next launch");
+                c.CensusDone = true;
+                var keep = _g; _g = c.G;
+                try { CheckRun(I.MOMENT_OVER, false); } finally { _g = keep; }
             }
-            catch { }
+            return BuildEnv(c, out text);
         }
 
         /// <summary>The signed envelope of one capture, or null when its game

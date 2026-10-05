@@ -24,6 +24,29 @@ namespace CompetitiveRounds
     /// runs both over the same fixtures and compares the bytes.</summary>
     internal static class SeatEvidenceCore
     {
+        /// <summary>The current frame's combat state from its two reads (the
+        /// game's own battle flag and the diagnostics flag): LIVE when either
+        /// read succeeds and says live; NOT_LIVE only when BOTH reads succeed
+        /// and say not live; otherwise UNKNOWN. A failed read never reads as
+        /// not live.</summary>
+        internal static class CombatRead
+        {
+            internal const int NOT_LIVE = 0, LIVE = 1, UNKNOWN = 2;
+
+            internal static int Of(Func<bool> gameState, Func<bool> diagnostics)
+            {
+                bool gOk = true, dOk = true, g = false, d = false;
+                try { g = gameState(); } catch { gOk = false; }
+                try { d = diagnostics(); } catch { dOk = false; }
+                if ((gOk && g) || (dOk && d)) return LIVE;
+                return gOk && dOk ? NOT_LIVE : UNKNOWN;
+            }
+
+            /// <summary>For any caller that does work on the main thread:
+            /// only a positively not-live frame may do it (UNKNOWN counts as live).</summary>
+            internal static bool Live(int state) { return state != NOT_LIVE; }
+        }
+
         internal const int CONTRACT = 2;
         internal const int SCHEMA = 2;
         internal const int RECORD_MAX_BYTES = 12288;

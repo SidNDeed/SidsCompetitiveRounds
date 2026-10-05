@@ -3170,6 +3170,9 @@ namespace CompetitiveRounds
         /// lease's series_status reads these).</summary>
         internal static bool ActiveSeriesReadOk { get; private set; }
         internal static float ActiveSeriesReadAt { get; private set; } = -1f;
+        /// <summary>Moves on every completed /series/active read, failed ones
+        /// included: a status cached before it is stale at once.</summary>
+        internal static long ActiveSeriesReadGen { get; private set; }
         public static List<MyBetEntry> CachedMyBets { get; private set; } = new List<MyBetEntry>();
 
         public static void FetchActiveSeries()
@@ -3178,7 +3181,7 @@ namespace CompetitiveRounds
                 $"{baseUrl}/api/v1/series/active",
                 (ok, resp) =>
                 {
-                    if (!ok) { ActiveSeriesReadOk = false; return; }
+                    if (!ok) { ActiveSeriesReadOk = false; ActiveSeriesReadGen++; return; }
                     var list = new List<ActiveSeriesEntry>();
                     bool parsed = false;
                     try
@@ -3211,11 +3214,13 @@ namespace CompetitiveRounds
                             e.phase           = ExtractJsonString(chunk, "phase");
                             if (!string.IsNullOrEmpty(e.series_id)) list.Add(e);
                         }
-                        // the answer is {"series": [...]}: complete only with that key
-                        parsed = resp != null && resp.IndexOf("\"series\"", StringComparison.Ordinal) >= 0;
+                        // complete only when the body IS {"series": [objects]} (parsed
+                        // structurally) and every object in it gave one entry
+                        int shape = IdentityClockCore.SeriesBodyShape(resp);
+                        parsed = shape >= 0 && shape == list.Count;
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[BET] active-series parse: {ex.Message}"); }
-                    try { ActiveSeriesReadOk = parsed; ActiveSeriesReadAt = UnityEngine.Time.realtimeSinceStartup; } catch { }
+                    try { ActiveSeriesReadOk = parsed; ActiveSeriesReadAt = UnityEngine.Time.realtimeSinceStartup; ActiveSeriesReadGen++; } catch { }
                     CachedActiveSeries = list;
                     NativeUI.MarkDirty();
                 }

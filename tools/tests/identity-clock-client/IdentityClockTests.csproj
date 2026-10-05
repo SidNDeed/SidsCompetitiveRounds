@@ -22,8 +22,12 @@
     <CoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\IdentityClockCore.cs</CoreSource>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(SeatCoreSource)' == ''">
+    <SeatCoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs</SeatCoreSource>
+  </PropertyGroup>
+
   <ItemGroup>
-    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs" />
+    <Compile Include="$(SeatCoreSource)" />
     <Compile Include="$(CoreSource)" />
     <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
   </ItemGroup>

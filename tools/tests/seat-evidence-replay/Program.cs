@@ -976,6 +976,44 @@ namespace SeatEvidenceReplay
             Eq(1, Logged("oldest queued request(s) dropped for closing records"), "the eviction logged");
         }
 
+        /// <summary>Identity-clock fix pass 2: the quit flush is POSITIVE. A
+        /// game live in this frame reaches the quit handler; the identity
+        /// flush (IdentityClockCore.FlushCaptures, the loop FlushOnQuit runs,
+        /// handed the real SeatEvidence.SpoolClosing under route "i" exactly as
+        /// FlushOnQuit hands it) writes ONE capture to the closing file, never
+        /// the queue, and logs it kept plus one summary; the next launch's first
+        /// load promotes that file into the queue under route "i", bytes unchanged.</summary>
+        private static void IdentityClosingNextBoot()
+        {
+            const string ENV = "{\"contract\":2,\"record\":\"identity-quit\",\"sig\":\"00\"}";
+            GameManager.instance.battleOngoing = true;      // the quit hook while a battle is live
+            var caps = new List<string> { "game-at-quit" };
+            IdentityClockCore.EnvBuilder<string> build = (string c, out string text) => { text = "record-of-" + c; return ENV; };
+            int kept = IdentityClockCore.FlushCaptures(caps, 4, build, env => SeatEvidence.SpoolClosing("i", env),
+                (c, t) => t.Length + " bytes", s => Plugin.Log.LogInfo("[IDENTITY-CLOCK]" + s),
+                s => Plugin.Log.LogWarning("[IDENTITY-CLOCK]" + s), () => { });
+            GameManager.instance.battleOngoing = false;
+            Eq(1, kept, "one capture kept");
+            Eq(0, caps.Count, "the capture taken");
+            Eq(1, Logged("record kept for the next launch: " + "record-of-game-at-quit".Length + " bytes"), "the kept line");
+            Eq(1, Logged("quit flush ran: 1 capture(s), 1 kept for the next launch"), "the summary line");
+            Eq(0, ApiClient.Posts.Count, "nothing sent while closing");
+            Eq(false, (bool)Field("_loaded"), "no queue load on the quitting path");
+            Check(!File.Exists(QueueFile()) && !File.Exists(QueueFile() + ".tmp"), "no queue write on the quitting path");
+            var spool = SpoolFiles();
+            Eq(1, spool.Length, "the capture in its own closing file");
+            var sc = SeatEvidenceCore.ParseQueue(File.ReadAllText(spool[0]), false);
+            Check(sc.Whole && sc.Items.Count == 1, "the closing file is whole");
+            Eq("i", sc.Items[0].Route, "route i");
+            Eq(ENV, sc.Items[0].Body, "the envelope in the closing file");
+            NextLaunch();
+            ApiUp();
+            SeatEvidence.Tick();
+            Eq(0, SpoolFiles().Length, "the closing file removed once the queue holds it");
+            Eq(1, RouteCount("i"), "promoted into the queue under route i");
+            Eq(1, BodyCount(ENV), "its bytes unchanged");
+        }
+
         /// <summary>F8: a closing file whose exact requests are not all in the
         /// queue the write saved (65 in one file, one past the cap) is kept
         /// for the next launch, and this launch's later pass (17 files: two
@@ -1169,6 +1207,8 @@ namespace SeatEvidenceReplay
             { "opponent_sample_outside_combat", OpponentSampleOutsideCombat },
             // fix pass 4
             { "closing_no_trailer", ClosingNoTrailer }, { "closing_bad_trailer", ClosingBadTrailer },
+            // identity-clock fix pass 2
+            { "identity_closing_next_boot", IdentityClosingNextBoot },
         };
 
         private static int Main(string[] args)

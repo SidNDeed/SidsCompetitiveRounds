@@ -196,10 +196,15 @@ namespace CompetitiveRounds
         /// <summary>The process's own ledger: a random id per process, every
         /// boot occurrence (each execution of the initialisation gate is its own
         /// occurrence, with its ordinal and process time: a persistent-host
-        /// respawn runs it again in the same process), and run totals.</summary>
+        /// respawn runs it again in the same process), and run totals.
+        /// The first BOOT_KEEP occurrences are kept in full and never
+        /// replaced; a later one is not kept in detail, and the record states
+        /// how many: `boots` (proc entry) counts every execution, and the kept
+        /// ones carry ordinals 0..BOOT_KEEP-1, so boots minus the kept count
+        /// is the number of occurrences without detail.</summary>
         internal sealed class ProcLedger
         {
-            internal const int BOOT_KEEP = 4;
+            internal const int BOOT_KEEP = 8;
             internal readonly string ProcId;
             internal int Boots;
             internal long Runs, Findings, NotRun;
@@ -218,8 +223,7 @@ namespace CompetitiveRounds
                 var r = new Run { Moment = MOMENT_BOOT, Ordinal = Math.Min(Boots, ORDINAL_MAX - 1), TMs = tMs, Outcome = outcome };
                 Boots = Math.Min(Boots + 1, ORDINAL_MAX);
                 Count(r, plugins, priv);
-                BootRuns.Add(r);
-                if (BootRuns.Count > BOOT_KEEP) BootRuns.RemoveAt(0);
+                if (BootRuns.Count < BOOT_KEEP) BootRuns.Add(r);
                 return r;
             }
 
@@ -428,6 +432,84 @@ namespace CompetitiveRounds
             string AsmName(string path);
         }
 
+        /// <summary>List's result for a directory that is itself a reparse
+        /// point (junction or symbolic link): refused, never listed.</summary>
+        internal const int LIST_REFUSED_REPARSE = 3;
+
+        /// <summary>The production file adapter. Not-found (the path or its
+        /// folder does not exist) is told apart from every other failure
+        /// (access, sharing, I/O): only not-found reports no_file, everything
+        /// else read_failed. A directory that is itself a reparse point is
+        /// refused (the loader root included), a file that is one is not opened.</summary>
+        internal sealed class DiskFs : IFs
+        {
+            private static bool NotFound(Exception ex) { return ex is FileNotFoundException || ex is DirectoryNotFoundException; }
+
+            public int List(string dir, int max, List<FsEntry> into)
+            {
+                FileAttributes a;
+                try { a = File.GetAttributes(dir); }
+                catch (Exception ex) { return NotFound(ex) ? 1 : 2; }
+                if ((a & FileAttributes.Directory) == 0) return 2;
+                if ((a & FileAttributes.ReparsePoint) != 0) return LIST_REFUSED_REPARSE;
+                try
+                {
+                    foreach (var e in new DirectoryInfo(dir).EnumerateFileSystemInfos())
+                    {
+                        if (into.Count > max) break;
+                        var ea = e.Attributes;
+                        into.Add(new FsEntry { Path = e.FullName, IsDir = (ea & FileAttributes.Directory) != 0, IsReparse = (ea & FileAttributes.ReparsePoint) != 0 });
+                    }
+                    return 0;
+                }
+                catch (Exception ex) { return NotFound(ex) ? 1 : 2; }
+            }
+
+            public Stream Open(string path, out bool missing)
+            {
+                missing = false;
+                if (string.IsNullOrEmpty(path)) { missing = true; return null; }
+                try
+                {
+                    var a = File.GetAttributes(path);
+                    if ((a & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0) return null;
+                    return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 4096);
+                }
+                catch (Exception ex) { missing = NotFound(ex); return null; }
+            }
+
+            public string AsmName(string path)
+            {
+                try { return System.Reflection.AssemblyName.GetAssemblyName(path).Name; } catch { return null; }
+            }
+        }
+
+        /// <summary>The survey's disk witness: wraps the adapter and, before
+        /// every disk call, reads the frame's combat state ITSELF (the
+        /// three-state read, never a read that turns a failure into not
+        /// live): a call in a live frame counts InCombat, a call in an
+        /// unknown frame counts Unknown. Both must stay 0.</summary>
+        internal sealed class WitnessFs : IFs
+        {
+            private readonly IFs _inner;
+            private readonly Func<int> _state;
+            internal long InCombat, Unknown;
+
+            internal WitnessFs(IFs inner, Func<int> combatState) { _inner = inner; _state = combatState; }
+
+            private void W()
+            {
+                int s;
+                try { s = _state(); } catch { s = C.CombatRead.UNKNOWN; }
+                if (s == C.CombatRead.LIVE) InCombat++;
+                else if (s == C.CombatRead.UNKNOWN) Unknown++;
+            }
+
+            public int List(string dir, int max, List<FsEntry> into) { W(); return _inner.List(dir, max, into); }
+            public Stream Open(string path, out bool missing) { W(); return _inner.Open(path, out missing); }
+            public string AsmName(string path) { W(); return _inner.AsmName(path); }
+        }
+
         /// <summary>Public bounds of one survey job (each a work bound, not a
         /// judging value). A job over any of them stops and says so.</summary>
         internal const int CHUNK_BYTES = 65536;
@@ -471,7 +553,7 @@ namespace CompetitiveRounds
             private Job _job;
             private SurveyResult _result;
             internal long Wanted;
-            internal long StaleRefused, Abandoned, CombatSkips, StepsWorked, UnitsTotal;
+            internal long StaleRefused, Abandoned, CombatSkips, UnknownSkips, StepsWorked, UnitsTotal;
 
             internal Survey(IFs fs, IList<FileTarget> files, string pluginsDir, string patchersDir, string gameAsm)
             {
@@ -510,12 +592,15 @@ namespace CompetitiveRounds
                 return true;
             }
 
-            /// <summary>One step from the caller's tick. Combat live: nothing
-            /// at all is done. Otherwise at most STEP_UNITS_MAX units, stopping
-            /// early once `budgetUs` has elapsed on `clockUs`. Returns units done.</summary>
-            internal int Step(bool combatLive, long budgetUs, Func<long> clockUs)
+            /// <summary>One step from the caller's tick, given the frame's
+            /// combat state (C.CombatRead). Live or UNKNOWN: nothing at all is
+            /// done (each counted). Only a positively not-live frame runs at
+            /// most STEP_UNITS_MAX units, stopping early once `budgetUs` has
+            /// elapsed on `clockUs`. Returns units done.</summary>
+            internal int Step(int combatState, long budgetUs, Func<long> clockUs)
             {
-                if (combatLive) { CombatSkips++; return 0; }
+                if (combatState == C.CombatRead.UNKNOWN) UnknownSkips++;
+                if (C.CombatRead.Live(combatState)) { CombatSkips++; return 0; }
                 if (_job == null) return 0;
                 long t0 = clockUs();
                 int n = 0;
@@ -1431,6 +1516,184 @@ namespace CompetitiveRounds
             if (!fightersKnown || !cachePresent || !lastReadOk) return "unknown";
             if (ageS < 0 || ageS > freshS) return "unknown";
             return "none";
+        }
+
+        /// <summary>L13: the /series/active body parsed STRUCTURALLY by hand
+        /// (no JsonUtility: nested arrays): a JSON object whose top-level key
+        /// "series" holds an array of objects, nothing after the object.
+        /// Returns the number of objects in that array, or -1 for any other
+        /// shape (not JSON, no top-level "series", a non-array value, an
+        /// element that is not an object, unbalanced, trailing text).</summary>
+        internal static int SeriesBodyShape(string body)
+        {
+            if (body == null) return -1;
+            int i = 0, n = body.Length;
+            int found = -1;
+            SkipWs(body, ref i);
+            if (i >= n || body[i] != '{') return -1;
+            i++;
+            SkipWs(body, ref i);
+            if (i < n && body[i] == '}') return -1;            // {} has no "series"
+            while (true)
+            {
+                SkipWs(body, ref i);
+                string key = ReadStr(body, ref i);
+                if (key == null) return -1;
+                SkipWs(body, ref i);
+                if (i >= n || body[i] != ':') return -1;
+                i++;
+                SkipWs(body, ref i);
+                if (key == "series")
+                {
+                    if (found >= 0 || i >= n || body[i] != '[') return -1;
+                    i++;
+                    int count = 0;
+                    SkipWs(body, ref i);
+                    if (i < n && body[i] == ']') i++;
+                    else
+                        while (true)
+                        {
+                            SkipWs(body, ref i);
+                            if (i >= n || body[i] != '{') return -1;
+                            if (!SkipValue(body, ref i)) return -1;
+                            count++;
+                            SkipWs(body, ref i);
+                            if (i < n && body[i] == ',') { i++; continue; }
+                            if (i < n && body[i] == ']') { i++; break; }
+                            return -1;
+                        }
+                    found = count;
+                }
+                else if (!SkipValue(body, ref i)) return -1;
+                SkipWs(body, ref i);
+                if (i < n && body[i] == ',') { i++; continue; }
+                if (i < n && body[i] == '}') { i++; break; }
+                return -1;
+            }
+            return TrailOk(body, i) ? found : -1;
+        }
+
+        private static bool TrailOk(string s, int i) { SkipWs(s, ref i); return i == s.Length; }
+
+        private static void SkipWs(string s, ref int i)
+        {
+            while (i < s.Length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) i++;
+        }
+
+        /// <summary>A JSON string at i (escapes honoured), or null.</summary>
+        private static string ReadStr(string s, ref int i)
+        {
+            if (i >= s.Length || s[i] != '"') return null;
+            var sb = new StringBuilder();
+            i++;
+            while (i < s.Length)
+            {
+                char c = s[i++];
+                if (c == '"') return sb.ToString();
+                if (c == '\\')
+                {
+                    if (i >= s.Length) return null;
+                    char e = s[i++];
+                    if (e == 'u') { if (i + 4 > s.Length) return null; i += 4; sb.Append('?'); }
+                    else sb.Append(e);
+                }
+                else if (c < 0x20) return null;
+                else sb.Append(c);
+            }
+            return null;
+        }
+
+        /// <summary>Skips one JSON value of any kind at i; false when malformed.</summary>
+        private static bool SkipValue(string s, ref int i)
+        {
+            SkipWs(s, ref i);
+            if (i >= s.Length) return false;
+            char c = s[i];
+            if (c == '"') return ReadStr(s, ref i) != null;
+            if (c == '{' || c == '[')
+            {
+                char close = c == '{' ? '}' : ']';
+                i++;
+                SkipWs(s, ref i);
+                if (i < s.Length && s[i] == close) { i++; return true; }
+                while (true)
+                {
+                    if (c == '{')
+                    {
+                        SkipWs(s, ref i);
+                        if (ReadStr(s, ref i) == null) return false;
+                        SkipWs(s, ref i);
+                        if (i >= s.Length || s[i] != ':') return false;
+                        i++;
+                    }
+                    if (!SkipValue(s, ref i)) return false;
+                    SkipWs(s, ref i);
+                    if (i < s.Length && s[i] == ',') { i++; continue; }
+                    if (i < s.Length && s[i] == close) { i++; return true; }
+                    return false;
+                }
+            }
+            int st = i;
+            while (i < s.Length && "-+.eE0123456789truefalsn".IndexOf(s[i]) >= 0) i++;
+            if (i == st) return false;
+            string lit = s.Substring(st, i - st);
+            if (lit == "true" || lit == "false" || lit == "null") return true;
+            double d;
+            return double.TryParse(lit, NumberStyles.Float, CultureInfo.InvariantCulture, out d);
+        }
+
+        /// <summary>L13: a cached series status may be reused only while it
+        /// is younger than `maxS` AND no read has completed since it was
+        /// computed (`readGen` moves on every completed read, failed ones
+        /// included), so a failed read invalidates it at once.</summary>
+        internal static bool SeriesCacheFresh(double ageS, double maxS, long readGen, long genSeen)
+        {
+            return ageS >= 0 && ageS < maxS && readGen == genSeen;
+        }
+
+        /// <summary>The builder of one capture's envelope (null: outside the
+        /// contract); `recordText` is the record it signed.</summary>
+        internal delegate string EnvBuilder<T>(T capture, out string recordText);
+
+        /// <summary>The quit flush: every capture (at most `max`) is built
+        /// now and handed to `spool` (the closing file, never the queue);
+        /// one line per capture (kept, or why there is no record) and ONE
+        /// summary line after the loop, a quit with no capture included.
+        /// Returns the number kept.</summary>
+        internal static int FlushCaptures<T>(List<T> caps, int max, EnvBuilder<T> build, Func<string, bool> spool,
+                                              Func<T, string, string> describe, Action<string> info, Action<string> warn, Action fault)
+        {
+            int tried = 0, kept = 0;
+            try
+            {
+                while (caps.Count > 0 && tried < max)
+                {
+                    var c = caps[0];
+                    caps.RemoveAt(0);
+                    tried++;
+                    try
+                    {
+                        string text;
+                        string env = build(c, out text);
+                        if (env == null) { warn(" no record at quit: the game key, seat ids or envelope are outside the contract"); continue; }
+                        if (spool(env)) { kept++; info(" record kept for the next launch: " + describe(c, text)); }
+                        else warn(" no record at quit: the closing file was not written");
+                    }
+                    catch (Exception ex)
+                    {
+                        try { fault(); } catch { }
+                        try { warn(" no record at quit: " + ex.GetType().Name); } catch { }
+                    }
+                }
+            }
+            catch { }
+            try
+            {
+                info(" quit flush ran: " + tried.ToString(CultureInfo.InvariantCulture) + " capture(s), "
+                     + kept.ToString(CultureInfo.InvariantCulture) + " kept for the next launch");
+            }
+            catch { }
+            return kept;
         }
     }
 }
