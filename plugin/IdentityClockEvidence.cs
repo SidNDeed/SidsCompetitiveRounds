@@ -542,7 +542,7 @@ namespace CompetitiveRounds
                 var p = PhotonNetwork.CurrentRoom.GetPlayer(g.OppActor);
                 if (p == null || !p.CustomProperties.ContainsKey("cr_gstats")) return;
                 var parts = (p.CustomProperties["cr_gstats"] as string ?? "").Split('|');
-                int v;
+                int v = 0;
                 bool ok = parts.Length >= 11 && int.TryParse(parts[6], NumberStyles.Integer, CultureInfo.InvariantCulture, out v);
                 g.Book.LastPubFps = I.PubFps(true, ok ? v : 0);
             }
