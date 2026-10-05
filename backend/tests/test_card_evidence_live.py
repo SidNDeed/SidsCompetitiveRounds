@@ -60,8 +60,18 @@ def revs(tmp_path_factory):
     since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
     _s, armed = k.build_card_revision(tmp, k.card_doc(post=True, post_since=since), name="armed")
     _s, again = k.build_card_revision(tmp, name="again")
+    # fix pass 1: a flag rule on the conflict marker (M7) and on the report
+    # surplus (M8); the dup rule's synthetic value moved past any count, and
+    # the dup rule dropped (M5: their quiet cases fire nothing)
+    quiet = [k.card_case([("a", "b", k.fixture_record("full_game"))], [])]
+    _s, conflict = k.build_card_revision(tmp, k.card_doc(conflict=True), name="conflict")
+    _s, picks = k.build_card_revision(tmp, k.card_doc(picks=True), name="picks")
+    _s, moved = k.build_card_revision(tmp, k.card_doc(dup_at=7.37), cases=quiet, name="moved")
+    _s, dropped = k.build_card_revision(tmp, k.card_doc(drop=(k.ID_DUP,)), cases=quiet, name="dropped")
     return types.SimpleNamespace(shadow=k.load(store, shadow), armed=k.load(store, armed),
-                                 again=k.load(store, again))
+                                 again=k.load(store, again), conflict=k.load(store, conflict),
+                                 picks=k.load(store, picks), moved=k.load(store, moved),
+                                 dropped=k.load(store, dropped))
 
 
 @pytest.fixture
@@ -199,6 +209,11 @@ def test_migration_370_applies_twice_with_an_identical_result(live):
     assert all(first[t] == [] for t in cp.CARD_TABLES if t != "card_evidence_seeded_keys")
     names = {r[0] for r in first["constraints"]}
     assert {"card_evidence_one_per_seat", "card_contrib_pk", "card_player_daily_pk"} <= names
+    cols = {r[0]: r for r in first["findings_columns"]}
+    assert cols["domain"][2] == "'seat'::character varying" and cols["domain"][3] == "NO"
+    assert {"seat_evidence_findings_domain", "seat_evidence_findings_once"} <= {
+        r[0] for r in first["findings_constraints"]}
+    assert "ux_seat_evidence_findings_domain" in {r[0] for r in first["findings_indexes"]}
 
 
 # -- the route ------------------------------------------------------------------------
@@ -339,11 +354,11 @@ def test_m9_with_no_revision_the_pass_attaches_and_derives_nothing(live):
         await _store(sm, ids, a, b, key, k.dup_record())
         await _store(sm, ids, b, a, key, rb)
         mid = await _match(sm, ids, a, b, key + "_r5")
-        before = await _scalar(sm, "SELECT count(*) FROM seat_evidence_findings WHERE dedup_key LIKE 'card|%'")
+        before = await _scalar(sm, "SELECT count(*) FROM seat_evidence_findings WHERE domain = 'card'")
         s = await ce.games_pass(sm, None)
         g = await _rows(sm, GAME, k=key)
         d = await _derived(sm, key)
-        after = await _scalar(sm, "SELECT count(*) FROM seat_evidence_findings WHERE dedup_key LIKE 'card|%'")
+        after = await _scalar(sm, "SELECT count(*) FROM seat_evidence_findings WHERE domain = 'card'")
         return s, g, d, mid, before, after
     s, g, d, mid, before, after = live.run(go())
     assert not _errors(s) and s["evaluated"] == 0 and "fault" not in s
@@ -373,8 +388,8 @@ def test_a_revision_derives_rows_writes_shadow_findings_and_a_second_pass_change
                                   "WHERE stable_game_key = :k ORDER BY source, subject_player_id", k=key)
         daily1 = await _rows(sm, "SELECT * FROM card_player_daily WHERE subject_player_id IN (:a, :b) "
                                  "ORDER BY subject_player_id, source", a=ids[a], b=ids[b])
-        f1 = await _rows(sm, _findings("dedup_key LIKE :k OR dedup_key LIKE :w"),
-                         k="card|" + key + "|%", w="card|win|%s|%%" % ids[a])
+        f1 = await _rows(sm, _findings("domain = 'card' AND (dedup_key LIKE :k OR dedup_key LIKE :w)"),
+                         k=ce.game_key(key, "%", "%"), w=ce.window_key(ids[a], "%", "%", "%", "%"))
         s2 = await ce.games_pass(sm, revs.shadow)
         daily2 = await _rows(sm, "SELECT * FROM card_player_daily WHERE subject_player_id IN (:a, :b) "
                                  "ORDER BY subject_player_id, source", a=ids[a], b=ids[b])
@@ -417,17 +432,25 @@ def test_a_late_second_record_reclassifies_one_to_paired(live, revs):
         one = await _rows(sm, "SELECT DISTINCT coverage FROM card_contrib WHERE stable_game_key = :k", k=key)
         d_one = await _scalar(sm, "SELECT count(*) FROM card_player_daily WHERE subject_player_id = :a "
                                   "AND coverage = 'one'", a=ids[a])
+        win = _findings("domain = 'card' AND scope = 'sitting' AND dedup_key LIKE :w")
+        w_one = await _rows(sm, win, w=ce.window_key(ids[a], "%", "one", "%", "%"))
         await _store(sm, ids, b, a, key, rb)
         await ce.games_pass(sm, revs.shadow)
         two = await _rows(sm, "SELECT DISTINCT coverage FROM card_contrib WHERE stable_game_key = :k", k=key)
         d_after = await _scalar(sm, "SELECT count(*) FROM card_player_daily WHERE subject_player_id = :a "
                                     "AND coverage = 'one'", a=ids[a])
+        w_one_after = await _rows(sm, win, w=ce.window_key(ids[a], "%", "one", "%", "%"))
+        w_paired = await _rows(sm, win, w=ce.window_key(ids[a], "%", "paired", "%", "%"))
         g = await _rows(sm, GAME, k=key)
-        return one, d_one, two, d_after, g
-    one, d_one, two, d_after, g = live.run(go())
+        return one, d_one, two, d_after, g, w_one, w_one_after, w_paired
+    one, d_one, two, d_after, g, w_one, w_one_after, w_paired = live.run(go())
     assert [r["coverage"] for r in one] == ["one"] and d_one > 0
     assert [r["coverage"] for r in two] == ["paired"] and d_after == 0
     assert g[0]["finalized_at"] is not None
+    # M3: the retired one-sided window was evaluated again and its shadow
+    # finding removed; the paired window holds the finding now (control)
+    assert [f["rule_id"] for f in w_one] and {f["rule_id"] for f in w_one} == {k.ID_WIN}
+    assert w_one_after == [] and {f["rule_id"] for f in w_paired} == {k.ID_WIN}
 
 
 def test_an_unregistered_census_reads_not_run_until_it_is_registered(live, revs):
@@ -442,10 +465,10 @@ def test_an_unregistered_census_reads_not_run_until_it_is_registered(live, revs)
         await _store(sm, ids, b, a, key, k.mirror(rec))
         await _match(sm, ids, a, b, key + "_r5")
         await ce.games_pass(sm, revs.shadow)
-        f1 = await _rows(sm, _findings("dedup_key LIKE :k"), k="card|" + key + "|%")
+        f1 = await _rows(sm, _findings("domain = 'card' AND dedup_key LIKE :k"), k=ce.game_key(key, "%", "%"))
         await _register(sm, k.census_dump(c.cards))
         s = await ce.games_pass(sm, revs.shadow)
-        f2 = await _rows(sm, _findings("dedup_key LIKE :k"), k="card|" + key + "|%")
+        f2 = await _rows(sm, _findings("domain = 'card' AND dedup_key LIKE :k"), k=ce.game_key(key, "%", "%"))
         return f1, s, f2
     f1, s, f2 = live.run(go())
     assert k.ID_HELD not in [f["rule_id"] for f in f1]
@@ -543,4 +566,149 @@ def test_the_admin_read_shows_records_measures_rows_and_unregistered_days(live, 
     assert any(h["measures"].get("b4.hand.dup") == 1 for h in g["hand_rows"])
     assert any(f["rule_id"] == k.ID_DUP for f in g["findings"])
     assert v["unregistered_by_day"] and v["unregistered_by_day"][-1]["records"] >= 1
+    assert g["measures"]["not_run_because"] and all(x["not_whole"] == [] for x in g["measures"]["not_run_because"])
     json.dumps(v)                                                     # serialisable as the route answers it
+
+
+# == fix pass 1 ======================================================================
+
+async def _game_findings(sm, key):
+    return await _rows(sm, _findings("domain = 'card' AND scope = 'game' AND dedup_key LIKE :k"),
+                       k=ce.game_key(key, "%", "%"))
+
+
+def test_m5_a_finding_a_newer_revision_no_longer_produces_is_removed_whatever_stamped_it(live, revs):
+    async def go():
+        sm = live.sm
+        a, b = "1000000000000811", "1000000000000812"
+        ids = await _players(sm, a, b)
+        key = "ranked_cardf5_000001"
+        _ra, _rb, c = _pair()
+        dup = k.on_census(k.dup_record(), c)
+        await _register(sm, k.census_dump(c.cards))
+        await _store(sm, ids, a, b, key, dup)
+        await _store(sm, ids, b, a, key, k.mirror(dup))
+        await _match(sm, ids, a, b, key + "_r5", sc="off")
+        out = {}
+        for name in ("shadow", "moved", "shadow", "dropped"):
+            await ce.games_pass(sm, getattr(revs, name))
+            out.setdefault(name, []).append(
+                sorted((f["rule_id"], f["rules_rev"]) for f in await _game_findings(sm, key)))
+        return out
+    out = live.run(go())
+    shadow, moved, dropped = revs.shadow.ruleset.rev, revs.moved.ruleset.rev, revs.dropped.ruleset.rev
+    assert len({shadow, moved, dropped}) == 3
+    for seen in out["shadow"]:
+        assert (k.ID_DUP, shadow) in seen                                      # control: the rule fires
+    for name, rev in (("moved", moved), ("dropped", dropped)):
+        seen = out[name][0]
+        # its deciding value moved / the rule removed: the row the earlier
+        # revision stamped is gone, and nothing stamped by another revision stays
+        assert k.ID_DUP not in {r for r, _v in seen} and all(v == rev for _r, v in seen), (name, seen)
+
+
+def test_m6_card_cleanup_never_touches_a_seat_domain_row(live, revs):
+    async def go():
+        sm = live.sm
+        a, b = "1000000000000821", "1000000000000822"
+        ids = await _players(sm, a, b)
+        key = "ranked_cardf6_000001"
+        ra, rb, c = _pair()
+        await _register(sm, k.census_dump(c.cards))
+        await _store(sm, ids, a, b, key, ra)
+        await _store(sm, ids, b, a, key, rb)
+        await _match(sm, ids, a, b, key + "_r5", sc="off")
+        lo, hi = sorted([str(ids[a]), str(ids[b])])
+        seat_rows = [("game", "%s|%s|%s" % (key, lo, hi)),                 # the seat lane's key of this game
+                     ("game", "card|%s|%s|%s" % (key, lo, hi)),            # the old card form, as a seat key
+                     ("game", ce.game_key(key, lo, hi))]                   # the card key itself, seat domain
+        for scope, dk in seat_rows:
+            await _exec(sm, "INSERT INTO seat_evidence_findings (scope, dedup_key, rule_id, rules_rev) "
+                            "VALUES (:s, :k, 'r0000fff1', 'seat')", s=scope, k=dk)
+        await _exec(sm, "INSERT INTO seat_evidence_findings (domain, scope, dedup_key, rule_id, rules_rev) "
+                        "VALUES ('card', 'game', :k, 'r0000fff2', 'old')", k=ce.game_key(key, lo, hi))
+        await ce.games_pass(sm, revs.shadow)
+        left = await _rows(sm, "SELECT domain, dedup_key, rule_id FROM seat_evidence_findings "
+                               "WHERE rule_id IN ('r0000fff1', 'r0000fff2') AND dedup_key LIKE :p ORDER BY 2, 1",
+                           p="%" + key + "%")
+        return left, seat_rows
+    left, seat_rows = live.run(go())
+    assert sorted((r["domain"], r["dedup_key"]) for r in left) == sorted(("seat", dk) for _s, dk in seat_rows)
+    # control: the card row the evaluation did not produce was removed in the same pass
+
+
+def test_m7_a_conflict_first_recorded_after_the_game_was_final_wakes_it(live, revs):
+    async def go():
+        sm = live.sm
+        a, b = "1000000000000831", "1000000000000832"
+        ids = await _players(sm, a, b)
+        key = "ranked_cardf7_000001"
+        ra, rb, c = _pair()
+        await _register(sm, k.census_dump(c.cards))
+        await _store(sm, ids, a, b, key, ra)
+        await _store(sm, ids, b, a, key, rb)
+        await _match(sm, ids, a, b, key + "_r5", sc="off")
+        await ce.games_pass(sm, revs.conflict)
+        sel = "SELECT finalized_at, processed_at, signature FROM card_games WHERE stable_game_key = :k"
+        g1 = (await _rows(sm, sel, k=key))[0]
+        await ce.games_pass(sm, revs.conflict)                         # control: nothing new, not visited
+        g2 = (await _rows(sm, sel, k=key))[0]
+        f_before = await _game_findings(sm, key)
+        try:
+            await _store(sm, ids, a, b, key, k.on_census(k.dup_record(), c))
+            status = 200
+        except ce.EvidenceRefused as r:
+            status = r.status
+        await ce.games_pass(sm, revs.conflict)
+        g3 = (await _rows(sm, sel, k=key))[0]
+        f_after = await _game_findings(sm, key)
+        return g1, g2, g3, status, f_before, f_after
+    g1, g2, g3, status, f_before, f_after = live.run(go())
+    assert g1["finalized_at"] is not None and g2["processed_at"] == g1["processed_at"]
+    assert status == 409
+    assert g3["processed_at"] > g1["processed_at"] and g3["signature"] != g1["signature"]
+    assert k.ID_CONFLICT not in {f["rule_id"] for f in f_before}
+    assert k.ID_CONFLICT in {f["rule_id"] for f in f_after}
+
+
+async def _picks_rows(sm, mid, player, names):
+    for i, name in enumerate(names):
+        await _exec(sm, "INSERT INTO match_cards (id, match_id, player_id, card_name, pick_order, round_number) "
+                        "VALUES (gen_random_uuid(), :m, :p, :n, :o, :o)", m=mid, p=player, n=name, o=i + 1)
+
+
+def test_m8_the_report_projection_reads_match_cards_and_writes_no_match_data(live, revs):
+    rec = k.default_record()
+    names = {x[0]: x[1] for x in rec["cards"]}
+    mine = [names[e[6][e[9]]] for e in rec["hd"] if e[2] == 0 and e[9] >= 0]
+    theirs = [names[e[6][e[9]]] for e in rec["hd"] if e[2] == 1 and e[9] >= 0]
+
+    async def game(tag, a, b, report_a):
+        sm = live.sm
+        ids = await _players(sm, a, b)
+        key = "ranked_cardf8_%s" % tag
+        ra, rb, c = _pair()
+        await _register(sm, k.census_dump(c.cards))
+        await _store(sm, ids, a, b, key, ra)
+        await _store(sm, ids, b, a, key, rb)
+        mid = await _match(sm, ids, a, b, key + "_r5", sc="off")
+        await _picks_rows(sm, mid, ids[a], report_a)
+        await _picks_rows(sm, mid, ids[b], theirs)
+        snap = "SELECT player_id, card_name, pick_order, round_number FROM match_cards WHERE match_id = :m ORDER BY 1, 3"
+        before = await _rows(sm, snap, m=mid)
+        await ce.games_pass(sm, revs.picks)
+        after = await _rows(sm, snap, m=mid)
+        async with sm() as db:
+            v = await ce.admin_view(db, match_id=str(mid), rs=revs.picks.ruleset)
+        rows = {r["b4.rec.index"]: r for r in v["games"][0]["measures"]["records"]}
+        return [dict(x) for x in before], [dict(x) for x in after], await _game_findings(sm, key), rows
+
+    async def go():
+        return (await game("000001", "1000000000000841", "1000000000000842", mine + ["NotInTheRecord"]),
+                await game("000002", "1000000000000843", "1000000000000844", mine))
+    (b1, a1, f1, rows1), (b2, a2, f2, rows2) = live.run(go())
+    assert b1 == a1 and b2 == a2                                         # match data unchanged
+    assert k.ID_PICKS in {f["rule_id"] for f in f1}                      # the report lists a pick the record lacks
+    assert k.ID_PICKS not in {f["rule_id"] for f in f2}                  # control: the report agrees
+    assert all(rows2[i]["b4.report.picks.self.rep"] == 0 for i in rows2)
+    assert any(rows1[i]["b4.report.picks.self.rep"] == 1 for i in rows1)

@@ -37,8 +37,11 @@ ID_PAIR = "r0000c004"
 ID_WIN = "r0000c005"
 ID_NOTE = "r0000c006"
 ID_SC = "r0000c007"
+ID_CONFLICT = "r0000c008"
+ID_PICKS = "r0000c009"
 WEIGHTS = {"common": 13, "uncommon": 5, "rare": 2}
 WINDOW = {"window_days": 9}
+DUP_AT = 0.37
 
 
 def cases():
@@ -203,11 +206,30 @@ def mirror(rec):
     return r
 
 
-def view(records, registry=None, sc=None, weights=None):
-    """card_view over [(seat, other, rec), ...] with a registry of censuses."""
+def family(weights, *recs) -> dict:
+    """A weights family naming each record's own deal profile."""
+    return {cm.deal_profile(r): dict(weights) for r in recs}
+
+
+def view(records, registry=None, sc=None, weights=None, report=None):
+    """card_view over [(seat, other, rec), ...] with a registry of censuses.
+    `weights` is a family (deal profile -> weight set), or one weight set,
+    which this helper gives to every record's own profile (the tests that
+    are about profiles pass a family)."""
     reg = {c.digest: c for c in (registry or [])}
     rows = [{"seat": s, "other": o, "rec": r, "conflict": False} for s, o, r in records]
-    return cm.card_view(rows, reg, sc, weights)
+    if weights is not None and set(weights) == set(cm.RARITIES):
+        weights = family(weights, *[r for _s, _o, r in records])
+    return cm.card_view(rows, reg, sc, weights, report)
+
+
+def default_record():
+    """The full game on its own census: the record the live cases store."""
+    return on_census(fixture_record("full_game"), fixture_census("full_game"))
+
+
+def default_profiles():
+    return [cm.deal_profile(default_record())]
 
 
 def hand(v, phase, recorder=None):
@@ -229,21 +251,35 @@ def cmp(a, rel, b):
     return {"op": "op.cmp", "args": {"a": a, "rel": rel, "b": b}}
 
 
-def card_doc(post=False, post_since=None, weights=True, window=True):
-    """A card-only draft with synthetic values."""
+def card_doc(post=False, post_since=None, weights=True, window=True, dup_at=DUP_AT, drop=(),
+             conflict=False, picks=False):
+    """A card-only draft with synthetic values. `weights`: True gives the
+    synthetic weight set to the default profiles; a dict is the family as
+    given. `dup_at` moves the dup rule's synthetic value, `drop` leaves rule
+    ids out, `conflict` and `picks` add a flag rule on the record's conflict
+    marker and on the report surplus."""
     params = {}
-    if weights:
-        params[cm.WEIGHTS] = dict(WEIGHTS)
+    if weights is True:
+        params[cm.WEIGHTS] = {p: dict(WEIGHTS) for p in default_profiles()}
+    elif weights:
+        params[cm.WEIGHTS] = weights
     if window:
         params[cm.WINDOW] = dict(WINDOW)
 
     def rule(rid, subject, when, show, line, effect="flag"):
         return {"id": rid, "scope": "card", "subject": subject, "effect": effect, "post": post,
                 "post_since": post_since, "when": when, "show": show, "line": line}
-    return {
+    extra = []
+    if conflict:
+        extra.append(rule(ID_CONFLICT, "card.record", cmp(M("b4.rec.conflict"), "gt", V(0.37)),
+                          [["rec", "b4.rec.index"]], "synthetic conflict {rec}"))
+    if picks:
+        extra.append(rule(ID_PICKS, "card.record", cmp(M("b4.report.picks.self.rep"), "gt", V(0.37)),
+                          [["rep", "b4.report.picks.self.rep"]], "synthetic picks {rep}"))
+    doc = {
         "format": 1, "nonce": "", "vocabulary": [], "closure": {}, "measure_params": params,
         "rules": [
-            rule(ID_DUP, "card.hand", cmp(M("b4.hand.dup"), "gt", V(0.37)),
+            rule(ID_DUP, "card.hand", cmp(M("b4.hand.dup"), "gt", V(dup_at)),
                  [["dup", "b4.hand.dup"], ["phase", "b4.hand.phase"]], "synthetic dup {dup} at {phase}"),
             rule(ID_HELD, "card.hand", cmp(M("b4.hand.heldrej"), "gt", V(0.37)),
                  [["held", "b4.hand.heldrej"]], "synthetic held {held}"),
@@ -258,8 +294,10 @@ def card_doc(post=False, post_since=None, weights=True, window=True):
                  [["n", "b4.sc.norule"]], "synthetic sc {n}"),
             rule(ID_NOTE, "card.record", cmp(M("b4.rec.conflict"), "gt", V(0.37)),
                  [["rec", "b4.rec.index"]], "synthetic note {rec}", effect="note"),
-        ],
+        ] + extra,
     }
+    doc["rules"] = [r for r in doc["rules"] if r["id"] not in drop]
+    return doc
 
 
 def card_case(records, fire, census_dumps=(), sc=None, windows=()):

@@ -70,6 +70,16 @@ async def snapshot(conn):
     out["indexes"] = await conn.fetch(
         "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() "
         "AND tablename LIKE 'card%' ORDER BY indexname")
+    # the one existing table 370 changes: the shared findings table's domain
+    out["findings_columns"] = await conn.fetch(
+        "SELECT column_name, data_type, column_default, is_nullable FROM information_schema.columns "
+        "WHERE table_schema = current_schema() AND table_name = 'seat_evidence_findings' ORDER BY 1")
+    out["findings_constraints"] = await conn.fetch(
+        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conrelid = 'seat_evidence_findings'::regclass ORDER BY conname")
+    out["findings_indexes"] = await conn.fetch(
+        "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = current_schema() "
+        "AND tablename = 'seat_evidence_findings' ORDER BY indexname")
     return {k: [tuple(r) for r in v] for k, v in out.items()}
 
 

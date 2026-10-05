@@ -528,7 +528,7 @@ def test_a_pool_with_an_unsupported_rarity_reads_not_run():
     h = k.hand(k.view([("a", "b", rec)], [c], None, k.WEIGHTS), 0)
     assert h["b4.hand.w0"] is None and h["b4.hand.eligible"] == 0
     assert cm.expectation(c, [0, 1], [], 0, k.WEIGHTS) is None   # the measure's own guard, not only the view's
-    assert cm.contributions(k.view([("a", "b", rec)], [c], None, k.WEIGHTS), k.WEIGHTS)[0]["hands"] == 0
+    assert cm.contributions(k.view([("a", "b", rec)], [c], None, k.WEIGHTS))[0]["hands"] == 0
     c = k.fixture_census("full_game")
     rec = k.on_census(k.fixture_record("full_game"), c)
     assert k.hand(k.view([("a", "b", rec)], [c], None, k.WEIGHTS), 0)["b4.hand.eligible"] == 1
@@ -538,7 +538,7 @@ def test_no_weights_means_no_expectation_and_no_contribution():
     rec, c = _full_on()
     v = k.view([("a", "b", rec)], [c], None, None)
     assert all(r["b4.hand.eligible"] == 0 for r, _m in v["hands"])
-    assert cm.contributions(v, None) == []
+    assert cm.contributions(v) == []
 
 
 def test_window_rows_are_counts_and_their_deviation():
@@ -586,9 +586,8 @@ def test_coverage_is_paired_only_when_both_records_name_each_other():
     full = k.fixture_record("full_game")
     c = k.fixture_census("full_game")
     rec = k.on_census(full, c)
-    one = cm.contributions(k.view([("a", "b", rec)], [c], "off", k.WEIGHTS), k.WEIGHTS)
-    two = cm.contributions(k.view([("a", "b", rec), ("b", "a", k.mirror(rec))], [c], "off", k.WEIGHTS),
-                           k.WEIGHTS)
+    one = cm.contributions(k.view([("a", "b", rec)], [c], "off", k.WEIGHTS))
+    two = cm.contributions(k.view([("a", "b", rec), ("b", "a", k.mirror(rec))], [c], "off", k.WEIGHTS))
     assert {x["coverage"] for x in one} == {"one"} and {x["coverage"] for x in two} == {"paired"}
 
 
@@ -641,7 +640,8 @@ def test_the_vocabulary_has_every_measure_and_the_two_families():
         for n in names:
             assert rm.REGISTRY[n].subject == subject and rm.REGISTRY[n].kind == "measure", n
     assert rm.REGISTRY[cm.WEIGHTS].data == list(cm.RARITIES)
-    assert rm.REGISTRY[cm.WINDOW].data == [cm.WINDOW_KEY]
+    assert rm.REGISTRY[cm.WEIGHTS].args == cm.PROFILE_KEYED              # keyed by deal profile
+    assert rm.REGISTRY[cm.WINDOW].data == [cm.WINDOW_KEY] and not rm.REGISTRY[cm.WINDOW].args
     v = k.view([("a", "b", k.fixture_record("full_game"))])
     for subject, rows in (("card.hand", v["hands"]), ("card.phase", v["phases"]),
                           ("card.record", v["records"]), ("card.game", [(v["game"], None)])):
@@ -727,3 +727,321 @@ def test_the_worker_pass_runs_the_card_pass_on_the_published_state():
     src = inspect.getsource(_main().review_worker_pass)
     assert "_cev.games_pass(session_factory, state)" in src
     assert "_cev.purge_pass(session_factory) if purge" in src
+
+
+# == fix pass 1 =========================================================================
+
+# -- M1: the coverage catalog; an omitted or capped dependency fails closed -----------
+
+def _omit(rec, fact):
+    """The record stating `fact` not whole: the flag alone, every list kept,
+    so only the stated coverage differs from the base game."""
+    r = copy.deepcopy(rec)
+    if fact == "whole":
+        r["inc"] |= cm.INC["lost"]
+    elif fact == "first":
+        r["inc"] |= cm.INC["first"]
+    elif fact == cm.W["omit_pair"]:
+        r["omit"][fact] = [1, 0]
+    else:
+        r["omit"][fact] = 1
+    return r
+
+
+def _picked(rec, role):
+    """The record's picked card names of the player in `role`."""
+    names = {c[0]: c[1] for c in rec["cards"]}
+    return [names[e[6][e[9]]] for e in rec["hd"] if e[2] == role and e[9] >= 0]
+
+
+def _scenario_full():
+    """The full game paired with its mirror, Same Cards off, a report read."""
+    rec = k.default_record()
+    other = k.mirror(rec)
+    return ([("a", "b", rec), ("b", "a", other)], [k.fixture_census("full_game")], "off",
+            {"a": _picked(rec, 0), "b": _picked(rec, 1)})
+
+
+def _scenario_shared():
+    """Game 2 under Same Cards on, both seats holding the same own deals: the
+    shared-deal measures run."""
+    c = k.fixture_census("game2_held_samecards")
+    g2 = k.on_census(k.fixture_record("game2_held_samecards"), c)
+    return [("a", "b", g2), ("b", "a", copy.deepcopy(g2))], [c], "on", None
+
+
+SCENARIOS = (_scenario_full, _scenario_shared)
+
+
+def _scn_view(scn, edit_first=None):
+    recs, reg, sc, report = scn()
+    if edit_first is not None:
+        s, o, r = recs[0]
+        recs[0] = (s, o, edit_first(r))
+    return k.view(recs, reg, sc, k.WEIGHTS, report)
+
+
+def _rows_of_first(v, subject):
+    """The rows of `subject` the first record's coverage governs: its own hand,
+    phase and record rows; every pair and game row (they need the fact on
+    every record of the game)."""
+    if subject == "card.hand":
+        return [r for r, m in v["hands"] if m["recorder"] == "a"]
+    if subject == "card.phase":
+        return [r for r, m in v["phases"] if m["recorder"] == "a"]
+    if subject == "card.record":
+        return [r for r, m in v["records"] if m["recorder"] == "a"]
+    if subject == "card.pair":
+        return [r for r, _m in v["pairs"]]
+    return [v["game"]]
+
+
+def _first_contribs(v):
+    return [c for c in cm.contributions(v) if c["recorder"] == "a"]
+
+
+def test_the_coverage_catalog_names_every_measure_once_with_known_facts():
+    table = cm.coverage_table()
+    names = [n for _s, n, _d in table]
+    assert len(names) == len(set(names)) == sum(len(v) for v in cm.MEASURES.values())
+    assert set(names) == set(cm.NEEDS)
+    assert all(set(d) <= set(cm.COVER) for _s, _n, d in table)
+    assert all(d == cm.CONTRIB_NEEDS for s, _n, d in table if s == cm.WINDOW_SUBJECT)
+    assert set(cm.CONTRIB_NEEDS) == set(cm.COVER)
+    assert cm.NEEDS["b4.hand.dup"] and not cm.NEEDS["b4.hand.n"]          # control: identifiers need none
+
+
+DEPENDENT = [(s, n, d) for s, n, needs in cm.coverage_table() for d in needs]
+
+
+@pytest.mark.parametrize("subject,name,fact", DEPENDENT, ids=["%s-%s" % (n, d) for _s, n, d in DEPENDENT])
+def test_every_measure_reads_not_run_and_no_contribution_when_a_fact_it_needs_is_omitted(subject, name, fact):
+    if subject == cm.WINDOW_SUBJECT:
+        # a window measure is a sum of contributions: the first record adds none
+        for scn in SCENARIOS:
+            assert _first_contribs(_scn_view(scn)), scn.__name__                 # control
+            v = _scn_view(scn, lambda rec: _omit(rec, fact))
+            assert _first_contribs(v) == [], (name, fact)
+        return
+    runs = [scn for scn in SCENARIOS
+            if any(r[name] is not None for r in _rows_of_first(_scn_view(scn), subject))]
+    assert runs, "no base game runs %s: its omission would prove nothing" % name   # control
+    for scn in runs:
+        v = _scn_view(scn, lambda rec: _omit(rec, fact))
+        rows = _rows_of_first(v, subject)
+        assert rows and all(r[name] is None for r in rows), (name, fact, scn.__name__)
+        assert _first_contribs(v) == [], (name, fact)
+        assert fact in v["uncovered"][0]["not_whole"]                           # the named reason
+        assert _first_contribs(_scn_view(scn)), scn.__name__                     # control
+
+
+def test_the_over_cap_fixture_reads_every_dependent_measure_not_run_and_contributes_nothing():
+    c = k.fixture_census("over_cap")
+    rec = k.on_census(k.fixture_record("over_cap"), c)
+    omitted = {kk for kk, v in rec["omit"].items() if (any(v) if isinstance(v, list) else v)}
+    assert omitted == {"cards", "held0", "ph", "hd", "ap", "sl", "sp"}
+    v = k.view([("a", "b", rec)], [c], "off", k.WEIGHTS, {"a": [], "b": []})
+    assert set(v["uncovered"][0]["not_whole"]) == omitted
+    assert v["records"][0][0]["b4.rec.uncovered"] == len(omitted)
+    rows = {"card.hand": [r for r, _m in v["hands"]], "card.phase": [r for r, _m in v["phases"]],
+            "card.record": [r for r, _m in v["records"]], "card.game": [v["game"]]}
+    checked = 0
+    for subject, name, needs in cm.coverage_table():
+        if subject in rows and set(needs) & omitted:
+            assert all(r[name] is None for r in rows[subject]), name
+            checked += 1
+    assert checked > len(cm.HAND_RULES) and cm.contributions(v) == []
+    whole = copy.deepcopy(rec)                                       # control: the same lists stated whole
+    whole["omit"] = {kk: ([0, 0] if isinstance(x, list) else 0) for kk, x in rec["omit"].items()}
+    vw = k.view([("a", "b", whole)], [c], "off", k.WEIGHTS, {"a": [], "b": []})
+    assert vw["hands"][0][0]["b4.hand.size"] is not None and cm.contributions(vw)
+
+
+# -- M2: weights by the exact deal profile ---------------------------------------------
+
+W_OLD = {"common": 13, "uncommon": 5, "rare": 2}                    # synthetic
+W_NEW = {"common": 3, "uncommon": 7, "rare": 11}                    # synthetic
+W_NEWER = {"common": 4, "uncommon": 4, "rare": 9}                   # synthetic
+
+
+def _other_build(rec):
+    r = copy.deepcopy(rec)
+    r["prof"][6] = "abcdef12"                                       # another mod commit: another profile
+    return r
+
+
+def _contrib(rec, fam):
+    return cm.contributions(k.view([("a", "b", rec)], [k.fixture_census("full_game")], None, fam))
+
+
+def test_a_game_is_weighed_only_with_its_own_profiles_weights_across_revisions(tmp_path):
+    old, new = k.default_record(), _other_build(k.default_record())
+    p_old, p_new = cm.deal_profile(old), cm.deal_profile(new)
+    assert p_old != p_new
+    store, r1 = k.build_card_revision(tmp_path, doc=k.card_doc(weights={p_old: W_OLD, p_new: W_NEW}), name="r1")
+    fam1 = k.load(store, r1).ruleset.params[cm.WEIGHTS]
+    assert fam1 == {p_old: W_OLD, p_new: W_NEW}
+    assert _contrib(old, fam1) == _contrib(old, {p_old: W_OLD}) != _contrib(old, {p_old: W_NEW})
+    assert _contrib(new, fam1) == _contrib(new, {p_new: W_NEW}) != _contrib(new, {p_new: W_OLD})
+    assert _contrib(old, fam1) and _contrib(new, fam1)
+    # a revision change that weighs only the newer build: the older games are
+    # not re-evaluated with it, they read NOT-RUN and contribute nothing
+    _s, r2 = k.build_card_revision(tmp_path, doc=k.card_doc(weights={p_new: W_NEWER}), name="r2")
+    fam2 = k.load(store, r2).ruleset.params[cm.WEIGHTS]
+    assert _contrib(old, fam2) == []
+    v = k.view([("a", "b", old)], [k.fixture_census("full_game")], None, fam2)
+    assert all(r["b4.hand.w0"] is None and r["b4.hand.eligible"] == 0 for r, _m in v["hands"])
+    assert _contrib(new, fam2) == _contrib(new, {p_new: W_NEWER}) != _contrib(new, fam1)
+
+
+def test_an_incomplete_or_not_ok_profile_identity_refuses_the_weights():
+    base = k.default_record()
+    assert _contrib(base, k.family(W_OLD, base))                                 # control
+    for label, edit in (("mod hash unread", lambda r: r["prof"].__setitem__(slice(2, 4), ["", "read_failed"])),
+                        ("game hash unread", lambda r: r["prof"].__setitem__(slice(0, 2), ["", "no_location"])),
+                        ("pool changed", lambda r: r["pool"].__setitem__(2, "changed")),
+                        ("unknown semantics", lambda r: r["prof"].__setitem__(7, "cd-sem:9"))):
+        r = copy.deepcopy(base)
+        edit(r)
+        assert not cm.profile_complete(r), label
+        fam = k.family(W_OLD, r)                                                 # the family names it exactly
+        assert cm.profile_weights(r, fam) is None and _contrib(r, fam) == [], label
+    assert cm.profile_weights(base, {}) is None and cm.profile_weights(base, None) is None
+    assert cm.profile_weights(base, k.family(W_OLD, _other_build(base))) is None   # another profile's set
+
+
+def test_the_weights_family_must_be_keyed_by_full_profile_ids(tmp_path):
+    with pytest.raises(rr.Refused):
+        k.build_card_revision(tmp_path, doc=k.card_doc(weights=dict(W_OLD)), name="flat")
+    with pytest.raises(rr.Refused):
+        k.build_card_revision(tmp_path, doc=k.card_doc(weights={"ab" * 8: W_OLD}), name="short")
+    with pytest.raises(rr.Refused):
+        k.build_card_revision(tmp_path, doc=k.card_doc(weights={cm.deal_profile(k.default_record()): {"common": 1}}),
+                              name="partial")
+    k.build_card_revision(tmp_path, doc=k.card_doc(), name="keyed")                    # control
+
+
+# -- M4: the final phase -----------------------------------------------------------
+
+def _with_end(rec, kind):
+    out = {}
+    for key in cm.W["keys"]:
+        if key in cm.W["optional"]:
+            out[key] = kind
+        elif key in rec:
+            out[key] = rec[key]
+    return out
+
+
+def _last_phase(rec):
+    return k.view([("a", "b", rec)])["phases"][-1][0]
+
+
+def test_an_ordinary_games_final_phase_not_done_counts_and_only_a_cut_game_exempts_it():
+    rec = k.fixture_record("full_game")
+    assert "end" not in rec and _last_phase(rec)["b4.ph.notdone"] == 0                     # control
+    open_ = copy.deepcopy(rec)
+    open_["ph"][-1][6] = 0
+    row = _last_phase(open_)
+    assert row["b4.ph.notdone"] == 1 and ce._nonzero(row, ce._PHASE_KEYS)
+    cut = _with_end(open_, "left")
+    cm.check_record(cut)
+    row = _last_phase(cut)
+    assert row["b4.ph.notdone"] == 0 and not ce._nonzero(row, ce._PHASE_KEYS)
+    cut["ph"][0][6] = 0                                                  # a cut game's earlier phase still counts
+    assert k.view([("a", "b", cut)])["phases"][0][0]["b4.ph.notdone"] == 1
+
+
+# -- M6: the evidence domain ----------------------------------------------------------
+
+def test_a_card_finding_key_can_never_equal_a_seat_finding_key():
+    lo, hi = "1d6f0000-0000-4000-8000-000000000001", "1d6f0000-0000-4000-8000-000000000002"
+    gk = ce.game_key("ranked_x|y", lo, hi)
+    wk = ce.window_key(lo, "self", "one", "f" * 64, "2026-10-05")
+    assert gk.startswith("card ") and gk.count(" ") == 1 and wk.startswith("card win ") and wk.count(" ") == 2
+    admitted = [chr(i) for i in range(32, 127) if se._KEY_CHARS.fullmatch("k" + chr(i))]
+    assert "|" in admitted and " " not in admitted                       # the separator is admitted, the space never
+    for stable in ("card", "card|ranked_x|y", "card win", "ranked_x"):
+        seat = "%s|%s|%s" % (stable, lo, hi)
+        if se._KEY_CHARS.fullmatch(stable):
+            assert " " not in seat and seat not in (gk, wk)
+    assert "%s|%s|%s" % (lo, hi, "2026-10-05") != wk                      # a seat sitting key
+    # control: the old encoding aliased a seat key built from the stable key "card|ranked_x|y"
+    assert "card|%s|%s|%s" % ("ranked_x|y", lo, hi) == "%s|%s|%s" % ("card|ranked_x|y", lo, hi)
+
+
+_FINDING_WRITE = re.compile(r"\b(?:DELETE\s+FROM|UPDATE|INSERT\s+INTO)\s+seat_evidence_findings\b", re.I)
+
+
+def _unscoped(statements):
+    """The statements writing the shared findings table that do not name the
+    card domain (an INSERT must write it, a DELETE or UPDATE must filter on it)."""
+    out = []
+    for s in statements:
+        if not _FINDING_WRITE.search(s):
+            continue
+        if re.search(r"INSERT\s+INTO", s, re.I):
+            if not re.search(r"\(domain,", s) or "'card'" not in s:
+                out.append(s)
+        elif "domain = 'card'" not in s:
+            out.append(s)
+    return out
+
+
+def _sql_statements(name):
+    body = "\n".join(ln.split("--")[0] for ln in _read(BACKEND, "sql", name).splitlines())
+    return [s for s in body.split(";") if s.strip()]
+
+
+def test_every_card_statement_on_the_shared_findings_table_names_the_card_domain():
+    import ast
+    consts = [n.value for n in ast.walk(ast.parse(_read(API, "card_evidence.py")))
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    written = [s for s in consts if _FINDING_WRITE.search(s)]
+    assert len(written) == 2 and _unscoped(consts) == []                  # the upsert and the retirement
+    rb = _sql_statements("rollback_370_card_evidence.sql")
+    assert [s for s in rb if _FINDING_WRITE.search(s)] and _unscoped(rb) == []
+    m370 = [s for s in _sql_statements("370_card_evidence.sql") if _FINDING_WRITE.search(s)]
+    assert len(m370) == 1 and "dedup_key LIKE 'card %'" in m370[0] and "domain = 'seat'" in m370[0]
+    assert _unscoped(["DELETE FROM seat_evidence_findings WHERE dedup_key = :k"])          # control
+    assert _unscoped(["INSERT INTO seat_evidence_findings (scope, dedup_key) VALUES (:s, :k)"])
+
+
+def test_the_migration_adds_the_domain_and_the_rollback_removes_it():
+    sql = _read(BACKEND, "sql", "370_card_evidence.sql")
+    assert "ADD COLUMN IF NOT EXISTS domain VARCHAR(8) NOT NULL DEFAULT 'seat'" in sql
+    assert "CHECK (domain IN ('seat', 'card'))" in sql
+    assert "ON seat_evidence_findings (domain, scope, dedup_key, rule_id)" in sql
+    rb = _read(BACKEND, "sql", "rollback_370_card_evidence.sql")
+    assert "DROP COLUMN IF EXISTS domain" in rb and "DROP INDEX IF EXISTS ux_seat_evidence_findings_domain" in rb
+    assert "LIKE 'card|%'" not in rb
+
+
+# -- M8: the report projection ----------------------------------------------------------
+
+def _report_row(rec, report):
+    return k.view([("a", "b", rec)], [k.fixture_census("full_game")], None, None, report)["records"][0][0]
+
+
+def test_the_report_picks_measure_counts_each_sides_surplus():
+    rec = k.default_record()
+    mine, theirs = _picked(rec, 0), _picked(rec, 1)
+    assert mine and theirs
+    keys = cm.REPORT_PICKS
+    assert [_report_row(rec, {"a": mine, "b": theirs})[x] for x in keys] == [0, 0, 0, 0]       # control
+    row = _report_row(rec, {"a": mine[1:], "b": theirs + ["NotInTheRecord"]})
+    assert [row[x] for x in keys] == [1, 0, 0, 1]
+    row = _report_row(rec, {"b": theirs})                                    # no rows for one player
+    assert [row[x] for x in keys] == [len(mine), 0, 0, 0]
+    assert all(_report_row(rec, None)[x] is None for x in keys)              # no report read: not run
+    unknown = copy.deepcopy(rec)
+    e = next(e for e in unknown["hd"] if e[2] == 0 and e[9] >= 0)
+    e[9] = -1                                                                # picked, the slot unknown
+    row = _report_row(unknown, {"a": mine, "b": theirs})
+    assert row[keys[0]] is None and row[keys[1]] is None and row[keys[2]] == 0
+
+
+def test_the_report_is_read_only():
+    src = inspect.getsource(ce._report)
+    assert "SELECT player_id, card_name FROM match_cards" in src and _written(src) == set()
+    assert _written(_read(API, "card_evidence.py")) & {"match_cards", "matches"} == set()
