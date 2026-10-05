@@ -433,6 +433,17 @@ namespace CompetitiveRounds
                     { "cr_nametag_glow", null },
                     { "cr_nametag_typeface", null },
                 };
+                // Fighter CAPABILITY keys go the same way, for the same
+                // reason one step further on. A capability key is a promise
+                // about what this seat's build does with a FIGHTER's effects.
+                // A spectator simulates none of them and is excluded from the
+                // census that reads them, so a key still set from a match this
+                // seat played describes a role it is not filling — and it is
+                // read by peers, not by us. The list lives beside the census
+                // that consumes it (ProximityVictim.FighterCapabilityKeys), so
+                // a key added there cannot be forgotten here.
+                foreach (var capabilityKey in ProximityVictim.FighterCapabilityKeys)
+                    props[capabilityKey] = null;
                 if (!string.IsNullOrEmpty(localSteamId)) props["u_id"] = localSteamId;
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
                 Plugin.Log?.LogInfo($"[SPECTATE] staged role pre-join (protocol {PROTOCOL}, capability {CAPABILITY}, state {state})");

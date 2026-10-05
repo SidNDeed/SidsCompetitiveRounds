@@ -1,0 +1,170 @@
+Both full suites, run SEQUENTIALLY on this seat, 2026-09-23 (round 18)
+======================================================================
+
+stdout: r18-suite-run.log
+
+Never concurrently: the two halves share this landing's local PostgreSQL
+databases, and a concurrent pair would have them fighting over the same
+scratch databases and reporting each other's failures.
+
+  opt-out  FFA_TEST_PG_OPTOUT=1, and the DSN REMOVED from the environment.
+           The live checks become skips, and the guard tests prove that only
+           an AFFIRMATIVE opt-out can do it -- a missing DSN alone cannot,
+           which is what stops the PostgreSQL half vanishing from a green run.
+  live DSN FFA_TEST_PG_DSN=...  the same suite with the live checks RUN.
+
+Instrument: backend/tests/evidence/run-both-suites.sh, committed beside this
+report and taking its DSN, its output directory and its round tag from the
+environment. This round does not change it. The per-half pytest logs are
+written OUTSIDE the repository, and so was this capture until the pair had
+finished: a capture sitting in this directory is untracked-and-not-ignored,
+which is exactly the set the fence walks, so a run redirected straight into it
+would fingerprint its own growing log and report MOVED.
+
+== WHAT THIS ROUND CHANGED ==
+Round 17 added the health marker; nothing is merged. This round changes no
+file the api imports. It carries the integrator's two decisions on round 17's
+open findings, and nothing else:
+
+  - The mutation runner's new-controls control now takes its swap from the
+    newest mutation-controls report that LISTS a new control; a report that
+    lists none does not move it. The rule is stated in the runner where its
+    gate lives, the control inventory's entry for that control says the same,
+    and a new test module, test_mutation_runner_swap_rule.py, holds the rule's
+    tests and a control on them.
+  - A .gitattributes at the repository root marks this directory -text, so
+    git converts no line endings in the evidence, in either direction.
+
+So the tree under test is round 17's, plus the runner's derivation, that one
+inventory entry, that one test module and that one attributes file.
+
+== THE ENVIRONMENT IS ROUND 16'S ==
+Main's four other database-gated families were set for BOTH halves, each on a
+database of this landing's own, and their opt-out variables were removed:
+
+  LADDER_TEST_PG_DSN         the title ladders          database rjland_ladder
+  SCR_MIGRATION_TEST_PG_DSN  migration headers, re-runs database rjland_migr
+  PC_EDITION_TEST_PG_DSN     the card edition rollover  database rjland_pced
+  BUG392_TEST_PG_DSN         the departure-cause walks  database scr_bug392
+    with BUG392_TESTS_REQUIRED set, so that family fails rather than skips
+    when its database is missing
+
+The question the two halves answer is still the lane's -- what the FFA checks
+do with and without their database -- so the difference between the halves is
+still the FFA-gated checks and nothing else. The FFA variable names
+rjland_suites. scr_bug392 sits on this sitting's private local instance, and
+the other four on the shared local instance under this landing's own prefix.
+The activity view of both instances, read immediately before the pair
+started, showed no session on any database but the reading one.
+
+The instrument prints only its own command, so none of these variables is in
+the verbatim block below; this section is where they are stated.
+
+== THIS REPORT IS ITS OWN RUN'S OUTPUT ==
+The narrative above the marker is written; everything below it is the exact
+bytes of the log named in the `stdout:` header. This file is ASSEMBLED by
+backend/tests/evidence/assemble-evidence.py, which REFUSES to write it at all
+when a number in the narrative is absent from that log. Two rules decide what
+a number is -- a count next to a term a run reports in, and any integer of
+three digits or more that is not one of the typed exempt shapes -- and the
+assembler's self-test asserts both fire and both stay quiet.
+
+The invocation of each half is printed by the script immediately before it
+runs, and is in the verbatim block below rather than quoted up here.
+
+== THE FENCE, and what it holds this round ==
+A suite that overlaps an edit to its own tree certifies nothing. So the tree
+is fingerprinted by backend/tests/evidence/tree-fingerprint.sh at the start
+and again at the end; the instrument re-derives its set at every call --
+tracked files differing from HEAD, and files present but untracked -- and the
+paths are part of the value, so an addition or a removal moves it even when
+every surviving file is untouched. The script refuses to run at all when the
+fingerprint comes back empty.
+
+Every tracked change of this round -- the runner's swap rule and its tests,
+the inventory entry, the attributes file, and the negations that admit this
+round's captures -- was COMMITTED before the pair, so no tracked file differs
+from HEAD. What the fence lists is the one path this round produced before
+the pair: the capture of the committed mutation runner's single run at this
+tip, r18-mutation-run.log. Unlike round 17's run, this one passed the gate
+that stopped that one: it took its swap from the newest report that lists a
+new control, resolved every anchor exactly once, and ran its whole campaign
+-- every control red under its mutation and green under its inert edit, and
+every file it mutated restored byte for byte -- in its own words on its first
+and last lines. It is committed with this report, unchanged.
+
+Ignored paths stay out, by `--exclude-standard`, which is also why the
+per-half pytest logs go outside the repository.
+
+== the route manifest, before this pair ==
+Neither decision touches main.py, so no handler changed. The manifest's own
+tool, run in its dry-run mode before this pair, rewrote no row and found no
+fingerprint moved against HEAD. The wrapper that runs last of all runs the
+manifest's tool once more and reports its rewritten-row count, which has to
+be zero.
+
+== what the numbers mean ==
+The skip count in the opt-out summary IS a check, not a footnote: an opt-out
+run that skipped as few as the live run did is a live run wearing the opt-out's
+name. The two halves are two different questions, and `env -u` is what keeps
+them that way.
+
+== the difference between the halves, and it reconciles ==
+The two summary lines are in the verbatim block below, each under the command
+that produced it:
+
+  opt-out   1890 passed, 38 skipped, 5 warnings in 807.71s (0:13:27)
+  live DSN  1922 passed, 6 skipped, 5 warnings in 802.14s (0:13:22)
+
+The live half runs the FFA-gated checks the opt-out half skips, so the
+difference has to appear twice in the same two lines: the live half's surplus
+of passes and the opt-out half's surplus of skips are the same set of checks.
+Here the live half passes exactly as many more checks as the opt-out half
+skips more, and neither line carries a failure. Two numbers from two
+different columns of the same two lines agreeing is the check; a
+disagreement there would be a finding, not a rounding error.
+
+Those four figures are the assembler's subject, not decoration. Each is a count
+next to a term the run reports in, so each must appear in the log below as the
+same integer beside the same term or this file does not get written.
+
+== against r17-suites.txt, named rather than copied ==
+Round 17's pair ran the same suite, in the same environment, on the tree
+before this round's commits. The only difference either half is expected to
+show is the new test module's own tests, which need no database and so pass
+in both halves; the node-by-node comparison with round 17's tree is kept with
+this round's notes, outside the repository. No previous round's figure is
+quoted here: every number in this narrative has to appear in the log below it
+or the assembler refuses to write the file, and a number from a DIFFERENT run
+cannot.
+
+== failures in either run ==
+Neither summary line above carries a `failed` term. pytest prints one whenever
+a run has any, so its absence from a line quoted verbatim IS the zero, and it
+is re-derivable from this file alone. Both halves also returned rc=0, printed
+immediately above the line they describe.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+========== r18-suite-run.log ==========
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r18-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      1 paths differ from HEAD or are untracked; fingerprinted before and after
+  1e0f0f022f2b73359e9fc324a9ae0d9a  backend/tests/evidence/r18-mutation-run.log
+=== opt-out started 20:28:26 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1890 passed, 38 skipped, 5 warnings in 807.71s (0:13:27)
+=== live DSN started 20:41:59 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1922 passed, 6 skipped, 5 warnings in 802.14s (0:13:22)
+=== tree re-fingerprinted 20:55:27 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 1 paths, each byte-identical to the pre-run fingerprint
+=== done 20:55:28 ===

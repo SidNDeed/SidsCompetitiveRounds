@@ -1,0 +1,131 @@
+The evidence assembler, run over this round's reports, 2026-09-21 (round 10)
+===========================================================================
+
+stdout: r10-suites-assembly-run.log
+
+The r6 lens raised this as a HIGH and as bar item B17: every report in this
+directory CLAIMED to be generated from the stdout of the run it describes, and
+nothing checked the claim. Round 9's suites report carried a file count its own
+run never printed, in a sentence shaped exactly like the sentences around it
+that WERE quoted, and nothing here could tell the two apart -- because nothing
+compared a report against the bytes it came from.
+
+`backend/tests/evidence/assemble-evidence.py` is that comparison, committed
+rather than described. It does not transcribe and then hope: it REFUSES, exiting
+non-zero and naming how many claims it could not derive, whenever a number in a
+report's prose is absent from the stdout that report names.
+
+== what counts as a claim, stated rather than left to taste ==
+Two rules, complementary, neither catching what the other does:
+
+  R1, the counting terms. An integer immediately followed by a term a run
+      reports in -- passed, skipped, deselected, paths, controls, rows -- must
+      appear in the stdout as the same integer next to the same term. This is
+      the rule that catches round 9's defect, which was two digits wide and so
+      invisible to any rule about big numbers.
+
+  R2, the big numbers. Any integer of three digits or more that survives the
+      typed exemptions must appear somewhere in the stdout. This is the rule
+      that catches a summary total quoted with one digit changed, which R1
+      would pass whenever the term beside it is right.
+
+THE EXEMPTIONS ARE TYPED, NOT PER-NUMBER. A list of individually excused numbers
+grows until the check cannot fail (#342), so what is exempt is a SHAPE -- a
+numbered lesson, a date, a clock time, an evidence-file round tag, a bar or
+finding row, a version or section number, a migration, an HTTP status, an
+inclusive range. Adding a number to a report never silences the check; only
+writing it in one of those shapes does, and each shape is something a run
+genuinely does not print.
+
+== both directions, on the rule rather than on this directory ==
+The self-test below asserts that every matching rule FIRES and every exemption
+STAYS QUIET, in both directions, so a typo in any pattern reds there rather than
+passing for ever. Then the tool is run against each of this round's reports, and
+then the refusal itself is executed on a fabricated pair: a narrative claiming a
+count its stdout does not print is refused, and the refusal names the count. A
+check that has only ever been seen to pass is a check nobody has seen work
+(#391).
+
+The same refusal is driven against the REAL report, not just a fabricated one,
+by the mutation control `suites-report-carries-an-underived-number` in
+r10-mutation-controls.txt: it puts into the suites report's prose a count no run
+here can print, and requires the committed check to go red.
+
+== this is not a step somebody remembers to take ==
+The closing run below is the committed test pair -- `--selftest` plus a
+re-check of every assembled report of the newest round -- so a report that
+stopped matching its own stdout reds in the suite, not in a log nobody
+re-reads. That is what makes the assembler a gate rather than a courtesy, and
+it is the half of B17 the brief asked for by name.
+
+== and it applies to itself ==
+This file declares its own stdout and is assembled from it by the same tool, on
+the rule this round adopted: once a round has one assembled report, every report
+of that round is one. The check that reads this directory derives that set from
+the files rather than from a list, so a round cannot adopt the rule for the file
+that satisfies it and drop it for the file that would not.
+
+The one file the rule cannot reach this way is the record of the re-pin, which
+is written after every pytest run by construction. That report is produced by a
+wrapper that applies these same rules -- imported from here, not restated -- to
+its own text before writing it, and writes nothing if either refuses.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+------------------------------------------------------------------------------
+========== r10-suites-assembly-run.log ==========
+== the assembler's own self-test, both directions on every rule ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --selftest
+selftest: 33 rule checks, all as stated
+selftest rc=0
+
+== r10-suites.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r10-suites.txt
+selftest: 33 rule checks, all as stated
+OK: backend/tests/evidence/r10-suites.txt -- 9 claim(s) all derived from r10-suite-run.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== r10-postgresql-controls.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r10-postgresql-controls.txt
+selftest: 33 rule checks, all as stated
+OK: backend/tests/evidence/r10-postgresql-controls.txt -- 6 claim(s) all derived from r10-pg-controls.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== r10-mutation-controls.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r10-mutation-controls.txt
+selftest: 33 rule checks, all as stated
+OK: backend/tests/evidence/r10-mutation-controls.txt -- 1 claim(s) all derived from r10-mutation-run.log r10-freeze-guard.log r10-citation-pin.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== the REFUSAL, executed rather than described ==
+A narrative claiming a count its stdout does not print is refused, and
+the refusal names the count. The pair is fabricated here so the
+direction is proved on the RULE rather than on whatever this directory
+happens to hold; the same two directions are asserted from the closing
+test below, and the same refusal is driven against the real report by
+the mutation control suites-report-carries-an-underived-number.
+
+cwd       <repo>
+command   python -c "import importlib.util as u; s=u.spec_from_file_location('a','backend/tests/evidence/assemble-evidence.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print('derivable   ->', m.undrivable('the run hashed 9 paths', '9 paths'))"
+derivable   -> []
+clean rc=0
+
+cwd       <repo>
+command   python -c "import importlib.util as u; s=u.spec_from_file_location('a','backend/tests/evidence/assemble-evidence.py'); m=u.module_from_spec(s); s.loader.exec_module(m); print('undrivable  ->', m.undrivable('the run hashed 12 paths', '9 paths'))"
+undrivable  -> [('count', '12 paths')]
+dirty rc=0
+
+== the closing evidence check, which RUNS the assembler ==
+The assembler is not a step somebody remembers to take: the committed
+check below runs its self-test and re-checks every assembled report of
+the newest round, so a report that stopped matching its own stdout reds
+in the suite rather than in a log nobody re-reads.
+cwd       <repo>/backend
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k "committed_evidence or assembled_from_its_run"
+..                                                                       [100%]
+2 passed, 153 deselected in 12.53s
+closing rc=0

@@ -1,0 +1,589 @@
+Every mutation control, with its negative control, 2026-09-22 (round 11)
+========================================================================
+
+stdout: r11-mutation-run.log r11-freeze-guard.log r11-citation-pin.log r11-residual-reach.log
+
+A control here is a pair, never a single edit. The MUTATION breaks the property
+and the paired test must go RED; the INERT twin changes the same site without
+changing its meaning -- a comment, a reflow, a doubled space -- and the same
+test must stay GREEN. Without the second half a red proves only that the test
+noticed SOMETHING, which is not the same as noticing the thing (#391), and a
+check that cannot fail is worse than no check at all (#342).
+
+This file is ASSEMBLED by backend/tests/evidence/assemble-evidence.py from the
+logs named above: everything below the marker is their exact bytes, and the
+assembler refuses to write the file at all when a number in this narrative is
+absent from them.
+
+NO NORMALISATION IS APPLIED TO ANY OF THOSE LOGS. Each is the exact stdout of
+the run that produced it, and each is LF because the instrument that wrote it
+makes it LF. That is a change this round made and it is not cosmetic: two of
+these four instruments are Python, a Windows text stream writes CRLF, and a
+report built from such a log would be LF above the marker and CRLF below. The
+runner records a file's newline convention when it first reads it and writes
+that one convention back, so a MIXED report comes back uniform, differs from
+the bytes it started as, and is reported as not restored -- correctly, and for
+a reason having nothing to do with the control being run. Round 10 reached the
+same end by normalising at the copy step and recorded that as a deviation;
+this round moved it into the instruments, so there is no step between a run
+and the report that quotes it.
+
+The freeze guard's log is the one written outside the repository and copied
+in. That is not an exception to the rule above but a consequence of what the
+guard measures: it fingerprints the whole working tree, so a log written in
+place is the guard detecting its own output. The first attempt of this round
+did exactly that and the guard refused, which is the instrument behaving as
+its own header says it will.
+
+== FOUR INSTRUMENTS, ONE REPORT, and why they are filed together ==
+
+  backend/tests/evidence/mutation-runner.py          the source-level controls
+  backend/tests/evidence/freeze-guard-control.sh     the tree-freeze guard
+  backend/tests/evidence/citation-pin-control.sh     the cited-revision pin
+  backend/tests/evidence/residual-reach-control.py   the residual list's reach
+
+All four are committed beside this report and each run below is VERBATIM under
+its own invocation line -- nothing here is merged, summarised or re-typed. They
+share one file because they produce one artifact type: a mutation that reddened
+a check, with an inert twin that did not. The fourth is new this round and is
+described in its own section below.
+
+== what the runner does, and what it refuses to do ==
+It edits a file in place, runs ONE test, restores the file from a byte-exact
+copy taken before anything ran, and repeats for the inert twin. Never
+`git checkout --` and never `git restore`: both are forbidden on a tree
+carrying uncommitted work (#290, #401), and this tree is carrying the round.
+Before it runs anything it resolves every anchor in its target file and refuses
+outright unless each resolves EXACTLY ONCE -- an anchor matching twice would
+mutate two sites and an anchor matching zero times would mutate none, and both
+look identical in a summary. At the end it compares the md5 of every file it
+touched against the value taken before the first mutation, and says so per file.
+
+== WHAT THE RUNNER NO LONGER HOLDS AS A LITERAL ==
+Round 10 wrote `r10-suites.txt` into the runner as a path, with a comment
+saying which round it belonged to. A path with a round number in it is a thing
+to remember to bump, and a forgotten one makes this round's controls mutate the
+PREVIOUS round's report -- a mutation that resolves, reds its test, and proves
+nothing about the artifact this round is committing. The runner now DERIVES
+both of the reports it mutates from the file names in this directory: the
+newest suites report, and the newest mutation-controls report, which is
+necessarily the previous round's because this round's is assembled from the
+runner's own output and cannot exist while the runner runs. Both derived paths
+are printed in the invocation block below, so the log says which files the
+evidence-level controls ran against.
+
+The same sweep found one more, inside this round's own new code -- which is
+where the next false claim lives, because it is the code written by the hand
+that had just finished making this argument everywhere else. The new-controls
+control named TWO control names of one round as its anchor and its mutant,
+written by hand, directly beside the derivations that had replaced the other
+three. It fails in the conservative direction -- the anchor pre-check refuses
+rather than passing -- so the cost is not a false green but a runner that will
+not start until somebody carries two names forward by hand, which is precisely
+the work this round exists to remove. Both names are now derived from the
+target report and the module inventory, and the pair is printed in the
+invocation block as `swap ... -> ... (derived)`.
+
+== EVERY round's controls are re-run, not trusted ==
+The inventory is 39 controls this round, and the count is the runner's own: it
+prints the number it resolved anchors for before it runs anything, and prints
+it again with the tally at the end. A count written here by hand would be a
+number nobody checked -- which is exactly what the previous round's list of its
+own new controls turned out to be, and is finding 4 of the r10 lens.
+
+Each round moves code around several of the previous rounds' anchors, and a
+control that is not re-run on the tree it certifies is an assertion about a
+different tree. So the inventory below is cumulative and all of it executes
+here. The rounds are deliberately not enumerated in the runner's header: an
+enumeration of a growing set goes stale the round after it is written, which is
+the defect this round is closing at three levels at once.
+
+== this round's new controls ==
+All six are at the level the r10 lens found -- the instruments and the
+documents rather than the endpoint -- and four of the six mutate a RULE
+rather than a document. That is deliberate. The directory as it stands
+satisfies both the old reading of the scope and the new one, so a mutation of
+the scope checked against the directory would prove nothing; what reds is the
+rule's own fabricated fixture, which is where both directions live (#391).
+
+  evidence-scope-keys-on-the-opt-in-set
+      Restores the derivation the r10 lens found: the newest round taken over
+      the reports that already DECLARE a stdout header rather than over every
+      report's name. A later round that declared no header anywhere was then
+      not the newest ADOPTING round, so none of its files were read and the
+      rule was satisfied by a directory that had dropped it.
+
+  scope-lets-a-report-belong-to-no-round
+      The escape one spelling over, swept with it. The round is taken from the
+      file NAME so that no report can opt out, which makes a name carrying no
+      round an opt-out by unparseability. The mutant drops the clause that
+      refuses one.
+
+  selftest-count-is-not-derived
+      Puts the assembler's printed check count back as the constant it was, on
+      the one instrument here whose purpose is to refuse a number a run did not
+      produce. Its inert twin is the SAME expression REFLOWED, which is the
+      negative control that matters when the assertion is about a number: it
+      must not be satisfiable by a line's shape (#441).
+
+  new-controls-list-credits-another-round
+      A report crediting its own round with a control another round added --
+      the r10 defect, reproduced on the committed report. One listed name is
+      swapped for a name the inventory tags for an earlier round, which reds in
+      BOTH directions at once: one name listed and not tagged, one tagged and
+      not listed. All three of its strings are DERIVED from the report and the
+      inventory, so this control does not carry a round's names into the round
+      after it. Its inert twin is the anchor with a trailing space -- still the
+      same claim, which is what keeps the control about the NAME rather than
+      about the shape of the line.
+
+  residual-reach-rule-admits-a-prose-count
+      Removes the clause that reds on a second statement of the reach, so the
+      section is searched for the claim with every line taken out of it and the
+      hand-counted summary the r10 lens found would pass.
+
+  invocation-frame-drops-a-known-key
+      The sibling of finding 2, one level down, and the one control this round
+      added that no lens finding named. The invocation rule reads UPWARD from
+      a result and stops at the first line it does not recognise, so its list
+      of the frame keys a tool prints between a command and its output is a
+      hand-written set beside a growing one -- the defect of the round,
+      written into the rule that closes it. This round's runner prints two new
+      frame lines, `reports` and `swap`. The mutant takes both keys back out
+      of the list; the rule's own fabricated frame then reports a result whose
+      command IS above it as carrying none. The negative twin lives inside
+      that same self-test and is what makes the list load-bearing rather than
+      decorative: a frame carrying a key the list has never been told about
+      must still STOP the scan, or reading past the known frame would prove
+      nothing about the list.
+
+== the freeze guard, and round 8's method beside it ==
+The guard answers one question: did the tree move while the suite pair ran? A
+guard that answers "no" for an edit class it cannot see is worse than no guard,
+because the report then carries UNCHANGED over a tree the run did not have. So
+its control performs each edit class and requires the guard to NOTICE, performs
+no edit at all and requires it to stay quiet, and runs ROUND 8'S captured-once
+method over the same two mutations side by side. That second half is the
+negative result that makes the finding concrete rather than argued.
+
+== the citation pin ==
+The contract states which revision of the client-lane method design its
+realignment section was checked against; that document declares its own revision
+on its first line. A citation is stale exactly when the two differ. The control
+reds on a revision rolled back under the citation and stays green on a reword
+beside it. It takes both paths as ARGUMENTS and names neither, because both live
+under the gitignored scratch and a committed file may not send a reader to a
+path this repository does not contain.
+
+== the residual list's reach, new this round ==
+A round's residual list is the one place it says what it did NOT close, and it
+is read by somebody deliberately not reading the rest -- so it is the place a
+summary sentence is most expensive to get wrong. The contract's list carried
+two statements sixteen lines apart: an item saying two seats one number apart
+can both settle, which is a second settlement of one physical game and pays it
+twice, and a later item saying it was the only one in the list that could move
+a rating. Neither sentence was wrong about its own subject. The second was a
+count of the first, made once, by hand, and nothing in the document could
+compare them (#351).
+
+`residual_rules.py` is the rule: every item states its reach once in a pinned
+shape, the count under the list is derived from those tags, and no other line
+in the section may state a reach at all. That last clause is the one that reds
+on the defect. `residual-reach-control.py` runs it against the real document --
+passed as an ARGUMENT, for the same reason the citation pin takes its two --
+with the superseded sentence put back as one mutation, a removed tag as a
+second, and a reword beside a tag as the inert twin. The document is read and
+never written; every edit is made to a copy in a temporary directory.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+========== r11-mutation-run.log ==========
+anchor pre-check: 39 controls, every anchor resolves exactly once
+
+======================================================================
+INVOCATION
+  command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python <repo>/backend/tests/evidence/mutation-runner.py
+  cwd       <repo>
+  pytest    run with cwd=<repo>/backend, one invocation per half of each
+            control, printed in full beside it below
+  python    3.12.10
+  started   2026-09-22 03:13:17 UTC
+  controls  39, each RED under its mutation and GREEN under an inert edit
+  reports   <repo>/backend/tests/evidence/r11-suites.txt (suites), <repo>/backend/tests/evidence/r10-mutation-controls.txt (mutation controls)
+  swap      acceptance-does-not-name-its-settled-game -> absent-columns-claimed-safe (derived)
+======================================================================
+
+======================================================================
+CONTROL refund-clamps-the-delta -> test_a_refund_moves_the_exact_stake_and_never_a_clamped_one
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_a_refund_moves_the_exact_stake_and_never_a_clamped_one
+  mutant   rc=1  1 failed, 157 deselected in 9.84s
+    RED: E   AssertionError: assert 'COALESCE(gold_spent, 0) >= CAST(:amt AS integer)' in 'async def _return_stake_exactly(db: AsyncSession, player_id, amount,\n                                *, reason: str,...player_id=player_id, amount=int(amount),\n                           reason=reason, reference_id=str(reference_id)))\n'
+  inert    rc=0  1 passed, 157 deselected in 10.01s
+======================================================================
+CONTROL refund-class-swept -> test_no_refund_in_the_file_still_clamps_its_delta
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_no_refund_in_the_file_still_clamps_its_delta
+  mutant   rc=1  1 failed, 157 deselected in 19.28s
+    RED: E   AssertionError: assert 'GREATEST(0,...E(gold_spent' not in '\n    UPDAT...ked\nblocked'
+  inert    rc=0  1 passed, 157 deselected in 18.11s
+======================================================================
+CONTROL variant-scan-unbounded -> test_the_variant_scan_is_bounded_by_the_quota_it_claims
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_variant_scan_is_bounded_by_the_quota_it_claims
+  mutant   rc=1  1 failed, 157 deselected in 9.68s
+    RED: E   assert "status = 'pending'" in 'photon_room_id IS NULL"\n        ), {"m": mode, "g": group_id})).scalars().all():\n            if _quarantine_same_payload(prior, body):\n                return "variant", True\n    return None, True\n'
+  inert    rc=0  1 passed, 157 deselected in 9.91s
+======================================================================
+CONTROL settlement-takes-for-update -> test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_lobby_lock_is_the_weakest_mode_that_still_conflicts_with_itself
+  mutant   rc=1  1 failed, 157 deselected in 10.19s
+    RED: E   AssertionError: assert 'FOR NO KEY UPDATE' in 'SELECT * FROM ffa_lobbies WHERE id = :lid FOR UPDATE'
+  inert    rc=0  1 passed, 157 deselected in 10.01s
+======================================================================
+CONTROL settled-game-without-a-named-number -> test_an_answer_names_a_settled_game_only_when_the_report_named_it
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_an_answer_names_a_settled_game_only_when_the_report_named_it
+  mutant   rc=1  1 failed, 157 deselected in 10.04s
+    RED: E   AssertionError: assert 'settled_game' not in {'games_played': 4, 'expected_game': 5, 'settled_game': 3}
+  inert    rc=0  1 passed, 157 deselected in 10.26s
+======================================================================
+CONTROL insert-failure-answers-bare -> test_every_reachable_insert_failure_answers_with_the_lobbys_progress
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_every_reachable_insert_failure_answers_with_the_lobbys_progress
+  mutant   rc=1  1 failed, 157 deselected in 11.98s
+    RED: E   assert 'raise HTTPE...ert failed")' not in '@app.post("...ame_number))'
+  inert    rc=0  1 passed, 157 deselected in 10.93s
+======================================================================
+CONTROL binding-sweep-posonly -> test_every_call_in_main_binds_to_the_function_it_names
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_every_call_in_main_binds_to_the_function_it_names
+  mutant   rc=1  1 failed, 157 deselected in 20.25s
+    RED: E   AssertionError: main.py:44701: _quarantine_on_file() missing=['mode', 'room', 'group_id', 'body'] unknown=['mode', 'room', 'group_id', 'body'] duplicated=[]
+  inert    rc=0  1 passed, 157 deselected in 20.27s
+======================================================================
+CONTROL refund-statement-never-executed -> test_pg_the_exact_refund_statement_runs_against_a_real_server
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_the_exact_refund_statement_runs_against_a_real_server
+  mutant   rc=1  1 failed, 157 deselected in 11.24s
+    RED: E   main.StakeRefundRefused: refund of 10 gold to player adb562f6-9e1b-4114-a888-bfddd9ecb52c (ffa_bet_refund) was refused: the balance does not cover the stake the wager records, so no gold and no ledger row were written
+  inert    rc=0  1 passed, 157 deselected in 11.19s
+======================================================================
+CONTROL refund-refusal-kills-the-queue -> test_pg_one_unpayable_wager_does_not_block_the_rest_of_the_queue
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_one_unpayable_wager_does_not_block_the_rest_of_the_queue
+  mutant   rc=1  1 failed, 157 deselected in 11.22s
+    RED: E   AssertionError: the queue stopped at the row it could not pay: 0
+  inert    rc=0  1 passed, 157 deselected in 12.05s
+======================================================================
+CONTROL refund-refusal-kills-the-sweep -> test_pg_one_unpayable_series_does_not_stop_the_stale_series_sweep
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_one_unpayable_series_does_not_stop_the_stale_series_sweep
+  mutant   rc=1  1 failed, 157 deselected in 10.19s
+    RED: E   main.StakeRefundRefused: refund of 10 gold to player fe149442-3351-450c-9f7f-f136d1e2120a (refund_abandoned) was refused: the balance does not cover the stake the wager records, so no gold and no ledger row were written
+  inert    rc=0  1 passed, 157 deselected in 10.33s
+======================================================================
+CONTROL wager-lock-dropped-as-redundant -> test_a_wager_cannot_be_inserted_while_its_game_settles
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_a_wager_cannot_be_inserted_while_its_game_settles
+  mutant   rc=1  1 failed, 157 deselected in 10.06s
+    RED: E   AssertionError: place_ffa_bet no longer takes its own lock on the lobby row
+  inert    rc=0  1 passed, 157 deselected in 9.98s
+======================================================================
+CONTROL relock-leaves-a-poisoned-transaction -> test_the_relock_leaves_a_transaction_the_next_read_can_run_in
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_relock_leaves_a_transaction_the_next_read_can_run_in
+  mutant   rc=1  1 failed, 157 deselected in 10.00s
+    RED: E   AssertionError: the relock retries without clearing the failed statement, so the second attempt raises for the reason the first one did
+  inert    rc=0  1 passed, 157 deselected in 10.98s
+======================================================================
+CONTROL evidence-cites-a-gitignored-path -> test_the_committed_evidence_re_derives_its_own_numbers
+  file     <repo>/backend/tests/evidence/r11-suites.txt
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_committed_evidence_re_derives_its_own_numbers
+  mutant   rc=1  1 failed, 157 deselected in 11.26s
+    RED: E   AssertionError: r11-suites.txt points at a gitignored path; evidence has to carry the output it is evidence of and name instruments a clone has
+  inert    rc=0  1 passed, 157 deselected in 3.10s
+======================================================================
+CONTROL refusal-skips-without-ending-the-transaction -> test_the_prune_batch_commits_per_series_so_it_cannot_hold_the_chain  [test_report_disconnect_durability.py]
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_report_disconnect_durability.py -q --tb=line -p no:cacheprovider -k test_the_prune_batch_commits_per_series_so_it_cannot_hold_the_chain
+  mutant   rc=1  1 failed, 125 deselected in 12.94s
+    RED: E   AssertionError: _refund_or_skip returns its skip sentinel without ending the transaction, so the loop would take the next series still holding the locks it took for this one
+  inert    rc=0  1 passed, 125 deselected in 11.26s
+======================================================================
+CONTROL commit-between -> test_the_lock_the_derivation_and_the_increment_are_one_transaction
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_lock_the_derivation_and_the_increment_are_one_transaction
+  mutant   rc=1  1 failed, 157 deselected in 10.87s
+    RED: E   assert 'await db.commit()' not in 'await _ffa_...ess)\n\n    '
+  inert    rc=0  1 passed, 157 deselected in 10.96s
+======================================================================
+CONTROL settlement-lock-removed-live -> test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_two_reports_for_one_lobby_cannot_settle_the_same_number
+  mutant   rc=1  1 failed, 157 deselected in 11.89s
+    RED: E   AssertionError: the second report did not wait on the lobby row, so both derived the same number from the same snapshot
+  inert    rc=0  1 passed, 157 deselected in 11.71s
+======================================================================
+CONTROL refusal-after-capture-reuses-stale-progress -> test_pg_a_refusal_raised_after_a_capture_reads_the_lobby_again
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_a_refusal_raised_after_a_capture_reads_the_lobby_again
+  mutant   rc=1  1 failed, 157 deselected in 11.07s
+    RED: E   AssertionError: the refusal answered with the counter read before the capture
+  inert    rc=0  1 passed, 157 deselected in 11.20s
+======================================================================
+CONTROL advertised-number-is-not-the-settling-one -> test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_a_realigned_resubmission_is_echoed_and_never_settled_twice
+  mutant   rc=1  1 failed, 157 deselected in 11.46s
+    RED: E   assert 2 == 3
+  inert    rc=0  1 passed, 157 deselected in 11.61s
+======================================================================
+CONTROL production-cites-a-gitignored-path -> test_no_production_file_cites_the_gitignored_scratch
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_no_production_file_cites_the_gitignored_scratch
+  mutant   rc=1  1 failed, 157 deselected in 15.96s
+    RED: E   AssertionError: a shipped file cites the gitignored scratch: ['backend/api/main.py'] -- a comment has to name an authority a reader of this repository can open
+  inert    rc=0  1 passed, 157 deselected in 11.30s
+======================================================================
+CONTROL relock-gives-up-after-one-attempt -> test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_the_relock_retries_once_and_answers_from_the_lobby_not_the_snapshot
+  mutant   rc=1  1 failed, 157 deselected in 11.51s
+    RED: E   asyncpg.exceptions.InFailedSQLTransactionError: current transaction is aborted, commands ignored until end of transaction block
+    RED: E   sqlalchemy.dialects.postgresql.asyncpg.AsyncAdapt_asyncpg_dbapi.Error: <class 'asyncpg.exceptions.InFailedSQLTransactionError'>: current transaction is aborted, commands ignored until end of transaction block
+    RED: E   sqlalchemy.exc.DBAPIError: (sqlalchemy.dialects.postgresql.asyncpg.Error) <class 'asyncpg.exceptions.InFailedSQLTransactionError'>: current transaction is aborted, commands ignored until end of transaction block
+    RED: E   main.FfaReportRefusal: 503: Could not read this lobby's progress - retry this report unchanged
+  inert    rc=0  1 passed, 157 deselected in 11.20s
+======================================================================
+CONTROL evidence-result-pattern-forgets-the-repin -> test_the_committed_evidence_re_derives_its_own_numbers
+  file     <repo>/backend/tests/test_ffa_game_number_anchor.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_committed_evidence_re_derives_its_own_numbers
+  mutant   rc=1  1 failed, 157 deselected in 12.35s
+    RED: E   AssertionError: rows rewritten now : 0
+  inert    rc=0  1 passed, 157 deselected in 3.83s
+======================================================================
+CONTROL control-list-drifts-from-the-inventory -> test_every_mutation_control_the_runner_carries_is_named_and_paired
+  file     <repo>/backend/tests/test_ffa_game_number_anchor.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_every_mutation_control_the_runner_carries_is_named_and_paired
+  mutant   rc=1  1 failed, 157 deselected in 3.90s
+    RED: E   AssertionError: evidence-result-pattern-forgets-the-repin is a control the runner carries and this module's docstring inventory does not name
+  inert    rc=0  1 passed, 157 deselected in 3.84s
+======================================================================
+CONTROL realignment-reuses-the-advertised-number -> test_pg_a_realigned_sitting_issues_each_game_its_own_number
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_a_realigned_sitting_issues_each_game_its_own_number
+  mutant   rc=1  1 failed, 157 deselected in 12.10s
+    RED: E   AssertionError: a second physical game keyed at the advertised number was not refused
+  inert    rc=0  1 passed, 157 deselected in 11.39s
+======================================================================
+CONTROL shipped-file-outside-the-swept-set -> test_no_production_file_cites_the_gitignored_scratch
+  file     <repo>/backend/Dockerfile.bot
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_no_production_file_cites_the_gitignored_scratch
+  mutant   rc=1  1 failed, 157 deselected in 11.32s
+    RED: E   AssertionError: a shipped file cites the gitignored scratch: ['backend/Dockerfile.bot'] -- a comment has to name an authority a reader of this repository can open
+  inert    rc=0  1 passed, 157 deselected in 3.38s
+======================================================================
+CONTROL catch-up-log-claims-a-persisted-repair -> test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_a_catch_up_on_a_refusing_path_logs_a_claim_its_transaction_can_keep
+  mutant   rc=1  1 failed, 157 deselected in 11.29s
+    RED: E   AssertionError: [FFA] lobby 0ea879a4-ff42-44c4-9473-4c58f89ef934 counter was behind its own rows: games_played 1 -> 2 (highest recorded game). The sitting resumes at 3
+  inert    rc=0  1 passed, 157 deselected in 11.23s
+======================================================================
+CONTROL capture-refusal-restores-the-snapshot -> test_a_refusal_whose_lobby_cannot_be_read_carries_no_progress_at_all
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_a_refusal_whose_lobby_cannot_be_read_carries_no_progress_at_all
+  mutant   rc=1  1 failed, 157 deselected in 10.93s
+    RED: E   AssertionError: ('recorded', 409, 'This game is already recorded')
+  inert    rc=0  1 passed, 157 deselected in 10.90s
+======================================================================
+CONTROL double-failure-invents-a-progress -> test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields
+  mutant   rc=1  1 failed, 157 deselected in 11.17s
+    RED: E   AssertionError: both attempts failed: the exhausted read answered with {'games_played': 0, 'expected_game': 1} instead of refusing
+  inert    rc=0  1 passed, 157 deselected in 11.17s
+======================================================================
+CONTROL vanished-lobby-invents-a-progress -> test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_an_exhausted_progress_read_answers_503_with_no_progress_fields
+  mutant   rc=1  1 failed, 157 deselected in 11.07s
+    RED: E   AssertionError: the lobby is gone: the exhausted read answered with {'games_played': 0, 'expected_game': 1} instead of refusing
+  inert    rc=0  1 passed, 157 deselected in 11.22s
+======================================================================
+CONTROL join-payload-omits-the-advertised-number -> test_the_lobby_state_advertises_the_sittings_settled_count
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_lobby_state_advertises_the_sittings_settled_count
+  mutant   rc=1  1 failed, 157 deselected in 10.91s
+    RED: E   assert '**_ffa_progress(int(lobby["games_played"] or 0)),' in 'return {"status": "searching", "queue_count": 0} members = (await db.execute(text(""" SELECT q.steam_id, q.display_na...d"], "display_name": m["display_name"], "slot": int(m["slot"]) if m["slot"] is not None else -1} for m in members ], }'
+  inert    rc=0  1 passed, 157 deselected in 10.85s
+======================================================================
+CONTROL acceptance-does-not-name-its-settled-game -> test_every_report_answer_carries_the_lobbys_progress
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_every_report_answer_carries_the_lobbys_progress
+  mutant   rc=1  1 failed, 157 deselected in 10.96s
+    RED: E   assert '**_ffa_progress(_game_number, settled_game=_game_number)' in '@app.post("/api/v1/ffa/matches", response_model=FfaMatchResponse, tags=["FFA Matches"]) async def submit_ffa_match(re... player_count=n, rating_changes=rating_changes, xp_gained=rep_xp, gold_gained=rep_gold, **_ffa_progress(_game_number))'
+  inert    rc=0  1 passed, 157 deselected in 10.89s
+======================================================================
+CONTROL evidence-results-without-an-invocation -> test_the_committed_evidence_re_derives_its_own_numbers
+  file     <repo>/backend/tests/evidence/r11-suites.txt
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_committed_evidence_re_derives_its_own_numbers
+  mutant   rc=1  1 failed, 157 deselected in 10.95s
+    RED: E   AssertionError: [('r11-suites.txt', 'line 22 states a result with no invocation above it: 1740 passed, 44 skipped, 1 xfailed, 2 warnings in 572.39s (0:09:32)')]
+  inert    rc=0  1 passed, 157 deselected in 2.98s
+======================================================================
+CONTROL suites-report-carries-an-underived-number -> test_the_committed_evidence_is_assembled_from_its_run_stdout
+  file     <repo>/backend/tests/evidence/r11-suites.txt
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_committed_evidence_is_assembled_from_its_run_stdout
+  mutant   rc=1  1 failed, 157 deselected in 3.84s
+    RED: E   AssertionError: ('r11-suites.txt', 'selftest: 34 rule checks, all as stated
+  inert    rc=0  1 passed, 157 deselected in 3.85s
+======================================================================
+CONTROL refusal-advertises-the-number-it-just-settled -> test_pg_a_seat_that_missed_an_update_recovers_in_one_submission
+  file     <repo>/backend/api/main.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_pg_a_seat_that_missed_an_update_recovers_in_one_submission
+  mutant   rc=1  1 failed, 157 deselected in 11.38s
+    RED: E   AssertionError: 3
+  inert    rc=0  1 passed, 157 deselected in 11.30s
+======================================================================
+CONTROL evidence-scope-keys-on-the-opt-in-set -> test_the_committed_evidence_re_derives_its_own_numbers
+  file     <repo>/backend/tests/evidence/evidence_rules.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_committed_evidence_re_derives_its_own_numbers
+  mutant   rc=1  1 failed, 157 deselected in 10.90s
+    RED: E   AssertionError: ['a later round that declared no stdout at all was not refused, which is the scope round 10 could not see: []']
+  inert    rc=0  1 passed, 157 deselected in 3.04s
+======================================================================
+CONTROL scope-lets-a-report-belong-to-no-round -> test_the_committed_evidence_re_derives_its_own_numbers
+  file     <repo>/backend/tests/evidence/evidence_rules.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_committed_evidence_re_derives_its_own_numbers
+  mutant   rc=1  1 failed, 157 deselected in 3.01s
+    RED: E   AssertionError: ['a report whose name carries no round was not refused, so the scope could be left by naming: []']
+  inert    rc=0  1 passed, 157 deselected in 3.00s
+======================================================================
+CONTROL selftest-count-is-not-derived -> test_the_assembler_counts_the_checks_it_ran
+  file     <repo>/backend/tests/evidence/assemble-evidence.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_assembler_counts_the_checks_it_ran
+  mutant   rc=1  1 failed, 157 deselected in 3.07s
+    RED: E   AssertionError: the self-test printed 33 and ran 34 checks
+  inert    rc=0  1 passed, 157 deselected in 3.08s
+======================================================================
+CONTROL new-controls-list-credits-another-round -> test_the_new_controls_a_report_claims_are_the_ones_the_inventory_tags
+  file     <repo>/backend/tests/evidence/r10-mutation-controls.txt
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_new_controls_a_report_claims_are_the_ones_the_inventory_tags
+  mutant   rc=1  1 failed, 157 deselected in 2.99s
+    RED: E   AssertionError: ('r10-mutation-controls.txt', [('absent-columns-claimed-safe', 'is listed as new in round 10 and the inventory tags it...cceptance-does-not-name-its-settled-game', 'is tagged (r10) in the inventory and the report does not list it as new')])
+  inert    rc=0  1 passed, 157 deselected in 2.92s
+======================================================================
+CONTROL invocation-frame-drops-a-known-key -> test_the_committed_evidence_re_derives_its_own_numbers
+  file     <repo>/backend/tests/evidence/evidence_rules.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_committed_evidence_re_derives_its_own_numbers
+  mutant   rc=1  1 failed, 157 deselected in 3.07s
+    RED: E   AssertionError: ["a result below the runner's own invocation frame was reported as having no command above it, so a frame key is missing from BETWEEN: [(9, '1734 passed, 42 skipped in 566.55s')]"]
+  inert    rc=0  1 passed, 157 deselected in 2.99s
+======================================================================
+CONTROL residual-reach-rule-admits-a-prose-count -> test_the_residual_reach_rule_holds_in_both_directions
+  file     <repo>/backend/tests/evidence/residual_rules.py
+  command  python -m pytest tests\test_ffa_game_number_anchor.py -q --tb=line -p no:cacheprovider -k test_the_residual_reach_rule_holds_in_both_directions
+  mutant   rc=1  1 failed, 157 deselected in 2.94s
+    RED: E   AssertionError: [('a prose reach claim is refused', '0, expected 1'), ('the prose refusal quotes the claim it found', 'False, expected True')]
+  inert    rc=0  1 passed, 157 deselected in 2.96s
+======================================================================
+restored main.py: byte-identical
+restored r11-suites.txt: byte-identical
+restored test_ffa_game_number_anchor.py: byte-identical
+restored Dockerfile.bot: byte-identical
+restored evidence_rules.py: byte-identical
+restored assemble-evidence.py: byte-identical
+restored r10-mutation-controls.txt: byte-identical
+restored residual_rules.py: byte-identical
+
+all 39 controls RED under mutation and GREEN under the inert edit
+========== r11-freeze-guard.log ==========
+script    <repo>/backend/tests/evidence/freeze-guard-control.sh
+cwd       <repo>
+command   bash <repo>/backend/tests/evidence/freeze-guard-control.sh
+guard     bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+bash      5.3.15(1)-release
+started   2026-09-22T03:28:04Z
+
+pre-check the tracked probe target is byte-identical to HEAD, and the
+          untracked probe path does not exist
+
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+baseline  15 paths fingerprinted; round-8 method holds 8 captured paths
+
+GREEN  inert    no edit between two calls -> fingerprint unchanged
+
+RED    class A  a file created mid-run -> fingerprint MOVED (detected)
+           14a15
+           > 1b234f2ba0a6ac3f3a0603acb23a4b57  backend/tests/freeze_guard_probe.tmp
+       round 8  the captured-once list reports UNCHANGED for the same edit
+
+RED    class B  an unmodified tracked file edited mid-run -> fingerprint MOVED (detected)
+           0a1
+           > 4fb759e495edf97bba8bf455fb554bfa  backend/sql/169_match_report_quarantine.sql
+       round 8  the captured-once list reports UNCHANGED for the same edit
+
+restored backend/sql/169_match_report_quarantine.sql md5 c976d6ceceedfe2ea04e727d501ed231 matches the pre-run md5
+restored the whole-tree fingerprint is back to its pre-control value
+
+RESULT: 1 inert GREEN, 2 mutation classes RED under the new guard and
+        UNDETECTED under round 8's, every touched file restored
+finished  2026-09-22T03:28:17Z
+========== r11-citation-pin.log ==========
+script    <repo>/backend/tests/evidence/citation-pin-control.sh
+command   bash <repo>/backend/tests/evidence/citation-pin-control.sh <citing-doc> <cited-doc>
+citing    <the lane's contract, under the gitignored scratch>
+cited     <the client lane's method design, under the gitignored scratch>
+bash      5.3.15(1)-release
+started   2026-09-22T03:28:17Z
+
+cited document declares: revision 3
+
+LIVE   the committed state of the two documents
+  live    : cites revision 3, cited document declares revision 3 -> MATCH
+
+MUTANT the citation is rolled back one revision (the r8 defect, restored)
+  mutant  : cites revision 2, cited document declares revision 3 -> STALE
+
+INERT  a wording change at the same site, the revision left alone
+  inert   : cites revision 3, cited document declares revision 3 -> MATCH
+
+RESULT: live MATCH, mutant STALE (red), inert MATCH (green). The check
+        reds on the edit that actually happens -- a revision moving
+        under a citation -- and not on a reword beside it.
+finished  2026-09-22T03:28:19Z
+========== r11-residual-reach.log ==========
+script    <repo>/backend/tests/evidence/residual-reach-control.py
+cwd       <repo>
+rule      <repo>/backend/tests/evidence/residual_rules.py
+document  <the lane's contract, under the gitignored scratch>
+python    3.12.10
+started   2026-09-22 03:28:19 UTC
+
+LIVE   the document as it stands
+  command   python backend/tests/evidence/residual_rules.py <the lane's contract, under the gitignored scratch>
+  live     CLEAN: every item carries one integrity-reach tag, the tally is the tags' own count, and no other line states a reach
+
+MUTANT A  the superseded prose count, put back where it stood
+  command   python backend/tests/evidence/residual_rules.py <a copy of it, in a temporary directory>
+  mutant A REFUSED: 1 problem(s) in the residual list:
+  mutant A the section states the reach outside a tag and outside the tally paragraph: ...perator by hand. This is the one item in this list that can move a rating. makes pa...
+
+MUTANT B  one item's tag removed, the count left as it was
+  command   python backend/tests/evidence/residual_rules.py <a copy of it, in a temporary directory>
+  mutant B REFUSED: 2 problem(s) in the residual list:
+  mutant B the item at line 732 carries 0 integrity-reach tags and the rule needs exactly one: - **Two seats whose last advertisement at the game-over edge
+  mutant B the tally says 2 of 5 and the tags say 1 of 5
+
+INERT  a wording change beside a tag, no claim touched
+  command   python backend/tests/evidence/residual_rules.py <a copy of it, in a temporary directory>
+  inert    CLEAN: every item carries one integrity-reach tag, the tally is the tags' own count, and no other line states a reach
+
+RESULT: live CLEAN, mutant A REFUSED, mutant B REFUSED, inert
+        CLEAN. The rule reds on a second statement of the reach
+        and on an item that states none, and stays quiet on a
+        reword beside them. The document was read, never written.
+finished  2026-09-22 03:28:20 UTC

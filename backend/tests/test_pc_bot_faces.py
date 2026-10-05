@@ -90,7 +90,7 @@ def test_the_byte_route_reader_takes_a_body_that_arrives_in_several_buffers():
     """The case the one-shot read lost: every face over a few kilobytes."""
     chunks = [b"\x89PNG" + bytes(900), bytes(900), bytes(1000)]
     ns = _bytes_ns(_Resp(chunks))
-    status, data = asyncio.run(ns["_pc_api_bytes"]("/internal/pc/face/back"))
+    status, data, _meta = asyncio.run(ns["_pc_api_bytes"]("/internal/pc/face/back"))
     assert status == 200 and data is not None and len(data) == 2804
 
 
@@ -104,7 +104,7 @@ def test_the_byte_route_reader_takes_a_body_that_arrives_in_several_buffers():
 ])
 def test_the_byte_route_reader_requires_an_exact_length_under_the_cap(chunks, declared, cap, expect):
     ns = _bytes_ns(_Resp(chunks, declared=declared), cap=cap or 4 * 1024 * 1024)
-    _, data = asyncio.run(ns["_pc_api_bytes"]("/internal/pc/face/back"))
+    _, data, _meta = asyncio.run(ns["_pc_api_bytes"]("/internal/pc/face/back"))
     assert (data if data is None else len(data)) == expect
     assert "_PC_FACE_MAX_BYTES = 4 * 1024 * 1024" in BOT_SRC
 
@@ -195,7 +195,7 @@ def _best_ns(lease=("L", 1e18, False), status=200, face=b"png", released=None):
 
     async def _bytes(path, params=None, timeout=10.0):
         (released if released is not None else []).append(("bytes", path))
-        return status, (face if status == 200 else None)
+        return status, (face if status == 200 else None), {}
 
     async def _release(lease_id):
         (released if released is not None else []).append(("release", lease_id))
@@ -277,9 +277,13 @@ def test_the_drain_leases_each_print_group_with_its_events_and_acks_with_the_lea
     assert "leases.append(lease[0])" in src
 
 
-def test_the_daily_answer_carries_the_canonical_back_without_a_lease():
+def test_the_daily_answer_is_the_pack_it_opened_and_takes_no_lease_itself():
+    """Fix round 1, D1: /daily claims, opens and shows its pack. The picture is the
+    reveal's strip, drawn under the reveal's own leases; the command takes none, and
+    the canonical back no longer rides on it - there is a revealed pack to show."""
     src = _fn(BOT_SRC, "cmd_pc_daily")
-    assert "await _pc_back_bytes()" in src and "_pc_lease(" not in src
+    assert "_pc_lease(" not in src and "_pc_back_bytes" not in src
+    assert "await _pc_open_and_show(ctx, {\"pack_id\": str(pack_id)}," in src
     back = _fn(BOT_SRC, "_pc_back_bytes")
     assert '_pc_api_bytes("/internal/pc/face/back")' in back and "3600" in back
 
@@ -300,7 +304,7 @@ def _card_ns(lease, preview_status=404, body=None):
 
     async def _bytes(path, params=None, timeout=10.0):
         calls["bytes"].append((path, params))
-        return preview_status, (b"png" if preview_status == 200 else None)
+        return preview_status, (b"png" if preview_status == 200 else None), {}
 
     async def _lease(ref, print_id=None, event_ids=None):
         calls["lease"].append(ref)

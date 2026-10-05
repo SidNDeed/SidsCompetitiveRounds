@@ -72,6 +72,24 @@ def _fields(pieces):
     return out
 
 
+def _server_fields():
+    """(required, suffix): the grammar's field names before its optional
+    dance cards group and inside it (design S2.8)."""
+    pattern = P.DESCRIPTOR_RE.pattern
+    cut = pattern.index("(?:\\|dance=")
+    return re.findall(r"\\\|(\w+)=", pattern[:cut]), re.findall(r"\\\|(\w+)=", pattern[cut:])
+
+
+def _client_suffix_literals():
+    """The quoted fragments of PortraitRender.DanceDescriptor's suffix
+    expression, in source order -- read as text, like the base literals."""
+    with open(PORTRAIT_CS, encoding="utf-8", newline="") as handle:
+        src = handle.read()
+    start = src.index('string d = descriptor + "|dance=')
+    expr = src[start:src.index(";", start)]
+    return re.findall(r'"([^"\\]*)"', expr)
+
+
 def test_the_client_and_the_grammar_name_the_same_fields_in_the_same_order():
     """Neither side may gain or lose a descriptor field alone.
 
@@ -81,9 +99,13 @@ def test_the_client_and_the_grammar_name_the_same_fields_in_the_same_order():
     clean telemetry (#438). A field the grammar requires and the client never
     sends is the same failure from the other direction."""
     client = _fields(_client_descriptor_literals())
-    server = re.findall(r"\\\|(\w+)=", P.DESCRIPTOR_RE.pattern)
+    server, suffix = _server_fields()
     assert client, "no descriptor literals found in PortraitRender.cs"
     assert client == server, (client, server)
+    # The dance suffix (design S2.8): the grammar's optional group, and the
+    # client appends exactly that group, field for field, in its own helper.
+    assert suffix == ["dance", "ar"], suffix
+    assert _fields(_client_suffix_literals()) == suffix
     # ...and the fixture every other test in this file is written against is
     # that same sequence, so the fixture cannot drift from the contract either.
     assert _fields([GOOD]) == server
@@ -92,12 +114,65 @@ def test_the_client_and_the_grammar_name_the_same_fields_in_the_same_order():
 def test_the_field_contract_check_can_fail():
     """The mutation control for the test above (#391): a dropped field, an
     added field and a reordering must each be caught."""
-    server = re.findall(r"\\\|(\w+)=", P.DESCRIPTOR_RE.pattern)
+    server, suffix = _server_fields()
     assert [f for f in server if f != "anim"] != server
     assert server + ["skin2"] != server
     assert list(reversed(server)) != server
-    # and the extractor really reads the file, rather than returning a constant
+    assert list(reversed(suffix)) != suffix
+    # and the extractors really read the file, rather than returning a constant
     assert "anim" in _fields(_client_descriptor_literals())
+    assert "ar" in _fields(_client_suffix_literals())
+
+
+def _legal(n, suffix=""):
+    """A grammar-legal descriptor of exactly n bytes: GOOD (plus `suffix`)
+    with the last offset's fraction carrying the padding."""
+    base = GOOD + suffix
+    pad = n - len(base.encode())
+    assert pad >= 0, (n, len(base.encode()))
+    out = base.replace("12.5,0", "12.5" + "5" * pad + ",0")
+    assert len(out.encode()) == n
+    return out
+
+
+def _client_caps():
+    """PortraitRender.cs's DESCRIPTOR_MAX_BYTES, and the right-hand side of
+    every descriptor cap check it makes."""
+    with open(PORTRAIT_CS, encoding="utf-8", newline="") as handle:
+        src = handle.read()
+    return (re.findall(r"internal const int DESCRIPTOR_MAX_BYTES = ([0-9]+);", src),
+            re.findall(r"GetByteCount\((?:inp\.descriptor|d)\) > ([A-Za-z_0-9]+)", src))
+
+
+def test_descriptor_contract_both_sides():
+    """T17 (design S2.8): the client's cap and the server's are both 384, and
+    every descriptor the client builds is checked against that one constant;
+    the dance suffix parses into its own groups and a legacy descriptor (no
+    suffix) still parses, with none. The suffix is anchored: whole, once,
+    last. Mutation: the server's cap back at 320. Control: a 320-byte legacy
+    descriptor is accepted."""
+    caps, checks = _client_caps()
+    assert caps == ["384"] and P.DESCRIPTOR_MAX_BYTES == 384, (caps, P.DESCRIPTOR_MAX_BYTES)
+    assert checks == ["DESCRIPTOR_MAX_BYTES", "DESCRIPTOR_MAX_BYTES"], checks
+    d = P.descriptor_parse(GOOD + "|dance=dance_bounce|ar=1")
+    assert d is not None and (d["dance"], d["ar"], d["recipe"]) == ("dance_bounce", "1", "1")
+    legacy = P.descriptor_parse(GOOD)
+    assert legacy is not None and legacy["dance"] is None and legacy["ar"] is None
+    for bad in (GOOD + "|dance=dance_bounce", GOOD + "|ar=1", GOOD + "|dance=Dance_bounce|ar=1",
+                GOOD + "|dance=bounce|ar=1", GOOD + "|dance=dance_bounce|ar=0",
+                GOOD + "|dance=dance_bounce|ar=1000", GOOD + "|dance=dance_" + "a" * 25 + "|ar=1",
+                GOOD + "|ar=1|dance=dance_bounce", GOOD + "|dance=dance_bounce|ar=1" * 2,
+                GOOD.replace("|r=1", "|dance=dance_bounce|ar=1|r=1"),
+                GOOD + "|dance=dance_bounce|ar=1|x=1", GOOD + "|dance=dance_bou-nce|ar=1"):
+        assert P.descriptor_parse(bad) is None, bad
+    assert P.descriptor_parse(GOOD + "|dance=dance_" + "a" * 24 + "|ar=999") is not None
+    # the cap counts bytes, suffix included: 384 parses, 385 does not
+    assert P.descriptor_parse(_legal(384, "|dance=dance_bounce|ar=1")) is not None
+    assert P.descriptor_parse(_legal(385, "|dance=dance_bounce|ar=1")) is None
+    assert P.descriptor_parse(_legal(384)) is not None
+    assert P.descriptor_parse(_legal(385)) is None
+    # control: the largest legacy descriptor v22 could send is still accepted
+    assert P.descriptor_parse(_legal(320)) is not None
 
 
 def test_canon_line_shape():
@@ -302,7 +377,7 @@ def test_cat_rev_and_face_rev_depend_on_every_input():
     spec = {"band": "legendary", "name": "Sid", "title": "Grand Master I", "title_rgb": (255, 215, 0),
             "rating": 1800, "pool_rank": 3, "board_rank": 7, "wins": 40, "losses": 12,
             "foil": True, "signed": False, "edition_label": "Edition 1", "minted_on": "2026-09-11",
-            "print_short": "#ab12cd", "top_card": True}
+            "print_short": "#ab12cd", "top_card": "Poison", "top_card_rgb": (0, 147, 76)}
     base = dict(renderer_fp="f" * 16, cat_rev_=r1, spec=spec, portrait_kind="game", portrait_hash="h" * 64)
     fr = P.face_rev(**base)
     # EVERY field of the spec, derived from the spec — a field added to it and

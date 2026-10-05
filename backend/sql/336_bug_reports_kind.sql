@@ -102,6 +102,37 @@ BEGIN
     END IF;
 END $m336col$;
 
+-- UNCONDITIONAL WORK, NAMED: FOUR statements in this file touch a relation
+-- from outside every guard block, and each of them runs unconditionally on
+-- every re-application. They are named here because a reader who has seen
+-- the guards otherwise concludes a re-run issues nothing at all:
+--
+--   * `COMMENT ON COLUMN` on bug_reports.kind -- re-sets the comment to the
+--     same text. A re-run writes what the first run wrote: the text is a
+--     literal in this file.
+--   * `DROP TABLE IF EXISTS` on pg_temp.m336_expected_probe -- the
+--     post-check's cleanup of its own probe, below. It is qualified to THIS
+--     session's temporary schema, so it can reach no relation other than the
+--     one the next statement creates; on a session that has never made a
+--     temporary table it reports that the schema does not exist and carries
+--     on.
+--   * `CREATE TEMP TABLE` pg_temp.m336_expected_probe -- the post-check
+--     writes this file's own CHECK predicate over a throwaway column of the
+--     live column's type and reads back what the catalog makes of it, rather
+--     than comparing against a rendering typed out here. The table is
+--     session-local and `ON COMMIT DROP`, takes no lock on bug_reports, and
+--     does not outlive the transaction.
+--   * `ALTER TABLE` pg_temp.m336_expected_probe -- the predicate itself, put
+--     on that temporary table. Safe on a re-run for the same reason: the
+--     only relation it can name is the one created immediately above, which
+--     each run makes fresh.
+--
+-- Every schema statement that touches bug_reports itself -- the ADD COLUMN,
+-- the SET DEFAULT, the CHECK constraint and both indexes -- is guarded on the
+-- catalog. (The file's `BEGIN`, `SET LOCAL lock_timeout` and `COMMIT` are
+-- outside the guards too and are not what this is about -- none of them
+-- touches a relation.)
+--
 -- Left unguarded deliberately, and it is the reason the sentence above is
 -- about which locks CONFLICT rather than about taking none: COMMENT's lock is
 -- stronger than a read's and still conflicts with neither an ordinary reader
@@ -152,9 +183,11 @@ END $m336def$;
 --
 -- The name is the identity here, so this guard adopts whatever already
 -- carries it. The post-check below is what stops that being a hole: it reads
--- the constraint's own definition and requires the only values named in it to
--- be 'report' and 'auto', so a same-named constraint that admits a third is a
--- failure rather than something this file silently keeps.
+-- the constraint's own definition and requires it to BE the definition this
+-- statement produces -- not to contain the right literals, which a predicate
+-- admitting every value on earth can also do. A same-named constraint whose
+-- body is anything else is a failure rather than something this file silently
+-- keeps.
 DO $m336c$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -214,7 +247,40 @@ DECLARE
     v_def TEXT;
     v_unique BOOLEAN;
     v_partial BOOLEAN;
-    v_admitted BOOLEAN;
+    v_values TEXT[];
+    v_coltype TEXT;
+    -- The rendering this file's own `CHECK (kind IN ('report', 'auto'))`
+    -- produces, DERIVED below by writing that exact predicate in a throwaway
+    -- scope and reading `pg_get_constraintdef` back off it.
+    --
+    -- Derived rather than written out, because the rendering is not a
+    -- property of the predicate alone: it is a property of the predicate AND
+    -- the column's type. Over `character varying` PostgreSQL renders `IN` as
+    -- `((kind)::text = ANY ((ARRAY[...])::text[]))` with a per-element
+    -- `::character varying` cast; over `text` it renders
+    -- `(kind = ANY (ARRAY[...::text]))` with no outer cast at all.
+    --
+    -- The literal below was measured over the VARCHAR(16) column this file
+    -- ADDS -- and the `ADD COLUMN` above is guarded on EXISTENCE, so the
+    -- column measured against is not always the column this file adds. The
+    -- default guard thirty lines up says so in as many words: "a hand-added
+    -- or partially-applied column". Over a pre-existing `text` kind, a
+    -- hardcoded varchar rendering refuses the constraint this file's own
+    -- ADD CONSTRAINT wrote seconds earlier, reports that the name was adopted
+    -- from a constraint this file did not write -- which is false in that
+    -- state -- and prints a remedy, DROP CONSTRAINT and re-run, that cannot
+    -- converge, because the re-run writes the same body again. Measured on
+    -- PostgreSQL 16.9.
+    v_expected TEXT;
+    -- KEPT, and it is now the cross-check rather than the answer. A
+    -- derivation compared against nothing is a check that cannot fail: if it
+    -- ever stopped writing this file's own predicate, it and the catalog
+    -- would agree with each other and with nothing else (#342). So over a
+    -- `character varying` column -- the type this file itself adds, and the
+    -- one every ordinary deployment of it has -- the derived string must
+    -- equal this independently measured one, or the file refuses.
+    v_expected_varchar CONSTANT TEXT :=
+        'CHECK (((kind)::text = ANY ((ARRAY[''report''::character varying, ''auto''::character varying])::text[])))';
 BEGIN
     SELECT column_default, (is_nullable = 'NO')
       INTO v_default, v_notnull
@@ -233,6 +299,23 @@ BEGIN
     IF NOT v_notnull THEN
         RAISE EXCEPTION '336: bug_reports.kind is nullable; a NULL row matches neither the report feed nor the auto retention sweep';
     END IF;
+
+    -- The column's own type, read from the catalog rather than assumed. It is
+    -- an INPUT to the constraint comparison at the bottom of this block
+    -- rather than a requirement of its own. Both consumers spell their
+    -- predicate `kind = 'report'` / `kind = 'auto'`, which a `text` column
+    -- serves exactly as a `character varying` one does, so a difference
+    -- between those two is not on its own a reason to refuse. Stated as
+    -- narrowly as it is implemented: the only type this file rejects is one
+    -- its own `CHECK (kind IN ('report', 'auto'))` cannot be written over at
+    -- all, and that rejection is raised where it happens, below. What this
+    -- block refuses is a constraint BODY that is not the one this file
+    -- writes, and that comparison has to be made in the rendering this
+    -- column produces.
+    SELECT format_type(a.atttypid, a.atttypmod) INTO v_coltype
+      FROM pg_attribute a
+     WHERE a.attrelid = 'bug_reports'::regclass
+       AND a.attname = 'kind' AND a.attnum > 0 AND NOT a.attisdropped;
 
     -- Every row carries a value the two consumers recognise. Stated as a
     -- membership test and NOT as "every row is 'report'": on the first run
@@ -295,84 +378,127 @@ BEGIN
         RAISE EXCEPTION '336: idx_bug_reports_steam_kind_created carries a WHERE clause (%); the 24 h count would not be served for the rows outside it', v_def;
     END IF;
 
-    -- The CHECK constraint: guarded creation keeps a same-named constraint it
-    -- did not write, so what that constraint DOES is asserted here.
+    -- The CHECK constraint, read the same way and read WHOLE. Guarded
+    -- creation adopts a same-named constraint it did not write, so this is
+    -- the only reader of its BODY.
     --
-    -- ASSERTED BY BEHAVIOUR, NOT BY READING THE DEFINITION. Two earlier forms
-    -- of this check both read the text and both had the same hole in
-    -- different sizes. The first asked whether 'report' and 'auto' were
-    -- PRESENT, which `CHECK (kind IN ('report','auto','legacy'))` satisfies.
-    -- The second -- this one's immediate predecessor -- asked that the only
-    -- quoted values ANYWHERE in the definition were exactly those two, which
-    -- is narrower and still not the question: `CHECK (kind <> 'report' OR
-    -- kind <> 'auto')` quotes exactly those two literals, is a tautology, and
-    -- admits every third value there is (Codex wave B/C r2, MEDIUM). A
-    -- predicate's literals are not its logic, and no amount of parsing the
-    -- rendered text gets from one to the other.
+    -- WHAT IS ASSERTED: the definition the catalog renders for the surviving
+    -- constraint is, after whitespace collapsing, the definition the catalog
+    -- renders for the constraint this file writes. Two weaker readings were
+    -- tried here first, and each one is a check that cannot fail for the case
+    -- its own message names (#342/#441):
     --
-    -- So the constraint is EXERCISED instead. A temp table is created LIKE
-    -- bug_reports INCLUDING CONSTRAINTS -- PostgreSQL copies the CHECK
-    -- expression itself, so this is the real predicate and not a restatement
-    -- of it -- and three rows are offered to it: a third kind, which it must
-    -- REFUSE, and both real kinds, which it must ACCEPT. The second half is
-    -- the control: without it a constraint that refused everything would pass
-    -- the first half and look correct (#391).
+    --   * asking whether 'report' and 'auto' APPEAR in the definition admits
+    --     `CHECK (kind IN ('report','auto','legacy'))`;
+    --   * asking whether the quoted values are EXACTLY {auto, report} admits
+    --     `CHECK (kind <> 'report' OR kind <> 'auto')`, which carries those
+    --     two literals and no others. No value equals both at once, so one
+    --     disjunct always holds and the predicate is TRUE for every non-null
+    --     value -- and this column is NOT NULL, so that is every value it can
+    --     hold. A constraint that enforces nothing, adopted by name, and then
+    --     announced as the one this column has.
     --
-    -- Nothing touches bug_reports. The probe table is ON COMMIT DROP, and
-    -- bug_number is supplied explicitly so the real bug-number sequence is
-    -- never advanced by a migration re-run.
+    -- The set of literals is a property of how a predicate is SPELLED; what
+    -- this column needs is a property of what the predicate ADMITS, and the
+    -- only predicate whose admitted set is known here is the one this file's
+    -- own ADD CONSTRAINT writes. So the whole definition is compared, and the
+    -- expected string is a measurement of that statement rather than a
+    -- restatement of the rule (see v_expected, and the derivation below it).
     --
-    -- THE PROBE VALUE MUST FIT THE COLUMN, and this is not a detail: kind is
-    -- VARCHAR(16) and the value first written here was nineteen characters.
-    -- PostgreSQL refused it as string_data_right_truncation, which is not
-    -- check_violation, so the handler below did not catch it and the whole
-    -- migration aborted -- found by running it, not by reading it. The
-    -- general form is worth more than the fix: a probe the column TYPE
-    -- refuses never reaches the predicate it claims to test, and had that
-    -- error been caught as a refusal it would have "passed" this check for a
-    -- reason having nothing to do with the constraint (#342). The value is
-    -- now thirteen characters, and a truncation is caught and re-raised
-    -- saying precisely that, so narrowing the column or lengthening the probe
-    -- reports a probe that proves nothing rather than a constraint that looks
-    -- checked.
+    -- The cost of exactness is that a logically equivalent constraint spelled
+    -- differently -- `CHECK (kind = 'report' OR kind = 'auto')` -- is refused
+    -- as well. That is the deliberate direction and not an oversight: there
+    -- is no equivalence oracle for an arbitrary predicate, the refusal prints
+    -- both definitions so the difference is visible, and the remedy is one
+    -- DROP CONSTRAINT and a re-run. A file that adopts a body it cannot
+    -- reason about is the failure this is written against.
+    --
+    -- THAT REMEDY CONVERGES, and the claim is scoped to the refusal that
+    -- prints it -- the body comparison below, which is the only place that
+    -- says DROP CONSTRAINT. It holds because the string compared against is
+    -- derived from this file's own predicate over THIS column, so the body a
+    -- re-run writes is the body the re-run then expects. A hardcoded
+    -- rendering is what broke it: over a pre-existing `text` kind the file
+    -- refused the constraint it had just written, and DROP-and-re-run
+    -- reproduced the refusal for ever. The two other exceptions raised near
+    -- here print their own remedies and neither is a DROP: an unwritable
+    -- column type, and a derivation that has drifted from the measurement it
+    -- is cross-checked against.
     SELECT pg_get_constraintdef(oid) INTO v_def
       FROM pg_constraint
      WHERE conname = 'bug_reports_kind_known' AND conrelid = 'bug_reports'::regclass;
     IF v_def IS NULL THEN
         RAISE EXCEPTION '336: bug_reports_kind_known is missing; a typo''d kind would be announced by nothing and collected by nothing';
     END IF;
-
-    CREATE TEMP TABLE m336_kind_probe
-        (LIKE bug_reports INCLUDING DEFAULTS INCLUDING CONSTRAINTS) ON COMMIT DROP;
-
-    -- 1. A third kind must be refused.
-    v_admitted := TRUE;
+    -- Diagnostic only, for the message below: the quoted literals are what a
+    -- reader looks at first, and on the tautology named above they are
+    -- exactly the two expected ones, which is the confusing part worth
+    -- printing beside the definition itself.
+    SELECT COALESCE(array_agg(DISTINCT m[1] ORDER BY m[1]), ARRAY[]::TEXT[])
+      INTO v_values
+      FROM regexp_matches(v_def, '''([^'']*)''', 'g') AS m;
+    -- DERIVE the expected rendering: write this file's own predicate over a
+    -- throwaway column of the SAME type and read back what the catalog makes
+    -- of it. The temp table is dropped at COMMIT, is visible to this session
+    -- only, and takes no lock on bug_reports -- the lock discipline the rest
+    -- of this file is written to is untouched by it.
+    --
+    -- The predicate below is a COPY of the one the ADD CONSTRAINT above
+    -- writes, and the two have to be edited together; the whole point of the
+    -- comparison is lost if they drift. `test_336_accepts_the_constraint_it_
+    -- writes_itself` and its `text` sibling are what catch that drift, in
+    -- both directions and against a live cluster.
+    -- Dropped first rather than assumed absent: the name is fixed, so a
+    -- session that already carries one would otherwise fail the CREATE and be
+    -- reported below as a column-type problem, which it would not be.
+    --
+    -- AND EVERY NAME BELOW IS QUALIFIED `pg_temp.`, WHICH IS WHAT MAKES THAT
+    -- DROP SAFE TO ISSUE. Unqualified, the name resolves against the search
+    -- path the deploy happens to be running under; a database holding an
+    -- ordinary table called `m336_expected_probe` would have that one
+    -- resolved here, and this DROP would delete it and COMMIT the deletion
+    -- with the rest of the file. `pg_temp` names THIS session's temporary
+    -- schema and nothing else, so the only relation these statements can
+    -- reach is the one this block creates itself. A session that has not yet
+    -- made a temporary table has no such schema, and the DROP answers
+    -- `schema "pg_temp" does not exist, skipping` and carries on -- measured
+    -- on 16.9, because the alternative would be an exception caught by the
+    -- handler below and reported as a column-type problem.
     BEGIN
-        INSERT INTO m336_kind_probe (steam_id, description, kind, bug_number)
-             VALUES ('0', '336 post-check probe', '__m336_nope__', -1);
-    EXCEPTION
-        WHEN check_violation THEN
-            v_admitted := FALSE;
-        WHEN string_data_right_truncation THEN
-            RAISE EXCEPTION '336: the post-check probe value does not fit bug_reports.kind, so the column type refused it before bug_reports_kind_known was ever consulted -- this probe proves nothing until the value is shortened or the column widened';
+        EXECUTE 'DROP TABLE IF EXISTS pg_temp.m336_expected_probe';
+        EXECUTE format(
+            'CREATE TEMP TABLE pg_temp.m336_expected_probe (kind %s) ON COMMIT DROP',
+            v_coltype);
+        EXECUTE 'ALTER TABLE pg_temp.m336_expected_probe
+                     ADD CONSTRAINT m336_expected_probe_body
+                     CHECK (kind IN (''report'', ''auto''))';
+    EXCEPTION WHEN others THEN
+        -- The type is CONTEXT here, not a diagnosis. This handler catches
+        -- whatever any of the statements above raises, and the commonest
+        -- cause -- a `kind` of some type this file's predicate cannot be
+        -- written over -- is a guess about the error, not a reading of it. So
+        -- the error itself is printed and named as the authority.
+        RAISE EXCEPTION '336: could not derive the expected constraint rendering for a bug_reports.kind of type %. PostgreSQL said: %. That derivation writes this file''s own CHECK (kind IN (''report'', ''auto'')) on a temporary table of the same type, so the likeliest cause is a column whose type that predicate cannot be written over -- this file adds it as VARCHAR(16). Read the message above before assuming so.', v_coltype, SQLERRM;
     END;
-    IF v_admitted THEN
-        RAISE EXCEPTION '336: bug_reports_kind_known is defined as % and ADMITS a third kind -- its literals look right and its logic is not. This column has exactly two consumers, the report feed and the retention sweep, and a value neither of them knows is a row announced by nothing and collected by nothing', v_def;
+    SELECT btrim(regexp_replace(pg_get_constraintdef(oid), '\s+', ' ', 'g'))
+      INTO v_expected
+      FROM pg_constraint
+     WHERE conname = 'm336_expected_probe_body'
+       AND conrelid = 'pg_temp.m336_expected_probe'::regclass;
+
+    -- The derivation, held to the independently measured literal on the type
+    -- this file itself adds. Without this the derivation would be its own
+    -- authority and could not disagree with anything (#342).
+    IF v_coltype LIKE 'character varying%' AND v_expected <> v_expected_varchar THEN
+        RAISE EXCEPTION '336: over a % column this file''s own CHECK (kind IN (''report'', ''auto'')) now renders as %, and the rendering measured when this file was written is %. The two disagree, so the comparison below is no longer measuring what it says it measures -- re-measure it on this cluster before trusting either.', v_coltype, v_expected, v_expected_varchar;
     END IF;
 
-    -- 2. THE CONTROL: both real kinds must still be accepted, or the check
-    --    above passed because the constraint refuses everything.
-    BEGIN
-        INSERT INTO m336_kind_probe (steam_id, description, kind, bug_number)
-             VALUES ('0', '336 post-check control', 'report', -2),
-                    ('0', '336 post-check control', 'auto', -3);
-    EXCEPTION WHEN check_violation THEN
-        RAISE EXCEPTION '336: bug_reports_kind_known is defined as % and REFUSES its own two values; every insert on this table would fail', v_def;
-    END;
+    IF btrim(regexp_replace(v_def, '\s+', ' ', 'g')) <> v_expected THEN
+        RAISE EXCEPTION '336: bug_reports_kind_known is defined as % (quoted values %), and the constraint this file writes over a % column renders as % -- so the surviving constraint is not the one this file writes, and what it ADMITS is unknown here. This column has exactly two consumers: the report feed selects kind = ''report'' and the retention sweep selects kind = ''auto'', so any value outside those two is a row announced by nothing and collected by nothing. DROP CONSTRAINT bug_reports_kind_known and re-run this file.', v_def, v_values, v_coltype, v_expected;
+    END IF;
 
-    DROP TABLE m336_kind_probe;
-
-    RAISE NOTICE '336: bug_reports.kind present, NOT NULL, default ''report''; % row(s) report, % auto; both indexes present',
+    RAISE NOTICE '336: bug_reports.kind present as %, NOT NULL, default ''report''; % row(s) report, % auto; both indexes present',
+        v_coltype,
         (SELECT COUNT(*) FROM bug_reports WHERE kind = 'report'),
         (SELECT COUNT(*) FROM bug_reports WHERE kind = 'auto');
 END $m336$;

@@ -8,10 +8,10 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger, Boolean, CheckConstraint, Column, DateTime, Double, FetchedValue, Float, ForeignKey, Index, Integer,
-    SmallInteger, String, Text, UniqueConstraint,
+    SmallInteger, String, Text, UniqueConstraint, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy.orm import DeclarativeBase, deferred, relationship
 
 
 class Base(DeclarativeBase):
@@ -25,8 +25,25 @@ class Base(DeclarativeBase):
 # it through the ORM (an undeclared column is a silent no-op, learning #346);
 # stamp it in SQL or not at all. (Kept outside the class body so the route
 # manifest's Player fingerprint does not move for a comment.)
+# Player also owns pc_trades_open BOOLEAN and pc_trades_generation INTEGER in
+# SQL (migration 353, card trading), mapped below as a read surface only
+# (build brief B3). Raw SQL stays their only writer and reader -- every trade
+# statement and the settings route ask the trading schema probe first -- so
+# never assign either through the ORM (learning #346) and never read either
+# as a Player attribute (a test in test_pc_trades.py refuses both forms).
+# The mapping is shaped so an api deployed ahead of 353 still answers as the
+# build before it, as 353's header states: both columns are deferred, so
+# select(Player), Session.get and Session.refresh leave them out; their
+# defaults are 353's own (true, 0), held server-side, so an ORM insert of a
+# player never names them; and Player's eager_defaults is off, so that
+# insert never RETURNs them either (learning #674: a mapped column the ORM
+# names fails its statement on a schema that lacks it). The deploy order is
+# unchanged: 353 first, then the api on both boxes, two SHAs (learning
+# #477). (Outside the class body, as the note above, so the route
+# manifest's Player fingerprint does not move for a comment.)
 class Player(Base):
     __tablename__ = "players"
+    __mapper_args__ = {"eager_defaults": False}
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     steam_id = Column(String(20), nullable=False, unique=True, index=True)
@@ -71,6 +88,8 @@ class Player(Base):
     pc_announce = Column(Boolean, nullable=False, default=True)
     pc_settings_revision = Column(Integer, nullable=False, default=0)
     pc_shards = Column(Integer, nullable=False, default=0)
+    pc_trades_open = deferred(Column(Boolean, nullable=False, server_default=text("true")))
+    pc_trades_generation = deferred(Column(Integer, nullable=False, server_default=text("0")))
     # Appear-offline privacy toggle (migration 126): when true, the player is
     # excluded from the Home tab's online / recently-online lists. The
     # anonymous online COUNT still includes them (it carries no identity).
@@ -716,23 +735,33 @@ class BugReport(Base):
     triage_notes = Column(Text, nullable=True)
     # DELIBERATELY UNMAPPED: `kind` (migration 336, 'report' | 'auto').
     # Not mapped because an ORM assignment to an undeclared column is a SILENT
-    # no-op, invisible at the call site (#346), and auto_logs.py -- the only
-    # writer of a non-default value -- uses raw SQL.
+    # no-op, invisible at the call site (#346). The one writer of a
+    # non-default value is the automatic post-match log upload,
+    # backend/api/auto_logs.py, and it uses raw SQL; every row the rest of
+    # this tree inserts is a player-filed 'report' and takes the column
+    # default.
     #
     # MIGRATION 336 MUST BE APPLIED BEFORE THIS CODE REACHES A BOX. Leaving the
-    # column unmapped does NOT make the reverse order safe. Being absent from
-    # the ORM keeps `kind` out of submit_bug_report's INSERT, but raw-SQL sites
-    # READ it and they decide the ordering:
+    # column unmapped does NOT make the reverse order safe, which is what an
+    # earlier version of this comment claimed. Being absent from the ORM keeps
+    # `kind` out of submit_bug_report's INSERT, but raw-SQL sites READ it
+    # and they decide the ordering:
     #   * the 10-per-24h rate-limit COUNT inside submit_bug_report itself,
     #     `WHERE steam_id = :sid AND kind = 'report' AND created_at >= :cutoff`
-    #   * recent_bug_report_events, both arms
-    #   * recent_bug_reports, both arms
-    #   * list_bug_reports and get_bug_report, which SELECT it
-    #   * user_comment_on_bug_report, which reads it to refuse an auto row
+    #   * the bug_report_events feed both arms
+    #   * the channel-post feed both arms
+    #   * the admin list and the admin detail pane, which carry it out
+    #   * the reporter's own comment route, which refuses a row that is not
+    #     a 'report'
     # On a box running this code without 336, that first one raises
     # UndefinedColumn before any INSERT is attempted, so NO player can file a
-    # bug report at all. Migration 336's own header states the requirement the
-    # same way; this comment agrees with it.
+    # bug report at all -- the precise outcome the old comment promised the
+    # unmapping prevented. Migration 336's own header states the requirement
+    # correctly; this comment now agrees with it. The count is DERIVED rather
+    # than remembered: test_migration_headers.py walks this api for functions
+    # whose own source runs SQL over bug_reports naming `kind`, and floors the
+    # result, so a reader added later moves that test rather than sitting
+    # outside it.
     # channel_posted_at (migration 102) is also unmapped and is read and
     # written by raw SQL in main.py; no reason was ever recorded for that one.
     created_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc))

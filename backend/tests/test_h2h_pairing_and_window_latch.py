@@ -296,7 +296,10 @@ def test_the_generation_only_ever_goes_up():
     """A reset would make it exactly as blind as the key it replaces."""
     src = ROOM_ACTORS_CS.read_text(encoding="utf-8")
     writes = re.findall(r"_rosterGeneration\s*(\+\+|--|=[^=])", src)
-    assert writes == ["++"], f"the generation is written some other way: {writes}"
+    # Two increment sites since the bug 389 client merge (a new room bumps the
+    # generation as well as an identity change); the invariant is that EVERY
+    # write is an increment, not that there is exactly one.
+    assert writes and all(w == "++" for w in writes),         f"the generation is written some other way: {writes}"
 
 
 # ── L1: a room name is not a room ────────────────────────────────────────────

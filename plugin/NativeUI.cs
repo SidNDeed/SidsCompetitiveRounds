@@ -1807,7 +1807,7 @@ namespace CompetitiveRounds
         /// bypassModalBlock and the IMGUI amount prompt renders independent
         /// of IsOpen — either surviving a close can stake real gold over
         /// live combat).</summary>
-        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}try{PlayerCardsUI.OnOverlayClosed();}catch{}/* Sept 12 (Player Cards): the full-screen card view is a persistent overlay child — it closes on EVERY close path (#369), and the next open counts as a tab visit */try{PlayerCardFaces.Clear();}catch{}/* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) — THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{CloseUtilityPopup();}catch{}/* Sept 7 item 1: the mail/music popup, its child prompts and the report modal close on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
+        private static void TeardownOverlaySurfaces(){try{ProfileCard.Teardown();}catch{}try{PlayerCardsUI.OnOverlayClosed();}catch{}/* Sept 12 (Player Cards): the full-screen card view is a persistent overlay child - it closes on EVERY close path (#369), and the next open counts as a tab visit */try{PlayerCardFaces.Clear();}catch{}try{PlayerCardMotion.Clear();}catch{}/* dance cards S5.7: the playback's overlays, atlases and in-flight answers go with the faces *//* Sept 6 item a: the hover profile card, pinned or not, closes on every page close/recovery path (#369) */try{HideTournamentBetsPopup();}catch{}try{HideRecentTournamentsPopup();}catch{}try{CancelCustomBet();}catch{}try{TrailPreview.Stop();}catch{}try{PlayerEffectCosmetic.StopPreview();}catch{}try{DanceEmotes.StopPreview();}catch{}try{MusicEngine.StopPreviewAndRestore();}catch{}/* music preview restores the pre-preview owner (generation-fenced, safe always) - THE canonical call site, per the module contract */try{HideInfoPopup();}catch{}try{HideCardPreview();}catch{}/* Aug 6 review find 3: an Escape with the picker dropdown open left a full-screen raycast-blocking dim over live gameplay and PickerOpen stuck true forever. */try{HidePicker();}catch{}try{SessionReportView.Close();}catch{}/* Sept 6 item c: the session report closes on EVERY close path (#369) */try{CloseUtilityPopup();}catch{}/* Sept 7 item 1: the mail/music popup, its child prompts and the report modal close on EVERY close path (#369) */try{MailUI.OnOverlayClosed();}catch{}/* Sept 6 mail: composer text focus + report modal released on EVERY close path (design B-4) */SetClickBlocker(false);SetMenuFade(false);/* fade must never survive a close (Sid2 in-game bleed hunt) */try{EventSystemGuard.OnCaptureEnd();}catch{}/* nav-submit ownership released on EVERY close path (Aug 30 r2 HIGH) */}
 
         public static void Close(){showcaseOwned=false;pendingInfoScroll=-1f;PageGeneration++;/* any close — operator or automation — revokes showcase ownership (Aug 30) */if(pageGO!=null)pageGO.SetActive(false);isOpen=false;TeardownOverlaySurfaces();Plugin.Log.LogInfo("[NATIVE] Closed competitive page");}
 
@@ -3141,7 +3141,7 @@ namespace CompetitiveRounds
              *       nothing can paint over the Leave button beside it. */
             ffaStartBtnTxt=UIFactory.GetButtonText(ffaStartBtn);
             UIFactory.FitOneLine(ffaStartBtnTxt);
-            ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(130,28));
+            ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue(label: "menu_leave");dirty=true;},sizeDelta:new Vector2(130,28));
 
             /* v1.36 host settings row (ffa-configurable-lobbies §1). Compact
              * -/value/+ clusters; each press sends ONLY that field and adopts
@@ -3976,7 +3976,17 @@ namespace CompetitiveRounds
                 string nameColor=winner?"#FFD700":"#FFFFFF";
                 /* Leading space INSIDE the key: a spaceless "(left)" token fails the
                    extractor's single-token rule and could never be harvested. */
-                string left=player.left_early?I18n.Tr(" <color=#888888>(left)</color>"):"";
+                /* Bug 392: this is the surface the reporting player actually
+                   looks at. The server records WHY a seat went early and both
+                   Discord renderers were taught to say it; this one kept
+                   printing "(left)" for a seat the transport dropped, which is
+                   the wording the report was about. A row the server did not
+                   mark stays exactly as it was. */
+                string left=player.left_early
+                    ?I18n.Tr(player.left_early_involuntary
+                             ?" <color=#888888>(disconnected)</color>"
+                             :" <color=#888888>(left)</color>")
+                    :"";
                 UIFactory.SetTextRaw(ui.txtIdentity,
                     $"<color={nameColor}>{FfaSafeRich(Trunc(player.display_name??"?",18))}</color>{title}{left}");
 

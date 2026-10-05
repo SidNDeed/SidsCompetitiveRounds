@@ -103,6 +103,13 @@ class _Face:
     def render_back(self):
         return b"\x89PNGback"
 
+    # The top cards whose art the fake's bundle carries (Discord card render
+    # parity): the routes ask the renderer, never decide it themselves.
+    art = frozenset({"Leach"})
+
+    def card_art_drawn(self, spec):
+        return (spec.get("top_card") or "").strip() in self.art
+
 
 def _png_body(n=2000):
     return b"\x89PNG\r\n\x1a\n" + bytes(n - 8)
@@ -341,8 +348,9 @@ def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
     """Since 2026-09-13 neither setting can withdraw a picture, so the writer
     has no exclusive-lock half and no lease wait: actor, row lock, the CAS
     write, commit. A key that could move the resolution would need the old
-    None writer back (r18 H2), which is why the SQL is pinned to the two
-    announce columns and the surface to the two keys. The route BODY takes
+    None writer back (r18 H2), which is why the SQL is pinned to the
+    announce columns and card trading's switch (migration 353, which moves
+    no picture either) and the surface to those three keys. The route BODY takes
     no advisory lock; the SHARED identity hold every player route takes
     inside `_pc_verified_actor` (c3) is kept on purpose, so a settings
     write of a player mid-deletion waits for that deletion instead of
@@ -357,7 +365,8 @@ def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
     for absent in ("pg_advisory_xact_lock", "_pc_lease_wait", "_pc_lock_portrait_blobs",
                    "_pc_release_portrait_blob", "none_write", "_pc_setting_revokes_picture"):
         assert absent not in src, absent
-    assert tuple(main._PC_SETTINGS_SQL) == main._pc.SETTINGS_KEYS == ("collection_public", "announce")
+    assert tuple(main._PC_SETTINGS_SQL) == main._pc.SETTINGS_KEYS == ("collection_public", "announce",
+                                                                      "trades_open")
     for key, sql in main._PC_SETTINGS_SQL.items():
         flat = " ".join(sql.split())
         assert ("WHERE id = CAST(:pid AS uuid) AND pc_settings_revision = CAST(:rev AS integer) "
@@ -368,8 +377,10 @@ def test_the_settings_writer_touches_no_picture_and_takes_no_lock_of_its_own():
 
 def test_the_settings_surface_is_exactly_the_two_announce_keys():
     # a key added here without a decision about the picture would silently
-    # ride the lock-free writer above
-    assert set(main._pc.SETTINGS_KEYS) == {"collection_public", "announce"}
+    # ride the lock-free writer above. trades_open (migration 353) is card
+    # trading's consent switch: decided in the trading design, it moves no
+    # picture and takes no card out of a binder.
+    assert set(main._pc.SETTINGS_KEYS) == {"collection_public", "announce", "trades_open"}
 
 
 def test_a_ban_deletes_the_subjects_leases_under_the_identity_lock():
@@ -517,6 +528,62 @@ def test_no_player_cards_answer_carries_a_steam_or_discord_identifier():
 # keys that end in `name` and are not a player's name
 _NOT_A_PLAYER_NAME = ("rank_name", "font_name", "file_name", "band_name")
 
+# A payload key that ends in `name`, and the value it answers on its line.
+_NAME_ANSWER = re.compile(r'"([a-z_]*name)"\s*:\s*(.+?),?\s*$')
+
+# The neutral label is not a name: `_pc_neutral_name` answers the locale's
+# `pc.unnamed` label or the built-in, never a stored name, so a value that is
+# that call and nothing else discloses nothing. The collection reveal's gone
+# roster entry answers it, as its design states (build notes, FINDING 9). Only the
+# exact call is admitted, as the whole value (R1 LOW Finding 3): the value ends
+# at the call - what follows it starts with a comma or a closing bracket - so a
+# concatenation, a fallback such as `x or _pc_neutral_name()`, a conditional or
+# a slice around the call still needs its projection. The rest of the line may
+# carry no `name` and no `**` spread: a second name key on the same line is
+# never checked by the caller, and a spread can replace the key the call answers.
+_NEUTRAL_CALL = re.compile(r"_pc_neutral_name\([a-z_]*\)")
+
+
+def _neutral_only(expr):
+    s = expr.strip()
+    m = _NEUTRAL_CALL.match(s)
+    if not m:
+        return False
+    rest = s[m.end():].lstrip()
+    return rest == "" or (rest[0] in ",)]}" and "name" not in rest and "**" not in rest)
+
+
+def test_the_neutral_exemption_admits_the_exact_call():
+    """R1 LOW Finding 3, the control: the exact call is admitted, alone or as
+    the value a key answers before the next key of its line, and so is every
+    line a Player Cards function answers it on today."""
+    for expr in ("_pc_neutral_name(ctx)", "_pc_neutral_name()", "  _pc_neutral_name(ctx)  ",
+                 '_pc_neutral_name(ctx), "face_rev": None})'):
+        assert _neutral_only(expr), expr
+    found = []
+    for _name, body in _pc_functions():
+        for line in body.splitlines():
+            m = _NAME_ANSWER.search(line)
+            if m and m.group(2).strip().startswith("_pc_neutral_name("):
+                found.append(m.group(2))
+    assert found and all(_neutral_only(e) for e in found), found
+
+
+def test_the_neutral_exemption_refuses_a_stored_name_beside_the_call():
+    """R1 LOW Finding 3: a value that is the call and something more is not
+    the call. A concatenation, a fallback, a conditional, a slice, a second
+    name key on the line and a spread after the call all still need the
+    projection, so none of them is admitted."""
+    refused = ('_pc_neutral_name(ctx) + row["subject_name"]',
+               '_pc_neutral_name(ctx) or row["owner_name"]',
+               '_pc_neutral_name(ctx) if gone else row["subject_name"]',
+               '_pc_neutral_name(ctx) if row["owner_name"] is None else row["owner_name"]',
+               '_pc_neutral_name(ctx)[:0] + row["subject_name"]',
+               '_pc_neutral_name(ctx), "owner_name": row["owner_name"]}',
+               '_pc_neutral_name(ctx), **row}')
+    admitted = [e for e in refused if _neutral_only(e)]
+    assert admitted == [], f"admitted as the neutral label: {admitted}"
+
 
 def test_the_player_cards_boundary_applies_the_coverage_projection_too():
     """`public_name` is P alone, which is correct for the global display name
@@ -543,13 +610,14 @@ def test_every_player_cards_name_answer_goes_through_the_public_projection():
         projected = set(re.findall(
             r"^\s*([a-z_]+)\s*=\s*_pcp\.public_(?:render_)?name\(", body, re.M))
         for line in body.splitlines():
-            m = re.search(r'"([a-z_]*name)"\s*:\s*(.+?),?\s*$', line)
+            m = _NAME_ANSWER.search(line)
             if not m or m.group(1) in _NOT_A_PLAYER_NAME:
                 continue
             checked += 1
             expr = m.group(2)
             ok = ("public_name" in expr or "public_render_name" in expr
-                  or any(re.match(rf"{p}\b", expr.strip()) for p in projected))
+                  or any(re.match(rf"{p}\b", expr.strip()) for p in projected)
+                  or _neutral_only(expr))
             assert ok, (name, line.strip())
     assert checked >= 8, checked
 
@@ -609,6 +677,17 @@ def test_the_face_surface_refuses_when_the_box_cannot_shape_or_project(monkeypat
 
     monkeypatch.setattr(main._pcp, "coverage_ready", lambda: "manifest gone")
     assert main._pc_renderer_unavailable() == "name_coverage_unavailable"
+    monkeypatch.setattr(main._pcp, "coverage_ready", lambda: None)
+
+    # ...and the card -> ink map, for the same reason one step further on.
+    # That colour is part of `face_rev`, so a box that could not read it does
+    # not draw a duller badge -- it keys every top-card face differently from
+    # the box that could, and both answer 200. Refusing is the only way that
+    # disagreement is visible.
+    monkeypatch.setattr(main, "_PC_CARD_THEMES", {})
+    assert main._pc_renderer_unavailable() == "card_themes_unavailable"
+    monkeypatch.setattr(main, "_PC_CARD_THEMES", {"Poison": (0, 147, 76)})
+    assert main._pc_renderer_unavailable() is None
     monkeypatch.setattr(main, "_pcf", None)
     assert main._pc_renderer_unavailable() == "image_processing_unavailable"
 
@@ -1050,7 +1129,8 @@ def test_the_internal_key_gate_is_the_first_statement_of_every_internal_pc_route
     import ast
     import textwrap
     for fn in (main.internal_pc_lease, main.internal_pc_lease_check, main.internal_pc_lease_release,
-               main.internal_pc_face_print, main.internal_pc_face_preview, main.internal_pc_face_back):
+               main.internal_pc_face_print, main.internal_pc_face_preview, main.internal_pc_face_back,
+               main.internal_pc_motion_preview):
         body = ast.parse(textwrap.dedent(_src(fn))).body[0].body
         if isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
             body = body[1:]   # the docstring
@@ -1146,7 +1226,7 @@ def _face_row(**over):
     row = {"subject_deleted": False, "subject_banned": False,
            "portrait_hash": None, "subject_name": "Sid", "rating": None, "title": None, "rarity": "rare",
            "foil": False, "signed": False, "minted_at": NOW, "pool_rank": 12, "board_rank": None,
-           "series_wins": 3, "series_losses": 1, "edition_id": 1, "print_id": PID, "top_card": False,
+           "series_wins": 3, "series_losses": 1, "edition_id": 1, "print_id": PID, "top_card": "Leach",
            "discarded_at": None}
     row.update(over)
     return row
@@ -1270,9 +1350,37 @@ def test_internal_print_face_answers_the_current_revision_in_a_header(monkeypatc
     resp = _run(main.internal_pc_face_print(str(PID), "fr", "card", "k", Scripted({})))
     assert resp.headers["x-face-rev"] == main._pc_face_inputs(row, _ctx(locale="en"))[3]
     assert resp.headers["cache-control"] == "private, max-age=60"
+    # Discord card render parity: whether the face carries the top card's art
+    # and which still it shows, from the row the pixels were drawn from.
+    assert resp.headers["x-face-art"] == "drawn" and resp.headers["x-face-still"] == "none"
+    row.update(top_card="Not In The Bundle", portrait_hash="ab" * 32)
+
+    async def still(_db, _phash):
+        return b"still"
+    monkeypatch.setattr(main, "_pc_portrait_bytes", still)
+    resp =_run(main.internal_pc_face_print(str(PID), "fr", "card", "k", Scripted({})))
+    assert resp.headers["x-face-art"] == "none" and resp.headers["x-face-still"] == "base"
     with pytest.raises(HTTPException) as ex:
         _run(main.internal_pc_face_print(str(PID), "en", "poster", "k", Scripted({})))
     assert ex.value.status_code == 404
+
+
+def test_the_bot_face_row_is_the_motion_select_with_the_subject_id_rule(monkeypatch):
+    """LOW 1: the bot's face read is ONE statement carrying the face columns
+    AND the servable columns, so the still header and the pixels come from the
+    same row snapshot; there is no second read for the still."""
+    seen = []
+
+    class _Db:
+        async def execute(self, statement, params=None):
+            seen.append(" ".join(str(statement).split()))
+            return SimpleNamespace(mappings=lambda: SimpleNamespace(first=lambda: None))
+    assert _run(main._pc_bot_face_row(_Db(), str(PID))) is None
+    assert len(seen) == 1
+    motion = " ".join(main._PC_PRINT_MOTION_SELECT.split())
+    assert seen[0].startswith(motion) and main._PC_FACE_SUBJECT_ID_SQL.split()[0] in seen[0]
+    for column in ("m_hash", "m_static", "m_descriptor", "m_item", "active_dance_id", "subject_sid"):
+        assert column in motion, column
 
 
 def test_preview_face_reapplies_the_card_gate_before_the_member_read(monkeypatch):
@@ -1330,10 +1438,17 @@ def test_the_card_and_its_preview_read_one_snapshot():
     reads cannot pair an old-rank embed with a new-rank picture."""
     card = _src(main.internal_pc_card)
     assert "s.id AS snapshot_id" in card and '"snapshot_id": int(row["snapshot_id"])' in card
-    prev = _src(main.internal_pc_face_preview)
-    assert "snapshot_id: int | None = Query(None, ge=1)" in prev
-    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in prev
-    assert '{"pid": player_ref, "snap": snapshot_id}' in prev
+    # the member read is the one preview read both preview routes call (dance
+    # cards B13, round 2): the face preview and the motion preview GIF pin the
+    # same snapshot the same way, each passing the snapshot it was told
+    read = _src(main._pc_preview_read)
+    assert "AND m.snapshot_id = COALESCE(CAST(:snap AS bigint), (SELECT MAX(id) FROM pc_pool_snapshots))" in read
+    assert '{"pid": player_ref, "snap": snapshot_id}' in read
+    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+        prev = _src(fn)
+        assert "snapshot_id: int | None = Query(None, ge=1)" in prev, fn.__name__
+        assert prev.count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
+        assert "pc_pool_members" not in prev, fn.__name__
 
 
 @pytest.mark.parametrize("gone, lookups, admin_w, target_w", [
@@ -1736,3 +1851,64 @@ def test_the_audit_rows_carry_the_whole_actor(monkeypatch):
     src = inspect.getsource(main)
     assert re.search(r'"a": admin_steam_id\[:', src) is None
     assert re.search(r"admin_steam_id=\w+\[:\d*\]", src) is None
+
+
+
+def test_every_face_spec_carries_the_theme_colour():
+    """Three places in main.py build a face spec, and they are 1500 lines
+    apart: the print builder, the Discord preview route and the always-on
+    Steam render probe. Updating one and missing another is invisible --
+    the missed surface keeps drawing the band colour and every test stays
+    green, because no test renders a Discord preview.
+
+    So this asserts the CLASS rather than the three lines: every dict literal
+    in main.py that is a face spec carries the colour beside the name.
+
+    A face spec is identified by the fields only a face has -- `band` and
+    `print_short` -- which separates the three from the four JSON wire dicts
+    that also carry `top_card` and must NOT grow a colour."""
+    import ast
+    from pathlib import Path
+
+    source = Path(main.__file__).read_text(encoding="utf-8")
+    offenders, seen = [], []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = {k.value for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+        if not {"band", "print_short"} <= keys:
+            continue
+        seen.append(node.lineno)
+        if "top_card" in keys and "top_card_rgb" not in keys:
+            offenders.append(node.lineno)
+    assert len(seen) == 3, f"expected exactly 3 face specs, found {len(seen)} at {seen}"
+    assert not offenders, f"face specs without top_card_rgb at lines {offenders}"
+
+
+def test_the_spec_builder_feeds_the_real_renderer():
+    """The seam nothing else covers. Every builder test substitutes `_Face`
+    and every renderer test hands in a hand-built literal, so `pc_face` can
+    ship the new badge while `main` still ships a boolean: full suite green,
+    health ok, every face drawn with an empty column.
+
+    This takes the spec the production builder actually produces and hands
+    that exact dict to the real renderer."""
+    import io as _io
+    import pc_face as _real
+    from PIL import Image as _Image
+    from pc_themes_data import rgb_map as _map
+
+    themes = _map()
+    spec = main._pc_face_inputs(_face_row(rarity="common", top_card="Poison"), _ctx())[0]
+    assert spec["top_card"] == "Poison"
+    assert spec["top_card_rgb"] == themes["Poison"]
+
+    png = _real.render_face(spec, _real._effective_labels({}), None, "card")
+    with _Image.open(_io.BytesIO(png)) as image:
+        box = tuple(_real.LAYOUT["rects"]["badge_name"])
+        crop = image.convert("RGBA").crop(box)
+        px = [p for p in crop.getdata() if p[3] > 128]
+        assert px, "the builder's own spec drew no name"
+        core = max(px, key=lambda p: sum((p[i] - (18, 20, 26)[i]) ** 2 for i in range(3)))[:3]
+        assert core == themes["Poison"]

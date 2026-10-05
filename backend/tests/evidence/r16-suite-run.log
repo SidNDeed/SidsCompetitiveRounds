@@ -1,0 +1,28 @@
+script    <repo>/backend/tests/evidence/run-both-suites.sh
+cwd       <repo>/backend
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r16-suite-run.log
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+tree      8 paths differ from HEAD or are untracked; fingerprinted before and after
+  61b3e2a7ea5210b6192eb6236d54d418  backend/tests/evidence/r16-citation-pin.log
+  7fd41c146d9c4819dcf3cffbcd3b3394  backend/tests/evidence/r16-contract-arms.log
+  ea238900bc66e968c8a31c25009210fb  backend/tests/evidence/r16-freeze-guard.log
+  74ae2899fe705b08c62fbc5d4198a29b  backend/tests/evidence/r16-mutation-controls.txt
+  6256ea5bc09d5247a4b01661aa9753ce  backend/tests/evidence/r16-mutation-run.log
+  e0c0c021a0a15e1262b2e7dd52e64db8  backend/tests/evidence/r16-pg-controls.log
+  4689c3fea79dbe8b5cd19342b0ecd55d  backend/tests/evidence/r16-postgresql-controls.txt
+  cf0ea91d1e53268644b35540ea019248  backend/tests/evidence/r16-residual-reach.log
+=== opt-out started 14:25:22 ===
+command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+opt-out rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1882 passed, 38 skipped, 5 warnings in 735.22s (0:12:15)
+=== live DSN started 14:37:44 ===
+command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+dsn rc=0
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+1914 passed, 6 skipped, 5 warnings in 750.07s (0:12:30)
+=== tree re-fingerprinted 14:50:21 ===
+command   bash <repo>/backend/tests/evidence/tree-fingerprint.sh <repo>
+UNCHANGED: the same 8 paths, each byte-identical to the pre-run fingerprint
+=== done 14:50:23 ===

@@ -1,0 +1,66 @@
+Both full suites, run SEQUENTIALLY on this seat, 2026-09-20 (round 7)
+=====================================================================
+
+Never concurrently: the two modes share one local PostgreSQL instance, and a
+concurrent pair would have them fighting over the same scratch databases and
+reporting each other's failures.
+
+  opt-out  FFA_TEST_PG_OPTOUT=1, and the DSN REMOVED from the environment.
+           The live checks become skips, and the guard tests prove that only
+           an AFFIRMATIVE opt-out can do it -- a missing DSN alone cannot,
+           which is what stops the PostgreSQL half vanishing from a green run.
+  live DSN FFA_TEST_PG_DSN=...  the same suite with the live checks RUN.
+
+Instrument: backend/tests/evidence/run-both-suites.sh, committed beside this
+report and taking its DSN and its output directory from the environment.
+
+  SUITE_OUT=<dir> FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> \
+    bash backend/tests/evidence/run-both-suites.sh
+
+------------------------------------------------------------------------------
+== opt-out ==
+1731 passed, 37 skipped, 1 xfailed, 2 warnings in 991.40s (0:16:31)
+
+== live DSN ==
+1753 passed, 15 skipped, 1 xfailed, 2 warnings in 903.74s (0:15:03)
+
+Started 11:20:14 and 11:36:51 UTC, in that order, from one invocation of the
+script above; it ran them back to back and printed both lines.
+
+== the difference, named, and it reconciles two ways ==
+opt-out skips 37, DSN skips 15: the 22 the DSN run executes are the
+PostgreSQL-gated checks. The same 22 shows up in the passed counts --
+1753 - 1731 = 22 -- so the two numbers are derived from different columns of
+the same two lines and agree. Round 6's difference was 19; round 7 adds three
+live checks (the exact-refund statement, the unpayable wager, the unpayable
+series), which is 22.
+
+r7-postgresql-controls.txt selects FORTY-TWO tests: those 22 plus 20 that need
+no server -- 13 opt-out guard cases and 7 source-reading checks -- run in the
+same selection on purpose, since they are what stops the other 22 turning into
+silent skips. 22 + 20 = 42, stated here because the two numbers sit in two
+files.
+
+== failures in either run ==
+Neither summary line above carries a `failed` term. pytest prints one whenever
+a run has any (#596: `N passed` is not a verdict, `failed` is), so its absence
+from a line quoted verbatim IS the zero, and it is re-derivable from this file
+alone rather than from a grep over a path this repository does not contain.
+
+== what the run certifies, exactly ==
+The four source files this round changed were md5'd before the pair started
+and re-checked after it finished; all four matched, so nothing moved under the
+run. Three earlier pairs were STARTED and discarded rather than explained: two
+because an edit landed after the run began, and one because the instrument
+exported the DSN into the opt-out half and turned it into a second live run
+(15 skips instead of 37 -- green, and measuring nothing). A run that overlaps
+its own tree, or that answers a different question than its name, certifies
+nothing (#308).
+
+Two files under evidence/ necessarily post-date this pair: this one, and
+r7-mutation-controls.txt, which records the run that comes next. The only test
+sensitive to what is in evidence/ is
+test_the_committed_evidence_re_derives_its_own_numbers, and it is executed
+against the COMPLETE final directory twice over: once as the inert half of the
+evidence-cites-a-gitignored-path control in r7-mutation-controls.txt, and once
+in the closing selection recorded at the end of that file.

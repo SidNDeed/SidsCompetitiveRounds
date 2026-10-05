@@ -128,7 +128,7 @@ def test_the_snapshot_stores_no_title_for_rank_title_wearers():
 
 def test_the_daily_cap_exemption_is_one_account_and_not_admins():
     assert main.PC_PACK_CAP_EXEMPT_STEAM_IDS == frozenset({STEAM})
-    src = _src(main.pc_open_pack)
+    src = _src(main._pc_open_for)
     guard = 'if source == "bought" and steam_id not in PC_PACK_CAP_EXEMPT_STEAM_IDS:'
     assert src.count(guard) == 1
     block = src[src.index(guard):src.index("# ── 4. the roll", src.index(guard))]

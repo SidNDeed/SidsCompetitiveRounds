@@ -4,7 +4,10 @@ Uses SQLAlchemy async with asyncpg for PostgreSQL.
 """
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 
 DATABASE_URL = os.getenv(
@@ -62,10 +65,117 @@ release_engine = create_async_engine(
 
 release_session = async_sessionmaker(release_engine, class_=AsyncSession, expire_on_commit=False)
 
+# The FFA assembly routes' own pool (connect-failure design V11, the
+# pre-COMMIT-work deadline): POST /api/v1/ffa/lobby/{id}/connect, .../assembly
+# and .../release run under ASM_TXN_DEADLINE_S (3 s, main.py), so a checkout
+# must fail fast instead of waiting the main pool's 30 s. pool_timeout=3 turns
+# a checkout that cannot complete in time into the pool's TimeoutError, which
+# those routes answer as 503 asm_deadline with no write; connect_args timeout=2
+# is asyncpg's connect timeout for a NEW connection (the dialect passes it to
+# asyncpg.connect; the lane's test confirms it against a listener that never
+# answers). What it does not bound: a checked-out connection's own validation
+# (the pre-ping, a recycle, a reconnection after an invalidation) can still
+# delay a request; the routes' elapsed-time check after checkout turns such a
+# delay into a 503, but not its wall time. At most ASM_POOL_SIZE +
+# ASM_POOL_OVERFLOW (8) connections per api process, beside engine's 30 and
+# release_engine's 5.
+#
+# Not added to the post-COMMIT seal listener below: only the quarantine triage
+# read primitive arms the seal, and it never calls these routes; the
+# listener's engine tuple is also pinned by the triage controls.
+ASM_POOL_SIZE = 4
+ASM_POOL_OVERFLOW = 4
+ASM_POOL_TIMEOUT_S = 3
+ASM_CONNECT_TIMEOUT_S = 2
+
+
+def make_asm_engine(url=DATABASE_URL, **connect_args):
+    """An engine with the assembly pool's arguments. The api builds exactly
+    one (asm_engine); a test builds its own with the same arguments against
+    its database (extra connect_args, such as server_settings, merge in)."""
+    args = {"timeout": ASM_CONNECT_TIMEOUT_S}
+    args.update(connect_args)
+    return create_async_engine(
+        url,
+        echo=False,
+        pool_size=ASM_POOL_SIZE,
+        max_overflow=ASM_POOL_OVERFLOW,
+        pool_timeout=ASM_POOL_TIMEOUT_S,
+        pool_pre_ping=True,
+        pool_recycle=1800,
+        connect_args=args,
+    )
+
+
+asm_engine = make_asm_engine()
+
+asm_session = async_sessionmaker(asm_engine, class_=AsyncSession, expire_on_commit=False)
+
+
+# ── The post-COMMIT seal (quarantine triage, RJ-TRIAGE C9) ─────────────────
+# The quarantine triage routes (main.py, _triage_read_txn) read in ONE
+# READ ONLY transaction and then build their response from values copied out
+# of it. While this variable is set -- armed by that primitive once its COMMIT,
+# or its ROLLBACK attempt, is over, until the response is built -- the listener
+# below refuses every statement executed through EITHER engine before it is
+# sent. That covers the request's own session (its next execute would begin a
+# new transaction, outside READ ONLY), a helper that opens its own session
+# with async_session, and the reserved pool. It sees only statements executed
+# through an engine (before_cursor_execute): the pool's pre-ping on checkout
+# is not one of them and is still sent. The variable is context-local, so it
+# seals the task that armed it. Only post_commit_seal sets the variable and
+# only the triage primitive calls it, so no other caller's behaviour changes.
+_post_commit_seal: ContextVar = ContextVar("scr_post_commit_seal", default=None)
+
+# How many statements the seal has refused in this process; the triage
+# controls assert it stays 0 on every route they run.
+post_commit_seal_stats = {"refused": 0}
+
+
+class PostCommitSealed(RuntimeError):
+    """A statement was issued after a triage read transaction had ended."""
+
+
+@contextmanager
+def post_commit_seal(owner: str):
+    """Seal both engines for the body of the with-block, then unseal through
+    the token, whether the body returns or raises."""
+    token = _post_commit_seal.set(owner)
+    try:
+        yield
+    finally:
+        _post_commit_seal.reset(token)
+
+
+def _refuse_sealed_statement(conn, cursor, statement, parameters, context, executemany):
+    owner = _post_commit_seal.get()
+    if owner is not None:
+        post_commit_seal_stats["refused"] += 1
+        first = (statement or "").split(None, 1)[:1]
+        raise PostCommitSealed(
+            f"{owner}: a statement ({first[0] if first else 'empty'}) was issued after "
+            "the read transaction ended; it was not sent")
+
+
+for _sealed_engine in (engine, release_engine):
+    event.listen(_sealed_engine.sync_engine, "before_cursor_execute", _refuse_sealed_statement)
+
 
 async def get_release_db():
     """FastAPI dependency: a session on the reserved pool (the lease release, the ack)."""
     async with release_session() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
+
+async def get_asm_db():
+    """FastAPI dependency: a session on the assembly pool. A session checks a
+    connection out lazily, at its first statement; the assembly routes force
+    the checkout themselves (main.py, _asm_begin) so that a pool timeout is
+    attributed to stage=pool."""
+    async with asm_session() as session:
         try:
             yield session
         finally:

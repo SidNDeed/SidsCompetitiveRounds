@@ -1,0 +1,2091 @@
+"""Discord fix round 1 (player report 2026-09-28): opening a Player Cards pack
+from Discord.
+
+D1: /daily claims today's pack, opens it through POST /internal/pc/packs/open
+and shows the cards it dealt - before this round it only claimed and told the
+player to open the pack in the mod, and no internal route could open a pack.
+
+D2 (a scope addition Sid asked for on 2026-09-28): /buypack buys one pack with
+gold or shards through the same route - the api's price (the mod's), its daily
+cap, its conditional delta debit and gold ledger row, keyed on a nonce the bot
+draws - and shows it the same way.
+
+Round 2, M1 (Codex round 1 MEDIUM 1): a purchase that committed is answered
+with its recorded outcome - the pack and its charge - whatever fails after
+the commit, on its first answer and on every replay of its key. The bot half:
+every answer that settles nothing is replayed with the same key, a bounded
+number of times, and a purchase still unconfirmed stays in the bot's journal
+until the api settles it, so the next /buypack completes it with its own
+nonce instead of buying a second pack.
+
+Server rows call the real app on the lane database (discord_collection_harness's
+Env); bot rows lift discord_bot.py's own functions (the harness's BotRig) over
+that same app, so every request the bot makes is answered by the production
+route. Live PostgreSQL is required, and a missing DSN FAILS by name, as in the
+collection suites:
+    DISCORD_COLLECTION_TEST_PG_DSN=postgresql+asyncpg://user@host:port/<lane database>
+    DISCORD_COLLECTION_TEST_PG_OPTOUT=1   says out loud that this run skips them
+"""
+
+import asyncio
+import json
+import os
+import re
+import secrets
+import threading
+import uuid
+from types import SimpleNamespace
+from typing import Literal
+
+import pytest
+
+import discord_collection_harness as H
+from discord_collection_harness import SCHEMA
+
+DSN = os.environ.get("DISCORD_COLLECTION_TEST_PG_DSN")
+OPTOUT = H.optout(os.environ.get("DISCORD_COLLECTION_TEST_PG_OPTOUT"))
+
+DAILY = "/internal/pc/daily"
+OPEN = "/internal/pc/packs/open"
+PACKS = "/internal/pc/packs"
+UNSHOWN = "Your pack is open - it could not be shown right now; `/pack` shows it."
+
+OPEN_FUNCS = H.REVEAL_FUNCS | {"cmd_pc_daily", "_pc_open_pack_api", "_pc_open_refusal", "_pc_open_and_show",
+                               "_pc_reveal_opened", "cmd_pc_buypack", "_pc_open_verdict", "_pc_buy_pending",
+                               "_pc_buy_pending_write", "_pc_buy_and_show", "_pc_buy_player",
+                               "_pc_buy_settled_ok", "_pc_buy_forget", "_pc_buy_deliver", "_faq_discord_link",
+                               "_pc_buy_journal_update", "_pc_buy_entry", "_pc_buy_record", "_pc_buy_settle",
+                               "_pc_buy_mark_revealing", "_pc_buy_bound"}
+# _PC_BUY_PENDING_FILE is not lifted: rig_over hands the bot a journal path in
+# the test's own folder instead of the container's /opt/bot-state
+OPEN_ASSIGNS = H.REVEAL_ASSIGNS | {"_PC_OPEN_TIMEOUT_S", "_PC_OPENED_UNSHOWN", "_pc_buying", "_PC_OPEN_SENDS",
+                                   "_PC_OPEN_REPLAY_PAUSE_S", "_PC_BUY_UNCONFIRMED", "_PC_BUY_PAUSED",
+                                   "_PC_BUY_MOVED", "_PC_BUY_NO_PLAYER", "_pc_buy_journal_lock", "_PC_BUY_KEEP",
+                                   "_PC_BUY_REBOUND", "_PC_BUY_UNCHECKED",
+                                   "_PC_BUY_SHOWN_BEFORE"}
+
+
+def e2e(monkeypatch, tmp_path, fn, **kw):
+    dsn = H.require_pg(DSN, OPTOUT)
+
+    async def go():
+        async with H.Env(monkeypatch, tmp_path, dsn, **kw) as env:
+            return await fn(env)
+    return H.run(go())
+
+
+def test_pack_open_gate_a_missing_dsn_fails_by_name():
+    with pytest.raises(BaseException) as ex:
+        H.require_pg(None, False)
+    assert "Failed" in type(ex.value).__name__ and "DISCORD_COLLECTION_TEST_PG_DSN" in str(ex.value)
+
+
+# -- shared helpers --------------------------------------------------------------------------
+
+async def world(env, n=5, *, snapshot=True, plan=True):
+    """n pool players, a linked owner outside the pool, a snapshot, and the
+    next roll scripted to deal the pool in order."""
+    subs = await H.pool(env, n, tag="s")
+    own = await env.player("owner", rating=None)
+    if snapshot:
+        await env.snapshot()
+    if plan:
+        env.plan([(s, False, False) for s in subs])
+    return own, subs
+
+
+async def claim(env, who):
+    r = await env.client.post("/api/v1" + DAILY, headers=env.ihead(), params={"discord_id": str(who.discord)})
+    assert r.status_code == 200, (r.status_code, r.text[:300])
+    return r.json()["pack_id"]
+
+
+async def open_internal(env, discord_id, pack_id):
+    return await env.client.post("/api/v1" + OPEN, headers=env.ihead(),
+                                 params={"discord_id": str(discord_id), "pack_id": pack_id})
+
+
+async def pack_row(env, pack_id):
+    rows = await env.rows(f"SELECT status, source, player_id::text AS owner FROM {SCHEMA}.pc_packs"
+                          " WHERE id = CAST(:p AS uuid)", {"p": pack_id})
+    return rows[0] if rows else None
+
+
+async def minted(env, pack_id):
+    return await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_prints WHERE pack_id = CAST(:p AS uuid)",
+                         {"p": pack_id})
+
+
+def _fake_wait_for(clock):
+    """asyncio.wait_for on the rig's clock (the collection suite's own model):
+    the awaited call runs to its end, and one that spent more than `timeout`
+    of the rig's time raises as the real one would have."""
+    async def wait_for(aw, timeout=None):
+        t0 = clock.now
+        out = await aw
+        if timeout is not None and clock.now - t0 > float(timeout):
+            raise asyncio.TimeoutError()
+        return out
+    return wait_for
+
+
+def bot_os(mounted):
+    """The bot's `os`, with os.path.ismount answering `mounted`: in the
+    container the journal's folder is the compose-mounted state volume, and
+    here it is a plain folder of the test's own."""
+    path = SimpleNamespace(**{k: getattr(os.path, k) for k in dir(os.path) if not k.startswith("_")})
+    path.ismount = lambda folder: mounted
+    fake = SimpleNamespace(**{k: getattr(os, k) for k in dir(os) if not k.startswith("_")})
+    fake.path = path
+    return fake
+
+
+def rig_over(env, stub=None, mounted=True):
+    """The lifted bot over the real app; `stub(call)` may answer a request
+    itself (a Reply) or return None to forward it. The bot's purchase journal
+    is bot-state/pc_buy_pending.json in the test's folder - the same file for
+    every rig of one test, as the volume is for every bot process - on what
+    the bot takes for a mounted volume unless `mounted` is False."""
+    base = H.asgi_handler(env)
+
+    async def handler(call):
+        reply = await stub(call) if stub is not None else None
+        if reply is None:
+            reply = await base(call)
+        call.reply = reply
+        return reply
+    state = env.tmp / "bot-state"
+    state.mkdir(exist_ok=True)
+    rig = H.BotRig(handler, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS,
+                   extra={"secrets": secrets, "Literal": Literal, "os": bot_os(mounted),
+                          "_PC_BUY_PENDING_FILE": str(state / "pc_buy_pending.json")})
+    rig.ns["asyncio"].wait_for = _fake_wait_for(rig.clock)
+    rig.base = base
+    return rig
+
+
+async def daily(rig, who_discord):
+    await rig.ns["cmd_pc_daily"](rig.ctx(who_discord))
+
+
+def calls_to(rig, path, method="POST"):
+    return [c for c in rig.calls if c.method == method and c.path == path]
+
+
+# -- the internal opener, server side ----------------------------------------------------------
+
+def test_d1_the_internal_opener_opens_the_linked_players_held_daily_pack(monkeypatch, tmp_path, capsys):
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+        before = await env.rows(f"SELECT COALESCE(gold_spent, 0) AS spent, pc_shards FROM {SCHEMA}.players"
+                                " WHERE id = CAST(:p AS uuid)", {"p": own.id})
+        r = await open_internal(env, own.discord, pack_id)
+        assert r.status_code == 200, (r.status_code, r.text[:400])
+        got = r.json()
+        assert got["pack_id"] == pack_id and got["status"] == "done" and got["source"] == "daily"
+        assert [p["subject_player_id"] for p in got["prints"]] == [s.id for s in subs]
+        row = await pack_row(env, pack_id)
+        assert row["status"] == "done" and row["owner"] == own.id
+        assert await minted(env, pack_id) == 5
+        after = await env.rows(f"SELECT COALESCE(gold_spent, 0) AS spent, pc_shards FROM {SCHEMA}.players"
+                               " WHERE id = CAST(:p AS uuid)", {"p": own.id})
+        assert after == before, "a held pack costs nothing to open"
+    e2e(monkeypatch, tmp_path, body)
+    out = capsys.readouterr().out
+    assert "source=daily pay=None price=0" in out and "via=discord" in out, out[-800:]
+
+
+def test_d1_a_replayed_open_answers_the_committed_pack_on_either_door_and_rolls_once(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        first = await open_internal(env, own.discord, pack_id)
+        assert first.status_code == 200, first.text[:300]
+        again = await open_internal(env, own.discord, pack_id)
+        assert again.status_code == 200, again.text[:300]
+        ids = [p["print_id"] for p in first.json()["prints"]]
+        assert [p["print_id"] for p in again.json()["prints"]] == ids
+        # the mod's door answers the same committed row: one body, one claim
+        canon = env.main._pc.canon_open_pack(own.steam, pack_id)
+        mod = await env.client.post("/api/v1/pc/packs/open", headers=env.mod_headers(own),
+                                    params={"steam_id": own.steam, "sig": H.mod_sig(canon), "pack_id": pack_id})
+        assert mod.status_code == 200, mod.text[:300]
+        assert [p["print_id"] for p in mod.json()["prints"]] == ids
+        assert await minted(env, pack_id) == 5 and env._plans == []
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_the_opener_refuses_another_players_pack_and_leaves_it_unopened(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        other = await env.player("other", rating=None)
+        theirs = await claim(env, other)
+        r = await open_internal(env, own.discord, theirs)
+        assert r.status_code == 404, (r.status_code, r.text[:300])
+        assert (await pack_row(env, theirs))["status"] == "unopened"
+        assert await minted(env, theirs) == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_the_opener_refuses_an_unlinked_discord_id(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        r = await open_internal(env, H.discord_of(999), pack_id)
+        assert r.status_code == 404 and r.json()["detail"] == {"error": "not_linked"}, r.text[:300]
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_the_opener_refuses_a_banned_player_and_writes_nothing(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        await env.ban(own)
+        r = await open_internal(env, own.discord, pack_id)
+        assert r.status_code == 403 and r.json()["detail"] == {"error": "banned"}, r.text[:300]
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+        assert await minted(env, pack_id) == 0
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_open_attempts WHERE pack_id = CAST(:p AS uuid)",
+                             {"p": pack_id}) == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_the_opener_refuses_a_deleted_account(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        discord_id = own.discord
+        await env.delete_data(own)
+        r = await open_internal(env, discord_id, pack_id)
+        assert r.status_code in (404, 410), (r.status_code, r.text[:300])
+        assert await minted(env, pack_id) == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_a_rebind_between_the_lookup_and_the_lock_is_refused(monkeypatch, tmp_path):
+    """The Discord id moves to another account after the route resolved it and
+    before the identity lock: the re-read under the lock refuses, and nothing
+    is opened for either account."""
+    async def body(env):
+        own, subs = await world(env)
+        other = await env.player("other", rating=None, discord=False)
+        pack_id = await claim(env, own)
+        discord_id = own.discord
+        real = env.main._pc_player_by_discord
+        moved = []
+
+        async def lookup_then_rebind(db, did):
+            player = await real(db, did)
+            if not moved:
+                moved.append(True)
+                await env.rebind(did, other)
+            return player
+        monkeypatch.setattr(env.main, "_pc_player_by_discord", lookup_then_rebind)
+        r = await open_internal(env, discord_id, pack_id)
+        assert moved and r.status_code == 404 and r.json()["detail"] == {"error": "not_linked"}, r.text[:300]
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+        assert await minted(env, pack_id) == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_the_renderer_gate_refuses_before_any_write(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        monkeypatch.setattr(env.main, "_pc_renderer_unavailable", lambda: "renderer_unavailable")
+        r = await open_internal(env, own.discord, pack_id)
+        assert r.status_code == 503, (r.status_code, r.text[:300])
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_open_attempts WHERE pack_id = CAST(:p AS uuid)",
+                             {"p": pack_id}) == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_the_identity_lock_is_taken_before_the_claim(monkeypatch, tmp_path):
+    """The shared identity lock the mod's door takes (delete_player_data and
+    the ban writer hold it exclusively across their purges) is taken by the
+    bot's door before the claim, the open's first write."""
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        env.app_sql.clear()
+        r = await open_internal(env, own.discord, pack_id)
+        assert r.status_code == 200, r.text[:300]
+        sql = [" ".join(s.split()) for s in env.app_sql]
+        lock = [i for i, s in enumerate(sql) if "pg_advisory_xact_lock_shared(hashtext(" in s]
+        claim_at = [i for i, s in enumerate(sql) if s.startswith("UPDATE pc_packs SET status = 'opening'")]
+        assert lock and claim_at and lock[0] < claim_at[0], (lock, claim_at)
+    e2e(monkeypatch, tmp_path, body, record_app_sql=True)
+
+
+def test_d1_a_service_account_opens_nothing(monkeypatch, tmp_path):
+    """The service check the mod's door makes (_assert_no_service_subject, both
+    ids) is made by the bot's door too: a service account's held pack stays
+    unopened, and nothing is minted or attempted."""
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        monkeypatch.setattr(env.main, "SPECTATE_BROADCAST_STEAM_IDS", {own.steam})
+        monkeypatch.setattr(env.main, "_service_player_uuid_cache", None)
+        r = await open_internal(env, own.discord, pack_id)
+        assert r.status_code == 403 and r.json()["detail"] == "service_account_forbidden", r.text[:300]
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+        assert await minted(env, pack_id) == 0
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_open_attempts WHERE pack_id = CAST(:p AS uuid)",
+                             {"p": pack_id}) == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- /daily in Discord, end to end ---------------------------------------------------------------
+
+def test_d1_daily_claims_opens_and_posts_the_pack_with_its_picture(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        rig = rig_over(env)
+        await daily(rig, own.discord)
+        claims, opens = calls_to(rig, DAILY), calls_to(rig, OPEN)
+        assert len(claims) == 1 and len(opens) == 1, [(c.method, c.path) for c in rig.calls]
+        pack_id = opens[0].params["pack_id"]
+        assert H._json.loads(claims[0].reply.body)["pack_id"] == pack_id, "the pack /daily claimed is the one it opens"
+        assert opens[0].params["discord_id"] == own.discord
+        row = await pack_row(env, pack_id)
+        assert row == {"status": "done", "source": "daily", "owner": own.id}, row
+        assert len(rig.sent) == 1, [s.content for s in rig.sent]
+        post = rig.sent[0]
+        assert post.file is not None and post.file.filename == "pack.png"
+        assert H.image_of(post.file.data).size == (1947, 549)
+        assert "**Today's pack** (the next one unlocks <t:" in post.content, post.content
+        assert "- daily, opened <t:" in post.content, post.content
+        for i, s in enumerate(subs, start=1):
+            assert f"\n{i}. " in post.content and f"**{s.name}**" in post.content, post.content
+        assert await minted(env, pack_id) == 5
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_daily_opens_a_pack_claimed_earlier_and_left_unopened(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        rig = rig_over(env)
+        await daily(rig, own.discord)
+        opens = calls_to(rig, OPEN)
+        assert len(opens) == 1 and opens[0].params["pack_id"] == pack_id
+        assert (await pack_row(env, pack_id))["status"] == "done"
+        assert len(rig.sent) == 1 and rig.sent[0].file is not None, [s.content for s in rig.sent]
+        assert "**Today's pack**" in rig.sent[0].content
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_a_second_daily_the_same_day_opens_nothing(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        rig = rig_over(env)
+        await daily(rig, own.discord)
+        await daily(rig, own.discord)
+        assert len(calls_to(rig, OPEN)) == 1 and len(calls_to(rig, DAILY)) == 2
+        assert len(rig.sent) == 2 and rig.sent[1].file is None
+        assert "Already claimed today" in rig.sent[1].content and "`/pack` shows your latest pack" in rig.sent[1].content
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_daily_for_an_unlinked_account_asks_for_the_link_and_opens_nothing(monkeypatch, tmp_path):
+    async def body(env):
+        await world(env, plan=False)
+        rig = rig_over(env)
+        await daily(rig, H.discord_of(999))
+        assert calls_to(rig, OPEN) == []
+        assert len(rig.sent) == 1 and "Not linked" in rig.sent[0].content, [s.content for s in rig.sent]
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_an_open_the_api_refuses_keeps_the_pack_and_says_so(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env, snapshot=False, plan=False)   # no pool snapshot: pool_empty
+        rig = rig_over(env)
+        await daily(rig, own.discord)
+        opens = calls_to(rig, OPEN)
+        assert len(opens) == 1 and opens[0].status == 409
+        pack_id = opens[0].params["pack_id"]
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+        assert len(rig.sent) == 1 and rig.sent[0].file is None
+        assert "the pack stays yours, unopened" in rig.sent[0].content, rig.sent[0].content
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_an_open_whose_answer_was_lost_is_sent_once_more_and_answers_the_committed_pack(monkeypatch, tmp_path):
+    """The first open reaches the api and commits, and its answer never comes
+    back (the bot's 20 s timeout): the one resend with the same pack id is
+    answered with the committed row - one roll, one set of prints - and the
+    pack is shown."""
+    async def body(env):
+        own, subs = await world(env)
+        holder = {}
+
+        async def stub(call):
+            if call.method == "POST" and call.path == OPEN and call.n == 1:
+                reply = await holder["rig"].base(call)
+                reply.delay = 25.0
+                return reply
+            return None
+        rig = rig_over(env, stub)
+        holder["rig"] = rig
+        await daily(rig, own.discord)
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [0, 200], [c.status for c in opens]
+        assert opens[0].params["pack_id"] == opens[1].params["pack_id"]
+        assert opens[0].total == 20.0
+        pack_id = opens[0].params["pack_id"]
+        assert await minted(env, pack_id) == 5 and env._plans == []
+        assert len(rig.sent) == 1 and rig.sent[0].file is not None, [s.content for s in rig.sent]
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d1_an_opened_pack_that_cannot_be_shown_says_it_is_open(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+
+        async def stub(call):
+            if call.method == "GET" and call.path == PACKS:
+                return H.Reply(500, json={"detail": "boom"})
+            return None
+        rig = rig_over(env, stub)
+        await daily(rig, own.discord)
+        pack_id = calls_to(rig, OPEN)[0].params["pack_id"]
+        assert (await pack_row(env, pack_id))["status"] == "done"
+        assert len(rig.sent) == 1 and rig.sent[0].file is None
+        assert rig.sent[0].content.endswith(UNSHOWN), rig.sent[0].content
+        assert any("opened, not shown: the read answered HTTP 500" in line for line in rig.logs), rig.logs
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- D2: buying a pack through Discord, server side ----------------------------------------------
+
+PRICE_KEY = {"gold": "pack_price_gold", "shards": "pack_price_shards"}
+
+
+def price_of(env, pay):
+    return int(env.main._pc.PC_ECONOMY[PRICE_KEY[pay]])
+
+
+async def set_gold(env, who, earned, spent=0):
+    await env.ex(f"UPDATE {SCHEMA}.players SET gold_earned = :e, gold_spent = :s WHERE id = CAST(:p AS uuid)",
+                 {"e": int(earned), "s": int(spent), "p": who.id})
+
+
+async def purse(env, who):
+    rows = await env.rows(f"SELECT gold_earned, gold_spent, pc_shards FROM {SCHEMA}.players"
+                          " WHERE id = CAST(:p AS uuid)", {"p": who.id})
+    return rows[0]
+
+
+async def ledger(env, who):
+    return await env.rows(f"SELECT amount, reason, reference_id FROM {SCHEMA}.gold_transactions"
+                          " WHERE player_id = CAST(:p AS uuid) ORDER BY id", {"p": who.id})
+
+
+async def buy_internal(env, discord_id, nonce, pay, **extra):
+    """A purchase through the bot's route. It names the player it is for as
+    the bot does (round 3, M1): the player the Discord id is linked to at
+    this call, unless `player_steam_id` is passed (None: not named)."""
+    params = {"discord_id": str(discord_id), "nonce": nonce, "pay": pay}
+    if "player_steam_id" not in extra:
+        extra["player_steam_id"] = await env.val(f"SELECT steam_id FROM {SCHEMA}.players WHERE discord_id = :d",
+                                                 {"d": str(discord_id)})
+    params.update({k: v for k, v in extra.items() if v is not None})
+    return await env.client.post("/api/v1" + OPEN, headers=env.ihead(), params=params)
+
+
+def test_d2_a_gold_purchase_debits_the_price_as_a_delta_and_writes_the_ledger_row(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 1000 + price, 150)
+        r = await buy_internal(env, own.discord, "d2-gold-" + secrets.token_hex(8), "gold")
+        assert r.status_code == 200, (r.status_code, r.text[:400])
+        got = r.json()
+        assert (got["source"], got["pay"], got["price"], got["status"]) == ("bought", "gold", price, "done")
+        assert await purse(env, own) == {"gold_earned": 1000 + price, "gold_spent": 150 + price, "pc_shards": 10000}
+        assert await ledger(env, own) == [{"amount": -price, "reason": "pc_pack", "reference_id": got["pack_id"]}]
+        assert await minted(env, got["pack_id"]) == 5
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_shards_purchase_debits_the_shards_and_no_gold(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "shards")
+        await set_gold(env, own, 500)
+        r = await buy_internal(env, own.discord, "d2-shards-" + secrets.token_hex(8), "shards")
+        assert r.status_code == 200, (r.status_code, r.text[:400])
+        assert await purse(env, own) == {"gold_earned": 500, "gold_spent": 0, "pc_shards": 10000 - price}
+        assert await ledger(env, own) == []
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_purchase_without_enough_gold_is_refused_and_moves_nothing(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)   # the roll (reads only) comes before the debit, as on the mod's route
+        price = price_of(env, "gold")
+        await set_gold(env, own, price - 1)
+        r = await buy_internal(env, own.discord, "d2-poor-" + secrets.token_hex(8), "gold")
+        assert r.status_code == 402, (r.status_code, r.text[:400])
+        d = r.json()["detail"]
+        assert (d["error"], d["status"], d["price"]) == ("insufficient_gold", "rejected", price)
+        assert await purse(env, own) == {"gold_earned": price - 1, "gold_spent": 0, "pc_shards": 10000}
+        assert await ledger(env, own) == []
+        assert (await pack_row(env, d["pack_id"]))["status"] == "rejected"
+        assert await minted(env, d["pack_id"]) == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_the_daily_cap_refuses_the_purchase_past_it(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        monkeypatch.setitem(env.main._pc.PC_ECONOMY, "paid_packs_per_day", 1)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        first = await buy_internal(env, own.discord, "d2-cap-a-" + secrets.token_hex(8), "gold")
+        assert first.status_code == 200, first.text[:300]
+        second = await buy_internal(env, own.discord, "d2-cap-b-" + secrets.token_hex(8), "gold")
+        assert second.status_code == 409, (second.status_code, second.text[:300])
+        assert (second.json()["detail"]["error"], second.json()["detail"]["cap"]) == ("daily_cap", 1)
+        assert (await purse(env, own))["gold_spent"] == price
+        assert len(await ledger(env, own)) == 1
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_replayed_nonce_answers_the_committed_purchase_and_charges_once(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        nonce = "d2-replay-" + secrets.token_hex(8)
+        first = await buy_internal(env, own.discord, nonce, "gold")
+        again = await buy_internal(env, own.discord, nonce, "gold")
+        assert first.status_code == 200 and again.status_code == 200, (first.text[:200], again.text[:200])
+        assert again.json()["pack_id"] == first.json()["pack_id"]
+        assert [p["print_id"] for p in again.json()["prints"]] == [p["print_id"] for p in first.json()["prints"]]
+        assert (await purse(env, own))["gold_spent"] == price
+        assert len(await ledger(env, own)) == 1 and env._plans == []
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_sent_price_must_be_the_apis_and_a_different_one_is_refused_before_any_debit(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        wrong = await buy_internal(env, own.discord, "d2-price-a-" + secrets.token_hex(8), "gold",
+                                   expected_price=price + 1)
+        assert wrong.status_code == 409, (wrong.status_code, wrong.text[:300])
+        assert (wrong.json()["detail"]["error"], wrong.json()["detail"]["price"]) == ("price_changed", price)
+        assert (await purse(env, own))["gold_spent"] == 0 and await ledger(env, own) == []
+        right = await buy_internal(env, own.discord, "d2-price-b-" + secrets.token_hex(8), "gold",
+                                   expected_price=price)
+        assert right.status_code == 200, right.text[:300]
+        assert (await purse(env, own))["gold_spent"] == price
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_the_route_takes_a_held_pack_or_a_purchase_and_nothing_else(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env, plan=False)
+        pack_id = await claim(env, own)
+        before = await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_packs")
+        head = env.ihead()
+        cases = [
+            {"discord_id": own.discord},                                               # neither form
+            {"discord_id": own.discord, "nonce": "d2-form-" + secrets.token_hex(8)},   # a nonce without pay
+            {"discord_id": own.discord, "nonce": "d2-form-" + secrets.token_hex(8), "pay": "rubies"},
+            {"discord_id": own.discord, "pack_id": pack_id, "nonce": "d2-form-" + secrets.token_hex(8),
+             "pay": "gold"},                                                           # both forms
+            {"discord_id": own.discord, "pack_id": pack_id, "expected_price": 1},
+            # round 3, M1: a purchase names its player, and a held pack takes none
+            {"discord_id": own.discord, "nonce": "d2-form-" + secrets.token_hex(8), "pay": "gold"},
+            {"discord_id": own.discord, "pack_id": pack_id, "player_steam_id": own.steam},
+        ]
+        for params in cases:
+            r = await env.client.post("/api/v1" + OPEN, headers=head, params=params)
+            assert r.status_code == 422, (params, r.status_code, r.text[:200])
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_packs") == before
+        assert (await pack_row(env, pack_id))["status"] == "unopened"
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_two_purchases_racing_for_the_last_packs_worth_of_gold_charge_once(monkeypatch, tmp_path):
+    """Two different nonces at once with gold for exactly one pack: the players
+    row lock orders them and the conditional delta debit refuses the second,
+    so the balance never goes below zero and one ledger row is written."""
+    async def body(env):
+        own, subs = await world(env)
+        env.plan([(s, False, False) for s in subs])
+        price = price_of(env, "gold")
+        await set_gold(env, own, price)
+        a, b = await asyncio.gather(buy_internal(env, own.discord, "d2-race-a-" + secrets.token_hex(8), "gold"),
+                                    buy_internal(env, own.discord, "d2-race-b-" + secrets.token_hex(8), "gold"))
+        assert sorted([a.status_code, b.status_code]) == [200, 402], (a.text[:200], b.text[:200])
+        assert await purse(env, own) == {"gold_earned": price, "gold_spent": price, "pc_shards": 10000}
+        assert len(await ledger(env, own)) == 1
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_an_erasure_between_the_lookup_and_the_lock_buys_nothing(monkeypatch, tmp_path):
+    """The account is erased after the route resolved its Discord id and before
+    the identity lock: the re-read under the lock (_pc_bot_actor) answers the
+    mod's 410, and nothing is written for the erased account - no pack row, no
+    print, no debit, no ledger row. The erasure removes the held packs, so a
+    purchase is the form that could still write."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        discord_id = own.discord
+        real = env.main._pc_player_by_discord
+        erased = []
+
+        async def lookup_then_erase(db, did):
+            player = await real(db, did)
+            if not erased:
+                erased.append(True)
+                await env.delete_data(own)
+            return player
+        monkeypatch.setattr(env.main, "_pc_player_by_discord", lookup_then_erase)
+        r = await buy_internal(env, discord_id, "d2-erased-" + secrets.token_hex(8), "gold")
+        assert erased and r.status_code == 410 and r.json()["detail"] == "Account deleted", (
+            r.status_code, r.text[:300])
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_packs WHERE player_id = CAST(:p AS uuid)",
+                             {"p": own.id}) == 0
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_prints WHERE owner_player_id = CAST(:p AS uuid)",
+                             {"p": own.id}) == 0
+        assert (await purse(env, own))["gold_spent"] == 0
+        assert [row for row in await ledger(env, own) if row["reason"] == "pc_pack"] == []
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- /buypack in Discord, end to end -------------------------------------------------------------
+
+async def buypack(rig, who_discord, pay="gold", ctx=None):
+    await rig.ns["cmd_pc_buypack"](ctx or rig.ctx(who_discord), pay)
+
+
+def test_d2_buypack_buys_opens_and_posts_the_pack(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 1000 + price)
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "gold")
+        opens = calls_to(rig, OPEN)
+        assert len(opens) == 1, [(c.method, c.path) for c in rig.calls]
+        params = opens[0].params
+        assert set(params) == {"discord_id", "locale", "nonce", "pay", "player_steam_id"}, params
+        assert params["discord_id"] == own.discord and params["pay"] == "gold"
+        assert params["player_steam_id"] == own.steam
+        assert re.fullmatch(r"[0-9a-f]{32}", params["nonce"]), params["nonce"]
+        assert len(rig.sent) == 1, [s.content for s in rig.sent]
+        post = rig.sent[0]
+        assert post.file is not None and H.image_of(post.file.data).size == (1947, 549)
+        assert f"**Pack bought for {price} gold** - bought, opened <t:" in post.content, post.content
+        assert (await purse(env, own))["gold_spent"] == price and len(await ledger(env, own)) == 1
+        assert rig.ns["_pc_buying"] == set()
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_buypack_with_shards_pays_shards(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "shards")
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "shards")
+        assert calls_to(rig, OPEN)[0].params["pay"] == "shards"
+        assert len(rig.sent) == 1 and f"**Pack bought for {price} shards**" in rig.sent[0].content
+        assert (await purse(env, own))["pc_shards"] == 10000 - price and await ledger(env, own) == []
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_buypack_without_enough_gold_says_so_and_charges_nothing(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 0)
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "gold")
+        assert len(rig.sent) == 1 and rig.sent[0].file is None
+        assert f"Not enough gold - a pack costs {price} gold. Nothing was charged." in rig.sent[0].content
+        assert await purse(env, own) == {"gold_earned": 0, "gold_spent": 0, "pc_shards": 10000}
+        assert await ledger(env, own) == [] and rig.ns["_pc_buying"] == set()
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_buypack_past_the_daily_cap_says_so(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        monkeypatch.setitem(env.main._pc.PC_ECONOMY, "paid_packs_per_day", 1)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "gold")
+        await buypack(rig, own.discord, "gold")
+        assert [c.status for c in calls_to(rig, OPEN)] == [200, 409]
+        assert len(rig.sent) == 2 and rig.sent[1].file is None
+        assert "Today's limit of bought packs is 1 - it resets at 00:00 UTC." in rig.sent[1].content
+        assert (await purse(env, own))["gold_spent"] == price
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_lost_purchase_answer_is_resent_with_the_same_nonce_and_charges_once(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        holder = {}
+
+        async def stub(call):
+            if call.method == "POST" and call.path == OPEN and call.n == 1:
+                reply = await holder["rig"].base(call)
+                reply.delay = 25.0
+                return reply
+            return None
+        rig = rig_over(env, stub)
+        holder["rig"] = rig
+        await buypack(rig, own.discord, "gold")
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [0, 200], [c.status for c in opens]
+        assert opens[0].params["nonce"] == opens[1].params["nonce"]
+        assert (await purse(env, own))["gold_spent"] == price and len(await ledger(env, own)) == 1
+        assert env._plans == []
+        assert len(rig.sent) == 1 and rig.sent[0].file is not None, [s.content for s in rig.sent]
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_d2_a_buypack_while_one_is_in_flight_buys_nothing_and_the_guard_always_clears(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        rig = rig_over(env)
+        rig.ns["_pc_buying"].add(own.discord)
+        await buypack(rig, own.discord, "gold")
+        assert calls_to(rig, OPEN) == [] and len(rig.sent) == 1
+        assert "your last purchase is still going through" in rig.sent[0].content
+        rig.ns["_pc_buying"].clear()
+        # a send that raises still clears the guard (the finally)
+        ctx = rig.ctx(own.discord)
+
+        async def broken_send(*a, **k):
+            raise RuntimeError("gateway gone")
+        ctx.send = broken_send
+        with pytest.raises(RuntimeError):
+            await buypack(rig, own.discord, "gold", ctx=ctx)
+        assert rig.ns["_pc_buying"] == set()
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- the refusal lines -----------------------------------------------------------------------------
+
+REFUSALS = [
+    (402, {"error": "insufficient_gold", "status": "rejected", "price": 100}, True,
+     "Not enough gold - a pack costs 100 gold. Nothing was charged."),
+    (402, {"error": "insufficient_shards", "status": "rejected", "price": 100}, True,
+     "Not enough shards - a pack costs 100 shards. Nothing was charged."),
+    (409, {"error": "daily_cap", "status": "rejected", "cap": 5}, True,
+     "Today's limit of bought packs is 5 - it resets at 00:00 UTC."),
+    (409, {"error": "pool_empty", "status": "rejected"}, True,
+     "the pack was not bought and nothing was charged."),
+    (409, {"error": "pool_empty", "status": "unopened"}, False,
+     "the pack stays yours, unopened; `/daily` tries again."),
+    (409, {"error": "in_progress"}, False, "That pack is being opened right now"),
+    (403, {"error": "banned"}, False, "Player Cards are closed to this account."),
+    (403, "service_account_forbidden", False, "Player Cards are closed to this account."),
+    (404, {"error": "not_linked"}, False, "Not linked."),
+    (410, "Account deleted", True, "Not linked."),
+    (503, {"error": "renderer_unavailable"}, False, "so nothing was opened - try again later."),
+    # Round 2, M1: every purchase answer that settles nothing reads the same:
+    # being confirmed, where to see it, and that the next /buypack completes it
+    (0, None, True, "your next `/buypack` completes this same purchase instead of buying another."),
+    (500, None, True, "your next `/buypack` completes this same purchase instead of buying another."),
+    (503, {"error": "renderer_unavailable"}, True,
+     "your next `/buypack` completes this same purchase instead of buying another."),
+    (0, None, False, "`/daily` again opens today's pack, or `/pack` shows it if it opened."),
+    (500, None, False, "Couldn't open the pack right now - try again in a moment."),
+]
+
+
+@pytest.mark.parametrize("status, detail, bought, line", REFUSALS)
+def test_d2_each_refusal_is_one_line_that_says_what_happened_to_the_pack(status, detail, bought, line):
+    """_pc_open_refusal: the line /daily and /buypack send when the api did not
+    open the pack, read by status and error token. The purchase lines are the
+    ones a player acts on with money: a refused purchase says nothing was
+    charged, and one left unconfirmed says so, where to see it, and that the
+    next /buypack completes it (round 2, M1). No request is made."""
+    async def never(call):
+        raise AssertionError(f"no request expected: {call.method} {call.path}")
+    rig = H.BotRig(never, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS, extra={"secrets": secrets, "Literal": Literal})
+    body = {"detail": detail} if detail is not None else None
+    got = rig.ns["_pc_open_refusal"](rig.ctx(H.discord_of(1)), status, body, bought=bought)
+    assert line in got, got
+    assert rig.calls == []
+
+
+# -- Round 2, M1 (server): the answer of a committed purchase ------------------------------------
+#
+# Codex round 1 MEDIUM 1: the purchase committed, then the subject query or
+# the answer's construction after the commit raised, and the api answered 500
+# for a purchase it had charged. The fix builds the whole answer inside the
+# transaction that debits and mints, keeps only a best-effort refresh after
+# the commit, and answers every replay of a committed key with the recorded
+# outcome even when its face keys cannot be read.
+
+async def nonce_status(env, nonce):
+    """The purchase's status as the harness's own connection sees it: only a
+    COMMITTED row is visible there, so None means not committed (yet)."""
+    return await env.val(f"SELECT status FROM {SCHEMA}.pc_packs WHERE nonce = :n", {"n": nonce})
+
+
+async def bought_packs(env, who):
+    return await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_packs WHERE player_id = CAST(:p AS uuid)"
+                         " AND source = 'bought'", {"p": who.id})
+
+
+def fail_after_commit(env, monkeypatch, nonce, names=("_pc_pack_subjects", "_pc_face_ctx")):
+    """The reviewer's failure: each named api function raises whenever the
+    purchase keyed on `nonce` is already committed, and runs as normal before
+    that; the Steam prime (the other post-commit step) raises every time.
+    Returns the names in the order they raised."""
+    main = env.main
+    tripped = []
+
+    def after_commit(name, real):
+        async def wrapped(*a, **k):
+            if await nonce_status(env, nonce) is not None:
+                tripped.append(name)
+                raise RuntimeError(f"{name} failed after the commit")
+            return await real(*a, **k)
+        return wrapped
+    for name in names:
+        monkeypatch.setattr(main, name, after_commit(name, getattr(main, name)))
+
+    async def prime(*a, **k):
+        tripped.append("_pc_steam_prime")
+        raise RuntimeError("the Steam prime failed")
+    monkeypatch.setattr(main, "_pc_steam_prime", prime)
+    return tripped
+
+
+def test_m1_a_failure_after_the_purchase_committed_still_answers_the_pack_and_the_charge(
+        monkeypatch, tmp_path, capsys):
+    """The purchase commits and everything after the commit fails: the first
+    answer is the pack and its charge, built before the commit, and a replay
+    of the same nonce answers the same recorded outcome (its face keys cannot
+    be read, so its prints carry none). One debit, one ledger row, one pack."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        nonce = "m1-after-" + secrets.token_hex(8)
+        tripped = fail_after_commit(env, monkeypatch, nonce)
+        first = await buy_internal(env, own.discord, nonce, "gold")
+        assert first.status_code == 200, (first.status_code, first.text[:300])
+        a = first.json()
+        assert (a["status"], a["pay"], a["price"]) == ("done", "gold", price), a
+        assert len(a["prints"]) == 5 and all(p.get("face_rev") for p in a["prints"]), a["prints"]
+        assert tripped == ["_pc_steam_prime"], tripped
+        again = await buy_internal(env, own.discord, nonce, "gold")
+        assert again.status_code == 200, (again.status_code, again.text[:300])
+        b = again.json()
+        assert (b["pack_id"], b["status"], b["pay"], b["price"]) == (a["pack_id"], "done", "gold", price), b
+        assert [p["print_id"] for p in b["prints"]] == [p["print_id"] for p in a["prints"]]
+        assert not any(p.get("face_rev") for p in b["prints"]) and "locale" not in b, b
+        assert tripped == ["_pc_steam_prime", "_pc_pack_subjects"], tripped
+        assert await nonce_status(env, nonce) == "done"
+        assert (await purse(env, own))["gold_spent"] == price and len(await ledger(env, own)) == 1
+        assert await bought_packs(env, own) == 1 and await minted(env, a["pack_id"]) == 5
+        out = capsys.readouterr().out
+        assert "answered as built before the commit; the refresh after it failed" in out, out[-2000:]
+        assert "answered without face keys (RuntimeError: _pc_pack_subjects failed after the commit)" in out
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_the_answer_is_built_inside_the_purchase_so_its_failure_charges_nothing(monkeypatch, tmp_path):
+    """The answer's inputs are read inside the transaction that debits: a
+    failure there, before the commit, rolls the purchase back - nothing
+    charged, no pack, no print - and the same nonce then buys once."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        nonce = "m1-inside-" + secrets.token_hex(8)
+        real = env.main._pc_pack_subjects
+        seen = []
+
+        async def broken(*a, **k):
+            seen.append(await nonce_status(env, nonce))
+            raise RuntimeError("the subject query failed")
+        monkeypatch.setattr(env.main, "_pc_pack_subjects", broken)
+        first = await buy_internal(env, own.discord, nonce, "gold")
+        assert first.status_code == 500, (first.status_code, first.text[:300])
+        assert seen == [None], seen   # it ran before the commit
+        assert await nonce_status(env, nonce) is None and await bought_packs(env, own) == 0
+        assert await env.val(f"SELECT COUNT(*) FROM {SCHEMA}.pc_prints WHERE owner_player_id = CAST(:p AS uuid)",
+                             {"p": own.id}) == 0
+        assert (await purse(env, own))["gold_spent"] == 0 and await ledger(env, own) == []
+        monkeypatch.setattr(env.main, "_pc_pack_subjects", real)
+        env.plan([(s, False, False) for s in subs])
+        again = await buy_internal(env, own.discord, nonce, "gold")
+        assert again.status_code == 200 and again.json()["price"] == price, (again.status_code, again.text[:300])
+        assert (await purse(env, own))["gold_spent"] == price and len(await ledger(env, own)) == 1
+        assert await bought_packs(env, own) == 1
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_the_mods_result_route_answers_the_recorded_purchase_when_its_face_keys_fail(monkeypatch, tmp_path):
+    """/pc/packs/result, the mod's recovery of a purchase whose answer it
+    lost, answers the committed pack and its charge when the face context
+    raises, instead of 500."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        nonce = "m1-result-" + secrets.token_hex(8)
+        first = await buy_internal(env, own.discord, nonce, "gold")
+        assert first.status_code == 200, (first.status_code, first.text[:300])
+
+        async def broken(*a, **k):
+            raise RuntimeError("the face context failed")
+        monkeypatch.setattr(env.main, "_pc_face_ctx", broken)
+        canon = env.main._pc.canon_result(own.steam, nonce)
+        r = await env.client.get("/api/v1/pc/packs/result", headers=env.mod_headers(own),
+                                 params={"steam_id": own.steam, "sig": H.mod_sig(canon), "nonce": nonce})
+        assert r.status_code == 200, (r.status_code, r.text[:300])
+        got = r.json()
+        assert (got["pack_id"], got["status"], got["pay"], got["price"]) == (
+            first.json()["pack_id"], "done", "gold", price), got
+        assert [p["print_id"] for p in got["prints"]] == [p["print_id"] for p in first.json()["prints"]]
+        assert not any(p.get("face_rev") for p in got["prints"]), got["prints"]
+        assert (await purse(env, own))["gold_spent"] == price
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_a_replayed_held_pack_open_answers_the_recorded_pack_when_its_face_keys_fail(monkeypatch, tmp_path):
+    """The same for the other key: a replay of an opened daily pack's id
+    answers its recorded prints, not 500, and rolls nothing."""
+    async def body(env):
+        own, subs = await world(env)
+        pack_id = await claim(env, own)
+        first = await open_internal(env, own.discord, pack_id)
+        assert first.status_code == 200, (first.status_code, first.text[:300])
+
+        async def broken(*a, **k):
+            raise RuntimeError("the face context failed")
+        monkeypatch.setattr(env.main, "_pc_face_ctx", broken)
+        again = await open_internal(env, own.discord, pack_id)
+        assert again.status_code == 200, (again.status_code, again.text[:300])
+        assert again.json()["pack_id"] == pack_id and again.json()["status"] == "done"
+        assert [p["print_id"] for p in again.json()["prints"]] == [p["print_id"] for p in first.json()["prints"]]
+        assert await minted(env, pack_id) == 5 and env._plans == []
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_an_earned_pack_voided_at_open_answers_410_with_its_row_when_its_face_keys_fail(monkeypatch, tmp_path):
+    """The void commits before its answer is built (the third committed
+    answer in the open): with the face context raising it still answers
+    410 voided with the pack's own row, not 500."""
+    async def body(env):
+        own = await env.player("owner", rating=None)
+        pack_id = str(uuid.uuid4())
+        await env.ex(f"INSERT INTO {SCHEMA}.pc_packs (id, player_id, source, mode, kind, reference_id, status)"
+                     " VALUES (CAST(:id AS uuid), CAST(:p AS uuid), 'earned', '1v1', 'win', :ref, 'unopened')",
+                     {"id": pack_id, "p": own.id, "ref": "1v1:" + str(uuid.uuid4())})
+
+        async def broken(*a, **k):
+            raise RuntimeError("the face context failed")
+        monkeypatch.setattr(env.main, "_pc_face_ctx", broken)
+        r = await open_internal(env, own.discord, pack_id)
+        assert r.status_code == 410, (r.status_code, r.text[:300])
+        d = r.json()["detail"]
+        assert (d["error"], d["pack_id"], d["status"], d["source"]) == ("voided", pack_id, "voided", "earned"), d
+        assert (await pack_row(env, pack_id))["status"] == "voided"
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 2, M1 (bot): one retry policy, and a nonce kept until the api settles it --------------
+#
+# Codex round 1 MEDIUM 1, the bot half: /buypack retried its nonce only on
+# status 0, answered "try again" to a 500, and the next /buypack drew a fresh
+# nonce, so a purchase that committed behind a 500 was bought twice. Now every
+# answer _pc_open_verdict calls unconfirmed is replayed with the SAME key, a
+# purchase still unconfirmed after the replays stays in the bot's journal, and
+# the next /buypack completes it with its own nonce; a fresh nonce is drawn
+# only after the api settles the last one.
+
+def journal(rig):
+    """The bot's purchase journal as it is on disk ({} when there is no file)."""
+    path = rig.ns["_PC_BUY_PENDING_FILE"]
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def lose_first_answers(holder, answers):
+    """A stub under which the first purchase nonce the api sees commits on
+    every send, and its first len(answers) answers are replaced on the way
+    back: a Reply is returned instead of the api's, None means the answer
+    never arrives (the bot's 20 s timeout). Later nonces, and later sends,
+    get the api's own answer."""
+    seen = {}
+
+    async def stub(call):
+        if call.method == "POST" and call.path == OPEN and call.params.get("nonce"):
+            nonce = call.params["nonce"]
+            n = seen[nonce] = seen.get(nonce, 0) + 1
+            if len(seen) == 1 and n <= len(answers):
+                reply = await holder["rig"].base(call)
+                lost = answers[n - 1]
+                if lost is None:
+                    reply.delay = 25.0
+                    return reply
+                return lost
+        return None
+    return stub
+
+
+def test_m1_a_purchase_answered_500_after_its_commit_is_replayed_with_the_same_nonce_and_charged_once(
+        monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        holder = {}
+        rig = rig_over(env, lose_first_answers(holder, [H.Reply(500, json={"detail": "Internal Server Error"})]))
+        holder["rig"] = rig
+        await buypack(rig, own.discord, "gold")
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [500, 200], [c.status for c in opens]
+        assert opens[0].params == opens[1].params and rig.sleeps[:1] == [2.0], (opens, rig.sleeps)
+        assert (await purse(env, own))["gold_spent"] == price and len(await ledger(env, own)) == 1
+        assert await bought_packs(env, own) == 1
+        assert len(rig.sent) == 1 and rig.sent[0].file is not None, [s.content for s in rig.sent]
+        assert f"**Pack bought for {price} gold** - bought, opened <t:" in rig.sent[0].content
+        assert journal(rig) == {}
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_a_purchase_left_unconfirmed_is_completed_by_the_next_buypack_and_never_bought_twice(
+        monkeypatch, tmp_path):
+    """The reviewer's scenario to its end. Every answer of the first /buypack
+    is lost after its purchase committed - a 500, a 200 without a body, then
+    no answer at all: the bot sends the same nonce three times, says the
+    purchase is being confirmed and where to see it, and keeps the nonce. The
+    player's next /buypack sends that same nonce, is answered with the
+    recorded purchase, shows it, and buys nothing else. The decisive line is
+    the first assertion: one debit and one pack after both commands."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        holder = {}
+        rig = rig_over(env, lose_first_answers(holder, [H.Reply(500, json={"detail": "Internal Server Error"}),
+                                                       H.Reply(200, b""), None]))
+        holder["rig"] = rig
+        await buypack(rig, own.discord, "gold")
+        after_first = list(rig.sent)
+        env.plan([(s, False, False) for s in subs])   # a deal for a second purchase, should one be made
+        await buypack(rig, own.discord, "gold")
+        spent, packs = (await purse(env, own))["gold_spent"], await bought_packs(env, own)
+        assert (spent, packs) == (price, 1), f"charged {spent // price} times for {packs} packs"
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [500, 200, 0, 200], [c.status for c in opens]
+        assert len({c.params["nonce"] for c in opens}) == 1 and all(c.params["pay"] == "gold" for c in opens)
+        assert [s.content for s in after_first] == [rig.ns["_PC_BUY_UNCONFIRMED"]], [s.content for s in after_first]
+        assert "`/pack` shows the pack" in after_first[0].content
+        assert "your next `/buypack` completes this same purchase" in after_first[0].content
+        assert len(rig.sent) == 2 and rig.sent[1].file is not None, [s.content for s in rig.sent]
+        assert rig.sent[1].content.startswith(f"Your earlier purchase went through - **Pack bought for {price} gold**")
+        assert len(await ledger(env, own)) == 1 and journal(rig) == {}
+        assert any("stays in the journal, unconfirmed (HTTP 0)" in line for line in rig.logs), rig.logs
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_a_purchase_left_unconfirmed_outlasts_a_restart_of_the_bot(monkeypatch, tmp_path):
+    """The journal is a file on the bot's state volume: a new bot process
+    (a fresh namespace, a fresh in-flight guard) completes the purchase the
+    old one left unconfirmed, with its nonce, and charges nothing more."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        holder = {}
+        lost = [H.Reply(502, b"<html>bad gateway</html>")] * 3
+        before = rig_over(env, lose_first_answers(holder, lost))
+        holder["rig"] = before
+        await buypack(before, own.discord, "gold")
+        nonce = calls_to(before, OPEN)[0].params["nonce"]
+        assert journal(before) == {own.discord: {"nonce": nonce, "pay": "gold", "player": own.steam}}
+        env.plan([(s, False, False) for s in subs])
+        after = rig_over(env)
+        assert after.ns["_PC_BUY_PENDING_FILE"] == before.ns["_PC_BUY_PENDING_FILE"]
+        await buypack(after, own.discord, "shards")
+        spent, packs = (await purse(env, own))["gold_spent"], await bought_packs(env, own)
+        assert (spent, packs) == (price, 1), f"charged {spent // price} times for {packs} packs"
+        again = calls_to(after, OPEN)
+        assert [(c.params["nonce"], c.params["pay"], c.status) for c in again] == [(nonce, "gold", 200)]
+        assert (await purse(env, own))["pc_shards"] == 10000
+        assert after.sent[0].content.startswith("Your earlier purchase went through")
+        assert journal(after) == {}
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_a_refused_purchase_is_settled_and_the_next_buypack_draws_a_fresh_nonce(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 0)
+        rig = rig_over(env)
+        await buypack(rig, own.discord, "gold")
+        assert rig.sent[0].content == f"Not enough gold - a pack costs {price} gold. Nothing was charged."
+        assert journal(rig) == {} and rig.sleeps == []
+        await set_gold(env, own, 10 * price)
+        env.plan([(s, False, False) for s in subs])
+        await buypack(rig, own.discord, "gold")
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [402, 200], [c.status for c in opens]
+        assert opens[0].params["nonce"] != opens[1].params["nonce"]
+        assert (await purse(env, own))["gold_spent"] == price and journal(rig) == {}
+        assert rig.sent[1].content.startswith(f"**Pack bought for {price} gold**"), rig.sent[1].content
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_the_nonce_is_in_the_journal_before_the_purchase_is_sent(monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        await set_gold(env, own, 10 * price_of(env, "gold"))
+        holder, at_send = {}, []
+
+        async def stub(call):
+            if call.method == "POST" and call.path == OPEN:
+                at_send.append((call.params["nonce"], journal(holder["rig"])))
+            return None
+        rig = rig_over(env, stub)
+        holder["rig"] = rig
+        await buypack(rig, own.discord, "gold")
+        (nonce, on_disk), = at_send
+        assert on_disk == {own.discord: {"nonce": nonce, "pay": "gold", "player": own.steam}}, on_disk
+        assert journal(rig) == {} and len(rig.sent) == 1 and rig.sent[0].file is not None
+    e2e(monkeypatch, tmp_path, body)
+
+
+@pytest.mark.parametrize("state", ["not on a mounted volume", "unreadable", "not purchases", "no player named"])
+def test_m1_a_journal_that_cannot_hold_the_nonce_buys_nothing(state, monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        await set_gold(env, own, 10 * price_of(env, "gold"))
+        rig = rig_over(env, mounted=state != "not on a mounted volume")
+        path = rig.ns["_PC_BUY_PENDING_FILE"]
+        if state == "unreadable":
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{half a journal")
+        elif state == "not purchases":
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({own.discord: {"nonce": "", "pay": "gold", "player": own.steam}}, f)
+        elif state == "no player named":   # round 3, M1: the round-2 shape cannot name its player
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({own.discord: {"nonce": "n" * 32, "pay": "gold"}}, f)
+        await buypack(rig, own.discord, "gold")
+        assert calls_to(rig, OPEN) == [], [(c.method, c.path) for c in rig.calls]
+        assert [s.content for s in rig.sent] == [rig.ns["_PC_BUY_PAUSED"]]
+        assert (await purse(env, own))["gold_spent"] == 0 and await ledger(env, own) == []
+        why = {"not on a mounted volume": "is not a mounted volume", "unreadable": "could not be read",
+               "not purchases": "holds something other than purchases",
+               "no player named": "holds something other than purchases"}[state]
+        assert any(line.startswith("[PC-BUY]") and why in line for line in rig.logs), rig.logs
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1_a_daily_open_answered_500_after_its_commit_is_replayed_with_the_same_pack_id_and_shown(
+        monkeypatch, tmp_path):
+    async def body(env):
+        own, subs = await world(env)
+        holder = {}
+
+        async def stub(call):
+            if call.method == "POST" and call.path == OPEN and call.n == 1:
+                await holder["rig"].base(call)
+                return H.Reply(500, json={"detail": "Internal Server Error"})
+            return None
+        rig = rig_over(env, stub)
+        holder["rig"] = rig
+        await daily(rig, own.discord)
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [500, 200], [c.status for c in opens]
+        assert opens[0].params == opens[1].params
+        assert await minted(env, opens[0].params["pack_id"]) == 5 and env._plans == []
+        assert len(rig.sent) == 1 and rig.sent[0].file is not None
+        assert "**Today's pack** (the next one unlocks <t:" in rig.sent[0].content
+    e2e(monkeypatch, tmp_path, body)
+
+
+def _ambiguous(kind):
+    return {
+        "no answer": H.Reply(200, b"", delay=25.0),
+        "500": H.Reply(500, json={"detail": "Internal Server Error"}),
+        "502 from the edge": H.Reply(502, b"<html>bad gateway</html>"),
+        "503 renderer gate": H.Reply(503, json={"detail": {"error": "renderer_unavailable"}}),
+        "200 without a body": H.Reply(200, b""),
+        "200 without a pack": H.Reply(200, json={"status": "done"}),
+        "409 in progress": H.Reply(409, json={"detail": {"error": "in_progress", "status": "pending"}}),
+        "422": H.Reply(422, json={"detail": [{"msg": "field required"}]}),
+        "429": H.Reply(429, json={"detail": "Too many requests"}),
+    }[kind]
+
+
+@pytest.mark.parametrize("kind", ["no answer", "500", "502 from the edge", "503 renderer gate", "200 without a body",
+                                  "200 without a pack", "409 in progress", "422", "429"])
+def test_m1_every_unconfirmed_answer_is_replayed_with_the_same_key_a_bounded_number_of_times(kind):
+    """_pc_open_pack_api, both doors' one policy: each kind of answer that
+    settles nothing is followed by a replay of the SAME key after a pause,
+    three sends in all, and the verdict stays unconfirmed. No database."""
+    async def handler(call):
+        return _ambiguous(kind)
+    rig = H.BotRig(handler, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS, extra={"secrets": secrets, "Literal": Literal})
+    params = {"discord_id": H.discord_of(1), "locale": "en", "nonce": "n" * 32, "pay": "gold"}
+    verdict, status, _body = H.run(rig.ns["_pc_open_pack_api"](dict(params)))
+    assert verdict == "unconfirmed", (verdict, status)
+    assert [c.params for c in rig.calls] == [params] * 3 and rig.sleeps == [2.0, 5.0], (rig.calls, rig.sleeps)
+    assert sum("unconfirmed (HTTP" in line for line in rig.logs) == 3, rig.logs
+
+
+VERDICTS = [
+    (200, {"pack_id": "p", "status": "done"}, False, "opened"),
+    (200, {"pack_id": "p", "status": "done"}, True, "opened"),
+    (200, None, False, "unconfirmed"),
+    (200, "", False, "unconfirmed"),
+    (200, {"status": "done"}, False, "unconfirmed"),
+    (402, {"detail": {"error": "insufficient_gold", "status": "rejected", "price": 100}}, True, "refused"),
+    (402, {"detail": {"error": "insufficient_shards", "status": "rejected", "price": 100}}, False, "refused"),
+    (409, {"detail": {"error": "daily_cap", "status": "rejected", "cap": 5}}, True, "refused"),
+    (409, {"detail": {"error": "pool_empty", "status": "rejected"}}, True, "refused"),
+    (409, {"detail": {"error": "pool_empty", "status": "unopened"}}, False, "refused"),
+    (410, {"detail": {"error": "voided", "status": "voided"}}, False, "refused"),
+    (409, {"detail": {"error": "in_progress", "status": "pending"}}, False, "unconfirmed"),
+    (409, {"detail": {"error": "in_progress"}}, False, "unconfirmed"),
+    (404, {"detail": {"error": "not_linked"}}, False, "refused"),
+    (404, {"detail": {"error": "not_linked"}}, True, "unconfirmed"),
+    (403, {"detail": {"error": "banned"}}, False, "refused"),
+    (403, {"detail": {"error": "banned"}}, True, "unconfirmed"),
+    (403, {"detail": "service_account_forbidden"}, False, "refused"),
+    (410, {"detail": "Account deleted"}, False, "refused"),
+    (410, {"detail": "Account deleted"}, True, "unconfirmed"),
+    (412, {"detail": {"error": "player_changed", "player_steam_id": "s", "recorded": "done"}}, True, "moved"),
+    (412, {"detail": {"error": "player_changed", "player_steam_id": "s", "recorded": None}}, False, "moved"),
+    (412, {"detail": "Precondition Failed"}, False, "unconfirmed"),
+    (404, {"detail": "Not Found"}, False, "unconfirmed"),
+    (0, None, False, "unconfirmed"),
+    (500, {"detail": "Internal Server Error"}, False, "unconfirmed"),
+    (502, "<html>bad gateway</html>", False, "unconfirmed"),
+    (503, {"detail": {"error": "renderer_unavailable"}}, False, "unconfirmed"),
+    (401, {"detail": "Invalid internal key"}, False, "unconfirmed"),
+    (422, {"detail": [{"msg": "field required"}]}, False, "unconfirmed"),
+    (429, {"detail": "Too many requests"}, False, "unconfirmed"),
+]
+
+
+@pytest.mark.parametrize("status, body, replayed, verdict", VERDICTS)
+def test_m1_each_answer_is_read_as_opened_refused_or_unconfirmed(status, body, replayed, verdict):
+    """_pc_open_verdict: only a 200 carrying the pack opens; a refusal with a
+    known reason settles the key (a caller's refusal only when no earlier
+    send of the key went unanswered); everything else leaves it
+    unconfirmed. No request is made."""
+    async def never(call):
+        raise AssertionError(f"no request expected: {call.method} {call.path}")
+    rig = H.BotRig(never, funcs=OPEN_FUNCS, assigns=OPEN_ASSIGNS, extra={"secrets": secrets, "Literal": Literal})
+    assert rig.ns["_pc_open_verdict"](status, body, replayed) == verdict
+    assert rig.calls == []
+
+
+# -- Round 3, M1: a journaled purchase is bound to the player it was bought for -------------------
+# Codex round 2 MEDIUM 1: the journal kept only discord id -> {nonce, pay}, while the api's key is
+# (player, nonce) and its actor is the Discord id's player at each request. A Discord id linked to
+# another player between the commit and a replay therefore made the replay a second purchase, for
+# that other player. Now the journal names the player the purchase is for, every send names it,
+# and the api refuses (412 player_changed) a purchase whose Discord id has since moved, before any
+# write; the bot settles such an entry as the earlier player's.
+
+async def pack_result(env, who, nonce):
+    """The mod's own recovery read, /pc/packs/result, keyed on the player and the nonce."""
+    canon = env.main._pc.canon_result(who.steam, nonce)
+    return await env.client.get("/api/v1/pc/packs/result", headers=env.mod_headers(who),
+                                params={"steam_id": who.steam, "sig": H.mod_sig(canon), "nonce": nonce})
+
+
+async def two_players(env):
+    """The buyer A (linked, funded) and B (funded, linked to nothing yet): the
+    Discord id moves from A to B in these tests."""
+    own, subs = await world(env)
+    other = await env.player("other", rating=None, discord=False)
+    price = price_of(env, "gold")
+    await set_gold(env, own, 10 * price)
+    await set_gold(env, other, 10 * price)
+    return own, other, subs, price
+
+
+async def holdings(env, who):
+    """(gold spent, bought packs, ledger rows) of one player."""
+    return (await purse(env, who))["gold_spent"], await bought_packs(env, who), len(await ledger(env, who))
+
+
+def deal(env, subs):
+    """One more scripted deal, so a second purchase - should one be made - can mint."""
+    if not env._plans:
+        env.plan([(s, False, False) for s in subs])
+
+
+def test_m1r3_the_api_refuses_a_purchase_whose_discord_id_is_now_linked_to_another_player(monkeypatch, tmp_path):
+    """The server half. A/N commits; the Discord id moves to B; the same key,
+    naming A, is refused 412 player_changed with A's recorded status and no
+    write; a key never committed is refused the same way (recorded null); B
+    is untouched; A/N stays readable on /pc/packs/result; and the Discord id
+    buys for B only when a purchase names B."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        d = own.discord
+        nonce = "m1r3-api-" + secrets.token_hex(8)
+        first = await buy_internal(env, d, nonce, "gold")
+        assert first.status_code == 200 and first.json()["player_steam_id"] == own.steam, first.text[:300]
+        await env.rebind(d, other)
+        deal(env, subs)
+        again = await buy_internal(env, d, nonce, "gold", player_steam_id=own.steam)
+        spent, packs, rows = await holdings(env, other)
+        assert (spent, packs, rows) == (0, 0, 0), f"B charged {spent} gold, holds {packs} packs, {rows} ledger rows"
+        assert again.status_code == 412, (again.status_code, again.text[:300])
+        assert again.json()["detail"] == {"error": "player_changed", "player_steam_id": own.steam,
+                                          "recorded": "done"}, again.json()
+        never = await buy_internal(env, d, "m1r3-api-never-" + secrets.token_hex(8), "gold",
+                                   player_steam_id=own.steam)
+        assert never.status_code == 412 and never.json()["detail"]["recorded"] is None, never.text[:300]
+        assert await holdings(env, other) == (0, 0, 0)
+        assert await holdings(env, own) == (price, 1, 1)
+        r = await pack_result(env, own, nonce)
+        assert r.status_code == 200 and r.json()["pack_id"] == first.json()["pack_id"], r.text[:300]
+        deal(env, subs)
+        ok = await buy_internal(env, d, "m1r3-api-b-" + secrets.token_hex(8), "gold", player_steam_id=other.steam)
+        assert ok.status_code == 200 and ok.json()["player_steam_id"] == other.steam, ok.text[:300]
+        assert await holdings(env, other) == (price, 1, 1) and await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def commit_then_rebind(holder, env, to):
+    """The reviewer's falsifier, automatic-retry arm: the first purchase send
+    commits at the api, the Discord id is then linked to `to` through the
+    production link route, and the answer is lost - replaced by a 500 - on
+    its way back. Every later send gets the api's own answer."""
+    state = {"n": 0}
+
+    async def stub(call):
+        if call.method == "POST" and call.path == OPEN and call.params.get("nonce"):
+            state["n"] += 1
+            if state["n"] == 1:
+                await holder["rig"].base(call)
+                await env.rebind(call.params["discord_id"], to)
+                return H.Reply(500, json={"detail": "Internal Server Error"})
+        return None
+    return stub
+
+
+def test_m1r3_a_rebind_before_the_automatic_retry_charges_the_new_player_nothing(monkeypatch, tmp_path):
+    """Commit A/N behind a 500, the Discord id moves to B, and the bot's own
+    replay of N names A: B's balance and pack count are unchanged, A holds
+    exactly one ledger row and one pack, the entry is settled as A's with one
+    plain line, and A/N stays readable by its journaled key. The decisive
+    line is the first assertion; under the round-2 journal shape (no player
+    named, the actor re-resolved) B is charged."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        holder = {}
+        rig = rig_over(env, commit_then_rebind(holder, env, other))
+        holder["rig"] = rig
+        d = own.discord
+        deal(env, subs)
+        await buypack(rig, d, "gold")
+        spent, packs, rows = await holdings(env, other)
+        assert (spent, packs, rows) == (0, 0, 0), f"B charged {spent} gold, holds {packs} packs, {rows} ledger rows"
+        assert await holdings(env, own) == (price, 1, 1)
+        opens = calls_to(rig, OPEN)
+        assert [c.status for c in opens] == [500, 412], [c.status for c in opens]
+        assert len({c.params["nonce"] for c in opens}) == 1
+        assert [c.params["player_steam_id"] for c in opens] == [own.steam, own.steam]
+        assert [s.content for s in rig.sent] == [rig.ns["_PC_BUY_MOVED"]], [s.content for s in rig.sent]
+        assert all(ord(ch) < 128 for ch in rig.ns["_PC_BUY_MOVED"])
+        assert journal(rig) == {}
+        r = await pack_result(env, own, opens[0].params["nonce"])
+        assert r.status_code == 200 and r.json()["status"] == "done" and r.json()["price"] == price, r.text[:300]
+        assert any("settled as the earlier player's" in line for line in rig.logs), rig.logs
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1r3_a_rebind_before_a_restart_replay_charges_the_new_player_nothing(monkeypatch, tmp_path):
+    """The restart arm of the falsifier: every answer of A/N is lost after its
+    commit, so the entry stays in the journal naming A; the Discord id moves
+    to B; a new bot process's /buypack replays N naming A and is refused.
+    B is untouched, A holds one pack and one ledger row, the new process sends
+    exactly that one key and draws no fresh nonce on that entry, and A/N stays
+    readable. Only the NEXT /buypack, a new purchase, buys for B."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        holder = {}
+        lost = [H.Reply(500, json={"detail": "Internal Server Error"}), H.Reply(200, b""), None]
+        before = rig_over(env, lose_first_answers(holder, lost))
+        holder["rig"] = before
+        d = own.discord
+        await buypack(before, d, "gold")
+        nonce = calls_to(before, OPEN)[0].params["nonce"]
+        assert journal(before) == {d: {"nonce": nonce, "pay": "gold", "player": own.steam}}
+        await env.rebind(d, other)
+        deal(env, subs)
+        after = rig_over(env)
+        await buypack(after, d, "gold")
+        spent, packs, rows = await holdings(env, other)
+        assert (spent, packs, rows) == (0, 0, 0), f"B charged {spent} gold, holds {packs} packs, {rows} ledger rows"
+        assert await holdings(env, own) == (price, 1, 1)
+        assert [(c.params["nonce"], c.params["player_steam_id"], c.status) for c in calls_to(after, OPEN)] == \
+            [(nonce, own.steam, 412)]
+        assert [s.content for s in after.sent] == [after.ns["_PC_BUY_MOVED"]] and journal(after) == {}
+        r = await pack_result(env, own, nonce)
+        assert r.status_code == 200 and r.json()["status"] == "done", r.text[:300]
+        # a new command is a new purchase, for the player linked now, with a fresh nonce
+        deal(env, subs)
+        await buypack(after, d, "gold")
+        last = calls_to(after, OPEN)[-1]
+        assert last.params["nonce"] != nonce and last.params["player_steam_id"] == other.steam and last.status == 200
+        assert await holdings(env, other) == (price, 1, 1) and await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1r3_a_purchase_starts_only_when_the_buyers_player_can_be_read(monkeypatch, tmp_path):
+    """The player is read before the nonce is drawn: an unlinked Discord id gets
+    the link hint and a link that cannot be read gets one line; neither sends
+    a purchase or writes the journal."""
+    async def body(env):
+        own, subs = await world(env)
+        await set_gold(env, own, 10 * price_of(env, "gold"))
+
+        async def down(call):
+            if call.method == "GET" and call.path.startswith("/players/by-discord/"):
+                return H.Reply(503, json={"detail": "unavailable"})
+            return None
+        rig = rig_over(env, down)
+        await buypack(rig, own.discord, "gold")
+        assert calls_to(rig, OPEN) == [] and journal(rig) == {}
+        assert [s.content for s in rig.sent] == [rig.ns["_PC_BUY_NO_PLAYER"]]
+        stranger = rig_over(env)
+        await buypack(stranger, H.discord_of(9999), "gold")
+        assert calls_to(stranger, OPEN) == [] and journal(stranger) == {}
+        assert len(stranger.sent) == 1 and "Not linked" in stranger.sent[0].content
+        assert (await purse(env, own))["gold_spent"] == 0
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 3, item 2: a definitive answer is not lost at the reveal boundary ----------------------
+# Round 2 took a bought pack's entry out of the journal BEFORE its reveal was delivered, so a crash
+# between the api's answer and the reveal lost the receipt (Codex round 2 residual). Now the entry
+# stays, marked settled with the answer, until the reveal's send has returned, and a /buypack that
+# finds a settled entry delivers that reveal from the journal without any request that could buy.
+
+def test_item2_a_crash_between_the_answer_and_the_reveal_keeps_the_receipt_and_a_restart_delivers_it(
+        monkeypatch, tmp_path):
+    """The purchase commits and is answered; the process dies at the reveal's
+    first read, before anything is sent (round 4: a death INSIDE the send
+    leaves the entry marked, test_low1r4_...). A new bot process's /buypack
+    shows exactly that pack, once, and sends no purchase request. The
+    decisive line is the first assertion after the restart: under the
+    round-2 removal order the entry is gone, the restart buys a second pack,
+    and the reveal of the first is lost."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        before = rig_over(env, dies_at_the_reveal_read({}))
+        with pytest.raises(ProcessEnded):
+            await buypack(before, own.discord, "gold")
+        (first,) = calls_to(before, OPEN)
+        bought = json.loads(first.reply.body)["pack_id"] if first.status == 200 else None
+        after_crash = journal(before)
+        deal(env, subs)   # a deal for a second purchase, should the restart make one
+        after = rig_over(env)
+        await buypack(after, own.discord, "gold")
+        revealed = [c.params.get("pack_id") for c in calls_to(after, PACKS, "GET") if c.params.get("pack_id")]
+        buys = calls_to(after, OPEN)
+        assert (revealed[:1], len(buys)) == ([bought], 0), \
+            f"the reveal of the bought pack was lost: revealed {revealed}, purchase requests after the restart {len(buys)}"
+        assert after_crash == {own.discord: {"nonce": first.params["nonce"], "pay": "gold", "player": own.steam,
+                                             "settled": {"pack_id": bought, "pay": "gold", "price": price}}}, after_crash
+        assert len(after.sent) == 1 and after.sent[0].file is not None, [s.content for s in after.sent]
+        assert after.sent[0].content.startswith(f"Your earlier purchase went through - **Pack bought for {price} gold**")
+        assert journal(after) == {}
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_item2_the_settled_entry_leaves_the_journal_only_after_the_reveal_is_sent(monkeypatch, tmp_path):
+    """While the reveal's send runs, the journal holds the entry marked settled
+    with the answer - and, since round 4 (LOW 1), marked "revealing"; once the
+    send has returned it holds nothing."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        rig = rig_over(env)
+        ctx = rig.ctx(own.discord)
+        real, seen = ctx.send, []
+
+        async def send(*a, **k):
+            seen.append(journal(rig))
+            return await real(*a, **k)
+        ctx.send = send
+        await buypack(rig, own.discord, "gold", ctx=ctx)
+        (buy,) = calls_to(rig, OPEN)
+        pack_id = json.loads(buy.reply.body)["pack_id"]
+        assert seen == [{own.discord: {"nonce": buy.params["nonce"], "pay": "gold", "player": own.steam,
+                                       "settled": {"pack_id": pack_id, "pay": "gold", "price": price},
+                                       "revealing": True}}], seen
+        assert journal(rig) == {} and len(rig.sent) == 1 and rig.sent[0].file is not None
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 4, M1: every journal change is one locked read-modify-write -----------------------------
+# Codex round 3 MEDIUM 1: /buypack read the whole journal, awaited the buyer's link lookup, and wrote
+# back {**what it read, me: ...}; the in-flight guard is per Discord id, so a second buyer's write could
+# put back a copy of the journal that no longer held the first buyer's nonce, and that buyer's next
+# /buypack would draw a fresh nonce and buy again. Now the write-ahead entry, the settled mark and the
+# removal each read the journal inside one process-wide lock and write before releasing it.
+
+def chain(*stubs):
+    """The first stub answer that is not None, in order."""
+    async def stub(call):
+        for s in stubs:
+            reply = await s(call)
+            if reply is not None:
+                return reply
+        return None
+    return stub
+
+
+def link_barrier(first, second, holder):
+    """Both buyers' link lookups wait until both are in flight - each buyer has
+    read the journal and neither has written its entry - and `second`'s lookup
+    answers only once `first` has sent its purchase, so `first`'s write-ahead
+    entry is on disk before `second` writes its own. Every request records
+    whether the journal lock was held while it was made."""
+    arrived = {first: asyncio.Event(), second: asyncio.Event()}
+    posted = asyncio.Event()
+    locked = []
+
+    async def stub(call):
+        locked.append(holder["rig"].ns["_pc_buy_journal_lock"].locked())
+        if call.method == "GET" and call.path.startswith("/players/by-discord/"):
+            who = call.path.rsplit("/", 1)[-1]
+            if who in arrived:
+                arrived[who].set()
+                await asyncio.wait_for(asyncio.gather(*(e.wait() for e in arrived.values())), 5)
+                if who == second:
+                    await asyncio.wait_for(posted.wait(), 5)
+        if call.method == "POST" and call.path == OPEN and call.params.get("discord_id") == first:
+            posted.set()
+        return None
+    return stub, locked
+
+
+def lose_answers_of(holder, discord_id, answers):
+    """`discord_id`'s first purchase nonce commits on every send, and its first
+    len(answers) answers are replaced on the way back (None: no answer, the
+    bot's timeout). Every other request gets the api's own answer."""
+    first = {}
+
+    async def stub(call):
+        if (call.method == "POST" and call.path == OPEN and call.params.get("nonce")
+                and call.params.get("discord_id") == discord_id):
+            nonce = first.setdefault("nonce", call.params["nonce"])
+            if call.params["nonce"] == nonce:
+                first["n"] = first.get("n", 0) + 1
+                if first["n"] <= len(answers):
+                    reply = await holder["rig"].base(call)
+                    lost = answers[first["n"] - 1]
+                    if lost is None:
+                        reply.delay = 25.0
+                        return reply
+                    return lost
+        return None
+    return stub
+
+
+def watched_ctx(rig, uid, locked):
+    """rig.ctx(uid) whose send records whether the journal lock was held."""
+    ctx = rig.ctx(uid)
+    real = ctx.send
+
+    async def send(*a, **k):
+        locked.append(rig.ns["_pc_buy_journal_lock"].locked())
+        return await real(*a, **k)
+    ctx.send = send
+    return ctx
+
+
+def test_m1r4_two_buyers_racing_the_journal_keep_each_others_nonces(monkeypatch, tmp_path):
+    """The reviewer's falsifier. Two linked buyers both reach the journal step
+    before either link lookup returns; A's purchase N commits and every
+    answer of it is lost; B completes; A's next /buypack runs in a NEW bot
+    process. N is still journaled after the race and is what the restart
+    replays: A holds exactly one debit, one pack and one ledger row, B holds
+    its own one of each, and the lock was free at every request and every
+    send. The decisive line is the first assertion: with the journal written
+    from the command's own earlier read, B's entry write puts back a journal
+    without N and A's restart buys a second pack."""
+    async def body(env):
+        own, subs = await world(env)
+        second = await env.player("second", rating=None)
+        env.plan([(s, False, False) for s in subs])   # B's deal
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        await set_gold(env, second, 10 * price)
+        a, b = str(own.discord), str(second.discord)
+        holder = {}
+        barrier, locked = link_barrier(a, b, holder)
+        lost = [H.Reply(500, json={"detail": "Internal Server Error"}), H.Reply(200, b""), None]
+        rig = rig_over(env, chain(barrier, lose_answers_of(holder, a, lost)))
+        holder["rig"] = rig
+        sends = []
+        ctx_a, ctx_b = watched_ctx(rig, a, sends), watched_ctx(rig, b, sends)
+        await asyncio.gather(buypack(rig, a, "gold", ctx=ctx_a), buypack(rig, b, "gold", ctx=ctx_b))
+        nonce = next(c.params["nonce"] for c in calls_to(rig, OPEN) if c.params["discord_id"] == a)
+        after_race = journal(rig)
+        assert after_race.get(a) == {"nonce": nonce, "pay": "gold", "player": own.steam}, \
+            f"A's committed nonce is not in the journal after the race: {after_race}"
+        assert set(after_race) == {a}, after_race
+        assert await holdings(env, second) == (price, 1, 1)
+        deal(env, subs)   # a deal for a second purchase by A, should the restart make one
+        after = rig_over(env)
+        await buypack(after, a, "gold")
+        spent, packs, rows = await holdings(env, own)
+        assert (spent, packs, rows) == (price, 1, 1), f"A charged {spent // price} times, {packs} packs, {rows} rows"
+        assert [(c.params["nonce"], c.params["player_steam_id"], c.status) for c in calls_to(after, OPEN)] == \
+            [(nonce, own.steam, 200)]
+        assert after.sent[-1].content.startswith(f"Your earlier purchase went through - **Pack bought for {price} gold**")
+        assert await holdings(env, second) == (price, 1, 1)
+        assert journal(after) == {}
+        assert locked and not any(locked), "the journal lock was held across a request"
+        assert sends and not any(sends), "the journal lock was held across a Discord send"
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_m1r4_the_journal_lock_serializes_two_writers_on_two_threads(tmp_path):
+    """The lock itself. Two write-ahead entries are recorded from two threads;
+    the first writer's read of the journal is held open for up to a second
+    waiting for the other writer to read. Under the lock the other cannot
+    read until the first has written, so both entries are in the journal.
+    The decisive line is the assertion: without the lock both read the same
+    empty journal and one entry is lost (or a write fails)."""
+    rig = rig_over(SimpleNamespace(tmp=tmp_path))
+    ns = rig.ns
+    real = ns["_pc_buy_pending"]
+    readers, gate, first_reading, count = set(), threading.Lock(), threading.Event(), threading.Event()
+
+    def slow():
+        me = threading.get_ident()
+        with gate:
+            fresh = me not in readers
+            readers.add(me)
+            n = len(readers)
+        out = real()
+        if fresh and n == 1:
+            first_reading.set()
+            count.wait(1.0)
+        elif fresh:
+            count.set()
+        return out
+    ns["_pc_buy_pending"] = slow
+    entries = {d: {"nonce": secrets.token_hex(16), "pay": "gold", "player": f"7656119{d}"}
+               for d in ("100000000001", "100000000002")}
+    results = {}
+
+    def write(d):
+        results[d] = ns["_pc_buy_record"](d, entries[d])
+    ids = list(entries)
+    t1 = threading.Thread(target=write, args=(ids[0],))
+    t2 = threading.Thread(target=write, args=(ids[1],))
+    t1.start()
+    assert first_reading.wait(5)
+    t2.start()
+    t1.join(10)
+    t2.join(10)
+    ns["_pc_buy_pending"] = real
+    assert (journal(rig), results) == (entries, {d: True for d in ids}), (journal(rig), results)
+
+
+def test_m1r4_every_journal_writer_keeps_the_other_buyers_entries(tmp_path):
+    """Each writer - the write-ahead entry, the settled mark, the removal -
+    changes only its own buyer's entry of the journal it reads inside the
+    lock: an entry another buyer wrote after this buyer's own read survives
+    each of them."""
+    rig = rig_over(SimpleNamespace(tmp=tmp_path))
+    ns = rig.ns
+    mine = {"nonce": "a" * 32, "pay": "gold", "player": "76561190000000001"}
+    theirs = {"nonce": "b" * 32, "pay": "shards", "player": "76561190000000002"}
+    assert ns["_pc_buy_record"]("1", mine)
+    assert ns["_pc_buy_record"]("1", {**mine, "nonce": "c" * 32}) is False   # one entry per buyer
+    assert ns["_pc_buy_record"]("2", theirs)
+    settled = {**mine, "settled": {"pack_id": str(uuid.uuid4()), "pay": "gold", "price": 100}}
+    assert ns["_pc_buy_settle"]("1", settled)
+    assert journal(rig) == {"1": settled, "2": theirs}
+    assert ns["_pc_buy_settle"]("1", {**settled, "nonce": "d" * 32}) is False   # not this buyer's nonce
+    ns["_pc_buy_forget"]("1", "d" * 32)
+    assert journal(rig) == {"1": settled, "2": theirs}
+    ns["_pc_buy_forget"]("1", mine["nonce"])
+    assert journal(rig) == {"2": theirs}
+    assert ns["_pc_buy_entry"]("2") == (True, theirs) and ns["_pc_buy_entry"]("1") == (True, None)
+
+
+# -- Round 4, LOW 2: a settled entry is delivered for the player it was bought for ----------------
+# Codex round 3 LOW 2: _pc_buy_deliver ignored entry["player"] and the reveal read the pack through the
+# Discord id's CURRENT player, so after a rebind the read answered 404, the "/pack shows it" line went
+# out and the entry of the earlier player was discarded undelivered. The reveal's reads now name the
+# journaled player, the api refuses them (412 player_changed) while the Discord id resolves to another,
+# and the entry stays until the binding matches again.
+
+class ProcessEnded(BaseException):
+    """The bot process ending mid-command: not an Exception, so nothing in the bot catches it."""
+
+
+def dies_at_the_reveal_read(state):
+    """The process ends at the first pack read of the reveal - after the api's
+    answer is settled in the journal, before anything is sent."""
+    async def stub(call):
+        if call.method == "GET" and call.path == PACKS and call.params.get("pack_id") and not state.get("died"):
+            state["died"] = True
+            raise ProcessEnded("the process ended before the reveal")
+        return None
+    return stub
+
+
+def test_low2r4_a_settled_entry_waits_for_its_player_and_is_revealed_when_the_binding_matches(
+        monkeypatch, tmp_path):
+    """The reviewer's falsifier. A's purchase is settled in the journal and its
+    reveal never delivered; the Discord id is rebound to B: a /buypack neither
+    marks nor discards the entry, sends one line with no pointer at /pack,
+    and buys nothing; rebound to A: the same pack is revealed, with zero
+    purchase requests, and the entry leaves. The decisive line is the first
+    assertion after the rebind to B: read through the player linked now, the
+    reveal answered 404 and the entry was discarded."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        d = own.discord
+        before = rig_over(env, dies_at_the_reveal_read({}))
+        with pytest.raises(ProcessEnded):
+            await buypack(before, d, "gold")
+        (buy,) = calls_to(before, OPEN)
+        bought = json.loads(buy.reply.body)["pack_id"]
+        settled = journal(before)
+        assert settled == {d: {"nonce": buy.params["nonce"], "pay": "gold", "player": own.steam,
+                               "settled": {"pack_id": bought, "pay": "gold", "price": price}}}, settled
+        await env.rebind(d, other)
+        deal(env, subs)
+        moved = rig_over(env)
+        await buypack(moved, d, "gold")
+        assert journal(moved) == settled, f"the entry was not kept for its player: {journal(moved)}"
+        assert [s.content for s in moved.sent] == [moved.ns["_PC_BUY_REBOUND"]], [s.content for s in moved.sent]
+        assert "/pack" not in moved.ns["_PC_BUY_REBOUND"] and all(ord(ch) < 128 for ch in moved.ns["_PC_BUY_REBOUND"])
+        assert calls_to(moved, OPEN) == []
+        reads = [c for c in calls_to(moved, PACKS, "GET") if c.params.get("pack_id")]
+        assert [(c.params["pack_id"], c.params.get("player_steam_id"), c.status) for c in reads] == \
+            [(bought, own.steam, 412)], [(c.params, c.status) for c in reads]
+        assert await holdings(env, other) == (0, 0, 0) and await holdings(env, own) == (price, 1, 1)
+        await env.rebind(d, own)
+        back = rig_over(env)
+        await buypack(back, d, "gold")
+        assert calls_to(back, OPEN) == []
+        revealed = [c.params["pack_id"] for c in calls_to(back, PACKS, "GET") if c.params.get("pack_id")]
+        assert revealed and set(revealed) == {bought}, revealed
+        assert len(back.sent) == 1 and back.sent[0].file is not None, [s.content for s in back.sent]
+        assert back.sent[0].content.startswith(f"Your earlier purchase went through - **Pack bought for {price} gold**")
+        assert journal(back) == {}
+        assert await holdings(env, other) == (0, 0, 0) and await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_low2r4_the_pack_read_refuses_a_player_the_discord_id_no_longer_resolves_to(monkeypatch, tmp_path):
+    """The server half: GET /internal/pc/packs naming a player answers that
+    player's pack while the Discord id resolves to it, and 412 player_changed
+    - before any read - once it resolves to another; without the name the
+    read is the Discord id's current player's, as before."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        d = own.discord
+        r = await buy_internal(env, d, "low2r4-" + secrets.token_hex(8), "gold", player_steam_id=own.steam)
+        assert r.status_code == 200, r.text[:300]
+        pack = r.json()["pack_id"]
+
+        async def read(**extra):
+            return await env.client.get("/api/v1" + PACKS, headers=env.ihead(),
+                                        params={"discord_id": str(d), "pack_id": pack, **extra})
+        ok = await read(player_steam_id=own.steam)
+        assert ok.status_code == 200 and ok.json()["packs"][0]["pack_id"] == pack, ok.text[:300]
+        await env.rebind(d, other)
+        refused = await read(player_steam_id=own.steam)
+        assert refused.status_code == 412 and refused.json()["detail"] == {
+            "error": "player_changed", "player_steam_id": own.steam}, refused.text[:300]
+        plain = await read()
+        assert plain.status_code == 404, plain.text[:300]
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 4, LOW 1: a settled reveal is never posted twice ---------------------------------------
+# Codex round 3 LOW 1: the reveal's send can reach Discord and still raise, or never return, and the
+# entry left the journal only after it returned, so a restart posted the reveal again. The direction
+# chosen: the entry is marked "revealing" under the journal lock immediately BEFORE the send, and an
+# entry carrying the mark is never revealed again - the next /buypack sends the pointer at /pack and
+# takes it out once that send has returned. Round 5, LOW 2: the pointer is at least once, not exactly
+# once - one reveal at most; the pointer may repeat after a failed acknowledgement; never a second
+# debit, never a second reveal (test_low2r5_...).
+
+def test_low1r4_a_reveal_whose_send_may_have_been_seen_is_never_posted_twice(monkeypatch, tmp_path):
+    """The reviewer's falsifier, adapted. The first reveal's send reaches
+    Discord (recorded as visible) and the process ends before it returns;
+    after the restart exactly one reveal was ever posted, the restart sent no
+    purchase request, read the pack only for its player check (round 5),
+    and its one /buypack sent one pointer; the
+    entry is gone. The decisive line is the first assertion after the
+    restart: without the mark the restart revealed the pack a second time."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        d = own.discord
+        before = rig_over(env)
+        ctx = before.ctx(d)
+        visible = []
+
+        async def seen_then_dies(content=None, **k):
+            visible.append(SimpleNamespace(content=content, file=k.get("file")))
+            raise ProcessEnded("the send reached Discord and the process ended before it returned")
+        ctx.send = seen_then_dies
+        with pytest.raises(ProcessEnded):
+            await buypack(before, d, "gold", ctx=ctx)
+        (buy,) = calls_to(before, OPEN)
+        bought = json.loads(buy.reply.body)["pack_id"]
+        marked = journal(before)
+        deal(env, subs)   # a deal for a second purchase, should the restart make one
+        after = rig_over(env)
+        await buypack(after, d, "gold")
+        reveals = visible + [s for s in after.sent if s.file is not None or "**Pack bought for" in (s.content or "")]
+        assert len(reveals) == 1, f"the bought pack was revealed {len(reveals)} times"
+        assert marked == {d: {"nonce": buy.params["nonce"], "pay": "gold", "player": own.steam,
+                              "settled": {"pack_id": bought, "pay": "gold", "price": price}, "revealing": True}}, marked
+        assert [s.content for s in after.sent] == [after.ns["_PC_BUY_SHOWN_BEFORE"]], [s.content for s in after.sent]
+        assert all(ord(ch) < 128 for ch in after.ns["_PC_BUY_SHOWN_BEFORE"])
+        assert calls_to(after, OPEN) == []
+        # round 5, LOW 1: the restart's only read is the journaled player's check, before the pointer
+        assert [(c.params["pack_id"], c.params.get("player_steam_id"), c.status)
+                for c in calls_to(after, PACKS, "GET")] == [(bought, own.steam, 200)]
+        assert journal(after) == {}
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+def test_low1r4_a_reveal_whose_mark_cannot_be_written_is_not_sent(monkeypatch, tmp_path):
+    """The mark comes first: when it cannot be written, the reveal is not sent
+    - the pointer is - so a reveal is never on Discord without its mark."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        rig = rig_over(env)
+        rig.ns["_pc_buy_mark_revealing"] = lambda me, nonce: False
+        await buypack(rig, own.discord, "gold")
+        assert [s.content for s in rig.sent] == [rig.ns["_PC_OPENED_UNSHOWN"]], [s.content for s in rig.sent]
+        assert any("its delivery mark could not be written" in line for line in rig.logs), rig.logs
+        assert journal(rig) == {}
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 5, LOW 1: every settled state is checked against its journaled player first -------------
+# Codex round 4 LOW 1: the branch on the delivery mark ("revealing": true) came before the player
+# check, so a marked entry whose Discord id had been linked to another player was answered with the
+# pointer at /pack - which reads the player linked now - and taken out of the journal. Now the check
+# (_pc_buy_bound: the bought pack's read naming the journaled player) comes first for every settled
+# entry, marked or not, and nothing is sent or forgotten until it has answered for that player.
+
+def journal_bytes(rig):
+    """The journal file's bytes, to compare an entry kept byte for byte."""
+    with open(rig.ns["_PC_BUY_PENDING_FILE"], "rb") as f:
+        return f.read()
+
+
+async def settled_for(env, own, marked):
+    """A's purchase, bought and settled in the journal, its reveal never
+    delivered: `marked` - the reveal's send reached Discord and the process
+    ended before it returned, so the entry carries "revealing": true;
+    otherwise the process ended at the reveal's first read, before any mark.
+    Returns (pack id, the journal's bytes, the reveals Discord showed)."""
+    visible = []
+    if marked:
+        before = rig_over(env)
+        ctx = before.ctx(own.discord)
+
+        async def seen_then_dies(content=None, **k):
+            visible.append(SimpleNamespace(content=content, file=k.get("file")))
+            raise ProcessEnded("the send reached Discord and the process ended before it returned")
+        ctx.send = seen_then_dies
+    else:
+        before = rig_over(env, dies_at_the_reveal_read({}))
+        ctx = None
+    with pytest.raises(ProcessEnded):
+        await buypack(before, own.discord, "gold", ctx=ctx)
+    (buy,) = calls_to(before, OPEN)
+    bought = json.loads(buy.reply.body)["pack_id"]
+    entry = {"nonce": buy.params["nonce"], "pay": "gold", "player": own.steam,
+             "settled": {"pack_id": bought, "pay": "gold", "price": price_of(env, "gold")}}
+    if marked:
+        entry["revealing"] = True
+    assert journal(before) == {own.discord: entry}, journal(before)
+    return bought, journal_bytes(before), visible
+
+
+def pack_reads(rig):
+    return [(c.params["pack_id"], c.params.get("player_steam_id"), c.status)
+            for c in calls_to(rig, PACKS, "GET") if c.params.get("pack_id")]
+
+
+@pytest.mark.parametrize("marked", [True, False], ids=["marked", "unmarked"])
+def test_low1r5_a_settled_entry_marked_or_not_stays_bound_to_its_journaled_player(marked, monkeypatch, tmp_path):
+    """The reviewer's falsifier, for both orders of the check. A's purchase is
+    settled in the journal - marked "revealing" (its reveal's send may have
+    been seen) or not - and the Discord id is linked to B: a /buypack answers
+    _PC_BUY_REBOUND, keeps the journal byte for byte, sends no pointer at
+    /pack and no purchase request. Linked back to A, the same purchase
+    resolves with no purchase request: the marked entry with the pointer
+    (never a second reveal), the unmarked one with its reveal; the entry
+    leaves. The decisive line for [marked] is the first assertion after the
+    link to B: with the mark's branch above the check, B's /buypack sent the
+    pointer and took A's entry out of the journal."""
+    async def body(env):
+        own, other, subs, price = await two_players(env)
+        d = own.discord
+        bought, kept, visible = await settled_for(env, own, marked)
+        await env.rebind(d, other)
+        deal(env, subs)   # a deal for a purchase, should the retry make one
+        moved = rig_over(env)
+        await buypack(moved, d, "gold")
+        assert journal_bytes(moved) == kept, f"A's entry was not kept byte for byte: {journal(moved)}"
+        assert [s.content for s in moved.sent] == [moved.ns["_PC_BUY_REBOUND"]], [s.content for s in moved.sent]
+        assert calls_to(moved, OPEN) == []
+        assert pack_reads(moved) == [(bought, own.steam, 412)], pack_reads(moved)
+        assert await holdings(env, other) == (0, 0, 0) and await holdings(env, own) == (price, 1, 1)
+        await env.rebind(d, own)
+        back = rig_over(env)
+        await buypack(back, d, "gold")
+        assert calls_to(back, OPEN) == []
+        if marked:
+            assert [s.content for s in back.sent] == [back.ns["_PC_BUY_SHOWN_BEFORE"]], [s.content for s in back.sent]
+            assert pack_reads(back) == [(bought, own.steam, 200)], pack_reads(back)
+            assert len(visible) == 1   # the one reveal Discord showed before the restart; none since
+        else:
+            assert len(back.sent) == 1 and back.sent[0].file is not None, [s.content for s in back.sent]
+            assert back.sent[0].content.startswith(
+                f"Your earlier purchase went through - **Pack bought for {price} gold**")
+            assert {r[0] for r in pack_reads(back)} == {bought} and all(r[1:] == (own.steam, 200)
+                                                                         for r in pack_reads(back))
+        assert journal(back) == {}
+        assert await holdings(env, other) == (0, 0, 0) and await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+@pytest.mark.parametrize("marked", [True, False], ids=["marked", "unmarked"])
+def test_low1r5_a_check_that_cannot_be_answered_sends_no_pointer_and_forgets_nothing(marked, monkeypatch, tmp_path):
+    """When the journaled player cannot be confirmed - here the pack read
+    answers 503 - nothing is sent but one plain line, nothing is forgotten,
+    and nothing is bought; the next /buypack, with the read answering again,
+    resolves the purchase as above with no purchase request."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        bought, kept, _visible = await settled_for(env, own, marked)
+        deal(env, subs)
+
+        async def down(call):
+            if call.method == "GET" and call.path == PACKS:
+                return H.Reply(503, json={"detail": "unavailable"})
+            return None
+        dark = rig_over(env, down)
+        await buypack(dark, own.discord, "gold")
+        assert journal_bytes(dark) == kept
+        assert [s.content for s in dark.sent] == [dark.ns["_PC_BUY_UNCHECKED"]], [s.content for s in dark.sent]
+        assert "`/pack`" not in dark.ns["_PC_BUY_UNCHECKED"] and all(ord(ch) < 128 for ch in dark.ns["_PC_BUY_UNCHECKED"])
+        assert calls_to(dark, OPEN) == [] and pack_reads(dark) == [(bought, own.steam, 503)]
+        assert any("its player could not be confirmed (HTTP 503)" in line for line in dark.logs), dark.logs
+        again = rig_over(env)
+        await buypack(again, own.discord, "gold")
+        assert calls_to(again, OPEN) == [] and journal(again) == {} and len(again.sent) == 1
+        assert (again.sent[0].content == again.ns["_PC_BUY_SHOWN_BEFORE"]) if marked else (again.sent[0].file is not None)
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)
+
+
+# -- Round 5, LOW 2: the pointer's bound is what the bot can keep ----------------------------------
+# Codex round 4 LOW 2: a pointer that Discord showed can still raise, or its process end, before
+# _pc_buy_forget, and the next /buypack sends it again. A send that became visible before it returned
+# cannot be told from one that never arrived, so the pointer is at least once (the integrator's
+# default, 2026-10-01): one reveal at most; the pointer may repeat after a failed acknowledgement;
+# never a second debit, never a second reveal.
+
+def test_low2r5_a_pointer_seen_before_its_send_failed_may_repeat_and_nothing_else_does(monkeypatch, tmp_path):
+    """The reviewer's falsifier, with the disclosed outcome. A's marked entry
+    (one reveal was shown); a /buypack's pointer becomes visible and the
+    process ends before the send returns, so the entry stays as it was; after
+    a restart the next /buypack sends the pointer again - a second pointer is
+    permitted - with zero purchase requests and zero reveals, and the entry
+    leaves the journal only after that acknowledged send. The decisive lines
+    are the zero purchase requests and the entry still journaled while the
+    second pointer's send runs: with the entry forgotten before the send, the
+    failed acknowledgement left no entry, and the next /buypack bought a
+    second pack."""
+    async def body(env):
+        own, subs = await world(env)
+        price = price_of(env, "gold")
+        await set_gold(env, own, 10 * price)
+        d = own.discord
+        bought, kept, reveals = await settled_for(env, own, True)
+        deal(env, subs)   # a deal for a second purchase, should a retry make one
+        first = rig_over(env)
+        ctx = first.ctx(d)
+        pointers = []
+
+        async def seen_then_dies(content=None, **k):
+            pointers.append(SimpleNamespace(content=content, file=k.get("file")))
+            raise ProcessEnded("the pointer reached Discord and the process ended before its send returned")
+        ctx.send = seen_then_dies
+        with pytest.raises(ProcessEnded):
+            await buypack(first, d, "gold", ctx=ctx)
+        assert journal_bytes(first) == kept, f"the entry did not outlast the failed acknowledgement: {journal(first)}"
+        after = rig_over(env)
+        actx = after.ctx(d)
+        real, during = actx.send, []
+
+        async def watched(*a, **k):
+            during.append(journal(after))
+            return await real(*a, **k)
+        actx.send = watched
+        await buypack(after, d, "gold", ctx=actx)
+        assert calls_to(first, OPEN) == [] and calls_to(after, OPEN) == [], "a retry sent a purchase request"
+        assert during == [json.loads(kept)], f"the entry left before the acknowledged send: {during}"
+        shown = after.ns["_PC_BUY_SHOWN_BEFORE"]
+        assert [p.content for p in pointers] == [shown] and [s.content for s in after.sent] == [shown]
+        assert len(pointers) + len(after.sent) == 2   # the second pointer is permitted (at least once)
+        assert all(s.file is None for s in pointers + after.sent) and len(reveals) == 1   # zero further reveals
+        assert all(r[1:] == (own.steam, 200) for r in pack_reads(first) + pack_reads(after))   # player checks only
+        assert journal(after) == {}
+        assert await holdings(env, own) == (price, 1, 1)
+    e2e(monkeypatch, tmp_path, body)

@@ -9,6 +9,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
+import log_redaction as _schema_logred   # the credential rule (standard library only); BugReportRequest applies it before its clamps
+
 
 # ── Match Submission ───────────────────────────────────────────
 
@@ -815,6 +817,13 @@ class HealthResponse(BaseModel):
     # §8) -- probed by the release train on both roles and read by nothing
     # else. Absent on a build older than v4.13.
     pc_fold: str | None = None
+    # pc_trading: the card-trading word (main._pc_trading_word, migration
+    # 353): ready | off | schema_missing | partial | unknown | broken --
+    # DERIVED from the accept's claim and move literals and the schema
+    # probe, never a constant (#306). The connected arm probes; the
+    # degraded arm reads only this process's cache (broken, the word of a
+    # found schema, else unknown). Absent on a build before trading.
+    pc_trading: str | None = None
     # ffa_hold_fences: which generation of the FFA readmission-hold fences this
     # build carries (main._FFA_HOLD_FENCES; 1 = migration 325's held_until /
     # held_lobby honoured by the janitor lapse sweep, the poll's 3-hour sweep
@@ -824,6 +833,216 @@ class HealthResponse(BaseModel):
     # it has no runtime signal of its own to read (#441: a postcondition that
     # cannot fail is worse than none). Absent on any build before Phase A.
     ffa_hold_fences: int | None = None
+    # rj_triage: which round of the quarantine triage view this build carries
+    # (main._RJ_TRIAGE_MARKER; 2 = round 2: PT3's lobby-wide labels need every
+    # comparison to have run, the read transaction holds automatic collection
+    # off, and a read whose session the server ended answers 503). A code
+    # constant, equal on both boxes by construction, probed by the release
+    # train and read by nothing else (#306): round 2 adds no route, so this
+    # value is what tells its build from the one before it. Absent on any
+    # build before round 2.
+    rj_triage: int | None = None
+    # ticket_redaction: whether this build applies the credential rule
+    # (main._TICKET_REDACTION_MARKER; 1 = log_redaction's Steam session ticket
+    # rule at the bug-report receive path before the first write, in the bundle
+    # scrub every stored-bundle door runs, and on the free-text fields every
+    # bug-report read door serves). A code constant, equal on both boxes by
+    # construction, probed by the release train and read by nothing else
+    # (#306): the batch adds no route, so this value is what tells its build
+    # from the one before it. Absent on any build before it.
+    ticket_redaction: int | None = None
+    # discord_collection: release-train verification plumbing, not a design
+    # mechanism (main._DISCORD_COLLECTION_MARKER; 1 = this build serves the
+    # Discord reveal's four internal routes). A code constant, equal on both
+    # boxes by construction, probed by the release train and read by nothing
+    # else (#306). Absent on any build before it.
+    discord_collection: int | None = None
+    # discord_fix: release-train verification plumbing for the Discord fix
+    # (main._discord_fix_probe): 1 when this app routes the bot's pack opener
+    # to its handler and the read a replay of a purchase key runs (the pack
+    # row by player and nonce; round 2, M1) runs on this box's database, 0
+    # when either fails (a missing column or table answers 0, not
+    # "disconnected"). DERIVED from the route table and from _pc_open_for's
+    # own statement, never a constant (#342): the connected arm probes, the
+    # degraded arm answers the last probe's value (0 before any). Read by
+    # nothing else (#306). Declared without a default, so building the answer
+    # without it raises instead of silently leaving the key out. Absent on
+    # any build before the fix, which is how the release train reads the old
+    # build on both boxes.
+    discord_fix: int
+    # pc_card_art: whether this box's faces draw the top card's art
+    # (main._pc_card_art_word; Discord card render parity). 3 = the renderer
+    # is up, the private art bundle validated in full, and the boot proof drew
+    # every entry into its rect; 1 = the renderer is up and the bundle is
+    # absent or invalid (every top card keeps the name-only badge; never a
+    # refusal); 0 = the renderer cannot serve faces, or an accepted bundle
+    # failed its proof. DERIVED by drawing, never a constant (#342). Declared
+    # without a default, so an answer built without it raises instead of
+    # leaving the key out. Absent on any build before it.
+    pc_card_art: int
+    # pc_art_rect: release-train verification plumbing for bug 408 (the top
+    # card's art geometry): the art rect of the layout this box's renderer
+    # LOADED, "x0,y0,x1,y1" (main._pc_art_rect_word -> pc_face.card_art_rect,
+    # rects.badge_art_back), DERIVED at every request, never a constant
+    # (#342); null when the renderer module did not import. It tells a box on
+    # this geometry from a box on another one even when both draw their own
+    # bundle healthily, which pc_card_art (unchanged in meaning) cannot. Equal
+    # on both roles and both arms; it needs no database. Read by nothing but
+    # the train (#306). Declared without a default, so an answer built
+    # without it raises instead of leaving the key out. Absent on any build
+    # before it.
+    pc_art_rect: str | None
+    # ffa_game_number: whether this build keys an FFA game on the number the
+    # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
+    # names game_number, migration 327's column, AND the prior-game lookup
+    # binds (lobby_id, game_number)). DERIVED from those two SQL literals when
+    # main is imported, never written down, so a build that lost either one
+    # reads 0 (#342). The release train's build discriminator for the rejoin
+    # live-defects batch, which adds no route and no key to a GET answer both
+    # builds serve; equal on both boxes by construction, and read by nothing
+    # else (#306). Declared without a default, so building the answer without
+    # it raises instead of silently leaving the key out. Absent on any build
+    # before that batch, which is how the train reads the old build.
+    ffa_game_number: int
+    # ovt_solo_split: whether this build refuses a 1v2 report that moves another
+    # player into the solo seat once the series holds a recorded game
+    # (main._OVT_SOLO_SPLIT; 1 = submit_ovt_match's compiled constants carry the
+    # refusal's 403 detail AND the trailing literal of its log line). DERIVED
+    # from those two strings when main is imported, never written down, so a
+    # build that lost or edited either one reads 0 (#342). The release train's
+    # build discriminator for the bug 391 batch, which adds no route and no key
+    # to a GET answer both builds serve; equal on both boxes by construction,
+    # and read by nothing else (#306). Declared without a default, so building
+    # the answer without it raises instead of silently leaving the key out.
+    # Absent on any build before that batch, which is how the train reads the
+    # old build.
+    ovt_solo_split: int
+    # lead_forfeit_pergame: whether this build settles a 2v2 lead-forfeit from
+    # the server's own per-game record (team_series_games, migrations 348/351/352) rather
+    # than the DC report's point snapshot (main._LEAD_FORFEIT_PERGAME; 1 =
+    # update_team_live_points' compiled code loads _record_team_game_points AND
+    # team_series_report_dc's loads _team_game_crossed_two). DERIVED from those
+    # two wirings when main is imported, never written down, so a build that
+    # lost either one reads 0 (#342). The release train's build discriminator
+    # for the lead-forfeit hotfix, which adds no route and no key to a GET
+    # answer both builds serve; equal on both boxes by construction, and read
+    # by nothing else (#306). It is a statement about the code only: whether
+    # migrations 348, 351 and 352 have been applied is proven by their own checks.
+    # Declared without a default, so building the answer without it raises
+    # instead of silently leaving the key out. Absent on any build before that
+    # batch, which is how the train reads the old build.
+    lead_forfeit_pergame: int
+    # pc_card_themes: whether this box loaded the ROUNDS card -> ink colour map
+    # that the Top card badge draws its name in (main._PC_CARD_THEMES, seeded
+    # by migration 333). `ready` once the map is non-empty, `empty` when the
+    # startup read found nothing.
+    #
+    # It is the release train's build discriminator for this batch, and it is
+    # the batch's OWN positive signal rather than a version stamp: the map is
+    # loaded once at startup from a table 333 creates, so `ready` says the new
+    # code is running AND its migration landed. `empty` says the code is there
+    # and the data is not, which must read as neither build and stop the train
+    # (#441: the value a broken feature reports must not look like success).
+    # Absent on any build before this batch, which is how the old build reads.
+    pc_card_themes: str | None = None
+    # ladder_hook: how many of the ranked game-reporting paths credit the worn
+    # title ladder in this build (main._LADDER_HOOK). 3 since the title ladders
+    # build (board row 29): submit_match, submit_team_match and
+    # submit_ffa_match each call title_ladders.record_completed_games once per
+    # game; it read 4 on the series-unit build (v1.41.0 item 12), whose fourth
+    # site, _complete_team_series_with_ratings, plays no game. DERIVED from
+    # those functions' compiled code when main is imported, never written
+    # down, so a build that lost a site's call reads less (#342). The release
+    # train's build discriminator for the
+    # ladder-hook batch, which adds no route and no key to a GET answer both
+    # builds serve; equal on both boxes by construction, and read by nothing
+    # else (#306). Declared without a default, so building the answer without
+    # it raises instead of silently leaving the key out. Absent on any build
+    # before that batch, which is how the train reads the old build.
+    ladder_hook: int
+    # team_dc_fallback: whether the database this box is connected to has the
+    # two columns migration 356 adds, which the 2v2 disconnect deferral reads
+    # and writes (main._team_dc_fallback_probe). 1 when a probe naming every
+    # dc_fallback_* column the deferral's SQL names runs, 0 when it fails for
+    # a missing column or table. The column list is DERIVED from that SQL
+    # when main is imported, never written down (#342). It asks the
+    # database: the connected arm probes, the degraded arm answers the last
+    # probe's value (0 before any). The release train's discriminator for
+    # the migration as the api sees it, on both roles (the standby's schema
+    # arrives by replication); read by nothing else (#306). Declared without a
+    # default, so building the answer without it raises instead of silently
+    # leaving the key out. Absent on any build before the 2v2 deferral batch,
+    # which is how the train reads the old build.
+    team_dc_fallback: int
+    # ffa_finishing_count: whether the database this box is connected to has
+    # the four columns the ranked-FFA finishing-count rule reads and writes
+    # (board row 28; main._ffa_finishing_count_probe): ffa_lobbies.member_ids
+    # and .departed_ids, ffa_match_players.left_early and .absent. 1 when a
+    # probe naming every one of them runs, 0 when it fails for a missing
+    # column or table. The column lists are DERIVED from ffa_lobby_start's,
+    # ffa_queue_leave's and submit_ffa_match's compiled SQL when main is
+    # imported, never written down (#342). It asks the database: the
+    # connected arm probes, the degraded arm answers the last probe's value
+    # (0 before any). Migration 363 adds no column of its own -- the rule is
+    # new code over an unchanged schema -- so this is the release train's
+    # discriminator for that code, on both roles (the standby's schema
+    # arrives by replication); read by nothing else (#306). Declared without
+    # a default, so building the answer without it raises instead of
+    # silently leaving the key out. Absent on any build before this batch,
+    # which is how the train reads the old build.
+    ffa_finishing_count: int
+    # pc_motion: how many of the dance-card motion routes are registered on
+    # this app (main._PC_MOTION_ROUTES, design S11.3): the motion upload, the
+    # per-visit motion read, the atlas, the selection and the bot's motion
+    # preview GIF -- 5 on this build. DERIVED from app.routes on every
+    # request, never written down, so a build that lost a route's
+    # registration reads fewer (#306/#342). The build discriminator for the
+    # dance-cards batch, equal on both boxes by construction and read by
+    # nothing else. Declared without a default, so building the answer
+    # without it raises instead of silently leaving the key out. Absent on
+    # any build before that batch, which is how the old build reads.
+    pc_motion: int
+    # title_ladders: how many ladders the catalogue this build serves holds
+    # (main._title_ladders_health_word -> title_ladders.LADDERS): 32 on the
+    # five-tier build (board row 29). DERIVED on every request from the list
+    # the read route and the hook read, never written down (#342). The build
+    # discriminator for the title ladders batch, which adds no route; equal on
+    # both boxes by construction and read by nothing else (#306). Declared
+    # without a default, so building the answer without it raises instead of
+    # silently leaving the key out. Absent on any build before that batch.
+    title_ladders: int
+    # janitor_selftest: the verdict of this api process's boot janitor SQL
+    # self-test (main._janitor_selftest_marker; 1 = it ran and every statement
+    # passed, 0 = it ran and did not pass, 2 = skipped on the read replica,
+    # 3 = not finished yet). DERIVED from the report the self-test recorded,
+    # never written down (#342), and ROLE-AWARE by design: the primary reads 1
+    # once its self-test has passed and the standby reads 2, so the release
+    # train asserts it per role; read by nothing else (#306). Declared without
+    # a default, so building the answer without it raises instead of silently
+    # leaving the key out. Absent on any build before it, which is how the
+    # train reads the old build.
+    janitor_selftest: int
+    # janitor_selftest_build: release-train verification plumbing, not a
+    # design mechanism (main._JANITOR_SELFTEST_BUILD; 1 = this build checks
+    # each janitor statement by its class and reports janitor_selftest). A
+    # code constant, equal on both boxes by construction, so the train can
+    # read it through the edge where janitor_selftest differs by role;
+    # probed by the release train and read by nothing else (#306). Declared
+    # without a default, so building the answer without it raises instead
+    # of silently leaving the key out. Absent on any build before it.
+    janitor_selftest_build: int
+    # connect_failure: how many of the connect-failure design's eight I2
+    # writers (the lock, the poll, connect, assembly, the leave, the verdict,
+    # the report and the release) are wired to their seat-row write in this
+    # build (main._CONNECT_FAILURE; 8 = every one). DERIVED from those
+    # functions' compiled code when main is imported, never written down, so
+    # a build that lost a writer's wiring reads less than 8 (#342). The
+    # release train's build discriminator for the connect-failure batch; read
+    # by nothing else (#306). Declared without a default, so building the
+    # answer without it raises instead of silently leaving the key out.
+    # Absent on any build before that batch, which is how the train reads the
+    # old build.
+    connect_failure: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes
@@ -998,12 +1217,26 @@ class BugReportRequest(BaseModel):
             return v[:64]
         return v
 
+    # THE CREDENTIAL RULE RUNS HERE, BEFORE EACH CLAMP (log_redaction.py). This
+    # is where the text of a bug report is first received, and the clamps below
+    # are its first cut: a Steam session ticket that straddles one can keep,
+    # after a head cut, a head of its value shorter than the rule's 32
+    # characters, and after the log's tail cut, its value without its label.
+    # Either way the rule no longer recognises what survives, and what survives
+    # is part of the credential. So the rule runs over the text as sent, then
+    # the cut.
+    # It runs on the event loop, where FastAPI has just decoded the body: over a
+    # 12 MB log, 6.6 ms with no ticket and 15.9 ms with one, against 38.6 ms for
+    # the JSON decode of the same body (measured on a development seat, 2026-09-25).
+
     @field_validator("description", "repro_steps", mode="before")
     @classmethod
     def _clamp_text(cls, v):
         # Keep the HEAD of free-text fields (the user's own words come first).
-        if isinstance(v, str) and len(v) > 8000:
-            return v[:8000]
+        if isinstance(v, str):
+            v = _schema_logred.redact_credentials(v)    # the rule, over the text as sent
+            if len(v) > 8000:
+                v = v[:8000]                            # then the head is kept
         return v
 
     @field_validator("log_text", mode="before")
@@ -1011,9 +1244,12 @@ class BugReportRequest(BaseModel):
     def _clamp_log(cls, v):
         # Keep the TAIL of the log — the most recent events are what matter for a
         # bug report. BUG_REPORT_LOG_MAX_CHARS pre-gzip, applied as a truncation
-        # and not as a 422-triggering hard cap.
-        if isinstance(v, str) and len(v) > BUG_REPORT_LOG_MAX_CHARS:
-            return v[-BUG_REPORT_LOG_MAX_CHARS:]
+        # and not as a 422-triggering hard cap -- AFTER the credential rule, so
+        # a ticket straddling the cut is never stored in part.
+        if isinstance(v, str):
+            v = _schema_logred.redact_credentials(v)    # the rule, over the log as sent
+            if len(v) > BUG_REPORT_LOG_MAX_CHARS:
+                v = v[-BUG_REPORT_LOG_MAX_CHARS:]       # then the tail is kept
         return v
 
 
@@ -1031,19 +1267,26 @@ class BugReportSummary(BaseModel):
     description: str
     has_log: bool
     log_bytes: int | None
-    # WHAT PUT THE ROW HERE: 'report' = a player filed it from the F5 bug form,
+    # WHAT PUT THE ROW HERE: 'report' = a player filed it from the F5 form,
     # 'auto' = the automatic post-match log upload wrote it (migration 336).
     # Carried so admin triage can tell the two apart. Without it they are
     # indistinguishable in the list, while every triage affordance the pane
     # offers -- a status change, a comment -- reads as acting on a ticket a
     # player filed and is waiting on an answer to.
     #
-    # Appended last and defaulted so an older admin client ignores the extra
-    # key. The default does NOT make this model survive a missing column, and
-    # an earlier version of this comment claimed it did: list_bug_reports
-    # SELECTs `kind` by name, so on a box without migration 336 the query
-    # raises before any response model is built. Migration 336 before the api
-    # is mandatory (#477); the default is about OLD CLIENTS, not old schemas.
+    # Appended last and defaulted, and the default buys exactly ONE thing: an
+    # older admin CLIENT ignores the extra key. It buys nothing against a
+    # database without the column. `list_bug_reports` names `kind` in its raw
+    # SELECT, so on a box whose 336 has not run that statement fails and the
+    # list does not render at all -- a default on the response model cannot
+    # supply a column the query never got back. MIGRATION 336 GOES FIRST AND
+    # THAT IS MANDATORY; 336's own header carries the order and the full
+    # reader/writer inventory. An earlier version of this comment offered the
+    # reverse order as survivable, which reads as permission to deploy the api
+    # first. It is not restated here in its own words on purpose: the standing
+    # check that keeps this sentence honest reads the whole block and does not
+    # model retraction, so a quoted wrong claim is indistinguishable from a
+    # made one (#666).
     kind: str = "report"
 
 
@@ -1619,6 +1862,36 @@ class FfaMatchResponse(BaseModel):
     xp_gained: int = 0          # reporter's own
     gold_gained: int = 0        # reporter's own
     message: str = "FFA match recorded"
+    # ── The lobby's authoritative progress (RJ-3 round 4) ─────────────────
+    # Every answer given once the lobby row has been LOCKED carries these,
+    # acceptances and refusals alike (a refusal carries them in its error body
+    # — see main.py's FfaReportRefusal). Two classes of answer are raised
+    # before there is a lobby row to read and therefore carry none: the
+    # integrity 400s (malformed roster, missing room id, bad signature) and the
+    # 404s (unknown player, lobby not found). A consumer reads them when they
+    # are present rather than assuming they always are.
+    #
+    # They exist because the game number a report names comes from the seats'
+    # own physical game counter, published by the host and frozen once per
+    # game: one terminally refused report leaves that number ahead of the
+    # server for the rest of the sitting, and every later game is then refused
+    # too. A client resynchronises from these instead — the consumer is
+    # specified by RJ-CLIENT-RESYNC-CONTRACT.md in the rejoin lane's review
+    # bundle, which is not a file in this repository, and no shipped client
+    # reads these fields yet.
+    #   games_played  — settled games of this sitting, INCLUDING this one when
+    #                   this answer settled it.
+    #   expected_game — the number the lobby's NEXT report has to name; always
+    #                   games_played + 1.
+    #   settled_game  — set only when the report NAMED a number and the lobby
+    #                   already holds a row for that same number: which number
+    #                   that is. A consumer drops such an outbox entry as
+    #                   terminal instead of retrying it, which is why an answer
+    #                   to a report that named no number never carries it.
+    # Additive: a client that reads none of them behaves exactly as before.
+    games_played: int = 0
+    expected_game: int = 0
+    settled_game: int | None = None
 
 
 class FfaLeaderboardEntry(BaseModel):

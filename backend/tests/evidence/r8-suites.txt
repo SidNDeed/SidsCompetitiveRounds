@@ -1,0 +1,152 @@
+Both full suites, run SEQUENTIALLY on this seat, 2026-09-20 (round 8)
+=====================================================================
+
+Never concurrently: the two modes share one local PostgreSQL instance, and a
+concurrent pair would have them fighting over the same scratch databases and
+reporting each other's failures.
+
+  opt-out  FFA_TEST_PG_OPTOUT=1, and the DSN REMOVED from the environment.
+           The live checks become skips, and the guard tests prove that only
+           an AFFIRMATIVE opt-out can do it -- a missing DSN alone cannot,
+           which is what stops the PostgreSQL half vanishing from a green run.
+  live DSN FFA_TEST_PG_DSN=...  the same suite with the live checks RUN.
+
+Instrument: backend/tests/evidence/run-both-suites.sh, committed beside this
+report and taking its DSN and its output directory from the environment.
+
+== the invocation, which round 8 prints and round 7 did not ==
+The script names what it is about to run, immediately before running it. A
+committed report that shows two summary lines and no invocation is two numbers
+from a selection nobody can reconstruct -- a different selection prints the
+same shape. Quoted from the run's own stdout:
+
+  script    <repo>/backend/tests/evidence/run-both-suites.sh
+  cwd       <repo>/backend
+  python    Python 3.12.10
+  command   env -u FFA_TEST_PG_DSN FFA_TEST_PG_OPTOUT=1 python -m pytest tests/ -q -p no:cacheprovider
+  command   FFA_TEST_PG_DSN=postgresql+asyncpg://<user>@<host>:<port>/<db> python -m pytest tests/ -q -p no:cacheprovider
+
+The DSN is redacted to its shape. The connection is an INPUT to the run and
+belongs in the log; its values are this seat's and do not.
+
+------------------------------------------------------------------------------
+== opt-out ==
+opt-out rc=0
+1734 passed, 40 skipped, 1 xfailed, 2 warnings in 584.40s (0:09:44)
+
+== live DSN ==
+dsn rc=0
+1759 passed, 15 skipped, 1 xfailed, 2 warnings in 559.52s (0:09:19)
+
+Started 22:53:19 and 23:03:08 UTC, in that order, from one invocation of
+the script above; it ran them back to back and printed both lines. Done
+23:12:32.
+
+== the difference, named, and it reconciles two ways ==
+opt-out skips 40, DSN skips 15: the 25 the DSN run executes are the
+PostgreSQL-gated checks. The same 25 shows up in the passed counts --
+1759 - 1734 = 25 -- so the two numbers are derived from different columns of
+the same two lines and agree.
+
+The opt-out totals reconcile against round 7 the same way: 1731 -> 1734 passed
+and 37 -> 40 skipped. Round 8 adds 6 tests. 3 of them read source and run
+everywhere (the production-hygiene sweep, the round-8 control pairing, and
+the check that every control the runner carries is named in the inventory
+and pairs with a test that exists), and 3 are live checks (the refusal
+raised after a capture, the realigned resubmission, and the relock that
+retries once), which are skips in this half. +3 passed and +3 skipped,
+which is exactly what the two lines show.
+
+r8-postgresql-controls.txt selects FORTY-SEVEN tests: those 25 plus 22 that
+need no server -- 13 opt-out guard cases and 9 source-reading checks -- run
+in the same selection on purpose, since they are what stops the other 25
+turning into silent skips. 25 + 22 = 47, stated here because the two
+numbers sit in two files.
+
+== failures in either run ==
+Neither summary line above carries a `failed` term. pytest prints one whenever
+a run has any (#596: `N passed` is not a verdict, `failed` is), so its absence
+from a line quoted verbatim IS the zero, and it is re-derivable from this file
+alone rather than from a grep over a path this repository does not contain.
+Both halves also returned rc=0, printed above the line they describe.
+
+One precision, because the next reader will grep this file for the word. Each
+summary line DOES carry the token `1 xfailed`, which is an expected failure --
+one test marked as expected-to-fail, which did -- and is not a failure count.
+pytest reports failures as `N failed`, a different term, and neither line
+carries one. The distinction is not pedantic: this round's own assembler
+tested the SUBSTRING `failed`, matched it inside `xfailed`, and refused to
+write this report over a pair in which both halves were green. It now tests
+the term. A filter that discards, or condemns, the very line it was built to
+measure is the recurring shape (#441), and it is cheapest to catch in the
+instrument that reads the line rather than in the prose that quotes it.
+
+== why this is the round's THIRD pair, and the earlier two are not quoted ==
+Two earlier pairs of this attempt ran GREEN and were discarded rather than
+committed. Neither was discarded for a failure; both were discarded because a
+source edit landed after them, and a pair that does not cover the final tree
+certifies nothing.
+
+  * After the first, the evidence check's result pattern still had to be
+    widened. The re-pin states its result as `rows rewritten now : 0`, which
+    the pattern did not recognise, so the check reddened a report carrying
+    exactly the result it exists to carry.
+  * After the second, that widening's own control exposed a larger version of
+    the same defect. The checks pairing controls to tests were hand-written
+    lists, so the newly added control was named in none of them and every one
+    of them stayed green regardless. The repair derives the control set from
+    the committed runner instead of restating it, and carries a control of its
+    own.
+
+Both repairs changed tracked files, so both cost a pair. The discarded pairs'
+numbers appear nowhere in this round; only the run below is quoted.
+
+== what the run certifies, exactly, and what it does not ==
+TWELVE files -- every TRACKED file this branch's working copy changes -- were
+md5'd by the script before the pair started and re-hashed when it finished,
+and the script compared the two sets ITSELF. Its verdict, quoted:
+
+  tree      12 tracked files differ from HEAD; hashed before and after
+  UNCHANGED: all 12 tracked files are byte-identical to the pre-run hash
+
+That comparison is the instrument's, not this report's. Round 7 asserted the
+same property in prose, and a sentence saying a run did not overlap its own
+tree is a claim written from the one state its author had in mind; a suite
+that overlaps an edit to its own tree certifies nothing (#308), so the check
+belongs in the thing that runs.
+
+== what ran after this pair, and why that is still sound ==
+THREE runs follow it: the PostgreSQL-gated selection, the mutation runner and
+the route-manifest re-pin. None leaves the tree changed, and none is trusted
+to say so in prose.
+
+  * The PostgreSQL-gated selection only reads the tree and writes its report
+    outside the repository, which is moved in when the run has finished.
+  * The mutation runner mutates three files -- `backend/api/main.py`,
+    `backend/tests/test_ffa_game_number_anchor.py`, and THIS REPORT, which one
+    control targets -- and restores each from a byte-exact copy taken before it
+    started, comparing md5 at the end and printing the comparison. It runs
+    after this pair ON PURPOSE: that way the report it mutates as a control
+    target is the one committed here, rather than a superseded attempt's.
+    Round 8's first ordering ran it first and had to carry that mismatch as a
+    stated limitation.
+  * The re-pin runs WITHOUT `--write`, so it reports what a rewrite would
+    change and changes nothing. `route_manifest_net_seat.json` is one of the
+    twelve hashed above, and its hash is the same before this pair, after it,
+    and at commit.
+
+== what the evidence directory held while the pair ran ==
+Two limits of the fence, stated rather than left to be discovered:
+
+  * The r8 evidence files are UNTRACKED while the pair runs, so
+    `git diff --name-only HEAD` does not list them and they are outside the
+    fence by construction. The fence covers the SOURCE the run exercises,
+    which is what it is for.
+  * Every r8 file was on disk throughout the pair holding its PREVIOUS
+    attempt's contents -- this one included, still carrying the discarded
+    pair's numbers. Each report here is written from its own run's stdout
+    afterwards, so the directory the suite's evidence check read is not the
+    directory committed. Nothing in this round takes a number from a file in
+    evidence/; every number above is quoted from the run's output, and the
+    re-pin log records a closing run of that check made against the directory
+    exactly as committed.

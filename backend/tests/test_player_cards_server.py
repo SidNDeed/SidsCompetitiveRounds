@@ -309,19 +309,31 @@ def test_the_pool_admits_players_who_have_run_the_mod_through_one_fragment():
     src = _main_code()
     # FIVE readers decide membership since the merge, and each interpolates the
     # one word: the snapshot's pool CTE, the open's live re-check, the public
-    # pool summary, the bot's /card and that card's face preview. Counted on the
+    # pool summary, the bot's /card and that card's preview read (one helper
+    # since dance cards B13, round 2, which both preview routes call). Counted on the
     # interpolation spelling -- under either quoting, since the preview builds
     # its statement from single-quoted pieces -- so the number IS the reader
     # count and does not move with prose. The preview joined this count on
     # 2026-09-15: it interpolated _PC_POOL_STEAM_ID_SQL, which is one half of
     # the merged word, while answering not_in_pool.
     assert len(re.findall(r'(?:WHERE|AND) (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 5
-    for fn in (main.pc_pool_summary, main.internal_pc_card, main.internal_pc_face_preview):
+    for fn in (main.pc_pool_summary, main.internal_pc_card, main._pc_preview_read):
         assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', inspect.getsource(fn))) == 1, fn.__name__
+    # The two preview routes decide membership through that one read and carry
+    # no membership clause of their own, so neither can drift from the other.
+    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+        route = inspect.getsource(fn)
+        assert route.count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
+        assert "_PC_POOL_MEMBER_SQL" not in route and "_PC_POOL_STEAM_ID_SQL" not in route, fn.__name__
+    # Card trading (migration 353) reads the word a sixth time: the trader word
+    # opens with it, so a trade party is a pool member by the same fragment,
+    # composed once into _PC_TRADER_OK_SQL and nowhere else.
+    assert main._PC_TRADER_OK_SQL.startswith("(" + fragment)
+    assert len(re.findall(r'\(" \+ _PC_POOL_MEMBER_SQL', src)) == 1
     # ...and the identifier appears nowhere else but its definition and the one
-    # docstring that names it, so a sixth reader cannot reach the word by any
+    # docstring that names it, so a seventh reader cannot reach the word by any
     # other spelling without failing here (comments are stripped by _main_code).
-    assert src.count("_PC_POOL_MEMBER_SQL") == 7
+    assert src.count("_PC_POOL_MEMBER_SQL") == 8
     assert src.count("_PC_POOL_MEMBER_SQL = ") == 1
     assert "_PC_POOL_MEMBER_SQL admits" in inspect.getdoc(main._pc_take_snapshot)
     # the snapshot's WHERE is the fragment alone: no second membership predicate beside it
@@ -525,6 +537,12 @@ def test_migration_321_converts_the_prints_minted_while_legendary_was_rank_1():
     assert inspect.getsource(pc).count("backend/sql/321_pc_rank2_legendary.sql") == 2
 
 
+# The rollover's own statement, as the fake session normalises it. Matching
+# on the INSERT and not on a comment or a table name keeps this a probe with
+# one purpose (#306): nothing else in the janitor inserts into pc_editions.
+ROLL_KEY = "INSERT INTO pc_editions (id, name, started_at, ends_at_planned)"
+
+
 def _due_row(last_at, db_now, today_at, last_rule=None):
     # The latest snapshot's rule defaults to the CURRENT one, so every test
     # written before the rule column asks about the daily rule alone.
@@ -549,12 +567,19 @@ def test_janitor_takes_the_first_snapshot_when_none_exists(monkeypatch):
     today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
     db, taken = _janitor(monkeypatch, _due_row(None, today - timedelta(hours=3), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == ["first"] and db.committed == 3   # retention, the blob janitor, then the snapshot
+    # retention, the blob janitor, the motion janitor's two candidate reads
+    # (dance cards S3.6), the edition rollover, then the snapshot
+    assert taken == ["first"] and db.committed == 6
+    # the rollover ran, and ran BEFORE the due read -- it is deliberately not
+    # behind the snapshot's due gate, so its position in the log is the
+    # property under test and not an implementation detail
+    assert db.count(ROLL_KEY) == 1
+    roll = [i for i, (sql, _) in enumerate(db.log) if ROLL_KEY in sql][0]
     assert db.count("DELETE FROM pc_events WHERE created_at < NOW() - INTERVAL '7 days'") == 1
     # the due state is read before the lock and AGAIN under it (c3 F)
     order = [sql[:40] for sql, _ in db.log]
     due_reads = [i for i, s in enumerate(order) if s == "SELECT (SELECT MAX(taken_at) FROM pc_poo"]
-    assert len(due_reads) == 2
+    assert len(due_reads) == 2 and roll < due_reads[0]
     assert due_reads[0] < order.index("SELECT pg_try_advisory_xact_lock(hashtex") < due_reads[1]
 
 
@@ -569,14 +594,49 @@ def test_janitor_takes_one_per_day_at_or_after_0005_utc(monkeypatch):
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today - timedelta(minutes=2), today))
     _run(main._pc_snapshot_janitor_step())
     assert taken == [] and db.count("pg_try_advisory_xact_lock") == 0
+    # ...and the rollover still ran: it does not share the snapshot's gate
+    assert db.count(ROLL_KEY) == 1
     # already done today: last snapshot after 00:05 today — retention still runs (c3 F)
     db, taken = _janitor(monkeypatch, _due_row(today + timedelta(seconds=30), today + timedelta(hours=5), today))
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 2
-    # lock held elsewhere: no snapshot (retention alone committed)
+    # retention, the motion janitor's two reads + the rollover; no snapshot
+    assert taken == [] and db.count("DELETE FROM pc_events") == 1 and db.committed == 5
+    assert db.count(ROLL_KEY) == 1
+    # lock held elsewhere: no snapshot (retention, the motion janitor's two
+    # reads and the rollover committed)
     db, taken = _janitor(monkeypatch, _due_row(yesterday, today + timedelta(minutes=1), today), lock=False)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.committed == 2
+    assert taken == [] and db.committed == 5
+
+
+def test_the_rollover_runs_on_a_pass_that_takes_no_snapshot(monkeypatch):
+    """The placement, stated as a test. A day whose snapshot has already
+    been taken returns None from _pc_snapshot_due for the rest of that day;
+    a rollover behind that gate would wait until tomorrow. It is in front of
+    it, so the boundary is honoured within one janitor tick."""
+    today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
+    db, taken = _janitor(monkeypatch, _due_row(today + timedelta(seconds=30),
+                                               today + timedelta(hours=5), today))
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == [], "precondition: this pass takes no snapshot"
+    assert db.count(ROLL_KEY) == 1
+
+
+def test_a_failing_rollover_does_not_cost_the_pool_its_snapshot(monkeypatch):
+    """Which direction the unhandled case fails (#276). The rollover is a
+    four-monthly event; the snapshot is the thing every pack open reads. A
+    rollover that raises -- migration 332 not applied yet, say -- must print
+    and let the snapshot proceed, not starve it on every tick."""
+    today = datetime(2026, 9, 11, 0, 5, tzinfo=timezone.utc)
+    db, taken = _janitor(monkeypatch, _due_row(None, today - timedelta(hours=3), today))
+
+    async def _boom(_db):
+        raise RuntimeError("column pc_editions.ends_at_planned does not exist")
+
+    monkeypatch.setattr(main, "_pc_edition_rollover", _boom)
+    _run(main._pc_snapshot_janitor_step())
+    assert taken == ["first"], "the snapshot must still be taken"
+    assert db.rolled_back == 1, "the failed transaction is rolled back first"
 
 
 def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
@@ -597,7 +657,7 @@ def test_janitor_rereads_the_due_state_under_the_lock(monkeypatch):
 
     monkeypatch.setattr(main, "_pc_take_snapshot", _take)
     _run(main._pc_snapshot_janitor_step())
-    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 2
+    assert taken == [] and db.count("pg_try_advisory_xact_lock") == 1 and db.committed == 5
 
 
 # ── the wire shape ───────────────────────────────────────────────────────────
@@ -652,7 +712,7 @@ def test_every_mutation_and_private_read_goes_through_the_verified_actor():
 
 
 def test_the_pack_open_claims_first_rolls_before_the_debit_and_mints_last():
-    src = inspect.getsource(main.pc_open_pack)
+    src = inspect.getsource(main._pc_open_for)
     claim_purchase = src.index("ON CONFLICT (player_id, nonce) WHERE nonce IS NOT NULL DO NOTHING")
     claim_pack = src.index("AND status = 'unopened'")
     lock = src.index("FOR NO KEY UPDATE")
@@ -684,7 +744,16 @@ def test_no_update_of_pc_prints_touches_a_frozen_column():
     allowed = {"discarded_at", "discard_shards", "owner_player_id"}
     for clause in updates:
         cols = {part.split("=")[0].strip() for part in clause.split(",")}
+        # acquired_by_trade (migration 353) is set by a trade's move and by
+        # nothing else, always to true beside an owner change -- the rule the
+        # re-created pc_prints_immutable enforces -- and that move is one
+        # literal, the one the accept and the reversal both run
+        if "acquired_by_trade" in cols:
+            assert clause == "owner_player_id = CAST(:to AS uuid), acquired_by_trade = true", clause
+            cols = cols - {"acquired_by_trade"}
         assert cols <= allowed, clause
+    assert sum("acquired_by_trade" in clause for clause in updates) == 1
+    assert "acquired_by_trade = true" in " ".join(main._PC_TRADE_MOVE_SQL.split())
     assert "DELETE FROM pc_prints WHERE owner_player_id = :pid" in code   # delete-my-data, the only other writer
 
 
@@ -804,6 +873,14 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/pc/settings", ("POST",)), ("/api/v1/pc/me", ("GET",)),
         ("/api/v1/pc/collection", ("GET",)), ("/api/v1/pc/card", ("GET",)), ("/api/v1/pc/pool", ("GET",)),
         ("/api/v1/pc/portrait", ("POST",)),
+        ("/api/v1/pc/portrait/motion", ("POST",)),   # dance cards: the motion upload (S2.6)
+        ("/api/v1/pc/dance", ("POST",)),              # dance cards: the selection (S2.10)
+        # card trading (migration 353): the five player routes
+        ("/api/v1/pc/trades/propose", ("POST",)),
+        ("/api/v1/pc/trades/accept", ("POST",)),
+        ("/api/v1/pc/trades/decline", ("POST",)),
+        ("/api/v1/pc/trades/cancel", ("POST",)),
+        ("/api/v1/pc/trades", ("GET",)),
     }
     admin = [r for r in main.app.routes if getattr(r, "path", "") == "/api/v1/admin/pc/snapshot"]
     assert len(admin) == 1 and "_require_admin(db, admin_steam_id, \"pc_snapshot\", \"pool\", sig)" in inspect.getsource(main.admin_pc_snapshot)
@@ -817,7 +894,15 @@ def test_route_inventory_of_phase_one():
         ("/api/v1/internal/pc/lease/{lease_id}", ("DELETE",)),
         ("/api/v1/internal/pc/face/print/{print_id}/{locale}", ("GET",)),
         ("/api/v1/internal/pc/face/preview/{player_ref}/{locale}", ("GET",)),
+        ("/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif", ("GET",)),   # dance cards: the /card GIF (S6.2)
         ("/api/v1/internal/pc/face/back", ("GET",)),
+        # the Discord collection reveal's reads (build notes, FINDING 9)
+        ("/api/v1/internal/pc/packs", ("GET",)),
+        ("/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png", ("GET",)),
+        ("/api/v1/internal/pc/binder", ("GET",)),
+        ("/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png", ("GET",)),
+        # the bot's pack opener (Discord fix round 1, D1): /daily opens its pack here
+        ("/api/v1/internal/pc/packs/open", ("POST",)),
     }
 
 
@@ -846,7 +931,7 @@ def test_every_player_route_takes_the_shared_identity_lock_before_the_player_rea
 
 
 def test_a_held_packs_failed_open_answers_its_own_unopened_state():
-    src = inspect.getsource(main.pc_open_pack)
+    src = inspect.getsource(main._pc_open_for)
     rej = src[src.index("async def _reject("):src.index("# ── 2. locks")]
     assert 'if source == "bought":\n            raise _pc_reject_http(reason, {"pack_id": this_pack' in rej
     assert '"status": "unopened", "pack_id": this_pack, "source": source' in rej and '"last_attempt"' in rej
@@ -881,7 +966,7 @@ def test_a_ban_withdraws_the_binder_and_the_announcements():
 def test_an_earned_packs_series_must_still_stand_at_open():
     # c5 B: a plain read (no lock, no new lock-order edge) before the claim;
     # an invalidated or missing series voids the pack and answers 410 voided
-    src = inspect.getsource(main.pc_open_pack)
+    src = inspect.getsource(main._pc_open_for)
     claim = src.index("UPDATE pc_packs SET status = 'opening'")
     guard = src.index("_PC_SERIES_STANDING_SQL.items()")
     assert guard < claim
@@ -939,9 +1024,13 @@ def test_titles_and_rank_names_resolve_against_the_rounded_rating():
     snap = inspect.getsource(main._pc_take_snapshot)
     assert "_pc_board_rating(rating)," in snap
     # pinned per FUNCTION, never file-wide (#279): the tier helper, the bot's /card answer, and the preview
-    # drawing through the helper rather than its own expression
+    # read (both preview routes draw through it since dance cards B13) drawing through the helper rather
+    # than its own expression
     assert inspect.getsource(main._pc_rank_name).count("_rank_name_for(_pc_board_rating(rating))") == 1
     assert inspect.getsource(main.internal_pc_card).count("_rank_name_for(_pc_board_rating(rating))") == 1
-    preview = inspect.getsource(main.internal_pc_face_preview)
+    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+        route = inspect.getsource(fn)
+        assert "_pc_rank_name(" not in route and "_rank_name_for(" not in route, fn.__name__
+    preview = inspect.getsource(main._pc_preview_read)
     assert "rank_name = _pc_rank_name(rating)" in preview and "_rank_name_for(" not in preview
     assert 'subtitle = _pc_shop_title(member["title"], rank_name)' in preview and '"subtitle": subtitle' in preview

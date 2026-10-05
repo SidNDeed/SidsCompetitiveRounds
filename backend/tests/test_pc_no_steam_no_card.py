@@ -331,12 +331,19 @@ def test_one_pool_word_carries_the_steam_id_rule_for_every_membership_reader():
     assert live == " ".join((_LIVE_PREFIX + " AND " + word).split())
     # Every reader that DECIDES membership -- answers not_in_pool, or leaves a
     # member out -- carries the one word, in whatever quoting its own statement is
-    # built from. The face preview is in this tuple because it is the reader that
-    # drifted: it carried the id clause alone until 2026-09-15.
-    for fn in (main.pc_pool_summary, main.internal_pc_card, main.internal_pc_face_preview):
+    # built from. The preview read is in this tuple because the face preview is the
+    # reader that drifted: it carried the id clause alone until 2026-09-15. Both
+    # preview routes read membership through it since dance cards B13 (round 2).
+    for fn in (main.pc_pool_summary, main.internal_pc_card, main._pc_preview_read):
         src = inspect.getsource(fn)
         assert len(re.findall(r'AND (?:"""|") \+ _PC_POOL_MEMBER_SQL', src)) == 1, fn.__name__
         assert "_PC_NOT_BANNED_SQL" not in src and "p.deleted_at IS NULL" not in src, fn.__name__
+    # ...and the two preview routes carry no membership clause of their own
+    for fn in (main.internal_pc_face_preview, main.internal_pc_motion_preview):
+        src = inspect.getsource(fn)
+        assert src.count("await _pc_preview_read(db, player_ref, loc, snapshot_id") == 1, fn.__name__
+        assert "_PC_POOL_MEMBER_SQL" not in src and "_PC_NOT_BANNED_SQL" not in src, fn.__name__
+        assert "p.deleted_at IS NULL" not in src, fn.__name__
     # ...and no reader anywhere tests the id clause on its own, which is a property
     # of the MODULE rather than of a tuple someone remembered to extend. The id
     # clause exists to be part of the word, so the counts below enumerate the
@@ -358,24 +365,27 @@ def test_one_pool_word_carries_the_steam_id_rule_for_every_membership_reader():
     # call at 4 and the hand-copied CASE at 1, all unmoved. The bare count is
     # what closes it, and it is measurable rather than asserted: main.py reaches
     # the rule only through `_sid64.`, so in comment-stripped source the bare
-    # count equals the qualified one -- 4 as measured here on 2026-09-16, a
-    # number re-derived rather than carried over from a brief. Any new site
-    # moves it, under any import form and any alias.
+    # count equals the qualified one -- 4 as measured here on 2026-09-16, and
+    # 5 since the Discord collection reveal's composite read (build notes,
+    # FINDING 9), a number re-derived rather than carried over from a brief.
+    # Any new site moves it, under any import form and any alias.
     code = _main_code()
     assert code.count("_PC_POOL_STEAM_ID_SQL") == 2, "the pool's id clause decides membership somewhere on its own"
-    # The four calls, by the alias each reads -- the events word's subject (su),
-    # the bot's face row (s), the Steam sweep's eligibility and the delivery
-    # lease's subject (p). None of them decides POOL membership: they gate a
-    # Discord handout, a picture read, whom the sweep may ask Steam about, and
-    # whether a lease's subject still has an id. A fifth call moves the total
-    # even under an alias nobody listed here.
+    # The five calls, by the alias each reads -- the events word's subject (su),
+    # the bot's face row (s), the collection reveal's composite tile subject
+    # (s2), the Steam sweep's eligibility and the delivery lease's subject (p).
+    # None of them decides POOL membership: they gate a Discord handout, a
+    # picture read (s and s2 each choose a face or the card back), whom the
+    # sweep may ask Steam about, and whether a lease's subject still has an
+    # id. A sixth call moves the total even under an alias nobody listed here.
     assert code.count('_sid64.individual_id_sql("p.steam_id")') == 2
     assert code.count('_sid64.individual_id_sql("s.steam_id")') == 1
+    assert code.count('_sid64.individual_id_sql("s2.steam_id")') == 1
     assert code.count('_sid64.individual_id_sql("su.steam_id")') == 1
-    assert code.count("_sid64.individual_id_sql(") == 4, "a new site spells the id rule under some other alias"
+    assert code.count("_sid64.individual_id_sql(") == 5, "a new site spells the id rule under some other alias"
     # the bare call, which the two counts above cannot see: equal to the
     # qualified count exactly while every reach goes through `_sid64.`
-    assert code.count("individual_id_sql(") == 4, \
+    assert code.count("individual_id_sql(") == 5, \
         "a site reaches the id rule through a bare individual_id_sql(...) -- a `from steamid64 import` form"
     # ...and nothing hand-copies the rule PAST both names: its text exists once,
     # in the constant above, and so do the interval's two edges.
@@ -735,6 +745,10 @@ def test_the_bots_picture_source_answers_404_for_a_print_of_a_non_steam_subject(
 
     monkeypatch.setattr(main, "_pc_face_ctx", ctx)
     monkeypatch.setattr(main, "_pc_render_face", render)
+    # The route's diagnostics headers (X-Face-Art, X-Face-Still) read the
+    # spec of the row it rendered; this session's rows carry only the id rule's
+    # columns, so the spec is the renderer stub's business here.
+    monkeypatch.setattr(main, "_pc_face_inputs", lambda _row, _ctx: ({"top_card": ""}, "none", None, "f" * 16))
     db = _FaceSession(OTHER_SUBJECT)
     with pytest.raises(HTTPException) as ex:
         _run(main.internal_pc_face_print(str(PRINT), "en", "card", "k", db))

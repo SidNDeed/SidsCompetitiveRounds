@@ -1,0 +1,192 @@
+The evidence assembler and the scope it binds, 2026-09-23 (round 16)
+====================================================================
+
+stdout: r16-suites-assembly-run.log
+
+== THE LOG BELOW HAS A COMMITTED PRODUCER ==
+Every number in every report here is derived from a committed instrument's
+stdout, and this report says so about all of them -- so the log it is itself
+assembled from has a committed producer too. A log with no producer is a log
+whose blocks can drift without a diff: one could be dropped, re-ordered, or
+re-run against a different report, and nothing in the repository would notice.
+
+The producer is `backend/tests/evidence/run-assembly.sh`, committed beside this
+file, and it was invoked exactly as its own header documents:
+
+  bash backend/tests/evidence/run-assembly.sh > backend/tests/evidence/r16-suites-assembly-run.log
+
+run from the repository root, which the script changes to itself. It runs
+after the suite pair, so no fence is open when its capture is written in
+place. The script prints that same capture name in its own header line
+below, which is what pairs it with the evidence-log re-inclusion in
+`.gitignore`. That pairing is one exact NAME per capture per round, and this
+round paid it rather than changed it: nine names went in, one for each capture
+a producer of this round prints, and the suite compares the admitted set with
+the produced set in both directions. A name no producer writes is refused, and
+so is a capture no name admits.
+
+THE ROUND IS DERIVED, never passed and never baked in. The script reads the
+newest `r<N>-suites.txt` in this directory and takes its round from the name. A
+round number written into a script is a thing to remember to bump, and a
+forgotten one makes this round's run check the PREVIOUS round's reports and
+report success. The set of reports it checks is derived the same way: every
+`r16-*.txt` in the directory except the two that cannot be checked by a run
+that produces them.
+
+== this round is the landing, and the producer did not change ==
+Round 16 carries the rejoin server half onto main and re-runs every instrument
+on the landed tree. Nothing in the producer, the assembler or the rules module
+was edited to do it: the landing's only edit under this directory is the
+re-anchoring of one mutation control, whose report is the round's
+mutation-controls report and is checked below like every other.
+
+== what counts as a claim, stated rather than left to taste ==
+Two rules, complementary, neither catching what the other does:
+
+  R1, the counting terms. An integer immediately followed by a term a run
+      reports in -- passed, skipped, deselected, paths, controls, rows -- must
+      appear in the stdout as the same integer next to the same term.
+
+  R2, the big numbers. Any integer of three digits or more that survives the
+      typed exemptions must appear somewhere in the stdout. This is the rule
+      that catches a summary total quoted with one digit changed, which R1
+      would pass whenever the term beside it is right.
+
+THE EXEMPTIONS ARE TYPED, NOT PER-NUMBER. A list of individually excused numbers
+grows until the check cannot fail (#342), so what is exempt is a SHAPE -- a
+numbered lesson, a date, a clock time, an evidence-file round tag, a bar or
+finding row, a version or section number, a migration, an HTTP status, an
+inclusive range. Adding a number to a report never silences the check; only
+writing it in one of those shapes does, and each shape is something a run
+genuinely does not print.
+
+== WHO THE RULE BINDS ==
+The round is derived from the FILE NAMES, which no report can opt out of, and
+every report of the newest round is bound: it names its stdout, it carries a
+verbatim run section, and every result in that section has its command above
+it. A report whose NAME carries no round is refused too -- that is the same
+escape one spelling over.
+
+Earlier rounds stay exempt, and for a reason that still holds: their reports
+are the record of rounds already judged, on the shapes their instruments
+printed at the time, and rewriting one now would be editing a log to satisfy a
+rule written after it. The landing carries them byte for byte.
+
+== both directions, on the rule rather than on this directory ==
+The self-test below asserts that every matching rule FIRES and every exemption
+STAYS QUIET, in both directions, so a typo in any pattern reds there rather than
+passing for ever. Then the tool is run against each of this round's reports.
+Then the refusal itself is EXECUTED on a fabricated pair -- a narrative claiming
+a count its stdout does not print is refused, and the refusal names the count --
+and the same rule is shown staying quiet on a claim the run did print. A check
+that has only ever been seen to pass is a check nobody has seen work (#391).
+
+The same refusal is driven against the REAL report by the mutation control
+`suites-report-carries-an-underived-number` in r16-mutation-controls.txt: it
+puts into the suites report's prose a count no run here can print, and requires
+the committed check to go red.
+
+THAT CONTROL'S ANCHOR IS STILL THE DERIVED ONE: the marker line that separates
+a report's narrative from its verbatim run, required of every report the rules
+module checks, so it cannot be reworded away without the assembler refusing
+first. This round it ran against the previous round's suites report, as it
+must: the controls run before the suite pair, so this round's report cannot
+exist when they do.
+
+== the producer RUNS the closing check ==
+The rule that binds every report of a round asks two things of it: that its
+verbatim run carries a command above every result, and that it carries an
+EXECUTED result at all. A report whose run prints verdicts and not one line the
+rule recognises as a result satisfies the first and fails the second, and the
+committed check refuses it by name before it can be committed.
+
+So the producer ends by RUNNING that check: the assembler's self-test plus a
+re-check of every assembled report of the newest round, under its own
+invocation line, in the log below. The block is the last thing the producer
+does, and its result is the last result in this file.
+
+== and it applies to itself ==
+This file declares its own stdout and is assembled from it by the same tool. It
+is a report of the newest round, so the scope reaches it by its NAME, whatever
+it declares.
+
+The one file the rule cannot reach this way is the record of the re-pin, which
+is written after every pytest run by construction. That report is produced by a
+wrapper that applies these same rules -- imported from here, not restated -- to
+its own text before writing it, and writes nothing if either refuses. It runs
+last again, and the attribution its two commits are made under stays DERIVED
+from the branch rather than typed into the file: it refuses when nothing can be
+derived, and before it writes anything it sweeps every message the final tip
+will carry for any other claim of authorship, exempting exactly the line it
+derived. On the landed branch the newest commits that carry an attribution are
+the landing's own, so the attribution it derives is the landing's.
+
+The wrapper also records the lane's client contract by digest -- the contract
+is an untracked document, so no commit carries it, and the round's record has
+to carry its state instead -- and refuses before anything is written when the
+two copies this round leaves differ. The landing does not edit the contract.
+What the wrapper reports -- the digests, and how many manifest rows had to be
+rewritten -- are facts about THIS tree, which is why a round that changed
+nothing there would still have to run it.
+
+------------------------------------------------------------------------------
+THE RUN, verbatim from here down
+========== r16-suites-assembly-run.log ==========
+== the producer of this log ==
+script    <repo>/backend/tests/evidence/run-assembly.sh
+cwd       <repo>
+python    Python 3.12.10
+capture   <repo>/backend/tests/evidence/r16-suites-assembly-run.log
+round     r16, derived from the newest -suites.txt beside this script
+
+== the assembler's own self-test, both directions on every rule ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --selftest
+selftest: 34 rule checks, all as stated
+selftest rc=0
+
+== r16-mutation-controls.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r16-mutation-controls.txt
+selftest: 34 rule checks, all as stated
+OK: backend/tests/evidence/r16-mutation-controls.txt -- 1 claim(s) all derived from r16-mutation-run.log r16-freeze-guard.log r16-citation-pin.log r16-residual-reach.log r16-contract-arms.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== r16-postgresql-controls.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r16-postgresql-controls.txt
+selftest: 34 rule checks, all as stated
+OK: backend/tests/evidence/r16-postgresql-controls.txt -- 6 claim(s) all derived from r16-pg-controls.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== r16-suites.txt, re-derived from the stdout it names ==
+cwd       <repo>
+command   python backend/tests/evidence/assemble-evidence.py --check backend/tests/evidence/r16-suites.txt
+selftest: 34 rule checks, all as stated
+OK: backend/tests/evidence/r16-suites.txt -- 11 claim(s) all derived from r16-suite-run.log; the verbatim block is the named stdout, byte for byte
+check rc=0
+
+== the REFUSAL, executed rather than described ==
+cwd       <repo>
+command   python -c "import sys; sys.stdout.reconfigure(newline=chr(10)); import importlib.util as u; s=u.spec_from_file_location("a","backend/tests/evidence/assemble-evidence.py"); m=u.module_from_spec(s); s.loader.exec_module(m); print("undrivable  ->", m.undrivable("the run hashed 12 paths", "9 paths"))"
+undrivable  -> [('count', '12 paths')]
+refusal rc=0
+
+== ...and the same rule stays quiet on a claim the run DID print ==
+cwd       <repo>
+command   python -c "import sys; sys.stdout.reconfigure(newline=chr(10)); import importlib.util as u; s=u.spec_from_file_location("a","backend/tests/evidence/assemble-evidence.py"); m=u.module_from_spec(s); s.loader.exec_module(m); print("derivable   ->", m.undrivable("the run hashed 9 paths", "9 paths"))"
+derivable   -> []
+clean rc=0
+
+== the closing evidence check, which RUNS the assembler ==
+The assembler is not a step somebody remembers to take: the committed
+check below runs its self-test and re-checks every assembled report of
+the newest round, so a report that stopped matching its own stdout reds
+in the suite rather than in a log nobody re-reads.
+cwd       <repo>/backend
+command   python -m pytest tests/test_ffa_game_number_anchor.py -q -p no:cacheprovider -k "committed_evidence or assembled_from_its_run"
+..                                                                       [100%]
+2 passed, 165 deselected in 7.39s
+closing rc=0
+
+== done ==

@@ -1,0 +1,6 @@
+# Build output and generated mutants. run-tests.ps1 regenerates every mutant
+# from the current seam on each run; a committed copy would be a second, silently
+# drifting version of the file under test.
+bin/
+obj/
+work/

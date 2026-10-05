@@ -114,6 +114,10 @@ FILES = [
     # Room rules (Sept 10): the friendly-fire / same-cards summaries and the
     # game-start toast, all at I18n.Tr/TrF sites.
     "RoomRules.cs",
+    # FFA assembly and late entry (connect-failure V11): the waiting, exit,
+    # re-form, dissolve and joined toasts, all literal notification or
+    # I18n.Tr/TrF arguments.
+    "FfaAssembly.cs", "FfaLateEntry.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

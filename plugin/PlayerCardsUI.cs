@@ -108,6 +108,13 @@ namespace CompetitiveRounds
         private static int previewShown = -1;   // PortraitRender.PreviewSerial the preview sprite was made from
         private static Sprite previewSprite;
         private static bool setInFlight; private static float setAt;
+        // the dance row (dance cards S5.8): the choice lives on the server; a
+        // click only moves the pending choice, sent after a short pause
+        private static GameObject btnDance;
+        private static object btnDanceTxt;
+        private static long danceChoice = -1;   // the shop item id a click chose, -1 when nothing is pending
+        private static float danceChoiceAt, danceSentAt;
+        private static bool danceInFlight;
         // identity fence (c4): every callback captures uiEpoch at dispatch and
         // returns when an identity edge advanced it; priceChangedAt gates a
         // repeat purchase until /pc/me has answered after a price_changed.
@@ -323,10 +330,12 @@ namespace CompetitiveRounds
             uiEpoch++;
             try { HideCardPopup(); } catch { }
             try { PlayerCardFaces.Clear(); } catch { }
+            try { PlayerCardMotion.Clear(); } catch { }
             try { PortraitRender.OnIdentityChanged(); } catch { }
             lastPack = null; lastMsg = null;
             HistoryReset();
             openInFlight = claimInFlight = recoverInFlight = discardInFlight = setInFlight = false;
+            danceChoice = -1; danceInFlight = false;   // the previous account's pending dance choice is never sent
             portraitWaitUntil = -1f; portraitWaitedAt = -100f; pendingVisit = false;
             settingsVisited = false;   // the next Settings look checks the picture again (r5 L12)
             // the previous account's character, as a Sprite over a texture
@@ -354,6 +363,7 @@ namespace CompetitiveRounds
         internal static void OnOverlayClosed()
         {
             try { HideCardPopup(); } catch { }
+            try { PlayerCardMotion.Stop(); } catch { }   // every overlay stops (S5.7)
             pendingVisit = true; settingsVisited = false;
         }
 
@@ -366,6 +376,7 @@ namespace CompetitiveRounds
 
         internal static void OnTabEntered()
         {
+            try { PlayerCardMotion.TabEntered(); } catch { }   // a new visit for the playback (S5.3)
             var id = LocalId();
             if (id == null) return;
             ApiClient.FetchPlayerStats(id);
@@ -390,7 +401,12 @@ namespace CompetitiveRounds
             // return inside one throttle window never ran an off-Settings tick,
             // so the visit check stayed disarmed for the second entry.
             if (!onSettings) settingsVisited = false;   // leaving Settings re-arms its one check for the next entry (r6 L12)
+            if (danceChoice >= 0) { try { MaybeSendDance(); } catch (Exception ex) { danceChoice = -1; danceInFlight = false; Plugin.Log.LogWarning($"[PC] dance selection threw: {ex.Message}"); } }
             if (onTab || cardPopupTile != null) { try { PlaceTopCards(); } catch { } }   // every frame: the overlays follow the layout and the snapshots (C3)
+            // Dance cards playback (design S5.7): every call, before the throttle
+            // below -- the clock is real time and the overlays follow the layout.
+            try { MotionTick(onTab); }
+            catch (Exception ex) { if (Time.unscaledTime >= motionWarnAt) { motionWarnAt = Time.unscaledTime + 10f; Plugin.Log.LogWarning($"[MOTION] tick threw: {ex.Message}"); } }
             if (Time.unscaledTime < tickAt) return;
             tickAt = Time.unscaledTime + 2f;
             var id = LocalId();
@@ -571,9 +587,9 @@ namespace CompetitiveRounds
             var hdr = new GameObject("PcBHdr"); hdr.transform.SetParent(binderRoot.transform, false); hdr.AddComponent<RectTransform>();
             UIFactory.AddHLG(hdr, spacing: 10, forceExpandH: true); UIFactory.AddLE(hdr, prefH: 28, flexH: 0);
             txtBinderHdr = UIFactory.CreateText("PcBHdrTxt", hdr.transform, "", 15f, C_WHITE, UIFactory.AlignMidLeft, sizeDelta: new Vector2(520, 26));
-            btnPrev = UIFactory.CreateButton("PcBPrev", hdr.transform, "<", 14f, C_WHITE, C_BTN, () => { if (binderPage > 0) { binderPage--; NativeUI.MarkDirty(); } }, sizeDelta: new Vector2(40, 24));
+            btnPrev = UIFactory.CreateButton("PcBPrev", hdr.transform, "<", 14f, C_WHITE, C_BTN, BinderPrev, sizeDelta: new Vector2(40, 24));
             txtBinderPage = UIFactory.CreateText("PcBPage", hdr.transform, "", 13f, C_LABEL, UIFactory.AlignMidCenter, sizeDelta: new Vector2(160, 24));
-            btnNext = UIFactory.CreateButton("PcBNext", hdr.transform, ">", 14f, C_WHITE, C_BTN, () => { binderPage++; NativeUI.MarkDirty(); }, sizeDelta: new Vector2(40, 24));
+            btnNext = UIFactory.CreateButton("PcBNext", hdr.transform, ">", 14f, C_WHITE, C_BTN, BinderNext, sizeDelta: new Vector2(40, 24));
             var sp = new GameObject("PcBSp"); sp.transform.SetParent(hdr.transform, false); sp.AddComponent<RectTransform>(); UIFactory.AddLE(sp, flexW: 1);
             btnSort = UIFactory.CreateButton("PcBSort", hdr.transform, "", 13f, C_WHITE, C_BTN, CycleSort, sizeDelta: new Vector2(220, 24));
             btnSortTxt = UIFactory.GetButtonText(btnSort);
@@ -828,6 +844,7 @@ namespace CompetitiveRounds
             cardPopupSeq++;
             cardPopupImg = null;
             cardPopupTile = null;
+            try { PlayerCardMotion.PopupClosed(); } catch { }   // the popup's overlay goes with it; the clip state stays (S5.7)
             if (cardPopupGO != null) { cardPopupFrame = Time.frameCount; try { UnityEngine.Object.Destroy(cardPopupGO); } catch { } cardPopupGO = null; }
         }
 
@@ -983,15 +1000,68 @@ namespace CompetitiveRounds
             PlaceTopCard(t);
         }
 
-        // ── the Top card overlay (Sept 14 batch, C3) ─────────────────────────
+        // ── the Top card overlay (Sept 14 batch, C3; regeometried for 9a) ────
         // The face draws its Top card badge at [58,642,178,754] of 750x1050
-        // (backend face_layout_v1.json): a silhouette above the TOP CARD label.
-        // In game the silhouette is covered by the actual card art from
-        // CardSnapshot; outside the game (Discord) the badge stands as drawn.
-        // Fractions of the face, top-left origin; the art box keeps the
-        // snapshot's own aspect inside it (preserveAspect).
-        private const float TC_BACK_X = 88f / 750f, TC_BACK_Y = 650f / 1050f, TC_BACK_W = 60f / 750f, TC_BACK_H = 77f / 1050f;
-        private const float TC_ART_X = 93f / 750f, TC_ART_Y = 652f / 1050f, TC_ART_W = 50f / 750f, TC_ART_H = 73f / 1050f;
+        // (backend face_layout_v1.json). Since 9a that badge is a NAME COLUMN
+        // up the left -- the ROUNDS card's own name, sideways, in the card's
+        // theme colour -- and an empty ART AREA beside it, which is what this
+        // overlay fills with the real card art from CardSnapshot. Outside the
+        // game (Discord, the bot) the badge stands as drawn: name, framed
+        // empty area.
+        //
+        // The art area is [94,646,172,750] -- 78x104. Its HEIGHT is the badge
+        // frame's full clear run: BadgeFrame.png's rails own y 642-645 and
+        // y 751-754, so 646..750 is every row the art can use, and the card's
+        // top and bottom edges meet the box.
+        //
+        // The WIDTH is 78 and not 72 because of what fills the height. The
+        // vanilla card body (Canvas/Front/Background, the rect the four
+        // corner marks sit on) measures 351.9 x 479.9, aspect 0.7333, and
+        // preserveAspect fits by whichever axis runs out first. At 72x104
+        // the box is aspect 0.6923 -- NARROWER than the card -- so the fit
+        // is width-limited and the card draws 98.2 px tall, 5.8 px short of
+        // the box, which is corner marks that do not reach the rails
+        // (observation 1, 2026-09-21). At 78x104 the box is 0.75, wider than
+        // the card, so the fit is HEIGHT-limited: the card draws the full
+        // 104 px and the corner marks land on 646 and 750. The 1.7 px that
+        // 78 has over the exact-match 76.26 is deliberate slack, so a small
+        // error in the measured card aspect cannot flip the fit back to
+        // width-limited and reopen the gap; it costs under a pixel either
+        // side. Measured from the asset: the frame's inner clear area is
+        // x 62..174, so 94..172 is inside it, and the badge name's own ink
+        // ends at x=89, so the art clears the name by five pixels.
+        //
+        // preserveAspect (CreatePanelCentred) does the scaling, and what it
+        // scales is CardSnapshot's THUMBNAIL: the capture cropped to the
+        // card's corner band, not the whole 380x600 render. That crop is
+        // what makes the corner marks meet this box -- the full render
+        // carries the camera's 8% wobble pad and the letterbox the fixed RT
+        // aspect adds, and fitting THAT lands the card's own edge ~9-10 px
+        // inside the box (observation 1, 2026-09-21). The band is still
+        // taller than it is wide, so the fit stays HEIGHT-limited: the band
+        // fills 104 px vertically, takes whatever width its aspect gives,
+        // centred, with the framed backing showing either side. A band
+        // wider than the box would fit to width instead, which is the same
+        // rule and still never overlaps the name.
+        //
+        // Before 9a these were 60x77 and 50x73, inset and offset up-left
+        // inside the old silhouette; the art did not reach the box edges.
+        //
+        // The BACKING starts eight pixels further left than the art, at
+        // x=92 rather than x=100. That strip is what a pre-9a server face
+        // draws its badge_mark in ([92,654,144,722]), and a client carrying
+        // these constants against such a face shows its left sliver as a
+        // white bar beside the card (observation 2, 2026-09-21). The real
+        // close for that is deploying the 9a renderer; this covers the strip
+        // meanwhile and is harmless once it is deployed. It does not reach
+        // the name: the 9a face draws the card name in the x 64..96 column,
+        // and the name's own INK ends at x=89 measured over nine card names
+        // at the fitter's 19 px (ai-collab probe, 2026-09-21) -- three
+        // pixels of clearance. A larger badge-name font would eat that, so
+        // the clearance belongs to the measurement, not to the rect's edge.
+        // Fractions of the face, top-left origin.
+        private const float TC_BACK_X = 92f / 750f, TC_BACK_Y = 646f / 1050f, TC_BACK_W = 80f / 750f, TC_BACK_H = 104f / 1050f;
+        private const float TC_ART_X = 94f / 750f, TC_ART_Y = 646f / 1050f, TC_ART_W = 78f / 750f, TC_ART_H = 104f / 1050f;
         private static readonly Color C_BADGE_DARK = new Color(0.08f, 0.08f, 0.10f, 1f);
         private static readonly Color C_FACE_DIM = new Color(0.42f, 0.42f, 0.48f, 1f);
 
@@ -1047,7 +1117,12 @@ namespace CompetitiveRounds
             var p = t.print;
             string card = (p != null && t.face.activeSelf) ? p.top_card : null;
             Sprite spr = null;
-            bool show = !string.IsNullOrEmpty(card) && CardSnapshot.TryGetSprite(card, out spr) && spr != null;
+            // The THUMBNAIL, not the full snapshot: cropped to the card's
+            // corner band so the corner marks reach this box's top and
+            // bottom edges and the card's own name plate stays out of a
+            // 104 px picture. The full sprite is unchanged for every other
+            // consumer (CardImageLoader, TabStatsOverlay, the card preview).
+            bool show = !string.IsNullOrEmpty(card) && CardSnapshot.TryGetThumbSprite(card, out spr) && spr != null;
             if (!show)
             {
                 if (!string.IsNullOrEmpty(card) && !CardSnapshot.IsFailed(card)) CardSnapshot.RequestSnapshot(card, false);
@@ -1073,6 +1148,160 @@ namespace CompetitiveRounds
             if (revealTiles != null) foreach (var t in revealTiles) PlaceTopCard(t);
             if (binderTiles != null) foreach (var t in binderTiles) PlaceTopCard(t);
             PlaceTopCard(cardPopupTile);
+        }
+
+        // -- dance cards playback (design S5.5, S5.7) --------------------------------
+
+        /// <summary>The dance overlay of one face: the existing centred,
+        /// click-through, aspect-preserving panel, moved to be the FIRST child
+        /// of the face so the Top card overlay and the discarded stamp stay
+        /// above it. Inactive until placed.</summary>
+        internal static GameObject CreateMotionOverlay(GameObject face)
+        {
+            if (face == null) return null;
+            var go = CreatePanelCentred("DcMo", face.transform, Color.white);
+            go.transform.SetAsFirstSibling();
+            return go;
+        }
+
+        /// <summary>Lay the overlay over the face's portrait window, through the
+        /// same letterbox-aware fraction box PlaceTopCard uses.</summary>
+        internal static void PlaceMotionOverlay(GameObject face, GameObject child)
+        {
+            if (PlayerCardMotion.DevT51AnchorToRect) { PlayerCardMotion.DevPlaceByRect(face, child); return; }
+            PlaceOverFace(face, child, PlayerCardMotionCore.WIN_X, PlayerCardMotionCore.WIN_Y, PlayerCardMotionCore.WIN_W, PlayerCardMotionCore.WIN_H);
+        }
+
+        private static float motionWarnAt;
+        private static readonly List<PlayerCardMotion.Slot> motionTiles = new List<PlayerCardMotion.Slot>();
+        private static readonly List<PlayerCardMotion.Slot> motionPool = new List<PlayerCardMotion.Slot>();
+        private static readonly PlayerCardMotion.Slot motionPopup = new PlayerCardMotion.Slot();
+        private static readonly string[] MotionViews = { "open", "binder", "info" };
+        private static string motionKey, motionKeyPack;
+        private static int motionKeyView = -1, motionKeyPage = int.MinValue;
+
+        /// <summary>The playback's view of this tab each tick: the shown page's
+        /// active tiles, the popup, the subview and the page identity (a binder
+        /// page number, or the history pack shown). Allocates only when the page
+        /// identity changes.</summary>
+        private static void MotionTick(bool onTab)
+        {
+            bool popup = cardPopupTile != null;
+            motionTiles.Clear();
+            int used = 0;
+            string key = null;
+            if (onTab)
+            {
+                if (view == View.Binder) { MotionAdd(binderTiles, ref used); key = MotionPageKey(1, binderPage, null); }
+                else if (view == View.Open)
+                {
+                    var shown = historyIndex >= 0 && historyIndex < packHistory.Count ? packHistory[historyIndex] : null;
+                    if (lastStrip != null && lastStrip.activeInHierarchy) MotionAdd(revealTiles, ref used);
+                    key = MotionPageKey(0, historyIndex, shown != null ? shown.pack_id : null);
+                }
+                else key = MotionPageKey(2, 0, null);
+            }
+            PlayerCardMotion.Slot pop = null;
+            if (popup)
+            {
+                motionPopup.Face = cardPopupTile.face; motionPopup.Print = cardPopupTile.print; motionPopup.BindSeq = cardPopupSeq;
+                pop = motionPopup;
+            }
+            PlayerCardMotion.Tick(onTab || popup, pendingVisit, MotionViews[(int)view], key, motionTiles, pop);
+        }
+
+        private static void MotionAdd(Tile[] tiles, ref int used)
+        {
+            if (tiles == null) return;
+            for (int i = 0; i < tiles.Length; i++)
+            {
+                var t = tiles[i];
+                if (t == null || t.root == null || t.print == null || !t.root.activeInHierarchy) continue;
+                if (used == motionPool.Count) motionPool.Add(new PlayerCardMotion.Slot());
+                var s = motionPool[used++];
+                s.Face = t.face; s.Print = t.print; s.BindSeq = t.bindSeq;
+                motionTiles.Add(s);
+            }
+        }
+
+        private static string MotionPageKey(int v, int page, string pack)
+        {
+            if (motionKey == null || v != motionKeyView || page != motionKeyPage || !string.Equals(pack, motionKeyPack, StringComparison.Ordinal))
+            {
+                motionKeyView = v; motionKeyPage = page; motionKeyPack = pack;
+                motionKey = v.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + page.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":" + (pack ?? "");
+            }
+            return motionKey;
+        }
+
+        /// <summary>The playback levers' hands on this tab (PlayerCardMotionDev,
+        /// broadcast identity only): each verb is the product's own action for
+        /// that event, on a synthetic binder -- nothing is sent to the api.</summary>
+        internal static void DevMotionAct(string what, int arg)
+        {
+            switch (what)
+            {
+                case "seed": DevSeedMotionPrints(arg); break;
+                case "card": DevMotionCard(arg); break;
+                case "close": HideCardPopup(); break;
+                case "tab": PlayerCardMotion.TabEntered(); break;
+                case "next": BinderNext(); break;
+                case "prev": BinderPrev(); break;
+                case "page0": view = View.Binder; binderPage = 0; NativeUI.MarkDirty(); break;
+                case "view": view = View.Open; NativeUI.MarkDirty(); break;
+                case "binder": view = View.Binder; NativeUI.MarkDirty(); break;
+                case "repaint": NativeUI.MarkDirty(); break;
+                case "refresh": { var col = ApiClient.CachedPcCollection; if (col != null) ApiClient.DevSetCollection(col); NativeUI.MarkDirty(); } break;
+                case "sort": CycleSort(); break;
+                case "overlay-close": OnOverlayClosed(); PlayerCardMotion.Clear(); break;
+            }
+        }
+
+        internal static string DevMotionFirstPrint()
+        {
+            var t = binderTiles != null && binderTiles.Length > 0 ? binderTiles[0] : null;
+            return t != null && t.print != null ? t.print.print_id : null;
+        }
+
+        internal static GameObject DevMotionFirstFace()
+        {
+            var t = binderTiles != null && binderTiles.Length > 0 ? binderTiles[0] : null;
+            return t != null ? t.face : null;
+        }
+
+        private static void DevSeedMotionPrints(int n)
+        {
+            n = Mathf.Clamp(n, 1, 40);
+            var col = new ApiClient.PcCollection { owner_steam_id = "dev", owner_name = "Sid", is_public = true };
+            string[] rar = { "legendary", "epic", "rare", "uncommon", "common" };
+            for (int i = 0; i < n; i++)
+            {
+                var p = new ApiClient.PcPrint
+                {
+                    print_id = "dvm" + i.ToString("D2", System.Globalization.CultureInfo.InvariantCulture), card_id = "dvmc" + i, subject_player_id = "dvmp" + i,
+                    subject_name = "Player " + i.ToString("D2", System.Globalization.CultureInfo.InvariantCulture), edition_id = "1", minted_at = "2026-09-27T00:00:00",
+                    rarity = rar[i % rar.Length], pool_rank = i + 1, rating = 1800 - i * 10, peak_rating = 1850 - i * 10, rank_name = "Advanced I",
+                    source = "bought", slot = i % 5, dup_at_pull = -1, face_rev = "dev", top_card = "",
+                };
+                col.prints.Add(p);
+                if (PlayerCardFaces.Cached(p.print_id, "dev", "en", "tile") == null)
+                    PlayerCardFaces.DevPut(p.print_id, "dev", "en", "tile", DevSprite(FrameColor(p.rarity, false)), 375L * 525L * 4L);
+            }
+            col.count = col.prints.Count;
+            ApiClient.DevSetCollection(col);
+            binderSort = Sort.Name;
+            view = View.Binder; binderPage = 0;
+            NativeUI.MarkDirty();
+        }
+
+        private static void DevMotionCard(int i)
+        {
+            var t = binderTiles != null && i >= 0 && i < binderTiles.Length ? binderTiles[i] : null;
+            var p = t != null ? t.print : null;
+            if (p == null) return;
+            if (PlayerCardFaces.Cached(p.print_id, p.face_rev, p.face_locale, "card") == null)
+                PlayerCardFaces.DevPut(p.print_id, p.face_rev, p.face_locale, "card", DevSprite(FrameColor(p.rarity, false)), 750L * 1050L * 4L);
+            ShowCard(new Tile { print = p });
         }
 
         // ── repaint ──────────────────────────────────────────────────────────
@@ -1492,11 +1721,29 @@ namespace CompetitiveRounds
             });
         }
 
+        // The binder's page buttons: a page change asked for, which the playback
+        // counts as a new visit once the shown page moves (S5.3).
+        private static void BinderPrev()
+        {
+            if (binderPage <= 0) return;
+            binderPage--;
+            try { PlayerCardMotion.NavRequested(); } catch { }
+            NativeUI.MarkDirty();
+        }
+
+        private static void BinderNext()
+        {
+            binderPage++;
+            try { PlayerCardMotion.NavRequested(); } catch { }
+            NativeUI.MarkDirty();
+        }
+
         private static void PageHistory(int delta)
         {
             var id = LocalId();
             int next = historyIndex + delta;
             if (next < 0) return;
+            try { PlayerCardMotion.NavRequested(); } catch { }
             if (next >= packHistory.Count)
             {
                 // past the loaded end: fetch the next page, then land on it
@@ -1580,6 +1827,7 @@ namespace CompetitiveRounds
         {
             binderSort = (Sort)(((int)binderSort + 1) % 5);
             binderPage = 0;
+            try { PlayerCardMotion.Rebase(); } catch { }   // a reorder, never a visit (S5.3)
             NativeUI.MarkDirty();
         }
 
@@ -2057,6 +2305,20 @@ namespace CompetitiveRounds
         {
             string[] rar = { "legendary", "epic", "rare", "uncommon", "common" };
             string[] names = { "Sid", "Rival", "Challenger", "Contender", "Newcomer" };
+            // The Top Card thumbnail is a picture of a DIFFERENT card prefab
+            // per print, so a lever that seeds one card everywhere can only
+            // ever measure that one card's art and that one card's name
+            // plate. These three are a one-word name, a two-word name and the
+            // card the first witness used, so a measurement can be repeated
+            // across names rather than asserted to generalise from one.
+            string[] tops = { "Poison", "Wind Up", "Bombs Away" };
+            // "card" opens the first print; "card:N" opens print N, so the
+            // witness can measure a second card's art without a second build.
+            const string CARD_AT = "card:";
+            bool cardMode = mode == "card" || mode.StartsWith(CARD_AT);
+            int cardIndex = 0;
+            if (cardMode && mode.Length > CARD_AT.Length)
+                int.TryParse(mode.Substring(CARD_AT.Length), out cardIndex);
             var a = new ApiClient.PcPackAnswer { pack_id = "dev", status = "done", source = "bought", pay = "gold", price = 100, opened_at = "2026-09-11T00:00:00" };
             for (int i = 0; i < 5; i++)
                 a.prints.Add(new ApiClient.PcPrint
@@ -2064,7 +2326,7 @@ namespace CompetitiveRounds
                     print_id = "dev" + i, card_id = "card" + i, subject_player_id = "p" + i, subject_name = names[i],
                     edition_id = "1", minted_at = "2026-09-11T00:00:00", rarity = rar[i], foil = i == 1, signed = i == 0,
                     pool_rank = i == 0 ? 1 : i * 9, rating = 1850 - i * 120, peak_rating = 1900 - i * 100, board_rank = i == 0 ? 1 : i * 9,
-                    series_wins = 60 - i * 8, series_losses = 12 + i * 3, top_card = "Bombs Away", title = i == 0 ? "Grandmaster" : "", rank_name = "Diamond", source = "bought", slot = i,
+                    series_wins = 60 - i * 8, series_losses = 12 + i * 3, top_card = tops[i % tops.Length], title = i == 0 ? "Grandmaster" : "", rank_name = "Diamond", source = "bought", slot = i,
                     dup_at_pull = i == 0 ? 0 : (i == 3 ? 2 : -1),   // one NEW, one DUPLICATE +2, the rest silent
                     discarded = i == 4, discard_shards = i == 4 ? 3 : -1,   // one DISCARDED stamp, for the screenshot
                 });
@@ -2072,7 +2334,7 @@ namespace CompetitiveRounds
             HistoryInsertHead(a);
             historyLoaded = true; historyExhausted = true;   // the pager shows this one; no server page behind it
             view = mode == "binder" ? View.Binder : (mode == "info" ? View.Info : View.Open);
-            if (mode == "binder" || mode == "binder-faces")
+            if (mode == "binder" || mode == "binder-faces" || cardMode)
             {
                 // A synthetic binder (this seat's account is a service account:
                 // 403 on the collection): ten prints, two of them copies of one
@@ -2090,17 +2352,35 @@ namespace CompetitiveRounds
                         print_id = "devb" + i, card_id = "cardb" + subj, subject_player_id = "pb" + subj, subject_name = i == 0 ? "Sid" : "Player " + subj,
                         edition_id = "1", minted_at = "2026-09-12T00:00:00", rarity = rar2[i], foil = i == 2, signed = i == 0,
                         pool_rank = i + 1, rating = 1900 - i * 40, peak_rating = 1950 - i * 40, board_rank = i < 5 ? i + 1 : 0,
-                        series_wins = 40 - i * 3, series_losses = 10 + i, top_card = "Bombs Away", title = i == 1 ? "Champion" : "", rank_name = "Advanced I",
+                        series_wins = 40 - i * 3, series_losses = 10 + i, top_card = tops[i % tops.Length], title = i == 1 ? "Champion" : "", rank_name = "Advanced I",
                         source = "bought", slot = i % 5, dup_at_pull = -1,
-                        face_rev = mode == "binder-faces" ? "dev" : null,
+                        face_rev = (mode == "binder-faces" || cardMode) ? "dev" : null,
                     });
                 }
-                if (mode == "binder-faces")
+                if (mode == "binder-faces" || cardMode)
                     for (int i = 0; i < col.prints.Count; i++)
                         PlayerCardFaces.DevPut(col.prints[i].print_id, "dev", "en", "tile", DevSprite(FrameColor(col.prints[i].rarity, false)), 375L * 525L * 4L);
                 col.count = col.prints.Count;
                 ApiClient.DevSetCollection(col);
                 view = View.Binder;
+                // "card" also opens the full-size card view on the first
+                // print, and "card:N" on print N — the prints carry different
+                // top cards, so N is how a second card's art gets measured.
+                // The Top card overlay is ~104/1050 of the face, so
+                // on a binder tile it is ~35 px tall and on this popup it is
+                // ~100 px: the popup is the only surface on this seat where
+                // the corner marks can be measured against the box edges to
+                // the pixel. Needs a face at the "card" size too — without
+                // one ShowCard asks the server, which answers 403 for this
+                // service account and falls back to the text view.
+                if (cardMode && col.prints.Count > 0)
+                {
+                    int idx = Mathf.Clamp(cardIndex, 0, col.prints.Count - 1);
+                    PlayerCardFaces.DevPut(col.prints[idx].print_id, "dev", "en", "card",
+                                           DevSprite(FrameColor(col.prints[idx].rarity, false)), 750L * 1050L * 4L);
+                    ShowCard(new Tile { print = col.prints[idx] });
+                    Plugin.Log.LogInfo("[PC] dev card view: print " + idx + " top_card='" + col.prints[idx].top_card + "'");
+                }
             }
             Plugin.Log.LogInfo("[PC] synthetic tiles seeded (dev lever, mode=" + mode + ")");
             NativeUI.MarkDirty();
@@ -2187,6 +2467,10 @@ namespace CompetitiveRounds
             btnPreset = SettingsRow(parent, "SPcPre", CyclePreset,
                 "Which character your picture shows: Follow uses the one you have selected in the character menu, or pin a saved preset. The preview below is what your card will show.", 18f);
             btnPresetTxt = UIFactory.GetButtonText(btnPreset);
+            btnDance = SettingsRow(parent, "SPcDnc", CycleDance,
+                "The dance your card performs: it plays once each time your card is shown in a binder or a pack, drawn from your own character on this PC. Pick one you own; None keeps your card still.", 18f);
+            btnDanceTxt = UIFactory.GetButtonText(btnDance);
+            if (btnDance.transform.parent != null) btnDance.transform.parent.gameObject.SetActive(false);   // shown once /pc/me says the server has dance cards
             // The preview in its own left-aligned row: dropped straight into
             // the settings column it was stretched to the column's width and
             // its picture centred in that ("too far to the right", Sid,
@@ -2266,7 +2550,111 @@ namespace CompetitiveRounds
                     ? "Announce my pulls: <color=#88FF88>ON</color>"
                     : "Announce my pulls: <color=#FF9966>OFF</color>");
             }
+            RefreshDanceRow(me);
             RefreshPictureRows();
+        }
+
+        // -- the dance row (dance cards design S5.8) -----------------------------------
+
+        /// <summary>The dances this player owns that this client can capture,
+        /// in the wheel's order; null while the shop list has not been read.</summary>
+        private static List<ApiClient.ShopItemData> OwnedDanceItems()
+        {
+            var items = ApiClient.CachedShopItems;
+            if (items == null) return null;
+            var list = new List<ApiClient.ShopItemData>();
+            foreach (var d in DanceEmotes.Defs)
+                foreach (var it in items)
+                    if (it != null && it.owned && it.kind == "dance" && string.Equals(it.sku, d.Sku, StringComparison.Ordinal)) { list.Add(it); break; }
+            return list;
+        }
+
+        private static string DanceItemLabel(long item, ApiClient.PcMe me)
+        {
+            if (item <= 0) return I18n.Tr("None");
+            var items = ApiClient.CachedShopItems;
+            if (items != null)
+                foreach (var it in items)
+                    if (it != null && it.id == item && !string.IsNullOrEmpty(it.name)) return I18n.Tr(it.name);
+            if (me != null && item == me.pc_dance_item && !string.IsNullOrEmpty(me.pc_dance_sku))
+                foreach (var d in DanceEmotes.Defs)
+                    if (d.Sku == me.pc_dance_sku) return I18n.Tr(d.Name);
+            return "#" + item.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Shown only when /pc/me carries the dance keys (a server with
+        /// dance cards); the label is the pending choice while one is waiting,
+        /// else the server's selection.</summary>
+        private static void RefreshDanceRow(ApiClient.PcMe me)
+        {
+            if (btnDance == null || btnDanceTxt == null) return;
+            bool show = me != null && me.dance_supported;
+            var grp = btnDance.transform.parent != null ? btnDance.transform.parent.gameObject : btnDance;
+            if (grp.activeSelf != show) grp.SetActive(show);
+            if (!show) return;
+            long item = danceChoice >= 0 ? danceChoice : me.pc_dance_item;
+            string label = DanceItemLabel(item, me) + (danceChoice >= 0 || danceInFlight ? " ..." : "");
+            UIFactory.SetTextRaw(btnDanceTxt, I18n.TrF("Dance on my card: {0}", "<color=#CCCCCC>" + label + "</color>"));
+        }
+
+        /// <summary>None -> each owned dance -> None. Only the pending choice
+        /// moves here; MaybeSendDance sends it after a 1.5 s pause, so a run of
+        /// clicks costs one selection. Nothing is written to the config: the
+        /// selection is the server's (S2.10).</summary>
+        private static void CycleDance()
+        {
+            var id = LocalId(); var me = ApiClient.CachedPcMe;
+            if (id == null || me == null || !me.dance_supported) return;
+            if (!SessionReady) { try { CompetitiveUI.ShowNotification(ReasonText("session_required"), C_WARN, 3f); } catch { } return; }
+            var owned = OwnedDanceItems();
+            if (owned == null)
+            {
+                try { ApiClient.FetchShopItems(id); } catch { }
+                try { CompetitiveUI.ShowNotification(I18n.Tr("Loading your dances..."), C_LABEL, 2f); } catch { }
+                return;
+            }
+            long cur = danceChoice >= 0 ? danceChoice : me.pc_dance_item;
+            int at = -1;
+            for (int i = 0; i < owned.Count; i++) if (owned[i].id == cur) at = i;
+            danceChoice = at + 1 < owned.Count ? owned[at + 1].id : 0;
+            danceChoiceAt = Time.unscaledTime;
+            NativeUI.MarkDirty();
+        }
+
+        /// <summary>Called on every PlayerCardsUI tick: the pending choice goes
+        /// to the selection route once the clicks pause, then /pc/me is read
+        /// again (the sku and the motion state) and the picture is checked.</summary>
+        private static void MaybeSendDance()
+        {
+            if (danceChoice < 0) return;
+            if (danceInFlight && Time.unscaledTime - danceSentAt < 25f) return;   // past the 20 s transport timeout
+            if (Time.unscaledTime - danceChoiceAt < 1.5f) return;
+            var id = LocalId(); var me = ApiClient.CachedPcMe;
+            if (id == null || me == null || !me.dance_supported) { danceChoice = -1; danceInFlight = false; return; }
+            long item = danceChoice;
+            if (item == me.pc_dance_item) { danceChoice = -1; NativeUI.MarkDirty(); return; }   // back to where it was: nothing to send
+            danceInFlight = true; danceSentAt = Time.unscaledTime;
+            int ep = uiEpoch;
+            Plugin.Log.LogInfo($"[PC] dance selection -> item {item}");
+            ApiClient.PcDanceSelect(id, NewNonce(), item, (ok, resp) =>
+            {
+                if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
+                danceInFlight = false;
+                if (danceChoice == item) danceChoice = -1;   // a newer click keeps its own pending choice
+                if (!ok)
+                {
+                    try { CompetitiveUI.ShowNotification(ReasonText(ApiClient.PcErrorCode(resp)), C_WARN, 3f); } catch { }
+                    NativeUI.MarkDirty();
+                    return;
+                }
+                ApiClient.FetchPcMe(id, true, (ok2, r2) =>
+                {
+                    if (ep != uiEpoch) return;
+                    try { PortraitRender.OnTabVisit(); } catch { }   // the picture check (S5.8): a dance picture, or the still without one
+                    NativeUI.MarkDirty();
+                });
+                NativeUI.MarkDirty();
+            });
         }
 
         /// <summary>The preset row and its preview are local (the preset is a

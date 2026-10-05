@@ -492,13 +492,23 @@ def _middleware_entry_points():
 def _exception_handler_entry_points():
     """First-party exception handlers.
 
-    This app registers NONE today -- all three handlers on the app are
-    FastAPI's own -- so this returns an empty list, and the assertion that
-    keeps it honest is not "non-empty" (which would be a check that cannot
-    pass) but the one in the test below: the RAW handler set must be non-empty,
-    proving the recovery still sees handlers at all. The day a first-party
-    handler is registered it enters the manifest, and its absence there fails
-    the exhaustiveness assertion."""
+    The day predicted below arrived: RJ-4 registered
+    `main._ffa_report_refusal_handler` for `FfaReportRefusal`, and the
+    exhaustiveness assertion below caught it exactly as it was written to --
+    two red tests on a manifest nobody had edited, which is what a gate that
+    fails closed is for. It is a REQUEST-PATH surface: every FFA report
+    refusal is serialised by it, so its body shape is reviewed here and
+    fingerprinted like a route.
+
+    The assertion this replaces was "the section is empty". That was correct
+    while it was true and is now the wrong shape, because it would have to be
+    re-written for every handler ever added. What is asserted instead is the
+    property that made the old one safe: the RAW handler set must be non-empty,
+    proving the recovery still sees handlers at all, and the recovered
+    first-party set must equal the manifest -- which the generic loop already
+    checks for every section. A handler appearing or leaving therefore stays a
+    review item, answerable only by editing the manifest's identity list by
+    hand (repin_route_manifest.py refuses to do it)."""
     keys = []
     for handler in (getattr(main.app, "exception_handlers", None) or {}).values():
         key = _binding_key(handler)
@@ -516,11 +526,26 @@ def _background_entry_points():
     `merged_lifespan` closing over ours. A one-level `__closure__` read finds
     nothing at all, which is a recovery that silently fingerprints an empty
     set. The walk below descends through nested closures and through
-    `__wrapped__`/`func` wrappers, bounded by identity and depth."""
+    `__wrapped__`/`func` wrappers, bounded by identity and depth.
+
+    THE DEPTH IS NOT A COST CONTROL AND MUST NOT BE TUNED LIKE ONE. `seen` is
+    what bounds the work -- every object is visited once -- so depth only
+    decides how deep the chain may be before the recovery gives up. The chain
+    grows by ONE LEVEL PER `include_router`, and `lifespan` itself is behind a
+    `@asynccontextmanager` wrapper, so the real function sits one hop below the
+    level that carries its name. At a bound of 8 it sat exactly at the edge:
+    mounting one more router pushed it past, `_is_ours` refused the contextlib
+    helper that was left, and this returned [] -- the empty set this docstring
+    warns about, arrived at by a number rather than by a missing lifespan.
+    (Measured on the wave B/C tree: four routers, the wrapper at depth 8 and
+    the function at 9.) The bound is now far above any plausible router count,
+    and `test_the_manifest_covers_every_non_route_entry_point` asserts the
+    recovery is NON-EMPTY, so a future chain that outgrows even this fails
+    loudly instead of fingerprinting nothing."""
     found, seen = [], set()
 
     def descend(obj, depth):
-        if depth > 8 or id(obj) in seen or not callable(obj):
+        if depth > 64 or id(obj) in seen or not callable(obj):
             return
         seen.add(id(obj))
         key = _binding_key(obj)
@@ -708,7 +733,18 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     )
 
     assert actual == expected
-    assert len(manifest) == 364   # automatic log upload: +2 (362 before — POST /logs/auto and the internal prune); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    # main d889294's history: 886bed8 r5: +1, the read-only team series status route (377 before); card trading: +7 (the five player trade routes and the two admin trade routes; 370 before); Discord collection reveal: +4 (the packs JSON and strip image routes, the binder JSON and page image routes; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    # lane be70f04's history: connect-failure: +4 (the three assembly routes and the G3 seat admin route; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    # connect-failure LAND (2026-09-29): main d889294's 378 + the lane's 4 new routes, the union, confirmed by the re-pin dry run
+    # main cd8d846's history (via claude/janitor-selftest 17ca44d): dance cards: +5 (the motion upload, the selection, the motion read, the atlas, the motion preview GIF; 378 before); 886bed8 r5: +1, the read-only team series status route (377 before); card trading: +7 (the five player trade routes and the two admin trade routes; 370 before); Discord collection reveal: +4 (the packs JSON and strip image routes, the binder JSON and page image routes; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before)
+    # lane side before sitting 3: 387 (connect-failure LAND, sitting 2 (2026-09-30): main cd8d846's 383 + the lane's 4 new routes, the union, confirmed by the re-pin dry run)
+    # main 0e751993's side: 384 (LAND of main cd8d846: dance cards' +5 (the motion upload, the selection, the motion read, the atlas, the motion preview GIF; 379 before); LAND of main 82c0da6: 886bed8 r5's +1, the read-only team series status route (378 before); Discord fix round 1: +1 (the bot's pack open, internal/pc/packs/open; 377 before); card trading: +7 (the five player trade routes and the two admin trade routes; 370 before); Discord collection reveal: +4 (the packs JSON and strip image routes, the binder JSON and page image routes; 366 before); title-ladder read route: +1 (365 before); quarantine triage: +3 (the two admin triage views and the internal digest; 362 before); Sept 12 pack history: +1 (361 before); portraits: +9 (the writer, the admin clear, the lease triple, four face routes; 352 before); Sept 10 Player Cards: +15 (pc/*, admin/pc/snapshot, internal/pc/*); room rules: +3 (334 before))
+    # connect-failure LAND, sitting 3 (2026-09-30): the union of the lane's 387 and main 0e751993's 384 over
+    # their shared 383 (main cd8d846) is 388: the lane's 4 new routes plus the Discord fix's 1, confirmed by
+    # the re-pin dry run
+    # automatic log upload revival (2026-10-05): main e9a3f1e1's 388 + the autolog lane's 2 new routes
+    # (POST /logs/auto and the internal prune; 362 -> 364 on the lane's own side), the union is 390
+    assert len(manifest) == 390
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -719,7 +755,18 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
     static = [entry for entry in manifest if entry["classification"] == "statically-nonconsumer"]
     assert len(exercised) == 1
-    assert len(static) == 363   # automatic log upload: +2 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    # main d889294's history: 886bed8 r5: +1, the read-only team series status route -- a fixed projection of team_series columns, no private Match column reachable (376 before); card trading: +7 (369 before); Discord collection reveal: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    # lane be70f04's history: connect-failure: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    # connect-failure LAND (2026-09-29): main d889294's 377 + the lane's 4 (all statically-nonconsumer), confirmed by the re-pin dry run
+    # main cd8d846's history (via claude/janitor-selftest 17ca44d): dance cards: +5 (377 before); 886bed8 r5: +1, the read-only team series status route -- a fixed projection of team_series columns, no private Match column reachable (376 before); card trading: +7 (369 before); Discord collection reveal: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before)
+    # lane side before sitting 3: 386 (connect-failure LAND, sitting 2 (2026-09-30): main cd8d846's 382 + the lane's 4 (all statically-nonconsumer), confirmed by the re-pin dry run)
+    # main 0e751993's side: 383 (LAND of main cd8d846: dance cards' +5 (378 before); LAND of main 82c0da6: 886bed8 r5's +1, the read-only team series status route -- a fixed projection of team_series columns, no private Match column reachable (377 before); Discord fix round 1: +1 (376 before); card trading: +7 (369 before); Discord collection reveal: +4 (365 before); title-ladder read route: +1 (364 before); quarantine triage: +3 (361 before); Sept 12 pack history: +1 (360 before); portraits: +9 (351 before); Sept 10 Player Cards: +15; room rules: +3 (333 before))
+    # connect-failure LAND, sitting 3 (2026-09-30): the union of the lane's 386 and main 0e751993's 383 over
+    # their shared 382 is 387: the lane's 4 plus the Discord fix's 1 (all statically-nonconsumer), confirmed
+    # by the re-pin dry run
+    # automatic log upload revival (2026-10-05): main e9a3f1e1's 387 + the autolog lane's 2 (both
+    # statically-nonconsumer), the union is 389
+    assert len(static) == 389
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
@@ -825,9 +872,11 @@ def test_the_helper_closure_stays_affordable():
     indexed bindings, with the walk itself taking 0.1 s once the index is built
     (~5.3 s, once per process). The bounds below sat above those with room, so
     this fails on a walk that has gone wrong rather than on ordinary growth;
-    the worst-route bounds have since moved for measured growth in bindings
-    a route really runs, each move recorded with its measurement at its
-    assertion.
+    the worst-route bounds, and the two p90 bounds (on the card trading lane
+    and, independently and to the same values, at the Discord collection
+    landing, then at the merge of the two), have since moved for measured
+    growth in bindings routes really run, each move recorded with its
+    measurement at its assertion.
 
     The second tier is exactly what these numbers pay for. Expanding data
     bindings as well as def/class ones makes `app = FastAPI(...)` a hub that
@@ -854,7 +903,225 @@ def test_the_helper_closure_stays_affordable():
     # alone: measured 20 / 55 / 198 with data-into-data expansion, against
     # 16 / 48 / 191 before it.
     assert code_median <= 24, f"median code closure {code_median} of {total}"
-    assert code_p90 <= 75, f"p90 code closure {code_p90} of {total}"
+    # Discord collection landing (2026-09-26): the p90 moved for measured
+    # growth. The same walk with the same route seeds over each tree:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   main 9a1dd9d                          365   21 / 69 / 326
+    #   lane 5868131                          369   21 / 73 / 326
+    #   LAND-1 74af3f6 (7541261 merged)       369   21 / 73 / 326
+    #   LAND-2 852f4be through 9f52e03        369   21 / 76 / 326
+    #
+    # Main alone passes and the lane alone passes; the landed tree is the sum
+    # of the two landings. The p90 is a rank statistic -- the value at sorted
+    # position int(0.9 * n) -- and it moved while the route AT that position
+    # did not: GET /api/v1/admin/quarantine/triage/{mode}/{group_id} measures
+    # 76 on every tree above. What moved is how many routes sit above 75: 37
+    # of 369 on the landed tree, exactly the count that puts position 332 on
+    # that route (main: 33 of 365; the lane: 35 of 369). Four of the 37 are
+    # the lane's new internal routes: the collection binder (117) and its page
+    # image (280), the pack list (123) and its strip image (280), the two
+    # images reaching the card-face rendering their tiles are composited from.
+    # Two crossed 75 on main's title-ladder hook: POST
+    # /api/v1/team/series/{series_id}/report-dc 72 -> 80 and POST
+    # /api/v1/admin/team/series/{series_id}/resolve 74 -> 82, each +8 in
+    # title_ladders (record_completed_games, the three lookups it runs and the
+    # four rung tables they read) -- the ladder credit their completion paths
+    # now give. Every one is a binding its route really runs, and the median
+    # has not moved, which is where a walk gone wrong shows first (the hub
+    # case in the docstring measured median 179).
+    #
+    # The bound moves to 80, 5% over the measurement -- the ~5-6% headroom the
+    # worst bounds keep over theirs; the median and worst bounds stay.
+    #
+    # Card trading LAND (2026-09-27): measured 21 / 76 / 326 of 2654 indexed
+    # bindings over 372 routes at the merge of main 9a1dd9d into the trading
+    # lane, against 21 / 73 / 326 over the lane tip 93227a8 (372 routes) and
+    # 21 / 69 / 326 over main 9a1dd9d (365 routes), the same walk with the
+    # same route seeds over each tree's own backend/api. Neither side passes
+    # 75; the composition does. The ladder hook gives two routes at the
+    # lane's p90 rank the eight title_ladders bindings a rated completion
+    # really runs (POST /api/v1/team/series/{series_id}/report-dc 72 -> 80,
+    # POST /api/v1/admin/team/series/{series_id}/resolve 74 -> 82), both rise
+    # past the rank, and the 90th percentile becomes the next route up, GET
+    # /api/v1/admin/quarantine/triage/{mode}/{group_id} at 76, unchanged
+    # itself. On main alone the rank sits lower (69); the five player trade
+    # routes above it are what put it in this band.
+    #
+    # The bound moves to 80 -- ~5% over the measurement, the headroom the
+    # other moves in this test gave -- for that reason and no other; the
+    # median and worst bounds stay.
+    #
+    # The two moves above were made independently, one on each side of the
+    # merge of main 36e8493 into the card trading lane (2026-09-27), and both
+    # chose 80.
+    #
+    # Card trading LAND, second merge (2026-09-27): measured 22 / 82 / 326
+    # of 2716 indexed bindings over 376 routes at the merge of main 36e8493
+    # into the trading lane (9a5b081), against 21 / 76 / 326 over the lane
+    # tip a666517 (372 routes) and over main 36e8493 (369 routes), the same
+    # walk with the same route seeds over each tree's own backend/api.
+    # Neither side passes 80; the composition does, by rank alone. The p90
+    # is the value at sorted position int(0.9 * n), the 38th route from the
+    # top at n = 376. Each side adds routes far above it -- the lane its five
+    # player trade routes (132 to 158), main its four collection routes (117
+    # to 280) -- and each side alone keeps 76 at its rank (37 and 36 routes
+    # above 76); the merged tree carries all nine, 38 routes sit above 80,
+    # and the 38th from the top is POST
+    # /api/v1/admin/team/series/{series_id}/resolve at 82, 82 on both sides
+    # too. No count is the merge's own: every route measures what it
+    # measures on the side that has it (the six that differ from main are
+    # the lane's trading reads, at their lane counts).
+    #
+    # The bound moves to 86 -- ~5% over the measurement, the headroom the
+    # moves above gave -- for that reason and no other; the median (22) and
+    # worst bounds stay.
+    #
+    # Connect-failure lane (2026-09-27): the p90 moved for measured growth.
+    # The same walk with the same route seeds over each tree's own
+    # backend/api:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   main 9a1dd9d                          365   21 / 69 / 326
+    #   lane f25c084 (api code)               369   21 / 76 / 326
+    #
+    # The p90 is a rank statistic, the value at sorted position int(0.9 * n),
+    # and it moved while no route near that position did: 37 of 369 routes
+    # sit above 75 on the lane (33 of 365 on main), which puts position 332
+    # on GET /api/v1/admin/quarantine/triage/{mode}/{group_id}, 76 on both
+    # trees. The four that crossed are the lane's three new assembly routes
+    # (POST /api/v1/ffa/lobby/{lobby_id}/connect 268, .../assembly 266 and
+    # .../release 93) and POST /api/v1/ffa/queue/leave, 53 -> 234: the leave
+    # now runs the assembly leave plan (the gone test and its witness census,
+    # the dissolve with the closers' record, and the re-form, which locks the
+    # next roster through the start's own _ffa_lock_roster, with its region
+    # pick, wager binding and titles). Every one is a binding its route
+    # really runs, and the median has not moved.
+    #
+    # The bound moves to 80, ~5% over the measurement; the median and worst
+    # bounds stay.
+    #
+    # Connect-failure LAND, merge main d889294 into the lane (2026-09-29):
+    # the same walk with the same route seeds over each tree's own
+    # backend/api:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   fork 9a1dd9d                          365   21 / 69 / 326
+    #   main d889294                          377   21 / 82 / 326
+    #   lane be70f04                          369   21 / 76 / 326
+    #   merge a234c91 (measured at 8652bdf)   381   22 / 83 / 326
+    #
+    # Neither side passes 83; the composition does, by rank alone. At
+    # n = 381 the p90 is the 39th route from the top and 38 routes sit above
+    # 83 on the merged tree: main's nine trade and collection routes (117 to
+    # 280) and the lane's four (POST /api/v1/ffa/lobby/{lobby_id}/connect
+    # 268, .../assembly 266, .../release 93, and POST
+    # /api/v1/ffa/queue/leave, 53 on main and 234 on the lane) are above it
+    # together for the first time. The route at the rank is GET
+    # /api/v1/spectate/games, 83 on both sides too. No count is the merge's
+    # own: checked route by route, every count at the merge is main's plus
+    # the lane's minus the fork's (or the one side's, for a route only one
+    # side has); the median moves 21 -> 22 the same way, by rank, under its
+    # bound of 24.
+    #
+    # The bound moves to 88 -- ~6% over the measurement, the headroom the
+    # moves above gave -- for that reason and no other; the median and
+    # worst bounds stay.
+    #
+    # Connect-failure LAND, sitting 2, merge claude/janitor-selftest 17ca44d
+    # (main cd8d846, the dance cards) into the lane (2026-09-30): the same
+    # walk with the same route seeds over each tree's own backend/api:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   base 82c0da6                          377   21 / 82 / 326
+    #   lane e966ed7                          381   22 / 83 / 326
+    #   trunk 17ca44d                         382   22 / 83 / 326
+    #   merge c8ffa2f                         386   22 / 90 / 326
+    #
+    # Again the rank alone: at n = 386 the p90 is the 39th route from the
+    # top. The trunk's five dance motion routes (the motion PNG 285, the
+    # motion preview GIF 282, GET /api/v1/pc-face/motion 125, POST
+    # /api/v1/pc/portrait/motion 118, POST /api/v1/pc/dance 32) now sit in
+    # the ranking beside the lane's four (connect 268, assembly 266, release
+    # 93, POST /api/v1/admin/ffa-g3-seats 14): four of the trunk's five are
+    # above the lane's rank and three of the lane's four above the trunk's,
+    # and the route at the rank is now GET /api/v1/ovt/queue/poll/{steam_id}
+    # at 90 (90 on both sides), with the lane's release at 93 just above it.
+    # Checked route by route, every count at the merge is the trunk's plus
+    # the lane's minus the base's (or the one side's, for a route only one
+    # side has): the merge adds no binding of its own. The bound moves to 95,
+    # ~6% over the measurement, for that reason and no other; the median and
+    # worst bounds stay (22 against 24, 326 against 335).
+    #
+    # Discord fix round 4 LAND (2026-09-30): measured 22 / 88 / 328 of 2940
+    # indexed bindings over 383 routes at the lane tip after its merges of
+    # main 82c0da6 and cd8d846, against 22 / 85 / 328 over the lane before
+    # them (ceddd3d, 377 routes) and 22 / 83 / 326 over main cd8d846 (382
+    # routes), the same walk with the same route seeds over each tree's own
+    # backend/api. Neither side passes 86; the composition does. The p90 is
+    # the value at sorted position int(0.9 * n), the 39th route from the top
+    # at n = 383. The lane's tournament routes keep their lane counts, above
+    # main's (signup 95 / 88, unsignup 90 / 82, time-vote 85 / 82, play-now
+    # 83 / 79, spectate/games 87 / 83: the row-32 start rule and round 4's
+    # one eligibility predicate), and main's dance cards add five routes and
+    # take POST /api/v1/pc/portrait from 86 to 88 (its motion writer); the
+    # 39th from the top is that route, at 88, 88 on main. Every count is the
+    # one its side measures; the only composed count, GET /api/v1/health (83:
+    # both sides' health words), sits below the rank.
+    #
+    # The bound moves to 92 -- ~5% over the measurement, the headroom the
+    # moves above gave -- for that reason and no other; the median (22) and
+    # worst bounds stay.
+    #
+    # Connect-failure LAND, sitting 3, merge main 0e751993 (the Discord fix)
+    # into the lane (2026-09-30): the same walk with the same route seeds over
+    # each tree's own backend/api:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   base 69a3599b                         382   22 / 83 / 326
+    #   lane a7e3d385                         386   22 / 90 / 326
+    #   trunk 0e751993                        383   22 / 88 / 328
+    #   merge                                 387   22 / 95 / 328
+    #
+    # At n = 387 the p90 is sorted position 348, and it holds POST
+    # /api/v1/tournaments/{tournament_id}/signup at 95, the trunk's own count
+    # (88 on the lane and the base); the lane's release (93) and the trunk's
+    # unsignup (90) sit just below it. Route by route, every count at the
+    # merge is the trunk's plus the lane's minus the base's (or the one side's,
+    # for a route only one side has) except four lane routes, each +4 over
+    # the lane: POST /api/v1/ffa/queue/leave, .../connect, .../assembly and
+    # GET /api/v1/ffa/queue/poll/{steam_id}. Those four reach
+    # tournaments._build_current_response, which the trunk changed to reach
+    # _eligible_slot_tallies, _ELIGIBLE_SLOT_TALLY_SQL, _ELIGIBLE_ENTRANT_SQL
+    # and MIN_SLOT_NOTICE_HOURS; the trunk's copies of those routes do not
+    # reach it, so the four bindings appear only when both sides are present.
+    # None of the four routes is at the rank. The bound moves to 100, ~5% over
+    # the measurement, for that reason and no other; the median and worst
+    # bounds stay (22 against 24, 328 against 335).
+    #
+    # Discord card render parity LAND, merge main 5062f4c4 (the
+    # connect-failure landing) into the lane (2026-10-01): the same walk with
+    # the same route seeds over each tree's own backend/api:
+    #
+    #   tree                               routes   code median / p90 / worst
+    #   base 0e751993                         383   22 / 88 / 328
+    #   lane fb9081c2                         383   22 / 90 / 370
+    #   trunk 5062f4c4                        387   22 / 95 / 328
+    #   merge                                 387   22 / 105 / 370
+    #
+    # Route by route, every count at the merge is the trunk's plus the lane's
+    # minus the base's (the trunk's, for its four new routes); no binding
+    # appears only when both sides are present. A rank effect: two routes
+    # that sat below the trunk's p90 crossed it with the lane's card art
+    # layer -- GET /api/v1/health 89 -> 265 (the pc_card_art self-test draws a
+    # face) and POST /api/v1/pc/portrait 88 -> 126 (the lane's card art
+    # bindings it reaches) -- so position 348 moves two ranks up the trunk's own ordering,
+    # from POST /api/v1/tournaments/{tournament_id}/signup (95, unmoved) to
+    # POST /api/v1/spectate/grant (105, unmoved on every tree). 39 routes sit
+    # above 100 on the merge, 35 on the trunk. The bound moves to 111, ~6%
+    # over the measurement, for that reason and no other; the median and
+    # worst bounds stay (22 against 24, 370 against 380).
+    assert code_p90 <= 111, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -886,7 +1153,22 @@ def test_the_helper_closure_stays_affordable():
     # data-into-data hub case measured worst 279 at MEDIAN 179, i.e. a runaway
     # shows up in the median long before it shows up here) rather than on a
     # feature module a route genuinely runs. The median and p90 bounds stay.
-    assert code_worst <= 335, f"worst code closure {code_worst} of {total}"
+    #
+    # Discord card render parity (2026-10-01): the same walk with the same
+    # route seeds measured 22 / 88 / 328 of 2949 over main 0e75199's
+    # backend/api and 22 / 90 / 357 of 2988 over the lane tip, the worst still
+    # POST /api/v1/pc/packs/open. Its +29 are all bindings that did not exist
+    # on main, all in pc_face -- the card art layer (_draw_badge_art,
+    # card_art_bundle/_patch/_names/_check_entry/_index_bytes, the bundle
+    # reader's _card_art_* helpers, the CardArtBundle record, top_card_name,
+    # _kit_pngs and the CARD_ART_* / _CARD_ART_* constants) -- and nothing
+    # main reached stopped being reached. 26 routes moved, none shrank: the
+    # face, strip, grid, motion and pack routes by 25 to 41 each, and GET
+    # /api/v1/health by 163 (87 -> 250), because the pc_card_art health word
+    # runs card_art_selftest, which draws a face to prove the layer. The
+    # bound moves to 380, ~6% over the measurement, for that reason and no
+    # other; the median and p90 bounds stay.
+    assert code_worst <= 380, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -895,7 +1177,169 @@ def test_the_helper_closure_stays_affordable():
     # than the code around it. A walk that has gone wrong still has to fail
     # here, so the bound is real and not merely raised to fit.
     assert all_median <= 90, f"median closure {all_median} of {total}"
-    assert all_p90 <= 150, f"p90 closure {all_p90} of {total}"
+    # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
+    # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
+    # the same walk with the same route seeds over main 7541261's backend/api.
+    # The same walk over this tree WITHOUT the seven trade routes gives
+    # 72 / 140 / 457 again, so the move is those seven routes and nothing
+    # else. (The code tier: p90 69 -> 73, median 21 and worst 326 unmoved,
+    # all under the bounds above, which stay.)
+    #
+    # The five player trade routes reach 229 to 257 bindings each, 83 of them
+    # in the face modules, and they enter those modules through the bindings
+    # GET /api/v1/pc/collection enters them through (_pc_print_dict,
+    # _pc_face_inputs, _pc_labels, _pc_face_ctx, _pc_locale, _pc_renderer_fp;
+    # the same 83 face-module bindings): a trade answers with the binder's
+    # own print projection. The two admin trade routes reach 91 and 73. Seven
+    # routes join a population of 365, five of them above the old p90, and
+    # the 90th percentile moves from 140 to 151.
+    #
+    # The bound moves to 160 -- ~6% over the measurement, the headroom 335
+    # gave over 315 and 300 over 282 at the code-worst moves -- for that
+    # reason and no other. A walk that has gone wrong still fails at the
+    # median bounds first (the data-into-data hub case measured median 179),
+    # and those stay, as does the worst bound.
+    #
+    # Discord collection landing (2026-09-26): the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   main 9a1dd9d                          365   72 / 140 / 457
+    #   lane 5868131                          369   73 / 150 / 457
+    #   LAND-1 74af3f6 (7541261 merged)       369   73 / 151 / 457
+    #   LAND-2 852f4be through 9f52e03        369   73 / 151 / 457
+    #
+    # The same rank effect as the code p90 above, and it crossed at the first
+    # landing: 37 of 369 routes sit above 150 on the landed tree (main: 33 of
+    # 365; the lane: 36 of 369), which puts position 332 on POST
+    # /api/v1/ovt/matches, 151 on every tree above. Four of the 37 are the
+    # lane's new internal routes (216, 410, 222, 409); the one that crossed on
+    # main is POST /api/v1/team/series/{series_id}/report-dc, 146 -> 153 on
+    # the lead-forfeit hotfix -- seven code bindings, _team_game_crossed_two
+    # with the four helpers and two constants beside it, the per-game
+    # evidence that route now settles from. The bound moves to 160, 6% over
+    # the measurement; the median and worst bounds stay.
+    #
+    # The two moves above were made independently, one on each side of the
+    # merge of main 36e8493 into the card trading lane (2026-09-27), and both
+    # chose 160.
+    #
+    # Card trading LAND, second merge (2026-09-27): measured 75 / 164 / 459
+    # over the same 376 routes of the merge 9a5b081, against 75 / 153 / 459
+    # over the lane tip a666517 and 73 / 151 / 457 over main 36e8493. The
+    # same rank effect as the code p90: 38 routes sit above 160 on the
+    # merged tree, nine of them the two sides' new routes, and the 38th from
+    # the top is POST /api/v1/team/series/{series_id}/report-dc at 164 (162
+    # on main; the +2 is models.deferred and models.text, the two import
+    # bindings F63's Player mapping added, which every route reaching the
+    # model reaches). The bound moves to 174, ~6% over the measurement; the
+    # median and worst bounds stay (the worst route, POST
+    # /api/v1/pc/packs/open, measures 459 against 460).
+    #
+    # Connect-failure lane (2026-09-27), the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   main 9a1dd9d                          365   72 / 140 / 457
+    #   lane f25c084 (api code)               369   73 / 151 / 457
+    #
+    # The same rank effect as the code p90 above: 37 of 369 routes sit above
+    # 150 (33 of 365 on main), which puts position 332 on POST
+    # /api/v1/ovt/matches, 151 on both trees. The four that crossed are the
+    # same four: connect 377, assembly 375, release 152, and POST
+    # /api/v1/ffa/queue/leave 118 -> 341. The bound moves to 160, ~6% over
+    # the measurement; the median and worst bounds stay.
+    #
+    # Connect-failure LAND, merge main d889294 into the lane (2026-09-29),
+    # the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   fork 9a1dd9d                          365   72 / 140 / 457
+    #   main d889294                          377   75 / 165 / 459
+    #   lane be70f04                          369   73 / 151 / 457
+    #   merge a234c91 (measured at 8652bdf)   381   76 / 167 / 459
+    #
+    # The same rank effect as the code p90 above: 37 routes sit above 167 on
+    # the merged tree, and the 39th from the top is GET
+    # /api/v1/spectate/games (with POST
+    # /api/v1/tournaments/{tournament_id}/matches/{match_id}/play-now) at
+    # 167, 167 on main too and 165 on the lane. Above it sit main's nine new
+    # routes and the lane's connect (379), assembly (377) and POST
+    # /api/v1/ffa/queue/leave (343; 120 on main), beside GET
+    # /api/v1/ffa/queue/poll/{steam_id} (377 on the merge, 183 on main).
+    # Every count on a route both sides have is main's plus the lane's minus
+    # the fork's; the lane's four new routes each measure 1 or 2 above their
+    # lane counts (connect 377 -> 379, assembly 375 -> 377, release
+    # 152 -> 153, POST /api/v1/admin/ffa-g3-seats 54 -> 55): models.text on
+    # all four and models.deferred on connect and assembly, the import
+    # bindings main's Player mapping added, which every route reaching the
+    # model reaches. The bound moves to 177, ~6% over the measurement; the
+    # median and worst bounds stay (the worst route measures 459 against
+    # 460).
+    #
+    # Connect-failure LAND, sitting 2, merge claude/janitor-selftest 17ca44d
+    # (main cd8d846) into the lane (2026-09-30), the same walk, whole
+    # closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   base 82c0da6                          377   75 / 165 / 459
+    #   lane e966ed7                          381   76 / 167 / 459
+    #   trunk 17ca44d                         382   76 / 167 / 459
+    #   merge c8ffa2f                         386   76 / 175 / 459
+    #
+    # The same rank effect: the trunk's five motion routes (397, 394, 216,
+    # 204, 100) and the lane's four (connect 379, assembly 377, release 153,
+    # admin G3 seats 55) are in one ranking, and the 39th from the top is
+    # POST /api/v1/admin/team/series/{series_id}/resolve at 175, 175 on both
+    # sides. Every count on a route both sides have is the trunk's plus the
+    # lane's minus the base's. The measurement is inside the old bound of
+    # 177 by 2; the bound moves to 185, ~6% over it, the headroom
+    # convention of every entry above; the median and worst bounds stay (76
+    # against 90, 459 against 460).
+    #
+    # Title ladders (board row 29), rebuilt on main 5062f4c4 (2026-10-01),
+    # the same walk, whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   main 5062f4c4                         387   76 / 178 / 461
+    #   lane (title ladders on 5062f4c4)      387   76 / 182 / 466
+    #
+    # The 39th route from the top is POST /api/v1/pc/portrait at 182 on both
+    # trees; POST /api/v1/tournaments/{tournament_id}/unsignup moves 178 ->
+    # 182 above it, gaining the catalogue bindings (LADDERS, LINES,
+    # rungs_at_tier, threshold) the ladder module's per-tier helpers read.
+    # The rated-game routes gain the per-game evaluator they run, and the
+    # 2v2 settlement routes lose the hook (the settlement plays no game).
+    # Inside the bound of 185 by 3, so the bound stays.
+    #
+    # Discord card render parity (2026-10-01): 76 / 171 / 461 over the 383
+    # routes of main 0e75199, 76 / 177 / 490 over the lane tip. A rank
+    # effect again: two routes that sat at or below main's p90 crossed it --
+    # GET /api/v1/health 137 -> 332 (the pc_card_art self-test draws a face)
+    # and GET /api/v1/internal/pc/face/back 157 -> 183 (the face module's art
+    # layer) -- so position 344 moves from GET /api/v1/spectate/games (171,
+    # unmoved) to POST /api/v1/ffa/lobby/start (177, unmoved). 40 routes sit
+    # above 174 on the tip, 38 on main. The lane's bound was 188, ~6% over
+    # that measurement; the median bound stayed.
+    #
+    # Discord card render parity LAND, merge main 5062f4c4 (the
+    # connect-failure landing) into the lane (2026-10-01), the same walk,
+    # whole closure:
+    #
+    #   tree                               routes   median / p90 / worst
+    #   base 0e751993                         383   76 / 171 / 461
+    #   lane fb9081c2                         383   76 / 177 / 503
+    #   trunk 5062f4c4                        387   76 / 178 / 461
+    #   merge                                 387   76 / 197 / 503
+    #
+    # Every count at the merge is the trunk's plus the lane's minus the
+    # base's (the trunk's, for its four new routes). The same rank effect as
+    # the code p90 above: GET /api/v1/health (139 on the trunk, 347 on the
+    # merge) and GET /api/v1/internal/pc/face/back (157 -> 197) crossed the
+    # trunk's p90, so position 348 is now the face back route itself at 197; POST /api/v1/spectate/grant (200,
+    # unmoved on every tree) sits one rank above it. 39 routes sit above 185
+    # on the merge, 36 on the trunk. The bound moves to 209, ~6% over the
+    # measurement, for that reason and no other; the median and worst bounds
+    # stay (76 against 90, 503 against 520).
+    assert all_p90 <= 209, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
@@ -917,7 +1361,23 @@ def test_the_helper_closure_stays_affordable():
     # That last one widens the reviewed surface rather than narrowing it, which
     # is the only direction this gate may be wrong in. The bound moves to 460,
     # the same ~5% headroom 420 gave over 401 and 400 gave over 383.
-    assert all_worst <= 460, f"worst closure {all_worst} of {total}"
+    # Discord fix (2026-09-28): the same route measured 459 at the lane base
+    # 64885ef, 460 at the round-1 tip d4a284d and 461 at round 2's 12952d5 -
+    # one code binding per round, each one the route really runs:
+    # main._pc_open_for (round 1: the open path this route and the bot's
+    # POST /api/v1/internal/pc/packs/open share, keyed by the purchase's
+    # nonce) and main._pc_committed_answer (round 2: the recorded outcome a
+    # replayed key, a pack voided at open and /pc/packs/result answer, so no
+    # work after a purchase commits can fail its answer). Code tier 326 ->
+    # 327 -> 328, under its bound; median 75 and p90 164 -> 166 under
+    # theirs. The bound moves to 484, the same ~5% headroom 460 gave over
+    # 439, for that reason and no other.
+    # Discord card render parity (2026-10-01): the same route measured 461 on
+    # main 0e75199 and 490 on the lane tip -- +29, exactly the 29 card art
+    # code bindings accounted for at the code bound above, with no import
+    # line added. The bound moves to 520, ~6% over the measurement, for that
+    # reason and no other.
+    assert all_worst <= 520, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):
@@ -1035,6 +1495,29 @@ def _load_entry_points():
     return {name: [tuple(row) for row in rows] for name, rows in sections.items()}
 
 
+def _entry_point_drift(manifest, sha_of=_entry_point_sha):
+    """EVERY pinned entry point whose fingerprint has moved, not the first.
+
+    This used to be an `assert` inside the loop, which stops at the first
+    mismatch it meets. The sections are walked in a fixed order and middleware
+    comes first, so a drift in the background entry point sat behind a
+    middleware drift owned by another lane and was reported by nothing: the
+    failure line named one function, and a reader had no way to tell whether
+    it was the only one. A gate that reports a subset of what it found is a
+    gate that certifies the rest by silence.
+
+    `sha_of` is a seam, so a control can hand this a scripted oracle and check
+    that a SECOND drifted entry is actually named.
+    """
+    drifted = []
+    for section in sorted(manifest):
+        for module, name, sha in manifest[section]:
+            live = sha_of(module, name)
+            if live != sha:
+                drifted.append((section, module, name, sha, live))
+    return drifted
+
+
 def test_the_manifest_covers_every_non_route_entry_point():
     """r14 M7, GATE C. A route table is not the whole app.
 
@@ -1060,30 +1543,73 @@ def test_the_manifest_covers_every_non_route_entry_point():
         sorted(live["background_entry_points"])
     )
 
-    # This app registers no first-party exception handlers, so asserting that
-    # SECTION is non-empty would be a check that cannot pass. What must be
-    # non-empty is the raw recovery -- proof the mechanism still sees handlers
-    # at all, so that a first-party one added later is picked up rather than
-    # silently skipped.
+    # The raw recovery must be non-empty -- proof the mechanism still sees
+    # handlers at all, so that a first-party one added later is picked up
+    # rather than silently skipped. (FastAPI's own three are always there; the
+    # recovery keeps only the first-party ones, which is why this is asserted
+    # on the RAW set and not on the section.)
     raw_handlers = getattr(main.app, "exception_handlers", None) or {}
     assert raw_handlers, "the exception-handler recovery sees nothing at all"
-    assert live["exception_handlers"] == [], (
-        "a first-party exception handler was registered -- it belongs in the "
-        "manifest, and this assertion is the thing that says so"
+    # ...and the first-party set is what the manifest says it is. The generic
+    # loop below asserts that for every section; this names the one handler
+    # this app registers, so DELETING it from both the app and the manifest --
+    # which the loop would call agreement -- still reddens here.
+    assert live["exception_handlers"] == [("main", "_ffa_report_refusal_handler")], (
+        "the first-party exception-handler set changed. A handler is a "
+        "request-path surface: adding, removing or renaming one is a review "
+        "item, not a re-pin (repin_route_manifest.py refuses to do it)."
     )
 
     for section, entries in live.items():
         recorded = [(m, n) for (m, n, _sha) in manifest[section]]
         assert recorded == entries, f"{section}: manifest {recorded} vs live {entries}"
-        for module, name, sha in manifest[section]:
-            assert _entry_point_sha(module, name) == sha, (
-                f"{module}.{name} source fingerprint changed; re-review it"
-            )
+
+    # Reported TOGETHER. One drifted fingerprint used to hide every later one,
+    # and the sections are walked in a fixed order, so whichever came first
+    # decided what a reader was told (#342: a check whose report is a subset of
+    # what it found).
+    drifted = _entry_point_drift(manifest)
+    assert not drifted, (
+        "%d pinned entry point(s) have moved; every one of them needs "
+        "re-reviewing and re-pinning:\n%s"
+        % (len(drifted), "\n".join(
+            "  %-24s %s.%s  %s -> %s" % (section, module, name, sha[:12], now[:12])
+            for section, module, name, sha, now in drifted)))
 
     before = _entry_point_sha("main", "rate_limit_gate")
     with _mutated_segment("main", "rate_limit_gate"):
         after = _entry_point_sha("main", "rate_limit_gate")
     assert after != before, "editing the rate-limit gate moved no fingerprint"
+
+
+def test_a_drifted_entry_point_does_not_hide_the_ones_behind_it():
+    """The gate above reports EVERY moved fingerprint, not the first.
+
+    Why it needs its own test: on this tree one middleware entry has already
+    drifted, and the sections are walked in a fixed order with middleware
+    first. A `main.lifespan` drift therefore sat behind it and was named by
+    nothing -- so "one function is listed" carried no information about the
+    others, and a background entry point could ship stale behind a failure
+    somebody else was expected to clear.
+
+    The oracle is scripted rather than taken from the live tree: a test that
+    depends on which entry points happen to be drifting today stops testing
+    this the moment somebody re-pins.
+    """
+    manifest = {
+        "middleware": [("main", "rate_limit_gate", "aaaa")],
+        "background_entry_points": [("main", "lifespan", "bbbb")],
+    }
+    both = _entry_point_drift(manifest, sha_of=lambda m, n: "cccc")
+    named = {(module, name) for _section, module, name, _sha, _now in both}
+    assert named == {("main", "rate_limit_gate"), ("main", "lifespan")}, (
+        "two entry points drifted and the gate reported %r -- the ones it "
+        "does not name are certified by its silence" % (sorted(named),))
+
+    # ...and it still says nothing when nothing moved, or the assertion above
+    # would be reporting drift that is not there.
+    assert _entry_point_drift(
+        manifest, sha_of=lambda m, n: "aaaa" if n == "rate_limit_gate" else "bbbb") == []
 
 
 def test_the_admission_rule_is_computed_for_every_module_not_just_main():
@@ -1330,8 +1856,8 @@ def _match_by_code_row(sentinels):
             "player1_id": p1_id,
             "player2_id": p2_id,
             "winner_id": p1_id,
-            "p1_sid": "76561198000000001",
-            "p2_sid": "76561198000000002",
+            "p1_sid": "76561193000000001",
+            "p2_sid": "76561193000000002",
             "p1_name": "Player One",
             "p2_name": "Player Two",
             "s_p1_id": None,
@@ -1385,7 +1911,7 @@ def _discord_game(sentinels):
         "series_status": "completed",
         "players": [
             {
-                "steam_id": "76561198000000001",
+                "steam_id": "76561193000000001",
                 "name": "Player One",
                 "rounds_won": 5,
                 "points_total": 12,
@@ -1393,7 +1919,7 @@ def _discord_game(sentinels):
                 "cards": ["Grow"],
             },
             {
-                "steam_id": "76561198000000002",
+                "steam_id": "76561193000000002",
                 "name": "Player Two",
                 "rounds_won": 3,
                 "points_total": 8,
@@ -1442,7 +1968,7 @@ def _flag_row(sentinels, reviewed: bool):
             "context_series_id": None,
             "flag_reason": "inactive_player",
             "flag_details": {
-                "reporter_steam": "76561198000000001",
+                "reporter_steam": "76561193000000001",
                 "shots": 0,
                 "blocks": 0,
                 "cards_picked": 0,
@@ -1451,8 +1977,8 @@ def _flag_row(sentinels, reviewed: bool):
             "invalidated_at": None,
             "invalidation_reason": None,
             "restoration_required": False,
-            "p1_steam_id": "76561198000000001",
-            "p2_steam_id": "76561198000000002",
+            "p1_steam_id": "76561193000000001",
+            "p2_steam_id": "76561193000000002",
             "p1_name": "Player One",
             "p2_name": "Player Two",
             "is_ranked": True,
@@ -1468,7 +1994,7 @@ def _flag_row(sentinels, reviewed: bool):
             "point_timeline": None,
             "point_times": None,
             "reporter_name": "Player One",
-            "reporter_steam_id": "76561198000000001",
+            "reporter_steam_id": "76561193000000001",
             "reporter_mod_version": "1.40.0",
             "game_version": "1.40.0",
             "region": "us",
