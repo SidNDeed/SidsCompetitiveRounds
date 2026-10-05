@@ -371,7 +371,8 @@ def test_m9_with_no_revision_the_pass_attaches_and_derives_nothing(live):
         return s, g, d, mid, before, after
     s, g, d, mid, before, after = live.run(go())
     assert not _errors(s) and s["evaluated"] == 0 and "fault" not in s
-    assert set(s) <= {"evaluated", "fired", "rule_errors", "attached", "waiting"}, s
+    assert set(s) <= {"evaluated", "fired", "rule_errors", "attached", "waiting", "parked"}, s
+    assert s["parked"] == 0
     assert g[0]["match_id"] == mid and g[0]["evaluated_rev"] is None and g[0]["finalized_at"] is None
     assert g[0]["derive_fault"] is None
     assert d == {"card_hand_outside": 0, "card_phase_outside": 0, "card_contrib": 0, "card_player_daily": 0}
@@ -1111,13 +1112,15 @@ def test_m7_a_conflict_that_waits_on_the_evaluations_row_lock_is_later_than_it_a
 
 # -- M2: every revision shape through the review pass (the worker cells of the table) ------
 
-async def _fresh_game(sm, tag):
+async def _fresh_game(sm, tag, dup=False):
+    """A fresh paired game; with dup, one side's record carries the
+    duplicate the card game rule fires on."""
     a, b = _steams()
     ids = await _players(sm, a, b)
     key = "ranked_cards%s_000001" % tag
     ra, rb, c = _pair()
     await _register(sm, k.census_dump(c.cards))
-    await _store(sm, ids, a, b, key, ra)
+    await _store(sm, ids, a, b, key, k.dup_record() if dup else ra)
     await _store(sm, ids, b, a, key, rb)
     await _match(sm, ids, a, b, key + "_r5", sc="off")
     return key, [await _pair_of(sm, key)], [ids[a], ids[b]]
@@ -1135,7 +1138,8 @@ def test_m2_every_revision_shape_runs_the_review_pass_derives_and_matches_the_or
     stored findings equal the from-scratch oracle (empty for a shape with no
     card rules), and the admin read answers under the revision."""
     state = revs.shapes[shape]
-    has_card = k.revision_shapes()[shape][2]
+    doc, _cases, has_card = k.revision_shapes()[shape]
+    weighed = cm.WEIGHTS in doc["measure_params"]
     monkeypatch.setattr(main._review_rules, "refresh_rules", lambda: state)
     cards = {}
     orig = ce.games_pass
@@ -1147,7 +1151,7 @@ def test_m2_every_revision_shape_runs_the_review_pass_derives_and_matches_the_or
 
     async def go():
         sm = live.sm
-        key, games, dealers = await _fresh_game(sm, "h%d" % SHAPES.index(shape))
+        key, games, dealers = await _fresh_game(sm, "h%d" % SHAPES.index(shape), dup=True)
         word, seat_games, sittings, _p = await main.review_worker_pass(sm, False)
         g = (await _rows(sm, GAME, k=key))[0]
         derived = await _derived(sm, key)
@@ -1161,7 +1165,11 @@ def test_m2_every_revision_shape_runs_the_review_pass_derives_and_matches_the_or
         assert not _errors(stats) and not stats.get("fault_unrecorded"), (shape, stats)
     assert cards["stats"]["parked"] == 0
     assert g["derive_fault"] is None and g["evaluated_rev"] == state.ruleset.rev and g["finalized_at"]
-    assert derived["card_hand_outside"] > 0                     # derivation proceeded
+    # derivation proceeded: the hand rows always (the duplicate is outside),
+    # the contributions exactly when the revision has a weight family (no
+    # expectation without weights)
+    assert derived["card_hand_outside"] > 0
+    assert (derived["card_contrib"] > 0) == weighed
     assert stored == want
     assert bool(want) == has_card                               # control: a card shape fires here
     assert adm["review_rules"] == state.ruleset.rev and adm["games"]
