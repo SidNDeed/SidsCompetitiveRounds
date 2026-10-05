@@ -233,6 +233,7 @@ def test_pg_the_probe_reads_0_while_what_it_names_is_missing_and_1_once_mended(m
 WITNESS_FUNCS = {"_pc_fix_ready_line", "_pc_buy_pending", "_pc_buy_settled_ok"}
 WITNESS_ASSIGNS = {"_PC_OPEN_SENDS"}
 TAIL = ("an unanswered open sends its key 3 times; every purchase names the player it was bought for; "
+        "every bought pack is checked against its player before its pointer or reveal; "
         "sync availability checks wait for a start time with min_players votes")
 
 

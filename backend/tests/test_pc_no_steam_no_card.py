@@ -745,6 +745,10 @@ def test_the_bots_picture_source_answers_404_for_a_print_of_a_non_steam_subject(
 
     monkeypatch.setattr(main, "_pc_face_ctx", ctx)
     monkeypatch.setattr(main, "_pc_render_face", render)
+    # The route's diagnostics headers (X-Face-Art, X-Face-Still) read the
+    # spec of the row it rendered; this session's rows carry only the id rule's
+    # columns, so the spec is the renderer stub's business here.
+    monkeypatch.setattr(main, "_pc_face_inputs", lambda _row, _ctx: ({"top_card": ""}, "none", None, "f" * 16))
     db = _FaceSession(OTHER_SUBJECT)
     with pytest.raises(HTTPException) as ex:
         _run(main.internal_pc_face_print(str(PRINT), "en", "card", "k", db))

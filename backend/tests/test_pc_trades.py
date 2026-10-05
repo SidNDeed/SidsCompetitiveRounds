@@ -218,8 +218,17 @@ def _bare(stmt):
     return " ".join(re.sub(r"--[^\n]*|/\*.*?\*/", "", stmt, flags=re.S).split())
 
 
+# Held out of every replay here: 366 is the refund of a production census (one
+# paying title_regicide holder) and refuses, changing nothing, on any database
+# that census does not describe -- this harness's fresh schema included. It
+# touches no object this module reads (shop_items, players, player_items and
+# gold_transactions rows of two retired titles only).
+HELD_OUT = frozenset({"366_title_refunds_voidshot_kingslayer.sql"})
+
+
 def _numbered(upto=None, above=None):
-    files = sorted(p for p in SQL_DIR.glob("*.sql") if re.match(r"^\d{3}_", p.name))
+    files = sorted(p for p in SQL_DIR.glob("*.sql")
+                   if re.match(r"^\d{3}_", p.name) and p.name not in HELD_OUT)
     if upto is not None:
         files = [p for p in files if int(p.name[:3]) <= upto]
     if above is not None:
@@ -2214,7 +2223,23 @@ def test_m45_a_deletion_without_the_trading_schema_completes(env):
 
 def test_m46_health_without_the_trading_schema(env):
     """M46 (E 10), census 13: on a database 353 has not reached, /health's
-    connected arm answers every marker and pc_trading: schema_missing."""
+    connected arm answers every marker and pc_trading: schema_missing.
+
+    The sweep word is read twice -- once inside /health, once below -- and it
+    is a function of the clock: a heartbeat stamp reads `running` and then
+    `stale` once _PC_STEAM_STALE_S has passed. Its inputs are pinned to the
+    never-run state (no stamp, no fault, a breaker never paused), whose word
+    no clock reading can change, so both reads answer the same word however
+    long the process has been running."""
+    mp = env.monkeypatch
+    mp.setattr(main, "IS_REPLICA", False)
+    mp.delenv("PC_STEAM_SWEEP", raising=False)
+    for key, value in (("clean_at", None), ("started_at", None), ("error", None)):
+        mp.setitem(main._PC_STEAM_SWEEP_STATE, key, value)
+    if main._pcs is not None:
+        mp.setattr(main, "_pc_steam_breaker", main._pcs.Breaker())
+    sweep = "paused:renderer" if main._pcs is None else "starting"
+
     async def body(ctx):
         await _missing(ctx, env)
         try:
@@ -2225,6 +2250,7 @@ def test_m46_health_without_the_trading_schema(env):
     assert (h.status, h.database, h.pc_trading) == ("ok", "connected", "schema_missing"), h
     assert (h.pc_renderer_fp, h.pc_raqm, h.pc_steam_sweep, h.pc_steam_render) == (
         main._pc_renderer_fp(), main._pc_raqm(), main._pc_steam_sweep_word(), main._pc_steam_render_word())
+    assert h.pc_steam_sweep == sweep, h
 
 
 class _Down:

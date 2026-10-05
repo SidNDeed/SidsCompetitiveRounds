@@ -6,7 +6,7 @@
     <RootNamespace>CompetitiveRounds</RootNamespace>
     <LangVersion>latest</LangVersion>
     <NoWarn>$(NoWarn);CS1701;CS1702;CS0169;CS0649</NoWarn>
-    <Configurations>Debug;Release;Thunderstore</Configurations>
+    <Configurations>Debug;Release;Thunderstore;G3</Configurations>
     <!-- Deterministic, symbol-free output: BepInEx stack traces report IL
          offsets regardless (the pdb is never loaded at runtime), so shipped
          builds carry no debug artifacts. Do not change. -->
@@ -27,6 +27,18 @@
          #if'd out of it). Every Thunderstore release before this one shipped
          unoptimized IL. Does NOT touch DebugType/Deterministic, which stay
          load-bearing for the no-local-paths guarantee. -->
+    <Optimize>true</Optimize>
+  </PropertyGroup>
+
+  <!-- G3 build (connect-failure V11 sec5.1, sec8.4 G3; K46): the admission build for
+       the five enrolled seats only. Defines SCR_G3, so ApiClient.BuildVariantMarker
+       returns SCR_BUILD_VARIANT=G3 (a marker that exists only to be probed, #306) and
+       FfaAssembly.AdvertiseAdm holds. Optimized like Release. It never installs to
+       this seat (the CopyToPlugins condition below), and tools/g3-publish-gate.ps1
+       refuses its DLL for every publish destination. The production-enabling
+       release deletes this group, the marker branch and the exclusion. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'G3'">
+    <DefineConstants>$(DefineConstants);SCR_G3</DefineConstants>
     <Optimize>true</Optimize>
   </PropertyGroup>
 
@@ -263,7 +275,7 @@
          searches. MSBuild property functions parse it straight from source. -->
     <MusicAssetRevision>$([System.Text.RegularExpressions.Regex]::Match($([System.IO.File]::ReadAllText('$(MSBuildProjectDirectory)\MusicAssets.cs')), 'ASSET_REVISION\s*=\s*&quot;([a-z0-9]+)&quot;').Groups[1].Value)</MusicAssetRevision>
   </PropertyGroup>
-  <Target Name="CopyToPlugins" AfterTargets="Build" Condition="'$(SkipCopyToPlugins)' != 'true'">
+  <Target Name="CopyToPlugins" AfterTargets="Build" Condition="'$(SkipCopyToPlugins)' != 'true' and '$(Configuration)' != 'G3'">
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds" />
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cards" />
     <MakeDir Directories="$(BepInExDir)\plugins\CompetitiveRounds\cosmetics" />

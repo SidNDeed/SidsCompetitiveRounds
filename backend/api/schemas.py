@@ -870,6 +870,28 @@ class HealthResponse(BaseModel):
     # any build before the fix, which is how the release train reads the old
     # build on both boxes.
     discord_fix: int
+    # pc_card_art: whether this box's faces draw the top card's art
+    # (main._pc_card_art_word; Discord card render parity). 3 = the renderer
+    # is up, the private art bundle validated in full, and the boot proof drew
+    # every entry into its rect; 1 = the renderer is up and the bundle is
+    # absent or invalid (every top card keeps the name-only badge; never a
+    # refusal); 0 = the renderer cannot serve faces, or an accepted bundle
+    # failed its proof. DERIVED by drawing, never a constant (#342). Declared
+    # without a default, so an answer built without it raises instead of
+    # leaving the key out. Absent on any build before it.
+    pc_card_art: int
+    # pc_art_rect: release-train verification plumbing for bug 408 (the top
+    # card's art geometry): the art rect of the layout this box's renderer
+    # LOADED, "x0,y0,x1,y1" (main._pc_art_rect_word -> pc_face.card_art_rect,
+    # rects.badge_art_back), DERIVED at every request, never a constant
+    # (#342); null when the renderer module did not import. It tells a box on
+    # this geometry from a box on another one even when both draw their own
+    # bundle healthily, which pc_card_art (unchanged in meaning) cannot. Equal
+    # on both roles and both arms; it needs no database. Read by nothing but
+    # the train (#306). Declared without a default, so an answer built
+    # without it raises instead of leaving the key out. Absent on any build
+    # before it.
+    pc_art_rect: str | None
     # ffa_game_number: whether this build keys an FFA game on the number the
     # lobby holds for it (main._FFA_GAME_NUMBER; 1 = the ffa_matches insert
     # names game_number, migration 327's column, AND the prior-game lookup
@@ -923,13 +945,15 @@ class HealthResponse(BaseModel):
     # (#441: the value a broken feature reports must not look like success).
     # Absent on any build before this batch, which is how the old build reads.
     pc_card_themes: str | None = None
-    # ladder_hook: how many of the four rated completion paths credit the worn
-    # title ladder in this build (main._LADDER_HOOK; 4 = submit_match,
-    # submit_team_match, _complete_team_series_with_ratings and
-    # submit_ffa_match each call title_ladders.record_completed_games, v1.41.0
-    # item 12). DERIVED from those four functions' compiled code when main is
-    # imported, never written down, so a build that lost a site's call reads
-    # less than 4 (#342). The release train's build discriminator for the
+    # ladder_hook: how many of the ranked game-reporting paths credit the worn
+    # title ladder in this build (main._LADDER_HOOK). 3 since the title ladders
+    # build (board row 29): submit_match, submit_team_match and
+    # submit_ffa_match each call title_ladders.record_completed_games once per
+    # game; it read 4 on the series-unit build (v1.41.0 item 12), whose fourth
+    # site, _complete_team_series_with_ratings, plays no game. DERIVED from
+    # those functions' compiled code when main is imported, never written
+    # down, so a build that lost a site's call reads less (#342). The release
+    # train's build discriminator for the
     # ladder-hook batch, which adds no route and no key to a GET answer both
     # builds serve; equal on both boxes by construction, and read by nothing
     # else (#306). Declared without a default, so building the answer without
@@ -989,6 +1013,15 @@ class HealthResponse(BaseModel):
     # without it raises instead of silently leaving the key out. Absent on
     # any build before that batch, which is how the old build reads.
     pc_motion: int
+    # title_ladders: how many ladders the catalogue this build serves holds
+    # (main._title_ladders_health_word -> title_ladders.LADDERS): 32 on the
+    # five-tier build (board row 29). DERIVED on every request from the list
+    # the read route and the hook read, never written down (#342). The build
+    # discriminator for the title ladders batch, which adds no route; equal on
+    # both boxes by construction and read by nothing else (#306). Declared
+    # without a default, so building the answer without it raises instead of
+    # silently leaving the key out. Absent on any build before that batch.
+    title_ladders: int
     # janitor_selftest: the verdict of this api process's boot janitor SQL
     # self-test (main._janitor_selftest_marker; 1 = it ran and every statement
     # passed, 0 = it ran and did not pass, 2 = skipped on the read replica,
@@ -1009,6 +1042,18 @@ class HealthResponse(BaseModel):
     # without a default, so building the answer without it raises instead
     # of silently leaving the key out. Absent on any build before it.
     janitor_selftest_build: int
+    # connect_failure: how many of the connect-failure design's eight I2
+    # writers (the lock, the poll, connect, assembly, the leave, the verdict,
+    # the report and the release) are wired to their seat-row write in this
+    # build (main._CONNECT_FAILURE; 8 = every one). DERIVED from those
+    # functions' compiled code when main is imported, never written down, so
+    # a build that lost a writer's wiring reads less than 8 (#342). The
+    # release train's build discriminator for the connect-failure batch; read
+    # by nothing else (#306). Declared without a default, so building the
+    # answer without it raises instead of silently leaving the key out.
+    # Absent on any build before that batch, which is how the train reads the
+    # old build.
+    connect_failure: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

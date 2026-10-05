@@ -2508,11 +2508,15 @@ def test_the_seat_binding_check_rejects_a_missing_and_a_late_binding():
 # names, under the session check's own policy (soft-fail where enforcement is
 # not armed for the caller). That class is filed in the round-9 notes and
 # not changed here; a renewer added later is unclassified and reddens this.
+# The ffa poll's body, its lease renewal with it, runs as _ffa_queue_poll_inner
+# since the connect-failure landing; ffa_queue_poll is now the route wrapper
+# that attaches the assembly notice after the poll's own COMMIT and renews
+# nothing itself. Same body, same class.
 LEASE_RENEWERS = {
     "presence_ping": "IN-GAME",
     "team_queue_poll": "LOBBY SEAT",
     "ovt_queue_poll": "LOBBY SEAT",
-    "ffa_queue_poll": "LOBBY SEAT",
+    "_ffa_queue_poll_inner": "LOBBY SEAT",
     "_lobby_state_impl": "LOBBY SEAT",
 }
 
@@ -2861,7 +2865,16 @@ LIVENESS_VETO_READERS = {
     "ovt_queue_leave": "OPEN",
     "ovt_queue_poll": "OPEN",
     "ffa_queue_leave": "OPEN",
-    "ffa_queue_poll": "OPEN",
+    # The ffa poll's body runs as _ffa_queue_poll_inner since the
+    # connect-failure landing (ffa_queue_poll wraps it and reads no veto).
+    "_ffa_queue_poll_inner": "OPEN",
+    # The connect-failure assembly verdict: it reads the veto inside the
+    # assembly lock step (_asm_lock, the ffa lobby row FOR NO KEY UPDATE) and
+    # holds no team_series lock, and a start-short / reform / dissolve write
+    # through _asm_apply_decision rests on the read. The same class as the ffa
+    # poll and leave: no publisher locks an ffa row, so it cannot be
+    # serialized against one.
+    "_ffa_assembly_verdict": "OPEN",
     "_ffa_game_in_progress_tristate": "HELPER",
     "_ffa_poll_locked_payload": "REPORTED",
 }
@@ -3003,24 +3016,45 @@ def test_mod_version_advertises_no_series_status_capability():
     whichever box answers latches enforce on its own
     (ReadGateRules.OnRefusal), so a later request never depends on this
     answer's box. Pinned here by name, by value and by its condition.
+
+    The connect-failure landing adds one key of its own, `join_region_guard`,
+    set only while JOIN_REGION_GUARD is true; it ships False, so with the
+    shipped value neither request kind sees it. Pinned below the same way.
     """
     node = node_named("get_mod_version")
     joined = "\n".join(code_lines_of(node))
     assert "series_status_readonly" not in joined, joined
     returns = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
     assert len(returns) == 1, [ast.unparse(r) for r in returns]
+    # The one return is `body`; `body` is bound exactly once, by a plain
+    # assignment to a dict literal, which the checks below read; and no
+    # method is called on it. The only other writes to it are subscript
+    # writes, pinned below: the read gate's two advert keys under the version
+    # condition and, since the connect-failure landing, "join_region_guard"
+    # alone under `if JOIN_REGION_GUARD:` (the joiner's region guard; it ships
+    # False). A dict literal cannot carry a conditional key except through a
+    # ** entry, whose key this pin could not name, so the pin is stated for
+    # that shape rather than the route rewritten. Any other key -- the
+    # series-status flag above all -- still turns this red.
     assert ast.unparse(returns[0].value) == "body", ast.unparse(returns[0])
-    built = [n for n in ast.walk(node) if isinstance(n, ast.Assign)
-             and [ast.unparse(t) for t in n.targets] == ["body"]]
-    assert len(built) == 1, [ast.unparse(b) for b in built]
-    answer = built[0].value
-    assert isinstance(answer, ast.Dict), ast.unparse(built[0])
+    binds = [n for n in ast.walk(node) if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+             and any(isinstance(t, ast.Name) and t.id == "body"
+                     for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+    assert len(binds) == 1 and isinstance(binds[0], ast.Assign), [ast.unparse(b) for b in binds]
+    assert [ast.unparse(t) for t in binds[0].targets] == ["body"], ast.unparse(binds[0])
+    calls = [n for n in ast.walk(node) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+             and n.func.value.id == "body"]
+    assert calls == [], [ast.unparse(c) for c in calls]
+    answer = binds[0].value
+    assert isinstance(answer, ast.Dict), ast.unparse(binds[0])
     keys = sorted(ast.unparse(k) for k in answer.keys)
     assert keys == sorted(["'version'", "'min_version'",
                            "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD"]), keys
     values = {ast.unparse(k): ast.unparse(v) for k, v in zip(answer.keys, answer.values)}
     # The advert: exactly two subscript writes to body, both under the one
-    # version condition.
+    # version condition; the region guard key is the only other subscript
+    # write, alone under its own condition.
     sent = [n for n in ast.walk(node) if isinstance(n, ast.Assign)
             and [ast.unparse(t) for t in n.targets] == ["sent_version"]]
     assert len(sent) == 1 and ast.unparse(sent[0].value) == (
@@ -3029,12 +3063,26 @@ def test_mod_version_advertises_no_series_status_capability():
     ifs = [n for n in ast.walk(node) if isinstance(n, ast.If)
            and ast.unparse(n.test) == "read_gate.advert_requested(sent_version)"]
     assert len(ifs) == 1, [ast.unparse(n.test) for n in ast.walk(node) if isinstance(n, ast.If)]
-    writes = {ast.unparse(t): ast.unparse(n.value) for n in ast.walk(node)
-              if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Subscript)}
+    subscript_writes = [n for n in ast.walk(node)
+                        if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+                        and any(isinstance(t, ast.Subscript)
+                                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]))]
+    assert sorted(ast.unparse(w) for w in subscript_writes) == sorted([
+        "body['read_gate'] = await read_gate.current_mode()",
+        "body['read_gate_open'] = read_gate.ungated_templates(app.routes)",
+        "body['join_region_guard'] = 1"]), [ast.unparse(w) for w in subscript_writes]
+    writes = {ast.unparse(t): ast.unparse(n.value) for n in subscript_writes
+              if isinstance(n, ast.Assign) for t in n.targets
+              if ast.unparse(t).startswith("body['read_gate")}
     assert writes == {"body['read_gate']": "await read_gate.current_mode()",
                       "body['read_gate_open']": "read_gate.ungated_templates(app.routes)"}, writes
     in_if = {ast.unparse(t) for s in ifs[0].body if isinstance(s, ast.Assign) for t in s.targets}
     assert in_if == set(writes), in_if
+    assert len(ifs[0].body) == 2, [ast.unparse(s) for s in ifs[0].body]
+    guards = [n for n in ast.walk(node) if isinstance(n, ast.If)
+              and ast.unparse(n.test) == "JOIN_REGION_GUARD"]
+    assert len(guards) == 1 and [ast.unparse(s) for s in guards[0].body] == [
+        "body['join_region_guard'] = 1"], [ast.unparse(g) for g in guards]
     # The two version numbers are the two constants, not a literal.
     assert values["'version'"] == "LATEST_MOD_VERSION", values
     assert values["'min_version'"] == "MIN_MOD_VERSION_EFFECTIVE", values

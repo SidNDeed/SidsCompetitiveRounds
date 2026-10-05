@@ -3141,7 +3141,7 @@ namespace CompetitiveRounds
              *       nothing can paint over the Leave button beside it. */
             ffaStartBtnTxt=UIFactory.GetButtonText(ffaStartBtn);
             UIFactory.FitOneLine(ffaStartBtnTxt);
-            ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue();dirty=true;},sizeDelta:new Vector2(130,28));
+            ffaLeaveBtn=UIFactory.CreateButton("FfaLeave",ctl.transform,"Leave",16f,C_WHITE,new Color(0.5f,0.2f,0.2f,0.9f),()=>{ApiClient.FfaLeaveQueue(label: "menu_leave");dirty=true;},sizeDelta:new Vector2(130,28));
 
             /* v1.36 host settings row (ffa-configurable-lobbies §1). Compact
              * -/value/+ clusters; each press sends ONLY that field and adopts

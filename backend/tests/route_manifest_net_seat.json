@@ -145,6 +145,15 @@
           "290836f5ce0b8178c51b0037aaba6f5b242c6284"
         ],
         [
+          "/api/v1/admin/ffa-g3-seats",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_ffa_g3_seat",
+          "ee1865fd07ea9b5ea1428a19f33843b827769fd3"
+        ],
+        [
           "/api/v1/admin/flagged-matches",
           [
             "GET"
@@ -1750,7 +1759,34 @@
           ],
           "main",
           "ffa_lobby_start",
-          "02ad9bb1eaf65b6adc3f1f409a5b7a3ac5644af8"
+          "0bec7680cb3f6164d9b540873764579056a2643c"
+        ],
+        [
+          "/api/v1/ffa/lobby/{lobby_id}/assembly",
+          [
+            "POST"
+          ],
+          "main",
+          "ffa_lobby_assembly",
+          "41d5af0cc582cb7cfe43cee93ca27cac7500eb9b"
+        ],
+        [
+          "/api/v1/ffa/lobby/{lobby_id}/connect",
+          [
+            "POST"
+          ],
+          "main",
+          "ffa_lobby_connect",
+          "582301a4735443cb274aa7afb491dfb60573e787"
+        ],
+        [
+          "/api/v1/ffa/lobby/{lobby_id}/release",
+          [
+            "POST"
+          ],
+          "main",
+          "ffa_lobby_release",
+          "9f7c32d3d518eb1d008f57ef5354e779e8991814"
         ],
         [
           "/api/v1/ffa/queue/join",
@@ -3920,6 +3956,10 @@
     "GET /api/v1/ffa/lobbies -> main.ffa_lobby_browser",
     "POST /api/v1/ffa/lobby/kick -> main.ffa_lobby_kick",
     "POST /api/v1/ffa/queue/leave -> main.ffa_queue_leave",
+    "POST /api/v1/ffa/lobby/{lobby_id}/connect -> main.ffa_lobby_connect",
+    "POST /api/v1/ffa/lobby/{lobby_id}/assembly -> main.ffa_lobby_assembly",
+    "POST /api/v1/ffa/lobby/{lobby_id}/release -> main.ffa_lobby_release",
+    "POST /api/v1/admin/ffa-g3-seats -> main.admin_ffa_g3_seat",
     "GET /api/v1/ffa/queue/recent-joins -> main.ffa_queue_recent_joins",
     "GET /api/v1/ffa/queue/list -> main.ffa_queue_list",
     "GET /api/v1/ffa/queue/poll/{steam_id} -> main.ffa_queue_poll",
