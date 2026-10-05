@@ -1144,8 +1144,10 @@ MEASURES = {
 # game measure needs the fact on every record of the game. The window
 # measures are sums of contributions, and a contribution needs EVERY fact: a
 # record that lost, cut or trimmed anything contributes no row at all, so no
-# capped game ever enters a window as a smaller clean sample. Identifiers and
-# the not-run counts need none.
+# capped game ever enters a window as a smaller clean sample. Identifiers
+# need none. Each entry must name at least every fact the measure's code
+# reads; the tests derive that read set from this module's code
+# (tests/card_read_sets.py) and check the catalog against it.
 
 _HAND = ("whole", "hd")
 _SLOTS = _HAND + ("sl",)
@@ -1156,7 +1158,7 @@ CONTRIB_NEEDS = COVER
 
 NEEDS = {
     "b4.hand.recorder": (), "b4.hand.meas": (), "b4.hand.phase": (), "b4.hand.deal": (),
-    "b4.hand.n": (), "b4.hand.n_exp": (), "b4.hand.n_reg": (),
+    "b4.hand.n": (), "b4.hand.n_exp": (), "b4.hand.n_reg": ("whole", "sl"),
     "b4.hand.size": _HAND, "b4.hand.unres": _SLOTS, "b4.hand.notpool": _NAMED,
     "b4.hand.dup": _SLOTS, "b4.hand.heldrej": _HELD, "b4.hand.w0": _NAMED,
     "b4.hand.spx": _HAND, "b4.hand.spo": _HAND + ("sp",), "b4.hand.ds0": _HAND,
@@ -1166,10 +1168,11 @@ NEEDS = {
     "b4.ph.dvp": _PHASE, "b4.ph.picker": _PHASE + ("first",), "b4.ph.notdone": _PHASE,
     "b4.rec.index": (), "b4.rec.inc": (), "b4.rec.conflict": (), "b4.rec.unreg": (),
     "b4.rec.census": (), "b4.rec.hands": ("hd",), "b4.rec.cut": (), "b4.rec.notrun_hands": ("hd",),
-    "b4.rec.uncovered": (), "b4.app.unpaired": ("whole", "hd", "ap"), "b4.app.offline": ("whole", "ap"),
+    "b4.rec.uncovered": (), "b4.app.unpaired": ("whole", "hd", "ap", "cards"),
+    "b4.app.offline": ("whole", "ap", "cards"),
     "b4.sc.rule": (),
     "b4.game.records": (), "b4.game.paired": (), "b4.pair.n": _HAND, "b4.pair.unpair": _HAND,
-    "b4.sc.norule": _HAND, "b4.sc.open": _NAMED + ("first",), "b4.sc.k": _HELD,
+    "b4.sc.norule": _SLOTS, "b4.sc.open": _NAMED + ("first",), "b4.sc.k": _HELD,
     "b4.pair.phase": (), "b4.pair.deal": (), "b4.pair.slot": _NAMED, "b4.pair.pick": _NAMED,
     "b4.pair.spawn": _HAND, "b4.pair.held": _HELD,
 }
