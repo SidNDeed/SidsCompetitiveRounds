@@ -1759,7 +1759,7 @@
           ],
           "main",
           "ffa_lobby_start",
-          "52fab1da17f5e3ccf74982cf7bc8d97a0ad2163e"
+          "be1b3194f32ac48090f387defe9fc6bc5382ef5b"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/assembly",
@@ -3548,7 +3548,7 @@
           ],
           "main",
           "admin_seat_evidence",
-          "9baf17e8e479f3227e37e899ab27dc13b5231b4a"
+          "1b2b7b0849e7a8bda15fe7815e6e9603914eee96"
         ],
         [
           "/api/v1/client/compat-outcome",
@@ -3581,7 +3581,7 @@
           ],
           "main",
           "admin_card_evidence",
-          "a449aafbc6a59a65c3ae54070973d314230290ff"
+          "a6a0755f3bca47b0589154e73e1e3400924f9487"
         ],
         [
           "/api/v1/admin/card-pool-census",
@@ -3638,7 +3638,7 @@
       [
         "main",
         "lifespan",
-        "b5529ecb5e49501a28aef9507ec1117686b2bd08"
+        "38b3b59cf8d7d115589d7c5a382ac8305e4f08c8"
       ]
     ]
   },
