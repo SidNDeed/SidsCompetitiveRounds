@@ -722,13 +722,14 @@ namespace CompetitiveRounds
         /// leaves one log line: kept, or why there is no record.</summary>
         internal static void FlushOnQuit()
         {
+            int n = 0, tried = 0, kept = 0;
             try
             {
-                int n = 0;
                 while (_captures.Count > 0 && n++ < CAPTURE_CAP)
                 {
                     var c = _captures[0];
                     _captures.RemoveAt(0);
+                    tried++;
                     try
                     {
                         if (!c.CensusDone)
@@ -740,7 +741,7 @@ namespace CompetitiveRounds
                         string text;
                         string env = BuildEnv(c, out text);
                         if (env == null) { Plugin.Log.LogWarning(TAG + " no record at quit: the game key, seat ids or envelope are outside the contract"); continue; }
-                        if (SeatEvidence.SpoolClosing("i", env)) Plugin.Log.LogInfo(TAG + " record kept for the next launch: " + RecordLine(c, text));
+                        if (SeatEvidence.SpoolClosing("i", env)) { kept++; Plugin.Log.LogInfo(TAG + " record kept for the next launch: " + RecordLine(c, text)); }
                         else Plugin.Log.LogWarning(TAG + " no record at quit: the closing file was not written");
                     }
                     catch (Exception ex)
@@ -749,6 +750,13 @@ namespace CompetitiveRounds
                         try { Plugin.Log.LogWarning(TAG + " no record at quit: " + ex.GetType().Name); } catch { }
                     }
                 }
+            }
+            catch { }
+            // Every quit leaves one line, a quit with no live game included.
+            try
+            {
+                Plugin.Log.LogInfo(TAG + " quit flush ran: " + tried.ToString(CultureInfo.InvariantCulture) + " capture(s), "
+                                   + kept.ToString(CultureInfo.InvariantCulture) + " kept for the next launch");
             }
             catch { }
         }
@@ -798,18 +806,36 @@ namespace CompetitiveRounds
             catch { return null; }
         }
 
-        /// <summary>One boot line naming the patches attached (bar 1).</summary>
+        /// <summary>Once after patching: one line naming each patch class that
+        /// Harmony reports on a patched method (attached), and an Error line
+        /// naming any class it does not report.</summary>
         internal static void BootLine()
         {
             try
             {
-                var names = new List<string>();
-                foreach (var t in new[] { typeof(IdentityClock_ExecuteRpcPatch), typeof(IdentityClock_PointStartPatch),
-                                          typeof(IdentityClock_MovePlayersPatch), typeof(IdentityClock_MovementPatch) })
-                    names.Add(t.Name);
-                Plugin.Log.LogInfo(TAG + " patches declared: " + string.Join(", ", names.ToArray()));
+                var seen = new HashSet<string>();
+                foreach (var m in Harmony.GetAllPatchedMethods())
+                {
+                    var info = Harmony.GetPatchInfo(m);
+                    if (info == null) continue;
+                    foreach (var list in new[] { info.Prefixes, info.Postfixes, info.Finalizers })
+                        foreach (var p in list)
+                            if (p.PatchMethod != null && p.PatchMethod.DeclaringType != null) seen.Add(p.PatchMethod.DeclaringType.Name);
+                }
+                var ok = new List<string>();
+                var bad = new List<string>();
+                var all = new[] { typeof(IdentityClock_ExecuteRpcPatch), typeof(IdentityClock_PointStartPatch),
+                                  typeof(IdentityClock_MovePlayersPatch), typeof(IdentityClock_MovementPatch) };
+                foreach (var t in all) (seen.Contains(t.Name) ? ok : bad).Add(t.Name);
+                string line = TAG + " patches attached " + ok.Count.ToString(CultureInfo.InvariantCulture) + "/"
+                              + all.Length.ToString(CultureInfo.InvariantCulture) + ": " + string.Join(", ", ok.ToArray());
+                if (bad.Count == 0) Plugin.Log.LogInfo(line);
+                else Plugin.Log.LogError(line + "; NOT attached: " + string.Join(", ", bad.ToArray()));
             }
-            catch { }
+            catch (Exception ex)
+            {
+                try { Plugin.Log.LogWarning(TAG + " boot line failed: " + ex.GetType().Name); } catch { }
+            }
         }
     }
 

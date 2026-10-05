@@ -286,6 +286,12 @@ def quit_wiring(plugin_text, evid_text):
             probs.append("FlushOnQuit does not write the closing file under route i")
         if body.count("no record at quit") < 3 or "record kept for the next launch" not in body:
             probs.append("FlushOnQuit does not log every outcome")
+        # The summary line sits after the capture loop, so a quit with no live game logs too.
+        i_sum = body.find('" quit flush ran: "')
+        i_loop = body.find("while (_captures.Count > 0")
+        loop_end = body_after(body, i_loop)[1] if i_loop >= 0 else -1
+        if i_sum < 0 or i_loop < 0 or i_sum < loop_end:
+            probs.append("FlushOnQuit leaves no line on a quit with no capture")
         if "RequestSurvey" in body or "_survey.Step" in body:
             probs.append("FlushOnQuit starts disk survey work")
     gsw = open(os.path.join(REPO, "plugin", "GameStateWatcher.cs"), encoding="utf-8").read()
@@ -402,7 +408,12 @@ def main():
     q1 = quit_wiring(plugin_text.replace("try { IdentityClockEvidence.FlushOnQuit(); } catch { }", ""), evid)
     q2 = quit_wiring(plugin_text, evid.replace('SeatEvidence.SpoolClosing("i", env)', "SeatEvidence.EnqueueIdentity(env)"))
     print("quit mutant flush_unregistered %s, flush_to_queue %s" % ("CAUGHT" if q1 else "MISSED", "CAUGHT" if q2 else "MISSED"))
-    ok = ok and bool(q1) and bool(q2)
+    # the summary line removed, and the summary line logged only inside the capture loop
+    q3 = quit_wiring(plugin_text, evid.replace('" quit flush ran: "', '" quit flush: "'))
+    q4 = quit_wiring(plugin_text, evid.replace('" quit flush ran: "', '" quit flush: "').replace(
+        "tried++;", 'tried++; Plugin.Log.LogInfo(TAG + " quit flush ran: ");'))
+    print("quit mutant summary_removed %s, summary_in_loop %s" % ("CAUGHT" if q3 else "MISSED", "CAUGHT" if q4 else "MISSED"))
+    ok = ok and bool(q1) and bool(q2) and bool(q3) and bool(q4)
 
     raw = open(CORE, "rb").read().decode("utf-8")
     nl = "\r\n" if "\r\n" in raw else "\n"
