@@ -355,8 +355,12 @@ def main():
     if tpath and done:
         with io.open(tpath, "a", encoding="utf-8", newline="\n") as fh:
             fh.write("\n".join(done) + "\n")
-    print("written: %d digest(s) replaced in place, nothing else in the file "
-          "moved" % len(done))
+    if structural:
+        print("written: %d row(s) (digests, first fingerprints, route order) by "
+              "re-serializing a byte-stable file; nothing else in it moved" % len(done))
+    else:
+        print("written: %d digest(s) replaced in place, nothing else in the file "
+              "moved" % len(done))
     return 0
 
 
