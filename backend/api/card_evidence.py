@@ -238,8 +238,8 @@ _CANDIDATES = text(
     "            OR e.conflict_at > g.processed_at OR p.registered_at > g.processed_at)))) "
     "   ) AND NOT (COALESCE(g.fault_attempts, 0) >= CAST(:cap AS int) "
     "        AND g.fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) "
-    "        AND NOT COALESCE(e.received_at > g.processed_at OR e.conflict_at > g.processed_at "
-    "                         OR p.registered_at > g.processed_at, false)) "
+    "        AND NOT COALESCE(g.processed_at < e.received_at OR g.processed_at < e.conflict_at "
+    "                         OR g.processed_at < p.registered_at, false)) "
     " GROUP BY e.stable_game_key, LEAST(e.seat_player_id, e.other_player_id), "
     "          GREATEST(e.seat_player_id, e.other_player_id) "
     " ORDER BY min(g.processed_at) NULLS FIRST, rx LIMIT CAST(:lim AS int)")
