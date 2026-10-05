@@ -731,8 +731,8 @@ async def sitting_pass(session_factory, state=None, *, limit: int = SITTINGS_PER
 
 async def purge_pass(session_factory) -> dict:
     """Retention: lists out of the payload after LIST_RETENTION_DAYS; records
-    never attached after GAME_EXPIRY_DAYS; compat rows and unposted findings
-    after a year. flagged_matches rows are never removed."""
+    never attached after GAME_EXPIRY_DAYS; compat rows and unposted seat
+    findings after a year. flagged_matches rows are never removed."""
     out = {}
     async with session_factory() as db:
         if await setting(db, "seat_evidence_purge") != "1":
@@ -761,8 +761,14 @@ async def purge_pass(session_factory) -> dict:
             "DELETE FROM client_compat_events "
             "WHERE received_at < now() - make_interval(days => CAST(:d AS int))"),
             {"d": COMPAT_RETENTION_DAYS})).rowcount
+        # Seat findings only. The table is shared with the card evidence lane,
+        # whose keys hold a space ('card ...'), which no seat key can; the key
+        # form names the domain whether or not the domain column exists (it
+        # comes with the card lane's migration). Card findings follow the card
+        # lane's own purge.
         out["findings"] = (await db.execute(text(
             "DELETE FROM seat_evidence_findings WHERE flag_id IS NULL "
+            "  AND dedup_key NOT LIKE 'card %' "
             "  AND changed_at < now() - make_interval(days => CAST(:d AS int))"),
             {"d": FINDING_RETENTION_DAYS})).rowcount
         await db.commit()

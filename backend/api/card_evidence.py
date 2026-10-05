@@ -572,8 +572,9 @@ async def games_pass(session_factory, state=None, limit: int = None) -> dict:
 async def purge_pass(session_factory) -> dict:
     """Retention: the hand lists out of the payload after the list retention;
     records never attached after the expiry; derived rows after the derived
-    retention. Findings follow seat_evidence's own purge; flagged_matches
-    rows are never removed."""
+    retention, and this lane's unposted findings (card domain) after the
+    derived retention too; the seat purge leaves them alone. flagged_matches
+    rows, and a finding a flag points at, are never removed."""
     lim = CARD_LIMITS
     out = {}
     async with session_factory() as db:
@@ -607,6 +608,11 @@ async def purge_pass(session_factory) -> dict:
                 "DELETE FROM card_hand_outside WHERE computed_at < now() - make_interval(days => CAST(:d AS int))",
                 "DELETE FROM card_phase_outside WHERE computed_at < now() - make_interval(days => CAST(:d AS int))"):
             out["derived"] += (await db.execute(text(q), d)).rowcount
+        # this lane's unposted findings (the card domain only), on the derived
+        # retention: a finding is derived from the same evidence as the rows above
+        out["findings"] = (await db.execute(text(
+            "DELETE FROM seat_evidence_findings WHERE domain = 'card' AND flag_id IS NULL "
+            "  AND changed_at < now() - make_interval(days => CAST(:d AS int))"), d)).rowcount
         await db.commit()
     return out
 
