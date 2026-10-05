@@ -1,9 +1,25 @@
 -- 370_card_evidence.sql
 --
--- CARD DRAW EVIDENCE, server half. Additive only: eight new tables and three
--- seeded runtime switches. No existing table, column, constraint or row is
--- changed; the match table, match_cards and the 7-field match HMAC are
--- untouched. Requires 368 (findings are stored in seat_evidence_findings).
+-- CARD DRAW EVIDENCE, server half. Additive: eight new tables, three seeded
+-- runtime switches, and ONE change to an existing table: the findings table
+-- 368 created (shared with the seat evidence lane) gains an evidence domain.
+-- The match table, match_cards and the 7-field match HMAC are untouched.
+-- Requires 368 (findings are stored in seat_evidence_findings).
+--
+--   seat_evidence_findings.domain
+--                           'seat' (every existing row, and every row the
+--                           seat lane writes, by the column default) or
+--                           'card'; a CHECK keeps it to those two, and a
+--                           unique index over (domain, scope, dedup_key,
+--                           rule_id) is the card upsert's conflict target.
+--                           The seat lane's own unique constraint and
+--                           statements are unchanged. A card finding's key
+--                           holds a space ('card <game>' / 'card win
+--                           <window>'), which no seat finding key can: a
+--                           stable game key is printable ASCII without the
+--                           space, and the other parts are ids and dates. So
+--                           no card key equals a seat key, and the one
+--                           UPDATE below can mark only card rows.
 --
 --   card_evidence           one signed card record per (stable game key, seat),
 --                           the first one kept; a later different record sets
@@ -37,7 +53,8 @@
 -- before this file reads the absent switch rows as off: the card route answers
 -- 503 card_evidence_off and the card pass idles, while the admin card read and
 -- the census registration answer 500 until this file lands.
--- Re-runnable: IF NOT EXISTS throughout; a second run writes no row.
+-- Re-runnable: IF NOT EXISTS throughout; a second run in a row writes no row
+-- (after the rollback it re-marks the posted card findings that one kept).
 
 BEGIN;
 
@@ -184,6 +201,26 @@ CREATE TABLE IF NOT EXISTS card_evidence_seeded_keys (
     key        VARCHAR(64) PRIMARY KEY,
     seeded_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE seat_evidence_findings
+    ADD COLUMN IF NOT EXISTS domain VARCHAR(8) NOT NULL DEFAULT 'seat';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conrelid = 'seat_evidence_findings'::regclass
+                      AND conname = 'seat_evidence_findings_domain') THEN
+        ALTER TABLE seat_evidence_findings
+            ADD CONSTRAINT seat_evidence_findings_domain CHECK (domain IN ('seat', 'card'));
+    END IF;
+END
+$$;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_seat_evidence_findings_domain
+    ON seat_evidence_findings (domain, scope, dedup_key, rule_id);
+-- A posted card finding the rollback kept (it keeps its flag) comes back
+-- marked 'seat' by the default when this file runs again; it is put back in
+-- its own domain. Only keys holding a space: card keys (see above).
+UPDATE seat_evidence_findings SET domain = 'card'
+ WHERE domain = 'seat' AND dedup_key LIKE 'card %';
 
 WITH seeded AS (
     INSERT INTO runtime_settings (key, value) VALUES
