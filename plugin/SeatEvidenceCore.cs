@@ -1172,7 +1172,7 @@ namespace CompetitiveRounds
                 notBefore = "0"; route = f[4]; body = f[5];
             }
             else return null;
-            if ((route != "e" && route != "c" && route != "k") || body.Length == 0) return null;
+            if ((route != "e" && route != "c" && route != "k" && route != "i") || body.Length == 0) return null;
             long first, nb; int att, ses;
             if (!long.TryParse(f[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out first)
                 || !int.TryParse(f[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out att)

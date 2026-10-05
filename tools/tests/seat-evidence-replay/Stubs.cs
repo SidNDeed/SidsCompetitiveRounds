@@ -185,6 +185,13 @@ namespace CompetitiveRounds
         internal static ConfigValue<string> ApiBaseUrl = new ConfigValue<string> { Value = "https://replay.invalid:8444" };
     }
 
+    // The identity-clock lane's clock reader, which SeatEvidence's pump hands
+    // the evidence POST for route "i" only (no replay case queues route "i").
+    internal static class IdentityClockEvidence
+    {
+        internal static string ClockHeaderNow() { return null; }
+    }
+
     internal static class SteamAuth
     {
         internal static string SessionToken;
@@ -220,7 +227,7 @@ namespace CompetitiveRounds
         internal static bool RefuseInside;
         internal static int NotSent;
         internal static Action OnSend;
-        internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Action<bool, bool, string, bool> callback)
+        internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Func<string> clockHeader, Action<bool, bool, string, bool> callback)
         {
             if (string.IsNullOrEmpty(Base) || !Plugin.DataConsentGranted) return false;
             if (RefuseInside) { NotSent++; callback(false, false, "insecure-transport", false); return true; }

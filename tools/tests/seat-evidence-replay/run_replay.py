@@ -196,7 +196,9 @@ WIRING = [
 ]
 
 # F10: the evidence POST's own bare path. The headers it sets, exactly.
-F10_HEADERS = {"Content-Type", "X-Mod-Version", "X-Session-Token"}
+# X-Seat-Clock: the identity-clock contract's own header (server lane 00608251,
+# notes section 2), set only when the caller passes a clock reader (route "i").
+F10_HEADERS = {"Content-Type", "X-Mod-Version", "X-Session-Token", "X-Seat-Clock"}
 F10_FORBIDDEN = ["StampVersionHeader(", "PostRequest(", "PostRequestRaw(", "X-Locale"]
 
 

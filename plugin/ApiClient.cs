@@ -2989,10 +2989,10 @@ namespace CompetitiveRounds
         /// left says whether the request went out at all; text is the body, or
         /// "HTTP code: body" plus a Retry-After line on a refusal;
         /// carriedToken says whether the session token went out.</summary>
-        internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Action<bool, bool, string, bool> callback)
+        internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Func<string> clockHeader, Action<bool, bool, string, bool> callback)
         {
             if (string.IsNullOrEmpty(baseUrl) || Plugin.Instance == null || !Plugin.DataConsentGranted) return false;
-            Plugin.Instance.StartCoroutine(SeatEvidencePostRaw(baseUrl + path, body, beforeSend, callback));
+            Plugin.Instance.StartCoroutine(SeatEvidencePostRaw(baseUrl + path, body, beforeSend, clockHeader, callback));
             return true;
         }
 
@@ -3004,7 +3004,7 @@ namespace CompetitiveRounds
         /// required: on a transport that may not carry it the request is not
         /// sent. The same consent, sensitive-transport, version-gate and
         /// session-refusal handling as the shared path.</summary>
-        private static IEnumerator SeatEvidencePostRaw(string url, string body, Func<bool> beforeSend, Action<bool, bool, string, bool> callback)
+        private static IEnumerator SeatEvidencePostRaw(string url, string body, Func<bool> beforeSend, Func<string> clockHeader, Action<bool, bool, string, bool> callback)
         {
             Action<bool, bool, string, bool> answer = (left, ok, text, carried) => { try { callback(left, ok, text, carried); } catch { } };
             if (ConsentBlocksRequest(url)) { answer(false, false, "no-consent", false); yield break; }
@@ -3026,6 +3026,16 @@ namespace CompetitiveRounds
                 request.SetRequestHeader("Content-Type", "application/json");
                 request.SetRequestHeader("X-Mod-Version", Plugin.ModVersion ?? "0.0.0");
                 request.SetRequestHeader("X-Session-Token", token);
+                // Identity-clock route only (clockHeader is null on every other
+                // route): X-Seat-Clock read now, as this send is built (each
+                // retry carries its own reading; the signed record bytes are
+                // unchanged). Outside the signature.
+                if (clockHeader != null)
+                {
+                    string ch = null;
+                    try { ch = clockHeader(); } catch { ch = null; }
+                    if (!string.IsNullOrEmpty(ch)) { try { request.SetRequestHeader("X-Seat-Clock", ch); } catch { } }
+                }
                 request.timeout = 20;
                 // F6: the request is completely built before beforeSend persists
                 // the spent transmission; between a true from it and
@@ -3154,6 +3164,12 @@ namespace CompetitiveRounds
         }
 
         public static List<ActiveSeriesEntry> CachedActiveSeries { get; private set; }
+        /// <summary>The last /series/active read: whether it answered and parsed
+        /// completely, and when (realtimeSinceStartup). A failed or partial read
+        /// is not a "no series" answer (report L13: the broadcast status
+        /// lease's series_status reads these).</summary>
+        internal static bool ActiveSeriesReadOk { get; private set; }
+        internal static float ActiveSeriesReadAt { get; private set; } = -1f;
         public static List<MyBetEntry> CachedMyBets { get; private set; } = new List<MyBetEntry>();
 
         public static void FetchActiveSeries()
@@ -3162,8 +3178,9 @@ namespace CompetitiveRounds
                 $"{baseUrl}/api/v1/series/active",
                 (ok, resp) =>
                 {
-                    if (!ok) return;
+                    if (!ok) { ActiveSeriesReadOk = false; return; }
                     var list = new List<ActiveSeriesEntry>();
+                    bool parsed = false;
                     try
                     {
                         var parts = resp.Split(new[] { "\"series_id\":" }, StringSplitOptions.None);
@@ -3194,8 +3211,11 @@ namespace CompetitiveRounds
                             e.phase           = ExtractJsonString(chunk, "phase");
                             if (!string.IsNullOrEmpty(e.series_id)) list.Add(e);
                         }
+                        // the answer is {"series": [...]}: complete only with that key
+                        parsed = resp != null && resp.IndexOf("\"series\"", StringComparison.Ordinal) >= 0;
                     }
                     catch (Exception ex) { Plugin.Log.LogWarning($"[BET] active-series parse: {ex.Message}"); }
+                    try { ActiveSeriesReadOk = parsed; ActiveSeriesReadAt = UnityEngine.Time.realtimeSinceStartup; } catch { }
                     CachedActiveSeries = list;
                     NativeUI.MarkDirty();
                 }

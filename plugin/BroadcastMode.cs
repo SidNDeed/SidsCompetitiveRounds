@@ -1464,6 +1464,12 @@ namespace CompetitiveRounds
         // emits the plain "w1-w2" the bot's overlay wants, not localized UI).
         private static string _cachedSeriesScore = "";
         private static float _seriesScoreCachedAt = -999f;
+        // Report L13: the watched fighters' ranked-series state beside the
+        // score, live | none | unknown (IdentityClockCore.SeriesStatus). An
+        // empty score is NOT "none": only a completed, fresh read that holds
+        // no series of theirs is. Recomputed with the score.
+        private static string _cachedSeriesStatus = "unknown";
+        private const double SERIES_READ_FRESH_S = 60.0;
 
         private static void TickLease()
         {
@@ -1577,6 +1583,7 @@ namespace CompetitiveRounds
             sb.Append(']');
             sb.Append(",\"is_tournament\":").Append(haveGame && meta.is_tournament ? "true" : "false");
             sb.Append(",\"series_score\":\"").Append(LeaseEscape(ComputeSeriesScore())).Append('"');
+            sb.Append(",\"series_status\":\"").Append(_cachedSeriesStatus).Append('"');
             sb.Append(",\"phase\":\"").Append(haveGame ? LeaseEscape(meta.phase) : "").Append('"');
             // W7 report payload (D1 deltas f14/f15/f19): rides ONLY while a
             // report is VISIBLY on screen — state Idle AND the engine Active
@@ -1734,6 +1741,7 @@ namespace CompetitiveRounds
             if (Time.realtimeSinceStartup - _seriesScoreCachedAt < 5f) return _cachedSeriesScore;
             _seriesScoreCachedAt = Time.realtimeSinceStartup;
             _cachedSeriesScore = "";
+            _cachedSeriesStatus = "unknown";
             try
             {
                 var sids = SpectatorSync.FighterSteamIds;
@@ -1761,6 +1769,9 @@ namespace CompetitiveRounds
                                 break;
                             }
                         }
+                    // L13: tri-state, decided by the read's own completion and age
+                    _cachedSeriesStatus = IdentityClockCore.SeriesStatus(true, _cachedSeriesScore.Length > 0, list != null,
+                        ApiClient.ActiveSeriesReadOk, Time.realtimeSinceStartup - ApiClient.ActiveSeriesReadAt, SERIES_READ_FRESH_S);
                 }
                 else if (mode == "2v2")
                 {
@@ -1779,9 +1790,11 @@ namespace CompetitiveRounds
                                 break;
                             }
                         }
+                    // the team read carries no completion stamp: a match is live, else unknown
+                    if (_cachedSeriesScore.Length > 0) _cachedSeriesStatus = "live";
                 }
             }
-            catch { _cachedSeriesScore = ""; }
+            catch { _cachedSeriesScore = ""; _cachedSeriesStatus = "unknown"; }
             return _cachedSeriesScore;
         }
     }

@@ -5837,6 +5837,8 @@ namespace CompetitiveRounds
 
             // Seat evidence (contract V2): open this game's window. Contained.
             try { SeatEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
+            // Identity-clock evidence: its window, moment 1. Contained.
+            try { IdentityClockEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
 
             // Spawn the cosmetic trail for this match (if the player owns one).
             TrailCosmetic.OnMatchStart();
@@ -6841,6 +6843,8 @@ namespace CompetitiveRounds
                 catch { }
                 // Card draw evidence (B4): after the seat record, same gate.
                 try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
+                // Identity-clock evidence: after the seat record, same gate.
+                try { IdentityClockEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
             }
 
             // Evaluate achievements before clearing match state
@@ -9145,6 +9149,8 @@ namespace CompetitiveRounds
                     matchIsRanked && oneVOneMatchAtStart);
                 // Card draw evidence (B4): the same game cut short, same attach key.
                 try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
+                // Identity-clock evidence: the same game cut short, same attach key.
+                try { IdentityClockEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
             }
             catch { }
         }

@@ -1370,6 +1370,7 @@ namespace CompetitiveRounds
                 Log.LogInfo($"[HARMONY] Patches applied: {applied} ok, {failed} failed");
                 // Card draw evidence (B4): one line naming its six patches as attached.
                 try { CardDrawEvidence.BootLine(); } catch { }
+                try { IdentityClockEvidence.BootLine(); } catch { }
             }
             catch (Exception ex)
             {
@@ -3459,6 +3460,7 @@ namespace CompetitiveRounds
             try { PointEvidence.Drain(); } catch { }
             try { SeatEvidence.Tick(); } catch { }
             try { CardDrawEvidence.Tick(); } catch { }
+            try { IdentityClockEvidence.Tick(); } catch { }
 
             if (Plugin.modDisabled) return;
 
@@ -3712,6 +3714,8 @@ namespace CompetitiveRounds
                             var guids = new List<string>();
                             foreach (var kvp in plugins) if (kvp.Key != Plugin.ModId) guids.Add(kvp.Key);
                             SeatEvidence.NoteCompat("finding", guids);
+                            // Identity-clock evidence: this execution of the gate is one boot occurrence.
+                            try { IdentityClockEvidence.BootCheck("finding", guids); } catch { }
                         }
                         catch { }
                         Plugin.modDisabled = true;
@@ -3760,12 +3764,14 @@ namespace CompetitiveRounds
                 }
                 Plugin.Log.LogInfo("[COMPAT] No other mods detected — OK");
                 try { SeatEvidence.NoteCompat("pass", null); } catch { }
+                try { IdentityClockEvidence.BootCheck("pass", null); } catch { }
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogWarning($"[COMPAT] Could not check other mods: {ex.Message}");
                 // A check that threw reports not_run, never pass.
                 try { SeatEvidence.NoteCompat("not_run", null); } catch { }
+                try { IdentityClockEvidence.BootCheck("not_run", null); } catch { }
             }
             Plugin.compatCheckComplete = true;
             // r3 find 4: releases the injector's activation gate. Everything

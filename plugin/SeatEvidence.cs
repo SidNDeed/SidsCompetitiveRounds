@@ -35,6 +35,7 @@ namespace CompetitiveRounds
         private const string ROUTE_RECORD = "/api/v1/matches/seat-evidence";
         private const string ROUTE_COMPAT = "/api/v1/client/compat-outcome";
         private const string ROUTE_CARD = "/api/v1/matches/card-evidence";
+        private const string ROUTE_IDENTITY = "/api/v1/matches/identity-clock-evidence";
 
         private static readonly Stopwatch _sw = Stopwatch.StartNew();
         internal static long SwMs { get { return _sw.ElapsedMilliseconds; } }
@@ -1455,7 +1456,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (body == null || (route != "e" && route != "k" && route != "c")) return false;
+                if (body == null || (route != "e" && route != "k" && route != "c" && route != "i")) return false;
                 var p = new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() };
                 string name = SPOOL_PREFIX + DateTime.UtcNow.Ticks.ToString("D19", CultureInfo.InvariantCulture) + "-"
                               + (++_spoolSeq).ToString("D4", CultureInfo.InvariantCulture) + ".jsonl";
@@ -1555,13 +1556,23 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>An identity-clock envelope (route "i"), persisted like the
+        /// others and sent by the same pump, outside combat, with its clock
+        /// header stamped at each send. False: not persisted, the caller keeps it.</summary>
+        internal static bool EnqueueIdentity(string body)
+        {
+            return Enqueue("i", body);
+        }
+
         private static string RouteOf(string route)
         {
+            if (route == "i") return ROUTE_IDENTITY;
             return route == "c" ? ROUTE_COMPAT : (route == "k" ? ROUTE_CARD : ROUTE_RECORD);
         }
 
         private static string What(string route)
         {
+            if (route == "i") return "identity-clock record";
             return route == "c" ? "compat outcome" : (route == "k" ? "card record" : "record");
         }
 
@@ -1597,6 +1608,7 @@ namespace CompetitiveRounds
             try
             {
                 started = ApiClient.SeatEvidencePost(RouteOf(route), body, () => BeforeSend(route, body),
+                    route == "i" ? (Func<string>)IdentityClockEvidence.ClockHeaderNow : null,
                     (left, ok, text, carried) =>
                     {
                         _answerLeft = left; _answerOk = ok; _answerText = text; _answerCarried = carried;
