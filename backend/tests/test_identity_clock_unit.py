@@ -119,7 +119,9 @@ def test_the_remaining_cross_field_rules():
     rec = fx.base_record()
     rec["pt_o"][0][3] = [5]
     _refused(rec, "pt_o.tgt")
-    _refused(fx.base_record(proc=[fx.PROC_A, 1, 1, 1, 1]), "proc.counts")
+    rec = fx.base_record()  # base_record's `proc` argument is the process id
+    rec["proc"] = [fx.PROC_A, 1, 1, 1, 1]
+    _refused(rec, "proc.counts")
     _refused(fx.base_record(asm_n=[1, 2, 0, 0]), "asm_n")
 
 
@@ -569,7 +571,11 @@ def test_s5_the_worker_writes_only_its_tables_and_the_shared_findings():
 
 def test_s5_the_match_report_canonical_is_untouched():
     main = SRC["main.py"]
-    assert main.count('f"{str(report.is_ranked).lower()}:{report.reported_by_steam_id}:"') == 1
+    canon = 'f"{str(report.is_ranked).lower()}:{report.reported_by_steam_id}:"'
+    # the 1v1 canonical is built once, in verify_hmac, and nothing of this lane touches it
+    ver = _fn_src(main, "verify_hmac")
+    assert ver.count(canon) == 1
+    assert "_ice" not in ver and "_conn_ranges" not in ver and "identity" not in ver
     sub = _fn_src(main, "submit_match")
     assert "_ice" not in sub and "_conn_ranges" not in sub
 

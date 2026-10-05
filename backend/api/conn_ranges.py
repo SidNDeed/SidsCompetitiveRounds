@@ -456,7 +456,10 @@ def classify_address(host) -> tuple:
 def build_ranges_revision(draft: str, store: str) -> str:
     """Seal a draft directory holding ranges.txt, sources.txt and selftest.txt
     into `store/ranges-<rev12>/` (REVISION written), validate it with the
-    loader, and return the rev12. Refuses to overwrite."""
+    loader, and return the rev12. Refuses to overwrite. The revision is sealed
+    and validated under a staging directory first and moved into the store only
+    when the loader accepts it, so a refused draft (RangesRefused raised)
+    leaves nothing in the store."""
     data = {}
     for name in ("ranges.txt", "sources.txt", "selftest.txt"):
         with open(os.path.join(draft, name), "rb") as f:
@@ -466,13 +469,28 @@ def build_ranges_revision(draft: str, store: str) -> str:
     final = os.path.join(store, "ranges-" + rev)
     if os.path.exists(final):
         raise FileExistsError(final)
-    os.makedirs(final)
-    for name, raw in data.items():
-        with open(os.path.join(final, name), "wb") as f:
-            f.write(raw)
-    with open(os.path.join(final, "REVISION"), "wb") as f:
-        f.write((digest + "\n").encode("ascii"))
-    load_ranges_dir(final)
+    staging = os.path.join(store, ".staging-" + rev)
+    sealed = os.path.join(staging, "ranges-" + rev)
+    os.makedirs(sealed)
+    try:
+        try:
+            for name, raw in data.items():
+                with open(os.path.join(sealed, name), "wb") as f:
+                    f.write(raw)
+            with open(os.path.join(sealed, "REVISION"), "wb") as f:
+                f.write((digest + "\n").encode("ascii"))
+            load_ranges_dir(sealed)
+            os.rename(sealed, final)
+        except BaseException:
+            for name in list(data) + ["REVISION"]:
+                try:
+                    os.remove(os.path.join(sealed, name))
+                except FileNotFoundError:
+                    pass
+            os.rmdir(sealed)
+            raise
+    finally:
+        os.rmdir(staging)
     return rev
 
 

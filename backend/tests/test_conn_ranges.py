@@ -64,6 +64,27 @@ def _loaded(tmp_path, root, **draft):
     return rev, cr.refresh_ranges()
 
 
+def _staged(tmp_path, root, **draft):
+    """Seal a revision WITHOUT the builder's validation (the builder refuses a
+    bad draft), so the refresh path's own refusal is what the case measures."""
+    data = {}
+    for fn, key in (("ranges.txt", "ranges"), ("sources.txt", "sources"),
+                    ("selftest.txt", "selftest")):
+        data[fn] = draft.get(key, {"ranges": RANGES, "sources": SOURCES,
+                                   "selftest": SELFTEST}[key]).encode("ascii")
+    digest = cr.ranges_digest(data)
+    rev = digest[: cr.CR_BOUNDS["rev_hex"]]
+    d = os.path.join(root, "ranges-" + rev)
+    os.makedirs(d)
+    for fn, raw in data.items():
+        with open(os.path.join(d, fn), "wb") as f:
+            f.write(raw)
+    with open(os.path.join(d, "REVISION"), "wb") as f:
+        f.write((digest + "\n").encode("ascii"))
+    _point(root, "ranges-" + rev)
+    return rev, cr.refresh_ranges()
+
+
 # -- loading and classifying ----------------------------------------------------
 
 def test_s2_a_valid_revision_loads_classifies_and_names_itself(fresh, tmp_path):
@@ -100,7 +121,7 @@ def test_l12_same_class_overlaps_merge_into_disjoint_intervals(fresh, tmp_path):
 @pytest.mark.parametrize("extra", ["[vpn]\n203.0.113.64/26\n", "[relay]\n203.0.113.0/25\n",
                                    "[tor]\n198.51.100.128/32\n"])
 def test_l12_any_cross_class_overlap_refuses_the_revision(fresh, tmp_path, extra):
-    _rev, st = _loaded(tmp_path, fresh, ranges=RANGES + extra)
+    _rev, st = _staged(tmp_path, fresh, ranges=RANGES + extra)
     assert (st.word, st.reason) == ("refused", "overlap")
     assert cr.ranges_health_word() == "refused"
     assert cr.classify_address("203.0.113.9") == ("unknown", "refused")
@@ -129,10 +150,23 @@ def test_l12_adjacent_ranges_of_different_classes_are_not_an_overlap(fresh, tmp_
 ])
 def test_s2_a_revision_failing_a_check_is_refused_with_its_class(fresh, tmp_path, over, reason,
                                                                   capsys):
-    _rev, st = _loaded(tmp_path, fresh, **over)
+    _rev, st = _staged(tmp_path, fresh, **over)
     assert (st.word, st.reason) == ("refused", reason)
     assert cr.ranges_health_word() == "refused"
     assert capsys.readouterr().out.strip() == "[RANGES] refused (%s)" % reason
+
+
+@pytest.mark.parametrize("over,reason", [
+    ({"selftest": SELFTEST.replace("203.0.113.5\thosting", "203.0.113.5\tvpn")}, "selftest_failed"),
+    ({"ranges": RANGES + "[vpn]\n203.0.113.64/26\n"}, "overlap"),
+    ({"sources": ""}, "sources"),
+])
+def test_s2_the_builder_refuses_a_bad_draft_and_leaves_the_store_empty(fresh, tmp_path, over,
+                                                                       reason):
+    with pytest.raises(cr.RangesRefused) as e:
+        cr.build_ranges_revision(_draft(tmp_path, **over), fresh)
+    assert e.value.cls == reason
+    assert os.listdir(fresh) == []
 
 
 def test_s1_a_corrupted_copy_is_refused_by_its_digest(fresh, tmp_path):
@@ -284,7 +318,7 @@ def test_a_large_synthetic_list_loads_inside_the_deadline(fresh, tmp_path):
     lines = ["[hosting]"] + ["2001:db8:2:%x::/64" % i for i in range(60000)]
     t = time.monotonic()
     rev, st = _loaded(tmp_path, fresh, ranges="\n".join(lines) + "\n",
-                      selftest=SELFTEST.replace("2001:db8:1::1\ttor", "2001:db8:2:5::1\thosting"))
+                      selftest="2001:db8:2:5::1\thosting\n2001:db8:3::1\tnone\n192.0.2.1\tnone\n")
     assert st.word == rev, st.reason
     assert time.monotonic() - t < cr.CR_BOUNDS["deadline_s"]
     assert cr.classify_address("2001:db8:2:ea5f::9")[0] == "hosting"
