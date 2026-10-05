@@ -2646,14 +2646,14 @@ def test_an_automatic_upload_does_not_spend_a_human_bug_number(logdir, verified)
         "the automatic INSERT names the human bug-number sequence: %s" % insert)
 
 
-def test_migration_350_gives_automatic_rows_their_own_descending_numbers():
+def test_migration_373_gives_automatic_rows_their_own_descending_numbers():
     """The schema half of the same defect, read from the file that ships.
 
     A comment claiming automatic rows cannot take a human number is a claim
     about the whole state space (#302); the CHECK is what makes it true of
     every writer, including one nobody has written yet.
     """
-    path = os.path.join(HERE, "..", "sql", "350_bug_reports_auto_number.sql")
+    path = os.path.join(HERE, "..", "sql", "373_bug_reports_auto_number.sql")
     sql = open(path, encoding="utf-8").read()
     flat = " ".join(sql.split())
 
@@ -3820,7 +3820,7 @@ _BRANCH_FILES = (
     "api/auto_logs.py",
     "tests/test_auto_logs.py",
     "sql/336_bug_reports_kind.sql",
-    "sql/350_bug_reports_auto_number.sql",
+    "sql/373_bug_reports_auto_number.sql",
 )
 
 
@@ -3983,20 +3983,20 @@ def test_every_test_this_files_prose_cites_actually_exists():
         "it proves nothing about this file's prose")
 
 
-# ── migration 350 does not depend on WHICH copy of 336 ran ───────────────────
+# ── migration 373 does not depend on WHICH copy of 336 ran ───────────────────
 
-def _sql_350():
+def _sql_373():
     return (pathlib.Path(HERE).parent / "sql"
-            / "350_bug_reports_auto_number.sql").read_text(encoding="utf-8")
+            / "373_bug_reports_auto_number.sql").read_text(encoding="utf-8")
 
 
-def test_350_preconditions_on_the_objects_336_creates_not_on_its_bytes():
+def test_373_preconditions_on_the_objects_336_creates_not_on_its_bytes():
     """336 exists in two copies and they are NOT byte-identical.
 
     The hotfix copy is a superset: its post-check was rebuilt to OFFER rows to
     the constraint instead of reading the constraint's rendered text. The
     wrapper applies a migration once by FILE NAME, so whichever copy reaches a
-    database first is the only one that ever runs there -- which means 350 has
+    database first is the only one that ever runs there -- which means 373 has
     to be correct after EITHER, and has to say so by checking the objects 336
     leaves behind rather than assuming which file produced them.
 
@@ -4004,11 +4004,11 @@ def test_350_preconditions_on_the_objects_336_creates_not_on_its_bytes():
     CHECK, and its `'report'` default. Both copies create all three; neither
     copy's identity is a premise of anything here.
     """
-    sql = _sql_350()
+    sql = _sql_373()
 
     # THE COMMENTS COME OFF FIRST, and that is the whole difference between
     # this check and one that cannot fail. Every name below also appears in
-    # 350's header prose, so searching the raw file would go on passing after
+    # 373's header prose, so searching the raw file would go on passing after
     # the guard stopped asking for the object -- the first cut of this test did
     # exactly that and a mutation proved it (#342). What is searched is the
     # EXECUTABLE text.
@@ -4019,19 +4019,19 @@ def test_350_preconditions_on_the_objects_336_creates_not_on_its_bytes():
         "searching nothing")
 
     for needle, why in (
-        ("column_name = 'kind'", "the column 350's CHECK is written against"),
+        ("column_name = 'kind'", "the column 373's CHECK is written against"),
         ("bug_reports_kind_known",
          "the CHECK 336 installs -- without it `kind` is a free-text column "
          "and 'auto' means nothing"),
         ("column_default", "the 'report' default every pre-336 row relies on"),
     ):
         assert needle in executable, (
-            "350's precondition does not name %s in any statement (%s), so it "
+            "373's precondition does not name %s in any statement (%s), so it "
             "can apply on a database where 336 left a partial shape"
             % (needle, why))
 
     assert "byte-identical" not in sql, (
-        "350 still claims the two copies of 336 are byte-identical. They are "
+        "373 still claims the two copies of 336 are byte-identical. They are "
         "not -- the hotfix copy is 22,384 bytes against the lane's 19,445, "
         "diverging at line 217 where the post-check was rebuilt -- and a "
         "migration whose header states a guarantee the tree refutes is a "
@@ -4392,7 +4392,7 @@ def test_the_cleanup_tests_prose_names_the_collector_that_exists():
                 "%s still says %r, which the orphan sweep refutes" % (name, stale))
 
 
-def test_350_preconditions_on_the_exact_336_default_not_a_substring():
+def test_373_preconditions_on_the_exact_336_default_not_a_substring():
     """R2-M3: THE GUARD ASKS FOR 336's DEFAULT, NOT FOR SOMETHING REPORTISH.
 
     The test used to be `column_default NOT LIKE '%report%'`, which any
@@ -4408,16 +4408,16 @@ def test_350_preconditions_on_the_exact_336_default_not_a_substring():
     watches it pass. This is the source half: the substring test is GONE and
     the equality names the value.
     """
-    sql = _sql_350()
+    sql = _sql_373()
     executable = "\n".join(ln for ln in sql.splitlines()
                            if not ln.lstrip().startswith("--"))
     assert "RAISE EXCEPTION" in executable, (
         "the comment stripper removed the statements too; this check is "
         "searching nothing")
     assert "NOT LIKE '%report%'" not in executable, (
-        "350 still accepts any rendered default containing 'report'")
+        "373 still accepts any rendered default containing 'report'")
     assert "v_default IS DISTINCT FROM c_336_default" in executable, (
-        "350's default guard is no longer an equality against the value 336 "
+        "373's default guard is no longer an equality against the value 336 "
         "installs")
     assert "c_336_default CONSTANT text := '''report''::character varying'" in executable, (
         "the expected default is not named in the file, so the guard cannot "
@@ -4426,7 +4426,7 @@ def test_350_preconditions_on_the_exact_336_default_not_a_substring():
     # The refusal has to name both halves, or an operator reading it cannot
     # tell a drifted default from a missing one.
     refusal = [ln for ln in executable.splitlines()
-               if "350: bug_reports.kind must carry exactly" in ln]
+               if "373: bug_reports.kind must carry exactly" in ln]
     assert len(refusal) == 1, refusal
     assert refusal[0].count("%") >= 2, (
         "the refusal prints fewer than two values; it has to say what it "
@@ -8317,7 +8317,7 @@ def test_the_sweeps_filesystem_work_does_not_block_the_event_loop(logdir,
         % (during, pass_name, blocked))
 
 
-def test_350_asserts_the_whole_shape_of_an_adopted_sequence():
+def test_373_asserts_the_whole_shape_of_an_adopted_sequence():
     """R4's MEDIUM: A DESCENDING SEQUENCE IS NOT THE SAME AS THE RIGHT ONE.
 
     `CREATE SEQUENCE IF NOT EXISTS` keeps a pre-existing sequence silently, so
@@ -8346,19 +8346,19 @@ def test_350_asserts_the_whole_shape_of_an_adopted_sequence():
     The rehearsal drives one fixture per attribute against a real server;
     this case holds the file to the shape that makes that possible.
     """
-    sql = _sql_350()
+    sql = _sql_373()
     body = sql.split("-- \u2500\u2500 1b. the shape this file is willing to adopt", 1)
     assert len(body) == 2, (
-        "350's sequence-shape block is no longer where this case looks for it")
-    check = body[1].split("END $m350s$;", 1)[0]
-    assert "DO $m350s$" in body[1][:len(body[1]) - len(check)] + check, (
+        "373's sequence-shape block is no longer where this case looks for it")
+    check = body[1].split("END $m373s$;", 1)[0]
+    assert "DO $m373s$" in body[1][:len(body[1]) - len(check)] + check, (
         "the shape block is not a DO block of its own")
 
     # BEFORE THE OWNED BY, and before the CHECK constraint. Both re-validate
     # or write against a sequence this file has not yet agreed to adopt.
     owned_by = sql.index(
         "ALTER SEQUENCE bug_reports_auto_number_seq OWNED BY")
-    shape_end = sql.index("END $m350s$;")
+    shape_end = sql.index("END $m373s$;")
     assert shape_end < owned_by, (
         "the shape block runs after the OWNED BY, which re-validates the "
         "sequence itself -- the seqstart refusal below can never fire")
@@ -8451,7 +8451,7 @@ def test_350_asserts_the_whole_shape_of_an_adopted_sequence():
         "value this file configures: %r" % (executable,))
 
 
-def test_350_scopes_every_guard_to_the_relation_it_alters():
+def test_373_scopes_every_guard_to_the_relation_it_alters():
     """R3-M1: THE GUARDS AND THE DDL LOOK AT ONE RELATION.
 
     `information_schema.columns` with no `table_schema` predicate answers
@@ -8463,12 +8463,12 @@ def test_350_scopes_every_guard_to_the_relation_it_alters():
     carrying two such schemas; this case holds the file to the shape that
     makes that possible.
     """
-    sql = _sql_350()
+    sql = _sql_373()
     lookups = [ln for ln in sql.splitlines()
                if "information_schema.columns" in ln
                and not ln.strip().startswith("--")]
     assert len(lookups) == 2, (
-        "350 reads information_schema.columns at %d executable site(s); each "
+        "373 reads information_schema.columns at %d executable site(s); each "
         "one has to carry its own schema predicate: %r"
         % (len(lookups), lookups))
     for site in lookups:
@@ -8488,7 +8488,7 @@ def test_350_scopes_every_guard_to_the_relation_it_alters():
     assert sql.count("quote_ident(current_schema())") >= 3, (
         "the second and third blocks do not bind their own names to "
         "current_schema()")
-    assert "CREATE TEMP TABLE m350_number_probe (LIKE bug_reports" not in sql, (
+    assert "CREATE TEMP TABLE m373_number_probe (LIKE bug_reports" not in sql, (
         "the post-check's probe table is still copied from whichever "
         "bug_reports the search_path resolves")
 
@@ -8950,7 +8950,7 @@ def test_a_player_attachment_on_a_slow_volume_does_not_stall_other_requests(
           "%.3fs -- bound %.2fs, one call %.1fs"
           % (hop, live, control, worst, BOUND, DELAY))
 
-def test_350_reads_where_the_sequence_is_under_the_lock_it_adopts_it_under():
+def test_373_reads_where_the_sequence_is_under_the_lock_it_adopts_it_under():
     """R6-M1: BLOCK 1c JUDGES THE POSITION, NOT ONLY THE CONFIGURATION.
 
     Block 1b reads six attributes and every one of them is configuration: a
@@ -8967,17 +8967,17 @@ def test_350_reads_where_the_sequence_is_under_the_lock_it_adopts_it_under():
     that makes those readings mean what they say. Searched in the EXECUTABLE
     text, because every needle below also appears in the prose (#342).
     """
-    sql = _sql_350()
+    sql = _sql_373()
     executable = "\n".join(ln for ln in sql.splitlines()
                            if not ln.lstrip().startswith("--"))
-    assert executable.count("DO $m350n$") == 1, (
-        "350 carries %d position block(s), not one"
-        % executable.count("DO $m350n$"))
+    assert executable.count("DO $m373n$") == 1, (
+        "373 carries %d position block(s), not one"
+        % executable.count("DO $m373n$"))
     owned_by = executable.index(
         "ALTER SEQUENCE bug_reports_auto_number_seq OWNED BY")
-    start = executable.index("DO $m350n$")
-    end = executable.index("END $m350n$;")
-    post = executable.index("DO $m350p$")
+    start = executable.index("DO $m373n$")
+    end = executable.index("END $m373n$;")
+    post = executable.index("DO $m373p$")
     assert owned_by < start < end < post, (
         "block 1c does not sit between the OWNED BY, whose lock it reads "
         "under, and the post-check that draws")
@@ -8995,9 +8995,9 @@ def test_350_reads_where_the_sequence_is_under_the_lock_it_adopts_it_under():
             "block 1c accepts %s, which nextval can pass" % mode)
 
     # THE SEQUENCE IT JUDGES IS THE ONE 1b CHECKED.
-    assert "PERFORM set_config('m350.shape_1b'," in executable[:owned_by], (
+    assert "PERFORM set_config('m373.shape_1b'," in executable[:owned_by], (
         "block 1b no longer records the shape it judged")
-    assert "current_setting('m350.shape_1b', true)" in block, (
+    assert "current_setting('m373.shape_1b', true)" in block, (
         "block 1c does not compare the shape under the lock with 1b's")
 
     # THE POSITION, and the next value it implies.
@@ -9039,14 +9039,14 @@ def test_350_reads_where_the_sequence_is_under_the_lock_it_adopts_it_under():
     assert "IF v_held IS NOT NULL THEN" in block
 
     # ONE READING, CARRIED TO THE DRAW.
-    assert "PERFORM set_config('m350.next_1c', v_next::text, true);" in block
-    post_block = executable[post:executable.index("END $m350p$;")]
-    assert ("IF v_a IS DISTINCT FROM current_setting('m350.next_1c', "
+    assert "PERFORM set_config('m373.next_1c', v_next::text, true);" in block
+    post_block = executable[post:executable.index("END $m373p$;")]
+    assert ("IF v_a IS DISTINCT FROM current_setting('m373.next_1c', "
             "true)::bigint THEN" in post_block), (
         "the post-check does not bind the first draw to 1c's reading")
 
 
-def test_350_leaves_the_position_it_accounted_for_and_states_its_policy_once():
+def test_373_leaves_the_position_it_accounted_for_and_states_its_policy_once():
     """R7-M1: ONE ADOPTION-FLOOR POLICY, READ AT ONE POINT OF CONSUMPTION.
 
     Round 7 applied the floor to the next value block 1c FOUND and then spent
@@ -9069,7 +9069,7 @@ def test_350_leaves_the_position_it_accounted_for_and_states_its_policy_once():
         applies them to each box. A second copy anywhere in the file would be
         a second policy for the train to disagree with.
     """
-    sql = _sql_350()
+    sql = _sql_373()
     executable = "\n".join(ln for ln in sql.splitlines()
                            if not ln.lstrip().startswith("--"))
     floor_lines = [ln for ln in executable.splitlines()
@@ -9096,7 +9096,7 @@ def test_350_leaves_the_position_it_accounted_for_and_states_its_policy_once():
             "the policy query carries %s, which the read-only wrapper the "
             "train sends it through refuses" % word)
 
-    post = executable[executable.index("DO $m350p$"):executable.index("END $m350p$;")]
+    post = executable[executable.index("DO $m373p$"):executable.index("END $m373p$;")]
     draws = post.count("nextval(v_autoseq)")
     declared = int(re.search(r"c_postcheck_draws CONSTANT bigint := ([0-9]+);",
                              executable).group(1))
@@ -9107,15 +9107,15 @@ def test_350_leaves_the_position_it_accounted_for_and_states_its_policy_once():
     assert pin > post.index("v_b := nextval(v_autoseq);"), (
         "the position is pinned before the second draw, so the draw after it "
         "logs ahead again")
-    back = post.index("EXECUTE format(current_setting('m350.accounted_sql', true),")
+    back = post.index("EXECUTE format(current_setting('m373.accounted_sql', true),")
     assert pin < back, "the policy reads the position before it is pinned"
-    assert ("IF v_left IS DISTINCT FROM current_setting('m350.accounted_1c', "
+    assert ("IF v_left IS DISTINCT FROM current_setting('m373.accounted_1c', "
             "true) THEN" in post), (
         "the post-check does not refuse a position other than 1c's accounted "
         "value")
-    assert ("IF v_left::bigint < current_setting('m350.floor', true)::bigint "
+    assert ("IF v_left::bigint < current_setting('m373.floor', true)::bigint "
             "THEN" in post), "the post-check never applies the floor it was handed"
-    assert back < post.index("CREATE TEMP TABLE m350_number_probe"), (
+    assert back < post.index("CREATE TEMP TABLE m373_number_probe"), (
         "the read-back runs after the probes, so a refusal there follows "
         "writes this file then has to explain")
 

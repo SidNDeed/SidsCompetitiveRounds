@@ -262,10 +262,19 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import log_redaction             # the credential rule, standard library only
 from database import get_db
 from schemas import BUG_REPORT_LOG_MAX_CHARS
 
 router = APIRouter(prefix="/api/v1/logs", tags=["Auto Logs"])
+
+# The revision /health reports as `auto_log` while this module's upload route
+# is mounted (main._auto_log_health_word). Release-train verification
+# plumbing: the train accepts a deploy of this route on the word the route's
+# own presence produces, on both boxes and through the edge. 1 = the revival
+# build (merged with main e9a3f1e1, migration 373). Bumped by the change that
+# alters what a deploy of this route must prove; read by nothing else (#306).
+AUTO_LOG_REVISION = 1
 
 # Its own 24 h bucket, counted over kind='auto' rows only, so an auto upload
 # can never spend a player's 10-reports-a-day budget and a player at their
@@ -919,8 +928,17 @@ class AutoLogRequest(BaseModel):
         # Keep the TAIL: the events nearest the end of the match are the ones
         # worth having. Same ceiling as the bug-report bundle, imported from
         # schemas so the two cannot drift apart.
-        if isinstance(v, str) and len(v) > BUG_REPORT_LOG_MAX_CHARS:
-            return v[-BUG_REPORT_LOG_MAX_CHARS:]
+        #
+        # THE CREDENTIAL RULE FIRST, over the log as sent, then the cut -- the
+        # order BugReportRequest uses and for its reason: a Steam session
+        # ticket straddling the cut keeps, after it, its value without its
+        # label, which the rule no longer recognises. The write-time scrub
+        # (main._scrub_pass_one) runs the same rule again before the bundle
+        # is written; this pass is the one the clamp cannot defeat.
+        if isinstance(v, str):
+            v = log_redaction.redact_credentials(v)     # the rule, over the log as sent
+            if len(v) > BUG_REPORT_LOG_MAX_CHARS:
+                v = v[-BUG_REPORT_LOG_MAX_CHARS:]       # then the tail is kept
         return v
 
 
@@ -2390,7 +2408,7 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
                 left = _span_budget(span_deadline)
                 row = (await asyncio.wait_for(db.execute(
                     # bug_number IS SUPPLIED, from a sequence of this route's own
-                    # (migration 350). The column's DEFAULT is nextval() on
+                    # (migration 373). The column's DEFAULT is nextval() on
                     # `bug_reports_number_seq` -- the counter that names a player's
                     # ticket in #bug-reports, in admin triage and in the ops
                     # `bug-log:N` verb. Left to the default, every automatic upload
@@ -2402,7 +2420,7 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
                     #
                     # `bug_reports_auto_number_seq` descends from -1, so an automatic
                     # row's number cannot collide with a human one (the unique index
-                    # is satisfied) and cannot consume one. The CHECK added by 350
+                    # is satisfied) and cannot consume one. The CHECK added by 373
                     # makes it a property of the schema rather than of this statement.
                     text("""INSERT INTO bug_reports
                                 (id, player_id, steam_id, display_name, mod_version, game_version,

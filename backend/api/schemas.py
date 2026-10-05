@@ -1043,6 +1043,17 @@ class HealthResponse(BaseModel):
     # Absent on any build before that batch, which is how the train reads the
     # old build.
     connect_failure: int
+    # auto_log: the automatic post-match log upload (main._auto_log_health_word).
+    # auto_logs.AUTO_LOG_REVISION when POST /api/v1/logs/auto is MOUNTED on the
+    # app that answers -- read from the routing table on every request, never
+    # written down (#342) -- and 0 when the module is present but its route is
+    # not. 1 = the revival build (the hotfix merged with main e9a3f1e1,
+    # migration 373). Code-only and role-blind, so both boxes answer it alike
+    # and the release train can read it through the edge; read by nothing else
+    # (#306). Declared without a default, so building the answer without it
+    # raises instead of silently leaving the key out. Absent on any build
+    # before it, which is how the train reads the old build.
+    auto_log: int
     # Which ROLE answered. Before this, /health was byte-identical on the
     # primary and on the read standby -- same status, same version, same
     # database -- so nothing on the network could tell a box that SKIPS writes

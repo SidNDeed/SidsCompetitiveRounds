@@ -7120,6 +7120,23 @@ def _title_ladders_health_word() -> int:
     return title_ladders.ladder_count()
 
 
+def _auto_log_health_word() -> int:
+    """/health `auto_log`: auto_logs.AUTO_LOG_REVISION when this app's routing
+    table carries POST /api/v1/logs/auto -- the route the v1.41.0 client's
+    post-match upload calls -- and 0 when it does not. DERIVED from app.routes
+    on every request, never written down (#342), so a build that imports the
+    module but stops mounting its router reads 0 rather than the revision.
+    Code-only and role-blind: both arms of /health answer it, alike on both
+    boxes, which is what lets the release train read it through the edge.
+    Read by nothing but the train (#306)."""
+    for r in app.routes:
+        if (getattr(r, "path", None) == "/api/v1/logs/auto"
+                and "POST" in (getattr(r, "methods", None) or ())
+                and getattr(r, "endpoint", None) is _auto_logs.upload_auto_log):
+            return _auto_logs.AUTO_LOG_REVISION
+    return 0
+
+
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
 async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
@@ -7139,6 +7156,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
+                              auto_log=_auto_log_health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -7171,6 +7189,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
+                              auto_log=_auto_log_health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
