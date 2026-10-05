@@ -227,6 +227,76 @@ def plugin_texts():
     return {f: read(os.path.join(PLUGIN, f)) for f in sorted(os.listdir(PLUGIN)) if f.endswith(".cs")}
 
 
+# F5 (combat client lane): receiver shapes the walk must follow. ShapeTarget.Inner.Deep has an uncapped loop and is
+# reached ONLY through the planted call; each shape must get it flagged, the base (no call) must be clean, a receiver
+# the walk cannot read must be REFUSED, and the old one-level pattern (the walker mutant) must miss every shape.
+SHAPE_BASE = """namespace CompetitiveRounds
+{
+    [HarmonyPatch(typeof(Foo), "Bar")]
+    internal static class ShapeProbe_Patch
+    {
+        private static void Prefix()
+        {
+            int z = 0;
+            /*CALL*/
+        }
+    }
+
+    internal static class ShapeTarget
+    {
+        internal static Inner Held;
+
+        internal sealed class Inner
+        {
+            internal Inner Next;
+            internal void Deep(int n) { for (int i = 0; i < n; i++) { } }
+        }
+    }
+}
+"""
+SHAPES = ["ShapeTarget.Held.Deep(z);", "ShapeTarget.Held.Next.Next.Deep(z);", "a.b.Deep(z);", "a.b.c.d.Deep(z);",
+          "Make().Deep(z);", "arr[0].Deep(z);", "a?.b?.Deep(z);", "a.b.Deep<int>(z);", "a . b\n                .Deep (z);",
+          "System.Linq.Enumerable.Empty<int>().Deep(z);"]
+SHAPE_REFUSED = "new int[] { 1 }.Deep(z);"
+SHAPE_FRAMEWORK = "Plugin.Log.Deep(z);"      # a framework root: no plugin target (control for the typed chain)
+
+
+def old_member_uses(body):
+    """The one-level pattern the walk used before F5 (the walker mutant)."""
+    call = re.compile(r"(?<![\w.])(?:(?P<q>\w+)\.)?(?P<m>\w+)\s*\(")
+    ref = re.compile(r"(?<![\w.])(?:(?P<q>\w+)\.)?(?P<m>\w+)\b(?!\s*[\(\w])")
+    return ([("one" if c.group("q") else None, c.group("q"), c.group("m"), True) for c in call.finditer(body)]
+            + [("one" if c.group("q") else None, c.group("q"), c.group("m"), False) for c in ref.finditer(body)])
+
+
+def shape_section():
+    sys.path.insert(0, HERE)
+    import bound_check
+    want = "ShapeTarget.Inner.Deep"
+
+    def run(shape):
+        f, _ = bound_check.check({"ShapeProbe.cs": SHAPE_BASE.replace("/*CALL*/", shape)})
+        return f
+
+    base = run("")
+    control = not base
+    hits = [s for s in SHAPES if any(x[1] == want for x in run(s))]
+    refused = [x for x in run(SHAPE_REFUSED) if x[1] == "ShapeProbe_Patch.Prefix" and "cannot read" in x[2]]
+    framework = run(SHAPE_FRAMEWORK)
+    saved = bound_check.member_uses
+    bound_check.member_uses = old_member_uses
+    try:
+        old_hits = [s for s in SHAPES if any(x[1] == want for x in run(s))]
+    finally:
+        bound_check.member_uses = saved
+    ok = control and len(hits) == len(SHAPES) and bool(refused) and not framework and not old_hits
+    print("receiver shapes (F5): base without the call clean=%s; shapes followed %d of %d%s; an unreadable receiver refused=%s;"
+          " a framework root followed nowhere=%s; walker mutant (the old one-level pattern) follows %d of %d (must be 0)" % (
+              control, len(hits), len(SHAPES), "" if len(hits) == len(SHAPES) else " MISSING " + repr(sorted(set(SHAPES) - set(hits))),
+              bool(refused), not framework, len(old_hits), len(SHAPES)))
+    return ok
+
+
 def bound_section():
     """F4: no forbidden operation is reachable from an evidence hook or a
     game-over dispatch. Base clean and non-vacuous; a comment naming a token
@@ -248,6 +318,7 @@ def bound_section():
     print("  hook-owned collection sweep (file, field, reached operations, insert sites, insert sites guarded by a cap):")
     for row in bound_check.LAST_SWEEP:
         print("    plugin/%s %s: %d, %d, %d" % row)
+    print("  member uses resolved by name (a result or untyped receiver, F5):", bound_check.LAST_CHAINED[0] if bound_check.LAST_CHAINED else 0)
     print("  plugin properties with a framework name, not followed through an undeclared receiver:",
           ", ".join(bound_check.LAST_FRAMEWORK_NAMED))
     if not bound_check.LAST_SWEEP or any(r[3] != r[4] for r in bound_check.LAST_SWEEP):
@@ -377,6 +448,7 @@ def main():
     before = {f: sha(os.path.join(PLUGIN, f)) for f in sorted(set(SOURCES + BOUND_SOURCES))}
     ok = True
 
+    ok = shape_section() and ok
     ok = bound_section() and ok
 
     names, text = generate()

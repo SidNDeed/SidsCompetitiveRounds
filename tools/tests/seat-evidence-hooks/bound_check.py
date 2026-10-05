@@ -255,8 +255,88 @@ def methods(text):
     return table, patches, by_instance, nested_owner, props
 
 
-CALL_RE = re.compile(r"(?<![\w.])(?:(?P<q>\w+)\.)?(?P<m>\w+)\s*\(")
-REF_RE = re.compile(r"(?<![\w.])(?:(?P<q>\w+)\.)?(?P<m>\w+)\b(?!\s*[\(\w])")
+# Member uses (F5, combat client lane). Every identifier in a body is read with its RECEIVER, at any depth:
+#   None      unqualified;
+#   one       one identifier (resolved by its declared type, else by name, as before F5);
+#   chain     an identifier chain `a.b.c` (typed hop by hop through the plugin's declarations, see
+#             Graph.chain_targets; a framework root or hop ends it; a hop whose type is lost falls back to NAME);
+#   result    the result of a call, an index or a generic type (`Make().M(`, `xs[i].M(`): resolved by NAME
+#             over the whole plugin, the walk's existing over-approximation for an undeclared receiver;
+#   ext       a literal (string or number): a framework type;
+#   refused   any other receiver shape: reported as a finding, never skipped.
+# Before F5 a one-level pattern was used and `s.Acct.AddShot(` or `Make().Run(` stopped the walk silently.
+IDENT_RE = re.compile(r"[A-Za-z_]\w*")
+GENERIC_CALL_RE = re.compile(r"\s*<[\w\s,.\[\]?]*(?:<[\w\s,.\[\]?]*>[\w\s,.\[\]?]*)*>\s*\(")
+CALL_AFTER_RE = re.compile(r"\s*\(")
+DECL_AFTER_RE = re.compile(r"\s*[\(\w]")
+SPACE = " \t\r\n"
+# called on a receiver of unknown type, these names are the framework's object members; a plugin override of
+# one of them is not followed from such a receiver (as FRAMEWORK_PROPS for properties)
+FRAMEWORK_METHODS = {"ToString", "Equals", "GetHashCode", "GetType", "CompareTo"}
+
+
+def _dot_before(body, i):
+    """The index of the last character of the receiver when a '.' or '?.' ends just
+    before position i+1 (spaces allowed around it), else None."""
+    while i >= 0 and body[i] in SPACE:
+        i -= 1
+    if i < 0 or body[i] != ".":
+        return None
+    j = i - 1
+    if j >= 0 and body[j] == "?":
+        j -= 1
+    while j >= 0 and body[j] in SPACE:
+        j -= 1
+    return j
+
+
+def receiver(body, s):
+    """(kind, value) of the receiver of the identifier that starts at s (see above)."""
+    j = _dot_before(body, s - 1)
+    if j is None:
+        return None, None
+    segs = []
+    while True:
+        if j < 0:
+            return "refused", None
+        c = body[j]
+        if c in ")]>":
+            return "result", None
+        if c == '"':
+            return "ext", None
+        if not (c.isalnum() or c == "_"):
+            return "refused", None
+        k = j
+        while k >= 0 and (body[k].isalnum() or body[k] == "_"):
+            k -= 1
+        name = body[k + 1:j + 1]
+        if name[0].isdigit():
+            return "ext", None
+        segs.insert(0, name)
+        nj = _dot_before(body, k)
+        if nj is None:
+            return ("one", name) if len(segs) == 1 else ("chain", segs)
+        j = nj
+
+
+def member_uses(body):
+    """(kind, value, m, call) for every identifier use m in body; kind and value as receiver() says."""
+    out = []
+    for mt in IDENT_RE.finditer(body):
+        s, e = mt.start(), mt.end()
+        if s > 0 and (body[s - 1].isalnum() or body[s - 1] in "_$@"):
+            continue
+        if CALL_AFTER_RE.match(body, e) or GENERIC_CALL_RE.match(body, e):
+            call = True
+        elif DECL_AFTER_RE.match(body, e):
+            continue                     # a declaration's type and the like (as the old reference pattern)
+        else:
+            call = False
+        kind, value = receiver(body, s)
+        out.append((kind, value, mt.group(0), call))
+    return out
+
+
 LOOP_RE = re.compile(r"\b(?P<kw>foreach|while|for)\s*\(|\bdo\s*\{")
 DECL_RE = re.compile(r"(?<![\w.])(?P<type>[A-Za-z_][\w\.]*(?:\s*<[^;=(){}]*?>)?(?:\s*\[\s*\])*\??)\s+(?P<name>[A-Za-z_]\w*)\s*(?=[=;,)])")
 VARNEW_RE = re.compile(r"\bvar\s+(?P<name>\w+)\s*=\s*new\s+(?P<type>[\w\.]+)")
@@ -411,6 +491,7 @@ class Graph:
         self.table, self.owner, self.patches, self.aliases = {}, {}, {}, {}
         self.by_name, self.nested_owner, self.props, self.decl = {}, {}, set(), {}
         self.fallbacks, self.file_classes = 0, {}
+        self.refused, self.chained = set(), 0
         self.coll_fields, self.cctors = {}, {}
         for f, src in texts.items():
             src = src.replace("\r\n", "\n")
@@ -503,6 +584,57 @@ class Graph:
         self.fallbacks += 1
         return sorted(self.by_name.get(m, ()))
 
+    def name_targets(self, m, call):
+        """F5: a member of a receiver whose type the walk does not know: every plugin
+        instance member of that name (the undeclared-receiver over-approximation)."""
+        self.chained += 1
+        if not call:
+            if m in FRAMEWORK_PROPS:
+                return []
+            return sorted(x for x in self.by_name.get(m, ()) if x in self.props)
+        if m in FRAMEWORK_METHODS:
+            return []
+        return sorted(self.by_name.get(m, ()))
+
+    def chain_targets(self, k, segs, m, call):
+        """F5: member m of the receiver chain segs, typed hop by hop: the root by the
+        class, alias or nested type it names, else by its declaration in this file;
+        each hop by the member's declaration in the file of the type it is read on.
+        A framework root or hop: no plugin target. A hop whose type is lost: by name."""
+        f = self.owner[k]
+        root = segs[0]
+        if root in ("this", "base"):
+            types = {k[1].rsplit(".", 1)[0]} if "." in k[1] and not k[1].startswith(".") else {k[0]}
+        elif root in self.classes or root in self.aliases or root in self.nested_owner:
+            types = {root}
+        else:
+            d = self.decl[f].get(root)
+            if d:
+                types = set(d)
+            elif root[0].isupper() or root in BUILTIN:
+                return []                # a framework class (Encoding.UTF8, Plugin-external statics)
+            else:
+                return self.name_targets(m, call)
+        for seg in segs[1:]:
+            nxt, plugin = set(), False
+            for t in types:
+                for top in self.cls_of(t, f):
+                    plugin = True
+                    for tf, cl in self.file_classes.items():
+                        if top in cl:
+                            nxt |= set(self.decl[tf].get(seg) or ())
+            if not plugin:
+                return []                # read on a framework type
+            if seg in self.nested_owner:
+                nxt.add(seg)
+            if not nxt:
+                return self.name_targets(m, call)
+            types = nxt
+        out = []
+        for t in sorted(types):
+            out.extend(self.resolve_type(t, f, m, call))
+        return out
+
     def ctor_targets(self, k, body):
         """Fix pass 4: every plugin type a body constructs (`new T(` or
         `new T {`): that type's constructor node."""
@@ -528,13 +660,18 @@ class Graph:
                     parent.setdefault(target, k)
                     stack.append(target)
             for body in self.table[k]:
-                found = [(c.group("q"), c.group("m"), True) for c in CALL_RE.finditer(body)]
-                found += [(c.group("q"), c.group("m"), False) for c in REF_RE.finditer(body)]
                 tg = []
-                for q, m, call in found:
-                    if m in KEYWORDS:
+                for kind, value, m, call in member_uses(body):
+                    if m in KEYWORDS or kind == "ext":
                         continue
-                    tg.extend(self.targets(k, q, m, call))
+                    if kind == "refused":
+                        self.refused.add((k, m))
+                    elif kind == "chain":
+                        tg.extend(self.chain_targets(k, value, m, call))
+                    elif kind == "result":
+                        tg.extend(self.name_targets(m, call))
+                    else:
+                        tg.extend(self.targets(k, value, m, call))
                 tg.extend(self.ctor_targets(k, body))
                 for target in tg:
                     if target in self.table and target not in seen:
@@ -583,6 +720,7 @@ class Graph:
 
 
 LAST_SWEEP = []
+LAST_CHAINED = []
 LAST_FRAMEWORK_NAMED = []
 
 
@@ -612,6 +750,9 @@ def check(texts, evidence_patch_filter=None, with_paths=False):
                     findings.append((g.owner[k], k[0] + "." + k[1], tok))
             for tok in loop_findings(body):
                 findings.append((g.owner[k], k[0] + "." + k[1], tok))
+    for k, m in sorted(g.refused):
+        findings.append((g.owner[k], k[0] + "." + k[1], "a member use whose receiver the walk cannot read: ." + m))
+    LAST_CHAINED[:] = [g.chained]
     cf, sweep = g.coll_findings(seen)
     findings.extend(cf)
     LAST_SWEEP[:] = sweep

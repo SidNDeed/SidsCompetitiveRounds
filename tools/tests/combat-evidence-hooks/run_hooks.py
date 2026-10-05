@@ -364,43 +364,14 @@ def judging_section(texts):
     return not bad and flagged and prose
 
 
-MULTI_CALL_RE = re.compile(r"(?<![\w.])[A-Za-z_]\w*(?:\.\w+)+\.(?P<m>\w+)\s*\(")
-
-
 def bound_section(texts):
     sys.path.insert(0, BOUND_DIR)
     import bound_check
     for e in [("CombatEvidence", "RpcSent"), ("CombatEvidence", "Dispatch"), ("CombatEvidence", "RoomExit")]:
         if e not in bound_check.EXTRA_ENTRIES:
             bound_check.EXTRA_ENTRIES.append(e)
-    # bound_check's call pattern does not see a call through a two-level receiver
-    # (`s.Acct.AddShot(`, `g.Aim.PushRow(`). Fixpoint: from the same entries check() uses,
-    # every plugin method named by such a call inside a REACHED body (resolved by name, as
-    # bound_check resolves an undeclared receiver) becomes an entry, until nothing new is reached.
-    g = bound_check.Graph(texts)
-    base = [(c, m) for f, patches in g.patches.items() for cls in patches if filt(f, cls)
-            for (c, m) in g.table if c == cls and m not in bound_check.PATCH_TIME]
-    base += [e for e in bound_check.EXTRA_ENTRIES if e in g.table]
-    added, names = [], set()
-    for _ in range(64):
-        seen, _parent = g.closure(base + added)
-        new = set()
-        for k in seen:
-            for body in g.table[k]:
-                for mm in MULTI_CALL_RE.finditer(body):
-                    name = mm.group("m")
-                    for tgt in g.by_name.get(name, ()):
-                        if tgt not in seen and tgt not in added:
-                            new.add(tgt)
-                            names.add(name)
-        if not new:
-            break
-        added.extend(sorted(new))
-    for e in added:
-        if e not in bound_check.EXTRA_ENTRIES:
-            bound_check.EXTRA_ENTRIES.append(e)
-    print("two-level receiver calls in reached code: %d methods added as entries (%s)"
-          % (len(added), ",".join(sorted(names))))
+    # F5: the walker itself follows a member use at any receiver depth (a two-level receiver such as
+    # `s.Acct.AddShot(` used to stop it); BOUND_REQUIRED lists methods reached only that way
 
     def filt(f, cls):
         return f == "CombatEvidence.cs"
