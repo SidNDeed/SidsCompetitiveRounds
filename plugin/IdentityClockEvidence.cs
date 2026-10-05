@@ -459,7 +459,9 @@ namespace CompetitiveRounds
             long now = SwUs;
             long frameUs = _lastTickUs > 0 ? now - _lastTickUs : 0;
             _lastTickUs = now;
-            bool combat = SeatEvidence.CombatLive();
+            // A failed combat read counts as combat: no survey step runs on it.
+            bool combat;
+            try { combat = SeatEvidence.CombatLive(); } catch { combat = true; }
             long t0 = SwUs;
             try { Slice(frameUs, combat); } catch { _cost[T2].Fault(); }
             _cost[T2].Add(SwUs - t0);
@@ -757,7 +759,8 @@ namespace CompetitiveRounds
         {
             text = null;
             {
-                string stable = SeatEvidence.StableOf(c.Attach);
+                string stable;
+                try { stable = SeatEvidence.StableOf(c.Attach); } catch { stable = null; }
                 if (stable == null || !C.IsSteamId(c.Seat) || !C.IsSteamId(c.Other)) return null;
                 var g = c.G;
                 var census = _lastCensus ?? new CensusOut { Asm = new List<object>(), AsmN = I.L(0L, 0L, 0L, 0L), Hp = new List<object>(), HpAll = I.L(0L, 0L, new List<object>()) };

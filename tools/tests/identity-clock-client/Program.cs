@@ -404,7 +404,9 @@ internal static class Program
     private static void PostBootCases()
     {
         var live = new List<string> { "self" };
-        var src = new I.KeySource(() => live);
+        // A fresh list per read, as the loader's key set is in game: a source
+        // that keeps its first answer must miss the late key.
+        var src = new I.KeySource(() => new List<string>(live));
         bool threw;
         var o0 = new List<string>();
         int boot = I.Outcome(src.Read(out threw), "self", threw, o0);

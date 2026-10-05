@@ -192,6 +192,7 @@ WIRING = [
     ("Plugin.cs", "the evidence ticks run above the modDisabled return (F5), the drain first (F4)",
      [r"try \{ SeatEvidence\.CompatTick\(\); \} catch \{ \}", r"try \{ PointEvidence\.Drain\(\); \} catch \{ \}\s*"
       r"try \{ SeatEvidence\.Tick\(\); \} catch \{ \}\s*try \{ CardDrawEvidence\.Tick\(\); \} catch \{ \}\s*"
+      r"try \{ IdentityClockEvidence\.Tick\(\); \} catch \{ \}\s*"
       r"if \(Plugin\.modDisabled\) return;"]),
 ]
 
