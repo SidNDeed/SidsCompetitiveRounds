@@ -105,11 +105,10 @@ from schemas import (
     AllowSpectatorsBody,
 )
 # Sept 6 Group 4 item a — the mini-profile card's models, imported in their
-# OWN statement on purpose: backend/tests/test_route_manifest_net_seat.py
-# fingerprints a binding by the text of the statement that binds it, so a name
-# added to the shared block above re-fingerprints every route that reaches any
-# schema name (45 handlers to re-review for an import line). Kept apart, the
-# only route whose fingerprint moves is the one that reaches these: h2h_summary.
+# OWN statement, the blocks of the h2h_summary response. (The route-manifest gate,
+# backend/tests/test_route_manifest_net_seat.py, gives every route one digest
+# of the whole api build context, so the split no longer changes which route
+# rows an edit moves.)
 from schemas import (
     H2HProfileBlock,
     H2HModesBlock,

@@ -2077,17 +2077,6 @@ def test_c28_a_live_pool_member_is_still_minted(monkeypatch, tmp_path):
 # -- 26, 26b, 26c, 26d: the manifest and the composite statement --------------------------
 
 NEW_ROUTES = {"internal_pc_packs", "internal_pc_pack_strip", "internal_pc_binder", "internal_pc_binder_page"}
-# The existing bindings this branch is expected to change, each named where
-# it is recorded: S13's savepoint and its success-only stamp (_rank_colors and
-# the cache's "ok" key; build notes FINDING 1), B11's marker, its two
-# health_check arms and its schema field (FINDING 2), and the three bindings
-# whose PIN comments cite lines the branch's insertions moved, re-pinned
-# comment-only (FINDING 9). Measured against the main this lane has merged
-# (_lane_reference), never against a fixed revision.
-EXPECTED_CHANGED = {("main", "_rank_colors"), ("main", "_rank_colors_cache"), ("main", "health_check"),
-                    ("main", "_DISCORD_COLLECTION_MARKER"), ("schemas", "HealthResponse"),
-                    ("main", "_ovt_horizon_candidates"), ("main", "_ovt_settle_horizon_row"),
-                    ("main", "submit_ovt_match")}
 # Design row 26's scope, stated in every skip the row takes.
 ROW26_SCOPE = "design row 26 is a landing-time property of the lane delta and has no subject on main"
 
@@ -2137,17 +2126,6 @@ def _lane_reference():
     return ref, doc
 
 
-def _reference_index(tmp_path, gate, ref):
-    names = [n for n in _git("ls-tree", "--name-only", ref, "backend/api/").decode().split()
-             if n.endswith(".py")]
-    out = {}
-    for rel in names:
-        p = tmp_path / Path(rel).name
-        p.write_bytes(_git("show", f"{ref}:{rel}"))
-        out[p.stem] = gate._index_module(p)
-    return out
-
-
 def _route_surface():
     tests = Path(__file__).resolve().parent
     if str(tests) not in sys.path:
@@ -2156,87 +2134,16 @@ def _route_surface():
     return gate
 
 
-def _live_routes(gate):
-    """{(path, methods, module, qualname): route}, enumerated as the gate does."""
-    from fastapi.routing import APIRoute, APIWebSocketRoute
-    from starlette.routing import Mount
-    out = {}
-
-    def walk(routes, prefix=""):
-        for route in routes:
-            if isinstance(route, Mount):
-                walk(route.routes, gate._joined_path(prefix, route.path))
-                continue
-            if not isinstance(route, (APIRoute, APIWebSocketRoute)):
-                continue
-            path = gate._joined_path(prefix, route.path)
-            if path.startswith("/api/v1/"):
-                out[(path, tuple(sorted(getattr(route, "methods", ()) or ())), route.endpoint.__module__,
-                     route.endpoint.__qualname__)] = route
-    walk(gate.main.app.routes)
-    return out
-
-
-def _changed_for(gate, seeds, old_index):
-    """The bindings whose presence or text differs between the reference's
-    closure of `seeds` and today's: exactly what moves their fingerprint."""
-    new = set(gate._reached(seeds))
-    old = set(gate._walk_bindings(seeds, index=old_index))
-    diff = new ^ old
-    for module, name in new & old:
-        if old_index[module][name][1] != gate._segment(module, name):
-            diff.add((module, name))
-    return diff
-
-
-def test_only_the_four_new_routes_move_in_the_route_manifest(tmp_path):
-    """REBUILT at binding level (build notes, row 26): on this base every
-    route that reaches _PC_PRINT_FACE_SELECT also reaches _rank_colors, whose
-    savepoint (S13) the branch carries, so the ROUTE moved set cannot tell a
-    column added to the face select from the savepoint. The reference's
-    own index and manifest are read from git, and the assertion is that the
-    set of existing bindings the branch changed is exactly the recorded one,
-    that the new routes are exactly the four, and that the recorded
-    fingerprints moved for exactly the routes and entry points that reach a
-    changed binding.
-
-    The reference is the main this lane has merged (_lane_reference: git
-    merge-base HEAD main, computed from the tree under test), never a fixed
-    revision. Design row 26 is a landing-time property of the lane delta and
-    has no subject on main: once the lane has landed, the row skips and its
-    skip text says so."""
-    gate = _route_surface()
-    ref, old_doc = _lane_reference()
-    old_ids = {(r[0], tuple(r[1]), r[2], r[3]) for g in old_doc["groups"] for r in g["routes"]}
-    old_sha = {(r[0], tuple(r[1]), r[2], r[3]): r[4] for g in old_doc["groups"] for r in g["routes"] if len(r) > 4}
-    routes = _live_routes(gate)
-    new = {k for k in routes if k not in old_ids}
-    assert {k[3] for k in new} == NEW_ROUTES and len(new) == 4, sorted(new)
-    old_index = _reference_index(tmp_path, gate, ref)
-    changed, per_route = set(), {}
-    for key, route in routes.items():
-        if key in new:
-            continue
-        per_route[key] = _changed_for(gate, gate._route_seeds(route), old_index)
-        changed |= per_route[key]
-    per_entry = {}
-    for section, rows_ in old_doc["entry_points"].items():
-        for module, name, sha in rows_:
-            per_entry[(module, name)] = (sha, _changed_for(gate, [(module, name)], old_index))
-            changed |= per_entry[(module, name)][1]
-    assert changed == EXPECTED_CHANGED, f"existing bindings changed on the branch: {sorted(changed)}"
-    live_sha = {(e["path"], tuple(e["methods"]), e["module"], e["qualname"]): e["source_sha1"]
-                for e in gate._route_identities(gate.main.app.routes)}
-    moved = {k for k, sha in old_sha.items() if live_sha[k] != sha}
-    expected = {k for k, c in per_route.items() if c and k in old_sha}
-    assert moved == expected, (sorted(moved - expected), sorted(expected - moved))
-    ep_moved = {k for k, (sha, _c) in per_entry.items() if gate._entry_point_sha(*k) != sha}
-    ep_expected = {k for k, (_sha, c) in per_entry.items() if c}
-    assert ep_moved == ep_expected, (sorted(ep_moved), sorted(ep_expected))
-    print(f"ROW26 reference (git merge-base HEAD main): {ref}")
-    print(f"ROW26 new routes: {sorted(k[3] for k in new)}")
-    print(f"ROW26 changed existing bindings: {sorted(changed)}")
-    print(f"ROW26 existing fingerprinted routes moved: {len(moved)}; entry points moved: {sorted(ep_moved)}")
+# DELETED in combat fix pass 7: test_only_the_four_new_routes_move_in_the_
+# route_manifest, with the helpers only it used (_live_routes, _changed_for,
+# _reference_index and EXPECTED_CHANGED). It measured which existing BINDINGS
+# the lane changed, through the route manifest gate's binding index and
+# closure walk, and asserted the recorded fingerprints moved for exactly the
+# routes reaching one. The gate no longer has an index or a walk: every route
+# carries one digest of the api image build context, so "which routes moved"
+# has the answer "all of them" for any edit and the row has no subject left
+# in the manifest. The new-route half of row 26 stays below
+# (test_c26_the_new_route_set_is_still_exactly_the_four).
 
 
 def test_c26_the_new_route_set_is_still_exactly_the_four():

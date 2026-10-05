@@ -7,11 +7,10 @@ an edit there would re-key every static face URL in the fleet (S4.1). This
 module reuses its PNG walk, its IHDR reader, its portrait background and its
 pinned encoder, read-only.
 """
-# Every import is bound under a private name: the route manifest gate folds a
-# module-level name of ANY api module into the fingerprint of every route that
-# references that name, so a public `time` or `re` here would move every route
-# in main.py that uses its own `time` or `re` (backend/tests/
-# test_route_manifest_net_seat.py, _walk_bindings).
+# Every import is bound under a private name, a naming convention kept so a
+# reader never confuses these with main.py's own `time` or `re`. The route
+# manifest gate (backend/tests/test_route_manifest_net_seat.py) does not depend
+# on it: every route row carries one digest of the whole api build context.
 import asyncio as _asyncio
 import concurrent.futures as _futures
 import hashlib as _hashlib

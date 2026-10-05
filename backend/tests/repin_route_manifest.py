@@ -22,11 +22,15 @@ writes nothing at all, not the rows that happened to pass:
     one no review has cleared) needs that review again, and a new digest is
     not a substitute for it. Entry points carry no classification and are
     re-pinned under the identity-set rule below.
-  * DIGEST UNIQUENESS. The file is edited as TEXT, one digest at a time, so
+  * DIGEST OCCURRENCES. The file is edited as TEXT, one digest at a time, so
     the document is not re-serialized around the change: every old digest
-    being replaced must occur exactly ONCE in the file, and every new digest
-    must occur NOWHERE in it yet. Either failing means a textual replacement
-    could touch a line it was not aimed at, and the write is refused. After the
+    being replaced must occur in the file exactly as many times as there are
+    rows this write moves off it -- once per row, and nowhere else -- and every
+    new digest must occur NOWHERE in it yet. Either failing means a textual
+    replacement could touch a line it was not aimed at, and the write is
+    refused. (Since combat fix pass 7 every row carries the one digest of the
+    api image build context, so one old digest occurs once per row; before
+    that each row had its own and this rule read "exactly once".) After the
     replacement the file is parsed again and must equal, value for value, the
     document with exactly the intended fingerprints changed.
   * THE TRANSCRIPT PRECEDES THE WRITE. One `BEFORE WRITE` line per row --
@@ -194,13 +198,17 @@ def main():
     # ── the refusals, all decided before anything is written ─────────────
     refusals = []
     decisions = []
+    moving_off = {}
+    for _kind, _name, _cls, old, _new in plan:
+        moving_off[old] = moving_off.get(old, 0) + 1
     for kind, name, cls, old, new in plan:
         n_old, n_new = raw.count(old), raw.count(new)
         why = []
         if kind == "route" and cls != REPINNABLE_CLASS:
             why.append("classification %r is not %r" % (cls, REPINNABLE_CLASS))
-        if n_old != 1:
-            why.append("the old digest occurs %d times in the file, not once" % n_old)
+        if n_old != moving_off[old]:
+            why.append("the old digest occurs %d times in the file, not once per row "
+                       "this write moves off it (%d)" % (n_old, moving_off[old]))
         if n_new != 0:
             why.append("the new digest already occurs %d time(s) in the file" % n_new)
         decisions.append((kind, name, cls, old, new, n_old, n_new, why))

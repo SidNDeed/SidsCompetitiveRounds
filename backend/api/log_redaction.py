@@ -48,11 +48,11 @@ WHY IT IS ITS OWN MODULE, STANDARD LIBRARY ONLY
 """
 from __future__ import annotations
 
-# Aliased to names no other api module binds. The route-manifest gate
-# (backend/tests/test_route_manifest_net_seat.py) resolves a bare name in EVERY
-# api module and folds every match into a route's fingerprint, so a plain
-# `import re` here would enter every route that names `re` anywhere and move
-# some two hundred fingerprints that do not depend on this file.
+# Aliased to names no other api module binds: a naming convention, kept so a
+# reader never confuses these with another module's `re` or `sys`. The
+# route-manifest gate (backend/tests/test_route_manifest_net_seat.py) does not
+# depend on it: every route row carries one digest of the whole api build
+# context, which any edit to this file moves.
 import codecs as _lr_codecs
 import hashlib as _lr_hashlib
 import re as _lr_re

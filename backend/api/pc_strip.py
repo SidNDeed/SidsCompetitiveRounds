@@ -12,10 +12,10 @@ would re-key every face in every locale. What keys a composite is
 STRIP_COMPOSITOR_VERSION, the layout constants below and the ordered per-slot
 tokens, all inside composite_digest().
 
-Every name bound here is unique across backend/api, imports included: the
-route-manifest gate resolves a name a route uses against every module, so a
-new binding that shared a name with an existing one would re-fingerprint the
-routes that use that name.
+Every name bound here is unique across backend/api, imports included: a
+naming convention, kept for the reader. The route-manifest gate does not
+depend on it: every route row carries one digest of the whole api build
+context.
 """
 import functools as _strip_functools
 import hashlib as _strip_hashlib
