@@ -376,7 +376,8 @@ namespace CombatEvidenceTests
         /// <summary>The fixture's group as the client lists it: at the caps of step
         /// one, otherwise verbatim (since the server's fix pass 5, f1b8f28a, the
         /// fixtures carry counter -1 on a non-reloading shot, as design 2.2 and the
-        /// client do).</summary>        private static E.Group AsListed(E.Group g, int i, bool own)
+        /// client do).</summary>
+        private static E.Group AsListed(E.Group g, int i, bool own)
         {
             return g.Copy(W.SHOT_CAP[i], W.REGEN_CAP[i]);
         }

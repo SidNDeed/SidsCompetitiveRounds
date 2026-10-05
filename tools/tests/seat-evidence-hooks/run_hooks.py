@@ -258,7 +258,8 @@ SHAPES = ["ShapeTarget.Held.Deep(z);", "ShapeTarget.Held.Next.Next.Deep(z);", "a
           "Make().Deep(z);", "arr[0].Deep(z);", "a?.b?.Deep(z);", "a.b.Deep<int>(z);", "a . b\n                .Deep (z);",
           "System.Linq.Enumerable.Empty<int>().Deep(z);"]
 SHAPE_REFUSED = "new int[] { 1 }.Deep(z);"
-SHAPE_FRAMEWORK = "Plugin.Log.Deep(z);"      # a framework root: no plugin target (control for the typed chain)
+SHAPE_FRAMEWORK = "Encoding.UTF8.Deep(z);"   # a framework root: no plugin target (control for the typed chain;
+                                             # a root that is not itself a FORBIDDEN token, unlike Plugin.Log)
 
 
 def old_member_uses(body):

@@ -3453,7 +3453,8 @@ namespace CompetitiveRounds
             // Evidence work the hooks deferred out of the game's methods: the
             // point-end lines and push counts first (before GameStateWatcher's
             // tick captures a record), then seat evidence's own clocks, the
-            // record builds and the queue, then the card draw builds. Above
+            // record builds and the queue, then the card draw builds, then the
+            // combat record builds. Above
             // the return: previously queued evidence sends whatever the mod's
             // state, under consent, a session, retry timing and no live
             // combat. No setting in front of any of it.
