@@ -677,8 +677,11 @@ def compile_rules(doc, bind, data) -> Ruleset:
         rs.rules.append(r)
     for name in CORE_ENTRIES:
         rs.core[name] = bind(name, "core")
-    # The card evaluator is bound only by a revision that has card rules, so a
-    # revision written before it existed loads unchanged.
+    # The card evaluator is bound only by a revision that has card rules. A
+    # revision sealed before card_measures.py joined the code closure is not
+    # loaded as it stands: load_dir refuses it as stale (code closure), and it
+    # must be rebuilt and resealed against this code; rebuilt without card
+    # rules, it binds no card entry.
     if rs.card_rules:
         rs.core[CARD_CORE] = bind(CARD_CORE, "core")
     families = {n for n, k in bind.kinds.items() if k == "params"}

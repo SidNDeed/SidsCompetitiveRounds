@@ -26,6 +26,7 @@ sys.path.insert(0, HERE)
 
 import card_evidence as ce  # noqa: E402
 import card_measures as cm  # noqa: E402
+import card_read_sets as crs  # noqa: E402
 import card_revision_kit as k  # noqa: E402
 import review_rules as rr  # noqa: E402
 import seat_evidence as se  # noqa: E402
@@ -811,7 +812,12 @@ def test_the_coverage_catalog_names_every_measure_once_with_known_facts():
     assert cm.NEEDS["b4.hand.dup"] and not cm.NEEDS["b4.hand.n"]          # control: identifiers need none
 
 
-DEPENDENT = [(s, n, d) for s, n, needs in cm.coverage_table() for d in needs]
+# fix pass 2 (M1): the one-at-a-time omission cases are generated over what
+# each measure's code READS (card_read_sets, derived from the code, never
+# from NEEDS) as well as what the catalog declares, so a dependency the
+# catalog leaves out is still exercised.
+_RS, READS = crs.analyze()
+DEPENDENT = [(s, n, d) for s, n, needs in cm.coverage_table() for d in sorted(set(needs) | READS[n])]
 
 
 @pytest.mark.parametrize("subject,name,fact", DEPENDENT, ids=["%s-%s" % (n, d) for _s, n, d in DEPENDENT])
@@ -847,7 +853,7 @@ def test_the_over_cap_fixture_reads_every_dependent_measure_not_run_and_contribu
             "card.record": [r for r, _m in v["records"]], "card.game": [v["game"]]}
     checked = 0
     for subject, name, needs in cm.coverage_table():
-        if subject in rows and set(needs) & omitted:
+        if subject in rows and (set(needs) | READS[name]) & omitted:
             assert all(r[name] is None for r in rows[subject]), name
             checked += 1
     assert checked > len(cm.HAND_RULES) and cm.contributions(v) == []
@@ -1100,3 +1106,83 @@ def test_the_report_is_read_only():
     src = inspect.getsource(ce._report)
     assert "SELECT player_id, card_name FROM match_cards" in src and _written(src) == set()
     assert _written(_read(API, "card_evidence.py")) & {"match_cards", "matches"} == set()
+
+
+# == fix pass 2 =========================================================================
+
+# -- M1: what each measure's code reads, against what the catalog declares ---------------
+
+def test_m1_every_measure_declares_every_coverage_fact_its_code_reads():
+    """DECLARED (NEEDS) contains READ for every measure; READ comes from the
+    static read-set analysis of card_measures.py (card_read_sets), which
+    never consults NEEDS."""
+    assert set(READS) == {n for names in cm.MEASURES.values() for n in names}
+    bad = {n: sorted(READS[n] - set(cm.NEEDS[n])) for n in READS if READS[n] - set(cm.NEEDS[n])}
+    assert bad == {}, bad
+
+
+def test_m1_the_read_set_analysis_covers_the_code_and_states_its_exclusions():
+    for entry in crs.ENTRIES + ("_hand_row", "_phase_rows", "_record_row", "_same_cards",
+                                "_report_surplus", "RecFacts.__init__", "RecFacts.held_at"):
+        assert entry in _RS.reach, entry
+    assert not set(crs.GATE) & _RS.reach                     # the gate itself is not read as data
+    # the only NOT-RUN test the analysis leaves out is the not-run counter's
+    assert {f for f, _line in _RS.drops} == {"_hand_row"} and len(_RS.drops) == 1
+    src = _read(API, "card_measures.py")
+    line = sorted(_RS.drops)[0][1]
+    assert "b4.hand.notrun" in src.splitlines()[line - 1]
+    # control: identifiers read nothing a fact certifies (the analysis is not
+    # everything everywhere)
+    for name in ("b4.hand.recorder", "b4.hand.phase", "b4.ph.phase", "b4.rec.index", "b4.pair.phase"):
+        assert READS[name] == frozenset(), name
+    assert "sl" in READS["b4.sc.norule"]                      # the round's own case, derived
+
+
+def _reads_of(src):
+    return crs.analyze(src)[1]
+
+
+def test_m1_the_analysis_sees_a_new_read_the_catalog_lacks():
+    """Controls on edited copies of the module source: a read moved into a
+    measure shows in its READ, and an unknown construct is refused."""
+    src = _read(API, "card_measures.py")
+    edits = (('"b4.hand.phase": f["o"]', '"b4.hand.phase": len(sl)', "b4.hand.phase", "sl"),
+             ('_bits(f["src"], len(f["sl"]))', '_bits(f["src"], len(f["sp"]))', "b4.sc.norule", "sp"),
+             ('"b4.rec.index": rf.i', '"b4.rec.index": len(rec["ap"])', "b4.rec.index", "ap"),
+             ('"b4.ph.role": w', '"b4.ph.role": w if not rf.first_lost else -1', "b4.ph.role", "first"))
+    for old, new, name, fact in edits:
+        assert src.count(old) == 1, old
+        got = _reads_of(src.replace(old, new))
+        assert fact in got[name] and fact not in READS[name], (name, fact, sorted(got[name]))
+    old = "    out = []\n    for _ in range(width):"
+    assert src.count(old) == 1
+    with pytest.raises(crs.Unsupported):
+        _reads_of(src.replace(old, "    out = []\n    while not out:\n        out = [0]\n"
+                                   "    for _ in range(width):"))
+
+
+def test_m1_the_generated_omission_cases_are_counted():
+    c = crs.counts(READS, cm.NEEDS)
+    print("card read-set counts: %s" % c)
+    assert c["measures"] == len(READS) and c["omission_cases"] == len(DEPENDENT)
+    assert c["undeclared"] == 0
+    assert c["read_pairs"] <= c["omission_cases"] and c["declared_pairs"] <= c["omission_cases"]
+
+
+def test_m1_a_trimmed_slot_list_reads_same_cards_not_run_with_every_other_fact_whole():
+    """The round's own case, isolated: one SELF hand's slot list cut short and
+    stated so (sl), the hand list and every other fact whole. b4.sc.norule
+    reads the slot list's length, so it is NOT-RUN, and the record adds no
+    contribution."""
+    recs, reg, sc, report = _scenario_full()
+    base = k.view(recs, reg, sc, k.WEIGHTS, report)
+    assert base["game"]["b4.sc.norule"] is not None and _first_contribs(base)    # control
+    s, o, rec = recs[0]
+    cut = copy.deepcopy(rec)
+    j = next(i for i, e in enumerate(cut["hd"]) if e[2] == 0 and len(e[6]) > 1)
+    cut["hd"][j][6] = cut["hd"][j][6][:-1]
+    cut["omit"]["sl"] = 1
+    v = k.view([(s, o, cut)] + recs[1:], reg, sc, k.WEIGHTS, report)
+    assert v["uncovered"][0]["not_whole"] == ["sl"]
+    assert v["game"]["b4.sc.norule"] is None
+    assert _first_contribs(v) == []
