@@ -665,11 +665,12 @@ internal static class Program
     private static void StreamCases()
     {
         var b = new I.ClockBook(0);
-        int st = 0; long sw = 0;
+        int st = 0; long sw = 0; double swD = 0;
         b.PointStart(true, 0, 0, 0);
         for (int k = 0; k < 600; k++)
         {
-            st += 33; sw += (long)Math.Round(33 * 1.001);
+            // the receiver's clock runs 0.1 % faster than the stated intervals
+            st += 33; swD += 33 * 1.001; sw = (long)Math.Round(swD);
             b.Package(new I.Pkg { Stamp = st, ArrServer = st + 30, ArrSw = sw, TdMs = 33, Vx = 100 });
         }
         b.FlushBucket();
