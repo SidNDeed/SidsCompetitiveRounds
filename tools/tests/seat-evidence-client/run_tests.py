@@ -8,7 +8,7 @@ written) and require:
     included) and verify_sig accepts its signature under the fixture key;
   * check_compat + verify_compat_sig accept the client's compat body.
 
-Then build mutated COPIES of the core (work/, CoreSource override; the tracked
+Then build mutated COPIES of the core (obj/work/, CoreSource override; the tracked
 file is never written) and require each mutant's target to FAIL and its
 control case to PASS. The target "server" is the comparison above. Exit 0
 only when everything holds.
@@ -51,7 +51,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 PROJ = os.path.join(HERE, "SeatEvidenceTests.csproj")
 CORE = os.path.join(REPO, "plugin", "SeatEvidenceCore.cs")
-WORK = os.path.join(HERE, "work")
+# Generated fixtures, builds and mutant copies go under obj/ (gitignored), the
+# folder the backend source walks prune (the conftest tree-movement stamps and
+# the account-id source gate): JSON written beside the sources is read as source.
+WORK = os.path.join(HERE, "obj", "work")
 DEFAULT_SERVER = os.path.join(os.path.dirname(REPO), "scr-wt-seat-evidence-server")
 DEFAULT_AMENDED = os.path.join(os.path.dirname(REPO), "scr-wt-seat-evidence-server-v2")
 PINNED = os.path.join(HERE, "server_fixtures")
@@ -378,7 +381,7 @@ def pinned_check():
     """The committed server-comparison fixtures (server_fixtures/, the set the
     server lane copies into backend/tests/fixtures/seat_evidence_client_b7/)
     equal, file for file and byte for byte, what the unmutated build just
-    wrote into work/base/fixtures. A difference in either direction FAILS."""
+    wrote into obj/work/base/fixtures. A difference in either direction FAILS."""
     d = os.path.join(WORK, "base", "fixtures")
     have, made = set(os.listdir(PINNED)), set(os.listdir(d))
     ok = have == made and len(have) > 0
@@ -392,7 +395,7 @@ def pinned_check():
 
 def amended_check(root, dll):
     """The amended server's own parser and budget fixture over the unmutated
-    build's fixtures (written by server_check into work/base/fixtures).
+    build's fixtures (written by server_check into obj/work/base/fixtures).
     Prints one line per check; True only when every one holds."""
     api = os.path.join(root, "backend", "api")
     path = os.path.join(api, "seat_evidence.py")

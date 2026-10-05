@@ -485,7 +485,7 @@ namespace SeatEvidenceTests
         private static void Envelope()
         {
             string rec = C.Budget(Sample(2, false).ToObj());
-            string seat = "76561198000000001", other = "76561198000000002";
+            string seat = "76561190000000001", other = "76561190000000002";
             string stable = "ranked_abc_123456", attach = stable + "_r8";
             string canon = C.Canonical(seat, other, stable, attach, rec);
             Check(canon.StartsWith("seat-evidence:v2:" + seat + ":" + other + ":"), "canonical head");
@@ -541,7 +541,7 @@ namespace SeatEvidenceTests
         private static C.Pending Queued(C.Record r, long firstUnix)
         {
             string rec = C.Budget(r.ToObj());
-            string seat = "76561198000000001", other = "76561198000000002", stable = "ranked_abc_123456", attach = stable + "_r8";
+            string seat = "76561190000000001", other = "76561190000000002", stable = "ranked_abc_123456", attach = stable + "_r8";
             string env = C.Envelope(seat, other, stable, attach, rec, C.Hmac(Encoding.UTF8.GetBytes("k"), C.Canonical(seat, other, stable, attach, rec)));
             return new C.Pending { Route = "e", Body = env, FirstUnix = firstUnix, Attempts = 1 };
         }
@@ -605,7 +605,7 @@ namespace SeatEvidenceTests
                 var obj = kv.Value.ToObj();
                 string full = C.Json(obj);               // the unbudgeted input, as the reference reads it
                 string rec = C.Budget(obj);
-                string seat = "76561198000000001", other = "76561198000000002";
+                string seat = "76561190000000001", other = "76561190000000002";
                 string stable = "ranked_room_" + kv.Key + "_123456", attach = stable + "_r8";
                 string sig = C.Hmac(key, C.Canonical(seat, other, stable, attach, rec));
                 string env = C.Envelope(seat, other, stable, attach, rec, sig);
@@ -615,8 +615,8 @@ namespace SeatEvidenceTests
                 lines.Append(kv.Key).Append('\n');
             }
             var plugins = C.CompatPlugins(new[] { "com.example.one", "bad guid!", "two_2" });
-            string ccanon = C.CompatCanonical("76561198000000001", "not_run", plugins);
-            string cbody = C.CompatBody("76561198000000001", "not_run", plugins, C.Hmac(key, ccanon));
+            string ccanon = C.CompatCanonical("76561190000000001", "not_run", plugins);
+            string cbody = C.CompatBody("76561190000000001", "not_run", plugins, C.Hmac(key, ccanon));
             File.WriteAllText(Path.Combine(dir, "compat.json"), cbody, new UTF8Encoding(false));
             File.WriteAllText(Path.Combine(dir, "cases.txt"), lines.ToString(), new UTF8Encoding(false));
             // amended B7: every entry the client writes over the state space (all must be admitted) ...

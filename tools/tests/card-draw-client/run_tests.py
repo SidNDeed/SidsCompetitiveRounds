@@ -16,7 +16,7 @@ reference (this file; it shares no code with the C# core):
     committed files byte for byte (CARD-DRAW-CLIENT-BUILD-NOTES.md, "Wire
     layout").
 
-Then build mutated COPIES of either core (work/; CoreSource / SeatCoreSource
+Then build mutated COPIES of either core (obj/work/; CoreSource / SeatCoreSource
 overrides; the tracked files are never written) and require each mutant's
 target to FAIL and its control to PASS. The target "fixtures" is the
 reference check above. Exit 0 only when everything holds.
@@ -35,7 +35,10 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 PROJ = os.path.join(HERE, "CardDrawTests.csproj")
 CORE = os.path.join(REPO, "plugin", "CardDrawEvidenceCore.cs")
 SEAT_CORE = os.path.join(REPO, "plugin", "SeatEvidenceCore.cs")
-WORK = os.path.join(HERE, "work")
+# Generated fixtures, builds and mutant copies go under obj/ (gitignored), the
+# folder the backend source walks prune (the conftest tree-movement stamps and
+# the account-id source gate): JSON written beside the sources is read as source.
+WORK = os.path.join(HERE, "obj", "work")
 GOLDEN = os.path.join(HERE, "fixtures")
 FIXTURE_KEY = b"fixture-key-not-a-secret"
 LIMIT = 8192
