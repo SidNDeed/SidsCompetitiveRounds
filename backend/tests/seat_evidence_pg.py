@@ -47,6 +47,7 @@ OPTOUT = os.environ.get(OPTOUT_VAR) == "1"
 
 M368_NAME = "368_seat_evidence.sql"
 M368 = os.path.join(cf_pg.SQL_DIR, M368_NAME)
+M370_NAME = "370_card_evidence.sql"
 SEV_TABLES = frozenset({"seat_evidence", "seat_evidence_games", "seat_evidence_findings",
                         "mod_release_digests", "client_compat_events",
                         "review_sitting_dirty", "review_cursor", "review_seen",
@@ -73,9 +74,11 @@ def read_368():
 
 
 def ddl_statements():
-    """cf_pg's replay set with 368 held out as well."""
+    """cf_pg's replay set with 368 held out as well, and 370 with it: 370
+    changes 368's findings table (its evidence domain), so it cannot replay
+    before 368 has run. The card evidence build applies 370 itself, after."""
     saved = cf_pg.HELD_OUT
-    cf_pg.HELD_OUT = frozenset(saved | {M368_NAME})
+    cf_pg.HELD_OUT = frozenset(saved | {M368_NAME, M370_NAME})
     try:
         return cf_pg.ddl_statements()
     finally:
