@@ -46,7 +46,10 @@ CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left",
          # fix pass 5: amended B7 (reset at hit_sent index 9)
          "last_reset_states",
          # merge pass 6, item 2: the stand-in server's not-found, refusal and no-answer bounds
-         "standin_bounds"]
+         "standin_bounds",
+         # merge pass 7, SE-L1: an asynchronous server; an abandoned request's late
+         # answer (2xx, refusal, not-found) arriving while another is in flight
+         "late_answer_identity"]
 
 # (name, old text, new text, target case, control case); old occurs exactly once.
 MUTANTS = [
@@ -179,6 +182,15 @@ MUTANTS = [
     ("pump_ignores_launch_hold", "if (!q.HoldUntilNextLaunch && q.NotBeforeUnix <= now) { p = q; break; }",
      "if (q.NotBeforeUnix <= now) { p = q; break; }", "standin_bounds", "victim_block_hit"),
     ("spool_pass_uncapped", "int n = Math.Min(files.Length, SPOOL_CAP);", "int n = files.Length;", "standin_bounds", "victim_block_hit"),
+    # merge pass 7, SE-L1: the flight identity. The identity check dropped; the
+    # check made on the wrong field (the route, which two queued records share);
+    # the drop not counted; the abandoned request not held for the launch.
+    ("late_identity_unchecked", "if (!_inFlight || id != _flightId)", "if (!_inFlight)",
+     "late_answer_identity", "standin_bounds"),
+    ("late_identity_wrong_field", "if (!_inFlight || id != _flightId)", "if (!_inFlight || route != _flightRoute)",
+     "late_answer_identity", "standin_bounds"),
+    ("late_drop_uncounted", "_lateAnswersDropped++;", "", "late_answer_identity", "standin_bounds"),
+    ("abandoned_not_held", "_queue[i].HoldUntilNextLaunch = true;", "", "late_answer_identity", "standin_bounds"),
 ]
 
 # Wiring the replays cannot reach: (file, what, anchors that must each occur

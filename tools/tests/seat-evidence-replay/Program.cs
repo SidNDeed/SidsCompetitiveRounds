@@ -1165,6 +1165,97 @@ namespace SeatEvidenceReplay
             Eq(1, ApiClient.Posts.Count, "one send per pump");
         }
 
+        /// <summary>Merge pass 7, SE-L1, against an ASYNCHRONOUS server: request
+        /// A leaves and gets no answer within FLIGHT_LIMIT_MS, so the slot is
+        /// freed and B leaves; then A's answer arrives while B is in flight, as
+        /// a 2xx, a refusal and a not-found in turn. A's answer is dropped and
+        /// counted and B is untouched (still in flight, no answer stored, its
+        /// queue line unchanged) until B's own answer settles B alone. A is
+        /// never POSTed twice in one launch, even once due again, and in the
+        /// next launch it leaves once more and its own answer decides it.</summary>
+        private static void LateAnswerIdentity()
+        {
+            const BindingFlags S = BindingFlags.NonPublic | BindingFlags.Static;
+            long limit = (long)typeof(SeatEvidence).GetField("FLIGHT_LIMIT_MS", S).GetRawConstantValue();
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            string[] names = { "2xx", "refusal", "not-found" };
+            bool[] oks = { true, false, false };
+            string[] texts = { "{\"status\":\"recorded\"}", "HTTP 400: {\"detail\":\"malformed\"}", "HTTP 404: {\"detail\":\"Not Found\"}" };
+            Func<string, string> lineOf = body =>
+            {
+                foreach (var l in QueueLines()) if (BodyOf(l) == body) return l;
+                return null;
+            };
+            ApiUp();
+            int dropped = 0;
+            for (int k = 0; k < names.Length; k++)
+            {
+                string n = names[k] + ": ";
+                ApiClient.Posts.Clear();
+                ApiClient.Held.Clear();
+                ApiClient.Deferred = true;
+                string bodyA = "{\"late\":\"" + names[k] + "\",\"req\":\"A\"}";
+                string bodyB = "{\"late\":\"" + names[k] + "\",\"req\":\"B\"}";
+                WriteQueue(new List<SeatEvidenceCore.Pending>
+                {
+                    new SeatEvidenceCore.Pending { Route = "e", Body = bodyA, FirstUnix = now - 10 },
+                    new SeatEvidenceCore.Pending { Route = "e", Body = bodyB, FirstUnix = now - 10 },
+                }, 1000 * (k + 1));
+                NextLaunch();
+
+                SendOnce();
+                Eq(1, ApiClient.Posts.Count, n + "A left");
+                Eq(bodyA, ApiClient.Posts[0].Value, n + "the first request out is A");
+                Eq(true, (bool)Field("_inFlight"), n + "A in flight, unanswered");
+
+                // no answer within the limit: A abandoned, B leaves on the same tick
+                SetField("_flightAtMs", SeatEvidence.SwMs - limit - 1000);
+                SendOnce();
+                Eq(2, ApiClient.Posts.Count, n + "B left after A was abandoned");
+                Eq(bodyB, ApiClient.Posts[1].Value, n + "the second request out is B");
+                string aLine = lineOf(bodyA), bLine = lineOf(bodyB);
+                Check(aLine != null && bLine != null, n + "both requests queued while B is in flight");
+
+                // A's late answer arrives while B is in flight
+                ApiClient.Deliver(0, oks[k], texts[k]);
+                dropped++;
+                Eq(dropped, (int)Field("_lateAnswersDropped"), n + "A's late answer dropped and counted");
+                Eq(true, (bool)Field("_inFlight"), n + "B still in flight");
+                Eq(bodyB, (string)Field("_flightBody"), n + "the flight is still B's");
+                Eq(false, (bool)Field("_answered"), n + "no answer stored for B");
+                SendOnce();
+                Eq(2, ApiClient.Posts.Count, n + "nothing else left");
+                Eq(2, QueueLines().Length, n + "neither request settled by A's answer");
+                Eq(aLine, lineOf(bodyA), n + "A's queue line unchanged by its late answer");
+                Eq(bLine, lineOf(bodyB), n + "B's queue line untouched by A's answer");
+
+                // B's own answer settles B alone
+                ApiClient.Deliver(1, true, "{\"status\":\"recorded\"}");
+                SendOnce();
+                Eq(1, QueueLines().Length, n + "B settled by its own answer");
+                Eq(aLine, lineOf(bodyA), n + "A kept as it was");
+
+                // the bound, unconditionally: A is due again and still not POSTed in this launch
+                foreach (SeatEvidenceCore.Pending p in (System.Collections.IList)Field("_queue")) p.NotBeforeUnix = 0;
+                for (int i = 0; i < 10; i++) SendOnce();
+                Eq(2, ApiClient.Posts.Count, n + "at most one POST per queued request in this launch");
+
+                // the next launch: A leaves once more, under a new flight, and its own answer decides it
+                ApiClient.Deferred = false;
+                ApiClient.AnswerOk = oks[k];
+                ApiClient.Answer = texts[k];
+                NextLaunch();
+                for (int i = 0; i < 10; i++) SendOnce();
+                Eq(3, ApiClient.Posts.Count, n + "A once in the next launch, no more");
+                Eq(bodyA, ApiClient.Posts[2].Value, n + "the next launch's request is A");
+                Eq(k == 2 ? 1 : 0, QueueLines().Length, n + "A's own answer decides A");
+                Eq(dropped, (int)Field("_lateAnswersDropped"), n + "no answer dropped in the next launch");
+            }
+            ApiClient.Deferred = false;
+            Check(Logged("that is no longer in flight was dropped") == 3, "one log line per dropped answer");
+            Check(Logged("held for the next launch") >= 3, "one log line per abandoned flight");
+        }
+
         /// <summary>Fix pass 4, F8: parsable lines under a trailer that does not verify.</summary>
         private static void ClosingBadTrailer()
         {
@@ -1273,6 +1364,8 @@ namespace SeatEvidenceReplay
             { "closing_no_trailer", ClosingNoTrailer }, { "closing_bad_trailer", ClosingBadTrailer },
             // merge pass 6, item 2
             { "standin_bounds", StandinBounds },
+            // merge pass 7, SE-L1
+            { "late_answer_identity", LateAnswerIdentity },
         };
 
         private static int Main(string[] args)

@@ -220,6 +220,16 @@ namespace CompetitiveRounds
         internal static bool RefuseInside;
         internal static int NotSent;
         internal static Action OnSend;
+        // Merge pass 7 (SE-L1): the ASYNCHRONOUS server. With Deferred set, a
+        // request that leaves gets no answer at once; its callback is kept in
+        // Held, in send order, and a case delivers it later with Deliver, as a
+        // real coroutine's late completion would arrive.
+        internal static bool Deferred;
+        internal static readonly List<Action<bool, bool, string, bool>> Held = new List<Action<bool, bool, string, bool>>();
+        internal static void Deliver(int i, bool ok, string text)
+        {
+            Held[i](true, ok, text, true);
+        }
         internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Action<bool, bool, string, bool> callback)
         {
             if (string.IsNullOrEmpty(Base) || !Plugin.DataConsentGranted) return false;
@@ -227,6 +237,7 @@ namespace CompetitiveRounds
             if (beforeSend != null && !beforeSend()) { NotSent++; callback(false, false, "not-sent", false); return true; }
             if (OnSend != null) OnSend();
             Posts.Add(new KeyValuePair<string, string>(path, body));
+            if (Deferred) { Held.Add(callback); return true; }
             callback(true, AnswerOk, Answer, true);
             return true;
         }

@@ -1565,13 +1565,22 @@ namespace CompetitiveRounds
             return route == "c" ? "compat outcome" : (route == "k" ? "card record" : "record");
         }
 
-        // the request in flight and its answer, as the result callback left it
+        // the request in flight and its answer, as the result callback left it.
+        // SE-L1 (merge pass 7): every flight has an identity, _flightId, taken
+        // from _flightSeq when Pump sets the request up and captured by that
+        // request's callback. Only the callback of the current flight may
+        // store an answer; any other callback (a request abandoned after
+        // FLIGHT_LIMIT_MS, or one whose set-up failed) is dropped and counted
+        // in _lateAnswersDropped, so it can never settle, refuse or hold a
+        // different request.
         private const long FLIGHT_LIMIT_MS = 60000;
+        private static long _flightSeq, _flightId;
         private static string _flightRoute, _flightBody;
         private static long _flightAtMs;
         private static volatile bool _answered;
         private static bool _answerLeft, _answerOk, _answerCarried;
         private static string _answerText;
+        private static int _lateAnswersDropped;
 
         /// <summary>One send of the oldest due request, from Tick only (after
         /// its current-frame combat check), with data consent and a session.
@@ -1591,20 +1600,39 @@ namespace CompetitiveRounds
             if (p == null) return;
             string refusal = C.SendRefusal(p, now);
             if (refusal != null) { Settle(p.Route, p.Body, refusal, 0); return; }
-            _inFlight = true; _flightRoute = p.Route; _flightBody = p.Body; _flightAtMs = nowMs; _answered = false;
+            long id = ++_flightSeq;
+            _inFlight = true; _flightId = id; _flightRoute = p.Route; _flightBody = p.Body; _flightAtMs = nowMs; _answered = false;
             string route = p.Route, body = p.Body;
             bool started = false;
             try
             {
                 started = ApiClient.SeatEvidencePost(RouteOf(route), body, () => BeforeSend(route, body),
-                    (left, ok, text, carried) =>
-                    {
-                        _answerLeft = left; _answerOk = ok; _answerText = text; _answerCarried = carried;
-                        _answered = true;
-                    });
+                    (left, ok, text, carried) => OnAnswer(id, route, left, ok, text, carried));
             }
             catch { started = false; }
-            if (!started) { _inFlight = false; _flightRoute = _flightBody = null; _answered = false; }
+            if (!started && _flightId == id) ClearFlight();
+        }
+
+        /// <summary>The result callback of flight `id`: it stores the answer
+        /// only while that flight is the one in flight. Any other callback is
+        /// dropped and counted; it changes no request (SE-L1).</summary>
+        private static void OnAnswer(long id, string route, bool left, bool ok, string text, bool carried)
+        {
+            if (!_inFlight || id != _flightId)
+            {
+                _lateAnswersDropped++;
+                Plugin.Log.LogInfo(TAG + " an answer for a " + What(route) + " that is no longer in flight was dropped (flight "
+                    + id.ToString(CultureInfo.InvariantCulture) + ", dropped this launch: "
+                    + _lateAnswersDropped.ToString(CultureInfo.InvariantCulture) + ")");
+                return;
+            }
+            _answerLeft = left; _answerOk = ok; _answerText = text; _answerCarried = carried;
+            _answered = true;
+        }
+
+        private static void ClearFlight()
+        {
+            _inFlight = false; _flightId = 0; _flightRoute = _flightBody = null; _answered = false;
         }
 
         /// <summary>Called by the api's evidence path immediately before
@@ -1642,23 +1670,49 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Tick, outside combat: acts on the answer the result
-        /// callback stored. A request that went out counts whatever came back;
-        /// one that never left (a gate refused it) changes nothing. A callback
-        /// that never comes (its host went away) frees the slot after
-        /// FLIGHT_LIMIT_MS with the transmission still counted.</summary>
+        /// callback stored, which OnAnswer admits only for the current flight.
+        /// A request that went out counts whatever came back; one that never
+        /// left (a gate refused it) changes nothing. A callback that has not
+        /// come after FLIGHT_LIMIT_MS (its host went away) frees the slot and
+        /// abandons the flight: its transmission stays counted, a later answer
+        /// for it is dropped (OnAnswer), and the request is held for the rest
+        /// of this launch, so it is sent again only in a later launch, under a
+        /// new flight, within the request's existing attempt and age limits.
+        /// So no request is POSTed twice in one launch on account of an
+        /// answer that came late or not at all (SE-L1).</summary>
         private static void TakeAnswer(long nowMs)
         {
             if (!_inFlight) return;
             if (!_answered)
             {
-                if (nowMs - _flightAtMs > FLIGHT_LIMIT_MS) { _inFlight = false; _flightRoute = _flightBody = null; }
+                if (nowMs - _flightAtMs > FLIGHT_LIMIT_MS)
+                {
+                    string aRoute = _flightRoute, aBody = _flightBody;
+                    long aId = _flightId;
+                    ClearFlight();
+                    HoldAbandoned(aRoute, aBody, aId);
+                }
                 return;
             }
             string route = _flightRoute, body = _flightBody;
             bool left = _answerLeft, ok = _answerOk, carried = _answerCarried;
             string text = _answerText;
-            _inFlight = false; _flightRoute = _flightBody = null; _answered = false;
+            ClearFlight();
             if (left && route != null) Answer(route, body, ok, text, carried);
+        }
+
+        /// <summary>The abandoned flight's request: held in memory for the rest
+        /// of this launch (the launch hold Adopt keeps across a reload). Its
+        /// persisted attempt count and next-eligible time are unchanged.</summary>
+        private static void HoldAbandoned(string route, string body, long id)
+        {
+            if (route == null || !Load()) return;
+            int i = Find(_queue, route, body);
+            if (i < 0) return;
+            _queue[i].HoldUntilNextLaunch = true;
+            Plugin.Log.LogInfo(TAG + " no answer for the " + What(route) + " within "
+                + (FLIGHT_LIMIT_MS / 1000).ToString(CultureInfo.InvariantCulture) + " s (flight "
+                + id.ToString(CultureInfo.InvariantCulture) + "): held for the next launch");
         }
 
         private static void Answer(string route, string bodyKey, bool ok, string text, bool carried)
