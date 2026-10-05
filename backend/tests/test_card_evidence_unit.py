@@ -998,13 +998,68 @@ def test_every_card_statement_on_the_shared_findings_table_names_the_card_domain
     consts = [n.value for n in ast.walk(ast.parse(_read(API, "card_evidence.py")))
               if isinstance(n, ast.Constant) and isinstance(n.value, str)]
     written = [s for s in consts if _FINDING_WRITE.search(s)]
-    assert len(written) == 2 and _unscoped(consts) == []                  # the upsert and the retirement
+    assert len(written) == 3 and _unscoped(consts) == []                  # the upsert, the retirement, the purge
     rb = _sql_statements("rollback_370_card_evidence.sql")
     assert [s for s in rb if _FINDING_WRITE.search(s)] and _unscoped(rb) == []
     m370 = [s for s in _sql_statements("370_card_evidence.sql") if _FINDING_WRITE.search(s)]
     assert len(m370) == 1 and "dedup_key LIKE 'card %'" in m370[0] and "domain = 'seat'" in m370[0]
     assert _unscoped(["DELETE FROM seat_evidence_findings WHERE dedup_key = :k"])          # control
     assert _unscoped(["INSERT INTO seat_evidence_findings (scope, dedup_key) VALUES (:s, :k)"])
+
+
+# Every statement that writes the shared findings table, in this lane's files
+# and the seat lane's files it runs with: (file, kind, the predicate that keeps
+# it to one domain). A seat key never holds a space and a card key always
+# begins 'card ', so the key form names the domain where the column may be absent.
+_DOMAIN_PREDICATES = (
+    ("api/card_evidence.py", "INSERT", "VALUES ('card'"),
+    ("api/card_evidence.py", "DELETE", "domain = 'card'"),
+    ("api/card_evidence.py", "DELETE", "domain = 'card'"),
+    ("api/seat_evidence.py", "INSERT", "INSERT INTO seat_evidence_findings (scope, dedup_key"),   # default 'seat'
+    ("api/seat_evidence.py", "UPDATE", "WHERE id = :i"),
+    ("api/seat_evidence.py", "DELETE", "scope = 'game' AND dedup_key = :k"),
+    ("api/seat_evidence.py", "DELETE", "dedup_key NOT LIKE 'card %'"),
+    ("sql/370_card_evidence.sql", "UPDATE", "dedup_key LIKE 'card %'"),
+    ("sql/rollback_370_card_evidence.sql", "DELETE", "domain = 'card'"),
+)
+
+
+def _finding_writes(rel):
+    """(kind, statement) for every statement of `rel` writing the findings table."""
+    if rel.endswith(".py"):
+        import ast
+        stmts = [n.value for n in ast.walk(ast.parse(_read(BACKEND, *rel.split("/"))))
+                 if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    else:
+        stmts = _sql_statements(rel.split("/")[1])
+    out = []
+    for s in stmts:
+        m = _FINDING_WRITE.search(s)
+        if m:
+            out.append((m.group(0).split()[0].upper(), " ".join(s.split())))
+    return out
+
+
+def _domain_table():
+    rows = []
+    for rel in sorted({r[0] for r in _DOMAIN_PREDICATES}):
+        for kind, s in _finding_writes(rel):
+            preds = [p for (f, kk, p) in _DOMAIN_PREDICATES if f == rel and kk == kind and p in s]
+            rows.append((rel, kind, preds[0] if preds else None))
+    return sorted(rows, key=lambda r: (r[0], r[1], r[2] or ""))
+
+
+def test_every_write_on_the_shared_findings_table_is_kept_to_one_domain():
+    rows = _domain_table()
+    assert None not in [p for _f, _k, p in rows], rows
+    assert rows == sorted(_DOMAIN_PREDICATES, key=lambda r: (r[0], r[1], r[2]))   # the count is checkable
+    assert len(rows) == 9
+    # the seat purge names the card key form; control: without it the row is unclassified
+    purge = [s for kk, s in _finding_writes("api/seat_evidence.py") if "changed_at <" in s]
+    assert len(purge) == 1 and "dedup_key NOT LIKE 'card %'" in purge[0]
+    bare = purge[0].replace("AND dedup_key NOT LIKE 'card %' ", "")
+    assert not [p for (f, kk, p) in _DOMAIN_PREDICATES if f == "api/seat_evidence.py" and kk == "DELETE"
+                and p in bare]                                                    # control
 
 
 def test_the_migration_adds_the_domain_and_the_rollback_removes_it():

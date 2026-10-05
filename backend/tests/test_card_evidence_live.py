@@ -712,3 +712,72 @@ def test_m8_the_report_projection_reads_match_cards_and_writes_no_match_data(liv
     assert k.ID_PICKS not in {f["rule_id"] for f in f2}                  # control: the report agrees
     assert all(rows2[i]["b4.report.picks.self.rep"] == 0 for i in rows2)
     assert any(rows1[i]["b4.report.picks.self.rep"] == 1 for i in rows1)
+
+
+def test_m7_a_conflict_whose_transaction_began_before_the_evaluation_still_wakes_the_game(live, revs):
+    """The conflicting submission's transaction begins, an evaluation then runs
+    and finalizes the game without seeing it, and only then is the conflict
+    written and committed (the order a wait on the evaluation's FOR SHARE lock
+    produces). Its marker must still be later than that evaluation."""
+    async def go():
+        sm = live.sm
+        a, b = "1000000000000851", "1000000000000852"
+        ids = await _players(sm, a, b)
+        key = "ranked_cardf9_000001"
+        ra, rb, c = _pair()
+        await _register(sm, k.census_dump(c.cards))
+        await _store(sm, ids, a, b, key, ra)
+        await _store(sm, ids, b, a, key, rb)
+        await _match(sm, ids, a, b, key + "_r5", sc="off")
+        env = ce.parse_envelope(k.envelope(k.on_census(k.dup_record(), c), seat=a, other=b, stable=key, rounds=5))
+        parsed = ce.parse_record(env)
+        sel = "SELECT finalized_at, processed_at FROM card_games WHERE stable_game_key = :k"
+        async with sm() as db:
+            began = (await db.execute(text("SELECT now()"))).scalar()   # the conflict's transaction begins
+            await ce.games_pass(sm, revs.conflict)                         # an evaluation that cannot see it
+            g1 = (await _rows(sm, sel, k=key))[0]
+            try:
+                await ce.store_record(db, env, parsed, ids[a], ids[b], "1.41.0")
+                status = 200
+            except ce.EvidenceRefused as r:
+                status = r.status
+        marker = await _scalar(sm, "SELECT max(conflict_at) FROM card_evidence WHERE stable_game_key = :k", k=key)
+        await ce.games_pass(sm, revs.conflict)
+        g2 = (await _rows(sm, sel, k=key))[0]
+        return began, g1, status, marker, g2, await _game_findings(sm, key)
+    began, g1, status, marker, g2, found = live.run(go())
+    assert status == 409 and g1["finalized_at"] is not None
+    assert began < g1["processed_at"]                     # control: the conflict's transaction began first
+    assert marker > g1["processed_at"]
+    assert g2["processed_at"] > g1["processed_at"] and k.ID_CONFLICT in {f["rule_id"] for f in found}
+
+
+def test_m6_each_purge_keeps_to_its_own_domain(live):
+    """The seat purge removes only seat findings; the card purge removes only
+    card findings (on the card lane's derived retention); neither removes a
+    posted finding or a recent one."""
+    age = ce.CARD_LIMITS["derived_retention_days"] + ce.se.FINDING_RETENTION_DAYS   # past both
+    tag = "ranked_cardpd_000001|lo|hi"
+    ins = ("INSERT INTO seat_evidence_findings (domain, scope, dedup_key, rule_id, rules_rev, flag_id, changed_at) "
+           "VALUES (:dom, 'game', :k, :r, 'old', CAST(:f AS uuid), now() - make_interval(days => CAST(:age AS int)))")
+    left = "SELECT rule_id FROM seat_evidence_findings WHERE dedup_key IN (:s, :c) ORDER BY rule_id"
+
+    async def go():
+        sm = live.sm
+        seat_key, card_key = tag, "card " + tag
+        for dom, kk, rid, flag, days in (("seat", seat_key, "r0000ff01", None, age),
+                                         ("card", card_key, "r0000ff02", None, age),
+                                         ("card", card_key, "r0000ff03", None, 0),
+                                         ("card", card_key, "r0000ff04", str(uuid.uuid4()), age)):
+            await _exec(sm, ins, dom=dom, k=kk, r=rid, f=flag, age=days)
+        await ce.se.purge_pass(sm)
+        after_seat = [r["rule_id"] for r in await _rows(sm, left, s=seat_key, c=card_key)]
+        await _exec(sm, ins, dom="seat", k=seat_key, r="r0000ff05", f=None, age=age)
+        await ce.purge_pass(sm)
+        after_card = [r["rule_id"] for r in await _rows(sm, left, s=seat_key, c=card_key)]
+        return after_seat, after_card
+    after_seat, after_card = live.run(go())
+    assert "r0000ff01" not in after_seat                  # control: the seat purge ran on its own row
+    assert after_seat == ["r0000ff02", "r0000ff03", "r0000ff04"]
+    assert "r0000ff02" not in after_card                  # control: the card purge ran on its own row
+    assert after_card == ["r0000ff03", "r0000ff04", "r0000ff05"]
