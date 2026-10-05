@@ -685,8 +685,80 @@ namespace CompetitiveRounds
                     _nextBuildTryMs = SwMs + 1000;     // the census is this tick's work; the build is the next
                     return;
                 }
+                string text;
+                string env = BuildEnv(c, out text);
+                if (env == null) { _captures.RemoveAt(0); Plugin.Log.LogWarning(TAG + " no record: the game key, seat ids or envelope are outside the contract"); return; }
+                if (!SeatEvidence.EnqueueIdentity(env)) { _nextBuildTryMs = SwMs + 5000; return; }
+                _captures.RemoveAt(0);
+                Plugin.Log.LogInfo(TAG + " record queued: " + RecordLine(c, text));
+            }
+            catch (Exception ex)
+            {
+                _cost[G1].Fault();
+                _captures.RemoveAt(0);
+                try { Plugin.Log.LogWarning(TAG + " no record: " + ex.GetType().Name); } catch { }
+            }
+            _cost[G1].Add(SwUs - t0);
+        }
+
+        private static string RecordLine(Capture c, string text)
+        {
+            var g = c.G;
+            return text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, points " + g.Book.PtO.Count
+                + ", survey " + (_survey != null && _survey.ResultFor(g.Gen) != null ? "complete" : "not_yet")
+                + ", io_in_combat " + IoInCombat.ToString(CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>Application.quitting, after GameStateWatcher's quit hook
+        /// captured a game still live (and after the seat and card-draw
+        /// flushes): every capture is built now, on this thread, because no
+        /// later frame comes, and written to the closing file under route "i"
+        /// (SeatEvidence.SpoolClosing, never the queue); the next launch's
+        /// first queue load moves it in. The game-over census runs here if the
+        /// tick had not run it; a survey that had not finished for that game
+        /// stays not_yet (no disk survey is started at quit). Every capture
+        /// leaves one log line: kept, or why there is no record.</summary>
+        internal static void FlushOnQuit()
+        {
+            try
+            {
+                int n = 0;
+                while (_captures.Count > 0 && n++ < CAPTURE_CAP)
+                {
+                    var c = _captures[0];
+                    _captures.RemoveAt(0);
+                    try
+                    {
+                        if (!c.CensusDone)
+                        {
+                            c.CensusDone = true;
+                            var keep = _g; _g = c.G;
+                            try { CheckRun(I.MOMENT_OVER, false); } finally { _g = keep; }
+                        }
+                        string text;
+                        string env = BuildEnv(c, out text);
+                        if (env == null) { Plugin.Log.LogWarning(TAG + " no record at quit: the game key, seat ids or envelope are outside the contract"); continue; }
+                        if (SeatEvidence.SpoolClosing("i", env)) Plugin.Log.LogInfo(TAG + " record kept for the next launch: " + RecordLine(c, text));
+                        else Plugin.Log.LogWarning(TAG + " no record at quit: the closing file was not written");
+                    }
+                    catch (Exception ex)
+                    {
+                        _cost[G1].Fault();
+                        try { Plugin.Log.LogWarning(TAG + " no record at quit: " + ex.GetType().Name); } catch { }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>The signed envelope of one capture, or null when its game
+        /// key, seat ids or envelope are outside the contract.</summary>
+        private static string BuildEnv(Capture c, out string text)
+        {
+            text = null;
+            {
                 string stable = SeatEvidence.StableOf(c.Attach);
-                if (stable == null || !C.IsSteamId(c.Seat) || !C.IsSteamId(c.Other)) { _captures.RemoveAt(0); return; }
+                if (stable == null || !C.IsSteamId(c.Seat) || !C.IsSteamId(c.Other)) return null;
                 var g = c.G;
                 var census = _lastCensus ?? new CensusOut { Asm = new List<object>(), AsmN = I.L(0L, 0L, 0L, 0L), Hp = new List<object>(), HpAll = I.L(0L, 0L, new List<object>()) };
                 List<object> gdig; C.JObj ldir; int diskState; string mvidDisk;
@@ -706,23 +778,10 @@ namespace CompetitiveRounds
                                I.Clamp(c.SerEnd, 0, I.RATE_MAX), I.Clamp(g.SerChanges, 0, I.SMALL_MAX));
                 var rec = I.Record(c.T0, c.FromToken, _cost, Proc, g.Runs, census.AsmN, census.Asm, gdig, aload, ldir,
                                    census.HpAll, census.Hp, g.Rpc.Entries(Priv), g.Rpc.Overflow, send, g.Book);
-                string text = I.Budget(rec);
+                text = I.Budget(rec);
                 string sig = ApiClient.SeatEvidenceSig(I.Canonical(c.Seat, c.Other, stable, c.Attach, text));
-                string env = I.Envelope(c.Seat, c.Other, stable, c.Attach, text, sig);
-                if (env == null) { _captures.RemoveAt(0); Plugin.Log.LogWarning(TAG + " no record: the envelope is outside the contract"); return; }
-                if (!SeatEvidence.EnqueueIdentity(env)) { _nextBuildTryMs = SwMs + 5000; return; }
-                _captures.RemoveAt(0);
-                Plugin.Log.LogInfo(TAG + " record queued: " + text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, points "
-                    + g.Book.PtO.Count + ", survey " + (_survey != null && _survey.ResultFor(g.Gen) != null ? "complete" : "not_yet")
-                    + ", io_in_combat " + IoInCombat.ToString(CultureInfo.InvariantCulture));
+                return I.Envelope(c.Seat, c.Other, stable, c.Attach, text, sig);
             }
-            catch (Exception ex)
-            {
-                _cost[G1].Fault();
-                _captures.RemoveAt(0);
-                try { Plugin.Log.LogWarning(TAG + " no record: " + ex.GetType().Name); } catch { }
-            }
-            _cost[G1].Add(SwUs - t0);
         }
 
         /// <summary>X-Seat-Clock for this send (ApiClient calls it immediately

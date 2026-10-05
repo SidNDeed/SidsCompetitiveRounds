@@ -264,6 +264,40 @@ def api_header_contained():
     return t.count("try { ch = clockHeader(); } catch { ch = null; }") == 1
 
 
+def quit_wiring(plugin_text, evid_text):
+    """A game that ends by quitting keeps its record: the quit handler captures the live game
+    (SeatEvidenceOnQuit, whose cut path runs IdentityClockEvidence.Dispatch) BEFORE the
+    identity flush runs, and the flush writes each capture to the closing file under route i
+    and logs every outcome. Returns the list of problems (empty when wired)."""
+    probs = []
+    i_cap = plugin_text.find("try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }")
+    i_quit = plugin_text.rfind("Application.quitting += () =>", 0, max(i_cap, 0))
+    i_flush = plugin_text.find("try { IdentityClockEvidence.FlushOnQuit(); } catch { }", max(i_cap, 0))
+    i_end = plugin_text.find("};", max(i_cap, 0))
+    if i_quit < 0 or i_cap < 0 or i_flush < 0 or not (i_cap < i_flush < i_end):
+        probs.append("Plugin.cs: the quit handler does not run IdentityClockEvidence.FlushOnQuit after the live-game capture")
+    s = evid_text.find("internal static void FlushOnQuit()")
+    if s < 0:
+        probs.append("IdentityClockEvidence.cs: FlushOnQuit missing")
+    else:
+        b, e = body_after(evid_text, s)
+        body = evid_text[b:e]
+        if body.count('SeatEvidence.SpoolClosing("i", env)') != 1:
+            probs.append("FlushOnQuit does not write the closing file under route i")
+        if body.count("no record at quit") < 3 or "record kept for the next launch" not in body:
+            probs.append("FlushOnQuit does not log every outcome")
+        if "RequestSurvey" in body or "_survey.Step" in body:
+            probs.append("FlushOnQuit starts disk survey work")
+    gsw = open(os.path.join(REPO, "plugin", "GameStateWatcher.cs"), encoding="utf-8").read()
+    q = gsw.find("internal static void SeatEvidenceOnQuit()")
+    if q < 0 or "SeatEvidenceCut(" not in gsw[q:q + 600]:
+        probs.append("GameStateWatcher.SeatEvidenceOnQuit no longer cuts the live game")
+    c = gsw.find("void SeatEvidenceCut(")
+    if c < 0 or "IdentityClockEvidence.Dispatch(" not in gsw[c:gsw.find("internal static void SeatEvidenceOnQuit()")]:
+        probs.append("SeatEvidenceCut does not capture the identity-clock game")
+    return probs
+
+
 # -- mutants -----------------------------------------------------------------------------------
 # (name, [(old, new), ...], target, control); target/control: a unit group, "fixtures" or "replay"
 
@@ -354,9 +388,21 @@ def main():
     print("containment: %d hook bodies, %d registration call sites, %d problems, ApiClient clock call contained: %s" % (hooks, n_sites, len(problems), api_ok))
     for p in problems:
         print("  " + p)
-    cok = hooks == 6 and n_sites >= 9 and not problems and api_ok
+    cok = hooks == 6 and n_sites >= 10 and not problems and api_ok
     print("containment check:", "PASS" if cok else "FAIL")
     ok = ok and cok
+
+    plugin_text = open(os.path.join(REPO, "plugin", "Plugin.cs"), encoding="utf-8").read()
+    qprobs = quit_wiring(plugin_text, evid)
+    for p in qprobs:
+        print("  " + p)
+    print("quit flush wiring check:", "PASS" if not qprobs else "FAIL")
+    ok = ok and not qprobs
+    # its mutants: the flush unregistered, and the flush writing the queue instead of the closing file
+    q1 = quit_wiring(plugin_text.replace("try { IdentityClockEvidence.FlushOnQuit(); } catch { }", ""), evid)
+    q2 = quit_wiring(plugin_text, evid.replace('SeatEvidence.SpoolClosing("i", env)', "SeatEvidence.EnqueueIdentity(env)"))
+    print("quit mutant flush_unregistered %s, flush_to_queue %s" % ("CAUGHT" if q1 else "MISSED", "CAUGHT" if q2 else "MISSED"))
+    ok = ok and bool(q1) and bool(q2)
 
     raw = open(CORE, "rb").read().decode("utf-8")
     nl = "\r\n" if "\r\n" in raw else "\n"

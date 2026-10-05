@@ -521,6 +521,7 @@ namespace CompetitiveRounds
                     try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }
                     try { SeatEvidence.FlushOnQuit(); } catch { }
                     try { CardDrawEvidence.FlushOnQuit(); } catch { }
+                    try { IdentityClockEvidence.FlushOnQuit(); } catch { }
                 };
             }
             catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
