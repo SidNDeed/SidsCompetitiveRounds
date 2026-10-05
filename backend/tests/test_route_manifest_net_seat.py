@@ -217,6 +217,154 @@ def _class_target_names(target):
     return set()
 
 
+# ── The reference walk: the default visit (combat fix pass 5, M-9) ───────
+#
+# Through fix pass 4 the reference walk was a hand-written visitor: for each
+# scope-opening node it read the fields its author listed, and each review
+# round found one more position it did not read (the last: the type
+# parameters of a generic class or function, whose lazily evaluated bounds
+# read module names). The method is replaced, not patched. The walk reads
+# EVERY field the interpreter reports for a node's class (`_node_fields`,
+# from the class's own `_fields`): a field holding nodes is visited, a
+# string is charged as a name read (or, in a node stored into or deleted,
+# bound), and any other value (an int, a bool, None) cannot spell a name.
+# Exactly two tables say what differs from that default:
+#
+#   _FIELD_SCOPE   the scope a field's names are read in when that is not
+#                  the scope the node stands in (a body, a parameter
+#                  default, a type parameter's annotation scope, a
+#                  comprehension's first iterable). A placement moves a
+#                  field; it never drops one.
+#   _NOT_CHARGED   the (class, field) rows whose string is NOT charged as a
+#                  read, each with its role (what the walk does with it
+#                  instead) and a one-line reason; every row has its own
+#                  control (`_NOT_CHARGED_CONTROLS`).
+#
+# A field nobody thought about is therefore charged, never skipped. A test
+# enumerates every (class, field) of the pinned interpreter and proves each
+# is charged by the default visit or is a row of _NOT_CHARGED, and it fails
+# when the interpreter gains a class or a field
+# (test_f5_every_node_field_is_charged_by_the_default_visit_or_excluded).
+
+_FIELD_SCOPE = {
+    # A definition: its decorators where it stands (the default); its
+    # parameters' annotations, its return annotation and its type parameters
+    # in its annotation scope (the scope it stands in when it has no type
+    # parameters); its parameters' defaults where it stands; its body in its
+    # own scope.
+    ("FunctionDef", "args"): "annotation",
+    ("FunctionDef", "returns"): "annotation",
+    ("FunctionDef", "type_params"): "annotation",
+    ("FunctionDef", "body"): "inner",
+    ("AsyncFunctionDef", "args"): "annotation",
+    ("AsyncFunctionDef", "returns"): "annotation",
+    ("AsyncFunctionDef", "type_params"): "annotation",
+    ("AsyncFunctionDef", "body"): "inner",
+    ("arguments", "defaults"): "outer",
+    ("arguments", "kw_defaults"): "outer",
+    ("Lambda", "body"): "inner",
+    # A class: its bases, keywords and type parameters in its annotation
+    # scope; its body as a class body, read in execution order.
+    ("ClassDef", "bases"): "annotation",
+    ("ClassDef", "keywords"): "annotation",
+    ("ClassDef", "type_params"): "annotation",
+    ("ClassDef", "body"): "class_body",
+    # A type alias: its type parameters and its lazily evaluated value in an
+    # annotation scope of its own.
+    ("TypeAlias", "type_params"): "annotation",
+    ("TypeAlias", "value"): "annotation",
+    # A comprehension: its first iterable where it stands, the rest in its
+    # own scope.
+    ("ListComp", "elt"): "inner",
+    ("ListComp", "generators"): "generators",
+    ("SetComp", "elt"): "inner",
+    ("SetComp", "generators"): "generators",
+    ("GeneratorExp", "elt"): "inner",
+    ("GeneratorExp", "generators"): "generators",
+    ("DictComp", "key"): "inner",
+    ("DictComp", "value"): "inner",
+    ("DictComp", "generators"): "generators",
+    ("comprehension", "iter"): "iter",
+    # A walrus binds in the nearest enclosing scope that is no comprehension.
+    ("NamedExpr", "target"): "home",
+}
+
+# The node classes that open a scope of their own, and its kind.
+_OPENS = {"FunctionDef": "function", "AsyncFunctionDef": "function", "Lambda": "function",
+          "ClassDef": "class", "ListComp": "comp", "SetComp": "comp", "GeneratorExp": "comp",
+          "DictComp": "comp"}
+
+_TYPE_COMMENT = "a type comment: text the interpreter never evaluates"
+_NOT_CHARGED = {
+    ("Attribute", "attr"): ("attr", "an attribute name: charged as `a.attr` on a bare-name "
+                                    "base (through the module `a` imports), never as a variable"),
+    ("keyword", "arg"): ("label", "a keyword argument's name, never a variable"),
+    ("MatchClass", "kwd_attrs"): ("label", "the attribute names a class pattern matches"),
+    ("alias", "name"): ("import", "what an import names: read from the statement (import_refs)"),
+    ("alias", "asname"): ("import", "the name an import binds: read from the statement"),
+    ("ImportFrom", "module"): ("import", "the module imported from: read from the statement"),
+    ("Global", "names"): ("global", "a declaration: the name read or written here is the module's"),
+    ("Nonlocal", "names"): ("nonlocal", "a declaration: the name is an enclosing function's"),
+    ("FunctionDef", "name"): ("bind", "binds the name where the definition stands"),
+    ("AsyncFunctionDef", "name"): ("bind", "binds the name where the definition stands"),
+    ("ClassDef", "name"): ("bind", "binds the name where the definition stands"),
+    ("ExceptHandler", "name"): ("bind", "the handler's alias: binds in the current scope"),
+    ("MatchAs", "name"): ("bind", "a capture: binds in the current scope"),
+    ("MatchStar", "name"): ("bind", "a capture: binds in the current scope"),
+    ("MatchMapping", "rest"): ("bind", "a capture: binds in the current scope"),
+    ("arg", "arg"): ("param", "a parameter: binds in the function or lambda it belongs to"),
+    ("TypeVar", "name"): ("bind", "a type parameter: binds in its annotation scope"),
+    ("ParamSpec", "name"): ("bind", "a type parameter: binds in its annotation scope"),
+    ("TypeVarTuple", "name"): ("bind", "a type parameter: binds in its annotation scope"),
+    ("Constant", "value"): ("literal", "a literal: a string constant is text, not a name"),
+    ("Constant", "kind"): ("literal", "the `u` prefix of a string literal"),
+    ("MatchSingleton", "value"): ("literal", "True, False or None in a pattern"),
+    ("Assign", "type_comment"): ("literal", _TYPE_COMMENT),
+    ("For", "type_comment"): ("literal", _TYPE_COMMENT),
+    ("AsyncFor", "type_comment"): ("literal", _TYPE_COMMENT),
+    ("With", "type_comment"): ("literal", _TYPE_COMMENT),
+    ("AsyncWith", "type_comment"): ("literal", _TYPE_COMMENT),
+    ("FunctionDef", "type_comment"): ("literal", _TYPE_COMMENT),
+    ("AsyncFunctionDef", "type_comment"): ("literal", _TYPE_COMMENT),
+    ("arg", "type_comment"): ("literal", _TYPE_COMMENT),
+    ("TypeIgnore", "tag"): ("literal", "a `type: ignore` comment's tag"),
+}
+
+
+def _node_fields(n):
+    """(field, value) for EVERY field the interpreter reports for the node's
+    class, in its own order: the one place the reference walk reads a node.
+    A field the node does not carry reads as None."""
+    for field in type(n)._fields:
+        yield field, getattr(n, field, None)
+
+
+def _strings(value):
+    """The strings a field holds: itself, or each string of a list."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [v for v in value if isinstance(v, str)]
+    return []
+
+
+def _store_bases(st):
+    """The name at the base of every attribute or subscript a statement
+    stores into or deletes (`X.a = ...`, `X[k] += ...`, `del X[k]`): the
+    object a module-level statement changes, as the module indexer charges
+    an assignment's (combat fix pass 5)."""
+    out = set()
+    for sub in ast.walk(st):
+        if isinstance(sub, (ast.Attribute, ast.Subscript)) \
+                and isinstance(getattr(sub, "ctx", None), (ast.Store, ast.Del)):
+            base = sub.value
+            while isinstance(base, (ast.Attribute, ast.Subscript)):
+                base = base.value
+            if isinstance(base, ast.Name):
+                out.add(base.id)
+    return out
+
+
 def _is_script_guard(node):
     """`if __name__ == ...:` -- a block that does not exist when the api imports
     the module.
@@ -239,12 +387,19 @@ def _is_script_guard(node):
             and node.test.comparators[0].value == "__main__")
 
 
-def _index_module(path):
+def _index_module(path, references_of=None):
     """{name: (kind, source segment, referenced names)} for every MODULE-SCOPE
-    binding in one file.
+    binding in one file. With `references_of` (a node), no file is read: the
+    references the walk charges for that node alone are returned (`_references`,
+    the completeness test's synthetic probes).
 
     `kind` is "def" for FunctionDef/AsyncFunctionDef/ClassDef and "data" for
-    Assign/AnnAssign. A def's segment starts at its first DECORATOR line, so a
+    Assign/AnnAssign and for every other statement that binds a name at module
+    scope (combat fix pass 5: a `type` alias, an augmented assignment, a loop
+    target, a `del`, a store into an object's attribute or item; read by
+    `_class_touched` and `_store_bases`, so a statement type nobody listed
+    binds what it binds). A statement that binds no name is no binding. A
+    def's segment starts at its first DECORATOR line, so a
     route's own decorator -- which carries its path and response_model -- is
     inside its fingerprint.
 
@@ -265,7 +420,7 @@ def _index_module(path):
     A name bound more than once at module scope CONCATENATES its segments rather
     than replacing them, so a conditional rebinding cannot hide half its
     source."""
-    source = path.read_text(encoding="utf-8")
+    source = "" if references_of is not None else path.read_text(encoding="utf-8")
     lines = source.splitlines(keepends=True)
     table = {}
 
@@ -345,7 +500,19 @@ def _index_module(path):
         targets.
 
         An attribute read on anything else (a local value, a call result)
-        names no module-level binding and is not a reference."""
+        names no module-level binding and is not a reference.
+
+        The walk is the DEFAULT VISIT (combat fix pass 5, M-9): every field
+        of every node is read (`_node_fields`), placed by `_FIELD_SCOPE` and
+        exempted from charging only by a row of `_NOT_CHARGED`. A generic
+        definition, class or type alias opens an ANNOTATION scope holding its
+        type parameters; its bounds and constraints, its annotations, bases
+        and keywords, and a type alias's value are read there. Inside a class
+        body such a scope also sees the class's names, never as certain (a
+        bound is evaluated lazily, against the class namespace as it is when
+        it is read): a read there charges the class binding and goes on to
+        the binding the enclosing scopes give it, so the module's is charged
+        unless an enclosing function binds the name."""
 
         class Scope:
             def __init__(self, parent, kind):
@@ -394,110 +561,95 @@ def _index_module(path):
                     out.setdefault(alias.asname or alias.name, set()).update(refs)
             return out
 
-        def outer_args(args, scope):
-            for d in list(args.defaults) + [d for d in args.kw_defaults if d is not None]:
-                visit(d, scope)
-            for a in args.posonlyargs + args.args + args.kwonlyargs + [args.vararg, args.kwarg]:
-                if a is not None and a.annotation is not None:
-                    visit(a.annotation, scope)
+        def class_body(inner, body):
+            """A class body, statement by statement. The conservative bound
+            (fix pass 3): every name the statement may touch beyond what it
+            is modelled to bind exactly loses certainty BEFORE the statement
+            runs and is charged as a load, so its module binding is in."""
+            for st in body:
+                exact = certain_binds(st)
+                touched = _class_touched(st) - exact
+                for name in sorted(touched):
+                    inner.certain.discard(name)
+                    bind_name(inner, name)
+                    load(inner, name, None)
+                visit(st, inner)
+                inner.certain -= touched
+                inner.certain |= exact
 
-        def bind_params(args, scope):
-            for a in args.posonlyargs + args.args + args.kwonlyargs + [args.vararg, args.kwarg]:
-                if a is not None:
-                    bind_name(scope, a.arg)
-
-        def visit(n, scope):
-            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                for d in n.decorator_list:
-                    visit(d, scope)
-                outer_args(n.args, scope)
-                if n.returns is not None:
-                    visit(n.returns, scope)
-                bind_name(scope, n.name)
-                inner = Scope(scope, "function")
-                bind_params(n.args, inner)
-                for st in n.body:
-                    visit(st, inner)
-                scopes.append(inner)
+        def visit(n, scope, env=None):
+            """The default visit: every field of `n` (`_node_fields`), read
+            in the scope `_FIELD_SCOPE` places it in (the current one unless
+            a row says otherwise); a string field is a read, or a binding in
+            a node stored into or deleted, unless `_NOT_CHARGED` gives it
+            another role. `env` carries what a definition's parameters need:
+            the scope they bind in and the scope their defaults are read in,
+            and a comprehension's first-iterable scope."""
+            if isinstance(n, list):
+                for item in n:
+                    visit(item, scope, env)
                 return
-            if isinstance(n, ast.Lambda):
-                outer_args(n.args, scope)
-                inner = Scope(scope, "function")
-                bind_params(n.args, inner)
-                visit(n.body, inner)
-                scopes.append(inner)
-                return
-            if isinstance(n, ast.ClassDef):
-                for d in n.decorator_list + n.bases + [k.value for k in n.keywords]:
-                    visit(d, scope)
-                bind_name(scope, n.name)
-                inner = Scope(scope, "class")
-                for st in n.body:
-                    # The conservative bound (fix pass 3): every name the
-                    # statement may touch beyond what it is modelled to bind
-                    # exactly loses certainty BEFORE the statement runs and
-                    # is charged as a load, so its module binding is in.
-                    exact = certain_binds(st)
-                    touched = _class_touched(st) - exact
-                    for name in sorted(touched):
-                        inner.certain.discard(name)
-                        bind_name(inner, name)
-                        load(inner, name, None)
-                    visit(st, inner)
-                    inner.certain -= touched
-                    inner.certain |= exact
-                scopes.append(inner)
-                return
-            if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
-                gens = n.generators
-                visit(gens[0].iter, scope)
-                inner = Scope(scope, "comp")
-                for i, g in enumerate(gens):
-                    if i:
-                        visit(g.iter, inner)
-                    visit(g.target, inner)
-                    for cond in g.ifs:
-                        visit(cond, inner)
-                for part in ((n.key, n.value) if isinstance(n, ast.DictComp) else (n.elt,)):
-                    visit(part, inner)
-                scopes.append(inner)
-                return
-            if isinstance(n, (ast.Import, ast.ImportFrom)):
-                for name, refs in import_refs(n).items():
-                    bind_name(scope, name, refs)
-                return
-            if isinstance(n, ast.Global):
-                scope.declared_global.update(n.names)
-                return
-            if isinstance(n, ast.Nonlocal):
-                scope.declared_nonlocal.update(n.names)
-                return
-            if isinstance(n, ast.NamedExpr):
+            if not isinstance(n, ast.AST):
+                return                                    # None, an int, a bool: no name
+            kind = type(n).__name__
+            places = dict(env or {})
+            opens = _OPENS.get(kind)
+            if opens is not None or kind == "TypeAlias":
+                places, env = {}, None
+                ann = None
+                if kind == "TypeAlias" or getattr(n, "type_params", None):
+                    ann = Scope(scope, "annotation")
+                    scopes.append(ann)
+                places["annotation"] = ann or scope
+                if opens is not None:
+                    inner = Scope(ann or scope, opens)
+                    scopes.append(inner)
+                    places.update(inner=inner, class_body=inner, generators=inner)
+                    env = {"outer": scope, "params": inner}
+            if kind == "NamedExpr":
                 home = scope
                 while home.kind == "comp" and home.parent is not None:
                     home = home.parent
-                bind_name(home, n.target.id)
-                visit(n.value, scope)
-                return
-            if isinstance(n, ast.Name):
-                if isinstance(n.ctx, ast.Load) or n.id in scope.declared_global:
-                    load(scope, n.id, None)               # a read, or a write to a global
+                places["home"] = home
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                for name, refs in import_refs(n).items():
+                    bind_name(scope, name, refs)
+            stored = isinstance(getattr(n, "ctx", None), (ast.Store, ast.Del))
+            for field, value in _node_fields(n):
+                row = _NOT_CHARGED.get((kind, field))
+                if row is not None:
+                    role, names = row[0], _strings(value)
+                    if role == "attr":
+                        base = getattr(n, "value", None)
+                        if isinstance(base, ast.Name) and isinstance(base.ctx, ast.Load):
+                            for name in names:
+                                load(scope, base.id, name)
+                    elif role == "bind":
+                        for name in names:
+                            bind_name(scope, name)
+                    elif role == "param":
+                        for name in names:
+                            bind_name(places.get("params", scope), name)
+                    elif role == "global":
+                        scope.declared_global.update(names)
+                    elif role == "nonlocal":
+                        scope.declared_nonlocal.update(names)
+                    continue                     # "label", "literal", "import": nothing read
+                for name in _strings(value):
+                    if stored and name not in scope.declared_global:
+                        bind_name(scope, name)   # a `del` in a class body: charged above
+                    else:
+                        load(scope, name, None)  # a read, or a write to a global
+                place = _FIELD_SCOPE.get((kind, field), "here")
+                if place == "class_body":
+                    class_body(places["class_body"],
+                               [st for st in (value or ()) if isinstance(st, ast.AST)])
+                elif place == "generators":
+                    for i, g in enumerate(value or ()):
+                        visit(g, places["generators"],
+                              {"iter": scope if i == 0 else places["generators"]})
                 else:
-                    bind_name(scope, n.id)                # a `del` in a class body: charged above
-                return
-            if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) \
-                    and isinstance(n.value.ctx, ast.Load):
-                load(scope, n.value.id, None)
-                load(scope, n.value.id, n.attr)
-                return
-            if isinstance(n, ast.ExceptHandler) and n.name:
-                bind_name(scope, n.name)
-            if isinstance(n, (ast.MatchAs, ast.MatchStar)) and n.name:
-                bind_name(scope, n.name)
-            if isinstance(n, ast.MatchMapping) and n.rest:
-                bind_name(scope, n.rest)
-            for child in ast.iter_child_nodes(n):
-                visit(child, scope)
+                    visit(value, places.get(place, scope), env)
 
         def owners(scope, name, certain):
             """Every scope whose binding `name` may denote when read in
@@ -505,9 +657,11 @@ def _index_module(path):
             and beside a class body's binding that is not certain at the
             read, the module global (a name a class body binds is looked up
             in the class namespace and then in the module's globals, never
-            in an enclosing function)."""
+            in an enclosing function). A class directly enclosing an
+            annotation scope the read passed through is read too, never as
+            certain, and the lookup goes on past it (fix pass 5)."""
             out = []
-            s, first = scope, True
+            s, first, through_annotation = scope, True, False
             while s is not None and s.kind != "module":
                 if name in s.declared_global:
                     break
@@ -517,6 +671,9 @@ def _index_module(path):
                     if s.kind == "class" and not certain:
                         out.append(None)
                     return out
+                if s.kind == "class" and through_annotation and name in s.bound:
+                    out.append(s)
+                through_annotation = s.kind == "annotation"
                 first = False
                 s = s.parent
             out.append(None)
@@ -609,6 +766,9 @@ def _index_module(path):
             elif isinstance(node, ast.AnnAssign):
                 if isinstance(node.target, ast.Name):
                     bind(node.target.id, "data", node, guard, guard_refs)
+                else:
+                    for name in sorted(_store_bases(node)):          # fix pass 5
+                        bind(name, "data", node, guard, guard_refs)
             elif isinstance(node, (ast.Import, ast.ImportFrom)):
                 # r15. An import binds a name, and WHICH object a name denotes
                 # is part of what a handler does. Removing a batch-added
@@ -629,6 +789,16 @@ def _index_module(path):
             elif isinstance(node, (ast.If, ast.Try, ast.With)):
                 if _is_script_guard(node):
                     continue
+                if isinstance(node, ast.With):
+                    # Fix pass 5: the names its `as` targets bind, with the
+                    # whole statement as their source.
+                    bound = set()
+                    for item in node.items:
+                        if item.optional_vars is not None:
+                            bound |= _class_touched(item.optional_vars) \
+                                | _store_bases(item.optional_vars)
+                    for name in sorted(bound):
+                        bind(name, "data", node, guard, guard_refs)
                 inner = guard + guard_header(node)
                 inner_refs = guard_refs | header_refs(node)
                 visit(node.body, inner, inner_refs)
@@ -648,10 +818,29 @@ def _index_module(path):
                 finalbody = getattr(node, "finalbody", [])
                 if finalbody:
                     visit(finalbody, inner + part_header(last, finalbody), inner_refs)
+            else:
+                # Combat fix pass 5 (M-9), the default: any other statement
+                # binds every name it may bind at module scope (a `type`
+                # alias, an augmented assignment, a loop or `with` target, a
+                # walrus, a `del`, a match capture, and anything a later
+                # Python adds: `_class_touched` reads it generically) and the
+                # object it stores into; each such binding carries the whole
+                # statement and its references. A statement that binds no
+                # name (a call, an assert) is no binding of anything.
+                for name in sorted(_class_touched(node) | _store_bases(node)):
+                    bind(name, "data", node, guard, guard_refs)
 
+    if references_of is not None:
+        return referenced(references_of)
     visit(ast.parse(source).body)
     return {name: (kind, text, frozenset(refs))
             for name, (kind, text, refs) in table.items()}
+
+
+def _references(node):
+    """The references the walk charges for one node, read as a module-level
+    binding's source is read (the same walk, no file)."""
+    return _index_module(None, references_of=node)
 
 
 def _binding_index():
@@ -2094,6 +2283,36 @@ def test_the_admission_rule_is_computed_for_every_module_not_just_main():
         tree = ast.parse(path.read_text(encoding="utf-8"))
         expected = set()
 
+        def stored(node):
+            """Combat fix pass 5: what any other module-level statement
+            binds, read here independently of `_class_touched`: every name
+            it stores or deletes and the base name of every attribute or
+            subscript it stores into or deletes, outside the nested scopes
+            (a definition's body, a lambda, a comprehension past its first
+            iterable)."""
+            out, stack = set(), [node]
+            while stack:
+                n = stack.pop()
+                ctx = getattr(n, "ctx", None)
+                if isinstance(ctx, (ast.Store, ast.Del)):
+                    base = n
+                    while isinstance(base, (ast.Attribute, ast.Subscript, ast.Starred)):
+                        base = base.value
+                    if isinstance(base, ast.Name) and base is not n or isinstance(n, ast.Name):
+                        out.add(base.id)
+                for name in ("name", "rest"):
+                    if isinstance(n, (ast.MatchAs, ast.MatchStar, ast.MatchMapping)) \
+                            and isinstance(getattr(n, name, None), str):
+                        out.add(getattr(n, name))
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                                  ast.Lambda)):
+                    continue
+                if isinstance(n, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                    stack.append(n.generators[0].iter)
+                    continue
+                stack.extend(ast.iter_child_nodes(n))
+            return out
+
         def collect(body):
             for node in body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -2106,17 +2325,24 @@ def test_the_admission_rule_is_computed_for_every_module_not_just_main():
                 elif isinstance(node, ast.AnnAssign):
                     if isinstance(node.target, ast.Name):
                         expected.add(node.target.id)
+                    else:
+                        expected.update(stored(node.target))
                 elif isinstance(node, (ast.Import, ast.ImportFrom)):
                     for alias in node.names:
                         expected.add(alias.asname or alias.name.split(".")[0])
                 elif isinstance(node, (ast.If, ast.Try, ast.With)):
                     if _is_script_guard(node):
                         continue
+                    for item in getattr(node, "items", []):
+                        if item.optional_vars is not None:
+                            expected.update(stored(item.optional_vars))
                     collect(node.body)
                     collect(getattr(node, "orelse", []))
                     collect(getattr(node, "finalbody", []))
                     for handler in getattr(node, "handlers", []):
                         collect(handler.body)
+                else:
+                    expected.update(stored(node))
 
         collect(tree.body)
         assert set(index[stem]) == expected, (
@@ -3382,17 +3608,59 @@ class _ModuleReads(dict):
 
 
 def _interpreter_reads_module_limit(body):
-    """True when executing the class body reads the module's LIMIT."""
+    """True when executing the class body reads the module's LIMIT (fix
+    pass 5: and forcing every lazy part of what it made, `_force`)."""
+    return "LIMIT" in _interpreter_reads("class C:\n" + body)
+
+
+def _force(values, depth=0):
+    """Make the reads a later use of these objects would make (combat fix
+    pass 5): each type parameter's bound and constraints and each type
+    alias's value (evaluated lazily, on first access), and one call with no
+    arguments of each function the executed source defined (a coroutine is
+    driven to its end); a class is entered, its namespace forced in turn."""
+    for v in list(values):
+        if isinstance(v, (staticmethod, classmethod)):
+            v = v.__func__
+        if isinstance(v, type) and depth < 3:
+            _force([x for k, x in vars(v).items() if not k.startswith("__")], depth + 1)
+        for tp in getattr(v, "__type_params__", None) or ():
+            if isinstance(tp, typing.TypeVar):
+                for attr in ("__bound__", "__constraints__"):
+                    with contextlib.suppress(Exception):
+                        getattr(tp, attr)
+        if isinstance(v, typing.TypeAliasType):
+            with contextlib.suppress(Exception):
+                v.__value__
+        if inspect.isfunction(v) and v.__code__.co_filename == "a":
+            with contextlib.suppress(Exception):
+                result = v()
+                if inspect.iscoroutine(result):
+                    with contextlib.suppress(BaseException):
+                        result.send(None)
+                    result.close()
+
+
+def _interpreter_reads(src, value=5, helpers=None):
+    """The names the interpreter reads past the module's own globals when it
+    executes `src` after the helpers and forces what it made (`_force`): the
+    module's LIMIT (= `value`) lives in a recording builtins mapping, so every
+    read of it is seen. A runtime error ends the execution; the reads before
+    it stand (a read that leads to an error is still a read)."""
     import builtins
-    rec = _ModuleReads(dict(vars(builtins), LIMIT=5))
+    rec = _ModuleReads(dict(vars(builtins), LIMIT=value))
     glb = {"__builtins__": rec}
-    exec(compile(_ORACLE_HELPERS, "a", "exec", dont_inherit=True), glb)
+    exec(compile(_ORACLE_HELPERS if helpers is None else helpers, "a", "exec",
+                 dont_inherit=True), glb)
     rec.seen.clear()
-    exec(compile("class C:\n" + body, "a", "exec", dont_inherit=True), glb)
-    return "LIMIT" in rec.seen
+    code = compile(src, "a", "exec", dont_inherit=True)
+    with contextlib.suppress(Exception):
+        exec(code, glb)
+    _force([v for k, v in glb.items() if k != "__builtins__"])
+    return set(rec.seen)
 
 
-def test_the_walk_charges_every_module_read_the_interpreter_makes(tmp_path):
+def test_the_walk_charges_every_module_read_the_interpreter_makes(tmp_path, capsys):
     """Combat fix pass 4, M-9, the ORACLE. A generated family of class
     bodies (every statement form the walk models exactly, every
     sub-expression carrying the name LIMIT, with and without an earlier and
@@ -3420,3 +3688,682 @@ def test_the_walk_charges_every_module_read_the_interpreter_makes(tmp_path):
     assert 0 < reads < len(family), reads
     assert _interpreter_reads_module_limit("    other = 0\n    n = LIMIT\n")
     assert not _interpreter_reads_module_limit("    LIMIT = 7\n    n = LIMIT\n")
+    with capsys.disabled():
+        print("\nPROOF SIZE f4_m9 oracle: %d class bodies executed, %d read the module's LIMIT, "
+              "%d missed by the walk" % (len(family), reads, len(missed)))
+
+
+# ── Combat fix pass 5, M-9: the default visit, proved complete ───────────
+
+_DOCKERFILE = Path(__file__).parents[1] / "api" / "Dockerfile"
+
+# The census of the pinned interpreter's node classes: (classes, (class,
+# field) pairs, SHA-1 of the sorted "Class.field:type" lines). An interpreter
+# that gains or loses a class or a field fails the completeness test until
+# its new rows are read and this pin is renewed.
+_CENSUS_PIN = (132, 188, "7dc7188805358ffd1214e6b21b21cae213b07582")
+_STRING_TYPES = ("identifier", "string", "constant")
+
+
+def _pinned_minor():
+    """(major, minor) of the interpreter the api image is built on."""
+    m = re.search(r"^FROM python:(\d+)\.(\d+)", _DOCKERFILE.read_text(encoding="utf-8"), re.M)
+    assert m, "the Dockerfile names no python base image"
+    return int(m.group(1)), int(m.group(2))
+
+
+def _node_census():
+    """{class name: ((field, ASDL type, quantifier), ...)} for EVERY node
+    class the running interpreter's `ast` module defines (an AST subclass;
+    one without fields maps to ()), fields in the class's own `_fields`
+    order, each type read from the class's ASDL line (its docstring)."""
+    out = {}
+    for name, cls in sorted(vars(ast).items()):
+        if not (isinstance(cls, type) and issubclass(cls, ast.AST)):
+            continue
+        if not cls._fields:
+            out[name] = ()
+            continue
+        sig = (cls.__doc__ or "").strip().split("\n")[0]
+        m = re.fullmatch(r"(\w+)\((.*)\)", sig)
+        assert m and m.group(1) == name, (name, sig)
+        typed = {}
+        for part in m.group(2).split(","):
+            asdl, field = part.split()
+            typed[field] = asdl
+        assert set(typed) == set(cls._fields), (name, cls._fields, typed)
+        out[name] = tuple((f, typed[f].rstrip("?*"), typed[f][-1] if typed[f][-1] in "?*" else "")
+                          for f in cls._fields)
+    return out
+
+
+def _classes_of(census, t):
+    """The parser's node classes a value of ASDL type `t` may be: the class
+    of that name when it has fields (a product type), else every class of
+    the parser's own module derived from the type's base class."""
+    import _ast
+    if census.get(t):
+        return [t]
+    base = getattr(ast, t, None)
+    if not (isinstance(base, type) and issubclass(base, ast.AST)):
+        return []
+    return sorted(n for n in census if n != t and n in vars(_ast)
+                  and issubclass(getattr(ast, n), base))
+
+
+def _carries(census, t, seen=frozenset()):
+    """Whether a value of ASDL type `t` can hold a name the walk must
+    charge: a string type can (its row decides), an int never; a node type
+    when one of its classes has a field outside _NOT_CHARGED of a type that
+    can."""
+    if t in _STRING_TYPES:
+        return True
+    if t == "int" or t in seen:
+        return False
+    return any((c, f) not in _NOT_CHARGED and _carries(census, ft, seen | {t})
+               for c in _classes_of(census, t) for f, ft, _q in census[c])
+
+
+def _neutral(census, t, q):
+    """A value of type `t` that holds no name the probe looks for: an empty
+    list, None for an optional, "n_", 0, a read context, or the first
+    field-less class of the type (an operator)."""
+    if q == "*":
+        return []
+    if q == "?":
+        return None
+    if t in _STRING_TYPES:
+        return "n_"
+    if t == "int":
+        return 0
+    if t == "expr_context":
+        return ast.Load()
+    leaves = [c for c in _classes_of(census, t) if not census[c]]
+    return getattr(ast, leaves[0])() if leaves else None
+
+
+def _probe(census, t, q, name, seen=frozenset()):
+    """A value of type `t` (quantifier `q`) holding `name` at a position the
+    walk must charge, built from the census alone: a string is the name; a
+    node is the first class of the type with a chargeable field, that field
+    probed in turn and every other field neutral."""
+    value = None
+    if t in _STRING_TYPES:
+        value = name
+    else:
+        for c in _classes_of(census, t):
+            f = next((f for f, ft, _q in census[c]
+                      if (c, f) not in _NOT_CHARGED and _carries(census, ft, seen | {t})), None)
+            if f is not None:
+                value = _probe_node(census, c, f, name, seen | {t})
+                break
+    if q == "*":
+        return [] if value is None else [value]
+    return value
+
+
+def _probe_node(census, c, f, name, seen=frozenset()):
+    """A node of class `c` whose field `f` holds `name` (`_probe`), every
+    other field neutral."""
+    node = getattr(ast, c)()
+    for g, gt, gq in census[c]:
+        setattr(node, g, _neutral(census, gt, gq))
+    ft, fq = next((gt, gq) for g, gt, gq in census[c] if g == f)
+    setattr(node, f, _probe(census, ft, fq, name, seen))
+    return node
+
+
+def test_f5_every_node_field_is_charged_by_the_default_visit_or_excluded(monkeypatch, capsys):
+    """Combat fix pass 5, M-9, the BOUND. Every node class the pinned
+    interpreter defines and every one of its fields is enumerated (the
+    census); the interpreter running this test is the minor the api image
+    pins, and the census is pinned, so a new class or field fails here. For
+    each (class, field):
+      * a field that can hold a name the walk must charge (a string, or a
+        node type that can carry one) and is no row of _NOT_CHARGED gets a
+        probe built from the census, and the walk CHARGES the probe;
+      * a row of _NOT_CHARGED sits on a string field (a node field is never
+        dropped: placement moves it, nothing removes it), has a role and a
+        one-line reason;
+      * every field of every class is READ by the walk (`_node_fields`,
+        recorded), including the fields that cannot hold a name.
+    A field nobody listed is charged by default, so the next unvisited
+    position cannot exist without this test going red."""
+    import _ast
+    census = _node_census()
+    pairs = [(c, f, t) for c, fields in census.items() for f, t, _q in fields]
+    digest = sha1("".join("%s.%s:%s\n" % p for p in sorted(pairs)).encode("ascii")).hexdigest()
+    assert sys.version_info[:2] == _pinned_minor(), (sys.version_info[:2], _pinned_minor())
+    assert (len(census), len(pairs), digest) == _CENSUS_PIN, (len(census), len(pairs), digest)
+    for c, f, t in pairs:
+        assert t in _STRING_TYPES or t == "int" or _classes_of(census, t), (c, f, t)
+    types = {(c, f): t for c, f, t in pairs}
+    for row, (role, reason) in _NOT_CHARGED.items():
+        assert types.get(row) in _STRING_TYPES, row
+        assert role in ("attr", "label", "import", "global", "nonlocal", "bind", "param",
+                        "literal"), row
+        assert reason and "\n" not in reason, row
+    for row, place in _FIELD_SCOPE.items():
+        assert row in types and row not in _NOT_CHARGED, row
+        assert place in ("inner", "annotation", "outer", "class_body", "generators", "iter",
+                         "home"), row
+    read = set()
+    real = _node_fields
+
+    def recording(n):
+        for field, value in real(n):
+            read.add((type(n).__name__, field))
+            yield field, value
+
+    monkeypatch.setitem(globals(), "_node_fields", recording)
+    charged, excluded, nameless, uncharged = [], [], [], []
+    for c, f, t in sorted(pairs):
+        if (c, f) in _NOT_CHARGED:
+            excluded.append((c, f))
+        elif not _carries(census, t):
+            nameless.append((c, f))
+        else:
+            probe = "PROBE_%s_%s" % (c, f)
+            if probe in _references(_probe_node(census, c, f, probe)):
+                charged.append((c, f))
+            else:
+                uncharged.append((c, f))
+    for c, fields in census.items():
+        if fields and c in vars(_ast):
+            _references(_probe_node(census, c, fields[0][0], "n_"))
+    unread = sorted({(c, f) for c, f, _t in pairs if c in vars(_ast)} - read)
+    assert uncharged == [], uncharged
+    assert unread == [], unread
+    assert len(charged) + len(excluded) + len(nameless) == len(pairs)
+    assert charged and nameless and len(excluded) == len(_NOT_CHARGED)
+    with capsys.disabled():
+        print("\nPROOF SIZE f5_m9 census: python %d.%d (the api image pins %d.%d), %d node classes, "
+              "%d (class, field) pairs: %d charged by the default visit, %d rows of the exclusion "
+              "table, %d that hold no name; %d read by the walk"
+              % (sys.version_info[0], sys.version_info[1], *_pinned_minor(), len(census),
+                 len(pairs), len(charged), len(excluded), len(nameless), len(read)))
+
+
+# Each excluded row's own control: a module whose function `f` holds the
+# row's field with the name the row must not charge, and whether the
+# interpreter can run it (f is then called and must read no module value of
+# that name). None: the parser fills the field only with type comments on.
+_NOT_CHARGED_CONTROLS = {
+    ("Attribute", "attr"): ("def f():\n    return ns.LIMIT\n", "LIMIT", True),
+    ("keyword", "arg"): ("def f():\n    return dict(LIMIT=0)\n", "LIMIT", True),
+    ("MatchClass", "kwd_attrs"): ("def f():\n    match ns:\n        case NS(LIMIT=0):\n"
+                                  "            return 1\n", "LIMIT", True),
+    ("alias", "name"): ("def f():\n    import LIMIT as other\n    return other\n", "LIMIT", False),
+    ("alias", "asname"): ("class f:\n    import os as LIMIT\n", "LIMIT", True),
+    ("ImportFrom", "module"): ("def f():\n    from LIMIT import thing as other\n    return other\n",
+                               "LIMIT", False),
+    ("Global", "names"): ("def f():\n    global LIMIT\n", "LIMIT", True),
+    ("Nonlocal", "names"): ("def f():\n    LIMIT = 0\n    def g():\n        nonlocal LIMIT\n"
+                            "        LIMIT = 1\n    return g\n", "LIMIT", True),
+    ("FunctionDef", "name"): ("def f():\n    def LIMIT():\n        pass\n", "LIMIT", True),
+    ("AsyncFunctionDef", "name"): ("def f():\n    async def LIMIT():\n        pass\n", "LIMIT",
+                                   True),
+    ("ClassDef", "name"): ("def f():\n    class LIMIT:\n        pass\n", "LIMIT", True),
+    ("ExceptHandler", "name"): ("def f():\n    try:\n        raise ValueError\n"
+                                "    except ValueError as LIMIT:\n        pass\n", "LIMIT", True),
+    ("MatchAs", "name"): ("def f():\n    match 0:\n        case LIMIT:\n            pass\n",
+                          "LIMIT", True),
+    ("MatchStar", "name"): ("def f():\n    match (0,):\n        case [*LIMIT]:\n            pass\n",
+                            "LIMIT", True),
+    ("MatchMapping", "rest"): ("def f():\n    match {}:\n        case {**LIMIT}:\n"
+                               "            pass\n", "LIMIT", True),
+    ("arg", "arg"): ("def f(LIMIT=0):\n    pass\n", "LIMIT", True),
+    ("TypeVar", "name"): ("def f[LIMIT]():\n    pass\n", "LIMIT", True),
+    ("ParamSpec", "name"): ("def f[**LIMIT]():\n    pass\n", "LIMIT", True),
+    ("TypeVarTuple", "name"): ("def f[*LIMIT]():\n    pass\n", "LIMIT", True),
+    ("Constant", "value"): ("def f():\n    return 'LIMIT'\n", "LIMIT", True),
+    ("Constant", "kind"): ("def f():\n    return u'x'\n", "u", True),
+    ("MatchSingleton", "value"): ("def f():\n    match 0:\n        case None:\n"
+                                  "            pass\n", "None", True),
+    ("Assign", "type_comment"): None,
+    ("For", "type_comment"): None,
+    ("AsyncFor", "type_comment"): None,
+    ("With", "type_comment"): None,
+    ("AsyncWith", "type_comment"): None,
+    ("FunctionDef", "type_comment"): None,
+    ("AsyncFunctionDef", "type_comment"): None,
+    ("arg", "type_comment"): None,
+    ("TypeIgnore", "tag"): None,
+}
+
+
+def test_f5_every_excluded_row_has_its_own_control():
+    """Combat fix pass 5, M-9: the exclusion table and its controls name the
+    same rows, so a row cannot be added without a test, and a control whose
+    row was removed fails in its own test below."""
+    assert set(_NOT_CHARGED_CONTROLS) == set(_NOT_CHARGED), \
+        sorted(set(_NOT_CHARGED) ^ set(_NOT_CHARGED_CONTROLS))
+
+
+@pytest.mark.parametrize("row", sorted(_NOT_CHARGED_CONTROLS), ids="%s_%s".__mod__)
+def test_f5_an_excluded_field_is_not_charged_and_its_control_agrees(row, tmp_path):
+    """Combat fix pass 5, M-9, one test per row of the exclusion table: the
+    row's field holding a probe string is not charged (were the row gone,
+    the default visit would charge it and this fails), and the row's source
+    control holds the name in that field: the walk does not charge it, and
+    where the interpreter can run the control, it reads no module value of
+    that name either (the row's reason is the interpreter's)."""
+    census = _node_census()
+    assert "PROBE_ROW" not in _references(_probe_node(census, row[0], row[1], "PROBE_ROW")), row
+    control = _NOT_CHARGED_CONTROLS[row]
+    if control is not None:
+        src, name, runs = control
+        assert name in src, row
+        index = _tmp_index(tmp_path, a=_ORACLE_HELPERS + src)
+        assert name not in index["a"]["f"][2], (row, sorted(index["a"]["f"][2]))
+        if runs:
+            assert name not in _interpreter_reads(src), row
+    assert row in _NOT_CHARGED, row
+
+
+# ── Combat fix pass 5, M-9: the oracle grows with the walk ───────────────
+
+class _LimitMeta(type):
+    """The metaclass of the module value the new oracle families read: a
+    class that is iterable (empty), subscriptable, truthy and a context
+    manager, so a read of it in most positions is followed by the rest of
+    the statement rather than by an error."""
+
+    def __iter__(cls):
+        return iter(())
+
+    def __getitem__(cls, key):
+        return cls
+
+    def __bool__(cls):
+        return True
+
+    def __enter__(cls):
+        return cls
+
+    def __exit__(cls, *exc):
+        return False
+
+
+class _LimitValue(metaclass=_LimitMeta):
+    """The module's LIMIT in the new families: a class (a base, a bound, a
+    class pattern), callable with anything (a decorator, a metaclass), with
+    the attributes the skeletons' dotted values name."""
+    x_ = 1
+    y_ = 0
+    __match_args__ = ("x_",)
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __init_subclass__(cls, **kwargs):
+        pass
+
+
+_ORACLE_HELPERS_5 = _ORACLE_HELPERS + "NS.x_ = 1\nNS.y_ = 0\nNS.__match_args__ = ('y_',)\n"
+
+# PEP-695 forms inside a class body, `{e}` in a bound, a constraint, a base,
+# a keyword, an annotation, a default, a body or a type alias's value; each
+# forced after the class is made (`_force`), with and without an earlier and
+# a later class binding, and with an earlier one deleted after the form (the
+# lazy bound then reads the module).
+_ORACLE_STMTS_695 = {
+    "class_bound": "class K[T: {e}]:\n        pass",
+    "class_constraints": "class K[T: ({e}, int)]:\n        pass",
+    "class_base": "class K[T]((object, {e})[0]):\n        pass",
+    "class_keyword": "class K[T](metaclass=(type, {e})[0]):\n        pass",
+    "class_name": "class LIMIT[T: {e}]:\n        pass",
+    "class_body": "class K[T]:\n        x = {e}",
+    "def_bound": "def g[T: {e}](a: T = None) -> T:\n        return a",
+    "def_constraints": "def g[T: ({e}, int)]():\n        pass",
+    "def_annotation": "def g[T](a: (T, {e})[0] = None) -> (T, {e})[0]:\n        return a",
+    "def_default": "def g[T](a={e}):\n        return a",
+    "def_name": "def LIMIT[T: {e}]():\n        pass",
+    "def_body": "def g[T]():\n        return {e}",
+    "asyncdef_bound": "async def g[T: {e}]():\n        pass",
+    "alias_value": "type A = {e}",
+    "alias_bound": "type A[T: {e}] = T",
+    "alias_constraints": "type A[T: ({e}, int)] = T",
+    "alias_name": "type LIMIT = {e}",
+    "alias_params": "type A[**P, *Ts] = {e}",
+}
+_VARIANTS_695 = (("", ""), ("    LIMIT = 7\n", ""), ("", "    LIMIT = 9\n"),
+                 ("    LIMIT = 7\n", "    LIMIT = 9\n"), ("    LIMIT = 7\n", "    del LIMIT\n"))
+
+# The same forms at module scope, each binding G; `{e}` as above. The
+# reviewer's case (round 5) is added verbatim.
+_ORACLE_MODULE_695 = {
+    "class_bound": "class G[T: {e}]:\n    pass\n",
+    "class_constraints": "class G[T: ({e}, int)]:\n    pass\n",
+    "class_base": "class G[T]((object, {e})[0]):\n    pass\n",
+    "class_keyword": "class G[T](metaclass=(type, {e})[0]):\n    pass\n",
+    "class_body": "class G[T]:\n    x = {e}\n",
+    "def_bound": "def G[T: {e}](a: T = None) -> T:\n    return a\n",
+    "def_constraints": "def G[T: ({e}, int)]():\n    pass\n",
+    "def_annotation": "def G[T](a: (T, {e})[0] = None) -> (T, {e})[0]:\n    return a\n",
+    "def_default": "def G[T](a={e}):\n    return a\n",
+    "def_body": "def G[T]():\n    return {e}\n",
+    "asyncdef_bound": "async def G[T: {e}]():\n    pass\n",
+    "alias_value": "type G = {e}\n",
+    "alias_bound": "type G[T: {e}] = T\n",
+    "alias_constraints": "type G[T: ({e}, int)] = T\n",
+    "alias_params": "type G[**P, *Ts] = {e}\n",
+}
+_ORACLE_REVIEWER_5 = "class Response[T: LIMIT]: pass\n"      # round 5, M-9, verbatim
+
+# The grammar family: for each class the brief names (definitions, class,
+# lambda, the comprehensions, the type alias, the match statement and its
+# patterns), a skeleton statement that fills every field the census gives
+# that class; `_slots` reads the expression positions from the census and
+# one body is made per position, the expression there replaced by LIMIT.
+_GRAMMAR_SKELETONS = {
+    ("ClassDef", "plain"): ("@(lambda c: c)\nclass K_[T_: int, *Ts_, **P_](NS, metaclass=type):\n"
+                            "    x_ = ns.x_\n", "K_"),
+    ("FunctionDef", "plain"): ("@(lambda f: f)\ndef K_[T_: int](a_: int = 0, /, b_: int = 0, "
+                               "*c_: int, d_: int = 0, **e_: int) -> int:\n    return ns.x_\n",
+                               "K_"),
+    ("AsyncFunctionDef", "plain"): ("@(lambda f: f)\nasync def K_[T_: int](a_: int = 0, /, "
+                                    "b_: int = 0, *c_: int, d_: int = 0, **e_: int) -> int:\n"
+                                    "    return ns.x_\n", "K_"),
+    ("Lambda", "plain"): ("K_ = (lambda a_=0, /, b_=0, *c_, d_=0, **e_: ns.x_)\n", "K_"),
+    ("ListComp", "plain"): ("K_ = [ns.x_ for ns.y_ in (0,) if ns.x_ for z_ in (0,) if ns.x_]\n",
+                            "K_"),
+    ("SetComp", "plain"): ("K_ = {ns.x_ for ns.y_ in (0,) if ns.x_ for z_ in (0,) if ns.x_}\n",
+                           "K_"),
+    ("GeneratorExp", "plain"): ("K_ = list(ns.x_ for ns.y_ in (0,) if ns.x_ for z_ in (0,) "
+                                "if ns.x_)\n", "K_"),
+    ("DictComp", "plain"): ("K_ = {ns.x_: ns.x_ for ns.y_ in (0,) if ns.x_ for z_ in (0,) "
+                            "if ns.x_}\n", "K_"),
+    ("TypeAlias", "plain"): ("type K_[T_: int, *Ts_, **P_] = ns.x_\n", "K_"),
+    ("Match", "sequence"): ("match [1, 2]:\n    case [ns.x_, *s_] if ns.x_:\n"
+                            "        K_ = ns.x_\n", "K_"),
+    ("Match", "mapping"): ("match {1: 1}:\n    case {ns.x_: ns.x_, **r_}:\n        K_ = ns.x_\n",
+                           "K_"),
+    ("Match", "class"): ("match ns:\n    case NS(ns.y_, x_=ns.x_):\n        K_ = ns.x_\n", "K_"),
+    ("Match", "or_as"): ("match 1:\n    case (ns.x_ | ns.x_) as v_ if ns.x_:\n        K_ = ns.x_\n",
+                         "K_"),
+}
+
+# A field the grammar admits no read in: the type alias's own name (a Name
+# it binds; the parser accepts nothing else there).
+_GRAMMAR_UNREADABLE = {("TypeAlias", "name")}
+
+
+def _slots(node, census, path=()):
+    """(path, parent, field, index) of every expression in a read position
+    inside `node` (an expression not stored into or deleted), found through
+    the census's fields; `path` is the (class, field) pairs from `node` down
+    to it."""
+    kind = type(node).__name__
+    for field, _t, _q in census.get(kind, ()):
+        value = getattr(node, field, None)
+        items = list(enumerate(value)) if isinstance(value, list) else [(None, value)]
+        for i, item in items:
+            if not isinstance(item, ast.AST):
+                continue
+            here = path + ((kind, field),)
+            if isinstance(item, ast.expr) \
+                    and not isinstance(getattr(item, "ctx", None), (ast.Store, ast.Del)):
+                yield here, node, field, i
+            yield from _slots(item, census, here)
+
+
+def _grammar_fields(census):
+    """Every (class, field) a read can sit in under the classes the
+    skeletons are named for: those classes and every class reachable from
+    them through a field of a type other than expr, stmt or a primitive
+    (parameters, keywords, type parameters, comprehensions, cases,
+    patterns), each field whose type can hold an expression."""
+    def holds(t, seen=frozenset()):
+        if t in ("expr", "stmt"):
+            return True
+        if t in _STRING_TYPES or t == "int" or t in seen:
+            return False
+        return any(holds(ft, seen | {t}) for c in _classes_of(census, t)
+                   for _f, ft, _q in census[c])
+    classes, todo = set(), sorted({k[0] for k in _GRAMMAR_SKELETONS})
+    while todo:
+        c = todo.pop()
+        if c in classes:
+            continue
+        classes.add(c)
+        for _f, ft, _q in census[c]:
+            if ft not in ("expr", "stmt", "int") and ft not in _STRING_TYPES:
+                todo.extend(_classes_of(census, ft))
+    return {(c, f) for c in classes for f, ft, _q in census[c] if holds(ft)}
+
+
+def _grammar_family(census):
+    """[(label, path, statement, bound name)]: per skeleton, one statement
+    per read position (`_slots` of the skeleton's node of its class), the
+    expression there replaced by LIMIT (by `LIMIT.x_` where a pattern needs
+    a value pattern: a bare name there would be a capture, or refused)."""
+    out = []
+    for (target, variant), (src, bound) in _GRAMMAR_SKELETONS.items():
+        count = None
+        k = 0
+        while count is None or k < count:
+            tree = ast.parse(src)
+            node = next(n for n in ast.walk(tree) if type(n).__name__ == target)
+            slots = list(_slots(node, census))
+            count = len(slots)
+            if not slots:
+                break
+            path, parent, field, i = slots[k]
+            new = ast.Name(id="LIMIT", ctx=ast.Load())
+            if isinstance(parent, (ast.MatchValue, ast.MatchMapping)):
+                new = ast.Attribute(value=new, attr="x_", ctx=ast.Load())
+            if i is None:
+                setattr(parent, field, new)
+            else:
+                getattr(parent, field)[i] = new
+            out.append(((target, variant, k), path, ast.unparse(ast.fix_missing_locations(tree))
+                        + "\n", bound))
+            k += 1
+    return out
+
+
+def _indent(stmt):
+    return "".join("    " + line + "\n" for line in stmt.rstrip("\n").split("\n"))
+
+
+def _compiles(src):
+    try:
+        compile(src, "a", "exec", dont_inherit=True)
+    except SyntaxError:
+        return False
+    return True
+
+
+def test_f5_the_walk_charges_every_module_read_of_generics_and_the_grammar(tmp_path, capsys):
+    """Combat fix pass 5, M-9, the ORACLE grown with the walk. Three
+    families, each executed by the interpreter (the module's LIMIT behind
+    the recording builtins mapping) and FORCED afterwards (`_force`: every
+    lazy bound, constraint and alias value evaluated, every function the
+    body made called), the walk's charge compared with the reads:
+      * PEP-695 forms in a class body (`_ORACLE_STMTS_695` times every
+        sub-expression, five class-binding variants, one deleting the class
+        binding after the form so a forced bound reads the module);
+      * the same forms at module scope, each binding G, and the reviewer's
+        round 5 body verbatim (`class Response[T: LIMIT]: pass`);
+      * the GRAMMAR family: a body per expression position of each skeleton
+        (`_slots`, read from the census), in a class body (four variants)
+        and at module scope; every field the census gives the named classes
+        and the classes under them (`_grammar_fields`) lies on the path of
+        a body whose execution READ the module's LIMIT, so the family is
+        derived from the grammar: a field it does not reach fails here.
+    In every body the interpreter compiles, the walk charges a SUPERSET of
+    what the interpreter read. A body the interpreter refuses to compile is
+    counted, never silently dropped."""
+    census = _node_census()
+    missed, refused, reads, executed = [], [], 0, 0
+    # 1. PEP-695 forms in a class body.
+    bodies = []
+    for sname, stmt in _ORACLE_STMTS_695.items():
+        for xname, e in _ORACLE_SUBS.items():
+            for vi, (pre, post) in enumerate(_VARIANTS_695):
+                body = pre + "    " + stmt.replace("{e}", e) + "\n    n = LIMIT\n" + post
+                if _compiles("class C:\n" + body):
+                    bodies.append((("695", sname, xname, vi), body))
+                else:
+                    refused.append(("695", sname, xname, vi))
+    # 3a. The grammar family in a class body.
+    grammar = _grammar_family(census)
+    grammar_read = set()
+    for label, path, stmt, _bound in grammar:
+        for vi, (pre, post) in enumerate(_VARIANTS_695[:4]):
+            body = pre + _indent(stmt) + "    n = LIMIT\n" + post
+            if _compiles("class C:\n" + body):
+                bodies.append((("grammar",) + label + (vi,), body, path))
+            else:
+                refused.append(("grammar",) + label + (vi,))
+    src = "LIMIT = 5\n" + _ORACLE_HELPERS_5 + "".join(
+        "class C%d:\n%s" % (k, item[1]) for k, item in enumerate(bodies))
+    index = _tmp_index(tmp_path, a=src)
+    for k, item in enumerate(bodies):
+        label, body = item[0], item[1]
+        read = "LIMIT" in _interpreter_reads("class C:\n" + body, _LimitValue, _ORACLE_HELPERS_5)
+        executed += 1
+        reads += read
+        if read and len(item) > 2:
+            grammar_read.update(item[2])
+        if read and "LIMIT" not in index["a"]["C%d" % k][2]:
+            missed.append(label)
+    # 2 and 3b. Module scope: each body its own module, its binding checked.
+    modules = [(("module", s, x), stmt.replace("{e}", e), "G", None)
+               for s, stmt in _ORACLE_MODULE_695.items() for x, e in _ORACLE_SUBS.items()]
+    modules.append((("module", "reviewer"), _ORACLE_REVIEWER_5, "Response", None))
+    modules += [(("grammar-module",) + label, stmt, bound, path)
+                for label, path, stmt, bound in grammar]
+    reviewer_read = None
+    for k, (label, body, bound, path) in enumerate(modules):
+        if not _compiles(body):
+            refused.append(label)
+            continue
+        read = "LIMIT" in _interpreter_reads(body, _LimitValue, _ORACLE_HELPERS_5)
+        executed += 1
+        reads += read
+        if path is not None and read:
+            grammar_read.update(path)
+        if label == ("module", "reviewer"):
+            reviewer_read = read
+        stem = "m%d" % k
+        table = _tmp_index(tmp_path, **{stem: "LIMIT = 5\n" + _ORACLE_HELPERS_5 + body})[stem]
+        if read and (bound not in table or "LIMIT" not in table[bound][2]):
+            missed.append(label)
+    fields = _grammar_fields(census)
+    unexercised = sorted(fields - _GRAMMAR_UNREADABLE - grammar_read)
+    assert reviewer_read, "the reviewer's body reads the module's LIMIT once its bound is forced"
+    assert missed == [], missed[:20]
+    assert unexercised == [], unexercised
+    assert 0 < reads < executed, (reads, executed)
+    with capsys.disabled():
+        print("\nPROOF SIZE f5_m9 oracle: %d bodies executed and forced (%d PEP-695 class-body, "
+              "%d module-scope, %d grammar positions over %d skeletons, each in a class body "
+              "and at module scope), %d read the module's LIMIT, %d refused by the compiler, "
+              "%d missed by the walk; %d grammar fields, every one read in some body"
+              % (executed, sum(1 for b in bodies if b[0][0] == "695"),
+                 len(modules) - len(grammar), len(grammar), len(_GRAMMAR_SKELETONS), reads,
+                 len(refused), len(missed), len(fields)))
+
+
+# The response-model controls for the type-parameter bound (fix pass 5,
+# d): a module edit under a bound moves the fingerprint of every binding
+# whose bound may read it.
+_GENERIC_SRC = (
+    "from pydantic import BaseModel\n"
+    "LIMIT = int\n"
+    "class Response[T: LIMIT]: pass\n"
+    "class Model(BaseModel):\n"
+    "    class Inner[T: LIMIT]:\n"
+    "        pass\n"
+    "def handler[T: LIMIT](x: T) -> T:\n"
+    "    return x\n"
+    "type Alias[T: LIMIT] = list[T]\n"
+    "type Plain = LIMIT\n"
+    "class Late(BaseModel):\n"
+    "    class Inner[T: LIMIT]:\n"
+    "        pass\n"
+    "    LIMIT = str\n"
+    "class Deleted(BaseModel):\n"
+    "    LIMIT = str\n"
+    "    class Inner[T: LIMIT]:\n"
+    "        pass\n"
+    "    del LIMIT\n"
+    "def outer():\n"
+    "    LIMIT = str\n"
+    "    def inner[T: LIMIT]():\n"
+    "        pass\n"
+    "    return inner\n")
+
+
+def test_f5_a_module_edit_under_a_type_parameter_bound_moves_the_fingerprint(tmp_path):
+    """Combat fix pass 5, M-9 (d). The reviewer's generic response model,
+    a generic class inside a model, a generic handler, two type aliases: an
+    edit to the module's LIMIT moves each one's closure text. `Late` binds
+    LIMIT after its generic, so its lazily evaluated bound reads the class's
+    value: the walk charges the module there too, deliberately (a read
+    through an annotation scope is never certain). `Deleted` deletes its
+    binding, so the bound reads the module. Inside a function the bound
+    reads the function's own LIMIT and the module is not charged. The same
+    source run by the interpreter, before and after the edit, agrees."""
+    index = _tmp_index(tmp_path, a=_GENERIC_SRC)
+    moved = _with_segment(index, "a", "LIMIT", "LIMIT = float\n")
+    for name in ("Response", "Model", "handler", "Alias", "Plain", "Late", "Deleted"):
+        reached = set(_walk_bindings([("a", name)], index=index))
+        assert ("a", "LIMIT") in reached, (name, sorted(reached))
+        after = _closure_text(moved, set(_walk_bindings([("a", name)], index=moved)))
+        assert after != _closure_text(index, reached), name
+    assert "LIMIT" not in index["a"]["outer"][2], sorted(index["a"]["outer"][2])
+
+    def run(src):
+        ns = {}
+        exec(compile(src.replace("from pydantic import BaseModel\n", "BaseModel = object\n"),
+                     "a", "exec", dont_inherit=True), ns)
+        return ns
+    for value, src in ((int, _GENERIC_SRC),
+                       (float, _GENERIC_SRC.replace("LIMIT = int\n", "LIMIT = float\n", 1))):
+        ns = run(src)
+        assert ns["Response"].__type_params__[0].__bound__ is value
+        assert ns["Model"].Inner.__type_params__[0].__bound__ is value
+        assert ns["handler"].__type_params__[0].__bound__ is value
+        assert ns["Alias"].__type_params__[0].__bound__ is value
+        assert ns["Plain"].__value__ is value
+        assert ns["Late"].Inner.__type_params__[0].__bound__ is str
+        assert ns["Deleted"].Inner.__type_params__[0].__bound__ is value
+        assert ns["outer"]().__type_params__[0].__bound__ is str
+
+
+def test_f5_a_module_level_statement_of_any_type_binds_what_it_binds(tmp_path):
+    """Combat fix pass 5, M-9: the module index's default. A `type` alias,
+    an augmented assignment, a loop target, a `with` target, a walrus, a
+    match capture and a store into an object's item are bindings carrying
+    their whole statement, so an edit to any of them moves the routes that
+    read the name; a call that binds nothing is no binding."""
+    index = _tmp_index(tmp_path, a=(
+        "LIMIT = 5\n"
+        "TABLE = {}\n"
+        "type Alias = LIMIT\n"
+        "LIMIT += 1\n"
+        "for LOOPED in (LIMIT,):\n"
+        "    pass\n"
+        "with open(__file__) as HANDLE:\n"
+        "    pass\n"
+        "(WALRUS := LIMIT)\n"
+        "match LIMIT:\n"
+        "    case CAPTURED:\n"
+        "        pass\n"
+        "TABLE['k'] += LIMIT\n"
+        "print(LIMIT)\n"
+        "def route():\n"
+        "    return Alias, LIMIT, LOOPED, HANDLE, WALRUS, CAPTURED, TABLE\n"))
+    table = index["a"]
+    for name in ("Alias", "LOOPED", "HANDLE", "WALRUS", "CAPTURED"):
+        assert table[name][0] == "data" and "LIMIT" in table[name][2] or name == "HANDLE", name
+    assert "LIMIT += 1" in table["LIMIT"][1] and "TABLE['k'] += LIMIT" in table["TABLE"][1]
+    assert "print" not in table
+    reached = set(_walk_bindings([("a", "route")], index=index))
+    for name in ("Alias", "LIMIT", "LOOPED", "HANDLE", "WALRUS", "CAPTURED", "TABLE"):
+        assert ("a", name) in reached, (name, sorted(reached))
+    moved = _with_segment(index, "a", "Alias", "type Alias = str\n")
+    assert _closure_text(moved, reached) != _closure_text(index, reached)
