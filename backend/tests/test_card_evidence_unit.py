@@ -1204,3 +1204,45 @@ def test_m2_a_card_window_is_a_whole_number_of_days_up_to_the_derived_retention(
         doc = k.card_doc()
         doc["measure_params"][cm.WINDOW] = {cm.WINDOW_KEY: good}
         k.build_card_revision(tmp_path, doc=doc, name="good%d" % i)
+
+
+# == fix pass 3 =========================================================================
+
+# -- M1: the read-set analysis fails closed on every shape it does not model -------------
+#
+# Source edits of card_measures.py, one per shape the round named. Each moves
+# a read into a measure that READS lacks; the analysis must either see the
+# read (the fact appears in that measure's READ) or refuse the edited module
+# (Unsupported, naming the shape). Reading nothing more is the defect.
+FIX3_EDITS = [
+    # nested integer indexing: an hd entry taken by position, then its slot list
+    ("nested_index", '"b4.hand.phase": f["o"]', '"b4.hand.phase": rec["hd"][0][6]',
+     "b4.hand.phase", "sl", None),
+    # a dynamic .get on the record
+    ("dynamic_get", '"b4.rec.index": rf.i', '"b4.rec.index": rec.get(rf.seat)',
+     "b4.rec.index", "hd", "dynamic key into the record"),
+    # a measure row read with a key the analysis cannot resolve
+    ("dynamic_measure_row", 'h["b4.hand.notrun"]', 'h[HAND_RULES[rf.i]]',
+     "b4.rec.notrun_hands", "held0", "measure row"),
+    # a module helper taking the whole record
+    ("opaque_helper", '"b4.rec.conflict": int(rf.conflict)', '"b4.rec.conflict": len(json.dumps(rec))',
+     "b4.rec.conflict", "hd", "whole read"),
+    # a method the analysis has no rule for, on the omission counts
+    ("opaque_method", '"b4.rec.cut": int(rf.cut)', '"b4.rec.cut": rf.omit.__getitem__("hd")',
+     "b4.rec.cut", "hd", "method __getitem__"),
+]
+
+
+@pytest.mark.parametrize("case", FIX3_EDITS, ids=[e[0] for e in FIX3_EDITS])
+def test_m1_fix3_an_unmodelled_shape_is_seen_or_refused_never_read_as_nothing(case):
+    _id, old, new, name, fact, refusal = case
+    src = _read(API, "card_measures.py")
+    assert src.count(old) == 1, old
+    assert fact not in READS[name]                          # control: the edit adds a read
+    edited = src.replace(old, new)
+    if refusal is None:
+        got = _reads_of(edited)
+        assert fact in got[name], (name, fact, sorted(got[name]))
+    else:
+        with pytest.raises(crs.Unsupported, match=refusal):
+            _reads_of(edited)
