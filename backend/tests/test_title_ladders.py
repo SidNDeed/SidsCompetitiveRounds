@@ -2240,15 +2240,22 @@ def test_342_puts_exactly_the_eight_entry_rungs_on_sale():
         try:
             await _fresh(conn)
             ready = await _ready_entry_skus(conn)
-            entry = sorted(tl.ENTRY_SKUS)
+            # The entry rungs of the catalogue 331 wrote, read from the
+            # table: tl.ENTRY_SKUS describes main's five-tier catalogue (365,
+            # 32 entry rungs), which this fixture does not apply.
+            entry = [r["sku"] for r in await conn.fetch(
+                "SELECT sku FROM title_ladders WHERE tier = 1 ORDER BY sku")]
             # Compared by SKU, not by count: "8 rows are ready" is also true
             # of any other 8.
             assert ready == entry
             assert len(entry) == 8
             # One line each -- a WHERE that widened or narrowed shows up here
             # as a line with two entry rungs, or with none.
-            assert sorted(tl.SKU_TO_RUNG[s]["line"] for s in ready) == \
-                sorted(ld["line"] for ld in tl.LADDERS)
+            ready_lines = sorted(r["line"] for r in await conn.fetch(
+                "SELECT line FROM title_ladders WHERE sku = ANY($1::text[])", ready))
+            all_lines = sorted(r["line"] for r in await conn.fetch(
+                "SELECT DISTINCT line FROM title_ladders"))
+            assert ready_lines == all_lines
             # The other 40 stay granted-only, which is the pool and the price.
             leaked = await conn.fetchval(
                 "SELECT COUNT(*) FROM title_ladders tl JOIN shop_items si ON si.sku = tl.sku "
