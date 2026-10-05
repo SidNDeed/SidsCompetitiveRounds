@@ -7,6 +7,11 @@ ApiClient.cs	ApiClient	ParseFfaRecentList	players	N	JSON record field, no body
 ApiClient.cs	ApiClient	SpectateValidateActors	ActiveFighters	V	the attest roster's fighter ids read ActiveFighters(), the kept view; the send is the master-only validation (MasterMaySend, row 48)	
 ApiClient.cs	ApiClient	SpectateValidateActors	GetPlayer	F	resolves the invalid spectator the master closes; the master-only validation send is fenced (row 48), and the close in its answer reads MasterMaySend() (V9, N5)	
 ApiClient.cs	ApiClient	SpectateValidateActors	MasterMaySend	F	master-only spectator validation send; reads MasterMaySend()	
+CardDrawEvidence.cs	CardDrawEvidence	C5	GetPlayerWithActorID	R	the card-draw evidence record: a raw fact of the pick phase written into the record the server judges; it decides no count, send gate, damage, pick or result (each target actor's role, read at the card's own event)	
+CardDrawEvidence.cs	CardDrawEvidence	FirstPhase	players	R	the card-draw evidence record: a raw fact of the pick phase written into the record the server judges; it decides no count, send gate, damage, pick or result (every body at the first pick phase, recorded as seen)	
+CardDrawEvidence.cs	CardDrawEvidence	GateRoom	ActiveFighterCount	V	the record is kept only for a two-fighter room, counted by ActiveFighterCount(), the kept view	
+CardDrawEvidence.cs	CardDrawEvidence	PlayerById	GetPlayerWithID	R	the card-draw evidence record: a raw fact of the pick phase written into the record the server judges; it decides no count, send gate, damage, pick or result (the picking player's id resolved for its role)	
+CardDrawEvidence.cs	CardDrawEvidence	Rounds	players	R	the card-draw evidence record: a raw fact of the pick phase written into the record the server judges; it decides no count, send gate, damage, pick or result (each body's rounds won, recorded as seen)	
 CompetitiveUI.cs	CompetitiveUI	DrawDanceWheel	players	N	UI	
 CompetitiveUI.cs	CompetitiveUI	FfaMatchPointName	players	N	HUD label	
 CompetitiveUI.cs	CompetitiveUI	MutedPlayersLine	PlayerList	N	chat UI	
@@ -284,6 +289,14 @@ RoomActors.cs	RoomActors	PresentNonSpectators	PresentNonSpectators	R	the present
 RoomActors.cs	RoomActors	PresentNonSpectators	RoomPlayers	R	the present-actor accessor walks the room's actors raw by design	
 RoomActors.cs	RoomActors	RawActorCensus	RoomPlayers	R	RJ-2: the raw actor census, no roster and no latch test by design; RosterCensusRules decides the union and the releases from it	
 RoomActors.cs	RoomActors	Spectators	PlayerList	N	spectator list	
+SeatEvidence.cs	SeatEvidence	BeginGame	IsMasterClient	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (whether this seat was master at the game's start)	
+SeatEvidence.cs	SeatEvidence	DamageArrived	Sender	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (a damage envelope is noted only from the opponent's actor, EventData.Sender)	
+SeatEvidence.cs	SeatEvidence	EnterRpc	Sender	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (the RPC envelope's sender actor, kept for the frame and compared with the opponent)	
+SeatEvidence.cs	SeatEvidence	HitEnter	Sender	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (a received hit is noted only from the opponent's actor)	
+SeatEvidence.cs	SeatEvidence	ResolveOpponent	OtherActiveFighters	V	the opponent the record is about is the one other fighter of OtherActiveFighters(), the kept view	
+SeatEvidence.cs	SeatEvidence	SampleOpponent	GetPlayer	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (the opponent's Photon player, for its round-trip sample)	
+SeatEvidence.cs	SeatEvidence	ShotArrived	GetPlayerWithActorID	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (the shooting body of the opponent's actor)	
+SeatEvidence.cs	SeatEvidence	ShotArrived	Sender	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (a shot is noted only from the opponent's actor)	
 SessionReportModel.cs	SessionReportModel	BlockHeader	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
 SessionReportModel.cs	SessionReportModel	Build	RoomPlayers	N	the session report model's own player list (SessionReportModel.cs:98, 461), not the room's	
 SessionReportModel.cs	SessionReportModel	BuildTotalsPages	RoomPlayers	N	the session report's own parsed player list (SessionReportRules.cs Envelope.Players / Derived.Players), not the room's	
