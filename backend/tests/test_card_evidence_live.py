@@ -1259,8 +1259,8 @@ def test_m2_a_raising_evaluator_is_recorded_and_the_queue_advances_then_heals(li
         out["heal_count"] = ce.parked()
         return keys, out
     (ka, kb), out = live.run(go())
-    a1, b1 = out["after1"][ka], out["after1"].get(kb)
-    first = ka if a1["n"] == 1 else kb
+    a1 = out["after1"].get(ka)
+    first = ka if a1 is not None and a1["n"] == 1 else kb
     second = kb if first == ka else ka
     assert out["after1"][first]["n"] == 1 and (out["after1"].get(second) is None
                                                 or out["after1"][second]["n"] == 0)
