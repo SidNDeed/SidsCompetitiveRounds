@@ -26,6 +26,7 @@ sys.path.insert(0, HERE)
 
 import card_evidence as ce  # noqa: E402
 import card_measures as cm  # noqa: E402
+import card_read_dynamic as crd  # noqa: E402
 import card_read_sets as crs  # noqa: E402
 import card_revision_kit as k  # noqa: E402
 import review_rules as rr  # noqa: E402
@@ -1246,3 +1247,329 @@ def test_m1_fix3_an_unmodelled_shape_is_seen_or_refused_never_read_as_nothing(ca
     else:
         with pytest.raises(crs.Unsupported, match=refusal):
             _reads_of(edited)
+
+
+# -- M1 (a): every ast expression and statement class is modelled or refused ---------------
+
+_PHASE = '"b4.hand.phase": f["o"]'
+_AFTER = "    weights = rf.weights\n"
+
+# The modelled expression classes, each with a positive case: the value of
+# b4.hand.phase in _hand_row replaced by the snippet, and what it must read.
+EXPR_CASES = {
+    "Constant": ("0", set()),
+    "Name": ("sl", {"sl"}),
+    "Tuple": ("(sl, 0)", {"sl"}),
+    "List": ("[sl]", {"sl"}),
+    "Set": ("{len(sl)}", {"sl"}),
+    "Starred": ("[*sl]", {"sl"}),
+    "Dict": ('{"o": sl}["o"]', {"sl"}),
+    "BinOp": ('0 + len(rec["ap"])', {"ap"}),
+    "UnaryOp": ('-len(rec["ap"])', {"ap"}),
+    "BoolOp": ("sl or 0", {"sl"}),
+    "Compare": ('len(rec["ap"]) > 0', {"ap"}),
+    "IfExp": ('0 if rec["ap"] else 1', {"ap"}),
+    "Call": ('len(rec["ap"])', {"ap"}),
+    "Attribute": ("rf.first_lost", {"first"}),
+    "Subscript": ('rec["hd"][0][6]', {"hd", "sl"}),
+    "Slice": ('rec["ap"][1:]', {"ap"}),                     # modelled inside the Subscript rule
+    "ListComp": ("[x for x in sl]", {"sl"}),
+    "SetComp": ("{x for x in sl}", {"sl"}),
+    "GeneratorExp": ("sum(x for x in sl)", {"sl"}),
+    "DictComp": ('len({x: 0 for x in rec["ap"]})', {"ap"}),
+    "JoinedStr": ("f\"{len(rec['ap'])}\"", {"ap"}),
+    "FormattedValue": ("f\"{len(rec['ap'])}\"", {"ap"}),
+}
+# The modelled statement classes: statements put before the row (the value
+# is `probe`), and what b4.hand.phase must then read.
+STMT_CASES = {
+    "Assign": ('    probe = len(rec["ap"])\n', {"ap"}),
+    "AugAssign": ('    probe = 0\n    probe += len(rec["ap"])\n', {"ap"}),
+    "Expr": ('    probe = []\n    probe.append(len(rec["ap"]))\n', {"ap"}),
+    "If": ('    probe = 0\n    if rec["ap"]:\n        probe = 1\n', {"ap"}),
+    "For": ('    probe = 0\n    for x in rec["ap"]:\n        probe += 1\n', {"ap"}),
+    # the continue's own test reaches the count (without the rule: ap only)
+    "Continue": ('    probe = 0\n    for x in rec["ap"]:\n        if f["sl"]:\n            continue\n'
+                 '        probe += 1\n', {"ap", "sl"}),
+    "Pass": ('    probe = len(rec["ap"])\n    pass\n', {"ap"}),
+    # the raise's test is in force where the row is built, and the row is
+    # returned, so the test is kept on it
+    "Raise": ('    probe = 0\n    if not f["sl"]:\n        raise probe\n    probe = len(rec["ap"])\n',
+              {"ap", "sl"}),
+    "Return": (None, {"ap"}),                                 # a helper returning the read
+}
+
+
+def _ast_classes():
+    """Every expression and statement class the ast module defines, aliases
+    mapped to the class they build."""
+    import ast
+    import warnings
+    out = {}
+    for name, cls in vars(ast).items():
+        if not (isinstance(cls, type) and issubclass(cls, (ast.expr, ast.stmt))) or cls in (ast.expr, ast.stmt):
+            continue
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            try:
+                built = type(cls())
+            except TypeError:
+                built = cls
+        out[name] = built
+    return out
+
+
+def _with_phase(value, before=""):
+    src = _read(API, "card_measures.py")
+    assert src.count(_PHASE) == 1 and src.count(_AFTER) == 1
+    return src.replace(_AFTER, _AFTER + before).replace(_PHASE, '"b4.hand.phase": ' + value)
+
+
+def _refused_node(cls):
+    """An instance of `cls` whose every field holds the record, put where
+    the analysis meets it: an expression evaluated in _hand_row where the
+    record is bound, a statement in a function body."""
+    import ast
+    node = cls(**{f: ast.Name(id="rec", ctx=ast.Load()) for f in cls._fields})
+    node.lineno = node.end_lineno = 1
+    node.col_offset = node.end_col_offset = 0
+    if issubclass(cls, ast.expr):
+        fn = _RS._fn("_hand_row")
+        site = next(i for i, st in enumerate(fn.stmts) if ast.unparse(st["node"]) == "weights = rf.weights")
+        with pytest.raises(crs.Unsupported, match="no rule for the expression " + cls.__name__):
+            _RS.ev(node, fn, site, ())
+    else:
+        fdef = ast.parse("def probe(rec):\n    pass\n").body[0]
+        fdef.body = [node]
+        with pytest.raises(crs.Unsupported, match="no rule for the statement " + cls.__name__):
+            crs.Fn("probe", fdef)
+
+
+def test_m1_fix3_every_ast_node_class_is_modelled_with_a_positive_case_or_refused():
+    import ast
+    classes = _ast_classes()
+    exprs = {n for n, c in classes.items() if c is classes[n] and issubclass(c, ast.expr)}
+    stmts = {n for n, c in classes.items() if c is classes[n] and issubclass(c, ast.stmt)}
+    modelled_e = {c.__name__ for c in crs.Analysis.EXPRS} | {"Slice"}
+    modelled_s = {c.__name__ for c in crs.STMTS}
+    # the allowlist is exactly the classes with a positive case
+    assert modelled_e == set(EXPR_CASES) and modelled_s == set(STMT_CASES)
+    assert modelled_e <= exprs and modelled_s <= stmts
+    positive = refused = aliases = 0
+    for name, (snippet, want) in EXPR_CASES.items():
+        got = _reads_of(_with_phase(snippet))["b4.hand.phase"]
+        assert set(got) == want, (name, snippet, sorted(got))
+        positive += 1
+    for name, (body, want) in STMT_CASES.items():
+        if body is None:
+            src = _with_phase('_probe(rec["ap"])') + "\n\ndef _probe(x):\n    return len(x)\n"
+        else:
+            src = _with_phase("probe", body)
+        got = _reads_of(src)["b4.hand.phase"]
+        assert set(got) == want, (name, sorted(got))
+        positive += 1
+    for name, cls in sorted(classes.items()):
+        if cls is not getattr(ast, name):
+            aliases += 1                             # builds another class, counted there
+            continue
+        if name in modelled_e | modelled_s and name != "Slice":
+            continue
+        _refused_node(cls)
+        refused += 1
+    print("node classes: %d enumerated (%d expression, %d statement, %d aliases); modelled %d with "
+          "a positive case; refused %d" % (len(classes), len(exprs), len(stmts), aliases, positive, refused))
+    assert positive + refused + aliases == len(classes) + 1      # Slice: modelled in Subscript, refused bare
+    assert refused > 0
+
+
+# -- M1 (a): the modelled callables, each with its read semantics; anything else refused -----
+
+def _callable_cases():
+    pos = {}
+    for n in crs.TRUTH_BUILTINS:
+        pos[n] = '%s(rec["ap"], list)' % n if n == "isinstance" else '%s(rec["ap"])' % n
+    for n in crs.CONTENT_BUILTINS | crs.PICK_BUILTINS | crs.KEEP_BUILTINS | crs.PAIR_BUILTINS:
+        pos[n] = '%s(rec["ap"])' % n
+    pos[crs.DICT_BUILTIN] = 'dict(rec["ap"])'
+    for mod, fn in crs.MODULE_CALLS:
+        pos["%s.%s" % (mod, fn)] = '%s.%s(rec["ap"])' % (mod, fn)
+    pos[".encode"] = 'str(len(rec["ap"])).encode()'
+    pos[".hexdigest"] = 'hashlib.sha256(rec["ap"]).hexdigest()'
+    assert {m[1:] for m in pos if m.startswith(".")} == crs.SCALAR_METHODS
+    return pos
+
+
+def test_m1_fix3_each_modelled_callable_reads_what_its_semantics_say():
+    cases = _callable_cases()
+    for name, snippet in sorted(cases.items()):
+        got = _reads_of(_with_phase(snippet))["b4.hand.phase"]
+        assert set(got) == {"ap"}, (name, sorted(got))
+    print("modelled callables: %d, each reading the list it was given" % len(cases))
+
+
+def test_m1_fix3_a_record_or_record_list_given_to_any_other_callable_is_refused():
+    import builtins
+    import hashlib
+    import json
+    import math
+    modelled = crs.BUILTIN_VALUES | {"Refusal"}
+    names = sorted(n for n in dir(builtins) if not n.startswith("_") and callable(getattr(builtins, n))
+                   and n not in modelled and not hasattr(cm, n))
+    refused = 0
+    for n in names:
+        for arg in ("rec", 'rec["ap"]'):
+            with pytest.raises(crs.Unsupported):
+                _reads_of(_with_phase("%s(%s)" % (n, arg)))
+            refused += 1
+    for mod in (math, hashlib, json):
+        for fn in sorted(a for a in dir(mod) if not a.startswith("_") and callable(getattr(mod, a))):
+            if (mod.__name__, fn) in crs.MODULE_CALLS:
+                continue
+            with pytest.raises(crs.Unsupported, match="module call"):
+                _reads_of(_with_phase('%s.%s(rec["ap"])' % (mod.__name__, fn)))
+            refused += 1
+    methods = set()
+    for t in (dict, list, str, int, set, tuple):
+        methods |= {a for a in dir(t) if not a.startswith("_")}
+    methods -= crs.MUTATORS | crs.KEEP_METHODS | crs.SCALAR_METHODS | {"get"}
+    methods -= set(_RS.methods)
+    for m in sorted(methods | {"__getitem__", "__len__", "__iter__"}):
+        for recv in ("rec", "rf.omit", 'rec["ap"]'):
+            with pytest.raises(crs.Unsupported):
+                _reads_of(_with_phase("%s.%s()" % (recv, m)))
+            refused += 1
+    # the modelled dict methods on the record itself: a whole read is refused
+    for m in ("items", "values", "append", "update"):
+        with pytest.raises(crs.Unsupported):
+            _reads_of(_with_phase("rec.%s(0)" % m if m in ("append", "update") else "rec.%s()" % m))
+        refused += 1
+    print("callables refused on record data: %d cases" % refused)
+    assert refused > len(names)
+
+
+# -- M1 (c): a measure-row key the analysis cannot resolve is refused when written --------
+
+_ROW_END = '"b4.hand.deal": f["k"], "b4.hand.n": n, "b4.hand.n_exp": rec["ns"]}\n'
+WRITE_EDITS = [
+    ("store_under_a_computed_key", _ROW_END, _ROW_END + "    row[HAND_RULES[rf.i]] = 0\n",
+     "unresolved key into a measure row"),
+    ("literal_with_a_computed_key", '"b4.hand.n": n,', '"b4.hand.n": n, HAND_RULES[rf.i]: 0,',
+     "unresolved key in a measure row literal"),
+    ("merge_of_a_non_row", _ROW_END, _ROW_END + '    row.update({"x": rf.i})\n',
+     "merged with what is not a measure row"),
+    ("gate_on_a_non_row", _ROW_END, _ROW_END + '    _gate({"x": rf.i}, rf.ok)\n',
+     "gate applied to what is not a measure row"),
+    ("row_name_rebound", _ROW_END, _ROW_END + "    row = dict(x=rf.i)\n",
+     "bound to a value that is not a measure row"),
+    ("mutation_of_a_row", _ROW_END, _ROW_END + "    row.pop(0)\n", "method pop"),
+]
+
+
+@pytest.mark.parametrize("case", WRITE_EDITS, ids=[e[0] for e in WRITE_EDITS])
+def test_m1_fix3_a_measure_row_write_the_analysis_cannot_resolve_is_refused(case):
+    _id, old, new, refusal = case
+    src = _read(API, "card_measures.py")
+    assert src.count(old) == 1, old
+    _reads_of(src.replace(old, old))                          # control: the unedited source analyses
+    with pytest.raises(crs.Unsupported, match=refusal):
+        _reads_of(src.replace(old, new))
+
+
+# -- M1 (b): the second method, and the two compared ---------------------------------------
+
+_DYN = {}
+
+
+def _dynamic():
+    if "r" not in _DYN:
+        _DYN["r"] = crd.measured()
+    return _DYN["r"]
+
+
+def test_m1_fix3_the_two_methods_share_no_walker_code():
+    src = _read(HERE, "card_read_dynamic.py")
+    assert "card_read_sets" not in src.replace("shares no code with card_read_sets", "")
+    assert "import ast" not in src and "ast." not in src
+
+
+def test_m1_fix3_dynamic_reads_are_static_reads_and_static_reads_are_declared():
+    """DYN (what moved a value) within STATIC (what the code reads, by the
+    analysis) within DECLARED (NEEDS), for every measure. A dynamic read the
+    static method leaves out must be exactly one of its stated exclusions:
+    a NOT-RUN counter's (the counted measures' own reads), or the incident
+    word read whole (the bits' facts, on the measures that carry it)."""
+    res, fns, taken, total, missing = _dynamic()
+    assert res.raised == [] and res.runs > len(crd.fixtures())
+    names = {n for ns in cm.MEASURES.values() for n in ns}
+    assert set(res.dyn) == names
+    # the recording view saw every fact touched, and nothing moved untouched
+    assert res.touched == set(cm.COVER)
+    assert set().union(*res.dyn.values()) <= res.touched
+    excess = {m: res.dyn[m] - set(READS[m]) for m in names if res.dyn[m] - set(READS[m])}
+    # the stated exclusions, from the static method's own record of them
+    counters = {}
+    for fn, line in _RS.drops:
+        defined = [m for m, sites in _RS.sites.items() if (fn, line) in sites]
+        assert len(defined) == 1, (fn, line, defined)
+        counters[defined[0]] = set(cm.HAND_RULES)
+    allowed = {m: set() for m in names}
+    for m, counted in counters.items():
+        allowed[m] |= set().union(*(res.dyn[r] for r in counted))
+    for m in _RS.statements():
+        allowed[m] |= {"whole", "first"}
+    changed = True
+    while changed:                                  # a measure built from one inherits its allowance
+        changed = False
+        for m in names:
+            for x in _RS.defs.get(m, ()):
+                if x.startswith("M:") and not allowed[x[2:]] <= allowed[m]:
+                    allowed[m] |= allowed[x[2:]]
+                    changed = True
+    unexplained = {m: sorted(e - allowed[m]) for m, e in excess.items() if e - allowed[m]}
+    assert unexplained == {}, unexplained
+    undeclared = {m: sorted(set(READS[m]) - set(cm.NEEDS[m])) for m in names
+                  if set(READS[m]) - set(cm.NEEDS[m])}
+    assert undeclared == {}, undeclared
+    # the other direction: what the static method reads and no run moved
+    surplus = {(m, f) for m in names for f in READS[m] if f not in res.dyn[m]}
+    never = {(m, f) for m, f in surplus if m not in res.valued}
+    rowset = {(m, f) for m, f in surplus - never if f in res.rowset[m]}
+    over = surplus - never - rowset
+    static_pairs = sum(len(v) for v in READS.values())
+    dyn_pairs = sum(len(v) for v in res.dyn.values())
+    declared = sum(len(cm.NEEDS[m]) for m in names)
+    print("two methods: measures %d, static pairs %d, dynamic pairs %d, declared pairs %d, "
+          "Unsupported over the real tree 0" % (len(names), static_pairs, dyn_pairs, declared))
+    print("dynamic beyond static, explained by the stated exclusions: %s"
+          % {m: sorted(e) for m, e in sorted(excess.items())})
+    print("static beyond dynamic: %d pairs (measure never held a value on these fixtures %d, fact "
+          "moved only which rows exist %d, a read that did not move the value on these fixtures %d)"
+          % (len(surplus), len(never), len(rowset), len(over)))
+    for m, f in sorted(over):
+        print("  static only: %s %s" % (m, f))
+    print("recording view: %d runs, facts touched %s" % (res.runs, sorted(res.touched)))
+    print("branch coverage of the measure functions: %d of %d arms in %d functions; %d unexercised"
+          % (taken, total, fns, len(missing)))
+    for fname, line, got in missing:
+        print("  unexercised: %s line %s, arms taken %d" % (fname, line, got))
+    assert taken <= total and fns > 0
+
+
+def test_m1_fix3_the_dynamic_method_sees_a_read_moved_into_a_measure():
+    """Control for the second method: the measure code edited in memory so
+    b4.hand.phase reads the slot list's length; the dynamic method must then
+    see sl move it (and must not before)."""
+    res, *_ = _dynamic()
+    assert "sl" not in res.dyn["b4.hand.phase"]
+    orig = cm._hand_row
+
+    def edited(rf, f, other_rf, dealer_self, series_sc):
+        row, meta = orig(rf, f, other_rf, dealer_self, series_sc)
+        row["b4.hand.phase"] = len(f["sl"])
+        return row, meta
+    cm._hand_row = edited
+    try:
+        got = crd.dynamic_reads()
+    finally:
+        cm._hand_row = orig
+    assert "sl" in got.dyn["b4.hand.phase"]
