@@ -101,6 +101,11 @@ CARD_SUBJECTS = ("card.hand", "card.phase", "card.record", "card.game", "card.pa
 WEIGHTS = "params.card_weights"
 WINDOW = "params.card_window"
 WINDOW_KEY = "window_days"
+# A window's length is a whole number of days from one to the derived rows'
+# retention (card_evidence CARD_LIMITS derived_retention_days): a longer one
+# would sum rows the purge has removed. It also bounds the work a changed day
+# costs (one window per endpoint it lies in).
+WINDOW_DAYS_MAX = 400
 WINDOW_SUBJECT = CARD_SUBJECTS[-1]
 PROFILE_KEYED = ("deal_profile",)
 

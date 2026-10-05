@@ -626,6 +626,10 @@ def compile_rules(doc, bind, data) -> Ruleset:
             continue
         if not _param_values(values, entry):
             raise Refused("malformed", "measure_params values")
+        if family == cm.WINDOW:
+            days = values[cm.WINDOW_KEY]
+            if isinstance(days, bool) or not isinstance(days, int) or not 0 < days <= cm.WINDOW_DAYS_MAX:
+                raise Refused("malformed", "card window")
         rs.params[family] = dict(values)
     rules = doc["rules"]
     if not isinstance(rules, list) or len(rules) > _BOUNDS["rules_max"]:

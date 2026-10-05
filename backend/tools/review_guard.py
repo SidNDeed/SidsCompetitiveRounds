@@ -150,6 +150,7 @@ PINNED = {
     ("card_evidence", "CARD_LIMITS"): {"games_per_pass": 500, "expiry_days": 14,
                                        "list_retention_days": 120, "derived_retention_days": 400,
                                        "unregistered_days": 30, "admin_rows": 50},
+    ("card_measures", "WINDOW_DAYS_MAX"): 400,
 }
 # A wire layout too large to restate here: pinned by the sha256 of
 # repr(ast.literal_eval(value)); any changed bound, code or word changes it.

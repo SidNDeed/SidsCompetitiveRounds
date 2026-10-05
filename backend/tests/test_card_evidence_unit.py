@@ -1149,7 +1149,10 @@ def test_m1_the_analysis_sees_a_new_read_the_catalog_lacks():
     edits = (('"b4.hand.phase": f["o"]', '"b4.hand.phase": len(sl)', "b4.hand.phase", "sl"),
              ('_bits(f["src"], len(f["sl"]))', '_bits(f["src"], len(f["sp"]))', "b4.sc.norule", "sp"),
              ('"b4.rec.index": rf.i', '"b4.rec.index": len(rec["ap"])', "b4.rec.index", "ap"),
-             ('"b4.ph.role": w', '"b4.ph.role": w if not rf.first_lost else -1', "b4.ph.role", "first"))
+             ('"b4.ph.role": w', '"b4.ph.role": w if not rf.first_lost else -1', "b4.ph.role", "first"),
+             # a control decision over a stated omission count
+             ('    if series_sc is None or rule < 0:', '    if series_sc is None or rule < 0 or not rf.ph_ok:',
+              "b4.sc.rule", "ph"))
     for old, new, name, fact in edits:
         assert src.count(old) == 1, old
         got = _reads_of(src.replace(old, new))
@@ -1186,3 +1189,18 @@ def test_m1_a_trimmed_slot_list_reads_same_cards_not_run_with_every_other_fact_w
     assert v["uncovered"][0]["not_whole"] == ["sl"]
     assert v["game"]["b4.sc.norule"] is None
     assert _first_contribs(v) == []
+
+
+# -- M2: the window length is bounded, so a changed day's work is ----------------------
+
+def test_m2_a_card_window_is_a_whole_number_of_days_up_to_the_derived_retention(tmp_path):
+    assert cm.WINDOW_DAYS_MAX == ce.CARD_LIMITS["derived_retention_days"]
+    for i, bad in enumerate((0, -3, cm.WINDOW_DAYS_MAX + 1, 9.5, True)):
+        doc = k.card_doc()
+        doc["measure_params"][cm.WINDOW] = {cm.WINDOW_KEY: bad}
+        with pytest.raises(rr.Refused):
+            k.build_card_revision(tmp_path, doc=doc, name="bad%d" % i)
+    for i, good in enumerate((1, cm.WINDOW_DAYS_MAX)):                     # control
+        doc = k.card_doc()
+        doc["measure_params"][cm.WINDOW] = {cm.WINDOW_KEY: good}
+        k.build_card_revision(tmp_path, doc=doc, name="good%d" % i)

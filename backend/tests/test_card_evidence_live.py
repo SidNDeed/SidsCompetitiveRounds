@@ -17,6 +17,7 @@ import asyncio
 import copy
 import json
 import os
+import random
 import sys
 import types
 import uuid
@@ -68,10 +69,16 @@ def revs(tmp_path_factory):
     _s, picks = k.build_card_revision(tmp, k.card_doc(picks=True), name="picks")
     _s, moved = k.build_card_revision(tmp, k.card_doc(dup_at=7.37), cases=quiet, name="moved")
     _s, dropped = k.build_card_revision(tmp, k.card_doc(drop=(k.ID_DUP,)), cases=quiet, name="dropped")
+    # fix pass 2 (M3): a revision with no window, and one whose weight family
+    # names only another deal profile (synthetic id)
+    _s, nowindow = k.build_card_revision(tmp, k.card_doc(window=False, drop=(k.ID_WIN,)), name="nowindow")
+    _s, noprofile = k.build_card_revision(tmp, k.card_doc(weights={"ab" * 32: dict(k.WEIGHTS)}),
+                                          name="noprofile")
     return types.SimpleNamespace(shadow=k.load(store, shadow), armed=k.load(store, armed),
                                  again=k.load(store, again), conflict=k.load(store, conflict),
                                  picks=k.load(store, picks), moved=k.load(store, moved),
-                                 dropped=k.load(store, dropped))
+                                 dropped=k.load(store, dropped), nowindow=k.load(store, nowindow),
+                                 noprofile=k.load(store, noprofile))
 
 
 @pytest.fixture
@@ -496,7 +503,9 @@ def test_a_new_revision_re_derives_under_its_own_id_and_an_armed_rule_posts(live
         g = await _rows(sm, GAME, k=key)
         return revs_seen, flags, g
     revs_seen, flags, g = live.run(go())
-    assert sorted(r["rules_rev"] for r in revs_seen) == sorted([revs.shadow.ruleset.rev, revs.again.ruleset.rev])
+    # fix pass 2 (M3): re-derived under its own id, and nothing the earlier
+    # revision derived from the game outlives that
+    assert [r["rules_rev"] for r in revs_seen] == [revs.again.ruleset.rev]
     assert flags and all(f["flag_reason"] == "review" and f["auto_invalidated"] is False for f in flags)
     details = [f["flag_details"] if isinstance(f["flag_details"], dict) else json.loads(f["flag_details"])
                for f in flags]
@@ -781,3 +790,316 @@ def test_m6_each_purge_keeps_to_its_own_domain(live):
     assert after_seat == ["r0000ff02", "r0000ff03", "r0000ff04"]
     assert "r0000ff02" not in after_card                  # control: the card purge ran on its own row
     assert after_card == ["r0000ff03", "r0000ff04", "r0000ff05"]
+
+
+# == fix pass 2 ======================================================================
+#
+# The oracle: what a from-scratch evaluation under one revision holds for some
+# games and some dealers. Windows are summed straight from card_contrib (never
+# the daily rows the incremental path maintains), one per endpoint a game of
+# the class was played on; game findings come from a fresh view of each game.
+# The stored unposted card findings of those games and dealers must equal it
+# wherever incremental maintenance is asserted.
+
+_CONTRIB_SUMS = ("hands", "slots", "notrun_hands") + tuple(
+    part + "_" + name for part in ("obs", "exp", "var") for name in cm.RARITIES)
+
+
+def _details(v):
+    return v if isinstance(v, dict) else json.loads(v)
+
+
+def _dealer_prefix(dealer):
+    return "card win %s|" % dealer
+
+
+async def _stored(sm, games, dealers):
+    rows = await _rows(sm, "SELECT scope, dedup_key, rule_id, details FROM seat_evidence_findings "
+                           "WHERE domain = 'card' AND flag_id IS NULL")
+    keys = {ce.game_key(kk, lo, hi) for kk, lo, hi in games}
+    out = {}
+    for r in rows:
+        if ((r["scope"] == "game" and r["dedup_key"] in keys)
+                or (r["scope"] == "sitting" and any(r["dedup_key"].startswith(_dealer_prefix(d))
+                                                    for d in dealers))):
+            out[(r["scope"], r["dedup_key"], r["rule_id"])] = _details(r["details"])
+    return out
+
+
+async def _from_scratch(sm, state, games, dealers):
+    rs = state.ruleset
+    want = {}
+
+    def put(scope, key, rule, items):
+        want.setdefault((scope, key, rule), []).extend(items)
+    win = rs.params.get(cm.WINDOW)
+    windows = []
+    if win:
+        w = int(win[cm.WINDOW_KEY])
+        rows = await _rows(sm, "SELECT subject_player_id::text AS s, source, coverage, deal_profile AS p, "
+                               "utc_day AS d, stable_game_key, pair_lo, pair_hi, " + ", ".join(_CONTRIB_SUMS)
+                           + " FROM card_contrib WHERE rules_rev = :rev "
+                             "AND subject_player_id::text = ANY(CAST(:ds AS text[]))",
+                           rev=rs.rev, ds=[str(d) for d in dealers])
+        classes = {}
+        for r in rows:
+            classes.setdefault((r["s"], r["source"], r["coverage"], r["p"]), []).append(r)
+        for cls in sorted(classes):
+            for e in sorted({r["d"] for r in classes[cls]}):
+                inside = [r for r in classes[cls] if e - timedelta(days=w) < r["d"] <= e]
+                agg = {"games": len({(r["stable_game_key"], r["pair_lo"], r["pair_hi"]) for r in inside}),
+                       "source": cls[1], "coverage": cls[2]}
+                for c in ("hands", "slots", "notrun_hands"):
+                    agg[c] = sum(int(r[c]) for r in inside)
+                for part in ("obs", "exp", "var"):
+                    agg[part] = [sum(int(r[part + "_" + n]) for r in inside) for n in cm.RARITIES]
+                windows.append(((cls, e), agg))
+    found, _notes, _f, errors = rs.evaluate_card(cm.card_subjects({}, [cm.window_row(a) for _k, a in windows]))
+    assert not errors
+    for rule, items in found:
+        for kk, item in items:
+            (s, src, cov, p), e = windows[kk[1]][0]
+            put("sitting", ce.window_key(s, src, cov, p, e), rule.id, [item])
+    async with sm() as db:
+        for key, lo, hi in games:
+            rows = (await db.execute(text(
+                "SELECT id, seat_player_id, other_player_id, attach_key, payload, pool_digest, conflict_at, "
+                "       received_at FROM card_evidence WHERE stable_game_key = :k "
+                "  AND LEAST(seat_player_id, other_player_id) = :lo "
+                "  AND GREATEST(seat_player_id, other_player_id) = :hi ORDER BY id"),
+                {"k": key, "lo": lo, "hi": hi})).mappings().all()
+            match = (await db.execute(ce._MATCH, {"keys": sorted({r["attach_key"] for r in rows}),
+                                                  "lo": lo, "hi": hi, "lag": ce.se.READY_LAG_S})).mappings().first()
+            if match is None:
+                continue
+            named, _other = ce.se.attached_records(rows, match)
+            records = ce._records(named)
+            if not records or any(not ce._has_lists(r["rec"]) for r in records):
+                continue
+            registry = await ce._registry(db, {r["pool_digest"] for r in rows if r["pool_digest"]})
+            report = await ce._report(db, match["id"])
+            view = cm.card_view(records, registry, match["sc"], rs.params.get(cm.WEIGHTS), report)
+            found, notes, _f, errors = rs.evaluate_card(cm.card_subjects(view, []))
+            assert not errors
+            for rule, items in found:
+                its = [dict(it, notes=[ln for _r, ln in notes]) if notes else it for _k, it in items]
+                put("game", ce.game_key(key, lo, hi), rule.id, its)
+    return {kk: json.loads(ce.se._dumps(ce.se.bounded_details({"items": v}))) for kk, v in want.items()}
+
+
+async def _pair_of(sm, key):
+    r = (await _rows(sm, "SELECT LEAST(seat_player_id, other_player_id) AS lo, "
+                         "GREATEST(seat_player_id, other_player_id) AS hi FROM card_evidence "
+                         "WHERE stable_game_key = :k LIMIT 1", k=key))[0]
+    return key, r["lo"], r["hi"]
+
+
+_SEQ = iter(range(900, 1000))
+
+
+def _steams():
+    n = next(_SEQ)
+    return "1000000000000%03d" % n, "1000000000001%03d" % n
+
+
+async def _late_pairing(sm, revs, offset, tag):
+    """G1 one-sided on day D, G2 one-sided on D + offset, both evaluated; then
+    G1's second record, and another pass. Returns the dealers' and games'
+    stored findings before and after the pairing, the oracle after it, and
+    the key of the one-sided window ending on G2's day."""
+    a, b = _steams()
+    ids = await _players(sm, a, b)
+    ra, rb, c = _pair()
+    await _register(sm, k.census_dump(c.cards))
+    g1, g2 = "ranked_cardw%s_000001" % tag, "ranked_cardw%s_000002" % tag
+    await _store(sm, ids, a, b, g1, ra)
+    m1 = await _match(sm, ids, a, b, g1 + "_r5", minutes_ago=10 + offset * 1440, sc="off")
+    await _store(sm, ids, a, b, g2, ra)
+    m2 = await _match(sm, ids, a, b, g2 + "_r5", minutes_ago=10, sc="off")
+    await ce.games_pass(sm, revs.shadow)
+    games = [await _pair_of(sm, g1), await _pair_of(sm, g2)]
+    dealers = [ids[a], ids[b]]
+    before = await _stored(sm, games, dealers)
+    await _store(sm, ids, b, a, g1, rb)
+    await ce.games_pass(sm, revs.shadow)
+    after = await _stored(sm, games, dealers)
+    want = await _from_scratch(sm, revs.shadow, games, dealers)
+    day2 = await _scalar(sm, "SELECT (ended_at AT TIME ZONE 'UTC')::date FROM matches WHERE id = :m", m=m2)
+    day1 = await _scalar(sm, "SELECT (ended_at AT TIME ZONE 'UTC')::date FROM matches WHERE id = :m", m=m1)
+    one = {kk for kk in before if kk[0] == "sitting" and "|one|" in kk[1] and kk[1].endswith(str(day2))}
+    return before, after, want, one, (day2 - day1).days
+
+
+def test_m2_a_late_pairing_refreshes_every_window_its_day_lies_in(live, revs):
+    """The two-day witness: G1 one-sided on D, G2 one-sided on D + 1, then
+    G1's late pairing. The one-sided window ending on D + 1 summed G1 and
+    must be evaluated again."""
+    before, after, want, one, gap = live.run(_late_pairing(live.sm, revs, 1, "a"))
+    assert gap == 1 and one                                     # control: the window ending on D + 1 existed
+    assert after == want
+    assert all(before[kk] != after.get(kk) for kk in one)       # control: and it changed
+
+
+def test_m2_the_late_pairing_property_over_day_offsets_matches_a_from_scratch_evaluation(live, revs):
+    """Generated: offsets within the window (1, a random one, w - 1) and just
+    outside it (w, w + 1). Within, the later window changes; outside, it
+    cannot; everywhere the stored findings equal the from-scratch oracle."""
+    w = k.WINDOW["window_days"]
+    seed = int.from_bytes(os.urandom(4), "big")
+    rnd = random.Random(seed)
+    offsets = [1, rnd.randint(2, w - 2), w - 1, w, w + 1]
+    compared = changed = 0
+    for i, off in enumerate(offsets):
+        before, after, want, one, gap = live.run(_late_pairing(live.sm, revs, off, "p%d" % i))
+        assert gap == off and one, (seed, off)
+        assert after == want, (seed, off)
+        moved = any(before[kk] != after.get(kk) for kk in one)
+        assert moved == (off < w), (seed, off)
+        compared += len(want)
+        changed += moved
+    print("m2 property: seed %d offsets %s windows-and-games compared %d later windows changed %d"
+          % (seed, offsets, compared, changed))
+    assert changed == 3
+
+
+async def _two_revisions(sm, first, second, tag, purge=False):
+    a, b = _steams()
+    ids = await _players(sm, a, b)
+    key = "ranked_cardr%s_000001" % tag
+    _ra, _rb, c = _pair()
+    dup = k.on_census(k.dup_record(), c)
+    await _register(sm, k.census_dump(c.cards))
+    await _store(sm, ids, a, b, key, dup)
+    await _store(sm, ids, b, a, key, k.mirror(dup))
+    await _match(sm, ids, a, b, key + "_r5", sc="off")
+    await ce.games_pass(sm, first)
+    games, dealers = [await _pair_of(sm, key)], [ids[a], ids[b]]
+    before = await _stored(sm, games, dealers)
+    if purge:
+        await _exec(sm, "UPDATE card_evidence SET received_at = now() - interval '200 days' "
+                        "WHERE stable_game_key = :k", k=key)
+        await ce.purge_pass(sm)
+        assert await _scalar(sm, "SELECT count(*) FROM card_evidence WHERE stable_game_key = :k "
+                                 "AND lists_purged_at IS NULL", k=key) == 0
+    await ce.games_pass(sm, second)
+    after = await _stored(sm, games, dealers)
+    want = await _from_scratch(sm, second, games, dealers)
+    stamped = await _rows(sm, "SELECT DISTINCT rules_rev FROM seat_evidence_findings WHERE domain = 'card' "
+                              "AND flag_id IS NULL AND (dedup_key = :g OR dedup_key LIKE :w1 OR dedup_key LIKE :w2)",
+                          g=ce.game_key(*games[0]), w1=_dealer_prefix(ids[a]) + "%", w2=_dealer_prefix(ids[b]) + "%")
+    contrib = await _rows(sm, "SELECT DISTINCT rules_rev FROM card_contrib WHERE stable_game_key = :k", k=key)
+    sel = "SELECT processed_at, evaluated_rev FROM card_games WHERE stable_game_key = :k"
+    g1 = (await _rows(sm, sel, k=key))[0]
+    await ce.games_pass(sm, second)                       # visited once per revision, not again
+    g2 = (await _rows(sm, sel, k=key))[0]
+    return (before, after, want, {r["rules_rev"] for r in stamped}, {r["rules_rev"] for r in contrib},
+            (g1["processed_at"], g1["evaluated_rev"], g2["processed_at"]))
+
+
+@pytest.mark.parametrize("second,purge", [("nowindow", False), ("noprofile", False), ("again", True)],
+                         ids=["no-window", "no-profile-family", "lists-purged"])
+def test_m3_what_another_revision_wrote_is_retired_when_the_current_one_produces_nothing_there(
+        live, revs, second, purge):
+    """R1 writes window (and game) findings; R2 has no window, or no weight
+    set for the game's exact profile, or the game's lists are purged before
+    R2 visits it. Afterwards the stored unposted findings of the game and its
+    dealers equal a fresh evaluation under R2, and none another revision
+    stamped remains."""
+    tag = {"nowindow": "nw", "noprofile": "np", "again": "pg"}[second]
+    before, after, want, stamped, contrib, (p1, ev, p2) = live.run(
+        _two_revisions(live.sm, revs.shadow, getattr(revs, second), tag, purge=purge))
+    r1, r2 = revs.shadow.ruleset.rev, getattr(revs, second).ruleset.rev
+    assert any(kk[0] == "sitting" for kk in before) and any(kk[0] == "game" for kk in before)  # control
+    assert after == want
+    assert stamped <= {r2} and r1 not in contrib
+    assert ev == r2 and p2 == p1
+
+
+def test_m3_the_oracle_differs_from_a_stale_store(live, revs):
+    """Control on the oracle itself: before R2 visits, the store holds what
+    R1 wrote, which the R2 oracle does not."""
+    async def go():
+        a, b = _steams()
+        sm = live.sm
+        ids = await _players(sm, a, b)
+        key = "ranked_cardro_000001"
+        ra, rb, c = _pair()
+        await _register(sm, k.census_dump(c.cards))
+        await _store(sm, ids, a, b, key, ra)
+        await _store(sm, ids, b, a, key, rb)
+        await _match(sm, ids, a, b, key + "_r5", sc="off")
+        await ce.games_pass(sm, revs.shadow)
+        games, dealers = [await _pair_of(sm, key)], [ids[a], ids[b]]
+        return (await _stored(sm, games, dealers), await _from_scratch(sm, revs.shadow, games, dealers),
+                await _from_scratch(sm, revs.nowindow, games, dealers))
+    stored, same, other = live.run(go())
+    assert stored == same and stored and stored != other
+
+
+async def _wait_lock(sm, pattern):
+    """Bounded: until a backend of this database waits on a lock in a
+    statement matching `pattern` (True), or about ten seconds (False)."""
+    for _ in range(200):
+        n = await _scalar(sm, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                              "AND wait_event_type = 'Lock' AND query LIKE :q", q=pattern)
+        if n:
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+def test_m7_a_conflict_that_waits_on_the_evaluations_row_lock_is_later_than_it_and_wakes_the_game(live, revs):
+    """Two real transactions on the record rows. The conflicting submission's
+    transaction begins first and waits (its seat lock held by a third
+    session); an evaluation then reads the game's records FOR SHARE and
+    stamps the game processed; the submission, released, blocks on those
+    rows until the evaluation commits, and only then takes the time of its
+    marker. The marker is later than the evaluation, and the next pass wakes
+    the game."""
+    async def go():
+        sm = live.sm
+        a, b = _steams()
+        ids = await _players(sm, a, b)
+        key = "ranked_cardlw_000001"
+        ra, rb, c = _pair()
+        await _register(sm, k.census_dump(c.cards))
+        await _store(sm, ids, a, b, key, ra)
+        await _store(sm, ids, b, a, key, rb)
+        await _match(sm, ids, a, b, key + "_r5", sc="off")
+        await ce.games_pass(sm, revs.conflict)
+        _k, lo, hi = await _pair_of(sm, key)
+        env = ce.parse_envelope(k.envelope(k.on_census(k.dup_record(), c), seat=a, other=b, stable=key, rounds=5))
+        parsed = ce.parse_record(env)
+
+        async def submit():
+            async with sm() as db:
+                try:
+                    await ce.store_record(db, env, parsed, ids[a], ids[b], "1.41.0")
+                    return 200
+                except ce.EvidenceRefused as r:
+                    return r.status
+        async with sm() as hold:
+            await hold.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"),
+                               {"k": "card_evidence:" + str(ids[a])})
+            task = asyncio.ensure_future(submit())
+            seat_wait = await _wait_lock(sm, "%pg_advisory_xact_lock%")
+            began = await _scalar(sm, "SELECT min(xact_start) FROM pg_stat_activity "
+                                      "WHERE datname = current_database() AND wait_event_type = 'Lock'")
+            async with sm() as ev:
+                state = await ce.evaluate_card_game(ev, key, lo, hi, revs.conflict.ruleset)
+                await hold.commit()
+                row_wait = await _wait_lock(sm, "%FOR UPDATE%")
+                await ev.commit()
+            status = await asyncio.wait_for(task, 30)
+        sel = "SELECT processed_at FROM card_games WHERE stable_game_key = :k"
+        processed = await _scalar(sm, sel, k=key)
+        marker = await _scalar(sm, "SELECT max(conflict_at) FROM card_evidence WHERE stable_game_key = :k", k=key)
+        await ce.games_pass(sm, revs.conflict)
+        return (seat_wait, row_wait, began, state, status, processed, marker,
+                await _scalar(sm, sel, k=key), await _game_findings(sm, key))
+    seat_wait, row_wait, began, state, status, processed, marker, woken, found = live.run(go())
+    assert seat_wait and row_wait                         # control: both waits really happened
+    assert state[0] == "unchanged" and began < processed  # control: the submission began first
+    assert status == 409
+    assert marker > processed
+    assert woken > processed and k.ID_CONFLICT in {f["rule_id"] for f in found}

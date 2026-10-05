@@ -205,11 +205,12 @@ async def _registry(db, digests) -> dict:
 
 
 # Games waiting for work, least recently processed first. With a revision:
-# every game not yet final; every game holding its lists whose last evaluation
-# was under another revision; every game with a record received, a conflict
-# marked on one of its records, or a census registered for one of its
-# records, after it was last processed. With none: only games not yet
-# attached to their match.
+# every game not yet final; every game whose last visit was under another
+# revision, its lists held or purged (a purged game is visited once per
+# revision, so what another revision derived from it is retired); every game
+# holding its lists with a record received, a conflict marked on one of its
+# records, or a census registered for one of its records, after it was last
+# processed. With none: only games not yet attached to their match.
 _CANDIDATES = text(
     "SELECT e.stable_game_key k, LEAST(e.seat_player_id, e.other_player_id) lo, "
     "       GREATEST(e.seat_player_id, e.other_player_id) hi, max(e.received_at) rx "
@@ -220,9 +221,9 @@ _CANDIDATES = text(
     "  LEFT JOIN card_pool_registry p ON p.digest = e.pool_digest "
     " WHERE (CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
     "    OR (CAST(:rev AS varchar) IS NOT NULL AND (g.finalized_at IS NULL "
-    "        OR (e.lists_purged_at IS NULL AND (g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) "
-    "            OR e.received_at > g.processed_at OR e.conflict_at > g.processed_at "
-    "            OR p.registered_at > g.processed_at)))) "
+    "        OR g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) "
+    "        OR (e.lists_purged_at IS NULL AND (e.received_at > g.processed_at "
+    "            OR e.conflict_at > g.processed_at OR p.registered_at > g.processed_at)))) "
     " GROUP BY e.stable_game_key, LEAST(e.seat_player_id, e.other_player_id), "
     "          GREATEST(e.seat_player_id, e.other_player_id) "
     " ORDER BY min(g.processed_at) NULLS FIRST, rx LIMIT CAST(:lim AS int)")
@@ -339,17 +340,20 @@ async def _recompute_daily(db, keys) -> None:
 
 
 async def _write_contrib(db, key, lo, hi, view, rs, match) -> list:
-    """Replace this game's contributions under this revision and recompute
-    every daily row they touched, before and after. Returns every touched key,
-    the retired ones as well as the new ones, so each window either side of
-    the change is evaluated (and its findings cleaned) again."""
+    """Replace this game's contributions -- those of every revision, so
+    nothing an earlier revision derived from the game outlives its
+    re-evaluation -- and recompute every daily row they touched, before and
+    after. Returns every touched key (dealer, day, source, coverage, profile,
+    revision), the retired ones as well as the new ones, so each window
+    either side of the change is evaluated (and its findings cleaned)
+    again."""
     rev = rs.rev
     day = match["ended_at"].astimezone(timezone.utc).date()
     old = (await db.execute(text(
-        "DELETE FROM card_contrib WHERE " + _WHERE_GAME + " AND rules_rev = :rev "
-        "RETURNING subject_player_id, utc_day, source, coverage, deal_profile"),
-        {"k": key, "lo": lo, "hi": hi, "rev": rev})).all()
-    touched = {(str(r[0]), r[1], r[2], r[3], r[4], rev) for r in old}
+        "DELETE FROM card_contrib WHERE " + _WHERE_GAME + " "
+        "RETURNING subject_player_id, utc_day, source, coverage, deal_profile, rules_rev"),
+        {"k": key, "lo": lo, "hi": hi})).all()
+    touched = {(str(r[0]), r[1], r[2], r[3], r[4], r[5]) for r in old}
     for c in cm.contributions(view):
         vals = {"k": key, "lo": lo, "hi": hi, "r": c["recorder"], "s": c["subject"],
                 "src": c["source"], "cov": c["coverage"], "p": c["profile"], "rev": rev, "d": day,
@@ -369,28 +373,71 @@ async def _write_contrib(db, key, lo, hi, view, rs, match) -> list:
     return sorted(touched)
 
 
-async def _windows(db, keys, rs) -> list:
-    """The window sums for each (dealer, source, coverage, profile) a game
-    touched, over the revision's window ending on the game's day. None
-    without a window in the revision."""
+async def _drop_other_revisions(db, key, lo, hi, rev) -> list:
+    """A game whose lists are purged derives nothing new, and what another
+    revision derived from it is not this revision's: those contributions go
+    and their daily rows are recomputed. Returns the touched keys."""
+    old = (await db.execute(text(
+        "DELETE FROM card_contrib WHERE " + _WHERE_GAME + " AND rules_rev IS DISTINCT FROM CAST(:rev AS varchar) "
+        "RETURNING subject_player_id, utc_day, source, coverage, deal_profile, rules_rev"),
+        {"k": key, "lo": lo, "hi": hi, "rev": rev})).all()
+    touched = {(str(r[0]), r[1], r[2], r[3], r[4], r[5]) for r in old}
+    await _recompute_daily(db, touched)
+    return sorted(touched)
+
+
+_SUM_COLS = ("games",) + _DAILY_COLS
+
+
+async def _windows(db, keys, rs) -> tuple:
+    """The windows a change of daily rows lies in, under this revision. A
+    window ending on day E sums the class's daily rows of E - w + 1 .. E, so
+    a daily row of day d is in the window of every endpoint d .. d + w - 1:
+    each changed key -- before and after the change, whatever revision wrote
+    it -- expands to its class (dealer, source, coverage, profile) over those
+    w endpoints. Returns (windows, owned): a window for each such endpoint
+    that has a daily row of the class under this revision (windows end on the
+    days a game of the class was played, as a from-scratch evaluation reads
+    them), and the window finding key of every such endpoint, so a finding
+    whose window changed or no longer exists is retired. The work: one read
+    of the class's daily rows and at most w window sums per class the game's
+    contributions had or have, w at most card_measures.WINDOW_DAYS_MAX.
+    Nothing without a window in the revision."""
     win = rs.params.get(cm.WINDOW)
     if not win:
-        return []
-    out = []
-    sums = ", ".join("COALESCE(sum(%s), 0) AS %s" % (c, c) for c in ("games",) + _DAILY_COLS)
-    for subject, day, source, coverage, profile, rev in sorted(set(keys)):
-        r = (await db.execute(text(
-            "SELECT " + sums + " FROM card_player_daily WHERE subject_player_id = CAST(:s AS uuid) "
-            "AND source = :src AND coverage = :cov AND deal_profile = :p AND rules_rev = :rev "
-            "AND day > CAST(:d AS date) - CAST(:w AS int) AND day <= CAST(:d AS date)"),
-            {"s": subject, "src": source, "cov": coverage, "p": profile, "rev": rev, "d": day,
-             "w": int(win[cm.WINDOW_KEY])})).mappings().first()
-        agg = {c: int(r[c]) for c in ("games", "hands", "slots", "notrun_hands")}
-        agg.update(source=source, coverage=coverage)
-        for part in ("obs", "exp", "var"):
-            agg[part] = [int(r[part + "_" + name]) for name in cm.RARITIES]
-        out.append(((subject, day, source, coverage, profile), agg))
-    return out
+        return [], set()
+    w = int(win[cm.WINDOW_KEY])
+    ends = {}
+    for subject, day, source, coverage, profile, _rev in keys:
+        ends.setdefault((subject, source, coverage, profile), set()).update(
+            day + timedelta(days=i) for i in range(w))
+    out, owned = [], set()
+    for cls in sorted(ends):
+        subject, source, coverage, profile = cls
+        days = sorted(ends[cls])
+        owned.update(window_key(subject, source, coverage, profile, e) for e in days)
+        rows = (await db.execute(text(
+            "SELECT day, " + ", ".join(_SUM_COLS) + " FROM card_player_daily "
+            "WHERE subject_player_id = CAST(:s AS uuid) AND source = :src AND coverage = :cov "
+            "AND deal_profile = :p AND rules_rev = :rev "
+            "AND day > CAST(:a AS date) - CAST(:w AS int) AND day <= CAST(:b AS date)"),
+            {"s": subject, "src": source, "cov": coverage, "p": profile, "rev": rs.rev,
+             "a": days[0], "b": days[-1], "w": w})).mappings().all()
+        by_day = {r["day"]: r for r in rows}
+        for e in days:
+            if e not in by_day:
+                continue
+            sums = dict.fromkeys(_SUM_COLS, 0)
+            for d, r in by_day.items():
+                if e - timedelta(days=w) < d <= e:
+                    for c in _SUM_COLS:
+                        sums[c] += int(r[c])
+            agg = {c: sums[c] for c in ("games", "hands", "slots", "notrun_hands")}
+            agg.update(source=source, coverage=coverage)
+            for part in ("obs", "exp", "var"):
+                agg[part] = [sums[part + "_" + name] for name in cm.RARITIES]
+            out.append(((subject, e, source, coverage, profile), agg))
+    return out, owned
 
 
 def game_key(key, lo, hi) -> str:
@@ -439,17 +486,64 @@ async def _post_findings(db, findings, dedup_of, rs, match_id) -> tuple:
     return len(grouped), {(d[0], d[1], rule.id) for (d, rule) in grouped}
 
 
-async def _retire_findings(db, mine, produced) -> None:
-    """Remove each unposted card finding of the keys this evaluation owns
-    (`mine`: (scope, key)) that it did not produce, whatever revision stamped
-    it: a rule a newer revision dropped, or whose value no longer holds, leaves
-    no stale row. Only the card domain, only these keys."""
-    for scope, key in mine:
-        keep = sorted(rid for (s, dk, rid) in produced if s == scope and dk == key)
+async def _retire_findings(db, rev, produced, own=(), stale_games=(), stale_prefixes=()) -> int:
+    """Remove every unposted card finding this evaluation owns that it did
+    not produce. Owned whatever revision stamped it (`own`, (scope, key)):
+    the game's key when its view was derived, and the key of every window a
+    changed daily row lies in. Owned when another revision stamped it: the
+    game's key when nothing new was derived from it (`stale_games`), and
+    every window key, whatever its endpoint, of a class the game's
+    contributions had or have (`stale_prefixes`): a finding another revision
+    wrote is never this revision's, whether or not this revision has a
+    window, or a weight set, for that class. Only the card domain, only
+    unposted rows. Returns how many were removed."""
+    rows = (await db.execute(text(
+        "SELECT id, scope, dedup_key, rule_id FROM seat_evidence_findings "
+        "WHERE domain = 'card' AND flag_id IS NULL AND ("
+        "  (scope = 'game' AND dedup_key = ANY(CAST(:og AS varchar[]))) "
+        "  OR (scope = 'sitting' AND dedup_key = ANY(CAST(:ow AS varchar[]))) "
+        "  OR (rules_rev IS DISTINCT FROM CAST(:rev AS varchar) AND ("
+        "      (scope = 'game' AND dedup_key = ANY(CAST(:sg AS varchar[]))) "
+        "      OR (scope = 'sitting' AND EXISTS (SELECT 1 FROM unnest(CAST(:sp AS varchar[])) AS p(x) "
+        "                                       WHERE left(dedup_key, length(p.x)) = p.x)))))"),
+        {"og": sorted(kk for s, kk in own if s == "game"),
+         "ow": sorted(kk for s, kk in own if s == "sitting"), "rev": rev,
+         "sg": sorted(stale_games), "sp": sorted(stale_prefixes)})).all()
+    drop = sorted(r[0] for r in rows if (r[1], r[2], r[3]) not in produced)
+    if drop:
         await db.execute(text(
-            "DELETE FROM seat_evidence_findings WHERE domain = 'card' AND scope = :s AND dedup_key = :k "
-            "AND flag_id IS NULL AND NOT (rule_id = ANY(CAST(:ids AS varchar[])))"),
-            {"s": scope, "k": key, "ids": keep or [""]})
+            "DELETE FROM seat_evidence_findings WHERE id = ANY(CAST(:ids AS bigint[])) "
+            "AND domain = 'card' AND flag_id IS NULL"), {"ids": drop})
+    return len(drop)
+
+
+async def _evaluate(db, rs, view, touched, key, lo, hi, match_id) -> tuple:
+    """The card rules over the game (when its view was derived: `view` not
+    None) and over every window its changed daily rows lie in; each finding
+    upserted and posted when the revision arms it; then every unposted card
+    finding the game or those windows own that this evaluation did not
+    produce is retired (_retire_findings). Returns (fired, rule errors)."""
+    wins, owned = await _windows(db, touched, rs)
+    windows = [cm.window_row(agg) for _k, agg in wins]
+    subjects = cm.card_subjects(view if view is not None else {}, windows)
+    findings, notes, _fired, errors = await asyncio.to_thread(rs.evaluate_card, subjects)
+    game_dedup = ("game", game_key(key, lo, hi))
+
+    def dedup_of(k):
+        if k[0] == cm.WINDOW_SUBJECT:
+            s, d, src, cov, p = wins[k[1]][0]
+            return ("sitting", window_key(s, src, cov, p, d))
+        return game_dedup
+    if notes:
+        findings = [(rule, [(k, dict(it, notes=[ln for _r, ln in notes])) for k, it in items])
+                    for rule, items in findings]
+    fired, produced = await _post_findings(db, findings, dedup_of, rs, match_id)
+    own = ([game_dedup] if view is not None else []) + [("sitting", w) for w in sorted(owned)]
+    prefixes = {window_key(s, src, cov, p, "") for s, _d, src, cov, p, _r in touched}
+    await _retire_findings(db, rs.rev, produced, own,
+                           stale_games=[] if view is not None else [game_dedup[1]],
+                           stale_prefixes=prefixes)
+    return fired, errors
 
 
 async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
@@ -503,6 +597,11 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
         records = _records(named)
         if any(not _has_lists(r["rec"]) for r in records):
             final = True          # lists purged: nothing left to derive
+            if g["evaluated_rev"] != rev:
+                # what another revision derived from the lists is not this
+                # revision's: retired, the windows it was in evaluated again
+                touched = await _drop_other_revisions(db, key, lo, hi, rev)
+                fired, errors = await _evaluate(db, rs, None, touched, key, lo, hi, match["id"])
         else:
             report = await _report(db, match["id"])
             try:
@@ -514,31 +613,18 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
             if view is not None:
                 await _write_outside(db, key, lo, hi, view, rev)
                 touched = await _write_contrib(db, key, lo, hi, view, rs, match)
-                wins = await _windows(db, touched, rs)
-                windows = [cm.window_row(agg) for _k, agg in wins]
-                subjects = cm.card_subjects(view, windows)
-                findings, notes, _fired, errors = await asyncio.to_thread(rs.evaluate_card, subjects)
-                game_dedup = ("game", game_key(key, lo, hi))
-
-                def dedup_of(k):
-                    if k[0] == cm.WINDOW_SUBJECT:
-                        s, d, src, cov, p = wins[k[1]][0]
-                        return ("sitting", window_key(s, src, cov, p, d))
-                    return game_dedup
-                if notes:
-                    findings = [(rule, [(k, dict(it, notes=[ln for _r, ln in notes])) for k, it in items])
-                                for rule, items in findings]
-                fired, produced = await _post_findings(db, findings, dedup_of, rs, match["id"])
-                mine = [game_dedup] + [dedup_of((cm.WINDOW_SUBJECT, j)) for j in range(len(wins))]
-                await _retire_findings(db, mine, produced)
+                fired, errors = await _evaluate(db, rs, view, touched, key, lo, hi, match["id"])
                 evaluated = rev
+    # a final game is stamped with the revision that visited it, derived or
+    # not, so the candidate query visits it again only under another one
+    stamp = evaluated or (rev if final and fault is None else None)
     await db.execute(text(
         "UPDATE card_games SET match_id = :m, series_sc = :sc, signature = :s, processed_at = now(), "
         "  derive_fault = :fault, evaluated_rev = COALESCE(CAST(:ev AS varchar), evaluated_rev), "
         "  finalized_at = CASE WHEN :f THEN COALESCE(finalized_at, now()) ELSE NULL END "
         "WHERE " + _WHERE_GAME),
         dict(b, m=match["id"] if match else None, sc=match["sc"] if match else None,
-             s=sig if fault is None else None, fault=fault, ev=evaluated,
+             s=sig if fault is None else None, fault=fault, ev=stamp,
              f=bool(final) and fault is None))
     state = "final" if final and fault is None else ("evaluated" if evaluated else
                                                      ("fault" if fault else "waiting"))
