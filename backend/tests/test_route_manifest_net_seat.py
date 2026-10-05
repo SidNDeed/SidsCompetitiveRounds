@@ -4367,3 +4367,28 @@ def test_f5_a_module_level_statement_of_any_type_binds_what_it_binds(tmp_path):
         assert ("a", name) in reached, (name, sorted(reached))
     moved = _with_segment(index, "a", "Alias", "type Alias = str\n")
     assert _closure_text(moved, reached) != _closure_text(index, reached)
+
+
+_TYPE_PARAM_SRC = (
+    "LIMIT = int\n"
+    "def handler[LIMIT](x: LIMIT) -> LIMIT:\n"
+    "    return x\n"
+    "class Box[LIMIT](list[LIMIT]):\n"
+    "    pass\n"
+    "type Alias[LIMIT] = list[LIMIT]\n")
+
+
+def test_f5_a_type_parameter_is_local_to_its_annotation_scope(tmp_path):
+    """Combat fix pass 5, M-9: a generic definition's type parameters bind
+    in its annotation scope, not where the definition stands. A type
+    parameter named like a module binding (here LIMIT) is read from that
+    scope by its annotations, bases and alias value, and a module-level
+    generic charges no module binding of that name. The interpreter agrees:
+    executing and forcing the source reads no module LIMIT. (Inside a class
+    body the fix pass 3 bound still touches a nested definition's type
+    parameter names conservatively: an over-charge, never a missed read.)"""
+    index = _tmp_index(tmp_path, a=_TYPE_PARAM_SRC)
+    for name in ("handler", "Box", "Alias"):
+        assert "LIMIT" not in index["a"][name][2], (name, sorted(index["a"][name][2]))
+        assert ("a", "LIMIT") not in set(_walk_bindings([("a", name)], index=index)), name
+    assert "LIMIT" not in _interpreter_reads(_TYPE_PARAM_SRC.split("\n", 1)[1])
