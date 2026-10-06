@@ -26,6 +26,7 @@ sys.path.insert(0, HERE)
 
 import card_evidence as ce  # noqa: E402
 import card_measures as cm  # noqa: E402
+import card_read_dispositions as crdisp  # noqa: E402
 import card_read_dynamic as crd  # noqa: E402
 import card_read_sets as crs  # noqa: E402
 import card_revision_kit as k  # noqa: E402
@@ -1192,6 +1193,118 @@ def test_m1_a_trimmed_slot_list_reads_same_cards_not_run_with_every_other_fact_w
     assert _first_contribs(v) == []
 
 
+# -- M1 fix pass 4: compositions, accepted with their attribution or refused --------------
+#
+# Source edits of card_measures.py. An ACCEPTED composition must show the read
+# it adds in the measure's READ (the fact absent before the edit); a REFUSED
+# one must raise Unsupported for the composition itself (the message names it).
+_SIZE = '    row["b4.hand.size"] = None if rf.lossy else int(n != rec["ns"])\n'
+_HAND_DEF = "def _hand_row(rf, f, other_rf, dealer_self, series_sc):\n"
+_PH_APPEND = '        rows.append((row, {"recorder": rf.seat, "o": o, "w": w}))\n'
+_HELD_TOP = "    count = 0\n    for j, ix in enumerate(sl):\n"
+_DYN_KEY = "HAND_RULES[n % len(HAND_RULES)]"
+FIX4_ACCEPTED = [
+    # a union of measure rows overwriting a measure: the new value's read is recorded
+    ("row_union_in_place", [(_SIZE, _SIZE + '    row |= {"b4.hand.size": len(rec["ap"])}\n')],
+     "b4.hand.size", "ap"),
+    ("row_union", [(_SIZE, _SIZE + '    row = row | {"b4.hand.size": len(rec["ap"])}\n')],
+     "b4.hand.size", "ap"),
+    ("row_unpacked_into_a_row", [(_SIZE, _SIZE + '    row = {**row, "b4.hand.size": len(rec["ap"])}\n')],
+     "b4.hand.size", "ap"),
+    # an augmented assignment on a measure of a row records its read
+    ("augmented_measure", [(_SIZE, _SIZE + '    row["b4.hand.phase"] += len(rec["ap"])\n')],
+     "b4.hand.phase", "ap"),
+    # an augmented assignment on a counter
+    ("augmented_counter", [('stated += sum(_bits(f["src"], len(f["sl"])))',
+                            'stated += sum(_bits(f["src"], len(f["sl"]))) + len(rf.rec["ap"])')],
+     "b4.sc.norule", "ap"),
+    # through the setdefault alias, a field and an element of a list field:
+    # followed to the window row
+    ("alias_field", [('        c["slots"] += meta["n"]\n', '        c["slots"] += meta["n"] + len(view["phases"])\n')],
+     "b4.rar.obs.common", "ph"),
+    ("alias_list_field_element", [('            c["obs"][r] += obs[r]\n',
+                                   '            c["obs"][r] += obs[r] + len(view["phases"])\n')],
+     "b4.rar.obs.common", "ph"),
+    # a container made here and changed before anything else holds it
+    ("fresh_list", [(_SIZE, _SIZE + '    extra = []\n    extra.append(len(rec["ap"]))\n'
+                     '    row["b4.hand.phase"] = sum(extra)\n')], "b4.hand.phase", "ap"),
+    ("fresh_dict_computed_key", [(_SIZE, _SIZE + '    tally = {}\n    tally[n] = len(rec["ap"])\n'
+                                  '    row["b4.hand.phase"] = sum(tally.values())\n')], "b4.hand.phase", "ap"),
+    # a callee writing a measure into the row it is given: followed to the row
+    ("callee_writes_the_row", [(_HAND_DEF, 'def _extra_measure(row, rec):\n    row["b4.hand.phase"] = '
+                                'len(rec["ap"])\n\n\n' + _HAND_DEF),
+                               (_SIZE, _SIZE + "    _extra_measure(row, rec)\n")], "b4.hand.phase", "ap"),
+]
+FIX4_REFUSED = [
+    # the round's case: a union overwriting a measure under a key the analysis cannot resolve
+    ("union_in_place_with_an_unresolved_key", [(_SIZE, _SIZE + "    row |= {%s: len(rec[\"ap\"])}\n" % _DYN_KEY)],
+     "union of a measure row or field dict with what is not a measure row"),
+    ("union_with_an_unresolved_key", [(_SIZE, _SIZE + "    row = row | {%s: len(rec[\"ap\"])}\n" % _DYN_KEY)],
+     "union of a measure row or field dict with what is not a measure row"),
+    ("row_unpacked_with_an_unresolved_key", [(_SIZE, _SIZE + "    row = {**row, %s: len(rec[\"ap\"])}\n" % _DYN_KEY)],
+     "unresolved key in a measure row literal"),
+    ("union_of_the_record", [(_SIZE, _SIZE + '    both = rec | {}\n')], "union of a record-derived structure"),
+    ("in_place_set_union", [("        earlier = set(sl[:j])\n", "        earlier = set(sl[:j])\n        earlier |= {ix}\n")],
+     "in-place union of what is not a measure row"),
+    ("augmented_list", [("            rows.append((row, meta))\n", "            rows += [(row, meta)]\n")],
+     "cannot show holds an immutable value"),
+    ("augmented_dict_element", [("        mine[name] = mine.get(name, 0) + 1\n", "        mine[name] += [1]\n")],
+     "cannot show holds an immutable value"),
+    ("augmented_operator", [("            count += 1\n", "            count @= 1\n")], "augmented operator MatMult"),
+    ("change_through_an_alias", [("    out = []\n    for _ in range(width):", "    out = []\n    alias = out\n"
+                                  "    for _ in range(width):"), ("        out.append(r)\n", "        alias.append(r)\n")],
+     "may hold an object another name holds"),
+    ("computed_key_store_through_an_alias", [("    mine = {}\n", "    mine = {}\n    seen = mine\n"),
+                                             ("        mine[name] = mine.get(name, 0) + 1\n",
+                                              "        seen[name] = mine.get(name, 0) + 1\n")],
+     "may hold an object another name holds"),
+    ("change_to_a_parameter", [(_HELD_TOP, "    count = 0\n    held.append(0)\n    for j, ix in enumerate(sl):\n")],
+     "change to the parameter held"),
+    ("computed_key_store_into_a_parameter", [("        g = gens[j]\n", "        g = gens[j]\n        gens[j] = g\n")],
+     "change to the parameter gens"),
+    ("callee_changes_its_callers_list", [(_HAND_DEF, "def _stamp(rows):\n    rows.append(None)\n\n\n" + _HAND_DEF),
+                                         (_PH_APPEND + "    return rows\n",
+                                          _PH_APPEND + "    _stamp(rows)\n    return rows\n")],
+     "change to the parameter rows"),
+    ("change_after_handed_on", [("        per_rec_rows.append(rows)\n",
+                                 "        per_rec_rows.append(rows)\n        rows.append((None, None))\n")],
+     "after it was handed on"),
+    ("change_after_handed_on_in_an_earlier_turn", [(_PH_APPEND, _PH_APPEND + "        snapshot = [rows]\n")],
+     "after it was handed on"),
+]
+
+
+def _edited(edits):
+    src = _read(API, "card_measures.py")
+    for old, new in edits:
+        assert src.count(old) == 1, old
+        src = src.replace(old, new)
+    return src
+
+
+@pytest.mark.parametrize("case", FIX4_ACCEPTED, ids=[c[0] for c in FIX4_ACCEPTED])
+def test_m1_fix4_an_accepted_composition_records_the_read_it_adds(case):
+    _id, edits, name, fact = case
+    assert fact not in READS[name]                          # control: the edit adds a read
+    got = _reads_of(_edited(edits))
+    assert fact in got[name], (name, fact, sorted(got[name]))
+
+
+@pytest.mark.parametrize("case", FIX4_REFUSED, ids=[c[0] for c in FIX4_REFUSED])
+def test_m1_fix4_a_composition_the_analysis_cannot_attribute_is_refused(case):
+    _id, edits, refusal = case
+    _reads_of(_edited([(old, old) for old, _new in edits]))   # control: the unedited source analyses
+    with pytest.raises(crs.Unsupported, match=refusal):
+        _reads_of(_edited(edits))
+
+
+def test_m1_fix4_the_composition_tables_are_counted():
+    print("compositions: %d accepted with a control, %d refused with a case"
+          % (len(FIX4_ACCEPTED), len(FIX4_REFUSED)))
+    assert len({c[0] for c in FIX4_ACCEPTED}) == len(FIX4_ACCEPTED)
+    assert len({c[0] for c in FIX4_REFUSED}) == len(FIX4_REFUSED)
+
+
 # -- M2: the window length is bounded, so a changed day's work is ----------------------
 
 def test_m2_a_card_window_is_a_whole_number_of_days_up_to_the_derived_retention(tmp_path):
@@ -1545,14 +1658,23 @@ def test_m1_fix3_dynamic_reads_are_static_reads_and_static_reads_are_declared():
     print("static beyond dynamic: %d pairs (measure never held a value on these fixtures %d, fact "
           "moved only which rows exist %d, a read that did not move the value on these fixtures %d)"
           % (len(surplus), len(never), len(rowset), len(over)))
-    for m, f in sorted(over):
-        print("  static only: %s %s" % (m, f))
+    # fix pass 4 (M2): every static-only pair and every unexercised arm is
+    # accounted for by identity (card_read_dispositions), all printed
+    for m, f in sorted(surplus):
+        why = crdisp.PAIRS.get((m, f), "NONE")
+        print("  static only: %s %s [%s] %s" % (m, f, why, crdisp.PAIR_REASONS.get(why, "")))
     print("recording view: %d runs, facts touched %s" % (res.runs, sorted(res.touched)))
     print("branch coverage of the measure functions: %d of %d arms in %d functions; %d unexercised"
           % (taken, total, fns, len(missing)))
-    for fname, line, got in missing:
-        print("  unexercised: %s line %s, arms taken %d" % (fname, line, got))
+    for fname, line, n, arm, _op, never, src_text in crd.describe(missing):
+        why = crdisp.ARMS.get((fname, line, n, arm), "NONE")
+        print("  unexercised: %s line %s site %d, %s arm (never %s: %s) [%s]"
+              % (fname, line, n, arm, never, src_text.strip()[:80], why))
+    for why, text in sorted(crdisp.ARM_REASONS.items()):
+        print("  arm reason %s: %s" % (why, text))
     assert taken <= total and fns > 0
+    problems = crdisp.check(surplus, res.rowset, missing)
+    assert problems == [], problems
 
 
 def test_m1_fix3_the_dynamic_method_sees_a_read_moved_into_a_measure():
@@ -1573,6 +1695,131 @@ def test_m1_fix3_the_dynamic_method_sees_a_read_moved_into_a_measure():
     finally:
         cm._hand_row = orig
     assert "sl" in got.dyn["b4.hand.phase"]
+
+
+# -- M2 fix pass 4: the dynamic proof is accountable and cannot cancel ----------------------
+
+def test_m2_fix4_the_gate_refuses_a_missing_stale_or_mismatched_disposition():
+    res, _fns, _taken, _total, missing = _dynamic()
+    names = {n for ns in cm.MEASURES.values() for n in ns}
+    surplus = {(m, f) for m in names for f in READS[m] if f not in res.dyn[m]}
+    assert crdisp.check(surplus, res.rowset, missing) == []                # control: accounted for
+    pair = sorted(surplus)[0]
+    arm = sorted(missing, key=str)[0]
+    cases = {
+        "a static-only pair with no disposition": (surplus | {("b4.game.records", "ap")}, res.rowset, missing),
+        "a disposition for a pair that is not static-only": (surplus - {pair}, res.rowset, missing),
+        "an unexercised arm with no disposition": (surplus, res.rowset, missing + [("card_view", 1, 1, "jump")]),
+        "a disposition for an arm that is not unexercised": (surplus, res.rowset,
+                                                             [a for a in missing if a != arm]),
+    }
+    for what, args in cases.items():
+        assert crdisp.check(*args), what
+    # a pair whose observed kind changed (rows moved, or no longer moved)
+    flipped = {m: set(v) for m, v in res.rowset.items()}
+    m, f = next(p for p in sorted(surplus) if crdisp.PAIRS[p] == "ROWSET")
+    flipped[m].discard(f)
+    assert any("no longer matches" in p for p in crdisp.check(surplus, flipped, missing))
+    # the counts the round named, as identities
+    print("dispositions: %d static-only pairs, %d unexercised arms, %d pair reasons, %d arm reasons"
+          % (len(crdisp.PAIRS), len(crdisp.ARMS), len(crdisp.PAIR_REASONS), len(crdisp.ARM_REASONS)))
+
+
+def test_m2_fix4_slot_and_spawn_lists_change_one_hand_and_one_entry_at_a_time():
+    """Each sl / sp perturbation changes one hand's list only: one entry
+    removed, or that list emptied. The rows it moved lie in the set that hand
+    can reach (its deal's hand and pair rows, the record, game and window
+    rows); the measures sl and sp moved are exactly the expected sets: the
+    static reads of each, less the dispositioned pairs."""
+    res, *_ = _dynamic()
+    rec = k.default_record()
+    count = {"sl": 0, "sp": 0}
+    for fact, label, changed, where in crd.perturbations(rec):
+        if fact not in ("sl", "sp"):
+            assert where is None
+            continue
+        pos = crd.SL if fact == "sl" else crd.SP
+        diff = [h for h, (a, b) in enumerate(zip(rec["hd"], changed["hd"])) if a[pos] != b[pos]]
+        assert len(diff) == 1, (label, diff)
+        h = diff[0]
+        a, b = list(rec["hd"][h][pos]), list(changed["hd"][h][pos])
+        assert b == [] or (len(b) == len(a) - 1 and any(a[:j] + a[j + 1:] == b for j in range(len(a)))), label
+        assert where == (rec["hd"][h][0], rec["hd"][h][1])
+        others = [i for i, (x, y) in enumerate(zip(rec["hd"], changed["hd"])) if i != h and x != y]
+        assert others == [], label
+        count[fact] += 1
+    assert count["sl"] > len(rec["hd"])                                   # every hand, entry by entry
+    assert res.outside == [], res.outside[:5]
+    assert res.moved and any(res.moved.values())                          # control: they moved rows
+    names = {n for ns in cm.MEASURES.values() for n in ns}
+    allowed = _exclusions(res)
+    for fact in ("sl", "sp"):
+        moved = {m for m in names if fact in res.dyn[m]}
+        expected = {m for m in names if fact in READS[m] and (m, fact) not in crdisp.PAIRS}
+        excluded = {m for m in names if fact in allowed[m]}
+        print("%s: %d one-hand perturbations over the fixtures; measures moved %d: %s; expected %d; "
+              "moved through a stated exclusion: %s"
+              % (fact, sum(1 for kk in res.moved if kk[3] == fact), len(moved), sorted(moved), len(expected),
+                 sorted(moved - expected)))
+        assert expected <= moved, (fact, sorted(expected - moved))
+        assert moved - expected <= excluded, (fact, sorted(moved - expected - excluded))
+
+
+def _exclusions(res):
+    """Per measure, the facts the static method's stated exclusions let move
+    it (a NOT-RUN counter: the counted measures' reads; the incident word
+    read whole: its bits' facts), inherited by a measure built from one."""
+    names = {n for ns in cm.MEASURES.values() for n in ns}
+    allowed = {m: set() for m in names}
+    for fn, line in _RS.drops:
+        defined = [m for m, sites in _RS.sites.items() if (fn, line) in sites]
+        for m in defined:
+            allowed[m] |= set().union(*(res.dyn[r] for r in cm.HAND_RULES))
+    for m in _RS.statements():
+        allowed[m] |= {"whole", "first"}
+    changed = True
+    while changed:
+        changed = False
+        for m in names:
+            for x in _RS.defs.get(m, ()):
+                if x.startswith("M:") and not allowed[x[2:]] <= allowed[m]:
+                    allowed[m] |= allowed[x[2:]]
+                    changed = True
+    return allowed
+
+
+def test_m2_fix4_a_read_two_hands_would_cancel_is_seen_one_hand_at_a_time(monkeypatch):
+    """Control: b4.rec.index edited in memory to the difference of the first
+    two hands' slot-list lengths. Trimming every hand alike leaves it
+    unchanged (the old perturbation's blind spot); one hand at a time moves
+    it."""
+    orig = cm._record_row
+
+    def edited(rf, rows, series_sc, report):
+        row = orig(rf, rows, series_sc, report)
+        hd = rf.rec["hd"]
+        row["b4.rec.index"] = len(hd[0][crd.SL]) - len(hd[1][crd.SL]) if len(hd) > 1 else 0
+        return row
+    monkeypatch.setattr(cm, "_record_row", edited)
+    fx = crd.fixtures()
+    got = crd.dynamic_reads(fx)
+    assert "sl" in got.dyn["b4.rec.index"]
+    single = crd.perturbations
+
+    def every_hand_alike(rec):
+        out = [p for p in single(rec) if p[0] != "sl"]
+        r = copy.deepcopy(rec)
+        hit = False
+        for e in r["hd"]:
+            if e[crd.SL]:
+                e[crd.SL] = e[crd.SL][:-1]
+                hit = True
+        if hit:
+            out.append(("sl", "every hand trimmed at the last entry", r, None))
+        return out
+    monkeypatch.setattr(crd, "perturbations", every_hand_alike)
+    alike = crd.dynamic_reads(fx)
+    assert "sl" not in alike.dyn["b4.rec.index"]
 
 
 # -- M2: every revision shape the loader accepts, at every evaluator entry point ------------
@@ -1669,10 +1916,163 @@ def test_m2_the_parked_word_is_required_and_on_both_arms():
 
 def test_m2_a_visit_that_raises_is_recorded_and_the_pass_moves_on():
     src = inspect.getsource(ce.games_pass)
-    assert "await _fault(session_factory, key, lo, hi, rev, st)" in src
+    assert "await _fault(session_factory, key, lo, hi, rev, st, failed, fp)" in src
     q = ce._CANDIDATES.text
     assert "NOT (COALESCE(g.fault_attempts, 0) >= CAST(:cap AS int)" in q
     assert "g.fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar)" in q
     # nothing is finalized, signed or stamped evaluated by the fault record
     f = inspect.getsource(ce._fault)
     assert "finalized_at" not in f and "evaluated_rev" not in f and "signature" not in f
+
+
+# == fix pass 4 ===========================================================================
+
+# -- M3: input generations ---------------------------------------------------------------------
+
+def test_m3_fix4_every_input_carries_a_generation_and_a_visit_records_what_it_read():
+    sql = _read(BACKEND, "sql", "370_card_evidence.sql")
+    assert "CREATE SEQUENCE IF NOT EXISTS card_input_gen;" in sql
+    assert sql.count("gen BIGINT NOT NULL DEFAULT nextval('card_input_gen')") == 2   # records, censuses
+    assert "seen_inputs TEXT NULL" in sql
+    rb = _read(BACKEND, "sql", "rollback_370_card_evidence.sql")
+    assert "DROP SEQUENCE IF EXISTS card_input_gen;" in rb
+    # the conflict marker takes a new generation, once, with the marker
+    st = inspect.getsource(ce.store_record)
+    assert "gen = CASE WHEN conflict_at IS NULL THEN nextval('card_input_gen') ELSE gen END" in st
+    # every visit arm records the inputs it read; a faulted one keeps the old
+    ev = inspect.getsource(ce.evaluate_card_game)
+    assert ev.count("seen_inputs = :fp") == 2
+    assert "seen_inputs = CASE WHEN CAST(:fault AS varchar) IS NULL THEN CAST(:fp AS varchar)" in ev
+    # the candidate query compares committed inputs with what was read
+    q = ce._CANDIDATES.text
+    assert "g.seen_inputs IS DISTINCT FROM f.fp" in q and ce._FP_SQL in q
+    assert "received_at > g.processed_at" not in q and "registered_at" not in q
+
+
+def test_m3_fix4_the_python_list_and_the_sql_list_have_one_form():
+    rows = [{"gen": 9, "pool_digest": "b"}, {"gen": 4, "pool_digest": None}, {"gen": 12, "pool_digest": "a"}]
+    assert ce._inputs_fp(rows, {"a": 7, "b": 3}) == "4:0,9:3,12:7"
+    assert ce._inputs_fp(rows[:1], {}) == "9:0"
+    # the SQL builds generation, colon, census generation (zero for none), by generation
+    assert "e.gen::text || ':' || COALESCE(p.gen, 0)::text" in ce._FP_SQL and "ORDER BY e.gen" in ce._FP_SQL
+
+
+# -- M4: bounded backoff with re-probe ---------------------------------------------------------
+
+def test_m4_fix4_the_backoff_schedule_doubles_from_its_base_to_its_cap():
+    lim = ce.CARD_RETRY_LIMITS
+    got = [ce.retry_delay(i) for i in range(10)]
+    want = []
+    for i in range(10):
+        want.append(min(lim["op_cap_s"], lim["op_base_s"] * 2 ** i))
+    assert got == want
+    assert got[0] == lim["op_base_s"] and got[-1] == lim["op_cap_s"]
+    assert ce.retry_delay(-3) == lim["op_base_s"] and ce.retry_delay(10 ** 6) == lim["op_cap_s"]
+    assert lim["reprobe_s"] > 0
+
+
+def _wrapped_driver(err):
+    import sqlalchemy.exc as sx
+    w = sx.DBAPIError("SELECT", {}, err)
+    return w
+
+
+OPERATIONAL_CASES = [
+    "ConnectionError", "TimeoutError", "ConnectionResetError", "sa.OperationalError", "sa.InterfaceError",
+    "sa.TimeoutError", "sa.DisconnectionError", "sa.DBAPIError.invalidated", "pg.PostgresConnectionError",
+    "pg.ConnectionDoesNotExistError", "pg.InterfaceError", "pg.DeadlockDetectedError",
+    "pg.SerializationError", "pg.TooManyConnectionsError", "pg.AdminShutdownError",
+    "pg.LockNotAvailableError", "sa.DBAPIError(pg.PostgresConnectionError)", "cause:ConnectionError",
+    "context:sa.TimeoutError"]
+DETERMINISTIC_CASES = [
+    "RuntimeError", "ValueError", "KeyError", "ZeroDivisionError", "card_measures.Refusal",
+    "sa.DBAPIError(pg.UniqueViolationError)", "sa.ProgrammingError", "pg.DataError",
+    "pg.UndefinedColumnError", "sa.DBAPIError.valid"]
+
+
+def _exception(name):
+    import asyncpg.exceptions as pg
+    import sqlalchemy.exc as sx
+    if name.startswith("cause:") or name.startswith("context:"):
+        how, inner = name.split(":", 1)
+        outer = RuntimeError("wrapper")
+        if how == "cause":
+            outer.__cause__ = _exception(inner)
+        else:
+            outer.__context__ = _exception(inner)
+        return outer
+    if name.startswith("sa.DBAPIError("):
+        return _wrapped_driver(_exception(name[len("sa.DBAPIError("):-1]))
+    if name == "sa.DBAPIError.invalidated":
+        return sx.DBAPIError("SELECT", {}, RuntimeError("x"), connection_invalidated=True)
+    if name == "sa.DBAPIError.valid":
+        return sx.DBAPIError("SELECT", {}, RuntimeError("x"), connection_invalidated=False)
+    if name.startswith("sa."):
+        cls = vars(sx)[name[3:]]
+        if issubclass(cls, sx.StatementError):
+            return cls("SELECT", {}, RuntimeError("x"))
+        return cls("x")
+    if name.startswith("pg."):
+        return vars(pg)[name[3:]]("x")
+    if name == "card_measures.Refusal":
+        return cm.Refusal("x")
+    return {"RuntimeError": RuntimeError, "ValueError": ValueError, "KeyError": KeyError,
+            "ZeroDivisionError": ZeroDivisionError, "ConnectionError": ConnectionError,
+            "TimeoutError": TimeoutError, "ConnectionResetError": ConnectionResetError}[name]("x")
+
+
+@pytest.mark.parametrize("name", OPERATIONAL_CASES)
+def test_m4_fix4_an_operational_failure_is_classified_operational(name):
+    assert ce.operational(_exception(name)) is True
+
+
+@pytest.mark.parametrize("name", DETERMINISTIC_CASES)
+def test_m4_fix4_any_other_failure_is_deterministic(name):
+    assert ce.operational(_exception(name)) is False
+
+
+def test_m4_fix4_an_operational_failure_never_counts_toward_the_park():
+    assert "fault_attempts" not in ce._OP_RETRY and "parked_at" not in ce._OP_RETRY
+    assert "fault_inputs" not in ce._OP_RETRY
+    f = inspect.getsource(ce._fault)
+    assert f.count("_OP_RETRY") == 1 and f.count("_FAULT_COUNT") == 1
+    assert "if is_operational:" in f
+    # a deterministic fault ends an operational backoff; a completed visit clears both
+    assert "op_attempts = 0, retry_at = NULL" in ce._FAULT_COUNT
+    for col in ("derive_fault = NULL", "fault_attempts = 0", "fault_rev = NULL", "fault_inputs = NULL",
+                "parked_at = NULL", "op_attempts = 0", "retry_at = NULL"):
+        assert col in ce._CLEAR
+
+
+def test_m4_fix4_a_parked_game_is_re_probed_and_a_waiting_retry_is_held():
+    q = ce._CANDIDATES.text
+    assert "(g.retry_at IS NULL OR g.retry_at <= now())" in q
+    assert "g.fault_inputs IS NOT DISTINCT FROM f.fp" in q
+    assert "g.processed_at > now() - make_interval(secs => CAST(:reprobe AS int))" in q
+    src = inspect.getsource(ce.games_pass)
+    assert '"reprobe": CARD_RETRY_LIMITS["reprobe_s"]' in src
+
+
+def test_m4_fix4_the_parked_age_is_required_and_on_both_arms():
+    import schemas
+    f = schemas.HealthResponse.model_fields["card_evidence_parked_oldest_s"]
+    assert f.annotation is int and f.is_required()
+    assert inspect.getsource(_main().health_check).count(
+        "card_evidence_parked_oldest_s=_cev.parked_oldest_s()") == 2
+    assert ce.parked_oldest_s() == ce.PARKED_UNKNOWN < 0
+
+
+def test_m4_fix4_the_retry_limits_are_pinned():
+    sys.path.insert(0, os.path.join(BACKEND, "tools"))
+    import review_guard as rg
+    assert rg.PINNED[("card_evidence", "CARD_RETRY_LIMITS")] == ce.CARD_RETRY_LIMITS
+
+
+# -- LOW 3: every completed visit clears derive_fault ------------------------------------------
+
+def test_low3_fix4_every_completed_visit_arm_clears_every_fault_field():
+    ev = inspect.getsource(ce.evaluate_card_game)
+    # the no-revision arm and the unchanged arm write _CLEAR; the deriving arm
+    # writes derive_fault = :fault with the fault counts (none: all cleared)
+    assert ev.count("+ _CLEAR +") == 2
+    assert "derive_fault = :fault" in ev and "+ _FAULT_COUNT +" in ev

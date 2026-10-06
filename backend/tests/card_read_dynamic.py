@@ -170,14 +170,18 @@ def _trim(lst, end):
 
 
 def perturbations(rec):
-    """(fact, label, the record changed) for every way each fact's data can
-    change; a change that does not apply to this record is left out."""
+    """(fact, label, the record changed, the hand changed or None) for every
+    way each fact's data can change; a change that does not apply to this
+    record is left out. A slot or spawn list is changed ONE HAND AND ONE
+    ENTRY AT A TIME (each entry removed alone, then the list emptied), so two
+    hands changed alike can never cancel in a measure that compares them;
+    the hand changed is named by its (phase, deal)."""
     out = []
 
-    def add(fact, label, edit):
+    def add(fact, label, edit, where=None):
         r = copy.deepcopy(rec)
         if edit(r) is not False:
-            out.append((fact, label, r))
+            out.append((fact, label, r, where))
 
     add("whole", "lost bit", lambda r: r.__setitem__("inc", r["inc"] | cm.INC["lost"]))
     add("whole", "fault bit", lambda r: r.__setitem__("inc", r["inc"] | cm.INC["fault"]))
@@ -218,16 +222,18 @@ def perturbations(rec):
             r["held0"][role] = None
         add("held0", "role %d absent" % role, held_none)
     for fact, pos in (("sl", SL), ("sp", SP)):
-        for end in ENDS:
-            def ent(r, pos=pos, end=end):
-                hit = False
-                for e in r["hd"]:
-                    t = _trim(e[pos], end)
-                    if t is not None:
-                        e[pos] = t
-                        hit = True
-                return hit
-            add(fact, "every hand's list trimmed at the %s entry" % end, ent)
+        for h, e0 in enumerate(rec["hd"]):
+            where = (e0[0], e0[1])
+            for j in range(len(e0[pos])):
+                def one(r, h=h, pos=pos, j=j):
+                    lst = list(r["hd"][h][pos])
+                    del lst[j]
+                    r["hd"][h][pos] = lst
+                add(fact, "hand %d entry %d removed" % (h, j), one, where)
+            if e0[pos]:
+                def empty(r, h=h, pos=pos):
+                    r["hd"][h][pos] = []
+                add(fact, "hand %d emptied" % h, empty, where)
     for fact in cm.W["omit_keys"]:
         def stated(r, fact=fact):
             r["omit"][fact] = [1, 1] if isinstance(r["omit"][fact], list) else 1
@@ -346,6 +352,21 @@ class Result:
         self.rowset = {n: set() for n in names}
         self.valued = set()
         self.touched, self.raised, self.runs = set(), [], 0
+        # one-hand perturbations: (fixture, record, label) -> the row keys whose
+        # values moved, and the rows each may move (_reach)
+        self.moved, self.outside = {}, []
+
+
+def _reach(key, where):
+    """Whether a one-hand change at `where` (phase, deal) may move row `key`:
+    that deal's hand rows in either record, its pair row, every record row,
+    the game row and every window."""
+    kind = key[0]
+    if kind == "hand":
+        return (key[2], key[3]) == where
+    if kind == "pair":
+        return (key[2], key[3]) == where
+    return kind in ("record", "game", "window")
 
 
 def dynamic_reads(fx=None):
@@ -360,7 +381,7 @@ def dynamic_reads(fx=None):
             for row in base.values():
                 res.valued |= {n for n, v in row.items() if v is not None}
             for i, (s, o, r) in enumerate(records):
-                for fact, label, changed in perturbations(r):
+                for fact, label, changed, where in perturbations(r):
                     recs = list(records)
                     recs[i] = (s, o, changed)
                     try:
@@ -369,11 +390,17 @@ def dynamic_reads(fx=None):
                         res.raised.append((fname, i, fact, label, type(exc).__name__))
                         continue
                     res.runs += 1
+                    moved = set()
                     for key in base.keys() & got.keys():
                         a, b = base[key], got[key]
                         for name in a:
                             if name in b and _differs(a[name], b[name]):
                                 res.dyn[name].add(fact)
+                                moved.add(key)
+                    if where is not None:
+                        res.moved[(fname, i, label, fact)] = moved
+                        res.outside += [(fname, i, label, key) for key in sorted(moved, key=str)
+                                        if not _reach(key, where)]
                     for key in base.keys() ^ got.keys():
                         for name in (base.get(key) or got.get(key)):
                             res.rowset[name].add(fact)
@@ -410,12 +437,66 @@ def module_functions():
 
 
 def _branch_sites(co):
-    """(offset, line) of every conditional jump and loop test in one code
-    object."""
+    """(offset, line, arm names, the next instruction's offset, the
+    instruction) of every conditional jump and loop test in one code object.
+    The arms: for a loop test 'body' (the next item, the fall-through) and
+    'exit'; for a jump 'fall' (the condition did not jump) and 'jump'."""
     out = []
-    for ins in dis.get_instructions(co):
-        if ins.opname.startswith("POP_JUMP_IF") or ins.opname == "FOR_ITER":
-            out.append((ins.offset, ins.positions.lineno if ins.positions else None))
+    ins = list(dis.get_instructions(co))
+    for i, x in enumerate(ins):
+        if x.opname.startswith("POP_JUMP_IF") or x.opname == "FOR_ITER":
+            nxt = ins[i + 1].offset if i + 1 < len(ins) else None
+            arms = ("body", "exit") if x.opname == "FOR_ITER" else ("fall", "jump")
+            out.append((x.offset, x.positions.lineno if x.positions else None, arms, nxt, x))
+    return out
+
+
+def _numbered(codes, measured):
+    """Every site of the measured functions with its identity (function,
+    line, n): n numbers the sites of one line of one function in code
+    order."""
+    nth = {}
+    for c, fname in sorted(codes.items(), key=lambda kv: (kv[1], kv[0].co_firstlineno, kv[0].co_name)):
+        if fname not in measured:
+            continue
+        for offset, line, arms, nxt, ins in _branch_sites(c):
+            n = nth[(fname, line)] = nth.get((fname, line), 0) + 1
+            yield fname, line, n, c, offset, arms, nxt, ins
+
+
+# What each arm of a jump means, by the jump's kind: (fall, jump).
+_MEANS = {"POP_JUMP_IF_FALSE": ("true", "false"), "POP_JUMP_IF_TRUE": ("false", "true"),
+          "POP_JUMP_IF_NONE": ("not None", "None"), "POP_JUMP_IF_NOT_NONE": ("None", "not None")}
+
+
+def describe(unexercised):
+    """For each unexercised arm (branch_coverage's identities): (function,
+    line, n, arm, what never happened, the source the site tests)."""
+    lines = inspect.getsource(cm).splitlines()
+    codes = {}
+    for fname, co, _in_view in module_functions():
+        for c in _codes(co):
+            codes[c] = fname
+    want = {(f, ln, n): arm for f, ln, n, arm in unexercised}
+    out = []
+    for fname, line, n, _c, _off, arms, _nxt, ins in _numbered(codes, {f for f, _l, _n in want}):
+        if (fname, line, n) not in want:
+            continue
+        arm = want[(fname, line, n)]
+        p = ins.positions
+        if p and p.lineno == p.end_lineno:
+            src = lines[p.lineno - 1][p.col_offset:p.end_col_offset]
+        elif p:
+            src = " ".join(x.strip() for x in lines[p.lineno - 1:p.end_lineno])
+        else:
+            src = ""
+        if ins.opname == "FOR_ITER":
+            never = {"body": "a turn of the loop", "exit": "the loop ran out",
+                     "both": "the loop was reached"}[arm]
+        else:
+            fall, jump = _MEANS.get(ins.opname, ("fall", "jump"))
+            never = {"fall": "tested " + fall, "jump": "tested " + jump, "both": "the test was reached"}[arm]
+        out.append((fname, line, n, arm, ins.opname, never, src))
     return out
 
 
@@ -423,7 +504,9 @@ def branch_coverage(run):
     """Run `run()` with branch and call events on every function of
     card_measures; the measure functions are the view section and every
     function the run called. Return (functions, arms taken, arms total,
-    unexercised [(function, line, arms taken)])."""
+    unexercised [(function, line, n, the arm that never ran)]): n numbers the
+    sites of one line of one function in code order, the arm is one of
+    _branch_sites' names, or 'both'."""
     mon = sys.monitoring
     seen, called = {}, set()
     codes, section = {}, set()
@@ -457,15 +540,15 @@ def branch_coverage(run):
     measured = section | called
     total = taken = 0
     unexercised = []
-    for c, fname in codes.items():
-        if fname not in measured:
-            continue
-        for offset, line in _branch_sites(c):
-            got = len(seen.get((c, offset), ()))
-            total += 2
-            taken += min(got, 2)
-            if got < 2:
-                unexercised.append((fname, line, got))
+    for fname, line, n, c, offset, arms, nxt, _ins in _numbered(codes, measured):
+        dests = seen.get((c, offset), set())
+        got = len(dests)
+        total += 2
+        taken += min(got, 2)
+        if got == 0:
+            unexercised.append((fname, line, n, "both"))
+        elif got == 1:
+            unexercised.append((fname, line, n, arms[1] if nxt in dests else arms[0]))
     return len(measured), taken, total, sorted(unexercised, key=str)
 
 
@@ -485,5 +568,5 @@ if __name__ == "__main__":
           % (res.runs, sorted(res.touched), len(res.raised)))
     print("dynamic pairs %d over %d measures" % (sum(len(v) for v in res.dyn.values()), len(res.dyn)))
     print("branch arms %d of %d in %d functions; unexercised %d" % (taken, total, fns, len(missing)))
-    for fname, line, got in missing:
-        print("  unexercised: %s line %s, arms taken %d" % (fname, line, got))
+    for fname, line, n, arm in missing:
+        print("  unexercised: %s line %s site %d, the %s arm" % (fname, line, n, arm))
