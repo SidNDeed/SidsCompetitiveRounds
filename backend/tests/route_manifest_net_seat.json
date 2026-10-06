@@ -691,7 +691,7 @@
           ],
           "main",
           "pc_collection",
-          "50efa9309738f4a8c5bd3cd9e8125b4003939bce"
+          "5d9e4408bc046ade79cc60140caa9b5c308dbec2"
         ],
         [
           "/api/v1/pc/daily",
@@ -2936,7 +2936,7 @@
           ],
           "main",
           "admin_pc_snapshot",
-          "f1c5a0c2b24e6a040e6029d13c79efcf38984630"
+          "5d7fa768b0d52cf496f7bcab974079593f16be75"
         ],
         [
           "/api/v1/admin/pc/trades",
@@ -3563,7 +3563,7 @@
       [
         "main",
         "lifespan",
-        "46e37f7ed7742b40a530696d5eba6aab36a4f2ad"
+        "9129e8a088e68575f3f317a0469095196230ee7a"
       ]
     ]
   },
