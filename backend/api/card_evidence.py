@@ -48,7 +48,13 @@ import hmac
 import re
 from datetime import datetime, timedelta, timezone
 
+import sqlalchemy.exc as sa_exc
 from sqlalchemy import text
+
+try:
+    import asyncpg.exceptions as pg_exc
+except ImportError:                           # the driver's own classes are optional here
+    pg_exc = None
 
 import card_measures as cm
 import review_rules as rr
@@ -60,9 +66,15 @@ EvidenceRefused = se.EvidenceRefused
 CARD_LIMITS = {"games_per_pass": 500, "expiry_days": 14, "list_retention_days": 120,
                "derived_retention_days": 400, "unregistered_days": 30, "admin_rows": 50}
 # The bound on visits that raise (operational; pinned by value in the guard):
-# how many in a row park a game under one revision, and the width of the
-# recorded error word (card_games.derive_fault).
+# how many deterministic faults in a row park a game under one revision, and
+# the width of the recorded error word (card_games.derive_fault).
 CARD_FAULT_LIMITS = {"attempts": 5, "word_chars": 40}
+# The retry schedule (operational; pinned by value in the guard), in seconds:
+# an operational failure (database, pool, connection, timeout) is retried
+# after op_base_s, doubling per failure in a row up to op_cap_s, and never
+# counts toward the park; a parked game is visited again (re-probed) once
+# reprobe_s has passed since its last visit, with or without new input.
+CARD_RETRY_LIMITS = {"op_base_s": 30, "op_cap_s": 900, "reprobe_s": 3600}
 SWITCHES = ("card_evidence_accept", "card_evidence_worker", "card_evidence_purge")
 LIST_KEYS = ("cards", "held0", "ph", "hd", "ap")
 _PRINTABLE = re.compile(r"[ -~]+")
@@ -139,13 +151,15 @@ async def store_record(db, env: dict, rec: dict, seat_id, other_id, header_versi
             return {"status": "already_recorded"}
         kind = ("attach_key" if prior["attach_key"] != env["attach"]
                 else "other_seat" if prior["other_player_id"] != other_id else "payload")
-        # The marker's time is read after this row's lock is held: the
-        # worker reads a game's records FOR SHARE, so an evaluation that did
-        # not see this marker committed before this statement ran, and the
-        # marker is later than its processed_at (the candidate query wakes it).
+        # The marker gives the row a new input generation: a visit that read
+        # the row without it recorded the old one (card_games.seen_inputs),
+        # so the candidate query schedules the game again whenever this
+        # commits (see _CANDIDATES).
         await db.execute(text(
             "UPDATE card_evidence SET conflict_at = COALESCE(conflict_at, clock_timestamp()), "
-            "  conflict_kind = COALESCE(conflict_kind, :ck) WHERE id = :i"),
+            "  conflict_kind = COALESCE(conflict_kind, :ck), "
+            "  gen = CASE WHEN conflict_at IS NULL THEN nextval('card_input_gen') ELSE gen END "
+            "WHERE id = :i"),
             {"ck": kind, "i": prior["id"]})
         await db.commit()
         raise EvidenceRefused(409, "conflict")
@@ -188,16 +202,20 @@ async def register_census(db, doc) -> dict:
 
 # -- the worker's card pass (primary only) ----------------------------------------------
 
-async def _registry(db, digests) -> dict:
-    """The registered censuses for the digests a game's records name."""
+async def _registry(db, digests, gens=None) -> dict:
+    """The registered censuses for the digests a game's records name; with
+    gens (a dict), each one's input generation read in the same statement,
+    by digest."""
     if not digests:
         return {}
     rows = (await db.execute(text(
-        "SELECT census FROM card_pool_registry WHERE digest = ANY(CAST(:d AS varchar[]))"),
+        "SELECT census, digest, gen FROM card_pool_registry WHERE digest = ANY(CAST(:d AS varchar[]))"),
         {"d": sorted(digests)})).all()
     out = {}
     keys = list(cm.W["dump_keys"])
-    for (doc,) in rows:
+    for doc, digest, gen in rows:
+        if gens is not None:
+            gens[digest] = gen
         # jsonb keeps no key order: the stored dump is put back in the file's
         # order (same key set, nothing added) before the whole check runs again
         doc = se._jsonv(doc)
@@ -208,41 +226,66 @@ async def _registry(db, digests) -> dict:
     return out
 
 
+# Input generations. Every published input carries a value of the sequence
+# card_input_gen: a record from its insert, again when its conflict marker is
+# set, a census from its registration. A visit records the generations of
+# exactly the rows it read (seen_inputs, _inputs_fp: each record's
+# generation with its census's, zero for none, in generation order; a game
+# has at most one record per seat, so the list is short). The candidate
+# query builds the same list over what is committed when it runs (_FP_SQL).
+# An input whose transaction commits after a visit read the game, whenever
+# that transaction started, is not in the visit's list, so the two differ
+# and the game is scheduled again: the comparison is of what was read
+# against what is committed, never of two clock times.
+_FP_SQL = "string_agg(e.gen::text || ':' || COALESCE(p.gen, 0)::text, ',' ORDER BY e.gen)"
+_FP_FROM = "FROM card_evidence e LEFT JOIN card_pool_registry p ON p.digest = e.pool_digest "
+
+
+def _inputs_fp(rows, gens) -> str:
+    """The input generations one visit read (rows: its records with their
+    gen and pool_digest; gens: the census generations it read, by digest),
+    in the form _FP_SQL builds."""
+    return ",".join("%d:%d" % (r["gen"], gens.get(r["pool_digest"], 0))
+                    for r in sorted(rows, key=lambda r: r["gen"]))
+
+
 # Games waiting for work, least recently processed first. With a revision:
 # every game not yet final; every game whose last visit was under another
 # revision, its lists held or purged (a purged game is visited once per
 # revision, so what another revision derived from it is retired); every game
-# holding its lists with a record received, a conflict marked on one of its
-# records, or a census registered for one of its records, after it was last
-# processed. With none: only games not yet attached to their match.
-# Either way not a parked game: one whose visits under this revision (or
-# with none) raised CARD_FAULT_LIMITS["attempts"] times in a row, unless a
-# record was received, a conflict marked or a census registered for it
-# after its last visit. A visit that raises is recorded on the game (its
-# error class, the attempt count, the revision, the visit time: _fault) and
-# the pass moves on; nothing about it is finalized or stamped evaluated. A
-# visit that completes clears the count; a new revision or new input ends
-# the parking.
+# whose committed inputs differ from the ones its last completed visit read
+# (a record received, a conflict marked, a census registered). With none:
+# only games not yet attached to their match.
+# Either way not a game waiting out a retry (retry_at in the future: an
+# operational failure, bounded backoff, see _fault; the game is visited
+# once it passes), and not a parked game: one whose visits under this
+# revision (or with none) raised a deterministic fault
+# CARD_FAULT_LIMITS["attempts"] times in a row, unless its committed inputs
+# differ from the ones read before its last faulted visit (fault_inputs) or
+# its last visit is CARD_RETRY_LIMITS["reprobe_s"] old (the re-probe:
+# nothing is excluded for good). A visit that raises is recorded on the game
+# (_fault) and the pass moves on; nothing about it is finalized or stamped
+# evaluated. A visit that completes without a fault clears every fault
+# field; a new revision restarts the count.
 _CANDIDATES = text(
-    "SELECT e.stable_game_key k, LEAST(e.seat_player_id, e.other_player_id) lo, "
-    "       GREATEST(e.seat_player_id, e.other_player_id) hi, max(e.received_at) rx "
-    "  FROM card_evidence e "
-    "  LEFT JOIN card_games g ON g.stable_game_key = e.stable_game_key "
-    "   AND g.pair_lo = LEAST(e.seat_player_id, e.other_player_id) "
-    "   AND g.pair_hi = GREATEST(e.seat_player_id, e.other_player_id) "
-    "  LEFT JOIN card_pool_registry p ON p.digest = e.pool_digest "
-    " WHERE ((CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
+    "WITH f AS (SELECT e.stable_game_key k, LEAST(e.seat_player_id, e.other_player_id) lo, "
+    "       GREATEST(e.seat_player_id, e.other_player_id) hi, max(e.received_at) rx, "
+    "       " + _FP_SQL + " fp "
+    "  " + _FP_FROM
+    + " GROUP BY e.stable_game_key, LEAST(e.seat_player_id, e.other_player_id), "
+    "          GREATEST(e.seat_player_id, e.other_player_id)) "
+    "SELECT f.k, f.lo, f.hi, f.fp FROM f "
+    "  LEFT JOIN card_games g ON g.stable_game_key = f.k AND g.pair_lo = f.lo AND g.pair_hi = f.hi "
+    " WHERE (g.retry_at IS NULL OR g.retry_at <= now()) "
+    "   AND ((CAST(:rev AS varchar) IS NULL AND g.finalized_at IS NULL AND g.match_id IS NULL) "
     "    OR (CAST(:rev AS varchar) IS NOT NULL AND (g.finalized_at IS NULL "
     "        OR g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) "
-    "        OR (e.lists_purged_at IS NULL AND (e.received_at > g.processed_at "
-    "            OR e.conflict_at > g.processed_at OR p.registered_at > g.processed_at)))) "
-    "   ) AND NOT (COALESCE(g.fault_attempts, 0) >= CAST(:cap AS int) "
+    "        OR g.seen_inputs IS DISTINCT FROM f.fp))) "
+    "   AND NOT (COALESCE(g.fault_attempts, 0) >= CAST(:cap AS int) "
     "        AND g.fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) "
-    "        AND NOT COALESCE(g.processed_at < e.received_at OR g.processed_at < e.conflict_at "
-    "                         OR g.processed_at < p.registered_at, false)) "
-    " GROUP BY e.stable_game_key, LEAST(e.seat_player_id, e.other_player_id), "
-    "          GREATEST(e.seat_player_id, e.other_player_id) "
-    " ORDER BY min(g.processed_at) NULLS FIRST, rx LIMIT CAST(:lim AS int)")
+    "        AND g.fault_inputs IS NOT DISTINCT FROM f.fp "
+    "        AND g.processed_at > now() - make_interval(secs => CAST(:reprobe AS int))) "
+    " ORDER BY g.processed_at NULLS FIRST, f.rx LIMIT CAST(:lim AS int)")
 
 _MATCH = text(
     "SELECT m.id, m.ended_at, m.photon_room_id, "
@@ -584,7 +627,7 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
     rev = rs.rev if rs is not None else None
     rows = (await db.execute(text(
         "SELECT id, seat_player_id, other_player_id, attach_key, payload, pool_digest, conflict_at, "
-        "       received_at FROM card_evidence "
+        "       received_at, gen FROM card_evidence "
         "WHERE stable_game_key = :k AND LEAST(seat_player_id, other_player_id) = :lo "
         "  AND GREATEST(seat_player_id, other_player_id) = :hi ORDER BY id FOR SHARE"), b)).mappings().all()
     if not rows:
@@ -592,20 +635,28 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
     keys = sorted({r["attach_key"] for r in rows})
     match = (await db.execute(_MATCH, {"keys": keys, "lo": lo, "hi": hi,
                                        "lag": se.READY_LAG_S})).mappings().first()
+    digests = {r["pool_digest"] for r in rows if r["pool_digest"]}
+    gens = {}
     if rs is None:
+        if digests:
+            gens = dict((await db.execute(text(
+                "SELECT digest, gen FROM card_pool_registry WHERE digest = ANY(CAST(:d AS varchar[]))"),
+                {"d": sorted(digests)})).all())
         await db.execute(text(
             "UPDATE card_games SET match_id = :m, series_sc = :sc, processed_at = now(), "
-            "  fault_attempts = 0, fault_rev = NULL WHERE "
-            + _WHERE_GAME), dict(b, m=match["id"] if match else None, sc=match["sc"] if match else None))
+            "  seen_inputs = :fp, " + _CLEAR + "WHERE "
+            + _WHERE_GAME), dict(b, m=match["id"] if match else None, sc=match["sc"] if match else None,
+                                 fp=_inputs_fp(rows, gens)))
         return ("attached" if match else "waiting"), 0, 0, False
     named, other_key = se.attached_records(rows, match)
     named_ids = {r["id"] for r in named}
-    registry = await _registry(db, {r["pool_digest"] for r in rows if r["pool_digest"]})
+    registry = await _registry(db, digests, gens)
+    fp = _inputs_fp(rows, gens)
     sig = _signature(match, rows, named_ids, registry)
     expired = g["first_seen_at"] < datetime.now(timezone.utc) - timedelta(days=lim["expiry_days"])
     if sig == g["signature"] and g["evaluated_rev"] == rev and not (expired and match is not None):
-        await db.execute(text("UPDATE card_games SET processed_at = now(), fault_attempts = 0, "
-                              "fault_rev = NULL WHERE " + _WHERE_GAME), b)
+        await db.execute(text("UPDATE card_games SET processed_at = now(), seen_inputs = :fp, "
+                              + _CLEAR + "WHERE " + _WHERE_GAME), dict(b, fp=fp))
         return "unchanged", 0, 0, False
     final = match is not None and ((len(named) >= cm.W["players"] and not other_key) or expired)
     fired = errors = 0
@@ -636,34 +687,96 @@ async def evaluate_card_game(db, key: str, lo, hi, rs) -> tuple:
     # a final game is stamped with the revision that visited it, derived or
     # not, so the candidate query visits it again only under another one
     stamp = evaluated or (rev if final and fault is None else None)
-    # a view that raised counts as a faulted visit (_FAULT_COUNT); a visit
-    # without one clears the count
+    # a view that raised is a deterministic fault of this game's records
+    # (_FAULT_COUNT: counted, recorded with the inputs it read); a visit
+    # without one clears every fault field and records the inputs it read
     await db.execute(text(
         "UPDATE card_games SET match_id = :m, series_sc = :sc, signature = :s, processed_at = now(), "
         "  derive_fault = :fault, evaluated_rev = COALESCE(CAST(:ev AS varchar), evaluated_rev), "
         "  finalized_at = CASE WHEN :f THEN COALESCE(finalized_at, now()) ELSE NULL END, "
+        "  seen_inputs = CASE WHEN CAST(:fault AS varchar) IS NULL THEN CAST(:fp AS varchar) "
+        "    ELSE seen_inputs END, "
         + _FAULT_COUNT + "WHERE " + _WHERE_GAME),
         dict(b, m=match["id"] if match else None, sc=match["sc"] if match else None,
              s=sig if fault is None else None, fault=fault, ev=stamp,
-             f=bool(final) and fault is None, rev=rev))
+             f=bool(final) and fault is None, rev=rev, fp=fp, cap=CARD_FAULT_LIMITS["attempts"]))
     state = "final" if final and fault is None else ("evaluated" if evaluated else
                                                      ("fault" if fault else "waiting"))
     return state, fired, errors, evaluated is not None
 
 
-# A faulted visit on the game row: the count grows while the faults are under
-# one revision (or none) and starts again under another; a visit without a
-# fault clears it.
+# Every fault field cleared: a visit that completed (any arm).
+_CLEAR = ("derive_fault = NULL, fault_attempts = 0, fault_rev = NULL, fault_inputs = NULL, "
+          "parked_at = NULL, op_attempts = 0, retry_at = NULL ")
+
+# A deterministic fault on the game row: the count grows while the faults
+# are under one revision (or none) and starts again under another; reaching
+# CARD_FAULT_LIMITS["attempts"] parks the game (parked_at: when it first
+# reached the bound under this revision), recorded with the inputs the
+# faulted visit read (fault_inputs). Any visit, faulted this way or not, ends
+# an operational backoff; a visit without a fault clears every fault field.
 _FAULT_COUNT = (
     "  fault_attempts = CASE WHEN CAST(:fault AS varchar) IS NULL THEN 0 "
     "    WHEN fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) THEN fault_attempts + 1 ELSE 1 END, "
-    "  fault_rev = CASE WHEN CAST(:fault AS varchar) IS NULL THEN NULL ELSE CAST(:rev AS varchar) END ")
+    "  parked_at = CASE WHEN CAST(:fault AS varchar) IS NOT NULL "
+    "    AND fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) "
+    "    AND fault_attempts + 1 >= CAST(:cap AS int) THEN COALESCE(parked_at, now()) ELSE NULL END, "
+    "  fault_rev = CASE WHEN CAST(:fault AS varchar) IS NULL THEN NULL ELSE CAST(:rev AS varchar) END, "
+    "  fault_inputs = CASE WHEN CAST(:fault AS varchar) IS NULL THEN NULL ELSE CAST(:fp AS varchar) END, "
+    "  op_attempts = 0, retry_at = NULL ")
+
+# An operational failure on the game row: never counted toward the park; the
+# game waits out a backoff (retry_delay) and is then visited again.
+_OP_RETRY = ("  op_attempts = op_attempts + 1, "
+             "  retry_at = now() + make_interval(secs => CAST(:delay AS int)) ")
+
+
+def retry_delay(failures_before: int) -> int:
+    """The backoff after an operational failure, in seconds, given how many
+    came in a row before it: op_base_s, doubling per failure, never more
+    than op_cap_s (CARD_RETRY_LIMITS)."""
+    lim = CARD_RETRY_LIMITS
+    room = (lim["op_cap_s"] // lim["op_base_s"]).bit_length()
+    return min(lim["op_cap_s"], lim["op_base_s"] << min(max(failures_before, 0), room))
+
+
+# What makes a failure operational: the database, its pool, the connection
+# or a timeout, at any depth of the exception's cause chain (SQLAlchemy
+# wraps the driver's error). Everything else is deterministic.
+_OPERATIONAL = [ConnectionError, TimeoutError, sa_exc.OperationalError, sa_exc.InterfaceError,
+                sa_exc.TimeoutError, sa_exc.DisconnectionError]
+if pg_exc is not None:
+    _OPERATIONAL += [pg_exc.PostgresConnectionError, pg_exc.InterfaceError,
+                     pg_exc.TransactionRollbackError, pg_exc.InsufficientResourcesError,
+                     pg_exc.OperatorInterventionError, pg_exc.PostgresSystemError,
+                     pg_exc.LockNotAvailableError]
+_OPERATIONAL = tuple(_OPERATIONAL)
+
+
+def operational(exc) -> bool:
+    """Whether a visit's exception is operational (see _OPERATIONAL);
+    otherwise it is deterministic."""
+    seen, todo = set(), [exc]
+    while todo:
+        e = todo.pop()
+        if not isinstance(e, BaseException) or id(e) in seen:
+            continue
+        seen.add(id(e))
+        if isinstance(e, _OPERATIONAL):
+            return True
+        if isinstance(e, sa_exc.DBAPIError) and e.connection_invalidated is True:
+            return True
+        todo += [e.orig if isinstance(e, sa_exc.StatementError) else None, e.__cause__, e.__context__]
+    return False
+
 
 # The games parked under the revision of the last card pass (see the
-# candidate query); before this worker's first pass, and on a box that runs
-# no worker, the unknown value. Shown on /health as card_evidence_parked.
+# candidate query), and how long ago the oldest of them was parked, in whole
+# seconds (none parked: zero); before this worker's first pass, and on a box
+# that runs no worker, the unknown value. Shown on /health as
+# card_evidence_parked and card_evidence_parked_oldest_s.
 PARKED_UNKNOWN = -1
-_PARKED = {"n": PARKED_UNKNOWN}
+_PARKED = {"n": PARKED_UNKNOWN, "oldest_s": PARKED_UNKNOWN}
 
 # Test hook: when set, called with each candidate's key before it is
 # visited, inside its transaction (a raise there is a faulted visit). Never
@@ -675,26 +788,43 @@ def parked() -> int:
     return _PARKED["n"]
 
 
-async def _fault(session_factory, key, lo, hi, rev, word) -> None:
+def parked_oldest_s() -> int:
+    return _PARKED["oldest_s"]
+
+
+async def _fault(session_factory, key, lo, hi, rev, word, is_operational, fp) -> None:
     """Record a visit that raised, in a transaction of its own (the visit's
-    was rolled back): the error class, the attempt count, the revision and
-    the visit time. Nothing is finalized, signed or stamped evaluated."""
+    was rolled back): the error word and the visit time, and either the
+    operational backoff (_OP_RETRY) or the deterministic count with the
+    revision and the inputs (_FAULT_COUNT). The inputs recorded are the ones
+    the candidate query read before the visit (fp), never a later reading:
+    an input committed after that read differs from them and wakes a parked
+    game. Nothing is finalized, signed or stamped evaluated."""
     async with session_factory() as db:
         b = {"k": key, "lo": lo, "hi": hi}
         await db.execute(text(
             "INSERT INTO card_games (stable_game_key, pair_lo, pair_hi) VALUES (:k, :lo, :hi) "
             "ON CONFLICT DO NOTHING"), b)
-        await db.execute(text(
-            "UPDATE card_games SET derive_fault = :fault, processed_at = now(), " + _FAULT_COUNT
-            + "WHERE " + _WHERE_GAME), dict(b, fault=word[:CARD_FAULT_LIMITS["word_chars"]], rev=rev))
+        word = word[:CARD_FAULT_LIMITS["word_chars"]]
+        if is_operational:
+            before = (await db.execute(text(
+                "SELECT op_attempts FROM card_games WHERE " + _WHERE_GAME + " FOR UPDATE"), b)).scalar()
+            await db.execute(text(
+                "UPDATE card_games SET derive_fault = :fault, processed_at = now(), " + _OP_RETRY
+                + "WHERE " + _WHERE_GAME), dict(b, fault=word, delay=retry_delay(before)))
+        else:
+            await db.execute(text(
+                "UPDATE card_games SET derive_fault = :fault, processed_at = now(), " + _FAULT_COUNT
+                + "WHERE " + _WHERE_GAME),
+                dict(b, fault=word, rev=rev, fp=fp, cap=CARD_FAULT_LIMITS["attempts"]))
         await db.commit()
 
 
 async def games_pass(session_factory, state=None, limit: int = None) -> dict:
     """The card games waiting for work, each in its own transaction. A visit
-    that raises is rolled back, recorded on its game (_fault) and counted,
-    and the pass moves on to the next game; the parked count is read at the
-    end of the pass."""
+    that raises is rolled back, recorded on its game by kind (_fault) and
+    counted, and the pass moves on to the next game; the parked count and
+    the oldest parked age are read at the end of the pass."""
     rs = state.ruleset if state is not None else None
     rev = rs.rev if rs else None
     stats = {"evaluated": 0, "fired": 0, "rule_errors": 0}
@@ -703,20 +833,30 @@ async def games_pass(session_factory, state=None, limit: int = None) -> dict:
             return {"off": 1}
         cands = (await db.execute(_CANDIDATES, {
             "lim": limit or CARD_LIMITS["games_per_pass"], "rev": rev,
-            "cap": CARD_FAULT_LIMITS["attempts"]})).all()
-    for key, lo, hi, _rx in cands:
-        async with session_factory() as db:
+            "cap": CARD_FAULT_LIMITS["attempts"], "reprobe": CARD_RETRY_LIMITS["reprobe_s"]})).all()
+    for key, lo, hi, fp in cands:
+        failed = None
+        try:
+            async with session_factory() as db:
+                try:
+                    if _VISIT_HOOK is not None:
+                        _VISIT_HOOK(key)
+                    st, fired, errors, done = await evaluate_card_game(db, key, lo, hi, rs)
+                    await db.commit()
+                except Exception:
+                    try:
+                        await db.rollback()
+                    except Exception:         # noqa: BLE001 -- the visit's own error is the one kept
+                        pass
+                    raise
+        except Exception as exc:              # noqa: BLE001 -- recorded on the game, next game
+            failed = operational(exc)
+            st, fired, errors, done = "error:" + type(exc).__name__, 0, 0, False
+        if failed is not None:
+            word = "operational" if failed else "deterministic"
+            stats[word] = stats.get(word, 0) + 1
             try:
-                if _VISIT_HOOK is not None:
-                    _VISIT_HOOK(key)
-                st, fired, errors, done = await evaluate_card_game(db, key, lo, hi, rs)
-                await db.commit()
-            except Exception as exc:          # noqa: BLE001 -- recorded on the game, next game
-                await db.rollback()
-                st, fired, errors, done = "error:" + type(exc).__name__, 0, 0, False
-        if st.startswith("error:"):
-            try:
-                await _fault(session_factory, key, lo, hi, rev, st)
+                await _fault(session_factory, key, lo, hi, rev, st, failed, fp)
             except Exception:                 # noqa: BLE001 -- counted; the game is visited again
                 stats["fault_unrecorded"] = stats.get("fault_unrecorded", 0) + 1
         stats[st] = stats.get(st, 0) + 1
@@ -724,10 +864,12 @@ async def games_pass(session_factory, state=None, limit: int = None) -> dict:
         stats["fired"] += fired
         stats["rule_errors"] += errors
     async with session_factory() as db:
-        _PARKED["n"] = int((await db.execute(text(
-            "SELECT count(*) FROM card_games WHERE fault_attempts >= CAST(:cap AS int) "
+        n, age = (await db.execute(text(
+            "SELECT count(*), COALESCE(floor(EXTRACT(EPOCH FROM now() - min(parked_at))), 0) "
+            "FROM card_games WHERE fault_attempts >= CAST(:cap AS int) "
             "AND fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar)"),
-            {"cap": CARD_FAULT_LIMITS["attempts"], "rev": rev})).scalar())
+            {"cap": CARD_FAULT_LIMITS["attempts"], "rev": rev})).one()
+        _PARKED["n"], _PARKED["oldest_s"] = int(n), int(age)
     stats["parked"] = _PARKED["n"]
     return stats
 

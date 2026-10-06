@@ -1034,11 +1034,16 @@ class HealthResponse(BaseModel):
     card_evidence: int
     # card_evidence_parked: how many card games the worker's last card pass
     # left parked under its revision (card_evidence.parked: visits that
-    # raised up to the attempt bound, skipped until new input or another
-    # revision). Read from this process's memory, so it answers on both arms;
+    # raised a deterministic fault up to the attempt bound, skipped until new
+    # input, another revision or the re-probe interval). Read from this
+    # process's memory, so it answers on both arms;
     # card_evidence.PARKED_UNKNOWN before this worker's first pass and on a
     # box that runs no worker. No default, as above.
     card_evidence_parked: int
+    # card_evidence_parked_oldest_s: how long ago, in whole seconds, the
+    # oldest of those games was parked (none parked: zero); the same source,
+    # the same unknown value, no default.
+    card_evidence_parked_oldest_s: int
     # review_eval: 8 hex of the review code's file digest
     # (review_rules.review_eval: review_measures.py and review_rules.py, by
     # file). Equal on both roles; the build discriminator through the edge.

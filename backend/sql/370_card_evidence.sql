@@ -1,8 +1,9 @@
 -- 370_card_evidence.sql
 --
--- CARD DRAW EVIDENCE, server half. Additive: eight new tables, three seeded
--- runtime switches, and ONE change to an existing table: the findings table
--- 368 created (shared with the seat evidence lane) gains an evidence domain.
+-- CARD DRAW EVIDENCE, server half. Additive: eight new tables, one new
+-- sequence (card_input_gen), three seeded runtime switches, and ONE change
+-- to an existing table: the findings table 368 created (shared with the
+-- seat evidence lane) gains an evidence domain.
 -- The match table, match_cards and the 7-field match HMAC are untouched.
 -- Requires 368 (findings are stored in seat_evidence_findings).
 --
@@ -107,11 +108,29 @@ CREATE TABLE IF NOT EXISTS card_games (
     CONSTRAINT card_games_pk PRIMARY KEY (stable_game_key, pair_lo, pair_hi),
     CONSTRAINT card_games_order CHECK (pair_lo < pair_hi)
 );
--- A visit that raised: how many in a row, under which revision (NULL: none).
--- The worker skips a game whose count reached its bound under the current
--- revision until new input arrives or the revision changes.
+-- A visit that raised a deterministic fault: how many in a row, under which
+-- revision (NULL: none), when the game first reached the bound (parked_at)
+-- and the inputs that visit read (fault_inputs). The worker skips a parked
+-- game until its inputs change, the revision changes, or the re-probe
+-- interval has passed since its last visit. An operational failure is not
+-- counted: op_attempts in a row and the time before which the game is not
+-- visited again (retry_at, a bounded backoff).
 ALTER TABLE card_games ADD COLUMN IF NOT EXISTS fault_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE card_games ADD COLUMN IF NOT EXISTS fault_rev VARCHAR(16) NULL;
+ALTER TABLE card_games ADD COLUMN IF NOT EXISTS parked_at TIMESTAMPTZ NULL;
+ALTER TABLE card_games ADD COLUMN IF NOT EXISTS fault_inputs TEXT NULL;
+ALTER TABLE card_games ADD COLUMN IF NOT EXISTS op_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE card_games ADD COLUMN IF NOT EXISTS retry_at TIMESTAMPTZ NULL;
+-- Input generations: every record (on insert, and again when its conflict
+-- marker is set) and every census (on registration) takes a value of one
+-- sequence; a completed visit records the list of the generations it read
+-- (seen_inputs). The worker visits a game again whenever the committed
+-- inputs list differently, whatever the order in which the transactions
+-- started.
+CREATE SEQUENCE IF NOT EXISTS card_input_gen;
+ALTER TABLE card_evidence ADD COLUMN IF NOT EXISTS gen BIGINT NOT NULL DEFAULT nextval('card_input_gen');
+ALTER TABLE card_pool_registry ADD COLUMN IF NOT EXISTS gen BIGINT NOT NULL DEFAULT nextval('card_input_gen');
+ALTER TABLE card_games ADD COLUMN IF NOT EXISTS seen_inputs TEXT NULL;
 CREATE INDEX IF NOT EXISTS ix_card_games_match ON card_games (match_id);
 
 CREATE TABLE IF NOT EXISTS card_hand_outside (

@@ -1255,7 +1255,10 @@ def test_m2_a_raising_evaluator_is_recorded_and_the_queue_advances_then_heals(li
         s_skip = await ce.games_pass(sm, faulty)
         out["skipped"] = await rows(keys)
         out["skip_stats"] = s_skip
-        await _exec(sm, "UPDATE card_evidence SET conflict_at = now() WHERE stable_game_key = :k", k=ka)
+        # new input on game a: the conflict marker as store_record sets it
+        # (a new input generation)
+        await _exec(sm, "UPDATE card_evidence SET conflict_at = now(), gen = nextval('card_input_gen') "
+                        "WHERE stable_game_key = :k", k=ka)
         await ce.games_pass(sm, faulty)
         out["woken"] = await rows(keys)
         await ce.games_pass(sm, other_faulty)
@@ -1293,3 +1296,420 @@ def test_m2_a_raising_evaluator_is_recorded_and_the_queue_advances_then_heals(li
     assert all(h[x]["n"] == 0 and h[x]["r"] is None and h[x]["f"] is None for x in (ka, kb))
     assert all(h[x]["ev"] == healed.ruleset.rev and h[x]["fin"] for x in (ka, kb))
     assert not _errors(out["heal_stats"]) and out["heal_count"] == 0
+
+
+# == fix pass 4 ===========================================================================
+
+# -- M3: an input committed after a visit always schedules another ------------------------------
+
+class _Gated:
+    """A session whose commit waits at a gate: the input's statements have
+    run and its transaction stays open (ready is set) until the gate opens,
+    then it commits. Everything else is the session's own."""
+
+    def __init__(self, db):
+        self._db = db
+        self.ready = asyncio.Event()
+        self.gate = asyncio.Event()
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    async def commit(self):
+        self.ready.set()
+        await self.gate.wait()
+        await self._db.commit()
+
+
+async def _candidates(sm, state):
+    rev = state.ruleset.rev if state is not None else None
+    async with sm() as db:
+        return [r[0] for r in (await db.execute(ce._CANDIDATES, {
+            "lim": 100000, "rev": rev, "cap": ce.CARD_FAULT_LIMITS["attempts"],
+            "reprobe": ce.CARD_RETRY_LIMITS["reprobe_s"]})).all()]
+
+
+WROW = ("SELECT processed_at, seen_inputs, finalized_at, evaluated_rev, derive_fault, fault_attempts, "
+        "fault_inputs, parked_at, op_attempts, retry_at, fault_rev FROM card_games WHERE stable_game_key = :k")
+
+
+async def _witness(sm, key, publish, during_state, visited, during_hook=None):
+    """Two connections. The input's transaction begins and runs its
+    statements (publish, on a gated session) and stays open; the worker runs
+    a whole pass (during_state) that visits the game; the input commits;
+    then the candidate query, a pass, and one more pass (the quiet control)."""
+    out = {}
+    async with sm() as raw:
+        g = _Gated(raw)
+        task = asyncio.ensure_future(publish(g))
+        await asyncio.wait_for(g.ready.wait(), 30)
+        out["open"] = await _scalar(sm, "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                                        "AND state = 'idle in transaction'")
+        out["began"] = await _scalar(sm, "SELECT min(xact_start) FROM pg_stat_activity "
+                                         "WHERE datname = current_database() AND state = 'idle in transaction'")
+        visited.clear()
+        out["during_stats"] = await ce.games_pass(sm, during_state)
+        out["during"] = key in visited
+        out["g1"] = dict((await _rows(sm, WROW, k=key))[0])
+        if during_hook is not None:
+            out["held"] = await during_hook()
+        g.gate.set()
+        out["result"] = await asyncio.wait_for(task, 30)
+    out["scheduled"] = key in await _candidates(sm, during_state)
+    return out
+
+
+async def _after(sm, key, state, visited):
+    visited.clear()
+    stats = await ce.games_pass(sm, state)
+    woken = key in visited
+    g2 = dict((await _rows(sm, WROW, k=key))[0])
+    visited.clear()
+    await ce.games_pass(sm, state)
+    return woken, g2, key not in visited, stats
+
+
+def _spy(monkeypatch, raising=None):
+    visited = []
+
+    def hook(key):
+        visited.append(key)
+        if raising is not None and key in raising:
+            raise RuntimeError("synthetic evaluator fault")
+    monkeypatch.setattr(ce, "_VISIT_HOOK", hook)
+    return visited
+
+
+def _gated_record(ids, seat, other, key, rec):
+    env = ce.parse_envelope(k.envelope(rec, seat=seat, other=other, stable=key, rounds=5))
+    parsed = ce.parse_record(env)
+
+    async def publish(db):
+        return await ce.store_record(db, env, parsed, ids[seat], ids[other], "1.41.0")
+    return publish
+
+
+def _gated_census(cards):
+    async def publish(db):
+        return await ce.register_census(db, k.census_dump(cards))
+    return publish
+
+
+def test_m3_fix4_a_record_published_across_a_visit_schedules_the_game_again(live, revs, monkeypatch):
+    """Record publication. A game final by expiry with one record; the other
+    seat's record is inserted in a transaction that stays open while a whole
+    pass visits the game (under another revision) and then commits. The
+    record's time is earlier than the visit, so no clock comparison could
+    see it; the game is scheduled and visited again, with both records'
+    generations in what that visit read, and then left alone."""
+    visited = _spy(monkeypatch)
+
+    async def go():
+        sm = live.sm
+        a, b = _steams()
+        ids = await _players(sm, a, b)
+        key = "ranked_cardw1_000001"
+        ra, rb, c = _pair()
+        await _register(sm, k.census_dump(c.cards))
+        await _store(sm, ids, a, b, key, ra)
+        await _match(sm, ids, a, b, key + "_r5", sc="off")
+        await ce.games_pass(sm, revs.shadow)
+        await _exec(sm, "UPDATE card_games SET first_seen_at = now() - make_interval(days => CAST(:d AS int)) "
+                        "WHERE stable_game_key = :k", d=ce.CARD_LIMITS["expiry_days"] + 1, k=key)
+        await ce.games_pass(sm, revs.shadow)
+        g0 = dict((await _rows(sm, WROW, k=key))[0])
+        w = await _witness(sm, key, _gated_record(ids, b, a, key, rb), revs.again, visited)
+        w["input_at"] = await _scalar(sm, "SELECT received_at FROM card_evidence WHERE stable_game_key = :k "
+                                          "AND seat_player_id = :s", k=key, s=ids[b])
+        w["after"] = await _after(sm, key, revs.again, visited)
+        return g0, w
+    g0, w = live.run(go())
+    assert g0["finalized_at"] is not None and len(g0["seen_inputs"].split(",")) == 1     # final with one record
+    assert w["open"] >= 1 and w["began"] is not None                                      # the input was open
+    assert w["during"] and w["g1"]["evaluated_rev"] == revs.again.ruleset.rev             # the visit ran then
+    assert w["g1"]["seen_inputs"] == g0["seen_inputs"]                                    # without the record
+    assert w["result"] == {"status": "recorded"}
+    assert w["input_at"] < w["g1"]["processed_at"]           # control: earlier than the visit by the clock
+    woken, g2, quiet, _s = w["after"]
+    assert w["scheduled"] and woken
+    assert g2["processed_at"] > w["g1"]["processed_at"] and len(g2["seen_inputs"].split(",")) == 2
+    assert quiet                                                                          # then left alone
+
+
+def test_m3_fix4_a_census_published_across_a_faulted_visit_wakes_the_parked_game(live, revs, monkeypatch):
+    """Census publication. A game whose visits raise a deterministic fault
+    is one fault short of parked; a census its records name is registered in
+    a transaction that stays open while a pass visits the game, faults it
+    and parks it; a further pass leaves the parked game alone (control);
+    the census commits. The parked game is scheduled again at once (inside
+    the re-probe interval), visited, evaluated, and every fault field
+    cleared."""
+    raising = set()
+    visited = _spy(monkeypatch, raising)
+    cap = ce.CARD_FAULT_LIMITS["attempts"]
+
+    async def go():
+        sm = live.sm
+        a, b = _steams()
+        ids = await _players(sm, a, b)
+        key = "ranked_cardw2_000001"
+        c = k.fixture_census("full_game", cats={6: ["W2"]})
+        rec = k.on_census(k.fixture_record("full_game"), c)
+        await _store(sm, ids, a, b, key, rec)
+        await _store(sm, ids, b, a, key, k.mirror(rec))
+        await _match(sm, ids, a, b, key + "_r5", sc="off")
+        raising.add(key)
+        for _i in range(cap + 2):
+            n = await _scalar(sm, "SELECT fault_attempts FROM card_games WHERE stable_game_key = :k", k=key)
+            if n is not None and n >= cap - 1:
+                break
+            await ce.games_pass(sm, revs.again)
+        g0 = dict((await _rows(sm, WROW, k=key))[0])
+
+        async def held():
+            visited.clear()
+            await ce.games_pass(sm, revs.again)
+            return key not in visited
+        w = await _witness(sm, key, _gated_census(c.cards), revs.again, visited, during_hook=held)
+        w["input_at"] = await _scalar(sm, "SELECT registered_at FROM card_pool_registry WHERE digest = :d",
+                                      d=c.digest)
+        raising.clear()
+        w["after"] = await _after(sm, key, revs.again, visited)
+        return g0, w
+    g0, w = live.run(go())
+    assert g0["fault_attempts"] == cap - 1 and g0["parked_at"] is None
+    assert w["open"] >= 1 and w["during"]
+    g1 = w["g1"]
+    assert g1["fault_attempts"] == cap and g1["parked_at"] is not None                   # parked by that visit
+    assert g1["fault_inputs"].endswith(":0") and g1["fault_rev"] == revs.again.ruleset.rev
+    assert w["held"]                                         # control: parked, no new input, not visited
+    assert w["result"]["status"] == "registered"
+    assert w["input_at"] < g1["processed_at"]
+    woken, g2, quiet, _s = w["after"]
+    assert w["scheduled"] and woken
+    assert g2["derive_fault"] is None and g2["fault_attempts"] == 0 and g2["parked_at"] is None
+    assert g2["fault_inputs"] is None and g2["finalized_at"] is not None
+    assert g2["evaluated_rev"] == revs.again.ruleset.rev
+    assert not any(p.endswith(":0") for p in g2["seen_inputs"].split(","))              # the census read
+    assert quiet
+
+
+def test_m3_fix4_a_census_published_across_a_visit_to_a_normally_final_game_schedules_it(live, revs,
+                                                                                         monkeypatch):
+    """A normally finalized game (both records name the attached match).
+    The census its records name is registered in a transaction that stays
+    open while a pass re-visits the game under another revision, and
+    commits after it. The game is scheduled and visited again, reading the
+    census, and then left alone."""
+    visited = _spy(monkeypatch)
+
+    async def go():
+        sm = live.sm
+        a, b = _steams()
+        ids = await _players(sm, a, b)
+        key = "ranked_cardw3_000001"
+        c = k.fixture_census("full_game", cats={6: ["W3"]})
+        rec = k.on_census(k.fixture_record("full_game"), c)
+        await _store(sm, ids, a, b, key, rec)
+        await _store(sm, ids, b, a, key, k.mirror(rec))
+        await _match(sm, ids, a, b, key + "_r5", sc="off")
+        await ce.games_pass(sm, revs.shadow)
+        g0 = dict((await _rows(sm, WROW, k=key))[0])
+        w = await _witness(sm, key, _gated_census(c.cards), revs.again, visited)
+        w["input_at"] = await _scalar(sm, "SELECT registered_at FROM card_pool_registry WHERE digest = :d",
+                                      d=c.digest)
+        w["after"] = await _after(sm, key, revs.again, visited)
+        return g0, w
+    g0, w = live.run(go())
+    assert g0["finalized_at"] is not None and g0["evaluated_rev"] == revs.shadow.ruleset.rev
+    assert all(p.endswith(":0") for p in g0["seen_inputs"].split(","))                  # census unregistered
+    assert w["open"] >= 1 and w["during"] and w["g1"]["evaluated_rev"] == revs.again.ruleset.rev
+    assert w["g1"]["seen_inputs"] == g0["seen_inputs"] and w["g1"]["finalized_at"] is not None
+    assert w["result"]["status"] == "registered"
+    assert w["input_at"] < w["g1"]["processed_at"]
+    woken, g2, quiet, _s = w["after"]
+    assert w["scheduled"] and woken
+    assert g2["processed_at"] > w["g1"]["processed_at"]
+    assert not any(p.endswith(":0") for p in g2["seen_inputs"].split(","))
+    assert quiet
+
+
+# -- M4: bounded backoff, recovery, re-probe ---------------------------------------------------
+
+def test_m4_fix4_five_pool_failures_back_off_never_park_and_the_next_probe_evaluates(live, revs, monkeypatch):
+    """Five induced pool failures (the visit raises the pool's own timeout
+    error): each is operational, counted on op_attempts only, the game waits
+    retry_delay(failures before) and a pass inside that wait leaves it
+    alone; time is moved past each wait. Then the pool recovers and the
+    next probe evaluates the game: final, under the same revision, every
+    fault field clear, no new evidence."""
+    import sqlalchemy.exc as sx
+    failing = {"on": True}
+    visited = []
+    target = {}
+
+    def hook(key):
+        visited.append(key)
+        if failing["on"] and key == target.get("k"):
+            raise sx.TimeoutError("QueuePool limit reached, connection timed out")
+    monkeypatch.setattr(ce, "_VISIT_HOOK", hook)
+
+    async def go():
+        sm = live.sm
+        key, _g, _d = await _fresh_game(sm, "op")
+        target["k"] = key
+        ev_before = await _scalar(sm, "SELECT count(*) FROM card_evidence WHERE stable_game_key = :k", k=key)
+        gens_before = await _scalar(sm, "SELECT string_agg(gen::text, ',' ORDER BY gen) FROM card_evidence "
+                                        "WHERE stable_game_key = :k", k=key)
+        steps = []
+        for i in range(5):
+            visited.clear()
+            s = await ce.games_pass(sm, revs.shadow)
+            hit = key in visited
+            r = dict((await _rows(sm, WROW, k=key))[0])
+            gap = await _scalar(sm, "SELECT EXTRACT(EPOCH FROM retry_at - processed_at) FROM card_games "
+                                    "WHERE stable_game_key = :k", k=key)
+            visited.clear()
+            await ce.games_pass(sm, revs.shadow)                       # inside the wait
+            held = key not in visited
+            steps.append((hit, s.get("operational", 0), s.get("deterministic", 0), r, float(gap), held))
+            await _exec(sm, "UPDATE card_games SET retry_at = retry_at - make_interval(secs => CAST(:d AS int)), "
+                            "processed_at = processed_at - make_interval(secs => CAST(:d AS int)) "
+                            "WHERE stable_game_key = :k", d=ce.retry_delay(i), k=key)
+        failing["on"] = False
+        visited.clear()
+        s = await ce.games_pass(sm, revs.shadow)
+        healed = dict((await _rows(sm, WROW, k=key))[0])
+        ev_after = await _scalar(sm, "SELECT count(*) FROM card_evidence WHERE stable_game_key = :k", k=key)
+        gens_after = await _scalar(sm, "SELECT string_agg(gen::text, ',' ORDER BY gen) FROM card_evidence "
+                                       "WHERE stable_game_key = :k", k=key)
+        return steps, key in visited, s, healed, (ev_before, gens_before), (ev_after, gens_after)
+    steps, probed, s, healed, before, after = live.run(go())
+    cap = ce.CARD_FAULT_LIMITS["attempts"]
+    assert len(steps) == 5 >= cap                     # control: as many failures as the park bound
+    for i, (hit, op, det, r, gap, held) in enumerate(steps):
+        assert hit and op >= 1 and det == 0
+        assert r["op_attempts"] == i + 1 and r["fault_attempts"] == 0 and r["parked_at"] is None
+        assert r["derive_fault"] == "error:TimeoutError" and r["finalized_at"] is None
+        assert gap == ce.retry_delay(i)
+        assert held
+    assert [st[4] for st in steps] == [30, 60, 120, 240, 480]
+    assert probed and not _errors(s)
+    assert healed["finalized_at"] is not None and healed["evaluated_rev"] == revs.shadow.ruleset.rev
+    for col in ("derive_fault", "fault_rev", "fault_inputs", "parked_at", "retry_at"):
+        assert healed[col] is None, col
+    assert healed["op_attempts"] == 0 and healed["fault_attempts"] == 0
+    assert before == after                                       # no new evidence, no new generation
+
+
+def test_m4_fix4_a_parked_game_is_re_probed_at_the_interval_and_heals(live, revs, monkeypatch):
+    """Deterministic faults park a game; inside the re-probe interval passes
+    leave it alone; past the interval the next pass re-probes it (still
+    faulting: still parked, the park time kept, alone again for another
+    interval); the health age reads the oldest park; past the interval
+    again with the fault gone, the game is evaluated and cleared."""
+    raising = set()
+    visited = _spy(monkeypatch, raising)
+    cap = ce.CARD_FAULT_LIMITS["attempts"]
+    rp = ce.CARD_RETRY_LIMITS["reprobe_s"]
+    back = ("UPDATE card_games SET processed_at = processed_at - make_interval(secs => CAST(:d AS int)) "
+            "WHERE stable_game_key = :k")
+
+    async def go():
+        sm = live.sm
+        key, _g, _d = await _fresh_game(sm, "rp")
+        raising.add(key)
+        for _i in range(cap + 2):
+            n = await _scalar(sm, "SELECT fault_attempts FROM card_games WHERE stable_game_key = :k", k=key)
+            if n is not None and n >= cap:
+                break
+            await ce.games_pass(sm, revs.shadow)
+        out = {"parked": dict((await _rows(sm, WROW, k=key))[0])}
+        await _exec(sm, "UPDATE card_games SET parked_at = parked_at - make_interval(secs => CAST(:d AS int)) "
+                        "WHERE stable_game_key = :k", d=2 * rp, k=key)
+        visited.clear()
+        out["inside"] = await ce.games_pass(sm, revs.shadow)
+        out["inside_hit"] = key in visited
+        out["health"] = (ce.parked(), ce.parked_oldest_s())
+        await _exec(sm, back, d=rp + 1, k=key)
+        visited.clear()
+        await ce.games_pass(sm, revs.shadow)
+        out["probe1_hit"] = key in visited
+        out["probe1"] = dict((await _rows(sm, WROW, k=key))[0])
+        visited.clear()
+        await ce.games_pass(sm, revs.shadow)
+        out["after1_hit"] = key in visited
+        raising.clear()
+        await _exec(sm, back, d=rp + 1, k=key)
+        visited.clear()
+        out["probe2_stats"] = await ce.games_pass(sm, revs.shadow)
+        out["probe2_hit"] = key in visited
+        out["healed"] = dict((await _rows(sm, WROW, k=key))[0])
+        out["health_after"] = (ce.parked(), ce.parked_oldest_s())
+        return out
+    o = live.run(go())
+    p = o["parked"]
+    assert p["fault_attempts"] == cap and p["parked_at"] is not None and p["op_attempts"] == 0
+    assert not o["inside_hit"] and o["inside"]["parked"] >= 1
+    n, oldest = o["health"]
+    assert n >= 1 and oldest >= 2 * rp
+    assert o["probe1_hit"]
+    p1 = o["probe1"]
+    assert p1["fault_attempts"] == cap + 1 and p1["parked_at"] == p["parked_at"] - timedelta(seconds=2 * rp)
+    assert not o["after1_hit"]                                           # alone for another interval
+    assert o["probe2_hit"] and not _errors(o["probe2_stats"])
+    h = o["healed"]
+    assert h["finalized_at"] is not None and h["evaluated_rev"] == revs.shadow.ruleset.rev
+    assert h["parked_at"] is None and h["fault_attempts"] == 0 and h["derive_fault"] is None
+    assert o["health_after"] == (0, 0)
+
+
+# -- LOW 3: every completed visit clears derive_fault -------------------------------------------
+
+PRESET = ("UPDATE card_games SET derive_fault = 'error:Preset', fault_attempts = 2, fault_rev = NULL, "
+          "fault_inputs = 'preset', op_attempts = 3, retry_at = NULL, parked_at = NULL")
+
+
+def test_low3_fix4_the_no_revision_arm_clears_every_fault_field(live, monkeypatch):
+    visited = _spy(monkeypatch)
+
+    async def go():
+        sm = live.sm
+        a, b = _steams()
+        ids = await _players(sm, a, b)
+        key = "ranked_cardn3_000001"
+        ra, rb, c = _pair()
+        await _register(sm, k.census_dump(c.cards))
+        await _store(sm, ids, a, b, key, ra)                     # no match yet: waiting
+        await ce.games_pass(sm, None)
+        await _exec(sm, PRESET + " WHERE stable_game_key = :k", k=key)
+        preset = dict((await _rows(sm, WROW, k=key))[0])
+        visited.clear()
+        s = await ce.games_pass(sm, None)
+        return preset, key in visited, s, dict((await _rows(sm, WROW, k=key))[0])
+    preset, hit, s, g = live.run(go())
+    assert preset["derive_fault"] == "error:Preset" and preset["op_attempts"] == 3      # control
+    assert hit and s.get("waiting", 0) >= 1 and not _errors(s)
+    assert g["derive_fault"] is None and g["fault_attempts"] == 0 and g["fault_inputs"] is None
+    assert g["op_attempts"] == 0 and g["seen_inputs"]
+
+
+def test_low3_fix4_the_unchanged_arm_clears_every_fault_field(live, revs, monkeypatch):
+    visited = _spy(monkeypatch)
+
+    async def go():
+        sm = live.sm
+        key, _g, _d = await _fresh_game(sm, "u3")
+        await ce.games_pass(sm, revs.shadow)
+        g0 = dict((await _rows(sm, WROW, k=key))[0])
+        await _exec(sm, PRESET + ", seen_inputs = 'stale' WHERE stable_game_key = :k", k=key)
+        preset = dict((await _rows(sm, WROW, k=key))[0])
+        visited.clear()
+        s = await ce.games_pass(sm, revs.shadow)
+        return g0, preset, key in visited, s, dict((await _rows(sm, WROW, k=key))[0])
+    g0, preset, hit, s, g = live.run(go())
+    assert g0["finalized_at"] is not None and preset["derive_fault"] == "error:Preset"   # control
+    assert hit and s.get("unchanged", 0) >= 1 and not _errors(s)
+    assert g["derive_fault"] is None and g["fault_attempts"] == 0 and g["fault_inputs"] is None
+    assert g["op_attempts"] == 0 and g["seen_inputs"] == g0["seen_inputs"]
+    assert g["processed_at"] > g0["processed_at"]

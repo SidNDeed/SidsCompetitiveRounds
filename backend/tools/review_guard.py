@@ -151,6 +151,7 @@ PINNED = {
                                        "list_retention_days": 120, "derived_retention_days": 400,
                                        "unregistered_days": 30, "admin_rows": 50},
     ("card_evidence", "CARD_FAULT_LIMITS"): {"attempts": 5, "word_chars": 40},
+    ("card_evidence", "CARD_RETRY_LIMITS"): {"op_base_s": 30, "op_cap_s": 900, "reprobe_s": 3600},
     ("card_measures", "WINDOW_DAYS_MAX"): 400,
 }
 # A wire layout too large to restate here: pinned by the sha256 of

@@ -1,7 +1,7 @@
 -- rollback_370_card_evidence.sql
 --
--- Removes what 370_card_evidence.sql added: its eight tables, the card
--- findings it caused in seat_evidence_findings (rows of the card domain that
+-- Removes what 370_card_evidence.sql added: its eight tables, its sequence,
+-- the card findings it caused in seat_evidence_findings (rows of the card domain that
 -- were never posted), the evidence domain it added to that table (column,
 -- CHECK and unique index), and the runtime switch rows that file itself
 -- inserted. Nothing else references these tables (no other table has a
@@ -63,5 +63,7 @@ DROP TABLE IF EXISTS card_games;
 DROP TABLE IF EXISTS card_pool_registry;
 DROP TABLE IF EXISTS card_evidence;
 DROP TABLE IF EXISTS card_evidence_seeded_keys;
+-- the input generation sequence, after the two tables whose defaults use it
+DROP SEQUENCE IF EXISTS card_input_gen;
 
 COMMIT;
