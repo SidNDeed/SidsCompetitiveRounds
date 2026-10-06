@@ -1303,3 +1303,38 @@ def test_the_name_glyphs_guarantees_each_have_a_case(harness_run, name):
     assert line.startswith("[nameglyphs] PASS"), line
     assert " | got=" in line and not line.rstrip().endswith("| got="), (
         "the case printed no measurement: " + line)
+
+
+# Item 19 (two default avatars by queue kind): design section 5.1's T1-T19,
+# each a claim plus a mutation that must red and a control that must stay
+# green, all run against plugin/AvatarDefaultRules.cs itself (the harness
+# compiles that file, not a copy). T4 is split into T4a/T4b so each half has
+# its own mutant. 20 ids x 3 lines + the T13 precondition line = 61.
+_AVATAR_IDS = ["T1", "T2", "T3", "T4a", "T4b", "T5", "T6", "T7", "T8", "T9",
+               "T10", "T11", "T12", "T13", "T14", "T15", "T16", "T17", "T18", "T19"]
+
+
+def test_the_avatar_defaults_suite_ran_every_case_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "avatardefaults" in suites, "the AvatarDefaults suite did not report"
+    run, fail, verdict = suites["avatardefaults"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[avatardefaults\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # 61 cases on the commit that added it (#342).
+    assert run >= 61, "the AvatarDefaults suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("cid", _AVATAR_IDS)
+def test_each_avatar_claim_has_its_mutation_and_its_control(harness_run, cid):
+    lines = [l for l in harness_run.stdout.splitlines()
+             if l.startswith("[avatardefaults] ") and (" | case=" + cid + " ") in l]
+    kinds = sorted("mutation" if " mutation reds |" in l else
+                   "control" if " control stays green |" in l else "claim"
+                   for l in lines if "precondition" not in l and "gate-less control" not in l)
+    assert kinds == ["claim", "control", "mutation"], (cid, lines)
+    for l in lines:
+        assert l.startswith("[avatardefaults] PASS"), l
+        assert " | got=" in l and not l.rstrip().endswith("| got="), (
+            "the case printed no measurement: " + l)

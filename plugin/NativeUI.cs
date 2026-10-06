@@ -13404,7 +13404,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // -- Settings Tab ----------------------------------------
         private static object txtConsentStatus, txtDeleteStatus;
         private static GameObject consentToggleBtn, deleteBtn, confirmDeleteBtn, cancelDelBtn, notifToggleBtn;
-        private static GameObject fpsToggleBtn, fpsCapToggleBtn, deepIdleToggleBtn, pingToggleBtn, lagNoticesToggleBtn, inactiveBoardsToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn, chatTtlBtn;
+        private static GameObject fpsToggleBtn, fpsCapToggleBtn, deepIdleToggleBtn, pingToggleBtn, lagNoticesToggleBtn, inactiveBoardsToggleBtn, ingameChatToggleBtn, trailToggleBtn, blockDbgToggleBtn, playerColorToggleBtn, inputOverlayToggleBtn, cursorShapeBtn, chatTtlBtn, avatarAutoBtn, avatarModBtn, avatarVanBtn;
         // Music opt-ins (design §8): menu playback + credit toast.
         private static GameObject menuMusicToggleBtn, musicCreditToggleBtn;
         private static object menuMusicToggleTxt, musicCreditToggleTxt;
@@ -13429,7 +13429,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // Bug #159: heavier menu text (the game's own font at a higher SDF weight).
         private static GameObject heavyFontBtn;
         private static object heavyFontTxt;
-        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, deepIdleToggleTxt, muteBgToggleTxt, pingToggleTxt, lagNoticesToggleTxt, inactiveBoardsToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt, chatTtlTxt;
+        private static object consentToggleTxt, notifToggleTxt, fpsToggleTxt, fpsCapToggleTxt, deepIdleToggleTxt, muteBgToggleTxt, pingToggleTxt, lagNoticesToggleTxt, inactiveBoardsToggleTxt, ingameChatToggleTxt, trailToggleTxt, blockDbgToggleTxt, playerColorToggleTxt, inputOverlayToggleTxt, cursorShapeTxt, chatTtlTxt, avatarAutoTxt, avatarModTxt, avatarVanTxt;
         private static GameObject muteBgToggleBtn;
         // v1.26.8 perf-pass toggles. Master + 7 per-patch flags; renders in a
         // collapsible section at the bottom of the Settings panel.
@@ -14412,6 +14412,30 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 () => CursorColorCosmetic.CurrentShape,
                 id => { CursorColorCosmetic.SetShape(id); dirty = true; });
             cursorShapeTxt = UIFactory.GetButtonText(cursorShapeBtn);
+            // Item 19: two default avatars. Each row's writer is edge E8 (it
+            // evaluates the room's choice at once, so turning the switch off
+            // while a room has switched you gives your own face back now).
+            avatarAutoBtn = SettingsSwitch(subVisuals.transform, "SAvAuto", I18n.Tr("Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave."),
+                () => Plugin.AvatarAutoSwitch != null && Plugin.AvatarAutoSwitch.Value,
+                () =>
+                {
+                    Plugin.Log.LogInfo("[SETTINGS] Avatar auto-switch toggled");
+                    if (Plugin.AvatarAutoSwitch != null) AvatarDefaults.SetAuto(!Plugin.AvatarAutoSwitch.Value);
+                    dirty = true;
+                });
+            avatarAutoTxt = UIFactory.GetButtonText(avatarAutoBtn);
+            avatarModBtn = SettingsDropdown(subVisuals.transform, "SAvMod", I18n.Tr("The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where everyone has the mod."),
+                AvatarDefaults.ModdedOptionIds,
+                () => (Plugin.AvatarModdedPreset != null ? Plugin.AvatarModdedPreset.Value : -1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                id => { AvatarDefaults.SetModded(AvatarDefaults.ParseSlot(id)); dirty = true; },
+                AvatarDefaults.ModdedOptionNames, I18n.Tr("Modded avatar"));
+            avatarModTxt = UIFactory.GetButtonText(avatarModBtn);
+            avatarVanBtn = SettingsDropdown(subVisuals.transform, "SAvVan", I18n.Tr("The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only."),
+                AvatarDefaults.VanillaOptionIds,
+                () => (Plugin.AvatarVanillaPreset != null ? Plugin.AvatarVanillaPreset.Value : -1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+                id => { if (id != "none") AvatarDefaults.SetVanilla(AvatarDefaults.ParseSlot(id)); dirty = true; },
+                AvatarDefaults.VanillaOptionNames, I18n.Tr("Vanilla avatar"));
+            avatarVanTxt = UIFactory.GetButtonText(avatarVanBtn);
 
             // -- Performance --
             fpsToggleBtn = SettingsSwitch(subPerf.transform, "SFPS", I18n.Tr("Frames per second, top-left corner. Handy for checking whether a setting actually helped."),
@@ -14988,6 +15012,9 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (ingameChatToggleTxt != null && Plugin.ShowIngameChat != null) PaintIngameChat(ingameChatToggleTxt, CompetitiveUI.CurrentChatOverlayMode());
             if (chatTtlTxt != null) PaintChatTtl(chatTtlTxt, Plugin.ChatOverlaySeconds != null ? Plugin.ChatOverlaySeconds.Value : 25f);
             if (cursorShapeTxt != null) PaintCursorShape(cursorShapeTxt, CursorColorCosmetic.CurrentShape);
+            if (avatarAutoTxt != null && Plugin.AvatarAutoSwitch != null) PaintAvatarAuto(avatarAutoTxt, Plugin.AvatarAutoSwitch.Value);
+            if (avatarModTxt != null && Plugin.AvatarModdedPreset != null) PaintAvatarModded(avatarModTxt, Plugin.AvatarModdedPreset.Value);
+            if (avatarVanTxt != null && Plugin.AvatarVanillaPreset != null) PaintAvatarVanilla(avatarVanTxt, Plugin.AvatarVanillaPreset.Value);
             if (trailToggleTxt != null && Plugin.ShowTrails != null) PaintTrails(trailToggleTxt, Plugin.ShowTrails.Value);
             if (blockDbgToggleTxt != null && Plugin.ShowBlockDebug != null) PaintBlockDebug(blockDbgToggleTxt, Plugin.ShowBlockDebug.Value);
             if (playerColorToggleTxt != null && Plugin.ShowPlayerColors != null) PaintPlayerColors(playerColorToggleTxt, Plugin.ShowPlayerColors.Value);
@@ -15216,6 +15243,26 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static void PaintCursorShape(object t, string id)
         {
             UIFactory.SetTextRaw(t, I18n.TrF("Cursor: <color=#88CCFF>{0}</color>", ShapeLabelTr(id)));
+        }
+
+        // Item 19: the switch's two states are whole-string keys (never
+        // label + Tr("ON"), #298c); the dropdowns compose an already
+        // translated value into a translated template and paint raw.
+        private static void PaintAvatarAuto(object t, bool on)
+        {
+            UIFactory.SetText(t, on
+                ? "Avatar auto-switch: <color=#88CCFF>ON</color>"
+                : "Avatar auto-switch: <color=#88CCFF>OFF</color>");
+        }
+
+        private static void PaintAvatarModded(object t, int v)
+        {
+            UIFactory.SetTextRaw(t, I18n.TrF("Modded avatar: <color=#88CCFF>{0}</color>", AvatarDefaults.PresetLabel(v)));
+        }
+
+        private static void PaintAvatarVanilla(object t, int v)
+        {
+            UIFactory.SetTextRaw(t, I18n.TrF("Vanilla avatar: <color=#88CCFF>{0}</color>", AvatarDefaults.PresetLabel(v)));
         }
 
         private static void PaintTrails(object t, bool on)

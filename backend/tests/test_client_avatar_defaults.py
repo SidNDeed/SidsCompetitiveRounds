@@ -1,0 +1,840 @@
+"""Item 19 (two default avatars by queue kind): design section 5.2's source
+claims S1-S26, each pinned to the code term it names, and the i18n catalogue
+obligation of section 2.10 (gate part 3).
+
+Same family as test_client_r3_claims.py. Every claim is a function over the
+plugin's C# sources that raises AssertionError when the claim is false. Each
+claim runs three ways: against the tree (must pass), against an in-memory
+MUTATION of the tree (must red), and against an in-memory negative CONTROL
+edit (must stay green) - so a claim that cannot fail, or that fails on any
+edit at all, is caught here rather than trusted (#391, #342). Every scope is a
+brace-balanced span (#432), never the whole file, unless the claim is a
+census across files.
+
+Adaptations to this lane, recorded in ai-collab/v1410/ITEM19-BUILD-NOTES.md:
+- S15: item 17's Keybinds registry is not on this lane, so item 19 has no swap
+  reader; the claim is "no key read at all in either new file, and the
+  behaviour's Update keeps exactly its one shipped GetKeyDown".
+- S10: the one PublishLocal call sits in Apply, the design's "apply".
+- S11/S19/S23: the decision half is split from the reading half
+  (AvatarDefaultRules.cs is pure), so the read-side terms are checked in
+  ReadFacing / ReadLoader and the comparison terms in the pure methods.
+- S21 reads the local decompile (gitignored); set SCR_DECOMPILED_DIR to it.
+"""
+import hashlib
+import io
+import json
+import os
+import re
+from pathlib import Path
+
+import pytest
+
+from _cs_structure import CsParseError, mask_code, method_spans, strip_comments_only
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
+PLUGIN = Path(REPO) / "plugin"
+
+AD = "AvatarDefaults.cs"
+AR = "AvatarDefaultRules.cs"
+PL = "Plugin.cs"
+NU = "NativeUI.cs"
+PR = "PortraitRender.cs"
+CAT = "I18nCatalogues.cs"
+NEW_FILES = (AD, AR)
+
+_CACHE = {}
+
+
+def _tree():
+    if not _CACHE:
+        for p in sorted(PLUGIN.glob("*.cs")):
+            with io.open(str(p), encoding="utf-8") as fh:
+                _CACHE[p.name] = fh.read()
+    return dict(_CACHE)
+
+
+# -- span helpers ---------------------------------------------------------
+
+_MASK = {}
+_STRIP = {}
+
+
+def _memo(cache, fn, text):
+    """Memoise only the tree's own file texts (identity, not equality):
+    mutated copies and spans are computed fresh and never retained."""
+    if not any(text is t for t in _CACHE.values()):
+        return fn(text)
+    k = id(text)
+    if k not in cache:
+        cache[k] = fn(text)
+    return cache[k]
+
+
+def _masked(text):
+    return _memo(_MASK, mask_code, text)
+
+
+def _one(text, sig, base=0):
+    """The single block after `sig` - method_spans' walk over a memoised
+    mask (the plugin's big files are masked once per distinct text, not once
+    per lookup; the claims run each file through ~80 lookups)."""
+    masked = _masked(text)
+    spans, search = [], 0
+    while True:
+        start = masked.find(sig, search)
+        if start == -1:
+            break
+        ob = masked.find("{", start + len(sig))
+        if ob == -1:
+            raise CsParseError("no block opens after %r" % sig)
+        depth, end = 0, None
+        for i in range(ob, len(masked)):
+            if masked[i] == "{":
+                depth += 1
+            elif masked[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i + 1
+                    break
+        if end is None:
+            raise CsParseError("unbalanced braces after %r" % sig)
+        spans.append((ob, end))
+        search = end
+    assert len(spans) == 1, "%d blocks match %r" % (len(spans), sig)
+    a, b = spans[0]
+    return base + a, base + b
+
+
+def _span(text, sig, within=None):
+    """(start, end) of the block after `sig`, optionally inside the block
+    after `within` (a class), as offsets into `text`."""
+    if within is None:
+        return _one(text, sig)
+    a, b = _one(text, within)
+    return _one(text[a:b], sig, base=a)
+
+
+def _body(text, sig, within=None):
+    a, b = _span(text, sig, within)
+    return _code(text[a:b])
+
+
+def _code(text):
+    return _memo(_STRIP, strip_comments_only, text)
+
+
+def _count(src, files, term):
+    return sum(_code(src[f]).count(term) for f in files)
+
+
+# -- edit helpers (mutations and controls) ---------------------------------
+
+def _replace(src, fname, old, new):
+    s = dict(src)
+    t = s[fname]
+    assert t.count(old) == 1, "edit anchor %r occurs %d times in %s" % (old, t.count(old), fname)
+    s[fname] = t.replace(old, new, 1)
+    assert s[fname] != t
+    return s
+
+
+def _insert_after_open(src, fname, sig, text, within=None):
+    """Insert `text` right after the opening brace of the block after `sig`."""
+    s = dict(src)
+    t = s[fname]
+    a, _ = _span(t, sig, within)
+    s[fname] = t[:a + 1] + "\n" + text + "\n" + t[a + 1:]
+    return s
+
+
+def _check(claim, mutation, control):
+    """The three-way run. A parse failure never counts as the mutation's red."""
+    src = _tree()
+    claim(src)
+    m = mutation(src)
+    assert m != src, "the mutation changed nothing"
+    try:
+        claim(m)
+    except CsParseError as e:
+        raise AssertionError("the mutation broke parsing instead of the claim: %s" % e)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("the mutation STAYED GREEN")
+    c = control(src)
+    assert c != src, "the control changed nothing"
+    claim(c)
+
+
+# -- the rows the claims scope on -------------------------------------------
+
+EVAL = "AvatarDefaults.Evaluate("
+BEH = "public class CompetitiveRoundsBehaviour : MonoBehaviour"
+CB = {
+    "joined": "public void OnJoinedRoom()",
+    "entered": "public void OnPlayerEnteredRoom(Photon.Realtime.Player p)",
+    "props": "public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changedProps)",
+    "left": "public void OnLeftRoom()",
+    "disconnected": "public void OnDisconnected(Photon.Realtime.DisconnectCause cause)",
+    "playerleft": "public void OnPlayerLeftRoom(Photon.Realtime.Player p)",
+    "roomprops": "public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged)",
+}
+CALL = {
+    "joined": 'AvatarDefaults.Evaluate("E2-joined");',
+    "entered": 'AvatarDefaults.Evaluate("E3-entered");',
+    "props": 'AvatarDefaults.Evaluate("E4-props");',
+    "left": 'AvatarDefaults.Evaluate("E6-left");',
+    "disconnected": 'AvatarDefaults.Evaluate("E7-disconnect");',
+    "playerleft": 'AvatarDefaults.Evaluate("E11-left");',
+    "roomprops": 'AvatarDefaults.Evaluate("E12-roomprops");',
+}
+
+
+def _drop(src, fname, stmt):
+    return _replace(src, fname, stmt, "")
+
+
+# S1 ------------------------------------------------------------------------
+
+def _s1(src):
+    t = src[AD]
+    body = _body(t, "private static void Prefix()", "class AvatarCreatePlayerPatch")
+    assert body.count(EVAL) == 1
+    assert "return false" not in body and "bool Prefix" not in _code(t)
+    m = re.search(r"\[HarmonyPatch\(typeof\(PlayerAssigner\), \"CreatePlayer\"\)\]\s*"
+                  r"\[HarmonyPriority\(Priority\.VeryHigh\)\]\s*internal static class AvatarCreatePlayerPatch\b",
+                  _code(t))
+    assert m, "the CreatePlayer prefix lost its VeryHigh priority"
+
+
+def test_s1_the_spawn_prefix_evaluates_first_and_never_skips_the_original():
+    _check(_s1,
+           lambda s: _drop(s, AD, 'AvatarDefaults.Evaluate("E5-spawn");'),
+           lambda s: _insert_after_open(s, AD, "private static void Prefix()", "            // unrelated note",
+                                        "class AvatarCreatePlayerPatch"))
+
+
+def test_s1_a_return_false_path_reds():
+    m = _replace(_tree(), AD, 'AvatarDefaults.Evaluate("E5-spawn");', 'AvatarDefaults.Evaluate("E5-spawn"); return false;')
+    with pytest.raises(AssertionError):
+        _s1(m)
+
+
+# S2 ------------------------------------------------------------------------
+
+CP_ATTR = '[HarmonyPatch(typeof(PlayerAssigner), "CreatePlayer")]'
+
+
+def _s2(src):
+    n = sum(_code(t).count(CP_ATTR) for t in src.values())
+    assert n == 4, "CreatePlayer patch census is %d, expected 4 (#352)" % n
+
+
+def test_s2_the_create_player_patch_census_is_four():
+    _check(_s2,
+           lambda s: _replace(s, AD, "internal static class AvatarCreatePlayerPatch",
+                              "internal static class AvatarCreatePlayerPatch2 { }\n    " + CP_ATTR
+                              + "\n    internal static class AvatarCreatePlayerPatch"),
+           lambda s: _replace(s, AD, "internal static class AvatarCreatePlayerPatch",
+                              "internal static class AvatarSpawnPatch"))
+
+
+# S3 / S4 / S5 ---------------------------------------------------------------
+
+def _s3(src):
+    t = src[AD]
+    assert '[HarmonyPatch(typeof(CharacterCreatorHandler), "LoadFaces")]' in _code(t)
+    assert _body(t, "private static void Postfix()", "class AvatarLoadFacesPatch").count(EVAL) == 1
+
+
+def _cut_class(src, fname, attr, cls):
+    t = src[fname]
+    i = t.index(attr)
+    a, b = _span(t, "internal static class " + cls)
+    s = dict(src)
+    s[fname] = t[:i] + t[b:]
+    return s
+
+
+def test_s3_the_load_faces_postfix_evaluates():
+    _check(_s3,
+           lambda s: _cut_class(s, AD, '[HarmonyPatch(typeof(CharacterCreatorHandler), "LoadFaces")]', "AvatarLoadFacesPatch"),
+           lambda s: _replace(s, AD, "/// whose process was killed mid-room restores its own face here.",
+                              "/// whose process was killed restores its own face here."))
+
+
+def _s4(src):
+    body = _body(src[AD], "private static void Postfix()", "class AvatarLoadFacesPatch")
+    logs = re.findall(r'Plugin\.Log\.LogInfo\("\[AVATAR\] ', body)
+    assert len(logs) == 1, "the launch postfix must log one positive line (#83)"
+
+
+def test_s4_the_load_faces_postfix_logs_a_positive_line():
+    _check(_s4,
+           lambda s: _replace(s, AD, 'Plugin.Log.LogInfo("[AVATAR] LoadFaces postfix attached; launch evaluation (home "',
+                              'string unused = ("[AVATAR] LoadFaces postfix attached; launch evaluation (home "'),
+           lambda s: _replace(s, AD, "LoadFaces postfix attached; launch evaluation", "LoadFaces postfix ran; launch evaluation"))
+
+
+def _s5(src):
+    t = src[AD]
+    assert '[HarmonyPatch(typeof(CharacterCreatorHandler), "SelectFace")]' in _code(t)
+    assert _body(t, "private static void Postfix(int faceID)", "class AvatarSelectFacePatch").count(EVAL) == 1
+
+
+def test_s5_the_select_face_postfix_evaluates():
+    _check(_s5,
+           lambda s: _cut_class(s, AD, '[HarmonyPatch(typeof(CharacterCreatorHandler), "SelectFace")]', "AvatarSelectFacePatch"),
+           lambda s: _replace(s, AD, "/// of selectedFaceID; only faceID 0 is this seat's own selection",
+                              "/// of selectedFaceID; faceID 0 alone is this seat's own selection"))
+
+
+# S6 / S7 / S24 --------------------------------------------------------------
+
+def _evaluates(src, edge):
+    body = _body(src[PL], CB[edge])
+    assert body.count(EVAL) == 1, "%s calls the evaluator %d times" % (edge, body.count(EVAL))
+    return body
+
+
+def _s6(src):
+    for edge in ("left", "disconnected"):
+        body = _evaluates(src, edge)
+        before = body[:body.index(EVAL)]
+        assert "InRoom" not in before, "%s: the evaluator call sits behind an InRoom test" % edge
+
+
+def _wrap_in_inroom(src, edge):
+    return _replace(src, PL, CALL[edge], "if (PhotonNetwork.InRoom) " + CALL[edge])
+
+
+def test_s6_the_leave_edges_are_not_behind_an_in_room_test():
+    _check(_s6, lambda s: _wrap_in_inroom(s, "left"), lambda s: _wrap_in_inroom(s, "joined"))
+
+
+def test_s6_the_disconnect_edge_is_not_behind_an_in_room_test():
+    _check(_s6, lambda s: _wrap_in_inroom(s, "disconnected"), lambda s: _wrap_in_inroom(s, "joined"))
+
+
+@pytest.mark.parametrize("edge,other", [("joined", "entered"), ("entered", "joined"), ("props", "joined"),
+                                        ("playerleft", "roomprops"), ("roomprops", "playerleft")])
+def test_s7_s24_each_room_edge_evaluates_and_reds_only_its_own_row(edge, other):
+    _check(lambda s: _evaluates(s, edge),
+           lambda s: _drop(s, PL, CALL[edge]),
+           lambda s: _drop(s, PL, CALL[other]))
+
+
+# S8 ------------------------------------------------------------------------
+
+ROWS = {"auto": ('"SAvAuto"', "avatarAutoTxt =", "AvatarDefaults.SetAuto(", "internal static void SetAuto(bool on)", 'Evaluate("E8-auto");'),
+        "mod": ('"SAvMod"', "avatarModTxt =", "AvatarDefaults.SetModded(", "internal static void SetModded(int slot)", 'Evaluate("E8-modded");'),
+        "van": ('"SAvVan"', "avatarVanTxt =", "AvatarDefaults.SetVanilla(", "internal static void SetVanilla(int slot)", 'Evaluate("E8-vanilla");')}
+
+
+def _s8(src, row):
+    key, end, setter, sig, _ = ROWS[row]
+    t = src[NU]
+    assert t.count(key + ", I18n.Tr(") == 1
+    i = t.index(key + ", I18n.Tr(")
+    j = t.index(end, i)
+    assert _code(t[i:j]).count(setter) == 1, "the %s row's callback does not call its writer" % row
+    assert _body(src[AD], sig, "internal static class AvatarDefaults").count("Evaluate(") == 1
+
+
+@pytest.mark.parametrize("row,other", [("auto", "mod"), ("mod", "van"), ("van", "auto")])
+def test_s8_each_settings_row_is_edge_e8(row, other):
+    _check(lambda s: _s8(s, row),
+           lambda s: _drop(s, AD, ROWS[row][4]),
+           lambda s: _drop(s, AD, ROWS[other][4]))
+
+
+# S9 / S10 / S13 / S25 (the apply) -------------------------------------------
+
+APPLY = "private static void Apply(int slot, string tag)"
+ADC = "internal static class AvatarDefaults"
+
+
+def _s9(src):
+    body = _body(src[AD], APPLY, ADC)
+    assert body.count("hit.ClickButton();") == 1 and body.count("cch.SelectFace(0, face, slot);") == 1
+    for f in NEW_FILES:
+        assert 'PlayerPrefs.SetInt("SelectedFace' not in _code(src[f])
+
+
+def test_s9_the_apply_goes_through_click_button():
+    _check(_s9,
+           lambda s: _replace(s, AD, "hit.ClickButton();", "hit.myFace.ToString();"),
+           lambda s: _replace(s, AD, "/// ClickButton passes that id to SelectFace)", "/// the portrait passes that id to SelectFace)"))
+
+
+def test_s9_no_selected_face_prefs_write():
+    m = _insert_after_open(_tree(), AD, APPLY, '            PlayerPrefs.SetInt("SelectedFace0", slot);', ADC)
+    with pytest.raises(AssertionError):
+        _s9(m)
+
+
+def _s10(src):
+    assert _body(src[AD], APPLY, ADC).count("FacePublisher.PublishLocal();") == 1
+
+
+def test_s10_the_apply_publishes_the_carrier_once():
+    _check(_s10,
+           lambda s: _drop(s, AD, "FacePublisher.PublishLocal();"),
+           lambda s: _drop(s, AD, "CharacterCreatorPortrait hit = null;"))
+
+
+def _s13(src, part):
+    body = _body(src[AD], APPLY, ADC)
+    term = {"send": "FaceResync.TrySendLocalFace(", "equip": "EquipFace("}[part]
+    assert body.count(term) == 1, "%s occurs %d times in the apply" % (term, body.count(term))
+
+
+@pytest.mark.parametrize("part,other", [("send", "equip"), ("equip", "send")])
+def test_s13_the_apply_informs_the_others_and_equips_the_local_body(part, other):
+    stmt = {"send": 'FaceResync.TrySendLocalFace("AVATAR");', "equip": "if (eq != null) eq.EquipFace(face);"}
+    _check(lambda s: _s13(s, part), lambda s: _drop(s, AD, stmt[part]), lambda s: _drop(s, AD, stmt[other]))
+
+
+def _s25(src, part):
+    t = src[AD]
+    if part == "resolver":
+        assert _code(t).count("playerId == -1") == 1
+        assert _body(t, "internal static List<CharacterCreatorPortrait> MenuPortraits()", ADC).count("playerId == -1") == 1
+        assert _code(t).count("ClickButton(") == 1
+        assert _body(t, APPLY, ADC).count("ClickButton(") == 1
+    else:
+        body = _body(t, "private static void Postfix(int faceID)", "class AvatarSelectFacePatch")
+        assert re.search(r"if \(faceID != 0\) return;", body), "the own-selection filter is gone"
+
+
+@pytest.mark.parametrize("part,other", [("resolver", "filter"), ("filter", "resolver")])
+def test_s25_the_apply_cannot_address_another_local_players_grid(part, other):
+    cut = {"resolver": lambda s: _drop(s, AD, ".Where(x => x.playerId == -1)"),
+           "filter": lambda s: _drop(s, AD, "if (faceID != 0) return;")}
+    _check(lambda s: _s25(s, part), cut[part], cut[other])
+
+
+# S11 / S12 / S14 (the carrier and the send) --------------------------------
+
+def _s11(src):
+    for f in NEW_FILES:
+        c = _code(src[f])
+        assert "SetCustomProperties" not in c, f
+        assert '"cr_face"' not in c, f
+    assert _count(src, NEW_FILES, "PROP_FACE") == 1
+    read = _body(src[AD], "private static AvatarFacingIn ReadFacing()", ADC)
+    assert "FaceKey = FacePublisher.PROP_FACE" in read, "PROP_FACE is not the read-side key name"
+    cms = _body(src[AR], "internal virtual bool CarriesModSignature(IList<string> keys, string faceKey)")
+    assert "k == faceKey" in cms, "the per-actor test no longer skips the carrier key"
+
+
+def test_s11_item_19_writes_no_carrier_key():
+    _check(_s11,
+           lambda s: _insert_after_open(s, AD, APPLY,
+                                        "            PhotonNetwork.LocalPlayer.SetCustomProperties(new ExitGames.Client.Photon.Hashtable { { FacePublisher.PROP_FACE, null } });", ADC),
+           lambda s: _insert_after_open(s, AD, "internal static void Tick()", "            FacePublisher.PublishLocal();", ADC))
+
+
+def _s12(src):
+    n = sum(len(re.findall(r"\bFacePublisher\.PublishLocal\s*\(", _code(t))) for t in src.values())
+    assert n == 4, "FacePublisher.PublishLocal has %d call sites, expected 4" % n
+
+
+def test_s12_publish_local_has_four_call_sites():
+    _check(_s12,
+           lambda s: _insert_after_open(s, AD, "internal static void Tick()", "            FacePublisher.PublishLocal();", ADC),
+           lambda s: _insert_after_open(s, AD, "internal static void Tick()", "            TrailCosmetic.PublishLocalProps();", ADC))
+
+
+def _s14(src):
+    body = _body(src[PL], "internal static bool TrySendLocalFace(string tag)", "internal static class FaceResync")
+    assert body.count("RpcTarget.Others") == 1 and "RpcTarget.All" not in body
+
+
+def test_s14_the_face_resend_targets_the_others():
+    _check(_s14,
+           lambda s: _replace(s, PL, 'lp.data.view.RPC("RPCA_SetFace", RpcTarget.Others,', 'lp.data.view.RPC("RPCA_SetFace", RpcTarget.All,'),
+           lambda s: _insert_after_open(s, PL, CB["joined"], "            var unrelatedTarget = RpcTarget.All;"))
+
+
+# S15 (adapted: no swap reader on this lane) ---------------------------------
+
+def _s15(src):
+    for f in NEW_FILES:
+        c = _code(src[f])
+        assert "KeyCode." not in c and "Input.GetKeyDown(" not in c and "Keybinds" not in c, f
+    upd = _body(src[PL], "private void Update()", BEH)
+    assert upd.count("Input.GetKeyDown(") == 1, "the behaviour's Update reads %d keys" % upd.count("Input.GetKeyDown(")
+
+
+def test_s15_item_19_binds_no_key():
+    _check(_s15,
+           lambda s: _replace(s, PL, "try { AvatarDefaults.Tick(); } catch { }",
+                              "try { AvatarDefaults.Tick(); } catch { }\n            if (Input.GetKeyDown(KeyCode.F6)) { }"),
+           lambda s: _replace(s, AD, "// The four ring sprites", "// (no KeyCode.F6 here) The four ring sprites"))
+
+
+# S16 / S23 (the facing) ------------------------------------------------------
+
+FACING = "internal virtual AvatarFacing FacingOf(AvatarFacingIn f)"
+READF = "private static AvatarFacingIn ReadFacing()"
+
+
+def _s16(src):
+    assert _body(src[AR], FACING).count("EveryOtherFighterIsModded(") == 1
+    for f in NEW_FILES:
+        assert "OpponentHasMod" not in _code(src[f]), f
+
+
+def test_s16_the_every_quantifier_and_not_the_any():
+    _check(_s16,
+           lambda s: _replace(s, AR, "return EveryOtherFighterIsModded(others, f.FaceKey)", "return OpponentHasMod(others, f.FaceKey)"),
+           lambda s: _replace(s, AR, "var others = f.OtherFighterKeys;", "var otherKeys = f.OtherFighterKeys; var others = otherKeys;"))
+
+
+ALLOWED_FACING_TERMS = {"PhotonNetwork.InRoom", "PhotonNetwork.OfflineMode", "RoomActors.LocalIsSpectator",
+                        "PhotonNetwork.CurrentRoom", "CompetitiveRoomDetect.IsModIssuedRoom",
+                        "RoomActors.ActiveFighters", "FacePublisher.PROP_FACE"}
+
+
+def _s23(src):
+    for f in NEW_FILES:
+        c = _code(src[f])
+        assert "InVanillaQuickmatch" not in c and "m_searchingType" not in c, f
+    read = _body(src[AD], READF, ADC)
+    named = set(re.findall(r"\b[A-Z]\w*\.[A-Z]\w*", read))
+    assert named <= ALLOWED_FACING_TERMS, "the facing reads a per-seat term: %s" % sorted(named - ALLOWED_FACING_TERMS)
+    assert "CompetitiveRoomDetect.IsModIssuedRoom" in named and "RoomActors.ActiveFighters" in named
+
+
+def test_s23_no_per_seat_term_decides_a_facing():
+    _check(_s23,
+           lambda s: _replace(s, AD, "f.LocalIsSpectator = RoomActors.LocalIsSpectator;",
+                              "f.LocalIsSpectator = RoomActors.LocalIsSpectator || Plugin.InVanillaQuickmatch();"),
+           lambda s: _replace(s, AD, "// The four ring sprites", "// (InVanillaQuickmatch is never read) The four ring sprites"))
+
+
+# S17 (the ring tick runs with the overlay closed) ---------------------------
+
+TICK = "try { AvatarDefaults.Tick(); } catch { }"
+
+
+def _s17(src):
+    n = sum(_code(t).count("AvatarDefaults.Tick()") for t in src.values())
+    assert n == 1
+    assert _body(src[PL], "private void Update()", BEH).count("AvatarDefaults.Tick()") == 1
+
+
+def test_s17_the_ring_repaint_runs_with_the_overlay_closed():
+    def mutate(s):
+        # after the guard, not after the opening brace: there it would still
+        # run with the page closed and could not red (design S17)
+        s = _drop(s, PL, TICK)
+        t = s[NU]
+        a, b = _span(t, "public static void Tick()")
+        seg = t[a:b]
+        guard = "if(!isOpen||!pageBuilt)return;"
+        assert seg.count(guard) == 1
+        s = dict(s)
+        s[NU] = t[:a] + seg.replace(guard, guard + " " + TICK) + t[b:]
+        return s
+
+    def control(s):
+        s = _drop(s, PL, TICK)
+        return _insert_after_open(s, PL, "private void Update()", "            " + TICK, BEH)
+    _check(_s17, mutate, control)
+
+
+# S18 (one Follow helper) ------------------------------------------------------
+
+FOLLOW = "else f = AvatarDefaults.FaceForFollow();"
+BARE = "else if (cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0) f = cch.selectedPlayerFaces[0];"
+
+
+def _s18(src):
+    for sig in ("private static string LiveInputsKey()", "private static Inputs Capture(int preset)"):
+        body = _body(src[PR], sig)
+        assert body.count("AvatarDefaults.FaceForFollow()") == 1, sig
+        assert "selectedPlayerFaces[0]" not in body, sig
+
+
+def test_s18_portrait_render_resolves_follow_through_one_helper():
+    def mutate(s):
+        t = s[PR]
+        a, b = _span(t, "private static Inputs Capture(int preset)")
+        seg = t[a:b]
+        assert seg.count(FOLLOW) == 1
+        s = dict(s)
+        s[PR] = t[:a] + seg.replace(FOLLOW, BARE) + t[b:]
+        return s
+    _check(_s18, mutate,
+           lambda s: _insert_after_open(s, PR, "private static PlayerFace PickFace(int preset, StringBuilder rep)",
+                                        "            var unrelated = CharacterCreatorHandler.instance.selectedPlayerFaces[0];"))
+
+
+# S19 (vanilla-clean is base-loader resolvability) ---------------------------
+
+CLEAN = "internal virtual bool VanillaClean(AvatarFaceIds fc, AvatarLoaderView l)"
+LOADER = "private static AvatarLoaderView ReadLoader()"
+
+
+def _s19(src):
+    for f in NEW_FILES:
+        assert "CUSTOM_ID_BASE" not in _code(src[f]), f
+    r = _body(src[AD], LOADER, ADC)
+    for term in ("CharacterCreatorItemLoader.instance", "L.eyes", "L.mouths", "L.accessories"):
+        assert term in r, term
+    c = _body(src[AR], CLEAN)
+    for term in ("l.Eyes", "l.Mouths", "l.Accessories", "ResolvesOnABaseSeat("):
+        assert term in c, term
+
+
+def test_s19_vanilla_clean_is_resolvability_not_a_threshold():
+    _check(_s19,
+           lambda s: _replace(s, AR, "if (l == null) return false;",
+                              "if (l == null || fc.Eye >= CharacterCreatorItemLoader.CUSTOM_ID_BASE) return false;"),
+           lambda s: _replace(s, AD, "var L = CharacterCreatorItemLoader.instance;",
+                              "var L = CharacterCreatorItemLoader.instance; var unusedLoaderName = L;"))
+
+
+# S20 (no latch, no stored shown-face) ---------------------------------------
+
+def _class_fields(text):
+    """{type name: [field statements]} for every class/struct in `text`,
+    read at the type's own brace depth (nested bodies skipped)."""
+    masked = mask_code(text)
+    out = {}
+    for m in re.finditer(r"\b(class|struct)\s+(\w+)", masked):
+        name = m.group(2)
+        ob = masked.find("{", m.end())
+        if ob == -1:
+            continue
+        depth, buf, stmts, i = 0, [], [], ob
+        while i < len(masked):
+            ch = masked[i]
+            if ch == "{":
+                depth += 1
+                if depth == 2:
+                    header = "".join(buf).strip()
+                    # an auto-property is state too; a method, a nested type or
+                    # an initializer body is not a field
+                    if "(" not in header and not re.search(r"\b(class|struct|enum)\b", header) and "=" not in header:
+                        stmts.append(header + " {property}")
+                    buf = []
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+                if depth == 1:
+                    buf = []
+            elif depth == 1:
+                buf.append(ch)
+                if ch == ";":
+                    st = " ".join("".join(buf).split())
+                    buf = []
+                    if "=>" in st:
+                        continue
+                    p, e = st.find("("), st.find("=")
+                    if p != -1 and (e == -1 or p < e):
+                        continue
+                    stmts.append(st)
+            i += 1
+        out.setdefault(name, []).extend(stmts)
+    return out
+
+
+CARRIERS = {"AvatarFaceIds", "AvatarLoaderView", "AvatarSetting", "AvatarLivenessIn",
+            "AvatarFacingIn", "AvatarEvalIn", "AvatarDecision"}
+
+
+def _s20(src):
+    fd = _class_fields(src[AD])
+    state = [st for st in fd["AvatarDefaults"] if " const " not in " " + st]
+    assert state == ["private static Sprite ringGold, ringBlue, ringBoth, ringRed;",
+                     "private static bool ringsBuilt;"], state
+    for patch in ("AvatarLoadFacesPatch", "AvatarSelectFacePatch", "AvatarCreatePlayerPatch"):
+        assert fd[patch] == [], (patch, fd[patch])
+    fr = _class_fields(src[AR])
+    assert fr["AvatarRules"] == [], fr["AvatarRules"]
+    assert set(fr) == CARRIERS | {"AvatarRules"}, sorted(fr)
+    for name in CARRIERS:
+        for st in fr[name]:
+            assert "static" not in st.split(), (name, st)
+    # the only persisted item-19 state: four config entries, one of them Home
+    for f in NEW_FILES:
+        c = _code(src[f])
+        assert "PlayerPrefs." not in c and "Config.Bind(" not in c, f
+    binds = re.findall(r"\b(Avatar\w+) = Config\.Bind\(", _code(src[PL]))
+    assert sorted(binds) == ["AvatarAutoSwitch", "AvatarHomeSlot", "AvatarModdedPreset", "AvatarVanillaPreset"], binds
+
+
+def test_s20_there_is_no_latch_and_no_stored_shown_face():
+    _check(_s20,
+           lambda s: _replace(s, AD, "private static bool ringsBuilt;", "private static bool ringsBuilt;\n        private static bool _switchedThisRoom;"),
+           lambda s: _insert_after_open(s, AD, "internal static void Tick()", "            bool _switchedThisRoom = false;", ADC))
+
+
+def test_s20_a_static_in_the_rules_reds():
+    m = _insert_after_open(_tree(), AR, "internal class AvatarRules", "        private static int lastApplied;")
+    with pytest.raises(AssertionError):
+        _s20(m)
+
+
+# S21 (the decompiled spans the design rests on) -----------------------------
+
+DECOMPILED = {
+    "CharacterCreatorItemLoader.cs": (22, 36, "421b9423b583c87cb5fe42f91647ace6dde7ebe9f8da65bd5aaa2c4ab43acd1f"),
+    "CharacterCreatorItemEquipper.cs": (64, 94, "77b32efbc742d6f9285d248190b4e2905cedb992b2da86362bacd59d1cdeb301"),
+    "CardChoiceVisuals.cs": (123, 127, "63b6b158bcea239608f1b0edbcd2f48f644e0973f3857485d3e1e6da88add0df"),
+}
+
+
+def _decompiled_dir():
+    d = os.environ.get("SCR_DECOMPILED_DIR") or os.path.join(REPO, "logs-snapshot", "decompiled", "full")
+    return d if os.path.isdir(d) else None
+
+
+def _span_hash(lines, a, b):
+    return hashlib.sha256(b"\n".join(lines[a - 1:b])).hexdigest()
+
+
+@pytest.mark.parametrize("fname", sorted(DECOMPILED))
+def test_s21_the_decompiled_spans_are_what_the_design_records(fname):
+    d = _decompiled_dir()
+    if d is None:
+        pytest.skip("the decompile is local-only; set SCR_DECOMPILED_DIR")
+    a, b, want = DECOMPILED[fname]
+    with open(os.path.join(d, fname), "rb") as fh:
+        lines = fh.read().split(b"\n")
+    assert _span_hash(lines, a, b) == want
+    # mutation: one line inside the span changes the hash
+    inside = list(lines)
+    inside[a] = inside[a] + b" "
+    assert _span_hash(inside, a, b) != want
+    # control: the neighbouring line just outside it does not
+    outside = list(lines)
+    outside[b] = outside[b] + b" "
+    assert _span_hash(outside, a, b) == want
+
+
+# S22 (the durable capture) ---------------------------------------------------
+
+def _s22(src):
+    body = _body(src[AD], "internal static void Evaluate(string tag)", ADC)
+    logs = [m.start() for m in re.finditer(r'Plugin\.Log\.LogInfo\("\[AVATAR\] "', body)]
+    assert len(logs) == 1
+    stmt = body[logs[0]:body.index(";", logs[0])]
+    for term in ('" (facing "', '", nominee "', '", other fighters "', "OtherFighterCount(f)", "d.Facing", "d.Nominee"):
+        assert term in stmt, term
+
+
+def test_s22_the_evaluator_logs_each_applied_change():
+    _check(_s22,
+           lambda s: _replace(s, AD, 'Plugin.Log.LogInfo("[AVATAR] " + tag + " applied slot "', 'string.Concat("[AVATAR] " + tag + " applied slot "'),
+           lambda s: _replace(s, AD, '" applied slot "', '" set slot "'))
+
+
+# S26 (one announcer) ---------------------------------------------------------
+
+ANN = "private static void Announce(string msg)"
+
+
+def _s26(src):
+    assert _count(src, NEW_FILES, "CompetitiveUI.ShowNotification(") == 1
+    assert _count(src, NEW_FILES, "CompetitiveUI.IsShowing(") == 1
+    body = _body(src[AD], ANN, ADC)
+    assert body.count("CompetitiveUI.ShowNotification(") == 1 and body.count("CompetitiveUI.IsShowing(") == 1
+
+
+def test_s26_one_announcer():
+    _check(_s26,
+           lambda s: _replace(s, AD, "if (d.Apply < 0) return;", "if (d.Apply < 0) return;\n                CompetitiveUI.ShowNotification(\"x\", Color.white, 5f);"),
+           lambda s: _replace(s, AD, "if (d.Apply < 0) return;", "if (d.Apply < 0) return;\n                Announce(RecoveryInstruction());"))
+
+
+# The gate: the swap rule exists in the pure half and has no plugin caller ---
+
+def test_the_swap_rule_has_no_caller_until_item_17_lands():
+    src = _tree()
+    for t in (src[AD], src[PL], src[NU]):
+        c = _code(t)
+        assert "SwapPermitted(" not in c and "SwapTarget(" not in c
+
+
+# i18n gate part 3 (design 2.10): 25 new keys (the two swap refusals are not on
+# this lane) plus the reused "Preset {0}" carry es/ru/uk/sv drafts -----------
+
+ITEM19_LITERALS = [
+    "Avatar auto-switch: <color=#88CCFF>ON</color>",
+    "Avatar auto-switch: <color=#88CCFF>OFF</color>",
+    "Modded avatar: <color=#88CCFF>{0}</color>",
+    "Vanilla avatar: <color=#88CCFF>{0}</color>",
+    "Modded avatar",
+    "Vanilla avatar",
+    "Not set",
+    "Preset {0} — has items an unmodded player cannot see",
+    "No preset is free of modded items yet.",
+    "Avatar defaults",
+    "Gold ring: your modded default",
+    "Blue ring: your vanilla default",
+    "Both rings: this preset is both of your defaults",
+    "Red ring: this preset has items an unmodded player cannot see, so it cannot be your vanilla default",
+    "Switched to your vanilla avatar for this room.",
+    "Switched back to your modded avatar.",
+    "Your vanilla avatar preset has items an unmodded player cannot see, so your avatar was not switched.",
+    "That preset has never been customised, so your avatar was not switched.",
+    "To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.",
+    "Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave.",
+    "The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where everyone has the mod.",
+    "The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.",
+    "keeps a modded avatar out of games where it renders with holes",
+    "any preset; this is the one you wear everywhere else",
+    "only presets an unmodded opponent's own loader can resolve are visible to them",
+]
+REUSED = "Preset {0}"
+_ENTRY = re.compile(r'\[("(?:[^"\\]|\\.)*")\]\s*=\s*("(?:[^"\\]|\\.)*")')
+
+
+def _catalogues(text):
+    out = {}
+    for loc in ("ES", "RU", "UK", "SV"):
+        a, b = _one(text, "private static readonly Dictionary<string, string> %s = new Dictionary<string, string>" % loc)
+        d = {}
+        for m in _ENTRY.finditer(text[a:b]):
+            d[json.loads(m.group(1))] = json.loads(m.group(2))
+        out[loc] = d
+    return out
+
+
+def _part3(src, keys):
+    cats = _catalogues(src[CAT])
+    for loc, d in cats.items():
+        for k in keys:
+            assert d.get(k), "%s has no %s draft for %r" % (CAT, loc, k[:60])
+
+
+def test_i18n_every_item_19_literal_is_a_harvested_source_key():
+    with io.open(os.path.join(REPO, "tools", "i18n_source.json"), encoding="utf-8") as fh:
+        strings = set(json.load(fh)["strings"])
+    missing = [k for k in ITEM19_LITERALS + [REUSED] if k not in strings]
+    assert not missing, missing
+    assert len(set(ITEM19_LITERALS)) == 25
+
+
+def test_i18n_part_3_every_key_carries_four_drafts():
+    keys = ITEM19_LITERALS + [REUSED]
+
+    def strip_drafts(s, key):
+        t = s[CAT]
+        lit = re.escape(json.dumps(key, ensure_ascii=True).replace("\\u2014", "\\u2014"))
+        t2, n = re.subn(r"\n[ \t]*\[" + lit + r"\][^\n]*", "", t)
+        assert n == 4, (key, n)
+        s = dict(s)
+        s[CAT] = t2
+        return s
+    # control key: one item 19 does not consume
+    _check(lambda s: _part3(s, keys),
+           lambda s: strip_drafts(s, REUSED),
+           lambda s: strip_drafts(s, "A player joined the match"))

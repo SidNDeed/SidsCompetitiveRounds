@@ -64,6 +64,18 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>Item 19: is the toast slot showing exactly this text right
+        /// now (translated the way ShowNotification translates it, timer
+        /// live)? A read of the two statics above; writes nothing. The timer
+        /// half is load-bearing: notifText is never cleared when a toast
+        /// expires, so a text-only test would suppress a message forever.</summary>
+        internal static bool IsShowing(string raw)
+        {
+            string t = raw;
+            try { t = I18n.Tr(raw); } catch { }
+            return notifTimer > 0f && notifText == t;
+        }
+
         public static void QueueNotification(string text, Color color, float duration = 5f)
         {
             if (!Plugin.ShowNotifications.Value) return;

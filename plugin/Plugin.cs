@@ -90,6 +90,12 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowBlockDebug;
         internal static ConfigEntry<bool> ShowPlayerColors;
         internal static ConfigEntry<bool> ShowInputOverlay;
+        // Item 19 (two default avatars): the setting (three keys) and the ONE
+        // remembered value, the pre-switch own selection (-1 = none).
+        internal static ConfigEntry<bool> AvatarAutoSwitch;
+        internal static ConfigEntry<int> AvatarModdedPreset;
+        internal static ConfigEntry<int> AvatarVanillaPreset;
+        internal static ConfigEntry<int> AvatarHomeSlot;
         // v1.32 items 7+8 — standalone accessibility/FPS toggles. Deliberately
         // NOT under the Performance master switch: these are user preferences
         // that should survive a perf-master flip (map note, settings tab).
@@ -832,6 +838,29 @@ namespace CompetitiveRounds
                 "UI", "ShowInputOverlay",
                 false,
                 "Show a bottom-left WASD + Space + L/R-click input visualizer during matches. Keys glow red when pressed."
+            );
+
+            // Item 19: two default avatars chosen by the kind of room. New keys
+            // only; nothing above is renamed, retyped or moved.
+            AvatarAutoSwitch = Config.Bind(
+                "UI", "AvatarAutoSwitch",
+                true,
+                "Wear your vanilla avatar preset in games where somebody does not have the mod, and your modded preset where everyone does. Does nothing until the presets below are set."
+            );
+            AvatarModdedPreset = Config.Bind(
+                "UI", "AvatarModdedPreset",
+                -1,
+                "Character preset slot (0-based) worn where everyone has the mod. -1 = not set."
+            );
+            AvatarVanillaPreset = Config.Bind(
+                "UI", "AvatarVanillaPreset",
+                -1,
+                "Character preset slot (0-based) worn where somebody does not have the mod; only presets made from base-game items can be used. -1 = not set."
+            );
+            AvatarHomeSlot = Config.Bind(
+                "UI", "AvatarHomeSlot",
+                -1,
+                "Written by the mod: the preset you were wearing before a room switched it, given back when the room ends. -1 = none. Do not edit."
             );
 
             // LEGACY. Kept bound so the one-time migration below can read what the
@@ -3515,6 +3544,11 @@ namespace CompetitiveRounds
                 CompetitiveUI.ToggleOverlay();
             }
 
+            // Item 19: the avatar-default rings on the character menu's portrait
+            // grid. Here, not in NativeUI.Tick, because this tick runs with the
+            // mod's overlay closed (the F5 read above can only open it from here).
+            try { AvatarDefaults.Tick(); } catch { }
+
             // Per-frame FPS sampling (active only while a match is being tracked).
             try { GameStateWatcher.TickFrame(); } catch { }
 
@@ -4623,6 +4657,8 @@ namespace CompetitiveRounds
             try { RoomActors.InvalidateFighterCache(); } catch { }
             // Poison convergence v3 (A2b): any entry, spectators included.
             try { PoisonSync.V3RoomEvent("player-entered", p); } catch { }
+            // Item 19 edge E3: the roster grew, so the room's facing may have moved.
+            AvatarDefaults.Evaluate("E3-entered");
 
             // Local classification cache. Best effort and LOCAL by design
             // (r9 deleted the announced-verdict property): the cross-client
@@ -4805,6 +4841,9 @@ namespace CompetitiveRounds
             try { RoomActors.InvalidateFighterCache(); } catch { }
             // Poison convergence v3 (A2b): any departure, spectators included.
             try { PoisonSync.V3RoomEvent("player-left", p); } catch { }
+            // Item 19 edge E11: a departure raises no property update, so this
+            // is the only edge on which the facing can return to Modded.
+            AvatarDefaults.Evaluate("E11-left");
 
             // A 2v2 DC fallback watch, if one is armed, is watching for exactly
             // this: the ELECTED seat leaving. Before any of the classification
@@ -5347,6 +5386,9 @@ namespace CompetitiveRounds
             try { DcReportSync.NoteActorProps(target); } catch { }
             // Poison convergence v3 (A2b): a cr_pois3 change on any actor.
             try { PoisonSync.V3PropsChanged(target, changedProps); } catch { }
+            // Item 19 edge E4: a peer's cr_* properties (or this seat's own role)
+            // may have arrived, which can move the room's facing either way.
+            AvatarDefaults.Evaluate("E4-props");
 
             // r8 M4: identity and role are what the lag-notice window keys on,
             // and both of them change through this callback. A change that
@@ -5373,7 +5415,12 @@ namespace CompetitiveRounds
             }
             catch { }
         }
-        public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) { }
+        public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged)
+        {
+            // Item 19 edge E12: cr_ff (read by IsModIssuedRoom) is a ROOM
+            // property that can land after the join.
+            AvatarDefaults.Evaluate("E12-roomprops");
+        }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {
             // Bug #269: a handoff revokes our authority to speak for the room,
@@ -5503,6 +5550,10 @@ namespace CompetitiveRounds
             try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
+            // Item 19 edge E7: a disconnect may produce no OnLeftRoom. Never inside
+            // an InRoom test: the census reads InRoom itself, and an evaluation
+            // with no room is where a forced face is given back.
+            AvatarDefaults.Evaluate("E7-disconnect");
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
             // OnLeftRoom must still close the room/game telemetry — first
             // statement, before any early return below. Idempotent: with no
@@ -5548,6 +5599,9 @@ namespace CompetitiveRounds
                 if (tgnLine != null) Plugin.Log.LogInfo(tgnLine);
             }
             catch { }
+            // Item 19 edge E2: the join. The room's facing is derived from the
+            // room and its fighters' published properties, on every edge.
+            AvatarDefaults.Evaluate("E2-joined");
             // V11 I1: joined_room, for every join.
             try
             {
@@ -6222,6 +6276,9 @@ namespace CompetitiveRounds
             try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
+            // Item 19 edge E6: never inside an InRoom test - the InRoom poll turns
+            // false during Leaving, before this callback. The census reads it.
+            AvatarDefaults.Evaluate("E6-left");
             // A teardown window is bound to the room it was opened in. Without
             // this a seat that leaves between the round call-in and the call-in
             // of new players carries the open window across the room boundary

@@ -554,6 +554,36 @@
       "class": "sub_tab_label",
       "key": "privacy",
       "text": "Privacy & account"
+    },
+    {
+      "class": "reason",
+      "key": "SAvAuto",
+      "text": "keeps a modded avatar out of games where it renders with holes"
+    },
+    {
+      "class": "help_body",
+      "key": "SAvAuto",
+      "text": "Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave."
+    },
+    {
+      "class": "reason",
+      "key": "SAvMod",
+      "text": "any preset; this is the one you wear everywhere else"
+    },
+    {
+      "class": "help_body",
+      "key": "SAvMod",
+      "text": "The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where everyone has the mod."
+    },
+    {
+      "class": "reason",
+      "key": "SAvVan",
+      "text": "only presets an unmodded opponent's own loader can resolve are visible to them"
+    },
+    {
+      "class": "help_body",
+      "key": "SAvVan",
+      "text": "The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only."
     }
   ],
   "total": 109

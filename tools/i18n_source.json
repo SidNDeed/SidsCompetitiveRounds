@@ -587,6 +587,9 @@
   "Auras",
   "Aurora",
   "Aurora Gradient",
+  "Avatar auto-switch: <color=#88CCFF>OFF</color>",
+  "Avatar auto-switch: <color=#88CCFF>ON</color>",
+  "Avatar defaults",
   "Average FPS",
   "Average game",
   "Avg Cards / Game",
@@ -678,6 +681,7 @@
   "Blood Moon",
   "Bloodbath",
   "Blue Cursor",
+  "Blue ring: your vanilla default",
   "Body colors",
   "Body colors in ROUNDS are team colors: the game holds four body skins and picks one by team number. Who gets which color follows from how each mode numbers its teams.\n\n<color=#FFD94D><b>VANILLA 1v1</b></color>\n\nIn a 1v1 each player is their own team: the first seat is team 0 and plays <color=#7FD4FF>orange</color>, the second is team 1 and plays <color=#7FD4FF>blue</color>. Vanilla never uses more than these two teams online.\n\n<color=#FFD94D><b>TEAM MODES: 2v2 AND 1v2</b></color>\n\n- <color=#7FD4FF>2v2</color> - the server splits the four players into two pairs when the match locks. Teammates share one body color: orange for the first team, blue for the second.\n- <color=#7FD4FF>1v2</color> - the solo player is one team (orange); the duo shares the other (blue).\n\n<color=#FFD94D><b>FFA: TEN PLAYERS, FOUR SKINS</b></color>\n\nIn FFA every player is their own team, numbered by lobby slot. ROUNDS ships exactly four body skins, so <color=#FF6666>colors repeat every four players</color>: the 1st, 5th and 9th players share a color, the 2nd, 6th and 10th share the next, and so on. That's deliberate - the mod adds no new skins, and the overhead nametags are what keep same-colored players apart. In a big lobby, read the name, not just the body.\n\n<color=#FFD94D><b>THE CARD-PICK SCREEN</b></color>\n\nThe body standing on the pick stage is a clone of the picker's skin. In team modes vanilla has two problems there: a load-order race can bake the WRONG team's color into that clone, and vanilla only ever presents one picker per round even when a losing team has two.\n\nThe mod fixes both. It re-checks the real team colors a few frames after the stage appears and retints the body if it came out wrong, and in 2v2 and 1v2 it re-runs the stage for each picker in turn - so every picker appears as themselves, in the right color. FFA doesn't use the vanilla stage at all: everyone picks at the same time on their own screen.\n\n<color=#FFD94D><b>CUSTOM PLAYER COLORS</b></color>\n\nA <color=#7FD4FF>player color</color> cosmetic from the shop (see <color=#7FD4FF>Shop & cosmetics</color>) replaces your team color on every modded player's screen; viewers can opt out with the Show Player Colors setting. Animated specials like Prismatic and Chrome cycle their color about 30 times a second. <color=#7FE87F>Players without the mod keep seeing standard orange and blue - to them your game looks untouched.</color>\n\nOn modded screens the color is also your team identity: point announcements call out your color's name (MUSTARD got a point, instead of ORANGE), the round-counter dots and the FFA score strip tint to match, and your in-game nametag tints too - unless a paid nametag color is equipped, which always wins. Identity is resolved from shared data, so everyone with the feature on sees the same names and dots; a player with it off sees vanilla bodies and tints (the custom team NAMES still show).",
   "Body/Team Color",
@@ -687,6 +691,7 @@
   "Boosters",
   "Both clients watch everything; only the elected reporter sends. Duplicates are absorbed, and the server re-checks ranked or casual when the report lands.",
   "Both ready! Joining match...",
+  "Both rings: this preset is both of your defaults",
   "Bottomless",
   "Bounce",
   "Bouncer",
@@ -1310,6 +1315,7 @@
   "Gold Sources",
   "Gold betting runs on live 1v1, 2v2 and FFA games. This page covers who can bet, how the odds are priced, exactly when windows open and close, and what happens to your stake.\n\n<color=#FFD94D><b>WHO CAN BET</b></color>\n\n- Any registered player, staking 1 to 2000 Gold per bet. The stake is taken the moment the bet is placed.\n- You cannot bet on a match or lobby you are playing in, and banned players cannot bet.\n- <color=#7FE87F>Spectators CAN bet.</color> That is safe by design: the windows below close on early scoring, so watching a game never gets you a bet on a result that is already decided.\n- One bet per series in 1v1 and 2v2; one bet per game in FFA.\n- If any participant runs a mod older than 1.38.1, betting on that game is refused. Older clients cannot report live points, so the scoring cutoff could never fire - <color=#FF6666>the system fails closed rather than leave a window open.</color>\n- A linked Discord account can place the same bets through the bot's commands.\n\n<color=#FFD94D><b>ODDS: 1v1 AND 2v2</b></color>\n\n- Your multiplier is 1 divided by your side's win chance, computed from both sides' ratings AND their RD (see <color=#7FD4FF>Ratings (Glicko-2)</color>). Floor: 1.01x.\n- Uncertainty caps the price. With both sides established (RD 100 or below) the multiplier can reach 3.0x; the cap slides down to 1.0x as the higher RD rises to 300. A fresh account at RD 350 caps the price below the 1.10x acceptance gate - <color=#FF6666>an unknown simply can't be bet on, so a smurf can't be farmed for Gold.</color>\n- A side only accepts bets at 1.10x or better; below that it is locked.\n- 2v2 prices off the pair's average rating. A player's own 2v2 rating counts once they have 10 completed series; before that their 1v1 rating stands in.\n\n<color=#FFD94D><b>ODDS: FFA</b></color>\n\n- The server races every player to the lobby's score target and computes your pick's true chance of banking it first. Your multiplier is half of the fair price - the house keeps the other half.\n- Floors: 2.0x in lobbies of 5 or more, 1.4x at 3-4 players. For heavy favourites the floor gives way to 0.95 divided by their win chance, so a guaranteed-profit bet cannot exist.\n- Cap: 5.0x, or half the lobby size if that is lower, and it shrinks when ratings are uncertain.\n- A player with no FFA games yet is priced off their 1v1 rating at full uncertainty.\n\n<color=#FFD94D><b>WHEN BETS OPEN AND CLOSE</b></color>\n\nThe cutoff is scored points, never a clock:\n\n- <color=#7FD4FF>1v1 and 2v2</color> - open from the moment the series exists. Closed once 2 total points are scored in game 1, or the moment any game of the series is decided. Tournament series stay listed through the whole multi-day wait before the pair actually plays.\n- <color=#7FD4FF>FFA</color> - each bet targets the lobby's NEXT game. The window closes when the field scores 2 points in that game (1 point if the lobby's score target is 3 or lower). A lobby is only listed while a next game is plausible: up to 15 minutes while assembling with no games yet, and up to 30 minutes after its last recorded game. <color=#FF6666>Casual lobbies are never bettable.</color> Departed members are not valid targets.\n- <color=#7FD4FF>Lobby-phase bets</color> - hosted 2v2 and FFA lobbies take wagers while still FILLING. No odds are quoted yet; at Start the bet is priced from the final field and becomes a normal bet - provided your target is still there and the usual checks pass. Anything else (target left, odds too low, lobby never starts within 6 hours) refunds the stake.\n- 1v2 has no betting at all.\n\n<color=#FFD94D><b>PAYOUTS AND THE FIGHTER TAX</b></color>\n\n- A winning payout includes your stake back. 1v1 and 2v2 pay stake x odds rounded to the nearest Gold; FFA rounds DOWN.\n- If your winning bet's stored odds were 1.50x or below, 20% of the PROFIT goes to the fighter or team you backed - being worth betting on pays them too. The potential payout quoted when you place the bet already includes this tax.\n\n<color=#FFD94D><b>REFUNDS, AND WHERE TO SEE IT ALL</b></color>\n\nA refund returns exactly your stake:\n\n- 1v1: a non-tournament series with no game reported in its first 30 minutes is abandoned and refunds its bets. A series stalled for 60 minutes mid-series refunds its bets too, while the series itself stays resumable - <color=#FF6666>a refunded bet stays refunded even if that series is finished later.</color>\n- 2v2: refunds only when a series is cancelled. Disconnect-paused series wait for the admin ruling before anything settles.\n- FFA: refunds only for a game that never produced a recorded result. Played games always settle as won or lost.\n- At tiny stakes a WIN can pay exactly your stake (1g at 1.10x pays 1g). It is still a win: every bet's stored state - open, won, lost or refunded - is what displays, not the arithmetic.\n- Your full bet history across all modes is the bets ledger in the F5 menu. Live bettable games are listed in-game and mirrored in the Discord live-bets channel and its bet commands.",
   "Gold per game",
+  "Gold ring: your modded default",
   "Gold this set",
   "Golden Eagle",
   "Goober",
@@ -1652,6 +1658,9 @@
   "Mint",
   "Mirrored chrome with a soft shifting tint.",
   "Mod display language. Machine-translated drafts until community moderators review them — card text in matches follows ROUNDS' own language setting.",
+  "Modded avatar",
+  "Modded avatar: <color=#88CCFF>{0}</color>",
+  "Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave.",
   "Mode closed",
   "Mode: <color=#88CCFF>vanilla music</color>",
   "Mode: <color=#88FF88>custom music</color>",
@@ -1771,6 +1780,7 @@
   "No matches.",
   "No messages in this channel yet.",
   "No opponent has enough ranked series against this group yet.",
+  "No preset is free of modded items yet.",
   "No ranked 1v1 series recorded for the selected players yet.",
   "No recent series",
   "No server-issued chat lines are in this session's log.\n\nOnly messages this client received from the server can be deleted - the request keys on the server's row id, which a local echo does not carry.",
@@ -1793,6 +1803,7 @@
   "Not in queue.",
   "Not on sale yet",
   "Not ready yet",
+  "Not set",
   "Not started",
   "Not started - buy {0} in the Shop to begin this ladder.",
   "Not started.",
@@ -1982,6 +1993,7 @@
   "Premium: northern-lights walls shimmering between polar teal and violet in a polar night",
   "Preparing your card picture...",
   "Preset {0}",
+  "Preset {0} — has items an unmodded player cannot see",
   "President Meow",
   "Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.",
   "Press Esc to leave",
@@ -2144,6 +2156,7 @@
   "Records",
   "Red Cursor",
   "Red Name",
+  "Red ring: this preset has items an unmodded player cannot see, so it cannot be your vanilla default",
   "Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.",
   "Reduced keeps the hit feedback without the camera motion",
   "Reef Shark",
@@ -2519,6 +2532,8 @@
   "Sweaty",
   "Sweden",
   "Sweeps: <color=#00FF00>5-0 x{0}</color>  <color=#FF6666>0-5 x{1}</color>",
+  "Switched back to your modded avatar.",
+  "Switched to your vanilla avatar for this room.",
   "Sync (weekly)",
   "Sync Champion",
   "Sync Finalist",
@@ -2581,6 +2596,7 @@
   "That player has card trading turned off",
   "That player has too many proposals waiting - try again later",
   "That player's binder is private - they can still propose a trade to you",
+  "That preset has never been customised, so your avatar was not switched.",
   "That shard was already done with other cards - your binder has been refreshed",
   "That trade has changed - check it again before answering",
   "That trade has expired",
@@ -2633,6 +2649,8 @@
   "The pack price changed - check the new price and try again",
   "The picture was not ready in time - try again",
   "The pool changed while your pack was opening - nothing was charged, try again",
+  "The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where everyone has the mod.",
+  "The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.",
   "The report could not be read",
   "The report details are too long.",
   "The report details contain characters that are not allowed.",
@@ -2708,6 +2726,7 @@
   "Title Ladders",
   "Titles",
   "Titles are the short labels that render beside your name across the mod - leaderboard rows, Recent Series, Records, Compare, and every T-chat message you send. You can own any number of them, but only one is active at a time: pick it in the Shop tab with <color=#7FD4FF>Set Active</color>.\n\n<color=#FFD94D><b>CURRENT RANK - FREE FOR EVERYONE</b></color>\n\n<color=#7FD4FF>Current Rank</color> costs 0 gold and sits in the shop for every player. It's dynamic: wherever it renders, it shows your live 1v1 rank name in that rank's color, resolved fresh at render time. Rank up and the title upgrades itself; rank down and it follows you there too. The ladder behind it runs 25 rungs, from Beginner I at 0 rating to Grand Master V at 2610.\n\n<color=#FFD94D><b>PODIUM TITLES</b></color>\n\nThere are three podium titles, one per ranked ladder: 1v1, 2v2 and FFA. Each is granted the moment you enter that board's visible top 3, and taken back the moment you fall out of it <color=#8A8A93>(the position check runs on a cached board, so both directions can trail the actual standings by a minute or two)</color>. A board only lists players who have at least one counted series - or, for FFA, one recorded game - so a fresh account can't hold a podium.\n\nThe rendering is the interesting part:\n\n- While you hold a podium spot, the title renders live as <color=#FFD700>1st Place</color>, <color=#C0C0C0>2nd Place</color> or <color=#CD7F32>3rd Place</color> in gold, silver or bronze - always your CURRENT position, with a 1v1, 2v2 or FFA prefix everywhere except that ladder's own board.\n- <color=#FF6666>Off the podium, the title leaves your inventory entirely</color> until you climb back into the top 3. You hold it exactly as long as you hold the spot.\n\nPodium titles never rotate on a schedule and can never be bought. The only way in is the top 3.\n\n<color=#FFD94D><b>SLAYER TITLES</b></color>\n\nTwo legendary trophies for beating the names on the door:\n\n<color=#7FD4FF>Sid Slayer</color> - win a completed ranked 1v1 series where Sid is the loser. Renders <color=#FF4655>red</color>.\n<color=#7FD4FF>Stan Slayer</color> - win a completed ranked 1v1 series where Stan is the loser. Renders <color=#00E5FF>cyan</color>.\n\nEach arrives attached to its achievement, which also pays <color=#7FE87F>1000 gold</color> (see <color=#7FD4FF>Achievement guide</color>). Taking a single game off them isn't enough - the series has to complete with you as the winner.\n\n<color=#FFD94D><b>TRANSLATOR TITLES</b></color>\n\nVerified translation work through the translation portal earns three tiers. The unit is a live string: an approved translation where you were the proposer or the reviewer - doing both jobs on the same string still counts once.\n\n<color=#7FD4FF>Rosetta</color> (rare) - 10 live strings. Pays 100 gold.\n<color=#7FD4FF>Dragoman</color> (epic) - 100 live strings. Pays 300 gold.\n<color=#7FD4FF>Babel</color> (legendary) - 1000 live strings. Pays 1000 gold.\n\n<color=#FFD94D><b>PURCHASED TITLES</b></color>\n\nRegular titles sit in the shop with a gold price and work like any other cosmetic: buy once, own forever, wear it whenever you feel like it.\n\n<color=#FFD94D><b>EQUIPPING AND WHERE TITLES SHOW</b></color>\n\n- Earned titles (podium, slayer, translator) are hidden from the public shop listing, but every one YOU own appears in your own shop view with its Set Active button. <color=#FF6666>Buying them is always refused</color> - earning the moment is the only currency they accept.\n- Equipping a new title replaces the old one; titles never stack.\n- Titles show on the mod's own surfaces: the leaderboard, Recent Series, Records, Compare, the stats panels, your T-chat messages (in the title's color), and the Discord chat bridge.\n- Titles do NOT appear on the overhead in-game nametag, and players without the mod never see them - every title surface lives in the mod's UI or on Discord.",
+  "To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.",
   "To pick the best server region for a match, the mod measures your ping to each Photon region and sends the result to the server, where it is kept for at most one hour.",
   "To {0}",
   "To: {0}",
@@ -2836,6 +2855,8 @@
   "Utility unlocks (e.g. hide your gold total on the leaderboard).",
   "VANILLA GROW: FRAME RATE CHANGES DAMAGE",
   "VOTING / SIGNUPS OPEN",
+  "Vanilla avatar",
+  "Vanilla avatar: <color=#88CCFF>{0}</color>",
   "Vanilla stays vanilla",
   "Velvet",
   "Verified movement tech: the shield edge bounce, wall jumps, and the flying bounce. Every rule on this page comes straight from the game's code.\n\n<color=#FFD94D><b>THE SHIELD EDGE BOUNCE</b></color>\n\nThe arena has a hard kill boundary just off-screen. While you are past it, the game checks you every 0.1 seconds:\n\n- <color=#FF6666>Not blocking:</color> you take a 51-damage lethal hit and an impulse back toward the arena. At 100 HP, two unshielded edge hits kill you.\n- <color=#7FE87F>Blocking:</color> no damage at all, and the return impulse is twice as strong. Your old velocity is zeroed first, so the bounce is clean and predictable no matter how fast you were flying out.\n\nThe block window is 0.3 seconds and the edge check ticks every 0.1 seconds, so the press can slightly TRAIL your exit and still count. Getting launched off-screen is survivable on demand: block as you cross the edge and you come back harder, for free. In a knockback war this is the difference between a lost point and a return volley.\n\n<color=#FFD94D><b>WALL JUMPS AND JUMP REFRESH</b></color>\n\n- Touching a wall in the air while holding movement INTO it counts as a wall grab. Unless you jumped within the last 0.15 seconds, <color=#7FE87F>a wall touch refreshes ALL of your jumps</color>.\n- Pressing jump within 0.1 seconds of a wall touch performs a wall jump: up and away from the wall instead of straight up.\n- Ground jumps add extra horizontal push proportional to how fast you were already moving sideways; wall jumps skip that bonus.\n- Holding jump keeps adding upward force for a short moment after takeoff - tap for a short hop, hold for full height.\n- While hanging close to a wall, your time-in-air counts more slowly for game systems that care about air time.\n\n<color=#FFD94D><b>THE FLYING BOUNCE</b></color>\n\nA hit big enough to set you 'flying' changes how walls treat you: while flying, hitting map geometry reflects your velocity off the surface, stuns you for 0.2 seconds, and deals a 5-damage self-hit. The reflected launch comes out after a quarter-second hold.\n\nThat self-hit is an ordinary blockable hit: <color=#7FE87F>blocking at the moment of wall impact negates the 5 damage</color>.\n\n<color=#FFD94D><b>MYTHS THE CODE SAYS NO TO</b></color>\n\n- <color=#8A8A93>Wall sliding is real, but not where you'd think: pressing into a wall damps your speed a little and keeps resetting the gravity ramp, so you do fall slower - while the stat actually named 'wall grab drag' does nothing at all.</color>\n- <color=#8A8A93>Cards that advertise a self-push on block do nothing on a normal block press - the game's own block window suppresses the push before it can apply. Do not draft them for movement.</color>\n\n<color=#FFD94D><b>SHIELD CHARGE IS THE REAL BLOCK MOVEMENT</b></color>\n\nShield Charge launches you along your AIM direction on any block press, and the launch works during your own block window. Hitting a player cancels the launch, damages and knocks them back, and grants a bonus block. It also combos with the wall rules above: charge into a wall, get your jumps refreshed, wall-jump out.",
@@ -3038,6 +3059,7 @@
   "Your placements:  <color=#FFE580>1stx{0}</color>  <color=#C8C8C8>2ndx{1}</color>  <color=#D4894A>3rdx{2}</color>  <color=#888>(played {3})</color>",
   "Your placements: <color=#888>no completed tournaments yet</color>",
   "Your shield absorbs for exactly 0.3 seconds per press, the absorb decision is made on the SHOOTER's machine, and a pile of cards ride the block event. This page covers all of it.\n\n<color=#FFD94D><b>WHAT PRESSING BLOCK DOES</b></color>\n\nAn off-cooldown block press does three things at once, bullet or no bullet:\n\n- Runs every card effect that rides your block. Shield Charge fires before everything else, then the main chain - Empower charges here, block-heal cards heal here, and block-spawn cards (Frost Slam, Supernova, Teleport) place their effects here.\n- Starts the cooldown.\n- Arms the absorb window: <color=#7FE87F>your shield absorbs for exactly 0.3 seconds after the press</color>.\n\nActivating and absorbing are separate events. The press always happens; absorption only happens if a bullet reaches you inside the window.\n\n<color=#FFD94D><b>WHAT AN ABSORBED BULLET DOES</b></color>\n\n- It deals no damage, no knockback, no slow, and spawns none of its on-hit effects.\n- Its velocity is reversed - it flies straight back the way it came.\n- The shooter loses their immunity to it: <color=#7FE87F>a reflected bullet can hit its own shooter</color>.\n- Your 'on successful block' card effects fire - unless the bullet you blocked was one of your own.\n- A few special bullets are destroyed on block instead of reflected.\n\nThe same window negates almost everything else that can touch you: direct damage, knockback, bullet slow, explosion slow and silence, stun, and poison or burn ticks (see <color=#7FD4FF>Poison & damage over time</color>). A crate or saw that hits your shield is bounced away harder than it would be off your body. Even the arena edge respects it: flying off-screen while blocking costs no damage and launches you back in twice as hard (see <color=#7FD4FF>Movement & shield tech</color>).\n\n<color=#FFD94D><b>COOLDOWN</b></color>\n\n- Base cooldown is 4 seconds. Cards modify it by adding to it or multiplying it.\n- The timer runs on game time, so slow-motion moments stretch it in real time.\n- The recharge is announced: a reload particle and a sound play the moment your shield is ready again.\n- <color=#FF6666>Presses during cooldown do nothing at all</color> - no window, no card effects.\n\n<color=#FFD94D><b>ECHO BLOCKS</b></color>\n\nCards that grant additional blocks turn one press into a burst: the first block schedules the extras in quick succession, and each echo re-runs the full card chain and re-arms the 0.3 second absorb window <color=#7FE87F>without restarting the cooldown</color>. One press buys a longer stretch of near-continuous cover.\n\nTwo wrinkles: card effects can ignore specific block types, and Empower is the one that matters - it charges only from a real press, never from echoes or Shield Charge dashes, and the charge is spent on your next fired shot.\n\n<color=#FFD94D><b>I BLOCKED ON TIME AND STILL GOT HIT</b></color>\n\nThe absorb decision is not made on your machine. Every bullet is simulated separately on every player's PC, and the copy that counts is the shooter's. When their copy of the bullet reaches you, their game checks their copy of YOUR shield - and that copy only turns on once your press has crossed the network, about half your ping plus half theirs after you pressed. A bullet that reached you on their screen inside that gap is ruled unblocked, the damage is sent as a final number, and nothing on your machine can refuse it. Your shield being visibly up on your screen never enters the decision.\n\nThe flip side is symmetric: your bullets are judged on YOUR screen. If your shot connected on your machine, it connects. The full mechanism and the numbers live one article over (see <color=#7FD4FF>Netcode & Photon</color>).\n\n<color=#FFD94D><b>WHAT THE MOD REPAIRS</b></color>\n\nVanilla ROUNDS has a family of bugs where block dies silently between games: the rematch teardown can destroy card objects half-way, leaving dead 'zombie' hooks attached to your block. The next game your shield animates and starts its cooldown but absorbs nothing - or basic blocking works while a card effect like Shield Charge never fires again.\n\nThe mod sweeps those dead hooks out at every game start, on every rematch, and right before every block executes, and one broken card hook no longer cancels the rest of your block. These repairs run everywhere because they only remove provably dead leftovers - restoring the block vanilla meant you to have, never inventing a new rule. <color=#7FE87F>A non-modded player always gets pure vanilla gameplay</color> (see <color=#7FD4FF>Vanilla stays vanilla</color>). The complete repair list lives in <color=#7FD4FF>Bug fixes the mod ships</color>.",
+  "Your vanilla avatar preset has items an unmodded player cannot see, so your avatar was not switched.",
   "Your view starts at the next round - that is the first moment the score, cards and health can be shown correctly.",
   "Your {0} lobby closed.",
   "Your {0} lobby seat expired — join or create a new one.",
@@ -3053,6 +3075,7 @@
   "always earns x1.5 pay",
   "an empty slot - no crash, no fallback",
   "any moment now",
+  "any preset; this is the one you wear everywhere else",
   "applies only when everyone in the room agrees",
   "applying a language rebuilds the page, so it cannot be part of one atomic bulk write; press this row to apply the detected id",
   "art submitted in-game",
@@ -3142,6 +3165,7 @@
   "it opens a browser; nothing in game changes",
   "jump within 0.1s: up and away",
   "just now",
+  "keeps a modded avatar out of games where it renders with holes",
   "keeps boards to players you can actually meet",
   "kill boundary",
   "kills",
@@ -3210,6 +3234,7 @@
   "online, data on, fighter",
   "only after reading the armed warning",
   "only if it is 1-1",
+  "only presets an unmodded opponent's own loader can resolve are visible to them",
   "only rare pulls, and only in one channel",
   "only to leave for good",
   "opp n/a",
@@ -6334,6 +6359,21 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Avatar auto-switch: <color=#88CCFF>OFF</color>": {
+   "surface": "NativeUI",
+   "location": "PaintAvatarAuto",
+   "kind": "SetText"
+  },
+  "Avatar auto-switch: <color=#88CCFF>ON</color>": {
+   "surface": "NativeUI",
+   "location": "PaintAvatarAuto",
+   "kind": "SetText"
+  },
+  "Avatar defaults": {
+   "surface": "AvatarDefaults",
+   "location": "PaintLegend",
+   "kind": "Tr"
+  },
   "Average FPS": {
    "surface": "NativeUI",
    "location": "BuildCompareBarChart",
@@ -6789,6 +6829,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Blue ring: your vanilla default": {
+   "surface": "AvatarDefaults",
+   "location": "PaintLegend",
+   "kind": "Tr"
+  },
   "Body colors": {
    "surface": "InfoViz",
    "location": "BuildVisibilitySeats",
@@ -6833,6 +6878,11 @@
    "surface": "ApiClient",
    "location": "ReadyUp, UpdateQueuePoll",
    "kind": "ShowNotification"
+  },
+  "Both rings: this preset is both of your defaults": {
+   "surface": "AvatarDefaults",
+   "location": "PaintLegend",
+   "kind": "Tr"
   },
   "Bottomless": {
    "surface": "shop catalog",
@@ -9949,6 +9999,11 @@
    "location": "BuildTotalsPages",
    "kind": "Tr"
   },
+  "Gold ring: your modded default": {
+   "surface": "AvatarDefaults",
+   "location": "PaintLegend",
+   "kind": "Tr"
+  },
   "Gold this set": {
    "surface": "SessionReportModel",
    "location": "BuildTotalsPages",
@@ -11659,6 +11714,21 @@
    "location": "BuildSettingsTab",
    "kind": "Tr"
   },
+  "Modded avatar": {
+   "surface": "NativeUI",
+   "location": "BuildSettingsTab",
+   "kind": "Tr"
+  },
+  "Modded avatar: <color=#88CCFF>{0}</color>": {
+   "surface": "NativeUI",
+   "location": "PaintAvatarModded",
+   "kind": "TrF"
+  },
+  "Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave.": {
+   "surface": "NativeUI, SettingsDescriptors.g",
+   "location": "BuildSettingsTab, HelpBodyTr",
+   "kind": "Tr"
+  },
   "Mode closed": {
    "surface": "ApiClient",
    "location": "SpectateReason, SpectateReasonExact",
@@ -12254,6 +12324,11 @@
    "location": "BuildCompareNemesisPanel",
    "kind": "Tr"
   },
+  "No preset is free of modded items yet.": {
+   "surface": "AvatarDefaults",
+   "location": "VanillaOptionNames",
+   "kind": "Tr"
+  },
   "No ranked 1v1 series recorded for the selected players yet.": {
    "surface": "NativeUI",
    "location": "BuildComparePlayerNemesisPanel",
@@ -12362,6 +12437,11 @@
   "Not ready yet": {
    "surface": "ApiClient",
    "location": "SpectateReason, SpectateReasonExact",
+   "kind": "Tr"
+  },
+  "Not set": {
+   "surface": "AvatarDefaults",
+   "location": "PresetLabel",
    "kind": "Tr"
   },
   "Not started": {
@@ -13305,8 +13385,13 @@
    "kind": "Tr"
   },
   "Preset {0}": {
-   "surface": "PlayerCardsUI",
+   "surface": "AvatarDefaults, PlayerCardsUI",
    "location": "PresetLabel",
+   "kind": "TrF"
+  },
+  "Preset {0} — has items an unmodded player cannot see": {
+   "surface": "AvatarDefaults",
+   "location": "VanillaOptionNames",
    "kind": "TrF"
   },
   "President Meow": {
@@ -14118,6 +14203,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Red ring: this preset has items an unmodded player cannot see, so it cannot be your vanilla default": {
+   "surface": "AvatarDefaults",
+   "location": "PaintLegend",
+   "kind": "Tr"
   },
   "Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.": {
    "surface": "InfoViz",
@@ -15994,6 +16084,16 @@
    "location": "RefreshMyStats, RefreshSession",
    "kind": "TrF"
   },
+  "Switched back to your modded avatar.": {
+   "surface": "AvatarDefaults",
+   "location": "SwitchedMessage",
+   "kind": "Tr"
+  },
+  "Switched to your vanilla avatar for this room.": {
+   "surface": "AvatarDefaults",
+   "location": "SwitchedMessage",
+   "kind": "Tr"
+  },
   "Sync (weekly)": {
    "surface": "NativeUI",
    "location": "RefreshRecentTournamentsPopup",
@@ -16304,6 +16404,11 @@
    "location": "ReasonText",
    "kind": "Tr"
   },
+  "That preset has never been customised, so your avatar was not switched.": {
+   "surface": "AvatarDefaults",
+   "location": "UnusableMessage",
+   "kind": "Tr"
+  },
   "That shard was already done with other cards - your binder has been refreshed": {
    "surface": "PlayerCardsUI",
    "location": "FailShard",
@@ -16562,6 +16667,16 @@
   "The pool changed while your pack was opening - nothing was charged, try again": {
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
+   "kind": "Tr"
+  },
+  "The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where everyone has the mod.": {
+   "surface": "NativeUI, SettingsDescriptors.g",
+   "location": "BuildSettingsTab, HelpBodyTr",
+   "kind": "Tr"
+  },
+  "The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.": {
+   "surface": "NativeUI, SettingsDescriptors.g",
+   "location": "BuildSettingsTab, HelpBodyTr",
    "kind": "Tr"
   },
   "The report could not be read": {
@@ -16937,6 +17052,11 @@
   "Titles are the short labels that render beside your name across the mod - leaderboard rows, Recent Series, Records, Compare, and every T-chat message you send. You can own any number of them, but only one is active at a time: pick it in the Shop tab with <color=#7FD4FF>Set Active</color>.\n\n<color=#FFD94D><b>CURRENT RANK - FREE FOR EVERYONE</b></color>\n\n<color=#7FD4FF>Current Rank</color> costs 0 gold and sits in the shop for every player. It's dynamic: wherever it renders, it shows your live 1v1 rank name in that rank's color, resolved fresh at render time. Rank up and the title upgrades itself; rank down and it follows you there too. The ladder behind it runs 25 rungs, from Beginner I at 0 rating to Grand Master V at 2610.\n\n<color=#FFD94D><b>PODIUM TITLES</b></color>\n\nThere are three podium titles, one per ranked ladder: 1v1, 2v2 and FFA. Each is granted the moment you enter that board's visible top 3, and taken back the moment you fall out of it <color=#8A8A93>(the position check runs on a cached board, so both directions can trail the actual standings by a minute or two)</color>. A board only lists players who have at least one counted series - or, for FFA, one recorded game - so a fresh account can't hold a podium.\n\nThe rendering is the interesting part:\n\n- While you hold a podium spot, the title renders live as <color=#FFD700>1st Place</color>, <color=#C0C0C0>2nd Place</color> or <color=#CD7F32>3rd Place</color> in gold, silver or bronze - always your CURRENT position, with a 1v1, 2v2 or FFA prefix everywhere except that ladder's own board.\n- <color=#FF6666>Off the podium, the title leaves your inventory entirely</color> until you climb back into the top 3. You hold it exactly as long as you hold the spot.\n\nPodium titles never rotate on a schedule and can never be bought. The only way in is the top 3.\n\n<color=#FFD94D><b>SLAYER TITLES</b></color>\n\nTwo legendary trophies for beating the names on the door:\n\n<color=#7FD4FF>Sid Slayer</color> - win a completed ranked 1v1 series where Sid is the loser. Renders <color=#FF4655>red</color>.\n<color=#7FD4FF>Stan Slayer</color> - win a completed ranked 1v1 series where Stan is the loser. Renders <color=#00E5FF>cyan</color>.\n\nEach arrives attached to its achievement, which also pays <color=#7FE87F>1000 gold</color> (see <color=#7FD4FF>Achievement guide</color>). Taking a single game off them isn't enough - the series has to complete with you as the winner.\n\n<color=#FFD94D><b>TRANSLATOR TITLES</b></color>\n\nVerified translation work through the translation portal earns three tiers. The unit is a live string: an approved translation where you were the proposer or the reviewer - doing both jobs on the same string still counts once.\n\n<color=#7FD4FF>Rosetta</color> (rare) - 10 live strings. Pays 100 gold.\n<color=#7FD4FF>Dragoman</color> (epic) - 100 live strings. Pays 300 gold.\n<color=#7FD4FF>Babel</color> (legendary) - 1000 live strings. Pays 1000 gold.\n\n<color=#FFD94D><b>PURCHASED TITLES</b></color>\n\nRegular titles sit in the shop with a gold price and work like any other cosmetic: buy once, own forever, wear it whenever you feel like it.\n\n<color=#FFD94D><b>EQUIPPING AND WHERE TITLES SHOW</b></color>\n\n- Earned titles (podium, slayer, translator) are hidden from the public shop listing, but every one YOU own appears in your own shop view with its Set Active button. <color=#FF6666>Buying them is always refused</color> - earning the moment is the only currency they accept.\n- Equipping a new title replaces the old one; titles never stack.\n- Titles show on the mod's own surfaces: the leaderboard, Recent Series, Records, Compare, the stats panels, your T-chat messages (in the title's color), and the Discord chat bridge.\n- Titles do NOT appear on the overhead in-game nametag, and players without the mod never see them - every title surface lives in the mod's UI or on Discord.": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
+   "kind": "Tr"
+  },
+  "To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.": {
+   "surface": "AvatarDefaults",
+   "location": "RecoveryInstruction",
    "kind": "Tr"
   },
   "To pick the best server region for a match, the mod measures your ping to each Photon region and sends the result to the server, where it is kept for at most one hour.": {
@@ -17578,6 +17698,16 @@
    "surface": "NativeUI",
    "location": "RefreshTournaments",
    "kind": "Tr"
+  },
+  "Vanilla avatar": {
+   "surface": "NativeUI",
+   "location": "BuildSettingsTab",
+   "kind": "Tr"
+  },
+  "Vanilla avatar: <color=#88CCFF>{0}</color>": {
+   "surface": "NativeUI",
+   "location": "PaintAvatarVanilla",
+   "kind": "TrF"
   },
   "Vanilla stays vanilla": {
    "surface": "InfoLibrary",
@@ -18589,6 +18719,11 @@
    "location": "(file scope)",
    "kind": "Tr"
   },
+  "Your vanilla avatar preset has items an unmodded player cannot see, so your avatar was not switched.": {
+   "surface": "AvatarDefaults",
+   "location": "UnusableMessage",
+   "kind": "Tr"
+  },
   "Your view starts at the next round - that is the first moment the score, cards and health can be shown correctly.": {
    "surface": "SpectatorHud",
    "location": "DrawBlackout",
@@ -18662,6 +18797,11 @@
   "any moment now": {
    "surface": "NativeUI",
    "location": "RefreshTeamTab",
+   "kind": "Tr"
+  },
+  "any preset; this is the one you wear everywhere else": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "applies only when everyone in the room agrees": {
@@ -19109,6 +19249,11 @@
    "location": "Ago",
    "kind": "Tr"
   },
+  "keeps a modded avatar out of games where it renders with holes": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "keeps boards to players you can actually meet": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
@@ -19447,6 +19592,11 @@
   "only if it is 1-1": {
    "surface": "InfoViz",
    "location": "BuildSeriesFormat",
+   "kind": "Tr"
+  },
+  "only presets an unmodded opponent's own loader can resolve are visible to them": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
    "kind": "Tr"
   },
   "only rare pulls, and only in one channel": {

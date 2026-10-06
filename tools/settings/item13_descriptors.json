@@ -559,6 +559,36 @@
       "class": "sub_tab_label",
       "key": "privacy",
       "text": "Privacy & account"
+    },
+    {
+      "class": "reason",
+      "key": "SAvAuto",
+      "text": "keeps a modded avatar out of games where it renders with holes"
+    },
+    {
+      "class": "help_body",
+      "key": "SAvAuto",
+      "text": "Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave."
+    },
+    {
+      "class": "reason",
+      "key": "SAvMod",
+      "text": "any preset; this is the one you wear everywhere else"
+    },
+    {
+      "class": "help_body",
+      "key": "SAvMod",
+      "text": "The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where everyone has the mod."
+    },
+    {
+      "class": "reason",
+      "key": "SAvVan",
+      "text": "only presets an unmodded opponent's own loader can resolve are visible to them"
+    },
+    {
+      "class": "help_body",
+      "key": "SAvVan",
+      "text": "The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only."
     }
   ],
   "descriptors": {
@@ -940,6 +970,248 @@
         "name": "AutoLogUpload.SetEnabled(bool)",
         "note": null,
         "source": "lane AutoLogUpload.cs",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SAvAuto": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave.",
+        "description_chars": null,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SAvAuto",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SAvAuto_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "keeps a modded avatar out of games where it renders with holes",
+        "state_words": []
+      },
+      "key": "SAvAuto",
+      "kind": "SWITCH",
+      "present_on": [
+        "lane"
+      ],
+      "reason": "keeps a modded avatar out of games where it renders with holes",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "method": "PaintAvatarAuto",
+          "source": "declared",
+          "writer": "SetText"
+        },
+        "stored": "true",
+        "value": "ON"
+      },
+      "reset_call": {
+        "args": [
+          "true"
+        ],
+        "server": null,
+        "writer": "AvatarDefaults.SetAuto(bool on)"
+      },
+      "reset_excluded_reason": "a picture choice has no right answer",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "true",
+        "independent_of_painted": true,
+        "kind": "bool",
+        "painted_value": "ON",
+        "type": "bool",
+        "writer_value_param": "bool"
+      },
+      "reset_selectors": [],
+      "row_group": "SAvAuto",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SAvAuto",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "AvatarDefaults.Evaluate"
+        ],
+        "kind": "semantic_setter",
+        "name": "AvatarDefaults.SetAuto(bool on)",
+        "note": "item 19: every write is edge E8 and evaluates f at once",
+        "source": "AvatarDefaults.cs",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SAvMod": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where everyone has the mod.",
+        "description_chars": null,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SAvMod",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SAvMod_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "any preset; this is the one you wear everywhere else",
+        "state_words": []
+      },
+      "key": "SAvMod",
+      "kind": "DROPDOWN",
+      "present_on": [
+        "lane"
+      ],
+      "reason": "any preset; this is the one you wear everywhere else",
+      "recommendation": {
+        "kind": "painted_runtime",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "method": "PaintAvatarModded",
+          "source": "declared",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "PresetLabel",
+        "render": {
+          "expression": "AvatarDefaults.PresetLabel(-1)",
+          "extracted_from": "PresetLabel",
+          "label": "PresetLabel",
+          "label_source": "AvatarDefaults.cs",
+          "not_constant_because": null,
+          "text": "Not set",
+          "text_source": "AvatarDefaults.cs"
+        },
+        "stored": "-1",
+        "value": null
+      },
+      "reset_call": {
+        "args": [
+          "-1"
+        ],
+        "server": null,
+        "writer": "AvatarDefaults.SetModded(int slot)"
+      },
+      "reset_excluded_reason": "a picture choice has no right answer",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "-1",
+        "independent_of_painted": true,
+        "kind": "number",
+        "painted_value": "Not set",
+        "type": "int",
+        "writer_value_param": "int"
+      },
+      "reset_selectors": [],
+      "row_group": "SAvMod",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SAvMod",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "AvatarDefaults.Evaluate"
+        ],
+        "kind": "semantic_setter",
+        "name": "AvatarDefaults.SetModded(int slot)",
+        "note": "item 19: every write is edge E8 and evaluates f at once",
+        "source": "AvatarDefaults.cs",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SAvVan": {
+      "bulk_reset": false,
+      "config": {
+        "lane": [],
+        "pin": []
+      },
+      "help_body": {
+        "authored": "The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.",
+        "description_chars": null,
+        "source": "authored"
+      },
+      "help_entry_id": "help_SAvVan",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SAvVan_q",
+      "home": "visuals",
+      "home_label": "Visuals",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "only presets an unmodded opponent's own loader can resolve are visible to them",
+        "state_words": []
+      },
+      "key": "SAvVan",
+      "kind": "DROPDOWN",
+      "present_on": [
+        "lane"
+      ],
+      "reason": "only presets an unmodded opponent's own loader can resolve are visible to them",
+      "recommendation": {
+        "kind": "painted_runtime",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "method": "PaintAvatarVanilla",
+          "source": "declared",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "PresetLabel",
+        "render": {
+          "expression": "AvatarDefaults.PresetLabel(-1)",
+          "extracted_from": "PresetLabel",
+          "label": "PresetLabel",
+          "label_source": "AvatarDefaults.cs",
+          "not_constant_because": null,
+          "text": "Not set",
+          "text_source": "AvatarDefaults.cs"
+        },
+        "stored": "-1",
+        "value": null
+      },
+      "reset_call": {
+        "args": [
+          "-1"
+        ],
+        "server": null,
+        "writer": "AvatarDefaults.SetVanilla(int slot)"
+      },
+      "reset_excluded_reason": "a picture choice has no right answer",
+      "reset_operand": {
+        "canonical_set": null,
+        "canonical_source": null,
+        "expression": "-1",
+        "independent_of_painted": true,
+        "kind": "number",
+        "painted_value": "Not set",
+        "type": "int",
+        "writer_value_param": "int"
+      },
+      "reset_selectors": [],
+      "row_group": "SAvVan",
+      "stores_value": true,
+      "sub_tab_body": "SubVisuals",
+      "target_id": "SAvVan",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [
+          "AvatarDefaults.Evaluate"
+        ],
+        "kind": "semantic_setter",
+        "name": "AvatarDefaults.SetVanilla(int slot)",
+        "note": "item 19: every write is edge E8 and evaluates f at once",
+        "source": "AvatarDefaults.cs",
         "writes_entry_as_side_effect": null
       }
     },

@@ -64,6 +64,9 @@ namespace CompetitiveRounds
                 case "SAnimCos": return true;
                 case "SAppOff": return false;
                 case "SAutoLog": return true;
+                case "SAvAuto": return true;
+                case "SAvMod": return -1;
+                case "SAvVan": return -1;
                 case "SBlkDbg": return false;
                 case "SBloom": return "Full";
                 case "SCT": return true;
@@ -118,6 +121,8 @@ namespace CompetitiveRounds
         {
             switch (key)
             {
+                case "SAvMod": return AvatarDefaults.PresetLabel(-1);
+                case "SAvVan": return AvatarDefaults.PresetLabel(-1);
                 case "SBloom": return I18n.Tr("Full".ToUpperInvariant());
                 case "SChatTtl": return Plugin.ChatOverlaySecondsLabel(25f);
                 case "SCursor": return I18n.Tr(CursorColorCosmetic.ShapeLabel("default"));
