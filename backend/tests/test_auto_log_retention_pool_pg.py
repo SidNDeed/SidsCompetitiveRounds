@@ -347,7 +347,9 @@ def test_thirty_prune_calls_on_the_real_pool_leave_it_available(tmp_path,
         "against the new size")
     monkeypatch.setattr(main, "BUG_REPORT_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("API_SECRET_KEY", "shh")
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 4.0)
+    # The ceiling outlasts the unrelated checkout's own 5 s bound, so with the
+    # fix reverted that checkout is still waiting when its bound ends.
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 8.0)
     monkeypatch.setattr(auto_logs, "_PRUNE_BATCH", 1)
 
     seen = _run_case(tmp_path, monkeypatch)
