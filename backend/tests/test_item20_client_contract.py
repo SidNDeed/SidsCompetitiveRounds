@@ -284,6 +284,11 @@ def test_the_collection_route_answers_the_shape_the_client_reads(lane, monkeypat
                 steam = dp.steam_id()
                 pl = await main.get_or_create_player(db, steam, "Contract " + tag)
                 ids[tag] = (steam, str(pl.id))
+            # get_or_create_player only db.add()s each player's Glicko row, and
+            # a text() statement does not autoflush: without this flush the
+            # DELETE below finds nothing and the commit then writes the
+            # "unrated" subject a default 1500 row.
+            await db.flush()
             await db.execute(text("UPDATE players SET last_seen = now(), pc_collection_public = true "
                                   "WHERE id = ANY(CAST(:ids AS uuid[]))"),
                              {"ids": [v[1] for v in ids.values()]})
