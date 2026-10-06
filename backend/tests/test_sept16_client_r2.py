@@ -2164,7 +2164,12 @@ def test_every_capability_stage_admits_the_states_the_verdict_lands_in():
         # the gate may be inlined or named; a named one is resolved to its body
         gate = stage
         if "InIdleClientState()" in stage:
-            gate = _method_body(src, "private static bool InIdleClientState")
+            # the rj-drift merge made the gate internal (the pre-join fence
+            # applies the same test); exactly one declaration must exist
+            sigs = [s + " static bool InIdleClientState" for s in ("private", "internal")
+                    if s + " static bool InIdleClientState" in src]
+            assert len(sigs) == 1, (cls, sigs)
+            gate = _method_body(src, sigs[0])
             assert gate, cls
         for st in idle:
             assert st in gate, (cls, st)
