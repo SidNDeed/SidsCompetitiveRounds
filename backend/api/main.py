@@ -40,6 +40,7 @@ from flag_evidence import fetch_flag_context_rows, flag_payload
 import seat_evidence as _sev
 import combat_evidence as _cev
 import review_rules as _review_rules
+import build_manifest as _build_manifest   # standard library only: /health `build_manifest`
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
@@ -7176,6 +7177,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               connect_failure=_CONNECT_FAILURE,
                               seat_evidence=_seat_evidence_health_word(),
                               combat_evidence=_combat_evidence_health_word(),
+                              build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
@@ -7210,6 +7212,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               connect_failure=_CONNECT_FAILURE,
                               seat_evidence=_seat_evidence_health_word(),
                               combat_evidence=_combat_evidence_health_word(),
+                              build_manifest=_build_manifest.health_word(),
                               review_eval=_review_rules.review_eval(),
                               review_rules=_review_rules.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,

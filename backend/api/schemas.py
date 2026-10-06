@@ -1032,6 +1032,12 @@ class HealthResponse(BaseModel):
     # registered on the app, else 0). Derived on every request; equal on both
     # roles. No default, as above. Absent on any build before the lane.
     combat_evidence: int
+    # build_manifest: the SHA-256 of the build-manifest.json this image's build
+    # wrote (build_manifest.py: the build context's digest, the pip freeze and
+    # the dpkg list, each hashed), "absent" when the process was not started
+    # from a built image, "refused" when the file is missing a part. Equal on
+    # both roles when both run one build. No default, as above.
+    build_manifest: str
     # review_eval: 8 hex over the public review vocabulary's per-entry
     # fingerprints (review_measures.review_eval). Equal on both roles; the
     # build discriminator through the edge. No default, as above.

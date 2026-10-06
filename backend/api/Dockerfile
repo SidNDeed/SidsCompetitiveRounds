@@ -41,11 +41,18 @@ WORKDIR /app
 # text_shaping_unavailable. That is what production did on 2026-09-12: both
 # boxes healthy, fonts present, first pack open refused. The release train now
 # asserts pc_raqm on both boxes; test_pc_deploy_wiring.py holds this line.
-RUN apt-get update && apt-get install -y --no-install-recommends libfribidi0 && rm -rf /var/lib/apt/lists/*
+# The version is pinned: 1.0.16-1 is the version in the base image's Debian
+# suite (trixie), read from the Debian archive index 2026-10-06 (combat fix
+# pass 8). When the archive supersedes it, apt refuses this line and the build
+# fails; re-read the version and change it here in its own commit.
+RUN apt-get update && apt-get install -y --no-install-recommends libfribidi0=1.0.16-1 && rm -rf /var/lib/apt/lists/*
 
-# Install dependencies first (cached layer)
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies first (cached layer). requirements.lock is the content
+# lock of requirements.txt (every package pinned, every wheel hashed); with
+# --require-hashes pip refuses any wheel whose bytes are not hashed there and
+# any package the lock does not list.
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r requirements.lock
 
 # Player Cards renderer fonts. The font FILES are not in the repo (gitignored,
 # ~30 MB); fetch_fonts.py pulls each one from a COMMIT-pinned URL and verifies
@@ -62,8 +69,16 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY assets/fonts/fetch_fonts.py assets/fonts/fonts.lock.json ./assets/fonts/
 RUN python assets/fonts/fetch_fonts.py
 
-# Copy application code
+# Copy application code. .dockerignore keeps caches, logs, key material, the
+# font binaries and the private card-art staging out of the context.
 COPY . .
+
+# Last: verify the fonts again (no fetch; a missing or moved font fails the
+# build), so the bytes the image carries are the verified ones whatever the
+# copy brought; then write build-manifest.json (build_manifest.py: the context
+# digest, the pip freeze and the dpkg list, each hashed), which /health
+# answers as `build_manifest`.
+RUN python assets/fonts/fetch_fonts.py --verify && python build_manifest.py write
 
 # Run with uvicorn.
 #

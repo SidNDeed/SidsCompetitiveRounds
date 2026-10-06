@@ -7,6 +7,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from hashlib import sha256
 import inspect
+import os
 import re
 import subprocess
 import sys
@@ -39,47 +40,55 @@ PINNED_FASTAPI = next(
 
 API_DIR = (Path(__file__).parents[1] / "api").resolve()
 
-# ── The reviewed surface: ONE digest of the api image build context ──────
+# ── The reviewed surface: ONE digest of the api image's build inputs ─────
 #
-# Combat fix pass 7. Until this pass a route's fingerprint covered the
-# module-level bindings a static walk said its handler could reach. Every
-# review round found another way a dependency escaped that walk, and by fix
-# pass 6 every route's closure was the whole tree anyway. The walk is gone and
-# nothing is resolved: every route row and every entry-point row carries the
-# SAME digest, of every file the api image is built from, so an edit to any
-# of those files moves every fingerprint. The digest says THAT something the
-# image runs changed, never WHICH route; what a moved digest obliges a
-# reviewer to read is stated where the drift test reports it.
+# Combat fix pass 7 replaced the per-route walk with one digest; fix pass 8
+# makes its input set the Docker build context itself. Every route row and
+# every entry-point row carries the SAME digest, of every file the api image
+# is built from, so an edit to any of them moves every fingerprint. The digest
+# says THAT something the image takes changed, never WHICH route; what a
+# moved digest obliges a reviewer to read is stated where the drift test
+# reports it.
 #
-# THE INPUT SET (`_context_paths`). The api image is built from backend/api
-# (docker-compose.yml: `context: ./api`) by `COPY . .`, with no ignore file,
-# so the image holds every file in that directory. The set is every file under
-# backend/api that git tracks or would track -- tracked files plus untracked
-# files the repository's ignore rules do not exclude -- found by git, never
-# listed by hand. The ignore rules are the one exclusion, stated once here:
-# they exclude bytecode caches (derived from sources in the set), the fetched
-# font binaries (the build verifies each against assets/fonts/fonts.lock.json,
-# which is in the set) and the private card-art staging directory. One file
-# outside the context is a member by an explicit named rule (`_NAMED_MEMBERS`):
-# backend/docker-compose.yml, which decides the command the api container
-# runs, every environment name the process can see, and every mount.
+# THE INPUT SET (`_context_paths`). docker-compose.yml builds the api from
+# `context: ./api`; Docker sends that directory minus what its .dockerignore
+# excludes, and the Dockerfile's `COPY . .` copies what was sent. The set is
+# computed the same way, from the WORKING DIRECTORY: every path under
+# backend/api that the committed .dockerignore does not exclude (read and
+# applied by `_dockerignore_rules` / `_docker_ignored`, Docker's rules as
+# written, implemented here and tested against them -- docker build does not
+# run on this seat, so nothing here was compared with a daemon), plus the
+# Dockerfile and the .dockerignore whatever the patterns say (Docker sends
+# both regardless), plus backend/docker-compose.yml by a named rule
+# (`_NAMED_MEMBERS`: it decides the command the container runs, every
+# environment name the process sees, and every mount).
 #
-# Not members, and why. SQL reaches the database by migration, under the
-# migration rules, and is never read by the image. The private card-art bundle
+# THE REFUSAL. The digest is taken only when that set IS the committed tree:
+# every member a regular file committed at HEAD whose working bytes are its
+# blob under the line-ending rule, and every committed file the patterns keep
+# present. Anything else -- a file git ignores or does not track, an edited or
+# deleted committed file, a link -- raises ContextRefused naming every such
+# path, and no fingerprint is computed. So a file Docker would copy can never
+# sit outside the digest: it is either a committed member or a refusal.
+#
+# Not members, and why. SQL reaches the database by migration under the
+# migration rules and is never read by the image. The private card-art bundle
 # and the private review rules are mounted read-only from each box's private
-# store and are never in the repository; each is checked by its own digest
-# where it is loaded. Configuration values (.env) reach the process through
-# the environment names the compose file declares.
+# store; each is checked by its own digest where it is loaded. Configuration
+# values (.env) reach the process through the environment names the compose
+# file declares. The bytes the image takes from OUTSIDE the context are
+# locked, not digested: the base image by its registry digest, the Python
+# packages by requirements.lock (every wheel hashed, installed with
+# --require-hashes; the lock is a member), libfribidi0 by its version, the
+# fonts by fonts.lock.json (a member) and a verification after the copy. What
+# a build actually took is written into the image (build_manifest.py) and
+# answered on /health as `build_manifest`.
 #
 # THE LINE-ENDING RULE (`_canonical`). The digest is over git BLOB bytes,
-# whatever the checkout. A checkout converts only text files and only by
-# writing CR before LF (core.autocrlf on this seat; the boxes clone on Linux
-# without it), so a file's blob bytes are its working bytes with CRLF turned
-# into LF, unless the file holds a NUL byte (binary), which no checkout
-# converts. That is exact while no text blob in the set itself carries a CR
-# byte: test_f7_the_digest_is_the_blob_digest_on_this_checkout asserts that,
-# and that the digest read from git objects equals the one read from the
-# working tree on this seat.
+# whatever the checkout: a working copy's bytes with CRLF turned into LF,
+# unless the file holds a NUL byte (binary), which no checkout converts. That
+# is exact while no text blob carries a CR byte, which the line-ending proof
+# asserts; the refusal above compares every member with its blob.
 #
 # THE FRAMING (`_framed`). Each file is framed, never concatenated: the path
 # (relative to the repository root, `/` separators, UTF-8) after its byte
@@ -93,15 +102,20 @@ API_DIR = (Path(__file__).parents[1] / "api").resolve()
 # the resolver, the dynamic-openness rule and its source lists, the node
 # census, the grammar and property oracles, and every test whose only subject
 # was one of those (the route seeds and the helper closure went with them:
-# they only fed or read the walk). The route list, the
-# classification of each route and the entry-point list never came from the
-# walk -- they are read from the app (`_route_identities`,
-# `_entry_point_sections`) and from the manifest -- and are kept unchanged.
+# they only fed or read the walk). The route list, the classification of each
+# route and the entry-point list never came from the walk -- they are read
+# from the app (`_route_identities`, `_entry_point_sections`) and from the
+# manifest -- and are kept unchanged.
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONTEXT = "backend/api"
 _NAMED_MEMBERS = ("backend/docker-compose.yml",)
+_ALWAYS_SENT = ("Dockerfile", ".dockerignore")
 _CONTEXT_DIGEST = {}
+
+
+class ContextRefused(AssertionError):
+    """The build context is not exactly the committed tree: no digest."""
 
 
 def _git(root, *args, stdin=None):
@@ -109,16 +123,165 @@ def _git(root, *args, stdin=None):
                           capture_output=True, check=True).stdout
 
 
-def _context_paths(root=REPO_ROOT):
-    """Every member path, relative to `root`, sorted: each file under the
-    context that git tracks or would track, and each named member present. A
-    tracked file deleted from the working tree is not a member: the image
-    would not hold it either."""
-    out = _git(root, "ls-files", "-z", "--cached", "--others", "--exclude-standard",
-               "--", _CONTEXT)
-    paths = {p for p in out.decode("utf-8").split("\0") if p}
-    paths.update(_NAMED_MEMBERS)
-    return sorted(p for p in paths if (Path(root) / p).is_file())
+# ── The .dockerignore rules, as Docker documents and applies them ────────
+#
+# Reading (`_dockerignore_patterns`): one pattern per line (a trailing CR
+# dropped, a UTF-8 BOM dropped from the first line); a line whose FIRST
+# character is `#` is a comment (checked before trimming, so ` #x` is a
+# pattern); surrounding whitespace trimmed; blank lines skipped; a leading
+# `!` (then trimmed again) makes an exception; the rest cleaned as Go's
+# filepath.Clean cleans it, and one leading `/` dropped. Matching
+# (`_docker_ignored`): patterns are applied in order to a path relative to the
+# context AND to each of its parent directories, the last one that matches
+# deciding; an exception is only consulted while the path is excluded and an
+# exclusion only while it is not. Each pattern is Go filepath.Match syntax
+# (`*` any run of non-`/`, `?` one non-`/`, `[...]` a class, `\` escapes the
+# next character) extended by `**`, which matches any number of directories
+# including none; a pattern that starts with `**` and has no other wildcard
+# matches any path that ends with the rest, and one that ends with `**` and
+# has no other wildcard matches any path that starts with what precedes it.
+# A malformed pattern refuses.
+
+_GO_ESCAPE = ".+()|{}$"
+
+
+def _go_clean(path):
+    """Go's filepath.Clean for a `/`-separated path."""
+    rooted = path.startswith("/")
+    parts = []
+    for part in path.split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if parts and parts[-1] != "..":
+                parts.pop()
+            elif not rooted:
+                parts.append("..")
+            continue
+        parts.append(part)
+    cleaned = ("/" if rooted else "") + "/".join(parts)
+    return cleaned or ("/" if rooted else ".")
+
+
+def _dockerignore_patterns(text):
+    """The pattern strings Docker reads from a .dockerignore's text."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    patterns = []
+    for index, line in enumerate(lines):
+        if line.endswith("\r"):
+            line = line[:-1]
+        if index == 0 and line.startswith("﻿"):
+            line = line[1:]
+        if line.startswith("#"):
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        invert = line.startswith("!")
+        if invert:
+            line = line[1:].strip()
+        if line:
+            line = _go_clean(line)
+            if len(line) > 1 and line.startswith("/"):
+                line = line[1:]
+        patterns.append(("!" if invert else "") + line)
+    return patterns
+
+
+def _compile_pattern(pattern):
+    """A predicate over a context-relative path for one cleaned pattern."""
+    regex, kind, i = "^", "exact", 0
+    while i < len(pattern):
+        ch = pattern[i]
+        first = i == 0
+        i += 1
+        if ch == "*":
+            if i < len(pattern) and pattern[i] == "*":
+                i += 1
+                if i < len(pattern) and pattern[i] == "/":
+                    i += 1
+                if i == len(pattern):
+                    if kind == "exact":
+                        kind = "prefix"
+                    else:
+                        regex += ".*"
+                        kind = "regex"
+                else:
+                    regex += "(.*/)?"
+                    kind = "regex"
+                if first:
+                    kind = "suffix"
+            else:
+                regex += "[^/]*"
+                kind = "regex"
+        elif ch == "?":
+            regex += "[^/]"
+            kind = "regex"
+        elif ch in _GO_ESCAPE:
+            regex += "\\" + ch
+        elif ch == "\\":
+            if i < len(pattern):
+                regex += "\\" + pattern[i]
+                i += 1
+                kind = "regex"
+            else:
+                regex += "\\\\"
+        elif ch in "[]":
+            regex += ch
+            kind = "regex"
+        else:
+            regex += ch
+    try:
+        compiled = re.compile(regex + "$", re.S)
+    except re.error as exc:
+        raise ContextRefused(f".dockerignore pattern {pattern!r} is malformed: {exc}") from None
+    if kind == "exact":
+        return lambda path: path == pattern
+    if kind == "prefix":
+        return lambda path: path.startswith(pattern[:-2])
+    if kind == "suffix":
+        suffix = pattern[2:]
+        return lambda path: path.endswith(suffix) or (suffix[:1] == "/" and path == suffix[1:])
+    return lambda path: compiled.match(path) is not None
+
+
+def _dockerignore_rules(text):
+    """[(is_exception, predicate, pattern)] in file order."""
+    rules = []
+    for pattern in _dockerignore_patterns(text):
+        pattern = _go_clean(pattern.strip()) if pattern.strip() else ""
+        if not pattern:
+            continue
+        exception = pattern.startswith("!")
+        if exception:
+            pattern = pattern[1:]
+            if not pattern:
+                raise ContextRefused('.dockerignore holds the illegal exception pattern "!"')
+        rules.append((exception, _compile_pattern(pattern), pattern))
+    return rules
+
+
+def _docker_ignored(rules, path):
+    """Whether Docker leaves context-relative `path` out of the context."""
+    parent = path.rsplit("/", 1)[0] if "/" in path else "."
+    parents = parent.split("/")
+    ignored = False
+    for exception, matches, _pattern in rules:
+        if exception != ignored:
+            continue
+        hit = matches(path)
+        if not hit and parent != ".":
+            hit = any(matches("/".join(parents[:k + 1])) for k in range(len(parents)))
+        if hit:
+            ignored = not exception
+    return ignored
+
+
+def _sent(paths, rules):
+    """The context-relative paths Docker sends, of `paths`."""
+    return sorted(p for p in paths if p in _ALWAYS_SENT or not _docker_ignored(rules, p))
 
 
 def _canonical(data):
@@ -126,36 +289,106 @@ def _canonical(data):
     return data if b"\0" in data else data.replace(b"\r\n", b"\n")
 
 
-def _working_files(root=REPO_ROOT):
-    """[(path, blob bytes)] for the input set as the working tree holds it."""
-    return [(path, _canonical((Path(root) / path).read_bytes()))
-            for path in _context_paths(root)]
-
-
-def _blob_files(commit, root=REPO_ROOT):
-    """[(path, blob bytes)] for the input set as git objects hold it at
-    `commit`: the tracked files under the context and the named members."""
+def _committed(commit, root=REPO_ROOT):
+    """{path: (mode, blob bytes)} for every file git holds at `commit` under
+    the context and among the named members."""
     listing = _git(root, "ls-tree", "-r", "-z", "--full-tree", commit, "--",
                    _CONTEXT, *_NAMED_MEMBERS)
     entries = []
     for record in listing.decode("utf-8").split("\0"):
         if record:
             meta, path = record.split("\t", 1)
-            _mode, kind, sha = meta.split()
+            mode, kind, sha = meta.split()
             if kind == "blob":
-                entries.append((path, sha))
+                entries.append((path, mode, sha))
     batch = _git(root, "cat-file", "--batch",
-                 stdin="".join(sha + "\n" for _path, sha in entries).encode("ascii"))
-    files, position = [], 0
-    for path, sha in entries:
+                 stdin="".join(sha + "\n" for _p, _m, sha in entries).encode("ascii"))
+    out, position = {}, 0
+    for path, mode, sha in entries:
         end = batch.index(b"\n", position)
         header = batch[position:end].split()
         assert header[0].decode("ascii") == sha and header[1] == b"blob", header
         size = int(header[2])
-        files.append((path, batch[end + 1:end + 1 + size]))
+        out[path] = (mode, batch[end + 1:end + 1 + size])
         position = end + 1 + size + 1
     assert position == len(batch), "git cat-file returned more than was asked for"
-    return sorted(files)
+    return out
+
+
+def _rules_at(committed):
+    """The .dockerignore rules a committed tree carries."""
+    entry = committed.get(f"{_CONTEXT}/.dockerignore")
+    return _dockerignore_rules(entry[1].decode("utf-8")) if entry else []
+
+
+def _blob_files(commit, root=REPO_ROOT):
+    """[(path, blob bytes)] for the input set as git objects hold it at
+    `commit`: the committed files its own .dockerignore keeps, the Dockerfile,
+    the .dockerignore, and the named members."""
+    committed = _committed(commit, root)
+    rules = _rules_at(committed)
+    prefix = _CONTEXT + "/"
+    keep = set(_sent([p[len(prefix):] for p in committed if p.startswith(prefix)], rules))
+    return sorted((path, data) for path, (_mode, data) in committed.items()
+                  if path in _NAMED_MEMBERS or path[len(prefix):] in keep)
+
+
+def _context_scan(root=REPO_ROOT):
+    """(the input set's paths, every refusal) from the working directory."""
+    root = Path(root)
+    context = root / _CONTEXT
+    ignore = context / ".dockerignore"
+    rules = _dockerignore_rules(ignore.read_bytes().decode("utf-8")) if ignore.is_file() else []
+    on_disk = []
+    for directory, dirnames, filenames in os.walk(context):
+        dirnames.sort()
+        here = Path(directory)
+        for name in sorted(filenames + [d for d in dirnames if (here / d).is_symlink()]):
+            on_disk.append((here / name).relative_to(context).as_posix())
+    committed = _committed("HEAD", root)
+    refusals = []
+    members = []
+    for rel in _sent(on_disk, rules):
+        path = f"{_CONTEXT}/{rel}"
+        members.append(path)
+    prefix = _CONTEXT + "/"
+    kept = set(_sent([p[len(prefix):] for p in committed if p.startswith(prefix)], rules))
+    for rel in sorted(kept - {m[len(prefix):] for m in members}):
+        refusals.append(f"{prefix}{rel}: committed but absent from the working directory")
+    for path in _NAMED_MEMBERS:
+        if (root / path).exists() or path in committed:
+            members.append(path)
+    for path in members:
+        local = root / path
+        if local.is_symlink() or not local.is_file():
+            refusals.append(f"{path}: not a regular file" if local.exists() or local.is_symlink()
+                            else f"{path}: committed but absent from the working directory")
+            continue
+        if path not in committed:
+            refusals.append(f"{path}: not a committed file (Docker would copy it)")
+        elif committed[path][0] not in ("100644", "100755"):
+            refusals.append(f"{path}: committed as mode {committed[path][0]}, not a regular file")
+        elif _canonical(local.read_bytes()) != committed[path][1]:
+            refusals.append(f"{path}: working bytes differ from the committed blob")
+    return sorted(set(members)), sorted(set(refusals))
+
+
+def _context_paths(root=REPO_ROOT):
+    """Every member path, relative to `root`, sorted; raises ContextRefused
+    naming every refusal when the context is not exactly the committed tree."""
+    members, refusals = _context_scan(root)
+    if refusals:
+        raise ContextRefused("the api build context is not the committed tree, so no digest "
+                             "is taken (commit the file, delete it, or exclude it in "
+                             "backend/api/.dockerignore):\n  " + "\n  ".join(refusals))
+    return members
+
+
+def _working_files(root=REPO_ROOT):
+    """[(path, blob bytes)] for the input set as the working tree holds it
+    (equal to the committed blobs, or `_context_paths` refused)."""
+    return [(path, _canonical((Path(root) / path).read_bytes()))
+            for path in _context_paths(root)]
 
 
 def _framed(files):
@@ -191,6 +424,12 @@ def _unframed(encoding):
 def _tree_digest(files):
     """SHA-256 over the framed input set."""
     return sha256(_framed(files)).hexdigest()
+
+
+def _context_only(files):
+    """The members inside the build context (the named members left out):
+    what the image itself receives, and what build_manifest.py digests."""
+    return [(path, data) for path, data in files if path.startswith(_CONTEXT + "/")]
 
 
 def _context_digest():
@@ -963,14 +1202,16 @@ def test_no_dynamic_route_is_registered_ahead_of_a_literal_it_swallows():
 
 def test_f7_the_input_set_is_the_image_build_context(capsys):
     """The set rule against the files that define the image: the compose
-    file builds the api from ./api, no ignore file narrows `COPY . .`, every
-    COPY source is inside the context and in the set, and no bytecode is."""
+    file builds the api from ./api, the context's committed .dockerignore is
+    the ignore file the set applies (and a member), every COPY source is inside
+    the context and in the set, and no bytecode is."""
     compose = (REPO_ROOT / "backend" / "docker-compose.yml").read_text(encoding="utf-8")
     assert re.search(r"^  api:\n(?:    .*\n|\n)*?    build:\n      context: \./api\n"
                      r"      dockerfile: Dockerfile\n", compose, re.M), (
         "the api service no longer builds from ./api with its Dockerfile: re-derive the set")
-    assert not (API_DIR / ".dockerignore").exists(), (
-        "an ignore file now narrows the build context: re-derive the set from it")
+    assert (API_DIR / ".dockerignore").is_file(), "the build context lost its .dockerignore"
+    assert not (API_DIR / "Dockerfile.dockerignore").exists(), (
+        "a Dockerfile-specific ignore file replaces .dockerignore: re-derive the set from it")
     paths = _context_paths()
     members = set(paths)
     copies = [line.split()[1:-1] for line in
@@ -982,7 +1223,8 @@ def test_f7_the_input_set_is_the_image_build_context(capsys):
         for source in sources:
             assert ".." not in source.split("/"), source
             assert source == "." or f"{_CONTEXT}/{source}" in members, source
-    assert {f"{_CONTEXT}/{name}" for name in ("main.py", "Dockerfile", "requirements.txt",
+    assert {f"{_CONTEXT}/{name}" for name in ("main.py", "Dockerfile", ".dockerignore",
+            "requirements.txt", "requirements.lock", "build_manifest.py",
             "assets/fonts/fonts.lock.json", "assets/pc/catalogue.json")} <= members
     assert set(_NAMED_MEMBERS) <= members
     assert not [p for p in paths if "__pycache__" in p.split("/") or p.endswith(".pyc")]
@@ -995,67 +1237,127 @@ def test_f7_the_input_set_is_the_image_build_context(capsys):
                              _context_digest()))
 
 
-def test_f7_a_new_file_under_the_context_is_a_member_and_nothing_outside_is(tmp_path):
-    """The membership rule, on a scratch repository: a file nobody lists that
-    appears under the context is IN and moves the digest; an ignored cache
-    file under the context, and any file outside the set (a migration, a
-    test), move nothing (the negative control)."""
+def _f8_commit(root, message):
+    hooks = root.parent / "no-hooks"
+    hooks.mkdir(exist_ok=True)
+    _git(root, "add", "-A")
+    _git(root, "-c", "user.name=gate", "-c", "user.email=gate@example.invalid",
+         "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={hooks}",
+         "commit", "-q", "--allow-empty", "-m", message)
+
+
+def _f8_refusals(root):
+    with pytest.raises(ContextRefused) as refused:
+        _context_paths(root)
+    return str(refused.value)
+
+
+def test_f8_the_context_is_the_committed_tree_or_no_digest(tmp_path, capsys):
+    """The membership rule and the refusal, on a scratch repository built like
+    this one: a committed file under the context is IN; a file the
+    .dockerignore excludes is out and refuses nothing (whether git ignores it
+    or tracks it); a file git ignores that Docker would copy, an untracked
+    file, an edited committed file and a deleted committed file each REFUSE,
+    naming the path; the Dockerfile and the .dockerignore are members even
+    when a pattern names them; files outside the context and the named
+    members (a migration, a test) move nothing (the negative control)."""
     root = tmp_path / "repo"
-    (root / "backend" / "api").mkdir(parents=True)
+    api = root / "backend" / "api"
+    api.mkdir(parents=True)
     (root / "backend" / "sql").mkdir()
     (root / "backend" / "tests").mkdir()
     _git(root, "init", "-q")
-    (root / ".gitignore").write_bytes(b"__pycache__/\n")
-    (root / "backend" / "api" / "main.py").write_bytes(b"X = 1\n")
+    _git(root, "config", "core.autocrlf", "false")
+    (root / ".gitignore").write_bytes(b"__pycache__/\ndist/\n*.log\n")
+    (api / ".dockerignore").write_bytes(b"**/__pycache__\n**/*.log\n")
+    (api / "Dockerfile").write_bytes(b"FROM scratch\nCOPY . .\n")
+    (api / "main.py").write_bytes(b"X = 1\n")
     (root / "backend" / "docker-compose.yml").write_bytes(b"services: {}\n")
     (root / "backend" / "sql" / "001_x.sql").write_bytes(b"SELECT 1;\n")
     (root / "backend" / "tests" / "test_x.py").write_bytes(b"def test(): pass\n")
+    _f8_commit(root, "base")
     base = _tree_digest(_working_files(root))
-    assert _context_paths(root) == ["backend/api/main.py", "backend/docker-compose.yml"]
+    assert _context_paths(root) == ["backend/api/.dockerignore", "backend/api/Dockerfile",
+                                    "backend/api/main.py", "backend/docker-compose.yml"]
+    cases = 0
 
+    # Excluded by .dockerignore: out, no refusal; outside files: nothing moves.
+    (api / "__pycache__").mkdir()
+    (api / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"\0pyc")
+    (api / "run.log").write_bytes(b"log\n")
     (root / "backend" / "sql" / "001_x.sql").write_bytes(b"SELECT 2;\n")
     (root / "backend" / "tests" / "test_x.py").write_bytes(b"def test(): assert 0\n")
-    (root / "backend" / "api" / "__pycache__").mkdir()
-    (root / "backend" / "api" / "__pycache__" / "main.cpython-312.pyc").write_bytes(b"\0pyc")
-    assert _tree_digest(_working_files(root)) == base, "a file outside the set moved the digest"
+    assert _tree_digest(_working_files(root)) == base, "an excluded or outside file moved the digest"
+    cases += 1
 
-    (root / "backend" / "api" / "helpers.py").write_bytes(b"Y = 2\n")
+    # Ignored by git, copied by Docker: refuses, naming it.
+    (api / "dist").mkdir()
+    (api / "dist" / "patch.py").write_bytes(b"X = 2\n")
+    assert "backend/api/dist/patch.py: not a committed file" in _f8_refusals(root)
+    (api / "dist" / "patch.py").unlink()
+    cases += 1
+
+    # Untracked and not ignored: refuses.
+    (api / "helpers.py").write_bytes(b"Y = 2\n")
+    assert "backend/api/helpers.py: not a committed file" in _f8_refusals(root)
+    cases += 1
+
+    # Committed: a member, and the digest moves.
+    _f8_commit(root, "helpers")
     assert "backend/api/helpers.py" in _context_paths(root)
-    assert _tree_digest(_working_files(root)) != base, "a new file under the context moved nothing"
+    with_helpers = _tree_digest(_working_files(root))
+    assert with_helpers != base
+    cases += 1
+
+    # An edited committed file refuses; so does a deleted one.
+    (api / "main.py").write_bytes(b"X = 3\n")
+    assert "backend/api/main.py: working bytes differ" in _f8_refusals(root)
+    (api / "main.py").write_bytes(b"X = 1\n")
+    (api / "helpers.py").unlink()
+    assert "backend/api/helpers.py: committed but absent" in _f8_refusals(root)
+    (api / "helpers.py").write_bytes(b"Y = 2\n")
+    cases += 2
+
+    # A committed file the .dockerignore excludes is out of the set.
+    _git(root, "add", "-f", "backend/api/run.log")
+    _f8_commit(root, "a committed log")
+    assert "backend/api/run.log" not in _context_paths(root)
+    assert _tree_digest(_working_files(root)) == with_helpers
+    cases += 1
+
+    # A pattern naming the Dockerfile and the .dockerignore keeps them in.
+    (api / ".dockerignore").write_bytes(b"**/__pycache__\n**/*.log\nDockerfile\n.dockerignore\n")
+    _f8_commit(root, "ignore the recipe")
+    assert {"backend/api/Dockerfile", "backend/api/.dockerignore"} <= set(_context_paths(root))
+    cases += 1
+    with capsys.disabled():
+        print("\nPROOF SIZE f8 membership: %d scratch cases (excluded, git-ignored, untracked, "
+              "committed, edited, deleted, committed-but-excluded, recipe kept), 0 wrong" % cases)
 
 
 def test_f7_the_digest_is_the_blob_digest_on_this_checkout(capsys):
     """The line-ending rule, proved on this seat: no text blob in the set
     carries a CR byte (so a blob is its own canonical form, as on the boxes
-    and in the image); every file git reports unmodified reads back as its
-    blob; and on a clean set the digest from git objects at HEAD equals the
-    digest from the working tree, CRLF checkout and all."""
+    and in the image); every member reads back as its blob; and the digest
+    from git objects at HEAD equals the digest from the working tree, CRLF
+    checkout and all (a context that is not the committed tree refuses before
+    this test can compare anything)."""
     blobs = dict(_blob_files("HEAD"))
     assert blobs, "no blob read from git"
     with_cr = sorted(p for p, data in blobs.items() if b"\0" not in data and b"\r" in data)
     assert not with_cr, f"text blobs carrying CR, the rule is not exact for them: {with_cr}"
-    status = _git(REPO_ROOT, "status", "--porcelain", "-z", "--untracked-files=all", "--",
-                  _CONTEXT, *_NAMED_MEMBERS).decode("utf-8")
-    dirty = {record[3:] for record in status.split("\0") if record[2:3] == " "}
     working = _working_files()
     converted = sum(1 for path, _data in working
                     if (REPO_ROOT / path).read_bytes() != blobs.get(path))
-    compared = 0
     for path, data in working:
-        if path in blobs and path not in dirty:
-            assert data == blobs[path], f"{path} does not read back as its blob"
-            compared += 1
-    if not dirty:
-        assert set(blobs) == {path for path, _data in working}
-        assert _tree_digest(sorted(blobs.items())) == _tree_digest(working) == _context_digest()
+        assert data == blobs.get(path), f"{path} does not read back as its blob"
+    assert set(blobs) == {path for path, _data in working}
+    assert _tree_digest(sorted(blobs.items())) == _tree_digest(working) == _context_digest()
     with capsys.disabled():
         print("\nPROOF SIZE f7 line endings: %d blobs, %d files compared byte for byte, "
               "%d working copies differ from their blob before the rule (CRLF), 0 text "
-              "blobs with CR; %s" % (len(blobs), compared, converted,
-                                      "digest from git objects == digest from working tree"
-                                      if not dirty else
-                                      "set dirty (%d paths): whole-digest equality not "
-                                      "asserted" % len(dirty)))
+              "blobs with CR; digest from git objects == digest from working tree"
+              % (len(blobs), len(working), converted))
 
 
 def _f7_flip(data, position):
@@ -1142,8 +1444,8 @@ def test_f7_the_framing_has_one_reading(capsys):
         paths = set()
         while len(paths) < n:
             paths.add("".join(rng.choice("ab") for _ in range(rng.randint(1, 3))))
-        lists.add(tuple(sorted((p, bytes(rng.choice(b"ab") for _ in range(rng.randint(0, 3))))
-                               for p in paths)))
+        lists.add(tuple((p, bytes(rng.choice(b"ab") for _ in range(rng.randint(0, 3))))
+                        for p in sorted(paths)))
     classes = defaultdict(set)
     for files in lists:
         assert _unframed(_framed(files)) == list(files), files
@@ -1160,3 +1462,280 @@ def test_f7_the_framing_has_one_reading(capsys):
               "holding more than one list (%d lists), every digest within each distinct; "
               "%d read back unchanged" % (len(lists), len(shared), in_shared, len(lists)))
     assert len(shared) > 100, "the generator no longer produces colliding concatenations"
+
+
+# ── Combat fix pass 8: the build context as Docker computes it, and the
+# bytes the image takes from outside it ───────────────────────────────────
+
+
+# (.dockerignore text, {context-relative path: ignored?}) -- each expectation
+# is what Docker's written rules say (docs.docker.com, "Build context",
+# .dockerignore; and the reading rules above). The matcher is ours: these are
+# checked against the rules as written, not against a daemon.
+_F8_IGNORE_CASES = [
+    ("*/temp*", {"somedir/temporary.txt": True, "somedir/temp": True, "temp.txt": False,
+                 "a/b/temp.txt": False, "a/temp/x.txt": True}),
+    ("*/*/temp*", {"somedir/subdir/temporary.txt": True, "somedir/temporary.txt": False}),
+    ("temp?", {"tempa": True, "temp": False, "tempab": False, "d/tempa": False}),
+    ("**/*.go", {"main.go": True, "a/b/c.go": True, "a/go": False}),
+    ("*.md\n!README.md", {"a.md": True, "README.md": False}),
+    ("*.md\n!README*.md\nREADME-secret.md", {"README-secret.md": True, "README.md": False,
+                                             "x.md": True}),
+    ("*.md\nREADME-secret.md\n!README*.md", {"README-secret.md": False, "x.md": True}),
+    ("logs", {"logs": True, "logs/a.txt": True, "mylogs/a": False, "a/logs/b": False}),
+    ("logs/", {"logs/a.txt": True, "logs2/a.txt": False}),
+    ("/abs/path", {"abs/path": True, "abs/path/x": True, "x/abs/path": False}),
+    ("./x/../y", {"y": True, "x": False, "x/y": False}),
+    ("#comment\n #notcomment", {"#comment": False, "#notcomment": True}),
+    ("**", {"anything/at/all": True, "top": True}),
+    ("**/__pycache__", {"__pycache__/a.pyc": True, "a/__pycache__/b.pyc": True,
+                        "a/x__pycache__": False}),
+    ("foo/**", {"foo/bar": True, "foo/bar/baz": True, "foo": False, "food/x": False}),
+    ("[a-c]at", {"bat": True, "dat": False}),
+    ("\\*star", {"*star": True, "xstar": False}),
+    ("dir\n!dir/keep.txt", {"dir/keep.txt": False, "dir/other.txt": True}),
+    ("*.log", {"a.log": True, "d/a.log": False}),
+    ("  spaced.txt  ", {"spaced.txt": True, "  spaced.txt  ": False}),
+    ("﻿bom.txt\r\nnext.txt\r\n", {"bom.txt": True, "next.txt": True}),
+    ("a.b", {"a.b": True, "axb": False}),
+    ("**/*.pyc\n!keep/**", {"keep/x.pyc": False, "other/x.pyc": True, "x.pyc": True}),
+]
+
+
+def test_f8_the_dockerignore_matcher_follows_the_written_rules(capsys):
+    """The matcher against twenty-odd patterns of the written rules: anchoring
+    at the context root, `*` and `?` stopping at `/`, `**` crossing
+    directories, exceptions and their order, directory patterns excluding
+    everything under them, comments, cleaning, a leading `/`, trimming, a BOM
+    and CRLF; and a malformed pattern refuses."""
+    checked = patterns = 0
+    for text, expected in _F8_IGNORE_CASES:
+        rules = _dockerignore_rules(text)
+        patterns += len(rules)
+        for path, ignored in expected.items():
+            assert _docker_ignored(rules, path) is ignored, (text, path, ignored)
+            checked += 1
+    for bad in ("[", "!"):
+        with pytest.raises(ContextRefused):
+            _dockerignore_rules(bad)
+    with capsys.disabled():
+        print("\nPROOF SIZE f8 matcher: %d ignore files, %d patterns, %d paths checked against "
+              "the written rules, 2 malformed refused; the matcher is ours, not compared "
+              "with a daemon" % (len(_F8_IGNORE_CASES), patterns, checked))
+    assert len(_F8_IGNORE_CASES) >= 20 and patterns >= 20
+
+
+def test_f8_the_set_equals_the_context_docker_would_send(capsys):
+    """Two listings of this checkout's context agree: the gate's, from the
+    working directory, and a dry listing from the git index (every file git
+    has under the context) with the committed .dockerignore applied the same
+    way, plus the named members. The paths the .dockerignore keeps out are
+    counted."""
+    paths = _context_paths()
+    rules = _dockerignore_rules((API_DIR / ".dockerignore").read_bytes().decode("utf-8"))
+    indexed = [p for p in _git(REPO_ROOT, "ls-files", "-z", "--", _CONTEXT).decode("utf-8").split("\0") if p]
+    prefix = _CONTEXT + "/"
+    dry = sorted([prefix + p for p in _sent([p[len(prefix):] for p in indexed], rules)]
+                 + list(_NAMED_MEMBERS))
+    assert paths == dry
+    on_disk = [(Path(d) / f).relative_to(API_DIR).as_posix()
+               for d, _dirs, files in os.walk(API_DIR) for f in files]
+    excluded = [p for p in on_disk if p not in _ALWAYS_SENT and _docker_ignored(rules, p)]
+    files = _working_files()
+    with capsys.disabled():
+        print("\nPROOF SIZE f8 context: %d members (%d in the context, %d named), %d bytes; %d "
+              "files on disk under the context kept out by .dockerignore; the index listing "
+              "equals the working-directory listing" % (
+                  len(paths), len(_context_only(files)), len(_NAMED_MEMBERS),
+                  sum(len(d) for _p, d in files), len(excluded)))
+
+
+def _f8_dockerfile():
+    return (API_DIR / "Dockerfile").read_text(encoding="utf-8")
+
+
+def test_f8_the_fonts_are_verified_last_and_never_taken_from_the_context(tmp_path, monkeypatch):
+    """The fonts the build fetched and verified cannot be replaced by the code
+    copy: every font the lock names is excluded from the context, and the last
+    RUN step, after the copy, verifies them again; that verification never
+    fetches, and refuses a missing font and a font whose bytes moved."""
+    df = _f8_dockerfile()
+    copy_all = re.search(r"^COPY \. \.\s*$", df, re.M)
+    runs = list(re.finditer(r"^RUN .*$", df, re.M))
+    assert copy_all and runs and runs[-1].start() > copy_all.start()
+    assert "python assets/fonts/fetch_fonts.py --verify" in runs[-1].group(0)
+    assert not re.search(r"^(COPY|ADD) ", df[copy_all.end():], re.M), "a copy after the code copy"
+    rules = _dockerignore_rules((API_DIR / ".dockerignore").read_bytes().decode("utf-8"))
+    lock = json.loads((API_DIR / "assets" / "fonts" / "fonts.lock.json").read_text(encoding="utf-8"))
+    assert lock and all(_docker_ignored(rules, "assets/fonts/" + name) for name in lock)
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "f8_fetch_fonts", API_DIR / "assets" / "fonts" / "fetch_fonts.py")
+    fetch = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fetch)
+    bodies = {name: (name + "-bytes").encode() for name in fetch.FONTS}
+    fake = {name: {"sha256": sha256(body).hexdigest(), "bytes": len(body), "url": "x"}
+            for name, body in bodies.items()}
+    (tmp_path / "fonts.lock.json").write_text(json.dumps(fake), encoding="utf-8")
+    for name, body in bodies.items():
+        (tmp_path / name).write_bytes(body)
+    monkeypatch.setattr(fetch, "HERE", str(tmp_path))
+    monkeypatch.setattr(fetch, "LOCK", str(tmp_path / "fonts.lock.json"))
+
+    def no_network(*_a, **_k):
+        raise AssertionError("--verify fetched")
+    monkeypatch.setattr(fetch.urllib.request, "urlopen", no_network)
+    assert fetch.main(["--verify"]) == 0
+    first = sorted(bodies)[0]
+    (tmp_path / first).write_bytes(b"moved")
+    assert fetch.main(["--verify"]) == 1
+    (tmp_path / first).unlink()
+    assert fetch.main(["--verify"]) == 1
+
+
+def _f8_lock_entries(text):
+    """[(name, version, [sha256...])] from a hashed requirements file."""
+    joined = re.sub(r"\\\n", " ", text.replace("\r\n", "\n"))
+    entries = []
+    for line in joined.split("\n"):
+        line = line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        head, *options = line.split()
+        name, version = head.split("==")
+        hashes = [o[len("--hash=sha256:"):] for o in options if o.startswith("--hash=sha256:")]
+        assert len(hashes) == len(options), line
+        entries.append((name, version, hashes))
+    return entries
+
+
+def _f8_norm(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _f8_wheel(directory, name, version):
+    import zipfile
+    path = directory / f"{name}-{version}-py3-none-any.whl"
+    info = f"{name}-{version}.dist-info"
+    with zipfile.ZipFile(path, "w") as wheel:
+        wheel.writestr(f"{name}/__init__.py", "")
+        wheel.writestr(f"{info}/METADATA", f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n")
+        wheel.writestr(f"{info}/WHEEL", "Wheel-Version: 1.0\nGenerator: gate\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+        wheel.writestr(f"{info}/RECORD", "")
+    return path
+
+
+def test_f8_the_python_packages_are_locked_by_content(tmp_path, capsys):
+    """The image installs only requirements.lock, with --require-hashes and
+    --only-binary=:all:; every locked package is pinned and carries at least
+    one SHA-256; every top-level pin of requirements.txt is in the lock at its
+    version; libfribidi0 is installed at a pinned version. And pip itself, on
+    a wheel built here, installs a locked hash and REFUSES a changed one."""
+    df = _f8_dockerfile()
+    pips = re.findall(r"^RUN pip install (.*)$", df, re.M)
+    assert len(pips) == 1, pips
+    for flag in ("--require-hashes", "--only-binary=:all:", "-r requirements.lock"):
+        assert flag in pips[0], flag
+    assert "requirements.txt" not in pips[0]
+    entries = _f8_lock_entries((API_DIR / "requirements.lock").read_text(encoding="utf-8"))
+    names = [_f8_norm(n) for n, _v, _h in entries]
+    assert len(names) == len(set(names))
+    assert all(hashes and all(re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes)
+               for _n, _v, hashes in entries)
+    locked = {_f8_norm(n): v for n, v, _h in entries}
+    top = 0
+    for line in (API_DIR / "requirements.txt").read_text(encoding="utf-8").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line:
+            name, version = line.split("==")
+            assert locked.get(_f8_norm(name.split("[")[0])) == version, line
+            top += 1
+    apt = re.search(r"^RUN apt-get update && apt-get install -y --no-install-recommends (.*?) &&", df, re.M)
+    packages = apt.group(1).split()
+    assert packages and all(re.fullmatch(r"[a-z0-9.+-]+=[0-9A-Za-z.+~:-]+", p) for p in packages), packages
+
+    wheel = _f8_wheel(tmp_path, "scrgateprobe", "1.0")
+    good = sha256(wheel.read_bytes()).hexdigest()
+    bad = good[:-1] + ("0" if good[-1] != "0" else "1")
+    outcomes = {}
+    for label, digest in (("locked", good), ("changed", bad)):
+        req = tmp_path / f"{label}.lock"
+        req.write_text(f"scrgateprobe==1.0 --hash=sha256:{digest}\n", encoding="utf-8")
+        run = subprocess.run([sys.executable, "-m", "pip", "install", "--dry-run", "--no-index",
+                              "--find-links", str(tmp_path), "--require-hashes",
+                              "--only-binary=:all:", "--ignore-installed",
+                              "--disable-pip-version-check", "--no-cache-dir", "-r", str(req)],
+                             capture_output=True, text=True)
+        outcomes[label] = (run.returncode, run.stdout + run.stderr)
+    assert outcomes["locked"][0] == 0, outcomes["locked"][1]
+    assert outcomes["changed"][0] != 0 and "DO NOT MATCH THE HASHES" in outcomes["changed"][1], (
+        outcomes["changed"][1])
+    with capsys.disabled():
+        print("\nPROOF SIZE f8 lock: %d packages, %d wheel hashes, %d top-level pins matched; "
+              "apt %s; pip installed the locked hash and refused a changed one"
+              % (len(entries), sum(len(h) for _n, _v, h in entries), top, " ".join(packages)))
+
+
+_F8_MANIFEST_FIXTURE = Path(__file__).with_name("fixtures") / "build_manifest" / "sample.json"
+
+
+def test_f8_the_build_manifest_refuses_a_missing_part(capsys):
+    """The manifest format, read from a fixture: a complete manifest is
+    accepted and its health word is the SHA-256 of its bytes; a manifest
+    missing ANY part, or whose list does not match its hash, or that is not
+    JSON, is refused; no file is "absent". Both /health arms carry the word,
+    and the schema declares it without a default."""
+    import build_manifest as bm
+    raw = _F8_MANIFEST_FIXTURE.read_bytes()
+    document = json.loads(raw)
+    assert bm.problems(document) == []
+    assert set(document) == set(bm.PARTS)
+    assert bm.word_for(raw) == sha256(raw).hexdigest()
+    assert bm.word_for(None) == "absent"
+    refused = 0
+    for part in bm.PARTS:
+        partial = {k: v for k, v in document.items() if k != part}
+        assert bm.problems(partial), part
+        assert bm.word_for(json.dumps(partial).encode()) == "refused", part
+        refused += 1
+    tampered = [dict(document, dpkg=document["dpkg"] + ["zz=1"]),
+                dict(document, pip_freeze=list(reversed(document["pip_freeze"]))),
+                dict(document, context_digest=document["context_digest"][:-1]),
+                dict(document, format="scr-build-manifest/0"),
+                dict(document, extra="x")]
+    for variant in tampered:
+        assert bm.word_for(json.dumps(variant).encode()) == "refused", variant
+    assert bm.word_for(b"{not json") == "refused"
+    src = inspect.getsource(main.health_check)
+    assert src.count("build_manifest=_build_manifest.health_word()") == 2
+    import schemas
+    assert schemas.HealthResponse.model_fields["build_manifest"].is_required()
+    with capsys.disabled():
+        print("\nPROOF SIZE f8 manifest: %d parts, each missing one refused; %d tampered "
+              "manifests and one non-JSON file refused" % (refused, len(tampered)))
+
+
+def test_f8_the_image_digests_its_context_as_the_gate_does(tmp_path, capsys):
+    """build_manifest.py, run over a directory laid out as the image's /app
+    (the context's members as committed, the fonts the build fetched, the
+    manifest the build writes), computes the gate's digest of the context's
+    members; any other file in that directory moves it."""
+    import build_manifest as bm
+    members = _context_only(_working_files())
+    app = tmp_path / "app"
+    for path, data in members:
+        target = app / path[len(_CONTEXT) + 1:]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    lock = json.loads((app / "assets" / "fonts" / "fonts.lock.json").read_text(encoding="utf-8"))
+    for name in lock:
+        (app / "assets" / "fonts" / name).write_bytes(b"fetched by the build")
+    (app / "build-manifest.json").write_bytes(b"{}")
+    expected = _tree_digest(members)
+    assert bm.context_digest(app) == expected
+    (app / "stray.py").write_bytes(b"")
+    assert bm.context_digest(app) != expected
+    with capsys.disabled():
+        print("\nPROOF SIZE f8 image context: %d files; build_manifest.context_digest == the "
+              "gate's context digest %s" % (len(members), expected))

@@ -1,0 +1,17 @@
+{
+ "context_digest": "0000000000000000000000000000000000000000000000000000000000000001",
+ "dpkg": [
+  "libc6=2.41-12",
+  "libfribidi0=1.0.16-1",
+  "python3-minimal=3.13.5-1"
+ ],
+ "dpkg_sha256": "15584a31fa4e4b8eae531e55a6ef1df5057b9e74abf429e0cdeabb575132fc5f",
+ "format": "scr-build-manifest/1",
+ "pip_freeze": [
+  "fastapi==0.115.0",
+  "pillow==11.3.0",
+  "pip==25.2",
+  "uvicorn==0.30.6"
+ ],
+ "pip_freeze_sha256": "014aa0c9687a314156c55368f2c347475b46e6b3131bb635a63eee5416af1a02"
+}
