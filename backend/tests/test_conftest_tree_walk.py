@@ -123,10 +123,17 @@ def test_one_pass_stays_affordable():
     repo. It is here so that adding a directory of binaries to one of the
     roots shows up as a failing test rather than as two slow passes per run
     that nobody attributes.
+
+    The ceiling was 40 MiB until the verified-reads lane met main e9a3f1e1:
+    the merged walk measured 40.09 MiB across 720 files as working files on
+    a core.autocrlf=true checkout (39.58 MiB as committed blobs), every file
+    tracked, no new binary directory -- the growth this docstring expects.
+    46 MiB keeps about 6 MiB of headroom; the 29 MiB of fonts the walk
+    excludes, or another set of card PNGs, would still cross it.
     """
     stamps = ct._source_stamps()
     total = sum(size for size, _digest in stamps.values())
-    assert total < 40 * 1024 * 1024, (
+    assert total < 46 * 1024 * 1024, (
         "one tree-movement pass now reads %.1f MiB across %d files, and it runs "
         "twice per session" % (total / 1048576.0, len(stamps)))
 
