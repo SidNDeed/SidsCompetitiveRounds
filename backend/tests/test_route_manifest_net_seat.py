@@ -1377,7 +1377,16 @@ def test_the_helper_closure_stays_affordable():
     # code bindings accounted for at the code bound above, with no import
     # line added. The bound moves to 520, ~6% over the measurement, for that
     # reason and no other.
-    assert all_worst <= 520, f"worst closure {all_worst} of {total}"
+    # Automatic log upload revival (2026-10-05): the same route measured 510 on
+    # main e9a3f1e1 and 525 at the merge of main into the auto-log lane -- +15,
+    # every one an IMPORT-tier binding of auto_logs (AsyncSession, Depends,
+    # HTTPException, Query, Request, asyncio, datetime, get_db, hashlib, json,
+    # os, text, time, timezone, uuid): the walk folds in every module that
+    # binds a shared name, and auto_logs binds these. Code tier 377 on both
+    # trees; all-binding median 76 -> 87 and p90 199 -> 206, under their
+    # bounds (90, 209). The bound
+    # moves to 552, ~5% over the measurement, for that reason and no other.
+    assert all_worst <= 552, f"worst closure {all_worst} of {total}"
 
 
 def _route_covering(module, name):
