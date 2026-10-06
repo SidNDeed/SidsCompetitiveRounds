@@ -100,8 +100,81 @@ namespace CompetitiveRounds
         };
         /// <summary>Never-trimmed totals (each 0..A1_HI).</summary>
         internal static readonly string[] A1TOT_FIELDS = { "b5_h", "rx_on_s", "rx_on_o", "rx_samples" };
-        /// <summary>The cost rows of the collectors the addendum added (P1, D1, X1, S1, H1, E1, RX).</summary>
-        internal const int COST_A1_ROWS = 7;
+        /// <summary>The cost rows of the collectors the addendum added (P1, D1, X1, S1, H1, E1, RX)
+        /// and the projectile integrator's (G1, amendment A1 section f).</summary>
+        internal const int COST_A1_ROWS = 8;
+
+        // A1 section (f): fields an amended record's rows of four lists carry after the
+        // layout's own (the chain's force stage, a death's recent force identities).
+        // A force identity is the hit key it was keyed to (pid -2: a force no open hit
+        // keyed), the seat that sent it (0 this seat, 1 the other) and its age at the
+        // death; an empty slot is pid -1, s_init 0, cord -1, snd -1, age -1.
+        internal const long FORCE_UNKEYED = -2;
+        internal static readonly string[] A1_EXT_KEYS = { "ch_s", "ch_o", "bd_s", "bd_o" };
+        internal static readonly string[][] A1_EXT_FIELDS =
+        {
+            new[] { "t_frc_rcv" },
+            new[] { "t_frc" },
+            new[] { "f1_pid", "f1_s_init", "f1_cord", "f1_snd", "f1_age", "f2_pid", "f2_s_init", "f2_cord", "f2_snd", "f2_age",
+                    "f3_pid", "f3_s_init", "f3_cord", "f3_snd", "f3_age" },
+            new[] { "f1_pid", "f1_s_init", "f1_cord", "f1_snd", "f1_age", "f2_pid", "f2_s_init", "f2_cord", "f2_snd", "f2_age",
+                    "f3_pid", "f3_s_init", "f3_cord", "f3_snd", "f3_age" },
+        };
+        private static readonly long[][] A1_EXT_LO = new long[4][], A1_EXT_HI = new long[4][];
+
+        /// <summary>The extension's bounds, taken from the layout's own fields they mirror:
+        /// t_frc_rcv as t_dmg_rcv, t_frc as t_dmg, a force identity as a recent hit's
+        /// (pid one lower for the unkeyed mark; snd -1..1).</summary>
+        private static void ExtBounds()
+        {
+            for (int e = 0; e < A1_EXT_KEYS.Length; e++)
+            {
+                int i = Ix(A1_EXT_KEYS[e]);
+                var names = W.FIELDS[i];
+                int n = A1_EXT_FIELDS[e].Length;
+                var lo = new long[n]; var hi = new long[n];
+                for (int k = 0; k < n; k++)
+                {
+                    string f = A1_EXT_FIELDS[e][k];
+                    string src = f == "t_frc_rcv" ? "t_dmg_rcv" : f == "t_frc" ? "t_dmg" : "h1_" + f.Substring(3);
+                    if (f.EndsWith("_snd", StringComparison.Ordinal)) { lo[k] = -1; hi[k] = 1; continue; }
+                    int s = Array.IndexOf(names, src);
+                    lo[k] = W.LO[i][s]; hi[k] = W.HI[i][s];
+                    if (f.EndsWith("_pid", StringComparison.Ordinal)) lo[k] = Math.Min(lo[k], FORCE_UNKEYED);
+                }
+                A1_EXT_LO[e] = lo; A1_EXT_HI[e] = hi;
+            }
+        }
+
+        private static int ExtOf(int i)
+        {
+            if (A1_EXT_LO[0] == null) ExtBounds();
+            return Array.IndexOf(A1_EXT_KEYS, W.KEYS[i]);
+        }
+
+        private static long[] Concat(long[] a, long[] b)
+        {
+            var o = new long[a.Length + b.Length];
+            Array.Copy(a, o, a.Length); Array.Copy(b, 0, o, a.Length, b.Length);
+            return o;
+        }
+
+        /// <summary>The field names of key i in a record with (a1) or without the amendment.</summary>
+        internal static string[] FieldsOf(int i, bool a1)
+        {
+            int e = a1 ? ExtOf(i) : -1;
+            if (e < 0) return W.FIELDS[i];
+            var o = new string[W.FIELDS[i].Length + A1_EXT_FIELDS[e].Length];
+            Array.Copy(W.FIELDS[i], o, W.FIELDS[i].Length); Array.Copy(A1_EXT_FIELDS[e], 0, o, W.FIELDS[i].Length, A1_EXT_FIELDS[e].Length);
+            return o;
+        }
+
+        /// <summary>The upper bounds of key i's row fields (the extension's under A1).</summary>
+        internal static long[] HiOf(int i, bool a1)
+        {
+            int e = a1 ? ExtOf(i) : -1;
+            return e < 0 ? W.HI[i] : Concat(W.HI[i], A1_EXT_HI[e]);
+        }
 
         internal sealed class A1Part
         {
@@ -118,12 +191,15 @@ namespace CompetitiveRounds
             return c is long && ((long)c & CAPS_A1) != 0;
         }
 
-        /// <summary>The layout's bounds for key i, with the two the amendment
-        /// widens when the record carries it (caps up to 63, a p3top mask may be
-        /// MASK_UNKNOWN).</summary>
-        private static long[] LoOf(int i, bool a1)
+        /// <summary>The layout's lower bounds for key i, with what the amendment
+        /// changes when the record carries it (caps up to 63, a p3top mask may be
+        /// MASK_UNKNOWN, the section (f) fields of four lists).</summary>
+        internal static long[] LoOf(int i, bool a1)
         {
-            if (!a1 || W.KEYS[i] != "p3top") return W.LO[i];
+            if (!a1) return W.LO[i];
+            int e = ExtOf(i);
+            if (e >= 0) return Concat(W.LO[i], A1_EXT_LO[e]);
+            if (W.KEYS[i] != "p3top") return W.LO[i];
             var lo = (long[])W.LO[i].Clone();
             lo[Array.IndexOf(W.FIELDS[i], "mask")] = MASK_UNKNOWN;
             return lo;
@@ -293,9 +369,9 @@ namespace CompetitiveRounds
                         break;
                     case W.K_LIST:
                         var l = v as List<long[]>;
-                        var llo = LoOf(i, a1);
+                        var llo = LoOf(i, a1); var lhi = HiOf(i, a1);
                         ok = l != null && l.Count <= W.CAP[i];
-                        for (int k = 0; ok && k < l.Count; k++) ok = RowOk(l[k], llo, W.HI[i]);
+                        for (int k = 0; ok && k < l.Count; k++) ok = RowOk(l[k], llo, lhi);
                         break;
                     case W.K_GROUPS:
                         var gs = v as List<Group>;
@@ -337,8 +413,8 @@ namespace CompetitiveRounds
                     case W.K_ROW: ClampRow((long[])v, W.LO[i], W.HI[i]); break;
                     case W.K_ROWS:
                     case W.K_LIST:
-                        var clo = LoOf(i, a1);
-                        foreach (var row in (List<long[]>)v) ClampRow(row, clo, W.HI[i]);
+                        var clo = LoOf(i, a1); var chi = HiOf(i, a1);
+                        foreach (var row in (List<long[]>)v) ClampRow(row, clo, chi);
                         break;
                     case W.K_HIST:
                     case W.K_OMIT:
@@ -1245,10 +1321,12 @@ namespace CompetitiveRounds
             private readonly long[] _a;
             internal int Count;
             internal long Omitted, Total;
+            /// <summary>The rows of key `key` as an amended record carries them (A1 is the wire
+            /// this client sends: the section (f) lists are wider by their extension).</summary>
             internal FixedRows(string key)
             {
                 int i = Ix(key);
-                Cap = W.CAP[i]; Width = W.LO[i].Length; _a = new long[Cap * Width];
+                Cap = W.CAP[i]; Width = LoOf(i, true).Length; _a = new long[Cap * Width];
             }
             /// <summary>The slot the next row is written to, or -1 when full (counted).</summary>
             internal int NextSlot()

@@ -1,4 +1,4 @@
-// Stubs for the combat evidence hook harness. The eighteen patch classes under
+// Stubs for the combat evidence hook harness. The nineteen patch classes under
 // test are copied VERBATIM from plugin/CombatEvidence.cs by run_hooks.py;
 // everything they call into is defined here. Every collector THROWS after
 // recording the arguments it was given, so a hook passes only when it contains
@@ -55,6 +55,7 @@ public class CharacterStatModifiers { }
 public class BounceEffectRetarget { }
 public class ScreenEdgeBounce { }
 public class Player { }
+public class MoveTransform { }
 public class HealthHandler
 {
     public enum DamageSource { Player, OutOfBounds }
@@ -98,6 +99,8 @@ namespace CompetitiveRounds
         internal static void SyncRead(Photon.Pun.SyncProjectile sp, Photon.Pun.PhotonStream stream) { throw Planted.Fault("SyncRead", sp, stream); }
         internal static void ForceEnter(HealthHandler h, UnityEngine.Vector2 force, out long state) { throw Planted.Fault("ForceEnter", h, force); }
         internal static void ForceExit(HealthHandler h, long state) { throw Planted.Fault("ForceExit", h, state); }
+        internal static void MoveEnter(MoveTransform m, out long state) { throw Planted.Fault("MoveEnter", m); }
+        internal static void MoveExit(MoveTransform m, long state) { throw Planted.Fault("MoveExit", m, state); }
         internal static void DamageEnter(HealthHandler h, UnityEngine.Vector2 damage, bool outOfBounds, out long state) { throw Planted.Fault("DamageEnter", h, damage, outOfBounds); }
         internal static void DamageExit(HealthHandler h, long state) { throw Planted.Fault("DamageExit", h, state); }
         internal static void Die(HealthHandler h) { throw Planted.Fault("Die", h); }

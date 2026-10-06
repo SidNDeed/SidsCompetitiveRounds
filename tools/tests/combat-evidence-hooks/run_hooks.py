@@ -1,6 +1,6 @@
 """Combat evidence (B1-B3, B5, the addendum's R1-R3 and R5) hook harness.
 
-1. Copies the eighteen combat evidence hook classes VERBATIM out of
+1. Copies the nineteen combat evidence hook classes VERBATIM out of
    plugin/CombatEvidence.cs into work/<tag>/Hooks.g.cs, compiles them against
    Stubs.cs (every collector throws after recording its arguments) and runs
    one case per hook: attached to the target the design names, contained,
@@ -54,16 +54,16 @@ EXPECTED = sorted([
     "CombatEvidence_ContactPatch", "CombatEvidence_BlockPatch", "CombatEvidence_TryBlockPatch",
     "CombatEvidence_DealtPatch", "CombatEvidence_TargetBouncePatch", "CombatEvidence_EdgeBouncePatch",
     "CombatEvidence_SyncPatch", "CombatEvidence_ForcePatch", "CombatEvidence_DamagePatch", "CombatEvidence_DiePatch",
-    "CombatEvidence_DiePhoenixPatch", "CombatEvidence_FindTargetPatch",
+    "CombatEvidence_DiePhoenixPatch", "CombatEvidence_FindTargetPatch", "CombatEvidence_MovePatch",
 ])
 
-# collector entry -> its cost row (design 11.2: K1..K5, N1..N7, T; the addendum's P1, D1, X1, S1, H1, E1, RX)
+# collector entry -> its cost row (design 11.2: K1..K5, N1..N7, T; the addendum's P1, D1, X1, S1, H1, E1, RX; A1's G1)
 ENTRIES = {"RpcSent": "K1", "InitEnter": "K2", "InitExit": "K2", "HitEnter": "K3", "BlockDone": "K4", "Dealt": "K5",
            "AttackEnter": "N1", "AttackExit": "N1", "ReloadEnter": "N2", "TargetBounce": "N3", "EdgeBounce": "N4",
            "SyncRead": "N5", "TryBlockEnter": "N6", "TryBlockExit": "N6", "ContactEnter": "N7", "Tick": "T",
            "ForceEnter": "P1", "ForceExit": "P1", "DamageEnter": "D1", "DamageExit": "D1", "Die": "X1",
-           "FindTarget": "S1", "HitExit": "H1", "EdgeBounceExit": "E1", "RxSample": "RX"}
-ROWS = ["K1", "K2", "K3", "K4", "K5", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "T", "P1", "D1", "X1", "S1", "H1", "E1", "RX"]
+           "FindTarget": "S1", "HitExit": "H1", "EdgeBounceExit": "E1", "RxSample": "RX", "MoveEnter": "G1", "MoveExit": "G1"}
+ROWS = ["K1", "K2", "K3", "K4", "K5", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "T", "P1", "D1", "X1", "S1", "H1", "E1", "RX", "G1"]
 
 # file -> [(literal, exact count)]
 WIRING = {
@@ -93,6 +93,7 @@ BLOCK_FIN = "try { CombatEvidence.BlockDone(__instance); } catch { }\n          
 RELOAD = "private static void Prefix(GunAmmo __instance, bool playSound)\n        {\n            try { CombatEvidence.ReloadEnter(__instance, playSound); } catch { }\n        }"
 HIT_FIN = "try { CombatEvidence.HitExit(__instance, __state); } catch { }\n            return __exception;"
 FORCE_FIN = "try { CombatEvidence.ForceExit(__instance, __state); } catch { }\n            return __exception;"
+MOVE_FIN = "try { CombatEvidence.MoveExit(__instance, __state); } catch { }\n            return __exception;"
 TRY_PRE = "            __state = 0;\n            try { CombatEvidence.TryBlockEnter(__instance, out __state); } catch { }"
 
 # (name, old, new, target, control); old must occur exactly once in Hooks.g.cs
@@ -142,6 +143,13 @@ MUTANTS = [
      "CombatEvidence_FindTargetPatch", "CombatEvidence_TargetBouncePatch"),
     ("sync_wrong_target", '[HarmonyPatch(typeof(SyncProjectile), "OnPhotonSerializeView")]',
      '[HarmonyPatch(typeof(SyncProjectile), "Update")]', "CombatEvidence_SyncPatch", "CombatEvidence_EdgeBouncePatch"),
+    # fix pass 3: the integrator's producer (M11)
+    ("move_finalizer_swallows", MOVE_FIN, MOVE_FIN.replace("return __exception;", "return null;"),
+     "CombatEvidence_MovePatch", "CombatEvidence_ForcePatch"),
+    ("move_unwrapped", "try { CombatEvidence.MoveEnter(__instance, out __state); } catch { }",
+     "CombatEvidence.MoveEnter(__instance, out __state);", "CombatEvidence_MovePatch", "CombatEvidence_HitPatch"),
+    ("move_state_dropped", "CombatEvidence.MoveExit(__instance, __state)", "CombatEvidence.MoveExit(__instance, 0)",
+     "CombatEvidence_MovePatch", "CombatEvidence_ForcePatch"),
 ]
 
 # (name, file, old, new, the method that must be flagged)
@@ -168,8 +176,10 @@ BOUND_MUTANTS = [
      '            if (data == null || data.view == null || data.playerVel == null) return 0;\n            Plugin.Log.LogInfo("f");', "CombatEvidence.ForceBody"),
     ("damage_formats", "CombatEvidence.cs", "            if (damage == Vector2.zero) return 0;",
      '            if (damage == Vector2.zero) return 0;\n            var dz = string.Format("{0}", 1);', "CombatEvidence.DamageBody"),
-    ("die_uncapped_loop", "CombatEvidence.cs", "            for (int h = 0; h < RECENT_CAP; h++)", "            for (int h = 0; h < n; h++)",
-     "CombatEvidence.DieBody"),
+    ("die_uncapped_loop", "CombatEvidence.cs", "            for (int h = 0; h < RECENT_CAP; h++)\n            {\n                int f = o + 8 + h * 4;",
+     "            for (int h = 0; h < n; h++)\n            {\n                int f = o + 8 + h * 4;", "CombatEvidence.DieBody"),
+    ("die_forces_uncapped", "CombatEvidence.cs", "            for (int h = 0; h < RECENT_CAP; h++)\n            {\n                int f = o + 8 + RECENT_CAP * 4 + h * 5;",
+     "            for (int h = 0; h < fn; h++)\n            {\n                int f = o + 8 + RECENT_CAP * 4 + h * 5;", "CombatEvidence.DieBody"),
     ("findtarget_reflects", "CombatEvidence.cs", "            var pm = PlayerManager.instance;\n            Vector2 refPos",
      '            var pm = PlayerManager.instance; var fz = typeof(Player).GetField("x");\n            Vector2 refPos', "CombatEvidence.FindTargetBody"),
     ("rx_logs", "CombatEvidence.cs", "            g.A1Tot[3]++;", '            g.A1Tot[3]++; Debug.Log("rx");', "CombatEvidence.RxBody"),
@@ -184,6 +194,13 @@ BOUND_MUTANTS = [
     ("contact_scan_uncapped", "CombatEvidence.cs", "i >= 0 && n < OUTSIDE_SCAN_CAP; i--, n++)", "i >= 0; i--, n++)", "CombatEvidence.FillContact"),
     ("core_gaps_uncapped", "CombatEvidenceCore.cs", "for (int i = 0; i < GAP_CAP; i++) _cx[o + 8 + i]",
      "for (int i = 0; i < W.GAP_COUNT; i++) _cx[o + 8 + i]", "CombatEvidenceCore.GunAccount.CloseCycle"),
+    # fix pass 3: the integrator's producer runs per projectile per frame
+    ("move_logs", "CombatEvidence.cs", "            if (g.OwnPid[k] != pid) return 0;\n            float x = mt.velocity.x",
+     '            if (g.OwnPid[k] != pid) return 0; Debug.Log("m");\n            float x = mt.velocity.x', "CombatEvidence.MoveBody"),
+    ("segframe_uncapped_loop", "CombatEvidence.cs", "            if (f == 0) return;\n",
+     "            if (f == 0) return;\n            while (g.SgCause[k] > 0) g.SgCause[k]--;\n", "CombatEvidence.SegFrame"),
+    ("recentforce_logs", "CombatEvidence.cs", "            var ring = own ? g.RfOwn : g.RfOpp;",
+     '            var ring = own ? g.RfOwn : g.RfOpp; Plugin.Log.LogInfo("f");', "CombatEvidence.RecentForce"),
 ]
 
 BOUND_REQUIRED = [
@@ -204,6 +221,10 @@ BOUND_REQUIRED = [
     "CombatEvidence.FindTargetBody", "CombatEvidence.EdgeBounceBody", "CombatEvidence.EdgeBounceExit", "CombatEvidence.ForceBody",
     "CombatEvidence.ForceExit", "CombatEvidence.Wait", "CombatEvidence.DamageBody", "CombatEvidence.DamageExit",
     "CombatEvidence.DieBody", "CombatEvidenceCore.ResidualInto",
+    # fix pass 3: the integrator's producer (M11) and the force identities (M12, M13)
+    "CombatEvidence.MoveEnter", "CombatEvidence.MoveBody", "CombatEvidence.MoveExit", "CombatEvidence.SegFrame",
+    "CombatEvidence.SegClose", "CombatEvidence.SegBreak", "CombatEvidence.SegRebase", "CombatEvidence.FrameNow",
+    "CombatEvidence.RecentForce",
 ]
 
 # judging vocabulary the public client must not carry (code and strings; comments stripped)
@@ -542,6 +563,10 @@ ALLOC_MUTANTS = [
     ("rx_lambda", "            g.A1Tot[3]++;", "            g.A1Tot[3]++; System.Func<int> zf = () => now;", "CombatEvidence.RxBody"),
     ("hit_tostring", "                g.ALastHit[slot] = stamp; g.AHasHit[slot] = true;",
      "                g.ALastHit[slot] = stamp; g.AHasHit[slot] = true; var zt = stamp.ToString();", "CombatEvidence.HitBody"),
+    ("segframe_allocates", "            if (f == 0) return;\n", "            if (f == 0) return;\n            var za = new float[2];\n",
+     "CombatEvidence.SegFrame"),
+    ("move_concatenates", "            if (g.OwnPid[k] != pid) return 0;\n            float x = mt.velocity.x",
+     '            if (g.OwnPid[k] != pid) return 0; var zm = "m" + pid;\n            float x = mt.velocity.x', "CombatEvidence.MoveBody"),
     # negative controls: a value type built on the stack, an allocation named in a comment or a string
     ("ctl_struct", "            DrainWaits(g, now);\n", "            var zv = new Vector2(1f, 2f);\n            DrainWaits(g, now);\n", None),
     ("ctl_comment", "            DrainWaits(g, now);\n", '            // new long[4] and "a" + b\n            DrainWaits(g, now);\n', None),

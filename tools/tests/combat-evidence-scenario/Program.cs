@@ -21,15 +21,25 @@ namespace CompetitiveRounds
     /// from its own side, so the two records pair as two real seats' would.
     ///
     /// Output lines: DIGEST (the game witness: every game value a hook could
-    /// reach, hashed after every patched call and every tick), COST row calls
-    /// faults, ENV (each queued envelope), LOG (the plug-in log), DROPIX (the
-    /// drop counters against the layout's names), ERR (a hook let an exception
-    /// out, or the driver could not bind an argument).
+    /// reach, hashed after every patched call and every tick), ENV (each queued
+    /// envelope: the emitted record, whose cost and cost_a1 rows the harness
+    /// reads, M1), LOG (the plug-in log), DROPIX (the drop counters against the
+    /// layout's names), ERR (a hook let an exception out, or the driver could not
+    /// bind an argument).
     ///
-    /// Options: --a1 (A1Live), --plant ROW (the throwing build's row),
-    /// --drop CLASS (leave a patch class out of the registry the boot census
-    /// reads), --unkeyed (a hit on this seat by a projectile it never saw
-    /// initialised), --perf (the A14 menu measurement instead of a game).</summary>
+    /// Every projectile alive runs its integrator frame each tick (gravity, the
+    /// G1 patch around it); two own projectiles are steered between frames for a
+    /// window (1101 on seat 1, 2101 on seat 2), as a steering card would (M11).
+    ///
+    /// Options: --plant ROW (the throwing build's row), --drop CLASS (leave a
+    /// patch class out of the registry the boot census reads), --unkeyed (a hit
+    /// on this seat by a projectile it never saw initialised), --norx (the
+    /// reaction sampler never runs, M7), --m6over (ten contacts of one
+    /// projectile before its ten hit messages, M6), --m9ring (130 of the other
+    /// seat's projectiles initialised in one frame, the mask ring overflows, one
+    /// of the dropped ones hits a wall, M9), --m9gone (a projectile hits a wall
+    /// and is destroyed in the frame of its init, before its mask scan, M9),
+    /// --perf (the A14 menu measurement instead of a game).</summary>
     internal static class ScenarioProgram
     {
         private const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance;
@@ -38,6 +48,7 @@ namespace CompetitiveRounds
         private static readonly List<string> Out = new List<string>();
         private static readonly StringBuilder Witness = new StringBuilder();
         private static readonly HashSet<string> Dropped = new HashSet<string>();
+        private static bool M6Over, M9Ring, M9Gone;
 
         private sealed class Seat
         {
@@ -166,6 +177,13 @@ namespace CompetitiveRounds
 
         private const float DT = 1f / 60f;
 
+        /// <summary>M11: the own projectiles a steering component turns between integrator
+        /// frames, and its window [from, to) on the clock.</summary>
+        private static readonly Dictionary<int, int[]> Steer = new Dictionary<int, int[]>
+        {
+            { 1101, new[] { 101100, 101500 } }, { 2101, new[] { 101600, 101950 } },
+        };
+
         private static void Tick()
         {
             Time.frameCount++;
@@ -176,7 +194,21 @@ namespace CompetitiveRounds
                 s.Vel.velocity = s.Vel.velocity * 0.9f;
                 s.B.sinceBlock += DT; s.B.counter += DT;
             }
-            foreach (var p in Projs) p.Go.transform.position = p.Go.transform.position + p.Move.velocity * DT;
+            foreach (var p in Projs)
+            {
+                if (!PhotonNetwork.Views.ContainsKey(p.Pid)) continue;           // destroyed: no frame
+                int[] w;
+                if (Steer.TryGetValue(p.Pid, out w) && Clock >= w[0] && Clock < w[1])
+                    p.Move.velocity = p.Move.velocity + new Vector3(0f, 3f, 0f);  // a steering component, outside the integrator
+                var mv = p.Move; var go = p.Go;
+                // MoveTransform.Update: gravity (simulateGravity 0), no drag in this world, the position step
+                Call("CombatEvidence_MovePatch", mv, Args(), () =>
+                {
+                    if (mv.simulateGravity == 0) mv.velocity = mv.velocity + new Vector3(0f, -mv.gravity * DT * mv.multiplier, 0f);
+                    go.transform.position = go.transform.position + mv.velocity * (DT * mv.multiplier);
+                    return null;
+                });
+            }
             try { CallCE("Tick"); }
             catch (TargetInvocationException ex) { Out.Add("ERR the tick let an exception out: " + ex.InnerException.GetType().Name); }
             Snapshot("tick");
@@ -429,6 +461,74 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>M6 overflow: `n` contacts of one projectile on this seat's player before
+        /// any of its `n` hit messages arrives (blocked hits: no push, no damage). With
+        /// n = 10 and the pairing window of 8 contact rows, the last two messages find
+        /// every contact in the window paired and the two oldest outside it.</summary>
+        private static void MultiContact(Proj p, Seat victim, int t, int n)
+        {
+            if (p.Owner == Local)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    At(t + 5 * i); Contact(p, victim);
+                    Push(t + 5 * i, Local, p.Pid, "RPCA_DoHit");
+                    Call("CombatEvidence_HitPatch", p.Hit, HitArgs(victim.Vel.position, p.Move.velocity, victim.V.ViewID, true), () => null);
+                    Pop();
+                }
+                return;
+            }
+            for (int i = 0; i < n; i++) { At(t + 5 * i); Contact(p, victim); }
+            for (int i = 0; i < n; i++)
+            {
+                At(t + 100 + 5 * i);
+                Push(t + 5 * i, p.Owner, p.Pid, "RPCA_DoHit");
+                Call("CombatEvidence_HitPatch", p.Hit, HitArgs(victim.Vel.position, p.Move.velocity, victim.V.ViewID, true), () => null);
+                Pop();
+            }
+        }
+
+        /// <summary>An init that uses no ammunition (RPCA_Init_noAmmoUse): the anchor and
+        /// its mask scan request, nothing on the gun.</summary>
+        private static void InitNoAmmo(Seat s, Proj p, int t)
+        {
+            Push(t, s.Actor, p.Pid, "RPCA_Init_noAmmoUse");
+            Call("CombatEvidence_InitNoAmmoPatch", p.Init, Args("senderID", s.Actor, "nrOfProj", 1, "dmgM", 1f, "randomSeed", 0f), () => null);
+            Pop();
+        }
+
+        /// <summary>M9 full ring: 130 of seat 2's projectiles initialised in one frame (the
+        /// mask scan ring holds 128); the last one, whose scan request was dropped, hits a
+        /// wall; then all 130 are destroyed. Returns that projectile's id.</summary>
+        private static int RingBurst(int t)
+        {
+            var B = Seats[2];
+            var burst = new List<Proj>();
+            At(t);
+            for (int i = 0; i < 130; i++)
+            {
+                var p = MakeProj(2, 2200 + i, new Vector2(0f, 1f), false, false);
+                burst.Add(p);
+                InitNoAmmo(B, p, t);
+            }
+            var last = burst[burst.Count - 1];
+            WallHit(last, t + 1, new Vector2(10f, 10f), false);
+            RunUntil(t + 300);                                   // every request the ring kept is scanned
+            foreach (var p in burst) { PhotonNetwork.Views.Remove(p.Pid); p.Go.destroyed = true; }
+            return last.Pid;
+        }
+
+        /// <summary>M9 gone before its scan: one of seat 2's projectiles is initialised and,
+        /// in the same frame, hits a wall and is destroyed (before any tick scans its mask).</summary>
+        private static void GoneBeforeScan(int t)
+        {
+            var p = MakeProj(2, 2105, new Vector2(0f, 1f), false, false);
+            At(t);
+            InitNoAmmo(Seats[2], p, t);
+            WallHit(p, t + 1, new Vector2(-10f, 10f), true);
+            p.Go.destroyed = true;
+        }
+
         /// <summary>A projectile's hit on a surface (no player view); `destroy` removes it inside the message.</summary>
         private static void WallHit(Proj p, int t, Vector2 newVel, bool destroy)
         {
@@ -622,6 +722,13 @@ namespace CompetitiveRounds
             }
             Reload(A, 109100); Reload(B, 109110);
             Dealt(A, 109200);
+            if (M6Over)
+            {
+                var pb4 = MakeProj(2, 2104, Dir(B, A), false, false);
+                Attack(B, new[] { pb4 }, 109300);
+                RunUntil(109390);
+                MultiContact(pb4, A, 109400, 10);                                   // M6: ten contacts, then ten messages
+            }
             RunUntil(109990);
             OobDeath(B, 110000);                                                    // R5: out of bounds, right edge
             RunUntil(110490);
@@ -630,6 +737,8 @@ namespace CompetitiveRounds
 
             Revive();
             At(120000); SeatEvidence.Combat = true; Tick();                         // point 2
+            if (M9Ring) RingBurst(120020);                                          // M9: the mask ring overflows
+            if (M9Gone) GoneBeforeScan(120400);                                     // M9: gone before its mask scan
             RunUntil(120490);
             var pb3 = MakeProj(2, 2103, Dir(B, A), false, false);
             Attack(B, new[] { pb3 }, 120500);
@@ -691,14 +800,18 @@ namespace CompetitiveRounds
         {
             Local = int.Parse(args[0], Inv); Other = 3 - Local;
             string path = args[1];
-            bool a1 = false, unkeyed = false, perf = false;
+            bool unkeyed = false, perf = false, norx = false;
             for (int i = 2; i < args.Length; i++)
             {
-                if (args[i] == "--a1") a1 = true;
-                else if (args[i] == "--unkeyed") unkeyed = true;
+                if (args[i] == "--unkeyed") unkeyed = true;
                 else if (args[i] == "--perf") perf = true;
+                else if (args[i] == "--norx") norx = true;
+                else if (args[i] == "--m6over") M6Over = true;
+                else if (args[i] == "--m9ring") M9Ring = true;
+                else if (args[i] == "--m9gone") M9Gone = true;
                 else if (args[i] == "--plant") ScenarioPlant.Row = int.Parse(args[++i], Inv);
                 else if (args[i] == "--drop") Dropped.Add(args[++i]);
+                else { Out.Add("ERR unknown option " + args[i]); }
             }
             Out.Add("SEAT " + Local);
             PhotonNetwork.LocalPlayer.ActorNumber = Local;
@@ -711,8 +824,15 @@ namespace CompetitiveRounds
             {
                 Registry();
                 CallCE("BootLine");
-                SetCE("A1Live", a1);
                 CallCE("BeginGame", true);
+                if (norx)
+                {
+                    // M7: a game whose reaction sampler never runs (its next sample never due)
+                    var gf = CE.GetField("_g", All); var g = gf != null ? gf.GetValue(null) : null;
+                    var nf = g != null ? g.GetType().GetField("RxNextMs", All) : null;
+                    if (nf == null) Out.Add("ERR no sampler clock to hold off");
+                    else nf.SetValue(g, long.MaxValue);
+                }
                 Script(unkeyed);
                 CallCE("Dispatch", Local == 1 ? "76561190000000001" : "76561190000000002", Local == 1 ? "76561190000000002" : "76561190000000001",
                        "scrroom1_g1_r1", true);
@@ -734,12 +854,6 @@ namespace CompetitiveRounds
                     else { bad++; Out.Add("ERR drop constant " + f.Name + " = " + v + " is not " + want); }
                 }
                 Out.Add("DROPIX " + ok + " " + bad + " " + dn.Length);
-            }
-            var calls = CE.GetField("_calls", All); var faults = CE.GetField("_faults", All);
-            if (calls != null && faults != null)
-            {
-                var c = (long[])calls.GetValue(null); var fl = (long[])faults.GetValue(null);
-                for (int i = 0; i < c.Length; i++) Out.Add("COST " + i + " " + c[i] + " " + fl[i]);
             }
             foreach (var e in SeatEvidence.Queued) Out.Add("ENV " + e);
             foreach (var l in Plugin.Log.Lines) Out.Add("LOG " + l);

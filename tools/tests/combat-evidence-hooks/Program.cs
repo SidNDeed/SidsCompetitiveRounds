@@ -48,6 +48,8 @@ namespace CompetitiveRounds
             { "CombatEvidence_DiePatch", Tuple.Create(typeof(HealthHandler), "RPCA_Die", "Prefix:Die:__instance") },
             { "CombatEvidence_DiePhoenixPatch", Tuple.Create(typeof(HealthHandler), "RPCA_Die_Phoenix", "Prefix:Die:__instance") },
             { "CombatEvidence_FindTargetPatch", Tuple.Create(typeof(BounceEffectRetarget), "FindTarget", "Postfix:FindTarget:__instance,hit,__result") },
+            { "CombatEvidence_MovePatch", Tuple.Create(typeof(MoveTransform), "Update",
+                "Prefix:MoveEnter:__instance|Finalizer:MoveExit:__instance,__state") },
         };
 
         private static object Arg(ParameterInfo p, int pos, bool flag)

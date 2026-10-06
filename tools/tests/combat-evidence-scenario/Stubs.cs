@@ -63,7 +63,20 @@ namespace UnityEngine
         public static float deltaTime = 1f / 60f, unscaledDeltaTime = 1f / 60f;
     }
 
-    public class Object { }
+    /// <summary>An engine object: a destroyed one compares equal to null, as the
+    /// engine's own objects do (M9: a projectile gone before its mask scan).</summary>
+    public class Object
+    {
+        public bool destroyed;
+        public static bool operator ==(Object a, Object b)
+        {
+            bool an = ReferenceEquals(a, null) || a.destroyed, bn = ReferenceEquals(b, null) || b.destroyed;
+            return an || bn ? an && bn : ReferenceEquals(a, b);
+        }
+        public static bool operator !=(Object a, Object b) { return !(a == b); }
+        public override bool Equals(object o) { return ReferenceEquals(this, o); }
+        public override int GetHashCode() { return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(this); }
+    }
 
     /// <summary>A game object: a bag of components, with a parent for the
     /// parent and root searches and children for the child search.</summary>
@@ -314,6 +327,8 @@ public class MoveTransform : UnityEngine.Component
     public float gravity = 30f, drag, dragMinSpeed = 1f, multiplier = 1f, simulationSpeed = 1f;
     public bool allowStop;
     public int simulateGravity;
+    /// <summary>The integrator frame G1 patches (the driver applies its effect around the patch parts).</summary>
+    private void Update() { }
 }
 public class ProjectileInit : UnityEngine.Component
 {

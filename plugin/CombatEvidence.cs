@@ -37,22 +37,18 @@ namespace CompetitiveRounds
         /// D1 the damage message and health change (RPCA_SendTakeDamage), X1 a death
         /// (RPCA_Die, RPCA_Die_Phoenix), S1 the owner's target choice
         /// (BounceEffectRetarget.FindTarget), H1 the hit message's end (RPCA_DoHit
-        /// finalizer), E1 the edge bounce's end, RX the reaction sampler on the tick.
-        /// The unamended record carries rows 0..12 in `cost`; the A1 record also
-        /// carries these seven in `cost_a1`.</summary>
-        internal const int P1 = 13, D1 = 14, X1 = 15, S1 = 16, H1 = 17, E1 = 18, RX = 19;
-        internal const int COST_ALL = 20;
+        /// finalizer), E1 the edge bounce's end, RX the reaction sampler on the tick,
+        /// G1 the projectile integrator (MoveTransform.Update: gravity and drag inside
+        /// it, steering as a change made outside it between two of its frames).
+        /// `cost` carries rows 0..12; `cost_a1` carries these eight. Every record this
+        /// client sends is an A1 record (amendment A1 is the wire: no switch clears it).</summary>
+        internal const int P1 = 13, D1 = 14, X1 = 15, S1 = 16, H1 = 17, E1 = 18, RX = 19, G1 = 20;
+        internal const int COST_ALL = 21;
         private const int COST_CAP = COST_ALL;
         private static readonly long[] _calls = new long[COST_ALL], _ticks = new long[COST_ALL],
                                        _maxTicks = new long[COST_ALL], _faults = new long[COST_ALL];
         private static readonly bool[] _faultLogged = new bool[COST_ALL];
         private static readonly string[] _faultNote = new string[COST_ALL];
-
-        /// <summary>The wire amendment A1 is emitted only when this is set. It stays
-        /// false in this build: the server takes A1 in its own amendment pass, and
-        /// until then every record is the current layout byte for byte. The
-        /// scenario harness sets it to generate the amended fixtures.</summary>
-        internal static bool A1Live;
 
         internal static long Stamp() { return System.Diagnostics.Stopwatch.GetTimestamp(); }
 
@@ -261,6 +257,17 @@ namespace CompetitiveRounds
             // recent hits per player (victim side keyed by AMsgCord, shooter side by OwnCord): pid, s_init, cord, stamp
             internal readonly int[] RhOwn = new int[RECENT_CAP * 4], RhOpp = new int[RECENT_CAP * 4];
             internal int RhOwnN, RhOwnHead, RhOppN, RhOppHead;
+            // recent forces per player (A1 f, M13): pid (FORCE_UNKEYED when no open hit keyed it), s_init, cord, sender seat, stamp
+            internal readonly int[] RfOwn = new int[RECENT_CAP * 5], RfOpp = new int[RECENT_CAP * 5];
+            internal int RfOwnN, RfOwnHead, RfOppN, RfOppHead;
+            // G1 (M11): per own projectile slot, the open integrator segment: the velocity it
+            // opened at, the velocity the last observed frame left, the causes since it
+            // opened and the stamp of its last change
+            internal readonly bool[] SgOn = new bool[ANCHOR_CAP]; internal readonly int[] SgPid = new int[ANCHOR_CAP], SgStamp = new int[ANCHOR_CAP];
+            internal readonly long[] SgCause = new long[ANCHOR_CAP];
+            internal readonly float[] SgOx = new float[ANCHOR_CAP], SgOy = new float[ANCHOR_CAP], SgLx = new float[ANCHOR_CAP], SgLy = new float[ANCHOR_CAP];
+            internal readonly float[] SgPx = new float[ANCHOR_CAP], SgPy = new float[ANCHOR_CAP]; internal readonly bool[] SgSteer = new bool[ANCHOR_CAP];
+            internal int NowFrame = -1, NowAt;
             // reaction sampler
             internal long RxNextMs; internal bool RxVis = true, RxRun;
             internal int RxRowS = -1, RxRowO = -1; internal long RxOnsetSw; internal int RxOnset;
@@ -634,6 +641,7 @@ namespace CompetitiveRounds
             {
                 g.P3self[0]++; slot = -1;
                 int k = pid & (ANCHOR_CAP - 1);
+                if (g.SgOn[k] && g.SgPid[k] != pid) { SegClose(g, k); g.SgOn[k] = false; }   // the slot's previous projectile
                 g.OwnPid[k] = pid; g.OwnSInit[k] = stamp; g.OwnCord[k] = 0; g.OwnDecOn[k] = false; g.BsOn[k] = false;
             }
             int i = g.Mask.PushSlot();
@@ -764,6 +772,7 @@ namespace CompetitiveRounds
             // R2: the owner's velocity before its own hit message (the finalizer reads the after)
             if (known && ph.move != null)
             {
+                SegBreak(g, k, pid, ph.move.velocity.x, ph.move.velocity.y);   // the segment ends before the message's change
                 g.HvOn = true; g.HvX = ph.move.velocity.x; g.HvY = ph.move.velocity.y;
                 g.HvPid = pid; g.HvSInit = g.OwnSInit[k]; g.HvStamp = stamp; g.HvView = viewID;
                 st |= 2;
@@ -798,6 +807,7 @@ namespace CompetitiveRounds
                 var c = g.ChO.Raw;
                 c[oc] = pid; c[oc + 1] = g.ScSInit; c[oc + 2] = hcord;
                 c[oc + 3] = g.OwnDecOn[k] ? g.OwnDec[k] : -1; c[oc + 4] = stamp; c[oc + 5] = -1;
+                c[oc + 6] = -1;                              // A1 f: t_frc, the force this message creates (ForceBody)
             }
             g.OwnDecOn[k] = false;
             return st | 1;
@@ -822,12 +832,122 @@ namespace CompetitiveRounds
             g.HvOn = false;
             var mv = ph != null ? ph.move : null;
             float nx = mv != null ? mv.velocity.x : g.HvX, ny = mv != null ? mv.velocity.y : g.HvY;
+            SegRebase(g, g.HvPid, nx, ny);                   // the integrator's next segment starts from the message's velocity
             long cause = 0;
-            if (PhotonNetwork.GetPhotonView(g.HvPid) == null) cause |= W.CAUSE_DESTRUCTION;
-            if (nx != g.HvX || ny != g.HvY) cause |= g.HvView != -1 ? W.CAUSE_COLLIDER : W.CAUSE_SURFACE;
+            // the cause bits are nonnegative constants: widened before the OR (L3)
+            if (PhotonNetwork.GetPhotonView(g.HvPid) == null) cause |= (long)W.CAUSE_DESTRUCTION;
+            if (nx != g.HvX || ny != g.HvY) cause |= g.HvView != -1 ? (long)W.CAUSE_COLLIDER : (long)W.CAUSE_SURFACE;
             if (cause == 0) return;
-            if ((cause & (W.CAUSE_COLLIDER | W.CAUSE_SURFACE)) == 0) cause |= g.HvView != -1 ? W.CAUSE_COLLIDER : W.CAUSE_SURFACE;
+            if ((cause & ((long)W.CAUSE_COLLIDER | (long)W.CAUSE_SURFACE)) == 0) cause |= g.HvView != -1 ? (long)W.CAUSE_COLLIDER : (long)W.CAUSE_SURFACE;
             VchgRow(g, g.HvPid, g.HvSInit, g.HvStamp, cause, g.HvX, g.HvY, nx, ny);
+        }
+
+        // -- G1: MoveTransform.Update prefix + finalizer (R2 gravity and steering, M11) ---------------
+
+        /// <summary>G1 prefix: an own projectile's integrator frame. A velocity other than
+        /// the one this projectile's previous frame left was changed OUTSIDE the
+        /// integrator and outside the three message paths that rebase the segment (the
+        /// hit message, the target bounce, the edge bounce): a steering component
+        /// (homing, remote control, dodge, the local steering cards). Returns the
+        /// finalizer's state (slot + 1, or 0).</summary>
+        internal static void MoveEnter(MoveTransform mt, out long state)
+        {
+            state = 0;
+            if (!_open || PerfSuspend) return;
+            long t0 = Stamp();
+            try { state = MoveBody(mt); } catch (Exception ex) { Fault(G1, ex); }
+            Cost(G1, t0);
+        }
+
+        private static long MoveBody(MoveTransform mt)
+        {
+            var g = _g;
+            if (g == null || mt == null) return 0;
+            var pv = mt.GetComponent<PhotonView>();
+            if (pv == null || !pv.IsMine) return 0;
+            int pid = pv.ViewID, k = pid & (ANCHOR_CAP - 1);
+            if (g.OwnPid[k] != pid) return 0;
+            float x = mt.velocity.x, y = mt.velocity.y;
+            if (!g.SgOn[k] || g.SgPid[k] != pid)
+            {
+                g.SgOn[k] = true; g.SgPid[k] = pid; g.SgCause[k] = 0;
+                g.SgOx[k] = x; g.SgOy[k] = y; g.SgLx[k] = x; g.SgLy[k] = y;
+            }
+            // this frame: the velocity before it, and whether it was steered since the last frame
+            g.SgPx[k] = g.SgLx[k]; g.SgPy[k] = g.SgLy[k]; g.SgSteer[k] = x != g.SgLx[k] || y != g.SgLy[k];
+            g.SgLx[k] = x; g.SgLy[k] = y;
+            return k + 1;
+        }
+
+        /// <summary>G1 finalizer: the frame's causes (steering before it, the integrator's
+        /// own gravity and drag inside it: MoveTransform.Update's terms).</summary>
+        internal static void MoveExit(MoveTransform mt, long state)
+        {
+            if (!_open || state == 0) return;
+            long t0 = Stamp();
+            try
+            {
+                var g = _g;
+                int k = (int)state - 1;
+                if (g != null && mt != null && k >= 0 && k < ANCHOR_CAP && g.SgOn[k])
+                {
+                    float x = mt.velocity.x, y = mt.velocity.y;
+                    long f = (g.SgSteer[k] ? (long)W.CAUSE_STEERING : 0L) | (x != g.SgLx[k] || y != g.SgLy[k] ? (long)W.CAUSE_GRAVITY : 0L);
+                    SegFrame(g, k, f, g.SgPx[k], g.SgPy[k], x, y);
+                }
+            }
+            catch (Exception ex) { Fault(G1, ex); }
+            Cost(G1, t0);
+        }
+
+        /// <summary>One frame of an own projectile with causes `f` that took its velocity
+        /// from (px, py) to (x, y): a frame whose cause set differs from the open
+        /// segment's closes that segment where the frame began (one row per run of
+        /// frames with the same causes) and opens the next.</summary>
+        private static void SegFrame(Game g, int k, long f, float px, float py, float x, float y)
+        {
+            if (f == 0) return;
+            if (g.SgCause[k] != 0 && f != g.SgCause[k]) { g.SgLx[k] = px; g.SgLy[k] = py; SegClose(g, k); }
+            g.SgCause[k] = f; g.SgLx[k] = x; g.SgLy[k] = y; g.SgStamp[k] = FrameNow(g);
+        }
+
+        /// <summary>Lists the open segment of slot k (when it changed anything) and opens
+        /// the next one where it ended.</summary>
+        private static void SegClose(Game g, int k)
+        {
+            if (!g.SgOn[k]) return;
+            if (g.SgCause[k] != 0 && g.OwnPid[k] == g.SgPid[k])
+                VchgRow(g, g.SgPid[k], g.OwnSInit[k], g.SgStamp[k], g.SgCause[k], g.SgOx[k], g.SgOy[k], g.SgLx[k], g.SgLy[k]);
+            g.SgCause[k] = 0; g.SgOx[k] = g.SgLx[k]; g.SgOy[k] = g.SgLy[k];
+        }
+
+        /// <summary>Before a message path changes own projectile `pid` (velocity x, y as it
+        /// stands): a change since the last observed frame is a steering change (no
+        /// frame of the integrator has run since), then the segment is listed.</summary>
+        private static void SegBreak(Game g, int k, int pid, float x, float y)
+        {
+            if (!g.SgOn[k] || g.SgPid[k] != pid) return;
+            if (x != g.SgLx[k] || y != g.SgLy[k]) SegFrame(g, k, (long)W.CAUSE_STEERING, g.SgLx[k], g.SgLy[k], x, y);
+            SegClose(g, k);
+        }
+
+        /// <summary>After a message path changed own projectile `pid`'s velocity (and
+        /// listed that change itself): the next segment starts at the new velocity.</summary>
+        private static void SegRebase(Game g, int pid, float x, float y)
+        {
+            int k = pid & (ANCHOR_CAP - 1);
+            if (g.OwnPid[k] != pid) return;
+            SegClose(g, k);
+            g.SgOn[k] = true; g.SgPid[k] = pid; g.SgCause[k] = 0;
+            g.SgOx[k] = x; g.SgOy[k] = y; g.SgLx[k] = x; g.SgLy[k] = y;
+        }
+
+        /// <summary>The shared clock once per rendered frame (G1 runs per projectile per frame).</summary>
+        private static int FrameNow(Game g)
+        {
+            int f = Time.frameCount;
+            if (f != g.NowFrame) { g.NowFrame = f; g.NowAt = ServerNow(); }
+            return g.NowAt;
         }
 
         private static void VchgRow(Game g, int pid, int sInit, int stamp, long cause, float ox, float oy, float nx, float ny)
@@ -859,6 +979,7 @@ namespace CompetitiveRounds
             if (o < 0) return;
             var a = g.ChS.Raw;
             a[o] = pid; a[o + 1] = sInit; a[o + 2] = cord; a[o + 3] = ServerNow(); a[o + 4] = -1; a[o + 5] = -1; a[o + 6] = -1; a[o + 7] = 0;
+            a[o + 8] = -1;                                   // A1 f: t_frc_rcv, the force's receipt here (ForceBody)
         }
 
         /// <summary>The last RECENT_CAP hits on one player (pid, s_init, cord, stamp), newest last.</summary>
@@ -867,6 +988,20 @@ namespace CompetitiveRounds
             int i = (head + n) % RECENT_CAP;
             if (n < RECENT_CAP) n++; else head = (head + 1) % RECENT_CAP;
             ring[i * 4] = pid; ring[i * 4 + 1] = sInit; ring[i * 4 + 2] = cord; ring[i * 4 + 3] = stamp;
+        }
+
+        /// <summary>The last RECENT_CAP forces on one player (own: this seat's player),
+        /// newest last: the hit key it was keyed to or FORCE_UNKEYED, the sender seat,
+        /// the message stamp (A1 section f, M13).</summary>
+        private static void RecentForce(bool own, int pid, int sInit, int cord, int snd, int stamp)
+        {
+            var g = _g;
+            var ring = own ? g.RfOwn : g.RfOpp;
+            int head = own ? g.RfOwnHead : g.RfOppHead, n = own ? g.RfOwnN : g.RfOppN;
+            int i = (head + n) % RECENT_CAP;
+            if (n < RECENT_CAP) n++; else head = (head + 1) % RECENT_CAP;
+            ring[i * 5] = pid; ring[i * 5 + 1] = sInit; ring[i * 5 + 2] = cord; ring[i * 5 + 3] = snd; ring[i * 5 + 4] = stamp;
+            if (own) { g.RfOwnHead = head; g.RfOwnN = n; } else { g.RfOppHead = head; g.RfOppN = n; }
         }
 
         /// <summary>A received hit message pairs to the OLDEST unmatched contact of the
@@ -1125,7 +1260,9 @@ namespace CompetitiveRounds
                 int pid = r.view.ViewID, k = pid & (ANCHOR_CAP - 1);
                 if (g.OwnPid[k] != pid) { g.Drop[D_UNKEYED]++; g.Void |= W.CAPS_VCHG; return; }
                 float ox = r.move != null ? r.move.velocity.x : newVel.x, oy = r.move != null ? r.move.velocity.y : newVel.y;
+                SegBreak(g, k, pid, ox, oy);
                 VchgRow(g, pid, g.OwnSInit[k], stamp, W.CAUSE_RETARGET, ox, oy, newVel.x, newVel.y);
+                SegRebase(g, pid, newVel.x, newVel.y);
                 if (!g.BsOn[k] || g.BsPid[k] != pid) { g.Drop[D_UNKEYED]++; g.Void |= W.CAPS_VCHG; return; }
                 g.BsOn[k] = false;
                 int o = g.Bsel.NextSlot();
@@ -1225,6 +1362,7 @@ namespace CompetitiveRounds
             if (g.OwnPid[k] != pid) { g.Drop[D_UNKEYED]++; g.Void |= W.CAPS_VCHG; return 0; }
             var mv = b.projHit != null ? b.projHit.move : null;
             if (mv == null) return 0;
+            SegBreak(g, k, pid, mv.velocity.x, mv.velocity.y);
             g.EvOn = true; g.EvX = mv.velocity.x; g.EvY = mv.velocity.y; g.EvPid = pid; g.EvSInit = g.OwnSInit[k]; g.EvStamp = stamp;
             return 1;
         }
@@ -1243,6 +1381,7 @@ namespace CompetitiveRounds
                     var mv = b != null && b.projHit != null ? b.projHit.move : null;
                     if (mv != null && (mv.velocity.x != g.EvX || mv.velocity.y != g.EvY))
                         VchgRow(g, g.EvPid, g.EvSInit, g.EvStamp, W.CAUSE_SURFACE, g.EvX, g.EvY, mv.velocity.x, mv.velocity.y);
+                    if (mv != null) SegRebase(g, g.EvPid, mv.velocity.x, mv.velocity.y);
                 }
             }
             catch (Exception ex) { Fault(E1, ex); }
@@ -1278,17 +1417,26 @@ namespace CompetitiveRounds
             int stamp, sender, view; string method;
             if (!RpcTop(P1, out stamp, out sender, out view, out method) || method != "RPCA_SendTakeForce" || view != data.view.ViewID) return 0;
             E.FixedRows rows; int pid, sInit, cord;
-            if (own && sender == _oppActor)
+            int snd = sender == _localActor ? 0 : 1;
+            if (own && sender == _oppActor && g.VcOn && !g.VcPush)
             {
-                if (!g.VcOn || g.VcPush) { g.Drop[D_FORCE_UNKEYED]++; return 0; }
                 g.VcPush = true; rows = g.PushS; pid = g.VcPid; sInit = g.VcSInit; cord = g.VcCord;
+                if (g.VcChRow >= 0) g.ChS.Raw[g.VcChRow + 8] = ServerNow();   // A1 f: the force's receipt on the victim
             }
-            else if (opp && sender == _localActor)
+            else if (opp && sender == _localActor && g.ScOn && !g.ScPush)
             {
-                if (!g.ScOn || g.ScPush) { g.Drop[D_FORCE_UNKEYED]++; return 0; }
                 g.ScPush = true; rows = g.PushO; pid = g.ScPid; sInit = g.ScSInit; cord = g.ScCord;
+                if (g.ScChRow >= 0) g.ChO.Raw[g.ScChRow + 6] = stamp;           // A1 f: the force's creation by the shooter
             }
-            else return 0;
+            else
+            {
+                // a force no open hit keys (the other seat's or this seat's own message with
+                // no hit scope, an out-of-bounds push): its identity is kept for a death
+                if ((own && sender == _oppActor) || (opp && sender == _localActor)) g.Drop[D_FORCE_UNKEYED]++;
+                RecentForce(own, (int)E.FORCE_UNKEYED, 0, -1, snd, stamp);
+                return 0;
+            }
+            RecentForce(own, pid, sInit, cord, snd, stamp);
             int o = rows.NextSlot();
             if (o < 0) return 0;
             var a = rows.Raw; var pv = data.playerVel; var pos = pv.position;
@@ -1451,6 +1599,9 @@ namespace CompetitiveRounds
             var ring = own ? g.RhOwn : g.RhOpp;
             int head = own ? g.RhOwnHead : g.RhOppHead, n = own ? g.RhOwnN : g.RhOppN;
             if (own) { g.RhOwnN = 0; g.RhOwnHead = 0; } else { g.RhOppN = 0; g.RhOppHead = 0; }
+            var fring = own ? g.RfOwn : g.RfOpp;
+            int fhead = own ? g.RfOwnHead : g.RfOppHead, fn = own ? g.RfOwnN : g.RfOppN;
+            if (own) { g.RfOwnN = 0; g.RfOwnHead = 0; } else { g.RfOppN = 0; g.RfOppHead = 0; }
             int o = rows.NextSlot();
             if (o < 0) return;
             var a = rows.Raw; var pos = data.playerVel.position; var vel = data.playerVel.velocity;
@@ -1467,6 +1618,18 @@ namespace CompetitiveRounds
                     a[f + 3] = E.Clamp(C.WrapDiff(now, ring[i + 3]), 0, 600000);
                 }
                 else { a[f] = -1; a[f + 1] = 0; a[f + 2] = -1; a[f + 3] = -1; }
+            }
+            // A1 f: the last three forces on the body, newest first (f1), each with its age
+            for (int h = 0; h < RECENT_CAP; h++)
+            {
+                int f = o + 8 + RECENT_CAP * 4 + h * 5;
+                if (h < fn)
+                {
+                    int i = ((fhead + fn - 1 - h) % RECENT_CAP) * 5;
+                    a[f] = fring[i]; a[f + 1] = fring[i + 1]; a[f + 2] = fring[i + 2]; a[f + 3] = fring[i + 3];
+                    a[f + 4] = E.Clamp(C.WrapDiff(now, fring[i + 4]), 0, 600000);
+                }
+                else { a[f] = -1; a[f + 1] = 0; a[f + 2] = -1; a[f + 3] = -1; a[f + 4] = -1; }
             }
         }
 
@@ -1876,12 +2039,12 @@ namespace CompetitiveRounds
         /// the aim is first inside the other body's angular radius, and the time
         /// until that side's first volley. A row closes when sight is lost, a body
         /// is gone, or the point ends.</summary>
-        /// The sampler runs only in a build whose A1 sections are live (it costs
-        /// a ray per sample and its rows travel only under CAPS_A1). Its time is
-        /// also inside row T, which encloses it.
+        /// The sampler runs on every live tick (a ray per sample at most; its rows
+        /// travel in every record, which is an A1 record, and CAPS_RX states that it
+        /// ran). Its time is also inside row T, which encloses it.
         internal static void RxSample(int now)
         {
-            if (!A1Live || _g == null || SwMs < _g.RxNextMs) return;
+            if (_g == null || SwMs < _g.RxNextMs) return;
             long t0 = Stamp();
             try { var g = _g; g.RxNextMs = SwMs + RX_PERIOD_MS; RxBody(g, now); } catch (Exception ex) { Fault(RX, ex); }
             Cost(RX, t0);
@@ -1977,8 +2140,8 @@ namespace CompetitiveRounds
                 int mask = slotOk ? g.AMask[slot] : 0;
                 // A1: an edge bounce since the anchor leaves no comparable prediction (F4);
                 // an unscanned mask is UNKNOWN and the sample joins no steering histogram
-                if (A1Live && edged) { g.Drop[D_RES_INCOMPARABLE]++; continue; }
-                bool unknown = A1Live && !known;
+                if (edged) { g.Drop[D_RES_INCOMPARABLE]++; continue; }
+                bool unknown = !known;
                 if (unknown) g.Drop[D_RES_MASK_UNKNOWN]++;
                 // the side that is behind is flown forward by |dT| x k in fixed steps (design 5.2, M7)
                 double span = Math.Abs(dTms) / 1000.0 * k;
@@ -2067,7 +2230,7 @@ namespace CompetitiveRounds
 
         private sealed class Capture
         {
-            internal Game G; internal long[][] Cost; internal long Producers; internal bool A1;
+            internal Game G; internal long[][] Cost; internal long Producers;
             internal string Seat, Other, Attach, Text, Env; internal int T0; internal bool FromToken;
         }
 
@@ -2107,7 +2270,7 @@ namespace CompetitiveRounds
                 for (int i = 0; i < COST_CAP; i++)
                     cost[i] = new long[] { _calls[i], _ticks[i], _maxTicks[i], _faults[i] };
                 if (_captures.Count >= CAPTURE_CAP) { _captures.RemoveAt(0); _note = " a captured record was dropped before it was persisted: too many waiting"; }
-                _captures.Add(new Capture { G = g, Cost = cost, Producers = Producers, A1 = A1Live, Seat = seat, Other = other, Attach = attach, T0 = t0, FromToken = fromToken });
+                _captures.Add(new Capture { G = g, Cost = cost, Producers = Producers, Seat = seat, Other = other, Attach = attach, T0 = t0, FromToken = fromToken });
                 _nextCaptureTryMs = 0;
             }
             catch { _note = " no record: the capture failed"; }
@@ -2130,37 +2293,45 @@ namespace CompetitiveRounds
         private static readonly int[][] SECTION_ROWS =
         {
             new[] { K2, K3, H1, P1, T },              // push (T reads the after-position through the wait ring)
-            new[] { K2, K3, H1, N3, N4, E1, S1 },     // velocity changes and bounce selections
+            new[] { K2, K3, H1, N3, N4, E1, S1, G1 }, // velocity changes (G1 the integrator: gravity, steering) and bounce selections
             new[] { K1, K2, K3, H1, D1, N7, N1, T },  // the hit chain (K1 the message stamps, N1 the decision, T the frame)
             new[] { K2, K3, D1, X1 },                 // deaths
         };
         private static readonly long[] SECTION_BITS = { W.CAPS_PUSH, W.CAPS_VCHG, W.CAPS_CHAIN, W.CAPS_DEATH };
 
+        /// <summary>The sections whose rows carry the force (A1 f): the chain's force stage
+        /// (t_frc, t_frc_rcv) and a death's recent force identities are produced by the
+        /// push's collector, so neither section is stated without the push section.</summary>
+        private const long NEEDS_PUSH = W.CAPS_CHAIN | W.CAPS_DEATH;
+
         /// <summary>The R-section bits this record states: proved attached at boot,
-        /// with no producer fault and no unkeyed event in the game.</summary>
+        /// with no producer fault and no unkeyed event in the game; the chain and
+        /// the deaths only together with the push (M12, M13).</summary>
         internal static long SectionCaps(long producers, long voided, long[][] cost)
         {
             long caps = producers & PRODUCERS & ~voided;
             for (int s = 0; s < SECTION_BITS.Length; s++)
                 for (int k = 0; k < SECTION_ROWS[s].Length; k++)
                     if (cost[SECTION_ROWS[s][k]][3] > 0) caps &= ~SECTION_BITS[s];
+            if ((caps & W.CAPS_PUSH) == 0) caps &= ~NEEDS_PUSH;
             return caps;
         }
 
         /// <summary>The record of a captured game (every layout key, full lists;
         /// the budgeter trims). Close of the last point happens here when the
-        /// game ended inside one. With A1Live clear the record is the current
-        /// layout; with it set, caps carries A1 (and RX when the sampler ran
-        /// without a fault) and the A1 part follows omit.</summary>
+        /// game ended inside one. Every record is an A1 record: caps carries A1, and
+        /// RX exactly when the sampler ran without a fault; the A1 part follows omit.</summary>
         private static E.Rec Build(Capture c)
         {
             var g = c.G;
             if (g.PointLive) PointEnd(g, ServerNow());
+            // G1: the segments still open (projectiles gone, or alive at the end) are listed
+            for (int k = 0; k < ANCHOR_CAP; k++) if (g.SgOn[k]) { SegClose(g, k); g.SgOn[k] = false; }
             var r = E.Empty();
-            long caps = SectionCaps(c.Producers, g.Void, c.Cost);
-            bool a1 = c.A1;
-            // RX: the sampler ran (calls > 0) and neither it nor the tick that drives it faulted
-            if (a1) { caps |= E.CAPS_A1; if (c.Cost[RX][0] > 0 && c.Cost[RX][3] == 0 && c.Cost[T][3] == 0) caps |= E.CAPS_RX; }
+            long caps = SectionCaps(c.Producers, g.Void, c.Cost) | E.CAPS_A1;
+            // RX: the sampler ran (calls > 0) and neither it nor the tick that drives it faulted;
+            // without the bit the reaction lists are NOT-COLLECTED, whatever they hold
+            if (c.Cost[RX][0] > 0 && c.Cost[RX][3] == 0 && c.Cost[T][3] == 0) caps |= E.CAPS_RX;
             r["schema"] = (long)W.SCHEMA; r["consts"] = 1L; r["caps"] = caps;
             r["t0"] = (long)c.T0; r["t0_src"] = c.FromToken ? "m" : "o";
             r["frame_p50_us"] = E.Clamp(g.Frames.Median(), 0, 1000000);
@@ -2203,16 +2374,13 @@ namespace CompetitiveRounds
             Section(r, rt, caps, W.CAPS_CHAIN, "ch_s", g.ChS, 4); Section(r, rt, caps, W.CAPS_CHAIN, "ch_o", g.ChO, 5);
             Section(r, rt, caps, W.CAPS_DEATH, "bd_s", g.BdS, 6); Section(r, rt, caps, W.CAPS_DEATH, "bd_o", g.BdO, 7);
             r["r_tot"] = rt;
-            if (a1)
-            {
-                var p = new E.A1Part();
-                for (int i = 0; i < p.Drop.Length; i++) p.Drop[i] = E.Clamp(g.Drop[i], 0, E.A1_HI);
-                p.Tot[0] = E.Clamp(g.A1Tot[0], 0, E.A1_HI);
-                p.Tot[1] = E.Clamp(g.RxS.Total, 0, E.A1_HI); p.Tot[2] = E.Clamp(g.RxO.Total, 0, E.A1_HI);
-                p.Tot[3] = E.Clamp(g.A1Tot[3], 0, E.A1_HI);
-                for (int i = W.COLLECTORS; i < COST_ALL; i++) p.Cost.Add(CostRow(c.Cost[i]));
-                r.A1 = p;
-            }
+            var p = new E.A1Part();
+            for (int i = 0; i < p.Drop.Length; i++) p.Drop[i] = E.Clamp(g.Drop[i], 0, E.A1_HI);
+            p.Tot[0] = E.Clamp(g.A1Tot[0], 0, E.A1_HI);
+            p.Tot[1] = E.Clamp(g.RxS.Total, 0, E.A1_HI); p.Tot[2] = E.Clamp(g.RxO.Total, 0, E.A1_HI);
+            p.Tot[3] = E.Clamp(g.A1Tot[3], 0, E.A1_HI);
+            for (int i = W.COLLECTORS; i < COST_ALL; i++) p.Cost.Add(CostRow(c.Cost[i]));
+            r.A1 = p;
             E.ClampToLayout(r);
             return r;
         }
@@ -2363,6 +2531,7 @@ namespace CompetitiveRounds
             new[] { "CombatEvidence_DiePatch", "HealthHandler", "RPCA_Die", "p" },
             new[] { "CombatEvidence_DiePhoenixPatch", "HealthHandler", "RPCA_Die_Phoenix", "p" },
             new[] { "CombatEvidence_FindTargetPatch", "BounceEffectRetarget", "FindTarget", "o" },
+            new[] { "CombatEvidence_MovePatch", "MoveTransform", "Update", "pf" },
         };
 
         /// <summary>The shared RPC frame every keyed row reads (RpcTop) and the send hook (RpcSent).</summary>
@@ -2376,7 +2545,7 @@ namespace CompetitiveRounds
         private static readonly int[][] SECTION_HOOKS =
         {
             new[] { 1, 2, 3, 5, 13 },             // push: inits (anchors), the hit message, the force
-            new[] { 1, 2, 3, 5, 10, 11, 17 },     // velocity changes and selections
+            new[] { 1, 2, 3, 5, 10, 11, 17, 18 }, // velocity changes and selections (18 the integrator: gravity, steering)
             new[] { 1, 2, 3, 5, 6, 14 },          // the chain: hit message, contact (decision), damage
             new[] { 1, 2, 3, 5, 14, 15, 16 },     // deaths: recent hits, damage source, both deaths
         };
@@ -2711,6 +2880,26 @@ namespace CompetitiveRounds
         private static void Postfix(BounceEffectRetarget __instance, HitInfo hit, Player __result)
         {
             try { CombatEvidence.FindTarget(__instance, hit, __result); } catch { }
+        }
+    }
+
+    /// <summary>G1: an own projectile's integrator frame (R2 gravity; steering seen as a
+    /// change made between two frames, M11).</summary>
+    [HarmonyPatch(typeof(MoveTransform), "Update")]
+    internal static class CombatEvidence_MovePatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix(MoveTransform __instance, out long __state)
+        {
+            __state = 0;
+            try { CombatEvidence.MoveEnter(__instance, out __state); } catch { }
+        }
+
+        [HarmonyFinalizer]
+        private static Exception Finalizer(MoveTransform __instance, long __state, Exception __exception)
+        {
+            try { CombatEvidence.MoveExit(__instance, __state); } catch { }
+            return __exception;
         }
     }
 }
