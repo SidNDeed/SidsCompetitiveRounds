@@ -1672,6 +1672,7 @@ namespace CompetitiveRounds
                 case "SHpPrec":
                     var m = typeof(TabStatsOverlay.HealthPrecisionSetting).GetMethod("Entry", DrvPriv);
                     return m != null ? m.Invoke(null, null) as BepInEx.Configuration.ConfigEntryBase : null;
+                case "SDmgNum": return DamageNumbers.Entry();
             }
             return null;
         }
@@ -1723,15 +1724,15 @@ namespace CompetitiveRounds
         }
 
         /// <summary>MEDIUM-3 / design T5-f: a segmented click on SMenuMus,
-        /// SBloom, SShake and SHpPrec leaves the canonical id in the .cfg on
+        /// SBloom, SShake, SHpPrec and SDmgNum leaves the canonical id in the .cfg on
         /// disk, and the live effect has run: the music engine's mode follows
         /// SMenuMus in the click's own call stack, and the live bloom changes
-        /// with SBloom. SShake and SHpPrec have no apply step (the level is
+        /// with SBloom. SShake, SHpPrec and SDmgNum have no apply step (the level is
         /// read where it is used), so their .cfg line is their assertion.
         /// Each row is put back.</summary>
         private static IEnumerator DriveT5f()
         {
-            foreach (var key in new[] { "SMenuMus", "SBloom", "SShake", "SHpPrec" })
+            foreach (var key in new[] { "SMenuMus", "SBloom", "SShake", "SHpPrec", "SDmgNum" })
             {
                 var r = DrvRec(key);
                 if (r == null || r.Kind != SettingsKind.Segmented) { DrvBad("T5-f the " + key + " row was not built as segmented"); continue; }
@@ -1777,7 +1778,7 @@ namespace CompetitiveRounds
         /// stated here rather than read from the descriptors the reset uses.</summary>
         private static readonly Dictionary<string, string[]> DrvLaneResetSets = new Dictionary<string, string[]>
         {
-            { "ingame", new[] { "SBlkDbg", "SHpPrec", "SInpOv", "SLagNotice", "SPing" } },
+            { "ingame", new[] { "SBlkDbg", "SDmgNum", "SHpPrec", "SInpOv", "SLagNotice", "SPing" } },
             { "chatmail", new[] { "SChatTtl", "SIgChat", "SNT" } },
             { "sound", new[] { "SMenuMus", "SMusCredit", "SMuteBg" } },
             { "visuals", new[] { "SAnimCos", "SBloom", "SChromAb", "SCursor", "SLight", "SPColor", "SShad", "SShake", "STrail" } },

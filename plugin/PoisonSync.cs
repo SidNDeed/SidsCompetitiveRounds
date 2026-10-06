@@ -2416,6 +2416,12 @@ namespace CompetitiveRounds
                             {
                                 var hbBar = view.GetComponentInChildren<HealthBar>(true);
                                 if (hbBar != null) hbBar.TakeDamage(default, false);
+                                // v1.41.0 item 21: the damage number for this
+                                // tick, display-only like the bar above. The
+                                // APPLIED drop (the 1-HP floor already taken),
+                                // so this seat prints what every fighter seat
+                                // measures through DoDamage's own clamp.
+                                DamageNumbers.NoteSpectatorPoison(view, preTick - cds.health);
                             }
                         }
                         catch { }

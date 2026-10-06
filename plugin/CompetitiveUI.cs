@@ -392,6 +392,7 @@ namespace CompetitiveRounds
             DrawFPS();
             DrawH2HBanner();          // Release B §1: "vs NAME · last played · H2H" (10 s)
             DrawLagNotices();   // Release B §4: opt-in network notices under the corner label
+            DamageNumbers.Draw();     // v1.41.0 item 21: damage/heal numbers, under the board and every modal
             TabStatsOverlay.Draw();   // hold-Tab scoreboard (bug batch item 3)
             if (!PageImguiHidden)   // Sept 8 item 1: page IMGUI never paints over a popup
             {

@@ -204,6 +204,11 @@ _HOLE = re.compile(r"\{\d+[^{}]*\}")
 SHORT_WHOLE_LINES = frozenset({
     "w/ {0}",
     "vs {0}",
+    # v1.41.0 item 21 (Q7): the damage-numbers ME mode word. No Tr("ME")
+    # site exists today (the word reaches the screen only as the value half
+    # of a painted literal that clears the floor itself), so this entry adds
+    # no key on this commit.
+    "ME",
 })
 
 

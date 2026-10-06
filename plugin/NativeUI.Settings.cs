@@ -883,6 +883,7 @@ namespace CompetitiveRounds
                 case "SBloom": PaintBloom(t, SettingsAsStr(v)); return true;
                 case "SShake": PaintScreenShake(t, SettingsAsStr(v)); return true;
                 case "SHpPrec": PaintHealthPrecision(t, SettingsAsStr(v)); return true;
+                case "SDmgNum": PaintDamageNumbers(t, SettingsAsStr(v)); return true;
                 case "SChromAb": PaintChromAb(t, SettingsAsBool(v)); return true;
                 case "SLight": PaintMapLighting(t, SettingsAsBool(v)); return true;
                 case "SShad": PaintMapShadows(t, SettingsAsBool(v)); return true;
@@ -1742,10 +1743,11 @@ namespace CompetitiveRounds
         /// <summary>Design section 15 (Sid's ruling): measurement decides
         /// whether a segmented row stays segmented. Every A2a pass records
         /// each row's widest option word against the segment width; SBloom
-        /// and SShake change kind together, the other three decide alone.
+        /// and SShake change kind together, the other four (item 21's SDmgNum
+        /// among them) decide alone.
         /// The widest word and the locale it was measured in are kept so the
         /// verdict can name them.</summary>
-        private static readonly string[] SettingsSegFitRows = { "SBloom", "SShake", "SMenuMus", "SIgChat", "SHpPrec" };
+        private static readonly string[] SettingsSegFitRows = { "SBloom", "SShake", "SMenuMus", "SIgChat", "SHpPrec", "SDmgNum" };
         private const float SettingsSegmentWidth = 142f;
         private static readonly Dictionary<string, float> stSegMax = new Dictionary<string, float>();
         private static readonly Dictionary<string, string> stSegWidest = new Dictionary<string, string>();
@@ -1754,13 +1756,14 @@ namespace CompetitiveRounds
         /// <summary>The keys the page paints through SetTextRaw (T2b control
         /// a): the lane's twenty (design 3.3) plus SCT, whose new painter
         /// composes its state word after translation and so writes raw, plus
-        /// SPcDnc (dance cards, merge pass 3), whose label carries a colour tag.</summary>
+        /// SPcDnc (dance cards, merge pass 3), whose label carries a colour tag,
+        /// plus SDmgNum (item 21), painted like SHpPrec.</summary>
         private static readonly string[] SettingsRawPainted =
         {
             "SCT", "SChatTtl", "SCursor", "SBloom", "SShake", "SHpPrec", "SLang", "SDateFmt", "SPerfH",
             "SPerf_Master", "SPerf_Stun", "SPerf_OOB", "SPerf_HitSnd", "SPerf_EdgeBn", "SPerf_Menu",
             "SPerf_BulletCap", "SPerf_PoolInit", "SMailFrom", "SMailRelay", "SMailBlocked", "SPcPre",
-            "SPcDnc",
+            "SPcDnc", "SDmgNum",
         };
 
         private static void SettingsSelfTestStart(string why, string mutation = "")
@@ -2447,7 +2450,7 @@ namespace CompetitiveRounds
         /// and the kind each row is built as must agree. The pair SBloom and
         /// SShake is one decision - if either row's widest word overflows its
         /// segment in any measured locale, both rows must be dropdowns - and
-        /// SMenuMus, SIgChat and SHpPrec each decide alone.</summary>
+        /// SMenuMus, SIgChat, SHpPrec and SDmgNum each decide alone.</summary>
         private static void SelfTestS15()
         {
             string over = stSegLocales.Count + " locale pass(es) [" + string.Join(",", new List<string>(stSegLocales).ToArray()) + "]";
@@ -2464,7 +2467,7 @@ namespace CompetitiveRounds
                 if (bloom.Kind == want && shake.Kind == want) StOk("S15 pair SBloom+SShake: measured " + want + ", built " + bloom.Kind + " and " + shake.Kind + "; " + rep);
                 else StBad("S15 pair SBloom+SShake: measured " + want + " but built " + bloom.Kind + " and " + shake.Kind + " (the pair changes kind together); " + rep);
             }
-            foreach (string key in new[] { "SMenuMus", "SIgChat", "SHpPrec" })
+            foreach (string key in new[] { "SMenuMus", "SIgChat", "SHpPrec", "SDmgNum" })
             {
                 SettingsRowRec r;
                 float w;
