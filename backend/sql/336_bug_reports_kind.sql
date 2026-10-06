@@ -49,6 +49,15 @@
 --                                              Discord reply path
 --   READER  auto_logs.auto_log_retention_loop  the scheduled sweep's own
 --                                              predicate, via prune_auto_logs
+--   READER  auto_logs._auto_bucket             the automatic upload's own
+--                                              12/24h count, kind = 'auto'
+--   NOT A READER  auto_logs.prune_orphan_blobs looks a blob up by
+--                                              log_filename over the WHOLE
+--                                              table and is deliberately NOT
+--                                              scoped to kind; its docstring
+--                                              names the column to say so,
+--                                              which is why a text detector
+--                                              lists it
 --
 -- So code-before-migration is a BROKEN deployment, not a degraded one. The
 -- REVERSE -- this file applied while the OLD code is still running -- is
