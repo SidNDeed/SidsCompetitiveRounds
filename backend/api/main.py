@@ -7203,7 +7203,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_finishing_count=ffa_finishing_count,
                               team_dc_fallback=team_dc_fallback,
                               read_gate=await read_gate.current_mode(db),
-                              read_gate_build=read_gate.READ_GATE_BUILD)
+                              read_gate_build=read_gate.READ_GATE_BUILD,
+                              binder_standings=_BINDER_STANDINGS_BUILD)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -7237,7 +7238,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
                               team_dc_fallback=_TEAM_DC_FALLBACK_LAST,
                               read_gate=read_gate.mode_word(),
-                              read_gate_build=read_gate.READ_GATE_BUILD)
+                              read_gate_build=read_gate.READ_GATE_BUILD,
+                              binder_standings=_BINDER_STANDINGS_BUILD)
 
 
 LATEST_MOD_VERSION = "1.40.3"
@@ -26361,6 +26363,11 @@ _PC_STANDINGS_TTL_S = 60
 # stamp only bounds retries of a statement that just failed, it must not keep
 # the sixth sort away for a TTL after the database recovers.
 _PC_STANDINGS_FAIL_TTL_S = 5
+
+# The /health word `binder_standings` (schemas.HealthResponse): a code
+# constant, so both arms answer it with no database. It exists to be probed
+# by the release train and has no other reader (#306).
+_BINDER_STANDINGS_BUILD = 1
 
 # The cache is keyed on WHAT IT WAS COMPUTED WITH, never on a module global
 # read back at call time (#744): an entry is

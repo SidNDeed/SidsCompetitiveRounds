@@ -907,6 +907,63 @@ def test_s11_a_failed_refresh_is_stamped_so_cold_callers_do_not_queue_on_it(monk
     run(go())
 
 
+# ── the build discriminator: /health's binder_standings ──────────────────────
+
+def test_s12_health_answers_binder_standings_1_on_both_arms(monkeypatch):
+    """The release train's discriminator for this build: the collection route
+    needs a signed request on every build, so an unsigned probe answers alike
+    old and new, and only this word tells them apart. Required in the schema,
+    passed once in each arm of health_check, a code constant so the degraded
+    arm answers it with no database, and on the wire of a sessionless,
+    versionless GET, as the train reads it.
+    """
+    import ast
+    import pathlib
+    import pydantic
+    from fastapi.testclient import TestClient
+    sys.path.insert(0, HERE)
+    import read_gate_testkit as K
+    import schemas
+    import test_health_read_gate_marker as H
+
+    field = schemas.HealthResponse.model_fields.get("binder_standings")
+    assert field is not None and field.annotation is int and field.is_required(), field
+
+    tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
+    health = [n for n in tree.body
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "health_check"]
+    assert len(health) == 1
+    tries = [n for n in ast.walk(health[0]) if isinstance(n, ast.Try)]
+    ok_arm = {id(n) for s in tries[0].body for n in ast.walk(s)}
+    degraded = {id(n) for h in tries[0].handlers for n in ast.walk(h)}
+    kws = [k for k in ast.walk(health[0])
+           if isinstance(k, ast.keyword) and k.arg == "binder_standings"]
+    assert len(kws) == 2 and sum(id(k) in ok_arm for k in kws) == 1 \
+        and sum(id(k) in degraded for k in kws) == 1, len(kws)
+
+    K.reset_gate()
+    try:
+        up, down = H._health("off")
+        assert up["binder_standings"] == 1, up
+        assert down["binder_standings"] == 1, down
+        # required: an answer without it does not validate
+        down.pop("binder_standings")
+        with pytest.raises(pydantic.ValidationError):
+            schemas.HealthResponse(**down)
+    finally:
+        K.reset_gate()
+
+    with K.gate_env(monkeypatch, mode=None) as (stub, _clock):
+        stub.fail.add("mode")
+
+        async def _db():
+            yield H._Down()
+        monkeypatch.setitem(main.app.dependency_overrides, main.get_db, _db)
+        r = TestClient(main.app, raise_server_exceptions=False).get("/api/v1/health")
+        assert r.status_code == 200, r.text
+        assert r.json().get("binder_standings") == 1, r.json()
+
+
 # ── the gate's own guard, always outside it ──────────────────────────────────
 
 def test_the_live_test_count_is_what_this_module_claims():

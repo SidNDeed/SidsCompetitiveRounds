@@ -1002,6 +1002,13 @@ class HealthResponse(BaseModel):
     # build before verified reads.
     read_gate: str
     read_gate_build: str
+    # binder_standings: item 20's fixed build marker (1): this build attaches
+    # the subjects' standings to the collection read. The collection route
+    # needs a signed request on every build and answers an unsigned probe
+    # alike on old and new, so this word is the release train's build
+    # discriminator; read by the train and nothing else (#306). Required, so
+    # a constructor that omits it raises; absent on any build before item 20.
+    binder_standings: int
     # pc_motion: how many of the dance-card motion routes are registered on
     # this app (main._PC_MOTION_ROUTES, design S11.3): the motion upload, the
     # per-visit motion read, the atlas, the selection and the bot's motion
