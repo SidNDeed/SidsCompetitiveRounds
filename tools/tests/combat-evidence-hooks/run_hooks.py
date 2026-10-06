@@ -509,6 +509,11 @@ def alloc_findings(texts):
         for (c, m) in g.table:
             if c in patches and m not in bound_check.PATCH_TIME:
                 entries.append((c, m))
+    # A type initializer runs once per type, at first use, never per call: its allocations (and the helpers only it
+    # calls) are not on the per-call path. The bound walk keeps them (a loop there must still be bounded); this
+    # allocation walk does not follow the type-initializer edges. An instance construction in a reached body is
+    # still flagged at the `new` in that body.
+    g.cctors = {}
     seen, _ = g.closure(entries)
     out = []
     for k in sorted(seen):

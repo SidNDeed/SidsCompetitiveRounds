@@ -125,6 +125,15 @@ def run(dll, tag, seat, *opts):
     return res
 
 
+def untimed(rec):
+    """A record with the measured-time fields of its cost rows (ticks, max ticks) set to 0."""
+    out = dict(rec)
+    for k in ("cost", "cost_a1"):
+        if k in out:
+            out[k] = [[row[0], 0, 0] + list(row[3:]) for row in out[k]]
+    return out
+
+
 def load_server(root):
     sys.path.insert(0, os.path.join(root, "backend", "api"))
     import combat_measures
@@ -160,7 +169,8 @@ def chk_pushes(cm, s1, s2):
     rows = cm.pushes(b, a) + cm.pushes(a, b)
     keys = sorted((r["pid"], r["cord"]) for r in rows)
     bad = [r for r in rows if r["not_run"] is not None or any(r["d_" + k] != 0 for k in ("fx", "fy", "vax", "vay", "pax", "pay"))]
-    moved = [r for r in rows if r["self"]["pax"] == r["self"]["pbx"] and r["self"]["pay"] == r["self"]["pby"]]
+    # the after-position is read a tick later: a surviving body has moved; 2103 is lethal (the body dies, stays put)
+    moved = [r for r in rows if r["pid"] != 2103 and r["self"]["pax"] == r["self"]["pbx"] and r["self"]["pay"] == r["self"]["pby"]]
     ok = keys == [(1101, 0), (1103, 0), (2103, 0)] and not bad and not moved
     return ok, "pairs %s; unpaired or differing %d; after-position not later %d" % (keys, len(bad), len(moved))
 
@@ -438,8 +448,10 @@ def main():
             for i, r in enumerate(rs, 1):
                 p = os.path.join(HERE, d, "seat%d.rec.txt" % i)
                 if os.path.exists(p):
-                    same = read(p) == r["text"][0]
-                    print("%s %s/seat%d.rec.txt reproduced byte for byte by this build: %s" % ("PASS" if same else "FAIL", d, i, same))
+                    # the cost rows' ticks and max ticks are measured time (Stopwatch): masked; every other value equal
+                    same = untimed(json.loads(read(p))) == untimed(r["rec"][0])
+                    print("%s %s/seat%d.rec.txt reproduced by this build (every value; the cost rows' two measured-time"
+                          " fields masked): %s" % ("PASS" if same else "FAIL", d, i, same))
                     aok = aok and same
                 else:
                     print("FAIL %s/seat%d.rec.txt absent (run once with --write-fixtures)" % (d, i))

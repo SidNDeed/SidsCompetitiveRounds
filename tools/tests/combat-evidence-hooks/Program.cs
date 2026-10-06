@@ -44,7 +44,7 @@ namespace CompetitiveRounds
             { "CombatEvidence_ForcePatch", Tuple.Create(typeof(HealthHandler), "RPCA_SendTakeForce",
                 "Prefix:ForceEnter:__instance,force|Finalizer:ForceExit:__instance,__state") },
             { "CombatEvidence_DamagePatch", Tuple.Create(typeof(HealthHandler), "RPCA_SendTakeDamage",
-                "Prefix:DamageEnter:__instance,damage,?1:damageSource|Finalizer:DamageExit:__instance,__state") },
+                "Prefix:DamageEnter:__instance,damage,?1=damageSource|Finalizer:DamageExit:__instance,__state") },
             { "CombatEvidence_DiePatch", Tuple.Create(typeof(HealthHandler), "RPCA_Die", "Prefix:Die:__instance") },
             { "CombatEvidence_DiePhoenixPatch", Tuple.Create(typeof(HealthHandler), "RPCA_Die_Phoenix", "Prefix:Die:__instance") },
             { "CombatEvidence_FindTargetPatch", Tuple.Create(typeof(BounceEffectRetarget), "FindTarget", "Postfix:FindTarget:__instance,hit,__result") },
@@ -111,8 +111,8 @@ namespace CompetitiveRounds
                         if (fwd[k].StartsWith("#")) want = int.Parse(fwd[k].Substring(1));
                         else if (fwd[k].StartsWith("?"))
                         {
-                            // "?n:param": the hook forwards (param == n) as a bool
-                            var sp = fwd[k].Substring(1).Split(new[] { ':' }, 2);
+                            // "?n=param": the hook forwards (param == n) as a bool ('=' because ':' separates the spec)
+                            var sp = fwd[k].Substring(1).Split(new[] { '=' }, 2);
                             int i = Array.FindIndex(ps, p => p.Name == sp[1]);
                             if (i < 0) throw new Exception(kind + " has no parameter " + sp[1]);
                             want = Convert.ToInt32(a[i]) == int.Parse(sp[0]);
