@@ -1,6 +1,6 @@
-"""Combat evidence (B1-B3, B5) hook harness.
+"""Combat evidence (B1-B3, B5, the addendum's R1-R3 and R5) hook harness.
 
-1. Copies the thirteen combat evidence hook classes VERBATIM out of
+1. Copies the eighteen combat evidence hook classes VERBATIM out of
    plugin/CombatEvidence.cs into work/<tag>/Hooks.g.cs, compiles them against
    Stubs.cs (every collector throws after recording its arguments) and runs
    one case per hook: attached to the target the design names, contained,
@@ -53,20 +53,24 @@ EXPECTED = sorted([
     "CombatEvidence_InitSeparatePatch", "CombatEvidence_ReloadPatch", "CombatEvidence_HitPatch",
     "CombatEvidence_ContactPatch", "CombatEvidence_BlockPatch", "CombatEvidence_TryBlockPatch",
     "CombatEvidence_DealtPatch", "CombatEvidence_TargetBouncePatch", "CombatEvidence_EdgeBouncePatch",
-    "CombatEvidence_SyncPatch",
+    "CombatEvidence_SyncPatch", "CombatEvidence_ForcePatch", "CombatEvidence_DamagePatch", "CombatEvidence_DiePatch",
+    "CombatEvidence_DiePhoenixPatch", "CombatEvidence_FindTargetPatch",
 ])
 
-# collector entry -> its cost row (design 11.2: K1..K5, N1..N7, T)
+# collector entry -> its cost row (design 11.2: K1..K5, N1..N7, T; the addendum's P1, D1, X1, S1, H1, E1, RX)
 ENTRIES = {"RpcSent": "K1", "InitEnter": "K2", "InitExit": "K2", "HitEnter": "K3", "BlockDone": "K4", "Dealt": "K5",
            "AttackEnter": "N1", "AttackExit": "N1", "ReloadEnter": "N2", "TargetBounce": "N3", "EdgeBounce": "N4",
-           "SyncRead": "N5", "TryBlockEnter": "N6", "TryBlockExit": "N6", "ContactEnter": "N7", "Tick": "T"}
-ROWS = ["K1", "K2", "K3", "K4", "K5", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "T"]
+           "SyncRead": "N5", "TryBlockEnter": "N6", "TryBlockExit": "N6", "ContactEnter": "N7", "Tick": "T",
+           "ForceEnter": "P1", "ForceExit": "P1", "DamageEnter": "D1", "DamageExit": "D1", "Die": "X1",
+           "FindTarget": "S1", "HitExit": "H1", "EdgeBounceExit": "E1", "RxSample": "RX"}
+ROWS = ["K1", "K2", "K3", "K4", "K5", "N1", "N2", "N3", "N4", "N5", "N6", "N7", "T", "P1", "D1", "X1", "S1", "H1", "E1", "RX"]
 
 # file -> [(literal, exact count)]
 WIRING = {
     "GameStateWatcher.cs": [("CombatEvidence.BeginGame(oneVOneMatchAtStart)", 1), ("CombatEvidence.Dispatch(", 2)],
     "HitEvidence.cs": [("CombatEvidence.RoomExit(", 1)],
-    "Plugin.cs": [("CombatEvidence.Tick(", 1), ("CombatEvidence.FlushOnQuit(", 1)],
+    "Plugin.cs": [("CombatEvidence.Tick(", 1), ("CombatEvidence.FlushOnQuit(", 1),
+                  ("try { CardDrawEvidence.BootLine(); } catch { }", 1), ("try { CombatEvidence.BootLine(); } catch { }", 1)],
     "SeatEvidence.cs": [('ROUTE_COMBAT = "/api/v1/matches/combat-evidence";', 1), ('route == "x" ? ROUTE_COMBAT', 1),
                         ("internal static bool EnqueueCombat(string body)", 1), ("try { CombatEvidence.RpcSent(__0, __1, __2); } catch { }", 1),
                         ("CombatEvidence.", 1)],
@@ -75,7 +79,10 @@ WIRING = {
     # quitting path writes its own closing file and never the queue
     "CombatEvidence.cs": [("SeatEvidence.EnqueueCombat(", 1), ("SeatEvidence.SpoolClosing(", 1),
                           ('bool persisted = quitting ? SeatEvidence.SpoolClosing("x", c.Env) : SeatEvidence.EnqueueCombat(c.Env);', 1),
-                          ("if (SeatEvidence.CombatLive()) return;", 1)],
+                          ("if (SeatEvidence.CombatLive()) return;", 1),
+                          # M8: the fault notes log only outside combat (behind the same gate as the build)
+                          ("if (SeatEvidence.CombatLive()) return;\n                DrainNotes();\n                BuildCaptures(false);", 1),
+                          ("DrainNotes();", 2)],
 }
 
 HEADER = "using System;\nusing HarmonyLib;\nusing Photon.Pun;\nusing UnityEngine;\n\nnamespace CompetitiveRounds\n{\n"
@@ -84,6 +91,8 @@ ATTACK_PRE = "try { CombatEvidence.AttackEnter(__instance, forceAttack, useAmmo,
 INIT_FIN = "try { CombatEvidence.InitExit(__instance, __state); } catch { }\n            return __exception;"
 BLOCK_FIN = "try { CombatEvidence.BlockDone(__instance); } catch { }\n            return __exception;"
 RELOAD = "private static void Prefix(GunAmmo __instance, bool playSound)\n        {\n            try { CombatEvidence.ReloadEnter(__instance, playSound); } catch { }\n        }"
+HIT_FIN = "try { CombatEvidence.HitExit(__instance, __state); } catch { }\n            return __exception;"
+FORCE_FIN = "try { CombatEvidence.ForceExit(__instance, __state); } catch { }\n            return __exception;"
 TRY_PRE = "            __state = 0;\n            try { CombatEvidence.TryBlockEnter(__instance, out __state); } catch { }"
 
 # (name, old, new, target, control); old must occur exactly once in Hooks.g.cs
@@ -102,8 +111,8 @@ MUTANTS = [
      "CombatEvidence_InitSeparatePatch", "CombatEvidence_InitNoAmmoPatch"),
     ("reload_can_skip", RELOAD, RELOAD.replace("private static void Prefix", "private static bool Prefix").replace(
         "catch { }\n        }", "catch { }\n            return true;\n        }"), "CombatEvidence_ReloadPatch", "CombatEvidence_HitPatch"),
-    ("hit_args_swapped", "CombatEvidence.HitEnter(__instance, hitPoint, vel, viewID, wasBlocked)",
-     "CombatEvidence.HitEnter(__instance, vel, hitPoint, viewID, wasBlocked)", "CombatEvidence_HitPatch", "CombatEvidence_ContactPatch"),
+    ("hit_args_swapped", "CombatEvidence.HitEnter(__instance, hitPoint, vel, viewID, wasBlocked, out __state)",
+     "CombatEvidence.HitEnter(__instance, vel, hitPoint, viewID, wasBlocked, out __state)", "CombatEvidence_HitPatch", "CombatEvidence_ContactPatch"),
     ("contact_unwrapped", "try { CombatEvidence.ContactEnter(__instance, hit); } catch { }", "CombatEvidence.ContactEnter(__instance, hit);",
      "CombatEvidence_ContactPatch", "CombatEvidence_HitPatch"),
     ("block_finalizer_swallows", BLOCK_FIN, BLOCK_FIN.replace("return __exception;", "return null;"),
@@ -114,8 +123,23 @@ MUTANTS = [
      "CombatEvidence_DealtPatch", "CombatEvidence_TargetBouncePatch"),
     ("targetbounce_by_ref", "BounceEffectRetarget __instance, Vector2 newVel)", "BounceEffectRetarget __instance, ref Vector2 newVel)",
      "CombatEvidence_TargetBouncePatch", "CombatEvidence_EdgeBouncePatch"),
-    ("edge_unwrapped", "try { CombatEvidence.EdgeBounce(__instance); } catch { }", "CombatEvidence.EdgeBounce(__instance);",
+    ("edge_unwrapped", "try { CombatEvidence.EdgeBounce(__instance, out __state); } catch { }", "CombatEvidence.EdgeBounce(__instance, out __state);",
      "CombatEvidence_EdgeBouncePatch", "CombatEvidence_SyncPatch"),
+    # the addendum's collectors (R1-R3, R5)
+    ("hit_finalizer_swallows", HIT_FIN, HIT_FIN.replace("return __exception;", "return null;"),
+     "CombatEvidence_HitPatch", "CombatEvidence_ForcePatch"),
+    ("force_finalizer_swallows", FORCE_FIN, FORCE_FIN.replace("return __exception;", "return null;"),
+     "CombatEvidence_ForcePatch", "CombatEvidence_DamagePatch"),
+    ("force_unwrapped", "try { CombatEvidence.ForceEnter(__instance, force, out __state); } catch { }",
+     "CombatEvidence.ForceEnter(__instance, force, out __state);", "CombatEvidence_ForcePatch", "CombatEvidence_DiePatch"),
+    ("damage_source_inverted", "damageSource == HealthHandler.DamageSource.OutOfBounds", "damageSource != HealthHandler.DamageSource.OutOfBounds",
+     "CombatEvidence_DamagePatch", "CombatEvidence_ForcePatch"),
+    ("damage_unwrapped", "try { CombatEvidence.DamageExit(__instance, __state); } catch { }", "CombatEvidence.DamageExit(__instance, __state);",
+     "CombatEvidence_DamagePatch", "CombatEvidence_DiePhoenixPatch"),
+    ("die_wrong_target", '[HarmonyPatch(typeof(HealthHandler), "RPCA_Die")]', '[HarmonyPatch(typeof(HealthHandler), "RPCA_Die_Phoenix")]',
+     "CombatEvidence_DiePatch", "CombatEvidence_DiePhoenixPatch"),
+    ("findtarget_result_dropped", "CombatEvidence.FindTarget(__instance, hit, __result)", "CombatEvidence.FindTarget(__instance, hit, null)",
+     "CombatEvidence_FindTargetPatch", "CombatEvidence_TargetBouncePatch"),
     ("sync_wrong_target", '[HarmonyPatch(typeof(SyncProjectile), "OnPhotonSerializeView")]',
      '[HarmonyPatch(typeof(SyncProjectile), "Update")]', "CombatEvidence_SyncPatch", "CombatEvidence_EdgeBouncePatch"),
 ]
@@ -128,17 +152,36 @@ BOUND_MUTANTS = [
      "            var sbx = new System.Text.StringBuilder();\n            NoteAnchor(g, init.gameObject, pv.ViewID, stamp, own);", "CombatEvidence.InitEnterBody"),
     ("attack_uncapped_loop", "CombatEvidence.cs", "            if (!s.AttackFirstSeen) s.Acct.AddNoInit();",
      "            for (int q = 0; q < g.PingN; q++) { }\n            if (!s.AttackFirstSeen) s.Acct.AddNoInit();", "CombatEvidence.AttackExitBody"),
-    ("volleys_uncapped", "CombatEvidence.cs", "for (int n = 0; n < RING_CAP && s.RingN > 0; n++)", "for (int n = 0; s.RingN > 0; n++)",
-     "CombatEvidence.DrainVolleys"),
-    ("hit_sorts_ping", "CombatEvidence.cs", "                g.ALastHit[slot] = stamp; g.AHasHit[slot] = true;",
-     "                g.ALastHit[slot] = stamp; g.AHasHit[slot] = true; LHatMs(g);", "CombatEvidence.LHatMs"),
+    ("volleys_uncapped", "CombatEvidence.cs", "for (int n = 0; n < RING_CAP && n < cap && s.RingN > 0; n++)",
+     "for (int n = 0; n < cap && s.RingN > 0; n++)", "CombatEvidence.DrainVolleys"),
+    # M8: the tick T is in the walk; a sort, an uncapped drain and an allocation planted in it are each caught
+    ("t_sorts", "CombatEvidence.cs", "            DrainWaits(g, now);\n", "            Array.Sort(g.PingBin);\n            DrainWaits(g, now);\n",
+     "CombatEvidence.TickBody"),
+    ("t_drain_uncapped", "CombatEvidence.cs", "            for (int n = 0; n < TICK_ROWS_CAP; n++)\n            {\n                int i = g.Pack.PopSlot();",
+     "            for (int n = 0; ; n++)\n            {\n                int i = g.Pack.PopSlot();", "CombatEvidence.DrainPackages"),
+    ("t_waits_uncapped", "CombatEvidence.cs", "for (int n = 0; n < WAIT_CAP && g.WN > 0; n++)", "for (int n = 0; g.WN > 0; n++)",
+     "CombatEvidence.DrainWaits"),
+    ("t_ping_while", "CombatEvidence.cs", "            for (int i = 0; i <= PING_BIN_CAP; i++)",
+     "            int q = 0; while (q < g.PingN) q++;\n            for (int i = 0; i <= PING_BIN_CAP; i++)", "CombatEvidence.LHatMs"),
+    # the addendum's collectors
+    ("force_logs", "CombatEvidence.cs", "            if (data == null || data.view == null || data.playerVel == null) return 0;",
+     '            if (data == null || data.view == null || data.playerVel == null) return 0;\n            Plugin.Log.LogInfo("f");', "CombatEvidence.ForceBody"),
+    ("damage_formats", "CombatEvidence.cs", "            if (damage == Vector2.zero) return 0;",
+     '            if (damage == Vector2.zero) return 0;\n            var dz = string.Format("{0}", 1);', "CombatEvidence.DamageBody"),
+    ("die_uncapped_loop", "CombatEvidence.cs", "            for (int h = 0; h < RECENT_CAP; h++)", "            for (int h = 0; h < n; h++)",
+     "CombatEvidence.DieBody"),
+    ("findtarget_reflects", "CombatEvidence.cs", "            var pm = PlayerManager.instance;\n            Vector2 refPos",
+     '            var pm = PlayerManager.instance; var fz = typeof(Player).GetField("x");\n            Vector2 refPos', "CombatEvidence.FindTargetBody"),
+    ("rx_logs", "CombatEvidence.cs", "            g.A1Tot[3]++;", '            g.A1Tot[3]++; Debug.Log("rx");', "CombatEvidence.RxBody"),
+    ("edge_coroutine", "CombatEvidence.cs", "            g.EvOn = true; g.EvX = mv.velocity.x;",
+     "            Plugin.Instance.StartCoroutine(null);\n            g.EvOn = true; g.EvX = mv.velocity.x;", "CombatEvidence.EdgeBounceBody"),
     ("roomexit_builds", "CombatEvidence.cs", "                    _open = false; _frozen = true; _frozenAtMs = SwMs;",
      "                    BuildCaptures(false);\n                    _open = false; _frozen = true; _frozenAtMs = SwMs;", "CombatEvidence.BuildCaptures"),
     ("dispatch_budgets", "CombatEvidence.cs", "                _nextCaptureTryMs = 0;\n            }\n            catch { _note",
      "                _nextCaptureTryMs = 0; E.Budget(null, 0);\n            }\n            catch { _note", "CombatEvidence.Dispatch"),
     ("tryblock_writes_file", "CombatEvidence.cs", "            g.B5tot[0]++;\n            if (counterMs < cd) g.B5tot[3]++;",
-     '            g.B5tot[0]++; File.AppendAllText("x", "y");\n            if (counterMs < cd) g.B5tot[3]++;', "CombatEvidence.TryBlockBody"),
-    ("contact_scan_uncapped", "CombatEvidence.cs", "i >= 0 && n < RECENT_CAP; i--, n++)", "i >= 0; i--, n++)", "CombatEvidence.FillContact"),
+     '            g.B5tot[0]++; File.AppendAllText("x", "y");\n            if (counterMs < cd) g.B5tot[3]++;', "CombatEvidence.ReserveOwnBlock"),
+    ("contact_scan_uncapped", "CombatEvidence.cs", "i >= 0 && n < OUTSIDE_SCAN_CAP; i--, n++)", "i >= 0; i--, n++)", "CombatEvidence.FillContact"),
     ("core_gaps_uncapped", "CombatEvidenceCore.cs", "for (int i = 0; i < GAP_CAP; i++) _cx[o + 8 + i]",
      "for (int i = 0; i < W.GAP_COUNT; i++) _cx[o + 8 + i]", "CombatEvidenceCore.GunAccount.CloseCycle"),
 ]
@@ -152,6 +195,15 @@ BOUND_REQUIRED = [
     "CombatEvidence.Dispatch", "CombatEvidence.RoomExit", "CombatEvidence.PointEnd", "CombatEvidence.DrainVolleys",
     "CombatEvidence.PointClose", "CombatEvidenceCore.GunAccount.AddShot", "CombatEvidenceCore.GunAccount.AddRegen",
     "CombatEvidenceCore.GunAccount.CloseCycle", "CombatEvidenceCore.FixedRows.NextSlot", "CombatEvidence.Ring.PushRow",
+    # fix pass 2: the tick (M8) and the addendum's collectors
+    "CombatEvidence.TickBody", "CombatEvidence.ReserveOwnBlock", "CombatEvidence.DrainWaits", "CombatEvidence.DrainMasks",
+    "CombatEvidence.DrainAim", "CombatEvidence.DrainResiduals", "CombatEvidence.DrainPackages", "CombatEvidence.TopInsert",
+    "CombatEvidence.HtUpsert", "CombatEvidence.LHatMs", "CombatEvidence.Sight", "CombatEvidence.Clear", "CombatEvidence.StatBlock",
+    "CombatEvidence.PointStart", "CombatEvidence.RxSample", "CombatEvidence.RxBody", "CombatEvidence.AimErr",
+    "CombatEvidence.HitExit", "CombatEvidence.VictimHit", "CombatEvidence.RecentHit", "CombatEvidence.VchgRow",
+    "CombatEvidence.FindTargetBody", "CombatEvidence.EdgeBounceBody", "CombatEvidence.EdgeBounceExit", "CombatEvidence.ForceBody",
+    "CombatEvidence.ForceExit", "CombatEvidence.Wait", "CombatEvidence.DamageBody", "CombatEvidence.DamageExit",
+    "CombatEvidence.DieBody", "CombatEvidenceCore.ResidualInto",
 ]
 
 # judging vocabulary the public client must not carry (code and strings; comments stripped)
@@ -307,6 +359,10 @@ def attachment(found, decompile):
                     if i >= len(target) or target[i][0] != t:
                         errs.append("%s is %s" % (n, t))
                 else:
+                    # a nested type is spelled qualified in the hook (HealthHandler.DamageSource) and bare in its
+                    # declaring class; the qualifier must then be the declaring class itself
+                    if "." in t and t.rsplit(".", 1)[0] == typ:
+                        t = t.rsplit(".", 1)[1]
                     named = [tt for tt, nn in target if nn == n]
                     if len(named) != 1 or named[0] != t:
                         errs.append("%s %s is not a parameter of the target" % (t, n))
@@ -336,7 +392,10 @@ def entries_section(src):
         stamps = body.count("long t0 = Stamp();")
         # only the window guard (and an out parameter's neutral value) runs before the timed, contained body
         head = body[body.index("{") + 1:body.index("long t0 = Stamp();")] if stamps == 1 else ""
-        head_ok = all(re.match(r"^\s*(?:state = 0;|if \([^;{}]*\) return(?: \w+)?;|if \([^;{}]*\)|\{|)$", ln) for ln in head.split("\n"))
+        # (A14: the tick alone first advances the measurement lever, itself contained; the lever is off in a shipped cfg)
+        frame = r"|try \{ CombatEvidencePerf\.Frame\(\); \} catch \{ \}" if name == "Tick" else ""
+        head_ok = all(re.match(r"^\s*(?:state = 0;|if \([^;{}]*\) return(?: \w+)?;|if \([^;{}]*\)|\{|" + frame + r")$", ln)
+                      for ln in head.split("\n"))
         try_ok = re.search(r"long t0 = Stamp\(\);\s*(?:\w+ \w+ = [^;]*;\s*)?try\b", body) is not None
         good = faults == [row] and costs == [row] and stamps == 1 and head_ok and try_ok and body.rindex("Cost(") > body.rindex("Fault(")
         used.add(row) if good else None
@@ -367,7 +426,9 @@ def judging_section(texts):
 def bound_section(texts):
     sys.path.insert(0, BOUND_DIR)
     import bound_check
-    for e in [("CombatEvidence", "RpcSent"), ("CombatEvidence", "Dispatch"), ("CombatEvidence", "RoomExit")]:
+    # M8: the tick's in-combat body is an entry (the build and the notes behind its out-of-combat gate are not)
+    for e in [("CombatEvidence", "RpcSent"), ("CombatEvidence", "Dispatch"), ("CombatEvidence", "RoomExit"),
+              ("CombatEvidence", "TickBody")]:
         if e not in bound_check.EXTRA_ENTRIES:
             bound_check.EXTRA_ENTRIES.append(e)
     # F5: the walker itself follows a member use at any receiver depth (a two-level receiver such as
@@ -417,6 +478,110 @@ def bound_section(texts):
             "CAUGHT" if hit else "MISSED", name, want, target, control))
     print("bound mutants: %d of %d caught" % (caught, len(BOUND_MUTANTS)))
     return ok
+
+
+# M8: no allocation on the combat path. The walk's closure from the combat hooks, RpcSent and the
+# tick's in-combat body (not Dispatch or RoomExit: they run after the game); every reached method of
+# the combat files (constructor and type-initializer nodes excepted: they run at BeginGame) is
+# scanned, comments and literals blanked, for an array or class allocation, a copy to a new
+# collection or string, a string concatenation, and a lambda. The value types the arithmetic
+# builds on the stack are allowed by name.
+ALLOC_STRUCTS = {"St", "E.St", "MovePrm", "E.MovePrm", "Vector2", "Vector3", "CombatEvidenceCore.St", "CombatEvidenceCore.MovePrm"}
+ALLOC_RES = [
+    (re.compile(r"\bnew\s+[A-Za-z_][\w.]*\s*(?:<[^;(){}]*>)?\s*\["), "array"),
+    (re.compile(r"\bnew\s*\[\s*\]"), "array"),
+    (re.compile(r"\bnew\s+(?P<t>[A-Za-z_][\w.]*)\s*(?:<[^;(){}]*>)?\s*[({]"), "object"),
+    (re.compile(r"\.(?:ToArray|ToList|ToString|Split|Substring|Concat|Join)\s*\("), "copy"),
+    (re.compile(r'"\s*\+(?![+=])|(?<![+])\+\s*"'), "string concatenation"),
+    (re.compile(r"(?:\b\w+|\([^()]*\))\s*=>"), "lambda"),
+]
+ALLOC_FILES = ("CombatEvidence.cs", "CombatEvidenceCore.cs")
+
+
+def alloc_findings(texts):
+    sys.path.insert(0, BOUND_DIR)
+    import bound_check
+    g = bound_check.Graph(texts)
+    entries = [("CombatEvidence", "RpcSent"), ("CombatEvidence", "TickBody")]
+    for f, patches in g.patches.items():
+        if f != "CombatEvidence.cs":
+            continue
+        for (c, m) in g.table:
+            if c in patches and m not in bound_check.PATCH_TIME:
+                entries.append((c, m))
+    seen, _ = g.closure(entries)
+    out = []
+    for k in sorted(seen):
+        if g.owner.get(k) not in ALLOC_FILES or k[1].startswith((".ctor:", ".cctor:")):
+            continue
+        for body in g.table[k]:
+            for rx, what in ALLOC_RES:
+                for m in rx.finditer(body):
+                    if what == "object" and m.group("t") in ALLOC_STRUCTS:
+                        continue
+                    if what == "lambda" and k in g.props:
+                        continue
+                    out.append((k[0] + "." + k[1], what, re.sub(r"\s+", " ", m.group(0))))
+    return out, seen
+
+
+ALLOC_MUTANTS = [
+    # (name, old, new, the method that must be flagged, or None: nothing may be flagged)
+    ("tick_allocates", "            DrainWaits(g, now);\n", "            var zz = new long[4];\n            DrainWaits(g, now);\n",
+     "CombatEvidence.TickBody"),
+    ("force_boxes_a_list", "            if (data == null || data.view == null || data.playerVel == null) return 0;",
+     "            if (data == null || data.view == null || data.playerVel == null) return 0;\n            var zl = new System.Collections.Generic.List<int>();",
+     "CombatEvidence.ForceBody"),
+    ("die_concatenates", "            int now = ServerNow();\n            int ord", '            int now = ServerNow(); var zs = "d" + now;\n            int ord',
+     "CombatEvidence.DieBody"),
+    ("rx_lambda", "            g.A1Tot[3]++;", "            g.A1Tot[3]++; System.Func<int> zf = () => now;", "CombatEvidence.RxBody"),
+    ("hit_tostring", "                g.ALastHit[slot] = stamp; g.AHasHit[slot] = true;",
+     "                g.ALastHit[slot] = stamp; g.AHasHit[slot] = true; var zt = stamp.ToString();", "CombatEvidence.HitBody"),
+    # negative controls: a value type built on the stack, an allocation named in a comment or a string
+    ("ctl_struct", "            DrainWaits(g, now);\n", "            var zv = new Vector2(1f, 2f);\n            DrainWaits(g, now);\n", None),
+    ("ctl_comment", "            DrainWaits(g, now);\n", '            // new long[4] and "a" + b\n            DrainWaits(g, now);\n', None),
+]
+
+
+def alloc_section(texts):
+    base, seen = alloc_findings(texts)
+    combat = [k for k in seen if k[0].startswith("CombatEvidence")]
+    print("no allocation on the combat path: %d methods reached from the hooks, RpcSent and TickBody (%d in combat classes); findings %d"
+          % (len(seen), len(combat), len(base)))
+    for f in base:
+        print("  ALLOCATES %s: %s (%s)" % f)
+    ok = not base
+    caught = 0
+    for name, old, new, want in ALLOC_MUTANTS:
+        mt = dict(texts)
+        n = mt["CombatEvidence.cs"].count(old)
+        if n != 1:
+            print("BAD alloc mutant %s: anchor occurs %d times" % (name, n))
+            ok = False
+            continue
+        mt["CombatEvidence.cs"] = mt["CombatEvidence.cs"].replace(old, new)
+        mf, _ = alloc_findings(mt)
+        if want is None:
+            hit = not mf
+        else:
+            hit = any(x[0] == want for x in mf) and all(x[0] == want for x in mf)
+        caught += hit
+        ok = ok and hit
+        print("%s alloc %s %s: flagged %s" % ("CAUGHT" if hit else "MISSED", "control" if want is None else "mutant", name,
+                                              sorted(set(x[0] for x in mf)) or "nothing"))
+    print("alloc mutants and controls: %d of %d as expected" % (caught, len(ALLOC_MUTANTS)))
+    return ok
+
+
+def census_section():
+    """L1: the static census of class-level [HarmonyPatch] classes (multi-line attributes counted)."""
+    import patch_census
+    sok = patch_census.selftest()
+    n = len(patch_census.census_dir(PLUGIN))
+    combat = sorted(c for c in patch_census.census_dir(PLUGIN) if c.startswith("plugin/CombatEvidence.cs:"))
+    print("static patch census: %d classes with a class-level [HarmonyPatch]; %d of them combat evidence hooks (want %d)"
+          % (n, len(combat), len(EXPECTED)))
+    return sok and len(combat) == len(EXPECTED)
 
 
 def main():
@@ -475,6 +640,8 @@ def main():
 
     ok = judging_section(texts) and ok
     ok = bound_section(texts) and ok
+    ok = alloc_section(texts) and ok
+    ok = census_section() and ok
 
     dll = build("base", text)
     if dll is None:

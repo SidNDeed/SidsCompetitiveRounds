@@ -77,7 +77,59 @@ namespace CompetitiveRounds
             internal readonly object[] V = new object[W.KEYS.Length];
             internal object this[string key] { get { return V[Ix(key)]; } set { V[Ix(key)] = value; } }
             internal long[] Omit { get { return (long[])V[N - 1]; } }
+            /// <summary>The amendment A1 part (null: the unamended shape, written
+            /// byte for byte as the current server layout).</summary>
+            internal A1Part A1;
         }
+
+        // -- the wire amendment A1 (ai-collab/integrity-1001/COMBAT-WIRE-AMENDMENT-A1.md) -----
+        //
+        // A record carries the A1 part only when its caps carry CAPS_A1; the
+        // part's keys follow `omit`, in A1_KEYS order. With the bit clear the
+        // record is the current layout exactly (no key, bound or byte differs).
+
+        internal const long CAPS_RX = 16, CAPS_A1 = 32, CAPS_HI_A1 = 63;
+        internal const long A1_HI = 9999999;
+        internal const long MASK_UNKNOWN = -1;
+        internal static readonly string[] A1_KEYS = { "drop", "a1_tot", "cost_a1" };
+        /// <summary>Per-buffer losses and coverage (each 0..A1_HI).</summary>
+        internal static readonly string[] DROP_FIELDS =
+        {
+            "mask", "aim", "res", "pack", "vol_s", "vol_o", "wait", "c_unpaired", "c_outside",
+            "push_expired", "force_unkeyed", "unkeyed", "ray_full", "res_mask_unknown", "res_incomparable", "mask_unscanned",
+        };
+        /// <summary>Never-trimmed totals (each 0..A1_HI).</summary>
+        internal static readonly string[] A1TOT_FIELDS = { "b5_h", "rx_on_s", "rx_on_o", "rx_samples" };
+        /// <summary>The cost rows of the collectors the addendum added (P1, D1, X1, S1, H1, E1, RX).</summary>
+        internal const int COST_A1_ROWS = 7;
+
+        internal sealed class A1Part
+        {
+            internal readonly long[] Drop = new long[DROP_FIELDS.Length];
+            internal readonly long[] Tot = new long[A1TOT_FIELDS.Length];
+            internal readonly List<long[]> Cost = new List<long[]>(COST_A1_ROWS);
+        }
+
+        internal static int DropIx(string name) { return Array.IndexOf(DROP_FIELDS, name); }
+
+        private static bool A1On(Rec r)
+        {
+            object c = r.V[Ix("caps")];
+            return c is long && ((long)c & CAPS_A1) != 0;
+        }
+
+        /// <summary>The layout's bounds for key i, with the two the amendment
+        /// widens when the record carries it (caps up to 63, a p3top mask may be
+        /// MASK_UNKNOWN).</summary>
+        private static long[] LoOf(int i, bool a1)
+        {
+            if (!a1 || W.KEYS[i] != "p3top") return W.LO[i];
+            var lo = (long[])W.LO[i].Clone();
+            lo[Array.IndexOf(W.FIELDS[i], "mask")] = MASK_UNKNOWN;
+            return lo;
+        }
+
+        private static long HiInt(int i, bool a1) { return a1 && W.KEYS[i] == "caps" ? CAPS_HI_A1 : W.HI[i][0]; }
 
         private static long[] Zeros(int n) { return new long[n]; }
 
@@ -180,6 +232,12 @@ namespace CompetitiveRounds
                         break;
                 }
             }
+            if (r.A1 != null)
+            {
+                sb.Append(','); C.WriteString(sb, A1_KEYS[0]); sb.Append(':'); Arr(sb, r.A1.Drop);
+                sb.Append(','); C.WriteString(sb, A1_KEYS[1]); sb.Append(':'); Arr(sb, r.A1.Tot);
+                sb.Append(','); C.WriteString(sb, A1_KEYS[2]); sb.Append(':'); Rows(sb, r.A1.Cost);
+            }
             sb.Append('}');
         }
 
@@ -213,13 +271,14 @@ namespace CompetitiveRounds
         /// <summary>The first layout key whose value is outside the layout, or null.</summary>
         internal static string Check(Rec r)
         {
+            bool a1 = A1On(r);
             for (int i = 0; i < N; i++)
             {
                 object v = r.V[i];
                 bool ok;
                 switch (W.KIND[i])
                 {
-                    case W.K_INT: ok = v is long && (long)v >= W.LO[i][0] && (long)v <= W.HI[i][0]; break;
+                    case W.K_INT: ok = v is long && (long)v >= W.LO[i][0] && (long)v <= HiInt(i, a1); break;
                     case W.K_ENUM: ok = v is string && Array.IndexOf(W.ENUMS[i], (string)v) >= 0; break;
                     case W.K_ROW: ok = RowOk(v as long[], W.LO[i], W.HI[i]); break;
                     case W.K_ROWS:
@@ -234,8 +293,9 @@ namespace CompetitiveRounds
                         break;
                     case W.K_LIST:
                         var l = v as List<long[]>;
+                        var llo = LoOf(i, a1);
                         ok = l != null && l.Count <= W.CAP[i];
-                        for (int k = 0; ok && k < l.Count; k++) ok = RowOk(l[k], W.LO[i], W.HI[i]);
+                        for (int k = 0; ok && k < l.Count; k++) ok = RowOk(l[k], llo, W.HI[i]);
                         break;
                     case W.K_GROUPS:
                         var gs = v as List<Group>;
@@ -250,6 +310,15 @@ namespace CompetitiveRounds
                 }
                 if (!ok) return W.KEYS[i];
             }
+            if (a1 != (r.A1 != null)) return A1_KEYS[0];
+            if (r.A1 != null)
+            {
+                for (int k = 0; k < r.A1.Drop.Length; k++) if (r.A1.Drop[k] < 0 || r.A1.Drop[k] > A1_HI) return A1_KEYS[0];
+                for (int k = 0; k < r.A1.Tot.Length; k++) if (r.A1.Tot[k] < 0 || r.A1.Tot[k] > A1_HI) return A1_KEYS[1];
+                int ci = Ix("cost");
+                if (r.A1.Cost.Count != COST_A1_ROWS) return A1_KEYS[2];
+                for (int k = 0; k < r.A1.Cost.Count; k++) if (!RowOk(r.A1.Cost[k], W.LO[ci], W.HI[ci])) return A1_KEYS[2];
+            }
             return null;
         }
 
@@ -258,16 +327,18 @@ namespace CompetitiveRounds
         /// check, so a bound written differently at a collector never costs the record.</summary>
         internal static void ClampToLayout(Rec r)
         {
+            bool a1 = A1On(r);
             for (int i = 0; i < N; i++)
             {
                 object v = r.V[i];
                 switch (W.KIND[i])
                 {
-                    case W.K_INT: r.V[i] = Clamp((long)v, W.LO[i][0], W.HI[i][0]); break;
+                    case W.K_INT: r.V[i] = Clamp((long)v, W.LO[i][0], HiInt(i, a1)); break;
                     case W.K_ROW: ClampRow((long[])v, W.LO[i], W.HI[i]); break;
                     case W.K_ROWS:
                     case W.K_LIST:
-                        foreach (var row in (List<long[]>)v) ClampRow(row, W.LO[i], W.HI[i]);
+                        var clo = LoOf(i, a1);
+                        foreach (var row in (List<long[]>)v) ClampRow(row, clo, W.HI[i]);
                         break;
                     case W.K_HIST:
                     case W.K_OMIT:
@@ -283,6 +354,13 @@ namespace CompetitiveRounds
                         }
                         break;
                 }
+            }
+            if (r.A1 != null)
+            {
+                for (int k = 0; k < r.A1.Drop.Length; k++) r.A1.Drop[k] = Clamp(r.A1.Drop[k], 0, A1_HI);
+                for (int k = 0; k < r.A1.Tot.Length; k++) r.A1.Tot[k] = Clamp(r.A1.Tot[k], 0, A1_HI);
+                int ci = Ix("cost");
+                foreach (var row in r.A1.Cost) ClampRow(row, W.LO[ci], W.HI[ci]);
             }
         }
 
@@ -419,6 +497,7 @@ namespace CompetitiveRounds
                     default: o.V[i] = v; break;
                 }
             }
+            o.A1 = rec.A1;
             return o;
         }
 
@@ -602,7 +681,7 @@ namespace CompetitiveRounds
         /// (the last one partial), at most MAX_STEPS steps.</summary>
         internal static St IntegrateSpan(St s, double span, double step, MovePrm p)
         {
-            for (int n = 0; n < MAX_STEPS && span > 1e-9; n++)
+            for (int n = 0; n < STEP_CAP && span > 1e-9; n++)
             {
                 double d = Math.Min(step, span);
                 s = Step(s, d, p);
@@ -612,6 +691,8 @@ namespace CompetitiveRounds
         }
 
         internal const int MAX_STEPS = 600;
+        /// <summary>The bound walk's name for MAX_STEPS (a loop reachable from the tick names a *_CAP).</summary>
+        internal const int STEP_CAP = MAX_STEPS;
 
         internal static St Turn(St s, double angle)
         {
@@ -631,11 +712,91 @@ namespace CompetitiveRounds
 
         internal static long RoundEven(double x) { return (long)Math.Round(x, MidpointRounding.ToEven); }
 
-        internal static double Hypot(double a, double b) { return Math.Sqrt(a * a + b * b); }
+        /// <summary>The reference's math.hypot for two finite coordinates: CPython's
+        /// vector_norm (Modules/mathmodule.c, 3.10 and later) ported operation for
+        /// operation: scale by a power of two so the larger magnitude lies in
+        /// [0.5, 1), sum the exact squares as a double-length value, take the root
+        /// and apply one differential correction. The products are exact (Dekker's
+        /// split stands in for fma; both give the exact low part), so every input
+        /// yields the reference's double bit for bit. Non-finite inputs follow the
+        /// reference too (an infinity wins, then NaN).</summary>
+        internal static double Hypot(double a, double b)
+        {
+            double ax = Math.Abs(a), bx = Math.Abs(b);
+            if (double.IsInfinity(ax) || double.IsInfinity(bx)) return double.PositiveInfinity;
+            if (double.IsNaN(ax) || double.IsNaN(bx)) return double.NaN;
+            double max = ax > bx ? ax : bx;
+            if (max == 0.0) return max;
+            int e = Frexp(max);
+            if (e < -1023)
+            {
+                const double DBL_MIN = 2.2250738585072014e-308;
+                return DBL_MIN * Hypot(ax / DBL_MIN, bx / DBL_MIN);
+            }
+            double scale = Ldexp1(-e);
+            double csum = 1.0, frac1 = 0.0, frac2 = 0.0, hi, lo, sh, sl;
+            double x = ax * scale;
+            TwoProd(x, x, out hi, out lo); FastSum(csum, hi, out sh, out sl); csum = sh; frac1 += lo; frac2 += sl;
+            x = bx * scale;
+            TwoProd(x, x, out hi, out lo); FastSum(csum, hi, out sh, out sl); csum = sh; frac1 += lo; frac2 += sl;
+            double h = Math.Sqrt(csum - 1.0 + (frac1 + frac2));
+            TwoProd(-h, h, out hi, out lo); FastSum(csum, hi, out sh, out sl); csum = sh; frac1 += lo; frac2 += sl;
+            x = csum - 1.0 + (frac1 + frac2);
+            h += x / (2.0 * h);
+            return h / scale;
+        }
+
+        /// <summary>frexp's exponent: max = m x 2^e with m in [0.5, 1) (max positive, finite).</summary>
+        private static int Frexp(double v)
+        {
+            long bits = BitConverter.DoubleToInt64Bits(v);
+            int ex = (int)((bits >> 52) & 0x7FF);
+            if (ex == 0)
+            {
+                // subnormal: normalize by 2^54 first
+                bits = BitConverter.DoubleToInt64Bits(v * 18014398509481984.0);
+                ex = (int)((bits >> 52) & 0x7FF) - 54;
+            }
+            return ex - 1022;
+        }
+
+        /// <summary>ldexp(1.0, k) for the exponents vector_norm uses (exact power of two).</summary>
+        private static double Ldexp1(int k)
+        {
+            if (k > 1023) return Ldexp1(1023) * Ldexp1(k - 1023);
+            if (k < -1022) return Ldexp1(-1022) * Ldexp1(k + 1022);
+            return BitConverter.Int64BitsToDouble((long)(k + 1023) << 52);
+        }
+
+        /// <summary>The exact product as hi + lo (Dekker / Veltkamp split).</summary>
+        private static void TwoProd(double a, double b, out double hi, out double lo)
+        {
+            hi = a * b;
+            const double SPLIT = 134217729.0;   // 2^27 + 1
+            double ca = SPLIT * a, ah = ca - (ca - a), al = a - ah;
+            double cb = SPLIT * b, bh = cb - (cb - b), bl = b - bh;
+            lo = al * bl - (((hi - ah * bh) - al * bh) - ah * bl);
+        }
+
+        /// <summary>Fast two-sum for |a| >= |b|: a + b as hi + lo exactly.</summary>
+        private static void FastSum(double a, double b, out double hi, out double lo)
+        {
+            hi = a + b;
+            double z = hi - a;
+            lo = b - z;
+        }
 
         /// <summary>[d_perp, d_along, ang]: the observed state against the predicted
         /// unsteered one (centi-units, centi-units, mrad; half to even).</summary>
         internal static long[] Residual(St pred, St actual)
+        {
+            var o = new long[3];
+            ResidualInto(pred, actual, o);
+            return o;
+        }
+
+        /// <summary>Residual into a caller's preallocated three-element row (the tick's path: no allocation).</summary>
+        internal static void ResidualInto(St pred, St actual, long[] o)
         {
             double dx = (double)actual.X - pred.X, dy = (double)actual.Y - pred.Y;
             double speed = Hypot(pred.VX, pred.VY);
@@ -650,7 +811,7 @@ namespace CompetitiveRounds
             double cross = (double)pred.VX * actual.VY - (double)pred.VY * actual.VX;
             double dot = (double)pred.VX * actual.VX + (double)pred.VY * actual.VY;
             double ang = Math.Abs(Math.Atan2(cross, dot));
-            return new long[] { RoundEven(perp * W.CENTI), RoundEven(along * W.CENTI), RoundEven(ang * 1000) };
+            o[0] = RoundEven(perp * W.CENTI); o[1] = RoundEven(along * W.CENTI); o[2] = RoundEven(ang * 1000);
         }
 
         /// <summary>The engine's unsigned vector angle in degrees (zero for a zero vector).</summary>
@@ -791,10 +952,13 @@ namespace CompetitiveRounds
         /// <summary>The fixed step a residual prediction integrates over, s.</summary>
         internal const double PRED_STEP_S = 1.0 / 60.0;
 
+        /// <summary>The longest edge list (AIM_EDGES); every loop over edges names it.</summary>
+        internal const int EDGE_CAP = 16;
+
         internal static int Bin(long[] edges, long v)
         {
             int b = 0;
-            for (int i = 1; i < edges.Length; i++) if (v >= edges[i]) b = i;
+            for (int i = 1; i < EDGE_CAP && i < edges.Length; i++) if (v >= edges[i]) b = i;
             return b;
         }
 
@@ -1140,6 +1304,22 @@ namespace CompetitiveRounds
             internal double Real, Game, Slow, Ramp, Clamp;
             internal bool Ramping = true;
             internal readonly FrameHist Hist = new FrameHist();
+            /// <summary>A point start on this preallocated clock (the tick's path: no allocation).</summary>
+            internal void Reset(long pt, long psRaw, long srvStart, long baseScale)
+            {
+                Pt = pt; PsRaw = psRaw; SrvStart = srvStart; SrvEnd = 0; Frames = 0; Base = baseScale;
+                Real = 0; Game = 0; Slow = 0; Ramp = 0; Clamp = 0; Ramping = true;
+                Hist.Clear();
+            }
+            /// <summary>PointRow into a caller's preallocated twelve-element row.</summary>
+            internal void PointRowInto(long t0, long[] o)
+            {
+                o[0] = CombatEvidenceCore.Clamp(Pt, 0, 99); o[1] = Wrap(PsRaw - t0); o[2] = Ms(Real, 3600000); o[3] = Ms(Game, 3600000);
+                o[4] = CombatEvidenceCore.Clamp(Wrap(SrvEnd - SrvStart), -3600000, 3600000); o[5] = CombatEvidenceCore.Clamp(Frames, 0, 1000000);
+                o[6] = Ms(Slow, 3600000); o[7] = Ms(Ramp, 3600000); o[8] = Ms(Clamp, 3600000);
+                o[9] = CombatEvidenceCore.Clamp(Hist.Median(), 0, 9999999); o[10] = CombatEvidenceCore.Clamp(Hist.Max, 0, 99999999);
+                o[11] = CombatEvidenceCore.Clamp(Base, 0, 10000);
+            }
             internal void Frame(double unscaled, double gameDelta, double engineDelta, double scale, double baseScale)
             {
                 Frames++;

@@ -31,14 +31,23 @@ namespace CompetitiveRounds
             { "CombatEvidence_InitNoAmmoPatch", Tuple.Create(typeof(ProjectileInit), "RPCA_Init_noAmmoUse", "Prefix:InitEnter:__instance,senderID,#1") },
             { "CombatEvidence_InitSeparatePatch", Tuple.Create(typeof(ProjectileInit), "RPCA_Init_SeparateGun", "Prefix:InitEnter:__instance,senderID,#2") },
             { "CombatEvidence_ReloadPatch", Tuple.Create(typeof(GunAmmo), "ReloadAmmo", "Prefix:ReloadEnter:__instance,playSound") },
-            { "CombatEvidence_HitPatch", Tuple.Create(typeof(ProjectileHit), "RPCA_DoHit", "Prefix:HitEnter:__instance,hitPoint,vel,viewID,wasBlocked") },
+            { "CombatEvidence_HitPatch", Tuple.Create(typeof(ProjectileHit), "RPCA_DoHit",
+                "Prefix:HitEnter:__instance,hitPoint,vel,viewID,wasBlocked|Finalizer:HitExit:__instance,__state") },
             { "CombatEvidence_ContactPatch", Tuple.Create(typeof(ProjectileHit), "Hit", "Prefix:ContactEnter:__instance,hit") },
             { "CombatEvidence_BlockPatch", Tuple.Create(typeof(Block), "RPCA_DoBlock", "Finalizer:BlockDone:__instance") },
             { "CombatEvidence_TryBlockPatch", Tuple.Create(typeof(Block), "TryBlock", "Prefix:TryBlockEnter:__instance|Postfix:TryBlockExit:__instance,__state") },
             { "CombatEvidence_DealtPatch", Tuple.Create(typeof(CharacterStatModifiers), "DealtDamage", "Postfix:Dealt:__instance") },
             { "CombatEvidence_TargetBouncePatch", Tuple.Create(typeof(BounceEffectRetarget), "SetNewVel", "Prefix:TargetBounce:__instance,newVel") },
-            { "CombatEvidence_EdgeBouncePatch", Tuple.Create(typeof(ScreenEdgeBounce), "DoHit", "Prefix:EdgeBounce:__instance") },
+            { "CombatEvidence_EdgeBouncePatch", Tuple.Create(typeof(ScreenEdgeBounce), "DoHit",
+                "Prefix:EdgeBounce:__instance|Finalizer:EdgeBounceExit:__instance,__state") },
             { "CombatEvidence_SyncPatch", Tuple.Create(typeof(Photon.Pun.SyncProjectile), "OnPhotonSerializeView", "Postfix:SyncRead:__instance,stream") },
+            { "CombatEvidence_ForcePatch", Tuple.Create(typeof(HealthHandler), "RPCA_SendTakeForce",
+                "Prefix:ForceEnter:__instance,force|Finalizer:ForceExit:__instance,__state") },
+            { "CombatEvidence_DamagePatch", Tuple.Create(typeof(HealthHandler), "RPCA_SendTakeDamage",
+                "Prefix:DamageEnter:__instance,damage,?1:damageSource|Finalizer:DamageExit:__instance,__state") },
+            { "CombatEvidence_DiePatch", Tuple.Create(typeof(HealthHandler), "RPCA_Die", "Prefix:Die:__instance") },
+            { "CombatEvidence_DiePhoenixPatch", Tuple.Create(typeof(HealthHandler), "RPCA_Die_Phoenix", "Prefix:Die:__instance") },
+            { "CombatEvidence_FindTargetPatch", Tuple.Create(typeof(BounceEffectRetarget), "FindTarget", "Postfix:FindTarget:__instance,hit,__result") },
         };
 
         private static object Arg(ParameterInfo p, int pos, bool flag)
@@ -50,6 +59,7 @@ namespace CompetitiveRounds
             if (t == typeof(float)) return 0.5f + pos + (flag ? 0 : 7);
             if (t == typeof(UnityEngine.Vector2)) return new UnityEngine.Vector2(pos + 0.25f, flag ? 1.5f : -2.5f);
             if (t == typeof(Exception)) return null;
+            if (t.IsEnum) return Enum.ToObject(t, (pos + (flag ? 0 : 1)) % 2);
             if (!t.IsAbstract && t.GetConstructor(Type.EmptyTypes) != null) return Activator.CreateInstance(t);
             return null;
         }
@@ -99,6 +109,14 @@ namespace CompetitiveRounds
                     {
                         object want;
                         if (fwd[k].StartsWith("#")) want = int.Parse(fwd[k].Substring(1));
+                        else if (fwd[k].StartsWith("?"))
+                        {
+                            // "?n:param": the hook forwards (param == n) as a bool
+                            var sp = fwd[k].Substring(1).Split(new[] { ':' }, 2);
+                            int i = Array.FindIndex(ps, p => p.Name == sp[1]);
+                            if (i < 0) throw new Exception(kind + " has no parameter " + sp[1]);
+                            want = Convert.ToInt32(a[i]) == int.Parse(sp[0]);
+                        }
                         else
                         {
                             int i = Array.FindIndex(ps, p => p.Name == fwd[k]);

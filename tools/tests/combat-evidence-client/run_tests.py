@@ -10,6 +10,9 @@ combat_evidence, read by path, never written), which is the oracle:
   * proof, sign, integrator, steering: the byte proof, the signing canonical
     and HMAC, the single-precision flight bit for bit and its residuals, the
     homing and target bounce references;
+  * hypot (L2): seeded differential vectors written by THIS interpreter's
+    math.hypot (its version is logged); the client's Hypot must match every
+    one bit for bit;
   * units: crafted budget ties, protected reason bits, the shot cap, the key
     loop bound (cases the fixtures do not reach);
   * accountant: every fixture group replayed through the client's cycle
@@ -63,7 +66,45 @@ MUTANTS = [
     ("regen_k_late", "_regs[o] = Clamp(_n, 0, 99999);", "_regs[o] = Clamp(_n + 1, 0, 99999);", "accountant", "sign"),
     ("cx_cap_overrun", "if (_nCx < _cxCap)", "if (_nCx <= _cxCap)", "accountant", "integrator"),
     ("shot_cap_overrun", "if (_listed && _nShots[_gi] < _shotCap)", "if (_listed && _nShots[_gi] <= _shotCap)", "units", "proof"),
+    # L2: the root of the summed squares (the round-1 Hypot) is not the reference's hypot
+    ("hypot_naive_root", "            double ax = Math.Abs(a), bx = Math.Abs(b);\n            if (double.IsInfinity(ax)",
+     "            if (a == a) return Math.Sqrt(a * a + b * b);\n            double ax = Math.Abs(a), bx = Math.Abs(b);\n            if (double.IsInfinity(ax)",
+     "hypot", "sign"),
+    ("hypot_no_correction", "            h += x / (2.0 * h);\n", "", "hypot", "sign"),
 ]
+
+HYPOT_SEED = 20261005
+HYPOT_RANDOM = 40000
+
+
+def hypot_vectors(path):
+    """L2: math.hypot of this interpreter on crafted and seeded random pairs, as double bits."""
+    import math
+    import random
+    import struct
+
+    def bits(x):
+        return "%016x" % struct.unpack("<Q", struct.pack("<d", x))[0]
+
+    def f32(x):
+        return struct.unpack("<f", struct.pack("<f", x))[0]
+
+    inf, nan = float("inf"), float("nan")
+    pairs = [(0.0, 0.0), (-0.0, 0.0), (3.0, 4.0), (-3.0, 4.0), (1e-310, 1e-310), (5e-324, 0.0), (1e308, 1e308),
+             (1.7976931348623157e308, 1.0), (inf, nan), (nan, inf), (nan, 1.0), (1.0, -inf), (2.2250738585072014e-308, 1e-320),
+             (1.0, 1e-17), (0.1, 0.2), (1e154, 1e154), (1e-154, 1e-154)]
+    rnd = random.Random(HYPOT_SEED)
+    for i in range(HYPOT_RANDOM):
+        e1, e2 = rnd.randint(-40, 40), rnd.randint(-40, 40)
+        a = rnd.uniform(-1, 1) * 2.0 ** e1
+        b = rnd.uniform(-1, 1) * (2.0 ** e2 if i % 3 else 2.0 ** e1)
+        if i % 2:
+            a, b = f32(a), f32(b)       # the velocities the tick reads are single precision
+        pairs.append((a, b))
+    with open(path, "w") as fh:
+        for a, b in pairs:
+            fh.write("%s %s %s\n" % (bits(a), bits(b), bits(math.hypot(a, b))))
+    return len(pairs)
 
 
 def sha(path):
@@ -98,6 +139,12 @@ def main():
     print("commit", head, "| server", root, server_head)
     before = sha(CORE)
     ok = True
+    vectors = os.path.join(WORK, "hypot_vectors.txt")
+    print("hypot reference: Python %s (%s), %d vectors, seed %d" % (sys.version.split()[0], sys.executable,
+                                                                    hypot_vectors(vectors), HYPOT_SEED))
+
+    def margs(mode):
+        return [mode, vectors] if mode == "hypot" else [mode, fixtures]
 
     g = subprocess.run([sys.executable, os.path.join(HERE, "gen_wire.py"), "--server-root", root, "--check"], capture_output=True, text=True)
     print(g.stdout.strip(), g.stderr.strip())
@@ -107,8 +154,8 @@ def main():
     if dll is None:
         print("BUILD FAILED (base)")
         return 1
-    for mode in MODES:
-        rc, out = run(dll, mode, fixtures)
+    for mode in MODES + ["hypot"]:
+        rc, out = run(dll, *margs(mode))
         print(out)
         ok = ok and rc == 0
 
@@ -127,8 +174,8 @@ def main():
             print("BAD mutant %s: does not build" % name)
             ok = False
             continue
-        trc, tout = run(mdll, target, fixtures)
-        crc, _ = run(mdll, control, fixtures)
+        trc, tout = run(mdll, *margs(target))
+        crc, _ = run(mdll, *margs(control))
         hit = trc != 0 and crc == 0
         caught += hit
         ok = ok and hit

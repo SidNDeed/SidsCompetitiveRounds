@@ -1,4 +1,4 @@
-// Stubs for the combat evidence hook harness. The thirteen patch classes under
+// Stubs for the combat evidence hook harness. The eighteen patch classes under
 // test are copied VERBATIM from plugin/CombatEvidence.cs by run_hooks.py;
 // everything they call into is defined here. Every collector THROWS after
 // recording the arguments it was given, so a hook passes only when it contains
@@ -54,6 +54,11 @@ public class Block { }
 public class CharacterStatModifiers { }
 public class BounceEffectRetarget { }
 public class ScreenEdgeBounce { }
+public class Player { }
+public class HealthHandler
+{
+    public enum DamageSource { Player, OutOfBounds }
+}
 
 namespace CompetitiveRounds
 {
@@ -79,14 +84,22 @@ namespace CompetitiveRounds
         internal static int InitEnter(ProjectileInit i, int senderID, int kind) { throw Planted.Fault("InitEnter", i, senderID, kind); }
         internal static void InitExit(ProjectileInit i, int state) { throw Planted.Fault("InitExit", i, state); }
         internal static void ReloadEnter(GunAmmo a, bool playSound) { throw Planted.Fault("ReloadEnter", a, playSound); }
-        internal static void HitEnter(ProjectileHit p, UnityEngine.Vector2 point, UnityEngine.Vector2 vel, int viewID, bool wasBlocked) { throw Planted.Fault("HitEnter", p, point, vel, viewID, wasBlocked); }
+        internal static void HitEnter(ProjectileHit p, UnityEngine.Vector2 point, UnityEngine.Vector2 vel, int viewID, bool wasBlocked, out long state) { throw Planted.Fault("HitEnter", p, point, vel, viewID, wasBlocked); }
+        internal static void HitExit(ProjectileHit p, long state) { throw Planted.Fault("HitExit", p, state); }
         internal static void ContactEnter(ProjectileHit p, HitInfo hit) { throw Planted.Fault("ContactEnter", p, hit); }
         internal static void BlockDone(Block b) { throw Planted.Fault("BlockDone", b); }
         internal static void TryBlockEnter(Block b, out long state) { throw Planted.Fault("TryBlockEnter", b); }
         internal static void TryBlockExit(Block b, long state) { throw Planted.Fault("TryBlockExit", b, state); }
         internal static void Dealt(CharacterStatModifiers s) { throw Planted.Fault("Dealt", s); }
         internal static void TargetBounce(BounceEffectRetarget r, UnityEngine.Vector2 newVel) { throw Planted.Fault("TargetBounce", r, newVel); }
-        internal static void EdgeBounce(ScreenEdgeBounce b) { throw Planted.Fault("EdgeBounce", b); }
+        internal static void FindTarget(BounceEffectRetarget r, HitInfo hit, Player result) { throw Planted.Fault("FindTarget", r, hit, result); }
+        internal static void EdgeBounce(ScreenEdgeBounce b, out long state) { throw Planted.Fault("EdgeBounce", b); }
+        internal static void EdgeBounceExit(ScreenEdgeBounce b, long state) { throw Planted.Fault("EdgeBounceExit", b, state); }
         internal static void SyncRead(Photon.Pun.SyncProjectile sp, Photon.Pun.PhotonStream stream) { throw Planted.Fault("SyncRead", sp, stream); }
+        internal static void ForceEnter(HealthHandler h, UnityEngine.Vector2 force, out long state) { throw Planted.Fault("ForceEnter", h, force); }
+        internal static void ForceExit(HealthHandler h, long state) { throw Planted.Fault("ForceExit", h, state); }
+        internal static void DamageEnter(HealthHandler h, UnityEngine.Vector2 damage, bool outOfBounds, out long state) { throw Planted.Fault("DamageEnter", h, damage, outOfBounds); }
+        internal static void DamageExit(HealthHandler h, long state) { throw Planted.Fault("DamageExit", h, state); }
+        internal static void Die(HealthHandler h) { throw Planted.Fault("Die", h); }
     }
 }

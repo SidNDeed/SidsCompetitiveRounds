@@ -586,6 +586,32 @@ namespace CombatEvidenceTests
             if (outPath != null) File.WriteAllBytes(outPath, Encoding.ASCII.GetBytes(sb.ToString()));
         }
 
+        /// <summary>L2: differential vectors. Each line is "a b want" as the
+        /// sixteen-hex-digit bits of three doubles, want being the reference
+        /// interpreter's math.hypot(a, b) (run_tests.py writes the file and logs
+        /// the interpreter's version). Every vector must match bit for bit (NaN
+        /// matches NaN).</summary>
+        private static void HypotVectors(string path)
+        {
+            int n = 0, bad = 0;
+            foreach (var line in File.ReadAllLines(path))
+            {
+                var f = line.Split(' ');
+                if (f.Length != 3) continue;
+                double a = BitConverter.Int64BitsToDouble(Convert.ToInt64(f[0], 16));
+                double b = BitConverter.Int64BitsToDouble(Convert.ToInt64(f[1], 16));
+                double want = BitConverter.Int64BitsToDouble(Convert.ToInt64(f[2], 16));
+                double got = E.Hypot(a, b);
+                bool same = double.IsNaN(want) ? double.IsNaN(got)
+                    : BitConverter.DoubleToInt64Bits(got) == BitConverter.DoubleToInt64Bits(want);
+                n++;
+                if (!same && bad++ < 5)
+                    Console.WriteLine("  hypot(" + a.ToString("R", CultureInfo.InvariantCulture) + ", " + b.ToString("R", CultureInfo.InvariantCulture)
+                                      + ") = " + got.ToString("R", CultureInfo.InvariantCulture) + ", reference " + want.ToString("R", CultureInfo.InvariantCulture));
+            }
+            Ok(n > 0 && bad == 0, "hypot: " + (n - bad) + " of " + n + " differential vectors bit for bit");
+        }
+
         private static int Main(string[] args)
         {
             if (args.Length < 2) { Console.WriteLine("usage: CombatEvidenceTests MODE DIR|OUT [N]"); return 2; }
@@ -601,6 +627,7 @@ namespace CombatEvidenceTests
                     case "steering": Steering(dir); break;
                     case "accountant": Accountant(dir); break;
                     case "units": Units(args.Length > 2 ? args[2] : null); break;
+                    case "hypot": HypotVectors(dir); break;
                     case "replay": ReplayOut(dir, args.Length > 2 ? int.Parse(args[2], CultureInfo.InvariantCulture) : 60); break;
                     case "all": Fixtures(dir); Proof(dir); Sign(dir); Integrator(dir); Steering(dir); Accountant(dir); Units(null); break;
                     default: Console.WriteLine("unknown mode " + mode); return 2;

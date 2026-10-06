@@ -1371,6 +1371,9 @@ namespace CompetitiveRounds
                 Log.LogInfo($"[HARMONY] Patches applied: {applied} ok, {failed} failed");
                 // Card draw evidence (B4): one line naming its six patches as attached.
                 try { CardDrawEvidence.BootLine(); } catch { }
+                // Combat evidence (B1-B5 and the addendum): one line naming every
+                // combat patch as attached, and the producers the census proves.
+                try { CombatEvidence.BootLine(); } catch { }
             }
             catch (Exception ex)
             {
