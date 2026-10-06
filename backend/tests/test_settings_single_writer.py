@@ -84,6 +84,9 @@ OWNER = {
     "ChatOverlaySeconds": ("Plugin.cs", "class Plugin : BaseUnityPlugin", "public static void SetChatOverlaySeconds(float s)"),
     "BloomStrength": ("Plugin.cs", "class BloomStrengthSetting", "internal static void Set(string level)"),
     "ScreenShakeStrength": ("PerfPatches.cs", "class ScreenshakerDisablePatch", "internal static void Set(string level)"),
+    "AvatarAutoSwitch": ("AvatarDefaults.cs", "class AvatarDefaults", "internal static void SetAuto(bool on)"),
+    "AvatarModdedPreset": ("AvatarDefaults.cs", "class AvatarDefaults", "internal static void SetModded(int slot)"),
+    "AvatarVanillaPreset": ("AvatarDefaults.cs", "class AvatarDefaults", "internal static void SetVanilla(int slot)"),
 }
 
 # The only other places a setting's entry may be written, each with its reason.
