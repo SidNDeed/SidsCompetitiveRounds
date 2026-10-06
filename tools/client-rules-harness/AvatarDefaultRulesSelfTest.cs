@@ -311,8 +311,9 @@ namespace CompetitiveRounds
         private static bool T15(AvatarRules r, out string got)
         {
             int moved = 0, n = 0; var faces = Faces(); var l = Loader();
-            foreach (var room in new[] { Room(true, Modded()), Room(false, Unmodded()), Room(false, Modded(), Modded()) })
+            foreach (var roster in new[] { Room(true, Modded()), Room(false, Unmodded()), Room(false, Modded(), Modded()) })
             {
+                var room = roster;   // AvatarFacingIn is a struct: a foreach variable is read-only
                 room.OfflineMode = true;
                 foreach (int m in Slots) foreach (int v in Slots)
                     {

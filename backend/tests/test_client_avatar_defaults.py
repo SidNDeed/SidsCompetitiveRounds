@@ -634,12 +634,13 @@ def _class_fields(text):
                 if ch == ";":
                     st = " ".join("".join(buf).split())
                     buf = []
-                    if "=>" in st:
-                        continue
+                    # an expression-bodied member or a method declaration is not
+                    # a field; no `continue` here, which would skip the `i += 1`
+                    # below and re-read this ';' as a statement of its own
                     p, e = st.find("("), st.find("=")
-                    if p != -1 and (e == -1 or p < e):
-                        continue
-                    stmts.append(st)
+                    is_member = "=>" in st or (p != -1 and (e == -1 or p < e))
+                    if not is_member:
+                        stmts.append(st)
             i += 1
         out.setdefault(name, []).extend(stmts)
     return out
