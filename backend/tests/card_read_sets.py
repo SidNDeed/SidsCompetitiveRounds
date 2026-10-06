@@ -59,6 +59,14 @@ instead of reading as nothing:
     mutation of a measure row by anything but another measure row) as when
     it is READ; a dict reaches the gate, a measure-row name or window_row's
     return only if it is a measure row the analysis built.
+  - compositions and in-place changes (fix pass 4, the rules above ARITH): a
+    union (|, |=) only of measure rows built here, a literal unpacking a
+    measure row only with keys that resolve; an augmented assignment only
+    with an arithmetic operator on an immutable target or with a number; a
+    change through a name (a mutating method, a computed-key store) only
+    where the name holds an object made here that nothing else holds yet --
+    a parameter (a callee's side effect), an alias, a loop target, a call's
+    result, or an object already handed on is refused.
 Every merge is a union, so imprecision only ever adds facts.
 
 Why it is complete (the proof refuses rather than under-reads):
@@ -221,6 +229,95 @@ def _exits(st):
 STMTS = (ast.Assign, ast.AugAssign, ast.Expr, ast.Return, ast.If, ast.For, ast.Continue, ast.Pass,
          ast.Raise)
 
+# -- in-place effects (fix pass 4) ----------------------------------------------
+#
+# A label is recorded on the definition of the NAME a mutation goes through.
+# That is exact only while no other name, container or callee holds the same
+# object, so an in-place change is accepted only where that holds:
+#   - the receiver's every reaching definition makes a NEW object (FRESH: a
+#     literal, a comprehension, a copying builtin, a copy, a concatenation
+#     with a literal); a parameter (a callee's side effect on its caller's
+#     object), an alias, a loop target, a call's result or a stored element is
+#     refused;
+#   - no use that hands the object on (_flows: an assignment's value, an
+#     element of a container, an argument a callee or a store may keep, a
+#     retained iterator or view) can run before the change on the same object:
+#     earlier in the function, or later in a loop whose next turn changes it
+#     again (the object made outside that loop);
+#   - an augmented assignment changes a value in place only when the value is
+#     mutable, so one is accepted only on an IMMUTABLE target: a name whose
+#     every definition is a constant or a numeric builtin, an element of a list
+#     of constants, or a field every write of which is one of those; and only
+#     with an arithmetic operator. A union (|, |=) is accepted only between
+#     measure rows built here (Analysis._union).
+# Measure keys and dict fields are recorded per key over the whole module, not
+# per name, so a store under a resolved measure key or a constant field key
+# is attributed whichever name, alias or parameter it goes through.
+ARITH = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod, ast.Pow, ast.BitOr, ast.BitAnd,
+         ast.BitXor, ast.LShift, ast.RShift)
+NUMERIC_CALLS = {"len", "sum", "int", "float", "abs", "round"}
+COPY_CALLS = {"sorted", "list", "set", "tuple", "frozenset", "dict"}
+RETAIN_CALLS = {"reversed", "iter"} | PAIR_BUILTINS
+STORE_METHODS = {"append", "add", "insert", "setdefault"}
+VIEW_METHODS = {"items", "values", "keys"}
+
+
+def _flows(node, kept, out):
+    """The names whose object `node` hands on, into out. kept: the value of
+    `node` itself is held by its context."""
+    if node is None:
+        return
+    if isinstance(node, ast.Name):
+        if kept and isinstance(node.ctx, ast.Load):
+            out.add(node.id)
+        return
+    if isinstance(node, ast.IfExp):
+        _flows(node.test, False, out)
+        _flows(node.body, kept, out)
+        _flows(node.orelse, kept, out)
+    elif isinstance(node, ast.BoolOp):
+        for v in node.values:
+            _flows(v, kept, out)
+    elif isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+        for e in node.elts:
+            _flows(e.value if isinstance(e, ast.Starred) else e, not isinstance(e, ast.Starred), out)
+    elif isinstance(node, ast.Dict):
+        for kk, vv in zip(node.keys, node.values):
+            _flows(kk, False, out)
+            _flows(vv, kk is not None, out)
+    elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+        for g in node.generators:
+            _flows(g.iter, False, out)
+            for c in g.ifs:
+                _flows(c, False, out)
+        if isinstance(node, ast.DictComp):
+            _flows(node.key, False, out)
+            _flows(node.value, True, out)
+        else:
+            _flows(node.elt, True, out)
+    elif isinstance(node, ast.Call):
+        f = node.func
+        args = list(node.args) + [kw.value for kw in node.keywords]
+        if isinstance(f, ast.Attribute):
+            m = f.attr
+            _flows(f.value, kept and m in VIEW_METHODS, out)
+            for i, a in enumerate(args):
+                keep = (m in STORE_METHODS or (m == "get" and i == 1)) or not (
+                    m in MUTATORS or m == "get" or m in KEEP_METHODS or m in SCALAR_METHODS)
+                _flows(a.value if isinstance(a, ast.Starred) else a, keep and not isinstance(a, ast.Starred),
+                       out)
+        elif isinstance(f, ast.Name) and f.id in BUILTIN_VALUES:
+            keep = kept if f.id in RETAIN_CALLS else False
+            for a in args:
+                _flows(a.value if isinstance(a, ast.Starred) else a, keep, out)
+        else:
+            _flows(f, False, out)
+            for a in args:                      # a callee may keep what it is given
+                _flows(a.value if isinstance(a, ast.Starred) else a, not isinstance(a, ast.Starred), out)
+    else:
+        for child in ast.iter_child_nodes(node):
+            _flows(child, False, out)
+
 
 class Fn:
     """One function: its statements in walk order with the control decisions
@@ -238,7 +335,7 @@ class Fn:
         self.params = names[1:] if cls else names
         self.defaults = dict(zip(names[len(names) - len(a.defaults):], a.defaults))
         self.stmts, self.guards, self.defs, self.alias = [], [], {}, {}
-        self.uses, self.escapes = {}, set()
+        self.uses, self.escapes, self.flows = {}, set(), {}
         self.measure_vars = set()
         for p in self.params:
             self.defs.setdefault(p, []).append((-1, True))
@@ -309,7 +406,32 @@ class Fn:
                 return
             name = self.alias[name]
 
+    def _handed_on(self, st, idx):
+        """Record at idx every name whose object this statement hands on."""
+        out = set()
+        if isinstance(st, ast.Assign):
+            _flows(st.value, True, out)
+            for t in st.targets:
+                _flows(t, False, out)
+        elif isinstance(st, ast.AugAssign):
+            _flows(st.target, False, out)
+            _flows(st.value, False, out)
+        elif isinstance(st, ast.Expr):
+            _flows(st.value, False, out)
+        elif isinstance(st, ast.Return):
+            _flows(st.value, False, out)        # the function ends: nothing here changes it after
+        elif isinstance(st, ast.If):
+            _flows(st.test, False, out)
+        elif isinstance(st, ast.For):
+            _flows(st.iter, False, out)
+        elif isinstance(st, ast.Raise):
+            _flows(st.exc, False, out)
+            _flows(st.cause, False, out)
+        for name in out:
+            self.flows.setdefault(name, set()).add(idx)
+
     def _names(self, st, idx):
+        self._handed_on(st, idx)
         if isinstance(st, ast.Return):
             self.escapes.add(idx)
         if isinstance(st, ast.AugAssign) and isinstance(st.target, ast.Name):
@@ -740,16 +862,7 @@ class Analysis:
                 for t in n.targets:
                     self.assign(t, lv, n.value, fn, idx)
             elif isinstance(n, ast.AugAssign):
-                lv = self.ev(n.value, fn, idx, ())
-                if isinstance(n.target, ast.Name):
-                    lv = lv | self.use(n.target.id, fn, idx, ())
-                    self.assign(n.target, lv, None, fn, idx)
-                elif isinstance(n.target, ast.Subscript):
-                    load = ast.Subscript(value=n.target.value, slice=n.target.slice, ctx=ast.Load())
-                    ast.copy_location(load, n.target)
-                    self.sub_assign(n.target, lv | self.ev(load, fn, idx, ()), fn, idx)
-                else:
-                    raise Unsupported("augmented target at line %d" % n.lineno)
+                self._aug(n, fn, idx)
             elif isinstance(n, ast.Expr):
                 self.ev(n.value, fn, idx, ())
             elif isinstance(n, ast.Return):
@@ -773,6 +886,219 @@ class Analysis:
                     self.ev(n.exc, fn, idx, ())
                 if n.cause is not None:
                     self.ev(n.cause, fn, idx, ())
+
+    # -- in-place effects (see ARITH above) ---------------------------------------
+
+    def _aug(self, n, fn, idx):
+        """An augmented assignment: a union only of measure rows, otherwise an
+        arithmetic operator on an immutable target; everything else refused."""
+        ln, t = n.lineno, n.target
+        val = self.ev(n.value, fn, idx, ())
+        if not isinstance(t, (ast.Name, ast.Subscript)):
+            raise Unsupported("augmented target at line %d" % ln)
+        if isinstance(n.op, ast.BitOr) and isinstance(t, ast.Name) and not self._immutable_target(t, fn, idx):
+            # in place on a container: only a measure row into a measure row
+            cur = self.use(t.id, fn, idx, ())
+            lv = self._union(cur, val, ln)
+            self._need_row(ROW in cur and ROW in val, "an in-place union of what is not a measure row", ln)
+            self.assign(t, lv, None, fn, idx)
+            return
+        if not isinstance(n.op, ARITH):
+            raise Unsupported("augmented operator %s at line %d" % (type(n.op).__name__, ln))
+        # in place only on a mutable target with an iterable value: either an
+        # immutable target or a number value (a container += a number raises)
+        if not (self._immutable_target(t, fn, idx) or self._number(n.value, fn, idx, ())):
+            raise Unsupported("augmented assignment at line %d on a target the analysis cannot show "
+                              "holds an immutable value, with a value it cannot show is a number" % ln)
+        lv = self._content(val, "an augmented assignment", ln)
+        if isinstance(t, ast.Name):
+            self.assign(t, lv | self.use(t.id, fn, idx, ()), None, fn, idx)
+            return
+        load = ast.Subscript(value=t.value, slice=t.slice, ctx=ast.Load())
+        ast.copy_location(load, t)
+        self.sub_assign(t, lv | self.ev(load, fn, idx, ()), fn, idx)
+
+    def _union(self, left, right, lineno):
+        """a | b, a |= b: between measure rows built here (each operand's own
+        measures recorded where it was built, the result a measure row);
+        between values that are not dicts, the union of their labels;
+        anything else refused."""
+        both = left | right
+        hard = both & {REC, OMIT, AGG, SELF, DS, DD}
+        if hard:
+            raise Unsupported("a union of a record-derived structure (%s) at line %d"
+                              % (",".join(sorted(hard)), lineno))
+        if both & {ROW, D}:
+            self._need_row(ROW in left and ROW in right,
+                           "a union of a measure row or field dict with what is not a measure row", lineno)
+        return both
+
+    @staticmethod
+    def _def_value(node, var):
+        """The expression a definition statement binds `var` to, or None (an
+        unpacking of a value that is not a literal tuple, a for target, ...)."""
+        if not isinstance(node, ast.Assign):
+            return None
+
+        def find(t, v):
+            if isinstance(t, ast.Name):
+                return v if t.id == var else None
+            if isinstance(t, (ast.Tuple, ast.List)) and isinstance(v, (ast.Tuple, ast.List)) \
+                    and len(t.elts) == len(v.elts):
+                for tt, vv in zip(t.elts, v.elts):
+                    got = find(tt, vv)
+                    if got is not None:
+                        return got
+            return None
+        for t in node.targets:
+            got = find(t, node.value)
+            if got is not None:
+                return got
+        return None
+
+    def _immutable(self, e, fn):
+        if isinstance(e, ast.Constant):
+            return True
+        if isinstance(e, ast.UnaryOp) and isinstance(e.operand, ast.Constant):
+            return True
+        return (isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and e.func.id in NUMERIC_CALLS
+                and not self._is_local(e.func.id, fn, ()))
+
+    def _number(self, e, fn, idx, seen):
+        """e is a number (or the statement raises): a numeric constant, a
+        numeric builtin's result, arithmetic of numbers, or a name every
+        binding of which is one of those."""
+        if isinstance(e, ast.Constant):
+            return isinstance(e.value, (int, float))
+        if isinstance(e, ast.UnaryOp) and isinstance(e.op, (ast.USub, ast.UAdd)):
+            return self._number(e.operand, fn, idx, seen)
+        if isinstance(e, ast.BinOp) and isinstance(e.op, ARITH):
+            return self._number(e.left, fn, idx, seen) and self._number(e.right, fn, idx, seen)
+        if isinstance(e, ast.Call) and isinstance(e.func, ast.Name) and not self._is_local(e.func.id, fn, ()):
+            if e.func.id == "sum":
+                return len(e.args) == 1 and not e.keywords
+            return e.func.id in NUMERIC_CALLS
+        if isinstance(e, ast.Name) and e.id not in seen:
+            ds = self._origins(fn, e.id, idx)
+            for d in ds:
+                if d < 0:
+                    return False
+                node = fn.stmts[d]["node"]
+                if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) \
+                        and node.target.id == e.id:
+                    if not self._number(node.value, fn, d, seen + (e.id,)):
+                        return False
+                    continue
+                v = self._def_value(node, e.id)
+                if v is None or not self._number(v, fn, d, seen + (e.id,)):
+                    return False
+            return bool(ds)
+        return False
+
+    def _const_list(self, e, fn):
+        """A list whose elements are constants: [c, ...], [c] * n."""
+        if isinstance(e, ast.List):
+            return all(self._immutable(x, fn) for x in e.elts)
+        if isinstance(e, ast.BinOp) and isinstance(e.op, ast.Mult):
+            return any(isinstance(s, ast.List) and self._const_list(s, fn) for s in (e.left, e.right))
+        return False
+
+    def _const_field(self, key, as_list, fn):
+        """Every write of field `key` in the module is a constant (as_list: a
+        list of constants), or an arithmetic update of it."""
+        seen = 0
+        pred = (lambda e: self._const_list(e, fn)) if as_list else (lambda e: self._immutable(e, fn))
+        for n in ast.walk(self.tree):
+            vals = []
+            if isinstance(n, ast.Dict):
+                vals = [v for kk, v in zip(n.keys, n.values) if kk is not None and _const(kk) == key]
+            elif isinstance(n, ast.Assign):
+                vals = [n.value for t in n.targets if isinstance(t, ast.Subscript) and _const(t.slice) == key]
+            elif isinstance(n, ast.Call):
+                vals = [kw.value for kw in n.keywords if kw.arg == key]
+            elif isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Subscript) \
+                    and _const(n.target.slice) == key and not as_list:
+                seen += 1
+                continue
+            for v in vals:
+                if not pred(v):
+                    return False
+                seen += 1
+        return seen > 0
+
+    def _origins(self, fn, var, u):
+        """The definitions of var reaching u that bind it (not the in-place
+        changes recorded as definitions), with each one's kill flag."""
+        kills = {d for d, kill in fn.defs.get(var, ()) if kill}
+        return [d for d in fn.reaching(var, u) if d < 0 or d in kills]
+
+    def _immutable_target(self, t, fn, idx):
+        if isinstance(t, ast.Name):
+            for d in self._origins(fn, t.id, idx):
+                if d < 0:
+                    return False
+                node = fn.stmts[d]["node"]
+                if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name) \
+                        and node.target.id == t.id:
+                    continue
+                v = self._def_value(node, t.id)
+                if v is None or not self._immutable(v, fn):
+                    return False
+            return True
+        base, key = t.value, _const(t.slice)
+        if isinstance(base, ast.Name) and isinstance(key, str):
+            return not key.startswith("b4.") and self._const_field(key, False, fn)
+        if isinstance(base, ast.Subscript) and isinstance(_const(base.slice), str) \
+                and isinstance(base.value, ast.Name):
+            fk = _const(base.slice)
+            return not fk.startswith("b4.") and self._const_field(fk, True, fn)
+        if isinstance(base, ast.Name):
+            ds = self._origins(fn, base.id, idx)
+            for d in ds:
+                if d < 0:
+                    return False
+                v = self._def_value(fn.stmts[d]["node"], base.id)
+                if v is None or not self._const_list(v, fn):
+                    return False
+            return bool(ds)
+        return False
+
+    def _fresh(self, e, fn):
+        if isinstance(e, (ast.List, ast.Dict, ast.Set, ast.ListComp, ast.SetComp, ast.DictComp)):
+            return True
+        if isinstance(e, ast.BinOp) and isinstance(e.op, (ast.Mult, ast.Add, ast.BitOr)):
+            return any(isinstance(s, (ast.List, ast.Set, ast.Dict)) for s in (e.left, e.right))
+        if isinstance(e, ast.Call) and not e.keywords:
+            f = e.func
+            if isinstance(f, ast.Name) and f.id in COPY_CALLS and not self._is_local(f.id, fn, ()):
+                return True
+            if isinstance(f, ast.Attribute) and f.attr == "copy" and not e.args:
+                return True
+        return False
+
+    def _alias_free(self, fn, var, m, lineno):
+        """A change at statement m through `var`, which is not a measure row:
+        accepted only when var holds an object made here that nothing else
+        holds yet (see ARITH above); refused otherwise."""
+        made = []
+        for d in self._origins(fn, var, m):
+            if d < 0:
+                raise Unsupported("a change to the parameter %s at line %d (a side effect on the caller's "
+                                  "object)" % (var, lineno))
+            v = self._def_value(fn.stmts[d]["node"], var)
+            if v is None or not self._fresh(v, fn):
+                raise Unsupported("a change through %s at line %d, which may hold an object another name "
+                                  "holds" % (var, lineno))
+            made.append(d)
+        for e in sorted(fn.flows.get(var, ())):
+            for k in made:
+                if k not in self._origins(fn, var, e):
+                    continue
+                le, lm, lk = fn.stmts[e]["loops"], fn.stmts[m]["loops"], fn.stmts[k]["loops"]
+                again = any(x in le and x not in lk for x in lm)
+                if e <= m or again:
+                    raise Unsupported("a change to %s at line %d after it was handed on at line %d"
+                                      % (var, lineno, getattr(fn.stmts[e]["node"], "lineno", 0)))
 
     def _pair_targets(self, it, target, fn, site, scopes):
         """enumerate(x) or zip(a, b, ...) unpacked straight into a tuple of
@@ -895,6 +1221,8 @@ class Analysis:
             raise Unsupported("unresolved key into a measure row at line %d" % t.lineno)
         if set(self.use(v, fn, idx, ())) & set(KEYED):
             raise Unsupported("unresolved key into a measure row or field dict at line %d" % t.lineno)
+        if self.strict:
+            self._alias_free(fn, v, idx, t.lineno)
         key = self.ev(t.slice, fn, idx, ())
         # a list element or a dict value: either holder, so both labels
         self._add(self.defl, (fn.key, v, idx),
@@ -977,7 +1305,9 @@ class Analysis:
 
     def e_binop(self, node, fn, site, scopes):
         left, right = self.ev(node.left, fn, site, scopes), self.ev(node.right, fn, site, scopes)
-        if isinstance(node.op, (ast.Add, ast.BitOr)):
+        if isinstance(node.op, ast.BitOr):
+            return self._union(left, right, node.lineno)
+        if isinstance(node.op, ast.Add):
             return left | right
         if isinstance(node.op, ast.BitAnd):
             # one bit of the incident word through its mask: the fact that
@@ -1017,6 +1347,10 @@ class Analysis:
     def dict_lit(self, node, fn, site, scopes, container):
         keys = [_const(kk) for kk in node.keys if kk is not None]
         has_meas = any(isinstance(c, str) and c.startswith("b4.") for c in keys)
+        # a literal that unpacks a measure row is a measure row: every key of
+        # it must resolve, as in one written with measure keys
+        has_meas = has_meas or any(ROW in self.ev(vv, fn, site, scopes)
+                                   for kk, vv in zip(node.keys, node.values) if kk is None)
         out = {ROW, D} if has_meas else ({D} if any(isinstance(c, str) for c in keys) else set())
         for kk, vv in zip(node.keys, node.values):
             lv = self.ev(vv, fn, site, scopes)
@@ -1337,6 +1671,8 @@ class Analysis:
             return set()
         if self.strict and m == "update" and any(ROW in a or D in a for a in args):
             raise Unsupported("a dict merged with a measure row or field dict at line %d" % ln)
+        if self.strict:
+            self._alias_free(fn, v, site, ln)
         if m == "setdefault":
             if not args or len(args) > 2:
                 raise Unsupported("setdefault form at line %d" % ln)
