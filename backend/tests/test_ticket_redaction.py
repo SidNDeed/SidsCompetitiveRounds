@@ -2392,12 +2392,14 @@ def test_pg_auto_log_route_harness_does_not_inherit_the_reserve_lock_of_a_closed
     was -- answers that 503 with that line, so this case can fail."""
     auto_logs = _require_auto_logs()
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", _a_reserve_lock_held_on_a_closed_loop())
+    # Made here, outside any running loop: the poisoning runs a loop of its own.
+    second_poison = _a_reserve_lock_held_on_a_closed_loop()
 
     async def body(poison_after_arm):
         async with Env(monkeypatch, tmp_path) as env:
             await _arm_the_real_auto_route(env, monkeypatch, auto_logs)
             if poison_after_arm:
-                monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", _a_reserve_lock_held_on_a_closed_loop())
+                monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", second_poison)
             resp = await env.client.post(AUTO_ROUTE, json={"steam_id": REPORTER, "log_text": LOG_HEAD + LOG_TAIL},
                                          headers={"X-Session-Token": AUTO_TOKEN})
             return resp.status_code, resp.text
