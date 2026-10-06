@@ -341,11 +341,21 @@ def r_sections_pair(variant="base"):
 
 
 A1_FIXTURE_DIR = os.path.join(HERE, "fixtures", "combat_evidence_a1")
-# The amended records the client lane committed at 5969a3b5 (its scenario run,
-# both seats), carried byte for byte. They are REVISION 1 of the amendment
-# (seven cost_a1 rows, no widened list), which a revision 2 server refuses;
-# `rev2` builds the synthetic revision 2 records the tests read from them.
+# The revision 2 records the client lane committed at fd52764b (its scenario
+# runs: both seats, and the norx, m6over, m9ring and m9gone variants of the
+# first seat), carried byte for byte, each pinned by its sha256 below.
+A1_CLIENT_SHA256 = {
+    "seat1.rec.txt": "61c5ab26e4fc3111903c706574fbea51ad5e6cf09d933e5dcbe9dfb1abc1fdab",
+    "seat2.rec.txt": "455baac61c021fadf8a2937838cb33c18de380a8bf6f8252613787c059f80147",
+    "norx.seat1.rec.txt": "50bfd0435073357732c03e92bd1651543ca4c4d68bf173a51707e666658aa94e",
+    "m6over.seat1.rec.txt": "658b60c3ce70d36c295db3242dd1f61c51594beb6b6f3eaf84b6a1bec756169f",
+    "m9ring.seat1.rec.txt": "ba9f82641d891ce76381dcafcd65346a7ddc5be7762acbb2544deb68d733a601",
+    "m9gone.seat1.rec.txt": "dc1bb62004647dd59b52a928cac12336c0ab427d94bfc4f263795d1616d7eb29",
+}
 A1_FIXTURES = ("seat1.rec.txt", "seat2.rec.txt")
+# The client's REVISION 1 records (5969a3b5: seven cost_a1 rows, no widened
+# list), kept as the records a revision 2 server refuses.
+A1_REV1_DIR = os.path.join(A1_FIXTURE_DIR, "rev1")
 
 
 def widen(rec):

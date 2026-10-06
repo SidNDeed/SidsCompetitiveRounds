@@ -12,6 +12,7 @@ a SYNTHETIC combat revision (A12 and A13 analogues without a database).
 Every record and every rule here is synthetic and built inside the tests."""
 
 import ast
+import hashlib
 import inspect
 import itertools
 import json
@@ -2535,11 +2536,11 @@ def test_l1_the_match_report_hmac_is_exactly_the_seven_field_canonical(monkeypat
 # three never-trimmed keys after `omit` (drop, a1_tot, cost_a1), two widened bounds. A
 # record without bit 32 is the current layout byte for byte (the canonical fixture test
 # above, unchanged, is that proof). Fix pass 9: the amendment is REVISION 2 (section f:
-# an eighth cost_a1 row, four widened lists, the push dependency). The client's two
-# revision 1 records (5969a3b5) stay carried in fixtures/combat_evidence_a1 as the records
-# a revision 2 server refuses; the tests read SYNTHETIC revision 2 records built from them
-# (fx.rev2), and the client's two previous-wire records (967a0fe7, fixtures-legacy) are
-# carried in fixtures/combat_evidence_a1/legacy and must reproduce byte for byte.
+# an eighth cost_a1 row, four widened lists, the push dependency). The tests read the
+# client's revision 2 records (fd52764b, six records) carried in fixtures/combat_evidence_a1;
+# its two revision 1 records (5969a3b5) are carried in fixtures/combat_evidence_a1/rev1 as
+# the records a revision 2 server refuses, and its two previous-wire records (967a0fe7,
+# fixtures-legacy) in fixtures/combat_evidence_a1/legacy, which must reproduce byte for byte.
 
 LEGACY_FIXTURES = sorted(n for n in os.listdir(fx.FIXTURE_DIR) if n.endswith(".in.json"))
 A1_LEGACY_DIR = os.path.join(fx.A1_FIXTURE_DIR, "legacy")
@@ -2547,16 +2548,18 @@ A1_LEGACY_DIR = os.path.join(fx.A1_FIXTURE_DIR, "legacy")
 
 def _a1_rev1(name):
     """The client's carried revision 1 record: its bytes and its value."""
-    with open(os.path.join(fx.A1_FIXTURE_DIR, name), "rb") as f:
+    with open(os.path.join(fx.A1_REV1_DIR, name), "rb") as f:
         raw = f.read()
     return raw, json.loads(raw.decode("ascii"))
 
 
 def _a1_fixture(name):
-    """A SYNTHETIC revision 2 record built from the carried revision 1 one:
-    its budgeted bytes and its value."""
-    rec = fx.rev2(_a1_rev1(name)[1])
-    return cm.budget_record(rec).encode("ascii"), rec
+    """The client's carried revision 2 record: its bytes (sha256-pinned) and
+    its value."""
+    with open(os.path.join(fx.A1_FIXTURE_DIR, name), "rb") as f:
+        raw = f.read()
+    assert hashlib.sha256(raw).hexdigest() == fx.A1_CLIENT_SHA256[name], name
+    return raw, json.loads(raw.decode("ascii"))
 
 
 def test_a1_a_revision_1_record_is_refused_by_the_revision_2_server():
@@ -2574,12 +2577,15 @@ def test_a1_a_revision_1_record_is_refused_by_the_revision_2_server():
         with pytest.raises(cm.Refusal) as e:
             cm.check_record(widened)                                # seven cost_a1 rows
         assert e.value.field == cm.COST_A1_KEY
-        cm.check_record(fx.rev2(rec))                               # control: revision 2
+        cm.check_record(fx.rev2(rec))                               # control: widened
+        cm.check_record(_a1_fixture(name)[1])                       # control: the client's
 
 
-def test_a1_the_synthetic_revision_2_records_reproduce_byte_for_byte():
+def test_a1_the_client_revision_2_records_reproduce_byte_for_byte():
     n = 0
-    for name in fx.A1_FIXTURES:
+    names = sorted(n_ for n_ in os.listdir(fx.A1_FIXTURE_DIR) if n_.endswith(".rec.txt"))
+    assert names == sorted(fx.A1_CLIENT_SHA256)
+    for name in names:
         raw, rec = _a1_fixture(name)
         cm.check_record(rec)
         assert cm.amended(rec) and list(rec)[-4:] == ["omit"] + list(cm.A1_KEYS), name
@@ -2590,8 +2596,30 @@ def test_a1_the_synthetic_revision_2_records_reproduce_byte_for_byte():
         assert cm.budget_record(json.loads(raw)).encode("ascii") == raw, name
         assert cm.section_faults(rec) == [], name
         n += 1
-    print("\nPROOF SIZE a1 fixtures: %d synthetic revision 2 records (built from the client's "
-          "revision 1 records) accepted and reproduced byte for byte" % n)
+    print("\nPROOF SIZE a1 fixtures: %d client revision 2 records (fd52764b, sha256-pinned) "
+          "accepted and reproduced byte for byte" % n)
+
+
+def test_a1_the_client_pair_shows_the_force_stage_and_identities():
+    """The client's own revision 2 seat pair through pair_view: every chain
+    row measures its force transit, and every death row lists its forces
+    beside its hits, the keyed ones found in push and the unkeyed one
+    marked, as those pinned records hold them."""
+    (_r1, s1), (_r2, s2) = (_a1_fixture(n) for n in fx.A1_FIXTURES)
+    view = cm.pair_view(fx.records(s1, s2))
+    transits = [r["frc_transit"] for c in view["chains"] for r in c["rows"]]
+    assert transits and all(isinstance(t, int) for t in transits), transits
+    assert not any("frc_transit" in r.get("interval_not_run", {})
+                   for c in view["chains"] for r in c["rows"])
+    forces = [f for d in view["deaths"] for r in d["rows"] for f in r["forces"]]
+    keyed = [f for f in forces if not f["unkeyed"]]
+    unkeyed = [f for f in forces if f["unkeyed"]]
+    assert keyed and all(f["push_listed"] is True and f["pid"] >= 0 for f in keyed), keyed
+    assert unkeyed and all(f["pid"] == cm.FORCE_UNKEYED and f["push_listed"] is None
+                           and f["push_not_run"] == "unkeyed" for f in unkeyed), unkeyed
+    assert {f["sender"] for f in forces} == set(cm.FORCE_SENDER.values())
+    print("\nPROOF SIZE a1 client pair: %d chain rows with a force transit, %d keyed and %d "
+          "unkeyed forces beside the hits" % (len(transits), len(keyed), len(unkeyed)))
 
 
 def test_a1_the_client_legacy_records_are_accepted_and_reproduced():
