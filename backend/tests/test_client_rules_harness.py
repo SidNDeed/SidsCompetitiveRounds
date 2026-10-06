@@ -131,6 +131,20 @@ def test_the_binder_sort_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= 38, "the BinderSortRules suite shrank to %d cases" % run
 
 
+def test_the_quick_shard_suite_ran_every_case_and_none_failed(harness_run):
+    """Item 18: the pull strip's per-card shard rules (PcQuickShardRules)."""
+    suites = _suites(harness_run)
+    assert "quickshard" in suites, "the PcQuickShardRules suite did not report"
+    run, fail, verdict = suites["quickshard"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[quickshard\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The suite ran 27 cases on the commit that added it (#342: a floor near
+    # the real count). Raise it when cases are added.
+    assert run >= 27, "the PcQuickShardRules suite shrank to %d cases" % run
+
+
 @pytest.mark.parametrize("name", [
     # the ordering rule itself
     "a ranked subject precedes an off-board subject",

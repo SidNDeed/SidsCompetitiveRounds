@@ -56,6 +56,14 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            if (!RunSuite("quickshard", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = PcQuickShardRules.SelfTest();
+                              return new Suite(r.Passed + r.Failed, r.Failed, r.Report.ToString());
+                          }))
+                return 2;
+
             if (!RunSuite("laddershop", quiet, ref totalRun, ref totalFail, ref suites,
                           () =>
                           {
