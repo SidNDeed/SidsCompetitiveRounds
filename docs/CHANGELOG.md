@@ -1,5 +1,15 @@
 # Sid's Competitive Rounds — Changelog
 
+## v1.41.0 — unreleased (notes being gathered)
+
+**Card pictures are drawn once more**
+
+- The card picture is now framed on the character itself, so a gun or a
+  one-sided cosmetic widens the frame instead of pushing the body off centre.
+  Because the framing changed, every stored card picture is out of date: the
+  first time you open Player Cards on this version, your game draws your card
+  picture again and uploads the new one. Nothing needs to be done by hand.
+
 ## v1.40.3 — 2026-09-09
 
 **The ranked room's region is measured again**
