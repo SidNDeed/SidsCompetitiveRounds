@@ -91,6 +91,10 @@ PLAYER_KEY = "SELECT id FROM players WHERE steam_id = :sid"
 INSERT_KEY = "INSERT INTO bug_reports"
 SESSION_KEY = "FROM steam_sessions"
 LOCK_KEY = "pg_advisory_xact_lock"
+# Retention's own lock (round 9, R8-M1): the NON-blocking form, in both of the
+# pass's transactions. Not a substring of LOCK_KEY's statement, nor LOCK_KEY of
+# this one, so the two are scripted and counted apart.
+PRUNE_LOCK_KEY = "pg_try_advisory_xact_lock"
 
 PID = UUID("0b7d2f8e-3c4a-4c2a-9b1e-2f3a4b5c6d7e")
 
@@ -192,6 +196,10 @@ class Scripted:
         # because setdefault does not overwrite. Four tests already do exactly
         # that, and they are the ones that own the session question.
         self.script.setdefault(SESSION_KEY, [[{"steam_id": STEAM}]])
+        # Retention's advisory lock answers TAKEN unless a case scripts it
+        # otherwise -- the same reasoning: the cases that own the lock's
+        # refusal pass PRUNE_LOCK_KEY themselves.
+        self.script.setdefault(PRUNE_LOCK_KEY, [[{"got": True}]])
         self.fail_on = fail_on
         self.log = []
         # EVERY STATEMENT AND EVERY END OF A TRANSACTION, IN ORDER. `log` is
@@ -353,6 +361,17 @@ def no_reserve_lock_carried_over(monkeypatch):
     none of them ever touches the import-time one."""
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+
+
+@pytest.fixture(autouse=True)
+def no_retention_pass_carried_over(monkeypatch):
+    """`_PRUNE_PASS` is the sixth (round 9, R8-M1): the retention gate's slot.
+    A pass's hold is released when its unlink work ENDS, so a case that leaves
+    a worker parked past its own end would otherwise hand the next case a
+    gate that refuses every pass. Each case gets a fresh slot; a late release
+    from an earlier case clears only the slot it was taken from
+    (`_PrunePass.release`), never this one."""
+    monkeypatch.setattr(auto_logs, "_PRUNE_PASS", [None])
 
 
 def _ok_db(auto_count=0, player=True):
@@ -3837,6 +3856,7 @@ _SYNTHETIC_IDS = {"76561198000000001", "76561198000000002"}
 _BRANCH_FILES = (
     "api/auto_logs.py",
     "tests/test_auto_logs.py",
+    "tests/test_auto_log_retention_pool_pg.py",
     "sql/336_bug_reports_kind.sql",
     "sql/373_bug_reports_auto_number.sql",
 )
@@ -4009,14 +4029,20 @@ def _sql_373():
 
 
 def test_373_preconditions_on_the_objects_336_creates_not_on_its_bytes():
-    """336 exists in two copies and they are NOT byte-identical.
+    """ONE copy of 336 is in the tree, and it is the file production applied:
+    30,980 bytes, sha256 2a7bfd1a3c5d8ffecbfd3db47dff013fda528bc2fb877b47e82286c3eebbffb5
+    (git blob 31ac3397, byte-identical to main's at e9a3f1e1 and 154a408d).
+    `test_the_336_prose_states_the_one_copy_the_tree_carries` measures both
+    numbers from the file and reds this paragraph when either moves.
 
-    The hotfix copy is a superset: its post-check was rebuilt to OFFER rows to
-    the constraint instead of reading the constraint's rendered text. The
-    wrapper applies a migration once by FILE NAME, so whichever copy reaches a
-    database first is the only one that ever runs there -- which means 373 has
-    to be correct after EITHER, and has to say so by checking the objects 336
-    leaves behind rather than assuming which file produced them.
+    Another copy HAS existed: this branch carried its own 336 until its merge
+    of main on 2026-10-05 (git blob 486b2833, last at 63849ca6), whose
+    post-check OFFERED rows to the constraint instead of reading the
+    constraint's rendered text. The wrapper applies a migration once by FILE
+    NAME, so a database that ran that copy first keeps what it left -- the
+    branch's own rehearsal databases did -- which means 373 has to be correct
+    after either, and says so by checking the objects 336 leaves behind
+    rather than assuming which file produced them.
 
     The three objects, by name: the `kind` column, its `bug_reports_kind_known`
     CHECK, and its `'report'` default. Both copies create all three; neither
@@ -4049,11 +4075,11 @@ def test_373_preconditions_on_the_objects_336_creates_not_on_its_bytes():
             % (needle, why))
 
     assert "byte-identical" not in sql, (
-        "373 still claims the two copies of 336 are byte-identical. They are "
-        "not -- the hotfix copy is 22,384 bytes against the lane's 19,445, "
-        "diverging at line 217 where the post-check was rebuilt -- and a "
-        "migration whose header states a guarantee the tree refutes is a "
-        "finding (#302/#351)")
+        "373 claims the copies of 336 that have existed are byte-identical. "
+        "They are not -- the branch's former copy (blob 486b2833) and the "
+        "applied one (blob 31ac3397) diverge at line 105, where the post-check "
+        "was rebuilt -- and a migration whose header states a guarantee the "
+        "history refutes is a finding (#302/#351)")
 
 
 # ── round 3: the method change, one control per finding ─────────────────────
@@ -4905,111 +4931,301 @@ def test_a_marker_with_no_blob_is_never_reported_as_a_removal(logdir,
         % (out,))
 
 
-def _due_lock_findings(sql):
-    """What is WRONG with a due-selection statement, as a list.
+# ── round 9: ONE retention pass at a time, refused holding nothing ──────────
+#
+# R8-M1 REPLACED the row lock that kept two passes off one row -- `FOR NO KEY
+# UPDATE SKIP LOCKED`, held from the due SELECT through the volume hop to the
+# DELETE, i.e. a pooled connection checked out for as long as the volume took
+# -- with a GATE taken before the pass's first statement and the pass's
+# advisory lock, non-blocking, in both of its transactions. The three cases
+# below are that replacement's behaviour, each with its mutation and its inert
+# twin; the order of the two transactions around the hop is
+# `test_a_retention_pass_ends_its_transaction_before_the_unlink_pass`.
 
-    The assertions live here rather than in the case so the mutants below can
-    be measured by the same sentence the live code is measured by. A control
-    whose red is produced by a differently worded check is a control that
-    proves the wording (#342/#441).
-    """
+
+def _retention_db(rows, t1=True, t2=True, cls=Scripted):
+    """A scripted session with the due `rows` -- (id, blob name) pairs -- and
+    the retention lock answering `t1` in the pass's first transaction and `t2`
+    in its second."""
+    due = [{"id": str(rid), "log_filename": name} for rid, name in rows]
+    return cls({PRUNE_LOCK_KEY: [[{"got": t1}], [{"got": t2}]],
+                DUE_KEY: [due],
+                "DELETE FROM bug_reports": [[{"id": r["id"]} for r in due]]})
+
+
+async def _overlapping_passes(prune, logdir, held):
+    """Pass A parked in its unlink pass; pass B started while A waits; then,
+    once A has ended, pass C. Answers what each did."""
+    for name in ("a.log.gz", "b.log.gz"):
+        (logdir / name).write_bytes(b"x")
+    db_a = _retention_db([(R1, "a.log.gz")])
+    db_b = _retention_db([(R2, "b.log.gz")])
+    db_c = _retention_db([(R2, "b.log.gz")])
+    a = asyncio.ensure_future(prune(db_a))
+    if not await _until(lambda: held.entered >= 1, 5.0):
+        a.cancel()
+        return {"a": "never reached its unlink pass"}
+    try:
+        await prune(db_b)
+        b = "ran"
+    except auto_logs.RetentionPassBusy:
+        b = "busy"
+    b_sql = [sql for sql, _ in db_b.log]
+    await held.drained()
+    a_out = await a
+    await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
+    try:
+        c_out = await prune(db_c)
+    except auto_logs.RetentionPassBusy:
+        c_out = "busy"
+    return {"a": a_out, "b": b, "b_sql": b_sql, "c": c_out}
+
+
+def _gate_findings(seen):
+    """What is wrong with one overlapping-pass run, as a list."""
     bad = []
-    if "FOR NO KEY UPDATE" not in sql:
-        bad.append("no row lock, so two overlapping passes read the same rows "
-                   "and the second reads the first's pending unlink as absent")
-    if "SKIP LOCKED" not in sql:
-        bad.append("waits on a locked row instead of taking the next")
-    # `FOR UPDATE` is the stronger mode and a different sentence: it conflicts
-    # with the `FOR KEY SHARE` that every foreign-key insert referencing a
-    # bug_reports row takes, so it enrols writers with no part in retention.
-    # Spelled as a word test, because "FOR NO KEY UPDATE" contains neither
-    # " FOR UPDATE" nor "FOR UPDATE SKIP".
-    if " FOR UPDATE" in sql or "FOR UPDATE SKIP" in sql:
-        bad.append("takes FOR UPDATE, which conflicts with FOR KEY SHARE")
+    if not isinstance(seen.get("a"), dict):
+        return ["pass A did not run: %r" % (seen,)]
+    if seen["b"] != "busy":
+        bad.append("a second pass RAN while the first was inside its unlink "
+                   "pass: two passes at once")
+    if seen["b_sql"]:
+        bad.append("the refused pass issued %d statement(s) before it was "
+                   "refused, so it checked a connection out to be told no: %r"
+                   % (len(seen["b_sql"]), seen["b_sql"]))
+    if seen["a"].get("rows") != 1:
+        bad.append("the first pass did not finish its own work: %r" % (seen["a"],))
+    if not (isinstance(seen["c"], dict) and seen["c"].get("rows") == 1):
+        bad.append("a pass after the first one ended was not admitted, so the "
+                   "gate outlives its pass: %r" % (seen["c"],))
     return bad
 
 
-#: M1(a). The lock clause deleted at its own site -- the state round 5 left,
-#: where two passes select the same rows.
-_NO_ROW_LOCK = (
-    '                 LIMIT :lim\n'
-    '                   FOR NO KEY UPDATE SKIP LOCKED"""),\n',
-    '                 LIMIT :lim"""),\n')
-#: THE INERT TWIN at the same site: the same clause, wrapped differently. SQL
-#: does not care where the line breaks fall, so a control that reds here is
-#: reacting to the site being edited rather than to the lock going.
-_ROW_LOCK_REWRAPPED = (
-    '                 LIMIT :lim\n'
-    '                   FOR NO KEY UPDATE SKIP LOCKED"""),\n',
-    '                 LIMIT :lim\n'
-    '                   FOR NO KEY UPDATE\n'
-    '                   SKIP LOCKED"""),\n')
+def test_one_retention_pass_runs_at_a_time_and_a_second_is_refused_holding_nothing(
+        logdir, monkeypatch):
+    """R8-M1: AT MOST ONE RETENTION PASS, AND A SECOND CALLER IS REFUSED AT
+    ONCE, BEFORE IT HAS CHECKED A CONNECTION OUT.
 
+    Pass A is parked inside its unlink pass (the volume does not answer); pass
+    B arrives meanwhile. B must be refused with `RetentionPassBusy` having
+    issued NO statement -- a refusal that first takes a connection is a waiter
+    holding the resource it is refused (#644/#646) -- and once A has ended a
+    third pass must be admitted, or the gate outlives its pass. The operator
+    route answers the refusal 409, again with no statement.
 
-def _due_sql_of(fn, logdir):
-    """Run `fn` over one due row and hand back the statement it selected with."""
-    (logdir / "a.log.gz").write_bytes(b"x")
-    db = Scripted({DUE_KEY: [[{"id": str(R1), "log_filename": "a.log.gz"}]],
-                   "DELETE FROM bug_reports": [[{"id": str(R1)}]]})
-    _run(fn(db))
-    return db.sql_for(DUE_KEY)[0]
-
-
-def test_the_due_selection_takes_the_row_lock_that_conflicts_with_its_own_delete(
-        logdir):
-    """M1(a): TWO RETENTION PASSES MUST NOT HOLD THE SAME ROW.
-
-    The pass selects its due rows, hands them to a worker thread that unlinks
-    up to two hundred blobs, and only then DELETEs. Between the SELECT and
-    the DELETE a second pass -- the hourly loop and an upload's opportunistic
-    call, in this process or in another worker -- could select the same rows,
-    see the first pass's unlink as `absent`, and commit the DELETE over a
-    removal that is still only in the directory cache.
-
-    `FOR NO KEY UPDATE SKIP LOCKED` closes that from the other side: the
-    second pass takes the rows the first one did not.
-
-    THE MODE IS THE WEAKEST ONE THAT STILL CONFLICTS WITH THIS PASS'S OWN
-    LATER WRITE (#202). `FOR UPDATE` conflicts with the `FOR KEY SHARE` that
-    every foreign-key insert referencing a `bug_reports` row takes, which
-    enrols writers that have nothing to do with retention in this sweep's
-    lock graph; `FOR NO KEY UPDATE` self-conflicts, so two passes still
-    serialize, and is KEY-SHARE compatible. `SKIP LOCKED` rather than a wait,
-    because the rows are interchangeable work and a pass behind a slow volume
-    should drain the rest rather than queue.
-
-    It gates on rows that EXIST by construction (#203/#207): they are the
-    SELECT's own answer, so there is no lock-nothing window and no advisory
-    key standing in for a row that may not be there.
+    MUTANT: the gate removed from `prune_auto_logs` -- B runs alongside A.
+    TWIN: the same decorator spelled as a parenthesised expression.
     """
+    held = _Held(auto_logs._unlink_due_blobs, first_only=True)
+    monkeypatch.setattr(auto_logs, "_unlink_due_blobs", held)
+
+    seen = _run(_overlapping_passes(auto_logs.prune_auto_logs, logdir, held))
+    assert _gate_findings(seen) == [], _gate_findings(seen)
+
+    # THE ROUTE, with the gate taken: 409 and no statement at all.
+    monkeypatch.setenv("API_SECRET_KEY", "shh")
+    slot = auto_logs._PRUNE_PASS
+    slot[0] = auto_logs._PrunePass(slot)
+    db = _retention_db([(R1, "a.log.gz")])
+    with pytest.raises(HTTPException) as e:
+        _run(auto_logs.run_auto_log_prune(x_internal_key="shh", db=db))
+    assert e.value.status_code == 409, e.value.status_code
+    assert db.log == [], db.log
+    slot[0].release()
+    assert slot[0] is None
+
+    site = "@_one_retention_pass_at_a_time\n"
+    held.reset()
+    mutant = _exec_mutant(auto_logs.prune_auto_logs, site, "")
+    assert _gate_findings(_run(_overlapping_passes(mutant, logdir, held))), (
+        "with the gate removed two passes still did not overlap, so this case "
+        "cannot see a second pass")
+    held.reset()
+    twin = _exec_mutant(auto_logs.prune_auto_logs, site,
+                        "@(_one_retention_pass_at_a_time)\n")
+    assert _gate_findings(_run(_overlapping_passes(twin, logdir, held))) == [], (
+        "the inert twin reds, so the mutant above is reacting to the site "
+        "being edited rather than to the gate")
+
+
+async def _a_pass_past_its_ceiling(logdir, held):
+    """Pass A times out with its unlink work still parked; pass B is tried
+    while that work runs; pass C once it has ended."""
+    for name in ("a.log.gz", "b.log.gz"):
+        (logdir / name).write_bytes(b"x")
+    seen = {}
+    try:
+        await auto_logs.prune_auto_logs(_retention_db([(R1, "a.log.gz")]))
+        seen["a"] = "returned"
+    except auto_logs.RetentionPassTimedOut:
+        seen["a"] = "timed out"
+    try:
+        out = await auto_logs.prune_auto_logs(_retention_db([(R2, "b.log.gz")]))
+        seen["b"] = "ran: %r" % (out,)
+    except auto_logs.RetentionPassBusy:
+        seen["b"] = "busy"
+    await held.drained()
+    await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
+    try:
+        seen["c"] = await auto_logs.prune_auto_logs(
+            _retention_db([(R2, "b.log.gz")]))
+    except auto_logs.RetentionPassBusy:
+        seen["c"] = "busy"
+    return seen
+
+
+def test_a_pass_past_its_ceiling_stays_the_running_pass_until_its_unlinks_end(
+        logdir, monkeypatch):
+    """R8-M1: A CEILING ENDS THE WAIT, NOT THE WORK -- so it must not end the
+    pass's hold on the gate either.
+
+    The unlink work keeps its thread after the pass stopped waiting for it. If
+    the gate were released with the WAIT, a second pass would be admitted
+    while the first pass's unlinks still run, which is two passes at once by
+    another route. So the work holds the gate too and releases it when it
+    ENDS (`_gated_unlink_due_blobs`).
+
+    MUTANT: the work's hold not taken (`_start_unlink_pass`). TWIN: the same
+    call spelled through a parenthesised name.
+    """
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2)
+    held = _Held(auto_logs._unlink_due_blobs, first_only=True)
+    monkeypatch.setattr(auto_logs, "_unlink_due_blobs", held)
+
+    seen = _run(_a_pass_past_its_ceiling(logdir, held))
+    assert seen["a"] == "timed out", seen
+    assert seen["b"] == "busy", (
+        "a pass was admitted while the timed-out pass's unlinks were still "
+        "running: %r" % (seen,))
+    assert isinstance(seen["c"], dict) and seen["c"]["rows"] == 1, seen
+
+    real = auto_logs._start_unlink_pass
+    site = "        gate.hold()\n"
+    for replacement, admitted in (("        pass\n", True),
+                                  ("        (gate).hold()\n", False)):
+        held.reset()
+        auto_logs._PRUNE_HELD.clear()
+        monkeypatch.setattr(auto_logs, "_start_unlink_pass",
+                            _exec_mutant(real, site, replacement))
+        seen = _run(_a_pass_past_its_ceiling(logdir, held))
+        assert seen["b"].startswith("ran") is admitted, (
+            "with %r at the work's hold the second pass was %s"
+            % (replacement.strip(), seen["b"]))
+    monkeypatch.setattr(auto_logs, "_start_unlink_pass", real)
+
+
+async def _refused_lock_pass(prune, logdir, where):
     (logdir / "a.log.gz").write_bytes(b"x")
-    db = Scripted({DUE_KEY: [[{"id": str(R1), "log_filename": "a.log.gz"}]],
-                   "DELETE FROM bug_reports": [[{"id": str(R1)}]]})
-    _run(auto_logs.prune_auto_logs(db))
+    t1, t2 = (False, True) if where == "T1" else (True, False)
+    db = _retention_db([(R1, "a.log.gz")], t1=t1, t2=t2)
+    try:
+        out = await prune(db)
+        return db, "ran: %r" % (out,)
+    except auto_logs.RetentionPassBusy:
+        return db, "busy"
 
-    due_sql = db.sql_for(DUE_KEY)[0]
-    assert _due_lock_findings(due_sql) == [], (
-        "the due selection %s: %s" % (_due_lock_findings(due_sql), due_sql))
-    # AND THE SECOND STATEMENT RE-CHECKS THE PREDICATE THE FIRST CHOSE ON
-    # (#208), so the lock is not carrying a decision the DELETE should be
-    # making for itself.
-    assert "kind = 'auto'" in db.sql_for("DELETE FROM bug_reports")[0]
 
-    # -- MUTANT (a): the lock clause deleted -------------------------------
-    auto_logs._PRUNE_HELD.clear()
-    mutant = _exec_mutant(auto_logs.prune_auto_logs, *_NO_ROW_LOCK)
-    found = _due_lock_findings(_due_sql_of(mutant, logdir))
-    assert found, (
-        "the due selection with its lock clause removed produced no finding, "
-        "so this case cannot tell a locked selection from an unlocked one")
+def _refused_lock_findings(db, outcome, where, logdir):
+    bad = []
+    if outcome != "busy":
+        bad.append("the pass ran past a refused lock (%s): %s" % (where, outcome))
+    if db.sql_for("DELETE FROM bug_reports"):
+        bad.append("a DELETE ran although the lock was refused in %s" % where)
+    if where == "T1":
+        if db.sql_for(DUE_KEY):
+            bad.append("the due rows were read although T1's lock was refused")
+        if not (logdir / "a.log.gz").exists():
+            bad.append("a blob was unlinked although T1's lock was refused")
+    else:
+        if str(R1) in auto_logs._PRUNE_HELD:
+            bad.append("a row whose removal is durable was HELD, so the pass "
+                       "that holds the lock cannot collect it for six hours")
+    if db.committed:
+        bad.append("something was committed under a refused lock")
+    if db.events and db.events[-1] not in ("ROLLBACK",):
+        bad.append("the transaction was not ended after the refusal: %r"
+                   % (db.events,))
+    return bad
 
-    # -- THE INERT TWIN at the same site -----------------------------------
-    auto_logs._PRUNE_HELD.clear()
-    twin = _exec_mutant(auto_logs.prune_auto_logs, *_ROW_LOCK_REWRAPPED)
-    assert _due_lock_findings(_due_sql_of(twin, logdir)) == [], (
-        "the inert twin reds, so the mutation above is reacting to the site "
-        "being edited rather than to the lock clause")
-    auto_logs._PRUNE_HELD.clear()
+
+@pytest.mark.parametrize("where", ["T1", "T2"])
+def test_a_retention_pass_refused_its_lock_waits_for_nothing_and_deletes_nothing(
+        logdir, monkeypatch, where):
+    """R8-M1: THE PASS'S ADVISORY LOCK IS NON-BLOCKING, IN BOTH TRANSACTIONS.
+
+    It is what refuses a second PROCESS's pass (the gate is this process's
+    own). Refused in T1, nothing has been read and nothing is unlinked;
+    refused in T2, the unlinks this pass made are durable and their rows are
+    kept UNHELD, so the pass holding the lock -- or the next -- reads them
+    absent, flushes and deletes them. Either way: `RetentionPassBusy`, no
+    DELETE, no commit, the transaction ended, and the route answers 409.
+
+    MUTANT: the lock's answer ignored (`_take_prune_lock` answers True). TWIN:
+    the same answer read through `bool(...)`.
+    """
+    db, outcome = _run(_refused_lock_pass(auto_logs.prune_auto_logs, logdir,
+                                          where))
+    assert _refused_lock_findings(db, outcome, where, logdir) == [], (
+        _refused_lock_findings(db, outcome, where, logdir))
+
+    monkeypatch.setenv("API_SECRET_KEY", "shh")
+    (logdir / "a.log.gz").write_bytes(b"x")
+    t1, t2 = (False, True) if where == "T1" else (True, False)
+    with pytest.raises(HTTPException) as e:
+        _run(auto_logs.run_auto_log_prune(
+            x_internal_key="shh",
+            db=_retention_db([(R1, "a.log.gz")], t1=t1, t2=t2)))
+    assert e.value.status_code == 409, e.value.status_code
+
+    real = auto_logs._take_prune_lock
+    site = "    return got is True\n"
+    for replacement, reds in (("    return True\n", True),
+                              ("    return bool(got is True)\n", False)):
+        auto_logs._PRUNE_HELD.clear()
+        monkeypatch.setattr(auto_logs, "_take_prune_lock",
+                            _exec_mutant(real, site, replacement))
+        db, outcome = _run(_refused_lock_pass(auto_logs.prune_auto_logs,
+                                              logdir, where))
+        assert bool(_refused_lock_findings(db, outcome, where, logdir)) is reds, (
+            replacement.strip(), outcome)
+    monkeypatch.setattr(auto_logs, "_take_prune_lock", real)
+
+
+def test_the_retention_lock_is_non_blocking_keyed_on_a_value_in_its_own_class(
+        logdir):
+    """The lock statement is the TRY form -- a blocking `pg_advisory_xact_lock`
+    would wait for the other pass with this one's connection checked out
+    (#612) -- in the two-key overload, keyed on the one retention pass, in a
+    class no other lock in the tree uses (#707: a shared class is a shared
+    namespace). Taken once in each transaction of a pass that deletes."""
+    (logdir / "a.log.gz").write_bytes(b"x")
+    db = _retention_db([(R1, "a.log.gz")])
+    out = _run(auto_logs.prune_auto_logs(db))
+    assert out["rows"] == 1, out
+    sql = db.sql_for(PRUNE_LOCK_KEY)
+    assert len(sql) == 2, sql
+    for s in sql:
+        assert ("pg_try_advisory_xact_lock(CAST(:cls AS integer), "
+                "CAST(:key AS integer))") in s, s
+    assert db.params_for(PRUNE_LOCK_KEY) == [
+        {"cls": auto_logs.AUTO_LOG_PRUNE_LOCK_CLASS,
+         "key": auto_logs.AUTO_LOG_PRUNE_LOCK_KEY}] * 2
+    assert not db.sql_for(LOCK_KEY), (
+        "retention took a BLOCKING advisory lock: %r" % (db.sql_for(LOCK_KEY),))
+
+    import pc_portrait
+    classes = {"AUTO_LOG_LOCK_CLASS": auto_logs.AUTO_LOG_LOCK_CLASS,
+               "PC_P_LOCK_CLASS": pc_portrait.PC_P_LOCK_CLASS}
+    main_src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+    for name, value in re.findall(r"^([A-Z_]*LOCK_CLASS[A-Z_]*)\s*=\s*(\d+)",
+                                  main_src, re.M):
+        classes[name] = int(value)
+    assert len(classes) >= 3, classes
+    clash = {n: v for n, v in classes.items()
+             if v == auto_logs.AUTO_LOG_PRUNE_LOCK_CLASS}
+    assert not clash, (
+        "AUTO_LOG_PRUNE_LOCK_CLASS (%d) collides with %r"
+        % (auto_logs.AUTO_LOG_PRUNE_LOCK_CLASS, clash))
 
 
 def test_an_absent_blob_is_collectable_only_once_the_pass_barrier_has_succeeded(
@@ -5553,27 +5769,40 @@ def _cursor_passes(logdir, prune):
 
 def test_every_round_six_sweep_and_lock_bound_reds_when_it_is_removed(
         logdir, monkeypatch):
-    """THE CONTROLS FOR M1(a)'s SPAN, L2 AND L3: one on-site mutation per
-    bound, each paired with an INERT TWIN at the same site (#391/#342).
+    """THE CONTROLS FOR R8-M1's TWO TRANSACTIONS (which replaced M1(a)'s span
+    in round 9), L2 AND L3: one on-site mutation per bound, each paired with
+    an INERT TWIN at the same site (#391/#342).
 
     Kept apart from the behaviour cases they control, so those cases carry
     no mutation anchor and an on-disk inert twin can re-spell the very line
     they guard without the case failing to find its own anchor.
     """
-    # -- M1(a): the transaction ended between the SELECT and the DELETE ----
+    # -- R8-M1: T1 not ended before the unlink pass ------------------------
     mutant = _exec_mutant(
-        auto_logs.prune_auto_logs, _LOCK_SPAN_SITE,
-        "    )).mappings().all()\n    await db.commit()\n    if not due:\n")
-    assert _lock_span_findings(_lock_span_events(mutant, logdir)), (
-        "a pass that commits between its SELECT and its DELETE produced no "
-        "finding, so the lock-span case cannot see the lock end early")
+        auto_logs.prune_auto_logs, _T1_END_SITE,
+        "    )).mappings().all()\n    if not due:\n")
+    assert _pass_order_findings(_pass_events(mutant, logdir)), (
+        "a pass that waits on the volume inside the transaction that read its "
+        "rows produced no finding, so the order case cannot see the hop held")
     twin = _exec_mutant(
-        auto_logs.prune_auto_logs, _LOCK_SPAN_SITE,
-        "    )).mappings().all()\n    await asyncio.sleep(0)\n    if not due:\n")
-    assert _lock_span_findings(_lock_span_events(twin, logdir)) == [], (
-        "the inert twin reds at the lock span, so the mutant above is "
-        "reacting to the site being edited rather than to the transaction "
-        "ending")
+        auto_logs.prune_auto_logs, _T1_END_SITE,
+        "    )).mappings().all()\n    await (_end_transaction)(db)\n"
+        "    if not due:\n")
+    assert _pass_order_findings(_pass_events(twin, logdir)) == [], (
+        "the inert twin reds at T1's end, so the mutant above is reacting to "
+        "the site being edited rather than to the transaction staying open")
+
+    # -- R8-M1: T2 deleting without the lock again --------------------------
+    mutant = _exec_mutant(
+        auto_logs.prune_auto_logs, _T2_LOCK_SITE, "\n        if False:\n")
+    assert _pass_order_findings(_pass_events(mutant, logdir)), (
+        "a pass whose DELETE runs without the retention lock produced no "
+        "finding")
+    twin = _exec_mutant(
+        auto_logs.prune_auto_logs, _T2_LOCK_SITE,
+        "\n        if not (await _take_prune_lock(db)):\n")
+    assert _pass_order_findings(_pass_events(twin, logdir)) == [], (
+        "the inert twin reds at T2's lock")
 
     # -- L2(i): a referenced marker's clear spends the removal budget ------
     site = "            cleared += 1\n"
@@ -6782,9 +7011,10 @@ def test_the_player_attachment_order_leaves_nothing_uncollectable_at_any_crash_p
 
 
 class _OrderedRetentionDB(Scripted):
-    """`Scripted` keeping ONE ordered record of the due SELECT, the unlink
-    pass, the DELETE and every transaction boundary -- so what is asserted is
-    WHEN the row lock ends, rather than the words that take it (#732)."""
+    """`Scripted` keeping ONE ordered record of the retention lock, the due
+    SELECT, the unlink pass, the DELETE and every transaction boundary -- so
+    what is asserted is WHEN each transaction ends relative to the volume
+    work, rather than the words that end it (#732)."""
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
@@ -6792,44 +7022,42 @@ class _OrderedRetentionDB(Scripted):
 
     async def execute(self, statement, params=None):
         sql = " ".join(str(statement).split())
-        self.events.append("SELECT-DUE" if DUE_KEY in sql else
+        self.events.append("LOCK" if PRUNE_LOCK_KEY in sql else
+                           "SELECT-DUE" if DUE_KEY in sql else
                            "DELETE" if sql.startswith("DELETE FROM bug_reports")
                            else "SQL")
         return await super().execute(statement, params)
 
-    async def commit(self):
-        self.events.append("COMMIT")
-        await super().commit()
-
-    async def rollback(self):
-        self.events.append("ROLLBACK")
-        await super().rollback()
+    # COMMIT and ROLLBACK are recorded by `Scripted` itself, into the same
+    # list; `execute` above records a label BEFORE the raw statement Scripted
+    # appends, and `_LABELS` reads the labels back out.
 
 
-def _lock_span_events(prune, logdir):
+_LABELS = ("LOCK", "SELECT-DUE", "DELETE", "SQL", "UNLINK-PASS", "COMMIT",
+           "ROLLBACK")
+
+
+def _pass_events(prune, logdir):
     """`prune` over one due row whose blob is present: the ordered events."""
     (logdir / "a.log.gz").write_bytes(b"x")
-    db = _OrderedRetentionDB(
-        {DUE_KEY: [[{"id": str(R1), "log_filename": "a.log.gz"}]],
-         "DELETE FROM bug_reports": [[{"id": str(R1)}]]})
-    g = prune.__globals__
-    real = g["_unlink_due_blobs"]
+    db = _retention_db([(R1, "a.log.gz")], cls=_OrderedRetentionDB)
+    real = auto_logs._unlink_due_blobs
 
     def _recording(base, plan):
         db.events.append("UNLINK-PASS")
         return real(base, plan)
 
-    g["_unlink_due_blobs"] = _recording
+    auto_logs._unlink_due_blobs = _recording
     auto_logs._PRUNE_HELD.clear()
     try:
         _run(prune(db))
     finally:
-        g["_unlink_due_blobs"] = real
+        auto_logs._unlink_due_blobs = real
         auto_logs._PRUNE_HELD.clear()
-    return db.events
+    return [e for e in db.events if e in _LABELS]
 
 
-def _lock_span_findings(events):
+def _pass_order_findings(events):
     """What is wrong with one retention pass's order, as a list."""
     try:
         s = events.index("SELECT-DUE")
@@ -6841,41 +7069,57 @@ def _lock_span_findings(events):
     if not s < u < d:
         bad.append("out of order: %r" % (events,))
     ends = [i for i, e in enumerate(events) if e in ("COMMIT", "ROLLBACK")]
-    if any(s < i < d for i in ends):
-        bad.append("a transaction ends between the SELECT and the DELETE, "
-                   "which releases the row lock before the DELETE it "
-                   "protects: %r" % (events,))
+    locks = [i for i, e in enumerate(events) if e == "LOCK"]
+    if not any(s < i < u for i in ends):
+        bad.append("no transaction ends between the due SELECT and the unlink "
+                   "pass, so a pooled connection is checked out while the "
+                   "volume is waited for: %r" % (events,))
+    if not any(i < s for i in locks):
+        bad.append("T1 reads the due rows without the retention lock: %r"
+                   % (events,))
+    t2 = [i for i in locks if u < i < d]
+    if not t2:
+        bad.append("T2 deletes without taking the retention lock again: %r"
+                   % (events,))
+    elif any(t2[-1] < i < d for i in ends):
+        bad.append("a transaction ends between T2's lock and its DELETE: %r"
+                   % (events,))
     if not any(i > d and events[i] == "COMMIT" for i in ends):
         bad.append("no COMMIT after the DELETE: %r" % (events,))
     return bad
 
 
-#: M1(a)'s span, cut: a commit straight after the due SELECT ends the
-#: transaction -- and the row lock with it -- before the unlink pass runs.
-_LOCK_SPAN_SITE = "    )).mappings().all()\n    if not due:\n"
+#: R8-M1's split, undone: T1's end after the due SELECT deleted, so the pass
+#: waits on the volume inside the transaction that read the rows.
+_T1_END_SITE = ("    )).mappings().all()\n"
+                "    await _end_transaction(db)\n"
+                "    if not due:\n")
+#: T2's lock, the second of the pass's two: the line that re-takes it.
+_T2_LOCK_SITE = "\n        if not await _take_prune_lock(db):\n"
 
 
-def test_the_due_rows_stay_locked_from_the_select_through_the_delete_commit(
-        logdir):
-    """M1(a), MEASURED AS AN ORDER rather than as a clause.
+def test_a_retention_pass_ends_its_transaction_before_the_unlink_pass(logdir):
+    """R8-M1, MEASURED AS AN ORDER: T1 -- the lock and the due SELECT -- ends
+    before the volume is touched, and T2 -- the lock again, the DELETE and its
+    commit -- opens only after the unlink pass has answered. So no pooled
+    connection is checked out across the hop, and every statement that
+    decides runs under the retention lock.
 
-    `FOR NO KEY UPDATE SKIP LOCKED` keeps an overlapping pass off this pass's
-    rows only for as long as the transaction that took the lock is open. The
-    window the lock exists to close runs from the SELECT, through the unlink
-    pass on the worker thread, to the DELETE and its commit -- so the
-    property is that no transaction boundary falls inside that span. The
-    clause itself is asserted beside this
-    (`test_the_due_selection_takes_the_row_lock_that_conflicts_with_its_own_delete`)
-    and its behaviour against a real server is the lock harness in the
-    round-6 evidence; this is the half a statement's text cannot show.
+    This REPLACES round 6's lock-span case, which asserted the opposite order
+    -- no transaction boundary between the SELECT and the DELETE -- because
+    the row lock it measured was the exclusion then. The exclusion is now the
+    gate and the advisory lock (the three cases above), and the order below
+    is what makes the hop hold nothing.
 
-    Its mutant and inert twin are in
+    Its mutants and inert twins are in
     `test_every_round_six_sweep_and_lock_bound_reds_when_it_is_removed`, so
     this case carries no mutation anchor of its own.
     """
-    events = _lock_span_events(auto_logs.prune_auto_logs, logdir)
-    assert _lock_span_findings(events) == [], (
-        "the retention pass: %r" % (_lock_span_findings(events),))
+    events = _pass_events(auto_logs.prune_auto_logs, logdir)
+    assert _pass_order_findings(events) == [], (
+        "the retention pass: %r" % (_pass_order_findings(events),))
+    assert events == ["LOCK", "SELECT-DUE", "ROLLBACK", "UNLINK-PASS", "LOCK",
+                      "DELETE", "COMMIT"], events
 
 
 def _report_mutant_pairs(pairs):
@@ -10905,61 +11149,80 @@ def test_a_marker_clear_that_does_not_return_in_time_leaves_the_upload_accepted(
 
 def test_a_retention_unlink_pass_that_does_not_return_in_time_deletes_no_row(
         logdir, monkeypatch, capsys):
-    """RETENTION'S UNLINK PASS HAS A CEILING, AND PAST IT NO ROW IS DELETED.
+    """RETENTION'S UNLINK PASS HAS A CEILING; PAST IT NO ROW IS DELETED, NO
+    CONNECTION IS HELD, AND THE OPERATOR ROUTE ANSWERS 503 (R7-M4, R8-M1).
 
-    This is the one wait on the volume made WITH a connection checked out,
-    by design: the row locks that keep two passes off one row live on the
-    pass's transaction. No upload reaches it -- the opportunistic pass runs
-    in a task of its own, on a session of its own -- and it is bounded by
-    `AUTO_LOG_SWEEP_HOP_WAIT_S`. Past the ceiling, no removal the pass made
-    can be named, so it deletes NO row: the transaction is rolled back, the
-    due rows are held out of the next sweeps, and a later pass re-reads the
-    volume.
+    Until round 9 this was the one wait on the volume made WITH a connection
+    checked out, and a pass past its ceiling RETURNED -- so the operator
+    route answered 200 for a pass that had collected nothing. Now T1 has
+    ended before the hop, the pass RAISES `RetentionPassTimedOut`, and the
+    route answers 503. Past the ceiling no removal the pass made can be
+    named, so it deletes NO row: the due rows are held out of the next
+    sweeps, and a later pass re-reads the volume.
 
     CONTROL: the ceiling lifted at the site, and the pass waits the hold out
     and deletes the row. TWIN: the same ceiling spelled `float(...)`.
     """
     HOLD = 3.0   # was 1.0 (see the marker-clear case)
     monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2)
+    monkeypatch.setenv("API_SECRET_KEY", "shh")
     held = _Held(auto_logs._unlink_due_blobs)
     monkeypatch.setattr(auto_logs, "_unlink_due_blobs", held)
-    site = ("            _VOLUME_POOL, AUTO_LOG_SWEEP_HOP_WAIT_S, "
-            "_unlink_due_blobs, base,\n")
+    site = "            AUTO_LOG_SWEEP_HOP_WAIT_S)\n"
 
     async def drive(prune):
         held.reset()
         auto_logs._PRUNE_HELD.clear()
         (logdir / "due.log.gz").write_bytes(b"x")
         asyncio.get_running_loop().call_later(HOLD, held.release)
-        db = Scripted({DUE_KEY: [[{"id": str(R1), "log_filename": "due.log.gz"}]],
-                       "DELETE FROM bug_reports": [[{"id": str(R1)}]]})
+        db = _retention_db([(R1, "due.log.gz")])
         at = time.monotonic()
-        out = await prune(db)
+        try:
+            out = await prune(db)
+        except auto_logs.RetentionPassTimedOut:
+            out = "timed out"
         took = time.monotonic() - at
         await held.drained()
+        await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
         return out, took, db
 
     out, took, db = _run(drive(auto_logs.prune_auto_logs))
-    assert out == {"rows": 0, "blobs": 0, "retained": 1, "undurable": 0,
-                   "due": 1, "held": 1}, out
-    assert took < HOLD, took
+    assert out == "timed out" and took < HOLD, (out, took)
     assert not db.sql_for("DELETE FROM bug_reports"), (
         "a row was deleted over an unlink pass that did not return")
     assert db.events[-1] == "ROLLBACK" and db.committed == 0, db.events
+    assert db.events.index("ROLLBACK") > max(
+        i for i, e in enumerate(db.events) if DUE_KEY in e), db.events
     assert str(R1) in auto_logs._PRUNE_HELD
     assert ("did not return within %ss" % 0.2) in capsys.readouterr().out
 
+    # THE ROUTE: 503, never a 200 reporting a pass that collected nothing.
+    async def via_route():
+        held.reset()
+        auto_logs._PRUNE_HELD.clear()
+        (logdir / "due.log.gz").write_bytes(b"x")
+        asyncio.get_running_loop().call_later(HOLD, held.release)
+        try:
+            await auto_logs.run_auto_log_prune(
+                x_internal_key="shh", db=_retention_db([(R1, "due.log.gz")]))
+            status = 200
+        except HTTPException as e:
+            status = e.status_code
+        await held.drained()
+        await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
+        return status
+
+    assert _run(via_route()) == 503
+
     out, took, db = _run(drive(_exec_mutant(
-        auto_logs.prune_auto_logs, site,
-        "            _VOLUME_POOL, 10 ** 6, _unlink_due_blobs, base,\n")))
-    assert out["rows"] == 1 and took >= HOLD - 0.05, (out, took)
+        auto_logs.prune_auto_logs, site, "            10 ** 6)\n")))
+    assert isinstance(out, dict) and out["rows"] == 1 and took >= HOLD - 0.05, (
+        out, took)
 
     out, took, db = _run(drive(_exec_mutant(
         auto_logs.prune_auto_logs, site,
-        "            _VOLUME_POOL, float(AUTO_LOG_SWEEP_HOP_WAIT_S), "
-        "_unlink_due_blobs, base,\n")))
-    assert out["rows"] == 0 and out["retained"] == 1 and took < HOLD, (
-        out, took)
+        "            float(AUTO_LOG_SWEEP_HOP_WAIT_S))\n")))
+    assert out == "timed out" and took < HOLD, (out, took)
 
 
 @pytest.mark.parametrize("hop", ["walk", "resolve"])
@@ -11030,3 +11293,325 @@ def test_an_orphan_sweep_hop_that_does_not_return_in_time_removes_nothing(
         site.replace("AUTO_LOG_SWEEP_HOP_WAIT_S",
                      "float(AUTO_LOG_SWEEP_HOP_WAIT_S)"))))
     assert out["unlinked"] == 0 and took < HOLD, (out, took)
+
+
+# ── round 9: thirty operator calls behind a stalled volume (R8-M1) ──────────
+#
+# Round 8's report: "thirty overlapping authorised maintenance passes can
+# retain the 20+10 connections behind four volume workers; unrelated queue or
+# match requests can exceed the 30-second pool checkout timeout". The case
+# below drives exactly that on the production-sized MODEL pool of the R7-M4
+# cases; the same shape on a REAL SQLAlchemy pool over asyncpg against
+# PostgreSQL is `test_auto_log_retention_pool_pg.py`.
+
+#: THE FIX REVERTED, as two on-site mutations together: the gate removed and
+#: T1 left open across the hop. (Either alone does not retain the pool: the
+#: gate refuses 29 of the 30, and an ended T1 holds nothing.)
+_RETENTION_FIX_REVERTED = [
+    ("@_one_retention_pass_at_a_time\n", ""),
+    (_T1_END_SITE, "    )).mappings().all()\n    if not due:\n"),
+]
+#: THE INERT TWIN at the same two sites.
+_RETENTION_FIX_TWIN = [
+    ("@_one_retention_pass_at_a_time\n", "@(_one_retention_pass_at_a_time)\n"),
+    (_T1_END_SITE, "    )).mappings().all()\n    await (_end_transaction)(db)\n"
+                   "    if not due:\n"),
+]
+
+
+async def _answer(coro):
+    """The HTTP status the operator route would give."""
+    try:
+        await coro
+        return 200
+    except HTTPException as e:
+        return e.status_code
+
+
+async def _thirty_prunes(logdir, held, n=30):
+    """`n` authorised operator calls at once, each on its own session of one
+    production-sized model pool, while the volume does not answer. Answers
+    the pool reading while they wait, an unrelated checkout's outcome and
+    time, and every call's status once the volume answers again."""
+    pool = _ModelPool(size=30, timeout=0.5)
+    sessions = []
+    for i in range(n):
+        name = "due-%02d.log.gz" % i
+        (logdir / name).write_bytes(b"x")
+        rid = UUID(int=0x5000 + i)
+        s = _retention_db([(rid, name)], cls=_PooledScripted)
+        s.pool = pool
+        sessions.append(s)
+    calls = [asyncio.ensure_future(_answer(auto_logs.run_auto_log_prune(
+        x_internal_key="shh", db=s))) for s in sessions]
+    reached = await _until(lambda: held.entered >= 1, 5.0)
+    await asyncio.sleep(0.3)            # every other call reaches its state
+    out_while_stalled = pool.out
+    refused_early = sum(1 for c in calls if c.done())
+    at = time.monotonic()
+    try:
+        await pool.checkout()           # a queue join, a match report
+        pool.checkin()
+        unrelated = "served"
+    except TimeoutError:
+        unrelated = "timed out"
+    unrelated_s = time.monotonic() - at
+    statuses = list(await asyncio.gather(*calls))
+    held.release()
+    await _until(lambda: held.finished >= held.entered
+                 and auto_logs._VOLUME_POOL._work_queue.qsize() == 0, 10.0)
+    await held.drained()
+    for s in sessions:
+        await s.close()
+    return {"reached": reached, "out": out_while_stalled,
+            "refused_early": refused_early, "unrelated": unrelated,
+            "unrelated_s": unrelated_s, "statuses": statuses,
+            "pool_after": pool.out}
+
+
+def _thirty_prunes_findings(seen):
+    bad = []
+    if not seen["reached"]:
+        return ["no pass reached the volume: %r" % (seen,)]
+    if seen["out"]:
+        bad.append("%d pooled connection(s) checked out while the passes "
+                   "waited on the volume" % seen["out"])
+    if seen["unrelated"] != "served" or seen["unrelated_s"] > 0.25:
+        bad.append("an unrelated checkout %s after %.2fs"
+                   % (seen["unrelated"], seen["unrelated_s"]))
+    if 200 in seen["statuses"]:
+        bad.append("a pass past its ceiling answered 200")
+    return bad
+
+
+def test_thirty_operator_prune_calls_cannot_retain_the_pool(logdir,
+                                                            monkeypatch):
+    """R8-M1 / B15: THIRTY AUTHORISED PRUNE CALLS BEHIND A STALLED VOLUME HOLD
+    NO CONNECTION, AND THE ONE PASS THAT RUNS ANSWERS 503 PAST ITS CEILING.
+
+    Thirty is the production pool's size exactly, and each call is on a
+    session of its own, as `get_db` gives each request one. With the fix, one
+    pass is admitted and holds nothing while it waits; the other twenty-nine
+    are refused 409 at once, before any statement; an unrelated checkout is
+    served at once; and the admitted pass answers 503 at its ceiling.
+
+    CONTROL: the fix reverted (`_RETENTION_FIX_REVERTED`) -- all thirty run,
+    each holding its connection across the hop: the pool reads thirty out,
+    the unrelated checkout times out, and the reverted passes still answer
+    past the ceiling. TWIN: the same two sites spelled otherwise, which
+    changes nothing.
+    """
+    monkeypatch.setenv("API_SECRET_KEY", "shh")
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 1.0)
+    held = _Held(auto_logs._unlink_due_blobs)
+    monkeypatch.setattr(auto_logs, "_unlink_due_blobs", held)
+
+    seen = _run(_thirty_prunes(logdir, held))
+    assert _thirty_prunes_findings(seen) == [], (_thirty_prunes_findings(seen),
+                                                 seen)
+    assert sorted(seen["statuses"]) == [409] * 29 + [503], seen["statuses"]
+    assert seen["refused_early"] == 29, seen
+    assert seen["pool_after"] == 0, seen
+
+    real = auto_logs.prune_auto_logs
+    for pairs, reds in ((_RETENTION_FIX_REVERTED, True),
+                        (_RETENTION_FIX_TWIN, False)):
+        held.reset()
+        auto_logs._PRUNE_HELD.clear()
+        monkeypatch.setattr(auto_logs, "prune_auto_logs",
+                            _exec_mutant_pairs(real, pairs))
+        seen = _run(_thirty_prunes(logdir, held))
+        found = _thirty_prunes_findings(seen)
+        assert bool(found) is reds, (pairs[0][1], found, seen)
+        if reds:
+            assert seen["out"] == 30 and seen["unrelated"] == "timed out", seen
+    monkeypatch.setattr(auto_logs, "prune_auto_logs", real)
+
+
+# ── B12: the claim read against the behaviour ───────────────────────────────
+
+#: The module's statement of the property, read by the check below. A
+#: rewording that drops it is a finding, so the check cannot pass by the
+#: claim going quiet.
+_WAIT_CLAIM = ("NO WAIT IS MADE WITH A CONNECTION CHECKED OUT, RETENTION'S "
+               "INCLUDED, AND EVERY WAIT ANSWERS 503 PAST ITS CEILING")
+
+#: Restatements of the exception round 8 documented, each a sentence the
+#: behaviour no longer has.
+_WAIT_EXCEPTIONS = (
+    r"\bone wait (?:is )?made with a (?:pooled )?connection",
+    r"\bthe one wait in the module that is made with a connection",
+    r"\bholds? (?:a|its) (?:pooled )?connection across its (?:own )?unlink "
+    r"pass by design",
+    r"\bmade with a (?:pooled )?connection (?:checked out )?(?:on purpose|by "
+    r"design|deliberately)",
+)
+
+
+def _prose_of(src):
+    """Source text with comment markers removed and whitespace collapsed, so a
+    sentence wrapped over `#` lines reads as one sentence."""
+    return " ".join(" ".join(re.sub(r"^\s*#+ ?", "", ln)
+                             for ln in src.splitlines()).split())
+
+
+def _wait_claim_findings(module_src, other_srcs, seen):
+    """What the module's wait claim gets wrong about the measured retention
+    behaviour `seen` (`_thirty_prunes`), as a list."""
+    bad = []
+    text = _prose_of(module_src)
+    held = seen["out"]
+    if _WAIT_CLAIM not in text:
+        bad.append("the module no longer states the wait claim, so nothing "
+                   "here reads it against the behaviour")
+    else:
+        if held:
+            bad.append("the module claims no wait holds a connection; "
+                       "retention held %d across its unlink pass" % held)
+        if 200 in seen["statuses"] or 503 not in seen["statuses"]:
+            bad.append("the module claims 503 past every ceiling; retention "
+                       "answered %r" % sorted(set(seen["statuses"])))
+    for src in (module_src,) + tuple(other_srcs):
+        for pat in _WAIT_EXCEPTIONS:
+            for m in re.finditer(pat, _prose_of(src), re.I):
+                bad.append("an exception the behaviour does not have is "
+                           "restated: %r" % m.group(0))
+    return bad
+
+
+def test_the_no_connection_and_503_claim_is_read_against_retention(
+        logdir, monkeypatch):
+    """B12 (round 8): "the absolute 503-past-every-wait / no pooled connection
+    across a hop claim is false for retention". After R8-M1 it is TRUE, and
+    this case READS the claim from `auto_logs.py` and the BEHAVIOUR from a
+    run of `_thirty_prunes`, and rejects a restatement of either that does
+    not match the other: the claim with a connection held or a 200 past the
+    ceiling, and the old exception sentence restated anywhere in
+    `auto_logs.py` or `main.py`.
+
+    MUTATIONS, one of each kind, each flagged: (comment) round 8's exception
+    sentence planted back into the module text; (comment) the claim removed;
+    (behaviour) T1 left open across the hop; (behaviour) the ceiling's raise
+    turned back into a return, i.e. a 200. NEGATIVE CONTROL: an unrelated
+    comment added to the module text, not flagged.
+    """
+    monkeypatch.setenv("API_SECRET_KEY", "shh")
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.5)
+    held = _Held(auto_logs._unlink_due_blobs)
+    monkeypatch.setattr(auto_logs, "_unlink_due_blobs", held)
+    module_src = pathlib.Path(auto_logs.__file__).read_text(encoding="utf-8")
+    main_src = pathlib.Path(main.__file__).read_text(encoding="utf-8")
+
+    seen = _run(_thirty_prunes(logdir, held, n=2))
+    assert _wait_claim_findings(module_src, (main_src,), seen) == [], (
+        _wait_claim_findings(module_src, (main_src,), seen))
+
+    # -- comment mutations ---------------------------------------------------
+    planted = module_src.replace(
+        "# NO WAIT IS MADE WITH A CONNECTION CHECKED OUT",
+        "# ONE WAIT IS MADE WITH A CONNECTION ON PURPOSE: retention's unlink\n"
+        "# pass, whose row locks live on its transaction.\n"
+        "# NO WAIT IS MADE WITH A CONNECTION CHECKED OUT", 1)
+    assert planted != module_src
+    assert _wait_claim_findings(planted, (main_src,), seen), (
+        "round 8's exception sentence planted back was not flagged")
+    removed = module_src.replace("RETENTION'S INCLUDED, AND", "AND", 1)
+    assert removed != module_src
+    assert _wait_claim_findings(removed, (main_src,), seen), (
+        "the claim removed from the module was not flagged")
+    unrelated = module_src.replace(
+        "_VOLUME_POOL = ThreadPoolExecutor(",
+        "# An unrelated note about thread names.\n"
+        "_VOLUME_POOL = ThreadPoolExecutor(", 1)
+    assert unrelated != module_src
+    assert _wait_claim_findings(unrelated, (main_src,), seen) == [], (
+        "an unrelated comment was flagged, so the check reads more than the "
+        "claim")
+
+    # -- behaviour mutations -------------------------------------------------
+    real = auto_logs.prune_auto_logs
+    for pairs, why in (
+            ([(_T1_END_SITE, "    )).mappings().all()\n    if not due:\n")],
+             "T1 left open across the hop"),
+            ([("        raise RetentionPassTimedOut(\n"
+               "            \"the retention unlink pass did not return in "
+               "time\") from None\n",
+               "        return {\"rows\": 0, \"blobs\": 0, \"retained\": "
+               "len(due), \"undurable\": 0, \"due\": len(due), \"held\": "
+               "len(_PRUNE_HELD)}\n")],
+             "the ceiling answered as a return")):
+        held.reset()
+        auto_logs._PRUNE_HELD.clear()
+        monkeypatch.setattr(auto_logs, "prune_auto_logs",
+                            _exec_mutant_pairs(real, pairs))
+        mseen = _run(_thirty_prunes(logdir, held, n=2))
+        assert _wait_claim_findings(module_src, (main_src,), mseen), (
+            "%s was not flagged against the unchanged claim: %r" % (why, mseen))
+    monkeypatch.setattr(auto_logs, "prune_auto_logs", real)
+
+
+# ── B12 / R8-L2: the 336 prose states the one copy the tree carries ─────────
+
+_336_SECTION = ("# ── migration 373 does not depend on WHICH copy of 336 ran",
+                "# ── round 3: the method change, one control per finding")
+
+
+def _sql_336_identity():
+    """336 as production ran it: the git blob's bytes, i.e. with LF line ends
+    whatever the checkout's own line-ending setting made of the working copy."""
+    import hashlib
+    raw = (pathlib.Path(HERE).parent / "sql"
+           / "336_bug_reports_kind.sql").read_bytes().replace(b"\r\n", b"\n")
+    return len(raw), hashlib.sha256(raw).hexdigest()
+
+
+def _336_prose_findings(test_src, size, digest):
+    """What the 373-vs-336 section of this file states wrongly about the one
+    copy of 336 in the tree, as a list."""
+    start = test_src.find(_336_SECTION[0])
+    end = test_src.find(_336_SECTION[1], start)
+    if start < 0 or end < 0:
+        return ["the 373-vs-336 section is not where this check reads it"]
+    section = _prose_of(test_src[start:end])
+    bad = []
+    for m in re.finditer(r"336 exists in two copies|two copies of 336 "
+                         r"(?:exist|are)\b", section, re.I):
+        bad.append("the prose says the tree carries two copies: %r"
+                   % m.group(0))
+    sizes = [int(n.replace(",", "")) for n in
+             re.findall(r"\b(\d{1,3}(?:,\d{3})+|\d{4,})\s+bytes\b", section)]
+    digests = re.findall(r"\b[0-9a-f]{64}\b", section)
+    if not sizes or not digests:
+        bad.append("the prose states no measured size and sha256 for 336")
+    bad += ["a stated size %d is not the tree's 336 (%d bytes)" % (n, size)
+            for n in sizes if n != size]
+    bad += ["a stated sha256 %s is not the tree's 336 (%s)" % (d, digest)
+            for d in digests if d != digest]
+    return bad
+
+
+def test_the_336_prose_states_the_one_copy_the_tree_carries():
+    """R8-L2 (B12's second half): the prose of the 373-vs-336 case said 336
+    "exists in two copies" with byte sizes from an earlier era, after the
+    merge of main had left ONE copy -- the one production applied. The case
+    now states that copy's size and sha256, and this check MEASURES both from
+    the file and rejects the prose wherever it disagrees.
+
+    MUTATIONS, each flagged: the two-copies sentence planted back; a stale
+    byte size planted; a wrong digest planted. NEGATIVE CONTROL: an unrelated
+    sentence added, not flagged.
+    """
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    size, digest = _sql_336_identity()
+    assert _336_prose_findings(src, size, digest) == [], (
+        _336_prose_findings(src, size, digest))
+    anchor = ("def test_373_preconditions_on_the_objects_336_creates_not_on_"
+              "its_bytes():\n")
+    assert src.count(anchor) == 1
+    for plant, reds in (
+            ('    """336 exists in two copies."""\n', True),
+            ("    # the copy is 22,384 bytes\n", True),
+            ("    # sha256 %s\n" % ("0" * 64), True),
+            ("    # the precondition reads objects, not files\n", False)):
+        mutated = src.replace(anchor, anchor + plant, 1)
+        assert bool(_336_prose_findings(mutated, size, digest)) is reds, plant

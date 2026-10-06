@@ -230,8 +230,10 @@ pointer to the file and left an orphan nothing can name.
   itself on the following tick instead of needing a migration.
 
   A pass is bounded by ``_PRUNE_BATCH`` rows so one sweep cannot hold a
-  transaction open across an unbounded unlink loop; a backlog drains over
-  consecutive ticks.
+  volume worker across an unbounded unlink loop; a backlog drains over
+  consecutive ticks. No transaction is open across the unlink loop at all
+  since round 9: the due rows are read in one transaction, ended before the
+  loop, and deleted in a second (R8-M1).
 
 NOT A REPLICA-ROUTABLE PATH. The blob is written to the api container's own
 disk. If this path were ever added to the edge's read-routing list, uploads
@@ -242,6 +244,7 @@ not touch it; this note is here so that stays deliberate.
 
 import asyncio
 import contextlib
+import functools
 import gzip
 import hashlib
 import heapq
@@ -401,10 +404,9 @@ _BLOB_WRITE_STALL_S = 5.0
 # Every call this module makes on the blob volume, and the two CPU-bound
 # passes over a bundle (the scrub and the gzip), run on a worker thread -- and
 # since round 8 on a thread of THIS MODULE'S OWN POOLS, never the event loop's
-# default executor, and -- on both upload paths -- never while the request's
-# session holds a pooled connection (R7-M4). The one wait made WITH a
-# connection is retention's, by design and bounded (see the last paragraph
-# below).
+# default executor, and -- on both upload paths and, since round 9, in
+# retention -- never while a session holds a pooled connection (R7-M4,
+# R8-M1; see the last paragraph below).
 #
 # WHY ITS OWN POOLS. `asyncio.to_thread` and `run_in_executor(None, ...)`
 # share one default executor with everything else in the process -- main.py's
@@ -444,13 +446,20 @@ _BLOB_WRITE_STALL_S = 5.0
 # returns its connection and every transaction-scoped lock -- before every hop,
 # and opens a fresh transaction after the hop where it has more to ask the
 # database. The suite drives thirty concurrent uploads, automatic and player,
-# against a stalled volume and reads the pool empty while they wait. ONE WAIT
-# IS MADE WITH A CONNECTION ON PURPOSE: retention's unlink pass, whose row
-# locks live on its transaction (`prune_auto_logs`). No upload reaches it --
-# the opportunistic pass runs on its own session in a task of its own -- and
-# it is bounded by `AUTO_LOG_SWEEP_HOP_WAIT_S` and by who can start one: the
-# retention loop's pass, at most one opportunistic pass an hour, and the
-# operator's internal route, whose request session is the one it holds.
+# against a stalled volume and reads the pool empty while they wait.
+#
+# NO WAIT IS MADE WITH A CONNECTION CHECKED OUT, RETENTION'S INCLUDED, AND
+# EVERY WAIT ANSWERS 503 PAST ITS CEILING (round 9, R8-M1). Until round 9
+# retention's unlink pass was the exception: its row locks lived on its
+# transaction, so each pass held a pooled connection for as long as the volume
+# took, and thirty overlapping operator calls could hold the whole 20 + 10
+# pool. Now `prune_auto_logs` ends its first transaction before the hop and
+# opens a second after it, at most one pass runs at a time (a gate taken
+# before its first statement, and an advisory lock in both transactions), a
+# second caller is refused at once holding nothing, and a hop past
+# `AUTO_LOG_SWEEP_HOP_WAIT_S` raises `RetentionPassTimedOut`, which the
+# operator route answers 503. The suite reads this paragraph against the
+# behaviour (`test_the_no_connection_and_503_claim_is_read_against_retention`).
 _VOLUME_POOL = ThreadPoolExecutor(
     max_workers=4, thread_name_prefix="autolog-volume")
 _CPU_POOL = ThreadPoolExecutor(
@@ -474,7 +483,8 @@ AUTO_LOG_CPU_WAIT_S = 30.0
 # flush each, so they get a longer ceiling than one call does. A pass that
 # does not return within it ends as a pass that collected nothing -- nothing
 # is deleted over a removal it could not see finish -- and the next tick
-# retries it.
+# retries it. Retention's pass RAISES `RetentionPassTimedOut` past it, so the
+# operator route answers 503 rather than a 200 reporting nothing collected.
 AUTO_LOG_SWEEP_HOP_WAIT_S = 120.0
 
 
@@ -679,9 +689,9 @@ AUTO_LOG_LOCK_CLASS = 141003
 _PRUNE_MIN_INTERVAL_S = 3600.0
 _LAST_PRUNE = [0.0]
 
-# Rows handled per pass. One pass holds a transaction open across its unlink
-# loop, so the loop is bounded and a backlog drains over consecutive ticks
-# instead of in one unbounded pass.
+# Rows handled per pass. One pass's unlink work is one thread on the volume
+# pool and its DELETE names every collectable id, so both are bounded and a
+# backlog drains over consecutive ticks instead of in one unbounded pass.
 _PRUNE_BATCH = 200
 
 # Rows whose blob could not be unlinked, held out of the next few selections.
@@ -704,6 +714,134 @@ _PRUNE_BATCH = 200
 _PRUNE_HOLD_S = 6 * 3600.0
 _PRUNE_HELD_MAX = 5 * _PRUNE_BATCH
 _PRUNE_HELD: dict[str, float] = {}
+
+# ── ONE RETENTION PASS AT A TIME, HELD WITHOUT A CONNECTION (R8-M1) ─────────
+#
+# Round 8 kept two passes off one row with row locks held from the due SELECT,
+# through the volume hop, to the DELETE -- a pooled connection checked out for
+# as long as the volume took. Round 9 holds no connection across the hop, so
+# the exclusion moves to two things that need none:
+#
+#   * THE GATE: one pass per process, taken by `prune_auto_logs` before its
+#     first statement and refused, never queued, when it is taken (#644/#646:
+#     a waiter that queued would be a waiter holding something). It is a
+#     check-and-set under a threading lock with no await between the two, and
+#     it is held by the pass AND by its unlink work, so a pass whose WAIT ended
+#     at the ceiling stays the running pass until its thread's unlinks end
+#     (`_PrunePass`). Process-wide is box-wide here: one worker, pinned on the
+#     compose command (#125/#651), the split `_account_turn` also makes.
+#   * THE ADVISORY LOCK, keyed on a VALUE (#197/#207: the pass is not a row),
+#     in its non-blocking form in BOTH of the pass's transactions, so a second
+#     process's pass -- were the pin ever lost -- is refused at its statements
+#     rather than waited for with a connection checked out (#612).
+#
+# The class differs from `AUTO_LOG_LOCK_CLASS` (the per-account upload lock)
+# and from every other *_LOCK_CLASS in the tree, which the suite asserts; the
+# key is the one retention pass there is.
+AUTO_LOG_PRUNE_LOCK_CLASS = 141004
+AUTO_LOG_PRUNE_LOCK_KEY = 1
+
+_PRUNE_GATE_LOCK = threading.Lock()
+_PRUNE_PASS: list = [None]
+
+
+class RetentionPassBusy(Exception):
+    """Another retention pass holds the gate or the lock; this one ran nothing
+    that needs undoing. The operator route answers 409."""
+
+
+class RetentionPassTimedOut(Exception):
+    """The unlink pass did not return within `AUTO_LOG_SWEEP_HOP_WAIT_S`; no
+    row was deleted. The operator route answers 503."""
+
+
+class _PrunePass:
+    """The running pass's hold on the gate. `holders` counts the pass's
+    coroutine and, once queued, its unlink work; the slot it was taken from
+    is cleared when the last of them releases -- and only that slot, so a hold
+    released after its slot was replaced never frees a newer pass's."""
+
+    __slots__ = ("slot", "holders")
+
+    def __init__(self, slot):
+        self.slot = slot
+        self.holders = 1
+
+    def hold(self) -> None:
+        with _PRUNE_GATE_LOCK:
+            self.holders += 1
+
+    def release(self) -> None:
+        with _PRUNE_GATE_LOCK:
+            self.holders -= 1
+            if self.holders <= 0 and self.slot[0] is self:
+                self.slot[0] = None
+
+
+def _prune_pass_take():
+    """The gate: a `_PrunePass` if no pass is running in this process, else
+    None. No await between the check and the set."""
+    slot = _PRUNE_PASS
+    with _PRUNE_GATE_LOCK:
+        if slot[0] is not None:
+            return None
+        slot[0] = _PrunePass(slot)
+        return slot[0]
+
+
+def _one_retention_pass_at_a_time(fn):
+    """`fn` admitted through the gate: a second caller is refused with
+    `RetentionPassBusy` before it has run a statement, so it holds no
+    connection, no lock and no thread while it is refused."""
+    @functools.wraps(fn)
+    async def gated(*args, **kwargs):
+        gate = _prune_pass_take()
+        if gate is None:
+            print("[AUTO-LOG] retention: a pass is already running in this "
+                  "process, so this one is refused rather than queued")
+            raise RetentionPassBusy("a retention pass is already running")
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            gate.release()
+    return gated
+
+
+async def _take_prune_lock(db: AsyncSession) -> bool:
+    """The pass's advisory lock in this transaction, NON-blocking: True when
+    taken. Anything but a true answer reads as not taken."""
+    got = (await db.execute(
+        text("SELECT pg_try_advisory_xact_lock(CAST(:cls AS integer), "
+             "CAST(:key AS integer)) AS got"),
+        {"cls": AUTO_LOG_PRUNE_LOCK_CLASS, "key": AUTO_LOG_PRUNE_LOCK_KEY},
+    )).scalar()
+    return got is True
+
+
+def _gated_unlink_due_blobs(gate, base, plan):
+    """`_unlink_due_blobs` on its worker thread, releasing the gate hold the
+    pass handed it when the unlinks END -- whether or not anybody still
+    waits for them."""
+    try:
+        return _unlink_due_blobs(base, plan)
+    finally:
+        if gate is not None:
+            gate.release()
+
+
+def _start_unlink_pass(base, plan):
+    """Queue retention's unlink pass on the volume pool and hand it a hold on
+    the running pass's gate; the future it answers is waited for shielded, so
+    a ceiling or a cancellation never un-queues the work that holds it."""
+    gate = _PRUNE_PASS[0]
+    if gate is not None:
+        gate.hold()
+    try:
+        return _start(_VOLUME_POOL, _gated_unlink_due_blobs, gate, base, plan)
+    except BaseException:
+        if gate is not None:
+            gate.release()
+        raise
 
 # The scheduled sweep's period, and how long after boot the first pass waits.
 # The delay keeps retention off the boot path, where the janitor self-test,
@@ -2567,13 +2705,12 @@ async def upload_auto_log(request: Request, db: AsyncSession = Depends(get_db)):
                   f"mode={req.mode or '-'} raw_chars={len(log_blob)} stored_bytes={len(data)} "
                   f"scrub os_user={counts.get('os_user', 0)} discord_id={counts.get('discord_id', 0)}")
 
-            # NOT AWAITED, AND NOT ON THIS REQUEST'S SESSION (R7-M4). The
-            # opportunistic retention pass holds its connection across its own
-            # unlink pass by design -- the row locks that keep two passes off one
-            # row live on it -- so run inside this request it made an accepted
-            # upload wait on a volume while holding a connection, the pattern
-            # this round removes. It is a task of its own with a session of its
-            # own (#607), and the upload answers without it.
+            # NOT AWAITED, AND NOT ON THIS REQUEST'S SESSION (R7-M4). Run
+            # inside this request the opportunistic retention pass would make
+            # an accepted upload wait on the volume for the length of a whole
+            # pass. It is a task of its own with a session of its own (#607),
+            # and the upload answers without it; since round 9 the pass holds
+            # no connection across its own unlink pass either (R8-M1).
             _maybe_prune()
 
             return {
@@ -2700,6 +2837,7 @@ def _unlink_due_blobs(base, plan) -> tuple[list, str | None]:
     return outcomes, barrier
 
 
+@_one_retention_pass_at_a_time
 async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DAYS) -> dict:
     """Unlink the blobs of kind='auto' rows older than `days`, then delete the
     rows whose blob is gone.
@@ -2739,29 +2877,43 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
     "the blob is durably not on the volume" are two different facts and the
     DELETE is entitled to the second one (#430).
 
-    TWO PASSES NEVER HOLD THE SAME ROW. The due rows are selected `FOR NO KEY
-    UPDATE SKIP LOCKED`, so an overlapping pass takes the rows this one did
-    not and the window above closes from the other side as well: a pass
-    cannot read `absent` off a removal another pass is in the middle of and
-    has not flushed. The MODE is the weakest one that still conflicts with
-    this pass's own later write (#202): the DELETE below needs it, `FOR NO KEY
-    UPDATE` self-conflicts so two passes serialize, and it is KEY-SHARE
-    compatible, so it does not enrol every foreign-key insert that references
-    a `bug_reports` row in this sweep's lock graph the way `FOR UPDATE` would.
-    `SKIP LOCKED` rather than a wait, because the rows are interchangeable
-    work and the pass behind should take the next `_PRUNE_BATCH` rather than
-    block on a volume that is already slow; the LockRows node sits under the
-    LIMIT, so a pass still gets up to a full batch of rows nobody else holds.
-    The lock is held from the SELECT through the thread hop to the DELETE and
-    the commit, because that whole span is the window it exists to close, and
-    #208's rule is kept by the DELETE re-checking the age predicate the SELECT
-    chose on rather than trusting the id list alone.
+    AT MOST ONE PASS AT A TIME, AND NO CONNECTION ACROSS THE UNLINK PASS
+    (round 9, R8-M1). Until round 9 two passes were kept off one row by
+    `FOR NO KEY UPDATE SKIP LOCKED` row locks held from the SELECT, through
+    the thread hop, to the DELETE -- a pooled connection checked out for as
+    long as the volume took, so with enough due batches thirty overlapping
+    operator calls held the whole 20 + 10 pool behind four volume threads and
+    every other request waited out the pool's timeout. Now:
 
-    Gating on the ROW is deliberate (#203): every due row exists by
-    construction -- it is what the SELECT returned -- so there is no
-    lock-nothing window of the kind a lazily created table has, and no
-    advisory lock is needed to stand in for a row that may not be there
-    (#207).
+      * THE GATE, BEFORE THE FIRST STATEMENT (`_one_retention_pass_at_a_time`):
+        a second caller in this process is refused at once with
+        `RetentionPassBusy` -- the operator route answers 409 -- holding no
+        connection, no lock and no thread. The pass's unlink work holds the
+        gate too, so a pass whose wait ended at the ceiling is still the one
+        running until its thread's unlinks end.
+      * THE ADVISORY LOCK, NON-BLOCKING, IN BOTH TRANSACTIONS
+        (`_take_prune_lock`, keyed on a value, #197/#207): refused, the pass
+        ends its transaction and raises `RetentionPassBusy`; it never waits for
+        the lock with a connection checked out (#612). This is what refuses a
+        second PROCESS; the gate is the process's own (one worker, #125/#651).
+      * T1 -- the lock and the due SELECT -- is ENDED before the hop
+        (`_end_transaction`), so nothing is checked out while the volume is
+        waited for. T2 -- the lock again, the DELETE and its commit -- opens
+        only once the outcomes are in, and the DELETE re-reads every row on the
+        new transaction and re-checks the predicate the SELECT chose on (#208)
+        rather than trusting the id list alone.
+      * PAST THE CEILING THE PASS RAISES `RetentionPassTimedOut` -- 503 on the
+        operator route, never a 200 -- having deleted nothing and holding
+        nothing: T1 has ended and T2 never began.
+
+    WHAT CROSSES THE HOP WITH NO DATABASE LOCK, AND WHY NO ROW IS LOST TO IT.
+    Between T1 and T2 nothing in the database is held, so a pass in ANOTHER
+    process -- were the one-worker pin lost -- could select the same rows. It
+    still deletes a row only after its OWN directory flush has succeeded, and
+    that flush promises every entry change issued in the directory, whoever
+    issued it (the `absent` reading above), so neither pass's DELETE runs ahead
+    of a removal nothing has promised; a row deleted by one is a DELETE of
+    nothing for the other. In this process the gate makes the question moot.
 
     A row kept this way is also HELD OUT of the next few selections
     (`_PRUNE_HELD`). Keeping it and re-selecting it are two different
@@ -2772,8 +2924,8 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
     it is a cooldown and not a verdict.
 
     Bounded to `_PRUNE_BATCH` rows per call. A backlog drains across ticks
-    rather than holding one transaction open over an unbounded loop of
-    filesystem calls.
+    rather than in one thread holding a volume worker over an unbounded loop
+    of filesystem calls and one DELETE naming an unbounded id list.
 
     `make_interval(days => CAST(:days AS integer))` rather than composing an
     interval from a string. The precise history, because the two learnings
@@ -2796,6 +2948,14 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
         _PRUNE_HELD.pop(rid, None)
     held = [uuid.UUID(rid) for rid in _PRUNE_HELD]
 
+    # T1: THE LOCK, THEN THE DUE ROWS, THEN THE TRANSACTION ENDS -- before
+    # anything touches the volume, so no connection is checked out across the
+    # hop below (R8-M1). Refused, nothing has been read and nothing is held.
+    if not await _take_prune_lock(db):
+        await _end_transaction(db)
+        print("[AUTO-LOG] retention: another process holds the retention "
+              "pass's lock, so this pass is refused rather than queued")
+        raise RetentionPassBusy("a retention pass is already running")
     due = (await db.execute(
         text("""SELECT id::text AS id, log_filename
                   FROM bug_reports
@@ -2803,10 +2963,10 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
                    AND created_at < NOW() - make_interval(days => CAST(:days AS integer))
                    AND NOT (id = ANY(CAST(:held AS uuid[])))
                  ORDER BY created_at
-                 LIMIT :lim
-                   FOR NO KEY UPDATE SKIP LOCKED"""),
+                 LIMIT :lim"""),
         {"days": int(days), "lim": _PRUNE_BATCH, "held": held},
     )).mappings().all()
+    await _end_transaction(db)
     if not due:
         if held:
             # Not "nothing to collect": there are rows this pass deliberately
@@ -2814,16 +2974,12 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
             # that skipped its entire backlog print the same thing otherwise.
             print(f"[AUTO-LOG] retention sweep: nothing due outside the "
                   f"{len(held)} row(s) held back after a failed unlink")
-        # The SELECT above opened a transaction on this session and this path
-        # writes nothing, so it has to be ENDED rather than abandoned. On a
-        # session of the pass's own -- the retention loop's, and since round 8
-        # the opportunistic pass's -- that would resolve itself when the
-        # context manager exits; on the operator route's it does not, because
-        # that session is the REQUEST's and it stays checked out until the
-        # request finishes -- an idle-in-transaction connection holding back
-        # the vacuum horizon for that long, for a pass that decided to do
-        # nothing.
-        await db.rollback()
+        # T1 has already ENDED above, on every path: on a session of the
+        # pass's own that would resolve itself when the context manager exits;
+        # on the operator route's it would not, because that session is the
+        # REQUEST's and stays open until the request finishes -- an
+        # idle-in-transaction connection holding back the vacuum horizon for
+        # that long, for a pass that decided to do nothing.
         return {"rows": 0, "blobs": 0, "retained": 0, "undurable": 0,
                 "due": 0, "held": len(held)}
 
@@ -2837,24 +2993,21 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
     # than one per row: the loop is free either way and the thread does not
     # pay a handoff per candidate.
     #
-    # ON THE VOLUME POOL, AND THE WAIT HAS A CEILING (R7-M4). This is the one
-    # wait in the module that is made WITH a connection checked out, and
-    # deliberately: the row locks above are what keep a second pass off
-    # these rows until the DELETE, and they live on this transaction. What
-    # bounds it is `AUTO_LOG_SWEEP_HOP_WAIT_S` and who can reach it -- the
-    # retention loop's pass, at most one opportunistic pass an hour on its own
-    # session, and the operator's internal route -- never an upload. A pass
-    # whose unlinks do not return in time cannot know which blobs went, so it
-    # deletes NOTHING: the transaction ends, every due row is kept and held
-    # out of the next passes, and the thread's unlinks, whenever they land,
-    # are what a later pass reads back as `absent` and makes durable before
-    # it deletes a row.
+    # ON THE VOLUME POOL, WITH A CEILING, AND WITH NO CONNECTION CHECKED OUT
+    # (R7-M4, R8-M1). T1 has ended, so the wait below holds nothing any other
+    # request needs. The work holds the pass's gate until it ENDS
+    # (`_start_unlink_pass`) and is waited for SHIELDED, so neither the
+    # ceiling nor a cancellation un-queues it. A pass whose unlinks do not
+    # return in time cannot know which blobs went, so it deletes NOTHING:
+    # every due row is kept and held out of the next passes, and the thread's
+    # unlinks, whenever they land, are what a later pass reads back as
+    # `absent` and makes durable before it deletes a row.
     try:
-        outcomes, barrier = await _hop(
-            _VOLUME_POOL, AUTO_LOG_SWEEP_HOP_WAIT_S, _unlink_due_blobs, base,
-            [(r["id"], r["log_filename"]) for r in due])
+        outcomes, barrier = await asyncio.wait_for(
+            asyncio.shield(_start_unlink_pass(
+                base, [(r["id"], r["log_filename"]) for r in due])),
+            AUTO_LOG_SWEEP_HOP_WAIT_S)
     except (asyncio.TimeoutError, TimeoutError):
-        await db.rollback()
         for r in due:
             _hold(r["id"], clock)
         print(f"[AUTO-LOG] retention: the unlink pass over {len(due)} due "
@@ -2863,8 +3016,8 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
               f"deleted this pass; they are kept, held out of the next "
               f"{int(_PRUNE_HOLD_S)}s of sweeps, and a later pass re-reads "
               f"the volume")
-        return {"rows": 0, "blobs": 0, "retained": len(due), "undurable": 0,
-                "due": len(due), "held": len(_PRUNE_HELD)}
+        raise RetentionPassTimedOut(
+            "the retention unlink pass did not return in time") from None
 
     collectable: list[str] = []
     retained: list[str] = []
@@ -2924,6 +3077,18 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
 
     deleted = 0
     if collectable:
+        # T2: THE LOCK AGAIN, on a fresh transaction. Refused, another
+        # process's pass is at its statements: the unlinks this pass made are
+        # durable (the barrier above succeeded) and their rows are kept, NOT
+        # held, so whichever pass runs next reads them `absent`, flushes, and
+        # deletes them. Nothing here is half-done: no statement has written.
+        if not await _take_prune_lock(db):
+            await _end_transaction(db)
+            print(f"[AUTO-LOG] retention: another process took the retention "
+                  f"pass's lock during the unlink pass, so the "
+                  f"{len(collectable)} collectable row(s) are kept for the "
+                  f"next pass, which reads their blobs as gone")
+            raise RetentionPassBusy("a retention pass is already running")
         # `CAST(:ids AS uuid[])` types the bound parameter explicitly, and the
         # values handed over are real UUID objects rather than strings --
         # #275/#448: under asyncpg the surrounding expression types the param,
@@ -2939,13 +3104,9 @@ async def prune_auto_logs(db: AsyncSession, *, days: int = AUTO_LOG_RETENTION_DA
             {"days": int(days), "ids": [uuid.UUID(i) for i in collectable]},
         )).rowcount or 0
         await db.commit()
-    else:
-        # Every due row was retained, so there is nothing to commit -- and the
-        # SELECT's transaction is still open. Same reason as the early return
-        # above: the loop's own session would be ended by its context manager,
-        # the request's session would not be, and this is the shape of pass a
-        # stuck blob volume produces for as long as the fault lasts.
-        await db.rollback()
+    # Every due row retained: there is no T2 at all, and nothing is open --
+    # T1 ended before the hop. This is the shape of pass a stuck blob volume
+    # produces for as long as the fault lasts.
 
     print(f"[AUTO-LOG] retention sweep: {len(due)} row(s) past {days}d, "
           f"{unlinked} blob(s) unlinked, {deleted} row(s) deleted, "
@@ -3585,16 +3746,15 @@ def _maybe_prune() -> None:
     """Opportunistic retention, throttled per process. Never fails an upload,
     and since round 8 never DELAYS one either.
 
-    The pass holds a pooled connection across its unlink pass by design --
-    the `FOR NO KEY UPDATE SKIP LOCKED` row locks that keep two passes off one
-    row are held on it from the SELECT to the DELETE (see `prune_auto_logs`).
-    Run on the request's session, an accepted upload therefore waited on the
-    volume with a connection checked out, which is the pattern R7-M4 removes.
-    So the pass is its own task with its own session (#607: a writer the
-    request must not wait for gets a session of its own, never a nested
-    checkout under the request's), and the upload has answered before it
-    starts. The throttle still reads a monotonic clock, so it is at most one
-    pass an hour per process however many uploads arrive."""
+    A pass waits on the volume for as long as its unlinks take, so run on the
+    request it would make an accepted upload wait for the whole pass. So the
+    pass is its own task with its own session (#607: a writer the request must
+    not wait for gets a session of its own, never a nested checkout under the
+    request's), and the upload has answered before it starts. Since round 9
+    the pass holds no connection across its unlinks either, and a pass that
+    finds another running is refused at the gate (`RetentionPassBusy`) and
+    goes no further. The throttle still reads a monotonic clock, so it is at
+    most one pass an hour per process however many uploads arrive."""
     now = time.monotonic()
     if now - _LAST_PRUNE[0] < _PRUNE_MIN_INTERVAL_S:
         return
@@ -3614,6 +3774,10 @@ async def _opportunistic_prune() -> None:
             await prune_auto_logs(db)
     except asyncio.CancelledError:
         raise
+    except RetentionPassBusy:
+        # Another pass is running; that pass is the retention this upload
+        # would have triggered. The gate printed its own line.
+        pass
     except Exception as ex:
         print(f"[AUTO-LOG] prune failed: {type(ex).__name__}")
 
@@ -3661,7 +3825,14 @@ async def auto_log_retention_loop() -> None:
     while True:
         try:
             async with async_session() as db:
-                result = await prune_auto_logs(db)
+                try:
+                    result = await prune_auto_logs(db)
+                except RetentionPassBusy:
+                    # The operator's pass (or another process's) is the one
+                    # running: retention IS running, so this is not a failure
+                    # and is not counted as one. The gate or the lock printed
+                    # its own line; the orphan sweep still runs this tick.
+                    result = {"due": 1, "held": 0}
                 # The row-walking sweep above cannot see a file no row names,
                 # and the upload's indeterminate-commit arm deliberately leaves
                 # one. This is the only thing in the tree that collects it, and
@@ -3710,6 +3881,12 @@ async def run_auto_log_prune(
     rate_limit_gate middleware before any body is read; the check is repeated
     here because every other internal route repeats it and a route that
     depended only on the middleware would be one refactor away from open.
+
+    THREE ANSWERS (round 9, R8-M1): 200 with the pass's counts; 409 when a
+    pass is already running -- refused before its first statement, so it held
+    nothing while it was refused; 503 when the unlink pass did not return
+    within `AUTO_LOG_SWEEP_HOP_WAIT_S` -- no row deleted, never reported as a
+    200 that collected nothing.
     """
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
@@ -3726,4 +3903,11 @@ async def run_auto_log_prune(
     # (A first attempt at this fix used `Query(None, ...)`, which is still a
     # Query instance and changed nothing; the test below caught it.)
     requested = AUTO_LOG_RETENTION_DAYS if days is None else days
-    return await prune_auto_logs(db, days=max(1, min(int(requested), 365)))
+    try:
+        return await prune_auto_logs(db, days=max(1, min(int(requested), 365)))
+    except RetentionPassBusy:
+        raise HTTPException(status_code=409,
+                            detail="a retention pass is already running")
+    except RetentionPassTimedOut:
+        raise HTTPException(status_code=503,
+                            detail="log storage unavailable")

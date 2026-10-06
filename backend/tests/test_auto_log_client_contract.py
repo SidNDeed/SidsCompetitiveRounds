@@ -205,5 +205,16 @@ def test_every_refusal_the_route_can_raise_is_one_the_client_handles_without_ret
     assert codes | helper_codes <= {400, 401, 413, 422, 429, 503}, codes | helper_codes
     assert all(400 <= c < 600 for c in codes | helper_codes)
     module_codes = {int(c) for c in re.findall(r"status_code=(\d+)", inspect.getsource(auto_logs))}
-    # 403 is the internal prune route's key check only; the client never calls it
-    assert module_codes - {403} <= {400, 401, 413, 422, 429, 503}, module_codes
+    # The internal prune route's own answers -- 403 (the key), 409 (a pass is
+    # already running) and 503 (its unlink pass past the ceiling) -- belong to
+    # it alone; the client never calls it, and no code the client can meet is
+    # admitted by this exception.
+    prune_codes = {int(c) for c in re.findall(
+        r"status_code=(\d+)", inspect.getsource(auto_logs.run_auto_log_prune))}
+    assert prune_codes == {403, 409, 503}, prune_codes
+    module_src = inspect.getsource(auto_logs)
+    for code in (403, 409):
+        assert module_src.count("status_code=%d" % code) == inspect.getsource(
+            auto_logs.run_auto_log_prune).count("status_code=%d" % code), (
+            "status %d is raised outside the internal prune route" % code)
+    assert module_codes - {403, 409} <= {400, 401, 413, 422, 429, 503}, module_codes
