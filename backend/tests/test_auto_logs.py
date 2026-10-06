@@ -4561,9 +4561,9 @@ def test_the_marked_span_deadline_covers_the_insert_and_the_commit(
     # would have measured the flush rather than the stalled statement it is
     # about. `test_the_durability_barrier_is_charged_to_the_marked_span` is
     # where the barrier's own cost is the subject.
-    T = 1.5
+    T = 4.0   # 1.5 until the relaunch hold: a loaded seat spent it on the section alone
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
-    stall = 5.0
+    stall = 12.0
 
     # ── the INSERT half ──────────────────────────────────────────────────
     started = time.monotonic()
@@ -4623,9 +4623,9 @@ def test_the_span_deadline_reds_when_an_await_inside_it_loses_the_budget(
     # Same headroom as the case above, and for the same reason: the span now
     # pays for four fsyncs, so a T below them would be expired by the
     # barriers rather than by the site each mutant unwraps.
-    T = 1.5
+    T = 4.0   # as above: 1.5 was spent by the section alone on a loaded seat
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
-    stall = 5.0
+    stall = 12.0
 
     COMMIT_SITE = ("                left = _span_budget(span_deadline)\n"
                    "                await asyncio.wait_for(db.commit(), left)\n")
@@ -7152,7 +7152,7 @@ def test_the_durability_barrier_is_charged_to_the_marked_span(logdir, verified,
     REFUSE 503 inside T and commit nothing. The mutant takes the ceiling off
     the await that covers the barrier, and the request outlives T instead.
     """
-    T, stall = 1.0, 4.0
+    T, stall = 3.0, 10.0   # was 1.0, 4.0: the same headroom as the span cases
     monkeypatch.setattr(auto_logs, "AUTO_LOG_MARKED_SPAN_DEADLINE_S", T)
 
     # STRUCTURAL FIRST: the two barriers on the write path are reached only
@@ -9735,6 +9735,11 @@ def test_thirty_concurrent_uploads_cannot_retain_the_pool(logdir, verified,
     """
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+    # The property is that the waits QUEUE and land, not that fifteen serial
+    # writes fit the production 20 s lock wait: on a loaded seat (the whole-
+    # suite run at 603fdcd7) they took 0.7-1.2 s each and the last five were
+    # refused at 20 s. The ceiling's own refusal has its own cases.
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK_WAIT_S", 120.0)
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
     monkeypatch.setattr(main, "_is_admin", _no_admin)
     monkeypatch.setattr(main, "_mark_mod_seen", _noop_mark)
@@ -10108,7 +10113,7 @@ def test_a_player_attachment_whose_directory_does_not_resolve_is_filed_as_lost(
     deadline, and meets it expired.) TWIN: the same deadline spelled
     `float(...)`.
     """
-    HOLD = 1.0
+    HOLD = 3.0   # was 1.0: on a loaded seat the rest of the path took the whole second
     site = ("                attach_deadline = (time.monotonic()\n"
             "                                   + _auto_logs.AUTO_LOG_VOLUME_WAIT_S)\n")
     monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
@@ -10235,7 +10240,7 @@ def test_the_admin_log_readers_answer_when_the_volume_does_not(logdir, admin,
     CONTROL: the ceiling lifted at each reader's site, and both wait the hold
     out and serve the log. TWIN: the same ceiling spelled `float(...)`.
     """
-    HOLD = 1.0
+    HOLD = 3.0   # was 1.0 (see the marker-clear case)
     monkeypatch.setattr(auto_logs, "AUTO_LOG_VOLUME_WAIT_S", 0.2)
     name = "%s.log.gz" % (RID,)
     (logdir / name).write_bytes(gzip.compress(b"a stored log line"))
@@ -10857,7 +10862,7 @@ def test_a_marker_clear_that_does_not_return_in_time_leaves_the_upload_accepted(
     CONTROL: the ceiling lifted at the site, and the upload waits the hold
     out. TWIN: the same ceiling spelled `float(...)`.
     """
-    HOLD = 1.0
+    HOLD = 3.0   # was 1.0: on a loaded seat the rest of the path took the whole second
     monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
     monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
     monkeypatch.setattr(auto_logs, "_free_bytes", lambda directory: 10 ** 12)
@@ -10914,7 +10919,7 @@ def test_a_retention_unlink_pass_that_does_not_return_in_time_deletes_no_row(
     CONTROL: the ceiling lifted at the site, and the pass waits the hold out
     and deletes the row. TWIN: the same ceiling spelled `float(...)`.
     """
-    HOLD = 1.0
+    HOLD = 3.0   # was 1.0 (see the marker-clear case)
     monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2)
     held = _Held(auto_logs._unlink_due_blobs)
     monkeypatch.setattr(auto_logs, "_unlink_due_blobs", held)
@@ -10973,7 +10978,7 @@ def test_an_orphan_sweep_hop_that_does_not_return_in_time_removes_nothing(
     CONTROL: the ceiling lifted at the site, and the pass waits the hold out
     and removes the orphan. TWIN: the same ceiling spelled `float(...)`.
     """
-    HOLD = 1.0
+    HOLD = 3.0   # was 1.0 (see the marker-clear case)
     target = {"walk": "_marker_candidates",
               "resolve": "_resolve_marker_candidates"}[hop]
     site = {"walk": "        walked = await _hop(_VOLUME_POOL, "
