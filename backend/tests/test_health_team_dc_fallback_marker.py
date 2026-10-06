@@ -670,8 +670,8 @@ def _controls():
          # route's own answer (degraded) on the first request of the pool test.
          + ["test_pg_requests_after_a_probe_on_a_one_connection_pool_answer[both-absent]"]),
         ("degraded-arm-unwired",
-         [("                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST)\n",
-           "                              team_dc_fallback=0)\n")],
+         [("                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST,\n",
+           "                              team_dc_fallback=0,\n")],
          "dc_fallback_at,dc_fallback_player_id",
          list(_OTHER_IDS) + ["test_the_degraded_arm_answers_the_cache_the_probe_writes",
                              "test_both_arms_carry_the_key_and_only_the_probe_writes_the_cache"]),

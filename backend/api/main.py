@@ -4468,7 +4468,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:47963 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:48103 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4534,7 +4534,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:47775 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:47915 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4604,7 +4604,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:47678 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:47818 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -5788,6 +5788,12 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+# Verified reads (board row 33, item b): every GET route this app registers
+# carries the read gate once, through the route class -- set here, before the
+# first route decorator, so a new GET route is gated by default. The two
+# routers included below are built with the same class. See read_gate.py.
+import read_gate
+app.router.route_class = read_gate.ReadGateRoute
 
 app.add_middleware(
     CORSMiddleware,
@@ -5981,6 +5987,16 @@ _VERSION_GATE_BYPASS = frozenset({
     # Aug 7 item 1: below-min clients (the ones being told to update) are a
     # prime audience for a standing "update out / server issue" notice.
     "/api/v1/alerts/active",
+    # Verified reads control routes (reviewed addition): the operator key
+    # issue, revoke and list, the read-gate stage, and the census read. Each
+    # carries the admin signature (_require_admin) and its caller is the seat's
+    # admin script, which is not the mod and has no mod version. Exact paths;
+    # the rate limiter's own list gains nothing.
+    "/api/v1/admin/operators/keys",
+    "/api/v1/admin/operators/keys/revoke",
+    "/api/v1/admin/operators",
+    "/api/v1/admin/read-gate/mode",
+    "/api/v1/admin/read-census",
 })
 
 
@@ -6337,6 +6353,21 @@ def _rl_client_address(request) -> str:
 
 
 @app.middleware("http")
+async def read_gate_cache_control(request: Request, call_next):
+    """Verified reads: a gated response the read gate marked (every gated read
+    under `enforce`, and the probe route in every stage) carries
+    `Cache-Control: no-store, private`, so no cache between the client and
+    this box can answer a later request with it. The gate's own refusals carry
+    the header themselves. In `off` and `log` nothing is marked, so gated
+    responses are byte-identical to what they were. Registered first, so it is
+    the innermost http middleware."""
+    response = await call_next(request)
+    if getattr(request.state, "read_gate_no_store", False):
+        response.headers["Cache-Control"] = read_gate.NO_STORE
+    return response
+
+
+@app.middleware("http")
 async def rate_limit_gate(request: Request, call_next):
     path = request.url.path
     # /api/v1/internal/* — AUTH BEFORE PARSE (Codex Aug-18 review; learning
@@ -6363,9 +6394,37 @@ async def rate_limit_gate(request: Request, call_next):
         return await call_next(request)   # authorized bot — exempt from RL
     if (not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS:
         return await call_next(request)
+    refusal = _rl_charge(request)
+    if refusal is not None:
+        return refusal
+    return await call_next(request)
+
+
+def _rl_charge(request, force: bool = False):
+    """Charge this request (or chat socket) to its per-address bucket, at most
+    ONCE per connection: the answer is None when it may proceed, else the
+    refusal response (413, 429, or the motion latch's 503). A connection
+    already charged is not charged again, so the version gate's charge ahead
+    of an operator-key lookup and rate_limit_gate's own charge are one charge.
+
+    rate_limit_gate calls it for every /api/v1/ path outside
+    _RATE_LIMIT_BYPASS. `force` charges a path in that bypass too: the version
+    gate passes it before the operator-key exemption lookup, and the read gate
+    (app.state.lookup_charge) before a credential lookup that would read the
+    database on a connection nothing has charged. A valid internal key is
+    never charged, as before. The once-per-connection mark lives on the
+    request's state; an object with url, client and headers but no state
+    (what rate_limit_gate accepted before this function) is charged on every
+    call."""
+    state = getattr(request, "state", None)
+    if state is not None and getattr(state, "rl_charged", False):
+        return None
+    path = request.url.path
+    if not force and ((not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS):
+        return None
     internal_key = request.headers.get("X-Internal-Key")
     if internal_key and internal_key == os.getenv("API_SECRET_KEY", ""):
-        return await call_next(request)   # bot is exempt
+        return None   # bot is exempt
     # Cheap body-size gate (header only; the proxy enforces the real limit).
     cl = request.headers.get("content-length")
     if cl:
@@ -6421,6 +6480,8 @@ async def rate_limit_gate(request: Request, call_next):
             headers={"Retry-After": str(int(window))},
         )
     dq.append(now)
+    if state is not None:
+        state.rl_charged = True
     # Periodic prune of idle buckets so the dict can't grow unbounded.
     if now - _RL_LAST_PRUNE[0] > 60:
         _RL_LAST_PRUNE[0] = now
@@ -6432,7 +6493,16 @@ async def rate_limit_gate(request: Request, call_next):
                 del _RL_BUCKETS[k]
         for k in [k for k, until in _RL_MOTION_LATCH.items() if until <= now]:
             del _RL_MOTION_LATCH[k]
-    return await call_next(request)
+    return None
+
+
+# Verified reads: the read gate charges a credential lookup that would read the
+# database on a connection nothing has charged yet (a route in
+# _RATE_LIMIT_BYPASS, the chat socket) to the same per-address buckets. The
+# charge is held by this app and the read gate reads it from the app serving
+# the connection, so importing this file a second time (as api.main) gives that
+# second app its own charge and leaves this app's charge unchanged.
+app.state.lookup_charge = lambda conn: _rl_charge(conn, force=True) is None
 
 
 @app.middleware("http")
@@ -6472,6 +6542,22 @@ async def version_gate(request: Request, call_next):
         return await call_next(request)
     sent = request.headers.get("X-Mod-Version")
     if not sent:
+        # Verified reads: a GET carrying a LIVE operator key (validated through
+        # the read gate's own verifier and cache) needs no mod version, unless
+        # its route is WRITE_ON_GET, PLAYER or BOT_ONLY. Every other request
+        # with no version, an unissued or revoked key included, gets the 426
+        # below exactly as before. The verdict rides request.state to the gate.
+        # The per-address limiter charges the request BEFORE that lookup (it
+        # is the request's one charge: rate_limit_gate does not charge it
+        # again), so repeated unissued keys answer 429 and stop reaching the
+        # operator table. /internal/ paths and a valid internal key returned
+        # above, so the internal key is still checked before any body is read.
+        if request.method == "GET" and request.headers.get("X-Operator-Key"):
+            refusal = _rl_charge(request, force=True)
+            if refusal is not None:
+                return refusal
+        if await read_gate.operator_version_exempt(request, app):
+            return await call_next(request)
         if REQUIRE_MOD_VERSION:
             return JSONResponse(
                 status_code=426,
@@ -7115,7 +7201,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=ffa_finishing_count,
-                              team_dc_fallback=team_dc_fallback)
+                              team_dc_fallback=team_dc_fallback,
+                              read_gate=await read_gate.current_mode(db),
+                              read_gate_build=read_gate.READ_GATE_BUILD)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -7147,13 +7235,15 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
-                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
+                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST,
+                              read_gate=read_gate.mode_word(),
+                              read_gate_build=read_gate.READ_GATE_BUILD)
 
 
 LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
-async def get_mod_version():
+async def get_mod_version(request: Request = None):
     """Returns the latest recommended mod version, the gating floor, and the
     capability flags a client must see BEFORE it changes what it puts on the
     wire.
@@ -7199,6 +7289,18 @@ async def get_mod_version():
         # first spelling went when the client lane landed on this tree.
         _INVOLUNTARY_CAUSE_CAPABILITY_FIELD: _involuntary,
     }
+    # Verified reads: the stage this box acts on (off | log | enforce |
+    # unknown), which a running client polls to learn a flip or a rollback, and
+    # the GET templates the gate never refuses for want of a read credential
+    # (from the live routing table). Present only for a request whose
+    # X-Mod-Version is READ_GATE_ADVERT_MIN or later; any other request (older,
+    # absent, unparseable) and a bare call with no request get the body above
+    # byte for byte. The header selects the response SHAPE only: both fields
+    # are readable by anyone, and nothing is admitted or refused on it.
+    sent_version = request.headers.get("x-mod-version") if request is not None else None
+    if read_gate.advert_requested(sent_version):
+        body["read_gate"] = await read_gate.current_mode()
+        body["read_gate_open"] = read_gate.ungated_templates(app.routes)
     # The joiner's region guard (connect-failure D3): advertised only while
     # this server enforces it. JOIN_REGION_GUARD ships False, so the answer
     # carries no such key and a gated joiner only logs a region mismatch.
@@ -20444,6 +20546,22 @@ async def get_recent_multimode_series(
     return {"entries": entries[:limit]}
 
 
+def _ws_chat_charge(ws) -> bool:
+    """Charge the chat socket's address to the per-address limiter before
+    database work the socket is about to cause: True when that work may run.
+    HTTP middleware never runs for a socket, so ws_chat charges here: once
+    at connect, before the socket's first database access, then once per auth
+    frame and once per chat message that passed the connection's spam gate,
+    each before that frame's own lookups. The once-per-connection mark is
+    cleared first because every one of those is a separate unit of database
+    work. A valid internal key is never charged (_rl_charge), so the bot's
+    socket is unaffected."""
+    state = getattr(ws, "state", None)
+    if state is not None:
+        state.rl_charged = False
+    return _rl_charge(ws, force=True) is None
+
+
 @app.websocket("/api/v1/ws/chat")
 async def ws_chat(ws: WebSocket):
     """Mod <-> server chat channel. Messages are broadcast fan-out style."""
@@ -20459,8 +20577,21 @@ async def ws_chat(ws: WebSocket):
         if sent and _parse_version(sent) < _parse_version(MIN_MOD_VERSION_EFFECTIVE):
             await ws.close(code=1008, reason="outdated")
             return
+    # The per-address limiter, before this socket's first database access (the
+    # credential count and the lockdown snapshot below). A refused charge is
+    # accepted and closed 1013 rate_limited -- the read gate's lookup_limited
+    # close -- so the client retries later and the handshake itself answers
+    # 101, not a refusal status; nothing below runs.
+    if not _ws_chat_charge(ws):
+        await ws.accept()
+        await ws.close(code=1013, reason="rate_limited")
+        return
     await chat_manager.connect(ws)
     print(f"[CHAT] subscriber connected (total={chat_manager.count})")
+    # Verified reads: the socket's outbound read side is COUNTED in log and
+    # enforce by its connect-time credential class; nothing here refuses, and
+    # the inbound path below is unchanged. Never raises.
+    await read_gate.count_socket(ws)
     # Lockdown snapshot for LATE JOINERS (D1 F15): the toggle broadcast only
     # reaches sockets connected at that moment, so every new socket is told
     # the current state up front — in BOTH states, because ChatClient.ChatLocked
@@ -20497,7 +20628,10 @@ async def ws_chat(ws: WebSocket):
             if data.get("type") == "auth":
                 claim = str(data.get("steam_id", ""))[:20]
                 token = str(data.get("token", ""))[:128]
-                if claim and token:
+                # Each auth frame's session read is charged first; a refused
+                # charge skips the read, so the socket's identity stays what
+                # it was, as after a failed check.
+                if claim and token and _ws_chat_charge(ws):
                     try:
                         from database import async_session
                         async with async_session() as _adb:
@@ -20558,6 +20692,12 @@ async def ws_chat(ws: WebSocket):
             # so spam bursts never turn into DB load.
             if not _chat_spam_ok(id(ws), message):
                 print(f"[CHAT] rate-limited {display_name} ({steam_id})")
+                continue
+            # The address is charged before this message's ban, mute and
+            # metadata reads and its insert; a refused charge drops the
+            # message silently, as the spam gate does.
+            if not _ws_chat_charge(ws):
+                print(f"[CHAT] address rate-limited {display_name} ({steam_id})")
                 continue
             # Banned players can't chat. Silently drop — telling them they're banned would
             # encourage griefing on alts. The mod's queue-join 409 is the primary signal.
@@ -68591,3 +68731,180 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int]:
         " RETURNING 1"
     ), {"days": MAIL_CENSOR_HITS_KEEP_DAYS})).fetchall()
     return len(expired), len(purged), len(hits)
+
+
+# -- Verified reads: operator keys, the read-gate stage, census, probe ---------
+#
+# Board row 33, item b. The gate itself, its route classes and its census live
+# in read_gate.py; these are its control routes. Every one carries the admin
+# signature (_require_admin) except the probe, which is the gate's canary. The
+# four admin paths and the census read are in _VERSION_GATE_BYPASS (their
+# caller is the seat's admin script, which has no mod version); the rate
+# limiter's own bypass list gains nothing. The POSTs land on the primary (the
+# standby's replica_write_gate refuses them); the census read answers on
+# either box from that process's memory.
+
+class _OperatorKeyIssueReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    operator_name: str = Field(..., max_length=64)
+    contact: str = Field(..., min_length=1, max_length=200)
+
+
+class _OperatorKeyRevokeReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    id: int
+
+
+class _ReadGateModeReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    mode: str = Field(..., max_length=16)
+
+
+@app.post("/api/v1/admin/operators/keys", tags=["Admin"])
+async def admin_operator_key_issue(req: _OperatorKeyIssueReq, db: AsyncSession = Depends(get_db)):
+    """Issue an operator key into the operator's free slot (1 or 2). The key is
+    answered ONCE; only its sha256 is stored. The operator name is
+    canonicalised (read_gate.canonical_operator_name) before the signature
+    check, the advisory lock, the insert and the audit row, so `SCRMOD` and
+    `scrmod` are one operator. With both slots live: 409 two_live_keys, and
+    the partial unique index refuses a racing third insert the same way."""
+    try:
+        name = read_gate.canonical_operator_name(req.operator_name)
+    except ValueError as ex:
+        raise HTTPException(status_code=422, detail=str(ex))
+    await _require_admin(db, req.admin_steam_id, "operator_key_issue", name, req.hmac_signature)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": "opkey:" + name})
+    live = {int(r[0]) for r in (await db.execute(text(
+        "SELECT slot FROM api_operator_keys WHERE operator_name = :n AND revoked_at IS NULL"
+    ), {"n": name})).all()}
+    free = [s for s in (1, 2) if s not in live]
+    if not free:
+        raise HTTPException(status_code=409, detail="two_live_keys")
+    key, key_hash, hint = read_gate.new_operator_key()
+    try:
+        async with db.begin_nested():
+            new_id = (await db.execute(text(
+                "INSERT INTO api_operator_keys"
+                " (operator_name, contact, slot, key_hash, key_hint, created_by)"
+                " VALUES (:n, :c, :s, :h, :hint, :by) RETURNING id"
+            ), {"n": name, "c": req.contact.strip(), "s": free[0], "h": key_hash,
+                "hint": hint, "by": req.admin_steam_id[:20]})).scalar()
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="two_live_keys")
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="operator_key_issue",
+                            details={"operator": name, "slot": free[0], "id": int(new_id),
+                                     "hint": hint})
+    await db.commit()
+    return {"id": int(new_id), "operator_name": name, "slot": free[0],
+            "key": key, "key_hint": hint}
+
+
+@app.post("/api/v1/admin/operators/keys/revoke", tags=["Admin"])
+async def admin_operator_key_revoke(req: _OperatorKeyRevokeReq, db: AsyncSession = Depends(get_db)):
+    """Revoke one live operator key by id. This box stops accepting it at
+    once; the other box within the 60 s positive-cache bound after the change
+    reaches its database."""
+    await _require_admin(db, req.admin_steam_id, "operator_key_revoke", str(req.id),
+                         req.hmac_signature)
+    row = (await db.execute(text(
+        "UPDATE api_operator_keys SET revoked_at = now(), revoked_by = :by"
+        " WHERE id = :id AND revoked_at IS NULL RETURNING operator_name, slot"
+    ), {"id": req.id, "by": req.admin_steam_id[:20]})).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no_live_key")
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="operator_key_revoke",
+                            details={"operator": row[0], "slot": int(row[1]), "id": req.id})
+    await db.commit()
+    read_gate.forget_operator_key_id(req.id)
+    return {"id": req.id, "operator_name": row[0], "slot": int(row[1]), "revoked": True}
+
+
+@app.get("/api/v1/admin/operators", tags=["Admin"])
+async def admin_operator_list(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Every operator key row, live and revoked, newest first. Never the hash."""
+    await _require_admin(db, admin_steam_id, "operator_key_list", "", hmac_signature)
+    rows = (await db.execute(text(
+        "SELECT id, operator_name, contact, slot, key_hint, created_at, created_by,"
+        "       revoked_at, revoked_by"
+        "  FROM api_operator_keys ORDER BY id DESC"
+    ))).mappings().all()
+    return {"operators": [{
+        "id": int(r["id"]), "operator_name": r["operator_name"], "contact": r["contact"],
+        "slot": int(r["slot"]), "key_hint": r["key_hint"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "created_by": r["created_by"],
+        "revoked_at": r["revoked_at"].isoformat() if r["revoked_at"] else None,
+        "revoked_by": r["revoked_by"],
+    } for r in rows]}
+
+
+def _read_gate_enforce_blocker() -> str | None:
+    """Why `enforce` may not be set yet, or None. Checked by the mode route
+    before it writes anything."""
+    floor = read_gate.READ_GATE_CLIENT_MIN
+    if floor is None:
+        return "client_floor_unnamed"
+    if _parse_version(MIN_MOD_VERSION_EFFECTIVE) < _parse_version(floor):
+        return "client_floor_below_read_gate"
+    if not read_gate.SOCKET_READ_GATE_BUILT:
+        return "socket_read_gate_absent"
+    return None
+
+
+@app.post("/api/v1/admin/read-gate/mode", tags=["Admin"])
+async def admin_read_gate_mode(req: _ReadGateModeReq, db: AsyncSession = Depends(get_db)):
+    """Set the verified-reads stage (off | log | enforce) for both boxes: one
+    runtime_settings row, read by each box through a 15 s TTL cache, no deploy
+    and no restart. Rollback is this route with `log`. `enforce` is refused
+    with 409 while the client floor is unnamed or below it, or while the chat
+    socket's read gate is not built; a refusal leaves the row unchanged."""
+    mode = (req.mode or "").strip().lower()
+    if mode not in read_gate.MODES:
+        raise HTTPException(status_code=422, detail="mode must be off, log or enforce")
+    await _require_admin(db, req.admin_steam_id, "read_gate_mode", mode, req.hmac_signature)
+    if mode == "enforce":
+        blocker = _read_gate_enforce_blocker()
+        if blocker is not None:
+            raise HTTPException(status_code=409, detail=blocker)
+    await db.execute(text(
+        "INSERT INTO runtime_settings (key, value) VALUES ('read_gate_mode', :v)"
+        " ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW()"
+    ), {"v": mode})
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="read_gate_mode",
+                            details={"mode": mode})
+    await db.commit()
+    read_gate.mode_cache_set(mode)
+    return {"mode": mode, "node": "standby" if IS_REPLICA else "primary"}
+
+
+@app.get("/api/v1/admin/read-census", tags=["Admin"])
+async def admin_read_census(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """This process's read census since it started (read_gate.census_snapshot):
+    node, boot_id, since, mode, counts by (route, method, class, key id,
+    version header present, refused), distinct sources per (class, hour) and
+    agents per unverified class. Readable on either box."""
+    await _require_admin(db, admin_steam_id, "read_census", "", hmac_signature)
+    return read_gate.census_snapshot(await read_gate.current_mode())
+
+
+@app.get(read_gate.PROBE_PATH, tags=["System"])
+async def read_gate_probe(request: Request):
+    """The read gate's canary. Class PROBE: the gate requires one valid
+    credential (internal key, session or operator key) in EVERY stage, counts
+    it, and this answers who it decided the caller was, and nothing else."""
+    cred = getattr(request.state, "read_gate_credential", None) or ("", "")
+    return JSONResponse(
+        {"node": "standby" if IS_REPLICA else "primary", "boot_id": read_gate.BOOT_ID,
+         "mode": read_gate.mode_word(), "credential_class": cred[0], "key_id": cred[1]},
+        headers={"Cache-Control": read_gate.NO_STORE})

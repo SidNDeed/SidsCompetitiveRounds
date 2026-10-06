@@ -34,7 +34,7 @@
           ],
           "main",
           "admin_list_actions",
-          "7a484d49de4d046de29dff5ded7030e060aa60b7"
+          "d789bb453fa9e182652cabbfae8f29fe9d33dc89"
         ],
         [
           "/api/v1/admin/admins",
@@ -43,7 +43,7 @@
           ],
           "main",
           "admin_list_admins",
-          "374fd4b7fda8134d6a72105e5777bc497056373f"
+          "e69af7baf19634dd7fa0add0d20962ee97b21dc9"
         ],
         [
           "/api/v1/admin/alerts",
@@ -52,7 +52,7 @@
           ],
           "main",
           "admin_alert_create",
-          "a25de11afb7789dbe627f5f545876c1b64b3d829"
+          "19d1f86650ecf731f95b4a4a48d6ac5f3cba2b23"
         ],
         [
           "/api/v1/admin/alerts/list",
@@ -61,7 +61,7 @@
           ],
           "main",
           "admin_alerts_list",
-          "decf96ecb4d81e6d1ebf5423d8588d6874e7ccbd"
+          "e80fd91f635853bfa6a0946ca041a0b63d77bc1e"
         ],
         [
           "/api/v1/admin/alerts/revoke",
@@ -70,7 +70,7 @@
           ],
           "main",
           "admin_alert_revoke",
-          "22a0d76f06ef0278f521a759dc86f9a1d8ceffd9"
+          "75d85dac8771a477bb36bf28efa1e3cedc1340ca"
         ],
         [
           "/api/v1/admin/artists/set",
@@ -79,7 +79,7 @@
           ],
           "main",
           "admin_set_artist",
-          "440bffc6fd7bf89bb68fbefdbc169bc31eeeacd6"
+          "15c7f35a66d02a7f2c5c116f77dc9837ac2e0196"
         ],
         [
           "/api/v1/admin/ban",
@@ -88,7 +88,7 @@
           ],
           "main",
           "admin_ban",
-          "19ffc3395ec12d2554a179f6d59760da62a5aecd"
+          "f3c5f56bd590c7802870ecf19f71a2051c820391"
         ],
         [
           "/api/v1/admin/banned-users",
@@ -97,7 +97,7 @@
           ],
           "main",
           "admin_list_bans",
-          "4464e8d7561b261fe20a7d140c5419b9df58cca7"
+          "7332eee79a928ba16ff0b958338eb16a47801a37"
         ],
         [
           "/api/v1/admin/check-status",
@@ -106,7 +106,7 @@
           ],
           "main",
           "admin_check_status",
-          "d0a920ac361ff1f473803d021f88c55bef1335f8"
+          "ee30698dd1f8857587a1f2229ca98cf3d5382ab8"
         ],
         [
           "/api/v1/admin/cosmetic-frames",
@@ -115,7 +115,7 @@
           ],
           "main",
           "admin_cosmetic_frames",
-          "6fd8d8b38b820e94615e1160cb1a4157be4d719f"
+          "38668728db08e466f64f61499ec4e126222e5681"
         ],
         [
           "/api/v1/admin/cosmetic-release-candidates",
@@ -124,7 +124,7 @@
           ],
           "main",
           "admin_cosmetic_release_candidates",
-          "ef9b03bebe8ec2ac0af1e9cc287ac935e0b3ae33"
+          "4fd3313bba7ca57b4535e737355e51e09e9c8baf"
         ],
         [
           "/api/v1/admin/cosmetic-review",
@@ -133,7 +133,7 @@
           ],
           "main",
           "admin_cosmetic_review",
-          "8be73ba18dab569095cf807c7c5ff8c905f7cf05"
+          "2e300234a9c3bb841e3845363ed46c8b663c6711"
         ],
         [
           "/api/v1/admin/cosmetic-submissions",
@@ -142,7 +142,7 @@
           ],
           "main",
           "admin_cosmetic_submissions",
-          "f5c8e7973285087eda853f3544005bfedcfd0e47"
+          "290836f5ce0b8178c51b0037aaba6f5b242c6284"
         ],
         [
           "/api/v1/admin/ffa-g3-seats",
@@ -151,7 +151,7 @@
           ],
           "main",
           "admin_ffa_g3_seat",
-          "ee1865fd07ea9b5ea1428a19f33843b827769fd3"
+          "5061096ddba04f14876209d991ccb40a2712b121"
         ],
         [
           "/api/v1/admin/flagged-matches",
@@ -160,7 +160,7 @@
           ],
           "main",
           "admin_list_flagged",
-          "d96944d924d86033d07cdd4031177204eace355b"
+          "099eb3292ee185a621fa4113c0f54b6602e3e394"
         ],
         [
           "/api/v1/admin/grant-achievement",
@@ -169,7 +169,7 @@
           ],
           "main",
           "admin_grant_achievement",
-          "0e54e28bb81c6b6579a198af5199ac6f802ee875"
+          "b7dd8d41bc4a4d742dcf29e08fc8761fa49246cf"
         ],
         [
           "/api/v1/admin/i18n/grants",
@@ -178,7 +178,7 @@
           ],
           "main",
           "admin_i18n_grant",
-          "4e3766464162c72b3fea48db29d0b68f671a35d7"
+          "d9fed1361d328d46a6bb78ec1ff206b2ad365d8e"
         ],
         [
           "/api/v1/admin/i18n/grants/list",
@@ -187,7 +187,7 @@
           ],
           "main",
           "admin_i18n_grants_list",
-          "03ab03e638763c4993d59138d25e66779afa0703"
+          "f8f10b17ea661dc10cf71aca0ef45ea43ae70915"
         ],
         [
           "/api/v1/admin/i18n/sync-keys",
@@ -196,7 +196,7 @@
           ],
           "main",
           "admin_i18n_sync_keys",
-          "ddb736f1908d2a5c810834e9895d29f6cd0a03ca"
+          "17fd1a7d9dac22d5ce6215220b54022042effae1"
         ],
         [
           "/api/v1/admin/maintenance/start",
@@ -205,7 +205,7 @@
           ],
           "main",
           "maintenance_start",
-          "cf9e63b5d7bf6cd86c63e2f1498f539257d5ec26"
+          "34cc1e08791de05ee829fb9c9a9f1cfa39d6454e"
         ],
         [
           "/api/v1/admin/maintenance/status",
@@ -214,7 +214,7 @@
           ],
           "main",
           "maintenance_status",
-          "adb1e77e1a2e1356aee8f624ed938076e8a100a2"
+          "c1f08e22b163061bf03a73f5a3202f4f2f8a0fe9"
         ],
         [
           "/api/v1/admin/maintenance/stop",
@@ -223,7 +223,7 @@
           ],
           "main",
           "maintenance_stop",
-          "420189ef37d4828dfa0fb4f171e2ec55e9189be8"
+          "3fbf3339a7986121e699322ee37addf2c54bfaa0"
         ],
         [
           "/api/v1/admin/missing-discord-usernames",
@@ -232,7 +232,7 @@
           ],
           "main",
           "missing_discord_usernames",
-          "c6f4721a22f885979b86c926bd52348bf9f91d46"
+          "28f23f46dda2e88928004233cc4cd609ce4c5168"
         ],
         [
           "/api/v1/admin/quarantine",
@@ -241,7 +241,7 @@
           ],
           "main",
           "admin_list_quarantine",
-          "58d722cf4b6f1e1c9aa002bc984b4d0cff87501d"
+          "8ae0ec457e4bc3c6c4d6e896cbdb1bc7fe17fa06"
         ],
         [
           "/api/v1/admin/quarantine/triage",
@@ -250,7 +250,7 @@
           ],
           "main",
           "admin_quarantine_triage",
-          "5e4267b55d72460a5ff5e06319c666528df4f30b"
+          "1d6dc182e1271ecb264e68c278dc412c8ef95450"
         ],
         [
           "/api/v1/admin/quarantine/triage/{mode}/{group_id}",
@@ -259,7 +259,7 @@
           ],
           "main",
           "admin_quarantine_triage_group",
-          "6fdb5d4c8fbe0f03821adcb6c1e34a1f52ef8d91"
+          "b6c3eddef6bf74123d8bb3a8cae03f9864791afb"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/accept",
@@ -268,7 +268,7 @@
           ],
           "main",
           "admin_accept_quarantine",
-          "452545965f792fd3396f7b1086517b7da4a5e73e"
+          "34e0ec075b3f7e74b6defd355534a0eda49b9f5b"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/discard",
@@ -277,7 +277,7 @@
           ],
           "main",
           "admin_discard_quarantine",
-          "0d4441f8e74a6c636ce1fe6993670255927f092d"
+          "cb4a4a1522f1234608f0ccdddeb2e120637c3836"
         ],
         [
           "/api/v1/admin/recent-series",
@@ -286,7 +286,7 @@
           ],
           "main",
           "admin_recent_series",
-          "e8d0ad2f37868dc04d5282d5827910320a790219"
+          "dd1ae3e153216b9b0f7f3ace3e487482bf8e80be"
         ],
         [
           "/api/v1/admin/records/exclude",
@@ -295,7 +295,7 @@
           ],
           "main",
           "admin_record_exclude",
-          "7ea05fa139e2602354cc01da3deea52ec2384d4c"
+          "ad03b0f7462f466469ce7beef0c49d2cb2af8fcc"
         ],
         [
           "/api/v1/admin/release-notes",
@@ -304,7 +304,7 @@
           ],
           "main",
           "admin_set_release_notes",
-          "7787ac2251e7cdaac3b30ee8817332f040c31fa2"
+          "4882cb6e598817ed534cb2a1f3305264c0a900a6"
         ],
         [
           "/api/v1/admin/resolve-flag-restoration",
@@ -313,7 +313,7 @@
           ],
           "main",
           "admin_resolve_flag_restoration",
-          "084d286b4142ed1749b397328400bbd027f47269"
+          "a5538c0d8b822bc55349603dc6525a9e04f3ee1e"
         ],
         [
           "/api/v1/admin/reverse-series",
@@ -322,7 +322,7 @@
           ],
           "main",
           "admin_reverse_series",
-          "128db9cc8fd4b2f2faaf265fe824feb5a8524c4a"
+          "38bd339e953a6d305d3e04fbff6a458fe98622a1"
         ],
         [
           "/api/v1/admin/review-flag",
@@ -331,7 +331,7 @@
           ],
           "main",
           "admin_review_flag",
-          "5a32d5712a8ef51c5e688375580daeaf07c8483b"
+          "da13a4872294fbf1458e21262b033d4d628b6100"
         ],
         [
           "/api/v1/admin/set-discord-username",
@@ -340,7 +340,7 @@
           ],
           "main",
           "set_discord_username",
-          "7bc1305fb288bf3d1064377c34f4dda402c6f61f"
+          "9fda8e2e681ae40272a62f557982d68e30d79f3f"
         ],
         [
           "/api/v1/admin/shop/set-artist",
@@ -349,7 +349,7 @@
           ],
           "main",
           "admin_set_item_artist",
-          "2df92fe0003b4a1a85871be4c3b732ebe9e21e21"
+          "5b34e3ef9adad45d0906b43062d6fe9058c01249"
         ],
         [
           "/api/v1/admin/team/rebuild-glicko",
@@ -358,7 +358,7 @@
           ],
           "main",
           "admin_rebuild_team_glicko",
-          "7be59505a216d871cc16fa17b44bfc683b7da8c1"
+          "396e5c6434c1ab64ee90ab79d6072eb994cfe04b"
         ],
         [
           "/api/v1/admin/team/reverse-series",
@@ -367,7 +367,7 @@
           ],
           "main",
           "admin_reverse_team_series",
-          "37aba2adb74370e800594cd23f9c1c2cf6b073ff"
+          "25125358ac22c939da786fe90ff6ece1cc38d499"
         ],
         [
           "/api/v1/admin/team/series/{series_id}/resolve",
@@ -376,7 +376,7 @@
           ],
           "main",
           "admin_resolve_team_series",
-          "89ea48a0d0d1cab5397e7699bda0aee08f6ff3a6"
+          "5fe7fcb9cbf5cc7202c7d2192ee780e23fbc5529"
         ],
         [
           "/api/v1/admin/unban",
@@ -385,7 +385,7 @@
           ],
           "main",
           "admin_unban",
-          "99f479d1e5f4daa4c67d84340293c685dc78266e"
+          "39d30cc628b3280a46ca3adc49da8b33e325d4c4"
         ],
         [
           "/api/v1/bug-reports",
@@ -394,7 +394,7 @@
           ],
           "main",
           "list_bug_reports",
-          "67f7317b9a7899b6e671cf8fc8d39a70913cad9b"
+          "78cb27b895209a872d9ec123ba905de55a9e904a"
         ],
         [
           "/api/v1/bug-reports",
@@ -403,7 +403,7 @@
           ],
           "main",
           "submit_bug_report",
-          "3443bce354ebaec879a957ffd5c29a30ec95c2c2"
+          "d71308f4538bcf9183a8850dbe9647cd0433a712"
         ],
         [
           "/api/v1/bug-reports/events/recent",
@@ -412,7 +412,7 @@
           ],
           "main",
           "recent_bug_report_events",
-          "10de18dd8ad1e9f82f1a76de70fe5d34a92e66ae"
+          "9dbcd94957406c06c438fa11ffe51f338db725ad"
         ],
         [
           "/api/v1/bug-reports/recent",
@@ -421,7 +421,7 @@
           ],
           "main",
           "recent_bug_reports",
-          "38f99eef394e8a69aa145ef2be8770015b0c1f62"
+          "024dc515deb9e6e6c43349ecbaaf7778bd55ce28"
         ],
         [
           "/api/v1/bug-reports/{report_id}",
@@ -430,7 +430,7 @@
           ],
           "main",
           "get_bug_report",
-          "7e60f60c6c1fe5a16904c7731faf2a45d17bf738"
+          "d34b7ef0bed37d38af331e135f2f157ec92820a7"
         ],
         [
           "/api/v1/bug-reports/{report_id}/comment",
@@ -439,7 +439,7 @@
           ],
           "main",
           "admin_comment_on_bug_report",
-          "b12b23b25296989209c38307588b210fd474b33d"
+          "e4c0b1da69a586d623a04db5efd675067c74190c"
         ],
         [
           "/api/v1/bug-reports/{report_id}/log",
@@ -448,7 +448,7 @@
           ],
           "main",
           "download_bug_report_log",
-          "89222f68c4735e96dc23bcfee02645e54a8c6b24"
+          "5dd054d53cf517094b012d38a4c4dccca19ee9c4"
         ],
         [
           "/api/v1/bug-reports/{report_id}/status",
@@ -457,7 +457,7 @@
           ],
           "main",
           "admin_change_bug_report_status",
-          "4d8ea8f89461e423298a1bf2843c08af206cbef4"
+          "2ebae5bdefc0b10deed379bf56051316d2f31fa9"
         ],
         [
           "/api/v1/cards",
@@ -466,7 +466,7 @@
           ],
           "main",
           "get_card_stats",
-          "a7db3a405325eb52343b158e1fec5e2b933aa33f"
+          "3c928c132faed16f5562818fbfaf7a2c9ec3a29e"
         ],
         [
           "/api/v1/cards/leaders-summary",
@@ -475,7 +475,7 @@
           ],
           "main",
           "get_card_leaders_summary",
-          "c144b6efee0f7d91f8c27b6a5632263c6a2fc339"
+          "bbb04a69b935e7ba7f11929c9091e34bc1bb296d"
         ],
         [
           "/api/v1/cards/pickers-summary",
@@ -484,7 +484,7 @@
           ],
           "main",
           "get_card_pickers_summary",
-          "e3b12ff3fb84c12fd3a509ccad13fca78ca093a0"
+          "1b0b0a811b96e6334fcb7517794bebfb354fe41e"
         ],
         [
           "/api/v1/cards/top-pickers",
@@ -493,7 +493,7 @@
           ],
           "main",
           "get_card_top_pickers",
-          "cc0c033ca41b54d0abddd1cbcd3809c102d00631"
+          "96833b65b4679b16af3b1cd9035aa724f94162ec"
         ],
         [
           "/api/v1/compare/player-nemesis",
@@ -502,7 +502,7 @@
           ],
           "main",
           "get_compare_player_nemesis",
-          "d44f5dea0748ef09d6466e4d35ba9c4f6be3a330"
+          "be285366e445c81bfe39b6f6aa1520176d349abc"
         ],
         [
           "/api/v1/ffa/leaderboard",
@@ -511,7 +511,7 @@
           ],
           "main",
           "ffa_leaderboard",
-          "c5dcd43275aee596d1fc32435db9a6d7c77fc158"
+          "3e2b190d5b163442b2044c4e78e9669d1cd63f56"
         ],
         [
           "/api/v1/ffa/matches",
@@ -520,7 +520,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "f2972f925785025569c52e3b83101370691d2396"
+          "4d23c3ed9152887f3d114624a2be779bba736dbf"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -529,7 +529,7 @@
           ],
           "main",
           "h2h_summary",
-          "470613c1ac2008c88f459a6f6790601582e5e030"
+          "fbda9180e81115d046dccefe78387dccbb41313c"
         ],
         [
           "/api/v1/internal/bug-reports/by-number/{bug_number}/user-comment",
@@ -538,7 +538,7 @@
           ],
           "main",
           "user_comment_on_bug_report",
-          "ba2637bcc826268e5b358b9b57e00ce3e1a4554a"
+          "160bdd21b9f536259813f375648292b28917fa8b"
         ],
         [
           "/api/v1/internal/bug-reports/events/ack",
@@ -547,7 +547,7 @@
           ],
           "main",
           "ack_bug_report_events",
-          "bae407b8f28968efa738307c62ef6b6cf2e06cdd"
+          "d2f3890abb94a86a67236e7b5bf8ae8a26135852"
         ],
         [
           "/api/v1/internal/bug-reports/{report_id}/channel-posted",
@@ -556,7 +556,7 @@
           ],
           "main",
           "ack_bug_report_posted",
-          "2a38a14302d581b48e8a0bde0be262c973659ac4"
+          "e2f0b64c29cee81a28963a4a9ccaa2a84f34ba17"
         ],
         [
           "/api/v1/internal/bug-reports/{report_id}/comment",
@@ -565,7 +565,7 @@
           ],
           "main",
           "internal_comment_on_bug_report",
-          "3d58cf96402cd4ad72c461a35a4d48fb40a82418"
+          "6b02645f35dbbeff98c6cec1c6c7145a61c36845"
         ],
         [
           "/api/v1/internal/linked-players",
@@ -574,7 +574,7 @@
           ],
           "main",
           "internal_linked_players",
-          "df81ce09b894b0054e64e128a39d7097b9448d8b"
+          "8dcbf22bae0d592b3dc16d197fba69e14be36966"
         ],
         [
           "/api/v1/internal/quarantine/digest",
@@ -583,7 +583,7 @@
           ],
           "main",
           "internal_quarantine_digest",
-          "36a9ac91eee77cc80f6916ff7499517fea5e7c1f"
+          "28a973563f1dcc0b256354a3330c935e2df8f3e9"
         ],
         [
           "/api/v1/internal/recent-flags",
@@ -592,7 +592,7 @@
           ],
           "main",
           "get_recent_flags",
-          "e6c294c54a76ebb33d00e264f59e4b2552a3f68e"
+          "50039df91f56c0f0e794bf603f276666c6f7b133"
         ],
         [
           "/api/v1/internal/recent-flags/ack",
@@ -601,7 +601,7 @@
           ],
           "main",
           "acknowledge_recent_flag",
-          "d8b3d4af3bc24e3ae391fdd0c37a953ebfdd1e4c"
+          "206b2dcca3648eb1852bc235766697e91e328a71"
         ],
         [
           "/api/v1/leaderboard",
@@ -610,7 +610,7 @@
           ],
           "main",
           "get_leaderboard",
-          "d6dd0f55dc027685971300d1e2e978fd7d9f9a00"
+          "fa0aaa02d6d187137205549e858bfabafc333134"
         ],
         [
           "/api/v1/matches",
@@ -619,7 +619,7 @@
           ],
           "main",
           "submit_match",
-          "902d218eb6582ee046c84ffab2ddc31d3aa83cd2"
+          "674e5f2d258a6eac408d41ead4494e7ff427a57c"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -628,7 +628,7 @@
           ],
           "main",
           "report_casual_dc",
-          "46753872d2ca59daf073db07266c4e9e974a90ec"
+          "1f039f9fdfcd8bf12c7e06e8f774bd88c2d63142"
         ],
         [
           "/api/v1/matches/macro-evidence",
@@ -637,7 +637,7 @@
           ],
           "main",
           "submit_macro_evidence",
-          "dd1f2888cc02cb7f962627a28fb0de2b3d56cca1"
+          "911bbbb950a9b4b9b74db2c878ecf481aef1e44c"
         ],
         [
           "/api/v1/ovt/leaderboard",
@@ -646,7 +646,7 @@
           ],
           "main",
           "ovt_leaderboard",
-          "17cd7b78f85465759699e0660a4b95a62adeabdd"
+          "5781d06a9370c59edfa324e5e597808244beb43f"
         ],
         [
           "/api/v1/ovt/matches",
@@ -655,7 +655,7 @@
           ],
           "main",
           "submit_ovt_match",
-          "52b7939c6209f0d5de2bcf2d6ef6bcdfd421f844"
+          "bc2ff019b5cdc13987b9cef2a52da9ca267b94b5"
         ],
         [
           "/api/v1/ovt/series/active",
@@ -664,7 +664,7 @@
           ],
           "main",
           "ovt_series_active",
-          "53557683606d2b28cbc0686f0593f5c890cf3042"
+          "b4ecad46fa029b790420b6d5785198d4e8918940"
         ],
         [
           "/api/v1/ovt/series/continuation",
@@ -673,7 +673,7 @@
           ],
           "main",
           "ovt_series_continuation",
-          "398596a591ddf6295ec9d1d8c692a9304198762f"
+          "24ea63d42e21facb0ec1d4c1eced4bc9b3e64f68"
         ],
         [
           "/api/v1/pc/card",
@@ -682,7 +682,7 @@
           ],
           "main",
           "pc_card_face",
-          "fb4020aa69d13554a9faae98671967d107e55e4f"
+          "72d03bb256e3500e609eefd38ba219a4163ce994"
         ],
         [
           "/api/v1/pc/collection",
@@ -691,7 +691,7 @@
           ],
           "main",
           "pc_collection",
-          "5d9e4408bc046ade79cc60140caa9b5c308dbec2"
+          "78315d5a9da9f24a0b7302656b522f0186159e38"
         ],
         [
           "/api/v1/pc/daily",
@@ -700,7 +700,7 @@
           ],
           "main",
           "pc_daily_claim",
-          "780204aeb992976da826949c5bdd77fd0a0f3188"
+          "0e1b8f965e05a87b6ddfe524634d9d092850ad35"
         ],
         [
           "/api/v1/pc/me",
@@ -709,7 +709,7 @@
           ],
           "main",
           "pc_me",
-          "48534667e94ad733fa3588f3cb88533ca698e2d5"
+          "24aefe3b50bd00bcdbd58da8baa9dbf4096588fc"
         ],
         [
           "/api/v1/pc/packs",
@@ -718,7 +718,7 @@
           ],
           "main",
           "pc_packs_history",
-          "69a74203f97f6c30bd4cd6741e6fe7da534ecd1f"
+          "a7d2e13cab8d0d28fadf6a3cd6c2ab0f861dbbaf"
         ],
         [
           "/api/v1/pc/packs/open",
@@ -727,7 +727,7 @@
           ],
           "main",
           "pc_open_pack",
-          "be8640d4883b9c70af5cb59bfa37676e6692f6c0"
+          "6041d593e55820afe9c264158921088705d4e927"
         ],
         [
           "/api/v1/pc/packs/result",
@@ -736,7 +736,7 @@
           ],
           "main",
           "pc_pack_result",
-          "58856a09c387ee638ff7121ac45d41654f5029bf"
+          "c216fc01142a4f6df5c67ca2e6df2897cd299548"
         ],
         [
           "/api/v1/pc/pool",
@@ -745,7 +745,7 @@
           ],
           "main",
           "pc_pool_summary",
-          "3b89fef8a6bccb456e757d48e07a9cfd29449ba3"
+          "1b4efe8d1ee40df767146288eab8e81cc326ec97"
         ],
         [
           "/api/v1/pc/prints/discard",
@@ -754,7 +754,7 @@
           ],
           "main",
           "pc_discard_print",
-          "bbe9765bb935ef6696eaf9e8630cfdda233fa743"
+          "97bbe899a6519dcb7fb6c0b0f355888008a26fee"
         ],
         [
           "/api/v1/pc/settings",
@@ -763,7 +763,7 @@
           ],
           "main",
           "pc_set_setting",
-          "003c5e01802f9d7ac50cbbaac7b4d2cd7a6838d7"
+          "d86126fde0367da457b6ad9a7a10fb0254f66bb2"
         ],
         [
           "/api/v1/players/block",
@@ -772,7 +772,7 @@
           ],
           "main",
           "block_player",
-          "f8bcfe0f31df421e1d87666d358fdf414795a36a"
+          "adf576dc9ecf23ad157a86d8da92632520a494c8"
         ],
         [
           "/api/v1/players/blocks/{steam_id}",
@@ -781,7 +781,7 @@
           ],
           "main",
           "get_player_blocks",
-          "15978a2dc71d03198220b3894eca7218e8ed9d83"
+          "c7778370f32c913ca27a008bf7dcc46b405379ae"
         ],
         [
           "/api/v1/players/by-discord/{discord_id}",
@@ -790,7 +790,7 @@
           ],
           "main",
           "get_player_by_discord",
-          "0df33808f7654da35909a4aeda80523a8e51638f"
+          "9b8cca4505c88539c2fb7736683bdd29710d5d03"
         ],
         [
           "/api/v1/players/link-code",
@@ -799,7 +799,7 @@
           ],
           "main",
           "generate_link_code",
-          "f077890836fe0dd46af9a4d6704dba387afd2cc4"
+          "b6d9c064dfaabcd4a66322cc5ca2dd11d7c591ee"
         ],
         [
           "/api/v1/players/link-discord",
@@ -808,7 +808,7 @@
           ],
           "main",
           "link_discord",
-          "6677b9d53f198ef84389958d320de8bfde7e89be"
+          "4f5bdb880e3750683b2f7f9abdb5a8d59754f79e"
         ],
         [
           "/api/v1/players/search",
@@ -817,7 +817,7 @@
           ],
           "main",
           "search_players",
-          "7ebdb17a54ada69323a27a8631048ea4fe9c7f1f"
+          "26a01507f067cebb420b642cefe9d58629dc6310"
         ],
         [
           "/api/v1/players/unblock",
@@ -826,7 +826,7 @@
           ],
           "main",
           "unblock_player",
-          "ded4d676576dbc9991538aca74c06c669d24c6ba"
+          "3e9746f5ab8f71e702c675580296fa300dcc559b"
         ],
         [
           "/api/v1/players/{steam_id}",
@@ -835,7 +835,7 @@
           ],
           "main",
           "get_player_stats",
-          "b6942cfd4d2ceed0763feff3a7cc6cae9e3d896a"
+          "59807386a8c33125f35518aa5126ee57ecd7225b"
         ],
         [
           "/api/v1/players/{steam_id}/active-color",
@@ -844,7 +844,7 @@
           ],
           "main",
           "set_active_color",
-          "ac95754129e442142b5d8c169915b9dd190e9e2b"
+          "68c2185ce95080d9daf30a57324f696b14d81f52"
         ],
         [
           "/api/v1/players/{steam_id}/active-cursor-color",
@@ -853,7 +853,7 @@
           ],
           "main",
           "set_active_cursor_color",
-          "5aef470e8815dd206c635b67ed209d63c800ce3a"
+          "403a88b177b85e8662deee400c27fa5ee57e85ff"
         ],
         [
           "/api/v1/players/{steam_id}/active-player-color",
@@ -862,7 +862,7 @@
           ],
           "main",
           "set_active_player_color",
-          "9b89719472162f4770da399c28f3205d8a779cc6"
+          "f2c465097d0ff90e3a1d5a31024fd103494d175c"
         ],
         [
           "/api/v1/players/{steam_id}/active-player-effect",
@@ -871,7 +871,7 @@
           ],
           "main",
           "set_active_player_effect",
-          "fad98b9b67c997d41d661c18f60b172c5ea2dbad"
+          "4836193db6cd752f78188e91a8b979882269dabe"
         ],
         [
           "/api/v1/players/{steam_id}/active-title",
@@ -880,7 +880,7 @@
           ],
           "main",
           "set_active_title",
-          "9a71d7e750aae0332acee1be527d71d1986378ac"
+          "bb1adbcc1f4fc3024d14db711130a1e9e3b25c85"
         ],
         [
           "/api/v1/players/{steam_id}/active-trail",
@@ -889,7 +889,7 @@
           ],
           "main",
           "set_active_trail",
-          "491bd88ce0af1e29fc8918c88c682b149b721fbf"
+          "43b1416b8b23ec3b957168e9440d8c450e78a1eb"
         ],
         [
           "/api/v1/players/{steam_id}/appear-offline",
@@ -898,7 +898,7 @@
           ],
           "main",
           "set_appear_offline",
-          "8054b077bca6269d84431970d1421ffcef0e520b"
+          "f5b0d29e0a1a3f23fa731f8cc85d0e3c91cbaa71"
         ],
         [
           "/api/v1/players/{steam_id}/bets",
@@ -907,7 +907,7 @@
           ],
           "main",
           "get_player_bets",
-          "6c52371410d38ccd8fd3894a510cfd75e9e6687b"
+          "06489286fd2358b706faa59ec4be9f0e77ad2303"
         ],
         [
           "/api/v1/players/{steam_id}/build-type",
@@ -916,7 +916,7 @@
           ],
           "main",
           "get_player_build_type",
-          "2f6592e3f4c7dfc1fe569e4c155ba5b145ec7dd0"
+          "0b7b31128dc8143eb4bd674675f3b11f79756c9e"
         ],
         [
           "/api/v1/players/{steam_id}/card-tiers",
@@ -925,7 +925,7 @@
           ],
           "main",
           "get_player_card_tiers",
-          "ffb5e1140f6eb9a5d56584224c04fc5a1017dc36"
+          "cdfabe0f948acece76f3ed0ad6db8e383e438d07"
         ],
         [
           "/api/v1/players/{steam_id}/card-tiers",
@@ -934,7 +934,7 @@
           ],
           "main",
           "set_player_card_tier",
-          "8da953dc3dc00bad339b4dea26843e8f2cb88272"
+          "9e739e0a7bc9248a772f07d8e23d363652939af6"
         ],
         [
           "/api/v1/players/{steam_id}/color-toggle",
@@ -943,7 +943,7 @@
           ],
           "main",
           "toggle_color",
-          "339f2c62c542da0c69fe1f5495d6529cbfd7ba0c"
+          "9eda37d0687289534d68aaa03c6a879e775dcdfa"
         ],
         [
           "/api/v1/players/{steam_id}/data",
@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "4e54165fe8d20b9e1115938c6961ce745c261945"
+          "f60954083f2269268d963b2dc75452e6c790a175"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -961,7 +961,7 @@
           ],
           "main",
           "player_ffa_history",
-          "e46bc932879c9d447252a77245429c0752a19abe"
+          "267968268850599481b1e78da8bb44cd5e94348e"
         ],
         [
           "/api/v1/players/{steam_id}/gold-sources",
@@ -970,7 +970,7 @@
           ],
           "main",
           "get_gold_sources",
-          "6065733ee1640a8763456e74841daa3640b32cd7"
+          "aaa5f4d5a1437ea18f0daf3bc2cb7116c184ad3d"
         ],
         [
           "/api/v1/players/{steam_id}/hide-gold",
@@ -979,7 +979,7 @@
           ],
           "main",
           "set_hide_gold",
-          "e7b4394919f13e01b879bcf751e260bfef3fd9c8"
+          "475b38457d4479d106edec7ca69d659de20f9fa2"
         ],
         [
           "/api/v1/players/{steam_id}/inventory",
@@ -988,7 +988,7 @@
           ],
           "main",
           "get_inventory",
-          "333174ac23dc364d1bf4bf14276f589346373f97"
+          "c57c2f26ef1186c1c92a10abec52d7a3290e6d97"
         ],
         [
           "/api/v1/players/{steam_id}/matches",
@@ -997,7 +997,7 @@
           ],
           "main",
           "get_player_matches",
-          "2cefe9d4d388c170ea14c6358ef11c0d924edba0"
+          "9d9372df0bfa370114d1c1be91a0154d89ae2fce"
         ],
         [
           "/api/v1/players/{steam_id}/matches/summary",
@@ -1006,7 +1006,7 @@
           ],
           "main",
           "get_player_matches_summary",
-          "b543c269e6c56ddec5833a9cb8bd62d838f91aa1"
+          "ce507de0bccaeeee0232b737dd4cfb2cd4c74713"
         ],
         [
           "/api/v1/players/{steam_id}/nametag-toggle",
@@ -1015,7 +1015,7 @@
           ],
           "main",
           "toggle_nametag_style",
-          "f48857c114172e58056682f0f40d5a7e0f5ff276"
+          "eea0910ccb600a75de47c7731d068754a3fbe071"
         ],
         [
           "/api/v1/players/{steam_id}/ovt-history",
@@ -1024,7 +1024,7 @@
           ],
           "main",
           "player_ovt_history",
-          "0ddeeab1fed4d0766e37536ee8da1374276ef910"
+          "0a0362f8e636c34128e1848396effb03b509c6c7"
         ],
         [
           "/api/v1/players/{steam_id}/pref-same-cards",
@@ -1033,7 +1033,7 @@
           ],
           "main",
           "set_pref_same_cards",
-          "2fe1c8d08dab1778a840e6f4fee01dbb6114d57b"
+          "e37e562e9b4ddae2d3a09ceb93f456546dba422c"
         ],
         [
           "/api/v1/players/{steam_id}/ranked-friends",
@@ -1042,7 +1042,7 @@
           ],
           "main",
           "get_ranked_friends",
-          "9462b9917b2e4270cb42c4f03cddee3e93a425f1"
+          "3e53a3f13e6874e239704b7ebed93bb661092fdd"
         ],
         [
           "/api/v1/players/{steam_id}/rating-history",
@@ -1051,7 +1051,7 @@
           ],
           "main",
           "get_player_rating_history",
-          "d36b7fdb26fc40aa84a2eb6087bbb8244a34c3bd"
+          "d3b84c9f5eb5ae5b8d89d3f1d04fc05306f5fd3b"
         ],
         [
           "/api/v1/players/{steam_id}/rating-preview",
@@ -1060,7 +1060,7 @@
           ],
           "main",
           "get_rating_preview",
-          "c3b41686e8f6f04aca5ddf04000ba8f6e14eedfb"
+          "6cc8f2a972e4f19dd4d5e9bf81eb4a7bffda740f"
         ],
         [
           "/api/v1/players/{steam_id}/show-discord",
@@ -1069,7 +1069,7 @@
           ],
           "main",
           "set_show_discord",
-          "e5ec8daab6f25548fb320979d0ab8aa7af7905fd"
+          "a8919e0f14e3870ad5b7482ccf0b74b00aa5a2d4"
         ],
         [
           "/api/v1/players/{steam_id}/similar",
@@ -1078,7 +1078,7 @@
           ],
           "main",
           "get_similar_players",
-          "56ef72ec1f33119bd9d997034f4effccf362c67e"
+          "753c08cb451d1c605642f407a637d8d606bbbb4e"
         ],
         [
           "/api/v1/players/{steam_id}/team-bets",
@@ -1087,7 +1087,7 @@
           ],
           "main",
           "get_player_team_bets",
-          "3fe994193fb48bb06b76ca255a42543a565b85d7"
+          "d177b9b18eda307b3025d2315eca4aeb00991e4d"
         ],
         [
           "/api/v1/players/{steam_id}/team-history",
@@ -1096,7 +1096,7 @@
           ],
           "main",
           "player_team_history",
-          "c929cf61e6abe521853d71c004e33871002a7c89"
+          "7c5851c2ac9b4d8bd49e68adda252d343db4f88b"
         ],
         [
           "/api/v1/players/{steam_id}/vs/{opponent_steam_id}/top-cards",
@@ -1105,7 +1105,7 @@
           ],
           "main",
           "get_h2h_top_cards",
-          "5fe12b62e1fdbebd0dc2a3591a1fe38666dbcb65"
+          "3ce77d23cfee1e18d489ca5be8811f546febc8c9"
         ],
         [
           "/api/v1/records",
@@ -1114,7 +1114,7 @@
           ],
           "main",
           "get_records_board",
-          "821de63bd5c20cbe40bf8f773bfd1d7f3d04dd4b"
+          "2641763d236526de0997fee6e89aeb2adc3d99ac"
         ],
         [
           "/api/v1/series/active",
@@ -1123,7 +1123,7 @@
           ],
           "main",
           "get_active_series",
-          "9256bf218d68a865f31de52214693e400e1bd4a6"
+          "acd6f8a4f2b60c13bb135559c132a8d93d7424c6"
         ],
         [
           "/api/v1/series/preflight",
@@ -1132,7 +1132,7 @@
           ],
           "main",
           "series_preflight",
-          "84d68a2ac7c29aaafbbc047066606a3416af9f89"
+          "7b7729a48b37bcdcccf1cf9b75b4c0bb9d9cec2a"
         ],
         [
           "/api/v1/series/recent",
@@ -1141,7 +1141,7 @@
           ],
           "main",
           "get_recent_series",
-          "7a0b10ec20069228f4bd3b1fbcb6a456ab7c3574"
+          "e459fdf67f4203254dfb35e8c66f6aa16e220ab0"
         ],
         [
           "/api/v1/series/recent-multimode",
@@ -1150,7 +1150,7 @@
           ],
           "main",
           "get_recent_multimode_series",
-          "d790c2a8b13c34c31ccc16a09fd7be7029dce51b"
+          "04ab5bfeccd472a972e7849bdb149f7d7be2ed67"
         ],
         [
           "/api/v1/series/{series_id}/live-points",
@@ -1159,7 +1159,7 @@
           ],
           "main",
           "update_live_points",
-          "5693a860c50dabc1d359794b40b396a8aff43782"
+          "702880adfc141e2a041053fd7a6e88e4d49b4e98"
         ],
         [
           "/api/v1/team/all-series-paged",
@@ -1168,7 +1168,7 @@
           ],
           "main",
           "team_all_series_paged",
-          "48e79e0a83b1c4ab6a23eb6aef49394fe531bb74"
+          "17ec14dd689a917b261bf105101c951da89b25ee"
         ],
         [
           "/api/v1/team/leaderboard",
@@ -1177,7 +1177,7 @@
           ],
           "main",
           "team_leaderboard",
-          "9bb04bf531640e85a1cb9767e33d92ea64d2aeca"
+          "8bd4f4172234eda6815f4cd5bda69eeaf216486d"
         ],
         [
           "/api/v1/team/matches",
@@ -1186,7 +1186,7 @@
           ],
           "main",
           "submit_team_match",
-          "1bfc6e99d0e39c6191fb5fbd98cf85e05304c260"
+          "7b974f4118a2576a03550463a84af67deb7fda85"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-matches",
@@ -1195,7 +1195,7 @@
           ],
           "main",
           "get_player_team_matches",
-          "eb5c065804a4819a1701512c6c0152ef57b069b4"
+          "58c756fbaa8685843b873f3cc0ac4cc3b1597fa6"
         ],
         [
           "/api/v1/team/players/{steam_id}/team-stats",
@@ -1204,7 +1204,7 @@
           ],
           "main",
           "get_player_team_stats",
-          "64d96581fe72c0539e88ee60ea6e99152c961b27"
+          "b474926f25ebb68ef61127b11e1bb184f2f98ce3"
         ],
         [
           "/api/v1/team/series/active",
@@ -1213,7 +1213,7 @@
           ],
           "main",
           "get_active_team_series",
-          "57608d3c9b34f03556c01fb519fd3b4f89ac7acf"
+          "4708184929fabb0a3e8ab325e8929c7453e0da62"
         ],
         [
           "/api/v1/team/series/continuation",
@@ -1222,7 +1222,7 @@
           ],
           "main",
           "team_series_continuation",
-          "5dd33c37f90c2f70ca359fe8c46f1e09475038d1"
+          "c4ffcd923f5d380006ae86446600b246632b252f"
         ],
         [
           "/api/v1/team/series/recent",
@@ -1231,7 +1231,7 @@
           ],
           "main",
           "team_series_recent",
-          "ff0e95dcb212ebb37919190e16a3fdb126025a88"
+          "5871d038dfd77874eb6ea94218bde3be5f192169"
         ],
         [
           "/api/v1/team/series/{series_id}/live-points",
@@ -1240,7 +1240,7 @@
           ],
           "main",
           "update_team_live_points",
-          "c88c91f5640f23d953306429b027ad122366d32d"
+          "95ef7ce75243f20dc508fdbfe3413dfe954bfb21"
         ],
         [
           "/api/v1/team/series/{series_id}/report-dc",
@@ -1249,7 +1249,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "8a01e292cb14edcfeffdc678291b66b71ec343a5"
+          "76621ab3eb4c2bb1cd0dbdb49166a75fe763927b"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1258,7 +1258,7 @@
           ],
           "main",
           "team_series_spawn_confirm",
-          "b262c54e57e2f455ef78c5cab70901deec13facb"
+          "0058b911eec33ef44cdd8f17897798cb70380250"
         ],
         [
           "/api/v1/team/series/{series_id}/state",
@@ -1267,7 +1267,7 @@
           ],
           "main",
           "team_series_state",
-          "43f1e5e3069a08e0da78b85fd54f20ab807f4634"
+          "65251c2fad75ec9b52e58b62472a29ebfb586e75"
         ],
         [
           "/api/v1/team/series/{series_id}/status",
@@ -1276,7 +1276,7 @@
           ],
           "main",
           "team_series_status_readonly",
-          "eaf0004c6efeb110fbc40c08ba5429655209d211"
+          "734b6c56e4b4e2e7bc8cfaf2cbbb01f9dbfb6b8a"
         ]
       ]
     },
@@ -1291,7 +1291,7 @@
           ],
           "main",
           "get_achievement_definitions",
-          "1648052c7c3ae051996a7ac8f32dbdf825743c2b"
+          "a20f68cc5e920b54cf0a2827b6036e08a0520143"
         ],
         [
           "/api/v1/achievements/unlock",
@@ -1300,7 +1300,7 @@
           ],
           "main",
           "unlock_achievement",
-          "1076e46bdae9bb9c072b961da959e87807787047"
+          "112f078f6cb17e63a9f16044dc3412dd75cabcc4"
         ],
         [
           "/api/v1/achievements/{key}/earners",
@@ -1309,7 +1309,7 @@
           ],
           "main",
           "get_achievement_earners",
-          "d1b839e7c58e6cf2bc70e48c2a52fdc12d38a132"
+          "1edf6a101e286c62dd08038892ef0903543f7206"
         ],
         [
           "/api/v1/achievements/{steam_id}",
@@ -1318,7 +1318,7 @@
           ],
           "main",
           "get_player_achievements",
-          "130410bbdf735373d7edb8525827fa82fff2bc6c"
+          "9f24ad53ee7050c5d5c2d23347ffb4f5531999f7"
         ],
         [
           "/api/v1/alerts/active",
@@ -1327,7 +1327,7 @@
           ],
           "main",
           "alerts_active",
-          "75e50b6845cdaf696fc35b3367c6b5e6cf2581c2"
+          "ba01fea2ad5dc5980d18220b352d0c50949a6a99"
         ],
         [
           "/api/v1/artist/block",
@@ -1336,7 +1336,7 @@
           ],
           "main",
           "artist_block",
-          "6421b4db009de2ed5258e427737ee5fa605c5f51"
+          "f30f094677e2b946c8c67e6d0a03a0326a2ca23c"
         ],
         [
           "/api/v1/artist/catalog-cosmetic-placement",
@@ -1345,7 +1345,7 @@
           ],
           "main",
           "artist_catalog_cosmetic_placement",
-          "ca501d2b4698051fb326383fb032c354dad2ec89"
+          "2fbee46c24926e9be28567c2c6fe73209060edac"
         ],
         [
           "/api/v1/artist/cosmetic-placement",
@@ -1354,7 +1354,7 @@
           ],
           "main",
           "artist_cosmetic_placement",
-          "e87a01bdf4c5dd37bf48cadf355528db85a8bdb0"
+          "4227fc305c1de15ad0ab852eedd5ddcfb047f392"
         ],
         [
           "/api/v1/artist/cosmetic-preview",
@@ -1363,7 +1363,7 @@
           ],
           "main",
           "artist_cosmetic_preview",
-          "fbefdb409a843e469ec712d73a4d94fa1717ca67"
+          "d21a756a54f7978d4935b79e6c325a3d98e093db"
         ],
         [
           "/api/v1/artist/gift",
@@ -1372,7 +1372,7 @@
           ],
           "main",
           "artist_gift",
-          "c2e4a99126241088f46c5c1f7e2d02768e9d573f"
+          "a6e7e88a9eaee9c0586925a31d7e69f4d0a9663a"
         ],
         [
           "/api/v1/artist/my-submissions",
@@ -1381,7 +1381,7 @@
           ],
           "main",
           "artist_my_submissions",
-          "198da3091f01b42dd7d660d05f3740e1e17b468a"
+          "51085023e257cdeec88b4c205530b46305c446a2"
         ],
         [
           "/api/v1/artist/set-desc",
@@ -1390,7 +1390,7 @@
           ],
           "main",
           "artist_set_desc",
-          "fb40ecfc7b00c60a5f8b902b212914c27d3a70f2"
+          "c8e407489c8ce60ed5155075aa43c698cf59e236"
         ],
         [
           "/api/v1/artist/set-name",
@@ -1399,7 +1399,7 @@
           ],
           "main",
           "artist_set_name",
-          "9d2ed2fd1686eede28e1d15bd0ddf05718c9fb29"
+          "c6706423b4f22853ce6eee0407897fa6a2c1adf0"
         ],
         [
           "/api/v1/artist/set-price",
@@ -1408,7 +1408,7 @@
           ],
           "main",
           "artist_set_price",
-          "f364b89082853513e1143eabce310871a6a002cd"
+          "cc9295d665ca9a5766f11079900156069e6399b2"
         ],
         [
           "/api/v1/artist/set-stock",
@@ -1417,7 +1417,7 @@
           ],
           "main",
           "artist_set_stock",
-          "9c460cda1e34e2d6774bbab28fd9363765945a29"
+          "11624a5014f59d3eb8bbda00cb704f43bc31dd8d"
         ],
         [
           "/api/v1/artist/status/{steam_id}",
@@ -1426,7 +1426,7 @@
           ],
           "main",
           "artist_status",
-          "927ab4d3bea25d802aa44f354623219821aef8bb"
+          "8a2a0a39caff8cafc20b690fd41c1fa7c90431ad"
         ],
         [
           "/api/v1/artist/submit-cosmetic",
@@ -1435,7 +1435,7 @@
           ],
           "main",
           "artist_submit_cosmetic",
-          "1b4c1f3afe17e85f2d620146e1f692cd2ae0bd6f"
+          "bf38a81e0fceb0e0912548988932b8a6275f3add"
         ],
         [
           "/api/v1/artist/submit-cosmetic-finalize",
@@ -1444,7 +1444,7 @@
           ],
           "main",
           "artist_submit_cosmetic_finalize",
-          "47e86b74d028c5c0530a00629d2487b56cd66142"
+          "da91eaadbe8df05c25c556f81d916df575761236"
         ],
         [
           "/api/v1/artist/submit-cosmetic-frame",
@@ -1453,7 +1453,7 @@
           ],
           "main",
           "artist_submit_cosmetic_frame",
-          "adf5e70659f924b715515c2e662af5853d4e5fca"
+          "8c200be4e98f4c9ad4c53b1bd6c04f14ef31eeeb"
         ],
         [
           "/api/v1/artist/submit-cosmetic-gif",
@@ -1462,7 +1462,7 @@
           ],
           "main",
           "artist_submit_cosmetic_gif",
-          "207eba33e0113347ba5e518798a4875bcdbc8925"
+          "03bd33d54791666313b7e74779b654b9a0a41f43"
         ],
         [
           "/api/v1/artist/{steam_id}/items",
@@ -1471,7 +1471,7 @@
           ],
           "main",
           "artist_items",
-          "fa64d75d874c38e09879a14601012b0d287a7809"
+          "7194473c3267c46e822ac6c176aaebf5a9755730"
         ],
         [
           "/api/v1/artist/{steam_id}/sales",
@@ -1480,7 +1480,7 @@
           ],
           "main",
           "artist_sales",
-          "113d3447bbd8d8f731ca08329e4a7d0e0f712474"
+          "3d3b10c2be86cb2e80f2efc2bce153b1631b7c76"
         ],
         [
           "/api/v1/artists",
@@ -1489,7 +1489,7 @@
           ],
           "main",
           "list_artists",
-          "8676e0db14d0f3231028795a7b7e40e32fe0e538"
+          "2477e6c68633b3775b526e764adf8189983238a4"
         ],
         [
           "/api/v1/auth/steam",
@@ -1498,7 +1498,7 @@
           ],
           "main",
           "steam_auth",
-          "7135becde37d5a9c6218f2c2c307ce1291eeec63"
+          "43cc9b4c240a135dc8a0d74e5b60552fa6fa042f"
         ],
         [
           "/api/v1/bets",
@@ -1507,7 +1507,7 @@
           ],
           "main",
           "place_bet",
-          "af97b8ad0c76e51d4a42505b90f3cd06a8c37428"
+          "e5b6259ce1bb19341d434ca731a2660d68d38ac4"
         ],
         [
           "/api/v1/broadcast/report-status",
@@ -1516,7 +1516,7 @@
           ],
           "main",
           "broadcast_report_status",
-          "08981c70599c724a3b8edbccf08eceaed20712d0"
+          "4f7b8d2f30d4c9e8be34004e23d2b3433a94c824"
         ],
         [
           "/api/v1/broadcast/target",
@@ -1525,7 +1525,7 @@
           ],
           "main",
           "broadcast_target",
-          "0cb0626eebefc1c631f652f2b60ce4bf4602b486"
+          "2180b5ab527d8727d99d270727ff0055abaef8ba"
         ],
         [
           "/api/v1/chat/moderate/bridge-unmute",
@@ -1534,7 +1534,7 @@
           ],
           "main",
           "chat_moderate_bridge_unmute",
-          "3c7936e9f112452614d77afb19aa68780ed31549"
+          "2801ae91f00150c099447add9587c620aa298d07"
         ],
         [
           "/api/v1/chat/moderate/delete",
@@ -1543,7 +1543,7 @@
           ],
           "main",
           "chat_moderate_delete",
-          "57680a378098cd2d171124be45411ff4403ec9e4"
+          "9724f6987c7dd819bd3480def9e037f8f56984fd"
         ],
         [
           "/api/v1/chat/moderate/lockdown",
@@ -1552,7 +1552,7 @@
           ],
           "main",
           "chat_moderate_lockdown",
-          "fe67e07c88f20cc0a4cd9e86ef4d6fb818109a74"
+          "1f2343dd55f72a52b6e871b04b8bcba7b126fdfb"
         ],
         [
           "/api/v1/chat/moderate/mute",
@@ -1561,7 +1561,7 @@
           ],
           "main",
           "chat_moderate_mute",
-          "5fb90a2c7aeced53c00e41407b6eed24dfc1124a"
+          "5e5bf5187da8b462474ba77e1d48a0288183b796"
         ],
         [
           "/api/v1/chat/moderate/mute-by-message",
@@ -1570,7 +1570,7 @@
           ],
           "main",
           "chat_moderate_mute_by_message",
-          "ef8e7570d3599a65cd61546d2e47d370507f6cba"
+          "a2ec6d3352c84ee02bc5d57a4409664829f01129"
         ],
         [
           "/api/v1/chat/moderate/mutes",
@@ -1579,7 +1579,7 @@
           ],
           "main",
           "chat_moderate_list_mutes",
-          "f25d1c03635e0c4293a5cb59751f732e45cdd2e4"
+          "9d06902d38fd2a9351ea5567e8b478ad943516f7"
         ],
         [
           "/api/v1/chat/moderate/spam-patterns",
@@ -1588,7 +1588,7 @@
           ],
           "main",
           "chat_moderate_spam_patterns",
-          "214713381f06690064d958d8f1fe2e21e2adcac7"
+          "2cf47b4f6a4365ae19b7964897709e9eae22bd57"
         ],
         [
           "/api/v1/chat/moderate/spam-patterns/add",
@@ -1597,7 +1597,7 @@
           ],
           "main",
           "chat_moderate_spam_pattern_add",
-          "b3d0df31d0dbd48e32eb480ab5d35c87baa01bb7"
+          "c4f9eda162fb41eafe1543a8e13a7f42e35f473c"
         ],
         [
           "/api/v1/chat/moderate/spam-patterns/revoke",
@@ -1606,7 +1606,7 @@
           ],
           "main",
           "chat_moderate_spam_pattern_revoke",
-          "c0b4d12cb478325fc8b093df59dbdfc6b644ff78"
+          "3e73dc2f52a1cb53764f9f8862e83da2a3f3f029"
         ],
         [
           "/api/v1/chat/moderate/unmute",
@@ -1615,7 +1615,7 @@
           ],
           "main",
           "chat_moderate_unmute",
-          "f1639bbede829fafa2ea1df7f66b96dc321e5a7d"
+          "616366f5c7927113f021d0850b85963dfac297d1"
         ],
         [
           "/api/v1/chat/post",
@@ -1624,7 +1624,7 @@
           ],
           "main",
           "post_chat_from_discord",
-          "c29e17be84326e7067e9fadbd965beb0d6399d85"
+          "6fb23f22100f8d6fbacd1b08fa3be88fff50dde8"
         ],
         [
           "/api/v1/chat/recent",
@@ -1633,7 +1633,7 @@
           ],
           "main",
           "get_recent_chat",
-          "80d2a3b52dc7e436990c9d553d95c1df0c72204a"
+          "c5e8703ad3a2803152bc4b8a86a7468b30a53d00"
         ],
         [
           "/api/v1/compare/nemesis",
@@ -1642,7 +1642,7 @@
           ],
           "main",
           "get_compare_nemesis",
-          "692d6d6823c32c4f27ee7686f5fdcac440f88f43"
+          "275be4166b062499db74e3182d3a2e07d905c584"
         ],
         [
           "/api/v1/discord-bets",
@@ -1651,7 +1651,7 @@
           ],
           "main",
           "place_discord_bet",
-          "e06b1a04f44cd795594a946412ed192bc00cc8a2"
+          "48225c30b54880e8ac52e625b3c891f8e4ab20d5"
         ],
         [
           "/api/v1/discord-ffa-bets",
@@ -1660,7 +1660,7 @@
           ],
           "main",
           "place_discord_ffa_bet",
-          "14ec8c019122863c380322303cde4fe8c921d583"
+          "895b0048b0710fc005b2de66b3b8df80ca83fb3e"
         ],
         [
           "/api/v1/discord-lobby-bets",
@@ -1669,7 +1669,7 @@
           ],
           "main",
           "place_discord_lobby_bet",
-          "a6d4a7f4ca39378d24f26d073bcb89065c79ad19"
+          "023ea414e84ef6d3204283c831710be6a9b00faa"
         ],
         [
           "/api/v1/discord-team-bets",
@@ -1678,7 +1678,7 @@
           ],
           "main",
           "place_discord_team_bet",
-          "c180b7faf9600def72a5bda72ebef0c44fd115ac"
+          "958f25e82e088be1bd56fd0122ac27db49e4ad38"
         ],
         [
           "/api/v1/ffa/bets",
@@ -1687,7 +1687,7 @@
           ],
           "main",
           "place_ffa_bet",
-          "ece059f483d4850e234926f8e3df643002b2dd95"
+          "b315d339ae874a613c1f3b41394d78ac1ad067f1"
         ],
         [
           "/api/v1/ffa/bettable",
@@ -1696,7 +1696,7 @@
           ],
           "main",
           "ffa_bettable",
-          "32a32801da2e6a5ad5c9ad39ab7e93ca4cffb6ff"
+          "884fa872537d885ba37e62ae97109e3521946209"
         ],
         [
           "/api/v1/ffa/lobbies",
@@ -1705,7 +1705,7 @@
           ],
           "main",
           "ffa_lobby_browser",
-          "a8a820a6fff1c9842c44014f7716978e759d44de"
+          "4fbb93bc1a0d7fe47c1c7bdc302fa5f574446684"
         ],
         [
           "/api/v1/ffa/lobbies/{lobby_id}/live-points",
@@ -1714,7 +1714,7 @@
           ],
           "main",
           "update_ffa_live_points",
-          "b1e93c3d827398bb1d8848e4561d134390088f84"
+          "025ebe009174d8f505007bc748ef346b03ea42d5"
         ],
         [
           "/api/v1/ffa/lobby/create",
@@ -1723,7 +1723,7 @@
           ],
           "main",
           "ffa_lobby_create",
-          "30a95f3dc0c5c5075511d40072b141534c06f261"
+          "1c9d370a2380f0c2a6fcb6f3331d434340c0f662"
         ],
         [
           "/api/v1/ffa/lobby/join",
@@ -1732,7 +1732,7 @@
           ],
           "main",
           "ffa_lobby_join",
-          "9624efe65b6c721d3a0a17748e2459c946b6c7fd"
+          "0e79504ab3780f5aba2407ece45fcff7fcc4d039"
         ],
         [
           "/api/v1/ffa/lobby/kick",
@@ -1741,7 +1741,7 @@
           ],
           "main",
           "ffa_lobby_kick",
-          "88386b0709f7f80232376b2290231793f1ce30a1"
+          "b071c8c2c96d5320b7d1f96a69c3f0a0d88d9f7e"
         ],
         [
           "/api/v1/ffa/lobby/settings",
@@ -1750,7 +1750,7 @@
           ],
           "main",
           "ffa_lobby_settings",
-          "d5a04b65de55aa0322b84cf7a85969c1a7e9ca01"
+          "7374f6f41fa36b70ec677b45f575b0dc837b218d"
         ],
         [
           "/api/v1/ffa/lobby/start",
@@ -1759,7 +1759,7 @@
           ],
           "main",
           "ffa_lobby_start",
-          "0bec7680cb3f6164d9b540873764579056a2643c"
+          "f8b9ac1637e886fa5ddc89b73474804c6c53622f"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/assembly",
@@ -1768,7 +1768,7 @@
           ],
           "main",
           "ffa_lobby_assembly",
-          "41d5af0cc582cb7cfe43cee93ca27cac7500eb9b"
+          "7dd2a93e751ac5bea72e232d3c32e8f5a28d086f"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/connect",
@@ -1777,7 +1777,7 @@
           ],
           "main",
           "ffa_lobby_connect",
-          "582301a4735443cb274aa7afb491dfb60573e787"
+          "6e71ed25d8c0852719c05a74bba77f2751580388"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/release",
@@ -1786,7 +1786,7 @@
           ],
           "main",
           "ffa_lobby_release",
-          "9f7c32d3d518eb1d008f57ef5354e779e8991814"
+          "fb95c24233a807fc8475d69262a08046ecf52405"
         ],
         [
           "/api/v1/ffa/queue/join",
@@ -1795,7 +1795,7 @@
           ],
           "main",
           "ffa_queue_join",
-          "70aa21a364cf786e6113ae8e00fe6599100f6784"
+          "2a8171a613a3b9115d0472f5761c858195f0cfff"
         ],
         [
           "/api/v1/ffa/queue/leave",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "878a3950d2da6560b17255ec00cf78ffd9e89995"
+          "88c3a07a1012fd1724e801164dbe192032eac6dc"
         ],
         [
           "/api/v1/ffa/queue/list",
@@ -1813,7 +1813,7 @@
           ],
           "main",
           "ffa_queue_list",
-          "fba3988302303e684539d6b6b52bf9ab934139f9"
+          "e8deebf7db91c20161241bc566d8b0615c4e12a5"
         ],
         [
           "/api/v1/ffa/queue/poll/{steam_id}",
@@ -1822,7 +1822,7 @@
           ],
           "main",
           "ffa_queue_poll",
-          "fbd1b974d92fa6b5401f704f3d79eb6449956568"
+          "e485351f306c1bbbcef474df5a5d1b4c161a07a7"
         ],
         [
           "/api/v1/ffa/queue/recent-joins",
@@ -1831,7 +1831,7 @@
           ],
           "main",
           "ffa_queue_recent_joins",
-          "fe58d7ef19c62e63757118deda61e88f582791f2"
+          "4f5d4815d200e0ba064fdb41344411b21edc3037"
         ],
         [
           "/api/v1/ffa/recent",
@@ -1840,7 +1840,7 @@
           ],
           "main",
           "ffa_recent",
-          "30b310aabd4da3eab4bd635e067754b4d7c9ef27"
+          "17a39f7f3c931d5322a6d6c37f5bc4d1c5d002f5"
         ],
         [
           "/api/v1/health",
@@ -1849,7 +1849,7 @@
           ],
           "main",
           "health_check",
-          "a7dc1f35ad48058d4b4dfb4eb526e2a0a6c215b6"
+          "5c4709ca83d942b2c0ae6a44794a4263cb3f5c09"
         ],
         [
           "/api/v1/i18n/approved",
@@ -1858,7 +1858,7 @@
           ],
           "main",
           "i18n_approved_list",
-          "4e32f545b1413996c0f3d79fedcfbd5adecb01c0"
+          "542535793db590ad48387deb1290f8a52faf669d"
         ],
         [
           "/api/v1/i18n/contributors",
@@ -1867,7 +1867,7 @@
           ],
           "main",
           "i18n_contributors",
-          "02bf0c66eb57f25db524e4122fa5d7f0e53e1faf"
+          "a067809d0606ea061c506e1dfefb0284b88d630b"
         ],
         [
           "/api/v1/i18n/grants/mine",
@@ -1876,7 +1876,7 @@
           ],
           "main",
           "i18n_my_grants",
-          "5adae0c83e9bb8ad74dcb6626e881edc95d0e9b6"
+          "76695d284002e02f88ae3c87f8a6a49834a60ffc"
         ],
         [
           "/api/v1/i18n/history",
@@ -1885,7 +1885,7 @@
           ],
           "main",
           "i18n_key_history",
-          "892f1ff337a797e30fe7e6345c1f0de1c4c7cbd2"
+          "d953548259455385bcf67b6f1c185e0416f8186b"
         ],
         [
           "/api/v1/i18n/keys",
@@ -1894,7 +1894,7 @@
           ],
           "main",
           "i18n_keys",
-          "b83a8fbf832e4674de6b5eadd0ebf9a2b9704d99"
+          "fa217f227a4ca8a8575a40da43f8381d712fa570"
         ],
         [
           "/api/v1/i18n/pack/{locale}",
@@ -1903,7 +1903,7 @@
           ],
           "main",
           "i18n_pack",
-          "e19c40816cb82268b13e7b9043792685d791731c"
+          "8b57f5a8b52319bdcc4de142ba7abe98061c731f"
         ],
         [
           "/api/v1/i18n/portal-session",
@@ -1912,7 +1912,7 @@
           ],
           "main",
           "i18n_portal_session",
-          "4784e4beccc560cb656949937568578c81f558d3"
+          "f649d904b04a7310d8330202143e4ca000762bd8"
         ],
         [
           "/api/v1/i18n/portal-session/refresh",
@@ -1921,7 +1921,7 @@
           ],
           "main",
           "i18n_portal_session_refresh",
-          "0e343648ec4f4436fb82cc3a38fffb85029c45f9"
+          "a71654b1e60396be1adb50fed075666bc273b98c"
         ],
         [
           "/api/v1/i18n/progress",
@@ -1930,7 +1930,7 @@
           ],
           "main",
           "i18n_progress",
-          "b3bf515025d9d46aedba48bf88ff516ec5239f82"
+          "dbb60c6a55f0a3d13e8871912da87d2d005b3a51"
         ],
         [
           "/api/v1/i18n/proposals",
@@ -1939,7 +1939,7 @@
           ],
           "main",
           "i18n_proposal_queue",
-          "9dbfca14cc5ffaee05191d8b33e500f1f7d7680f"
+          "eb2b287c303b426f5af0a9cd77ac691fc6a9a6cd"
         ],
         [
           "/api/v1/i18n/proposals",
@@ -1948,7 +1948,7 @@
           ],
           "main",
           "i18n_propose",
-          "5d564532718d147875fd72a4ddd58d5ad1b8c811"
+          "88338aa91dcebcc186942c821a44b41d38e9e6f6"
         ],
         [
           "/api/v1/i18n/revert",
@@ -1957,7 +1957,7 @@
           ],
           "main",
           "i18n_revert",
-          "78de3a770d592c8b4ec770988d6615ac997e6066"
+          "2a3820a1c7f8bf7ca111e3799e2cad9e85265a67"
         ],
         [
           "/api/v1/i18n/review",
@@ -1966,7 +1966,7 @@
           ],
           "main",
           "i18n_review",
-          "79c8b618cef4d775b48e0f055b818c56aed9972d"
+          "74caa9356cb6c1b365b8a0a5e89ba77686904ff3"
         ],
         [
           "/api/v1/internal/booster-grant",
@@ -1975,7 +1975,7 @@
           ],
           "main",
           "booster_grant",
-          "581fe247f359c60e96d90a59168bdd938e73bb5e"
+          "8ce769f4400095e25298fcf3e72a3b0e9367033d"
         ],
         [
           "/api/v1/internal/channel-posts/ack",
@@ -1984,7 +1984,7 @@
           ],
           "main",
           "ack_channel_post",
-          "6cba1a2a92e6801978f2a18ab2a116873b713f1c"
+          "618c87f88c3b29c7be17384dd421c10a252165df"
         ],
         [
           "/api/v1/internal/channel-posts/pending",
@@ -1993,7 +1993,7 @@
           ],
           "main",
           "pending_channel_posts",
-          "3522e13cd01ad49b1dd50a148eb018c6c3aae828"
+          "9f28bec79c1f6c1ac19ae02bbbf796a9d85dccf9"
         ],
         [
           "/api/v1/internal/chat/bridge",
@@ -2002,7 +2002,7 @@
           ],
           "main",
           "bridge_stream_chat",
-          "0781876ca5ed88630c79572a75f43a438fc35c3c"
+          "c00c6ea8c162ea827a800c60dc09157f1d4bcc1a"
         ],
         [
           "/api/v1/internal/chat/bridge-moderation",
@@ -2011,7 +2011,7 @@
           ],
           "main",
           "internal_chat_bridge_moderation",
-          "8758f8dd62777d7a87682bd24d7ddc2b919d3dfe"
+          "b953888808eccb9b97b23b2b5153c5b04d43397b"
         ],
         [
           "/api/v1/internal/chat/discord-deleted",
@@ -2020,7 +2020,7 @@
           ],
           "main",
           "internal_chat_discord_deleted",
-          "0b165dd85dbed7f1767cb3311e9264c803c809b6"
+          "2bfdbfcdd7698a111fd4376aeddac0c75a906ba3"
         ],
         [
           "/api/v1/internal/chat/discord-mute",
@@ -2029,7 +2029,7 @@
           ],
           "main",
           "internal_chat_discord_mute",
-          "a45052a744d7ab44a7827bd9a617908c8bb34e02"
+          "f3c5e9dbbcdae45ede402725da8fedb8ed898770"
         ],
         [
           "/api/v1/internal/chat/lockdown",
@@ -2038,7 +2038,7 @@
           ],
           "main",
           "internal_chat_lockdown",
-          "4994a02fa229d53c839402a7bfcc71b03d7b0a15"
+          "7b2505e5e3b158ebfd7da99ad131951c57a73ce1"
         ],
         [
           "/api/v1/internal/chat/lockdown-state",
@@ -2047,7 +2047,7 @@
           ],
           "main",
           "internal_chat_lockdown_state",
-          "1b35493b32db14ab9ea48dd30a95318946df9951"
+          "f17a39b5d4a88525f8f995809cd103f5d5efc97f"
         ],
         [
           "/api/v1/internal/chat/mirrors",
@@ -2056,7 +2056,7 @@
           ],
           "main",
           "internal_chat_mirrors",
-          "8fb7db999e9a615aa04fac118e240d871a31aaaf"
+          "c450e3713e4e79d7525eeb7eb12172240342aae9"
         ],
         [
           "/api/v1/internal/chat/mod-actions",
@@ -2065,7 +2065,7 @@
           ],
           "main",
           "internal_chat_mod_actions",
-          "78315b0163529848cc7c53c4051a07b1274657d4"
+          "82780ac0861fcb039877ce3cf57d1daaf4c8a974"
         ],
         [
           "/api/v1/internal/chat/mod-actions/ack",
@@ -2074,7 +2074,7 @@
           ],
           "main",
           "internal_chat_mod_actions_ack",
-          "8744298bc31f6a84caeaf41f31167822d6079d2d"
+          "6067f72b99215f82931b758c62bb01770b386ced"
         ],
         [
           "/api/v1/internal/chat/since",
@@ -2083,7 +2083,7 @@
           ],
           "main",
           "internal_chat_since",
-          "d0b6d984303c5dcb71c079c1a3b04c9bfad35b6f"
+          "96921558a3b9bb8b679c01efed852d2e53077db7"
         ],
         [
           "/api/v1/internal/janitor-selftest",
@@ -2092,7 +2092,7 @@
           ],
           "main",
           "get_janitor_selftest",
-          "f6b44f1809d652f82914d5cd13243ee08e542a23"
+          "3889c2214d96416f1a096e060f824b9da4808de5"
         ],
         [
           "/api/v1/internal/lfp-pings",
@@ -2101,7 +2101,7 @@
           ],
           "main",
           "internal_lfp_pings",
-          "ea3378ac8bfa8181d64fcd1d91b5a514fd1fe62e"
+          "f0a2d30fb1ad39b9426f0e475c92531d36cc209c"
         ],
         [
           "/api/v1/internal/lfp-pings/ack",
@@ -2110,7 +2110,7 @@
           ],
           "main",
           "ack_lfp_pings",
-          "abf6cf5b5fcdc03c37b0765294fd54e4bc5b543f"
+          "5d417e328ce1de961612d5319bf18c0eae943146"
         ],
         [
           "/api/v1/internal/pending-dms",
@@ -2119,7 +2119,7 @@
           ],
           "main",
           "internal_pending_dms",
-          "2dc356ec9d7f72182f0b0e9fb134448f63c19e8c"
+          "2b68f9e4b40ade98efc91f677291319fea0bed1a"
         ],
         [
           "/api/v1/internal/pending-dms/ack",
@@ -2128,7 +2128,7 @@
           ],
           "main",
           "ack_pending_dms",
-          "743f7ae358f4548fc1fd76e10d3b824096e31553"
+          "4813ed0fc09385ccff26b5f76600930ebcde825e"
         ],
         [
           "/api/v1/internal/rank-role-colors",
@@ -2137,7 +2137,7 @@
           ],
           "main",
           "push_rank_role_colors",
-          "f2f5e2e8e3ea2e248bdea20b49e969fdcdd42ff2"
+          "c6b42f20b171bed4cc4e05906c5a7e633aada74d"
         ],
         [
           "/api/v1/internal/recent-bans",
@@ -2146,7 +2146,7 @@
           ],
           "main",
           "get_recent_bans",
-          "f188c3a5b80c6e1f0230a4ea5a6a7a71f0451ba0"
+          "3cd4f729a2c4001d80234479decd5f1b45d54a2a"
         ],
         [
           "/api/v1/internal/release-posts",
@@ -2155,7 +2155,7 @@
           ],
           "main",
           "push_release_posts",
-          "37ee541ee0e7e13e336e2d75e19a410510b41a2e"
+          "ba470fa17a9c296f752dd3422912d6d25b7ef891"
         ],
         [
           "/api/v1/internal/stream-posts/ack",
@@ -2164,7 +2164,7 @@
           ],
           "main",
           "internal_stream_posts_ack",
-          "c10d0c739751b70df7323c8c6e45e8511abc4e0c"
+          "113e541a4b46ec71399a1970ebeec9396125b36f"
         ],
         [
           "/api/v1/internal/stream-posts/pending",
@@ -2173,7 +2173,7 @@
           ],
           "main",
           "internal_stream_posts_pending",
-          "c5b5c686a9c5f1d97e7e263ab6d21be6ad24cb1a"
+          "dca1621ee671080ddd1988c5901dfcfb91688e48"
         ],
         [
           "/api/v1/internal/tournament-notices",
@@ -2182,7 +2182,7 @@
           ],
           "main",
           "internal_tournament_notices",
-          "c04722074f1e2be2b1f2103229514a8f23718601"
+          "543e66267317da365fef3a14f6453c707e6db2c6"
         ],
         [
           "/api/v1/internal/tournament-notices/ack",
@@ -2191,7 +2191,7 @@
           ],
           "main",
           "ack_tournament_notices",
-          "0a3918d14e245a447aeea8be4216b6946f758bbc"
+          "f36276973f6bef35a2b395db4f435ea9d5894933"
         ],
         [
           "/api/v1/internal/tournaments/checkin-response",
@@ -2200,7 +2200,7 @@
           ],
           "main",
           "internal_tournament_checkin_response",
-          "abd8d8e538292190f37d5a2b90ad756bc01b985a"
+          "9c2bb19d8f08cc86c9d21c60ac8230b9499a47c0"
         ],
         [
           "/api/v1/lfp-ping",
@@ -2209,7 +2209,7 @@
           ],
           "main",
           "lfp_ping",
-          "f2758d954ce57024786913bc76ba0fa62410bf6b"
+          "d13fc147eb90d0fdaa44665df3a6b617b61ea17a"
         ],
         [
           "/api/v1/lobby-bets",
@@ -2218,7 +2218,7 @@
           ],
           "main",
           "place_lobby_bet",
-          "f1836a655b3623aa2aff42f8bfecf7e456fb6c60"
+          "837a9a1390a095f7beb77e6aef5dc102231f66e8"
         ],
         [
           "/api/v1/lobby-bets/cancel",
@@ -2227,7 +2227,7 @@
           ],
           "main",
           "cancel_lobby_bet",
-          "3838264ca8f7c11c4c84c358d34b3ff23bafcf2e"
+          "8728218a41e849edf16bf68aa125c1e33e913ff0"
         ],
         [
           "/api/v1/mod-version",
@@ -2236,7 +2236,7 @@
           ],
           "main",
           "get_mod_version",
-          "0854bbd60342add914e640d328bbe085377c4dd4"
+          "0a4a396674505fae9247734d68ad35dfccf2a880"
         ],
         [
           "/api/v1/mod/check/{steam_id}",
@@ -2245,7 +2245,7 @@
           ],
           "main",
           "check_player_registered",
-          "a5b4c382bd48248bef1de7ebcc066318dc64f5f9"
+          "1111bfb7efa614d4d02c7f8ee736238edc0b9c56"
         ],
         [
           "/api/v1/mod/toggle-ranked/{steam_id}",
@@ -2254,7 +2254,7 @@
           ],
           "main",
           "toggle_ranked",
-          "e56349dad6c21259594e8c04f869d38185b75ceb"
+          "926f29a4b4615f66ab16bb499308e7b8df42eb98"
         ],
         [
           "/api/v1/music/rate",
@@ -2263,7 +2263,7 @@
           ],
           "main",
           "music_rate",
-          "43f5b9664a60eb4f76987ee36443b28cf03d53b5"
+          "8eec96762f356b9db66676d11a4978790603dfcd"
         ],
         [
           "/api/v1/music/ratings",
@@ -2272,7 +2272,7 @@
           ],
           "main",
           "music_ratings_public",
-          "5c0163a010b57fe0c19dbdd2b8d6cfe2ae8f3820"
+          "8d5d2150fef25d6b2ad10bcfa4b1ff60ede5ca38"
         ],
         [
           "/api/v1/music/ratings/mine",
@@ -2281,7 +2281,7 @@
           ],
           "main",
           "music_ratings_mine",
-          "472222000339fade748d57ed09648a6adb678c44"
+          "98a089d98a4c730e83dd2a8ceb8b4df8a9dec473"
         ],
         [
           "/api/v1/ovt/lobbies",
@@ -2290,7 +2290,7 @@
           ],
           "main",
           "ovt_lobby_browser",
-          "738222d348576e96f2fed02d66103b3730017a74"
+          "058ddd6c35196c3ce3fec9c04c78ae294da0d0fd"
         ],
         [
           "/api/v1/ovt/lobby/create",
@@ -2299,7 +2299,7 @@
           ],
           "main",
           "ovt_lobby_create",
-          "011eb43d8dc0cb2ec851a2cd6759bffa3054f387"
+          "60b3ea4ee6340b5ee63e0987af7badbb4463cec4"
         ],
         [
           "/api/v1/ovt/lobby/join",
@@ -2308,7 +2308,7 @@
           ],
           "main",
           "ovt_lobby_join",
-          "eacccb6447c3d10132bad07735c31a102b167ecb"
+          "2df76cc5a2fc487fdd04c22a499ded8417677dfc"
         ],
         [
           "/api/v1/ovt/lobby/kick",
@@ -2317,7 +2317,7 @@
           ],
           "main",
           "ovt_lobby_kick",
-          "426cedc0e3b818fdc13f00979e437ce23237f0a2"
+          "7f32ea362219452245066350c0ec1b4c63ebf886"
         ],
         [
           "/api/v1/ovt/lobby/leave",
@@ -2326,7 +2326,7 @@
           ],
           "main",
           "ovt_lobby_leave",
-          "6bd025c5665fc9ab75eb16803b97dc2db36aa3f9"
+          "b4eaf1898958d780bd6d3dbf961c4785807135d0"
         ],
         [
           "/api/v1/ovt/lobby/prefs",
@@ -2335,7 +2335,7 @@
           ],
           "main",
           "ovt_lobby_prefs",
-          "79b8e768c661023505f9fa12822ac2baa77ab98b"
+          "488914e72b7a0b238b28d0f83741243f38611cd4"
         ],
         [
           "/api/v1/ovt/lobby/resolve",
@@ -2344,7 +2344,7 @@
           ],
           "main",
           "ovt_lobby_resolve",
-          "21cb5b08fe6baa381dd758f2df06187cd28dfafe"
+          "bfcbddc7201c270ccce354b6254da790e660ea04"
         ],
         [
           "/api/v1/ovt/lobby/settings",
@@ -2353,7 +2353,7 @@
           ],
           "main",
           "ovt_lobby_settings",
-          "fc5c9aac8f68fb881da66f7cac18a21ec1310e54"
+          "ba3466cedeaa8d39331f5481190fa5c91345e7be"
         ],
         [
           "/api/v1/ovt/lobby/start",
@@ -2362,7 +2362,7 @@
           ],
           "main",
           "ovt_lobby_start",
-          "b8b994beb140f3d4659d81704511adbde0415286"
+          "f72138689bc5fdd3ffe511c2e48c9f4d821a34e8"
         ],
         [
           "/api/v1/ovt/lobby/state",
@@ -2371,7 +2371,7 @@
           ],
           "main",
           "ovt_lobby_state",
-          "80eac764f360f68cf934f08083aaebe15e52ffd2"
+          "a09efd51dabd352b6a681e04fe5163f270db2d48"
         ],
         [
           "/api/v1/ovt/queue/join",
@@ -2380,7 +2380,7 @@
           ],
           "main",
           "ovt_queue_join",
-          "9efb5ad96d7235f454ddd286719252fc927e73ac"
+          "3814841378bd1a5889e2f609dc79a202048d16ae"
         ],
         [
           "/api/v1/ovt/queue/leave",
@@ -2389,7 +2389,7 @@
           ],
           "main",
           "ovt_queue_leave",
-          "4850b6dc5a85d479f75050613a0d945d194046e8"
+          "cffa0493490028dd9ce7e1b2e92e39070f3ff075"
         ],
         [
           "/api/v1/ovt/queue/list",
@@ -2398,7 +2398,7 @@
           ],
           "main",
           "ovt_queue_list",
-          "e603539aebc7009e815fd267f2c9168bea6ff483"
+          "3b97b36602d16e43b7cfab344a8f6e3581832463"
         ],
         [
           "/api/v1/ovt/queue/poll/{steam_id}",
@@ -2407,7 +2407,7 @@
           ],
           "main",
           "ovt_queue_poll",
-          "6a64c0f45931c066b5184287ee276adbaa3d4b97"
+          "0f9065b015d3db676f19d5f710ce55e318ca8f7d"
         ],
         [
           "/api/v1/ovt/queue/recent-joins",
@@ -2416,7 +2416,7 @@
           ],
           "main",
           "ovt_queue_recent_joins",
-          "9bfa29c3c87e59c83eaa8c6afc4f7095af86f623"
+          "d735117e102cefbfa0f9406b59aa8b5a818ce51e"
         ],
         [
           "/api/v1/ovt/recent",
@@ -2425,7 +2425,7 @@
           ],
           "main",
           "ovt_recent",
-          "c8ee05bbc450e1624bac903f6c25e5188888b7fa"
+          "9a24687dd5a7f965841c3439f59237a993fea45d"
         ],
         [
           "/api/v1/presence/online",
@@ -2434,7 +2434,7 @@
           ],
           "main",
           "presence_online",
-          "e2c83e75f5f4d4301b68a32ee572e8e4bce29c27"
+          "a3bd3f8dbb1c55b79cb904e8d0eda54ce58eef25"
         ],
         [
           "/api/v1/presence/ping",
@@ -2443,7 +2443,7 @@
           ],
           "main",
           "presence_ping",
-          "722bbb119e81f97ba61895be4689e6026752d161"
+          "1ba7d3f971867cadf8843e6cc7392d480814f152"
         ],
         [
           "/api/v1/queue/count",
@@ -2452,7 +2452,7 @@
           ],
           "main",
           "queue_count",
-          "b662e8c1da37b5f166adaab1a111c534c215565e"
+          "e0b38a2890a6a206784da6e49b6a65144ae80cef"
         ],
         [
           "/api/v1/queue/decline",
@@ -2461,7 +2461,7 @@
           ],
           "main",
           "queue_decline",
-          "674e1807ece4e9ec6ebdce835d662c19b4113acf"
+          "de3ca9fc2dd0b014df59f03ab562d3cdc61199ab"
         ],
         [
           "/api/v1/queue/join",
@@ -2470,7 +2470,7 @@
           ],
           "main",
           "queue_join",
-          "a75398371553e97e66a141abb5dd63714ba27764"
+          "cce0f615738f72153bd4fe019c995b1bd297e8b0"
         ],
         [
           "/api/v1/queue/leave",
@@ -2479,7 +2479,7 @@
           ],
           "main",
           "queue_leave",
-          "eb75c342bfc00e484836f7d8f96f7f70f0d26d45"
+          "6c36c799ec2439d1ff263c362a64bd1434257fc2"
         ],
         [
           "/api/v1/queue/poll/{steam_id}",
@@ -2488,7 +2488,7 @@
           ],
           "main",
           "queue_poll",
-          "df8b9f56ecc8c134489fe9dd844542400e22c6ca"
+          "029f1831a8bfcd3a03fa118799000c81c324fcb9"
         ],
         [
           "/api/v1/queue/ready",
@@ -2497,7 +2497,7 @@
           ],
           "main",
           "queue_ready",
-          "002c49c1c5850b41094f57d6a3ea04951556a8a2"
+          "b6763dad66450e254496744eb61f61e5028f1ae0"
         ],
         [
           "/api/v1/queue/recent-joins",
@@ -2506,7 +2506,7 @@
           ],
           "main",
           "queue_recent_joins",
-          "3c37ce59ad822b75da6b64d204ee61ec147a4ecb"
+          "375cf77a9ca0ace6f29931b6b9b722758caf5427"
         ],
         [
           "/api/v1/queues/escape",
@@ -2515,7 +2515,7 @@
           ],
           "main",
           "queues_escape",
-          "65deef94f20f2389e1cf785379f36340954c0a1e"
+          "d2e6db6ad9d504cf46c7cb76a5a9cc3e94e8c355"
         ],
         [
           "/api/v1/rank-tiers",
@@ -2524,7 +2524,7 @@
           ],
           "main",
           "get_rank_tiers",
-          "20a532eeed941754e3dd52479095cf8ded0153d7"
+          "08168d70c01ce34e9d2462aea11bc65837e2ce91"
         ],
         [
           "/api/v1/release-notes/full/{locale}",
@@ -2533,7 +2533,7 @@
           ],
           "main",
           "release_notes_full",
-          "a39c4faab01542ad48dcb8c8969802bc94a8b344"
+          "0643b8a2185b83eb3e698a24bb6bd7c720d15466"
         ],
         [
           "/api/v1/release-notes/{locale}",
@@ -2542,7 +2542,7 @@
           ],
           "main",
           "release_notes_localized",
-          "8aa36e05a6783a6108500b263aaa183d4256b4a8"
+          "4478ce7255983dd9726fdfeaeb6213705074f5e0"
         ],
         [
           "/api/v1/releases/recent",
@@ -2551,7 +2551,7 @@
           ],
           "main",
           "get_recent_releases",
-          "20edb768e60e1bcb46a8baed86105f9d58b4b475"
+          "97f9638b630b0c4f4f9072339fb6646345f02272"
         ],
         [
           "/api/v1/report-disconnect",
@@ -2560,7 +2560,7 @@
           ],
           "main",
           "report_disconnect",
-          "118bcd0ee531dc38c5230bf6a6527f34c57594ac"
+          "d934a06b6137d85d8b20723e27108676a2090cf0"
         ],
         [
           "/api/v1/settings/allow-spectators",
@@ -2569,7 +2569,7 @@
           ],
           "main",
           "set_allow_spectators",
-          "24ea83390e30b5df687d6a4506a6ba271b0bc1a2"
+          "74d48eb2a1ca5240afe8b4f432eefef8e7f8dbf6"
         ],
         [
           "/api/v1/shop/items",
@@ -2578,7 +2578,7 @@
           ],
           "main",
           "list_shop_items",
-          "41199c4cbe10327dbf9f86d9d9f0e22d3d30594d"
+          "c8e5be49810920812a7c114e47b962c3813fa6a5"
         ],
         [
           "/api/v1/shop/newest",
@@ -2587,7 +2587,7 @@
           ],
           "main",
           "newest_shop_items",
-          "56280237779a78a2dfbcdb3457149175e4267d83"
+          "3b3af3a1f5836ea90e9eb298d622ed32af03aa52"
         ],
         [
           "/api/v1/shop/purchase",
@@ -2596,7 +2596,7 @@
           ],
           "main",
           "purchase_item",
-          "e7520735a8c11abe126591f1b1fbd2092da44322"
+          "e832be96c7b57d400f090873179ad9f3cbb54931"
         ],
         [
           "/api/v1/shop/sales-board",
@@ -2605,7 +2605,7 @@
           ],
           "main",
           "shop_sales_board",
-          "5459ca79b662b84ebb54d4af763b4fc0d26dbade"
+          "785885b1ee6400338c0afd49b99f15a7a59a523b"
         ],
         [
           "/api/v1/spectate/close",
@@ -2614,7 +2614,7 @@
           ],
           "main",
           "spectate_close",
-          "4df50827dfc78f9cde98fba1cc21898b6c47f33c"
+          "27764b33cc68d6c6c16aa73e36a7f67dd8fbcb11"
         ],
         [
           "/api/v1/spectate/games",
@@ -2623,7 +2623,7 @@
           ],
           "main",
           "spectate_games",
-          "e836ce2c2145b2c94e149890eeed5bb7671aee14"
+          "84282163d51ffbf21e0540103ed6bb6992fa3e63"
         ],
         [
           "/api/v1/spectate/grant",
@@ -2632,7 +2632,7 @@
           ],
           "main",
           "spectate_grant",
-          "67de758e803533086b55f66d661c5c177000a76c"
+          "48257283f4d0f1ef5f603a923199dec3f933fabb"
         ],
         [
           "/api/v1/spectate/heartbeat",
@@ -2641,7 +2641,7 @@
           ],
           "main",
           "spectate_heartbeat",
-          "1602b20b2f76bfa7894d9ee269dea8a3d01418a8"
+          "5c6809e0205c29cd808ce268e34cc38d67ff5b51"
         ],
         [
           "/api/v1/spectate/leave",
@@ -2650,7 +2650,7 @@
           ],
           "main",
           "spectate_leave",
-          "2bcecd00d0acfb566b5847511eb92006924175c9"
+          "40e539d04fd3e74dd35489e6346d6d991a7852a1"
         ],
         [
           "/api/v1/spectate/participant-attest",
@@ -2659,7 +2659,7 @@
           ],
           "main",
           "spectate_participant_attest",
-          "60ad0527e3ca1945a2d8e77548936f5dd7ca59aa"
+          "649834dd851ba3f981a94c46870f649f07b20075"
         ],
         [
           "/api/v1/spectate/validate",
@@ -2668,7 +2668,7 @@
           ],
           "main",
           "spectate_validate",
-          "fcf51d73d3565b8d39252e915f2044de0b130fcd"
+          "9800a95c7ed8632ad4a589231d178b2d1f21f94c"
         ],
         [
           "/api/v1/team-bets",
@@ -2677,7 +2677,7 @@
           ],
           "main",
           "place_team_bet",
-          "83cd636373bda3591e537ff1efb068f240824a87"
+          "5cdeb74de4c575624a4b3a2c8098ad52f21a0f86"
         ],
         [
           "/api/v1/team/lobbies",
@@ -2686,7 +2686,7 @@
           ],
           "main",
           "team_lobby_browser",
-          "d13889219e45b0169b65c221b99a15c34233f689"
+          "3c3a8615b1a77c5bed4d8594cbb2df0a3f629176"
         ],
         [
           "/api/v1/team/lobby/create",
@@ -2695,7 +2695,7 @@
           ],
           "main",
           "team_lobby_create",
-          "d1c8215a05538edb312df81dbfc725ec70ed9e07"
+          "35cb627546f93d1a4bd7b82232feb3037531307f"
         ],
         [
           "/api/v1/team/lobby/join",
@@ -2704,7 +2704,7 @@
           ],
           "main",
           "team_lobby_join",
-          "aafb090223ea1a0d66cf4315e7b25e3777ad164b"
+          "2b9deba6680349da8e73c83f029a6fe1a6b7c508"
         ],
         [
           "/api/v1/team/lobby/kick",
@@ -2713,7 +2713,7 @@
           ],
           "main",
           "team_lobby_kick",
-          "4491f3e9e8bdbad15d3e05148c9bba1605b8b095"
+          "d45927cfe15602ee50a753ccb4858eb2fce12751"
         ],
         [
           "/api/v1/team/lobby/leave",
@@ -2722,7 +2722,7 @@
           ],
           "main",
           "team_lobby_leave",
-          "d1cda798cf5ddf5f7c4efd52113d601604bc8eb9"
+          "25457f889a9fa8aded35fb3a249db08e96fb6fed"
         ],
         [
           "/api/v1/team/lobby/prefs",
@@ -2731,7 +2731,7 @@
           ],
           "main",
           "team_lobby_prefs",
-          "f5822254cd7ff917a794120bf7311e212aa05947"
+          "47cc9081d4d2f814fcbce3beed330b08ff0bc70a"
         ],
         [
           "/api/v1/team/lobby/resolve",
@@ -2740,7 +2740,7 @@
           ],
           "main",
           "team_lobby_resolve",
-          "48abc3052d070a7c5236f1b0014dbd52258b8bad"
+          "7c4ef656794eb6441e920e734194d3e46f7aff51"
         ],
         [
           "/api/v1/team/lobby/settings",
@@ -2749,7 +2749,7 @@
           ],
           "main",
           "team_lobby_settings",
-          "cfbb35ec5221914a363520ac5bfc142c310ab3ed"
+          "3c215ea316f4489ae17c8d61f00c1d34baf5dda3"
         ],
         [
           "/api/v1/team/lobby/start",
@@ -2758,7 +2758,7 @@
           ],
           "main",
           "team_lobby_start",
-          "24003a943b247791a39f30aca8673ea6bd921e17"
+          "66eaee08deb988dfdb0b58958d58fee3fed7e294"
         ],
         [
           "/api/v1/team/lobby/state",
@@ -2767,7 +2767,7 @@
           ],
           "main",
           "team_lobby_state",
-          "dc9b453ee18c5a95bbfca2b34359129881fb50de"
+          "4e6b59c86cb33ac9245da66bd16126b43fb93b36"
         ],
         [
           "/api/v1/team/queue/count",
@@ -2776,7 +2776,7 @@
           ],
           "main",
           "team_queue_count",
-          "ba18def95e77fcf3b4313fcce3f2374547a158bf"
+          "305e385a811fcc9a165915823ea39eed6b8efd60"
         ],
         [
           "/api/v1/team/queue/join",
@@ -2785,7 +2785,7 @@
           ],
           "main",
           "team_queue_join",
-          "a1ee0968ab6e778e0c88519fc5a6e978af1413e9"
+          "2d9595cbda4106c700f8981d26dda73c839061cd"
         ],
         [
           "/api/v1/team/queue/leave",
@@ -2794,7 +2794,7 @@
           ],
           "main",
           "team_queue_leave",
-          "81bc2c63f2aefefa8b277888ef3e1f9e01cd547a"
+          "8b91aba5fedb5cd6e2df966a70202c454b0f3798"
         ],
         [
           "/api/v1/team/queue/list",
@@ -2803,7 +2803,7 @@
           ],
           "main",
           "team_queue_list",
-          "b78dfc2455df8cdd6dd0ffebc665d965ffaa9e8d"
+          "01e37bf67c937cd2ee598508e64e2e420b9973c7"
         ],
         [
           "/api/v1/team/queue/manual-pick-toggle",
@@ -2812,7 +2812,7 @@
           ],
           "main",
           "team_queue_manual_pick_toggle",
-          "f5b60acceaf6cc1210693b5c1a41c38342e89266"
+          "2d5cd14195c5b3545e9e8b01ec72aa2bec78d3e2"
         ],
         [
           "/api/v1/team/queue/poll/{steam_id}",
@@ -2821,7 +2821,7 @@
           ],
           "main",
           "team_queue_poll",
-          "05e9785ff39628cbe7efb7efa31d9ad5ba622906"
+          "59cd9642c0281aa7175e234b477e5b49836b1eff"
         ],
         [
           "/api/v1/team/queue/preferred-team",
@@ -2830,7 +2830,7 @@
           ],
           "main",
           "team_queue_preferred_team",
-          "c21f726e91482fbeebe6ecf7f90a8593350af002"
+          "86d730b591f63e04ab6f39acf23cb5c71f506c46"
         ],
         [
           "/api/v1/team/queue/ready",
@@ -2839,7 +2839,7 @@
           ],
           "main",
           "team_queue_ready",
-          "c04ac95f35dc0e948b6c9c40af12139124b0dc97"
+          "0832f165cb0fb6672060fb11f472aaaebf93fd5e"
         ],
         [
           "/api/v1/team/queue/recent-joins",
@@ -2848,14 +2848,14 @@
           ],
           "main",
           "team_queue_recent_joins",
-          "8c4bac8df373022da8358a43fed1e0c432d3584b"
+          "6265ae44900166301420a8d566b8c9373d2ee3b1"
         ],
         [
           "/api/v1/ws/chat",
           [],
           "main",
           "ws_chat",
-          "31e53bb09ecc4785bf7b0f4ad9584fab325897ac"
+          "ba17bc96541da4d4c12db2ed0ce30f9af1d52335"
         ],
         [
           "/api/v1/rating-preview/2v2",
@@ -2864,7 +2864,7 @@
           ],
           "main",
           "get_rating_preview_2v2",
-          "8ad9b6f6a86cf419c2c857cdd4893f7c2948d563"
+          "85f7cdac9253d15db09163b60f0b5c670bcf5f53"
         ],
         [
           "/api/v1/rating-preview/ffa",
@@ -2873,7 +2873,7 @@
           ],
           "main",
           "get_rating_preview_ffa",
-          "c5632d4e05908b0c40a5cc121289278411b78d40"
+          "26b524c05f8f424f2505f7e69fde6e355d6d6674"
         ],
         [
           "/api/v1/admin/mail/broadcast",
@@ -2882,7 +2882,7 @@
           ],
           "main",
           "admin_mail_broadcast",
-          "6e972c3416533c1f840bc7a2fafa1a134912e94d"
+          "84d1613c690376fd3eb8d6d390adde5e53fbcd69"
         ],
         [
           "/api/v1/admin/mail/bulk-grants",
@@ -2891,7 +2891,7 @@
           ],
           "main",
           "admin_mail_bulk_grant",
-          "9e12a3a5d395345f0b2a1a3dd5a5a8af00e61e26"
+          "80ab86a55745201728a6cc837515d0c0df37432f"
         ],
         [
           "/api/v1/admin/mail/bulk-grants/{steam_id}",
@@ -2900,7 +2900,7 @@
           ],
           "main",
           "admin_mail_bulk_grant_revoke",
-          "5dd4e6d26e037ca269d79ca7a1eb615467ac760e"
+          "8ebdb02bc0fe3fafd2261bf090edae2ca083b13b"
         ],
         [
           "/api/v1/admin/moderation-cases",
@@ -2909,7 +2909,7 @@
           ],
           "main",
           "admin_moderation_cases",
-          "b7ee7d812af7bd4de73a4f43afbf78ecf65e381b"
+          "0db04e0363041238d719adfa3f180c59fc02c323"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/act",
@@ -2918,7 +2918,7 @@
           ],
           "main",
           "admin_moderation_case_act",
-          "c830b68fdbf53d37bf69726e009c6383f026bbe1"
+          "ed08e041f0cc8b1a42118006e827471a8d2d1b1d"
         ],
         [
           "/api/v1/admin/moderation-cases/{case_id}/notified",
@@ -2927,7 +2927,7 @@
           ],
           "main",
           "admin_moderation_case_notified",
-          "fcf378c39614627286ebaae27d47c990c6036cf1"
+          "e77c37c361f641a41146223abb8b9dd383c0e3b6"
         ],
         [
           "/api/v1/admin/pc/snapshot",
@@ -2936,7 +2936,7 @@
           ],
           "main",
           "admin_pc_snapshot",
-          "5d7fa768b0d52cf496f7bcab974079593f16be75"
+          "18951dbaf5d1b65fd2da1f686880023621c88256"
         ],
         [
           "/api/v1/admin/pc/trades",
@@ -2945,7 +2945,7 @@
           ],
           "main",
           "admin_pc_trades",
-          "687b62163e85a86b4953bcfbdf0e41bfd0c823f5"
+          "42c6f55954a8192a61805e529e10e59368756b8f"
         ],
         [
           "/api/v1/admin/pc/trades/reverse",
@@ -2954,7 +2954,7 @@
           ],
           "main",
           "admin_pc_trade_reverse",
-          "880b0c811c62aa6c09cdfcc014ce4f92bb699c88"
+          "29b4905ad345069a930ef9974f0949d843cac29c"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/act",
@@ -2963,7 +2963,7 @@
           ],
           "main",
           "internal_moderation_case_act",
-          "c83ea248f62af4fa4cc4ddd0937998c884061f4a"
+          "87839436b6a2cb2089de47a0708462071e248d86"
         ],
         [
           "/api/v1/internal/moderation-cases/{case_id}/notified",
@@ -2972,7 +2972,7 @@
           ],
           "main",
           "internal_moderation_case_notified",
-          "6959c78dcdc235e8c5eccbb0b6f62f4d561af457"
+          "3f70cfffaaef8eef8d2b8b6ca4544ad0e1aa8881"
         ],
         [
           "/api/v1/internal/pc/binder",
@@ -2981,7 +2981,7 @@
           ],
           "main",
           "internal_pc_binder",
-          "eaa47e70ade47795b9a50f47cbc571e71a8fb011"
+          "b3cfa1390f47ab2485802e0f2eff808f2d04d8f3"
         ],
         [
           "/api/v1/internal/pc/binder/{owner_ref}/page/{page}/{locale}.png",
@@ -2990,7 +2990,7 @@
           ],
           "main",
           "internal_pc_binder_page",
-          "f6b6515252e97d8dede557c680506689beeefe54"
+          "97bdde4559a53d76fd668264b8910897a8013532"
         ],
         [
           "/api/v1/internal/pc/card",
@@ -2999,7 +2999,7 @@
           ],
           "main",
           "internal_pc_card",
-          "78574c9fde3b2129cb5c34609fe99f671b20d163"
+          "2504f7a2e079b10bb8aaee4ce35f4fd69dd888ce"
         ],
         [
           "/api/v1/internal/pc/collection",
@@ -3008,7 +3008,7 @@
           ],
           "main",
           "internal_pc_collection",
-          "fee629824da76c334dff074bb6c5420d07286dd6"
+          "d1993368029b7442c2b7e5c87e968418a62d6995"
         ],
         [
           "/api/v1/internal/pc/daily",
@@ -3017,7 +3017,7 @@
           ],
           "main",
           "internal_pc_daily",
-          "daa549ed7e06e87ef986eccbb2e6194060163f06"
+          "b0b1b9bd1d510f65006c04a90e615cdb3521ca3f"
         ],
         [
           "/api/v1/internal/pc/events/ack",
@@ -3026,7 +3026,7 @@
           ],
           "main",
           "internal_pc_events_ack",
-          "f21615d5111c3f56733bf36546c6968de85034e7"
+          "e30fe5fb8ad3d0d64ca3adba2737e9b99c4c757e"
         ],
         [
           "/api/v1/internal/pc/events/pending",
@@ -3035,7 +3035,7 @@
           ],
           "main",
           "internal_pc_events_pending",
-          "aa316407ec5a498dc60d951b08283d1c5b84e0f5"
+          "d319f447e6f5778c66c4800073b94217b307dadc"
         ],
         [
           "/api/v1/mail",
@@ -3044,7 +3044,7 @@
           ],
           "main",
           "mail_send",
-          "18899fdb66fcef5ccf596e7c2ad30e3fa4c41b43"
+          "677610b757148b19e83978c68ac5d4bef2bc2c57"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3053,7 +3053,7 @@
           ],
           "main",
           "mail_block_add",
-          "f53c1afec15c207bbf8d5443545b9882a9ca4c37"
+          "a56cb45a9ec6b46c0248df577b45a090315666fe"
         ],
         [
           "/api/v1/mail/blocks",
@@ -3062,7 +3062,7 @@
           ],
           "main",
           "mail_blocks_list",
-          "90ab224fb136507dd905e96e351ff58e678deb43"
+          "696171ed6a62c65d9a096db466962d7af93450f8"
         ],
         [
           "/api/v1/mail/blocks/{steam_id}",
@@ -3071,7 +3071,7 @@
           ],
           "main",
           "mail_block_remove",
-          "e2937cc396926ddaa54dd62fa37a042fcbe0e845"
+          "78a0a3bb63a48dec4d5e1eed7f5b2ec78dae532c"
         ],
         [
           "/api/v1/mail/inbox",
@@ -3080,7 +3080,7 @@
           ],
           "main",
           "mail_inbox",
-          "6a8f7888955c2050d36d9eee6e42ea46cb92724b"
+          "cca68e047c7207425aeec7fae58806adc4c01e61"
         ],
         [
           "/api/v1/mail/sent",
@@ -3089,7 +3089,7 @@
           ],
           "main",
           "mail_sent",
-          "e3ed0a8557e1fc4be5d07c4d38ce5152abf2a311"
+          "a528e9ba9b90b68371199ecbe368c623b9614098"
         ],
         [
           "/api/v1/mail/settings",
@@ -3098,7 +3098,7 @@
           ],
           "main",
           "mail_settings_put",
-          "4aa30a24b6853f04f3a5d34823200550f52c5f04"
+          "c73d109bf89db73032f6dcec35e2501e91a80687"
         ],
         [
           "/api/v1/mail/settings",
@@ -3107,7 +3107,7 @@
           ],
           "main",
           "mail_settings_get",
-          "05c1b5012ee34f89869c9638b21ab5582f85409a"
+          "a8fa4fd1c92f3c3df82a9c875ce04b0ff6958977"
         ],
         [
           "/api/v1/mail/status",
@@ -3116,7 +3116,7 @@
           ],
           "main",
           "mail_status",
-          "ac57235af34e884bcf8719df0f23b65fe45cf7d5"
+          "34b3c3fc98358903b48190d8375e529badc665f1"
         ],
         [
           "/api/v1/mail/{message_id}",
@@ -3125,7 +3125,7 @@
           ],
           "main",
           "mail_delete",
-          "8caf8896fdaa685677dac11178451be7a444ba12"
+          "cbe73cabad1643a8068eda73f2d5723a7059addd"
         ],
         [
           "/api/v1/mail/{message_id}",
@@ -3134,7 +3134,7 @@
           ],
           "main",
           "mail_detail",
-          "7ed639a1d29b1f970b1097d45f2c8c727f21b5cd"
+          "458345e43371d7e8866d31fd043b6c2954e0c980"
         ],
         [
           "/api/v1/mail/{message_id}/read",
@@ -3143,7 +3143,7 @@
           ],
           "main",
           "mail_read",
-          "806c4c3d4a7a3eddd29958950f772c48d7b017a6"
+          "facc7d8a6faf8f48ae1fee698f1dde00e496ce4f"
         ],
         [
           "/api/v1/mail/{message_id}/reply",
@@ -3152,7 +3152,7 @@
           ],
           "main",
           "mail_reply",
-          "eea7ad25faee84f74e9db757ef93d7df8496e53f"
+          "89d827fa63423b67c29f8cdceea6364c566abe27"
         ],
         [
           "/api/v1/mail/{message_id}/report",
@@ -3161,7 +3161,7 @@
           ],
           "main",
           "mail_report",
-          "18e79807fc867ac1eb94c779e860cc9b354ec0a4"
+          "2e253601a21c1bd86860f063176ff5c213a26234"
         ],
         [
           "/api/v1/report",
@@ -3170,7 +3170,7 @@
           ],
           "main",
           "get_set_report",
-          "aa9ba608693f4c3387c311e6f9111f7b58c785dc"
+          "564898a02eb3cb85943a95370ee91b9438a369ec"
         ],
         [
           "/api/v1/admin/pc/portrait/clear",
@@ -3179,7 +3179,7 @@
           ],
           "main",
           "admin_pc_portrait_clear",
-          "0d331a62302f70e17aba7766405b4fb026d512b3"
+          "4636f95437c36db4b897dea2a6056669ab14159e"
         ],
         [
           "/api/v1/internal/pc/face/back",
@@ -3188,7 +3188,7 @@
           ],
           "main",
           "internal_pc_face_back",
-          "938a8cffff0dd5c2b13c6cde25cbd45d8cbc1cf8"
+          "1b4c50c6efc4199fb9195ec581c25aa70b64e692"
         ],
         [
           "/api/v1/internal/pc/face/preview/{player_ref}/{locale}",
@@ -3197,7 +3197,7 @@
           ],
           "main",
           "internal_pc_face_preview",
-          "93829b7eddf969483afe5a7bc48992e007b80dc1"
+          "435197c239b1e6b82687fe62397c1534650a39c9"
         ],
         [
           "/api/v1/internal/pc/face/print/{print_id}/{locale}",
@@ -3206,7 +3206,7 @@
           ],
           "main",
           "internal_pc_face_print",
-          "85374cfee7595ba9915a1e816ce72ce7912b5265"
+          "41df305bee50c7b4bd45d0eca5507d844b6b4159"
         ],
         [
           "/api/v1/internal/pc/lease",
@@ -3215,7 +3215,7 @@
           ],
           "main",
           "internal_pc_lease",
-          "62f0819c86231d8d81acb5055fb1b8e815e29665"
+          "8cda14a17851dec0232d02eeaef6216e692d51c5"
         ],
         [
           "/api/v1/internal/pc/lease/{lease_id}",
@@ -3224,7 +3224,7 @@
           ],
           "main",
           "internal_pc_lease_release",
-          "ef3332efda7c0c272e4c546fa7b0a76ed052da92"
+          "d403aaf1dd3874ab633f14f455301534c46bfa27"
         ],
         [
           "/api/v1/internal/pc/lease/{lease_id}",
@@ -3233,7 +3233,7 @@
           ],
           "main",
           "internal_pc_lease_check",
-          "f5419b4e638b0dc0a7c27f27438b0f27bbda92c0"
+          "6fead426a689e879a54df6ce788daddd6fb8d560"
         ],
         [
           "/api/v1/internal/pc/packs",
@@ -3242,7 +3242,7 @@
           ],
           "main",
           "internal_pc_packs",
-          "67f5fe97b0f1831ecaa391e601d691b6fec782d2"
+          "f06e1c454ec6d7ece5f700a850f1848c8530f8b7"
         ],
         [
           "/api/v1/internal/pc/packs/open",
@@ -3251,7 +3251,7 @@
           ],
           "main",
           "internal_pc_open_pack",
-          "f9f274ce2ff383a300a9d2cb0201ca2c0bf8147d"
+          "45a78d6dd4280cfc89e70e20d01e923fa8817479"
         ],
         [
           "/api/v1/internal/pc/packs/{pack_id}/strip/{locale}.png",
@@ -3260,7 +3260,7 @@
           ],
           "main",
           "internal_pc_pack_strip",
-          "1e3ef00bc6546b4789cc23b57503d2a5ee09468e"
+          "70202c7bb39ac91915d97c37f28b748162cdb967"
         ],
         [
           "/api/v1/pc-face/{print_id}/{rev}/{locale}/{size}.png",
@@ -3269,7 +3269,7 @@
           ],
           "main",
           "pc_face_png",
-          "617ba9c361dca7f3eb065514d34f43532563ed4b"
+          "fa4d37a6dbbde6c64e35ac2b73a76e1ac338c39f"
         ],
         [
           "/api/v1/pc/portrait",
@@ -3278,7 +3278,7 @@
           ],
           "main",
           "pc_portrait_upload",
-          "1d67472ee8fa553ae1bc3af6fd549ee8bce31dec"
+          "2abc2d2f7c73d491b861b840cab4b1655be6811a"
         ],
         [
           "/api/v1/pc/portrait/motion",
@@ -3287,7 +3287,7 @@
           ],
           "main",
           "pc_motion_upload",
-          "b24a3142ca1377df509ae0ecd97b0cacdb57c88d"
+          "51032205ff5b6f79012008357cf5473ec115c3d6"
         ],
         [
           "/api/v1/pc/dance",
@@ -3296,7 +3296,7 @@
           ],
           "main",
           "pc_dance_select",
-          "d5fff77d30fc737a0501ef7115527ecb1f0d7c20"
+          "d2517322eaeff7a22a07e063a62c451dbbb99278"
         ],
         [
           "/api/v1/pc-face/motion",
@@ -3305,7 +3305,7 @@
           ],
           "main",
           "pc_face_motion_read",
-          "29eb49d964d1a4a23447d042581dac0613105c20"
+          "532f0603e81b4d7cdb4d4611dbf177391c40b9fb"
         ],
         [
           "/api/v1/pc-face/motion/{print_id}/{motion_rev}/{locale}/{size}.png",
@@ -3314,7 +3314,7 @@
           ],
           "main",
           "pc_face_motion_atlas",
-          "1ca028186a180a487c8c72f853273035e81406d3"
+          "2709e2026398ffea5156edad9bbfdd0f0f3991af"
         ],
         [
           "/api/v1/internal/pc/motion/preview/{player_ref}/{locale}.gif",
@@ -3323,7 +3323,7 @@
           ],
           "main",
           "internal_pc_motion_preview",
-          "a8d5eb328fedb10b46154e7ad95d17b49d059df3"
+          "e647cbf02a4495ed29ce0b73f4d8b6197059f715"
         ],
         [
           "/api/v1/pc/trades",
@@ -3332,7 +3332,7 @@
           ],
           "main",
           "pc_trades",
-          "17f7848a908939b16d0338661c334a39f75d4495"
+          "db4393d469bb9b400aafa0a258544d0968059b90"
         ],
         [
           "/api/v1/pc/trades/accept",
@@ -3341,7 +3341,7 @@
           ],
           "main",
           "pc_trade_accept",
-          "2eeb80975ba65fe752543e4ad3f11b9762b0bfe2"
+          "b3bdb50b71712a8fc60eff953248e8ffb28ef766"
         ],
         [
           "/api/v1/pc/trades/cancel",
@@ -3350,7 +3350,7 @@
           ],
           "main",
           "pc_trade_cancel",
-          "91d250b1be68efd3f258d4f485b57bd4cd9e36fa"
+          "f8bdef8605dfa715244406d853bc26e1b0f952eb"
         ],
         [
           "/api/v1/pc/trades/decline",
@@ -3359,7 +3359,7 @@
           ],
           "main",
           "pc_trade_decline",
-          "2017e9ff6f8716fd4c02b16581c5edfbb2f16c5d"
+          "efaf59604027fbb163db8e22833f21dfb9457b60"
         ],
         [
           "/api/v1/pc/trades/propose",
@@ -3368,7 +3368,7 @@
           ],
           "main",
           "pc_trade_propose",
-          "6db0d41d7592083226444d0d27d0e7b6f7cfcfc5"
+          "ed9c61bfd969a992ab6ef24e67393000b3722d2f"
         ]
       ]
     },
@@ -3383,7 +3383,7 @@
           ],
           "tournaments",
           "get_current",
-          "de8490ce3cd9ef3cd9258b1bb9d34893b3f14afc"
+          "c40c3d3e8799ddec7ef2076814e03f8af74a9b38"
         ],
         [
           "/api/v1/tournaments/history",
@@ -3392,7 +3392,7 @@
           ],
           "tournaments",
           "history",
-          "567ef7ff6b076257eaf5b6e1c445a2fc062ddbf7"
+          "4937920ab270c068d2bf6a611c99bfe9ec80a501"
         ],
         [
           "/api/v1/tournaments/history-detail",
@@ -3401,7 +3401,7 @@
           ],
           "tournaments",
           "history_detail",
-          "dc02b773ff445402a2806acfd542f2bcbd90ea44"
+          "1aa614d4d57bf1c19f7e591de43af53dc67eee17"
         ],
         [
           "/api/v1/tournaments/internal/watch",
@@ -3410,7 +3410,7 @@
           ],
           "tournaments",
           "internal_watch",
-          "6f002d2276270bb3addaaf4e6067fcc34169c9a8"
+          "d845798480f66a01ce9287bc94fac5a7b612f795"
         ],
         [
           "/api/v1/tournaments/my-active-matches",
@@ -3419,7 +3419,7 @@
           ],
           "tournaments",
           "my_active_matches",
-          "f7ae094b0d63a245157504c968a2b30c2bf3b751"
+          "2010c9c887fd967884eba34d7482810e3582a381"
         ],
         [
           "/api/v1/tournaments/players/{steam_id}/penalty",
@@ -3428,7 +3428,7 @@
           ],
           "tournaments",
           "player_penalty",
-          "2579dd20e916ec0b91eb164528308730049abf08"
+          "f0ca01737eeace7ae9c0ff9a7010ade245219805"
         ],
         [
           "/api/v1/tournaments/players/{steam_id}/tournaments",
@@ -3437,7 +3437,7 @@
           ],
           "tournaments",
           "player_tournaments",
-          "5642c3fde2a1ed688f85edade58702d857bfafd4"
+          "eacc5322634b9ec155cddaaa7c00e7abb4376066"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/bracket-detail",
@@ -3446,7 +3446,7 @@
           ],
           "tournaments",
           "bracket_detail",
-          "2aa2cee543777ebd81ecc1ea0ee681ac63cf76fe"
+          "09204815a047ca77f88643836c06b8ac6d7a0641"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/force-start-vote",
@@ -3455,7 +3455,7 @@
           ],
           "tournaments",
           "force_vote",
-          "2fc755e5898b1b4ccf678e06db2909ce5bcb1477"
+          "a134aa59b9cc272c96799eb58300255177509c15"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/matches/{match_id}/forfeit",
@@ -3464,7 +3464,7 @@
           ],
           "tournaments",
           "forfeit_match",
-          "2e114fadd2432404f0053ca85dd94daf18f27f42"
+          "6a08606ce43177acbe0a2ddadba10623ff382196"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/matches/{match_id}/play-now",
@@ -3473,7 +3473,7 @@
           ],
           "tournaments",
           "play_now",
-          "196cf69716f774a8c3df0e1d472b1bfb7df3824c"
+          "f80dc3b139fa200d5d75de32697976b4efc08c93"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/ready",
@@ -3482,7 +3482,7 @@
           ],
           "tournaments",
           "ready",
-          "2f5da2ef5e9dff99316724f19637022a8ad6acff"
+          "6a24ff2bcb07df0c999edca5c8735421f0338e40"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/signup",
@@ -3491,7 +3491,7 @@
           ],
           "tournaments",
           "signup",
-          "9af8590604c560e0c132487934e02c4107d59c0e"
+          "9056ab54657c9809dda34ae7d7bd63be669cf1c9"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/time-vote",
@@ -3500,7 +3500,7 @@
           ],
           "tournaments",
           "time_vote",
-          "14ac927bb316316722f833b76f162e81c4fb0aac"
+          "985b32c688904e879a59a5bcb516a7e5f2f661dd"
         ],
         [
           "/api/v1/tournaments/{tournament_id}/unsignup",
@@ -3509,7 +3509,7 @@
           ],
           "tournaments",
           "unsignup",
-          "96235aa56f641c1b7263676f842ee7262b326723"
+          "9c87250f572c5d379f324d5e681408fffbb8fe7b"
         ]
       ]
     },
@@ -3524,7 +3524,67 @@
           ],
           "title_ladders",
           "get_title_ladders",
-          "d0108f508be5c0f7dc653053665e6080c7c8c8d6"
+          "92cfafca31b74a508b8676f85bd53ad44a8a5a00"
+        ]
+      ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "verified-reads control routes (backend/api/main.py): GET /api/v1/read-gate/probe answers a fixed body once the read gate admits it; the other five require an admin signature: the operator-key routes (list, issue, revoke) and the read-gate mode route respond from api_operator_keys and runtime_settings, the read-census route from the in-process census. No route here reads matches, so no W1 private Match column can reach its output.",
+      "routes": [
+        [
+          "/api/v1/admin/operators",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_operator_list",
+          "cd1a10b51d35ada9deac3d139b8ff975be07863e"
+        ],
+        [
+          "/api/v1/admin/operators/keys",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_operator_key_issue",
+          "a53a92b4c0cf323af2b8d302b179fd5c8869649c"
+        ],
+        [
+          "/api/v1/admin/operators/keys/revoke",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_operator_key_revoke",
+          "51d79064c32da6f936fbd7cc98746ea4c92e3183"
+        ],
+        [
+          "/api/v1/admin/read-census",
+          [
+            "GET"
+          ],
+          "main",
+          "admin_read_census",
+          "081a5ae0df5d968cd9ad8f652acec3074a3bab1d"
+        ],
+        [
+          "/api/v1/admin/read-gate/mode",
+          [
+            "POST"
+          ],
+          "main",
+          "admin_read_gate_mode",
+          "bc32b9e66dd28bf5296cde7427e3d3fa1f28e799"
+        ],
+        [
+          "/api/v1/read-gate/probe",
+          [
+            "GET"
+          ],
+          "main",
+          "read_gate_probe",
+          "b1c6c4f0969e39c0f6d96a5fab1102df29c82db4"
         ]
       ]
     }
@@ -3534,36 +3594,41 @@
       [
         "main",
         "maintenance_gate",
-        "1d7d6806f059c852ee82063a64a801ce23086bcd"
+        "4e43eed6a14950d03417583fdd6356c94c117e19"
       ],
       [
         "main",
         "rate_limit_gate",
-        "f065649e5f96c29aed9efc3c51174e4d4fa4c0be"
+        "791fe7840529eadef9a14a8da0d4e6365a5327a1"
+      ],
+      [
+        "main",
+        "read_gate_cache_control",
+        "e013dd0c25aa0ba419258f0ee2cee747cce1fb8c"
       ],
       [
         "main",
         "replica_write_gate",
-        "a097089946e5668ba25ba9768101b9728417c637"
+        "c810224e293d0956b202a07ae32194b834c4590d"
       ],
       [
         "main",
         "version_gate",
-        "849e9fbbdcee26f3f7307359f1134e1415b7ba5d"
+        "42502a00a2b7acd8aae751964878bd299d579a11"
       ]
     ],
     "exception_handlers": [
       [
         "main",
         "_ffa_report_refusal_handler",
-        "6c0d430f5b100aee65761c1f24e9af2eb967bfe5"
+        "03241c65607d236c7e2319284504e1c301d0e364"
       ]
     ],
     "background_entry_points": [
       [
         "main",
         "lifespan",
-        "9129e8a088e68575f3f317a0469095196230ee7a"
+        "ad9109983a3465bd16a0e00dee58cfaedf0f38db"
       ]
     ]
   },
@@ -3955,6 +4020,12 @@
     "POST /api/v1/internal/moderation-cases/{case_id}/notified -> main.internal_moderation_case_notified",
     "POST /api/v1/admin/mail/broadcast -> main.admin_mail_broadcast",
     "POST /api/v1/admin/mail/bulk-grants -> main.admin_mail_bulk_grant",
-    "DELETE /api/v1/admin/mail/bulk-grants/{steam_id} -> main.admin_mail_bulk_grant_revoke"
+    "DELETE /api/v1/admin/mail/bulk-grants/{steam_id} -> main.admin_mail_bulk_grant_revoke",
+    "POST /api/v1/admin/operators/keys -> main.admin_operator_key_issue",
+    "POST /api/v1/admin/operators/keys/revoke -> main.admin_operator_key_revoke",
+    "GET /api/v1/admin/operators -> main.admin_operator_list",
+    "POST /api/v1/admin/read-gate/mode -> main.admin_read_gate_mode",
+    "GET /api/v1/admin/read-census -> main.admin_read_census",
+    "GET /api/v1/read-gate/probe -> main.read_gate_probe"
   ]
 }
