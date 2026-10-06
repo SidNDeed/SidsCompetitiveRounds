@@ -89,6 +89,23 @@
 --                                       whole point of this file
 --   READER  the ops `bug-log:N` verb    looks a ticket up by that number
 --
+-- THE `kind` READERS THAT ARRIVE WITH THIS LANE (2026-10-06). 336's header
+-- carries the inventory of every reader and writer of `bug_reports.kind`,
+-- and it is the argument for applying 336 before the api. 336 is APPLIED on
+-- production, so its file is not edited (round 8's LOW 1): the two readers
+-- the automatic upload adds are listed HERE instead, in the file that ships
+-- with them and is applied before their code, which itself requires 336
+-- (the guard below). The header check reads 336's header and this one's:
+--   READER  auto_logs._auto_bucket             the automatic upload's own
+--                                              12/24h count, kind = 'auto'
+--   NOT A READER  auto_logs.prune_orphan_blobs looks a blob up by
+--                                              log_filename over the WHOLE
+--                                              table and is deliberately NOT
+--                                              scoped to kind; its docstring
+--                                              names the column to say so,
+--                                              which is why a text detector
+--                                              lists it
+--
 -- BOTH MIXED WINDOWS (#477):
 --   * THIS FILE APPLIED, OLD CODE STILL RUNNING -- entirely safe, and it is
 --     the state the two-SHA order passes through on purpose. The old code has
@@ -106,8 +123,8 @@ BEGIN;
 
 -- ── guard: the SHAPE 336 leaves must already be here, object by object ───────
 --
--- ASKED FOR BY OBJECT, NOT BY FILE. Two copies of 336 exist (see the header)
--- and they differ in their self-verification only, so "did 336 run" is not a
+-- ASKED FOR BY OBJECT, NOT BY FILE. Two copies of 336 have existed (see the
+-- header) and they differ in their self-verification only, so "did 336 run" is not a
 -- question this file can answer and not the question it needs answered. What
 -- it needs is the three objects its own CHECK and its own handler are written
 -- against, and each one is named separately so a partial shape says WHICH
