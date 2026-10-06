@@ -435,6 +435,9 @@ V3_EXEMPT = {
     "StaleProjectileSweepPatch": "NoteRoundBoundary feeds ShadowDot's silence-report window only; no health",
     "EndScreenKillPatch": "v3 reads RefusesNow() as a state predicate (LiveReplica keeps a fighter's regular "
                           "tick out of the refusal window); its prefix's attachment does not change that read",
+    "DamageNumbers": "NoteSpectatorPoison (v1.41.0 item 21) feeds the local damage-number display only, after "
+                     "the tick's health write; it returns nothing to v3 and writes no health, so its "
+                     "DoDamage/Heal attachment does not change what v3 applies",
 }
 
 
