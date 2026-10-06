@@ -341,15 +341,42 @@ def r_sections_pair(variant="base"):
 
 
 A1_FIXTURE_DIR = os.path.join(HERE, "fixtures", "combat_evidence_a1")
-# The amended records the client lane committed (its scenario run, both seats):
-# carried byte for byte; the server's budgeter must reproduce each exactly.
+# The amended records the client lane committed at 5969a3b5 (its scenario run,
+# both seats), carried byte for byte. They are REVISION 1 of the amendment
+# (seven cost_a1 rows, no widened list), which a revision 2 server refuses;
+# `rev2` builds the synthetic revision 2 records the tests read from them.
 A1_FIXTURES = ("seat1.rec.txt", "seat2.rec.txt")
+
+
+def widen(rec):
+    """`rec`'s rows of the four widened lists given their revision 2 fields
+    (in place, returned), each new field at its none value: no force stamp
+    (-1) on a chain row, three empty force slots on a death row. A row
+    already at its amended width is left as it is."""
+    for key, extra in cm.WA["widened"]:
+        base = len(cm.SPEC[key][3])
+        none = (list(cm.FORCE_EMPTY) * cm.FORCE_SLOTS if key in cm.DEATH_LISTS
+                else [cm.WA["chain_none"]] * len(extra))
+        rec[key] = [list(r) + none if len(r) == base else list(r) for r in rec[key]]
+    return rec
+
+
+def rev2(rec):
+    """A SYNTHETIC revision 2 record from a revision 1 one (a copy): the
+    eighth cost_a1 row (G1, zero cost) appended and the widened lists'
+    rows given their new fields at their none values."""
+    out = json.loads(json.dumps(rec))
+    if len(out[cm.COST_A1_KEY]) == cm.WA["cost_rows"] - 1:
+        out[cm.COST_A1_KEY].append([0, 0, 0, 0])
+    return widen(out)
 
 
 def amend(rec, rx=True, **drop):
     """`rec` as an amended record (in place, returned): the amendment bit,
     the reaction bit when `rx`, the loss counters named in `drop` (others
-    zero), totals that agree with the lists as they stand, zero added cost."""
+    zero), totals that agree with the lists as they stand, zero added cost,
+    and the widened lists' rows at their revision 2 width (`widen`)."""
+    widen(rec)
     rec["caps"] |= cm.CAPS_AMEND | (cm.CAPS_RX if rx else 0)
     rec[cm.DROP_KEY] = [drop.pop(f, 0) for f in cm.DROP_FIELDS]
     assert not drop, drop

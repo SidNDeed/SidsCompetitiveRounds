@@ -2534,27 +2534,260 @@ def test_l1_the_match_report_hmac_is_exactly_the_seven_field_canonical(monkeypat
 # The client lane's COMBAT-WIRE-AMENDMENT-A1: two caps bits (reaction 16, amendment 32),
 # three never-trimmed keys after `omit` (drop, a1_tot, cost_a1), two widened bounds. A
 # record without bit 32 is the current layout byte for byte (the canonical fixture test
-# above, unchanged, is that proof); the client's two amended records are carried in
-# fixtures/combat_evidence_a1 and must reproduce byte for byte.
+# above, unchanged, is that proof). Fix pass 9: the amendment is REVISION 2 (section f:
+# an eighth cost_a1 row, four widened lists, the push dependency). The client's two
+# revision 1 records (5969a3b5) stay carried in fixtures/combat_evidence_a1 as the records
+# a revision 2 server refuses; the tests read SYNTHETIC revision 2 records built from them
+# (fx.rev2), and the client's two previous-wire records (967a0fe7, fixtures-legacy) are
+# carried in fixtures/combat_evidence_a1/legacy and must reproduce byte for byte.
 
 LEGACY_FIXTURES = sorted(n for n in os.listdir(fx.FIXTURE_DIR) if n.endswith(".in.json"))
+A1_LEGACY_DIR = os.path.join(fx.A1_FIXTURE_DIR, "legacy")
 
 
-def _a1_fixture(name):
+def _a1_rev1(name):
+    """The client's carried revision 1 record: its bytes and its value."""
     with open(os.path.join(fx.A1_FIXTURE_DIR, name), "rb") as f:
         raw = f.read()
     return raw, json.loads(raw.decode("ascii"))
 
 
-def test_a1_the_client_records_reproduce_byte_for_byte():
+def _a1_fixture(name):
+    """A SYNTHETIC revision 2 record built from the carried revision 1 one:
+    its budgeted bytes and its value."""
+    rec = fx.rev2(_a1_rev1(name)[1])
+    return cm.budget_record(rec).encode("ascii"), rec
+
+
+def test_a1_a_revision_1_record_is_refused_by_the_revision_2_server():
+    """Integrator default (fix pass 9, Sid may change it): no revision field
+    exists and the only client writing bit 32 writes revision 2, so a
+    revision 1 record is refused, at its first narrow list or at cost_a1."""
+    for name in fx.A1_FIXTURES:
+        raw, rec = _a1_rev1(name)
+        assert cm.budget_record(rec).encode("ascii") == raw, name    # the budgeter is generic
+        with pytest.raises(cm.Refusal) as e:
+            cm.check_record(rec)
+        assert e.value.field == "ch_s", (name, e.value.field)
+        widened = fx.widen(json.loads(json.dumps(rec)))
+        assert len(widened[cm.COST_A1_KEY]) == 7
+        with pytest.raises(cm.Refusal) as e:
+            cm.check_record(widened)                                # seven cost_a1 rows
+        assert e.value.field == cm.COST_A1_KEY
+        cm.check_record(fx.rev2(rec))                               # control: revision 2
+
+
+def test_a1_the_synthetic_revision_2_records_reproduce_byte_for_byte():
+    n = 0
     for name in fx.A1_FIXTURES:
         raw, rec = _a1_fixture(name)
         cm.check_record(rec)
         assert cm.amended(rec) and list(rec)[-4:] == ["omit"] + list(cm.A1_KEYS), name
-        assert cm.budget_record(rec).encode("ascii") == raw, name
+        assert len(rec[cm.COST_A1_KEY]) == cm.WA["cost_rows"] == 8
+        for key in cm.A1_WIDENED:
+            assert all(len(r) == len(cm.AMENDED_FIELDS[key]) for r in rec[key]), (name, key)
+        assert raw == cm.dumps(rec).encode("ascii"), name           # under the bound, untrimmed
+        assert cm.budget_record(json.loads(raw)).encode("ascii") == raw, name
         assert cm.section_faults(rec) == [], name
-    print("\nPROOF SIZE a1 fixtures: %d amended client records reproduced byte for byte"
-          % len(fx.A1_FIXTURES))
+        n += 1
+    print("\nPROOF SIZE a1 fixtures: %d synthetic revision 2 records (built from the client's "
+          "revision 1 records) accepted and reproduced byte for byte" % n)
+
+
+def test_a1_the_client_legacy_records_are_accepted_and_reproduced():
+    n = 0
+    for name in sorted(os.listdir(A1_LEGACY_DIR)):
+        with open(os.path.join(A1_LEGACY_DIR, name), "rb") as f:
+            raw = f.read()
+        rec = json.loads(raw.decode("ascii"))
+        cm.check_record(rec)
+        assert not cm.amended(rec) and not set(cm.A1_KEYS) & set(rec), name
+        assert cm.budget_record(rec).encode("ascii") == raw, name
+        n += 1
+    assert n == 2
+    print("\nPROOF SIZE a1 client legacy: %d previous-wire client records accepted and "
+          "reproduced byte for byte" % n)
+
+
+def _r2_bounds(key, field):
+    return next(f[1:] for f in cm.AMENDED_FIELDS[key] if f[0] == field)
+
+
+def test_a1_revision_2_widened_fields_mirror_the_fields_the_amendment_names():
+    """Each new field is bounded as the amendment says: the force stamps as
+    the damage stamps, a force identity as a recent hit except the pid's
+    lowest value (the unkeyed mark) and the sender (-1..1)."""
+    assert _r2_bounds("ch_s", "t_frc_rcv") == _r2_bounds("ch_s", "t_dmg_rcv")
+    assert _r2_bounds("ch_o", "t_frc") == _r2_bounds("ch_o", "t_dmg")
+    assert [len(cm.AMENDED_FIELDS[k]) for k in ("ch_s", "ch_o", "bd_s", "bd_o")] == [9, 7, 35, 35]
+    for key in cm.DEATH_LISTS:
+        assert [f[0] for f in cm.AMENDED_FIELDS[key][:20]] == [f[0] for f in cm.SPEC[key][3]]
+        for i in (1, 2, 3):
+            lo, hi = _r2_bounds(key, "h1_pid")
+            assert _r2_bounds(key, "f%d_pid" % i) == (min(lo, cm.FORCE_UNKEYED), hi)
+            for part in ("s_init", "cord", "age"):
+                assert _r2_bounds(key, "f%d_%s" % (i, part)) == _r2_bounds(key, "h1_" + part)
+            assert _r2_bounds(key, "f%d_snd" % i) == (-1, 1)
+    assert cm.FORCE_EMPTY == (-1, 0, -1, -1, -1) and cm.FORCE_UNKEYED == -2
+
+
+def _r2_record():
+    return _a1_fixture("seat2.rec.txt")[1]
+
+
+def _refused_at(rec):
+    try:
+        cm.check_record(rec)
+    except cm.Refusal as e:
+        return e.field
+    return None
+
+
+def test_a1_mutant_revision_2_widths_and_bounds_are_enforced():
+    """Every widened width and every new bound, each with its red control:
+    one width off by one each way, one field out of bounds, an empty force
+    slot that is not exactly the empty mark, and the same widened row in a
+    record without the amendment bit."""
+    base = _r2_record()
+    assert base["ch_s"] and base["ch_o"] and base["bd_s"] is not None
+    assert _refused_at(base) is None                                        # control
+    cases = 0
+    for key in ("ch_s", "ch_o"):
+        if not base[key]:
+            continue
+        for delta in (-1, 1):                                               # width off by one
+            m = json.loads(json.dumps(base))
+            m[key][0] = m[key][0][:delta] if delta < 0 else m[key][0] + [0]
+            assert _refused_at(m) == key, (key, delta)
+            cases += 1
+    stamp = {"ch_s": "t_frc_rcv", "ch_o": "t_frc"}
+    for key, field in stamp.items():
+        if not base[key]:
+            continue
+        ix = cm.IX_A1[key][field]
+        for v, ok in ((-1, True), (2147483647, True), (-2147483649, False), (2147483648, False)):
+            m = json.loads(json.dumps(base))
+            m[key][0][ix] = v
+            assert (_refused_at(m) is None) is ok, (key, v)
+            cases += 1
+    m = json.loads(json.dumps(base))
+    legacy = {k: v for k, v in m.items() if k not in cm.A1_KEYS}
+    legacy["caps"] &= ~(cm.CAPS_AMEND | cm.CAPS_RX)
+    assert _refused_at(legacy) == "ch_s"                                    # widened, no bit
+    cases += 1
+    death = _r2_death_record()
+    assert _refused_at(death) is None                                       # control
+    ix = cm.IX_A1["bd_s"]
+    for field, v, ok in (("f1_pid", -2, True), ("f1_pid", -3, False), ("f1_snd", 1, True),
+                         ("f1_snd", 2, False), ("f1_snd", -2, False), ("f1_age", 600000, True),
+                         ("f1_age", 600001, False), ("f2_cord", 256, False),
+                         ("f3_s_init", 2147483648, False)):
+        m = json.loads(json.dumps(death))
+        m["bd_s"][0][ix[field]] = v
+        assert (_refused_at(m) is None) is ok, (field, v)
+        cases += 1
+    for part, v in (("s_init", 5), ("cord", 0), ("snd", 0), ("age", 0)):    # inexact empty slot
+        m = json.loads(json.dumps(death))
+        m["bd_s"][0][ix["f3_" + part]] = v
+        assert m["bd_s"][0][ix["f3_pid"]] == -1
+        assert _refused_at(m) == "bd_s", part
+        cases += 1
+    for delta in (-1, 1):
+        m = json.loads(json.dumps(death))
+        m["bd_s"][0] = m["bd_s"][0][:delta] if delta < 0 else m["bd_s"][0] + [-1]
+        assert _refused_at(m) == "bd_s", delta
+        cases += 1
+    print("\nPROOF SIZE a1 r2 bounds: %d widened-width and bound cases, each refused or "
+          "accepted as the amendment says" % cases)
+
+
+def _r2_death_record():
+    """A synthetic revision 2 record with one death row on each list: f1 a
+    keyed force this seat sent, f2 an unkeyed force the other seat sent, f3
+    the empty slot."""
+    rec = _r2_record()
+    ix = cm.IX_A1["bd_s"]
+    row = [0] * len(cm.AMENDED_FIELDS["bd_s"])
+    for f in cm.AMENDED_FIELDS["bd_s"]:
+        row[ix[f[0]]] = max(f[1], min(0, f[2]))
+    row[ix["h1_pid"]], row[ix["h2_pid"]], row[ix["h3_pid"]] = 7, -1, -1
+    for i, slot in enumerate(((7, 100, 1, 0, 40), (-2, 0, -1, 1, 90), cm.FORCE_EMPTY)):
+        for part, v in zip(cm.FORCE_PARTS, slot):
+            row[ix["f%d_%s" % (i + 1, part)]] = v
+    rec["bd_s"] = [row]
+    rec["bd_o"] = [list(row)]
+    return rec
+
+
+def test_a1_revision_2_deaths_show_the_force_identities_beside_the_hits():
+    rec = _r2_death_record()
+    cm.check_record(rec)
+    (d,) = [d for d in cm.pair_view(fx.records(rec, None))["deaths"] if d["seat"] == A]
+    (row,) = d["rows"]
+    assert [f["pid"] for f in row["forces"]] == [7, -2]                     # newest first, empty skipped
+    keyed, unkeyed = row["forces"]
+    assert keyed["sender"] == "self" and keyed["unkeyed"] is False and keyed["age"] == 40
+    assert (keyed["s_init"], keyed["cord"]) == (100, 1)
+    assert unkeyed["sender"] == "other" and unkeyed["unkeyed"] is True and unkeyed["push_listed"] is None
+    legacy = fx.empty_record()
+    legacy["caps"] = rec["caps"] & 15
+    legacy["bd_s"] = [row_[:20] for row_ in rec["bd_s"]]
+    (d0,) = [d for d in cm.pair_view(fx.records(legacy, None))["deaths"] if d["seat"] == A]
+    assert "forces" not in d0["rows"][0]                                    # control: no key
+
+
+def test_a1_revision_2_chains_carry_the_force_transit():
+    v, s = fx.r_sections_pair()
+    fx.amend(v)
+    fx.amend(s)
+    S, O = cm.IX_A1["ch_s"], cm.IX_A1["ch_o"]
+    v["ch_s"][0][S["t_frc_rcv"]] = 4400
+    s["ch_o"][0][O["t_frc"]] = 4330
+    cm.check_record(v)
+    cm.check_record(s)
+
+    def row_of(victim, shooter):
+        (c,) = [c for c in cm.pair_view(fx.records(victim, shooter))["chains"] if c["victim"] == A]
+        return c["rows"][0]
+
+    r = row_of(v, s)
+    assert r["frc_transit"] == 70 and "frc_transit" not in r.get("interval_not_run", {})
+    s2 = json.loads(json.dumps(s))
+    s2["ch_o"][0][O["t_frc"]] = -1
+    r = row_of(v, s2)
+    assert r["frc_transit"] is None and r["interval_not_run"]["frc_transit"] == "no_force"
+    v2 = json.loads(json.dumps(v))
+    v2["ch_s"][0][S["t_frc_rcv"]] = -1
+    assert row_of(v2, s)["interval_not_run"]["frc_transit"] == "no_force"
+    plain_v, plain_s = fx.r_sections_pair()
+    r0 = row_of(plain_v, plain_s)
+    assert "frc_transit" not in r0 and "interval_not_run" not in r0         # control: no key
+    r = row_of(v, plain_s)
+    assert r["frc_transit"] is None and r["interval_not_run"]["frc_transit"] == "not_collected"
+    assert r["dmg_transit"] == r0["dmg_transit"]
+
+
+def test_a1_mutant_revision_2_push_dependency():
+    """Integrator default (fix pass 9, Sid may change it): an amended record
+    claiming the chain or death section without the push section is refused,
+    because the push collector produces both; a record without the amendment
+    bit keeps the layout's caps rule."""
+    caps = cm.W["caps"]
+    base = _r2_record()
+    seen = []
+    for push, chain, death, want in ((1, 1, 1, None), (0, 1, 0, "caps.chain_without_push"),
+                                     (0, 0, 1, "caps.death_without_push"),
+                                     (0, 1, 1, "caps.chain_without_push"), (0, 0, 0, None),
+                                     (1, 0, 0, None)):
+        m = json.loads(json.dumps(base))
+        bits = (caps["push"] * push) | (caps["chain"] * chain) | (caps["death"] * death)
+        m["caps"] = (m["caps"] & ~(caps["push"] | caps["chain"] | caps["death"])) | bits
+        assert _refused_at(m) == want, (push, chain, death)
+        seen.append(want)
+    legacy = fx.empty_record()
+    legacy["caps"] = caps["chain"] | caps["death"]
+    assert _refused_at(legacy) is None                                      # no bit 32: layout rule
+    assert seen.count(None) == 3
 
 
 def test_a1_a_record_without_the_bit_is_the_current_layout():
@@ -2584,7 +2817,9 @@ def test_a1_mutant_the_keys_without_the_bit_are_refused():
     with pytest.raises(cm.Refusal) as e:
         cm.check_record(no_bit)
     assert e.value.field == cm.DROP_KEY
-    rx_only = {k: v for k, v in no_bit.items() if k not in cm.A1_KEYS}
+    narrow = _a1_rev1("seat1.rec.txt")[1]                       # the layout's row widths
+    narrow["caps"] &= ~(cm.CAPS_AMEND | cm.CAPS_RX)
+    rx_only = {k: v for k, v in narrow.items() if k not in cm.A1_KEYS}
     cm.check_record(rx_only)                                    # control: the current shape
     rx_only["caps"] |= cm.CAPS_RX
     with pytest.raises(cm.Refusal) as e:

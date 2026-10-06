@@ -317,7 +317,39 @@ COMBAT_WIRE_A1 = {
              "res_incomparable", "mask_unscanned"),
     "totals": ("b5_h", "rx_on_s", "rx_on_o", "rx_samples"),
     "count": (0, 9999999),
-    "cost_rows": 7,
+    "cost_rows": 8,
+    # The second revision, section (f): the fields an amended record's rows of four
+    # lists carry after the layout's own, in order. The chain's force stage
+    # (receipt on the victim's list, creation on the shooter's, bounded as the
+    # damage stage's), and a death's three most recent force identities,
+    # newest first, bounded as a recent hit's except the projectile id, whose
+    # lowest value is the unkeyed mark, and the sender (0 this seat, 1 the
+    # other, -1 an empty slot).
+    "widened": (
+        ("ch_s", (("t_frc_rcv", -2147483648, 2147483647),)),
+        ("ch_o", (("t_frc", -2147483648, 2147483647),)),
+        ("bd_s", (("f1_pid", -2, 2147483647), ("f1_s_init", -2147483648, 2147483647),
+                  ("f1_cord", -1, 255), ("f1_snd", -1, 1), ("f1_age", -1, 600000),
+                  ("f2_pid", -2, 2147483647), ("f2_s_init", -2147483648, 2147483647),
+                  ("f2_cord", -1, 255), ("f2_snd", -1, 1), ("f2_age", -1, 600000),
+                  ("f3_pid", -2, 2147483647), ("f3_s_init", -2147483648, 2147483647),
+                  ("f3_cord", -1, 255), ("f3_snd", -1, 1), ("f3_age", -1, 600000))),
+        ("bd_o", (("f1_pid", -2, 2147483647), ("f1_s_init", -2147483648, 2147483647),
+                  ("f1_cord", -1, 255), ("f1_snd", -1, 1), ("f1_age", -1, 600000),
+                  ("f2_pid", -2, 2147483647), ("f2_s_init", -2147483648, 2147483647),
+                  ("f2_cord", -1, 255), ("f2_snd", -1, 1), ("f2_age", -1, 600000),
+                  ("f3_pid", -2, 2147483647), ("f3_s_init", -2147483648, 2147483647),
+                  ("f3_cord", -1, 255), ("f3_snd", -1, 1), ("f3_age", -1, 600000))),
+    ),
+    "force_slots": 3,
+    "force_parts": ("pid", "s_init", "cord", "snd", "age"),
+    "force_unkeyed": -2,
+    "force_empty": (-1, 0, -1, -1, -1),
+    "force_sender": {"self": 0, "other": 1},
+    # The push collector produces the chain's force stage and the death's
+    # force identities: an amended record claiming either section without
+    # the push section is inconsistent.
+    "requires": (("chain", "push"), ("death", "push")),
     "mask_unknown": -1,
     "chain_none": -1,
     "counted": (("b5_h", "b5_h"), ("rx_s", "rx_on_s"), ("rx_o", "rx_on_o")),
@@ -401,6 +433,41 @@ MASK_UNKNOWN = WA["mask_unknown"]
 A1_MARKS = dict(WA["marks"])
 # `p3top` under the amendment: the mask's lowest value is the never-scanned one.
 P3TOP_AMENDED = tuple((f[0], MASK_UNKNOWN, f[2]) if f[0] == "mask" else f for f in SPEC["p3top"][3])
+# The second revision (section f): the four lists whose amended rows are wider, their
+# full amended field lists, and the force identity slots of a death row.
+A1_WIDENED = dict(WA["widened"])
+AMENDED_FIELDS = {k: tuple(SPEC[k][3]) + tuple(extra) for k, extra in WA["widened"]}
+IX_A1 = {k: _index(f) for k, f in AMENDED_FIELDS.items()}
+FORCE_SLOTS = WA["force_slots"]
+FORCE_PARTS = WA["force_parts"]
+FORCE_UNKEYED = WA["force_unkeyed"]
+FORCE_EMPTY = tuple(WA["force_empty"])
+FORCE_SENDER = {v: k for k, v in WA["force_sender"].items()}
+A1_REQUIRES = WA["requires"]
+DEATH_LISTS = tuple(k for k, _c in dict(W["sections"])["death"])
+
+
+def fields_of(key, amend=False):
+    """The field list of list `key`'s rows: the layout's own, or with
+    `amend` the amended one (the second revision) for the four widened lists."""
+    if amend and key in AMENDED_FIELDS:
+        return AMENDED_FIELDS[key]
+    if amend and key == "p3top":
+        return P3TOP_AMENDED
+    return SPEC[key][3]
+
+
+def force_slots(row, key) -> list:
+    """The force identity slots of one amended death row of list `key`,
+    newest first, as (pid, s_init, cord, snd, age) tuples."""
+    ix = IX_A1[key]
+    return [tuple(row[ix["f%d_%s" % (i + 1, part)]] for part in FORCE_PARTS)
+            for i in range(FORCE_SLOTS)]
+
+
+def _forces_ok(row, key) -> bool:
+    """A slot whose projectile id is the empty mark is exactly the empty slot."""
+    return all(s == FORCE_EMPTY for s in force_slots(row, key) if s[0] == FORCE_EMPTY[0])
 
 
 def amended(rec) -> bool:
@@ -461,8 +528,10 @@ def check_field(key, v, amend=False) -> bool:
     if kind == "hist":
         return isinstance(v, list) and len(v) == s[1] and all(_int_ok(x, s[2], s[3]) for x in v)
     if kind == "list":
-        fields = P3TOP_AMENDED if amend and key == "p3top" else s[3]
-        return isinstance(v, list) and len(v) <= s[1] and all(_row_ok(x, fields) for x in v)
+        fields = fields_of(key, amend)
+        if not (isinstance(v, list) and len(v) <= s[1] and all(_row_ok(x, fields) for x in v)):
+            return False
+        return not (amend and key in DEATH_LISTS) or all(_forces_ok(x, key) for x in v)
     if kind == "groups":
         return isinstance(v, list) and len(v) <= s[1] and all(_group_ok(g, s) for g in v)
     if kind == "omit":
@@ -493,7 +562,14 @@ def check_record(rec) -> None:
     or key order other than the layout's. A record whose caps carry the
     amendment bit must carry the amendment's keys after `omit`, in their
     order; any other record must carry none of them (its caps bound stays
-    the layout's, so the reaction bit alone is refused as `caps`)."""
+    the layout's, so the reaction bit alone is refused as `caps`).
+
+    An amended record is the second revision of the amendment: the
+    amendment's cost key holds its eight rows, the four widened lists hold
+    their amended rows (a death row's empty force slot exactly the empty
+    mark), and a section the push collector produces (chain, death) is
+    claimed only with the push section: otherwise it is refused as
+    `caps.<section>_without_push`."""
     if not isinstance(rec, dict):
         raise Refusal("record")
     amend = amended(rec)
@@ -509,6 +585,9 @@ def check_record(rec) -> None:
     for key in (A1_KEYS if amend else ()):
         if not check_amended_field(key, rec[key]):
             raise Refusal(key)
+    for section, needs in (A1_REQUIRES if amend else ()):
+        if rec["caps"] & W["caps"][section] and not rec["caps"] & W["caps"][needs]:
+            raise Refusal("caps.%s_without_%s" % (section, needs))
 
 
 # -- serialization, the budgeter and its byte proof ---------------------------------
@@ -1631,11 +1710,21 @@ def chains(victim_rec, shooter_rec) -> list:
     shooter writes minus one for a decision it did not see (no aim sample led
     the hit message) and for a damage message it did not send: an interval
     with such an operand is NOT-RUN (`interval_not_run` names it
-    `no_decision` or `no_damage`), never a number."""
+    `no_decision` or `no_damage`), never a number.
+
+    An amended victim record (the second revision) adds the force stage: `frc_transit`
+    is the victim's receipt of the force message keyed to this hit minus the
+    shooter's creation of it, when both stamps are at least zero; otherwise
+    NOT-RUN `no_force` (or `not_collected` when the shooter's record is not
+    amended and so carries no force stamp). The key is the hit key, the one
+    the push rows carry."""
     if victim_rec is None or not has_cap(victim_rec, "chain"):
         return []
     none = WA["chain_none"]
     S, O = IX["ch_s"], IX["ch_o"]
+    force = amended(victim_rec)
+    frc_rcv = IX_A1["ch_s"]["t_frc_rcv"]
+    frc = IX_A1["ch_o"]["t_frc"]
     vic = _keyed(victim_rec["ch_s"], S)
     sho = _keyed(shooter_rec["ch_o"], O) if shooter_rec is not None else []
     bad = _ambiguous(vic) | _ambiguous(sho)
@@ -1648,6 +1737,8 @@ def chains(victim_rec, shooter_rec) -> list:
                "hp_to_frame": wrap(e[S["t_frame"]] - e[S["t_hp"]]),
                "dec_to_msg": None, "msg_transit": None, "dmg_transit": None,
                "decision_to_screen": None, "not_run": base}
+        if force:
+            row["frc_transit"] = None
         gaps = {}
         if base is None:
             if (k[0], k[1]) in bad:
@@ -1666,6 +1757,12 @@ def chains(victim_rec, shooter_rec) -> list:
                     gaps["dmg_transit"] = "no_damage"
                 else:
                     row["dmg_transit"] = wrap(e[S["t_dmg_rcv"]] - o[O["t_dmg"]])
+                if force and not amended(shooter_rec):
+                    gaps["frc_transit"] = "not_collected"
+                elif force and (e[frc_rcv] < 0 or o[frc] < 0):
+                    gaps["frc_transit"] = "no_force"
+                elif force:
+                    row["frc_transit"] = wrap(e[frc_rcv] - o[frc])
         rows.append(_noted(row, interval_not_run=gaps))
     return rows
 
@@ -1752,7 +1849,8 @@ def deaths(own_rec, other_rec) -> list:
     it; False only when the absence gate says that list proves absence
     (`absence`: collected, nothing omitted, as many entries as
     `r_tot.push_own` counts); otherwise None with `push_not_run` naming why
-    (`not_collected`, `trimmed`, `inconsistent`)."""
+    (`not_collected`, `trimmed`, `inconsistent`). An amended row (the second revision)
+    also shows its three force identities beside the hits (`forces`)."""
     if own_rec is None or not has_cap(own_rec, "death"):
         return []
     D = IX["bd_s"]
@@ -1765,20 +1863,36 @@ def deaths(own_rec, other_rec) -> list:
             theirs.setdefault(e[D["ord"]], []).append(e)
     base = _section_not_run(own_rec, other_rec, "death")
     rows = []
+    force = amended(own_rec)
     for e in own_rec["bd_s"]:
-        hits = []
+        # The recent hits, then (second revision) the non-empty force slots, newest
+        # first: each resolved against the seat's own push list by ONE rule.
+        entries = []
         for i in range(W["recent_hits"]):
             p = "h%d_" % (i + 1)
-            if e[D[p + "pid"]] < 0:
-                continue
-            key = (e[D[p + "pid"]], e[D[p + "s_init"]], e[D[p + "cord"]])
+            if e[D[p + "pid"]] >= 0:
+                entries.append(("hits", (e[D[p + "pid"]], e[D[p + "s_init"]], e[D[p + "cord"]]),
+                                {"age": e[D[p + "age"]]}))
+        for pid, s_init, cord, snd, age in (force_slots(e, "bd_s") if force else ()):
+            if pid != FORCE_EMPTY[0]:
+                entries.append(("forces", (pid, s_init, cord),
+                                {"unkeyed": pid == FORCE_UNKEYED, "sender": FORCE_SENDER.get(snd),
+                                 "age": age}))
+        listing = {"hits": [], "forces": []}
+        for kind, key, extra in entries:
             listed = pushes_own is not None and key in pushes_own
-            hits.append({"pid": key[0], "s_init": key[1], "cord": key[2], "age": e[D[p + "age"]],
-                         "push_listed": (True if listed else
-                                         (False if push_why == ABSENT else None)),
-                         "push_not_run": None if listed or push_why == ABSENT else push_why})
-        row = {"self": dict(zip(fields, e)), "meas": None, "hits": hits, "d_px": None,
+            item = dict({"pid": key[0], "s_init": key[1], "cord": key[2]}, **extra,
+                        push_listed=(True if listed else
+                                     (False if push_why == ABSENT else None)),
+                        push_not_run=None if listed or push_why == ABSENT else push_why)
+            if extra.get("unkeyed"):
+                # A force no open hit keyed names no hit: the push list cannot hold it.
+                item.update(push_listed=None, push_not_run="unkeyed")
+            listing[kind].append(item)
+        row = {"self": dict(zip(fields, e)), "meas": None, "hits": listing["hits"], "d_px": None,
                "d_py": None, "d_vx": None, "d_vy": None, "not_run": base}
+        if force:
+            row["forces"] = listing["forces"]
         if base is None:
             cand = theirs.get(e[D["ord"]], [])
             if len(cand) != 1:
@@ -1889,6 +2003,8 @@ def pair_view(records: list) -> dict:
             for r in ch_rows:
                 r.update(dec_to_msg=None, msg_transit=None, dmg_transit=None,
                          decision_to_screen=None, not_run="incompatible")
+                if "frc_transit" in r:
+                    r["frc_transit"] = None
             for r in d_rows:
                 r.update(meas=None, d_px=None, d_py=None, d_vx=None, d_vy=None,
                          not_run="incompatible")
