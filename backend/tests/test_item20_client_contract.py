@@ -55,6 +55,10 @@ import main  # noqa: E402
 
 TOP_KEY = "subject_standings"
 PRINT_KEYS = ("subject_board_rank", "subject_rating", "subject_inactive")
+# The print's subject_* keys from BEFORE item 20 (the Player Cards core,
+# 014621c6): the client reads each of them already (ParsePcPrint), so they
+# are not strays. Anything else starting subject_ is a misspelt standings key.
+PRE_ITEM20_SUBJECT_KEYS = ("subject_player_id", "subject_name", "subject_deleted")
 CLIENT_SRC_VAR = "ITEM20_CLIENT_APICLIENT"
 SECRET = "item20-contract-" + uuid.uuid4().hex
 
@@ -116,7 +120,7 @@ def malformed(print_obj):
     has no standings row and the client reads the off-board defaults)."""
     bad = []
     stray = [k for k in print_obj if k.startswith("subject_") and k not in PRINT_KEYS
-             and k != "subject_player_id"]
+             and k not in PRE_ITEM20_SUBJECT_KEYS]
     if stray:
         bad.append("unknown key(s) %s" % stray)
     present = [k for k in PRINT_KEYS if k in print_obj]
@@ -145,6 +149,9 @@ def test_the_reader_port_rejects_each_malformed_value():
             "subject_rating": 1834.5, "subject_inactive": False}
     assert malformed(good) == []
     assert client_reads(good) == (7, 1834.5, True, False)
+    # the real answer carries the pre-item-20 subject keys beside the new ones
+    assert malformed(dict(good, subject_name="n", subject_deleted=False)) == []
+    assert malformed(dict(good, subject_name="n", subject_ratng=1.0))
     off = {"subject_player_id": "x", "subject_board_rank": None,
            "subject_rating": None, "subject_inactive": True}
     assert malformed(off) == []
@@ -240,7 +247,10 @@ def test_the_client_source_reads_exactly_these_keys():
                  'PcFloat(PcTopLevel(obj, "subject_rating"))',
                  'PcHas(obj, "subject_rating")',
                  'PcBool(PcTopLevel(obj, "subject_inactive"))',
-                 'PcBool(PcTopLevel(json, "subject_standings"))'):
+                 'PcBool(PcTopLevel(json, "subject_standings"))',
+                 'PcStr(PcTopLevel(obj, "subject_player_id"))',
+                 'PcStr(PcTopLevel(obj, "subject_name"))',
+                 'PcBool(PcTopLevel(obj, "subject_deleted"))'):
         assert src.count(line) == 1, line
     assert 'internal static bool PcBool(string raw) => raw == "true";' in src
     reqs = re.findall(r'PcUrl\("collection",[^\n]*', src)
