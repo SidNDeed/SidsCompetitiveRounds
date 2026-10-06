@@ -299,6 +299,50 @@ COMBAT_WIRE = {
     "centi": 100,
 }
 
+# The first wire amendment (the client lane's wire amendment document): two
+# capability bits above the four section bits, three never-trimmed keys
+# written after `omit`, and two widened bounds (the caps value, a `p3top`
+# mask that was never scanned). A record whose caps lack the amendment bit
+# is the layout above exactly, key for key and byte for byte. `marks` names,
+# per loss counter of the `drop` row, the inputs a non-zero count leaves
+# incomplete: a list or histogram key, or `key.part` for one field of a
+# list. `counted` gives three lists their never-trimmed whole-game totals.
+# Pinned by the sha256 of its literal value, as the layout is.
+COMBAT_WIRE_A1 = {
+    "caps": {"reaction": 16, "amendment": 32},
+    "caps_hi": 63,
+    "keys": ("drop", "a1_tot", "cost_a1"),
+    "drop": ("mask", "aim", "res", "pack", "vol_s", "vol_o", "wait", "c_unpaired", "c_outside",
+             "push_expired", "force_unkeyed", "unkeyed", "ray_full", "res_mask_unknown",
+             "res_incomparable", "mask_unscanned"),
+    "totals": ("b5_h", "rx_on_s", "rx_on_o", "rx_samples"),
+    "count": (0, 9999999),
+    "cost_rows": 7,
+    "mask_unknown": -1,
+    "chain_none": -1,
+    "counted": (("b5_h", "b5_h"), ("rx_s", "rx_on_s"), ("rx_o", "rx_on_o")),
+    "reaction_lists": ("rx_s", "rx_o"),
+    "sight_counter": "ray_full",
+    "marks": (
+        ("mask", ("p3top.mask", "p3dp1", "p3an1")),
+        ("aim", ("a1s", "a1p", "a1sum")),
+        ("res", ("p3dp0", "p3an0", "p3dp1", "p3an1", "p3top")),
+        ("pack", ("p3dp0", "p3an0", "p3dp1", "p3an1")),
+        ("vol_s", ("a1n", "a1m", "rx_s.first")),
+        ("vol_o", ("a1n", "a1m", "rx_o.first")),
+        ("wait", ("push_s.after", "push_o.after")),
+        ("c_unpaired", ("b5_c.own_since",)),
+        ("c_outside", ("b5_c.own_since",)),
+        ("push_expired", ("push_s", "push_o")),
+        ("force_unkeyed", ("push_s", "push_o")),
+        ("unkeyed", ("push_s", "push_o", "ch_s", "ch_o", "vchg")),
+        ("ray_full", ("bsel.los", "rx_s", "rx_o")),
+        ("res_mask_unknown", ("p3dp1", "p3an1", "p3top.steering")),
+        ("res_incomparable", ("p3dp0", "p3an0", "p3dp1", "p3an1", "p3top")),
+        ("mask_unscanned", ("p3top.mask",)),
+    ),
+}
+
 W = COMBAT_WIRE
 SPEC = dict(W["spec"])
 KEYS = tuple(k for k, _s in W["spec"])
@@ -343,6 +387,35 @@ END = W["end"]
 WHY = W["why"]
 FL = W["fl"]
 
+# The amendment's names, all read from its pinned value.
+WA = COMBAT_WIRE_A1
+CAPS_RX = WA["caps"]["reaction"]
+CAPS_AMEND = WA["caps"]["amendment"]
+A1_KEYS = WA["keys"]
+DROP_KEY, TOTAL_KEY, COST_A1_KEY = A1_KEYS
+DROP_FIELDS = WA["drop"]
+TOTAL_FIELDS = WA["totals"]
+A1_COUNTED = dict(WA["counted"])
+RX_LISTS = WA["reaction_lists"]
+MASK_UNKNOWN = WA["mask_unknown"]
+A1_MARKS = dict(WA["marks"])
+# `p3top` under the amendment: the mask's lowest value is the never-scanned one.
+P3TOP_AMENDED = tuple((f[0], MASK_UNKNOWN, f[2]) if f[0] == "mask" else f for f in SPEC["p3top"][3])
+
+
+def amended(rec) -> bool:
+    """Whether a record carries the amendment (its caps carry the amendment
+    bit). Every other record is checked and budgeted exactly as the layout
+    above says."""
+    c = rec.get("caps") if isinstance(rec, dict) else None
+    return isinstance(c, int) and not isinstance(c, bool) and bool(c & CAPS_AMEND)
+
+
+def has_rx(rec) -> bool:
+    """Whether the reaction sampler ran for this record (the reaction bit).
+    Without it the reaction lists are NOT-COLLECTED, whatever they hold."""
+    return rec is not None and bool(rec["caps"] & CAPS_RX)
+
 
 # -- shape ------------------------------------------------------------------------
 
@@ -372,11 +445,13 @@ def _group_ok(g, spec) -> bool:
     return len(shots) <= n and len(regens) <= nrg and ks == sorted(ks) and all(k <= n for k in ks)
 
 
-def check_field(key, v) -> bool:
+def check_field(key, v, amend=False) -> bool:
+    """Whether `v` is inside the layout's bounds for `key`; `amend` widens
+    the two bounds the amendment widens (the caps value, the `p3top` mask)."""
     s = SPEC[key]
     kind = s[0]
     if kind == "int":
-        return _int_ok(v, s[1], s[2])
+        return _int_ok(v, s[1], WA["caps_hi"] if amend and key == "caps" else s[2])
     if kind == "enum":
         return isinstance(v, str) and v in s[1]
     if kind == "row":
@@ -386,7 +461,8 @@ def check_field(key, v) -> bool:
     if kind == "hist":
         return isinstance(v, list) and len(v) == s[1] and all(_int_ok(x, s[2], s[3]) for x in v)
     if kind == "list":
-        return isinstance(v, list) and len(v) <= s[1] and all(_row_ok(x, s[3]) for x in v)
+        fields = P3TOP_AMENDED if amend and key == "p3top" else s[3]
+        return isinstance(v, list) and len(v) <= s[1] and all(_row_ok(x, fields) for x in v)
     if kind == "groups":
         return isinstance(v, list) and len(v) <= s[1] and all(_group_ok(g, s) for g in v)
     if kind == "omit":
@@ -395,18 +471,43 @@ def check_field(key, v) -> bool:
     return False
 
 
+def _count_row_ok(v, n) -> bool:
+    lo, hi = WA["count"]
+    return isinstance(v, list) and len(v) == n and all(_int_ok(x, lo, hi) for x in v)
+
+
+def check_amended_field(key, v) -> bool:
+    """Whether `v` is inside the amendment's bounds for its key `key`."""
+    if key == DROP_KEY:
+        return _count_row_ok(v, len(DROP_FIELDS))
+    if key == TOTAL_KEY:
+        return _count_row_ok(v, len(TOTAL_FIELDS))
+    if key == COST_A1_KEY:
+        return (isinstance(v, list) and len(v) == WA["cost_rows"]
+                and all(_row_ok(x, SPEC["cost"][2]) for x in v))
+    return False
+
+
 def check_record(rec) -> None:
     """Raise Refusal(<key>) for the first key outside the layout, or a key set
-    or key order other than the layout's."""
+    or key order other than the layout's. A record whose caps carry the
+    amendment bit must carry the amendment's keys after `omit`, in their
+    order; any other record must carry none of them (its caps bound stays
+    the layout's, so the reaction bit alone is refused as `caps`)."""
     if not isinstance(rec, dict):
         raise Refusal("record")
+    amend = amended(rec)
+    want = KEYS + A1_KEYS if amend else KEYS
     keys = list(rec.keys())
-    if keys != list(KEYS):
-        missing = [k for k in KEYS if k not in rec]
-        extra = [k for k in keys if k not in KEYS]
+    if keys != list(want):
+        missing = [k for k in want if k not in rec]
+        extra = [k for k in keys if k not in want]
         raise Refusal((missing or extra or ["key_order"])[0])
     for key in KEYS:
-        if not check_field(key, rec[key]):
+        if not check_field(key, rec[key], amend):
+            raise Refusal(key)
+    for key in (A1_KEYS if amend else ()):
+        if not check_amended_field(key, rec[key]):
             raise Refusal(key)
 
 
@@ -501,10 +602,14 @@ def budget_record(rec: dict, limit: int | None = None) -> str:
             before the own gun's on a full tie. Every removal adds one to that
             list's `omit` count.
 
+    An amended record's amendment keys are serialized after `omit`, in
+    their order, and never trimmed: their bytes count against the bound and
+    the removal rule runs unchanged on the rest.
+
     Deterministic: the same input gives the same bytes."""
     limit = RECORD_MAX_BYTES if limit is None else limit
     out = {}
-    for k in KEYS:
+    for k in KEYS + (A1_KEYS if amended(rec) else ()):
         v = rec[k]
         out[k] = [list(x) if isinstance(x, list) else x for x in v] if isinstance(v, list) else v
     omit = {k: rec["omit"][k] for k in OMIT_KEYS}
@@ -535,15 +640,17 @@ def _max_row(fields):
     return [_widest(f[1], f[2]) for f in fields]
 
 
-def max_width_record() -> dict:
+def max_width_record(amend=False) -> dict:
     """A valid record whose never-trimmed part is as wide as the layout
     allows: every field at its widest bound, every never-trimmed list at its
-    cap, every trimmable list empty, every omit count at its widest."""
+    cap, every trimmable list empty, every omit count at its widest. With
+    `amend`, an amended record: the caps at the amendment's widest and the
+    amendment's never-trimmed keys at their widest after `omit`."""
     out = {}
     for k, s in W["spec"]:
         kind = s[0]
         if kind == "int":
-            out[k] = _widest(s[1], s[2])
+            out[k] = _widest(s[1], WA["caps_hi"] if amend and k == "caps" else s[2])
         elif kind == "enum":
             out[k] = max(s[1], key=len)
         elif kind == "row":
@@ -558,6 +665,11 @@ def max_width_record() -> dict:
             out[k] = []
         else:
             out[k] = {o: _widest(s[1], s[2]) for o in OMIT_KEYS}
+    if amend:
+        wide = _widest(*WA["count"])
+        out[DROP_KEY] = [wide for _f in DROP_FIELDS]
+        out[TOTAL_KEY] = [wide for _f in TOTAL_FIELDS]
+        out[COST_A1_KEY] = [_max_row(SPEC["cost"][2]) for _i in range(WA["cost_rows"])]
     return out
 
 
@@ -567,8 +679,10 @@ def max_width_group(key: str) -> list:
             [_max_row(s[7]) for _i in range(s[6])]]
 
 
-def byte_proof() -> dict:
-    """The exact bounds the budgeter guarantees, computed from the layout:
+def byte_proof(amend=False) -> dict:
+    """The exact bounds the budgeter guarantees, computed from the layout
+    (with `amend`, for an amended record, whose never-trimmed part includes
+    the amendment's keys):
 
       never_trimmed_max  the largest the never-trimmed part can serialize to;
       group_max          the largest one cycle group can serialize to;
@@ -579,7 +693,7 @@ def byte_proof() -> dict:
                          largest and fewer than this many protected groups
                          (each with its own point and separators) the record
                          is under it."""
-    nt = len(dumps(max_width_record()))
+    nt = len(dumps(max_width_record(amend)))
     group = max(len(dumps(max_width_group(k))) for k, _c in W["protect"])
     point = len(dumps(_max_row(SPEC["tb"][3])))
     per = group + point + 2
@@ -1325,6 +1439,45 @@ def has_cap(rec, name) -> bool:
     return rec is not None and bool(rec["caps"] & W["caps"][name])
 
 
+def _noted(d, **extra) -> dict:
+    """`d` with each of `extra` added only when it says something (not None,
+    not empty): a key the amendment adds to a view row or entry is absent
+    wherever it would be empty, so a record without the amendment gains no
+    such key."""
+    d.update({k: v for k, v in extra.items() if v})
+    return d
+
+
+def a1_marks(rec) -> dict:
+    """Per input, the counters that leave it incomplete in an amended record
+    (an empty dict for any other record): each non-zero loss counter of the
+    `drop` row names the inputs it marks (the pinned `marks`), and a counted
+    list whose listed plus omitted entries differ from its never-trimmed
+    whole-game total is marked by that total's name (for `b5_h` this is the
+    amendment's comparison of the list with its total; a reaction list is
+    counted only while the reaction bit is set)."""
+    if rec is None or not amended(rec):
+        return {}
+    out = {}
+    for field, n in zip(DROP_FIELDS, rec[DROP_KEY]):
+        if n > 0:
+            for part in A1_MARKS[field]:
+                out.setdefault(part, []).append(field)
+    totals = dict(zip(TOTAL_FIELDS, rec[TOTAL_KEY]))
+    for key, field in WA["counted"]:
+        if key in RX_LISTS and not has_rx(rec):
+            continue
+        if len(rec[key]) + rec["omit"][key] != totals[field]:
+            out.setdefault(key, []).append(field)
+    return {k: sorted(v) for k, v in sorted(out.items())}
+
+
+def _marks_for(rec, parts) -> dict:
+    """The marks of `rec` on the named inputs only."""
+    m = a1_marks(rec)
+    return {k: m[k] for k in parts if k in m}
+
+
 def section_faults(rec) -> list:
     """Each addendum section against its whole-game count: a section the
     record says it did not fill must be empty, with a zero count and a zero
@@ -1365,9 +1518,23 @@ def list_gap(rec, key):
     `missing_record`, `not_collected`, `trimmed`, `inconsistent` (the
     counter and the list disagree, so the list proves nothing) or
     `uncounted` (a list the layout gives no whole-game counter, `b5_o` and
-    `b5_h`, never proves an absence)."""
+    `b5_h`, never proves an absence).
+
+    The amendment: a reaction list is `not_collected` unless the reaction
+    bit is set (any record); in an amended record a list a loss counter
+    marks is `incomplete`, and the lists the amendment counts (`b5_h` and
+    the reaction lists) are decided by their never-trimmed totals:
+    `trimmed` with an omitted entry, `incomplete` when listed plus omitted
+    differs from the total."""
     if rec is None:
         return "missing_record"
+    if key in RX_LISTS and not has_rx(rec):
+        return "not_collected"
+    marks = a1_marks(rec)
+    if key in A1_COUNTED and amended(rec):
+        if rec["omit"][key] > 0:
+            return "trimmed"
+        return "incomplete" if key in marks else None
     if key not in WHOLE_COUNTERS:
         return "trimmed" if rec["omit"][key] > 0 else "uncounted"
     row, field, cap = WHOLE_COUNTERS[key]
@@ -1375,6 +1542,8 @@ def list_gap(rec, key):
         return "not_collected"
     if rec["omit"][key] > 0:
         return "trimmed"
+    if key in marks:
+        return "incomplete"
     if len(rec[key]) != rec[row][IX[row][field]]:
         return "inconsistent"
     return None
@@ -1429,11 +1598,16 @@ def pushes(victim_rec, shooter_rec) -> list:
     bad = _ambiguous(vic) | _ambiguous(sho)
     by_key = dict(zip(sho, shooter_rec["push_o"])) if shooter_rec is not None else {}
     base = _section_not_run(victim_rec, shooter_rec, "push")
+    # A lost deferred after-position read (either seat's) withholds the
+    # after-position differences: `after_not_run` names the counters.
+    after = sorted(set(_marks_for(victim_rec, ("push_s.after",)).get("push_s.after", []))
+                   | set(_marks_for(shooter_rec, ("push_o.after",)).get("push_o.after", [])))
     rows = []
     for k, e in zip(vic, victim_rec["push_s"]):
         row = {"pid": k[0], "s_init": k[1], "cord": k[2], "self": dict(zip(fields, e)),
                "meas": None, "d_fx": None, "d_fy": None, "d_vax": None, "d_vay": None,
                "d_pax": None, "d_pay": None, "not_run": base}
+        _noted(row, after_not_run=after)
         if base is None:
             if (k[0], k[1]) in bad:
                 row["not_run"] = "ambiguous"
@@ -1442,7 +1616,7 @@ def pushes(victim_rec, shooter_rec) -> list:
             else:
                 o = by_key[k]
                 row["meas"] = dict(zip(fields, o))
-                for f in ("fx", "fy", "vax", "vay", "pax", "pay"):
+                for f in ("fx", "fy", "vax", "vay") + (() if after else ("pax", "pay")):
                     row["d_" + f] = e[P[f]] - o[P[f]]
         rows.append(row)
     return rows
@@ -1453,9 +1627,14 @@ def chains(victim_rec, shooter_rec) -> list:
     screen, by hit identity: the shooter's decision, hit message and damage
     and force creation; the victim's receipt of both, its health change and
     the first rendered frame after it. Every interval is on the shared stamp
-    clock; one needing the other seat's entry is NOT-RUN without it."""
+    clock; one needing the other seat's entry is NOT-RUN without it. The
+    shooter writes minus one for a decision it did not see (no aim sample led
+    the hit message) and for a damage message it did not send: an interval
+    with such an operand is NOT-RUN (`interval_not_run` names it
+    `no_decision` or `no_damage`), never a number."""
     if victim_rec is None or not has_cap(victim_rec, "chain"):
         return []
+    none = WA["chain_none"]
     S, O = IX["ch_s"], IX["ch_o"]
     vic = _keyed(victim_rec["ch_s"], S)
     sho = _keyed(shooter_rec["ch_o"], O) if shooter_rec is not None else []
@@ -1469,6 +1648,7 @@ def chains(victim_rec, shooter_rec) -> list:
                "hp_to_frame": wrap(e[S["t_frame"]] - e[S["t_hp"]]),
                "dec_to_msg": None, "msg_transit": None, "dmg_transit": None,
                "decision_to_screen": None, "not_run": base}
+        gaps = {}
         if base is None:
             if (k[0], k[1]) in bad:
                 row["not_run"] = "ambiguous"
@@ -1476,11 +1656,17 @@ def chains(victim_rec, shooter_rec) -> list:
                 row["not_run"] = absence(shooter_rec, "ch_o")
             else:
                 o = by_key[k]
-                row["dec_to_msg"] = wrap(o[O["t_msg"]] - o[O["t_dec"]])
                 row["msg_transit"] = wrap(e[S["t_rcv"]] - o[O["t_msg"]])
-                row["dmg_transit"] = wrap(e[S["t_dmg_rcv"]] - o[O["t_dmg"]])
-                row["decision_to_screen"] = wrap(e[S["t_frame"]] - o[O["t_dec"]])
-        rows.append(row)
+                if o[O["t_dec"]] == none:
+                    gaps.update(dec_to_msg="no_decision", decision_to_screen="no_decision")
+                else:
+                    row["dec_to_msg"] = wrap(o[O["t_msg"]] - o[O["t_dec"]])
+                    row["decision_to_screen"] = wrap(e[S["t_frame"]] - o[O["t_dec"]])
+                if o[O["t_dmg"]] == none:
+                    gaps["dmg_transit"] = "no_damage"
+                else:
+                    row["dmg_transit"] = wrap(e[S["t_dmg_rcv"]] - o[O["t_dmg"]])
+        rows.append(_noted(row, interval_not_run=gaps))
     return rows
 
 
@@ -1522,6 +1708,9 @@ def velocity_changes(owner_rec, meas_rec) -> dict:
     meas_count = Counter(meas_keys)
     meas_by = dict(zip(meas_keys, meas_rec["p3tb"])) if meas_rec is not None else {}
     own_count = Counter((e[Bx["pid"]], e[Bx["s_init"]], e[Bx["stamp"]]) for e in owner_rec["bsel"])
+    # A ray that met its collider cap may have read sight wrongly: with such
+    # a loss counted, every line-of-sight candidate is withheld.
+    los_gap = _marks_for(owner_rec, ("bsel.los",)).get("bsel.los")
     for e in owner_rec["bsel"]:
         d_self, d_other = e[Bx["d_self"]], e[Bx["d_other"]]
         nearer = None
@@ -1541,9 +1730,10 @@ def velocity_changes(owner_rec, meas_rec) -> dict:
         out["bounces"].append({
             "pid": e[Bx["pid"]], "s_init": e[Bx["s_init"]], "stamp": e[Bx["stamp"]],
             "target": next(n for n, v in W["bounce_target"].items() if v == target),
-            "d_self": d_self, "los_self": e[Bx["los_self"]],
-            "d_other": d_other, "los_other": e[Bx["los_other"]], "nearer": nearer,
-            "meas": meas, "meas_not_run": why})
+            "d_self": d_self, "los_self": None if los_gap else e[Bx["los_self"]],
+            "d_other": d_other, "los_other": None if los_gap else e[Bx["los_other"]],
+            "nearer": nearer, "meas": meas, "meas_not_run": why})
+        _noted(out["bounces"][-1], los_not_run=los_gap)
     # Measured target bounces no owner selection names: shown, never paired.
     gap = absence(owner_rec, "bsel")
     out["meas_unpaired"] = [dict(zip(tb_fields, e), not_run="ambiguous" if meas_count[k] > 1 else gap)
@@ -1607,21 +1797,36 @@ def deaths(own_rec, other_rec) -> list:
 RECORD_ROWS = ("tb_tot", "tot_s", "tot_o", "p3n", "p3self", "b5_tot", "r_tot")
 # The four reaction-and-aim sets, in layout order; `a1sum` holds one row per set.
 A1_SETS = tuple(k for k in KEYS if SPEC[k][0] == "hist" and k.startswith("a"))
+# The bullet-path inputs a loss counter can mark (the `b3` view shows their marks).
+P3_MARKED = ("p3top", "p3dp0", "p3an0", "p3dp1", "p3an1")
+
+
+def _cost_sum(rows):
+    cost = [_named(e, SPEC["cost"][2]) for e in rows]
+    return {f[0]: sum(c[f[0]] for c in cost) for f in SPEC["cost"][2]}
 
 
 def _record_row(rec, seat, other, faults):
     """One record's own whole-game statements: frame time, the latency
     estimate, the collectors' cost, the whole-game rows, the summaries of the
     four aim sets, and per list its listed and omitted counts (a list with a
-    non-zero omitted count is trimmed: its listed count is no whole count)."""
-    cost = [_named(e, SPEC["cost"][2]) for e in rec["cost"]]
+    non-zero omitted count is trimmed: its listed count is no whole count).
+    An amended record adds its loss counters, its never-trimmed totals, the
+    added collectors' cost beside `cost`, and `incomplete` (its marks, when
+    it has any); any other record's row has none of these keys."""
+    amend = amended(rec)
     row = {"seat": seat, "other": other, "consts": rec["consts"], "caps": rec["caps"],
            "t0": rec["t0"], "t0_src": rec["t0_src"],
            "frame_p50_us": rec["frame_p50_us"], "l_hat": rec["l_hat"],
-           "cost": {f[0]: sum(c[f[0]] for c in cost) for f in SPEC["cost"][2]},
+           "cost": _cost_sum(rec["cost"]),
            "a1sum": {s: _named(e, SPEC["a1sum"][2]) for s, e in zip(A1_SETS, rec["a1sum"])},
            "listed": {k: len(rec[k]) for k in LISTS}, "omitted": dict(rec["omit"]),
            "faults": faults}
+    if amend:
+        row.update({DROP_KEY: dict(zip(DROP_FIELDS, rec[DROP_KEY])),
+                    TOTAL_KEY: dict(zip(TOTAL_FIELDS, rec[TOTAL_KEY])),
+                    COST_A1_KEY: _cost_sum(rec[COST_A1_KEY])})
+    _noted(row, incomplete=a1_marks(rec))
     for k in RECORD_ROWS:
         row[k] = _named(rec[k], SPEC[k][1])
     return row
@@ -1671,8 +1876,10 @@ def pair_view(records: list) -> dict:
                                "not_run": (None if victim and shooter and compat else
                                            "incompatible" if victim and shooter else
                                            "missing_record")})
-        view["contacts"].append({"victim": str(owner), "rows": c_rows})
         own_rec, other_rec = (owner_r["rec"] if owner_r else None), (meas_r["rec"] if meas_r else None)
+        view["contacts"].append(_noted({"victim": str(owner), "rows": c_rows},
+                                       incomplete=dict(_marks_for(own_rec, ("b5_c.own_since",)),
+                                                    **_marks_for(other_rec, ("b5_h",)))))
         p_rows, ch_rows = pushes(own_rec, other_rec), chains(own_rec, other_rec)
         vel, d_rows = velocity_changes(own_rec, other_rec), deaths(own_rec, other_rec)
         if not compat:
@@ -1689,11 +1896,16 @@ def pair_view(records: list) -> dict:
                 b.update(meas=None, meas_not_run="incompatible")
             for b in vel["meas_unpaired"]:
                 b["not_run"] = "incompatible"
-        view["pushes"].append({"victim": str(owner), "rows": p_rows,
-                               "not_run": _own_section(own_rec, "push")})
-        view["chains"].append({"victim": str(owner), "rows": ch_rows,
-                               "not_run": _own_section(own_rec, "chain")})
-        view["velocity"].append(dict(vel, owner=str(owner)))
+        view["pushes"].append(_noted({"victim": str(owner), "rows": p_rows,
+                                      "not_run": _own_section(own_rec, "push")},
+                                     incomplete=dict(_marks_for(own_rec, ("push_s", "push_s.after")),
+                                                  **_marks_for(other_rec, ("push_o", "push_o.after")))))
+        view["chains"].append(_noted({"victim": str(owner), "rows": ch_rows,
+                                      "not_run": _own_section(own_rec, "chain")},
+                                     incomplete=dict(_marks_for(own_rec, ("ch_s",)),
+                                                  **_marks_for(other_rec, ("ch_o",)))))
+        view["velocity"].append(_noted(dict(vel, owner=str(owner)),
+                                       incomplete=_marks_for(own_rec, ("vchg", "bsel.los"))))
         view["deaths"].append({"seat": str(owner), "rows": d_rows,
                                "not_run": _own_section(own_rec, "death")})
     for r in records:
@@ -1711,10 +1923,18 @@ def pair_view(records: list) -> dict:
                            "tb_not_run": "trimmed" if rec["omit"]["p3tb"] else None,
                            "hm_not_run": "trimmed" if rec["omit"]["p3ht"] else None,
                            "omitted": {k: rec["omit"][k] for k in ("p3top", "p3tb", "p3ht")}})
+        _noted(view["b3"][-1], incomplete={k: v for k, v in a1_marks(rec).items()
+                                           if k.split(".")[0] in P3_MARKED})
+        # The reaction lists are NOT-COLLECTED (no rows) unless the reaction
+        # bit is set, whatever the lists hold.
+        rx = has_rx(rec)
         view["react"].append({"seat": seat, "other": other,
-                              "own": [_named(e, SPEC["rx_s"][3]) for e in rec["rx_s"]],
-                              "copy": [_named(e, SPEC["rx_o"][3]) for e in rec["rx_o"]],
-                              "omitted": {k: rec["omit"][k] for k in ("rx_s", "rx_o")}})
+                              "own": [_named(e, SPEC["rx_s"][3]) for e in rec["rx_s"]] if rx else [],
+                              "copy": [_named(e, SPEC["rx_o"][3]) for e in rec["rx_o"]] if rx else [],
+                              "omitted": {k: rec["omit"][k] for k in ("rx_s", "rx_o")},
+                              "not_run": None if rx else "not_collected"})
+        _noted(view["react"][-1], incomplete={k: v for k, v in a1_marks(rec).items()
+                                              if k.split(".")[0] in RX_LISTS})
         view["interval"].append({"seat": seat, "other": other,
                                  "own": [_named(e, SPEC["ivl_s"][3]) for e in rec["ivl_s"]],
                                  "copy": [_named(e, SPEC["ivl_o"][3]) for e in rec["ivl_o"]]})
@@ -1725,7 +1945,9 @@ def pair_view(records: list) -> dict:
     for owner in seats:
         own = by_seat.get(owner)
         meas = next((r for r in records if r["other"] == owner and r["seat"] != owner), None)
-        row = {"subject": str(owner), "self": None, "meas": None, "not_run": None}
+        row = _noted({"subject": str(owner), "self": None, "meas": None, "not_run": None},
+                     incomplete=dict(_marks_for(own["rec"] if own else None, A1_SETS[:2]),
+                                     **_marks_for(meas["rec"] if meas else None, A1_SETS[2:])))
         if own is not None:
             row["self"] = {"a1s": own["rec"]["a1s"], "a1p": own["rec"]["a1p"],
                            "label": LABEL_SELF} if consts_ok(own["rec"]) else None
@@ -1794,6 +2016,10 @@ def combat_subjects(view: dict) -> dict:
     for b in view["b3"]:
         for r in b["top"]:
             add("combat.top", dict(r, measuring_seat=b["measuring_seat"]))
+    # A reaction row's values are withheld (None) when a loss counter marks
+    # them: a ray at its collider cap marks every value read from sight, a
+    # lost volley stamp marks the first-volley time.
+    sight = WA["sight_counter"]
     for r in view["b1"]:
         add("combat.aim", r)
     for p in view["pushes"]:
@@ -1817,9 +2043,17 @@ def combat_subjects(view: dict) -> dict:
         for r in b["homing_top"]:
             add("combat.homing", dict(r, measuring_seat=b["measuring_seat"], subject=b["subject"]))
     for x in view["react"]:
-        for account, rows, subject in (("self", x["own"], x["seat"]), ("meas", x["copy"], x["other"])):
+        inc = x.get("incomplete", {})
+        for account, rows, subject, key in (("self", x["own"], x["seat"], RX_LISTS[0]),
+                                            ("meas", x["copy"], x["other"], RX_LISTS[1])):
+            withheld = {}
+            if sight in inc.get(key, ()):
+                withheld.update(aim_on=None, first=None, err=None)
+            if key + ".first" in inc:
+                withheld["first"] = None
             for r in rows:
-                add("combat.react", dict(r, seat=x["seat"], account=account, subject=subject))
+                add("combat.react", dict(r, seat=x["seat"], account=account, subject=subject,
+                                         **withheld))
     for x in view["interval"]:
         for account, rows, subject in (("self", x["own"], x["seat"]), ("meas", x["copy"], x["other"])):
             for r in rows:
@@ -2231,7 +2465,11 @@ def m_top_d_perp(ctx, p):
 
 @cmeasure("b3.top.mask", "combat.top")
 def m_top_mask(ctx, p):
-    return ctx.row["mask"]
+    """The steering mask of the entry; None (NOT-RUN) when it was never
+    scanned (the amendment's unknown mask): such an entry joins no steering
+    class."""
+    m = ctx.row["mask"]
+    return None if m == MASK_UNKNOWN else m
 
 
 @cmeasure("b3.top.speed", "combat.top")
@@ -2250,14 +2488,18 @@ def m_aim_compatible(ctx, p):
 
 @cmeasure("b1.hist.meas_volleys", "combat.aim", consts=True)
 def m_aim_meas_volleys(ctx, p):
+    """The measuring seat's volley count of this subject; None (NOT-RUN) with
+    the record missing, of another version, or its set marked incomplete."""
     m = ctx.row.get("meas")
-    return None if m is None else sum(m["a1m"])
+    return None if m is None or A1_SETS[2] in ctx.row.get("incomplete", ()) else sum(m["a1m"])
 
 
 @cmeasure("b1.hist.self_volleys", "combat.aim", consts=True)
 def m_aim_self_volleys(ctx, p):
+    """The subject's own volley count; None (NOT-RUN) with the record
+    missing, of another version, or its set marked incomplete."""
     s = ctx.row.get("self")
-    return None if s is None else sum(s["a1s"])
+    return None if s is None or A1_SETS[0] in ctx.row.get("incomplete", ()) else sum(s["a1s"])
 
 
 @cmeasure("b5.push.d_fx", "combat.push")
@@ -2416,20 +2658,32 @@ for _fd in SPEC["gun_s"][3]:
     if "b2.stat.d_" + _fd[0] not in rm.REGISTRY:
         _gen("b2.stat.d_" + _fd[0], "combat.stat", "d_" + _fd[0], sub="diff")
 _gen("rec.l_hat", "combat.record", "l_hat", clock=True)
+# The amendment's record inputs (None on a record without it).
+for _f in DROP_FIELDS:
+    _gen("rec.%s.%s" % (DROP_KEY, _f), "combat.record", _f, sub=DROP_KEY)
+for _f in TOTAL_FIELDS:
+    _gen("rec.%s.%s" % (TOTAL_KEY, _f), "combat.record", _f, sub=TOTAL_KEY)
+for _fd in SPEC["cost"][2]:
+    _gen("rec.%s.%s" % (COST_A1_KEY, _fd[0]), "combat.record", _fd[0], sub=COST_A1_KEY)
 
 
 @cmeasure("rec.listed", "combat.record")
 def m_rec_listed(ctx, p):
     """Per list: its listed count when the list is whole, None (NOT-RUN)
     while the budgeter trimmed it."""
-    return {k: (None if ctx.row["omitted"][k] else n) for k, n in ctx.row["listed"].items()}
+    return {k: (None if ctx.row["omitted"][k] or k in ctx.row.get("incomplete", ()) else n)
+            for k, n in ctx.row["listed"].items()}
 
 
 @cmeasure("rec.a1sum", "combat.record", consts=True)
 def m_rec_a1sum(ctx, p):
-    if not _row_consts_ok(ctx, "seat"):
+    """The four sets' summaries; None (NOT-RUN) with another version or the
+    summaries marked incomplete, and a set marked incomplete answers None
+    in its place."""
+    inc = ctx.row.get("incomplete", {})
+    if not _row_consts_ok(ctx, "seat") or "a1sum" in inc:
         return None
-    return ctx.row["a1sum"]
+    return {s: (None if s in inc else v) for s, v in ctx.row["a1sum"].items()}
 
 
 @cmeasure("rec.faults", "combat.record")
@@ -2498,16 +2752,19 @@ def contributions(records: list) -> list:
     """Per subject seat: its own statements (SELF) from its own record, and
     the other seat's measurements of it (MEAS) from that seat's record, each
     with the contributing record's measurement version. Sums of different
-    versions are never added together."""
+    versions are never added together. A set an amended record marks
+    incomplete joins no sum: it is left out of `sums` and named, with its
+    counters, in `withheld`."""
     out = []
     for r in records:
         rec = r["rec"]
-        out.append({"subject": r["seat"], "source": "self", "consts": rec["consts"],
-                    "sums": {"a1s": list(rec["a1s"]), "a1p": list(rec["a1p"])}})
-        out.append({"subject": r["other"], "source": "meas", "consts": rec["consts"],
-                    "sums": {"a1m": list(rec["a1m"]), "a1n": list(rec["a1n"]),
-                             "p3dp0": list(rec["p3dp0"]), "p3an0": list(rec["p3an0"]),
-                             "p3dp1": list(rec["p3dp1"]), "p3an1": list(rec["p3an1"])}})
+        marks = a1_marks(rec)
+        for subject, source, sets in ((r["seat"], "self", ("a1s", "a1p")),
+                                      (r["other"], "meas", ("a1m", "a1n", "p3dp0", "p3an0",
+                                                            "p3dp1", "p3an1"))):
+            out.append({"subject": subject, "source": source, "consts": rec["consts"],
+                        "sums": {k: list(rec[k]) for k in sets if k not in marks},
+                        "withheld": {k: marks[k] for k in sets if k in marks}})
     return out
 
 

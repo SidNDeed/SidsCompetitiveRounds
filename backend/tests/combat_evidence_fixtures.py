@@ -340,6 +340,27 @@ def r_sections_pair(variant="base"):
     return victim, shooter
 
 
+A1_FIXTURE_DIR = os.path.join(HERE, "fixtures", "combat_evidence_a1")
+# The amended records the client lane committed (its scenario run, both seats):
+# carried byte for byte; the server's budgeter must reproduce each exactly.
+A1_FIXTURES = ("seat1.rec.txt", "seat2.rec.txt")
+
+
+def amend(rec, rx=True, **drop):
+    """`rec` as an amended record (in place, returned): the amendment bit,
+    the reaction bit when `rx`, the loss counters named in `drop` (others
+    zero), totals that agree with the lists as they stand, zero added cost."""
+    rec["caps"] |= cm.CAPS_AMEND | (cm.CAPS_RX if rx else 0)
+    rec[cm.DROP_KEY] = [drop.pop(f, 0) for f in cm.DROP_FIELDS]
+    assert not drop, drop
+    totals = {f: 0 for f in cm.TOTAL_FIELDS}
+    for key, field in cm.WA["counted"]:
+        totals[field] = len(rec[key]) + rec["omit"][key]
+    rec[cm.TOTAL_KEY] = [totals[f] for f in cm.TOTAL_FIELDS]
+    rec[cm.COST_A1_KEY] = [[0, 0, 0, 0] for _i in range(cm.WA["cost_rows"])]
+    return rec
+
+
 def max_width_protected(n_groups=4):
     """A record whose never-trimmed part is at its widest (cm.max_width_record,
     omit counts left room to grow at the same width), with `n_groups`

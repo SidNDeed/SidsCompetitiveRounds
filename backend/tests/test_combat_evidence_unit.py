@@ -2399,6 +2399,9 @@ def full_pair():
     victim["p3ht"], victim["p3hm"] = steer["p3ht"], steer["p3hm"]
     victim["p3top"] = [fx.named_row("p3top", pid=3, s_rel=0, d_perp=5, d_along=2, ang=1, dt=117,
                                     speed=8000, mask=0)]
+    # The reaction lists are read only under the reaction bit, which travels
+    # only in an amended record: the victim is one (the shooter is not).
+    fx.amend(victim)
     return victim, shooter
 
 
@@ -2524,3 +2527,225 @@ def test_l1_the_match_report_hmac_is_exactly_the_seven_field_canonical(monkeypat
     assert main.verify_hmac(report(sign(unranked), ranked=False)) is True
     no_room = canonical.rsplit(b":", 1)[0] + b":"
     assert main.verify_hmac(report(sign(no_room), room=None)) is True
+
+
+# -- the wire amendment A1 (combat fix pass 8 scope) -------------------------------------
+#
+# The client lane's COMBAT-WIRE-AMENDMENT-A1: two caps bits (reaction 16, amendment 32),
+# three never-trimmed keys after `omit` (drop, a1_tot, cost_a1), two widened bounds. A
+# record without bit 32 is the current layout byte for byte (the canonical fixture test
+# above, unchanged, is that proof); the client's two amended records are carried in
+# fixtures/combat_evidence_a1 and must reproduce byte for byte.
+
+LEGACY_FIXTURES = sorted(n for n in os.listdir(fx.FIXTURE_DIR) if n.endswith(".in.json"))
+
+
+def _a1_fixture(name):
+    with open(os.path.join(fx.A1_FIXTURE_DIR, name), "rb") as f:
+        raw = f.read()
+    return raw, json.loads(raw.decode("ascii"))
+
+
+def test_a1_the_client_records_reproduce_byte_for_byte():
+    for name in fx.A1_FIXTURES:
+        raw, rec = _a1_fixture(name)
+        cm.check_record(rec)
+        assert cm.amended(rec) and list(rec)[-4:] == ["omit"] + list(cm.A1_KEYS), name
+        assert cm.budget_record(rec).encode("ascii") == raw, name
+        assert cm.section_faults(rec) == [], name
+    print("\nPROOF SIZE a1 fixtures: %d amended client records reproduced byte for byte"
+          % len(fx.A1_FIXTURES))
+
+
+def test_a1_a_record_without_the_bit_is_the_current_layout():
+    assert guard.PINNED_SHA[("combat_measures", "COMBAT_WIRE")] == (
+        "cf51bb58df95b57e062ad4dcbfc90c6d34b57469d58012e85108c308561b295f")
+    with open(os.path.join(fx.FIXTURE_DIR, "byte_proof.json"), encoding="ascii") as f:
+        assert json.load(f) == cm.byte_proof()
+    n = 0
+    for name in LEGACY_FIXTURES:
+        with open(os.path.join(fx.FIXTURE_DIR, name), encoding="ascii") as f:
+            rec = json.load(f)
+        cm.check_record(rec)
+        assert not cm.amended(rec) and cm.a1_marks(rec) == {}, name
+        assert not set(cm.A1_KEYS) & set(json.loads(cm.budget_record(rec))), name
+        (row,) = [r for r in cm.pair_view(fx.records(rec, None))["record"]]
+        assert not set(cm.A1_KEYS) & set(row) and "incomplete" not in row, name
+        n += 1
+    assert n == 10
+    print("\nPROOF SIZE a1 legacy: %d current fixtures read with no amendment" % n)
+
+
+def test_a1_mutant_the_keys_without_the_bit_are_refused():
+    _raw, rec = _a1_fixture("seat1.rec.txt")
+    cm.check_record(rec)                                        # control: amended, accepted
+    no_bit = json.loads(json.dumps(rec))
+    no_bit["caps"] &= ~(cm.CAPS_AMEND | cm.CAPS_RX)
+    with pytest.raises(cm.Refusal) as e:
+        cm.check_record(no_bit)
+    assert e.value.field == cm.DROP_KEY
+    rx_only = {k: v for k, v in no_bit.items() if k not in cm.A1_KEYS}
+    cm.check_record(rx_only)                                    # control: the current shape
+    rx_only["caps"] |= cm.CAPS_RX
+    with pytest.raises(cm.Refusal) as e:
+        cm.check_record(rx_only)
+    assert e.value.field == "caps"
+    keyless = {k: v for k, v in rec.items() if k not in cm.A1_KEYS}
+    with pytest.raises(cm.Refusal) as e:
+        cm.check_record(keyless)
+    assert e.value.field == cm.DROP_KEY
+    for key, bad in ((cm.DROP_KEY, [0] * (len(cm.DROP_FIELDS) - 1)),
+                     (cm.TOTAL_KEY, [0, 0, 0, 10000000]),
+                     (cm.COST_A1_KEY, [[0, 0, 0, 0]] * (cm.WA["cost_rows"] + 1))):
+        m = json.loads(json.dumps(rec))
+        m[key] = bad
+        with pytest.raises(cm.Refusal) as e:
+            cm.check_record(m)
+        assert e.value.field == key
+
+
+def test_a1_the_widened_bounds_hold_only_under_the_bit():
+    _raw, rec = _a1_fixture("seat2.rec.txt")
+    mask = cm.IX["p3top"]["mask"]
+    rec["p3top"][0][mask] = cm.MASK_UNKNOWN
+    rec["caps"] = cm.WA["caps_hi"]
+    cm.check_record(rec)                                        # amended: both accepted
+    legacy = fx.empty_record()
+    legacy["p3top"] = [list(rec["p3top"][0])]
+    with pytest.raises(cm.Refusal) as e:
+        cm.check_record(legacy)
+    assert e.value.field == "p3top"
+    legacy["p3top"][0][mask] = 0
+    cm.check_record(legacy)                                     # control
+    proof = cm.byte_proof(True)
+    widest = cm.max_width_record(True)
+    cm.check_record(widest)
+    assert cm.budget_record(widest) == cm.dumps(widest)
+    assert proof["never_trimmed_max"] == len(cm.dumps(widest)) and proof["protected_floor"] >= 1
+    print("\nPROOF SIZE a1 bound: amended never-trimmed part %d bytes of %d, protected floor %d"
+          % (proof["never_trimmed_max"], proof["limit"], proof["protected_floor"]))
+
+
+def test_a1_mutant_without_the_reaction_bit_the_reaction_lists_are_not_collected():
+    _raw, rec = _a1_fixture("seat1.rec.txt")
+    assert rec["rx_s"] and rec["rx_o"]
+    view = cm.pair_view(fx.records(rec, None))
+    (x,) = view["react"]
+    assert x["not_run"] is None and len(x["own"]) == len(rec["rx_s"])     # control
+    assert cm.list_gap(rec, "rx_s") is None
+    rec["caps"] &= ~cm.CAPS_RX
+    cm.check_record(rec)
+    (x,) = cm.pair_view(fx.records(rec, None))["react"]
+    assert x["not_run"] == "not_collected" and x["own"] == [] and x["copy"] == []
+    assert cm.list_gap(rec, "rx_s") == cm.list_gap(rec, "rx_o") == "not_collected"
+    assert not cm.combat_subjects(cm.pair_view(fx.records(rec, None)))["combat.react"]
+    legacy = fx.empty_record()
+    legacy["rx_s"] = [list(rec["rx_s"][0])]
+    (x,) = cm.pair_view(fx.records(legacy, None))["react"]
+    assert x["not_run"] == "not_collected" and x["own"] == []
+
+
+def test_a1_mutant_each_loss_counter_marks_its_measures():
+    _raw, control = _a1_fixture("seat1.rec.txt")
+    assert cm.a1_marks(control) == {}
+    assert len(cm.A1_MARKS) == len(cm.DROP_FIELDS) == 16
+    for i, field in enumerate(cm.DROP_FIELDS):
+        rec = json.loads(json.dumps(control))
+        rec[cm.DROP_KEY][i] = 1
+        cm.check_record(rec)
+        assert cm.a1_marks(rec) == {p: [field] for p in cm.A1_MARKS[field]}, field
+    print("\nPROOF SIZE a1 marks: %d loss counters, each marking exactly its listed inputs"
+          % len(cm.DROP_FIELDS))
+
+
+def _a1_marked_pair(**drop):
+    victim, shooter = fx.r_sections_pair()
+    fx.amend(victim, **drop)
+    fx.amend(shooter)
+    return victim, shooter
+
+
+def test_a1_mutant_the_marks_reach_the_measures():
+    m = _measure_fn
+    v0, s0 = _a1_marked_pair()
+    view0 = cm.pair_view(fx.records(v0, s0))
+    assert cm.list_gap(v0, "push_s") is None and cm.list_gap(s0, "ch_o") is None   # controls
+    for counter, key in (("push_expired", "push_s"), ("unkeyed", "ch_s"), ("unkeyed", "vchg")):
+        v, s = _a1_marked_pair(**{counter: 2})
+        assert cm.list_gap(v, key) == "incomplete", (counter, key)
+    for drop, listed in (({}, [False]), ({"unkeyed": 1}, [None])):   # control, then the mutant
+        v, s = fx.r_sections_pair()
+        v["push_s"] = []
+        v["r_tot"][cm.IX["r_tot"]["push_own"]] = 0
+        fx.amend(v, **drop)
+        (d,) = [d for d in cm.pair_view(fx.records(v, s))["deaths"] if d["seat"] == A]
+        assert [h["push_listed"] for h in d["rows"][0]["hits"]] == listed, drop
+    v, s = _a1_marked_pair(wait=1)
+    (p,) = [p for p in cm.pair_view(fx.records(v, s))["pushes"] if p["victim"] == A]
+    assert p["rows"][0]["d_pax"] is None and p["rows"][0]["after_not_run"] == ["wait"]
+    assert p["rows"][0]["d_fx"] is not None
+    (p0,) = [p for p in view0["pushes"] if p["victim"] == A]
+    assert p0["rows"][0]["d_pax"] is not None and "after_not_run" not in p0["rows"][0]
+    s = fx.amend(fx.r_sections_pair()[1], ray_full=1)
+    (vel,) = [x for x in cm.pair_view(fx.records(None, s))["velocity"] if x["owner"] == B]
+    assert vel["bounces"][0]["los_self"] is None and vel["bounces"][0]["los_not_run"] == ["ray_full"]
+    (vel0,) = [x for x in view0["velocity"] if x["owner"] == B]
+    assert vel0["bounces"][0]["los_self"] == 1
+    victim, shooter = full_pair()
+    victim[cm.DROP_KEY][cm.DROP_FIELDS.index("vol_s")] = 1
+    subs = cm.combat_subjects(cm.pair_view(fx.records(victim, shooter)))
+    own = [c for c in subs["combat.react"] if c.row["account"] == "self"]
+    copy = [c for c in subs["combat.react"] if c.row["account"] == "meas"]
+    assert [m("b1.react.first")(c, None) for c in own] == [None]
+    assert [m("b1.react.first")(c, None) for c in copy] == [260]                      # control
+    victim[cm.DROP_KEY][cm.DROP_FIELDS.index("ray_full")] = 1
+    subs = cm.combat_subjects(cm.pair_view(fx.records(victim, shooter)))
+    assert [m("b1.react.aim_on")(c, None) for c in subs["combat.react"]] == [None, None]
+    victim[cm.DROP_KEY][cm.DROP_FIELDS.index("aim")] = 1
+    view = cm.pair_view(fx.records(victim, shooter))
+    (aim,) = [c for c in cm.combat_subjects(view)["combat.aim"] if c.row["subject"] == A]
+    assert m("b1.hist.self_volleys")(aim, None) is None
+    (rec,) = [c for c in cm.combat_subjects(view)["combat.record"] if c.row["seat"] == A]
+    assert m("rec.a1sum")(rec, None) is None
+    assert m("rec.%s.aim" % cm.DROP_KEY)(rec, None) == 1
+    (c,) = [c for c in cm.contributions(fx.records(victim, shooter)) if c["subject"] == A
+            and c["source"] == "self"]
+    assert c["sums"] == {} and c["withheld"] == {"a1p": ["aim"], "a1s": ["aim"]}
+
+
+def test_a1_the_never_scanned_mask_joins_no_steering_class_and_marks_are_counted():
+    raw, rec = _a1_fixture("seat2.rec.txt")
+    marks = cm.a1_marks(rec)
+    assert marks == {k: ["res_incomparable"] for k in ("p3an0", "p3an1", "p3dp0", "p3dp1", "p3top")}
+    (meas,) = [c for c in cm.contributions(fx.records(rec, None)) if c["source"] == "meas"]
+    assert set(meas["sums"]) == {"a1m", "a1n"} and set(meas["withheld"]) == {
+        "p3dp0", "p3an0", "p3dp1", "p3an1"}
+    (b3,) = cm.pair_view(fx.records(rec, None))["b3"]
+    assert b3["incomplete"] == marks
+    mask = cm.IX["p3top"]["mask"]
+    rec["p3top"][0][mask] = cm.MASK_UNKNOWN
+    rec["p3top"][1][mask] = 2
+    tops = cm.combat_subjects(cm.pair_view(fx.records(rec, None)))["combat.top"]
+    assert [_measure_fn("b3.top.mask")(t, None) for t in tops[:2]] == [None, 2]
+    _raw, s1 = _a1_fixture("seat1.rec.txt")
+    assert cm.list_gap(s1, "b5_h") is None                      # F2: the total says whole
+    s1[cm.TOTAL_KEY][cm.TOTAL_FIELDS.index("b5_h")] += 1
+    assert cm.a1_marks(s1) == {"b5_h": ["b5_h"]} and cm.list_gap(s1, "b5_h") == "incomplete"
+    s1[cm.TOTAL_KEY][cm.TOTAL_FIELDS.index("rx_on_s")] += 1
+    assert cm.list_gap(s1, "rx_s") == "incomplete" and cm.list_gap(s1, "rx_o") is None
+    assert cm.list_gap(fx.empty_record(), "b5_h") == "uncounted"                     # legacy
+
+
+def test_a1_a_chain_operand_of_minus_one_is_not_run():
+    v, s = fx.r_sections_pair()
+    (row0,) = [c for c in cm.pair_view(fx.records(v, s))["chains"] if c["victim"] == A][0]["rows"]
+    assert row0["dec_to_msg"] == 1 and row0["dmg_transit"] == 49 and "interval_not_run" not in row0
+    o = cm.IX["ch_o"]
+    s["ch_o"][0][o["t_dec"]] = -1
+    s["ch_o"][0][o["t_dmg"]] = -1
+    (row,) = [c for c in cm.pair_view(fx.records(v, s))["chains"] if c["victim"] == A][0]["rows"]
+    assert row["dec_to_msg"] is None and row["decision_to_screen"] is None and row["dmg_transit"] is None
+    assert row["msg_transit"] == row0["msg_transit"]
+    assert row["interval_not_run"] == {"dec_to_msg": "no_decision",
+                                       "decision_to_screen": "no_decision",
+                                       "dmg_transit": "no_damage"}

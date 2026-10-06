@@ -99,10 +99,13 @@ PINNED = {
 }
 # The combat wire layout (field bounds, list caps, tier order, enum codes):
 # pinned by the sha256 of repr(ast.literal_eval(value)). A value added to or
-# changed in it makes the digest differ, and the guard refuses it.
+# changed in it makes the digest differ, and the guard refuses it. The wire
+# amendment's layout is pinned the same way, beside it.
 PINNED_SHA = {
     ("combat_measures", "COMBAT_WIRE"):
         "cf51bb58df95b57e062ad4dcbfc90c6d34b57469d58012e85108c308561b295f",
+    ("combat_measures", "COMBAT_WIRE_A1"):
+        "644aaae92623587f5cfc2d814edb3351d89b159032073ce9451d7dd9501a135c",
 }
 SWITCHES = {"seat_evidence_accept", "seat_evidence_worker", "seat_evidence_purge",
             "combat_evidence_accept", "combat_evidence_worker", "combat_evidence_purge"}
