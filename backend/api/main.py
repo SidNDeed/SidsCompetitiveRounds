@@ -26060,44 +26060,31 @@ _PC_POOL_MEMBER_SQL = """(p.deleted_at IS NULL
 # its tie-breaker (rating, then player id); the card's W/L (`series`) is the
 # truthful record and excludes invalidated series, as pool_rank's
 # has-a-series rule does (design v4 §2).
-_PC_SNAPSHOT_SELECT_SQL = """
-    WITH pool AS (
-        SELECT p.id AS player_id, gr.rating, gr.peak_rating,
-               si.sku AS title_sku, si.name AS title_name, si.preview_color AS title_color
-          FROM players p
-          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
-          LEFT JOIN shop_items si ON si.id = p.active_title_id
-         WHERE """ + _PC_POOL_MEMBER_SQL + """
-    ),
-    series AS (
-        SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
-          FROM (
-              SELECT rs.player1_id AS player_id,
-                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END AS won,
-                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END AS lost
-                FROM ranked_series rs
-               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
-              UNION ALL
-              SELECT rs.player2_id,
-                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END,
-                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END
-                FROM ranked_series rs
-               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
-          ) s
-         GROUP BY s.player_id
-    ),
+#
+# THE BOARD A CARD'S RANK MEANS, as ONE text, in the spelling
+# `_PC_POOL_STEAM_ID_SQL` already uses. Two statements stand on it: the
+# snapshot's select below, which freezes `board_rank` onto a print at mint,
+# and `_PC_BOARD_RANKS_SQL`, which answers "where does this subject stand
+# TODAY" for the binder's rating-position sort (item 20 §3.2). A card prints
+# one of those numbers and the binder orders by the other, so the two have to
+# be the same board by construction rather than by two texts agreeing — a
+# drift in `:min_matches`, in the activity clause or in the ROW_NUMBER
+# ordering would put a card in a group its own printed rank contradicts.
+# test_binder_rating_sort.py pins this text character for character and pins
+# that both consumers interpolate it, the way test_pc_no_steam_no_card.py:319
+# pins the pool's id clause.
+#
+# It is the TAIL of the snapshot's WITH list on purpose: `board` has to be the
+# last CTE for `_PC_BOARD_RANKS_SQL` to append its own SELECT. `top` moved
+# above `series` for the same reason; no CTE here reads another except
+# `board`, which reads the two above it, so the order is free to change.
+_PC_BOARD_CTE_SQL = """
     legacy AS (
         SELECT p.id AS player_id, COUNT(m.id) AS total
           FROM players p
           JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id)
                         AND m.is_ranked = true AND m.series_id IS NULL
          GROUP BY p.id
-    ),
-    top AS (
-        SELECT DISTINCT ON (mc.player_id) mc.player_id, mc.card_name
-          FROM (SELECT player_id, card_name, COUNT(*) AS n
-                  FROM match_cards GROUP BY player_id, card_name) mc
-         ORDER BY mc.player_id, mc.n DESC, mc.card_name
     ),
     board_series AS (
         SELECT s.player_id, COUNT(*) AS total
@@ -26116,7 +26103,58 @@ _PC_SNAPSHOT_SELECT_SQL = """
            AND COALESCE(se.total, 0) + COALESCE(lg.total, 0) >= CAST(:min_matches AS integer)
            AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
     )
-    SELECT pool.player_id,
+"""
+
+#
+# THE PARENTHESES AROUND THE TAIL ARE LOAD-BEARING, and they are not style.
+# `_janitor_sql_inventory` resolves every janitor `text(...)` argument
+# statically and refuses a call it cannot fold; its constant folder gives up
+# past a depth of 8, and `+` is left-associative, so each term appended after
+# `_PC_POOL_MEMBER_SQL` pushes that name — and the `_PC_POOL_STEAM_ID_SQL`
+# inside it — one level deeper. Written flat, the two extra terms this change
+# adds put the pool's id clause at depth 9 and `_pc_take_snapshot` turns up in
+# the self-test's `dynamic` list, i.e. the boot-time EXPLAIN sweep silently
+# stops covering the snapshot. Bracketing the tail keeps the left spine the
+# length it was, so the pool clause resolves at exactly the depth it always
+# did. test_pc_no_steam_no_card.py's
+# test_the_boot_self_test_explains_both_of_the_janitors_pool_reads is the
+# check that fails if this is ever flattened.
+#
+# The fragment already ends in a newline, so the literal that follows it opens
+# straight on `    SELECT` — without that the statement would grow a blank line
+# the pre-item-20 text did not have.
+_PC_SNAPSHOT_SELECT_SQL = """
+    WITH pool AS (
+        SELECT p.id AS player_id, gr.rating, gr.peak_rating,
+               si.sku AS title_sku, si.name AS title_name, si.preview_color AS title_color
+          FROM players p
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+         WHERE """ + _PC_POOL_MEMBER_SQL + ("""
+    ),
+    top AS (
+        SELECT DISTINCT ON (mc.player_id) mc.player_id, mc.card_name
+          FROM (SELECT player_id, card_name, COUNT(*) AS n
+                  FROM match_cards GROUP BY player_id, card_name) mc
+         ORDER BY mc.player_id, mc.n DESC, mc.card_name
+    ),
+    series AS (
+        SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
+          FROM (
+              SELECT rs.player1_id AS player_id,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END AS won,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END AS lost
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+              UNION ALL
+              SELECT rs.player2_id,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+          ) s
+         GROUP BY s.player_id
+    ),""" + _PC_BOARD_CTE_SQL + """    SELECT pool.player_id,
            ROW_NUMBER() OVER (ORDER BY (COALESCE(series.total, 0) > 0) DESC,
                                        pool.rating DESC NULLS LAST,
                                        pool.peak_rating DESC NULLS LAST,
@@ -26131,7 +26169,188 @@ _PC_SNAPSHOT_SELECT_SQL = """
       LEFT JOIN top ON top.player_id = pool.player_id
       LEFT JOIN board ON board.player_id = pool.player_id
      ORDER BY pool_rank
+""")
+
+# ── the binder's rating-position sort: the subject's standings TODAY ──────────
+# Item 20 §3.2. The collection answer carries, per print, where the subject
+# stands on the card's own board right now — which is not what the print row
+# holds: `pr.board_rank` and `pr.rating` are the MINT-TIME snapshot, frozen,
+# and pc_face draws that frozen number on the card. Two statements, not one,
+# because the two halves have very different costs.
+
+# (a) The heavy half: the whole board, ranked, over the shared CTE above. It
+# stands on a full aggregate over `matches` and a full GROUP BY over every
+# completed `ranked_series`, and `WHERE p.id = ANY(...)` would reduce none of
+# it because the ROW_NUMBER window is computed before any such join. So it is
+# never per-subject and never per-request; it is computed for the whole board
+# and cached for `_PC_STANDINGS_TTL_S`.
+_PC_BOARD_RANKS_SQL = "WITH" + _PC_BOARD_CTE_SQL + """
+    SELECT player_id, board_rank FROM board
 """
+
+# MEASURED on this seat's local PostgreSQL 16.9 (2026-09-20, database
+# item20test, rebuilt and re-measured seven times; the full table is in the
+# design's §3.2, and `backend/tests/item20_board_cost.py` re-derives it).
+#
+# The fixture the bound is set against DOMINATES production on every axis the
+# cost scales on, which is the only thing that makes it a bound: 9,000 players
+# and 9,000 glicko rows against the primary's 5,130 and 5,130, 40,000 matches
+# against 16,401, 38,000 ranked_series against 2,217, and 846 eligible board
+# rows against 98 (all read from the primary through `sql-readonly:`).
+#
+# Statement (a) there: median of medians 275.3 ms over three builds of ten
+# timed runs, worst single sample 345.8 ms, ~92k shared buffer hits of which
+# ~90k are the `legacy` arm alone.
+#
+# The TTL is chosen against the SPREAD rather than a median, and the difference
+# is the whole argument: at 30 s the median run costs 0.92% of a pool
+# connection-minute, which passes, but the worst observed run costs 1.15%,
+# which does not. At 60 s the median is 0.46% and the worst run 0.58% — inside
+# the ~1% bar at every one of the seventy samples taken. 60 is the smallest
+# value that holds at the worst observation and not merely at the typical one.
+_PC_STANDINGS_TTL_S = 60
+
+# The cache is keyed on WHAT IT WAS COMPUTED WITH, never on a module global
+# read back at call time (#744): an entry is
+# (min_matches, active_days) -> (expires_at_monotonic, {player_id: board_rank}),
+# so a request whose binds differ MISSES rather than being handed someone
+# else's board. No functools cache anywhere near it — an unbounded path-blind
+# cache is the shape that answered with stand-in fonts for the rest of a
+# process. Unbounded growth is not a concern here for a reason that is checked
+# rather than assumed: the only writer is `_pc_board_ranks`, whose key comes
+# from two module constants, so the map holds one entry per distinct
+# configuration this process has ever run under.
+_PC_BOARD_RANKS_CACHE: dict = {}
+_PC_BOARD_RANKS_LOCK = asyncio.Lock()
+
+# (b) The cheap half, run per collection read, over the few hundred distinct
+# subjects of the rows just fetched. `board_rank` comes from (a)'s map, so this
+# statement never touches `matches` or `ranked_series` at all — which is what
+# makes it cheap, and it is a property of the TEXT rather than of a plan.
+#
+# It is deliberately NOT described here as a primary-key lookup. Measured at
+# 3,000 players / 300 ids, the planner reads `players` sequentially (112 pages)
+# in preference to 300 `players_pkey` descents, and it is right to: forcing the
+# index with `enable_seqscan=off` more than doubles server-side execution
+# (2.676 ms against 1.215 ms) and reads 3,032 buffers instead of 140. An
+# `unnest(...) JOIN players` rewrite is no better — it scans all 3,000 rather
+# than 300. The plan is the planner's to choose and it moves with the table;
+# the bound that does NOT move is the absence of the two aggregate tables
+# above, which is why the test pins the statement's text and not its plan.
+# 140 shared buffers here against ~92,245 for (a), a factor of 659.
+#
+# The `inactive` expression is the leaderboard's own SELECT-LIST form, lifted
+# character for character — deliberately NOT the WHERE-clause form, whose
+# `OR CAST(:include_inactive AS boolean)` disjunct belongs to a display toggle
+# this statement has nothing to do with. Every bind is typed and none is
+# string-built (#448).
+_PC_SUBJECT_STANDINGS_SQL = """
+    SELECT p.id AS player_id,
+           CASE WHEN p.deleted_at IS NULL THEN gr.rating END       AS rating,
+           (gr.player_id IS NOT NULL AND p.deleted_at IS NULL)     AS rated,
+           NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer)))
+                                                                   AS inactive
+      FROM players p
+      LEFT JOIN glicko_ratings gr ON gr.player_id = p.id AND p.deleted_at IS NULL
+     WHERE p.id = ANY(CAST(:subject_ids AS uuid[]))
+"""
+
+
+async def _pc_board_ranks(db: AsyncSession, *, min_matches: int, active_days: int) -> dict:
+    """{player_id: board_rank} for the whole board, at most once per TTL.
+
+    The expiry is re-checked AFTER the lock is acquired, not only before it:
+    twenty binder tabs opening together all miss the first check, queue on the
+    lock, and the nineteen that wake up behind the winner must see the entry it
+    just wrote rather than each running the statement again. Without the second
+    check the lock would serialise twenty executions instead of collapsing them
+    into one, which is worse than no lock at all.
+
+    `time.monotonic` rather than wall clock: a clock step must not make an
+    entry immortal, and comparing monotonic to monotonic is the only comparison
+    that holds across one.
+
+    ONE lock for every key, not one per key. A refresh under a second
+    configuration therefore waits behind the first, which is acceptable
+    because the map holds one entry per distinct (min_matches, active_days)
+    this process has ever run under: in production that is a single entry, and
+    the second only ever appears under a test that redirects a global. A
+    per-key lock would buy concurrency between configurations that do not
+    exist, at the price of a second structure to keep in step with the cache."""
+    key = (int(min_matches), int(active_days))
+    hit = _PC_BOARD_RANKS_CACHE.get(key)
+    if hit is not None and hit[0] > time.monotonic():
+        return hit[1]
+    async with _PC_BOARD_RANKS_LOCK:
+        hit = _PC_BOARD_RANKS_CACHE.get(key)
+        if hit is not None and hit[0] > time.monotonic():
+            return hit[1]
+        rows = (await db.execute(text(_PC_BOARD_RANKS_SQL),
+                                 {"min_matches": key[0], "active_days": key[1]})).mappings().all()
+        ranks = {str(r["player_id"]): int(r["board_rank"]) for r in rows}
+        _PC_BOARD_RANKS_CACHE[key] = (time.monotonic() + _PC_STANDINGS_TTL_S, ranks)
+        return ranks
+
+
+async def _pc_subject_standings(db: AsyncSession, subject_ids) -> dict:
+    """{player_id: {board_rank, rating, inactive}} for the given subjects.
+
+    `board_rank` is None for a subject the board does not hold — off it, below
+    the match minimum, deleted, or not seen inside the activity window. `rating`
+    is None unless the subject has a live rating row, which is what `rated`
+    decides: a subject who deleted their data has neither.
+
+    The binds are read HERE and passed down as the cache key, so a test that
+    redirects `LEADERBOARD_ACTIVE_DAYS` changes the key and misses rather than
+    being served the board computed under the old value (#744)."""
+    ids = sorted({str(s) for s in subject_ids if s})
+    if not ids:
+        return {}
+    min_matches, active_days = _PC_POOL_MIN_MATCHES, LEADERBOARD_ACTIVE_DAYS
+    ranks = await _pc_board_ranks(db, min_matches=min_matches, active_days=active_days)
+    rows = (await db.execute(text(_PC_SUBJECT_STANDINGS_SQL),
+                             {"active_days": active_days, "subject_ids": ids})).mappings().all()
+    out = {}
+    for r in rows:
+        pid = str(r["player_id"])
+        out[pid] = {"board_rank": ranks.get(pid),
+                    "rating": (_pc_num(r["rating"]) if r["rated"] else None),
+                    "inactive": bool(r["inactive"])}
+    return out
+
+
+async def _pc_attach_subject_standings(db: AsyncSession, prints: list) -> bool:
+    """Put each subject's standings TODAY onto the prints, and say whether it
+    worked. The return value is what the answer's `subject_standings` flag is
+    built from — a computed bool on the one path that holds both a board map
+    and a completed per-subject read, never a literal on a return path, so a
+    box that could not compute them cannot claim it did.
+
+    A fact about the SUBJECT, not about the print, so it is not a column on
+    `pc_prints` and cannot come out of the face select. Attached after
+    `_pc_print_dict` has run, which is the shape `_pc_prints_of_pack` already
+    uses for `dup_at_pull`, and keyed by subject id rather than by position.
+
+    Which way the unhandled case fails: a refresh that raises returns False and
+    the binder still paints, with its five existing sorts — the sixth is simply
+    not offered. Expiring by default, never blocking by default (#276): the
+    refusal costs one ordering, and a guard is judged by what its refusal
+    costs (#430)."""
+    try:
+        standings = await _pc_subject_standings(
+            db, {p.get("subject_player_id") for p in prints})
+    except Exception as ex:   # noqa: BLE001 - any failure means "no standings"
+        print(f"[PC] subject standings unavailable: {ex}")
+        return False
+    for p in prints:
+        st = standings.get(p.get("subject_player_id"))
+        if st is None:
+            continue
+        p["subject_board_rank"] = st["board_rank"]
+        p["subject_rating"] = st["rating"]
+        p["subject_inactive"] = st["inactive"]
+    return True
+
 
 _PC_MEMBER_INSERT_SQL = """
     INSERT INTO pc_pool_members (snapshot_id, player_id, pool_rank, rarity, rating, peak_rating,
@@ -28115,11 +28334,16 @@ async def pc_collection(
         """), {"owner": owner_pid})).all()}
         for p in prints:
             p["traded"] = p["print_id"] in traded
+    # Item 20: where each subject stands on the card's own board TODAY, so the
+    # binder can order by position. THIS ROUTE ONLY -- a pack-open answer and
+    # /pc/card go through the same `_pc_print_dict` and must keep their present
+    # shape, which is why the attach lives here and not in that helper.
+    standings = await _pc_attach_subject_standings(db, prints)
     counts = {k: 0 for k in _pc.RARITIES}
     for p in prints:
         counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
     return {"owner_name": _pcp.public_render_name(owner_name) or _pc_neutral_name(ctx),
-            "public": public, "locale": ctx["locale"],
+            "public": public, "locale": ctx["locale"], "subject_standings": standings,
             "count": len(prints), "by_rarity": counts, "prints": prints}
 
 
