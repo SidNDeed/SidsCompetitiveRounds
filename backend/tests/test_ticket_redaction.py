@@ -449,7 +449,9 @@ def run(coro):
 
 # ── the harness ───────────────────────────────────────────────────────────
 # bug_reports is 083's DDL plus 086's bug_number sequence, 102's
-# channel_posted_at and 336's kind; bug_report_events is 085's plus 102's
+# channel_posted_at, 336's kind and 373's descending automatic-number sequence
+# (owned by bug_number, so the table's DROP removes it and the census admits
+# it as a column-owned sequence) with its CHECK; bug_report_events is 085's plus 102's
 # notified_at. players, the shop_items its cosmetic columns reference, and
 # admin_users come from the ORM, because submit_bug_report selects every mapped
 # Player column. gen_random_uuid()
@@ -504,6 +506,11 @@ CREATE TABLE public.bug_reports (
     channel_posted_at TIMESTAMPTZ,
     kind              VARCHAR(16) NOT NULL DEFAULT 'report' CHECK (kind IN ('report', 'auto'))
 );
+CREATE SEQUENCE public.bug_reports_auto_number_seq AS BIGINT
+    INCREMENT BY -1 MINVALUE -9223372036854775807 MAXVALUE -1 START WITH -1 CACHE 1 NO CYCLE;
+ALTER SEQUENCE public.bug_reports_auto_number_seq OWNED BY public.bug_reports.bug_number;
+ALTER TABLE public.bug_reports ADD CONSTRAINT bug_reports_auto_number_negative
+    CHECK (kind <> 'auto' OR bug_number < 0);
 CREATE TABLE public.bug_report_events (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     bug_report_id   UUID NOT NULL REFERENCES public.bug_reports(id) ON DELETE CASCADE,

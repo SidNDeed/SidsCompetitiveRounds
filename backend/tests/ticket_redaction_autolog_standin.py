@@ -12,7 +12,8 @@ contract judges --
     (auto_logs.AutoLogRequest._clamp_log there);
   * the write-time scrub through main._scrub_pass_one, late-imported as the
     real route does, in a worker thread;
-  * the gzip, the file write under BUG_REPORT_LOG_DIR, the kind='auto' row.
+  * the gzip, the file write under BUG_REPORT_LOG_DIR, the kind='auto' row
+    numbered from migration 373's descending sequence.
 
 It is written the way a CONFORMING upload must be: the credential rule over
 the log as sent, then the clamp; the scrub, then the write. The controls in
@@ -69,9 +70,12 @@ async def upload_auto_log(request: Request, db=Depends(get_db)):
     with open(path, "wb") as f:
         f.write(data)
     await db.execute(
+        # The number from migration 373's descending sequence, as the real
+        # route draws it: its CHECK refuses an automatic row on the human default.
         text("INSERT INTO bug_reports (id, steam_id, severity, category, kind, description,"
-             " log_filename, log_bytes)"
-             " VALUES (CAST(:id AS uuid), :sid, 'low', 'other', 'auto', 'stand-in upload', :f, :b)"),
+             " log_filename, log_bytes, bug_number)"
+             " VALUES (CAST(:id AS uuid), :sid, 'low', 'other', 'auto', 'stand-in upload', :f, :b,"
+             " nextval('bug_reports_auto_number_seq'))"),
         {"id": str(report_id), "sid": req.steam_id, "f": path.name, "b": len(data)})
     await db.commit()
     return {"status": "received", "id": str(report_id)}
