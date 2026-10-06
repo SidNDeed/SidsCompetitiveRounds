@@ -1738,6 +1738,11 @@ def test_m2_fix4_slot_and_spawn_lists_change_one_hand_and_one_entry_at_a_time():
         if fact not in ("sl", "sp"):
             assert where is None
             continue
+        if label == "omission stated":
+            # the record states the list omitted (the coverage fact); no
+            # list is changed, so no hand is named
+            assert where is None and changed["hd"] == rec["hd"], label
+            continue
         pos = crd.SL if fact == "sl" else crd.SP
         diff = [h for h, (a, b) in enumerate(zip(rec["hd"], changed["hd"])) if a[pos] != b[pos]]
         assert len(diff) == 1, (label, diff)
@@ -2034,7 +2039,13 @@ def test_m4_fix4_any_other_failure_is_deterministic(name):
 def test_m4_fix4_an_operational_failure_never_counts_toward_the_park():
     assert "fault_attempts" not in ce._OP_RETRY and "parked_at" not in ce._OP_RETRY
     assert "fault_inputs" not in ce._OP_RETRY
-    f = inspect.getsource(ce._fault)
+    # the code of _fault, its docstring taken out (the docstring names both)
+    import ast
+    tree = ast.parse(textwrap.dedent(inspect.getsource(ce._fault)))
+    body = tree.body[0].body
+    if body and isinstance(body[0], ast.Expr) and isinstance(getattr(body[0], "value", None), ast.Constant):
+        body.pop(0)
+    f = ast.unparse(tree)
     assert f.count("_OP_RETRY") == 1 and f.count("_FAULT_COUNT") == 1
     assert "if is_operational:" in f
     # a deterministic fault ends an operational backoff; a completed visit clears both
