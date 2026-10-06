@@ -26350,11 +26350,24 @@ _PC_BOARD_RANKS_SQL = "WITH" + _PC_BOARD_CTE_SQL + """
 # value that holds at the worst observation and not merely at the typical one.
 _PC_STANDINGS_TTL_S = 60
 
+# A refresh that RAISES is cached too, for this much shorter window (Codex
+# item 20 round 1, LOW 2; 5 s is the value the land brief names, the design
+# names none). Without it a failed refresh leaves nothing behind, so every
+# cold caller queued on the one lock runs the same failing heavy statement in
+# turn, each holding a pool connection while it does. With it, callers inside
+# the window answer at once with no statement, the attach helper turns that
+# into `subject_standings: false` (the existing degraded answer, five sorts),
+# and the first caller after the window retries once. Short on purpose: the
+# stamp only bounds retries of a statement that just failed, it must not keep
+# the sixth sort away for a TTL after the database recovers.
+_PC_STANDINGS_FAIL_TTL_S = 5
+
 # The cache is keyed on WHAT IT WAS COMPUTED WITH, never on a module global
 # read back at call time (#744): an entry is
 # (min_matches, active_days) -> (expires_at_monotonic, {player_id: board_rank}),
-# so a request whose binds differ MISSES rather than being handed someone
-# else's board. No functools cache anywhere near it — an unbounded path-blind
+# or (expires_at_monotonic, None) for a refresh that failed inside the last
+# `_PC_STANDINGS_FAIL_TTL_S`, so a request whose binds differ MISSES rather
+# than being handed someone else's board. No functools cache anywhere near it — an unbounded path-blind
 # cache is the shape that answered with stand-in fonts for the rest of a
 # process. Unbounded growth is not a concern here for a reason that is checked
 # rather than assumed: the only writer is `_pc_board_ranks`, whose key comes
@@ -26416,20 +26429,42 @@ async def _pc_board_ranks(db: AsyncSession, *, min_matches: int, active_days: in
     this process has ever run under: in production that is a single entry, and
     the second only ever appears under a test that redirects a global. A
     per-key lock would buy concurrency between configurations that do not
-    exist, at the price of a second structure to keep in step with the cache."""
+    exist, at the price of a second structure to keep in step with the cache.
+
+    A refresh that raises stamps a failure entry for `_PC_STANDINGS_FAIL_TTL_S`
+    and re-raises; a caller that finds that stamp raises `_PcBoardUnavailable`
+    without running the statement. Both are exceptions on purpose: the one
+    caller, `_pc_attach_subject_standings`, already turns any exception into
+    `subject_standings: false`. A cancelled refresh (BaseException) stamps
+    nothing, since it says nothing about the statement."""
     key = (int(min_matches), int(active_days))
     hit = _PC_BOARD_RANKS_CACHE.get(key)
     if hit is not None and hit[0] > time.monotonic():
-        return hit[1]
+        return _pc_board_hit(hit)
     async with _PC_BOARD_RANKS_LOCK:
         hit = _PC_BOARD_RANKS_CACHE.get(key)
         if hit is not None and hit[0] > time.monotonic():
-            return hit[1]
-        rows = (await db.execute(text(_PC_BOARD_RANKS_SQL),
-                                 {"min_matches": key[0], "active_days": key[1]})).mappings().all()
+            return _pc_board_hit(hit)
+        try:
+            rows = (await db.execute(text(_PC_BOARD_RANKS_SQL),
+                                     {"min_matches": key[0], "active_days": key[1]})).mappings().all()
+        except Exception:
+            _PC_BOARD_RANKS_CACHE[key] = (time.monotonic() + _PC_STANDINGS_FAIL_TTL_S, None)
+            raise
         ranks = {str(r["player_id"]): int(r["board_rank"]) for r in rows}
         _PC_BOARD_RANKS_CACHE[key] = (time.monotonic() + _PC_STANDINGS_TTL_S, ranks)
         return ranks
+
+
+class _PcBoardUnavailable(RuntimeError):
+    """The board refresh failed inside the last `_PC_STANDINGS_FAIL_TTL_S`."""
+
+
+def _pc_board_hit(hit) -> dict:
+    """The map of a live cache entry, or `_PcBoardUnavailable` for a failure stamp."""
+    if hit[1] is None:
+        raise _PcBoardUnavailable("board refresh failed recently; retried after the stamp expires")
+    return hit[1]
 
 
 async def _pc_subject_standings(db: AsyncSession, subject_ids) -> dict:

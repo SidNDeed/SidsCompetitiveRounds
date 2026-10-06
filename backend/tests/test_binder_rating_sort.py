@@ -417,8 +417,11 @@ def test_s5c_the_cache_is_keyed_on_its_binds_and_rechecks_after_the_lock():
     assert "_PC_BOARD_RANKS_CACHE.get(key)" in body, "the re-check is outside the lock"
     assert "functools" not in fn and "lru_cache" not in fn
     # monotonic on both sides of every comparison: a wall-clock step must not
-    # be able to make an entry immortal
-    assert fn.count("time.monotonic()") == 3
+    # be able to make an entry immortal. Four since the failure stamp (round 1
+    # LOW 2): two comparisons, the success expiry and the failure expiry.
+    assert fn.count("time.monotonic()") == 4
+    assert "time.time()" not in fn
+    assert fn.count("_PC_STANDINGS_FAIL_TTL_S") >= 2 and "_PC_STANDINGS_TTL_S)" in fn
     # the binds are read at the CALLER, so a redirected global changes the key
     caller = inspect.getsource(main._pc_subject_standings)
     assert "min_matches, active_days = _PC_POOL_MIN_MATCHES, LEADERBOARD_ACTIVE_DAYS" in caller
@@ -805,6 +808,102 @@ def test_s10_a_cached_rank_never_outlives_the_subjects_rating():
                 assert set(got) == {"top", "hundred_one", "four_games"}
         finally:
             await eng.dispose()
+    run(go())
+
+
+class _FailingBoard:
+    """A session whose board statement raises after yielding once, so every
+    concurrent caller really is queued on the lock while the first one runs.
+    Counts executions of the board statement; any other statement is a defect
+    in the test (the board is the first thing the attach path runs)."""
+
+    def __init__(self):
+        self.n = 0
+
+    async def execute(self, clause, params=None):
+        assert str(clause) == main._PC_BOARD_RANKS_SQL, "unexpected statement"
+        self.n += 1
+        await asyncio.sleep(0)
+        raise RuntimeError("board unavailable")
+
+
+class _WorkingBoard(_FailingBoard):
+    async def execute(self, clause, params=None):
+        assert str(clause) == main._PC_BOARD_RANKS_SQL, "unexpected statement"
+        self.n += 1
+
+        class _R:
+            def mappings(self):
+                return self
+
+            def all(self):
+                return [{"player_id": "p1", "board_rank": 1}]
+        return _R()
+
+
+def test_s11_a_failed_refresh_is_stamped_so_cold_callers_do_not_queue_on_it(monkeypatch):
+    """Codex item 20 round 1, LOW 2. Twelve cold callers arrive together and
+    the board statement raises. Without a failure stamp each caller wakes
+    behind the lock, finds nothing, and runs the failing statement again --
+    twelve executions in series, each on a pool connection. With it: one.
+
+    The clock is the test's own (`main.time` replaced for this test only, the
+    asyncio loop keeps the real one), so the window is crossed by setting a
+    number, never by sleeping. Recovery half: inside the window a caller and
+    the attach helper both answer without the statement (the helper with
+    False, the existing degraded answer); after it the next caller runs the
+    statement exactly once more, and a working statement then caches the
+    board for the full TTL.
+    """
+    import time as _real_time
+    now = [10_000.0]
+
+    class _Clock:
+        def __getattr__(self, name):
+            return getattr(_real_time, name)
+
+        def monotonic(self):
+            return now[0]
+
+    monkeypatch.setattr(main, "time", _Clock())
+    # a fresh lock: asyncio.Lock binds to the first loop it is contended on,
+    # and each test here runs its own loop
+    monkeypatch.setattr(main, "_PC_BOARD_RANKS_LOCK", asyncio.Lock())
+    fail_ttl = getattr(main, "_PC_STANDINGS_FAIL_TTL_S", 5)
+    # the binds the attach path itself uses, so its read hits the same key
+    binds = {"min_matches": main._PC_POOL_MIN_MATCHES,
+             "active_days": main.LEADERBOARD_ACTIVE_DAYS}
+    db = _FailingBoard()
+
+    async def cold_burst(n):
+        return await asyncio.gather(*[
+            main._pc_board_ranks(db, **binds) for _ in range(n)],
+            return_exceptions=True)
+
+    async def go():
+        got = await cold_burst(12)
+        assert all(isinstance(g, Exception) for g in got), got
+        assert db.n == 1, "twelve cold callers ran the failing board %d times" % db.n
+
+        # inside the window: no statement, and the binder's degraded answer
+        now[0] += fail_ttl - 0.5
+        prints = [{"subject_player_id": "p1"}]
+        assert await main._pc_attach_subject_standings(db, prints) is False
+        assert "subject_board_rank" not in prints[0]
+        assert db.n == 1, "a caller inside the failure window ran the board"
+
+        # after the window: exactly one retry
+        now[0] += 1.0
+        await cold_burst(8)
+        assert db.n == 2, "after the window the board ran %d times, not once more" % (db.n - 1)
+
+        # recovery: a working statement after the next window caches for the TTL
+        now[0] += fail_ttl + 0.5
+        ok = _WorkingBoard()
+        assert await main._pc_board_ranks(ok, **binds) == {"p1": 1}
+        now[0] += main._PC_STANDINGS_TTL_S - 1
+        assert await main._pc_board_ranks(ok, **binds) == {"p1": 1}
+        assert ok.n == 1
     run(go())
 
 
