@@ -108,7 +108,7 @@ needs_pg = pytest.mark.skipif(
 # gate (the test at the bottom of this file always runs) so that moving one
 # behind the gate is a deliberate edit and not a silent extra "skipped" that
 # still reads as a clean run.
-LIVE_TESTS = 9
+LIVE_TESTS = 10
 
 
 def run(coro):
@@ -748,6 +748,61 @@ def test_s9_an_empty_binder_still_reports_that_standings_were_computed():
                 c = _CountingSession(s, main._PC_BOARD_RANKS_SQL)
                 assert await main._pc_attach_subject_standings(c, []) is True
                 assert c.n == 0, "an empty binder ran the board statement"
+        finally:
+            await eng.dispose()
+    run(go())
+
+
+@needs_pg
+def test_s10_a_cached_rank_never_outlives_the_subjects_rating():
+    """The cached board map is a hint and the live row is the authority (Codex
+    item 20 round 1, LOW 1). Seed the map with both subjects rated, then take
+    one subject's rating row away and mark the other deleted WITHOUT expiring
+    the map: inside the TTL the map still holds both old ranks, and the answer
+    must still carry no rank for either.
+
+    Control on the same read: `four_games` and the fillers are untouched, and
+    the board statement does not run again, so the answer really was built
+    from the stale map rather than from a recomputed board.
+    """
+    async def go():
+        eng, Session = await _session()
+        try:
+            async with Session() as s:
+                await _seed(s)
+                first = await _standings(s, names=("top", "hundred_one"))
+                assert first["top"] == {"board_rank": 1, "rating": 3000.0, "inactive": False}
+                assert first["hundred_one"]["board_rank"] == 101
+                key = (main._PC_POOL_MIN_MATCHES, main.LEADERBOARD_ACTIVE_DAYS)
+                cached = main._PC_BOARD_RANKS_CACHE[key][1]
+                assert cached[str(SUBJ["top"])] == 1 and cached[str(SUBJ["hundred_one"])] == 101
+
+                # unrated: the rating row goes; deleted: the data-deletion mark
+                await s.execute(text("DELETE FROM glicko_ratings WHERE player_id = CAST(:p AS uuid)"),
+                                {"p": str(SUBJ["top"])})
+                await s.execute(text("UPDATE players SET deleted_at = NOW() WHERE id = CAST(:p AS uuid)"),
+                                {"p": str(SUBJ["hundred_one"])})
+                await s.commit()
+
+                c = _CountingSession(s, main._PC_BOARD_RANKS_SQL)
+                got = await _standings(c, names=("top", "hundred_one", "four_games"))
+                assert c.n == 0, "the map was recomputed, so this read proves nothing about it"
+                assert main._PC_BOARD_RANKS_CACHE[key][1][str(SUBJ["top"])] == 1, \
+                    "the stale rank is no longer in the map"
+                assert got["top"]["rating"] is None
+                assert got["top"]["board_rank"] is None, \
+                    "a cached rank %r stands beside rating None" % (got["top"]["board_rank"],)
+                assert got["hundred_one"]["rating"] is None
+                assert got["hundred_one"]["board_rank"] is None, \
+                    "a deleted subject keeps cached rank %r" % (got["hundred_one"]["board_rank"],)
+                # control: a subject still rated keeps the rank the same map
+                # holds, so the mask removes only what the live row disowns
+                filler = (await main._pc_subject_standings(c, [str(_pid(1))]))[str(_pid(1))]
+                assert filler == {"board_rank": 2, "rating": 2000.0, "inactive": False}
+                assert c.n == 0
+                assert got["four_games"] == {"board_rank": None, "rating": 2500.0,
+                                             "inactive": False}
+                assert set(got) == {"top", "hundred_one", "four_games"}
         finally:
             await eng.dispose()
     run(go())

@@ -26453,7 +26453,13 @@ async def _pc_subject_standings(db: AsyncSession, subject_ids) -> dict:
     out = {}
     for r in rows:
         pid = str(r["player_id"])
-        out[pid] = {"board_rank": ranks.get(pid),
+        # The cached board map is a HINT, up to one TTL old; this live row is
+        # the authority. A subject who lost their rating row or deleted their
+        # data inside the TTL is `rated` false here while the map still holds
+        # their old rank, and a rank beside a null rating would sort the card
+        # as a rated one. So no rank without a live rating. A subject with no
+        # live row at all is absent from `rows` and gets no entry.
+        out[pid] = {"board_rank": (ranks.get(pid) if r["rated"] else None),
                     "rating": (_pc_num(r["rating"]) if r["rated"] else None),
                     "inactive": bool(r["inactive"])}
     return out
