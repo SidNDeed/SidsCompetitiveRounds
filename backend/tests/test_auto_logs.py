@@ -337,6 +337,24 @@ def no_cursor_carried_over(monkeypatch):
     monkeypatch.setattr(auto_logs, "_ORPHAN_CURSOR", [""])
 
 
+@pytest.fixture(autouse=True)
+def no_reserve_lock_carried_over(monkeypatch):
+    """`_BLOB_RESERVE_LOCK` and `_BLOB_WRITE_STARTED` are the fourth and fifth,
+    and they leak ACROSS EVENT LOOPS: every case here runs on its own
+    (`_run` is asyncio.run). A contended asyncio.Lock is bound to the loop it
+    was contended on, and a section abandoned as its loop closed never runs
+    the hand-on that releases the lock and clears the stamp. Without this, a
+    case that leaves the module's own lock held hands that state to every
+    later case in the process that uses it, here or in another file; a case
+    meeting it on a new loop gets RuntimeError from the acquire, which the
+    route answers 503 "log storage unavailable" (the signature of the two
+    real-route cases of test_ticket_redaction.py in the whole-suite run at
+    603fdcd7). Cases that install their own lock still do; this only means
+    none of them ever touches the import-time one."""
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
+
+
 def _ok_db(auto_count=0, player=True):
     return Scripted({
         COUNT_KEY: [[_bucket(auto_count)]],
