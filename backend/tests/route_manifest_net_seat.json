@@ -1849,7 +1849,7 @@
           ],
           "main",
           "health_check",
-          "d24c445d8b8ed483b30a22737709d2dd0f306ce9"
+          "b7af170e41cbe26ef7b5e8c2f2f6e936bad380ed"
         ],
         [
           "/api/v1/i18n/approved",
@@ -3548,7 +3548,7 @@
           ],
           "main",
           "admin_seat_evidence",
-          "1b2b7b0849e7a8bda15fe7815e6e9603914eee96"
+          "84b5619a8eccac188b0b49ddb6899770100b681e"
         ],
         [
           "/api/v1/client/compat-outcome",
@@ -3566,7 +3566,7 @@
           ],
           "main",
           "submit_seat_evidence",
-          "fb20c87453fd0cf099b6e8f22e5be5ae1dcde9b8"
+          "d092e4c32e3cbf7cdf0a206b7f04d13d98e78b8c"
         ]
       ]
     },
@@ -3581,7 +3581,7 @@
           ],
           "main",
           "admin_card_evidence",
-          "a6a0755f3bca47b0589154e73e1e3400924f9487"
+          "26c9b0b41ea1e6145b163df6a44a03ad8fd2591f"
         ],
         [
           "/api/v1/admin/card-pool-census",
@@ -3599,7 +3599,7 @@
           ],
           "main",
           "submit_card_evidence",
-          "89dd05c3bae7aa612d6077f82592d1db2ff20e36"
+          "0427c54861e1d35146884b03c639192afb238f15"
         ]
       ]
     }
@@ -3638,7 +3638,7 @@
       [
         "main",
         "lifespan",
-        "49f095e1bb799df9aa2befb2d2f6c6ba294437bd"
+        "3475aa7c722e2f0efa1e68570dcd0570c0bc0d2c"
       ]
     ]
   },
