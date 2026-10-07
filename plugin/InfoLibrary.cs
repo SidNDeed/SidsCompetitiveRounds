@@ -274,7 +274,7 @@ namespace CompetitiveRounds
         // ── Bodies ───────────────────────────────────────────────────────
         // GENERATED from the reviewed drafts (session scratchpad wiki/drafts).
 
-        private static string StartHere => I18n.Tr(@"Sid's Competitive Rounds adds a full competitive layer to ROUNDS: ranked 1v1, 2v2 and free-for-all with their own Glicko-2 ratings (plus a 1v2 beta, recorded but unrated for now), an XP and Gold economy with a cosmetic shop, weekly tournaments, live betting on matches, achievements, and Discord integration. All of it is community-built and community-run.
+        private static string StartHere => I18n.TrF(@"Sid's Competitive Rounds adds a full competitive layer to ROUNDS: ranked 1v1, 2v2 and free-for-all with their own Glicko-2 ratings (plus a 1v2 beta, recorded but unrated for now), an XP and Gold economy with a cosmetic shop, weekly tournaments, live betting on matches, achievements, and Discord integration. All of it is community-built and community-run.
 
 <color=#FFD94D><b>THE TWO GUARANTEES</b></color>
 
@@ -287,29 +287,29 @@ Two nuances, spelled out in <color=#7FD4FF>Vanilla stays vanilla</color>: crash-
 
 <color=#FFD94D><b>HOW THIS LIBRARY WORKS</b></color>
 
-The column on the left lists every article, grouped by category. Click a topic and it opens in this pane. Blue names like (see <color=#7FD4FF>Blocking</color>) point at other articles in the same list. <color=#8A8A93>This whole menu is F5. T opens in-game chat, and Esc closes the menu.</color>
+The column on the left lists every article, grouped by category. Click a topic and it opens in this pane. Blue names like (see <color=#7FD4FF>Blocking</color>) point at other articles in the same list. <color=#8A8A93>This whole menu is F5. {0} opens in-game chat, and Esc closes the menu.</color>
 
 <color=#FFD94D><b>WHERE TO GET HELP</b></color>
 
 - <color=#7FD4FF>Discord</color> - the Discord button at the bottom of this menu opens the community server. Real people answer questions there, and so does the server bot - ask it things like 'how does ranked work' or 'how do I get gold' and it answers on its own.
 - <color=#7FD4FF>Bug reports</color> - on the Settings tab, find 'Report a bug' and press Open Report Form. You can attach your game logs (a Preview button shows exactly what gets sent), you get up to 10 reports a day, and if your Discord account is linked, responses from the team arrive as DMs.
 
-If something looks wrong mid-match, file the report right after that session - the attached log is usually what makes a bug findable.");
+If something looks wrong mid-match, file the report right after that session - the attached log is usually what makes a bug findable.", NativeUI.KeybindRowFace(KeybindRules.ChatOpen));
 
         private static string ControlsIntro => I18n.Tr(@"The mod never rebinds anything - every vanilla control works exactly as it always has, and the competitive keys are added AROUND them. The board below shows every key that does something during competitive play: gold keys belong to the mod, blue keys to the base game, purple to both.");
 
-        private static string ControlsOutro => I18n.Tr(@"<color=#FFD94D><b>THE KEYS IN PRACTICE</b></color>
-F5 works everywhere - menu, lobby, mid-game. While the menu is open your inputs stay out of the game: clicks do not fire your gun, Space does not ready you up, and Escape only closes the menu - it will not cancel a match that is connecting. Close it and everything flows again.
+        private static string ControlsOutro => I18n.TrF(@"<color=#FFD94D><b>THE KEYS IN PRACTICE</b></color>
+{0} works everywhere - menu, lobby, mid-game. While the menu is open your inputs stay out of the game: clicks do not fire your gun, {8} does not ready you up, and Escape only closes the menu - it will not cancel a match that is connecting. Close it and everything flows again.
 
-Chat has three doors. T types a message, holding Q opens the quick-chat wheel - point at a phrase and release to send it, or pick More... for the full list - and Enter still opens the vanilla box - the mod leaves it alone. M cycles the chat overlay display mode. While typing, a tap of Alt switches the language channel your message goes to - global, then each language channel in turn, then back to global; the Home tab dropdown sets it too.
+Chat has three doors. {1} types a message, holding {2} opens the quick-chat wheel - point at a phrase and release to send it, or pick More... for the full list - and Enter still opens the vanilla box - the mod leaves it alone. {4} cycles the chat overlay display mode. While typing, a tap of {5} switches the language channel your message goes to - global, then each language channel in turn, then back to global; the Home tab dropdown sets it too.
 
-Holding E opens the emote wheel - even mid-battle: point at a dance you own and release to play it for everyone running the mod. Your own controls lock until the dance ends, and the dance stops if you get knocked around or fire. Dances are bought in the Shop's DANCES section, where Preview shows the exact moves.
+Holding {3} opens the emote wheel - even mid-battle: point at a dance you own and release to play it for everyone running the mod. Your own controls lock until the dance ends, and the dance stops if you get knocked around or fire. Dances are bought in the Shop's DANCES section, where Preview shows the exact moves.
 
-Hold Tab during a match for the live scoreboard: score, cards, accuracy and connection info for everyone in the room, without opening the full menu.
+Hold {6} during a match for the live scoreboard: score, cards, accuracy and connection info for everyone in the room, without opening the full menu.
 
-Shift swaps between your equipped map color skins as a new round paints in. If you have none equipped, it does nothing.
+{7} swaps between your equipped map color skins as a new round paints in. If you have none equipped, it does nothing.
 
-Vanilla rebinding lives in the game options; the mod keys themselves are fixed. For what to practice with all of this, read <color=#7FD4FF>Getting better</color>.");
+Vanilla rebinding lives in the game options; the mod keys themselves are fixed. For what to practice with all of this, read <color=#7FD4FF>Getting better</color>.", NativeUI.KeybindRowFace(KeybindRules.MenuToggle), NativeUI.KeybindRowFace(KeybindRules.ChatOpen), NativeUI.KeybindRowFace(KeybindRules.QuickChat), NativeUI.KeybindRowFace(KeybindRules.DanceWheel), NativeUI.KeybindRowFace(KeybindRules.ChatOverlayMode), NativeUI.KeybindRowFace(KeybindRules.ChatChannel), NativeUI.KeybindRowFace(KeybindRules.Scoreboard), NativeUI.KeybindRowFace(KeybindRules.MapSkinCycle), NativeUI.KeybindRowFace(KeybindRules.Jump));
 
         private static string GettingBetter => I18n.Tr(@"Getting better at competitive ROUNDS is mechanical, not mystical: blocking discipline, netcode awareness, drafting, and reading the numbers the mod already keeps on you. Every tip below is tied to a real mechanic you can go test.
 
@@ -320,7 +320,7 @@ Blocking is the skill that decides close games, and it has a cost model worth re
 - A block that absorbs nothing still spends its full cooldown. <color=#FF6666>Panic-blocking at the sound of a trigger buys you nothing and hands your opponent a free window while it recharges.</color>
 - React to the bullet, not the trigger: watch the opponent's gun and the shot itself, and drill on-reaction blocks until they're reflex.
 - One activation can absorb several bullets. A block held for a burst or a bounced volley does far more work than one spent on a lone pellet.
-- Block-effect cards multiply timing skill: Echo repeats and Shield Charge dashes all belong to the right-click that started them, so one well-timed block fires the whole chain.
+- Block-effect cards multiply timing skill: Echo repeats and Shield Charge dashes all belong to the block that started them, so one well-timed block fires the whole chain.
 - A poison or burn tick that lands inside your block is consumed - erased, not postponed - so blocking while poisoned is real damage prevention. <color=#8A8A93>(A room mixing current and outdated mod versions can fall back to poison ignoring blocks, for everyone equally - see <color=#7FD4FF>Vanilla stays vanilla</color>.)</color>
 
 <color=#FFD94D><b>PLAY WITH THE NETCODE</b></color>
@@ -343,7 +343,7 @@ Blocking is the skill that decides close games, and it has a cost model worth re
 My Stats tracks more about your play than you probably realize. What the headline stats mean:
 
 - <color=#7FD4FF>Hit %</color> - counts bullets, not clicks: one Buckshot click counts every pellet, and only direct, unblocked hits on enemies count - poison and burn ticks, explosions and self-hits never do. A shotgun build reads low by construction. <color=#FF6666>Compare a build against itself over time, never against a sniper's number.</color>
-- <color=#7FD4FF>Block success</color> - one off-cooldown right-click is one attempt, and at most one success per attempt no matter how many bullets it absorbed. Preemptive blocks that meet no bullet are normal, not a mistake - watch the trend across games, not one game.
+- <color=#7FD4FF>Block success</color> - one off-cooldown block is one attempt, and at most one success per attempt no matter how many bullets it absorbed. Preemptive blocks that meet no bullet are normal, not a mistake - watch the trend across games, not one game.
 - Timeline graphs sample every 3 to 5 seconds and always span the whole game. Use them to find where games turn: the score timeline shows when a lead slipped, and the hit and damage lines show what changed when it did.
 - A 1v1 game records average and worst ping plus freeze events (frame stalls over half a second); team and FFA games carry lighter connection data. Before blaming your aim for one bad game, check whether the connection numbers already explain it (see <color=#7FD4FF>How stats are tracked</color>).
 
@@ -623,7 +623,7 @@ The ping number (the mod shows it in the corner overlay, next to your region) is
 - Below about 30 FPS your machine drains the incoming movement stream slower than it arrives, so enemy copies get visibly choppier.
 - <color=#8A8A93>A game can feel awful while both FPS and ping graphs read flat - stutter in the replicated stream is invisible to both numbers.</color>");
 
-        private static string VanillaBugs => I18n.Tr(@"ROUNDS ships with real bugs - some cosmetic, some that decide rounds. The catalogue: symptom, real cause, and whether the mod repairs it. Repair details: (see <color=#7FD4FF>Bug fixes the mod ships</color>).
+        private static string VanillaBugs => I18n.TrF(@"ROUNDS ships with real bugs - some cosmetic, some that decide rounds. The catalogue: symptom, real cause, and whether the mod repairs it. Repair details: (see <color=#7FD4FF>Bug fixes the mod ships</color>).
 
 <color=#FFD94D><b>INPUT AND LOBBY BUGS</b></color>
 
@@ -631,7 +631,7 @@ The ping number (the mod shows it in the corner overlay, next to your region) is
 
 <color=#7FD4FF>'No space to ready up' - you cannot spawn into a lobby</color> - the game tries to spawn your character before you are actually in a room, crashes, and never recovers. <color=#7FE87F>Fixed by the mod, always on</color>; 30 seconds stuck returns you to the menu.
 
-<color=#7FD4FF>Typing confirms a card pick, Enter opens the room-code box, Space readies you up mid-sentence</color> - three places read the raw keyboard without checking for an open text box. <color=#7FE87F>Fixed for the mod's own chat</color>; the vanilla chat box keeps its quirks.
+<color=#7FD4FF>Typing confirms a card pick, Enter opens the room-code box, {0} readies you up mid-sentence</color> - three places read the raw keyboard without checking for an open text box. <color=#7FE87F>Fixed for the mod's own chat</color>; the vanilla chat box keeps its quirks.
 
 <color=#FFD94D><b>COMBAT BUGS</b></color>
 
@@ -669,7 +669,7 @@ The ping number (the mod shows it in the corner overlay, next to your region) is
 
 <color=#FFD94D><b>WHERE THE FIXES RUN</b></color>
 
-Crash guards and dead-state repairs run everywhere - they repair states vanilla never intended, without changing any rule. Rule changes are gated: mode logic needs its own mod-issued room, Grow normalization needs every fighter modded and consenting, and poison authority follows the poisoned player - an unmodded victim keeps vanilla poison. <color=#7FE87F>A non-modded player always gets pure vanilla gameplay</color> - and the only things they can ever see of the mod are nametag styling and quick-chat phrases you deliberately send through the game's own chat (see <color=#7FD4FF>Vanilla stays vanilla</color>).");
+Crash guards and dead-state repairs run everywhere - they repair states vanilla never intended, without changing any rule. Rule changes are gated: mode logic needs its own mod-issued room, Grow normalization needs every fighter modded and consenting, and poison authority follows the poisoned player - an unmodded victim keeps vanilla poison. <color=#7FE87F>A non-modded player always gets pure vanilla gameplay</color> - and the only things they can ever see of the mod are nametag styling and quick-chat phrases you deliberately send through the game's own chat (see <color=#7FD4FF>Vanilla stays vanilla</color>).", NativeUI.KeybindRowFace(KeybindRules.Jump));
 
         private static string Ranked1v1 => I18n.Tr(@"Ranked 1v1 is the mod's core mode: best-of-3 series, one Glicko rating, and two ways to start a rated series - the queue, or a private room where both players run the mod. This page covers the queue from Search to room, how a private lobby becomes rated, and exactly what a disconnect does.
 
@@ -826,7 +826,7 @@ The base XP and gold numbers above are multiplied by a difficulty multiplier:
 - Players who left in an EARLIER game ride along as absent ghosts - on the roster, excluded from rating and pay.
 - A game that drops under 3 players before 2 half points were scored is cancelled; dropping under 3 after a game over ends the sitting.");
 
-        private static string Spectating => I18n.Tr(@"Live competitive games in every mode can be watched from inside the mod - ranked 1v1, 2v2, 1v2 and FFA (ordinary casual 1v1 rooms aren't listed). You see the real game, live, from a seat that is built so it cannot touch the match.
+        private static string Spectating => I18n.TrF(@"Live competitive games in every mode can be watched from inside the mod - ranked 1v1, 2v2, 1v2 and FFA (ordinary casual 1v1 rooms aren't listed). You see the real game, live, from a seat that is built so it cannot touch the match.
 
 <color=#FFD94D><b>HOW TO WATCH</b></color>
 
@@ -839,7 +839,7 @@ The base XP and gold numbers above are multiplied by a difficulty multiplier:
 - The true live game - real movement and real projectiles, not a replay or a delayed feed.
 - The screen stays black until the first clean round boundary, then the game appears in sync. If your client ever has to catch up mid-round, you see the live scene with a Syncing note instead of black.
 - Card picks are visible, and every round boundary carries everyone's full decks. In FFA you see pick results and decks, not each picker's private hand of candidates.
-- A minimal top bar shows the score and the fighters' names, titles and ratings. Hold Tab for the stats board. Chat works (and can be muted). Esc opens the leave menu.
+- A minimal top bar shows the score and the fighters' names, titles and ratings. Hold {0} for the stats board. Chat works (and can be muted). Esc opens the leave menu.
 
 <color=#FFD94D><b>WHY A SPECTATOR CAN'T TOUCH THE GAME</b></color>
 
@@ -867,7 +867,7 @@ The spectator seat is an observer by construction, not by politeness:
 <color=#FFD94D><b>SPECTATING AND BETTING</b></color>
 
 - Spectators can bet. The early bet-close windows are the information gate: 1v1 and 2v2 bets lock once 2 points are scored in game 1, and FFA bets lock once 2 half points are scored in the game being bet on (earlier in short lobbies) - so a lingering seat learns nothing useful before the window shuts.
-- The only barred group is a lobby's own members: you can never bet on your own lobby.");
+- The only barred group is a lobby's own members: you can never bet on your own lobby.", NativeUI.KeybindRowFace(KeybindRules.Scoreboard));
 
         private static string TournHow => I18n.Tr(@"Tournaments are 8-16 player double-elimination brackets of best-of-3 series, run end to end by the mod and the bot. There are two kinds: <color=#7FD4FF>Sync</color> (the whole bracket plays out in one sitting) and <color=#7FD4FF>Async</color> (each match has a week to happen). Both are ranked - every game moves your normal 1v1 rating.
 
@@ -1580,7 +1580,7 @@ Regular titles sit in the shop with a gold price and work like any other cosmeti
 - <color=#7FD4FF>Untouchable</color> - win a game in which your health never dropped, even once. <color=#7FE87F>100g</color>
 - <color=#7FD4FF>Pacifist</color> - win without ever holding the fire button during live combat. <color=#7FE87F>100g</color>
 - <color=#7FD4FF>Immovable Object</color> - win without ever holding a movement or jump key during live combat. <color=#7FE87F>100g</color>
-- <color=#7FD4FF>Grounded</color> - win without ever holding a jump key (Space, W, Up). <color=#7FE87F>100g</color>
+- <color=#7FD4FF>Grounded</color> - win without ever holding a jump control. <color=#7FE87F>100g</color>
 - <color=#7FD4FF>Instinct</color> - win with 3 or more card picks, taking the pre-highlighted left-most card on every pick without ever moving the selection. <color=#8A8A93>Only checked in queue and sync-tournament rooms - room-code games, async tournament matches included, skip it.</color> <color=#7FE87F>100g</color>
 
 <color=#FFD94D><b>CLIENT-CHECKED: SWEEPS AND STUNTS</b></color>
@@ -1656,13 +1656,13 @@ The translator tiers come from the translation portal, not from matches. A live 
 - <color=#7FD4FF>Dragoman</color> - 100 live strings. <color=#7FE87F>300g</color>
 - <color=#7FD4FF>Babel</color> - 1000 live strings. <color=#7FE87F>1000g</color>");
 
-        private static string Cosmetics => I18n.Tr(@"Cosmetics live in the F5 Shop tab and are bought with the gold you earn by playing. This page covers every kind, how each equips, how drops and stock work, and where the art comes from.
+        private static string Cosmetics => I18n.TrF(@"Cosmetics live in the F5 Shop tab and are bought with the gold you earn by playing. This page covers every kind, how each equips, how drops and stock work, and where the art comes from.
 
 <color=#FFD94D><b>WHAT EACH KIND DOES</b></color>
 
 <color=#7FD4FF>Titles</color> - the label beside your name on mod surfaces (see <color=#7FD4FF>Titles</color>).
 <color=#7FD4FF>Trails</color> - a colored trail behind your body in matches. Length scales with price: 3,000 gold trails are short, 5,000 medium, 10,000 long.
-<color=#7FD4FF>Map skins</color> - recolor the whole map and background. Equip as many as you like and cycle through them mid-game with Left Shift. The catalog holds recolors styled after the six vanilla arts, more than thirty original presets including the night pack, and three premium sparkle skins: Gilded, Platinum and Aurora. <color=#7FE87F>Map skins are yours alone</color> - they're never sent to other players, so every player sees their own pick.
+<color=#7FD4FF>Map skins</color> - recolor the whole map and background. Equip as many as you like and cycle through them mid-game with {0}. The catalog holds recolors styled after the six vanilla arts, more than thirty original presets including the night pack, and three premium sparkle skins: Gilded, Platinum and Aurora. <color=#7FE87F>Map skins are yours alone</color> - they're never sent to other players, so every player sees their own pick.
 <color=#7FD4FF>Name styling</color> - stackable styling on your display name. Formatting (bold, italic, underline, strike, float) stacks freely; glow, size, font transform and typeface allow one each, and the color effects (solids, neons, rainbow, per-letter gradients) share one slot.
 <color=#7FD4FF>Player colors</color> - replace your team orange or blue with a color of your own, and become your team identity on modded screens (see <color=#7FD4FF>Team & body colors</color>).
 <color=#7FD4FF>Cursor colors</color> - recolor your mouse cursor. The cursor SHAPE (default, arrow, dot, crosshair, circle) is a free preference. Nobody else ever sees your cursor.
@@ -1700,7 +1700,7 @@ Community artists make a large share of the catalog. The pipeline:
 
 <color=#FFD94D><b>GIFTS</b></color>
 
-Only artists can gift, and only their own items: a free copy to any player who has used the mod, including before sales open. Gifts still consume stock on a limited drop. There is no player-to-player gifting, and no way to send gold to another player.");
+Only artists can gift, and only their own items: a free copy to any player who has used the mod, including before sales open. Gifts still consume stock on a limited drop. There is no player-to-player gifting, and no way to send gold to another player.", NativeUI.KeybindRowFace(KeybindRules.MapSkinCycle));
 
         private static string TeamColors => I18n.Tr(@"Body colors in ROUNDS are team colors: the game holds four body skins and picks one by team number. Who gets which color follows from how each mode numbers its teams.
 

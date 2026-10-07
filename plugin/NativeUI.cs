@@ -6837,7 +6837,7 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
              * holding the label + the channel selector button. The label is
              * refreshed in RefreshChatLog so the active channel is VISIBLE. */
             var chHdrRow=new GameObject("CHRow");chHdrRow.transform.SetParent(chatBox.transform,false);chHdrRow.AddComponent<RectTransform>();UIFactory.AddHLG(chHdrRow,spacing:6);UIFactory.AddLE(chHdrRow,prefH:26,minH:26,flexH:0);
-            txtChatHeader=UIFactory.CreateText("CH",chHdrRow.transform,"Chat  <color=#888>(press T to chat)</color>",17f,new Color(0.7f,0.85f,1f),UIFactory.AlignMidLeft,sizeDelta:new Vector2(460,26));
+            txtChatHeader=UIFactory.CreateText("CH",chHdrRow.transform,I18n.TrF("Chat  <color=#888>(press {0} to chat)</color>",KeybindRowFace(KeybindRules.ChatOpen)),17f,new Color(0.7f,0.85f,1f),UIFactory.AlignMidLeft,sizeDelta:new Vector2(460,26));
             var chHdrSp=new GameObject("S");chHdrSp.transform.SetParent(chHdrRow.transform,false);chHdrSp.AddComponent<RectTransform>();UIFactory.AddLE(chHdrSp,flexW:1);
             /* item 13: two separate controls. Width budget for this row is the chat
              * box's inner width (~966 at the 1920 width-matched canvas): 460 header
@@ -10975,14 +10975,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             "All cosmetics - everything available, grouped by category.",
             "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
             "Bold, italic, underline, strikethrough, and color/size modifiers applied to your player nametag in lobbies and matches. Visible to every player, modded or not.",
-            "Map color schemes. Equip as many as you like and cycle between your owned colors with Left Shift in-game.",
+            "Map color schemes. Equip as many as you like and cycle between your owned colors with {0} in-game.",
             "Flair text shown next to your name on the leaderboard, match history, and in chat.",
             "A glowing trail that follows your character body during combat. Only visible to modded players; the shop preview shows it following your cursor.",
             "Override the default orange/blue team color with a tint of your choice. Only visible to modded players. Premium tiers (Prismatic, Chrome) animate during combat.",
             "Mouse-cursor color tint (local-only). Pick the cursor SHAPE — arrow, dot, crosshair, circle — in Settings; the tint colors whichever shape you choose.",
             "In-combat particle aura around your character. Only visible to modded players.",
             "Utility unlocks (e.g. hide your gold total on the leaderboard).",
-            "Emote dances for the hold-E wheel. Your character busts the move for everyone running the mod - but your own controls lock until the dance ends, so dance wisely.",
+            "Emote dances for the hold-{0} wheel. Your character busts the move for everyone running the mod - but your own controls lock until the dance ends, so dance wisely.",
             "Full music albums that replace ROUNDS' combat soundtrack for you. Click an album row for 30-second track previews; after buying, pick tracks and control playback in the Music tab.",
         };
         private static List<GameObject> shopRowPool = new List<GameObject>();
@@ -11118,7 +11118,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
             // Description of the active tab - updated on each RefreshShop.
             txtShopCategoryDesc = UIFactory.CreateText("SHDesc", panel.transform,
-                I18n.Tr(SHOP_TAB_DESCS[0]), 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
+                KbShopTabDesc(0), 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
 
             var sv = UIFactory.CreateScrollView("SHSV", panel.transform, spacing: 4);
             UIFactory.AddLE(sv.scrollGO, flexH: 1);
@@ -11702,7 +11702,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (txtShopCategoryDesc != null)
             {
                 int di = Math.Max(0, Math.Min(shopCategoryFilter, SHOP_TAB_DESCS.Length - 1));
-                UIFactory.SetText(txtShopCategoryDesc, I18n.Tr(SHOP_TAB_DESCS[di]));
+                UIFactory.SetText(txtShopCategoryDesc, KbShopTabDesc(di));
             }
 
             var rawItems = ApiClient.CachedShopItems;
@@ -12417,7 +12417,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // artist-authored included (design-Q4 reversal; see the name
                 // line above for why). Mod-authored suffixes are Tr'd/TrF'd
                 // BEFORE concatenation (compose-after-Tr, #298c).
-                string desc = I18n.Tr(it.description ?? "");
+                string desc = KbShopItemDesc(it.description);   // item 17: the dance rows name the bound wheel key
                 // Limited-stock counter (v1.30). The artist byline lives on the
                 // NAME line only now (round 3 item 1 — twice per row was noise).
                 if (it.stock_limit < 0)
@@ -13465,14 +13465,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 <color=#FFD94D><b>BLOCK SUCCESS</b></color>
 
 - One OFF-COOLDOWN block activation = one attempt
-  (right-clicks during cooldown don't count), and at
+  (blocks during cooldown don't count), and at
   most ONE success no matter how many bullets that
   block absorbs.
 - Echo repeats and Shield Charge dashes belong to the
-  right-click that started them - they never add
+  block that started them - they never add
   attempts.
 - Abyssal / Shields Up auto-blocks are not attempts,
-  though an auto-block absorbing within the right-click's
+  though an auto-block absorbing within the block's
   short credit window can claim its success.
 - Blocking your OWN reflected bullet DOES count as a
   success.
@@ -14130,6 +14130,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var subPrivacy = new GameObject("SubPrivacy");
             subPrivacy.transform.SetParent(panel.transform, false);
             SettingsBodyInit(subPrivacy, 6);
+            // Item 17: the Controls sub-tab (NativeUI.Keybinds.cs builds its rows).
+            var subControls = new GameObject("SubControls");
+            subControls.transform.SetParent(panel.transform, false);
+            SettingsBodyInit(subControls, 7);
+            BuildControlsRows(subControls.transform);
 
             // -- In game --
             pingToggleBtn = SettingsSwitch(subIngame.transform, "SPing", I18n.Tr("Shows your current server region and your ping to it."),
@@ -14152,7 +14157,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     dirty = true;
                 });
             lagNoticesToggleTxt = UIFactory.GetButtonText(lagNoticesToggleBtn);
-            inputOverlayToggleBtn = SettingsSwitch(subIngame.transform, "SInpOv", I18n.Tr("Input overlay (bottom-left): shows W, A, S, D, Space and both mouse buttons. Lights up red when pressed. Useful for streams or spotting missed inputs."),
+            inputOverlayToggleBtn = SettingsSwitch(subIngame.transform, "SInpOv", KbDescInputOverlay(),
                 () => Plugin.ShowInputOverlay != null && Plugin.ShowInputOverlay.Value,
                 () =>
                 {
@@ -14176,9 +14181,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // number is drawn and nothing else: the wire format is produced by
             // WireNum, which ignores StatRow.fmt entirely (#47). Item 13: the
             // three levels are chosen directly through the named writer.
-            healthPrecToggleBtn = SettingsSegmented(subIngame.transform, "SHpPrec", I18n.Tr("Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. "
-                + "Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops "
-                + "reading as a whole number too. Local display only - nothing stored or sent changes."),
+            healthPrecToggleBtn = SettingsSegmented(subIngame.transform, "SHpPrec", KbDescHpPrecision(),
                 new[] { TabStatsOverlay.HealthPrecisionSetting.ROUNDED, TabStatsOverlay.HealthPrecisionSetting.ONE_DP, TabStatsOverlay.HealthPrecisionSetting.TWO_DP },
                 () => TabStatsOverlay.HealthPrecisionSetting.Level,
                 id =>
@@ -14259,7 +14262,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             escBtnTxt = UIFactory.GetButtonText(escRow);
 
             // -- Chat & mail --
-            ingameChatToggleBtn = SettingsSegmented(subChatMail.transform, "SIgChat", I18n.Tr("Shows community chat in the corner while you play. Press T to type a reply, or M in game to cycle normal / pinned / muted."),
+            ingameChatToggleBtn = SettingsSegmented(subChatMail.transform, "SIgChat", KbDescInGameChat(),
                 new[] { "Normal", "Pinned", "Muted" },
                 () => CompetitiveUI.CurrentChatOverlayMode().ToString(),
                 id =>
@@ -14811,7 +14814,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             UIFactory.SetWordWrap(txtConsentStatus, true); UIFactory.SetTextAutoHeight(txtConsentStatus, 22f);
             // Item 5 companion: point players at the chat language channels.
             var note = UIFactory.CreateText("SLangChatNote", extras,
-                "Chat has language channels - use the dropdown on the Home tab, or tap Alt while typing, to switch.",
+                I18n.TrF("Chat has language channels - use the dropdown on the Home tab, or tap {0} while typing, to switch.",
+                    KeybindRowFace(KeybindRules.ChatChannel)),
                 13f, C_DIM, sizeDelta: new Vector2(748, 18));
             UIFactory.SetWordWrap(note, true); UIFactory.SetTextAutoHeight(note, 18f);
             var sdd = UIFactory.CreateText("SDD", extras,
@@ -22204,15 +22208,15 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 try { mutedLine = CompetitiveUI.MutedPlayersLine(); } catch { }
                 UIFactory.SetTextRaw(txtChatHeader,
                     mutedLine.Length > 0
-                        ? I18n.TrF("Viewing: {0}  <color=#888>(press T to chat)</color>", ChatChannelDisplayName(filter))
+                        ? I18n.TrF("Viewing: {0}  <color=#888>(press {1} to chat)</color>", ChatChannelDisplayName(filter), KeybindRowFace(KeybindRules.ChatOpen))
                           + "  <color=#997766>" + mutedLine + "</color>"
-                        : I18n.TrF("Viewing: {0}  <color=#888>(press T to chat)</color>", ChatChannelDisplayName(filter)));
+                        : I18n.TrF("Viewing: {0}  <color=#888>(press {1} to chat)</color>", ChatChannelDisplayName(filter), KeybindRowFace(KeybindRules.ChatOpen)));
             }
             if (chatViewBtn != null)
                 UIFactory.SetTextRaw(UIFactory.GetButtonText(chatViewBtn), I18n.Tr("Change view"));
             if (chatSendBtn != null)
                 UIFactory.SetTextRaw(UIFactory.GetButtonText(chatSendBtn),
-                    I18n.TrF("Typing: {0}  (Alt to change)", ChatChannelDisplayName(send)));
+                    I18n.TrF("Typing: {0}  ({1} to change)", ChatChannelDisplayName(send), KeybindRowFace(KeybindRules.ChatChannel)));
             if (txtChatLog == null) return;
             // "all" (and the "auto" default) keeps the merged view; only an explicit
             // concrete channel filters. System lines (null channel) always show.

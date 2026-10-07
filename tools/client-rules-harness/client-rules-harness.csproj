@@ -149,6 +149,7 @@
     <Compile Include="../../plugin/LogScrub.cs" />
     <Compile Include="../../plugin/TopStripBand.cs" />
     <Compile Include="../../plugin/FfaReportRules.cs" />
+    <Compile Include="../../plugin/KeybindRules.cs" />
     <Compile Include="../../plugin/RosterCensusRules.cs" />
     <Compile Include="../../plugin/BinderSortRules.cs" />
     <Compile Include="../../plugin/TitleLadderRules.cs" />

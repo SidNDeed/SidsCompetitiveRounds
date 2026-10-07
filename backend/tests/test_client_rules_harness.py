@@ -259,6 +259,51 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= 44, "the SettingsModel suite shrank to %d cases" % run
 
 
+KEYBIND_MUTATIONS = 17
+
+
+def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
+    """Item 17, T1: plugin/KeybindRules.cs's SelfTest, executed - the sixteen
+    defaults, the refusal rules, the token parse, the capture gesture, the
+    key table and seventeen mutation cases, each with its control."""
+    suites = _suites(harness_run)
+    assert "keybinds" in suites, "the keybinds suite did not report"
+    run, fail, verdict = suites["keybinds"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[keybinds\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The count on the commit that added the suite (#342).
+    assert run >= KEYBIND_CASES, "the keybinds suite shrank to %d cases" % run
+
+
+KEYBIND_CASES = 69
+
+
+@pytest.mark.parametrize("n", range(1, KEYBIND_MUTATIONS + 1))
+def test_each_keybind_mutation_reds_its_assertion_and_keeps_its_control(harness_run, n):
+    """Every T1 mutation: unmutated green, the mutation reds the guarded
+    assertion, the control stays green under it (#391)."""
+    lines = [l for l in harness_run.stdout.splitlines()
+             if l.startswith("[keybinds] ") and (" | case=T1 case %d " % n) in l]
+    assert len(lines) == 3, (n, lines)
+    assert all(l.startswith("[keybinds] PASS") for l in lines), lines
+    assert any("(unmutated)" in l for l in lines)
+    assert any("mutation %d reds the guarded assertion" % n in l for l in lines)
+    assert any("the control stays green under mutation %d" % n in l for l in lines)
+
+
+@pytest.mark.parametrize("name", [
+    "the sixteen defaults equal today's keys exactly",
+    "no two defaults conflict",
+    "the defaults pass every rule on their own rows",
+    "the key table has 132 rows in each column",
+])
+def test_the_keybind_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "keybinds")
+    assert line.startswith("[keybinds] PASS"), line
+
+
 @pytest.mark.parametrize("name", [
     # T2a, the design's four cases
     "T2a the ordinary case",
@@ -954,7 +999,8 @@ def test_the_harness_compiles_only_the_rule_files():
                       "plugin/RoomRulesStrip.cs", "plugin/MusicLevels.cs",
                       "plugin/SecureRouteRules.cs", "plugin/SecureRouteText.cs",
                       "plugin/NameGlyphs.cs",
-                      "plugin/SessionReportRules.cs", "plugin/ShowcaseRules.cs"):
+                      "plugin/SessionReportRules.cs", "plugin/ShowcaseRules.cs",
+                      "plugin/KeybindRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial

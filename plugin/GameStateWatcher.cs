@@ -1448,8 +1448,11 @@ namespace CompetitiveRounds
             if (pollTimer < 0.1f) return;
             pollTimer = 0f;
 
-            PollRoomState();
-            PollMatchState();
+            // Item 17 (METHOD CHANGE 1b, belt): each half contained, so a throw in
+            // one costs only that half's non-paying duties. No paying achievement
+            // predicate is reachable only through here (TickAchievementInput).
+            try { PollRoomState(); } catch (Exception e) { SafeAchLog("PollRoomState threw: " + e.Message); }
+            try { PollMatchState(); } catch (Exception e) { SafeAchLog("PollMatchState threw: " + e.Message); }
             if (isTracking) TryRefreshSharedGameToken();
             PollRoomlessGameScene();
             TickSpectateAttest();
@@ -1979,6 +1982,9 @@ namespace CompetitiveRounds
         private static bool _lastBattleForPoisonEdge;
         public static void TickFrame()
         {
+            // Item 17 (D3): the three paying input predicates, FIRST - nothing in
+            // the tick runs ahead of them, and a throw inside marks all three acted.
+            try { TickAchievementInput(); } catch { MarkInputPredicatesActed("achievement tick threw"); }
             // [NET] telemetry BEFORE the spectator early-return — the
             // spectator seat needs the ping/fps/dispatch line most (bug 217:
             // the whole latency question was unanswerable from a bundle).
@@ -2255,28 +2261,24 @@ namespace CompetitiveRounds
 
             LocalActiveSecondsThisMatch += dt;
 
+            // Item 17: advisory counters read the BOUND sources only, and count a
+            // Down and nothing else - an unreadable source never adds to the #50
+            // macro bucket. Exactly seven reads, one per game row; the arrows are
+            // gone (on the defaults they move nobody). The achievement half of
+            // the old Fire block lives in TickAchievementInput, never here.
             int keyDowns = 0;
             int clickDowns = 0;
-            if (Input.GetKeyDown(KeyCode.W)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.A)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.S)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.D)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.Space)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.UpArrow)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.DownArrow)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.LeftArrow)) keyDowns++;
-            if (Input.GetKeyDown(KeyCode.RightArrow)) keyDowns++;
-            if (Input.GetMouseButtonDown(0))
+            if (Keybinds.ReadBoundSource(KeybindRules.MoveUp, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.MoveDown, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.MoveLeft, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.MoveRight, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.Jump, Keybinds.Mode.Edge) == Read.Down) keyDowns++;
+            if (Keybinds.ReadBoundSource(KeybindRules.Fire, Keybinds.Mode.Edge) == Read.Down)
             {
                 clickDowns++;
                 LocalShotsThisMatch++;
-                if (!achFiredShot)
-                {
-                    achFiredShot = true;
-                    Plugin.Log.LogInfo("[ACH] Player fired a shot");
-                }
             }
-            if (Input.GetMouseButtonDown(1))
+            if (Keybinds.ReadBoundSource(KeybindRules.Block, Keybinds.Mode.Edge) == Read.Down)
             {
                 clickDowns++;
                 LocalBlocksThisMatch++;
@@ -5123,6 +5125,9 @@ namespace CompetitiveRounds
                     // these later-spawned sprites.
                     try { PlayerColorCosmetic.OnRoundStart(); } catch { }
                     try { PlayerEffectCosmetic.OnRoundStart(); } catch { }
+                    // Item 17 (question 5): one local toast naming any control
+                    // rebound since the last round start.
+                    try { Keybinds.OnRoundStart(); } catch { }
 
                     // Achievement: track comeback (0-4 deficit)
                     int localR = localTeamId == 0 ? p1Rounds : p2Rounds;
@@ -5140,7 +5145,7 @@ namespace CompetitiveRounds
                 PollCardPicks();
 
                 // Achievement: poll health and death state on local player
-                PollAchievementState();
+                try { PollAchievementState(); } catch (Exception e) { SafeAchLog("PollAchievementState threw: " + e.Message); }
 
                 // Bug 324 / review r1 find 3: live-points CATCH-UP. Eligibility
                 // (ActiveRankedSeriesId adoption, a late matchIsRanked=true
@@ -5666,6 +5671,7 @@ namespace CompetitiveRounds
             // Spectator: never tracks a match (defense in depth — the GM
             // lifecycle that fires this is suppressed on a spectator).
             if (RoomActors.LocalIsSpectator) return;
+            try { Keybinds.OnRoundStart(); } catch { }   // item 17: the first round start of a match
             // Roster census (bug 391 §4.1), BEFORE OnGameStarted: that call
             // resets the per-actor view window, so a census taken after it
             // would read every batch counter as zero.
@@ -8247,50 +8253,154 @@ namespace CompetitiveRounds
                     break;
                 }
             }
-            catch { }
+            catch (Exception e) { SafeAchLog("health/death sample threw: " + e.Message); }
 
             // Sync our exposed flag — true ONLY when we're truly in combat (not pick / dead / menu).
+            // Item 17: no achievement predicate reads it any more (ReadCombatGate
+            // derives its own); its consumers are the advisory counters and chat.
             LocalAliveInCombatNow = localAliveInCombat && !inPickPhase;
 
-            // Input tracking — discrete key/click COUNTS moved to TickInputSampling
-            // (per-frame; the *Down APIs are frame-edge triggers and missed ~97% of
-            // events at this 10 Hz cadence — bug #50). Only HELD-state achievement
-            // edges remain here: GetKey/GetMouseButton read held state, which a
-            // 10 Hz sample sees reliably.
-            if (localAliveInCombat && !inPickPhase)
+        }
+
+        // ── Item 17 (D3): the paying input predicates ─────────────
+        // Pacifist (achFiredShot), Immovable Object (achMoved) and Grounded
+        // (achJumped) pay gold when their flag is still FALSE at a win. So the
+        // failure direction that matters is a flag left false while the player
+        // acted: every read here is TOTAL (Keybinds.ReadBoundSource answers
+        // Unreadable, never throws), every union folds Down OR Unreadable as
+        // acted, the combat gate suppresses only on a POSITIVE not-in-combat,
+        // and a throw anywhere marks the predicate acted. A wrong "acted"
+        // forfeits one achievement for one match; a wrong "not acted" pays.
+
+        private enum Gate { InCombat, NotInCombat, Unknown }
+
+        /// <summary>Fire: the bound row, legacy LMB (the default and every
+        /// player's habit) and this seat's own PlayerAction.</summary>
+        private static readonly Keybinds.Src[] FireUnion =
+        {
+            Keybinds.Src.Row(KeybindRules.Fire), Keybinds.Src.LegacyMouse(0), Keybinds.ActionFire,
+        };
+
+        /// <summary>Move: the four movement rows and Jump, the legacy keys the
+        /// pin read (W A S D Space and the arrows), and the action term.</summary>
+        private static readonly Keybinds.Src[] MoveUnion =
+        {
+            Keybinds.Src.Row(KeybindRules.MoveUp), Keybinds.Src.Row(KeybindRules.MoveDown),
+            Keybinds.Src.Row(KeybindRules.MoveLeft), Keybinds.Src.Row(KeybindRules.MoveRight),
+            Keybinds.Src.Row(KeybindRules.Jump),
+            Keybinds.Src.Legacy(KeyCode.W), Keybinds.Src.Legacy(KeyCode.A), Keybinds.Src.Legacy(KeyCode.S),
+            Keybinds.Src.Legacy(KeyCode.D), Keybinds.Src.Legacy(KeyCode.Space),
+            Keybinds.Src.Legacy(KeyCode.UpArrow), Keybinds.Src.Legacy(KeyCode.DownArrow),
+            Keybinds.Src.Legacy(KeyCode.LeftArrow), Keybinds.Src.Legacy(KeyCode.RightArrow),
+            Keybinds.ActionMove,
+        };
+
+        /// <summary>Jump: the Jump and MoveUp rows (both jump in ROUNDS), the
+        /// legacy Space, W and Up, and the action term.</summary>
+        private static readonly Keybinds.Src[] JumpUnion =
+        {
+            Keybinds.Src.Row(KeybindRules.Jump), Keybinds.Src.Row(KeybindRules.MoveUp),
+            Keybinds.Src.Legacy(KeyCode.Space), Keybinds.Src.Legacy(KeyCode.W), Keybinds.Src.Legacy(KeyCode.UpArrow),
+            Keybinds.ActionJump,
+        };
+
+        /// <summary>Acted = Down OR Unreadable, over every term, no branch
+        /// that can skip one. ReadBoundSource cannot throw.</summary>
+        private static bool UnionActed(Keybinds.Mode mode, Keybinds.Src[] union)
+        {
+            bool acted = false;
+            for (int i = 0; i < union.Length; i++)
+                if (Keybinds.ReadBoundSource(union[i], mode) != Read.Up) acted = true;
+            return acted;
+        }
+
+        /// <summary>The gate, derived here every frame from values this
+        /// method reads itself. Only NotInCombat suppresses.</summary>
+        private static Gate ReadCombatGate()
+        {
+            try
             {
-                // Skip while the chat overlay / F5 menu has focus — typing "wasd"
-                // in a Discord-bridged message previously false-flagged Immovable
-                // Object. Hoisted above the shot check for bug #128: the T chat is
-                // now openable DURING combat, so a click that lands while the box
-                // has focus fires no gun (GameManager.lockInput) and must not
-                // count as "fired a shot" either — that would silently break a
-                // Pacifist run for anyone who chats mid-round.
-                bool typingInChat = false;
-                try { typingInChat = CompetitiveUI.AnyChatTyping || NativeUI.IsOpen; } catch { }
-                if (!typingInChat && !achFiredShot && Input.GetMouseButton(0))
-                {
-                    achFiredShot = true;
-                    Plugin.Log.LogInfo("[ACH] Player fired a shot");
-                }
-                if (!typingInChat && !achMoved && (Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.A) ||
-                    Input.GetKey(KeyCode.S) || Input.GetKey(KeyCode.D) ||
-                    Input.GetKey(KeyCode.Space) || Input.GetKey(KeyCode.UpArrow) ||
-                    Input.GetKey(KeyCode.DownArrow) || Input.GetKey(KeyCode.LeftArrow) ||
-                    Input.GetKey(KeyCode.RightArrow)))
+                if (!isTracking) return Gate.NotInCombat;
+                if (inPickPhase) return Gate.NotInCombat;
+                var data = Keybinds.LocalCharacter();
+                if (data == null) return Gate.Unknown;
+                return (!data.dead && data.health > 0f) ? Gate.InCombat : Gate.NotInCombat;
+            }
+            catch { return Gate.Unknown; }
+        }
+
+        /// <summary>The first statement of TickFrame. Held at frame rate: a
+        /// press cannot be shorter than the frame that samples it. Fire first,
+        /// in its own try (D3); each union's catch drives its own predicate.</summary>
+        private static void TickAchievementInput()
+        {
+            if (!isTracking) return;
+            if (ReadCombatGate() == Gate.NotInCombat) return;
+            bool typingInChat = false;                    // unknown => NOT typing => the flag SETS
+            try { typingInChat = CompetitiveUI.AnyChatTyping || NativeUI.IsOpen; }
+            catch { SafeAchLog("chat state unreadable - read as not typing"); }
+            if (typingInChat) return;
+            // Fire first, in its own try (D3): no advisory read sits ahead of it.
+            try { if (!achFiredShot && UnionActed(Keybinds.Mode.Held, FireUnion)) NoteShotFired(false); }
+            catch { NoteShotFired(true); SafeAchLog("input predicate threw: fire - marked acted"); }
+            try
+            {
+                if (!achMoved && UnionActed(Keybinds.Mode.Held, MoveUnion))
                 {
                     achMoved = true;
-                    Plugin.Log.LogInfo("[ACH] Player moved");
-                }
-                // Grounded (v1.30): jump keys only — W/Space/Up all jump in ROUNDS.
-                if (!typingInChat && !achJumped && (Input.GetKey(KeyCode.Space)
-                    || Input.GetKey(KeyCode.W) || Input.GetKey(KeyCode.UpArrow)))
-                {
-                    achJumped = true;
-                    Plugin.Log.LogInfo("[ACH] Player jumped");
+                    SafeAchLog("Player moved");
                 }
             }
+            catch { achMoved = true; SafeAchLog("input predicate threw: move - marked acted"); }
+            try
+            {
+                if (!achJumped && UnionActed(Keybinds.Mode.Held, JumpUnion))
+                {
+                    achJumped = true;
+                    SafeAchLog("Player jumped");
+                }
+            }
+            catch { achJumped = true; SafeAchLog("input predicate threw: jump - marked acted"); }
         }
+
+        /// <summary>The ONLY writer of achFiredShot, and total: the flag read
+        /// first, the typingInChat re-derivation inside its own try defaulting
+        /// to false, the log through SafeAchLog. forced is read in one place,
+        /// the typing guard: a catch passes true because on that path the input
+        /// was never read, so the typing suppression cannot apply to it.</summary>
+        private static void NoteShotFired(bool forced)
+        {
+            if (achFiredShot) return;
+            bool typingInChat = false;
+            try { typingInChat = CompetitiveUI.AnyChatTyping || NativeUI.IsOpen; }
+            catch { SafeAchLog("chat state unreadable at the shot - read as not typing"); }
+            if (typingInChat && !forced) return;
+            achFiredShot = true;
+            SafeAchLog("Player fired a shot");
+        }
+
+        /// <summary>A throw reached the tick's wrapper: all three input
+        /// predicates are marked acted rather than left false (the conservative
+        /// direction: the achievement is not paid). Total, like the two
+        /// routines it calls.</summary>
+        private static void MarkInputPredicatesActed(string reason)
+        {
+            NoteShotFired(true);
+            achMoved = true;
+            achJumped = true;
+            SafeAchLog("input predicates unevaluated, marked acted: " + reason);
+        }
+
+        /// <summary>Failed achievement-log writes (the one thing SafeAchLog's
+        /// own catch can do without calling anything).</summary>
+        private static int achLogFailures;
+
+        /// <summary>A log line that cannot throw.</summary>
+        private static void SafeAchLog(string message)
+        {
+            try { Plugin.Log.LogInfo("[ACH] " + message); } catch { achLogFailures++; }
+        }
+
 
         private static void EvaluateAchievements(bool localWon)
         {

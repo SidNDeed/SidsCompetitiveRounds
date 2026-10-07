@@ -313,20 +313,21 @@ namespace CompetitiveRounds
             // Function legend, two columns.
             string[] left =
             {
-                I18n.Tr("F5 - open / close the competitive menu"),
-                I18n.Tr("T - open in-game chat"),
-                I18n.Tr("Q (hold) - quick-chat wheel, release to send"),
-                I18n.Tr("E (hold) - dance wheel; dancing locks your controls"),
-                I18n.Tr("M - cycle the chat overlay mode"),
-                I18n.Tr("ALT (tap, while typing in chat) - switch the chat language channel"),
-                I18n.Tr("TAB (hold, in a match) - live scoreboard"),
-                I18n.Tr("SHIFT - cycle your equipped map skins"),
+                // Item 17: every line names the BOUND control, not a fixed key.
+                I18n.TrF("{0} - open / close the competitive menu", Cap(KeybindRules.MenuToggle)),
+                I18n.TrF("{0} - open in-game chat", Cap(KeybindRules.ChatOpen)),
+                I18n.TrF("{0} (hold) - quick-chat wheel, release to send", Cap(KeybindRules.QuickChat)),
+                I18n.TrF("{0} (hold) - dance wheel; dancing locks your controls", Cap(KeybindRules.DanceWheel)),
+                I18n.TrF("{0} - cycle the chat overlay mode", Cap(KeybindRules.ChatOverlayMode)),
+                I18n.TrF("{0} (tap, while typing in chat) - switch the chat language channel", Cap(KeybindRules.ChatChannel)),
+                I18n.TrF("{0} (hold, in a match) - live scoreboard", Cap(KeybindRules.Scoreboard)),
+                I18n.TrF("{0} - cycle your equipped map skins", Cap(KeybindRules.MapSkinCycle)),
             };
             string[] right =
             {
-                I18n.Tr("WASD - move.  SPACE - jump"),
-                I18n.Tr("LMB - shoot.  RMB - block"),
-                I18n.Tr("SPACE (hold, in a lobby) - ready up / join"),
+                I18n.TrF("{0} - move.  {1} - jump", MoveCaps(), Cap(KeybindRules.Jump)),
+                I18n.TrF("{0} - shoot.  {1} - block", Cap(KeybindRules.Fire), Cap(KeybindRules.Block)),
+                I18n.TrF("{0} (hold, in a lobby) - ready up / join", Cap(KeybindRules.Jump)),
                 I18n.Tr("ENTER - room code box / vanilla chat"),
                 I18n.Tr("B (in a lobby) - add a practice bot"),
                 I18n.Tr("ESC - closes this menu first, then the game menu"),
@@ -343,6 +344,20 @@ namespace CompetitiveRounds
         // Numbers restate the Poison article's asset-verified facts (#424):
         // Poison = 10 ticks over 3.0s (one per 0.3s, first on impact), Toxic
         // Cloud = ~17 ticks over 5.0s, block window = 0.3s.
+
+        /// <summary>Item 17: a legend cap, the bound control's name in the
+        /// legend's upper-case style.</summary>
+        private static string Cap(int row) { return NativeUI.KeybindRowFace(row).ToUpperInvariant(); }
+
+        /// <summary>The four movement caps: run together when each is one
+        /// character (the default reads WASD), slash-separated otherwise.</summary>
+        private static string MoveCaps()
+        {
+            var c = new[] { Cap(KeybindRules.MoveUp), Cap(KeybindRules.MoveLeft), Cap(KeybindRules.MoveDown), Cap(KeybindRules.MoveRight) };
+            bool glyphs = true;
+            foreach (var s in c) if (s.Length != 1) glyphs = false;
+            return glyphs ? string.Concat(c) : string.Join("/", c);
+        }
 
         private static GameObject BuildDotTimeline(Transform parent)
         {

@@ -1,0 +1,797 @@
+using System;
+using System.Collections.Generic;
+using System.Text;
+
+namespace CompetitiveRounds
+{
+    /// <summary>What a binding is: an InControl Key ordinal, an InControl
+    /// Mouse value, or nothing (item 17 design section 2.1).</summary>
+    internal enum BindKind { None, Key, Mouse }
+
+    internal struct BindSource : IEquatable<BindSource>
+    {
+        internal readonly BindKind Kind;
+        internal readonly int Value;
+
+        internal BindSource(BindKind kind, int value) { Kind = kind; Value = kind == BindKind.None ? 0 : value; }
+
+        internal static readonly BindSource None = new BindSource(BindKind.None, 0);
+        internal static BindSource Key(int keyOrdinal) { return new BindSource(BindKind.Key, keyOrdinal); }
+        internal static BindSource Mouse(int mouseValue) { return new BindSource(BindKind.Mouse, mouseValue); }
+
+        public bool Equals(BindSource o) { return Kind == o.Kind && Value == o.Value; }
+        public override bool Equals(object o) { return o is BindSource && Equals((BindSource)o); }
+        public override int GetHashCode() { return ((int)Kind * 397) ^ Value; }
+        public override string ToString() { return KeybindRules.FormatToken(this); }
+    }
+
+    /// <summary>Why a check refused a binding (design section 2.6).</summary>
+    internal enum Refusal { None, Overlap, Reserved, RescueKey, MouseOnModRow, NoneAsBind, TypesText, WheelModifier }
+
+    /// <summary>What one capture-poll input means (design section 2.5).</summary>
+    internal enum Gesture { Ignore, Bind, Cancel }
+
+    /// <summary>The three-valued result of every input read the achievement
+    /// path makes (design section 2.7, METHOD CHANGE 1). Two-valued is what
+    /// pays: to a bool read "not pressed" and "could not be read" are the
+    /// same false, and only one of them means the player did not act.</summary>
+    internal enum Read { Down, Up, Unreadable }
+
+    /// <summary>
+    /// Item 17 (v1.41.0, the keybind system): every decision the keybind
+    /// system makes that needs no Unity, so tools/client-rules-harness can
+    /// EXECUTE it (#391). The plugin calls these functions; it keeps no second
+    /// copy of any of them (T4's static half). The key table is transcribed
+    /// from InControl's UnityKeyboardProvider.KeyMappings literal on the live
+    /// install; at run time Keybinds validates the reflected table against
+    /// it (design section 2.1a, T2 case i).
+    /// </summary>
+    internal static class KeybindRules
+    {
+        // -- the sixteen rows (design section 2.2) -------------------------
+        internal const int RowCount = 16;
+        internal const int MenuToggle = 0, Scoreboard = 1, QuickChat = 2, DanceWheel = 3, ChatOpen = 4,
+                           ChatChannel = 5, ChatOverlayMode = 6, MapSkinCycle = 7, AvatarSwap = 8,
+                           MoveUp = 9, MoveDown = 10, MoveLeft = 11, MoveRight = 12, Jump = 13,
+                           Fire = 14, Block = 15;
+        internal const int FirstGameRow = 9;
+
+        /// <summary>The config key of each row (section "Controls").</summary>
+        internal static readonly string[] RowIds =
+        {
+            "MenuToggle", "Scoreboard", "QuickChat", "DanceWheel", "ChatOpen", "ChatChannel",
+            "ChatOverlayMode", "MapSkinCycle", "AvatarSwap", "MoveUp", "MoveDown", "MoveLeft",
+            "MoveRight", "Jump", "Fire", "Block",
+        };
+
+        /// <summary>The sixteen defaults, today's keys exactly (design
+        /// section 2.8). MapSkinCycle narrows to left shift (question 8).</summary>
+        private static readonly string[] DefaultTokens =
+        {
+            "key:F5", "key:Tab", "key:Q", "key:E", "key:T", "key:Alt", "key:M", "key:LeftShift", "none",
+            "key:W", "key:S", "key:A", "key:D", "key:Space", "mouse:LeftButton", "mouse:RightButton",
+        };
+
+        /// <summary>The same sixteen defaults spelled as KeyCode ordinals, the
+        /// fallback every reader resolves to while the mapping accessor is
+        /// not validated (design section 2.1a). The two mouse rows need no
+        /// table. Case 11 proves these equal the token table's codes.</summary>
+        internal static readonly int[][] StaticDefaults =
+        {
+            new[] { 286 },          // F5
+            new[] { 9 },            // Tab
+            new[] { 113 },          // Q
+            new[] { 101 },          // E
+            new[] { 116 },          // T
+            new[] { 308, 307 },     // LeftAlt, RightAlt
+            new[] { 109 },          // M
+            new[] { 304 },          // LeftShift
+            new int[0],             // AvatarSwap: unbound
+            new[] { 119 },          // W
+            new[] { 115 },          // S
+            new[] { 97 },           // A
+            new[] { 100 },          // D
+            new[] { 32 },           // Space
+            new int[0],             // Fire: mouse:LeftButton
+            new int[0],             // Block: mouse:RightButton
+        };
+
+        internal static bool IsGameRow(int row) { return row >= FirstGameRow && row < RowCount; }
+        internal static bool IsModRow(int row) { return row >= 0 && row < FirstGameRow; }
+
+        // -- the key table, transcribed from UnityKeyboardProvider.KeyMappings
+        // (132 rows, index == InControl.Key ordinal; KeyCode ordinals) -------
+        internal const int KeyTableLength = 132;
+
+        internal static readonly string[] KeyIds =
+        {
+            "None", "Shift", "Alt", "Command", "Control", "LeftShift", "LeftAlt", "LeftCommand",
+            "LeftControl", "RightShift", "RightAlt", "RightCommand", "RightControl", "Escape", "F1", "F2",
+            "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10",
+            "F11", "F12", "Key0", "Key1", "Key2", "Key3", "Key4", "Key5",
+            "Key6", "Key7", "Key8", "Key9", "A", "B", "C", "D",
+            "E", "F", "G", "H", "I", "J", "K", "L",
+            "M", "N", "O", "P", "Q", "R", "S", "T",
+            "U", "V", "W", "X", "Y", "Z", "Backquote", "Minus",
+            "Equals", "Backspace", "Tab", "LeftBracket", "RightBracket", "Backslash", "Semicolon", "Quote",
+            "Return", "Comma", "Period", "Slash", "Space", "Insert", "Delete", "Home",
+            "End", "PageUp", "PageDown", "LeftArrow", "RightArrow", "UpArrow", "DownArrow", "Pad0",
+            "Pad1", "Pad2", "Pad3", "Pad4", "Pad5", "Pad6", "Pad7", "Pad8",
+            "Pad9", "Numlock", "PadDivide", "PadMultiply", "PadMinus", "PadPlus", "PadEnter", "PadPeriod",
+            "Clear", "PadEquals", "F13", "F14", "F15", "AltGr", "CapsLock", "ExclamationMark",
+            "Tilde", "At", "Hash", "Dollar", "Percent", "Caret", "Ampersand", "Asterisk",
+            "LeftParen", "RightParen", "Underscore", "Plus", "LeftBrace", "RightBrace", "Pipe", "Colon",
+            "DoubleQuote", "LessThan", "GreaterThan", "QuestionMark",
+        };
+
+        internal static readonly int[] KeyCode0 =
+        {
+            0, 304, 308, 310, 306, 304, 308, 310, 306, 303, 307, 309, 305, 27, 282, 283,
+            284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 48, 49, 50, 51, 52, 53,
+            54, 55, 56, 57, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108,
+            109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 96, 45,
+            61, 8, 9, 91, 93, 92, 59, 39, 13, 44, 46, 47, 32, 277, 127, 278,
+            279, 280, 281, 276, 275, 273, 274, 256, 257, 258, 259, 260, 261, 262, 263, 264,
+            265, 300, 267, 268, 269, 270, 271, 266, 12, 272, 294, 295, 296, 313, 301, 33,
+            126, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 123, 125, 124, 58,
+            34, 60, 62, 63,
+        };
+
+        /// <summary>The second target of the four aggregate rows (Shift, Alt,
+        /// Command, Control); 0 everywhere else.</summary>
+        internal static readonly int[] KeyCode1 = BuildKeyCode1();
+
+        private static int[] BuildKeyCode1()
+        {
+            var a = new int[KeyTableLength];
+            a[1] = 303;   // Shift   -> RightShift
+            a[2] = 307;   // Alt     -> RightAlt
+            a[3] = 309;   // Command -> RightMeta
+            a[4] = 305;   // Control -> RightControl
+            return a;
+        }
+
+        /// <summary>InControl.Mouse member names, by value (Mouse.cs:5-20).</summary>
+        internal static readonly string[] MouseIds =
+        {
+            "None", "LeftButton", "RightButton", "MiddleButton", "NegativeX", "PositiveX", "NegativeY",
+            "PositiveY", "PositiveScrollWheel", "NegativeScrollWheel", "Button4", "Button5", "Button6", "Button7",
+        };
+
+        /// <summary>Unity GetMouseButton(n) for n = 0..6 to InControl.Mouse:
+        /// the enum is SPARSE (UnityMouseProvider.cs:42-48), so (Mouse)(n + 1)
+        /// would bind button 3 to NegativeX (design section 2.5 property 5).</summary>
+        private static readonly int[] UnityToMouse = { 1, 2, 3, 10, 11, 12, 13 };
+
+        /// <summary>Mutation selector for the harness and the in-game
+        /// self-test. Always 0 outside a self-test run.</summary>
+        internal static int Mut;
+
+        private static readonly Dictionary<string, int> keyIndex = BuildKeyIndex();
+        private static Dictionary<string, int> BuildKeyIndex()
+        {
+            var d = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < KeyIds.Length; i++) d[KeyIds[i]] = i;
+            return d;
+        }
+
+        internal static int KeyOrdinal(string id)
+        {
+            int i;
+            return id != null && keyIndex.TryGetValue(id, out i) ? i : -1;
+        }
+
+        internal static readonly int KeyEscape = KeyOrdinal("Escape"), KeyReturn = KeyOrdinal("Return"),
+                                     KeyPadEnter = KeyOrdinal("PadEnter"), KeyF5 = KeyOrdinal("F5"),
+                                     KeySpace = KeyOrdinal("Space"), KeyBackspace = KeyOrdinal("Backspace"),
+                                     KeyDelete = KeyOrdinal("Delete");
+        internal const int CodeF5 = 286;
+
+        /// <summary>The KeyCode ordinals one Key row names: 0, 1 or 2 codes.</summary>
+        internal static int[] StaticCodesForKey(int keyOrdinal)
+        {
+            if (keyOrdinal <= 0 || keyOrdinal >= KeyTableLength) return new int[0];
+            int a = KeyCode0[keyOrdinal], b = KeyCode1[keyOrdinal];
+            if (a == 0) return new int[0];
+            return b == 0 ? new[] { a } : new[] { a, b };
+        }
+
+        /// <summary>Every distinct KeyCode the table names, KeyCode.None
+        /// excluded: 127. The four aggregate rows re-name the eight
+        /// side-specific codes their own rows already name, so 131 rows give
+        /// 127 codes (design section 2.1a, r3 R4).</summary>
+        internal static int[] StaticKeyScan { get { return BuildStaticKeyScan(Mut == 108); } }
+        private static int[] scanCache;
+        private static int[] BuildStaticKeyScan(bool byRow)
+        {
+            if (!byRow && scanCache != null) return scanCache;
+            var seen = new HashSet<int>();
+            var list = new List<int>();
+            for (int i = 1; i < KeyTableLength; i++)
+                foreach (int c in StaticCodesForKey(i))
+                    if (byRow || seen.Add(c)) list.Add(c);
+            var arr = list.ToArray();
+            if (!byRow) scanCache = arr;
+            return arr;
+        }
+
+        // -- tokens ----------------------------------------------------------
+
+        internal static string FormatToken(BindSource s)
+        {
+            switch (s.Kind)
+            {
+                case BindKind.Key:
+                    return s.Value > 0 && s.Value < KeyTableLength ? "key:" + KeyIds[s.Value] : "none";
+                case BindKind.Mouse:
+                    return s.Value > 0 && s.Value < MouseIds.Length ? "mouse:" + MouseIds[s.Value] : "none";
+                default:
+                    return "none";
+            }
+        }
+
+        /// <summary>A config string to a source. False for anything that is
+        /// not a token this table can name; the loader then keeps the row's
+        /// default (a corrupt line never throws and never unbinds).</summary>
+        internal static bool ParseToken(string token, out BindSource src)
+        {
+            src = BindSource.None;
+            if (Mut == 5 && token != null && token.StartsWith("bogus", StringComparison.Ordinal))
+                throw new FormatException("mutation 5: the parser throws on an unknown token");
+            if (token == null) return false;
+            string t = token.Trim();
+            if (string.Equals(t, "none", StringComparison.OrdinalIgnoreCase)) return true;
+            int colon = t.IndexOf(':');
+            if (colon <= 0) return false;
+            string kind = t.Substring(0, colon).Trim(), name = t.Substring(colon + 1).Trim();
+            if (string.Equals(kind, "key", StringComparison.OrdinalIgnoreCase))
+            {
+                int k = KeyOrdinal(name);
+                if (k <= 0) return false;
+                src = BindSource.Key(k);
+                return true;
+            }
+            if (string.Equals(kind, "mouse", StringComparison.OrdinalIgnoreCase))
+            {
+                for (int i = 0; i < UnityToMouse.Length; i++)
+                    if (string.Equals(MouseIds[UnityToMouse[i]], name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        src = BindSource.Mouse(UnityToMouse[i]);
+                        return true;
+                    }
+                return false;
+            }
+            return false;
+        }
+
+        internal static string DefaultToken(int row)
+        {
+            if (Mut == 11 && row == MapSkinCycle) return "key:Shift";
+            return row >= 0 && row < RowCount ? DefaultTokens[row] : "none";
+        }
+
+        internal static BindSource Default(int row)
+        {
+            BindSource s;
+            return ParseToken(DefaultToken(row), out s) ? s : BindSource.None;
+        }
+
+        /// <summary>The loader's rule: a token that parses is the binding,
+        /// anything else falls back to the row's default.</summary>
+        internal static BindSource LoadToken(int row, string token)
+        {
+            BindSource s;
+            try { if (ParseToken(token, out s)) return s; }
+            catch (Exception) { if (Mut == 5) throw; }
+            return Default(row);
+        }
+
+        // -- mouse -------------------------------------------------------------
+
+        /// <summary>Unity button n (0..6) to its InControl.Mouse source;
+        /// None outside the range.</summary>
+        internal static BindSource MouseIndexToSource(int unityIndex)
+        {
+            if (unityIndex < 0 || unityIndex >= UnityToMouse.Length) return BindSource.None;
+            if (Mut == 9) return BindSource.Mouse(unityIndex + 1);
+            return BindSource.Mouse(UnityToMouse[unityIndex]);
+        }
+
+        /// <summary>The reverse: the Unity button a Mouse value is read
+        /// through, or -1.</summary>
+        internal static int MouseSourceToUnityIndex(int mouseValue)
+        {
+            for (int i = 0; i < UnityToMouse.Length; i++) if (UnityToMouse[i] == mouseValue) return i;
+            return -1;
+        }
+
+        /// <summary>One guarded mouse read in UnityMouseProvider.SafeGetMouseButton's
+        /// shape (UnityMouseProvider.cs:60-74): a button at or above the cap
+        /// is Unreadable for the rest of the process, and an ArgumentException
+        /// from the raw read lowers the cap. Never throws (Mut 13 makes a
+        /// capped button read Up instead, the shape case 13 must red on).</summary>
+        internal static Read GuardedMouseRead(int button, ref int cap, Func<int, bool> raw, Action<int> onCapped)
+        {
+            if (button < 0) return Read.Unreadable;
+            if (button >= cap) return Mut == 13 ? Read.Up : Read.Unreadable;
+            try { return raw(button) ? Read.Down : Read.Up; }
+            catch (ArgumentException)
+            {
+                if (button < cap) { cap = button; if (onCapped != null) { try { onCapped(button); } catch { } } }
+                return Mut == 13 ? Read.Up : Read.Unreadable;
+            }
+            catch (Exception) { return Read.Unreadable; }
+        }
+
+        /// <summary>True when the row's bound mouse button sits at or above the cap.</summary>
+        internal static bool MouseUnreadable(BindSource s, int cap)
+        {
+            if (s.Kind != BindKind.Mouse) return false;
+            int n = MouseSourceToUnityIndex(s.Value);
+            if (Mut == 13) return false;
+            return n < 0 || n >= cap;
+        }
+
+        // -- overlap and refusal (design section 2.6) ------------------------
+
+        /// <summary>Two sources conflict when their KeyCode sets intersect or
+        /// they carry the same mouse value. The KeyCode set, never Key
+        /// equality: Shift and LeftShift are two values and one physical key.</summary>
+        internal static bool Overlap(BindSource a, BindSource b, Func<int, int[]> codesFor)
+        {
+            if (a.Kind == BindKind.None || b.Kind == BindKind.None) return false;
+            if (a.Kind == BindKind.Mouse && b.Kind == BindKind.Mouse) return Mut != 7 && a.Value == b.Value;
+            if (a.Kind != BindKind.Key || b.Kind != BindKind.Key) return false;
+            if (Mut == 1) return a.Value == b.Value;
+            var ca = (codesFor ?? StaticCodesForKey)(a.Value);
+            var cb = (codesFor ?? StaticCodesForKey)(b.Value);
+            foreach (int x in ca) foreach (int y in cb) if (x == y && x != 0) return true;
+            return false;
+        }
+
+        /// <summary>The first OTHER row whose binding conflicts, or -1.</summary>
+        internal static int OverlapRow(int row, BindSource src, BindSource[] current, Func<int, int[]> codesFor)
+        {
+            if (current == null) return -1;
+            for (int r = 0; r < current.Length && r < RowCount; r++)
+                if (r != row && Overlap(src, current[r], codesFor)) return r;
+            return -1;
+        }
+
+        private static bool CodesContain(BindSource s, int code, Func<int, int[]> codesFor)
+        {
+            if (s.Kind != BindKind.Key) return false;
+            foreach (int c in (codesFor ?? StaticCodesForKey)(s.Value)) if (c == code) return true;
+            return false;
+        }
+
+        /// <summary>Rule 6's set: a key that CHANGES THE TEXT in the chat box
+        /// - by putting a character in or by taking one out - and is not
+        /// consumed by the box first. 68 glyph keys, 16 numpad value keys,
+        /// Space, Backspace and Delete: 87.</summary>
+        internal static bool IsTextChanging(int keyOrdinal)
+        {
+            if (keyOrdinal <= 0 || keyOrdinal >= KeyTableLength) return false;
+            string id = KeyIds[keyOrdinal];
+            if (IsGlyphKey(keyOrdinal) || IsNumpadValueKey(id)) return true;
+            if (Mut == 14) return false;                                   // revision 2's rendering-arm classifier
+            if (keyOrdinal == KeySpace) return true;
+            if (keyOrdinal == KeyBackspace) return Mut != 15 && Mut != 17;
+            if (keyOrdinal == KeyDelete) return Mut != 17;
+            return false;
+        }
+
+        private static bool IsNumpadValueKey(string id)
+        {
+            switch (id)
+            {
+                case "Pad0": case "Pad1": case "Pad2": case "Pad3": case "Pad4":
+                case "Pad5": case "Pad6": case "Pad7": case "Pad8": case "Pad9":
+                case "PadDivide": case "PadMultiply": case "PadMinus": case "PadPlus":
+                case "PadPeriod": case "PadEquals":
+                    return true;
+            }
+            return false;
+        }
+
+        private static readonly HashSet<int> ModifierCodes = new HashSet<int> { 303, 304, 305, 306, 307, 308, 309, 310, 313 };
+
+        /// <summary>A key every code of which is a modifier (either Shift,
+        /// Alt, Control, Command or AltGr).</summary>
+        internal static bool IsModifierKey(int keyOrdinal, Func<int, int[]> codesFor)
+        {
+            var codes = (codesFor ?? StaticCodesForKey)(keyOrdinal);
+            if (codes.Length == 0) return false;
+            foreach (int c in codes) if (!ModifierCodes.Contains(c)) return false;
+            return true;
+        }
+
+        /// <summary>The whole check, in rule order. <paramref name="other"/>
+        /// names the row that already holds the source on an overlap.</summary>
+        internal static Refusal Refuse(int row, BindSource src, BindSource[] current, Func<int, int[]> codesFor, out int other)
+        {
+            other = -1;
+            if (src.Kind == BindKind.None) return Refusal.NoneAsBind;                                  // rule 5
+            if (src.Kind == BindKind.Mouse)
+            {
+                if (IsModRow(row) && !(Mut == 6 && row == ChatOpen)) return Refusal.MouseOnModRow;     // rule 4
+                if (MouseSourceToUnityIndex(src.Value) < 0) return Refusal.NoneAsBind;
+            }
+            if (src.Kind == BindKind.Key)
+            {
+                if (src.Value <= 0 || src.Value >= KeyTableLength) return Refusal.NoneAsBind;
+                if ((src.Value == KeyEscape && Mut != 2) || (src.Value == KeyReturn && Mut != 3) || src.Value == KeyPadEnter)
+                    return Refusal.Reserved;                                                             // rule 2
+                if (row != MenuToggle && CodesContain(src, CodeF5, codesFor) && !(Mut == 4 && row == Scoreboard))
+                    return Refusal.RescueKey;                                                            // rule 3
+                if (row == ChatChannel && Mut != 8 && IsTextChanging(src.Value)) return Refusal.TypesText;   // rule 6
+                if ((row == QuickChat || row == DanceWheel) && IsModifierKey(src.Value, codesFor))
+                    return Refusal.WheelModifier;                                                        // question 6
+            }
+            other = OverlapRow(row, src, current, codesFor);                                             // rule 1
+            return other >= 0 ? Refusal.Overlap : Refusal.None;
+        }
+
+        // -- capture (design section 2.5) ------------------------------------
+
+        /// <summary>One capture-poll input, as the KeyMappings row of the key
+        /// that went down (-1: none). Escape cancels; every other key binds;
+        /// unbind is the _x control's job and nothing else's.</summary>
+        internal static Gesture CaptureGesture(int row, bool armed)
+        {
+            if (!armed || row <= 0) return Gesture.Ignore;
+            if (row == KeyEscape) return Gesture.Cancel;
+            if (Mut == 10 && row == KeyBackspace) return Gesture.Cancel;
+            return Gesture.Bind;
+        }
+
+        /// <summary>The detection order: the LOWEST KeyMappings row among the
+        /// rows whose key is down, so a physical left shift captures as
+        /// Key.Shift (row 1), never Key.LeftShift (row 5). -1 for none.</summary>
+        internal static int FirstHit(int[] rowsDown)
+        {
+            if (rowsDown == null) return -1;
+            int best = -1;
+            foreach (int r in rowsDown)
+            {
+                if (r <= 0 || r >= KeyTableLength) continue;
+                if (best < 0) best = r;
+                else if (Mut == 12 ? r > best : r < best) best = r;
+            }
+            return best;
+        }
+
+        /// <summary>The ready prompts say SPACE; they are rewritten only when
+        /// Jump does not hold key:Space (design section 2.4, T8). A mouse-bound
+        /// or unbound Jump cannot be described by the word SPACE either.</summary>
+        internal static bool ShouldOverrideReadyPrompt(BindSource jump)
+        {
+            if (Mut == 16) return false;
+            return !(jump.Kind == BindKind.Key && jump.Value == KeySpace);
+        }
+
+        // -- names (design section 2.9) --------------------------------------
+
+        private static readonly Dictionary<string, string> Glyphs = new Dictionary<string, string>
+        {
+            { "Backquote", "`" }, { "Minus", "-" }, { "Equals", "=" }, { "LeftBracket", "[" }, { "RightBracket", "]" },
+            { "Backslash", "\\" }, { "Semicolon", ";" }, { "Quote", "'" }, { "Comma", "," }, { "Period", "." },
+            { "Slash", "/" }, { "ExclamationMark", "!" }, { "Tilde", "~" }, { "At", "@" }, { "Hash", "#" },
+            { "Dollar", "$" }, { "Percent", "%" }, { "Caret", "^" }, { "Ampersand", "&" }, { "Asterisk", "*" },
+            { "LeftParen", "(" }, { "RightParen", ")" }, { "Underscore", "_" }, { "Plus", "+" }, { "LeftBrace", "{" },
+            { "RightBrace", "}" }, { "Pipe", "|" }, { "Colon", ":" }, { "DoubleQuote", "\"" }, { "LessThan", "<" },
+            { "GreaterThan", ">" }, { "QuestionMark", "?" },
+        };
+
+        /// <summary>The glyph arm: A-Z, 0-9 and the 32 punctuation keys (68).</summary>
+        internal static bool IsGlyphKey(int keyOrdinal)
+        {
+            return GlyphFor(keyOrdinal) != null;
+        }
+
+        /// <summary>The character a glyph-arm key prints, or null.</summary>
+        internal static string GlyphFor(int keyOrdinal)
+        {
+            if (keyOrdinal <= 0 || keyOrdinal >= KeyTableLength) return null;
+            string id = KeyIds[keyOrdinal];
+            if (id.Length == 1 && id[0] >= 'A' && id[0] <= 'Z') return id;
+            if (id.Length == 4 && id.StartsWith("Key", StringComparison.Ordinal) && char.IsDigit(id[3])) return id.Substring(3);
+            string g;
+            return Glyphs.TryGetValue(id, out g) ? g : null;
+        }
+
+        /// <summary>The function arm: F1-F15 (15).</summary>
+        internal static int FunctionNumber(int keyOrdinal)
+        {
+            if (keyOrdinal <= 0 || keyOrdinal >= KeyTableLength) return 0;
+            string id = KeyIds[keyOrdinal];
+            int n;
+            if (id.Length >= 2 && id[0] == 'F' && int.TryParse(id.Substring(1), out n) && n >= 1 && n <= 15) return n;
+            return 0;
+        }
+
+        // ---------------------------------------------------------------------
+        // T1 - the executed self-test (design section 5). Every case names
+        // the production symbol it drives; every mutation case runs the
+        // unmutated build (must pass), the mutated build (the guarded
+        // assertion must RED) and the control under the mutation (must stay
+        // GREEN), so a mutation that broke everything cannot pass for one
+        // that reached its target (#391, #712).
+        // ---------------------------------------------------------------------
+
+        internal sealed class SelfTestResult
+        {
+            internal int Passed;
+            internal int Failed;
+            internal readonly StringBuilder Report = new StringBuilder();
+        }
+
+        private static void Check(SelfTestResult r, string name, bool ok, string got)
+        {
+            if (ok) r.Passed++; else r.Failed++;
+            r.Report.Append(ok ? "PASS" : "FAIL").Append(" | case=").Append(name)
+                    .Append(" | got=").Append(got ?? "(null)").Append('\n');
+        }
+
+        private static BindSource K(string id) { return BindSource.Key(KeyOrdinal(id)); }
+        private static BindSource M(string id)
+        {
+            for (int i = 0; i < MouseIds.Length; i++) if (MouseIds[i] == id) return BindSource.Mouse(i);
+            return BindSource.None;
+        }
+
+        private static BindSource[] Defaults()
+        {
+            var a = new BindSource[RowCount];
+            for (int i = 0; i < RowCount; i++) a[i] = Default(i);
+            return a;
+        }
+
+        private static Refusal Ref(int row, BindSource s, BindSource[] cur)
+        {
+            int other;
+            return Refuse(row, s, cur, null, out other);
+        }
+
+        private static Refusal Ref(int row, BindSource s)
+        {
+            var cur = Defaults();
+            cur[row] = BindSource.None;   // the row being written does not conflict with itself
+            return Ref(row, s, cur);
+        }
+
+        /// <summary>One mutation case: <paramref name="guarded"/> must hold
+        /// unmutated and fail under the mutation; <paramref name="control"/>
+        /// must hold both ways.</summary>
+        private static void MutCase(SelfTestResult r, int n, string symbol, string what,
+                                    Func<bool> guarded, Func<bool> control, Func<string> measure)
+        {
+            int saved = Mut;
+            bool g0, c0, g1, c1;
+            string m0, m1;
+            try
+            {
+                Mut = 0;
+                g0 = Safe(guarded); c0 = Safe(control); m0 = SafeS(measure);
+                Mut = n;
+                g1 = Safe(guarded); c1 = Safe(control); m1 = SafeS(measure);
+            }
+            finally { Mut = saved; }
+            Check(r, "T1 case " + n + " " + symbol + ": " + what + " (unmutated)", g0 && c0,
+                  "guarded=" + g0 + " control=" + c0 + " " + m0);
+            Check(r, "T1 case " + n + " " + symbol + ": mutation " + n + " reds the guarded assertion", !g1,
+                  "guarded=" + g1 + " " + m1);
+            Check(r, "T1 case " + n + " " + symbol + ": the control stays green under mutation " + n, c1,
+                  "control=" + c1);
+        }
+
+        private static bool Safe(Func<bool> f) { try { return f(); } catch { return false; } }
+        private static string SafeS(Func<string> f) { try { return f != null ? f() : ""; } catch (Exception e) { return "threw " + e.GetType().Name; } }
+
+        internal static SelfTestResult SelfTest()
+        {
+            var r = new SelfTestResult();
+            int saved = Mut;
+            Mut = 0;
+            try { Run(r); }
+            finally { Mut = saved; }
+            return r;
+        }
+
+        private static void Run(SelfTestResult r)
+        {
+            // -- the table itself ------------------------------------------------
+            Check(r, "the key table has 132 rows in each column",
+                  KeyIds.Length == KeyTableLength && KeyCode0.Length == KeyTableLength && KeyCode1.Length == KeyTableLength,
+                  KeyIds.Length + "/" + KeyCode0.Length + "/" + KeyCode1.Length);
+            var scan = StaticKeyScan;
+            var scanSet = new HashSet<int>(scan);
+            Check(r, "StaticKeyScan holds 127 distinct KeyCodes, KeyCode.None excluded",
+                  scan.Length == 127 && scanSet.Count == 127 && !scanSet.Contains(0), "length=" + scan.Length + " distinct=" + scanSet.Count);
+            int glyph = 0, func = 0, word = 0, text = 0;
+            for (int i = 1; i < KeyTableLength; i++)
+            {
+                if (IsGlyphKey(i)) glyph++; else if (FunctionNumber(i) > 0) func++; else word++;
+                if (IsTextChanging(i)) text++;
+            }
+            Check(r, "the name arms split 68 glyph / 15 function / 48 word",
+                  glyph == 68 && func == 15 && word == 48, glyph + "/" + func + "/" + word);
+            Check(r, "rule 6 refuses 87 keys on ChatChannel", text == 87, text.ToString());
+            Check(r, "Unity mouse buttons 0-6 map to the sparse Mouse enum",
+                  MouseIndexToSource(0).Value == 1 && MouseIndexToSource(1).Value == 2 && MouseIndexToSource(2).Value == 3
+                  && MouseIndexToSource(3).Value == 10 && MouseIndexToSource(6).Value == 13 && MouseIndexToSource(7).Kind == BindKind.None,
+                  MouseIndexToSource(3).ToString() + "," + MouseIndexToSource(6) + "," + MouseIndexToSource(7));
+
+            // -- defaults: the sixteen, pinned (required behaviour) ----------------
+            string[] want = { "key:F5", "key:Tab", "key:Q", "key:E", "key:T", "key:Alt", "key:M", "key:LeftShift", "none",
+                              "key:W", "key:S", "key:A", "key:D", "key:Space", "mouse:LeftButton", "mouse:RightButton" };
+            var got = new List<string>();
+            bool allEq = true;
+            for (int i = 0; i < RowCount; i++) { string t = FormatToken(Default(i)); got.Add(t); if (t != want[i]) allEq = false; }
+            Check(r, "the sixteen defaults equal today's keys exactly", allEq, string.Join(",", got.ToArray()));
+            bool staticEq = true;
+            for (int i = 0; i < RowCount; i++)
+            {
+                var d = Default(i);
+                var codes = d.Kind == BindKind.Key ? StaticCodesForKey(d.Value) : new int[0];
+                var a = new HashSet<int>(codes);
+                if (!a.SetEquals(StaticDefaults[i])) staticEq = false;
+            }
+            Check(r, "StaticDefaults spells the same sixteen defaults as KeyCodes", staticEq, staticEq ? "16 of 16" : "mismatch");
+            var defs = Defaults();
+            bool noConflict = true;
+            for (int i = 0; i < RowCount; i++) if (OverlapRow(i, defs[i], defs, null) >= 0) noConflict = false;
+            Check(r, "no two defaults conflict", noConflict, noConflict.ToString());
+            Check(r, "the defaults pass every rule on their own rows", AllDefaultsAccepted(), AllDefaultsAccepted().ToString());
+
+            // -- the seventeen mutation cases (design section 5, T1) ---------------
+            MutCase(r, 1, "KeybindRules.Overlap", "Shift against LeftShift conflicts",
+                    () => Overlap(K("Shift"), K("LeftShift"), null),
+                    () => !Overlap(K("Q"), K("E"), null),
+                    () => "Shift~LeftShift=" + Overlap(K("Shift"), K("LeftShift"), null));
+            MutCase(r, 2, "KeybindRules.Refuse", "Escape is reserved",
+                    () => Ref(Scoreboard, K("Escape")) == Refusal.Reserved,
+                    () => Ref(Scoreboard, K("F1")) == Refusal.None,
+                    () => "Escape=" + Ref(Scoreboard, K("Escape")));
+            MutCase(r, 3, "KeybindRules.Refuse", "Return is reserved",
+                    () => Ref(Scoreboard, K("Return")) == Refusal.Reserved,
+                    () => Ref(Scoreboard, K("Backspace")) == Refusal.None,
+                    () => "Return=" + Ref(Scoreboard, K("Return")));
+            MutCase(r, 4, "KeybindRules.Refuse", "F5 is refused on Scoreboard",
+                    () => Ref(Scoreboard, K("F5")) == Refusal.RescueKey,
+                    () => Ref(MenuToggle, K("F5")) == Refusal.None,
+                    () => "F5@Scoreboard=" + Ref(Scoreboard, K("F5")));
+            MutCase(r, 5, "KeybindRules.ParseToken", "a corrupt token falls back to the row default",
+                    () => FormatToken(LoadToken(Jump, "bogus:???")) == "key:Space",
+                    () => FormatToken(LoadToken(Jump, "key:K")) == "key:K",
+                    () => "bogus->" + SafeS(() => FormatToken(LoadToken(Jump, "bogus:???"))));
+            MutCase(r, 6, "KeybindRules.Refuse", "a mouse source on ChatOpen is refused",
+                    () => Ref(ChatOpen, M("MiddleButton")) == Refusal.MouseOnModRow,
+                    () => Ref(Fire, M("LeftButton")) == Refusal.None,
+                    () => "Middle@ChatOpen=" + Ref(ChatOpen, M("MiddleButton")));
+            MutCase(r, 7, "KeybindRules.Overlap", "Fire and Block both on the left button conflict",
+                    () => { var c = Defaults(); return Ref(Block, M("LeftButton"), c) == Refusal.Overlap; },
+                    () => { var c = Defaults(); c[Block] = BindSource.None; return Ref(Block, M("RightButton"), c) == Refusal.None; },
+                    () => { var c = Defaults(); int o; var x = Refuse(Block, M("LeftButton"), c, null, out o); return "Block=Left:" + x + " other=" + o; });
+            MutCase(r, 8, "KeybindRules.Refuse", "key:J on ChatChannel types into the box",
+                    () => Ref(ChatChannel, K("J")) == Refusal.TypesText,
+                    () => Ref(ChatChannel, K("F9")) == Refusal.None && Ref(ChatOpen, K("J")) == Refusal.None,
+                    () => "J@ChatChannel=" + Ref(ChatChannel, K("J")));
+            MutCase(r, 9, "KeybindRules.MouseIndexToSource", "Unity button 3 resolves to Button4",
+                    () => FormatToken(MouseIndexToSource(3)) == "mouse:Button4",
+                    () => FormatToken(MouseIndexToSource(0)) == "mouse:LeftButton" && FormatToken(MouseIndexToSource(1)) == "mouse:RightButton"
+                          && FormatToken(MouseIndexToSource(2)) == "mouse:MiddleButton",
+                    () => "3->" + FormatToken(MouseIndexToSource(3)));
+            MutCase(r, 10, "KeybindRules.CaptureGesture", "an armed capture over Backspace binds",
+                    () => CaptureGesture(KeyBackspace, true) == Gesture.Bind,
+                    () => CaptureGesture(KeyEscape, true) == Gesture.Cancel && CaptureGesture(KeyBackspace, false) == Gesture.Ignore
+                          && FormatToken(BindSource.None) == "none",
+                    () => "Backspace(armed)=" + CaptureGesture(KeyBackspace, true));
+            MutCase(r, 11, "KeybindRules.StaticDefaults", "MapSkinCycle defaults to key:LeftShift",
+                    () => DefaultToken(MapSkinCycle) == "key:LeftShift",
+                    () => { for (int i = 0; i < RowCount; i++) if (i != MapSkinCycle && DefaultToken(i) != want[i]) return false; return true; },
+                    () => "MapSkinCycle=" + DefaultToken(MapSkinCycle));
+            MutCase(r, 12, "KeybindRules.FirstHit", "rows {1, 5} down capture as row 1 (Shift)",
+                    () => FirstHit(new[] { 5, 1 }) == 1,
+                    () => { BindSource s; return ParseToken("key:LeftShift", out s) && s.Value == 5 && KeyIds[s.Value] == "LeftShift"; },
+                    () => "FirstHit{5,1}=" + FirstHit(new[] { 5, 1 }));
+            int capA = 3;
+            MutCase(r, 13, "Keybinds.ReadBoundSource / KeybindRules.GuardedMouseRead", "a mouse button above the cap reads Unreadable",
+                    () => { int cap = 3; return GuardedMouseRead(3, ref cap, b => true, null) == Read.Unreadable && MouseUnreadable(M("Button4"), 3); },
+                    () => { int cap = 3; return GuardedMouseRead(0, ref cap, b => true, null) == Read.Down
+                                               && GuardedMouseRead(0, ref cap, b => false, null) == Read.Up
+                                               && !MouseUnreadable(M("LeftButton"), 3); },
+                    () => "Button4@cap3=" + GuardedMouseRead(3, ref capA, b => true, null));
+            MutCase(r, 14, "KeybindRules.Refuse", "key:Space on ChatChannel types into the box",
+                    () => Ref(ChatChannel, K("Space")) == Refusal.TypesText,
+                    () => Ref(ChatChannel, K("F9")) == Refusal.None && Ref(ChatChannel, K("LeftAlt")) == Refusal.None
+                          && Ref(Jump, K("Space")) == Refusal.None,
+                    () => "Space@ChatChannel=" + Ref(ChatChannel, K("Space")));
+            MutCase(r, 15, "KeybindRules.Refuse", "key:Backspace on ChatChannel removes text",
+                    () => Ref(ChatChannel, K("Backspace")) == Refusal.TypesText,
+                    () => Ref(Scoreboard, K("Backspace")) == Refusal.None,
+                    () => "Backspace@ChatChannel=" + Ref(ChatChannel, K("Backspace")));
+            MutCase(r, 16, "KeybindRules.ShouldOverrideReadyPrompt", "Jump on key:K asks for the prompt override",
+                    () => ShouldOverrideReadyPrompt(K("K")),
+                    () => !ShouldOverrideReadyPrompt(K("Space")),
+                    () => "K=" + ShouldOverrideReadyPrompt(K("K")) + " Space=" + ShouldOverrideReadyPrompt(K("Space")));
+            MutCase(r, 17, "KeybindRules.Refuse", "key:Delete and key:Backspace on ChatChannel remove text",
+                    () => Ref(ChatChannel, K("Delete")) == Refusal.TypesText && Ref(ChatChannel, K("Backspace")) == Refusal.TypesText,
+                    () => Ref(ChatChannel, K("Insert")) == Refusal.None && Ref(ChatChannel, K("Home")) == Refusal.None
+                          && Ref(ChatChannel, K("End")) == Refusal.None && Ref(ChatChannel, K("PageUp")) == Refusal.None
+                          && Ref(ChatChannel, K("PageDown")) == Refusal.None && Ref(Scoreboard, K("Delete")) == Refusal.None,
+                    () => "Delete@ChatChannel=" + Ref(ChatChannel, K("Delete")));
+
+            // case 16's own second control, outside the mutation: an unbound or
+            // mouse-bound Jump cannot be described by the word SPACE either.
+            Check(r, "T1 case 16 KeybindRules.ShouldOverrideReadyPrompt: mouse and unbound Jump also override",
+                  ShouldOverrideReadyPrompt(M("LeftButton")) && ShouldOverrideReadyPrompt(BindSource.None) && !ShouldOverrideReadyPrompt(K("Space")),
+                  "mouse=" + ShouldOverrideReadyPrompt(M("LeftButton")) + " none=" + ShouldOverrideReadyPrompt(BindSource.None));
+
+            // -- question 6 (wheel rows refuse modifiers) and question 7 (mouse) --
+            Check(r, "Q6 KeybindRules.Refuse: QuickChat and DanceWheel refuse Shift, Left Alt and AltGr",
+                  Ref(QuickChat, K("Shift")) == Refusal.WheelModifier && Ref(DanceWheel, K("LeftAlt")) == Refusal.WheelModifier
+                  && Ref(QuickChat, K("AltGr")) == Refusal.WheelModifier,
+                  Ref(QuickChat, K("Shift")) + "," + Ref(DanceWheel, K("LeftAlt")) + "," + Ref(QuickChat, K("AltGr")));
+            Check(r, "Q6 control: the wheels still take an ordinary key, and Shift stays bindable elsewhere",
+                  Ref(QuickChat, K("G")) == Refusal.None && Ref(DanceWheel, K("H")) == Refusal.None && Ref(MoveUp, K("RightShift")) == Refusal.None,
+                  Ref(QuickChat, K("G")) + "," + Ref(DanceWheel, K("H")) + "," + Ref(MoveUp, K("RightShift")));
+            bool gameMouse = true, modMouse = true;
+            for (int row = 0; row < RowCount; row++)
+            {
+                var c = Defaults();
+                c[row] = BindSource.None;
+                var res = Ref(row, M("Button5"), c);
+                if (IsGameRow(row) && res != Refusal.None) gameMouse = false;
+                if (IsModRow(row) && res != Refusal.MouseOnModRow) modMouse = false;
+            }
+            Check(r, "Q7 KeybindRules.Refuse: all seven game rows take a mouse button, none of the nine mod rows does",
+                  gameMouse && modMouse, "game=" + gameMouse + " mod=" + modMouse);
+            Check(r, "rule 5 KeybindRules.Refuse: None is never a bind", Ref(Jump, BindSource.None) == Refusal.NoneAsBind,
+                  Ref(Jump, BindSource.None).ToString());
+            Check(r, "rule 1 KeybindRules.Refuse names the row that already holds the key",
+                  RefOther(MoveLeft, K("W")) == MoveUp, "other=" + RefOther(MoveLeft, K("W")));
+            Check(r, "PadEnter is reserved", Ref(Scoreboard, K("PadEnter")) == Refusal.Reserved, Ref(Scoreboard, K("PadEnter")).ToString());
+
+            // -- tokens round-trip ---------------------------------------------------
+            bool rt = true;
+            for (int i = 1; i < KeyTableLength; i++)
+            {
+                BindSource s;
+                if (!ParseToken(FormatToken(BindSource.Key(i)), out s) || s.Value != i || s.Kind != BindKind.Key) rt = false;
+            }
+            for (int n = 0; n < 7; n++)
+            {
+                BindSource s;
+                var m = MouseIndexToSource(n);
+                if (!ParseToken(FormatToken(m), out s) || !s.Equals(m)) rt = false;
+            }
+            Check(r, "KeybindRules.ParseToken round-trips every key and every bindable mouse button", rt, rt.ToString());
+            BindSource ns;
+            Check(r, "KeybindRules.ParseToken: none parses to the unbound source and a mouse axis does not parse",
+                  ParseToken("none", out ns) && ns.Kind == BindKind.None && !ParseToken("mouse:NegativeX", out ns) && !ParseToken("key:None", out ns),
+                  "ok");
+        }
+
+        private static int RefOther(int row, BindSource s)
+        {
+            var cur = Defaults();
+            cur[row] = BindSource.None;
+            int other;
+            Refuse(row, s, cur, null, out other);
+            return other;
+        }
+
+        private static bool AllDefaultsAccepted()
+        {
+            var cur = Defaults();
+            for (int i = 0; i < RowCount; i++)
+            {
+                if (cur[i].Kind == BindKind.None) continue;
+                int other;
+                if (Refuse(i, cur[i], cur, null, out other) != Refusal.None) return false;
+            }
+            return true;
+        }
+    }
+}

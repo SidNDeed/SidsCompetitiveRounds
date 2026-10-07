@@ -106,7 +106,7 @@ namespace CompetitiveRounds
                     if (cf == null) return null;
                     _entry = cf.Bind(
                         "UI", "HealthPrecision", ROUNDED,
-                        "Decimals on the HP readout (hold-Tab board, spectator seat, broadcaster HUD): "
+                        "Decimals on the HP readout (the live scoreboard, spectator seat, broadcaster HUD): "
                         + "Rounded, 1 decimal or 2 decimals. BOTH halves of \"current/max\" follow it, so a "
                         + "card that leaves max health on a fraction stops reading as a whole number too. "
                         + "Local display only - nothing stored or sent changes.");
@@ -314,6 +314,7 @@ namespace CompetitiveRounds
         private static string trTitle, trCardsLabel, trNoCards;
         private static bool localeHooked;
         private static int trGen = -1;
+        private static int trKb = -1;
 
         private static void EnsureLocaleStrings()
         {
@@ -325,14 +326,16 @@ namespace CompetitiveRounds
              * loaded, catalogue registered, locale set), so it is the honest key.
              * Kept as a cheap int compare because this runs on the hold-Tab
              * path, which must not allocate per frame (#162). */
-            if (trLabels != null && trGen == I18n.CatalogueGeneration) return;
+            if (trLabels != null && trGen == I18n.CatalogueGeneration && trKb == Keybinds.Revision) return;
             trGen = I18n.CatalogueGeneration;
+            trKb = Keybinds.Revision;   // item 17: the title names the bound scoreboard key
             if (!localeHooked)
             {
                 localeHooked = true;
                 try { I18n.LocaleChanged += () => { trLabels = null; }; } catch { }
             }
-            trTitle = I18n.Tr("MATCH STATS  <color=#888><size=12>(hold Tab)</size></color>");
+            trTitle = I18n.TrF("MATCH STATS  <color=#888><size=12>(hold {0})</size></color>",
+                NativeUI.KeybindRowFace(KeybindRules.Scoreboard));
             trCardsLabel = I18n.Tr("Cards");
             trNoCards = I18n.Tr("<color=#666>no cards</color>");
             var labels = new[]
@@ -878,7 +881,7 @@ namespace CompetitiveRounds
             try
             {
                 if (Event.current == null || Event.current.type != EventType.Repaint) return;
-                if (!Input.GetKey(KeyCode.Tab)) return;
+                if (!Keybinds.Held(KeybindRules.Scoreboard)) return;   // item 17: the bound key
                 if (NativeUI.IsOpen) return;                    // F5 menu owns the screen
                 if (CompetitiveUI.IsChatInputOpen) return;      // typing in chat
                 var pm = PlayerManager.instance;
@@ -922,7 +925,7 @@ namespace CompetitiveRounds
                 GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
                     ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.88f), 0, 0);
                 GUI.Label(new Rect(x + 12, y + 6, w - 24, 24),
-                    trTitle ?? "MATCH STATS  <color=#888><size=12>(hold Tab)</size></color>", stTitle);
+                    trTitle ?? "", stTitle);
                 if (h2hH > 0f)
                     GUI.Label(new Rect(x + 12, y + 30, w - 24, 20), h2hLine, stH2H);
 

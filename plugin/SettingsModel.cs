@@ -14,13 +14,13 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class SettingsModel
     {
-        /// <summary>The seven sub-tabs, in bar order. The home id is the
+        /// <summary>The eight sub-tabs, in bar order (item 17 added Controls). The home id is the
         /// descriptor's <c>home</c>; the body name is the GameObject the
         /// tab's rows are built under (the keyset manifest's sub_tab_body).</summary>
         internal static readonly string[] SubTabHomes =
-            { "ingame", "chatmail", "sound", "visuals", "perf", "langmenus", "privacy" };
+            { "ingame", "chatmail", "sound", "visuals", "perf", "langmenus", "privacy", "controls" };
         internal static readonly string[] SubTabBodies =
-            { "SubIngame", "SubChatMail", "SubSound", "SubVisuals", "SubPerf", "SubLangMenus", "SubPrivacy" };
+            { "SubIngame", "SubChatMail", "SubSound", "SubVisuals", "SubPerf", "SubLangMenus", "SubPrivacy", "SubControls" };
 
         /// <summary>The home id or body name's index in bar order, or -1.</summary>
         internal static int SubTabIndex(string homeOrBody)
@@ -142,6 +142,7 @@ namespace CompetitiveRounds
             {
                 case "ACTION":
                 case "DROPDOWN":
+                case "KEYBIND":   // item 17: Enter, Space or the pad arm the row's capture
                     return true;
                 case "DESTRUCTIVE":
                     return source == SettingsActivation.Enter;
