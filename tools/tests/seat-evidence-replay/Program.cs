@@ -1245,6 +1245,11 @@ namespace SeatEvidenceReplay
                 ApiClient.AnswerOk = oks[k];
                 ApiClient.Answer = texts[k];
                 NextLaunch();
+                // the backoff BeforeSend persisted for A's first send is on disk;
+                // load the next launch's queue and make A due, so the count below
+                // measures the per-launch bound, not the backoff
+                Check((bool)typeof(SeatEvidence).GetMethod("Load", S).Invoke(null, null), n + "the next launch loads the queue");
+                foreach (SeatEvidenceCore.Pending p in (System.Collections.IList)Field("_queue")) p.NotBeforeUnix = 0;
                 for (int i = 0; i < 10; i++) SendOnce();
                 Eq(3, ApiClient.Posts.Count, n + "A once in the next launch, no more");
                 Eq(bodyA, ApiClient.Posts[2].Value, n + "the next launch's request is A");
