@@ -26440,8 +26440,9 @@ async def _pc_board_ranks(db: AsyncSession, *, min_matches: int, active_days: in
 
     A refresh that raises stamps a failure entry for `_PC_STANDINGS_FAIL_TTL_S`
     and re-raises; a caller that finds that stamp raises `_PcBoardUnavailable`
-    without running the statement. Both are exceptions on purpose: the one
-    caller, `_pc_attach_subject_standings`, already turns any exception into
+    without running the statement. Both are exceptions on purpose: they reach
+    the collection route through `_pc_subject_standings` and the attach helper
+    below it, which already turns any exception into
     `subject_standings: false`. A cancelled refresh (BaseException) stamps
     nothing, since it says nothing about the statement."""
     key = (int(min_matches), int(active_days))

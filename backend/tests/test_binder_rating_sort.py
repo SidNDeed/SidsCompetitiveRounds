@@ -421,7 +421,8 @@ def test_s5c_the_cache_is_keyed_on_its_binds_and_rechecks_after_the_lock():
     # LOW 2): two comparisons, the success expiry and the failure expiry.
     assert fn.count("time.monotonic()") == 4
     assert "time.time()" not in fn
-    assert fn.count("_PC_STANDINGS_FAIL_TTL_S") >= 2 and "_PC_STANDINGS_TTL_S)" in fn
+    assert "(time.monotonic() + _PC_STANDINGS_FAIL_TTL_S, None)" in fn
+    assert "(time.monotonic() + _PC_STANDINGS_TTL_S, ranks)" in fn
     # the binds are read at the CALLER, so a redirected global changes the key
     caller = inspect.getsource(main._pc_subject_standings)
     assert "min_matches, active_days = _PC_POOL_MIN_MATCHES, LEADERBOARD_ACTIVE_DAYS" in caller
