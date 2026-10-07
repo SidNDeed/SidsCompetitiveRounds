@@ -131,17 +131,20 @@ TWIN = {
 }
 
 
-def _mutant(name, pairs):
-    """`auto_logs.<name>` with every (anchor, replacement) applied, each
-    anchor asserted to be exactly one site of the function (#432/#279),
-    compiled against a copy of the module's globals."""
-    src = textwrap.dedent(inspect.getsource(getattr(auto_logs, name)))
-    for anchor, replacement in pairs:
-        assert src.count(anchor) == 1, (name, anchor)
-        src = src.replace(anchor, replacement)
+def _mutants(table):
+    """Every `auto_logs.<name>` of `table` with its (anchor, replacement)
+    pairs applied, each anchor asserted to be exactly one site of the
+    function (#432/#279), all compiled into ONE copy of the module's globals
+    so a mutated function calls the other mutated functions of the table
+    (the reverted pass must read the reverted lock answer, not the real one)."""
     namespace = dict(vars(auto_logs))
-    exec(compile(src, "<mutant:%s>" % name, "exec"), namespace)
-    return namespace[name]
+    for name, pairs in table.items():
+        src = textwrap.dedent(inspect.getsource(getattr(auto_logs, name)))
+        for anchor, replacement in pairs:
+            assert src.count(anchor) == 1, (name, anchor)
+            src = src.replace(anchor, replacement)
+        exec(compile(src, "<mutant:%s>" % name, "exec"), namespace)
+    return {name: namespace[name] for name in table}
 
 
 class _Stall:
@@ -311,8 +314,8 @@ def _run_case(logdir, monkeypatch, patches=None):
     stall = _Stall(auto_logs._unlink_due_blobs)
     monkeypatch.setattr(auto_logs, "_unlink_due_blobs", stall)
     real = {name: getattr(auto_logs, name) for name in (patches or {})}
-    for name, pairs in (patches or {}).items():
-        monkeypatch.setattr(auto_logs, name, _mutant(name, pairs))
+    for name, fn in (_mutants(patches) if patches else {}).items():
+        monkeypatch.setattr(auto_logs, name, fn)
     try:
         seen = asyncio.run(_drive(logdir, stall))
     finally:
