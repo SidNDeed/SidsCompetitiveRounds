@@ -1121,7 +1121,23 @@ def test_the_helper_closure_stays_affordable():
     # above 100 on the merge, 35 on the trunk. The bound moves to 111, ~6%
     # over the measurement, for that reason and no other; the median and
     # worst bounds stay (22 against 24, 370 against 380).
-    assert code_p90 <= 111, f"p90 code closure {code_p90} of {total}"
+    #
+    # Auto-log fix pass 9 (R8-M1, 2026-10-07): retention's one-pass gate, its
+    # advisory lock and its two refusals are twelve new auto_logs bindings
+    # (`_one_retention_pass_at_a_time`, `_PrunePass`, `_prune_pass_take`,
+    # `_PRUNE_PASS`, `_PRUNE_GATE_LOCK`, `_take_prune_lock`,
+    # `AUTO_LOG_PRUNE_LOCK_CLASS`, `AUTO_LOG_PRUNE_LOCK_KEY`,
+    # `_start_unlink_pass`, `_gated_unlink_due_blobs`, `RetentionPassBusy`,
+    # `RetentionPassTimedOut`). Three routes really run them, each +12 and
+    # nothing else moved: POST /api/v1/logs/auto (its opportunistic prune),
+    # POST /api/v1/internal/logs/auto/prune, and GET /api/v1/health (the
+    # retention loop it reaches). Measured at the tip: code median / p90 /
+    # worst 22 / 115 / 384, all-bindings p90 212; the same walk with the
+    # twelve left out reads 22 / 110 / 377 and 207. The upload route (103 ->
+    # 115) is the route at the p90 rank. This bound moves to 121, the code
+    # worst bound to 400 and the all-bindings p90 bound to 222, each ~5% over
+    # the measurement, for that reason and no other.
+    assert code_p90 <= 121, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1168,7 +1184,9 @@ def test_the_helper_closure_stays_affordable():
     # runs card_art_selftest, which draws a face to prove the layer. The
     # bound moves to 380, ~6% over the measurement, for that reason and no
     # other; the median and p90 bounds stay.
-    assert code_worst <= 380, f"worst code closure {code_worst} of {total}"
+    # Auto-log fix pass 9: 380 -> 400, measured 384 (GET /api/v1/health, 372 without the twelve); see the note at the code p90
+    # bound for the twelve bindings and the three routes that run them.
+    assert code_worst <= 400, f"worst code closure {code_worst} of {total}"
 
     # Imports are counted separately rather than folded in or waved through.
     # They roughly triple the closure -- measured 69 / 119 / 308 -- and that is
@@ -1339,7 +1357,9 @@ def test_the_helper_closure_stays_affordable():
     # on the merge, 36 on the trunk. The bound moves to 209, ~6% over the
     # measurement, for that reason and no other; the median and worst bounds
     # stay (76 against 90, 503 against 520).
-    assert all_p90 <= 209, f"p90 closure {all_p90} of {total}"
+    # Auto-log fix pass 9: 209 -> 222, measured 212 (207 without the twelve); see the note at the code p90
+    # bound for the twelve bindings and the three routes that run them.
+    assert all_p90 <= 222, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
