@@ -7586,7 +7586,7 @@
   },
   "Click Discard again to discard that card for shards": {
    "surface": "PlayerCardsUI",
-   "location": "OnDiscardClick",
+   "location": "OnDiscardClick, OnQuickShardClick",
    "kind": "Tr"
   },
   "Click Dupes again to discard every other copy of that card": {
@@ -11236,7 +11236,7 @@
   },
   "Loading your binder - try again in a moment": {
    "surface": "PlayerCardsUI",
-   "location": "OnShardPackClick, OnShardSelectedClick",
+   "location": "OnQuickShardClick, OnShardPackClick, OnShardSelectedClick",
    "kind": "Tr"
   },
   "Loading your binder...": {
@@ -19671,7 +19671,7 @@
   },
   "sharding...": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshBinder, RefreshSelectRow, RefreshShardPackButton",
+   "location": "FillTile, RefreshBinder, RefreshSelectRow +1",
    "kind": "Tr"
   },
   "short-match farming pattern": {
