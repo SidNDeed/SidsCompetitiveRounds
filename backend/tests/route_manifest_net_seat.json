@@ -691,7 +691,7 @@
           ],
           "main",
           "pc_collection",
-          "78315d5a9da9f24a0b7302656b522f0186159e38"
+          "037e76fc8b9ab4c0ac20768af7b84c6eec9681a3"
         ],
         [
           "/api/v1/pc/daily",
@@ -1849,7 +1849,7 @@
           ],
           "main",
           "health_check",
-          "5c4709ca83d942b2c0ae6a44794a4263cb3f5c09"
+          "3937280a73a43fc0ab1f47b578cdb05c2dc4a166"
         ],
         [
           "/api/v1/i18n/approved",
@@ -2936,7 +2936,7 @@
           ],
           "main",
           "admin_pc_snapshot",
-          "18951dbaf5d1b65fd2da1f686880023621c88256"
+          "e247bef005b12020f13a1ded81d4dfa61cdfc301"
         ],
         [
           "/api/v1/admin/pc/trades",
@@ -3628,7 +3628,7 @@
       [
         "main",
         "lifespan",
-        "ad9109983a3465bd16a0e00dee58cfaedf0f38db"
+        "d3552aaaacbb1899efd4905fe6b064950cb6190d"
       ]
     ]
   },
