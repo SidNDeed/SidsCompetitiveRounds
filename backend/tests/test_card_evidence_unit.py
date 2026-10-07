@@ -2087,3 +2087,7 @@ def test_low3_fix4_every_completed_visit_arm_clears_every_fault_field():
     # writes derive_fault = :fault with the fault counts (none: all cleared)
     assert ev.count("+ _CLEAR +") == 2
     assert "derive_fault = :fault" in ev and "+ _FAULT_COUNT +" in ev
+    # what _CLEAR writes: every fault field, derive_fault among them
+    cleared = {p.strip() for p in ce._CLEAR.split(",")}
+    assert cleared == {"derive_fault = NULL", "fault_attempts = 0", "fault_rev = NULL", "fault_inputs = NULL",
+                       "parked_at = NULL", "op_attempts = 0", "retry_at = NULL"}, sorted(cleared)
