@@ -724,7 +724,7 @@ namespace CompetitiveRounds
 
             // case 16's own second control, outside the mutation: an unbound or
             // mouse-bound Jump cannot be described by the word SPACE either.
-            Check(r, "T1 case 16 KeybindRules.ShouldOverrideReadyPrompt: mouse and unbound Jump also override",
+            Check(r, "T1 case 16b KeybindRules.ShouldOverrideReadyPrompt: mouse and unbound Jump also override",
                   ShouldOverrideReadyPrompt(M("LeftButton")) && ShouldOverrideReadyPrompt(BindSource.None) && !ShouldOverrideReadyPrompt(K("Space")),
                   "mouse=" + ShouldOverrideReadyPrompt(M("LeftButton")) + " none=" + ShouldOverrideReadyPrompt(BindSource.None));
 
