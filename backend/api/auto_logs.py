@@ -3906,8 +3906,12 @@ async def run_auto_log_prune(
     try:
         return await prune_auto_logs(db, days=max(1, min(int(requested), 365)))
     except RetentionPassBusy:
+        print("[AUTO-LOG] internal prune: refused 409, a retention pass is "
+              "already running")
         raise HTTPException(status_code=409,
                             detail="a retention pass is already running")
     except RetentionPassTimedOut:
+        print("[AUTO-LOG] internal prune: answered 503, the retention unlink "
+              "pass did not return in time (no row deleted)")
         raise HTTPException(status_code=503,
                             detail="log storage unavailable")
