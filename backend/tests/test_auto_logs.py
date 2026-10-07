@@ -5066,6 +5066,11 @@ async def _a_pass_past_its_ceiling(logdir, held):
         seen["b"] = "busy"
     await held.drained()
     await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
+    # Pass C does REAL work (one unlink and the directory flush) -- the hold
+    # is on pass A's only -- so it gets a ceiling that a loaded seat's flush
+    # cannot reach: the 0.2 s that times pass A out reds pass C under a whole
+    # suite (2026-10-07, half A3), which measures the volume, not the gate.
+    auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S = 30.0
     try:
         seen["c"] = await auto_logs.prune_auto_logs(
             _retention_db([(R2, "b.log.gz")]))
