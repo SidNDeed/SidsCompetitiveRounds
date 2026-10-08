@@ -41,11 +41,18 @@ WORKDIR /app
 # text_shaping_unavailable. That is what production did on 2026-09-12: both
 # boxes healthy, fonts present, first pack open refused. The release train now
 # asserts pc_raqm on both boxes; test_pc_deploy_wiring.py holds this line.
-# The version is pinned: 1.0.16-1 is the version in the base image's Debian
-# suite (trixie), read from the Debian archive index 2026-10-06 (combat fix
-# pass 8). When the archive supersedes it, apt refuses this line and the build
-# fails; re-read the version and change it here in its own commit.
-RUN apt-get update && apt-get install -y --no-install-recommends libfribidi0=1.0.16-1 && rm -rf /var/lib/apt/lists/*
+# The package is pinned by the DIGEST of its .deb, not by its version alone
+# (combat fix pass 10): apt.lock names it with its version, architecture and
+# SHA-256, and apt_lock.py downloads it with `apt-get download`, refuses the
+# build unless the directory holds exactly the locked files with exactly the
+# locked SHA-256s, and only then hands them to `dpkg -i`; it records the
+# SHA-256 of what dpkg installed in /var/lib/scr-build/apt-installed.lock,
+# which build_manifest.py compares with apt.lock. So a same-version .deb with
+# different bytes refuses here. When the archive supersedes the version, the
+# download fails and so does the build; apt.lock says how to re-pin. Nothing
+# here runs `apt-get install`: no package the lock does not name is installed.
+COPY apt.lock apt_lock.py ./
+RUN apt-get update && python apt_lock.py install apt.lock /tmp/scr-apt /var/lib/scr-build/apt-installed.lock && rm -rf /var/lib/apt/lists/* /tmp/scr-apt
 
 # Install dependencies first (cached layer). requirements.lock is the content
 # lock of requirements.txt (every package pinned, every wheel hashed); with

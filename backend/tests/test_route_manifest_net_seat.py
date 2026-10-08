@@ -78,11 +78,12 @@ API_DIR = (Path(__file__).parents[1] / "api").resolve()
 # values (.env) reach the process through the environment names the compose
 # file declares. The bytes the image takes from OUTSIDE the context are
 # locked, not digested: the base image by its registry digest, the Python
-# packages by requirements.lock (every wheel hashed, installed with
-# --require-hashes; the lock is a member), libfribidi0 by its version, the
-# fonts by fonts.lock.json (a member) and a verification after the copy. What
-# a build actually took is written into the image (build_manifest.py) and
-# answered on /health as `build_manifest`.
+# packages by requirements.lock (exactly one wheel hash per package, installed
+# with --require-hashes; the lock is a member), the apt packages by apt.lock
+# (the SHA-256 of each .deb, checked by apt_lock.py before dpkg reads it; both
+# are members), the fonts by fonts.lock.json (a member) and a verification
+# after the copy. What a build actually took is written into the image
+# (build_manifest.py) and answered on /health as `build_manifest`.
 #
 # THE LINE-ENDING RULE (`_canonical`). The digest is over git BLOB bytes,
 # whatever the checkout: a working copy's bytes with CRLF turned into LF,
@@ -1225,7 +1226,7 @@ def test_f7_the_input_set_is_the_image_build_context(capsys):
             assert source == "." or f"{_CONTEXT}/{source}" in members, source
     assert {f"{_CONTEXT}/{name}" for name in ("main.py", "Dockerfile", ".dockerignore",
             "requirements.txt", "requirements.lock", "build_manifest.py",
-            "assets/fonts/fonts.lock.json", "assets/pc/catalogue.json")} <= members
+            "apt.lock", "apt_lock.py", "assets/fonts/fonts.lock.json", "assets/pc/catalogue.json")} <= members
     assert set(_NAMED_MEMBERS) <= members
     assert not [p for p in paths if "__pycache__" in p.split("/") or p.endswith(".pyc")]
     assert all(p.startswith(_CONTEXT + "/") or p in _NAMED_MEMBERS for p in paths)
@@ -1630,7 +1631,7 @@ def test_f8_the_python_packages_are_locked_by_content(tmp_path, capsys):
     """The image installs only requirements.lock, with --require-hashes and
     --only-binary=:all:; every locked package is pinned and carries exactly
     one SHA-256; every top-level pin of requirements.txt is in the lock at its
-    version; libfribidi0 is installed at a pinned version. And pip itself, on
+    version; the apt packages are read from apt.lock. And pip itself, on
     a wheel built here, installs a locked hash and REFUSES a changed one."""
     df = _f8_dockerfile()
     pips = re.findall(r"^RUN pip install (.*)$", df, re.M)
@@ -1654,9 +1655,9 @@ def test_f8_the_python_packages_are_locked_by_content(tmp_path, capsys):
             name, version = line.split("==")
             assert locked.get(_f8_norm(name.split("[")[0])) == version, line
             top += 1
-    apt = re.search(r"^RUN apt-get update && apt-get install -y --no-install-recommends (.*?) &&", df, re.M)
-    packages = apt.group(1).split()
-    assert packages and all(re.fullmatch(r"[a-z0-9.+-]+=[0-9A-Za-z.+~:-]+", p) for p in packages), packages
+    import apt_lock
+    packages = ["%s=%s" % (p, v) for p, v, _a, _s in
+                apt_lock.read_lock((API_DIR / "apt.lock").read_text(encoding="utf-8"))]
 
     wheel = _f8_wheel(tmp_path, "scrgateprobe", "1.0")
     good = sha256(wheel.read_bytes()).hexdigest()
@@ -1725,6 +1726,89 @@ def test_f10_pip_refuses_a_second_artifact_of_a_locked_version(tmp_path, capsys)
               "the same-version substitute alone (exit %d), offered both: %s"
               % (outcomes["second only"][0],
                  "refused" if outcomes["both"][1] is None else "installed the locked file"))
+
+
+def _f10_apt_served(monkeypatch, apt_lock, serve):
+    """Replace apt_lock's one command runner: `apt-get download` writes the
+    bytes `serve` maps the package to (a dict of file name -> bytes per
+    package) into the work directory, as a scratch index would; dpkg and
+    dpkg-query are recorded. Returns the call list."""
+    calls = []
+
+    def run(argv, cwd=None):
+        calls.append(list(argv))
+        if argv[:2] == ["apt-get", "download"]:
+            package = argv[2].split("=", 1)[0]
+            for name, data in serve.get(package, {}).items():
+                (Path(cwd) / name).write_bytes(data)
+            return ""
+        if argv[:2] == ["dpkg", "-i"]:
+            return ""
+        if argv[0] == "dpkg-query":
+            return serve["__query__"][argv[-1]]
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(apt_lock, "_run", run)
+    return calls
+
+
+def test_f10_the_apt_packages_are_installed_from_locked_bytes(tmp_path, monkeypatch, capsys):
+    """The Dockerfile installs apt packages only through apt_lock.py, from
+    apt.lock (one line per package: version, architecture, the .deb's
+    SHA-256), above the code copy, and never by `apt-get install`. Executed
+    here with apt-get and dpkg replaced by a served directory: the locked
+    bytes install and are recorded; the same version with ONE byte changed,
+    an extra file, a missing file, and a malformed lock each refuse with
+    dpkg never called and no record written."""
+    df = _f8_dockerfile()
+    assert not re.search(r"^RUN .*(apt-get|apt|dpkg) +(install|-i)\b", df, re.M), "a RUN line installs unlocked"
+    runs =re.findall(r"^RUN .*apt_lock\.py.*$", df, re.M)
+    assert runs == ["RUN apt-get update && python apt_lock.py install apt.lock /tmp/scr-apt "
+                    "/var/lib/scr-build/apt-installed.lock && rm -rf /var/lib/apt/lists/* "
+                    "/tmp/scr-apt"], runs
+    copy_lock = re.search(r"^COPY apt\.lock apt_lock\.py \./\s*$", df, re.M)
+    copy_all = re.search(r"^COPY \. \.\s*$", df, re.M)
+    assert copy_lock and copy_lock.start() < df.index(runs[0]) < copy_all.start()
+    import apt_lock
+    entries = apt_lock.read_lock((API_DIR / "apt.lock").read_text(encoding="utf-8"))
+    assert [e[0] for e in entries] == ["libfribidi0"], entries
+
+    deb = b"!<arch>\ndebian-binary scr gate probe\n" * 40
+    name = apt_lock.deb_name("scrprobe", "1:2.0-1", "amd64")
+    assert name == "scrprobe_1%3a2.0-1_amd64.deb"
+    lock = tmp_path / "apt.lock"
+    lock.write_text("# probe\nscrprobe 1:2.0-1 amd64 %s\n" % sha256(deb).hexdigest(), encoding="utf-8")
+    query = {"__query__": {"scrprobe": "1:2.0-1 amd64"}}
+    changed = bytearray(deb)
+    changed[len(changed) // 2] ^= 0x01
+    cases = {
+        "locked bytes": {"scrprobe": {name: deb}},
+        "one byte changed": {"scrprobe": {name: bytes(changed)}},
+        "an extra file": {"scrprobe": {name: deb, "libextra_1_amd64.deb": deb}},
+        "nothing served": {"scrprobe": {}},
+    }
+    outcomes = {}
+    for label, serve in cases.items():
+        calls = _f10_apt_served(monkeypatch, apt_lock, dict(serve, **query))
+        work, record = tmp_path / label / "work", tmp_path / label / "record"
+        code = apt_lock.main(["install", str(lock), str(work), str(record)])
+        dpkg = [c for c in calls if c[:2] == ["dpkg", "-i"]]
+        outcomes[label] = (code, len(dpkg), record.exists())
+        if label == "locked bytes":
+            assert code == 0 and dpkg == [["dpkg", "-i", str(work / name)]], (code, calls)
+            assert record.read_text(encoding="utf-8") == "scrprobe 1:2.0-1 amd64 %s\n" % sha256(deb).hexdigest()
+            assert list(work.iterdir()) == []
+        else:
+            assert outcomes[label] == (1, 0, False), (label, outcomes[label], calls)
+    bad_lock = tmp_path / "bad.lock"
+    bad_lock.write_text("scrprobe 1:2.0-1 amd64 %s\n" % sha256(deb).hexdigest()[:63], encoding="utf-8")
+    _f10_apt_served(monkeypatch, apt_lock, dict(cases["locked bytes"], **query))
+    assert apt_lock.main(["install", str(bad_lock), str(tmp_path / "b" / "w"), str(tmp_path / "b" / "r")]) == 1
+    with capsys.disabled():
+        print("\nPROOF SIZE f10 apt: %d locked package(s) (%s); served directory: %s; malformed lock refused"
+              % (len(entries), " ".join("%s=%s" % (e[0], e[1]) for e in entries),
+                 "; ".join("%s -> exit %d, dpkg calls %d, record %s" % (k, v[0], v[1], v[2])
+                           for k, v in outcomes.items())))
 
 
 _F8_MANIFEST_FIXTURE = Path(__file__).with_name("fixtures") / "build_manifest" / "sample.json"

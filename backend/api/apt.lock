@@ -1,0 +1,20 @@
+# The api image's apt packages, locked by content: one line per package,
+#   <package> <version> <architecture> <sha256 of the .deb file>
+# The Dockerfile installs ONLY these, through apt_lock.py: `apt-get download`
+# fetches each package at its version into an empty directory, apt_lock.py
+# refuses the build unless the directory then holds exactly the .deb files
+# named here and each file's SHA-256 is the one written here, and only then
+# hands those files to `dpkg -i`. So a .deb of the same version with any
+# other bytes refuses the build before dpkg reads it. The SHA-256 each
+# installed file actually had is written to the build's record, which
+# build_manifest.py compares with this file.
+#
+# libfribidi0 1.0.16-1 amd64: the version of the base image's Debian suite
+# (trixie); trixie-updates and trixie-security carry no libfribidi0. The
+# SHA-256 is the trixie main/binary-amd64 Packages.xz stanza's (that index's
+# own SHA-256 checked against trixie's InRelease), and the file fetched from
+# the pool on 2026-10-08 (combat fix pass 10) had it, 26484 bytes. When the
+# archive supersedes the version, `apt-get download` fails and so does the
+# build: read the new version and its SHA-256 the same way and change this
+# line in its own commit.
+libfribidi0 1.0.16-1 amd64 f8c35ec8606d0843bd3cf020c6cfa39ddfe717ec58ed826b5855ba9927eb0d55
