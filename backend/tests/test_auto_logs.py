@@ -5050,33 +5050,69 @@ def test_one_retention_pass_runs_at_a_time_and_a_second_is_refused_holding_nothi
 
 async def _a_pass_past_its_ceiling(logdir, held):
     """Pass A times out with its unlink work still parked; pass B is tried
-    while that work runs; pass C once it has ended."""
+    while that work runs; pass C once it has ended.
+
+    ONE CALL IS ONE ARM, and every arm's pass A runs under the caller's SHORT
+    ceiling: pass C's long ceiling is put back in a `finally`, so no later
+    arm inherits it. An inherited 30 s ceiling equals `_Held`'s own 30 s
+    self-release, and pass A could then end by the hold letting go instead of
+    by its ceiling -- B would be judged after A's work had finished, and the
+    overlap this case exists to see would be gone. So the arm also RECORDS
+    what B was judged against: the ceiling pass A ran under, how long A took,
+    and how many held calls had not returned when B's answer came back."""
     for name in ("a.log.gz", "b.log.gz"):
         (logdir / name).write_bytes(b"x")
-    seen = {}
+    seen = {"a_ceiling": auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S}
+    t0 = time.monotonic()
     try:
         await auto_logs.prune_auto_logs(_retention_db([(R1, "a.log.gz")]))
         seen["a"] = "returned"
     except auto_logs.RetentionPassTimedOut:
         seen["a"] = "timed out"
+    seen["a_s"] = time.monotonic() - t0
     try:
         out = await auto_logs.prune_auto_logs(_retention_db([(R2, "b.log.gz")]))
         seen["b"] = "ran: %r" % (out,)
     except auto_logs.RetentionPassBusy:
         seen["b"] = "busy"
+    seen["a_open_at_b"] = held.entered - held.finished
     await held.drained()
     await _until(lambda: auto_logs._PRUNE_PASS[0] is None, 5.0)
     # Pass C does REAL work (one unlink and the directory flush) -- the hold
     # is on pass A's only -- so it gets a ceiling that a loaded seat's flush
     # cannot reach: the 0.2 s that times pass A out reds pass C under a whole
     # suite (2026-10-07, half A3), which measures the volume, not the gate.
+    # The 30 s is pass C's ALONE: the short ceiling is restored after it.
+    short = auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S
     auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S = 30.0
     try:
         seen["c"] = await auto_logs.prune_auto_logs(
             _retention_db([(R2, "b.log.gz")]))
     except auto_logs.RetentionPassBusy:
         seen["c"] = "busy"
+    finally:
+        auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S = short
     return seen
+
+
+def _pass_a_was_unfinished(seen, ceiling):
+    """Every way B could have been judged after pass A's work had ENDED:
+    pass A not under the short ceiling, A not timed out, A taking a third of
+    the hold's 30 s self-release or more, or no held call outstanding when
+    B's answer came back."""
+    bad = []
+    if seen["a_ceiling"] != ceiling:
+        bad.append("pass A ran under a %r s ceiling, not the arm's %r s"
+                   % (seen["a_ceiling"], ceiling))
+    if seen["a"] != "timed out":
+        bad.append("pass A %s instead of timing out" % seen["a"])
+    if not seen["a_s"] < 10.0:
+        bad.append("pass A took %.2f s, so the hold's own 30 s release, not "
+                   "the ceiling, may have ended it" % seen["a_s"])
+    if seen["a_open_at_b"] < 1:
+        bad.append("no held call was outstanding when B was judged: pass A's "
+                   "work had already finished")
+    return bad
 
 
 def test_a_pass_past_its_ceiling_stays_the_running_pass_until_its_unlinks_end(
@@ -5091,18 +5127,27 @@ def test_a_pass_past_its_ceiling_stays_the_running_pass_until_its_unlinks_end(
     ENDS (`_gated_unlink_due_blobs`).
 
     MUTANT: the work's hold not taken (`_start_unlink_pass`). TWIN: the same
-    call spelled through a parenthesised name.
+    call spelled through a parenthesised name. Every arm -- the real one, the
+    mutant and the twin -- runs its pass A under the 0.2 s ceiling (pass C's
+    30 s is restored in the helper) and is judged only while pass A's work is
+    DEMONSTRABLY unfinished (`_pass_a_was_unfinished`), so the twin's green
+    is the gate's answer and not the hold letting go.
     """
-    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", 0.2)
+    short = 0.2
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", short)
     held = _Held(auto_logs._unlink_due_blobs, first_only=True)
     monkeypatch.setattr(auto_logs, "_unlink_due_blobs", held)
 
     seen = _run(_a_pass_past_its_ceiling(logdir, held))
-    assert seen["a"] == "timed out", seen
+    assert _pass_a_was_unfinished(seen, short) == [], (
+        _pass_a_was_unfinished(seen, short), seen)
     assert seen["b"] == "busy", (
         "a pass was admitted while the timed-out pass's unlinks were still "
         "running: %r" % (seen,))
     assert isinstance(seen["c"], dict) and seen["c"]["rows"] == 1, seen
+    assert auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S == short, (
+        "pass C's ceiling outlived pass C: %r"
+        % (auto_logs.AUTO_LOG_SWEEP_HOP_WAIT_S,))
 
     real = auto_logs._start_unlink_pass
     site = "        gate.hold()\n"
@@ -5113,6 +5158,10 @@ def test_a_pass_past_its_ceiling_stays_the_running_pass_until_its_unlinks_end(
         monkeypatch.setattr(auto_logs, "_start_unlink_pass",
                             _exec_mutant(real, site, replacement))
         seen = _run(_a_pass_past_its_ceiling(logdir, held))
+        assert _pass_a_was_unfinished(seen, short) == [], (
+            "with %r at the work's hold the second pass was judged after "
+            "pass A's work had ended: %r %r"
+            % (replacement.strip(), _pass_a_was_unfinished(seen, short), seen))
         assert seen["b"].startswith("ran") is admitted, (
             "with %r at the work's hold the second pass was %s"
             % (replacement.strip(), seen["b"]))
