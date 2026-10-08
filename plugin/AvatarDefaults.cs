@@ -552,9 +552,15 @@ namespace CompetitiveRounds
     {
         private static void Postfix()
         {
-            Plugin.Log.LogInfo("[AVATAR] LoadFaces postfix attached; launch evaluation (home "
-                + (Plugin.AvatarHomeSlot != null ? Plugin.AvatarHomeSlot.Value : -1) + ")");
-            AvatarDefaults.Evaluate("E1-launch");
+            // The whole body is one exception boundary (fix pass 1, BR-M1):
+            // nothing item 19 does may escape into vanilla's LoadFaces.
+            try
+            {
+                Plugin.Log.LogInfo("[AVATAR] LoadFaces postfix attached; launch evaluation (home "
+                    + (Plugin.AvatarHomeSlot != null ? Plugin.AvatarHomeSlot.Value : -1) + ")");
+                AvatarDefaults.Evaluate("E1-launch");
+            }
+            catch (Exception ex) { AvatarDefaults.Warn("[AVATAR] E1-launch hook failed: " + ex.Message); }
         }
     }
 
@@ -566,8 +572,12 @@ namespace CompetitiveRounds
     {
         private static void Postfix(int faceID)
         {
-            if (faceID != 0) return;
-            AvatarDefaults.Evaluate("E9-select");
+            try
+            {
+                if (faceID != 0) return;
+                AvatarDefaults.Evaluate("E9-select");
+            }
+            catch (Exception ex) { AvatarDefaults.Warn("[AVATAR] E9-select hook failed: " + ex.Message); }
         }
     }
 
@@ -583,7 +593,8 @@ namespace CompetitiveRounds
     {
         private static void Prefix()
         {
-            AvatarDefaults.Evaluate("E5-spawn");
+            try { AvatarDefaults.Evaluate("E5-spawn"); }
+            catch (Exception ex) { AvatarDefaults.Warn("[AVATAR] E5-spawn hook failed: " + ex.Message); }
         }
     }
 }
