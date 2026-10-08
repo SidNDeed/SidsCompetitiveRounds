@@ -82,8 +82,11 @@ API_DIR = (Path(__file__).parents[1] / "api").resolve()
 # with --require-hashes; the lock is a member), the apt packages by apt.lock
 # (the SHA-256 of each .deb, checked by apt_lock.py before dpkg reads it; both
 # are members), the fonts by fonts.lock.json (a member) and a verification
-# after the copy. What a build actually took is written into the image
-# (build_manifest.py) and answered on /health as `build_manifest`.
+# after the copy. What a build actually installed -- the SHA-256 of every
+# wheel pip verified (its --report) with the digest of the RECORD it wrote,
+# and of every .deb dpkg was given -- is written into the image
+# (build_manifest.py), compared there with both locks, and answered on
+# /health as `build_manifest` ("refused" when an identity is not the locks').
 #
 # THE LINE-ENDING RULE (`_canonical`). The digest is over git BLOB bytes,
 # whatever the checkout: a working copy's bytes with CRLF turned into LF,
@@ -1818,8 +1821,12 @@ def test_f8_the_build_manifest_refuses_a_missing_part(capsys):
     """The manifest format, read from a fixture: a complete manifest is
     accepted and its health word is the SHA-256 of its bytes; a manifest
     missing ANY part, or whose list does not match its hash, or that is not
-    JSON, is refused; no file is "absent". Both /health arms carry the word,
-    and the schema declares it without a default."""
+    JSON, is refused; no file is "absent". Since fix pass 10 the lists are
+    artifact identities, and a manifest whose lists are self-consistent but
+    whose identities are not the locks' (a substituted or unverified wheel, a
+    missing or extra package, a .deb of other bytes or none) is refused, as is
+    any manifest against a lock with two hashes for a package. Both /health
+    arms carry the word, and the schema declares it without a default."""
     import build_manifest as bm
     raw = _F8_MANIFEST_FIXTURE.read_bytes()
     document = json.loads(raw)
@@ -1833,13 +1840,38 @@ def test_f8_the_build_manifest_refuses_a_missing_part(capsys):
         assert bm.problems(partial), part
         assert bm.word_for(json.dumps(partial).encode()) == "refused", part
         refused += 1
-    tampered = [dict(document, dpkg=document["dpkg"] + ["zz=1"]),
-                dict(document, pip_freeze=list(reversed(document["pip_freeze"]))),
+    def relisted(part, lines):
+        """The fixture with `part` replaced and its list hash RECOMPUTED, so
+        only the identity comparison with the locks can refuse it."""
+        lines = sorted(lines)
+        return dict(document, **{part: lines, part + "_sha256": bm.list_sha256(lines)})
+
+    entries = _f8_lock_entries((API_DIR / "requirements.lock").read_text(encoding="utf-8"))
+    pillow = next(h[0] for n, _v, h in entries if _f8_norm(n) == "pillow")
+    fribidi = next(line for line in document["apt"] if line.startswith("libfribidi0="))
+    tampered = [dict(document, apt=document["apt"] + ["zz=1:amd64 deb=base"]),
+                dict(document, python=list(reversed(document["python"]))),
                 dict(document, context_digest=document["context_digest"][:-1]),
-                dict(document, format="scr-build-manifest/0"),
-                dict(document, extra="x")]
+                dict(document, format="scr-build-manifest/1"),
+                dict(document, extra="x"),
+                # Fix pass 10 (M-9): self-consistent lists whose identities
+                # are not the locks'.
+                relisted("python", [l.replace(pillow, "0" * 64) for l in document["python"]]),
+                relisted("python", [l.replace("wheel=" + pillow, "wheel=base") for l in document["python"]]),
+                relisted("python", [l for l in document["python"] if not l.startswith("pillow==")]),
+                relisted("python", document["python"] + ["zzprobe==1.0 wheel=%s record=%s" % ("1" * 64, "2" * 64)]),
+                relisted("apt", [l if l != fribidi else fribidi.rsplit("=", 1)[0] + "=" + "3" * 64
+                                 for l in document["apt"]]),
+                relisted("apt", [l if l != fribidi else fribidi.rsplit("=", 1)[0] + "=base"
+                                 for l in document["apt"]]),
+                relisted("apt", document["apt"] + ["zzprobe=1:amd64 deb=" + "4" * 64])]
+    assert all(document["python"] != v["python"] or document["apt"] != v["apt"] for v in tampered[5:])
     for variant in tampered:
         assert bm.word_for(json.dumps(variant).encode()) == "refused", variant
+    two = (API_DIR / "requirements.lock").read_text(encoding="utf-8").replace(
+        "--hash=sha256:" + pillow, "--hash=sha256:%s \\\n    --hash=sha256:%s" % (pillow, "5" * 64))
+    assert bm.problems(document, (two, (API_DIR / "apt.lock").read_text(encoding="utf-8"))), (
+        "a lock with two hashes for one package must refuse the manifest")
     assert bm.word_for(b"{not json") == "refused"
     src = inspect.getsource(main.health_check)
     assert src.count("build_manifest=_build_manifest.health_word()") == 2
@@ -1848,6 +1880,117 @@ def test_f8_the_build_manifest_refuses_a_missing_part(capsys):
     with capsys.disabled():
         print("\nPROOF SIZE f8 manifest: %d parts, each missing one refused; %d tampered "
               "manifests and one non-JSON file refused" % (refused, len(tampered)))
+
+
+def _f10_wheel(directory, name, version, extra=None):
+    """A wheel whose RECORD lists every file with its SHA-256, as a real
+    wheel's does; `extra` adds files (a same-version substitute)."""
+    import base64
+    import zipfile
+    info = f"{name}-{version}.dist-info"
+    files = {f"{name}/__init__.py": b"PROBE = 1\n",
+             f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n".encode(),
+             f"{info}/WHEEL": b"Wheel-Version: 1.0\nGenerator: gate\nRoot-Is-Purelib: true\nTag: py3-none-any\n"}
+    files.update(extra or {})
+    rows = ["%s,sha256=%s,%d" % (p, base64.urlsafe_b64encode(sha256(d).digest()).rstrip(b"=").decode(), len(d))
+            for p, d in sorted(files.items())] + [f"{info}/RECORD,,"]
+    path = directory / f"{name}-{version}-py3-none-any.whl"
+    with zipfile.ZipFile(path, "w") as wheel:
+        for p, d in sorted(files.items()):
+            wheel.writestr(p, d)
+        wheel.writestr(f"{info}/RECORD", "\n".join(rows) + "\n")
+    return path
+
+
+def _f10_target_install(tmp_path, label, wheel, digest):
+    """pip installs `wheel` into its own target directory with the image's
+    flags and --report; returns (target, report)."""
+    target, report = tmp_path / ("site-" + label), tmp_path / ("report-%s.json" % label)
+    req = tmp_path / ("%s.lock" % label)
+    req.write_text("scrgateprobe==1.0 --hash=sha256:%s\n" % digest, encoding="utf-8")
+    run = subprocess.run([sys.executable, "-m", "pip", "install", "--no-index", "--find-links",
+                          str(wheel.parent), "--require-hashes", "--only-binary=:all:", "--no-deps",
+                          "--disable-pip-version-check", "--no-cache-dir", "--no-compile",
+                          "--target", str(target), "--report", str(report), "-r", str(req)],
+                         capture_output=True, text=True)
+    assert run.returncode == 0, run.stdout + run.stderr
+    return target, report
+
+
+def test_f10_the_manifest_records_installed_artifact_identity(tmp_path, capsys):
+    """build_manifest.collect over a REAL pip install: the python line of a
+    package carries the SHA-256 of the archive pip verified (from its
+    --report) and the digest of the RECORD pip wrote; the apt line carries
+    the .deb SHA-256 apt_lock.py recorded. The locked artifact validates; a
+    different, same-version wheel installed in its place changes the line and
+    the manifest bytes AND is refused against the lock; an installed file
+    changed after install refuses collection; a .deb record that is not the
+    lock's refuses."""
+    import build_manifest as bm
+    df = _f8_dockerfile()
+    pips = re.findall(r"^RUN pip install (.*)$", df, re.M)
+    assert len(pips) == 1 and "--report %s " % bm.PIP_REPORT.as_posix() in pips[0], pips
+    assert re.search(r"^RUN apt-get update && python apt_lock\.py install apt\.lock \S+ %s "
+                     % re.escape(bm.APT_RECORD.as_posix()), df, re.M), "the apt record path differs"
+    assert df.rstrip().splitlines()[-1].startswith("CMD ")
+    assert re.search(r"^RUN python assets/fonts/fetch_fonts\.py --verify && python build_manifest\.py write$",
+                     df, re.M), "the manifest is no longer written by the build's last RUN"
+    first_dir, second_dir = tmp_path / "first", tmp_path / "second"
+    first_dir.mkdir()
+    second_dir.mkdir()
+    first = _f10_wheel(first_dir, "scrgateprobe", "1.0")
+    second = _f10_wheel(second_dir, "scrgateprobe", "1.0", {"scrgateprobe/substitute.py": b"SUBSTITUTE = 1\n"})
+    locked, other = sha256(first.read_bytes()).hexdigest(), sha256(second.read_bytes()).hexdigest()
+    assert locked != other
+    lock_text = "scrgateprobe==1.0 --hash=sha256:%s\n" % locked
+    deb = "f" * 64
+    apt_text = "libscrprobe 1.0-1 amd64 %s\n" % deb
+    record = tmp_path / "apt-installed.lock"
+    record.write_text("libscrprobe 1.0-1 amd64 %s\n" % deb, encoding="utf-8")
+    dpkg = ["libc6=2.41-12:amd64", "libscrprobe=1.0-1:amd64"]
+    documents = {}
+    for label, wheel, digest in (("locked", first, locked), ("substitute", second, other)):
+        target, report = _f10_target_install(tmp_path, label, wheel, digest)
+        documents[label] = bm.collect(root=_F10_EMPTY_CONTEXT(tmp_path), site_paths=[target], report=report,
+                                      dpkg=dpkg, record=record)
+    good, bad = documents["locked"], documents["substitute"]
+    line = next(l for l in good["python"] if l.startswith("scrgateprobe=="))
+    assert line.startswith("scrgateprobe==1.0 wheel=%s record=" % locked), good["python"]
+    assert good["apt"] == ["libc6=2.41-12:amd64 deb=base", "libscrprobe=1.0-1:amd64 deb=%s" % deb]
+    assert bm.problems(good, (lock_text, apt_text)) == []
+    assert bm.word_for(bm.encode(good), (lock_text, apt_text)) == sha256(bm.encode(good)).hexdigest()
+    assert bad["python"] != good["python"] and bm.encode(bad) != bm.encode(good)
+    found = bm.problems(bad, (lock_text, apt_text))
+    assert found and "requirements.lock locks 1.0 to %s" % locked in found[0], found
+    assert bm.word_for(bm.encode(bad), (lock_text, apt_text)) == "refused"
+    # An installed file changed after install: RECORD verification refuses.
+    target = tmp_path / "site-locked"
+    (target / "scrgateprobe" / "__init__.py").write_text("CHANGED = True\n", encoding="utf-8")
+    try:
+        bm.python_lines([target], tmp_path / "report-locked.json")
+        changed = None
+    except bm.Refused as refusal:
+        changed = str(refusal)
+    assert changed and "does not match its RECORD" in changed, changed
+    # A .deb record that is not the lock's.
+    wrong = tmp_path / "apt-wrong.lock"
+    wrong.write_text("libscrprobe 1.0-1 amd64 %s\n" % ("e" * 64), encoding="utf-8")
+    other_apt = dict(good, apt=bm.apt_lines(dpkg, wrong))
+    other_apt["apt_sha256"] = bm.list_sha256(other_apt["apt"])
+    assert bm.problems(other_apt, (lock_text, apt_text)), other_apt["apt"]
+    with capsys.disabled():
+        print("\nPROOF SIZE f10 identity: locked wheel line %s accepted; same-version substitute "
+              "refused (%s); changed installed file refused (%s); .deb record off the lock refused"
+              % (line, found[0], changed))
+
+
+def _F10_EMPTY_CONTEXT(tmp_path):
+    """A minimal /app for collect's context digest (the identity parts are
+    what this test reads)."""
+    root = tmp_path / "app"
+    (root / "assets" / "fonts").mkdir(parents=True, exist_ok=True)
+    (root / "assets" / "fonts" / "fonts.lock.json").write_text("{}", encoding="utf-8")
+    return root
 
 
 def test_f8_the_image_digests_its_context_as_the_gate_does(tmp_path, capsys):

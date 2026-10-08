@@ -1033,10 +1033,11 @@ class HealthResponse(BaseModel):
     # roles. No default, as above. Absent on any build before the lane.
     combat_evidence: int
     # build_manifest: the SHA-256 of the build-manifest.json this image's build
-    # wrote (build_manifest.py: the build context's digest, the pip freeze and
-    # the dpkg list, each hashed), "absent" when the process was not started
-    # from a built image, "refused" when the file is missing a part. Equal on
-    # both roles when both run one build. No default, as above.
+    # wrote (build_manifest.py: the build context's digest and the identity of
+    # every installed wheel and .deb), "absent" when the process was not
+    # started from a built image, "refused" when the file is missing a part or
+    # an identity differs from requirements.lock / apt.lock. Equal on both
+    # roles when both run one build. No default, as above.
     build_manifest: str
     # review_eval: 8 hex over the public review vocabulary's per-entry
     # fingerprints (review_measures.review_eval). Equal on both roles; the

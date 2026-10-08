@@ -55,11 +55,14 @@ COPY apt.lock apt_lock.py ./
 RUN apt-get update && python apt_lock.py install apt.lock /tmp/scr-apt /var/lib/scr-build/apt-installed.lock && rm -rf /var/lib/apt/lists/* /tmp/scr-apt
 
 # Install dependencies first (cached layer). requirements.lock is the content
-# lock of requirements.txt (every package pinned, every wheel hashed); with
-# --require-hashes pip refuses any wheel whose bytes are not hashed there and
-# any package the lock does not list.
+# lock of requirements.txt (every package pinned to ONE wheel by its hash);
+# with --require-hashes pip refuses any wheel whose bytes are not the one
+# hashed there and any package the lock does not list. --report records, for
+# every package pip installed, the SHA-256 of the archive it verified, outside
+# /app so the code copy cannot replace it; build_manifest.py compares those
+# with the lock.
 COPY requirements.lock .
-RUN pip install --no-cache-dir --require-hashes --only-binary=:all: -r requirements.lock
+RUN pip install --no-cache-dir --require-hashes --only-binary=:all: --report /var/lib/scr-build/pip-report.json -r requirements.lock
 
 # Player Cards renderer fonts. The font FILES are not in the repo (gitignored,
 # ~30 MB); fetch_fonts.py pulls each one from a COMMIT-pinned URL and verifies
@@ -83,8 +86,10 @@ COPY . .
 # Last: verify the fonts again (no fetch; a missing or moved font fails the
 # build), so the bytes the image carries are the verified ones whatever the
 # copy brought; then write build-manifest.json (build_manifest.py: the context
-# digest, the pip freeze and the dpkg list, each hashed), which /health
-# answers as `build_manifest`.
+# digest, and the identity of every installed artifact -- each Python
+# package's verified wheel SHA-256 and RECORD digest, each dpkg package's .deb
+# SHA-256 or `base` -- compared with requirements.lock and apt.lock; any
+# difference fails the build), which /health answers as `build_manifest`.
 RUN python assets/fonts/fetch_fonts.py --verify && python build_manifest.py write
 
 # Run with uvicorn.
