@@ -5168,6 +5168,84 @@ def test_a_pass_past_its_ceiling_stays_the_running_pass_until_its_unlinks_end(
     monkeypatch.setattr(auto_logs, "_start_unlink_pass", real)
 
 
+# The control's release of the inert twin's held work: well past the 0.2 s
+# ceiling the twin's pass A must run under, and well short of both the 10 s
+# that `_pass_a_was_unfinished` reads as "the hold may have ended it" and the
+# 30 s ceiling pass C uses.
+_TWIN_RELEASE_S = 5.0
+
+
+async def _released_after(held, delay_s, coro):
+    """`coro`, with `held`'s parked call let go `delay_s` after it entered.
+
+    The signal is the control's, not the hold's own 30 s: pass A's work then
+    ENDS at a known moment. Under the arm's short ceiling pass A has timed out
+    and B has been judged long before it; under a ceiling that leaked from an
+    earlier pass C, pass A waits for that work, which finishes, and B is
+    judged after it -- the state the twin must never be accepted from."""
+    async def release_later():
+        await _until(lambda: held.entered >= 1, 10.0)
+        await asyncio.sleep(delay_s)
+        held.release()
+    task = asyncio.ensure_future(release_later())
+    try:
+        return await coro
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+def test_the_ceiling_twin_is_never_judged_after_pass_a_work_finished(
+        logdir, monkeypatch):
+    """Round 10 LOW (B16): THE INERT TWIN IS JUDGED ONLY WHILE PASS A'S WORK
+    IS STILL RUNNING, AND A TWIN JUDGED AFTER THAT WORK FINISHED IS REJECTED.
+
+    The ceiling case above runs the real arm (whose pass C sets a 30 s
+    ceiling and puts the short one back) and then its twin. Here the same two
+    arms run, and the twin's held work is let go by this control
+    `_TWIN_RELEASE_S` after it entered (`_released_after`). With pass C's
+    ceiling restored, the twin's pass A times out at 0.2 s first, B is judged
+    with the work still outstanding (`a_open_at_b` 1) and the twin is busy.
+    With the restore removed, the twin's pass A runs under the leaked 30 s,
+    waits for the released work, which finishes, and B is judged after it
+    (`a_open_at_b` 0): the check reds on that, by name, before any of the
+    ceiling, timeout or duration findings is read.
+    """
+    short = 0.2
+    monkeypatch.setattr(auto_logs, "AUTO_LOG_SWEEP_HOP_WAIT_S", short)
+    held = _Held(auto_logs._unlink_due_blobs, first_only=True)
+    monkeypatch.setattr(auto_logs, "_unlink_due_blobs", held)
+
+    first = _run(_a_pass_past_its_ceiling(logdir, held))
+    assert _pass_a_was_unfinished(first, short) == [], (
+        _pass_a_was_unfinished(first, short), first)
+
+    real = auto_logs._start_unlink_pass
+    held.reset()
+    auto_logs._PRUNE_HELD.clear()
+    monkeypatch.setattr(auto_logs, "_start_unlink_pass", _exec_mutant(
+        real, "        gate.hold()\n", "        (gate).hold()\n"))
+    try:
+        seen = _run(_released_after(held, _TWIN_RELEASE_S,
+                                    _a_pass_past_its_ceiling(logdir, held)))
+    finally:
+        monkeypatch.setattr(auto_logs, "_start_unlink_pass", real)
+    print("inert twin recorded: a_open_at_b=%r a=%r a_ceiling=%r a_s=%.3f b=%r"
+          % (seen["a_open_at_b"], seen["a"], seen["a_ceiling"], seen["a_s"],
+             seen["b"]))
+    assert seen["a_open_at_b"] >= 1, (
+        "REJECTED: the inert twin's B was judged after pass A's work had "
+        "finished (a_open_at_b=%r), so its green would be the work ending, "
+        "not the gate: %r %r"
+        % (seen["a_open_at_b"], _pass_a_was_unfinished(seen, short), seen))
+    assert _pass_a_was_unfinished(seen, short) == [], (
+        _pass_a_was_unfinished(seen, short), seen)
+    assert seen["b"] == "busy", seen
+
+
 async def _refused_lock_pass(prune, logdir, where):
     (logdir / "a.log.gz").write_bytes(b"x")
     t1, t2 = (False, True) if where == "T1" else (True, False)
