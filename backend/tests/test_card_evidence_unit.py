@@ -1305,6 +1305,39 @@ def test_m1_fix4_the_composition_tables_are_counted():
     assert len({c[0] for c in FIX4_REFUSED}) == len(FIX4_REFUSED)
 
 
+# -- M1 fix pass 5: a value a call stores or returns as itself is handed on -----------------
+#
+# A fresh list held by a shallow container constructor (dict, list, tuple,
+# set: keyword and mapping forms), stored by keyword through .update, or
+# returned as itself by min/max (two arguments, a default), then changed in
+# place: the change is refused, so its read can never be missing from what
+# the container is read for. Each edit sits at the row["b4.hand.size"] line.
+_LEAK = '    leaked = []\n'
+_LEAK_CHANGE = '    leaked.append(len(rec["ap"]))\n'
+FIX5_HANDED_ON = [
+    ("dict_keyword_value", '    box = dict(n=leaked)\n', 'len(box["n"])'),
+    ("dict_mapping_literal", '    box = dict({"n": leaked})\n', 'len(box["n"])'),
+    ("dict_unpacked_mapping", '    box = dict(**{"n": leaked})\n', 'len(box["n"])'),
+    ("list_constructor", '    box = list([leaked])\n', 'len(box[0])'),
+    ("tuple_constructor", '    box = tuple((leaked,))\n', 'len(box[0])'),
+    ("set_constructor", '    box = set([leaked])\n', 'len(box)'),
+    ("update_keyword_value", '    box = {}\n    box.update(n=leaked)\n', 'len(box["n"])'),
+    ("max_of_two_arguments", '    box = max(leaked, [0])\n', 'len(box)'),
+    ("min_default", '    box = min([], default=leaked)\n', 'len(box)'),
+]
+
+
+@pytest.mark.parametrize("case", FIX5_HANDED_ON, ids=[c[0] for c in FIX5_HANDED_ON])
+def test_m1_fix5_a_value_a_container_holds_is_handed_on_and_its_later_change_refused(case):
+    _id, hold, read = case
+    assert "ap" not in READS["b4.hand.phase"]                    # control: the read would be new
+    unchanged = _SIZE + _LEAK + hold + '    row["b4.hand.phase"] = %s\n' % read
+    _reads_of(_edited([(_SIZE, unchanged)]))                       # control: held, unchanged: analyses
+    changed = _SIZE + _LEAK + hold + _LEAK_CHANGE + '    row["b4.hand.phase"] = %s\n' % read
+    with pytest.raises(crs.Unsupported, match="after it was handed on"):
+        _reads_of(_edited([(_SIZE, changed)]))
+
+
 # -- M2: the window length is bounded, so a changed day's work is ----------------------
 
 def test_m2_a_card_window_is_a_whole_number_of_days_up_to_the_derived_retention(tmp_path):

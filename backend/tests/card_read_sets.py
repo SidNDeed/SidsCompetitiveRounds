@@ -241,7 +241,9 @@ STMTS = (ast.Assign, ast.AugAssign, ast.Expr, ast.Return, ast.If, ast.For, ast.C
 #     refused;
 #   - no use that hands the object on (_flows: an assignment's value, an
 #     element of a container, an argument a callee or a store may keep, a
-#     retained iterator or view) can run before the change on the same object:
+#     value dict(...) or .update(...) stores under a keyword, an argument
+#     min/max/next may return as itself, a retained iterator or view) can
+#     run before the change on the same object:
 #     earlier in the function, or later in a loop whose next turn changes it
 #     again (the object made outside that loop);
 #   - an augmented assignment changes a value in place only when the value is
@@ -298,18 +300,29 @@ def _flows(node, kept, out):
     elif isinstance(node, ast.Call):
         f = node.func
         args = list(node.args) + [kw.value for kw in node.keywords]
+        # a value a call stores or returns AS ITSELF (fix pass 5): a named
+        # keyword of dict(...) or of .update(...) (a shallow store into the
+        # dict), and an argument min/max/next may return (two or more
+        # positional arguments, or a default)
+        named = {id(kw.value) for kw in node.keywords if kw.arg is not None}
         if isinstance(f, ast.Attribute):
             m = f.attr
             _flows(f.value, kept and m in VIEW_METHODS, out)
             for i, a in enumerate(args):
-                keep = (m in STORE_METHODS or (m == "get" and i == 1)) or not (
+                keep = (m in STORE_METHODS or (m == "get" and i == 1)
+                        or (m == "update" and id(a) in named)) or not (
                     m in MUTATORS or m == "get" or m in KEEP_METHODS or m in SCALAR_METHODS)
                 _flows(a.value if isinstance(a, ast.Starred) else a, keep and not isinstance(a, ast.Starred),
                        out)
         elif isinstance(f, ast.Name) and f.id in BUILTIN_VALUES:
             keep = kept if f.id in RETAIN_CALLS else False
+            picked = f.id in PICK_BUILTINS and len(node.args) > 1
+            default = {id(kw.value) for kw in node.keywords if kw.arg == "default"}
             for a in args:
-                _flows(a.value if isinstance(a, ast.Starred) else a, keep, out)
+                stored = ((f.id == DICT_BUILTIN and id(a) in named)
+                          or (f.id in PICK_BUILTINS and (id(a) in default or (picked and a in node.args))))
+                _flows(a.value if isinstance(a, ast.Starred) else a,
+                       keep or (stored and not isinstance(a, ast.Starred)), out)
         else:
             _flows(f, False, out)
             for a in args:                      # a callee may keep what it is given
