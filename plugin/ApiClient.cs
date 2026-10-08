@@ -4919,8 +4919,12 @@ namespace CompetitiveRounds
         /// written into the JSON body as they are, so both must be plain tokens
         /// ([A-Za-z0-9-], at most 64): anything else is refused here, unsent.
         /// The balance in the answer is written into the cache before the
-        /// callback runs, as the single discard does.</summary>
-        public static void PcDiscardBatch(string steamId, string key, IList<string> printIds, Action<bool, string> callback)
+        /// callback runs, as the single discard does -- and only while
+        /// `current` says the request is still the caller's current one
+        /// (item 18 fix pass 1, F2: PcShardFlight's generation), so a request
+        /// given up whose answer arrives late writes no balance. A null
+        /// `current` writes none (PcShardFlight.Admits fails closed).</summary>
+        public static void PcDiscardBatch(string steamId, string key, IList<string> printIds, Func<bool> current, Action<bool, string> callback)
         {
             if (Plugin.Instance == null || !PcPlainToken(key) || printIds == null || printIds.Count == 0
                 || printIds.Count > PC_DISCARD_BATCH_CAP)
@@ -4941,7 +4945,7 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(PostRequest(url, body.ToString(), (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[PC] discard-batch key={key} prints={count} ok={ok} resp={PcShort(resp)}");
-                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))
                 {
                     string sh = PcTopLevel(resp, "shards");
                     if (sh != null) CachedPcMe.shards = PcInt(sh);

@@ -107,7 +107,7 @@ def gate_q1_the_strip_card_shards_in_place_on_a_confirmed_click(s):
         "the strip's Discard is not the one-card shard")
     q = _code(_member(ui, "private static void OnQuickShardClick("))
     arm = _at(q, "if (!ShardConfirmed(set))", "the strip card no longer asks first")
-    send = _at(q, "SendShard(id, quickKey, ids, null, p.print_id);", "the strip card is not sent as a one-card shard")
+    send = _at(q, "SendShard(id, key, ids, null, p.print_id);", "the strip card is not sent as a one-card shard")
     assert arm < send, "the strip card is sent before it is confirmed"
     assert "string set = PcQuickShardRules.ArmSet(p.print_id);" in q, "the arm is not the card's own set"
 
@@ -115,12 +115,19 @@ def gate_q1_the_strip_card_shards_in_place_on_a_confirmed_click(s):
 def gate_q2_the_key_is_kept_for_the_card_until_an_answer(s):
     ui = s["ui"]
     q = _code(_member(ui, "private static void OnQuickShardClick("))
-    assert "if (quickKeyFor != set || string.IsNullOrEmpty(quickKey)) { quickKey = NewNonce(); quickKeyFor = set; }" in q, (
+    assert "string key = shardFlight.KeyFor(set, () => NewNonce());" in q, (
         "the strip card's nonce is not kept for that card")
     assert q.count("NewNonce()") == 1, "the strip card draws a fresh nonce on every click"
-    fail = _code(_member(ui, "private static void FailShard("))
-    assert "if (!PcQuickShardRules.KeepKeyAfter(code)) { quickKey = null; quickKeyFor = null; }" in fail, (
+    rules = _code(s["rules"])
+    keyfor = _member(rules, "internal string KeyFor(")
+    assert "if (QuickKeyFor != set || string.IsNullOrEmpty(QuickKey)) { QuickKey = mint(); QuickKeyFor = set; }" in keyfor, (
+        "the strip card's nonce is not kept for that card")
+    settle = _member(rules, "internal bool Settle(")
+    assert "if (quick && !PcQuickShardRules.KeepKeyAfter(code)) { QuickKey = null; QuickKeyFor = null; }" in settle, (
         "a refused strip shard drops its key outside the rule")
+    for fn in ("private static void FailShard(", "private static void FinishShard("):
+        assert "QuickKey" not in _code(_member(ui, fn)) and "quickKey" not in _code(_member(ui, fn)), (
+            "a refused strip shard drops its key outside the rule")
     send = _code(_member(ui, "private static void SendShard("))
     assert "ApiClient.PcDiscardBatch(id, key, ids," in send, "the one-card shard is not the batch route"
 
@@ -135,7 +142,7 @@ def gate_q4_the_balance_and_the_stamp_come_only_from_an_answer(s):
     for forbidden in ("CachedPcMe", "HistoryMarkDiscarded(", "prints.RemoveAll("):
         assert forbidden not in quick, "a refused strip shard changes the screen (%s)" % forbidden
     api = _code(_member(s["api"], "public static void PcDiscardBatch("))
-    assert 'if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)' in api, (
+    assert 'if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))' in api, (
         "the balance is written from an answer that is not a success")
     assert 'string sh = PcTopLevel(resp, "shards");' in api, "the balance is not the answer's top-level shards"
 
@@ -167,11 +174,44 @@ def gate_q6_one_request_per_shard(s):
     assert 'case "rate_limited":' in rules, "the rate limit is not named by the read-back rule"
 
 
+def gate_q9_a_retired_generation_touches_nothing(s):
+    """Fix pass 1, finding 2: every batch request is stamped with a
+    generation (PcShardFlight.Begin); the cache write and the callback both
+    test it, the callback before its first state write; the give-up and the
+    identity reset retire it. The decisions themselves are EXECUTED by the
+    harness (PcQuickShardRules.FlightCases); this pins that the client calls
+    them where the answer lands."""
+    ui = s["ui"]
+    send = _code(_member(ui, "private static void SendShard("))
+    begin = _at(send, "int serial = shardFlight.Begin(Now, packId, quickPrintId);", "a batch request is not stamped with a generation")
+    call = _at(send, "ApiClient.PcDiscardBatch(id, key, ids, () => ep == uiEpoch && shardFlight.IsCurrent(serial), (ok, resp) =>",
+               "the cache write does not test the request's generation")
+    cb = send[call:]
+    epoch = _at(cb, "if (ep != uiEpoch) return;", "the answer's identity check moved")
+    settle = _at(cb, "if (!shardFlight.Settle(serial, code))", "the answer is not checked against its own generation")
+    drop = settle + _at(cb[settle:], "return;", "a retired answer is not dropped")
+    first = min(_at(cb, "FinishShard(", "the answer no longer finishes"), _at(cb, "FailShard(", "the answer no longer fails"))
+    assert begin < call and epoch < settle < drop < first, "a retired answer is not dropped before its first state write"
+    assert cb.count("shardFlight.") == 2, "the answer touches the flight outside its generation check"
+    api = _code(_member(s["api"], "public static void PcDiscardBatch("))
+    write = _at(api, "CachedPcMe.shards = PcInt(sh);", "the batch no longer writes the balance it was sent")
+    guard = _at(api, "&& PcShardFlight.Admits(current))", "the balance is written for a retired request")
+    assert guard < write, "the balance is written for a retired request"
+    tick = _code(_member(ui, "internal static void MaybeTick("))
+    assert tick.count("shardFlight.GiveUp(Now, 25f, out quick)") == 1, "the give-up does not retire the generation"
+    assert "shardFlight.Reset();" in ui, "an identity change does not retire the flight"
+    for raw in (r"\bshardInFlight\s*=[^=>]", r"\bshardAt\b", r"\bquickKey\b", r"\bshardQuickId\s*=[^=>]", r"\bshardPackId\s*=[^=>]"):
+        assert not re.search(raw, _code(ui)), "the latch or nonce has a second writer: " + raw
+    settle_rule = _member(_code(s["rules"]), "internal bool Settle(")
+    assert "if (!IsCurrent(serial)) return false;" in settle_rule, "the answer is not checked against its own generation"
+
+
 GATES = [gate_q1_the_strip_card_shards_in_place_on_a_confirmed_click,
          gate_q2_the_key_is_kept_for_the_card_until_an_answer,
          gate_q4_the_balance_and_the_stamp_come_only_from_an_answer,
          gate_q5_a_failure_reads_back_by_the_rule,
-         gate_q6_one_request_per_shard]
+         gate_q6_one_request_per_shard,
+         gate_q9_a_retired_generation_touches_nothing]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -194,15 +234,23 @@ MUTATIONS = [
      "            if (!ShardConfirmed(set))   // the first click asks\n            {\n                int traded;",
      "the strip card no longer asks first"),
     ("Q2a", gate_q2_the_key_is_kept_for_the_card_until_an_answer, "ui",
-     "            SendShard(id, quickKey, ids, null, p.print_id);",
-     "            SendShard(id, quickKey = NewNonce(), ids, null, p.print_id);",
-     "            SendShard(id, quickKey, ids, null, p.print_id);   // the kept key",
+     "            SendShard(id, key, ids, null, p.print_id);",
+     "            SendShard(id, NewNonce(), ids, null, p.print_id);",
+     "            SendShard(id, key, ids, null, p.print_id);   // the kept key",
      "the strip card draws a fresh nonce on every click"),
+    ("Q2b", gate_q2_the_key_is_kept_for_the_card_until_an_answer, "rules",
+     "            if (quick && !PcQuickShardRules.KeepKeyAfter(code)) { QuickKey = null; QuickKeyFor = null; }\n"
+     "            return true;\n        }\n\n        /// <summary>The give-up",
+     "            QuickKey = null; QuickKeyFor = null;\n"
+     "            return true;\n        }\n\n        /// <summary>The give-up",
+     "            if (quick && !PcQuickShardRules.KeepKeyAfter(code)) { QuickKey = null; QuickKeyFor = null; }   // the rule\n"
+     "            return true;\n        }\n\n        /// <summary>The give-up",
+     "a refused strip shard drops its key outside the rule"),
     ("Q4a", gate_q4_the_balance_and_the_stamp_come_only_from_an_answer, "ui",
-     "            if (quickKeyFor != set || string.IsNullOrEmpty(quickKey)) { quickKey = NewNonce(); quickKeyFor = set; }\n",
-     "            if (quickKeyFor != set || string.IsNullOrEmpty(quickKey)) { quickKey = NewNonce(); quickKeyFor = set; }\n"
+     "            string key = shardFlight.KeyFor(set, () => NewNonce());\n",
+     "            string key = shardFlight.KeyFor(set, () => NewNonce());\n"
      "            HistoryMarkDiscarded(p.print_id, value0);\n",
-     "            if (quickKeyFor != set || string.IsNullOrEmpty(quickKey)) { quickKey = NewNonce(); quickKeyFor = set; }   // kept\n",
+     "            string key = shardFlight.KeyFor(set, () => NewNonce());   // kept\n",
      "the click changes the screen before the server answers"),
     ("Q5a", gate_q5_a_failure_reads_back_by_the_rule, "ui",
      "if (PcQuickShardRules.ReadBackAfter(code) && id != null) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }",
@@ -215,20 +263,40 @@ MUTATIONS = [
      'if (PcQuickShardRules.ReadBackAfter("given_up")) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }  ',
      "a strip shard given up does not read back"),
     ("Q6a", gate_q6_one_request_per_shard, "ui",
-     "            SendShard(id, quickKey, ids, null, p.print_id);",
-     "            foreach (var x in ids) SendShard(id, quickKey, new List<string> { x }, null, p.print_id);",
-     "            SendShard(id, quickKey, ids, null, p.print_id);   // one request",
+     "            SendShard(id, key, ids, null, p.print_id);",
+     "            foreach (var x in ids) SendShard(id, key, new List<string> { x }, null, p.print_id);",
+     "            SendShard(id, key, ids, null, p.print_id);   // one request",
      "the strip card's click loops or schedules"),
     ("Q6c", gate_q6_one_request_per_shard, "ui",
-     "            SendShard(id, quickKey, ids, null, p.print_id);",
-     "            SendShard(id, quickKey, ids, null, p.print_id);\n            SendShard(id, quickKey, ids, null, p.print_id);",
-     "            SendShard(id, quickKey, ids, null, p.print_id);   // once",
+     "            SendShard(id, key, ids, null, p.print_id);",
+     "            SendShard(id, key, ids, null, p.print_id);\n            SendShard(id, key, ids, null, p.print_id);",
+     "            SendShard(id, key, ids, null, p.print_id);   // once",
      "a confirmed click sends more than once"),
     ("Q6b", gate_q6_one_request_per_shard, "ui",
      "                else FailShard(id, resp, packId, quickPrintId != null);",
      "                else { FailShard(id, resp, packId, quickPrintId != null); SendShard(id, key, ids, packId, quickPrintId); }",
      "                else FailShard(id, resp, packId, quickPrintId != null);   // never sent again",
      "an answer sends again"),
+    ("Q9a", gate_q9_a_retired_generation_touches_nothing, "ui",
+     "                if (!shardFlight.Settle(serial, code))",
+     "                if (!shardFlight.Settle(shardFlight.Serial, code))",
+     "                if (!shardFlight.Settle(serial, code))   // its own generation",
+     "the answer is not checked against its own generation"),
+    ("Q9b", gate_q9_a_retired_generation_touches_nothing, "api",
+     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))",
+     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)",
+     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))   ",
+     "the balance is written for a retired request"),
+    ("Q9c", gate_q9_a_retired_generation_touches_nothing, "ui",
+     "            if (shardFlight.GiveUp(Now, 25f, out quick))",
+     "            quick = shardQuickId != null;\n            if (shardInFlight && quick)",
+     "            if (shardFlight.GiveUp(Now, 25f, out quick))   // retires the generation",
+     "the give-up does not retire the generation"),
+    ("Q9d", gate_q9_a_retired_generation_touches_nothing, "rules",
+     "            if (!IsCurrent(serial)) return false;\n            bool quick = QuickId != null;",
+     "            bool quick = QuickId != null;",
+     "            if (!IsCurrent(serial)) return false;   // retired: nothing\n            bool quick = QuickId != null;",
+     "the answer is not checked against its own generation"),
 ]
 
 

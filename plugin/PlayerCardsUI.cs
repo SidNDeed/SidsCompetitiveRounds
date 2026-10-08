@@ -209,14 +209,17 @@ namespace CompetitiveRounds
         private static bool selecting;                                        // the binder's Select mode
         private static readonly List<string> selectedIds = new List<string>();  // in the order they were clicked
         private static string armedShard; private static float armedShardAt;   // the exact request the first click armed
-        private static bool shardInFlight; private static float shardAt;
-        private static string shardPackId;             // the pack a Shard pack in flight came from (null: a selection)
+        // Item 18 fix pass 1 (F2): the one batch shard in flight -- its latch,
+        // its generation, the pack or strip card it is for -- and a strip
+        // card's nonce (kept until an answer, PcQuickShardRules.KeepKeyAfter,
+        // so the same card asked again after a lost answer is a replay) have
+        // ONE writer, PcShardFlight: a retired generation's late answer
+        // changes nothing (SendShard).
+        private static readonly PcShardFlight shardFlight = new PcShardFlight();
+        private static bool shardInFlight => shardFlight.InFlight;
+        private static string shardPackId => shardFlight.PackId;    // the pack a Shard pack in flight came from (null: a selection)
+        private static string shardQuickId => shardFlight.QuickId;  // the strip card a one-card shard is for
         private static string shardKey, shardKeyFor;   // a selection's nonce and the exact request it was made for (#172)
-        // Item 18: a pull-strip card's nonce and the card it was made for,
-        // kept until an answer (PcQuickShardRules.KeepKeyAfter), so the same
-        // card asked again after a lost answer is a replay; and the card a
-        // strip shard in flight is for (null: none, or a pack or selection).
-        private static string quickKey, quickKeyFor, shardQuickId;
         // Prints the server named as no longer this account's (a refused
         // batch), kept out of the next Shard pack; and packs whose key an
         // earlier batch already used with other cards, whose button stays
@@ -516,8 +519,7 @@ namespace CompetitiveRounds
             // and an answer still in flight is dropped by its epoch check.
             selecting = false; selectedIds.Clear();
             armedShard = null; armedShardAt = 0f;
-            shardInFlight = false; shardPackId = null; shardKey = null; shardKeyFor = null;
-            quickKey = null; quickKeyFor = null; shardQuickId = null;
+            shardFlight.Reset(); shardKey = null; shardKeyFor = null;
             shardGone.Clear(); packShardBurned.Clear();
             // FinishDiscard is not on this path, so the run state it clears
             // is cleared here too. A per-copy retry latch left populated
@@ -636,13 +638,14 @@ namespace CompetitiveRounds
             if (armedShard != null && Now - armedShardAt > 6f) { armedShard = null; NativeUI.MarkDirty(); }
             // Past the 20 s transport timeout, the other latches' rule: an answer
             // that never came back does not leave both shard buttons dead.
-            if (shardInFlight && Now - shardAt > 25f)
+            // The give-up retires the request's generation (F2): an answer that
+            // does arrive later settles nothing and writes no balance.
+            bool quick;
+            if (shardFlight.GiveUp(Now, 25f, out quick))
             {
                 // Item 18: a strip shard given up has an unknown outcome, so
                 // the collection and the balance are read back (its key is
                 // kept: the same card asked again is a replay).
-                bool quick = shardQuickId != null;
-                shardInFlight = false; shardPackId = null; shardQuickId = null;
                 if (quick)
                 {
                     Plugin.Log.LogWarning("[PC] quick shard: no answer 25 s after the request; given up, read back");
@@ -3099,8 +3102,8 @@ namespace CompetitiveRounds
                     + OnlyCopyNote(one, col) + TradedNote(traded), C_WARN);
                 return;
             }
-            if (quickKeyFor != set || string.IsNullOrEmpty(quickKey)) { quickKey = NewNonce(); quickKeyFor = set; }
-            SendShard(id, quickKey, ids, null, p.print_id);
+            string key = shardFlight.KeyFor(set, () => NewNonce());
+            SendShard(id, key, ids, null, p.print_id);
         }
 
         private static void RefreshSelectRow(ApiClient.PcCollection col)
@@ -3129,14 +3132,22 @@ namespace CompetitiveRounds
         /// (item 18), null for a pack or a selection.</summary>
         private static void SendShard(string id, string key, List<string> ids, string packId, string quickPrintId = null)
         {
-            shardInFlight = true; shardAt = Now; shardPackId = packId; shardQuickId = quickPrintId;
+            // F2: the request's generation. Its answer is checked against it
+            // twice: by ApiClient before the balance is written into the
+            // cache, and here before anything else is touched.
+            int serial = shardFlight.Begin(Now, packId, quickPrintId);
             NativeUI.MarkDirty();
             int ep = uiEpoch;
             Plugin.Log.LogInfo($"[PC] shard {(quickPrintId != null ? "quick" : packId != null ? "pack" : "selection")}: {ids.Count} card(s)");
-            ApiClient.PcDiscardBatch(id, key, ids, (ok, resp) =>
+            ApiClient.PcDiscardBatch(id, key, ids, () => ep == uiEpoch && shardFlight.IsCurrent(serial), (ok, resp) =>
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
-                shardInFlight = false; shardPackId = null; shardQuickId = null;
+                string code = ok ? null : resp == "not ready" ? "not_ready" : ApiClient.PcErrorCode(resp);
+                if (!shardFlight.Settle(serial, code))
+                {
+                    Plugin.Log.LogInfo($"[PC] shard: answer for request {serial} dropped (given up)");
+                    return;
+                }
                 if (ok) FinishShard(id, resp, ids, packId, quickPrintId != null);
                 else FailShard(id, resp, packId, quickPrintId != null);
                 NativeUI.MarkDirty();
@@ -3162,8 +3173,8 @@ namespace CompetitiveRounds
                 HistoryMarkDiscarded(r.Key, r.Value);
             }
             selectedIds.RemoveAll(x => done.Contains(x));
-            if (quick) { if (!PcQuickShardRules.KeepKeyAfter(null)) { quickKey = null; quickKeyFor = null; } }
-            else if (packId == null) { shardKey = null; shardKeyFor = null; }
+            // a strip card's nonce was ended by PcShardFlight.Settle (a success)
+            if (!quick) { if (packId == null) { shardKey = null; shardKeyFor = null; } }
             if (results.Count != sent.Count) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
             if (n <= 0) n = results.Count;
             string msg = I18n.TrF("Sharded {0} cards for {1} shards", n, total);
@@ -3203,8 +3214,9 @@ namespace CompetitiveRounds
                 // whether the card's key is kept for a replay.
                 // ApiClient refused to build the request (its "not ready"),
                 // which PcErrorCode would read as transport: nothing was sent.
+                // The card's nonce was kept or dropped by PcShardFlight.Settle
+                // (PcQuickShardRules.KeepKeyAfter) before this ran.
                 if (resp == "not ready") code = "not_ready";
-                if (!PcQuickShardRules.KeepKeyAfter(code)) { quickKey = null; quickKeyFor = null; }
                 if (code == "not_owned") foreach (var g in NamedPrintIds(resp)) { shardGone.Add(g); selectedIds.Remove(g); }
                 string say;
                 if (code == "not_owned") say = I18n.Tr("One of those cards is no longer in your collection - nothing was sharded; your binder has been refreshed");

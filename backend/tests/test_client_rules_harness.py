@@ -140,9 +140,10 @@ def test_the_quick_shard_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[quickshard\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # The suite ran 27 cases on the commit that added it (#342: a floor near
-    # the real count). Raise it when cases are added.
-    assert run >= 27, "the PcQuickShardRules suite shrank to %d cases" % run
+    # The suite ran 27 cases on the commit that added it, 45 once fix pass 1
+    # added the batch shard's generation cases (PcShardFlight, finding 2)
+    # (#342: a floor near the real count). Raise it when cases are added.
+    assert run >= 45, "the PcQuickShardRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
