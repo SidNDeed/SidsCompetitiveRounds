@@ -25,7 +25,11 @@ Required behaviour, each a named test:
   Q6  one shard is ONE request: the route is called once per confirmed click,
       never in a loop, never retried by itself;
   Q7  the shard writes only card rows, the shard balance and the key's row:
-      no match, series or rating table is touched.
+      no match, series or rating table is touched;
+  Q8  (fix pass 1, finding 1) every batch discard credits a print received
+      by trade at the server's configured traded-discard value, exactly as
+      the single discard does, and a batch whose traded-discard rule cannot
+      be established writes nothing.
 
 Each client gate runs on the real sources and, with its mutation and control,
 on edited copies (#391). The database tests use test_pc_shard_batch's harness
@@ -44,9 +48,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from test_pc_shard_batch import (  # noqa: E402,F401  (pg_build and env are fixtures)
-    _batch, _batches, _discarded, _err, _flat, _key, _pc, _player, _print, _scenario, _shards, _single,
-    env, pg_build,
+    _batch, _batches, _discarded, _err, _flat, _key, _pc, _player, _print, _q, _scenario, _shards, _single,
+    _val, env, main, pg_build,
 )
+from test_pc_shard_batch import _code as _py_code, _fn_src  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugin"
@@ -347,3 +352,112 @@ def test_q2_the_card_s_key_sent_for_another_card_is_refused(env):
         assert await _shards(me) == 40
         assert (await _discarded([b]))[b] == (False, None)
     _scenario(env, body)
+
+
+# ------------------------------- Q8: the traded-discard rule (fix pass 1, F1)
+
+# A configured traded-discard value no rarity pays, so a print credited at its
+# rarity can never pass for one credited at the traded rule.
+_TRADED_VALUE = 7
+
+
+async def _traded(print_id, to):
+    """Move a print to `to` as received by trade, the accept's own move
+    (main._PC_TRADE_MOVE_SQL: the owner and acquired_by_trade = true in one
+    statement, the only change migration 353's trigger admits to the flag)."""
+    await _q("UPDATE pc_prints SET owner_player_id = $2::uuid, acquired_by_trade = true "
+             "WHERE id = $1::uuid AND discarded_at IS NULL", print_id, to.pid)
+
+
+async def _rows(who):
+    """Every row count a discard can move, for one player."""
+    return (await _val("SELECT count(*) FROM pc_prints WHERE owner_player_id = $1::uuid AND discarded_at IS NOT NULL", who.pid),
+            await _val("SELECT count(*) FROM pc_shard_batches WHERE player_id = $1::uuid", who.pid),
+            await _val("SELECT count(*) FROM pc_delivery_leases"),
+            await _shards(who))
+
+
+def test_q8_a_batch_credits_a_traded_print_at_the_traded_value_and_an_untraded_one_at_its_rarity(env):
+    """One batch holding a print received by trade and one that was not:
+    the first is credited PC_TRADE['traded_discard_shards'] whatever its
+    rarity, the second its rarity's value -- each print's row, the answer's
+    results, the total, the key's row and the balance all agree, and the
+    single discard pays the same traded print kind the same value."""
+    env.monkeypatch.setitem(_pc.PC_TRADE, "traded_discard_shards", _TRADED_VALUE)
+    assert _TRADED_VALUE not in _pc.PC_ECONOMY["shards"].values()
+
+    async def body(ctx):
+        me = await _player(1, shards=3)
+        subject = await _player(2)
+        giver = await _player(3)
+        traded = await _print(giver, subject, "legendary")
+        plain = await _print(me, subject, "epic")
+        single = await _print(giver, subject, "legendary")
+        await _traded(traded, me)
+        await _traded(single, me)
+        k = _key()
+        status, ans = await _batch(ctx, "both", me, k, sorted([traded, plain]))
+        assert status == 200, ans
+        want = _TRADED_VALUE + _pc.shards_for("epic")
+        assert (ans["prints"], ans["shards_gained"], ans["shards"]) == (2, want, 3 + want), ans
+        paid = {r["print_id"]: r["shards_gained"] for r in ans["results"]}
+        assert paid == {traded: _TRADED_VALUE, plain: _pc.shards_for("epic")}, paid
+        rows = await _discarded([traded, plain])
+        assert rows[traded] == (True, _TRADED_VALUE) and rows[plain] == (True, _pc.shards_for("epic")), rows
+        assert await _batches(me) == [{"batch_key": k, "print_ids": ",".join(sorted([traded, plain])),
+                                       "prints": 2, "shards_gained": want}]
+        assert await _shards(me) == 3 + want
+        # The single route, the rule the batch must match: the same kind of
+        # print, the same value.
+        s_status, s_ans = await _single(ctx, "single", me, single)
+        assert s_status == 200 and s_ans["shards_gained"] == _TRADED_VALUE, s_ans
+    _scenario(env, body)
+
+
+@pytest.mark.parametrize("word", ["unknown", "partial", "broken"])
+def test_q8_a_batch_whose_traded_rule_cannot_be_established_writes_nothing(env, word):
+    """The trading schema's word is neither found (ready / off) nor a
+    positively confirmed schema_missing: no traded-discard value is provably
+    right, so the batch answers 503 trading_unavailable, exactly as the
+    single discard does, and writes nothing -- every row count before equals
+    after, both prints stay live, no key row, no credit statement."""
+    async def word_is(_db):
+        return word
+    env.monkeypatch.setattr(main, "_pc_trading_word", word_is)
+
+    async def body(ctx):
+        me = await _player(1, shards=9)
+        subject = await _player(2)
+        giver = await _player(3)
+        traded = await _print(giver, subject, "rare")
+        plain = await _print(me, subject, "common")
+        await _traded(traded, me)
+        before = await _rows(me)
+        answer = await _batch(ctx, "refused", me, _key(), sorted([traded, plain]))
+        assert _err(answer) == (503, "trading_unavailable"), answer
+        assert await _rows(me) == before, (before, await _rows(me))
+        assert (await _discarded([traded, plain])) == {traded: (False, None), plain: (False, None)}
+        assert not any(_flat(s).lower().startswith(("update", "insert", "delete")) for s in ctx.statements("refused")), (
+            "the refused batch sent a write")
+        single = await _single(ctx, "single", me, traded)
+        assert _err(single) == (503, "trading_unavailable"), single
+    _scenario(env, body)
+
+
+def test_q8_both_routes_read_the_one_traded_rule_before_the_gate_and_any_write():
+    """Structure, per FUNCTION (#279): each discard route calls
+    _pc_traded_rule_governs exactly once, after its players-row lock, before
+    its gate and before its first conditional discard; the batch's value
+    reads PC_TRADE['traded_discard_shards'] for a traded print, as the
+    single route's does."""
+    for name in ("pc_discard_print", "pc_discard_batch"):
+        code = _py_code(_fn_src(name))
+        assert code.count("_pc_traded_rule_governs (") == 1, name
+        lock = code.index("FOR NO KEY UPDATE")
+        rule = code.index("_pc_traded_rule_governs (")
+        gate = code.index("_pc_discard_gate (")
+        disc = code.index("UPDATE pc_prints SET discarded_at = now()")
+        assert lock < rule < gate < disc, name
+        assert code.count("_pc . PC_TRADE [ \"traded_discard_shards\" ]") == 1, name
+    rule = _py_code(_fn_src("_pc_traded_rule_governs"))
+    assert rule.count("HTTPException (") == 2 and rule.count("await db . rollback ( )") == 2
