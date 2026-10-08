@@ -4485,7 +4485,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:48568 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:48981 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4551,7 +4551,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:48380 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:48793 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4621,7 +4621,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:48283 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:48696 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -5805,6 +5805,12 @@ app = FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+# Verified reads (board row 33, item b): every GET route this app registers
+# carries the read gate once, through the route class -- set here, before the
+# first route decorator, so a new GET route is gated by default. The two
+# routers included below are built with the same class. See read_gate.py.
+import read_gate
+app.router.route_class = read_gate.ReadGateRoute
 
 app.add_middleware(
     CORSMiddleware,
@@ -6008,6 +6014,16 @@ _VERSION_GATE_BYPASS = frozenset({
     # Aug 7 item 1: below-min clients (the ones being told to update) are a
     # prime audience for a standing "update out / server issue" notice.
     "/api/v1/alerts/active",
+    # Verified reads control routes (reviewed addition): the operator key
+    # issue, revoke and list, the read-gate stage, and the census read. Each
+    # carries the admin signature (_require_admin) and its caller is the seat's
+    # admin script, which is not the mod and has no mod version. Exact paths;
+    # the rate limiter's own list gains nothing.
+    "/api/v1/admin/operators/keys",
+    "/api/v1/admin/operators/keys/revoke",
+    "/api/v1/admin/operators",
+    "/api/v1/admin/read-gate/mode",
+    "/api/v1/admin/read-census",
 })
 
 
@@ -6372,6 +6388,21 @@ def _rl_client_address(request) -> str:
 
 
 @app.middleware("http")
+async def read_gate_cache_control(request: Request, call_next):
+    """Verified reads: a gated response the read gate marked (every gated read
+    under `enforce`, and the probe route in every stage) carries
+    `Cache-Control: no-store, private`, so no cache between the client and
+    this box can answer a later request with it. The gate's own refusals carry
+    the header themselves. In `off` and `log` nothing is marked, so gated
+    responses are byte-identical to what they were. Registered first, so it is
+    the innermost http middleware."""
+    response = await call_next(request)
+    if getattr(request.state, "read_gate_no_store", False):
+        response.headers["Cache-Control"] = read_gate.NO_STORE
+    return response
+
+
+@app.middleware("http")
 async def rate_limit_gate(request: Request, call_next):
     path = request.url.path
     # /api/v1/internal/* — AUTH BEFORE PARSE (Codex Aug-18 review; learning
@@ -6398,9 +6429,37 @@ async def rate_limit_gate(request: Request, call_next):
         return await call_next(request)   # authorized bot — exempt from RL
     if (not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS:
         return await call_next(request)
+    refusal = _rl_charge(request)
+    if refusal is not None:
+        return refusal
+    return await call_next(request)
+
+
+def _rl_charge(request, force: bool = False):
+    """Charge this request (or chat socket) to its per-address bucket, at most
+    ONCE per connection: the answer is None when it may proceed, else the
+    refusal response (413, 429, or the motion latch's 503). A connection
+    already charged is not charged again, so the version gate's charge ahead
+    of an operator-key lookup and rate_limit_gate's own charge are one charge.
+
+    rate_limit_gate calls it for every /api/v1/ path outside
+    _RATE_LIMIT_BYPASS. `force` charges a path in that bypass too: the version
+    gate passes it before the operator-key exemption lookup, and the read gate
+    (app.state.lookup_charge) before a credential lookup that would read the
+    database on a connection nothing has charged. A valid internal key is
+    never charged, as before. The once-per-connection mark lives on the
+    request's state; an object with url, client and headers but no state
+    (what rate_limit_gate accepted before this function) is charged on every
+    call."""
+    state = getattr(request, "state", None)
+    if state is not None and getattr(state, "rl_charged", False):
+        return None
+    path = request.url.path
+    if not force and ((not path.startswith("/api/v1/")) or path in _RATE_LIMIT_BYPASS):
+        return None
     internal_key = request.headers.get("X-Internal-Key")
     if internal_key and internal_key == os.getenv("API_SECRET_KEY", ""):
-        return await call_next(request)   # bot is exempt
+        return None   # bot is exempt
     # Cheap body-size gate (header only; the proxy enforces the real limit).
     cl = request.headers.get("content-length")
     if cl:
@@ -6456,6 +6515,8 @@ async def rate_limit_gate(request: Request, call_next):
             headers={"Retry-After": str(int(window))},
         )
     dq.append(now)
+    if state is not None:
+        state.rl_charged = True
     # Periodic prune of idle buckets so the dict can't grow unbounded.
     if now - _RL_LAST_PRUNE[0] > 60:
         _RL_LAST_PRUNE[0] = now
@@ -6467,7 +6528,16 @@ async def rate_limit_gate(request: Request, call_next):
                 del _RL_BUCKETS[k]
         for k in [k for k, until in _RL_MOTION_LATCH.items() if until <= now]:
             del _RL_MOTION_LATCH[k]
-    return await call_next(request)
+    return None
+
+
+# Verified reads: the read gate charges a credential lookup that would read the
+# database on a connection nothing has charged yet (a route in
+# _RATE_LIMIT_BYPASS, the chat socket) to the same per-address buckets. The
+# charge is held by this app and the read gate reads it from the app serving
+# the connection, so importing this file a second time (as api.main) gives that
+# second app its own charge and leaves this app's charge unchanged.
+app.state.lookup_charge = lambda conn: _rl_charge(conn, force=True) is None
 
 
 @app.middleware("http")
@@ -6507,6 +6577,22 @@ async def version_gate(request: Request, call_next):
         return await call_next(request)
     sent = request.headers.get("X-Mod-Version")
     if not sent:
+        # Verified reads: a GET carrying a LIVE operator key (validated through
+        # the read gate's own verifier and cache) needs no mod version, unless
+        # its route is WRITE_ON_GET, PLAYER or BOT_ONLY. Every other request
+        # with no version, an unissued or revoked key included, gets the 426
+        # below exactly as before. The verdict rides request.state to the gate.
+        # The per-address limiter charges the request BEFORE that lookup (it
+        # is the request's one charge: rate_limit_gate does not charge it
+        # again), so repeated unissued keys answer 429 and stop reaching the
+        # operator table. /internal/ paths and a valid internal key returned
+        # above, so the internal key is still checked before any body is read.
+        if request.method == "GET" and request.headers.get("X-Operator-Key"):
+            refusal = _rl_charge(request, force=True)
+            if refusal is not None:
+                return refusal
+        if await read_gate.operator_version_exempt(request, app):
+            return await call_next(request)
         if REQUIRE_MOD_VERSION:
             return JSONResponse(
                 status_code=426,
@@ -7168,7 +7254,10 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=ffa_finishing_count,
-                              team_dc_fallback=team_dc_fallback)
+                              team_dc_fallback=team_dc_fallback,
+                              read_gate=await read_gate.current_mode(db),
+                              read_gate_build=read_gate.READ_GATE_BUILD,
+                              binder_standings=_BINDER_STANDINGS_BUILD)
     except Exception:
         # Report the role even when the database is unreachable: "which box is
         # this" is exactly the question being asked when things are degraded --
@@ -7201,13 +7290,16 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               janitor_selftest_build=_JANITOR_SELFTEST_BUILD,
                               janitor_selftest=_janitor_selftest_marker(),
                               ffa_finishing_count=_FFA_FINISHING_COUNT_LAST,
-                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST)
+                              team_dc_fallback=_TEAM_DC_FALLBACK_LAST,
+                              read_gate=read_gate.mode_word(),
+                              read_gate_build=read_gate.READ_GATE_BUILD,
+                              binder_standings=_BINDER_STANDINGS_BUILD)
 
 
 LATEST_MOD_VERSION = "1.40.3"
 
 @app.get("/api/v1/mod-version", tags=["System"])
-async def get_mod_version():
+async def get_mod_version(request: Request = None):
     """Returns the latest recommended mod version, the gating floor, and the
     capability flags a client must see BEFORE it changes what it puts on the
     wire.
@@ -7253,6 +7345,18 @@ async def get_mod_version():
         # first spelling went when the client lane landed on this tree.
         _INVOLUNTARY_CAUSE_CAPABILITY_FIELD: _involuntary,
     }
+    # Verified reads: the stage this box acts on (off | log | enforce |
+    # unknown), which a running client polls to learn a flip or a rollback, and
+    # the GET templates the gate never refuses for want of a read credential
+    # (from the live routing table). Present only for a request whose
+    # X-Mod-Version is READ_GATE_ADVERT_MIN or later; any other request (older,
+    # absent, unparseable) and a bare call with no request get the body above
+    # byte for byte. The header selects the response SHAPE only: both fields
+    # are readable by anyone, and nothing is admitted or refused on it.
+    sent_version = request.headers.get("x-mod-version") if request is not None else None
+    if read_gate.advert_requested(sent_version):
+        body["read_gate"] = await read_gate.current_mode()
+        body["read_gate_open"] = read_gate.ungated_templates(app.routes)
     # The joiner's region guard (connect-failure D3): advertised only while
     # this server enforces it. JOIN_REGION_GUARD ships False, so the answer
     # carries no such key and a gated joiner only logs a region mismatch.
@@ -20498,6 +20602,22 @@ async def get_recent_multimode_series(
     return {"entries": entries[:limit]}
 
 
+def _ws_chat_charge(ws) -> bool:
+    """Charge the chat socket's address to the per-address limiter before
+    database work the socket is about to cause: True when that work may run.
+    HTTP middleware never runs for a socket, so ws_chat charges here: once
+    at connect, before the socket's first database access, then once per auth
+    frame and once per chat message that passed the connection's spam gate,
+    each before that frame's own lookups. The once-per-connection mark is
+    cleared first because every one of those is a separate unit of database
+    work. A valid internal key is never charged (_rl_charge), so the bot's
+    socket is unaffected."""
+    state = getattr(ws, "state", None)
+    if state is not None:
+        state.rl_charged = False
+    return _rl_charge(ws, force=True) is None
+
+
 @app.websocket("/api/v1/ws/chat")
 async def ws_chat(ws: WebSocket):
     """Mod <-> server chat channel. Messages are broadcast fan-out style."""
@@ -20513,8 +20633,21 @@ async def ws_chat(ws: WebSocket):
         if sent and _parse_version(sent) < _parse_version(MIN_MOD_VERSION_EFFECTIVE):
             await ws.close(code=1008, reason="outdated")
             return
+    # The per-address limiter, before this socket's first database access (the
+    # credential count and the lockdown snapshot below). A refused charge is
+    # accepted and closed 1013 rate_limited -- the read gate's lookup_limited
+    # close -- so the client retries later and the handshake itself answers
+    # 101, not a refusal status; nothing below runs.
+    if not _ws_chat_charge(ws):
+        await ws.accept()
+        await ws.close(code=1013, reason="rate_limited")
+        return
     await chat_manager.connect(ws)
     print(f"[CHAT] subscriber connected (total={chat_manager.count})")
+    # Verified reads: the socket's outbound read side is COUNTED in log and
+    # enforce by its connect-time credential class; nothing here refuses, and
+    # the inbound path below is unchanged. Never raises.
+    await read_gate.count_socket(ws)
     # Lockdown snapshot for LATE JOINERS (D1 F15): the toggle broadcast only
     # reaches sockets connected at that moment, so every new socket is told
     # the current state up front — in BOTH states, because ChatClient.ChatLocked
@@ -20551,7 +20684,10 @@ async def ws_chat(ws: WebSocket):
             if data.get("type") == "auth":
                 claim = str(data.get("steam_id", ""))[:20]
                 token = str(data.get("token", ""))[:128]
-                if claim and token:
+                # Each auth frame's session read is charged first; a refused
+                # charge skips the read, so the socket's identity stays what
+                # it was, as after a failed check.
+                if claim and token and _ws_chat_charge(ws):
                     try:
                         from database import async_session
                         async with async_session() as _adb:
@@ -20612,6 +20748,12 @@ async def ws_chat(ws: WebSocket):
             # so spam bursts never turn into DB load.
             if not _chat_spam_ok(id(ws), message):
                 print(f"[CHAT] rate-limited {display_name} ({steam_id})")
+                continue
+            # The address is charged before this message's ban, mute and
+            # metadata reads and its insert; a refused charge drops the
+            # message silently, as the spam gate does.
+            if not _ws_chat_charge(ws):
+                print(f"[CHAT] address rate-limited {display_name} ({steam_id})")
                 continue
             # Banned players can't chat. Silently drop — telling them they're banned would
             # encourage griefing on alts. The mod's queue-join 409 is the primary signal.
@@ -26114,44 +26256,31 @@ _PC_POOL_MEMBER_SQL = """(p.deleted_at IS NULL
 # its tie-breaker (rating, then player id); the card's W/L (`series`) is the
 # truthful record and excludes invalidated series, as pool_rank's
 # has-a-series rule does (design v4 §2).
-_PC_SNAPSHOT_SELECT_SQL = """
-    WITH pool AS (
-        SELECT p.id AS player_id, gr.rating, gr.peak_rating,
-               si.sku AS title_sku, si.name AS title_name, si.preview_color AS title_color
-          FROM players p
-          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
-          LEFT JOIN shop_items si ON si.id = p.active_title_id
-         WHERE """ + _PC_POOL_MEMBER_SQL + """
-    ),
-    series AS (
-        SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
-          FROM (
-              SELECT rs.player1_id AS player_id,
-                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END AS won,
-                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END AS lost
-                FROM ranked_series rs
-               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
-              UNION ALL
-              SELECT rs.player2_id,
-                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END,
-                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END
-                FROM ranked_series rs
-               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
-          ) s
-         GROUP BY s.player_id
-    ),
+#
+# THE BOARD A CARD'S RANK MEANS, as ONE text, in the spelling
+# `_PC_POOL_STEAM_ID_SQL` already uses. Two statements stand on it: the
+# snapshot's select below, which freezes `board_rank` onto a print at mint,
+# and `_PC_BOARD_RANKS_SQL`, which answers "where does this subject stand
+# TODAY" for the binder's rating-position sort (item 20 §3.2). A card prints
+# one of those numbers and the binder orders by the other, so the two have to
+# be the same board by construction rather than by two texts agreeing — a
+# drift in `:min_matches`, in the activity clause or in the ROW_NUMBER
+# ordering would put a card in a group its own printed rank contradicts.
+# test_binder_rating_sort.py pins this text character for character and pins
+# that both consumers interpolate it, the way test_pc_no_steam_no_card.py:319
+# pins the pool's id clause.
+#
+# It is the TAIL of the snapshot's WITH list on purpose: `board` has to be the
+# last CTE for `_PC_BOARD_RANKS_SQL` to append its own SELECT. `top` moved
+# above `series` for the same reason; no CTE here reads another except
+# `board`, which reads the two above it, so the order is free to change.
+_PC_BOARD_CTE_SQL = """
     legacy AS (
         SELECT p.id AS player_id, COUNT(m.id) AS total
           FROM players p
           JOIN matches m ON (m.player1_id = p.id OR m.player2_id = p.id)
                         AND m.is_ranked = true AND m.series_id IS NULL
          GROUP BY p.id
-    ),
-    top AS (
-        SELECT DISTINCT ON (mc.player_id) mc.player_id, mc.card_name
-          FROM (SELECT player_id, card_name, COUNT(*) AS n
-                  FROM match_cards GROUP BY player_id, card_name) mc
-         ORDER BY mc.player_id, mc.n DESC, mc.card_name
     ),
     board_series AS (
         SELECT s.player_id, COUNT(*) AS total
@@ -26170,7 +26299,58 @@ _PC_SNAPSHOT_SELECT_SQL = """
            AND COALESCE(se.total, 0) + COALESCE(lg.total, 0) >= CAST(:min_matches AS integer)
            AND p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer))
     )
-    SELECT pool.player_id,
+"""
+
+#
+# THE PARENTHESES AROUND THE TAIL ARE LOAD-BEARING, and they are not style.
+# `_janitor_sql_inventory` resolves every janitor `text(...)` argument
+# statically and refuses a call it cannot fold; its constant folder gives up
+# past a depth of 8, and `+` is left-associative, so each term appended after
+# `_PC_POOL_MEMBER_SQL` pushes that name — and the `_PC_POOL_STEAM_ID_SQL`
+# inside it — one level deeper. Written flat, the two extra terms this change
+# adds put the pool's id clause at depth 9 and `_pc_take_snapshot` turns up in
+# the self-test's `dynamic` list, i.e. the boot-time EXPLAIN sweep silently
+# stops covering the snapshot. Bracketing the tail keeps the left spine the
+# length it was, so the pool clause resolves at exactly the depth it always
+# did. test_pc_no_steam_no_card.py's
+# test_the_boot_self_test_explains_both_of_the_janitors_pool_reads is the
+# check that fails if this is ever flattened.
+#
+# The fragment already ends in a newline, so the literal that follows it opens
+# straight on `    SELECT` — without that the statement would grow a blank line
+# the pre-item-20 text did not have.
+_PC_SNAPSHOT_SELECT_SQL = """
+    WITH pool AS (
+        SELECT p.id AS player_id, gr.rating, gr.peak_rating,
+               si.sku AS title_sku, si.name AS title_name, si.preview_color AS title_color
+          FROM players p
+          LEFT JOIN glicko_ratings gr ON gr.player_id = p.id
+          LEFT JOIN shop_items si ON si.id = p.active_title_id
+         WHERE """ + _PC_POOL_MEMBER_SQL + ("""
+    ),
+    top AS (
+        SELECT DISTINCT ON (mc.player_id) mc.player_id, mc.card_name
+          FROM (SELECT player_id, card_name, COUNT(*) AS n
+                  FROM match_cards GROUP BY player_id, card_name) mc
+         ORDER BY mc.player_id, mc.n DESC, mc.card_name
+    ),
+    series AS (
+        SELECT s.player_id, SUM(s.won) AS wins, SUM(s.lost) AS losses, COUNT(*) AS total
+          FROM (
+              SELECT rs.player1_id AS player_id,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END AS won,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END AS lost
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+              UNION ALL
+              SELECT rs.player2_id,
+                     CASE WHEN rs.winner_id = rs.player2_id THEN 1 ELSE 0 END,
+                     CASE WHEN rs.winner_id = rs.player1_id THEN 1 ELSE 0 END
+                FROM ranked_series rs
+               WHERE rs.status = 'completed' AND rs.invalidated_at IS NULL
+          ) s
+         GROUP BY s.player_id
+    ),""" + _PC_BOARD_CTE_SQL + """    SELECT pool.player_id,
            ROW_NUMBER() OVER (ORDER BY (COALESCE(series.total, 0) > 0) DESC,
                                        pool.rating DESC NULLS LAST,
                                        pool.peak_rating DESC NULLS LAST,
@@ -26185,7 +26365,235 @@ _PC_SNAPSHOT_SELECT_SQL = """
       LEFT JOIN top ON top.player_id = pool.player_id
       LEFT JOIN board ON board.player_id = pool.player_id
      ORDER BY pool_rank
+""")
+
+# ── the binder's rating-position sort: the subject's standings TODAY ──────────
+# Item 20 §3.2. The collection answer carries, per print, where the subject
+# stands on the card's own board right now — which is not what the print row
+# holds: `pr.board_rank` and `pr.rating` are the MINT-TIME snapshot, frozen,
+# and pc_face draws that frozen number on the card. Two statements, not one,
+# because the two halves have very different costs.
+
+# (a) The heavy half: the whole board, ranked, over the shared CTE above. It
+# stands on a full aggregate over `matches` and a full GROUP BY over every
+# completed `ranked_series`, and `WHERE p.id = ANY(...)` would reduce none of
+# it because the ROW_NUMBER window is computed before any such join. So it is
+# never per-subject and never per-request; it is computed for the whole board
+# and cached for `_PC_STANDINGS_TTL_S`.
+_PC_BOARD_RANKS_SQL = "WITH" + _PC_BOARD_CTE_SQL + """
+    SELECT player_id, board_rank FROM board
 """
+
+# MEASURED on this seat's local PostgreSQL 16.9 (2026-09-20, database
+# item20test, rebuilt and re-measured seven times; the full table is in the
+# design's §3.2, and `backend/tests/item20_board_cost.py` re-derives it).
+#
+# The fixture the bound is set against DOMINATES production on every axis the
+# cost scales on, which is the only thing that makes it a bound: 9,000 players
+# and 9,000 glicko rows against the primary's 5,130 and 5,130, 40,000 matches
+# against 16,401, 38,000 ranked_series against 2,217, and 846 eligible board
+# rows against 98 (all read from the primary through `sql-readonly:`).
+#
+# Statement (a) there: median of medians 275.3 ms over three builds of ten
+# timed runs, worst single sample 345.8 ms, ~92k shared buffer hits of which
+# ~90k are the `legacy` arm alone.
+#
+# The TTL is chosen against the SPREAD rather than a median, and the difference
+# is the whole argument: at 30 s the median run costs 0.92% of a pool
+# connection-minute, which passes, but the worst observed run costs 1.15%,
+# which does not. At 60 s the median is 0.46% and the worst run 0.58% — inside
+# the ~1% bar at every one of the seventy samples taken. 60 is the smallest
+# value that holds at the worst observation and not merely at the typical one.
+_PC_STANDINGS_TTL_S = 60
+
+# A refresh that RAISES is cached too, for this much shorter window (Codex
+# item 20 round 1, LOW 2; 5 s is the value the land brief names, the design
+# names none). Without it a failed refresh leaves nothing behind, so every
+# cold caller queued on the one lock runs the same failing heavy statement in
+# turn, each holding a pool connection while it does. With it, callers inside
+# the window answer at once with no statement, the attach helper turns that
+# into `subject_standings: false` (the existing degraded answer, five sorts),
+# and the first caller after the window retries once. Short on purpose: the
+# stamp only bounds retries of a statement that just failed, it must not keep
+# the sixth sort away for a TTL after the database recovers.
+_PC_STANDINGS_FAIL_TTL_S = 5
+
+# The /health word `binder_standings` (schemas.HealthResponse): a code
+# constant, so both arms answer it with no database. It exists to be probed
+# by the release train and has no other reader (#306).
+_BINDER_STANDINGS_BUILD = 1
+
+# The cache is keyed on WHAT IT WAS COMPUTED WITH, never on a module global
+# read back at call time (#744): an entry is
+# (min_matches, active_days) -> (expires_at_monotonic, {player_id: board_rank}),
+# or (expires_at_monotonic, None) for a refresh that failed inside the last
+# `_PC_STANDINGS_FAIL_TTL_S`, so a request whose binds differ MISSES rather
+# than being handed someone else's board. No functools cache anywhere near it — an unbounded path-blind
+# cache is the shape that answered with stand-in fonts for the rest of a
+# process. Unbounded growth is not a concern here for a reason that is checked
+# rather than assumed: the only writer is `_pc_board_ranks`, whose key comes
+# from two module constants, so the map holds one entry per distinct
+# configuration this process has ever run under.
+_PC_BOARD_RANKS_CACHE: dict = {}
+_PC_BOARD_RANKS_LOCK = asyncio.Lock()
+
+# (b) The cheap half, run per collection read, over the few hundred distinct
+# subjects of the rows just fetched. `board_rank` comes from (a)'s map, so this
+# statement never touches `matches` or `ranked_series` at all — which is what
+# makes it cheap, and it is a property of the TEXT rather than of a plan.
+#
+# It is deliberately NOT described here as a primary-key lookup. Measured at
+# 3,000 players / 300 ids, the planner reads `players` sequentially (112 pages)
+# in preference to 300 `players_pkey` descents, and it is right to: forcing the
+# index with `enable_seqscan=off` more than doubles server-side execution
+# (2.676 ms against 1.215 ms) and reads 3,032 buffers instead of 140. An
+# `unnest(...) JOIN players` rewrite is no better — it scans all 3,000 rather
+# than 300. The plan is the planner's to choose and it moves with the table;
+# the bound that does NOT move is the absence of the two aggregate tables
+# above, which is why the test pins the statement's text and not its plan.
+# 140 shared buffers here against ~92,245 for (a), a factor of 659.
+#
+# The `inactive` expression is the leaderboard's own SELECT-LIST form, lifted
+# character for character — deliberately NOT the WHERE-clause form, whose
+# `OR CAST(:include_inactive AS boolean)` disjunct belongs to a display toggle
+# this statement has nothing to do with. Every bind is typed and none is
+# string-built (#448).
+_PC_SUBJECT_STANDINGS_SQL = """
+    SELECT p.id AS player_id,
+           CASE WHEN p.deleted_at IS NULL THEN gr.rating END       AS rating,
+           (gr.player_id IS NOT NULL AND p.deleted_at IS NULL)     AS rated,
+           NOT (p.last_seen > NOW() - make_interval(days => CAST(:active_days AS integer)))
+                                                                   AS inactive
+      FROM players p
+      LEFT JOIN glicko_ratings gr ON gr.player_id = p.id AND p.deleted_at IS NULL
+     WHERE p.id = ANY(CAST(:subject_ids AS uuid[]))
+"""
+
+
+async def _pc_board_ranks(db: AsyncSession, *, min_matches: int, active_days: int) -> dict:
+    """{player_id: board_rank} for the whole board, at most once per TTL.
+
+    The expiry is re-checked AFTER the lock is acquired, not only before it:
+    twenty binder tabs opening together all miss the first check, queue on the
+    lock, and the nineteen that wake up behind the winner must see the entry it
+    just wrote rather than each running the statement again. Without the second
+    check the lock would serialise twenty executions instead of collapsing them
+    into one, which is worse than no lock at all.
+
+    `time.monotonic` rather than wall clock: a clock step must not make an
+    entry immortal, and comparing monotonic to monotonic is the only comparison
+    that holds across one.
+
+    ONE lock for every key, not one per key. A refresh under a second
+    configuration therefore waits behind the first, which is acceptable
+    because the map holds one entry per distinct (min_matches, active_days)
+    this process has ever run under: in production that is a single entry, and
+    the second only ever appears under a test that redirects a global. A
+    per-key lock would buy concurrency between configurations that do not
+    exist, at the price of a second structure to keep in step with the cache.
+
+    A refresh that raises stamps a failure entry for `_PC_STANDINGS_FAIL_TTL_S`
+    and re-raises; a caller that finds that stamp raises `_PcBoardUnavailable`
+    without running the statement. Both are exceptions on purpose: they reach
+    the collection route through `_pc_subject_standings` and the attach helper
+    below it, which already turns any exception into
+    `subject_standings: false`. A cancelled refresh (BaseException) stamps
+    nothing, since it says nothing about the statement."""
+    key = (int(min_matches), int(active_days))
+    hit = _PC_BOARD_RANKS_CACHE.get(key)
+    if hit is not None and hit[0] > time.monotonic():
+        return _pc_board_hit(hit)
+    async with _PC_BOARD_RANKS_LOCK:
+        hit = _PC_BOARD_RANKS_CACHE.get(key)
+        if hit is not None and hit[0] > time.monotonic():
+            return _pc_board_hit(hit)
+        try:
+            rows = (await db.execute(text(_PC_BOARD_RANKS_SQL),
+                                     {"min_matches": key[0], "active_days": key[1]})).mappings().all()
+        except Exception:
+            _PC_BOARD_RANKS_CACHE[key] = (time.monotonic() + _PC_STANDINGS_FAIL_TTL_S, None)
+            raise
+        ranks = {str(r["player_id"]): int(r["board_rank"]) for r in rows}
+        _PC_BOARD_RANKS_CACHE[key] = (time.monotonic() + _PC_STANDINGS_TTL_S, ranks)
+        return ranks
+
+
+class _PcBoardUnavailable(RuntimeError):
+    """The board refresh failed inside the last `_PC_STANDINGS_FAIL_TTL_S`."""
+
+
+def _pc_board_hit(hit) -> dict:
+    """The map of a live cache entry, or `_PcBoardUnavailable` for a failure stamp."""
+    if hit[1] is None:
+        raise _PcBoardUnavailable("board refresh failed recently; retried after the stamp expires")
+    return hit[1]
+
+
+async def _pc_subject_standings(db: AsyncSession, subject_ids) -> dict:
+    """{player_id: {board_rank, rating, inactive}} for the given subjects.
+
+    `board_rank` is None for a subject the board does not hold — off it, below
+    the match minimum, deleted, or not seen inside the activity window. `rating`
+    is None unless the subject has a live rating row, which is what `rated`
+    decides: a subject who deleted their data has neither.
+
+    The binds are read HERE and passed down as the cache key, so a test that
+    redirects `LEADERBOARD_ACTIVE_DAYS` changes the key and misses rather than
+    being served the board computed under the old value (#744)."""
+    ids = sorted({str(s) for s in subject_ids if s})
+    if not ids:
+        return {}
+    min_matches, active_days = _PC_POOL_MIN_MATCHES, LEADERBOARD_ACTIVE_DAYS
+    ranks = await _pc_board_ranks(db, min_matches=min_matches, active_days=active_days)
+    rows = (await db.execute(text(_PC_SUBJECT_STANDINGS_SQL),
+                             {"active_days": active_days, "subject_ids": ids})).mappings().all()
+    out = {}
+    for r in rows:
+        pid = str(r["player_id"])
+        # The cached board map is a HINT, up to one TTL old; this live row is
+        # the authority. A subject who lost their rating row or deleted their
+        # data inside the TTL is `rated` false here while the map still holds
+        # their old rank, and a rank beside a null rating would sort the card
+        # as a rated one. So no rank without a live rating. A subject with no
+        # live row at all is absent from `rows` and gets no entry.
+        out[pid] = {"board_rank": (ranks.get(pid) if r["rated"] else None),
+                    "rating": (_pc_num(r["rating"]) if r["rated"] else None),
+                    "inactive": bool(r["inactive"])}
+    return out
+
+
+async def _pc_attach_subject_standings(db: AsyncSession, prints: list) -> bool:
+    """Put each subject's standings TODAY onto the prints, and say whether it
+    worked. The return value is what the answer's `subject_standings` flag is
+    built from — a computed bool on the one path that holds both a board map
+    and a completed per-subject read, never a literal on a return path, so a
+    box that could not compute them cannot claim it did.
+
+    A fact about the SUBJECT, not about the print, so it is not a column on
+    `pc_prints` and cannot come out of the face select. Attached after
+    `_pc_print_dict` has run, which is the shape `_pc_prints_of_pack` already
+    uses for `dup_at_pull`, and keyed by subject id rather than by position.
+
+    Which way the unhandled case fails: a refresh that raises returns False and
+    the binder still paints, with its five existing sorts — the sixth is simply
+    not offered. Expiring by default, never blocking by default (#276): the
+    refusal costs one ordering, and a guard is judged by what its refusal
+    costs (#430)."""
+    try:
+        standings = await _pc_subject_standings(
+            db, {p.get("subject_player_id") for p in prints})
+    except Exception as ex:   # noqa: BLE001 - any failure means "no standings"
+        print(f"[PC] subject standings unavailable: {ex}")
+        return False
+    for p in prints:
+        st = standings.get(p.get("subject_player_id"))
+        if st is None:
+            continue
+        p["subject_board_rank"] = st["board_rank"]
+        p["subject_rating"] = st["rating"]
+        p["subject_inactive"] = st["inactive"]
+    return True
+
 
 _PC_MEMBER_INSERT_SQL = """
     INSERT INTO pc_pool_members (snapshot_id, player_id, pool_rank, rarity, rating, peak_rating,
@@ -28169,11 +28577,16 @@ async def pc_collection(
         """), {"owner": owner_pid})).all()}
         for p in prints:
             p["traded"] = p["print_id"] in traded
+    # Item 20: where each subject stands on the card's own board TODAY, so the
+    # binder can order by position. THIS ROUTE ONLY -- a pack-open answer and
+    # /pc/card go through the same `_pc_print_dict` and must keep their present
+    # shape, which is why the attach lives here and not in that helper.
+    standings = await _pc_attach_subject_standings(db, prints)
     counts = {k: 0 for k in _pc.RARITIES}
     for p in prints:
         counts[p["rarity"]] = counts.get(p["rarity"], 0) + 1
     return {"owner_name": _pcp.public_render_name(owner_name) or _pc_neutral_name(ctx),
-            "public": public, "locale": ctx["locale"],
+            "public": public, "locale": ctx["locale"], "subject_standings": standings,
             "count": len(prints), "by_rarity": counts, "prints": prints}
 
 
@@ -68972,3 +69385,180 @@ async def _mail_retention_sweep(db: AsyncSession) -> tuple[int, int, int]:
         " RETURNING 1"
     ), {"days": MAIL_CENSOR_HITS_KEEP_DAYS})).fetchall()
     return len(expired), len(purged), len(hits)
+
+
+# -- Verified reads: operator keys, the read-gate stage, census, probe ---------
+#
+# Board row 33, item b. The gate itself, its route classes and its census live
+# in read_gate.py; these are its control routes. Every one carries the admin
+# signature (_require_admin) except the probe, which is the gate's canary. The
+# four admin paths and the census read are in _VERSION_GATE_BYPASS (their
+# caller is the seat's admin script, which has no mod version); the rate
+# limiter's own bypass list gains nothing. The POSTs land on the primary (the
+# standby's replica_write_gate refuses them); the census read answers on
+# either box from that process's memory.
+
+class _OperatorKeyIssueReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    operator_name: str = Field(..., max_length=64)
+    contact: str = Field(..., min_length=1, max_length=200)
+
+
+class _OperatorKeyRevokeReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    id: int
+
+
+class _ReadGateModeReq(BaseModel):
+    admin_steam_id: str
+    hmac_signature: str | None = None
+    mode: str = Field(..., max_length=16)
+
+
+@app.post("/api/v1/admin/operators/keys", tags=["Admin"])
+async def admin_operator_key_issue(req: _OperatorKeyIssueReq, db: AsyncSession = Depends(get_db)):
+    """Issue an operator key into the operator's free slot (1 or 2). The key is
+    answered ONCE; only its sha256 is stored. The operator name is
+    canonicalised (read_gate.canonical_operator_name) before the signature
+    check, the advisory lock, the insert and the audit row, so `SCRMOD` and
+    `scrmod` are one operator. With both slots live: 409 two_live_keys, and
+    the partial unique index refuses a racing third insert the same way."""
+    try:
+        name = read_gate.canonical_operator_name(req.operator_name)
+    except ValueError as ex:
+        raise HTTPException(status_code=422, detail=str(ex))
+    await _require_admin(db, req.admin_steam_id, "operator_key_issue", name, req.hmac_signature)
+    await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {"k": "opkey:" + name})
+    live = {int(r[0]) for r in (await db.execute(text(
+        "SELECT slot FROM api_operator_keys WHERE operator_name = :n AND revoked_at IS NULL"
+    ), {"n": name})).all()}
+    free = [s for s in (1, 2) if s not in live]
+    if not free:
+        raise HTTPException(status_code=409, detail="two_live_keys")
+    key, key_hash, hint = read_gate.new_operator_key()
+    try:
+        async with db.begin_nested():
+            new_id = (await db.execute(text(
+                "INSERT INTO api_operator_keys"
+                " (operator_name, contact, slot, key_hash, key_hint, created_by)"
+                " VALUES (:n, :c, :s, :h, :hint, :by) RETURNING id"
+            ), {"n": name, "c": req.contact.strip(), "s": free[0], "h": key_hash,
+                "hint": hint, "by": req.admin_steam_id[:20]})).scalar()
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="two_live_keys")
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="operator_key_issue",
+                            details={"operator": name, "slot": free[0], "id": int(new_id),
+                                     "hint": hint})
+    await db.commit()
+    return {"id": int(new_id), "operator_name": name, "slot": free[0],
+            "key": key, "key_hint": hint}
+
+
+@app.post("/api/v1/admin/operators/keys/revoke", tags=["Admin"])
+async def admin_operator_key_revoke(req: _OperatorKeyRevokeReq, db: AsyncSession = Depends(get_db)):
+    """Revoke one live operator key by id. This box stops accepting it at
+    once; the other box within the 60 s positive-cache bound after the change
+    reaches its database."""
+    await _require_admin(db, req.admin_steam_id, "operator_key_revoke", str(req.id),
+                         req.hmac_signature)
+    row = (await db.execute(text(
+        "UPDATE api_operator_keys SET revoked_at = now(), revoked_by = :by"
+        " WHERE id = :id AND revoked_at IS NULL RETURNING operator_name, slot"
+    ), {"id": req.id, "by": req.admin_steam_id[:20]})).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no_live_key")
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="operator_key_revoke",
+                            details={"operator": row[0], "slot": int(row[1]), "id": req.id})
+    await db.commit()
+    read_gate.forget_operator_key_id(req.id)
+    return {"id": req.id, "operator_name": row[0], "slot": int(row[1]), "revoked": True}
+
+
+@app.get("/api/v1/admin/operators", tags=["Admin"])
+async def admin_operator_list(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """Every operator key row, live and revoked, newest first. Never the hash."""
+    await _require_admin(db, admin_steam_id, "operator_key_list", "", hmac_signature)
+    rows = (await db.execute(text(
+        "SELECT id, operator_name, contact, slot, key_hint, created_at, created_by,"
+        "       revoked_at, revoked_by"
+        "  FROM api_operator_keys ORDER BY id DESC"
+    ))).mappings().all()
+    return {"operators": [{
+        "id": int(r["id"]), "operator_name": r["operator_name"], "contact": r["contact"],
+        "slot": int(r["slot"]), "key_hint": r["key_hint"],
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        "created_by": r["created_by"],
+        "revoked_at": r["revoked_at"].isoformat() if r["revoked_at"] else None,
+        "revoked_by": r["revoked_by"],
+    } for r in rows]}
+
+
+def _read_gate_enforce_blocker() -> str | None:
+    """Why `enforce` may not be set yet, or None. Checked by the mode route
+    before it writes anything."""
+    floor = read_gate.READ_GATE_CLIENT_MIN
+    if floor is None:
+        return "client_floor_unnamed"
+    if _parse_version(MIN_MOD_VERSION_EFFECTIVE) < _parse_version(floor):
+        return "client_floor_below_read_gate"
+    if not read_gate.SOCKET_READ_GATE_BUILT:
+        return "socket_read_gate_absent"
+    return None
+
+
+@app.post("/api/v1/admin/read-gate/mode", tags=["Admin"])
+async def admin_read_gate_mode(req: _ReadGateModeReq, db: AsyncSession = Depends(get_db)):
+    """Set the verified-reads stage (off | log | enforce) for both boxes: one
+    runtime_settings row, read by each box through a 15 s TTL cache, no deploy
+    and no restart. Rollback is this route with `log`. `enforce` is refused
+    with 409 while the client floor is unnamed or below it, or while the chat
+    socket's read gate is not built; a refusal leaves the row unchanged."""
+    mode = (req.mode or "").strip().lower()
+    if mode not in read_gate.MODES:
+        raise HTTPException(status_code=422, detail="mode must be off, log or enforce")
+    await _require_admin(db, req.admin_steam_id, "read_gate_mode", mode, req.hmac_signature)
+    if mode == "enforce":
+        blocker = _read_gate_enforce_blocker()
+        if blocker is not None:
+            raise HTTPException(status_code=409, detail=blocker)
+    await db.execute(text(
+        "INSERT INTO runtime_settings (key, value) VALUES ('read_gate_mode', :v)"
+        " ON CONFLICT (key) DO UPDATE SET value = :v, updated_at = NOW()"
+    ), {"v": mode})
+    await _log_admin_action(db, admin_steam_id=req.admin_steam_id, action="read_gate_mode",
+                            details={"mode": mode})
+    await db.commit()
+    read_gate.mode_cache_set(mode)
+    return {"mode": mode, "node": "standby" if IS_REPLICA else "primary"}
+
+
+@app.get("/api/v1/admin/read-census", tags=["Admin"])
+async def admin_read_census(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    """This process's read census since it started (read_gate.census_snapshot):
+    node, boot_id, since, mode, counts by (route, method, class, key id,
+    version header present, refused), distinct sources per (class, hour) and
+    agents per unverified class. Readable on either box."""
+    await _require_admin(db, admin_steam_id, "read_census", "", hmac_signature)
+    return read_gate.census_snapshot(await read_gate.current_mode())
+
+
+@app.get(read_gate.PROBE_PATH, tags=["System"])
+async def read_gate_probe(request: Request):
+    """The read gate's canary. Class PROBE: the gate requires one valid
+    credential (internal key, session or operator key) in EVERY stage, counts
+    it, and this answers who it decided the caller was, and nothing else."""
+    cred = getattr(request.state, "read_gate_credential", None) or ("", "")
+    return JSONResponse(
+        {"node": "standby" if IS_REPLICA else "primary", "boot_id": read_gate.BOOT_ID,
+         "mode": read_gate.mode_word(), "credential_class": cred[0], "key_id": cred[1]},
+        headers={"Cache-Control": read_gate.NO_STORE})

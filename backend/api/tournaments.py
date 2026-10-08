@@ -52,8 +52,11 @@ from schemas import (
     TournamentTimeVoteRequest,
 )
 from tournament_bracket import SignupInput, build_bracket, build_double_elim_bracket
+from read_gate import ReadGateRoute
 
-router = APIRouter(prefix="/api/v1/tournaments", tags=["Tournaments"])
+# Verified reads: every GET route here carries the read gate (read_gate.py).
+router = APIRouter(prefix="/api/v1/tournaments", tags=["Tournaments"],
+                   route_class=ReadGateRoute)
 
 
 async def _assert_tournament_service_policy(

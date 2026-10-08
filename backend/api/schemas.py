@@ -991,6 +991,24 @@ class HealthResponse(BaseModel):
     # silently leaving the key out. Absent on any build before this batch,
     # which is how the train reads the old build.
     ffa_finishing_count: int
+    # read_gate: the verified-reads stage this box acts on (read_gate.py):
+    # off | log | enforce, or unknown while this process has never read the
+    # stage (gated reads then answer 503). The connected arm reads the stage
+    # (TTL-cached); the degraded arm answers the cached value with no I/O.
+    # read_gate_build: the lane's fixed build marker ("vr1"), equal on both
+    # boxes by construction; read by the release train and nothing else
+    # (#306). Both declared without a default, so a constructor that omits
+    # either raises instead of silently leaving the key out; absent on any
+    # build before verified reads.
+    read_gate: str
+    read_gate_build: str
+    # binder_standings: item 20's fixed build marker (1): this build attaches
+    # the subjects' standings to the collection read. The collection route
+    # needs a signed request on every build and answers an unsigned probe
+    # alike on old and new, so this word is the release train's build
+    # discriminator; read by the train and nothing else (#306). Required, so
+    # a constructor that omits it raises; absent on any build before item 20.
+    binder_standings: int
     # pc_motion: how many of the dance-card motion routes are registered on
     # this app (main._PC_MOTION_ROUTES, design S11.3): the motion upload, the
     # per-visit motion read, the atlas, the selection and the bot's motion

@@ -519,8 +519,15 @@ def test_the_boot_self_test_explains_both_of_the_janitors_pool_reads():
     rule = " ".join(steamid64.individual_id_sql("p.steam_id").split())
     word = " ".join(main._PC_POOL_MEMBER_SQL.split())
     assert rule in word
-    # the snapshot's select: the word resolved down to the id clause's own text
-    assert sum(("WHERE " + word + " ), series AS (") in q for q in by_func["_pc_take_snapshot"]) == 1
+    # the snapshot's select: the word resolved down to the id clause's own
+    # text, and it is the LAST thing in the pool CTE -- nothing sits between
+    # the membership word and that CTE's closing paren, which is the property
+    # this line measures. The neighbour named is `top` rather than `series`
+    # since item 20 lifted the board CTEs into `_PC_BOARD_CTE_SQL`: `board`
+    # has to be the last CTE for `_PC_BOARD_RANKS_SQL` to append its own
+    # SELECT, and that put `top` above `series`. Only the name of the CTE
+    # that follows the pool moved.
+    assert sum(("WHERE " + word + " ), top AS (") in q for q in by_func["_pc_take_snapshot"]) == 1
     # the writer half of the versioned rule is a janitor statement too
     assert sum("INSERT INTO pc_pool_snapshots (member_count, rule)" in q
                for q in by_func["_pc_take_snapshot"]) == 1
