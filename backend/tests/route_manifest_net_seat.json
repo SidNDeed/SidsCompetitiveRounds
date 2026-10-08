@@ -3587,6 +3587,30 @@
           "b1c6c4f0969e39c0f6d96a5fab1102df29c82db4"
         ]
       ]
+    },
+    {
+      "classification": "statically-nonconsumer",
+      "reason": "auto-log router (backend/api/auto_logs.py): the upload route responds from its own write -- a status word, the new bug_reports row's id and bug_number, the stored blob size and the write-time scrub's counters -- and the internal prune route responds with its own sweep's tallies. Neither reads the matches table at all, so no W1 private Match column has a path to either output. Static classification: handler-implementation drift is caught by the source fingerprint beside each row.",
+      "routes": [
+        [
+          "/api/v1/logs/auto",
+          [
+            "POST"
+          ],
+          "auto_logs",
+          "upload_auto_log",
+          "5cc0674615135d5b568127bf6facbccb1fffd6d5"
+        ],
+        [
+          "/api/v1/internal/logs/auto/prune",
+          [
+            "POST"
+          ],
+          "auto_logs",
+          "run_auto_log_prune",
+          "4959f5f014de91885204974d2b451b293b2cc131"
+        ]
+      ]
     }
   ],
   "entry_points": {
