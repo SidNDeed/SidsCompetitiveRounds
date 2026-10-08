@@ -71,6 +71,13 @@ namespace CompetitiveRounds
 
         private static AvatarFacingIn Menu() => new AvatarFacingIn { FaceKey = FaceKey };
 
+        private static AvatarFacingIn OfflineRoom()
+        {
+            var f = Room(false, Modded());
+            f.OfflineMode = true;
+            return f;
+        }
+
         private static AvatarSetting Set(bool auto, int modded, int vanilla)
             => new AvatarSetting { Auto = auto, Modded = modded, Vanilla = vanilla };
 
@@ -144,8 +151,10 @@ namespace CompetitiveRounds
 
         private static bool T4b(AvatarRules r, out string got)
         {
-            var c = r.Census(NotLive(), new AvatarFacingIn { Unreadable = true, FaceKey = FaceKey });
-            got = "unreadable facing inside a room -> " + c;
+            // fix pass 1 (BR-M4): the room is a REAL online room here, as the
+            // claim says; the no-room half is case BRM4.
+            var c = r.Census(NotLive(), new AvatarFacingIn { Unreadable = true, InRoom = true, RoomExists = true, FaceKey = FaceKey });
+            got = "unreadable facing inside a real online room -> " + c;
             return c == AvatarFacing.Vanilla;
         }
 
@@ -190,7 +199,9 @@ namespace CompetitiveRounds
             foreach (bool auto in new[] { true, false })
                 foreach (int m in Slots)
                     foreach (int v in Slots)
-                        foreach (var f in new[] { Room(true, Modded()), Room(false, Unmodded()), Room(false), Menu() })
+                        // in-room facings only: a confirmed no-room outranks a
+                        // live manager (fix pass 1, H9), which cases H9 and M3 pin
+                        foreach (var f in new[] { Room(true, Modded()), Room(false, Unmodded()), Room(false), OfflineRoom() })
                         {
                             var d = r.Evaluate(In(Live(), f, Set(auto, m, v), 2, 7));
                             combos++;
@@ -289,7 +300,7 @@ namespace CompetitiveRounds
             var s = Set(true, 2, 1);
             bool menu = r.SwapPermitted(In(NotLive(), Menu(), s, 3, -1));
             bool forced = r.SwapPermitted(In(NotLive(), Room(true, Modded()), s, 2, 3));
-            bool live = r.SwapPermitted(In(Live(), Menu(), s, 3, -1));
+            bool live = r.SwapPermitted(In(Live(), Room(false), s, 3, -1));   // f names no face here: only the gate refuses
             bool unset = r.SwapPermitted(In(NotLive(), Room(true, Modded()), Set(true, -1, 1), 3, -1));
             bool off = r.SwapPermitted(In(NotLive(), Room(true, Modded()), Set(false, 2, 1), 3, -1));
             got = "menu=" + menu + " room naming a face=" + forced + " live game=" + live
@@ -390,7 +401,272 @@ namespace CompetitiveRounds
             return unusable == 120 && inWindow == 1 && afterExpiry == 2 && two.Raised == 2;
         }
 
+        // ---- fix pass 1 (Codex BUILD round 1), one case per finding -------
+
+        private static AvatarLivenessIn PlayingOnly() => new AvatarLivenessIn { ManagerExists = true, IsPlaying = true };
+        private static AvatarLivenessIn BattleOnly() => new AvatarLivenessIn { ManagerExists = true, BattleOngoing = true };
+        private static AvatarLivenessIn BodyOnly() => new AvatarLivenessIn { ManagerExists = false, LocalBodyExists = true };
+
+        /// <summary>One liveness term alone, the other two false: the face
+        /// must not move. The separator is the same room with every term false,
+        /// which must switch, so a feature that never switches cannot pass.</summary>
+        private static bool LiveTermBlocks(AvatarRules r, AvatarLivenessIn term, string name, out string got)
+        {
+            var room = Room(false, Unmodded());
+            var locked = r.Evaluate(In(term, room, Set(true, 3, 1), 5, -1));
+            var open = r.Evaluate(In(new AvatarLivenessIn { ManagerExists = term.ManagerExists }, room, Set(true, 3, 1), 5, -1));
+            got = name + " alone: census=" + locked.Facing + " apply=" + locked.Apply
+                + " | every term false: census=" + open.Facing + " apply=" + open.Apply;
+            return locked.Gated && locked.Apply < 0 && !open.Gated && open.Apply == 1;
+        }
+
+        private static bool H6a(AvatarRules r, out string got) => LiveTermBlocks(r, PlayingOnly(), "isPlaying", out got);
+        private static bool H6b(AvatarRules r, out string got) => LiveTermBlocks(r, BattleOnly(), "battleOngoing", out got);
+        private static bool H6c(AvatarRules r, out string got) => LiveTermBlocks(r, BodyOnly(), "no manager, a local body", out got);
+
+        private static bool H8(AvatarRules r, out string got)
+        {
+            var entrant = r.FacingOf(Room(true, Modded(), Unmodded()));
+            var gone = r.FacingOf(Room(true, Modded()));
+            var plain = r.FacingOf(Room(false, Modded(), Unmodded()));
+            int w = r.F(entrant == AvatarFacing.Locked ? AvatarFacing.Undecided : entrant, Set(true, 3, 1), 5, Faces(), Loader());
+            got = "issued room + an unmodded entrant=" + entrant + " (f(own 5)=" + w + ") | entrant left=" + gone
+                + " | the same roster unissued=" + plain;
+            return entrant == AvatarFacing.Vanilla && w == 1 && gone == AvatarFacing.Modded && plain == AvatarFacing.Vanilla;
+        }
+
+        private static bool BRH1(AvatarRules r, out string got)
+        {
+            var solo = r.Evaluate(In(NotLive(), Room(true), Set(true, 2, 1), 3, -1));
+            var issued = r.FacingOf(Room(true, Modded()));
+            var census = r.FacingOf(Room(false, Modded(), Modded()));
+            var faceOnly = r.FacingOf(Room(true, FaceOnly()));
+            got = "issued room, zero others: facing=" + solo.Facing + " apply=" + solo.Apply
+                + " | issued + one modded=" + issued + " | unissued, all modded=" + census
+                + " | issued + one cr_face-only actor=" + faceOnly;
+            return solo.Facing == AvatarFacing.Undecided && solo.Apply < 0 && issued == AvatarFacing.Modded
+                && census == AvatarFacing.Modded && faceOnly == AvatarFacing.Vanilla;
+        }
+
+        private static bool H9(AvatarRules r, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var seat = new Seat(3);
+            seat.Step(r, NotLive(), Room(false, Unmodded()), s);                  // Vanilla: 3 -> 1, home 3
+            int forced = seat.Live, held = seat.Home;
+            seat.Step(r, Live(), Room(false, Unmodded()), s);                     // the game: locked
+            int inGame = seat.Live;
+            var d = seat.Step(r, Live(), Menu(), s);                              // leave, the old manager still live
+            got = "forced live=" + forced + " home=" + held + " | in game live=" + inGame
+                + " | leave with a live manager: census=" + d.Facing + " live=" + seat.Live + " home=" + seat.Home;
+            return forced == 1 && held == 3 && inGame == 1 && seat.Live == 3 && seat.Home == -1;
+        }
+
+        private static bool M3(AvatarRules r, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var seat = new Seat(3);
+            seat.Step(r, NotLive(), Room(true, Modded()), s);                     // Modded: 3 -> 2, home 3
+            seat.Step(r, Live(), Room(true, Modded()), s);                        // the game
+            seat.Step(r, Live(), Menu(), s);                                      // E7 alone (no OnLeftRoom)
+            int afterOne = seat.Applies, liveOne = seat.Live, homeOne = seat.Home;
+            seat.Step(r, Live(), Menu(), s);                                      // a second exit edge
+            seat.Step(r, NotLive(), Menu(), s);                                   // and a third, manager gone
+            var unreadable = r.Census(Live(), new AvatarFacingIn { Unreadable = true, FaceKey = FaceKey });
+            got = "disconnect alone: applies=" + afterOne + " live=" + liveOne + " home=" + homeOne
+                + " | two more exits: applies=" + seat.Applies + " live=" + seat.Live
+                + " | unreadable room read, live manager: " + unreadable;
+            return afterOne == 2 && liveOne == 3 && homeOne == -1 && seat.Applies == 2 && seat.Live == 3
+                && unreadable == AvatarFacing.Locked;
+        }
+
+        private static bool BRM3(AvatarRules r, out string got)
+        {
+            var faces = Faces(); var l = Loader();
+            int onlyM = r.F(AvatarFacing.Modded, Set(true, 3, -1), 5, faces, l);
+            int onlyV = r.F(AvatarFacing.Vanilla, Set(true, -1, 1), 5, faces, l);
+            int both = r.F(AvatarFacing.Modded, Set(true, 3, 1), 5, faces, l);
+            var dOne = r.Evaluate(In(NotLive(), Room(true, Modded()), Set(true, 3, -1), 5, -1));
+            var dRestore = r.Evaluate(In(NotLive(), Room(false, Unmodded()), Set(true, -1, 1), 1, 4));   // a debt from before
+            got = "only modded set, modded room: f=" + onlyM + " | only vanilla set, vanilla room: f=" + onlyV
+                + " | both set: f=" + both + " | one set, evaluator: apply=" + dOne.Apply + " unusable=" + dOne.Unusable
+                + " | one set, remembered 4: apply=" + dRestore.Apply + " home->" + dRestore.NewHome;
+            return onlyM == 5 && onlyV == 5 && both == 3 && dOne.Apply < 0 && dOne.Unusable == AvatarUnusable.None
+                && dRestore.Apply == 4 && dRestore.NewHome == -1;
+        }
+
+        private static bool BRM4(AvatarRules r, out string got)
+        {
+            var noRoom = r.FacingOf(new AvatarFacingIn { Unreadable = true, FaceKey = FaceKey });
+            var offline = r.FacingOf(new AvatarFacingIn { Unreadable = true, InRoom = true, OfflineMode = true, FaceKey = FaceKey });
+            var real = r.FacingOf(new AvatarFacingIn { Unreadable = true, InRoom = true, RoomExists = true, FaceKey = FaceKey });
+            var census = r.Census(NotLive(), new AvatarFacingIn { Unreadable = true, FaceKey = FaceKey });
+            got = "unreadable, no room established=" + noRoom + " | unreadable, offline room=" + offline
+                + " | unreadable, real online room=" + real + " | census at the menu, unreadable=" + census;
+            return noRoom == AvatarFacing.Undecided && offline == AvatarFacing.Undecided
+                && real == AvatarFacing.Vanilla && census == AvatarFacing.Undecided;
+        }
+
+        /// <summary>The carrier as the popup sees it: the last value written,
+        /// or none.</summary>
+        private static string Carry(FaceCarrierAction a, string carrier, string current)
+        {
+            return a == FaceCarrierAction.Publish ? current : a == FaceCarrierAction.Clear ? null : carrier;
+        }
+
+        private static bool H3(AvatarRules r, out string got)
+        {
+            var valid = AvatarFaceIds.Of(3, 3, 3, 3);
+            var zero = AvatarFaceIds.Of(0, 0, 0, 0);
+            var none = new AvatarFaceIds();
+            string carrier = null;
+            carrier = Carry(r.CarrierAction(false, true, true, true, valid), carrier, "face-3");
+            string afterValid = carrier;
+            carrier = Carry(r.CarrierAction(false, true, true, true, zero), carrier, "face-0");
+            string afterZero = carrier;
+            carrier = Carry(r.CarrierAction(false, true, true, true, valid), carrier, "face-3");
+            carrier = Carry(r.CarrierAction(false, true, true, true, none), carrier, "null");
+            string afterNull = carrier;
+            carrier = Carry(r.CarrierAction(false, true, true, true, valid), carrier, "face-3");
+            carrier = Carry(r.CarrierAction(false, true, true, false, none), carrier, "empty");
+            string afterEmpty = carrier;
+            var spec = r.CarrierAction(true, true, true, true, valid);
+            var noHandler = r.CarrierAction(false, false, true, false, none);
+            var noPlayer = r.CarrierAction(false, true, false, true, valid);
+            got = "valid -> carrier " + (afterValid ?? "none") + " | then all-zero -> " + (afterZero ?? "none")
+                + " | then a null face -> " + (afterNull ?? "none") + " | then an empty list -> " + (afterEmpty ?? "none")
+                + " | spectator=" + spec + " no handler=" + noHandler + " no local player=" + noPlayer;
+            return afterValid == "face-3" && afterZero == null && afterNull == null && afterEmpty == null
+                && spec == FaceCarrierAction.Keep && noHandler == FaceCarrierAction.Keep && noPlayer == FaceCarrierAction.Keep;
+        }
+
+        /// <summary>The capture replay (M8): the exact line AvatarDefaults.Evaluate
+        /// logs, for the issued, vanilla, census-Modded, entrant and departure
+        /// rooms, each driven through a seat.</summary>
+        private static bool M8(AvatarRules r, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var sb = new StringBuilder();
+            bool ok = true;
+            Func<Seat, string, AvatarFacingIn, AvatarFacing, int, int, bool> step = (seat, tag, room, wantFacing, wantNominee, wantOthers) =>
+            {
+                int was = seat.Live, home = seat.Home;
+                var d = seat.Step(r, NotLive(), room, s);
+                int n = room.OtherFighterKeys != null ? room.OtherFighterKeys.Count : 0;
+                string line = r.LogsClassification(tag) || d.Apply >= 0 ? r.ClassificationLine(tag, d, n, room.ModIssuedRoom, was, home) : "(no line)";
+                sb.Append(" || ").Append(line);
+                return line.Contains("(facing " + wantFacing + ",") && line.Contains(", nominee " + wantNominee + ",")
+                    && line.Contains(", other fighters " + wantOthers + ",");
+            };
+            ok &= step(new Seat(3), "E2-joined", Room(true, Modded()), AvatarFacing.Modded, 2, 1);
+            ok &= step(new Seat(3), "E2-joined", Room(false, Unmodded()), AvatarFacing.Vanilla, 1, 1);
+            var c = new Seat(3);
+            ok &= step(c, "E2-joined", Room(false, Modded(), Modded()), AvatarFacing.Modded, 2, 2);
+            ok &= step(c, "E3-entered", Room(false, Modded(), Modded(), Unmodded()), AvatarFacing.Vanilla, 1, 3);
+            ok &= step(c, "E11-left", Room(false, Modded(), Modded()), AvatarFacing.Modded, 2, 2);
+            var kept = new Seat(2);
+            ok &= step(kept, "E2-joined", Room(true, Modded()), AvatarFacing.Modded, 2, 1);      // nothing moves: a kept line
+            bool quiet = !r.LogsClassification("E5-spawn") && !r.LogsClassification("E4-props")
+                && !r.LogsClassification("E9-select") && !r.LogsClassification("E12-roomprops");
+            got = "per-frame and property edges log no kept line=" + quiet + sb;
+            return ok && quiet;
+        }
+
         // ---- the mutants and the controls -------------------------------
+
+        // fix pass 1 mutants: each restores the build-round-1 behaviour (or
+        // drops exactly the term its case is about); each control is the same
+        // method rewritten with its meaning unchanged.
+        private sealed class M_H6a : AvatarRules
+        {
+            internal override bool Live(AvatarLivenessIn l) { if (l.Unreadable) return true; return l.ManagerExists ? l.BattleOngoing : l.LocalBodyExists; }
+        }
+        private sealed class M_H6b : AvatarRules
+        {
+            internal override bool Live(AvatarLivenessIn l) { if (l.Unreadable) return true; return l.ManagerExists ? l.IsPlaying : l.LocalBodyExists; }
+        }
+        private sealed class M_H6c : AvatarRules
+        {
+            internal override bool Live(AvatarLivenessIn l) { if (l.Unreadable) return true; return l.ManagerExists && (l.IsPlaying || l.BattleOngoing); }
+        }
+
+        private sealed class M_ProvenanceDecides : AvatarRules
+        {   // build round 1's FacingOf: provenance before the roster
+            internal override AvatarFacing FacingOf(AvatarFacingIn f)
+            {
+                if (f.InRoom && !f.OfflineMode && !f.Unreadable && !f.LocalIsSpectator && f.RoomExists && f.ModIssuedRoom) return AvatarFacing.Modded;
+                return base.FacingOf(f);
+            }
+        }
+        private sealed class M_SoloIssued : AvatarRules
+        {   // provenance answers only the empty roster
+            internal override AvatarFacing FacingOf(AvatarFacingIn f)
+            {
+                var c = base.FacingOf(f);
+                bool empty = f.OtherFighterKeys == null || f.OtherFighterKeys.Count == 0;
+                return c == AvatarFacing.Undecided && f.InRoom && f.RoomExists && !f.OfflineMode && !f.LocalIsSpectator && f.ModIssuedRoom && empty
+                    ? AvatarFacing.Modded : c;
+            }
+        }
+
+        private sealed class M_LivenessFirst : AvatarRules
+        {   // build round 1's Census: liveness before the confirmed exit
+            internal override AvatarFacing Census(AvatarLivenessIn l, AvatarFacingIn f) => Live(l) ? AvatarFacing.Locked : FacingOf(f);
+        }
+        private sealed class M_AnyNoRoomIsExit : AvatarRules
+        {   // an unreadable room read counted as a confirmed exit
+            internal override AvatarFacing Census(AvatarLivenessIn l, AvatarFacingIn f)
+            {
+                if (!f.InRoom) return FacingOf(f);
+                return Live(l) ? AvatarFacing.Locked : FacingOf(f);
+            }
+        }
+        private sealed class K_Census : AvatarRules
+        {
+            internal override AvatarFacing Census(AvatarLivenessIn l, AvatarFacingIn f)
+            {
+                bool confirmedExit = f.InRoom == false && f.Unreadable == false;
+                if (!confirmedExit && Live(l)) return AvatarFacing.Locked;
+                return FacingOf(f);
+            }
+        }
+
+        private sealed class M_OnePresetEnough : AvatarRules { internal override bool BothPresetsSet(AvatarSetting s) => true; }
+        private sealed class K_BothPresets : AvatarRules { internal override bool BothPresetsSet(AvatarSetting s) => !(s.Modded < 0 || s.Vanilla < 0); }
+
+        private sealed class M_UnreadableFirst : AvatarRules
+        {   // build round 1's FacingOf order: unreadability before the room
+            internal override AvatarFacing FacingOf(AvatarFacingIn f) => f.Unreadable ? AvatarFacing.Vanilla : base.FacingOf(f);
+        }
+
+        private sealed class M_H3 : AvatarRules
+        {   // build round 1's publisher: a definitive decline writes nothing
+            internal override FaceCarrierAction CarrierAction(bool spectator, bool handlerReady, bool localPlayerReady, bool facesListed, AvatarFaceIds face0)
+            {
+                var a = base.CarrierAction(spectator, handlerReady, localPlayerReady, facesListed, face0);
+                return a == FaceCarrierAction.Clear ? FaceCarrierAction.Keep : a;
+            }
+        }
+        private sealed class K_H3 : AvatarRules
+        {
+            internal override FaceCarrierAction CarrierAction(bool spectator, bool handlerReady, bool localPlayerReady, bool facesListed, AvatarFaceIds face0)
+            {
+                if (!(handlerReady && localPlayerReady) || spectator) return FaceCarrierAction.Keep;
+                bool valid = facesListed && face0.Present && !face0.AllZero;
+                return valid ? FaceCarrierAction.Publish : FaceCarrierAction.Clear;
+            }
+        }
+
+        private sealed class M_M8 : AvatarRules
+        {   // the capture loses the other-fighter count
+            internal override string ClassificationLine(string tag, AvatarDecision d, int otherFighters, bool issuedRoom, int was, int homeBefore)
+                => base.ClassificationLine(tag, d, -1, issuedRoom, was, homeBefore);
+        }
+        private sealed class K_M8 : AvatarRules
+        {
+            internal override string ClassificationLine(string tag, AvatarDecision d, int otherFighters, bool issuedRoom, int was, int homeBefore)
+                => string.Concat(base.ClassificationLine(tag, d, otherFighters, issuedRoom, was, homeBefore), "");
+        }
 
         private sealed class M_T1 : AvatarRules { internal override bool ResolvesOnABaseSeat(int id, bool[] arr) => id < 1000; }
         private sealed class K_T1 : AvatarRules { internal override bool ResolvesOnABaseSeat(int id, bool[] arr) => arr != null && (uint)id < (uint)arr.Length && arr[id]; }
@@ -642,6 +918,21 @@ namespace CompetitiveRounds
             Pair(r, "T17", "a spectator seat's facing is Undecided", T17, new M_T17(), new K_FacingSame());
             Pair(r, "T18", "the per-actor test excludes cr_face", T18, new M_T18(), new K_T18());
             Pair(r, "T19", "the announcer is bounded by the surface, not by a counter", T19, new M_T19(), new K_T19());
+
+            // fix pass 1 (Codex BUILD round 1), one case per finding. The H6
+            // controls are each other's mutants: dropping a DIFFERENT liveness
+            // term must leave the case green, so no term masks another.
+            Pair(r, "H6a", "isPlaying alone blocks a face change", H6a, new M_H6a(), new M_H6b());
+            Pair(r, "H6b", "battleOngoing alone blocks a face change", H6b, new M_H6b(), new M_H6c());
+            Pair(r, "H6c", "a local body without a manager blocks a face change", H6c, new M_H6c(), new M_H6a());
+            Pair(r, "H8", "an issued room with an unmodded entrant is Vanilla; its departure is Modded", H8, new M_ProvenanceDecides(), new K_FacingSame());
+            Pair(r, "BRH1", "Modded only from a nonempty every-modded census; an issued room with zero others keeps the own face", BRH1, new M_SoloIssued(), new K_FacingSame());
+            Pair(r, "H9", "a leave while the old manager reports live repays the remembered selection", H9, new M_LivenessFirst(), new K_Census());
+            Pair(r, "M3", "a disconnect alone restores once, repeated exits write nothing, an unreadable room read stays locked", M3, new M_AnyNoRoomIsExit(), new K_Census());
+            Pair(r, "BRM3", "automatic switching needs both preset slots set; a remembered selection is still given back", BRM3, new M_OnePresetEnough(), new K_BothPresets());
+            Pair(r, "BRM4", "an unreadable facing is Vanilla only inside an established online room", BRM4, new M_UnreadableFirst(), new K_FacingSame());
+            Pair(r, "H3", "a definitive no-face publish attempt clears the carrier", H3, new M_H3(), new K_H3());
+            Pair(r, "M8", "the classification line names facing, nominee and other fighters for the five room cases", M8, new M_M8(), new K_M8());
             return r;
         }
 
