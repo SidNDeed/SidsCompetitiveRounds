@@ -254,6 +254,15 @@ namespace CompetitiveRounds
             return (home >= 0 && home < faceCount) ? home : -1;
         }
 
+        /// <summary>Both preset slots are set (fix pass 1, BR-M3): the switch
+        /// ships on but is inert until the player has named BOTH defaults
+        /// (design section 8). With one slot set, f returns the own face for
+        /// either facing, so a remembered selection is still given back.</summary>
+        internal virtual bool BothPresetsSet(AvatarSetting s)
+        {
+            return s.Modded >= 0 && s.Vanilla >= 0;
+        }
+
         /// <summary>f. Its domain excludes Locked: the evaluator gated on it.
         /// Called with Locked it refuses rather than answers, so a caller that
         /// skipped the gate is caught instead of silently restoring mid-game.</summary>
@@ -262,6 +271,7 @@ namespace CompetitiveRounds
             if (c == AvatarFacing.Locked)
                 throw new ArgumentException("f is not defined on a Locked census (the evaluator gates on it)");
             if (!s.Auto) return own;                                     // the feature is off
+            if (!BothPresetsSet(s)) return own;                          // inert until both defaults are named
             if (c == AvatarFacing.Undecided) return own;                 // menu, offline, spectator, empty roster
             int nominee = c == AvatarFacing.Modded ? s.Modded : s.Vanilla;
             if (!Usable(nominee, c, faces, l)) return own;               // unset, out of domain, unauthored, not clean
@@ -308,7 +318,7 @@ namespace CompetitiveRounds
             // use. Derived from the same inputs on whatever edge reaches it.
             int nom = c == AvatarFacing.Modded ? s.Modded : c == AvatarFacing.Vanilla ? s.Vanilla : -1;
             d.Nominee = nom;
-            if (s.Auto && nom >= 0) d.Unusable = WhyUnusable(nom, c, x.Faces, x.Loader);
+            if (s.Auto && BothPresetsSet(s) && nom >= 0) d.Unusable = WhyUnusable(nom, c, x.Faces, x.Loader);
 
             if (want == live)
             {
