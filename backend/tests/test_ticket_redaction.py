@@ -449,7 +449,9 @@ def run(coro):
 
 # ── the harness ───────────────────────────────────────────────────────────
 # bug_reports is 083's DDL plus 086's bug_number sequence, 102's
-# channel_posted_at and 336's kind; bug_report_events is 085's plus 102's
+# channel_posted_at, 336's kind and 373's descending automatic-number sequence
+# (owned by bug_number, so the table's DROP removes it and the census admits
+# it as a column-owned sequence) with its CHECK; bug_report_events is 085's plus 102's
 # notified_at. players, the shop_items its cosmetic columns reference, and
 # admin_users come from the ORM, because submit_bug_report selects every mapped
 # Player column. gen_random_uuid()
@@ -504,6 +506,11 @@ CREATE TABLE public.bug_reports (
     channel_posted_at TIMESTAMPTZ,
     kind              VARCHAR(16) NOT NULL DEFAULT 'report' CHECK (kind IN ('report', 'auto'))
 );
+CREATE SEQUENCE public.bug_reports_auto_number_seq AS BIGINT
+    INCREMENT BY -1 MINVALUE -9223372036854775807 MAXVALUE -1 START WITH -1 CACHE 1 NO CYCLE;
+ALTER SEQUENCE public.bug_reports_auto_number_seq OWNED BY public.bug_reports.bug_number;
+ALTER TABLE public.bug_reports ADD CONSTRAINT bug_reports_auto_number_negative
+    CHECK (kind <> 'auto' OR bug_number < 0);
 CREATE TABLE public.bug_report_events (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     bug_report_id   UUID NOT NULL REFERENCES public.bug_reports(id) ON DELETE CASCADE,
@@ -2306,6 +2313,16 @@ async def _arm_the_real_auto_route(env, monkeypatch, auto_logs):
         return steam_id == REPORTER
 
     monkeypatch.setattr(main, "_strict_steam_session_ok", session_ok)
+    # THE MODULE'S BLOB-RESERVE STATE IS PROCESS STATE, AND EVERY CASE HERE RUNS
+    # ON A NEW EVENT LOOP (`run` is asyncio.run). `_BLOB_RESERVE_LOCK` is an
+    # asyncio.Lock made at import: once it has been contended it is bound to that
+    # loop, and a section abandoned as its loop closed never runs the hand-on
+    # that releases it. A case meeting such a lock on its own loop gets
+    # RuntimeError from the acquire, which the route answers 503 "log storage
+    # unavailable", so the case would measure an earlier case and not the scrub.
+    # Each case is given the lock and the in-flight stamp a fresh process has.
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(auto_logs, "_BLOB_WRITE_STARTED", [0.0])
     env.app.include_router(auto_logs.router)
 
 
@@ -2340,6 +2357,61 @@ def test_pg_auto_log_route_redacts_before_its_clamp(monkeypatch, tmp_path):
     hx, (calls, fname, stored) = run(body())
     _assert_scrubbed_before_the_write(calls, fname)
     assert hx[-24:] not in stored, "the upload stored the tail of a ticket its clamp cut from its label"
+
+
+def _a_reserve_lock_held_on_a_closed_loop():
+    """An asyncio.Lock in the state an earlier case can leave the module's
+    reserve lock in: HELD, and bound (by one contended acquire) to a loop that
+    has since closed."""
+    lock = asyncio.Lock()
+
+    async def hold_and_contend():
+        await lock.acquire()
+        waiter = asyncio.ensure_future(lock.acquire())
+        await asyncio.sleep(0)
+        waiter.cancel()
+        try:
+            await waiter
+        except asyncio.CancelledError:
+            pass
+
+    run(hold_and_contend())
+    assert lock.locked() and getattr(lock, "_loop", None) is not None
+    return lock
+
+
+def test_pg_auto_log_route_harness_does_not_inherit_the_reserve_lock_of_a_closed_loop(monkeypatch, tmp_path, capsys):
+    """The two real-route cases above go red when an EARLIER case in the same
+    process leaves `auto_logs._BLOB_RESERVE_LOCK` held on a loop that closed:
+    their upload answers 503 "log storage unavailable" and prints
+    "blob write failed ...: RuntimeError" (the whole-suite run at 603fdcd7). The
+    harness gives each case a lock of its own, so with the module's lock
+    poisoned before the arm the upload still lands.
+
+    CONTROL: the same poisoned lock installed AFTER the arm -- the harness as it
+    was -- answers that 503 with that line, so this case can fail."""
+    auto_logs = _require_auto_logs()
+    monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", _a_reserve_lock_held_on_a_closed_loop())
+    # Made here, outside any running loop: the poisoning runs a loop of its own.
+    second_poison = _a_reserve_lock_held_on_a_closed_loop()
+
+    async def body(poison_after_arm):
+        async with Env(monkeypatch, tmp_path) as env:
+            await _arm_the_real_auto_route(env, monkeypatch, auto_logs)
+            if poison_after_arm:
+                monkeypatch.setattr(auto_logs, "_BLOB_RESERVE_LOCK", second_poison)
+            resp = await env.client.post(AUTO_ROUTE, json={"steam_id": REPORTER, "log_text": LOG_HEAD + LOG_TAIL},
+                                         headers={"X-Session-Token": AUTO_TOKEN})
+            return resp.status_code, resp.text
+
+    status, body_text = run(body(False))
+    assert status == 200, (status, body_text[:500])
+
+    capsys.readouterr()
+    status, body_text = run(body(True))
+    printed = capsys.readouterr().out
+    assert status == 503 and "log storage unavailable" in body_text, (status, body_text[:500])
+    assert "blob write failed" in printed and "RuntimeError" in printed, printed[-2000:]
 
 
 def test_pg_auto_log_contract_holds_on_the_stand_in(monkeypatch, tmp_path):

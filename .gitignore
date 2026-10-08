@@ -193,6 +193,18 @@ AGENTS.md
 AGENTS.override.md
 .codex/
 ai-collab/
+# ...except the three logs round 8 of the automatic-log-upload hotfix commits as
+# its evidence. The ai-collab and autolog directories are re-included only so
+# that everything in each is ignored again; each log is then re-included by its
+# whole name, with no wildcard, so no other file under ai-collab/ -- another
+# round's log, the notes, a later round's name -- is admitted by these lines.
+!/ai-collab/
+/ai-collab/*
+!/ai-collab/autolog/
+/ai-collab/autolog/*
+!/ai-collab/autolog/autolog-hotfix-r8-tests-final.log
+!/ai-collab/autolog/autolog-hotfix-r8-migration.log
+!/ai-collab/autolog/autolog-hotfix-r8-trainplan.log
 docs/DUAL-AI-SETUP.md
 docs/CODEX-CHEATSHEET.md
 scr-tour-script.md

@@ -735,17 +735,16 @@ class BugReport(Base):
     triage_notes = Column(Text, nullable=True)
     # DELIBERATELY UNMAPPED: `kind` (migration 336, 'report' | 'auto').
     # Not mapped because an ORM assignment to an undeclared column is a SILENT
-    # no-op, invisible at the call site (#346). Nothing in THIS tree writes a
-    # non-default value: every row it inserts is a player-filed 'report' and
-    # takes the column default. The writer of 'auto' rows is the automatic
-    # post-match log upload, which ships in its own branch and uses raw SQL --
-    # 336's own header inventories it, and that is why this file's readers
-    # scope on the column now rather than when the writer arrives.
+    # no-op, invisible at the call site (#346). The one writer of a
+    # non-default value is the automatic post-match log upload,
+    # backend/api/auto_logs.py, and it uses raw SQL; every row the rest of
+    # this tree inserts is a player-filed 'report' and takes the column
+    # default.
     #
     # MIGRATION 336 MUST BE APPLIED BEFORE THIS CODE REACHES A BOX. Leaving the
     # column unmapped does NOT make the reverse order safe, which is what an
     # earlier version of this comment claimed. Being absent from the ORM keeps
-    # `kind` out of submit_bug_report's INSERT, but six raw-SQL sites READ it
+    # `kind` out of submit_bug_report's INSERT, but raw-SQL sites READ it
     # and they decide the ordering:
     #   * the 10-per-24h rate-limit COUNT inside submit_bug_report itself,
     #     `WHERE steam_id = :sid AND kind = 'report' AND created_at >= :cutoff`

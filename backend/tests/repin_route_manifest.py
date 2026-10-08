@@ -40,6 +40,26 @@ The identity SET is never re-pinned: a route or an entry point appearing or
 leaving is a review item, and answering it by rewriting the manifest is how
 the gate stops meaning anything.
 
+TWO MORE FAMILIES, carried in from the automatic-log lane at its merge of
+main (2026-10-05):
+
+  * FIRST FINGERPRINTS. A statically-nonconsumer row written by hand with no
+    digest (four elements: the classification and the reason are the human's
+    call) gets its first digest here, from the same `_route_identities`, and is
+    reported apart from `moved` -- a first fingerprint is not a drift.
+  * `route_order`, from `gate._route_registration_order()` -- the function
+    `test_the_manifest_records_the_order_requests_are_matched_in` compares
+    against, so tool and gate cannot disagree (#596). Adding a route moves it
+    by construction. Every insertion, removal and move is printed, and a
+    RESHUFFLE of routes that already existed is called out: Starlette matches
+    in registration order and first match wins, so re-pinning order is not
+    approving it.
+
+Neither is a one-digest textual replacement, so a write carrying either
+re-serializes the document -- admitted only when the file as it stands
+re-serializes byte for byte (then nothing but the intended values can move),
+refused whole otherwise; each gets its own BEFORE WRITE line.
+
 Usage (from anywhere; paths are resolved from this file):
 
     python backend/tests/repin_route_manifest.py                  # dry run
@@ -143,10 +163,30 @@ def main():
     # recorded digest differs from the live one -- the rows a write changes.
     plan = []
     moved = []
+    # Rows that carried no fingerprint and get their FIRST one here (the
+    # autolog lane's seeding, kept through the 2026-10-05 merge of main).
+    seeded = []
     for group in doc["groups"]:
         cls = group.get("classification")
         for r in group["routes"]:
             if len(r) <= 4:
+                # A four-element row carries no fingerprint. For the
+                # sentinel-exercised route that is correct and permanent --
+                # it is checked by being RUN with all 50 sentinels, not by its
+                # source. For a statically-nonconsumer row it means a route
+                # was just added to the manifest and its sha has not been
+                # taken yet, so take it HERE rather than letting someone paste
+                # one in: the classification and the reason are the human's
+                # call, the sha never is (#596). Reported separately from
+                # `moved`, because a first fingerprint is not a drift.
+                if cls != REPINNABLE_CLASS:
+                    continue
+                k = (r[0], tuple(r[1]), r[2], r[3])
+                if k not in live:
+                    continue
+                r.append(live[k])
+                seeded.append(("first fingerprint", "%s %s %s.%s" % (",".join(r[1]), r[0], r[2], r[3]),
+                               cls, None, live[k]))
                 continue
             k = (r[0], tuple(r[1]), r[2], r[3])
             if baseline.get(k) != live[k]:
@@ -181,9 +221,44 @@ def main():
                              None, row[2], now))
                 row[2] = now
 
+    # ── registration order: the third family ────────────────────────────
+    # Read from the gate's own `_route_registration_order`, never rebuilt
+    # here. Starlette matches in this order and first match wins, so the
+    # DIFFERENCE is printed rather than quietly absorbed: a route that only
+    # moved position is the case where the manifest looks unchanged and the
+    # handler that answers a request is not the one that used to.
+    live_order = gate._route_registration_order()
+    recorded_order = doc.get("route_order") or []
+    order_added = [s for s in live_order if s not in recorded_order]
+    order_gone = [s for s in recorded_order if s not in live_order]
+    kept_live = [s for s in live_order if s in recorded_order]
+    kept_recorded = [s for s in recorded_order if s in live_order]
+    order_reshuffled = kept_live != kept_recorded
+    order_changed = live_order != recorded_order
+    if order_changed:
+        doc["route_order"] = live_order
+
     print("manifest rows      : %d" % sum(len(g["routes"]) for g in doc["groups"]))
     print("fingerprinted      : %d" % len(rows(doc)))
     print("rows to rewrite    : %d" % len(plan))
+    if seeded:
+        print("FIRST fingerprint taken for %d newly-manifested route(s):" % len(seeded))
+        for _k, name, _c, _o, _n in sorted(seeded, key=lambda s: s[1]):
+            print("   * %s" % name)
+    print("ROUTE ORDER        : %d recorded -> %d live (+%d/-%d)%s"
+          % (len(recorded_order), len(live_order), len(order_added),
+             len(order_gone), ", RESHUFFLED" if order_reshuffled else ""))
+    for s in order_added:
+        print("   + %s" % s)
+    for s in order_gone:
+        print("   - %s" % s)
+    if order_reshuffled:
+        # Said loudly and separately from the +/- list: an insertion is
+        # expected when a batch adds a route, a RESHUFFLE of routes that were
+        # already there is the case where first-match-wins may now pick a
+        # different handler for the same request.
+        print("   !! routes that already existed changed position; confirm the "
+              "route that answers each path is still the one that used to")
     print("MOVED vs %-9s : %d" % (baseline_name, len(moved)))
     for name, old, new in sorted(moved):
         print("   %-42s %s -> %s" % (name, (old or "none")[:8], new[:8]))
@@ -206,6 +281,31 @@ def main():
         decisions.append((kind, name, cls, old, new, n_old, n_new, why))
         if why:
             refusals.append((name, why))
+    # A first fingerprint and the registration order cannot be written as a
+    # one-digest textual replacement, so they are written by re-serializing
+    # the document -- and that is admitted only when re-serializing the file
+    # AS IT STANDS reproduces it byte for byte, i.e. when nothing but the
+    # intended values can move. Otherwise the write is refused whole.
+    structural = bool(seeded) or order_changed
+    stable = (json.dumps(json.loads(raw), indent=2) + "\n") == raw
+    for kind, name, cls, old, new in seeded:
+        n_new = raw.count(new)
+        why = []
+        if n_new != 0:
+            why.append("the new digest already occurs %d time(s) in the file" % n_new)
+        if not stable:
+            why.append("the file does not re-serialize byte for byte")
+        decisions.append((kind, name, cls, "none", new, 0, n_new, why))
+        if why:
+            refusals.append((name, why))
+    if order_changed:
+        why = [] if stable else ["the file does not re-serialize byte for byte"]
+        decisions.append(("route order", "+%d/-%d%s" % (len(order_added), len(order_gone),
+                                                         " RESHUFFLED" if order_reshuffled else ""),
+                          None, "%d entries" % len(recorded_order),
+                          "%d entries" % len(live_order), 0, 0, why))
+        if why:
+            refusals.append(("route_order", why))
 
     write = "--write" in sys.argv
     tpath = _opt("--transcript")
@@ -237,7 +337,11 @@ def main():
     # The textual edit: each old digest (unique) becomes its new one (absent).
     out = raw
     for kind, name, cls, old, new, n_old, n_new, why in decisions:
-        out = out.replace(old, new)
+        if kind in ("route", "entry point"):
+            out = out.replace(old, new)
+    if structural:
+        # Admitted above only on a file that re-serializes byte for byte.
+        out = json.dumps(doc, indent=2) + "\n"
     if json.loads(out) != doc:
         print("REFUSING: the edited text does not parse to the intended "
               "document; nothing was written")
@@ -251,8 +355,12 @@ def main():
     if tpath and done:
         with io.open(tpath, "a", encoding="utf-8", newline="\n") as fh:
             fh.write("\n".join(done) + "\n")
-    print("written: %d digest(s) replaced in place, nothing else in the file "
-          "moved" % len(done))
+    if structural:
+        print("written: %d row(s) (digests, first fingerprints, route order) by "
+              "re-serializing a byte-stable file; nothing else in it moved" % len(done))
+    else:
+        print("written: %d digest(s) replaced in place, nothing else in the file "
+              "moved" % len(done))
     return 0
 
 

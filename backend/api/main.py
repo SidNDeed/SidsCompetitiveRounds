@@ -3692,7 +3692,7 @@ async def lifespan(app: FastAPI):
             # work; the replica is a read surface and nothing more.
             print("[REPLICA] BOOTING AS READ REPLICA: write schedulers disabled "
                   "(queue_cleanup, team_queue_cleanup, tournament_tick, "
-                  "min_version_autoraise, janitor self-test)")
+                  "min_version_autoraise, auto_log_retention, janitor self-test)")
             # The floor still has to track the primary — see the docstring.
             tasks.append(asyncio.create_task(
                 _supervised("min_version_follow", min_version_follow_loop)))
@@ -3753,6 +3753,23 @@ async def lifespan(app: FastAPI):
             # stack imported; the health word says which of those it is.
             if not IS_REPLICA and _pcs is not None:
                 tasks.append(asyncio.create_task(_pc_steam_sweep_loop()))
+            # Automatic post-match log retention (v1.41.0 Item 3). PRIMARY
+            # ONLY: every pass DELETEs, and a delete raises in recovery. This
+            # is the ONLY thing that enforces the fourteen-day rule -- the
+            # opportunistic prune inside the upload route collects nothing once
+            # uploads stop, which is precisely when a corpus needs collecting.
+            #
+            # WHAT TO GREP FOR, because a sweep failing every hour and a sweep
+            # with nothing to do are equally quiet otherwise:
+            # `[AUTO-LOG] retention sweep armed` once at boot, one
+            # `[AUTO-LOG] retention sweep:` line per pass including the empty
+            # ones, and `[AUTO-LOG] retention sweep FAILED` with a consecutive
+            # count when a pass dies. Those are the lines that exist because
+            # the loop catches its own per-pass errors; _supervised is the
+            # backstop for what escapes the loop entirely, and its restart line
+            # is NOT this sweep's failure signal.
+            tasks.append(asyncio.create_task(
+                _supervised("auto_log_retention", _auto_logs.auto_log_retention_loop)))
         # Awaited, before anything can render: a face keyed off a colour
         # this box has not read yet is a promise about pixels it cannot make.
         if _pcf is not None:
@@ -4468,7 +4485,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:48376 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:48987 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4534,7 +4551,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:48188 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:48799 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4604,7 +4621,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:48091 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:48702 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -5811,6 +5828,16 @@ app.add_middleware(
 from tournaments import router as tournaments_router
 app.include_router(tournaments_router)
 
+# Opt-in automatic post-match log upload (v1.41.0 Item 3). LIVE, not inert:
+# the client half is in the v1.41.0 client lane build 46f54d4 on Sid's desktop
+# and the opt-in setting is switched on there, so POST /api/v1/logs/auto
+# receives real traffic. The module's own docstring says what a working call
+# looks like and what it prints. The module object is bound as well as the
+# routers because lifespan starts its retention sweep.
+import auto_logs as _auto_logs
+from auto_logs import router as auto_logs_router, internal_router as auto_logs_internal_router
+app.include_router(auto_logs_router)
+app.include_router(auto_logs_internal_router)
 # Animal title ladders (v1.41.0 item 12): the READ route,
 # GET /api/v1/players/{steam_id}/title-ladders, which the Titles tab draws its
 # progress bars from. Pure read, no writes, safe on the replica: one
@@ -6289,6 +6316,14 @@ _RL_SENSITIVE_PREFIXES = (
     # would throttle every player read. The trailing slash keeps it from
     # matching any sibling path.
     "/api/v1/h2h/",
+    # Automatic post-match log upload: a single accepted request can carry up
+    # to 14 MiB and writes a disk artifact, so it belongs in the tighter
+    # bucket rather than the 150/10s one it inherited. THE TRAILING SLASH IS
+    # LOAD-BEARING for the same reason as /bug-reports/ above. It does not
+    # cover /api/v1/internal/logs (a different prefix), whose callers carry
+    # X-Internal-Key and bypass the limiter anyway. A real client uploads once
+    # per match, so 20/10s is nowhere near binding.
+    "/api/v1/logs/",
     "/api/v1/ffa/matches", # quarantine-capture write path (Codex v1.36 find 6)
     "/api/v1/ffa/bets",
     # Lobby-phase wagers (migration 207). startswith also covers
@@ -7171,6 +7206,29 @@ def _title_ladders_health_word() -> int:
     return title_ladders.ladder_count()
 
 
+def _auto_log_health_word() -> int:
+    """/health `auto_log`: auto_logs.AUTO_LOG_REVISION when this app's routing
+    table carries POST /api/v1/logs/auto -- the route the v1.41.0 client's
+    post-match upload calls -- and 0 when it does not. DERIVED from app.routes
+    on every request, never written down (#342), so a build that imports the
+    module but stops mounting its router reads 0 rather than the revision.
+    The handler is matched by its module and qualified name, not by naming
+    the function object: a reference to it would put the upload handler,
+    its writers and its session check inside /health's reviewed closure
+    (the read-gate inventory), and /health calls none of them.
+    Code-only and role-blind: both arms of /health answer it, alike on both
+    boxes, which is what lets the release train read it through the edge.
+    Read by nothing but the train (#306)."""
+    for r in app.routes:
+        ep = getattr(r, "endpoint", None)
+        if (getattr(r, "path", None) == "/api/v1/logs/auto"
+                and "POST" in (getattr(r, "methods", None) or ())
+                and getattr(ep, "__module__", None) == _auto_logs.__name__
+                and getattr(ep, "__qualname__", None) == "upload_auto_log"):
+            return _auto_logs.AUTO_LOG_REVISION
+    return 0
+
+
 @app.get("/api/v1/health", response_model=HealthResponse, tags=["System"])
 async def health_check(db: AsyncSession = Depends(get_db)):
     """Check if the API and database are operational."""
@@ -7190,6 +7248,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
+                              auto_log=_auto_log_health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -7225,6 +7284,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
+                              auto_log=_auto_log_health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
@@ -41326,10 +41386,12 @@ _SCRUB_STEAMID_RE = _re.compile(r"\b[0-9]{17}\b")
 
 
 def _read_bug_log_sync(path_str: str) -> str:
-    """Blocking gunzip of a stored bundle. MUST be driven through
-    asyncio.to_thread: this API runs ONE uvicorn worker on purpose (#125) and
-    a stored blob can be megabytes, so doing it inline stalls the event loop
-    for the whole community while one admin opens one report.
+    """Blocking gunzip of a stored bundle. MUST be driven off the event loop:
+    this API runs ONE uvicorn worker on purpose (#125) and a stored blob can
+    be megabytes, so doing it inline stalls the event loop for the whole
+    community while one admin opens one report. Both readers drive it on the
+    auto-log module's volume pool, with a ceiling on the wait (R7-M4's
+    class), because it is a call on the same volume the log writers use.
 
     Overflow keeps the TAIL. A log's recent lines are the ones that explain
     the crash; head-truncating a bundle discards the part being asked about.
@@ -41463,8 +41525,21 @@ async def _scrub_bug_log(db: AsyncSession, body: str) -> tuple:
     593 ms, and switching the id scan from findall to finditer removes most of
     what remained. So this reduces the stall substantially -- it does not make
     the loop free. Do not read this function as non-blocking.
+
+    SINCE ROUND 8 NEITHER PASS IS WAITED FOR WITHOUT A CEILING OR WITH A
+    POOLED CONNECTION CHECKED OUT (R7-M4's class; the two admin readers are
+    the only callers). Both passes run on the auto-log module's CPU pool --
+    not the event loop's default executor -- each waited for at most
+    `AUTO_LOG_CPU_WAIT_S`; past it this raises `TimeoutError`, which the
+    detail pane reads as a log read error and the download answers 503. And
+    the probe's transaction is ENDED before pass two: the probe is a read,
+    and nothing either caller does afterwards needs that transaction, so
+    pass two waits holding no connection. Pass one needs no such step --
+    both callers end their read before the volume hop that precedes it.
     """
-    body, counts, ids = await asyncio.to_thread(_scrub_pass_one, body)
+    body, counts, ids = await _auto_logs._hop(
+        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,
+        _scrub_pass_one, body)
     if not body:
         return body, counts
 
@@ -41491,7 +41566,12 @@ async def _scrub_bug_log(db: AsyncSession, body: str) -> tuple:
         # Redact whatever was already PROVEN deleted and stop probing. Partial
         # redaction beats abandoning the pass and serving every id unredacted.
         print(f"[BUG-LOG] purge probe failed (partial redaction applied): {type(ex).__name__}")
-    body = await asyncio.to_thread(_scrub_pass_two, body, purged, counts)
+    # THE PROBE'S TRANSACTION ENDS HERE, before pass two is waited for: the
+    # rollback returns its connection to the pool (R7-M4's class).
+    await _auto_logs._end_transaction(db)
+    body = await _auto_logs._hop(
+        _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,
+        _scrub_pass_two, body, purged, counts)
     return body, counts
 BUG_REPORT_PER_STEAM_PER_DAY = 10
 BUG_REPORT_VALID_SEVERITIES = ("low", "medium", "high", "crash")
@@ -41509,22 +41589,35 @@ def _bug_report_log_path(report_id: str) -> _pathlib.Path:
 @app.post("/api/v1/bug-reports", tags=["Bug Reports"])
 async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Player-submitted bug report. Idempotent only on (steam_id, description)
-    dupes — sliding window rate-limits flooding."""
+    dupes — sliding window rate-limits flooding.
+
+    NO WAIT ON THE VOLUME IS MADE WITH A POOLED CONNECTION CHECKED OUT
+    (R7-M4). Until round 7 this handler INSERTed the row first -- for the id
+    the attachment is named after -- and then did the attachment's whole
+    durable sequence inside that open transaction, so a player's form held a
+    connection for as long as the volume took, and thirty of them held the
+    whole 20 + 10 pool. The work is now three phases:
+
+      T1   the reads that decide whether the report is taken at all (the
+           admin exemption, the rate limit), ENDED before any volume work;
+      the attachment, with no transaction open: the gzip on the auto-log
+           module's CPU pool, then the directory, the marker, the bytes and
+           their flushes on its volume pool, every wait with a ceiling;
+      T2   the player's row, the mod-seen stamp, the report and its event,
+           committed together -- and only then the marker's clear, with a
+           ceiling of its own.
+
+    The row's id is chosen here rather than by a flush, which is what lets
+    the attachment be written before the row exists. A wait that passes its
+    ceiling is an attachment that could not be stored, recorded on the row
+    in the three-state encoding below; the report itself is still filed.
+    """
     severity = req.severity.lower() if req.severity else "medium"
     category = req.category.lower() if req.category else "other"
     if severity not in BUG_REPORT_VALID_SEVERITIES:
         severity = "medium"
     if category not in BUG_REPORT_VALID_CATEGORIES:
         category = "other"
-
-    # Resolve player if known — bug reports tolerate unknown senders so
-    # first-launch players can still report.
-    player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
-    player = player.scalar_one_or_none()
-    if player:
-        # Bug reports accept an arbitrary subject id and tolerate missing
-        # sessions, so this may mark mod-seen/Beta but cannot stamp a version.
-        await _mark_mod_seen(db, player)
 
     # Rate limit: 10 reports per 24h per Steam ID. Returns 429 so the client
     # can show a "slow down" toast. Admins are exempt (July 28, Sid hit the
@@ -41553,6 +41646,16 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
         if (recent.scalar() or 0) >= BUG_REPORT_PER_STEAM_PER_DAY:
             raise HTTPException(status_code=429, detail=f"Limit is {BUG_REPORT_PER_STEAM_PER_DAY} reports per 24h — try again later")
 
+    # T1 ENDS HERE, BEFORE ANY WORK ON THE VOLUME (R7-M4). Everything above
+    # was a READ -- the admin row, the strict session check under its own
+    # savepoint, the count -- so ending the transaction discards nothing and
+    # returns the connection. The writes this request makes (the mod-seen
+    # stamp, the report, its event) all happen in T2, after the attachment,
+    # in one transaction; a report refused 429 above therefore persists
+    # nothing, exactly as before, when the refusal's own rollback discarded
+    # the mod-seen stamp taken ahead of it.
+    await _auto_logs._end_transaction(db)
+
     log_filename: str | None = None
     log_bytes_stored: int | None = None
     # No credential reaches storage (the bug-log posture above): the Steam
@@ -41563,47 +41666,490 @@ async def submit_bug_report(req: BugReportRequest, request: Request, db: AsyncSe
     # rule too little of a ticket to recognise -- so none of the three, as the
     # flush (the row) and the open() (the file) below write them, carries one.
     log_blob = (req.log_text or "").strip()
-    description = req.description.strip()
-    repro_steps = (req.repro_steps or "").strip() or None
+    # THE ROW'S ID IS CHOSEN HERE, not by a flush. The attachment is named
+    # after it and is written BEFORE the row exists -- that ordering is what
+    # keeps the connection out of the volume work -- and the model's own
+    # default is this same `uuid4`, so nothing about the id changes but when
+    # it is drawn.
+    report_id = uuid.uuid4()
+    row_log_filename: str | None = None
+    row_log_bytes: int | None = None
 
-    report = BugReport(
-        player_id=player.id if player else None,
-        steam_id=req.steam_id,
-        display_name=req.display_name or (player.display_name if player else None),
-        mod_version=req.mod_version,
-        game_version=req.game_version,
-        severity=severity,
-        category=category,
-        description=description,
-        repro_steps=repro_steps,
-    )
-    db.add(report)
-    await db.flush()  # need report.id for the filename
+    attempted_path = None
+    # THE ATTACHMENT'S CLAIM, shared with the auto-log module's write path:
+    # its lock and its `discarded` flag are what make a store and a cleanup
+    # that OVERLAP safe -- and since round 8 they can overlap, because a wait
+    # that passes its ceiling stops waiting while the thread goes on. A
+    # cleanup sets `discarded` under the lock before it removes anything, so
+    # a store still queued behind it creates nothing and a store still
+    # running finishes before the removal starts.
+    own = None
+    # EVERY WORKER THIS REQUEST STARTS on the attachment's files, so the name
+    # is released only when the last of them has ended (the `finally`).
+    hops: list = []
+    committed = False
+    # ONE `try` FROM THE REGISTRATION TO THE COMMIT, and its `finally` is the
+    # only place the attachment's in-flight registration is released.
+    #
+    # It used to be released by a `finally` around the commit alone, beside a
+    # comment arguing that the stretch before it could not raise. It could:
+    # the failure arm's own statements and the event's `db.add` run in that
+    # stretch, and any of them raising ended the request with the name still
+    # registered, so every sweep for the rest of the process skipped a marked,
+    # unreferenced attachment. Every statement from the registration to the
+    # commit is now inside this `try`, whatever it is (round-6 LOW 3).
+    #
+    # WHAT THE `finally` DOES, stated for every path (#351): after a commit
+    # that RETURNED it clears the marker, on a worker thread, waited for with
+    # a ceiling, and on no other path; and on every path it drops the name
+    # -- at once when no worker is still touching the attachment's files,
+    # and otherwise when the last worker this request started finishes (the
+    # store, the partial file's removal, or the marker's clear), because a
+    # request cancelled -- or a wait that passed its ceiling -- while a
+    # thread is still creating or removing one of those files must not
+    # unregister it. Wherever the marker stays, it is what makes the
+    # unreferenced file collectable.
+    try:
+        if log_blob:
+            try:
+                # THE GZIP FIRST, ON THE AUTO-LOG MODULE'S CPU POOL, WITH A
+                # CEILING. It touches nothing on the volume, so a pass that
+                # does not finish in time is an attachment that was never
+                # started: no file exists and nothing is registered.
+                data = await _auto_logs._hop(
+                    _auto_logs._CPU_POOL, _auto_logs.AUTO_LOG_CPU_WAIT_S,
+                    _gzip.compress, log_blob.encode("utf-8", errors="replace"))
 
-    if log_blob:
-        try:
-            path = _bug_report_log_path(str(report.id))
-            data = _gzip.compress(log_blob.encode("utf-8", errors="replace"))
-            with open(path, "wb") as f:
-                f.write(data)
-            log_filename = path.name
-            log_bytes_stored = len(data)
-            report.log_filename = log_filename
-            report.log_bytes = log_bytes_stored
-        except Exception as ex:
-            print(f"[BUG-REPORT] log persistence failed for {report.id}: {ex}")
+                # ONE CEILING FOR THE ATTACHMENT'S VOLUME WORK, spent by each
+                # of its waits in turn -- the directory, then the durable
+                # sequence -- so the two cannot sum past it however the time
+                # falls between them (`_span_budget`, the upload's own rule).
+                attach_deadline = (time.monotonic()
+                                   + _auto_logs.AUTO_LOG_VOLUME_WAIT_S)
 
-    # Seed the activity log with a "created" event so the timeline is complete.
-    db.add(BugReportEvent(
-        bug_report_id=report.id,
-        actor_steam_id=req.steam_id,
-        actor_name=req.display_name or req.steam_id or "Unknown",
-        event_type="created",
-        new_status="open",
-        comment=None,
-    ))
+                # THE PATH IS RESOLVED ON A WORKER THREAD TOO.
+                # `_bug_report_log_path` creates the directory, and a
+                # `mkdir` on a contended volume blocks for as long as the
+                # volume does, like every other call on it (round-6 MEDIUM
+                # 3's class, swept in round 7). Nothing is registered or
+                # stamped yet, so a request cancelled here has nothing to
+                # release. Since round 8 it runs on the volume pool, with no
+                # transaction open and a ceiling on the wait (R7-M4).
+                path = await _auto_logs._hop(
+                    _auto_logs._VOLUME_POOL,
+                    _auto_logs._span_budget(attach_deadline),
+                    _bug_report_log_path, str(report_id))
+                attempted_path = path
+                own = _auto_logs._MarkedBlob(path)
+                # REGISTERED BEFORE THE MARKER EXISTS, which is the upload
+                # path's order (`_reserve_stamp_and_write`). The sweep skips a
+                # registered name at any age, so there is no instant at which
+                # this request's marker is on the volume and its name is not
+                # protected -- including while the worker below is running.
+                _auto_logs._MARKERS_IN_FLIGHT.add(path.name)
 
-    await db.commit()
+                def _store_attachment():
+                    """The attachment's durable sequence up to the commit, on
+                    a worker thread: the marker's stamp and its two flushes,
+                    the blob's bytes, its contents flush and its directory
+                    flush.
+
+                    The api runs one asynchronous worker (#125), and every
+                    step here can block for as long as a contended or
+                    recovering volume takes. Run on the loop, that was every
+                    other request in the process -- queue polls, match
+                    reports -- waiting behind one player's attachment
+                    (round-6 MEDIUM 3). The ORDER inside is unchanged: the
+                    stamp before the first byte, the contents, the entry;
+                    the row commits on the loop after this has returned, and
+                    the marker is cleared after that, on a worker of its own
+                    (the `finally` below).
+
+                    UNDER THE CLAIM'S LOCK, AND NOT AT ALL ONCE IT IS
+                    DISCARDED (round 8). The wait for this call has a
+                    ceiling, and a cleanup that starts after the ceiling
+                    must not race a store that is still running or still
+                    queued: the lock makes them take turns, and the flag
+                    makes a store that comes second create nothing."""
+                    with own.lock:
+                        if own.discarded:
+                            return 0
+                        # THE MARKER GOES BEFORE THE FIRST BYTE, which is the
+                        # upload path's own order applied here (#432: the
+                        # defect is the class, not the line that was flagged).
+                        #
+                        # A process or host stop between `open()` and the
+                        # cleanup arm below leaves a PREFIX of this gzip
+                        # stream on the volume with no row naming it -- and
+                        # the player-report path has no sweep of its own,
+                        # while the automatic path's sweep walks the MARKER
+                        # SET and `prune_auto_logs` walks kind='auto' ROWS.
+                        # Neither can see an unmarked, unreferenced file, so
+                        # that prefix would be permanent, on the volume this
+                        # route is most protective of. Stamping first makes it
+                        # discoverable from before it has any bytes: the sweep
+                        # finds a marker whose blob no row names and takes
+                        # both.
+                        #
+                        # AND THE MARKER IS CLEARED ONLY AFTER THE COMMIT,
+                        # below. Between the two the file is marked and
+                        # unreferenced, which is a state the sweep collects --
+                        # so the window is covered by the in-flight
+                        # registration above and by the sweep's age gate
+                        # rather than by nothing.
+                        #
+                        # `_stamp_marker` is DURABLE and it RAISES rather than
+                        # swallowing, so a volume that cannot carry the marker
+                        # refuses the attachment through the same arm every
+                        # other write failure uses, instead of writing a file
+                        # nothing could ever find.
+                        _auto_logs._stamp_marker(path)
+                        own.marked = True
+                        # AND THE BLOB IS MADE DURABLE BEFORE THE ROW NAMES
+                        # IT, which is the rest of the upload path's order
+                        # (`_write_blob`): the contents flushed, then the
+                        # directory entry that names them. `write()` and
+                        # `close()` promise nothing about either, so a host
+                        # stop after the commit below could otherwise recover
+                        # a row that names an attachment the volume holds
+                        # empty, truncated or not at all -- a report whose log
+                        # the database says it has (#507). A flush that
+                        # refuses raises into the arm below, the same arm a
+                        # failed write takes, so the row never claims bytes
+                        # the filesystem did not promise.
+                        with open(path, "wb") as f:
+                            f.write(data)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        _auto_logs._fsync_dir(_pathlib.Path(path).parent)
+                        own.written = True
+                        return len(data)
+
+                # A WORKER OF ITS OWN, AWAITED THROUGH `asyncio.shield` WITH A
+                # CEILING, the upload path's own shape. Cancelling this request
+                # -- or the ceiling passing -- cannot stop a worker thread, so
+                # it does not pretend to: the thread runs to its end, the
+                # `finally` below keeps the name registered until it has, and
+                # `_drain_section_error` consumes an exception nobody is left
+                # to read. A store that has not returned by the ceiling is an
+                # attachment that was not stored, and the arm below discards
+                # it under the claim's lock.
+                hop = _auto_logs._start(_auto_logs._VOLUME_POOL,
+                                        _store_attachment)
+                hops.append(hop)
+                stored = await asyncio.wait_for(
+                    asyncio.shield(hop),
+                    _auto_logs._span_budget(attach_deadline))
+                if not own.written:
+                    raise RuntimeError("the attachment was discarded before "
+                                       "it was written")
+                log_bytes_stored = stored
+                log_filename = path.name
+                row_log_filename = log_filename
+                row_log_bytes = log_bytes_stored
+            except Exception as ex:
+                # A LOG WAS ATTACHED AND IT WAS NOT STORED, and the row has to
+                # say so -- including which of the two ways it failed.
+                #
+                # Falling through leaves log_filename NULL, which is the SAME
+                # state as a report filed with no log at all. An admin opening
+                # the row a week later sees "no attachment" and has no way to
+                # know one was sent, so a player who attached their log and
+                # describes a crash looks like a player who did not bother.
+                # The api log line below is the only record, and it is thirty
+                # thousand lines away by the time anybody looks.
+                #
+                # THE ROW ENCODES THREE STATES, one per thing that can have
+                # happened to the attachment, and none of them needs a schema
+                # change:
+                #
+                #   filename NULL, bytes NULL -- nothing was attached;
+                #   filename NULL, bytes 0    -- attached, lost, and NOTHING
+                #                                of it is on the volume: the
+                #                                partial file was removed and
+                #                                the removal is DURABLE;
+                #   filename SET,  bytes NULL -- attached, the write failed,
+                #                                and the partial file could
+                #                                NOT be taken off the volume,
+                #                                so the row NAMES it.
+                #
+                # 0 is unreachable for a stored blob -- this arm only runs
+                # when a non-empty log_blob was sent, and gzip of anything is
+                # never zero bytes -- so it cannot be confused with a real
+                # attachment.
+                #
+                # The response carries `log_persisted: false` in all three
+                # cases: it is derived from the LOCAL `log_filename`, which
+                # this arm never sets, so the client is told the log was not
+                # persisted even in the third state, where the row names a
+                # truncated file. That is the truth from the client's side and
+                # from the row's side at the same time.
+                #
+                # AND THE PARTIAL FILE GOES BEFORE THE ROW COMMITS, DURABLY.
+                # `open()` can succeed and `write()`, `flush()` or either of
+                # the two durability barriers above fail, which leaves a
+                # prefix of the gzip stream on the volume -- or a whole one
+                # the filesystem never promised, which is no better. That
+                # prefix is MARKED before it has any bytes, so the orphan
+                # sweep can find it even if this arm never runs -- but the arm
+                # is still what makes the ordinary case deterministic, and it
+                # is what decides whether the row names the file or disclaims
+                # it. The sweep is the floor, not the plan: it waits out the
+                # age gate, while this runs now.
+                #
+                # THREE THINGS MAKE THE UNREFERENCED PREFIX UNREACHABLE RATHER
+                # THAN UNLIKELY.
+                #
+                #   * The marker, stamped before `open()`. Even a host stop
+                #     between the first byte and this arm leaves a file the
+                #     sweep can name.
+                #
+                #   * The unlink is followed by a DIRECTORY FLUSH before the
+                #     row commits. Issuing the unlink first is a call order;
+                #     an entry removal is not durable until the directory is
+                #     flushed, so a host that stops after the commit could
+                #     otherwise recover the file with the row already saying
+                #     log_bytes=0 over it -- the same unreferenced prefix, one
+                #     step later (#507).
+                #   * An unlink that RAISES anything but FileNotFoundError
+                #     leaves the file where it is, so the row KEEPS THE
+                #     REFERENCE instead of dropping it. A named file is an
+                #     ordinary attachment of this report: an admin can see it,
+                #     the report's own lifecycle governs it, and it is not a
+                #     residue class no tick can reach. log_bytes is left NULL
+                #     rather than set to 0, because 0 is the claim that nothing
+                #     is on the volume and this arm cannot make it.
+                #
+                # A flush that itself refuses is treated exactly like a
+                # refused unlink: the removal cannot be proved, so the
+                # reference stays -- and that is a SEPARATE except arm rather
+                # than a shared one, because `FileNotFoundError` from the
+                # flush and `FileNotFoundError` from the unlink are opposite
+                # facts.
+                #
+                # AND SO IS A REMOVAL WHOSE WAIT PASSES ITS CEILING (round 8).
+                # The removal goes on in its thread and may yet succeed, but
+                # nothing here can say so before the row commits, so the row
+                # KEEPS the reference: the conservative reading, the one the
+                # refused flush already takes (#430/#276).
+                removed = "no file was created"
+                keep_reference = False
+                if own is not None:
+                    # THE UNLINK AND THE FLUSH ARE TWO STATEMENTS WITH TWO
+                    # ANSWERS, and round 6 separated them because one `except
+                    # FileNotFoundError` over both read the WRONG failure as
+                    # the harmless one. `FileNotFoundError` is an `OSError`,
+                    # so a flush that raised it AFTER a successful unlink --
+                    # the directory replaced under a recovering mount, the
+                    # container losing the subtree -- landed in the arm that
+                    # means "no file was created" and committed
+                    # `log_bytes = 0`: the claim that nothing is on the
+                    # volume, made over a removal the filesystem never
+                    # promised, which a recovery can undo.
+                    #
+                    # Read separately they say different things. The UNLINK's
+                    # own FileNotFoundError means the file never existed, and
+                    # the reference may drop. A FLUSH failure of any kind,
+                    # including that one, means the removal cannot be proved,
+                    # and the reference STAYS -- the same conservative
+                    # direction the retention pass takes for the same reason
+                    # (#430/#276).
+                    #
+                    # BOTH RUN ON A WORKER THREAD TOO: the cleanup's directory
+                    # flush is the same barrier on the same volume as the
+                    # stored path's, and it would stall the loop the same way.
+                    # And both run UNDER THE CLAIM'S LOCK with `discarded` set
+                    # first (round 8), so a store still queued creates nothing
+                    # and a store still running finishes before this starts.
+                    def _discard_partial():
+                        with own.lock:
+                            own.discarded = True
+                            removed = "no file was created"
+                            keep_reference = False
+                            try:
+                                os.unlink(str(attempted_path))
+                            except FileNotFoundError:
+                                removed = "no file was created"
+                            except OSError as rm:
+                                # THE REFERENCE STAYS. The file may still be on the
+                                # volume and the row is now the thing that names
+                                # it, so it is referenced rather than unreachable.
+                                # The operator line says so as well, because the
+                                # file is a truncated gzip and a download of it
+                                # will fail.
+                                keep_reference = True
+                                removed = (f"the partial file {attempted_path.name} could "
+                                           f"NOT be removed ({type(rm).__name__}), so the "
+                                           f"row now NAMES it rather than leaving it "
+                                           f"unreferenced; it is a truncated gzip and will "
+                                           f"not download cleanly")
+                            else:
+                                try:
+                                    _auto_logs._fsync_dir(
+                                        _pathlib.Path(attempted_path).parent)
+                                    removed = "the partial file was removed durably"
+                                except OSError as fx:
+                                    keep_reference = True
+                                    removed = (f"the partial file {attempted_path.name} "
+                                               f"was unlinked and the directory would NOT "
+                                               f"flush ({type(fx).__name__}), so the "
+                                               f"removal is not durable and the row KEEPS "
+                                               f"the reference; if the volume recovers the "
+                                               f"entry it is a truncated gzip this report "
+                                               f"names, and if it does not the row names a "
+                                               f"file that is gone")
+                            return removed, keep_reference
+
+                    hop = _auto_logs._start(_auto_logs._VOLUME_POOL,
+                                            _discard_partial)
+                    hops.append(hop)
+                    try:
+                        removed, keep_reference = await asyncio.wait_for(
+                            asyncio.shield(hop),
+                            _auto_logs.AUTO_LOG_VOLUME_WAIT_S)
+                    except Exception as dx:
+                        keep_reference = True
+                        removed = (f"the removal of the partial file "
+                                   f"{attempted_path.name} did not finish "
+                                   f"within {_auto_logs.AUTO_LOG_VOLUME_WAIT_S}s "
+                                   f"({type(dx).__name__}) and goes on in its "
+                                   f"thread, so the row KEEPS the reference: "
+                                   f"nothing here can say the file is gone "
+                                   f"before the row commits")
+                if keep_reference:
+                    row_log_filename = attempted_path.name
+                    print(f"[BUG-REPORT] log persistence FAILED for {report_id}: "
+                          f"{type(ex).__name__} {ex}; {removed}; the row is committed "
+                          f"naming that file with log_bytes NULL, because 0 would "
+                          f"claim the volume is clean and this arm cannot claim that")
+                else:
+                    row_log_bytes = 0
+                    print(f"[BUG-REPORT] log persistence FAILED for {report_id}: "
+                          f"{type(ex).__name__} {ex}; {removed}; the row is committed "
+                          f"with log_bytes=0 to record that a log was attached and "
+                          f"could not be stored")
+
+        # T2: THE WRITES, TOGETHER, AFTER THE VOLUME WORK (R7-M4).
+        #
+        # Resolve player if known — bug reports tolerate unknown senders so
+        # first-launch players can still report. Read HERE, in the
+        # transaction that writes, and not carried over from T1: nothing
+        # before this point needs the row, and an object read in a
+        # transaction that has since ended is a snapshot this one would be
+        # acting on (#208).
+        player = await db.execute(select(Player).where(Player.steam_id == req.steam_id))
+        player = player.scalar_one_or_none()
+        if player:
+            # Bug reports accept an arbitrary subject id and tolerate missing
+            # sessions, so this may mark mod-seen/Beta but cannot stamp a version.
+            await _mark_mod_seen(db, player)
+
+        report = BugReport(
+            id=report_id,
+            player_id=player.id if player else None,
+            steam_id=req.steam_id,
+            display_name=req.display_name or (player.display_name if player else None),
+            mod_version=req.mod_version,
+            game_version=req.game_version,
+            severity=severity,
+            category=category,
+            description=req.description.strip(),
+            repro_steps=(req.repro_steps or "").strip() or None,
+            log_filename=row_log_filename,
+            log_bytes=row_log_bytes,
+        )
+        db.add(report)
+        await db.flush()
+
+        # Seed the activity log with a "created" event so the timeline is complete.
+        db.add(BugReportEvent(
+            bug_report_id=report.id,
+            actor_steam_id=req.steam_id,
+            actor_name=req.display_name or req.steam_id or "Unknown",
+            event_type="created",
+            new_status="open",
+            comment=None,
+        ))
+
+        # THE MARKER IS REMOVED AFTER THE REFERENCE IS COMMITTED, AND ONLY
+        # THEN, in the `finally` below.
+        #
+        # A crash before the commit leaves a marked file no row names, which
+        # the orphan sweep collects. A crash after it leaves a marked file a
+        # row DOES name, which the sweep clears and does not touch. Clearing
+        # the marker before the commit would open the window this stamp exists
+        # to close, so the order is the upload path's: stamp, write, commit,
+        # clear.
+        #
+        # WHEN THE SWEEP COLLECTS WHAT A FAILED REQUEST LEAVES, read off the
+        # sweep's own code (`prune_orphan_blobs`, `_marker_candidates`)
+        # rather than hoped for -- not "on the first sweep", and not
+        # necessarily in the next process life. A marker is a candidate only
+        # while no request of the running process holds its name and only
+        # once it is older than `_ORPHAN_MIN_AGE_S` (the sweep interval plus
+        # twice the marked-span deadline). Each pass then reaches a window of
+        # at most `_ORPHAN_SCAN_BOUND` marker names, taken in name order after
+        # a cursor that moves on across passes and resolved oldest first, and
+        # removes at most `_ORPHAN_BATCH` blobs. So a marked residue waits for
+        # the age gate, then for the window to reach it, then for removal
+        # budget in that window: delayed, never permanent.
+        await db.commit()
+        committed = True
+    finally:
+        if own is not None:
+            if committed:
+                # THE MARKER'S CLEAR RUNS ON A WORKER THREAD, like every
+                # other call this request makes on the volume: it is an
+                # unlink in the same directory, and the last step of the
+                # sequence -- `_clear_marker`, the upload path's own, under
+                # the claim's lock. It becomes a worker the release below
+                # waits for, so the name stays registered until the last
+                # thread this request started has finished with the
+                # attachment's files -- a cancellation that ends the wait
+                # ends only the wait -- and it is told NOT to drop the name
+                # itself (`release_name=False`), because the release below is
+                # the one place that knows when the last of them has ended.
+                #
+                # It is scheduled whenever the row has committed, not only
+                # when this request saw the marker stamped. The one way a
+                # committed row meets a store that is still running is a
+                # store whose wait passed its ceiling, and then the arm above
+                # started a removal behind it. The three take the claim's
+                # lock in turn, in whatever order the pool runs them, and no
+                # order leaves a blob that nothing names: a clear that runs
+                # after the store removes the marker it stamped, and one that
+                # runs before it leaves that marker -- beside a blob the
+                # removal takes -- for the sweep, which clears a marker whose
+                # blob is gone.
+                hops.append(_auto_logs._start(_auto_logs._VOLUME_POOL,
+                                              _auto_logs._clear_marker, own,
+                                              False))
+            _in_flight = attempted_path.name
+            _running = [h for h in hops if not h.done()]
+            if _running:
+                _left = [len(_running)]
+
+                def _release_after(_t):
+                    _left[0] -= 1
+                    if _left[0] == 0:
+                        _auto_logs._MARKERS_IN_FLIGHT.discard(_in_flight)
+
+                for h in _running:
+                    h.add_done_callback(_release_after)
+            else:
+                _auto_logs._MARKERS_IN_FLIGHT.discard(_in_flight)
+            if committed:
+                # A CEILING ON THIS WAIT TOO, and the report stands either
+                # way: the row is committed, so a marker still on the volume
+                # is one the sweep finds a row for and clears.
+                try:
+                    await asyncio.wait_for(asyncio.shield(hops[-1]),
+                                           _auto_logs.AUTO_LOG_VOLUME_WAIT_S)
+                except Exception as cx:
+                    print(f"[BUG-REPORT] the attachment marker for {report_id} "
+                          f"was not cleared ({type(cx).__name__}); the report "
+                          f"stands, and the orphan sweep clears the marker over "
+                          f"the committed row")
     # Re-read so we have the DB-assigned bug_number.
     await db.refresh(report)
     print(f"[BUG-REPORT] #{report.bug_number} ({report.id}) {severity}/{category} from {req.steam_id} ({req.display_name}) " +
@@ -41622,6 +42168,22 @@ async def list_bug_reports(
     hmac_signature: str | None = Query(None),
     status: str | None = Query(None, max_length=16),
     severity: str | None = Query(None, max_length=16),
+    # WHAT PUT THE ROW HERE, as a filter and not only as a field.
+    #
+    # One opted-in seat can write up to twelve automatic uploads a day --
+    # more in a day than the bug form produces in a month -- and they are
+    # written 'open'/'low'/'other', which is exactly what an untriaged player
+    # report looks like. So neither `status` nor `severity` separates them,
+    # and page one of a DESC-by-created_at list is fifty machine rows with a
+    # player's two-day-old ticket sitting on page three.
+    #
+    # Carrying `kind` on the summary row was not enough by itself: it lets an
+    # admin SEE which row is which once the page has been fetched, and that
+    # field's default in schemas.py exists precisely so an OLDER admin client
+    # ignores the key. This parameter is what makes the two separable by
+    # QUERY. Omitted, the list is unchanged and shows both -- an admin should
+    # be able to see automatic uploads, just not have to wade through them.
+    kind: str | None = Query(None, max_length=16),
     limit: int = Query(50, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -41640,13 +42202,24 @@ async def list_bug_reports(
     if severity:
         filters.append("severity = :severity")
         params["severity"] = severity.lower()
+    if kind:
+        filters.append("kind = :kind")
+        params["kind"] = kind.lower()
     where = " WHERE " + " AND ".join(filters) if filters else ""
     # `kind` is SELECTed and carried out: an automatic post-match upload
     # (migration 336) and a player-filed ticket are otherwise the same row in
     # this list, and the triage actions beside them -- status, comment -- mean
-    # completely different things for the two. The list is deliberately NOT
-    # filtered to kind='report': an admin should be able to see automatic
-    # uploads, just not mistake one for a ticket somebody is waiting on.
+    # completely different things for the two. The list is deliberately not
+    # filtered to kind='report' BY DEFAULT -- an admin should be able to see
+    # automatic uploads, just not mistake one for a ticket somebody is waiting
+    # on, and not have to page past them to find one. `?kind=report` is the
+    # filter that does the second half; the default answers as it always did.
+    #
+    # AN OLD API BOX IGNORES AN UNKNOWN QUERY PARAMETER AND ANSWERS 200 (#266).
+    # A new admin client asking for `kind=report` against a box that has not
+    # been deployed yet gets the UNFILTERED list back, looking filtered. That
+    # is the standby-drift signature exactly, and it is why this endpoint has
+    # to be live on both boxes before the filter is trusted.
     rows = await db.execute(
         text(f"""SELECT id, bug_number, created_at, steam_id, display_name, mod_version,
                         severity, category, status, description,
@@ -41706,7 +42279,7 @@ async def recent_bug_report_events(
     # linked player's discord_id attached -- which DMs them that staff acted
     # on 'your report' for something they never filed and cannot see.
     # Filtering the feed is the fix rather than filtering in the bot: the
-    # reporter_discord_id join above is what makes the row deliverable, and
+    # reporter_discord_id join below is what makes the row deliverable, and
     # it should not be built for a row that is not a player's ticket.
     if unnotified:
         where = ("br.kind = 'report' AND bre.notified_at IS NULL "
@@ -41912,13 +42485,30 @@ async def get_bug_report(
             # endpoint while this one stayed as-is would make the scrub a
             # rendering suggestion rather than a control (#159's shape).
             #
-            # to_thread: this gunzip used to run inline on the single worker.
+            # Off the loop: this gunzip used to run inline on the single
+            # worker. Since round 8 it runs on the auto-log module's VOLUME
+            # POOL, with a ceiling on the wait and no pooled connection held
+            # across it (R7-M4's class): the read is a call on the same volume
+            # the two log writers use, so a volume that stops answering holds
+            # threads of that pool and never the event loop's default
+            # executor, and the transaction the row was read in -- a READ --
+            # is ended first. A read that does not return in time is a read
+            # error on the pane like any other, and so is a scrub pass that
+            # does not finish (`_scrub_bug_log`: its passes run on the CPU
+            # pool under their own ceiling, with no connection held).
             path = _pathlib.Path(BUG_REPORT_LOG_DIR) / row["log_filename"]
-            raw = await asyncio.to_thread(_read_bug_log_sync, str(path))
+            await _auto_logs._end_transaction(db)
+            raw = await _auto_logs._hop(
+                _auto_logs._VOLUME_POOL, _auto_logs.AUTO_LOG_VOLUME_WAIT_S,
+                _read_bug_log_sync, str(path))
             log_text, _scrub_counts = await _scrub_bug_log(db, raw)
             log_scrubbed = True
         except Exception as ex:
-            log_text = f"[log read error: {ex}]"
+            # The MESSAGE when there is one, the exception's NAME when there
+            # is not: a ceiling's TimeoutError carries no message, and an
+            # exception object is always truthy, so `ex or name` never took
+            # the name and the pane read "[log read error: ]".
+            log_text = f"[log read error: {str(ex) or type(ex).__name__}]"
 
     # Activity timeline — chronological so the UI can render top-down.
     ev_rows = (await db.execute(
@@ -42067,10 +42657,23 @@ async def download_bug_report_log(
     # traversal. Keep it that way: never accept a filename or path component
     # from the caller.
     path = _pathlib.Path(BUG_REPORT_LOG_DIR) / row["log_filename"]
+    # ON THE AUTO-LOG MODULE'S VOLUME POOL, with a ceiling and no pooled
+    # connection held across it (R7-M4's class): the transaction the row was
+    # read in is ended first, and a volume that does not answer holds a
+    # thread of that pool, never the event loop's default executor. A read
+    # that does not return in time is a 503 -- the volume, not the request,
+    # is what failed.
+    await _auto_logs._end_transaction(db)
     try:
-        raw = await asyncio.to_thread(_read_bug_log_sync, str(path))
+        raw = await _auto_logs._hop(
+            _auto_logs._VOLUME_POOL, _auto_logs.AUTO_LOG_VOLUME_WAIT_S,
+            _read_bug_log_sync, str(path))
     except ValueError as ex:
         raise HTTPException(413, str(ex))
+    except TimeoutError:
+        print(f"[BUG-LOG] read of #{row['bug_number']} did not return within "
+              f"{_auto_logs.AUTO_LOG_VOLUME_WAIT_S}s")
+        raise HTTPException(503, "Log storage unavailable")
     except Exception as ex:
         print(f"[BUG-LOG] read failed for #{row['bug_number']}: {type(ex).__name__}: {ex}")
         raise HTTPException(500, "Log read failed")
@@ -42079,7 +42682,15 @@ async def download_bug_report_log(
         # from "no attachment" above so the two are diagnosable apart.
         raise HTTPException(410, "Log attachment is recorded but missing on disk")
 
-    body, counts = await _scrub_bug_log(db, raw)
+    try:
+        body, counts = await _scrub_bug_log(db, raw)
+    except TimeoutError:
+        # A scrub pass that did not finish within its ceiling: the CPU pool is
+        # busy or the bundle is pathological, and the answer is the same
+        # "try again" the volume's ceiling gives. Never the unscrubbed body.
+        print(f"[BUG-LOG] scrub of #{row['bug_number']} did not finish within "
+              f"{_auto_logs.AUTO_LOG_CPU_WAIT_S}s")
+        raise HTTPException(503, "Log scrub unavailable")
     print(f"[BUG-LOG] #{row['bug_number']} downloaded by {admin_steam_id} "
           f"({len(body)} chars; redacted credential={counts['credential']} os_user={counts['os_user']} "
           f"discord={counts['discord_id']} deleted_steam={counts['deleted_steam_id']})")
@@ -48483,7 +49094,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4573 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4590 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and

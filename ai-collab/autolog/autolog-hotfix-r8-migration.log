@@ -1,0 +1,1654 @@
+===== migration rehearsal ROUND 8 (350 ACCOUNTED POSITION, CACHE, CATALOGUE, PERSISTENCE) 2026-09-24T04:35:44Z =====
+
+WHICH BLOCK DECIDES WHAT, stated before the evidence so the sections
+below can be read against it. `CREATE SEQUENCE IF NOT EXISTS` keeps a
+pre-existing sequence of ANY shape and reports success, so the file
+cannot learn anything from the DDL itself.
+
+  * THE PRE-ADOPTION BLOCK ($m350s$, 350:317-425) DECIDES ADOPTION.
+    It runs immediately after the CREATE. Since round 8 it first reads
+    the catalogue's own column list against the eight columns it
+    declares and the relation's persistence, refusing a difference or
+    anything but 'p' by name; then it reads the catalogue row once and
+    RAISES on the first attribute that is not the one this file
+    configures -- type, increment, MAXVALUE, MINVALUE, CYCLE, CACHE
+    (since round 8), the start's range and the start's IDENTITY. A
+    sequence it refuses is never adopted: the transaction aborts
+    before the ALTER .. OWNED BY, before the CHECK, and before any
+    row could draw from it. It judges CONFIGURATION only, and hands
+    its reading to 1c.
+  * THE POSITION BLOCK ($m350n$, 350:499-628) DECIDES THE REST.
+    It runs right after the ALTER .. OWNED BY, whose lock
+    (ShareRowExclusiveLock, held to COMMIT) blocks every nextval by
+    another session; it refuses unless pg_locks shows this backend
+    holding such a lock, re-reads the column list, the persistence and
+    the whole shape and requires 1b's reading, reads last_value and
+    is_called from the sequence itself, and -- since round 8 -- judges
+    the ACCOUNTED value, the next value the sequence hands out once
+    this file has committed (the value found, moved by the
+    post-check's two draws), against -2^62; and it refuses a next
+    value a row already holds. It hands the post-check the policy:
+    the floor, the accounted-value query and the value it accounted for.
+  * THE POST-CHECK BLOCK ($m350p$, 350:675-859) IS THE SECOND GATE,
+    NOT THE FIRST. It exercises what the file produced -- two draws,
+    the CHECK against a positive automatic row, a correct one and an
+    ordinary player row, and the human sequence's position. Its FIRST
+    DRAW must equal 1c's reading; since round 8 it pins the position
+    with setval to its second draw, reads it back through the policy's
+    own query, and refuses unless that equals 1c's accounted value and
+    meets the floor. It holds no c_auto_* constants of its own: the
+    attribute decisions belong to the block above, and two copies of
+    the same literals are two places for them to disagree.
+  * THE RELEASE TRAIN reads `c_floor` and `c_accounted_sql` out of this
+    file at the reviewed precursor commit and applies them to each box
+    (3g shows it agreeing with the file at the boundary).
+
+The round-5 log said this the other way round at its line 159. The
+correction is recorded here rather than in that file, which is
+evidence of the round that produced it.
+INVOCATION (cwd WT):
+  PYTHON TMP/r8_migration.py <this log>
+336 sha256: 16289bd679bd8ab6aee766d3c46fb1c0704e3597600f6549391e55c31107e6cd
+350 sha256: 84ac31e821c4eae47e9be25a7d1ccc6d7453f88cd4f08bd9720bb50135a4acf1
+
+############ 0. WHICH SERVER, WHICH DATABASE -- READ FROM THE CONNECTION ############
+-- the target is named by the SERVER, not by this script's arguments --
+   127.0.0.1/32|55432|postgres|postgres|public|PostgreSQL 16.9, compiled by Visual C++ build 1943, 64-bit
+-- this is a LOCAL rehearsal server; the production chain is NEVER touched --
+   is_local_loopback=t
+   OK   the rehearsal server is loopback-local
+-- databases before (only the scr_autolog8* set may change) --
+   (none)
+-- sessions per database before any step (SELECT datname, count(*) FROM pg_stat_activity GROUP BY 1) --
+   (no database) 5
+   postgres 1
+   OK   no session sits on any scr_autolog8* database before any step
+
+############ 1. FRESH DATABASES AND THE PRODUCTION CHAIN SUBSET ############
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8";
+     NOTICE:  database "scr_autolog8" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_mut";
+     NOTICE:  database "scr_autolog8_mut" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_sch";
+     NOTICE:  database "scr_autolog8_sch" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_w";
+     NOTICE:  database "scr_autolog8_w" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_type";
+     NOTICE:  database "scr_autolog8_seq_type" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_incr";
+     NOTICE:  database "scr_autolog8_seq_incr" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_max";
+     NOTICE:  database "scr_autolog8_seq_max" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_min";
+     NOTICE:  database "scr_autolog8_seq_min" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_cycle";
+     NOTICE:  database "scr_autolog8_seq_cycle" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_start";
+     NOTICE:  database "scr_autolog8_seq_start" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_ident";
+     NOTICE:  database "scr_autolog8_seq_ident" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_identm";
+     NOTICE:  database "scr_autolog8_seq_identm" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_ok";
+     NOTICE:  database "scr_autolog8_seq_ok" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_min";
+     NOTICE:  database "scr_autolog8_pos_min" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_edge";
+     NOTICE:  database "scr_autolog8_pos_edge" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_edge1";
+     NOTICE:  database "scr_autolog8_pos_edge1" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_r7";
+     NOTICE:  database "scr_autolog8_pos_r7" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_held";
+     NOTICE:  database "scr_autolog8_pos_held" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_minm";
+     NOTICE:  database "scr_autolog8_pos_minm" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_minmm";
+     NOTICE:  database "scr_autolog8_pos_minmm" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_heldm";
+     NOTICE:  database "scr_autolog8_pos_heldm" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_ctl";
+     NOTICE:  database "scr_autolog8_pos_ctl" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_acct";
+     NOTICE:  database "scr_autolog8_pos_acct" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_r7m";
+     NOTICE:  database "scr_autolog8_pos_r7m" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_foundm";
+     NOTICE:  database "scr_autolog8_pos_foundm" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_cache";
+     NOTICE:  database "scr_autolog8_seq_cache" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_cachem";
+     NOTICE:  database "scr_autolog8_seq_cachem" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_cols";
+     NOTICE:  database "scr_autolog8_seq_cols" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_unl";
+     NOTICE:  database "scr_autolog8_seq_unl" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_unlm";
+     NOTICE:  database "scr_autolog8_seq_unlm" does not exist, skipping
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_ext";
+     NOTICE:  database "scr_autolog8_pos_ext" does not exist, skipping
+     exit=0
+---- into scr_autolog8 ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+---- into scr_autolog8_mut ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_mut";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+
+############ 2. THE REFUSED PRE-336 RUN ############
+350 names `kind`, so on a database without 336 it must refuse BY NAME
+rather than failing as a bare UndefinedColumn.
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:213: ERROR:  350: bug_reports.kind is missing from schema public, so the shape 336 installs is not on this database. Apply 336_bug_reports_kind.sql first; this file constrains the automatic rows that column identifies
+     CONTEXT:  PL/pgSQL function inline_code_block line 48 at RAISE
+     exit=3  (expected: non-zero)
+   OK   350 refuses a database without 336
+   OK   the refusal names 336
+
+############ 3. APPLY 336 ############
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   OK   336 applies cleanly
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   OK   336 applies cleanly on the mutant database
+
+############ 3b. THE EXACT-DEFAULT ARMS, BOTH DIRECTIONS ############
+-- (a) a default that merely CONTAINS 'report': a '%report%' test ADMITS it --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -c ALTER TABLE bug_reports ALTER COLUMN kind SET DEFAULT 'auto_report';
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:213: ERROR:  350: bug_reports.kind must carry exactly the default 336 installs, 'report'::character varying, and it reads 'auto_report'::character varying instead. A default that merely mentions 'report' is not the same fact: rows written by code that does not name the column would take a value this file's CHECK was not written against. Apply 336_bug_reports_kind.sql (either copy), or repair the default with ALTER TABLE bug_reports ALTER COLUMN kind SET DEFAULT 'report', before this file
+     CONTEXT:  PL/pgSQL function inline_code_block line 95 at RAISE
+     exit=3  (expected: non-zero)
+   OK   a drifted kind default is REFUSED
+   OK   the refusal names the exact default it wanted and the one it read
+-- (b) NO default at all: refused by the same line (IS DISTINCT FROM covers NULL) --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -c ALTER TABLE bug_reports ALTER COLUMN kind DROP DEFAULT;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:213: ERROR:  350: bug_reports.kind must carry exactly the default 336 installs, 'report'::character varying, and it reads NULL instead. A default that merely mentions 'report' is not the same fact: rows written by code that does not name the column would take a value this file's CHECK was not written against. Apply 336_bug_reports_kind.sql (either copy), or repair the default with ALTER TABLE bug_reports ALTER COLUMN kind SET DEFAULT 'report', before this file
+     CONTEXT:  PL/pgSQL function inline_code_block line 95 at RAISE
+     exit=3  (expected: non-zero)
+   OK   a MISSING kind default is REFUSED by the same line
+   OK   the refusal says plainly that it read no default
+-- (c) CONTROL: restoring 336's own default makes the same file PASS --
+Without this arm the two refusals above are equally well explained by a
+file that refuses every database it is offered (#391).
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -c ALTER TABLE bug_reports ALTER COLUMN kind SET DEFAULT 'report';
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_mut -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0 -- the ONLY change is the restored default)
+   OK   CONTROL: the same file PASSES once the default is 336's
+
+############ 3c. THE SCHEMA-SCOPING PAIR ############
+---- into scr_autolog8_sch ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_sch";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_sch -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_sch -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_sch -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_sch -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_sch -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   -- a SECOND schema carrying its own drifted bug_reports.kind --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_sch -c CREATE SCHEMA other; CREATE TABLE other.bug_reports (id int, kind varchar(16) DEFAULT 'drifted');
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_sch -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0 -- the CORRECT target under a drifted second schema)
+   OK   a correct target PASSES although a second schema has drifted
+
+############ 3d. THE WHOLE-SEQUENCE-SHAPE FIXTURES ############
+CREATE SEQUENCE IF NOT EXISTS keeps a pre-existing sequence of ANY shape,
+so the PRE-ADOPTION block is what decides whether 350 may adopt one --
+it reads the catalogue row right after the CREATE and refuses on the
+first attribute that is not this file's. The post-check at the end is
+the SECOND gate, over what the file produced.
+One fixture per attribute the file configures; each must be
+REFUSED and the refusal must NAME that attribute. The last fixture is
+the TWIN: a correctly shaped pre-existing sequence, which must be
+ADOPTED -- without it every refusal above would also pass for a file
+that refuses everything (#391).
+
+---- [seqtypid] a pre-existing sequence with the wrong seqtypid ----
+---- into scr_autolog8_seq_type ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_type";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_type -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_type -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_type -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_type -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_type -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_type -c CREATE SEQUENCE bug_reports_auto_number_seq AS integer INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -2147483647 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_type -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public with data type integer, not bigint; its range would run out while bug_reports.bug_number can still hold the number, and every upload past that point would 503
+     CONTEXT:  PL/pgSQL function inline_code_block line 54 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [seqtypid] 350 REFUSES the wrong-shaped sequence
+   OK   [seqtypid] the refusal names it ('data type')
+
+---- [seqincrement] a pre-existing sequence with the wrong seqincrement ----
+---- into scr_autolog8_seq_incr ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_incr";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_incr -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_incr -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_incr -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_incr -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_incr -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_incr -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -2 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_incr -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public with increment -2, not -1; a sequence that does not descend by one hands out numbers into the human range, which the CHECK this file adds below then refuses -- 503s with no explanation
+     CONTEXT:  PL/pgSQL function inline_code_block line 57 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [seqincrement] 350 REFUSES the wrong-shaped sequence
+   OK   [seqincrement] the refusal names it ('increment -2')
+
+---- [seqmax] a pre-existing sequence with the wrong seqmax ----
+---- into scr_autolog8_seq_max ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_max";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_max -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_max -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_max -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_max -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_max -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_max -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -5 MAXVALUE -5 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_max -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public with MAXVALUE -5, not -1; the ceiling is what keeps every automatic number negative and out of the human range
+     CONTEXT:  PL/pgSQL function inline_code_block line 60 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [seqmax] 350 REFUSES the wrong-shaped sequence
+   OK   [seqmax] the refusal names it ('MAXVALUE -5')
+
+---- [seqmin] a pre-existing sequence with the wrong seqmin ----
+---- into scr_autolog8_seq_min ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_min";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_min -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_min -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_min -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_min -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_min -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_min -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -2 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_min -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public with MINVALUE -2, not -9223372036854775807; the range this file configures is what makes exhaustion something nobody has to think about, and a shorter one exhausts into a 503 on every upload
+     CONTEXT:  PL/pgSQL function inline_code_block line 63 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [seqmin] 350 REFUSES the wrong-shaped sequence
+   OK   [seqmin] the refusal names it ('MINVALUE -2')
+
+---- [seqcycle] a pre-existing sequence with the wrong seqcycle ----
+---- into scr_autolog8_seq_cycle ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_cycle";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cycle -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cycle -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cycle -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cycle -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cycle -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cycle -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cycle -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public and CYCLES; on exhaustion it would hand out a number it has already given away, and bug_reports.bug_number is UNIQUE, so the upload would fail on the index instead of on the counter
+     CONTEXT:  PL/pgSQL function inline_code_block line 66 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [seqcycle] 350 REFUSES the wrong-shaped sequence
+   OK   [seqcycle] the refusal names it ('CYCLES')
+
+---- [seqstart] a catalogue row whose start is outside its own range ----
+PostgreSQL's own DDL validates START against MINVALUE/MAXVALUE, so this
+state cannot be reached with CREATE or ALTER SEQUENCE -- the fixture is
+a direct catalogue UPDATE, because `pg_sequence` is what 350 READS and
+a check is only worth having if it can be shown to fire (#342).
+This arm is also WHY the shape block sits where it does: the round-5
+draft asserted the shape in the post-check, and `ALTER SEQUENCE .. OWNED
+BY` re-validates the whole sequence, so this state was refused there by
+PostgreSQL -- `START value (5) cannot be greater than MAXVALUE (-1)`,
+naming neither the file nor the repair -- and the arm was unreachable.
+---- into scr_autolog8_seq_start ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_start";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_start -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_start -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_start -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_start -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_start -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_start -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_start -c UPDATE pg_sequence SET seqstart = 5 WHERE seqrelid = 'bug_reports_auto_number_seq'::regclass;
+     exit=0
+   OK   [seqstart] the fixture row was written
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_start -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public starting at 5, which is outside its own range -9223372036854775807 .. -1; a restart would put it there and the next draw would fail
+     CONTEXT:  PL/pgSQL function inline_code_block line 72 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [seqstart] 350 REFUSES a start outside the range
+   OK   [seqstart] the refusal names the start and the range
+
+############ 3e. NEW: THE SEQUENCE'S START IS THE CONFIGURED ONE ############
+The round-5 check asked whether the start sits inside the sequence's
+own range. EVERY LEGAL START DOES -- PostgreSQL's own DDL validates
+that much -- so the only state it could ever refuse was the direct
+catalogue UPDATE in 3d's [seqstart] arm. A sequence someone else
+configured is in range by construction and was adopted.
+
+The fixture is the one that matters in practice: a perfectly legal
+sequence of this file's own type, increment, bounds and cycle, started
+at MINVALUE + 1. It descends, it draws, and it is TWO numbers from
+exhaustion -- after which every upload answers 503. 350 must refuse it
+by name.
+---- into scr_autolog8_seq_ident ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_ident";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ident -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ident -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ident -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ident -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ident -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ident -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -9223372036854775806 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   OK   [seqstart-identity] the fixture sequence was created by ordinary DDL, so this is a state a deploy can meet
+   the fixture's start is inside its own range: t
+   OK   [seqstart-identity] the fixture PASSES the round-5 range check, which is why the identity check is a different question
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ident -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public starting at -9223372036854775806, not -1; it is inside its own range, so it draws, but a sequence configured to begin somewhere else was set up by something other than this file, and a RESTART with no value returns it to -9223372036854775806, not to -1. Near MINVALUE that start is also a short distance from exhaustion; anywhere else it is still not the sequence this file configures
+     CONTEXT:  PL/pgSQL function inline_code_block line 91 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [seqstart-identity] 350 REFUSES a legal in-range start that is not the configured one
+   OK   [seqstart-identity] the refusal names the start it read and the start this file configures
+   OK   [seqstart-identity] the refusal says why the range check did not catch it
+-- AND THE RANGE REFUSAL IS STILL ITS OWN SENTENCE. The two checks
+   answer different questions and 3d's [seqstart] arm above shows the
+   range one still fires, so neither has been replaced by the other.
+
+---- [identity MUTANT] the same fixture, against a COPY of 350 without the identity check ----
+The refusal above names the start, so it is the identity check's. In
+round 6 this arm showed the file WITHOUT it adopting the fixture and
+committing a sequence already exhausted. SINCE ROUND 7 THAT FIXTURE HAS
+A SECOND, INDEPENDENT GATE: a fresh sequence's next value IS its start,
+so block 1c's floor refuses the same fixture by its POSITION. The arm
+below requires exactly that, and then shows the identity check is
+still load-bearing on its own: a start that is not -1 but sits where the
+floor admits it (-2) is refused by the real file and ADOPTED by this copy.
+   removed, in the copy only, lines 406-408 of 350: the IF, its RAISE and its END IF
+---- into scr_autolog8_seq_identm ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_identm";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -9223372036854775806 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -f TMP/r8_350_identity_mutant.sql
+     psql:TMP/r8_350_identity_mutant.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_identity_mutant.sql:626: ERROR:  350: bug_reports_auto_number_seq in schema public would stand at -9223372036854775808 once this file commits (next value -9223372036854775806 now, last_value -9223372036854775806, is_called f, less the 2 value(s) its post-check draws), below the adoption floor -4611686018427387904: fewer than 2^62 of its -9223372036854775807 .. -1 range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above -4611686018427387902 and below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 109 at RAISE
+     exit=3  (expected: non-zero -- WITHOUT the identity check, 1c's floor refuses)
+   OK   [identity MUTANT] without the identity check the MINVALUE+1 start is STILL refused
+   OK   [identity MUTANT] and the refusal is 1c's, by POSITION: two independent gates
+   position after the refusal: -9223372036854775806|f
+   OK   [identity MUTANT] refused before any draw
+-- the identity check on its own: START -2, a position the floor admits --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -c DROP SEQUENCE bug_reports_auto_number_seq;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -2 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public starting at -2, not -1; it is inside its own range, so it draws, but a sequence configured to begin somewhere else was set up by something other than this file, and a RESTART with no value returns it to -2, not to -1. Near MINVALUE that start is also a short distance from exhaustion; anywhere else it is still not the sequence this file configures
+     CONTEXT:  PL/pgSQL function inline_code_block line 91 at RAISE
+     exit=3  (expected: non-zero -- the REAL file)
+   OK   [identity] the real file refuses a START of -2 by identity
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_identm -f TMP/r8_350_identity_mutant.sql
+     psql:TMP/r8_350_identity_mutant.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_identity_mutant.sql:857: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -2, adopted at next value -2 (read under the lock by block 1c), and descends (-2 then -3); it is left at next value -4 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0 -- the copy WITHOUT the identity check)
+   OK   [identity MUTANT] the copy without it ADOPTS that sequence: the identity check still decides a case no other check reaches
+
+---- [TWIN] a CORRECTLY shaped pre-existing sequence is ADOPTED ----
+---- into scr_autolog8_seq_ok ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_ok";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ok -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ok -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ok -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ok -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ok -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ok -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_ok -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   [TWIN] 350 ADOPTS a correctly shaped pre-existing sequence
+   OK   [TWIN] the post-check's NOTICE reports the shape
+   OK   [TWIN] the NOTICE reports the START it adopted, which is the attribute 3e's refusal is about
+   This is the control every refusal above needs. Seven fixtures are
+   refused and this one, differing from them in exactly the attribute
+   under test, is ADOPTED with EXIT 0 -- so the file is discriminating
+   rather than refusing everything it is offered (#391).
+
+############ 3f. THE SEQUENCE'S CURRENT POSITION, UNDER ROUND 8'S ACCOUNTED POLICY ############
+Every fixture in 3d/3e is a CONFIGURATION. `ALTER SEQUENCE .. RESTART`
+and `setval()` move a sequence without touching one configured
+attribute. Block 1c reads the position from the sequence itself, under
+the OWNED BY's lock, and must refuse BEFORE ANY DRAW: each refusal below
+is followed by a reading of the position, which must be exactly what the
+fixture set. SINCE ROUND 8 (R7-M1) the value 1c judges against -2^62 is
+the ACCOUNTED one -- the next value the sequence hands out once this file
+has committed: the value found, moved by the post-check's two draws. So
+the floor's two sides sit two values above round 7's, and round 7's own
+adopted-side fixture is now refused.
+
+---- [position MINVALUE+1] exact shape, restarted two values from the end ----
+---- into scr_autolog8_pos_min ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_min";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   its configured shape (every attribute 1b asserts, cache and persistence included): -1|-1|-1|-9223372036854775807|1|f|p
+   OK   [position MINVALUE+1] the fixture is EXACT in configuration, so 1b alone admits it
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -9223372036854775806;
+     exit=0
+   position before 350: -9223372036854775806|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:628: ERROR:  350: bug_reports_auto_number_seq in schema public would stand at -9223372036854775808 once this file commits (next value -9223372036854775806 now, last_value -9223372036854775806, is_called f, less the 2 value(s) its post-check draws), below the adoption floor -4611686018427387904: fewer than 2^62 of its -9223372036854775807 .. -1 range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above -4611686018427387902 and below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 109 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [position MINVALUE+1] 350 REFUSES it
+   OK   [position MINVALUE+1] the refusal NAMES the accounted value, the reading it came from, the draws accounted for and the floor
+   position after: -9223372036854775806|f
+   OK   [position MINVALUE+1] refused BEFORE ANY DRAW: the position is exactly the fixture's
+-- [position TWIN] the SAME database and sequence, restarted at -1: ADOPTED --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -1;
+     exit=0
+   position before 350: -1|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_min -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   [position TWIN] 350 ADOPTS it
+   OK   [position TWIN] the closing NOTICE reports the position 1c adopted
+   OK   [position TWIN] and the position it leaves, two draws further
+   position after: -2|t
+
+---- [floor, adopted side] next value -2^62 + 2: it stands exactly AT the floor once committed ----
+---- into scr_autolog8_pos_edge ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_edge";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -4611686018427387902;
+     exit=0
+   position before 350: -4611686018427387902|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -4611686018427387902 (read under the lock by block 1c), and descends (-4611686018427387902 then -4611686018427387903); it is left at next value -4611686018427387904 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   [floor, adopted side] 350 ADOPTS it
+   OK   [floor, adopted side] the NOTICE reports the adopted position
+   OK   [floor, adopted side] the post-check's two draws
+   OK   [floor, adopted side] and it is LEFT exactly at the floor
+   position after: -4611686018427387903|t
+   the relation after COMMIT: last_value|log_cnt|is_called = -4611686018427387903|0|t; through 350's own accounted-value query: -4611686018427387904
+   OK   [floor, adopted side] the committed position, read through the policy, IS the value 1c accounted for: pinned (log_cnt 0) at the post-check's second draw
+
+---- [floor, refused side] next value -2^62 + 1: it would stand one below the floor ----
+---- into scr_autolog8_pos_edge1 ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_edge1";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -4611686018427387903;
+     exit=0
+   position before 350: -4611686018427387903|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:628: ERROR:  350: bug_reports_auto_number_seq in schema public would stand at -4611686018427387905 once this file commits (next value -4611686018427387903 now, last_value -4611686018427387903, is_called f, less the 2 value(s) its post-check draws), below the adoption floor -4611686018427387904: fewer than 2^62 of its -9223372036854775807 .. -1 range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above -4611686018427387902 and below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 109 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [floor, refused side] 350 REFUSES it
+   OK   [floor, refused side] the refusal names the accounted value one below the floor
+   position after: -4611686018427387903|f
+   OK   [floor, refused side] refused BEFORE ANY DRAW: the position is exactly the fixture's
+-- [floor, is_called branch] the adopted side's last_value with is_called true: one value further --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -c SELECT setval('bug_reports_auto_number_seq', -4611686018427387902, true);
+             setval
+     ----------------------
+      -4611686018427387902
+     (1 row)
+     exit=0
+   position before 350: -4611686018427387902|t
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_edge1 -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:628: ERROR:  350: bug_reports_auto_number_seq in schema public would stand at -4611686018427387905 once this file commits (next value -4611686018427387903 now, last_value -4611686018427387902, is_called t, less the 2 value(s) its post-check draws), below the adoption floor -4611686018427387904: fewer than 2^62 of its -9223372036854775807 .. -1 range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above -4611686018427387902 and below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 109 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [floor, is_called] 350 REFUSES it
+   OK   [floor, is_called] the refusal reads is_called: the same last_value as the adopted side, next one further
+   position after: -4611686018427387902|t
+   OK   [floor, is_called] refused BEFORE ANY DRAW: the position is exactly the fixture's
+
+---- [R7-M1's own fixture] next value EXACTLY -2^62, which round 7 adopted ----
+Round 7 compared the value it FOUND with the floor, adopted this sequence,
+spent -2^62 and -2^62 - 1 in its post-check and committed it at next
+-2^62 - 2 -- below the floor the release train then applied to the same
+box. The accounted policy refuses it before any draw.
+---- into scr_autolog8_pos_r7 ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_r7";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7 -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7 -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7 -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7 -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7 -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7 -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7 -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -4611686018427387904;
+     exit=0
+   position before 350: -4611686018427387904|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7 -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:628: ERROR:  350: bug_reports_auto_number_seq in schema public would stand at -4611686018427387906 once this file commits (next value -4611686018427387904 now, last_value -4611686018427387904, is_called f, less the 2 value(s) its post-check draws), below the adoption floor -4611686018427387904: fewer than 2^62 of its -9223372036854775807 .. -1 range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above -4611686018427387902 and below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 109 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [R7-M1 fixture] 350 REFUSES it
+   OK   [R7-M1 fixture] the refusal names the position the file would have LEFT, two below the floor
+   position after: -4611686018427387904|f
+   OK   [R7-M1 fixture] refused BEFORE ANY DRAW: the position is exactly the fixture's
+
+---- [held number] a position whose next values a row already holds ----
+bug_number is UNIQUE (086). A row holding -3 under a sequence that will
+hand out -1: the post-check spends -1 and -2, and the first real upload
+draws -3 and fails on the index.
+---- into scr_autolog8_pos_held ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_held";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -c INSERT INTO bug_reports (steam_id, description, kind, bug_number) VALUES ('0', 'rehearsal held number', 'auto', -3);
+     exit=0
+   position before 350: -1|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:628: ERROR:  350: bug_reports_auto_number_seq in schema public would hand out -1 next, but bug_reports already holds bug number -3 at or below it; bug_number is UNIQUE, so the writer would draw into a number that is taken and that upload would fail. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 117 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [held number] 350 REFUSES it
+   OK   [held number] the refusal names the next value and the number already held
+   position after: -1|f
+   OK   [held number] refused BEFORE ANY DRAW: the position is exactly the fixture's
+-- [held TWIN] the same database, the sequence restarted at -4, below the held number --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -4;
+     exit=0
+   position before 350: -4|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_held -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -4 (read under the lock by block 1c), and descends (-4 then -5); it is left at next value -6 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 1 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   [held TWIN] 350 ADOPTS it
+   OK   [held TWIN] the NOTICE reports -4
+   position after: -5|t
+
+---- [floor MUTANT, 1c] the MINVALUE+1 fixture against a COPY of 350 without 1c's floor ----
+Since round 8 the policy is applied TWICE: by 1c before any draw, and by
+the post-check to the position it leaves. Without 1c's application the
+post-check must still refuse -- but only after spending two values, which
+is why 1c judges the accounted value before anything draws.
+   removed, in the copy only, 350 lines 606-608 (IF v_accounted < c_floor THEN .. END IF, block $m350n$)
+---- into scr_autolog8_pos_minm ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_minm";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minm -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minm -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minm -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minm -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minm -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minm -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minm -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -9223372036854775806;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minm -f TMP/r8_350_floor1c.sql
+     psql:TMP/r8_350_floor1c.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_floor1c.sql:857: ERROR:  350: bug_reports_auto_number_seq stands at -9223372036854775808 after the post-check, below the adoption floor -4611686018427387904
+     CONTEXT:  PL/pgSQL function inline_code_block line 121 at RAISE
+     exit=3  (expected: non-zero -- the post-check's application refuses)
+   OK   [floor MUTANT, 1c] without 1c's floor, the post-check's application of the SAME policy refuses by name
+   position before -9223372036854775806|f, after the refusal -9223372036854775807|t
+   OK   [floor MUTANT, 1c] and that refusal came after two values were spent (nextval and setval are not transactional): the reason 1c judges first
+
+---- [floor MUTANT, both] the same fixture against a COPY without EITHER application ----
+   removed, in the copy only, 350 lines 606-608 (IF v_accounted < c_floor THEN .. END IF, block $m350n$)
+   removed, in the copy only, 350 lines 792-794 (IF v_left::bigint < current_setting('m350.floor', true)::bigint THEN .. END IF, block $m350p$)
+---- into scr_autolog8_pos_minmm ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_minmm";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minmm -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minmm -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minmm -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minmm -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minmm -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minmm -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minmm -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -9223372036854775806;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_minmm -f TMP/r8_350_floor_both.sql
+     psql:TMP/r8_350_floor_both.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_floor_both.sql:855: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -9223372036854775806 (read under the lock by block 1c), and descends (-9223372036854775806 then -9223372036854775807); it is left at next value -9223372036854775808 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0 -- WITHOUT the floor the fixture is adopted)
+   OK   [floor MUTANT, both] without the floor, the MINVALUE+1 position is ADOPTED and the file reports success
+   the first draw after that success: exit=1  ERROR:  nextval: reached minimum value of sequence "bug_reports_auto_number_seq" (-9223372036854775807)
+   OK   [floor MUTANT, both] the adopted sequence is ALREADY exhausted: round 6's MEDIUM 1 itself
+
+---- [held MUTANT] the held-number fixture against a COPY of 350 without the collision check ----
+   removed, in the copy only, 350 lines 614-616 (IF v_held IS NOT NULL THEN .. END IF)
+---- into scr_autolog8_pos_heldm ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_heldm";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_heldm -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_heldm -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_heldm -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_heldm -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_heldm -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_heldm -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_heldm -c INSERT INTO bug_reports (steam_id, description, kind, bug_number) VALUES ('0', 'rehearsal held number', 'auto', -3);
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_heldm -f TMP/r8_350_held.sql
+     psql:TMP/r8_350_held.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_held.sql:857: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 1 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0 -- WITHOUT the collision check the fixture is adopted)
+   OK   [held MUTANT] without the collision check the position is ADOPTED
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_heldm -c INSERT INTO bug_reports (steam_id, description, kind, bug_number) VALUES ('0', 'rehearsal first real upload', 'auto', nextval('bug_reports_auto_number_seq'));
+     ERROR:  duplicate key value violates unique constraint "idx_bug_reports_number"
+     DETAIL:  Key (bug_number)=(-3) already exists.
+     exit=1  (expected: non-zero -- the writer's first draw is the held number)
+   OK   [held MUTANT] the first real automatic insert fails on the UNIQUE index
+
+---- [lock / shape / binding MUTANTS] one pre-existing exact sequence, three copies ----
+A pre-existing sequence, because one CREATEd inside the file's own
+transaction is held in AccessExclusiveLock from its creation and would
+satisfy the lock test wherever 1c sat.
+---- into scr_autolog8_pos_ctl ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_ctl";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   moved, in the copy only, block 1c (350 lines 499-628) above the ALTER SEQUENCE .. OWNED BY
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -f TMP/r8_350_lock.sql
+     psql:TMP/r8_350_lock.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_lock.sql:568: ERROR:  350: this transaction holds no lock on bug_reports_auto_number_seq in schema public that blocks nextval, so the position read below could move before COMMIT; ALTER SEQUENCE ... OWNED BY takes that lock and must run before this block
+     CONTEXT:  PL/pgSQL function inline_code_block line 53 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [lock MUTANT] 1c above the lock REFUSES by name: the lock test is live
+   inserted, in the copy only, `ALTER SEQUENCE .. START WITH -2` between 1b and 1c
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -f TMP/r8_350_shape.sql
+     psql:TMP/r8_350_shape.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_shape.sql:629: ERROR:  350: bug_reports_auto_number_seq in schema public reads as 20/-2/-1/-1/-9223372036854775807/1/f/p under the lock, but block 1b judged 20/-1/-1/-1/-9223372036854775807/1/f/p; the sequence this file would adopt is not the one it checked
+     CONTEXT:  PL/pgSQL function inline_code_block line 84 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [shape MUTANT] a shape changed after 1b judged it is REFUSED by 1c's re-read
+   replaced, in the copy only, 1c's handed reading with v_next - 1
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -f TMP/r8_350_bind.sql
+     psql:TMP/r8_350_bind.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_bind.sql:859: ERROR:  350: the first draw from bug_reports_auto_number_seq returned -1 but block 1c read the next value as -2; the position this file judged is not the one the sequence continues from
+     CONTEXT:  PL/pgSQL function inline_code_block line 90 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [binding MUTANT] a reading that is not what the sequence continues from is REFUSED by the post-check's first draw
+   position after the three mutants: -2|t (the binding mutant's two draws are spent: nextval is not transactional)
+-- CONTROL: the unmutated file on the same database --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ctl -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -3 (read under the lock by block 1c), and descends (-3 then -4); it is left at next value -5 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   [CONTROL] the unmutated file ADOPTS the sequence the three mutants refused
+   OK   [CONTROL] and adopts it where it actually is: after the binding mutant's two spent draws
+
+---- [draws / pin MUTANTS] what the post-check binds the accounting to ----
+The post-check pins the position with setval to its second draw and reads it
+back through the policy's own query; it must equal 1c's accounted value.
+Two copies: one that accounts for ONE draw where the post-check makes two,
+and one that leaves the position unpinned, where nextval's pre-logging puts
+the logged position 32 values past the one handed out.
+---- into scr_autolog8_pos_acct ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_acct";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_acct -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_acct -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_acct -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_acct -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_acct -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_acct -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   replaced, in the copy only, 350 line 530 (block $m350n$): c_postcheck_draws CONSTANT bigint := 2;  ->  c_postcheck_draws CONSTANT bigint := 1;
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_acct -f TMP/r8_350_draws.sql
+     psql:TMP/r8_350_draws.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_draws.sql:859: ERROR:  350: bug_reports_auto_number_seq stands at -3 through the adoption policy after the post-check, but block 1c accounted for -2; the position this file leaves is not the one it judged
+     CONTEXT:  PL/pgSQL function inline_code_block line 118 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [draws MUTANT] an accounting that misses a draw is REFUSED by name
+   position after the draws mutant: -2|t
+   replaced, in the copy only, 350 line 778 (block $m350p$): PERFORM setval(v_autoseq, v_b, true);  ->  NULL;
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_acct -f TMP/r8_350_pin.sql
+     psql:TMP/r8_350_pin.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_pin.sql:859: ERROR:  350: bug_reports_auto_number_seq stands at -36 through the adoption policy after the post-check, but block 1c accounted for -5; the position this file leaves is not the one it judged
+     CONTEXT:  PL/pgSQL function inline_code_block line 118 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [pin MUTANT] without the pin the logged position is NOT the accounted one, and the read-back refuses by name
+   the relation after the pin mutant: last_value|log_cnt|is_called = -4|31|t
+-- CONTROL: the unmutated file on the same database --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_acct -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -5 (read under the lock by block 1c), and descends (-5 then -6); it is left at next value -7 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   [CONTROL] the unmutated file adopts it where it is and leaves it where it accounted
+
+############ 3g. NEW IN ROUND 8: ONE POLICY WITH THE TRAIN; CACHE; CATALOGUE COLUMNS; PERSISTENCE ############
+
+---- [R7-M1] THE RELEASE TRAIN READS 350'S POLICY, AND AGREES WITH 350 AT THE BOUNDARY ----
+The train copy's own module is imported with ONE substitution: its `sql`,
+on a deploy the box's read-only verb, runs psql on the named rehearsal
+database. `sequence_state` sends exactly the queries it sends a box and
+reads the policy exactly as on a deploy: `floor_policy`, out of 350 at
+the reviewed precursor commit.
+   train floor_policy(): floor -4611686018427387904, read from backend/sql/350_bug_reports_auto_number.sql at 824662a0a997
+   train accounted-value query: SELECT (CASE WHEN is_called THEN last_value + (log_cnt + 1) * -1 ELSE last_value END)::text AS accounted_next FROM %s
+   350 blob at the precursor 824662a0a997: 6735d9539b2a977dbe53255e46ffb9a7fa5dc785; the file this rehearsal applies: 6735d9539b2a977dbe53255e46ffb9a7fa5dc785
+   OK   [R7-M1] the train reads its policy from the SAME BYTES this rehearsal applies
+   OK   [R7-M1] and the two lines it reads are 350's c_floor and c_accounted_sql
+   train sequence gate on 3f's [floor, adopted side] database: (1, 1, {})
+   OK   [R7-M1] a sequence 350 adopted AT the boundary is one the train counts: 1/1
+   train sequence gate on 3f's [position TWIN] database: (1, 1, {})
+   OK   [R7-M1] and the ordinary adopted sequence: 1/1
+
+---- [R7-M1 MUTANT] the ROUND-7 POLICY: 1c judges the value FOUND, the post-check applies no floor ----
+   replaced, in the copy only, 350 line 606 (block $m350n$): IF v_accounted < c_floor THEN  ->  IF v_next < c_floor THEN
+   removed, in the copy only, 350 lines 794-796 (IF v_left::bigint < current_setting('m350.floor', true)::bigint THEN .. END IF, block $m350p$)
+---- into scr_autolog8_pos_r7m ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_r7m";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7m -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7m -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7m -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7m -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7m -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7m -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7m -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -4611686018427387904;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_r7m -f TMP/r8_350_round7_policy.sql
+     psql:TMP/r8_350_round7_policy.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_round7_policy.sql:857: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -4611686018427387904 (read under the lock by block 1c), and descends (-4611686018427387904 then -4611686018427387905); it is left at next value -4611686018427387906 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0 -- round 7's policy adopts R7-M1's fixture)
+   OK   [R7-M1 MUTANT] round 7's policy ADOPTS the fixture and leaves it two below the floor (the copy's NOTICE still says 'at or above': it is the copy's claim, false by construction)
+   train sequence gate on that database: (0, 1, {'bug_reports_auto_number_seq': 'its accounted next value -4611686018427387906 is below the adoption floor -4611686018427387904 (both read from backend/sql/350_bug_reports_auto_number.sql at 824662a0a997)'})
+   OK   [R7-M1 MUTANT] and the train REFUSES what that migration committed: round 7's disagreement, reproduced -- the real file refuses this fixture before any draw (3f)
+
+---- [1c-found MUTANT] 1c judges the value FOUND; the post-check's floor is intact ----
+   replaced, in the copy only, 350 line 606 (block $m350n$): IF v_accounted < c_floor THEN  ->  IF v_next < c_floor THEN
+---- into scr_autolog8_pos_foundm ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_foundm";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_foundm -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_foundm -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_foundm -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_foundm -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_foundm -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_foundm -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_foundm -c ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH -4611686018427387904;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_foundm -f TMP/r8_350_found1c.sql
+     psql:TMP/r8_350_found1c.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_found1c.sql:859: ERROR:  350: bug_reports_auto_number_seq stands at -4611686018427387906 after the post-check, below the adoption floor -4611686018427387904
+     CONTEXT:  PL/pgSQL function inline_code_block line 121 at RAISE
+     exit=3  (expected: non-zero -- the post-check's floor)
+   position before -4611686018427387904|f, after -4611686018427387905|t
+   OK   [1c-found MUTANT] the post-check's application is live and refuses -- after spending two values, which the real 1c does not
+
+---- [R7-M2] seqcache: a pre-existing exact sequence but for CACHE 20 ----
+---- into scr_autolog8_seq_cache ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_cache";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -c ALTER SEQUENCE bug_reports_auto_number_seq CACHE 20;
+     exit=0
+   position before 350: -1|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public with CACHE 20, not 1; a session's first draw then moves the stored position past the whole run it caches, so every reading of where the sequence stands -- block 1c, the post-check, the release train -- judges a position no writer has handed out. Set it with ALTER SEQUENCE bug_reports_auto_number_seq CACHE 1, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 69 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [cache] 350 REFUSES it
+   OK   [cache] 1b refuses the cache by name
+   position after: -1|f
+   OK   [cache] refused BEFORE ANY DRAW: the position is exactly the fixture's
+-- [cache TWIN] the same database, CACHE 1: ADOPTED --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -c ALTER SEQUENCE bug_reports_auto_number_seq CACHE 1;
+     exit=0
+   position before 350: -1|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cache -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   [cache TWIN] 350 ADOPTS it
+   OK   [cache TWIN] the NOTICE reports cache 1
+   position after: -2|t
+-- [cache MUTANT, 1b] a COPY without 1b's cache check: 1c's own check refuses under the lock --
+   removed, in the copy only, 350 lines 384-386 (IF v_cache IS DISTINCT FROM c_auto_cache THEN .. END IF, block $m350s$)
+---- into scr_autolog8_seq_cachem ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_cachem";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cachem -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cachem -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cachem -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cachem -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cachem -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cachem -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cachem -c ALTER SEQUENCE bug_reports_auto_number_seq CACHE 20;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cachem -f TMP/r8_350_cache1b.sql
+     psql:TMP/r8_350_cache1b.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_cache1b.sql:626: ERROR:  350: under the lock, bug_reports_auto_number_seq in schema public has CACHE 20, not 1; the position read below would not be the one the writer continues from
+     CONTEXT:  PL/pgSQL function inline_code_block line 79 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [cache MUTANT, 1b] 1c refuses the cache by name at the second site
+-- [cache MUTANT, both] a COPY without either check: adopted, and what the check prevents --
+   removed, in the copy only, 350 lines 384-386 (IF v_cache IS DISTINCT FROM c_auto_cache THEN .. END IF, block $m350s$)
+   removed, in the copy only, 350 lines 574-576 (IF v_cache IS DISTINCT FROM c_auto_cache THEN .. END IF, block $m350n$)
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cachem -f TMP/r8_350_cache_both.sql
+     psql:TMP/r8_350_cache_both.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_cache_both.sql:855: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 20, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0 -- no cache check anywhere)
+   OK   [cache MUTANT, both] without either check a CACHE 20 sequence is ADOPTED
+   a new session's first draw returned -3; the relation's last_value is now -22
+   OK   [cache MUTANT, both] one draw moved the stored position 19 values past the value handed out: every reading of where it stands judges numbers no writer has used
+
+---- [R7-M2] the catalogue's columns: the declaration against pg_catalog.pg_sequence ----
+---- into scr_autolog8_seq_cols ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_cols";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cols -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cols -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cols -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cols -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cols -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cols -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   this server's pg_catalog.pg_sequence columns: seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle
+   OK   [columns] the catalogue carries exactly the eight columns 350 declares
+-- [columns MUTANT, 1b] a COPY whose 1b declaration omits seqcache --
+   replaced, in the copy only, 350 line 331 (block $m350s$): 'seqstart', 'seqincrement', 'seqmax', 'seqmin', 'seqcache', 'seqcycle'];  ->  'seqstart', 'seqincrement', 'seqmax', 'seqmin', 'seqcycle'];
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cols -f TMP/r8_350_cols_1b.sql
+     psql:TMP/r8_350_cols_1b.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_cols_1b.sql:425: ERROR:  350: pg_catalog.pg_sequence has 8 column(s), {seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle}, and this file judges exactly the 7 it declares, {seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcycle}; unjudged: {seqcache}, absent: {}. A sequence attribute this block does not read is part of the shape nobody checked, so nothing is adopted over it
+     CONTEXT:  PL/pgSQL function inline_code_block line 38 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [columns MUTANT, 1b] a catalogue column the declaration does not judge is REFUSED by name at 1b
+-- [columns MUTANT, 1c] a COPY whose 1c declaration omits seqcache --
+   replaced, in the copy only, 350 line 518 (block $m350n$): 'seqstart', 'seqincrement', 'seqmax', 'seqmin', 'seqcache', 'seqcycle'];  ->  'seqstart', 'seqincrement', 'seqmax', 'seqmin', 'seqcycle'];
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cols -f TMP/r8_350_cols_1c.sql
+     psql:TMP/r8_350_cols_1c.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_cols_1c.sql:628: ERROR:  350: under the lock, pg_catalog.pg_sequence has 8 column(s), {seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle}, and this file judges exactly the 7 it declares, {seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcycle}; unjudged: {seqcache}, absent: {}
+     CONTEXT:  PL/pgSQL function inline_code_block line 65 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [columns MUTANT, 1c] a catalogue column the declaration does not judge is REFUSED by name at 1c
+-- [columns TWIN] the real file, the full declaration, the same database --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_cols -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   [columns TWIN] the unmutated file ADOPTS it
+
+---- [R7-M3] relpersistence: a pre-existing exact sequence made UNLOGGED ----
+---- into scr_autolog8_seq_unl ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_unl";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -c ALTER SEQUENCE bug_reports_auto_number_seq SET UNLOGGED;
+     exit=0
+   position before 350: -1|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:425: ERROR:  350: bug_reports_auto_number_seq exists in schema public with relpersistence u, not p (logged); an unlogged sequence is reset by crash recovery and is not carried to a standby, while the logged bug_reports rows keep every negative number it had handed out, so after a crash or a promotion the writer would draw into numbers that are taken. Make it logged with ALTER SEQUENCE bug_reports_auto_number_seq SET LOGGED, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 45 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [persistence] 350 REFUSES it
+   OK   [persistence] 1b refuses the persistence by name
+   position after: -1|f
+   OK   [persistence] refused BEFORE ANY DRAW: the position is exactly the fixture's
+-- [persistence TWIN] the same database, SET LOGGED: ADOPTED --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -c ALTER SEQUENCE bug_reports_auto_number_seq SET LOGGED;
+     exit=0
+   position before 350: -1|f
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unl -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   [persistence TWIN] 350 ADOPTS it
+   OK   [persistence TWIN] the NOTICE reports relpersistence p
+   position after: -2|t
+-- [persistence MUTANT, 1b] a COPY without 1b's check: 1c's own check refuses under the lock --
+   removed, in the copy only, 350 lines 360-362 (IF v_persistence IS DISTINCT FROM c_logged THEN .. END IF, block $m350s$)
+---- into scr_autolog8_seq_unlm ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_seq_unlm";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unlm -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unlm -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unlm -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unlm -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unlm -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unlm -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unlm -c ALTER SEQUENCE bug_reports_auto_number_seq SET UNLOGGED;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unlm -f TMP/r8_350_persist1b.sql
+     psql:TMP/r8_350_persist1b.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_persist1b.sql:626: ERROR:  350: under the lock, bug_reports_auto_number_seq in schema public has relpersistence u, not p (logged); its position would not survive crash recovery or reach a standby, while the rows it numbered would
+     CONTEXT:  PL/pgSQL function inline_code_block line 71 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [persistence MUTANT, 1b] 1c refuses the persistence by name at the second site
+-- [persistence MUTANT, both] a COPY without either check --
+   removed, in the copy only, 350 lines 360-362 (IF v_persistence IS DISTINCT FROM c_logged THEN .. END IF, block $m350s$)
+   removed, in the copy only, 350 lines 566-568 (IF v_persistence IS DISTINCT FROM c_logged THEN .. END IF, block $m350n$)
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_seq_unlm -f TMP/r8_350_persist_both.sql
+     psql:TMP/r8_350_persist_both.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_persist_both.sql:855: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence u, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0 -- no persistence check)
+   OK   [persistence MUTANT, both] without either check an UNLOGGED sequence is ADOPTED
+
+---- [R8-X1] the bottom of the range: positions within two values of MINVALUE ----
+Found in round 8 by this rehearsal's author and FIXED in round 8 (notes 19,
+D-19.4). 1c summed the accounted value in bigint, and from a next value
+at MINVALUE, or the one below the range that a sequence standing at
+MINVALUE with is_called true reports, the sum left the bigint range: the
+block stopped on PostgreSQL's unnamed `bigint out of range` before the
+floor could name the refusal. 1c now declares the accounted value numeric
+and takes the sum in numeric. Each of the three positions must be refused
+BY THE FLOOR'S SENTENCE, naming the value the file would leave, before any
+draw -- nothing commits, the position is unchanged. Then a COPY of 350
+with the declaration put back to bigint, and one with the sum put back to
+bigint, must each refuse all three UNNAMED: both lines are load-bearing.
+---- into scr_autolog8_pos_ext ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_pos_ext";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c CREATE SEQUENCE bug_reports_auto_number_seq AS bigint INCREMENT BY -1 START WITH -1 MAXVALUE -1 MINVALUE -9223372036854775807 NO CYCLE;
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775807, true);
+             setval
+     ----------------------
+      -9223372036854775807
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:628: ERROR:  350: bug_reports_auto_number_seq in schema public would stand at -9223372036854775810 once this file commits (next value -9223372036854775808 now, last_value -9223372036854775807, is_called t, less the 2 value(s) its post-check draws), below the adoption floor -4611686018427387904: fewer than 2^62 of its -9223372036854775807 .. -1 range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above -4611686018427387902 and below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 109 at RAISE
+     exit=3  (expected: non-zero)
+   setval(-9223372036854775807, true): exit 3, position before -9223372036854775807|t after -9223372036854775807|t, refused BY NAME (would stand at -9223372036854775810 once this file commits)
+   OK   [R8-X1] setval(-9223372036854775807, true) is REFUSED BY NAME before any draw: it would stand at -9223372036854775810 once this file commits
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775807, false);
+             setval
+     ----------------------
+      -9223372036854775807
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:628: ERROR:  350: bug_reports_auto_number_seq in schema public would stand at -9223372036854775809 once this file commits (next value -9223372036854775807 now, last_value -9223372036854775807, is_called f, less the 2 value(s) its post-check draws), below the adoption floor -4611686018427387904: fewer than 2^62 of its -9223372036854775807 .. -1 range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above -4611686018427387902 and below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 109 at RAISE
+     exit=3  (expected: non-zero)
+   setval(-9223372036854775807, false): exit 3, position before -9223372036854775807|f after -9223372036854775807|f, refused BY NAME (would stand at -9223372036854775809 once this file commits)
+   OK   [R8-X1] setval(-9223372036854775807, false) is REFUSED BY NAME before any draw: it would stand at -9223372036854775809 once this file commits
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775806, true);
+             setval
+     ----------------------
+      -9223372036854775806
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:628: ERROR:  350: bug_reports_auto_number_seq in schema public would stand at -9223372036854775809 once this file commits (next value -9223372036854775807 now, last_value -9223372036854775806, is_called t, less the 2 value(s) its post-check draws), below the adoption floor -4611686018427387904: fewer than 2^62 of its -9223372036854775807 .. -1 range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above -4611686018427387902 and below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 109 at RAISE
+     exit=3  (expected: non-zero)
+   setval(-9223372036854775806, true): exit 3, position before -9223372036854775806|t after -9223372036854775806|t, refused BY NAME (would stand at -9223372036854775809 once this file commits)
+   OK   [R8-X1] setval(-9223372036854775806, true) is REFUSED BY NAME before any draw: it would stand at -9223372036854775809 once this file commits
+-- [R8-X1 MUTANT, declaration] a COPY of 350 with the declaration put back to bigint --
+   put back, in the copy only, 350 line 514: v_accounted bigint;
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775807, true);
+             setval
+     ----------------------
+      -9223372036854775807
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f TMP/r8_350_x1_decl.sql
+     psql:TMP/r8_350_x1_decl.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_x1_decl.sql:628: ERROR:  bigint out of range
+     CONTEXT:  PL/pgSQL function inline_code_block line 106 at assignment
+     exit=3  (expected: non-zero)
+   setval(-9223372036854775807, true): exit 3, position before -9223372036854775807|t after -9223372036854775807|t, refused UNNAMED (bigint out of range)
+   OK   [R8-X1 MUTANT, declaration] setval(-9223372036854775807, true) is refused UNNAMED (bigint out of range) with the declaration in bigint
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775807, false);
+             setval
+     ----------------------
+      -9223372036854775807
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f TMP/r8_350_x1_decl.sql
+     psql:TMP/r8_350_x1_decl.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_x1_decl.sql:628: ERROR:  bigint out of range
+     CONTEXT:  PL/pgSQL function inline_code_block line 106 at assignment
+     exit=3  (expected: non-zero)
+   setval(-9223372036854775807, false): exit 3, position before -9223372036854775807|f after -9223372036854775807|f, refused UNNAMED (bigint out of range)
+   OK   [R8-X1 MUTANT, declaration] setval(-9223372036854775807, false) is refused UNNAMED (bigint out of range) with the declaration in bigint
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775806, true);
+             setval
+     ----------------------
+      -9223372036854775806
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f TMP/r8_350_x1_decl.sql
+     psql:TMP/r8_350_x1_decl.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_x1_decl.sql:628: ERROR:  bigint out of range
+     CONTEXT:  PL/pgSQL function inline_code_block line 106 at assignment
+     exit=3  (expected: non-zero)
+   setval(-9223372036854775806, true): exit 3, position before -9223372036854775806|t after -9223372036854775806|t, refused UNNAMED (bigint out of range)
+   OK   [R8-X1 MUTANT, declaration] setval(-9223372036854775806, true) is refused UNNAMED (bigint out of range) with the declaration in bigint
+-- [R8-X1 MUTANT, sum] a COPY of 350 with the sum put back to bigint --
+   put back, in the copy only, 350 line 604: v_accounted := v_next + c_postcheck_draws * v_increment;
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775807, true);
+             setval
+     ----------------------
+      -9223372036854775807
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f TMP/r8_350_x1_sum.sql
+     psql:TMP/r8_350_x1_sum.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_x1_sum.sql:628: ERROR:  bigint out of range
+     CONTEXT:  PL/pgSQL function inline_code_block line 106 at assignment
+     exit=3  (expected: non-zero)
+   setval(-9223372036854775807, true): exit 3, position before -9223372036854775807|t after -9223372036854775807|t, refused UNNAMED (bigint out of range)
+   OK   [R8-X1 MUTANT, sum] setval(-9223372036854775807, true) is refused UNNAMED (bigint out of range) with the sum in bigint
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775807, false);
+             setval
+     ----------------------
+      -9223372036854775807
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f TMP/r8_350_x1_sum.sql
+     psql:TMP/r8_350_x1_sum.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_x1_sum.sql:628: ERROR:  bigint out of range
+     CONTEXT:  PL/pgSQL function inline_code_block line 106 at assignment
+     exit=3  (expected: non-zero)
+   setval(-9223372036854775807, false): exit 3, position before -9223372036854775807|f after -9223372036854775807|f, refused UNNAMED (bigint out of range)
+   OK   [R8-X1 MUTANT, sum] setval(-9223372036854775807, false) is refused UNNAMED (bigint out of range) with the sum in bigint
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775806, true);
+             setval
+     ----------------------
+      -9223372036854775806
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f TMP/r8_350_x1_sum.sql
+     psql:TMP/r8_350_x1_sum.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:TMP/r8_350_x1_sum.sql:628: ERROR:  bigint out of range
+     CONTEXT:  PL/pgSQL function inline_code_block line 106 at assignment
+     exit=3  (expected: non-zero)
+   setval(-9223372036854775806, true): exit 3, position before -9223372036854775806|t after -9223372036854775806|t, refused UNNAMED (bigint out of range)
+   OK   [R8-X1 MUTANT, sum] setval(-9223372036854775806, true) is refused UNNAMED (bigint out of range) with the sum in bigint
+-- [R8-X1] one value further up, the committed file --
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -c SELECT setval('bug_reports_auto_number_seq', -9223372036854775805, true);
+             setval
+     ----------------------
+      -9223372036854775805
+     (1 row)
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_pos_ext -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:628: ERROR:  350: bug_reports_auto_number_seq in schema public would stand at -9223372036854775808 once this file commits (next value -9223372036854775806 now, last_value -9223372036854775805, is_called t, less the 2 value(s) its post-check draws), below the adoption floor -4611686018427387904: fewer than 2^62 of its -9223372036854775807 .. -1 range would remain, and uploads cannot have spent that many, so a restart or a setval put it there and every upload past its end answers 503. Move it with ALTER SEQUENCE bug_reports_auto_number_seq RESTART WITH a value at or above -4611686018427387902 and below every negative bug_number in use, then apply this file again
+     CONTEXT:  PL/pgSQL function inline_code_block line 109 at RAISE
+     exit=3  (expected: non-zero)
+   OK   [R8-X1] one value further up, setval(MINVALUE + 2, true) is refused BY NAME
+
+############ 4. APPLY 350 ON THE MAIN REHEARSAL DATABASE ############
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0
+   OK   350 applies cleanly over 336
+   OK   the post-check NOTICE reports 'is bigint'
+   OK   the post-check NOTICE reports 'cache 1,'
+   OK   the post-check NOTICE reports 'cycle f'
+   OK   the post-check NOTICE reports 'relpersistence p,'
+   OK   the post-check NOTICE reports 'starting at -1'
+   OK   the post-check NOTICE reports 'adopted at next value -1 (read under the lock by block 1c)'
+   OK   the post-check NOTICE reports 'descends (-1 then -2)'
+   OK   the post-check NOTICE reports 'it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904'
+
+############ 5. AN AUTOMATIC ROW TAKES A NEGATIVE NUMBER ############
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -c INSERT INTO bug_reports (steam_id, description, kind, bug_number) VALUES ('0', 'rehearsal auto row', 'auto', nextval('bug_reports_auto_number_seq'));
+     exit=0
+   automatic bug_number: -3
+   OK   the automatic row took a negative number
+   human sequence last_value: 1
+   OK   the human sequence has not been spent
+
+############ 6. THE DEFAULT-FIRED INSERT IS REFUSED ############
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -c INSERT INTO bug_reports (steam_id, description, kind) VALUES ('0', 'rehearsal default-fired', 'auto');
+     ERROR:  new row for relation "bug_reports" violates check constraint "bug_reports_auto_number_negative"
+     DETAIL:  Failing row contains (202d51ec-d67f-4ce7-bbf4-5d10e1fdbe13, null, 0, null, null, null, medium, other, rehearsal default-fired, null, null, null, open, null, 2026-09-23 21:37:03.577902-07, 2026-09-23 21:37:03.577902-07, 1, auto).
+     exit=1  (expected: non-zero)
+   OK   an automatic insert left to the column default is REFUSED
+   OK   the refusal names the CHECK
+
+############ 7. RE-RUN: 350 IS A CLEAN NO-OP ############
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8 -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:253: NOTICE:  relation "bug_reports_auto_number_seq" already exists, skipping
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -4 (read under the lock by block 1c), and descends (-4 then -5); it is left at next value -6 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 1 automatic row(s) present, all negative by construction
+     exit=0
+   OK   350 re-runs cleanly over its own output
+
+############ 8. THE WEAKENED-PREDICATE MUTANT ABORTS ITS OWN POST-CHECK ############
+A post-check that cannot fail is worse than no post-check (#342/#441).
+---- into scr_autolog8_w ----
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c CREATE DATABASE "scr_autolog8_w";
+     exit=0
+   -- applying 001_schema.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_w -f WT/backend/sql/001_schema.sql
+     exit=0
+   -- applying 083_bug_reports.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_w -f WT/backend/sql/083_bug_reports.sql
+     exit=0
+   -- applying 085_bug_report_events.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_w -f WT/backend/sql/085_bug_report_events.sql
+     exit=0
+   -- applying 086_bug_report_number.sql
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_w -f WT/backend/sql/086_bug_report_number.sql
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_w -f WT/backend/sql/336_bug_reports_kind.sql
+     psql:WT/backend/sql/336_bug_reports_kind.sql:378: NOTICE:  336: bug_reports.kind present, NOT NULL, default 'report'; 0 row(s) report, 0 auto; both indexes present
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_w -f TMP/r8_350_mutant.sql
+     psql:TMP/r8_350_mutant.sql:859: ERROR:  350: bug_reports_auto_number_negative is defined as CHECK (true) and ADMITS an automatic row holding a positive bug number -- the counter players read by number is still being spent by machine uploads
+     CONTEXT:  PL/pgSQL function inline_code_block line 142 at RAISE
+     exit=3  (expected: non-zero)
+   OK   the weakened CHECK aborts 350's own post-check
+   OK   the abort names what the weakened predicate admitted
+
+############ 9. CONTROL -- THE UNMUTATED FILE ON THE SAME DATABASE ############
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/scr_autolog8_w -f WT/backend/sql/350_bug_reports_auto_number.sql
+     psql:WT/backend/sql/350_bug_reports_auto_number.sql:859: NOTICE:  350: in schema public, bug_reports_auto_number_seq is bigint, increment -1, range -9223372036854775807 .. -1, cache 1, cycle f, relpersistence p, starting at -1, adopted at next value -1 (read under the lock by block 1c), and descends (-1 then -2); it is left at next value -3 through the adoption policy, at or above the floor -4611686018427387904; the CHECK refuses a positive automatic number and accepts both controls; human sequence unmoved at 1; 0 automatic row(s) present, all negative by construction
+     exit=0  (expected: 0)
+   OK   the unmutated file PASSES on the database the mutant failed on
+
+############ 10. CLEAN UP ############
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_mut";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_sch";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_w";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_type";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_incr";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_max";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_min";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_cycle";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_start";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_ident";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_identm";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_ok";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_min";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_edge";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_edge1";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_r7";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_held";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_minm";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_minmm";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_heldm";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_ctl";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_acct";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_r7m";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_foundm";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_cache";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_cachem";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_cols";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_unl";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_seq_unlm";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_pos_ext";
+     exit=0
+   $ psql -X -q -v ON_ERROR_STOP=1 -d postgresql://postgres@127.0.0.1:55432/postgres -c DROP DATABASE IF EXISTS "scr_autolog8_w";
+     NOTICE:  database "scr_autolog8_w" does not exist, skipping
+     exit=0
+-- databases after (the scr_autolog8* set is gone) --
+   (none)
+   OK   every database this rehearsal created was dropped
+-- sessions per database after the last step (SELECT datname, count(*) FROM pg_stat_activity GROUP BY 1) --
+   (no database) 5
+   postgres 1
+   OK   no session sits on any scr_autolog8* database after the last step
+
+===== rehearsal complete =====
+OPEN RESIDUALS RECORDED (not check failures; see the notes): 0
+ALL CHECKS OK
+EXIT 0
