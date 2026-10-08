@@ -4485,7 +4485,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:48981 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:48987 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4551,7 +4551,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:48793 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:48799 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4621,7 +4621,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:48696 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:48702 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7212,13 +7212,19 @@ def _auto_log_health_word() -> int:
     post-match upload calls -- and 0 when it does not. DERIVED from app.routes
     on every request, never written down (#342), so a build that imports the
     module but stops mounting its router reads 0 rather than the revision.
+    The handler is matched by its module and qualified name, not by naming
+    the function object: a reference to it would put the upload handler,
+    its writers and its session check inside /health's reviewed closure
+    (the read-gate inventory), and /health calls none of them.
     Code-only and role-blind: both arms of /health answer it, alike on both
     boxes, which is what lets the release train read it through the edge.
     Read by nothing but the train (#306)."""
     for r in app.routes:
+        ep = getattr(r, "endpoint", None)
         if (getattr(r, "path", None) == "/api/v1/logs/auto"
                 and "POST" in (getattr(r, "methods", None) or ())
-                and getattr(r, "endpoint", None) is _auto_logs.upload_auto_log):
+                and getattr(ep, "__module__", None) == _auto_logs.__name__
+                and getattr(ep, "__qualname__", None) == "upload_auto_log"):
             return _auto_logs.AUTO_LOG_REVISION
     return 0
 
