@@ -5554,7 +5554,8 @@ namespace CompetitiveRounds
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // Item 19 edge E7: a disconnect may produce no OnLeftRoom. Never inside
             // an InRoom test: the census reads InRoom itself, and an evaluation
-            // with no room is where a forced face is given back.
+            // with no room is where a forced face is given back, even while the
+            // old GameManager still reports a game (fix pass 1, M3).
             AvatarDefaults.Evaluate("E7-disconnect");
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
             // OnLeftRoom must still close the room/game telemetry — first
@@ -6279,7 +6280,8 @@ namespace CompetitiveRounds
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
             // Item 19 edge E6: never inside an InRoom test - the InRoom poll turns
-            // false during Leaving, before this callback. The census reads it.
+            // false during Leaving, before this callback. The census reads it,
+            // and a confirmed no-room outranks a still-live manager (fix pass 1, H9).
             AvatarDefaults.Evaluate("E6-left");
             // A teardown window is bound to the room it was opened in. Without
             // this a seat that leaves between the round call-in and the call-in

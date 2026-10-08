@@ -184,8 +184,19 @@ namespace CompetitiveRounds
             return EveryOtherFighterIsModded(others, f.FaceKey) ? AvatarFacing.Modded : AvatarFacing.Vanilla;
         }
 
+        /// <summary>A confirmed exit (the room read succeeded and says not in a
+        /// room: OnLeftRoom, OnDisconnected, the menu) outranks liveness (fix
+        /// pass 1, H9 and M3): GameManager's isPlaying is never written false,
+        /// so the old manager can still report a game after the room is gone,
+        /// and gating there would carry the remembered selection into the menu
+        /// and the next room. With no room the facing is Undecided, f returns
+        /// the remembered selection, and the debt is repaid; a second exit
+        /// finds want == live and writes nothing. An offline room (Sandbox,
+        /// local play) is still a room, so a live offline game stays Locked.
+        /// An unreadable room read is not a confirmed exit.</summary>
         internal virtual AvatarFacing Census(AvatarLivenessIn l, AvatarFacingIn f)
         {
+            if (!f.InRoom && !f.Unreadable) return FacingOf(f);
             if (Live(l)) return AvatarFacing.Locked;
             return FacingOf(f);
         }
