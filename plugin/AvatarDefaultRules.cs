@@ -81,7 +81,7 @@ namespace CompetitiveRounds
     {
         internal bool Unreadable;       // reading the room threw
         internal bool InRoom, OfflineMode, LocalIsSpectator, RoomExists;
-        internal bool ModIssuedRoom;    // CompetitiveRoomDetect.IsModIssuedRoom(name, props)
+        internal bool ModIssuedRoom;    // CompetitiveRoomDetect.IsModIssuedRoom(name, props): logged, never decides (BR-H1)
         /// <summary>One entry per OTHER active fighter: that actor's custom
         /// property keys (a null entry = an actor whose properties are null).</summary>
         internal IList<IList<string>> OtherFighterKeys;
@@ -160,16 +160,25 @@ namespace CompetitiveRounds
             return true;
         }
 
-        /// <summary>Term (2). Unreadable inside a real room means Vanilla: the
+        /// <summary>Term (2), capability first (fix pass 1, BR-H1 and BR-M4).
+        /// No online room (not in a room, or offline) is Undecided BEFORE
+        /// unreadability is consulted: AvatarDefaults.ReadFacing establishes
+        /// InRoom and OfflineMode in their own read, and leaves InRoom false
+        /// when that read throws, so Unreadable can only mean Vanilla once a
+        /// real online room is known. Inside one, unreadable is Vanilla: the
         /// plain face in a modded room costs a friend a nicer face, the modded
-        /// face in a vanilla room is the complaint this item exists for.</summary>
+        /// face in a vanilla room is the complaint this item exists for.
+        /// Modded is answered only by a NONEMPTY census in which every other
+        /// fighter carries the mod's signature; zero others is Undecided (the
+        /// own face). The room's provenance (ModIssuedRoom: a room-name prefix
+        /// or cr_ff) is not read here, so it can trigger a re-evaluation (edge
+        /// E12) but never decides the face (learnings #286, #301).</summary>
         internal virtual AvatarFacing FacingOf(AvatarFacingIn f)
         {
-            if (f.Unreadable) return AvatarFacing.Vanilla;
             if (!f.InRoom || f.OfflineMode) return AvatarFacing.Undecided;
+            if (f.Unreadable) return AvatarFacing.Vanilla;
             if (f.LocalIsSpectator) return AvatarFacing.Undecided;
             if (!f.RoomExists) return AvatarFacing.Undecided;
-            if (f.ModIssuedRoom) return AvatarFacing.Modded;
             var others = f.OtherFighterKeys;
             if (others == null || others.Count == 0) return AvatarFacing.Undecided;
             return EveryOtherFighterIsModded(others, f.FaceKey) ? AvatarFacing.Modded : AvatarFacing.Vanilla;

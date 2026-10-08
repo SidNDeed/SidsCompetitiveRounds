@@ -5418,7 +5418,9 @@ namespace CompetitiveRounds
         public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged)
         {
             // Item 19 edge E12: cr_ff (read by IsModIssuedRoom) is a ROOM
-            // property that can land after the join.
+            // property that can land after the join. It triggers a fresh
+            // evaluation and is logged; it never decides the face (fix pass 1,
+            // BR-H1: only the every-fighter census can answer Modded).
             AvatarDefaults.Evaluate("E12-roomprops");
         }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)

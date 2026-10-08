@@ -50,14 +50,26 @@ namespace CompetitiveRounds
             return l;
         }
 
+        /// <summary>The room term. InRoom and OfflineMode are read FIRST and on
+        /// their own (fix pass 1, BR-M4): when that read throws, InRoom stays
+        /// false and Unreadable is set, so the census cannot answer Vanilla
+        /// for a room that was never established (and does not treat the
+        /// failure as a confirmed exit either). Only a failure after a real
+        /// online room is known reads as an unreadable room.</summary>
         private static AvatarFacingIn ReadFacing()
         {
             var f = new AvatarFacingIn { FaceKey = FacePublisher.PROP_FACE };
             try
             {
-                f.InRoom = PhotonNetwork.InRoom;
-                f.OfflineMode = PhotonNetwork.OfflineMode;
-                if (!f.InRoom || f.OfflineMode) return f;
+                bool inRoom = PhotonNetwork.InRoom;
+                bool offline = PhotonNetwork.OfflineMode;
+                f.InRoom = inRoom;
+                f.OfflineMode = offline;
+            }
+            catch { f.InRoom = false; f.OfflineMode = false; f.Unreadable = true; return f; }
+            if (!f.InRoom || f.OfflineMode) return f;
+            try
+            {
                 f.LocalIsSpectator = RoomActors.LocalIsSpectator;
                 var room = PhotonNetwork.CurrentRoom;
                 f.RoomExists = room != null;
