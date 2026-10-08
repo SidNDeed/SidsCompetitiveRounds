@@ -231,14 +231,14 @@ namespace CombatEvidenceTests
             // the envelope body: the route's field order, the record as one JSON string
             string rec = ReadAscii(Path.Combine(dir, "a24_owner.out.txt"));
             string s = new string('a', 64);
-            string env = E.Envelope("76561198000000001", "76561198000000002", "ranked_cev_000001", "ranked_cev_000001_r8", rec, s);
+            string env = E.Envelope("76561190000000001", "76561190000000002", "ranked_cev_000001", "ranked_cev_000001_r8", rec, s);
             var pj = env == null ? null : (JObject)Parse(env);
             bool shape = pj != null && string.Join(",", pj.Select(kv => kv.Key)) == "contract,seat_steam_id,other_steam_id,stable_game_key,attach_key,record,sig"
                          && L(pj["contract"]) == W.CONTRACT && (string)pj["record"] == rec && (string)pj["sig"] == s;
             Ok(shape, "envelope: the route's seven fields in order, the record carried byte for byte");
-            Ok(E.Envelope("76561198000000001", "76561198000000001", "ranked_cev_000001", "ranked_cev_000001_r8", rec, s) == null
-               && E.Envelope("76561198000000001", "76561198000000002", "ranked_cev_000001", "ranked_cev_000001_r8", rec + "é", s) == null
-               && E.Envelope("76561198000000001", "76561198000000002", "ranked_cev_000001", "ranked_cev_000001_r8", rec, "ab") == null,
+            Ok(E.Envelope("76561190000000001", "76561190000000001", "ranked_cev_000001", "ranked_cev_000001_r8", rec, s) == null
+               && E.Envelope("76561190000000001", "76561190000000002", "ranked_cev_000001", "ranked_cev_000001_r8", rec + "é", s) == null
+               && E.Envelope("76561190000000001", "76561190000000002", "ranked_cev_000001", "ranked_cev_000001_r8", rec, "ab") == null,
                "envelope refuses a self pair, a non-ASCII record and a short signature");
         }
 
