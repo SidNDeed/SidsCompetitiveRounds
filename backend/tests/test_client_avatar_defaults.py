@@ -685,11 +685,15 @@ def test_s20_a_static_in_the_rules_reds():
 
 # S21 (the decompiled spans the design rests on) -----------------------------
 
-DECOMPILED = {
-    "CharacterCreatorItemLoader.cs": (22, 36, "421b9423b583c87cb5fe42f91647ace6dde7ebe9f8da65bd5aaa2c4ab43acd1f"),
-    "CharacterCreatorItemEquipper.cs": (64, 94, "77b32efbc742d6f9285d248190b4e2905cedb992b2da86362bacd59d1cdeb301"),
-    "CardChoiceVisuals.cs": (123, 127, "63b6b158bcea239608f1b0edbcd2f48f644e0973f3857485d3e1e6da88add0df"),
-}
+DECOMPILED = [
+    ("CharacterCreatorItemLoader.cs", 22, 36, "421b9423b583c87cb5fe42f91647ace6dde7ebe9f8da65bd5aaa2c4ab43acd1f"),
+    ("CharacterCreatorItemEquipper.cs", 64, 94, "77b32efbc742d6f9285d248190b4e2905cedb992b2da86362bacd59d1cdeb301"),
+    ("CardChoiceVisuals.cs", 123, 127, "63b6b158bcea239608f1b0edbcd2f48f644e0973f3857485d3e1e6da88add0df"),
+    # Item 19 fix pass 1 (M11): the PlayerFace persistence proof the design's
+    # round-1 M11 closure rests on (twelve keys per slot): LoadFace and SaveFace.
+    ("PlayerFace.cs", 23, 37, "9b494c26368d35d5beae100248148a6c2fcb34946d8ed851f0310b5e5a80a1b4"),
+    ("PlayerFace.cs", 39, 54, "4bb696a16552c987474f14ea76d31ddb7ad6a2ac928225f033021b6d65987d69"),
+]
 
 
 def _decompiled_dir():
@@ -701,12 +705,11 @@ def _span_hash(lines, a, b):
     return hashlib.sha256(b"\n".join(lines[a - 1:b])).hexdigest()
 
 
-@pytest.mark.parametrize("fname", sorted(DECOMPILED))
-def test_s21_the_decompiled_spans_are_what_the_design_records(fname):
+@pytest.mark.parametrize("fname,a,b,want", DECOMPILED, ids=["%s:%d-%d" % (f, a, b) for f, a, b, _ in DECOMPILED])
+def test_s21_the_decompiled_spans_are_what_the_design_records(fname, a, b, want):
     d = _decompiled_dir()
     if d is None:
         pytest.skip("the decompile is local-only; set SCR_DECOMPILED_DIR")
-    a, b, want = DECOMPILED[fname]
     with open(os.path.join(d, fname), "rb") as fh:
         lines = fh.read().split(b"\n")
     assert _span_hash(lines, a, b) == want
@@ -723,18 +726,235 @@ def test_s21_the_decompiled_spans_are_what_the_design_records(fname):
 # S22 (the durable capture) ---------------------------------------------------
 
 def _s22(src):
+    """Fix pass 1 (M8): one info line in the evaluator, built by the pure
+    formatter the harness replays (case M8), logged for every applied change
+    AND for every classification on a room edge, before the no-apply return."""
     body = _body(src[AD], "internal static void Evaluate(string tag)", ADC)
-    logs = [m.start() for m in re.finditer(r'Plugin\.Log\.LogInfo\("\[AVATAR\] "', body)]
-    assert len(logs) == 1
+    logs = [m.start() for m in re.finditer(r"Plugin\.Log\.LogInfo\(", body)]
+    assert len(logs) == 1, "the evaluator has %d info lines" % len(logs)
     stmt = body[logs[0]:body.index(";", logs[0])]
-    for term in ('" (facing "', '", nominee "', '", other fighters "', "OtherFighterCount(f)", "d.Facing", "d.Nominee"):
-        assert term in stmt, term
+    assert "rules.ClassificationLine(tag, d, OtherFighterCount(f)" in stmt, stmt
+    assert body.rfind("rules.LogsClassification(tag)", 0, logs[0]) != -1, \
+        "a kept classification on a room edge logs nothing"
+    assert body.index("if (d.Apply < 0) return;") > logs[0], "the line is logged only after an apply"
+    fmt = _body(src[AR], "internal virtual string ClassificationLine(")
+    for term in ('" (facing "', '", nominee "', '", other fighters "', "d.Facing", "d.Nominee", "otherFighters"):
+        assert term in fmt, term
+    edges = _body(src[AR], "internal virtual bool LogsClassification(string tag)")
+    for e in ('"E2-"', '"E3-"', '"E6-"', '"E7-"', '"E11-"'):
+        assert e in edges, e
+    for e in ('"E5-"', '"E4-"', '"E9-"'):
+        assert e not in edges, e
 
 
 def test_s22_the_evaluator_logs_each_applied_change():
     _check(_s22,
-           lambda s: _replace(s, AD, 'Plugin.Log.LogInfo("[AVATAR] " + tag + " applied slot "', 'string.Concat("[AVATAR] " + tag + " applied slot "'),
-           lambda s: _replace(s, AD, '" applied slot "', '" set slot "'))
+           lambda s: _replace(s, AD, "if (d.Apply >= 0 || rules.LogsClassification(tag))", "if (d.Apply >= 0)"),
+           lambda s: _replace(s, AR, '" kept slot "', '" held slot "'))
+
+
+def test_s22_the_line_names_the_other_fighter_count():
+    _check(_s22,
+           lambda s: _replace(s, AR, '+ ", other fighters " + otherFighters', '+ ""'),
+           lambda s: _replace(s, AR, '+ ", issued room " +', '+ ", issued " +'))
+
+
+# S27 (fix pass 1, H3): one publish-or-clear helper behind all four callers --
+
+FP = "internal static class FacePublisher"
+PUB = "public static FaceCarrierAction PublishLocal()"
+
+
+def _s27(src):
+    body = _body(src[PL], PUB, FP)
+    assert not re.search(r"\breturn\s*;", mask_code(body)), "PublishLocal still has a bare return"
+    assert body.count("new AvatarRules().CarrierAction(") == 1
+    a, b = _one(body, "if (action == FaceCarrierAction.Clear)")
+    clear = body[a:b]
+    for term in ("[PROP_FACE] = null;", "SetCustomProperties(clear)", "return action;"):
+        assert term in clear, term
+    assert body.count("SetCustomProperties(") == 2, "a third carrier write"
+    car = _body(src[AR], "internal virtual FaceCarrierAction CarrierAction(")
+    assert re.search(r"if \(!facesListed \|\| !face0\.Present \|\| face0\.AllZero\) return FaceCarrierAction\.Clear;", car), car
+
+
+def test_s27_a_definitive_decline_clears_the_carrier():
+    _check(_s27,
+           lambda s: _drop(s, PL, "PhotonNetwork.LocalPlayer.SetCustomProperties(clear);"),
+           lambda s: _replace(s, PL, "cleared the face carrier (", "removed the face carrier ("))
+
+
+def test_s27_the_round_1_decline_shape_reds():
+    _check(_s27,
+           lambda s: _replace(s, AR, "face0.AllZero) return FaceCarrierAction.Clear;", "face0.AllZero) return FaceCarrierAction.Keep;"),
+           lambda s: _replace(s, AR, "if (spectator || !handlerReady || !localPlayerReady) return FaceCarrierAction.Keep;",
+                              "if (!handlerReady || !localPlayerReady || spectator) return FaceCarrierAction.Keep;"))
+
+
+# S28 (fix pass 1, BR-M1): every Harmony body is one exception boundary ------
+
+HOOKS = {"E1": ("AvatarLoadFacesPatch", "private static void Postfix()"),
+         "E9": ("AvatarSelectFacePatch", "private static void Postfix(int faceID)"),
+         "E5": ("AvatarCreatePlayerPatch", "private static void Prefix()")}
+
+
+def _match_brace(masked, ob):
+    depth = 0
+    for i in range(ob, len(masked)):
+        if masked[i] == "{":
+            depth += 1
+        elif masked[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    raise CsParseError("unbalanced braces")
+
+
+def _s28(src, hook):
+    cls, sig = HOOKS[hook]
+    body = _body(src[AD], sig, "class " + cls)
+    inner = body.strip()[1:-1]
+    m = mask_code(inner)
+    i = len(m) - len(m.lstrip())
+    assert m[i:i + 3] == "try", "%s: the body is not one exception boundary" % hook
+    e = _match_brace(m, m.index("{", i))
+    c = re.match(r"\s*catch\s*\(\s*Exception\s+\w+\s*\)\s*\{", m[e:])
+    assert c, "%s: no catch (Exception) right after the try" % hook
+    cs = e + c.end() - 1
+    ce = _match_brace(m, cs)
+    assert m[ce:].strip() == "", "%s: a statement outside the boundary" % hook
+    catch_code = inner[cs:ce]
+    assert "AvatarDefaults.Warn(" in catch_code and "Plugin.Log." not in catch_code, catch_code
+    warn = _body(src[AD], "internal static void Warn(string msg)", ADC)
+    assert "Plugin.Log?.LogWarning(msg)" in warn and re.search(r"catch\s*\{\s*\}", warn), warn
+
+
+@pytest.mark.parametrize("hook,other", [("E1", "E9"), ("E9", "E5"), ("E5", "E1")])
+def test_s28_each_hook_body_is_one_exception_boundary(hook, other):
+    cls, sig = HOOKS[hook]
+    _check(lambda s: _s28(s, hook),
+           lambda s: _insert_after_open(s, AD, sig, "            AvatarDefaults.Tick();", "class " + cls),
+           lambda s: _replace(s, AD, "[AVATAR] %s" % {"E1": "E1-launch hook failed: ", "E9": "E9-select hook failed: ",
+                                                       "E5": "E5-spawn hook failed: "}[other],
+                              "[AVATAR] %s" % {"E1": "E1-launch hook threw: ", "E9": "E9-select hook threw: ",
+                                               "E5": "E5-spawn hook threw: "}[other]))
+
+
+def test_s28_a_catch_that_logs_through_the_bare_logger_reds():
+    m = _replace(_tree(), AD, 'AvatarDefaults.Warn("[AVATAR] E5-spawn hook failed: " + ex.Message);',
+                 "Plugin.Log.LogWarning(ex.Message);")
+    with pytest.raises(AssertionError):
+        _s28(m, "E5")
+
+
+# S29 (fix pass 1, BR-H1 and BR-M4): capability first, provenance never decides
+
+def _s29(src):
+    body = _body(src[AR], FACING)
+    assert "ModIssuedRoom" not in mask_code(body), "the room's provenance decides a facing"
+    room = body.index("if (!f.InRoom || f.OfflineMode) return AvatarFacing.Undecided;")
+    unread = body.index("if (f.Unreadable) return AvatarFacing.Vanilla;")
+    assert room < unread, "unreadability is consulted before an online room is established"
+    assert "others.Count == 0) return AvatarFacing.Undecided;" in body
+    census = _body(src[AR], "internal virtual AvatarFacing Census(AvatarLivenessIn l, AvatarFacingIn f)")
+    assert census.index("if (!f.InRoom && !f.Unreadable) return FacingOf(f);") < census.index("if (Live(l))"), \
+        "a confirmed exit no longer outranks liveness (H9)"
+
+
+def test_s29_provenance_never_decides_the_facing():
+    _check(_s29,
+           lambda s: _replace(s, AR, "            var others = f.OtherFighterKeys;",
+                              "            if (f.ModIssuedRoom) return AvatarFacing.Modded;\n            var others = f.OtherFighterKeys;"),
+           lambda s: _replace(s, AR, "/// <summary>Term (2), capability first", "/// <summary>Term (2), the capability first"))
+
+
+def test_s29_unreadability_after_the_room_and_the_exit_before_liveness():
+    _check(_s29,
+           lambda s: _replace(s, AR, "            if (!f.InRoom || f.OfflineMode) return AvatarFacing.Undecided;\n            if (f.Unreadable) return AvatarFacing.Vanilla;",
+                              "            if (f.Unreadable) return AvatarFacing.Vanilla;\n            if (!f.InRoom || f.OfflineMode) return AvatarFacing.Undecided;"),
+           lambda s: _replace(s, AR, "            if (f.LocalIsSpectator) return AvatarFacing.Undecided;\n            if (!f.RoomExists) return AvatarFacing.Undecided;",
+                              "            if (!f.RoomExists) return AvatarFacing.Undecided;\n            if (f.LocalIsSpectator) return AvatarFacing.Undecided;"))
+
+
+def test_s29_the_liveness_first_census_reds():
+    m = _replace(_tree(), AR, "            if (!f.InRoom && !f.Unreadable) return FacingOf(f);\n            if (Live(l)) return AvatarFacing.Locked;",
+                 "            if (Live(l)) return AvatarFacing.Locked;\n            if (!f.InRoom && !f.Unreadable) return FacingOf(f);")
+    with pytest.raises(AssertionError):
+        _s29(m)
+
+
+# S30 (fix pass 1, M11 and L1): the exact assignment the nametag citation names
+
+NT = "NametagStyler.cs"
+
+
+def _s30(src):
+    lines = src[NT].split("\n")
+    assert lines[421].strip() == "string styled = Wrap(_baseName, skus);", "line 422: %r" % lines[421]
+    assert lines[422].strip() == "", "line 423: %r" % lines[422]
+    assert lines[425].strip() == "PhotonNetwork.LocalPlayer.NickName = styled;", "line 426: %r" % lines[425]
+
+
+def test_s30_the_broadcast_assignment_is_at_the_cited_line():
+    _check(_s30,
+           lambda s: _replace(s, NT, "                string styled = Wrap(_baseName, skus);",
+                              "\n                string styled = Wrap(_baseName, skus);"),
+           lambda s: _replace(s, NT, "// keep fresh if Steam persona changed", "// keep it fresh if the Steam persona changed"))
+
+
+# S31 (fix pass 1, M11): the refusal citation, by meaning not by line count --
+
+TWO_V_TWO = "class PlayerAssigner_CreatePlayer_2v2_Patch"
+REFUSAL = "if (__instance.hasCreatedLocalPlayer) return false;"
+TEAM_EXIT = "if (slot < 0) return true;"
+
+
+def _s31(src):
+    t = src[PL]
+    a, b = _span(t, TWO_V_TWO)
+    seg = _code(t[a:b])
+    assert seg.count(REFUSAL) == 1, "the already-spawned refusal occurs %d times" % seg.count(REFUSAL)
+    assert seg.count(TEAM_EXIT) == 1
+    between = seg[seg.index(TEAM_EXIT) + len(TEAM_EXIT):seg.index(REFUSAL)]
+    assert between.strip() == "", "the refusal is no longer the statement after the team-mode exit"
+
+
+def test_s31_the_already_spawned_refusal_is_where_the_design_cites_it():
+    _check(_s31,
+           lambda s: _replace(s, PL, REFUSAL + "     // already done", "// already done"),
+           lambda s: _replace(s, PL, REFUSAL + "     // already done", REFUSAL + "     // done already"))
+
+
+# S32 (fix pass 1, L1): the dual ring, the hybrid ring, the recovery text -----
+
+RING = "private static Sprite RingSprite(string name, Color outer, Color inner)"
+ENSURE = "private static void EnsureRings()"
+UNUSABLE = "private static string UnusableMessage(AvatarUnusable u)"
+
+
+def _s32(src, part):
+    t = src[AD]
+    if part == "ring":
+        assert "px[y * size + x] = edge < 3 ? outer : edge < 6 ? inner : clear;" in _body(t, RING, ADC)
+    elif part == "hybrid":
+        body = _body(t, ENSURE, ADC)
+        for stmt in ('ringGold = RingSprite("CR_AvRingGold", gold, gold);', 'ringBlue = RingSprite("CR_AvRingBlue", blue, blue);',
+                     'ringBoth = RingSprite("CR_AvRingBoth", gold, blue);', 'ringRed = RingSprite("CR_AvRingRed", red, red);'):
+            assert stmt in body, stmt
+        assert "(isM && isV) ? ringBoth" in _body(t, "private static void PaintRings()", ADC)
+    else:
+        assert 'return first + "\\n" + RecoveryInstruction();' in _body(t, UNUSABLE, ADC)
+
+
+@pytest.mark.parametrize("part,old,new,sig", [
+    ("ring", "edge < 6 ? inner : clear", "edge < 6 ? outer : clear", RING),
+    ("hybrid", 'RingSprite("CR_AvRingBoth", gold, blue)', 'RingSprite("CR_AvRingBoth", gold, gold)', ENSURE),
+    ("recovery", 'return first + "\\n" + RecoveryInstruction();', "return first;", UNUSABLE),
+])
+def test_s32_each_low_closure_has_its_own_pair(part, old, new, sig):
+    _check(lambda s: _s32(s, part),
+           lambda s: _replace(s, AD, old, new),
+           lambda s: _insert_after_open(s, AD, sig, "            // an unrelated note", ADC))
 
 
 # S26 (one announcer) ---------------------------------------------------------
