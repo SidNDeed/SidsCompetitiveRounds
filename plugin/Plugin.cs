@@ -521,6 +521,7 @@ namespace CompetitiveRounds
                     try { GameStateWatcher.SeatEvidenceOnQuit(); } catch { }
                     try { SeatEvidence.FlushOnQuit(); } catch { }
                     try { CardDrawEvidence.FlushOnQuit(); } catch { }
+                    try { CombatEvidence.FlushOnQuit(); } catch { }
                 };
             }
             catch (Exception ex) { Log.LogWarning($"[BUG-REPORT] quit hook bind failed: {ex.Message}"); }
@@ -1370,6 +1371,9 @@ namespace CompetitiveRounds
                 Log.LogInfo($"[HARMONY] Patches applied: {applied} ok, {failed} failed");
                 // Card draw evidence (B4): one line naming its six patches as attached.
                 try { CardDrawEvidence.BootLine(); } catch { }
+                // Combat evidence (B1-B5 and the addendum): one line naming every
+                // combat patch as attached, and the producers the census proves.
+                try { CombatEvidence.BootLine(); } catch { }
             }
             catch (Exception ex)
             {
@@ -3452,13 +3456,15 @@ namespace CompetitiveRounds
             // Evidence work the hooks deferred out of the game's methods: the
             // point-end lines and push counts first (before GameStateWatcher's
             // tick captures a record), then seat evidence's own clocks, the
-            // record builds and the queue, then the card draw builds. Above
+            // record builds and the queue, then the card draw builds, then the
+            // combat record builds. Above
             // the return: previously queued evidence sends whatever the mod's
             // state, under consent, a session, retry timing and no live
             // combat. No setting in front of any of it.
             try { PointEvidence.Drain(); } catch { }
             try { SeatEvidence.Tick(); } catch { }
             try { CardDrawEvidence.Tick(); } catch { }
+            try { CombatEvidence.Tick(); } catch { }
 
             if (Plugin.modDisabled) return;
 

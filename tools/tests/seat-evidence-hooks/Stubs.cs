@@ -117,6 +117,12 @@ namespace CompetitiveRounds
         internal static void UnkeyedReset(Block b) { throw Planted.Fault(); }
     }
 
+    // the combat evidence collector the shared RPC send hook also calls (contained beside BlockSent)
+    internal static class CombatEvidence
+    {
+        internal static void RpcSent(PhotonView v, string m, RpcTarget t) { throw Planted.Fault(); }
+    }
+
     internal static class PointEvidence
     {
         internal static int Point { get { throw Planted.Fault(); } }

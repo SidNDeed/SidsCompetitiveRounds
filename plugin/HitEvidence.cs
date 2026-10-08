@@ -343,6 +343,7 @@ namespace CompetitiveRounds
             RpcSender = 0;
             try { SeatEvidence.RoomExit(); } catch { }
             try { CardDrawEvidence.RoomExit(); } catch { }
+            try { CombatEvidence.RoomExit(); } catch { }
         }
     }
 

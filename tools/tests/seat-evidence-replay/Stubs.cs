@@ -175,6 +175,12 @@ namespace CompetitiveRounds
 
     public class ConfigValue<T> { public T Value; }
 
+    // the combat evidence collector the shared RPC send hook also calls (out of this harness's scope)
+    internal static class CombatEvidence
+    {
+        internal static void RpcSent(Photon.Pun.PhotonView v, string m, Photon.Pun.RpcTarget t) { }
+    }
+
     internal static class Plugin
     {
         internal const string ModId = "com.scr.competitiverounds";

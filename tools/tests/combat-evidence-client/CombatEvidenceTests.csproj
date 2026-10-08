@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Combat evidence, client half: executes the REAL plugin/CombatEvidenceCore.cs
+       (the record, its serializer and budgeter, signing, the cycle accountant,
+       the single-precision path references) against the SERVER branch's
+       canonical fixture set, and writes synthetic records that
+       ../combat-evidence-replay/run_replay.py hands to the server's own
+       combat_measures.py. Mutants are built from COPIES of the core
+       (CombatSource override); the tracked file is never modified. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>CombatEvidenceTests</AssemblyName>
+    <RootNamespace>CombatEvidenceTests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(CombatSource)' == ''">
+    <CombatSource>$(MSBuildThisFileDirectory)..\..\..\plugin\CombatEvidenceCore.cs</CombatSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(CombatSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\CombatEvidenceWire.g.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>
