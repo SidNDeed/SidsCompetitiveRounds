@@ -1628,7 +1628,7 @@ def _f8_wheel(directory, name, version):
 
 def test_f8_the_python_packages_are_locked_by_content(tmp_path, capsys):
     """The image installs only requirements.lock, with --require-hashes and
-    --only-binary=:all:; every locked package is pinned and carries at least
+    --only-binary=:all:; every locked package is pinned and carries exactly
     one SHA-256; every top-level pin of requirements.txt is in the lock at its
     version; libfribidi0 is installed at a pinned version. And pip itself, on
     a wheel built here, installs a locked hash and REFUSES a changed one."""
@@ -1641,8 +1641,11 @@ def test_f8_the_python_packages_are_locked_by_content(tmp_path, capsys):
     entries = _f8_lock_entries((API_DIR / "requirements.lock").read_text(encoding="utf-8"))
     names = [_f8_norm(n) for n, _v, _h in entries]
     assert len(names) == len(set(names))
-    assert all(hashes and all(re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes)
-               for _n, _v, hashes in entries)
+    assert all(all(re.fullmatch(r"[0-9a-f]{64}", h) for h in hashes) for _n, _v, hashes in entries)
+    # Fix pass 10 (M-9): exactly ONE hash per package, the one wheel the
+    # image's platform resolves, so no other file of the same version installs.
+    plural = ["%s==%s carries %d hashes" % (n, v, len(h)) for n, v, h in entries if len(h) != 1]
+    assert not plural, "requirements.lock must lock each package to one artifact: " + "; ".join(plural)
     locked = {_f8_norm(n): v for n, v, _h in entries}
     top = 0
     for line in (API_DIR / "requirements.txt").read_text(encoding="utf-8").splitlines():
@@ -1675,6 +1678,53 @@ def test_f8_the_python_packages_are_locked_by_content(tmp_path, capsys):
         print("\nPROOF SIZE f8 lock: %d packages, %d wheel hashes, %d top-level pins matched; "
               "apt %s; pip installed the locked hash and refused a changed one"
               % (len(entries), sum(len(h) for _n, _v, h in entries), top, " ".join(packages)))
+
+
+def test_f10_pip_refuses_a_second_artifact_of_a_locked_version(tmp_path, capsys):
+    """One hash per version is what makes a same-version substitute refuse:
+    two different wheel files of scrgateprobe 1.0 are built here, the lock
+    names the first. pip, run with the image's flags, installs the first when
+    it alone is offered and REFUSES when only the second is; offered both, it
+    never installs the second (from a plain link directory pip learns a
+    file's hash only after choosing it, so it may refuse there; an index that
+    publishes hashes lets it filter to the locked file first)."""
+    first_dir, second_dir, both_dir = (tmp_path / d for d in ("first", "second", "both"))
+    for d in (first_dir, second_dir, both_dir):
+        d.mkdir()
+    first = _f8_wheel(first_dir, "scrgateprobe", "1.0")
+    second = second_dir / "scrgateprobe-1.0-py2.py3-none-any.whl"
+    import zipfile
+    with zipfile.ZipFile(first) as src, zipfile.ZipFile(second, "w") as dst:
+        for item in src.infolist():
+            dst.writestr(item, src.read(item))
+        dst.writestr("scrgateprobe/substitute.py", "SUBSTITUTE = True\n")
+    for wheel in (first, second):
+        (both_dir / wheel.name).write_bytes(wheel.read_bytes())
+    digest = sha256(first.read_bytes()).hexdigest()
+    assert digest != sha256(second.read_bytes()).hexdigest()
+    req = tmp_path / "one.lock"
+    req.write_text(f"scrgateprobe==1.0 --hash=sha256:{digest}\n", encoding="utf-8")
+    outcomes = {}
+    for label, links in (("first only", first_dir), ("both", both_dir), ("second only", second_dir)):
+        report = tmp_path / ("report-%s.json" % label.replace(" ", "-"))
+        run = subprocess.run([sys.executable, "-m", "pip", "install", "--dry-run", "--no-index",
+                              "--find-links", str(links), "--require-hashes", "--only-binary=:all:",
+                              "--ignore-installed", "--disable-pip-version-check", "--no-cache-dir",
+                              "--report", str(report), "-r", str(req)],
+                             capture_output=True, text=True)
+        chosen = None
+        if run.returncode == 0:
+            chosen = json.loads(report.read_text(encoding="utf-8"))["install"][0]["download_info"]
+            chosen = chosen["archive_info"]["hashes"]["sha256"]
+        outcomes[label] = (run.returncode, chosen, run.stdout + run.stderr)
+    assert outcomes["first only"][0] == 0 and outcomes["first only"][1] == digest, outcomes["first only"]
+    assert outcomes["second only"][0] != 0, outcomes["second only"]
+    assert outcomes["both"][1] in (None, digest), outcomes["both"]
+    with capsys.disabled():
+        print("\nPROOF SIZE f10 one artifact: pip installed the locked file alone (exit 0), refused "
+              "the same-version substitute alone (exit %d), offered both: %s"
+              % (outcomes["second only"][0],
+                 "refused" if outcomes["both"][1] is None else "installed the locked file"))
 
 
 _F8_MANIFEST_FIXTURE = Path(__file__).with_name("fixtures") / "build_manifest" / "sample.json"
