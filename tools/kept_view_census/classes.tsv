@@ -12,6 +12,8 @@ CardDrawEvidence.cs	CardDrawEvidence	FirstPhase	players	R	the card-draw evidence
 CardDrawEvidence.cs	CardDrawEvidence	GateRoom	ActiveFighterCount	V	the record is kept only for a two-fighter room, counted by ActiveFighterCount(), the kept view	
 CardDrawEvidence.cs	CardDrawEvidence	PlayerById	GetPlayerWithID	R	the card-draw evidence record: a raw fact of the pick phase written into the record the server judges; it decides no count, send gate, damage, pick or result (the picking player's id resolved for its role)	
 CardDrawEvidence.cs	CardDrawEvidence	Rounds	players	R	the card-draw evidence record: a raw fact of the pick phase written into the record the server judges; it decides no count, send gate, damage, pick or result (each body's rounds won, recorded as seen)	
+CombatEvidence.cs	CombatEvidence	BeginGame	OtherActiveFighters	V	the opponent the record is about is the one other fighter of OtherActiveFighters(), the kept view	
+CombatEvidence.cs	CombatEvidence	ResolvePlayers	GetPlayerWithActorID	R	the combat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (the bodies of this seat's actor and the opponent's actor, resolved once for the window)	
 CompetitiveUI.cs	CompetitiveUI	DrawDanceWheel	players	N	UI	
 CompetitiveUI.cs	CompetitiveUI	FfaMatchPointName	players	N	HUD label	
 CompetitiveUI.cs	CompetitiveUI	MutedPlayersLine	PlayerList	N	chat UI	
@@ -316,6 +318,7 @@ SeatEvidence.cs	SeatEvidence	DamageArrived	Sender	R	the seat evidence record: a 
 SeatEvidence.cs	SeatEvidence	EnterRpc	Sender	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (the RPC envelope's sender actor, kept for the frame and compared with the opponent)	
 SeatEvidence.cs	SeatEvidence	HitEnter	Sender	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (a received hit is noted only from the opponent's actor)	
 SeatEvidence.cs	SeatEvidence	ResolveOpponent	OtherActiveFighters	V	the opponent the record is about is the one other fighter of OtherActiveFighters(), the kept view	
+SeatEvidence.cs	SeatEvidence	RpcTop	Sender	R	the seat evidence RPC frame, read for the combat evidence record: a raw fact; it decides no count, damage, block, hit or result (a read-only copy of the innermost frame's sender actor, kept by EnterRpc)	
 SeatEvidence.cs	SeatEvidence	SampleOpponent	GetPlayer	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (the opponent's Photon player, for its round-trip sample)	
 SeatEvidence.cs	SeatEvidence	ShotArrived	GetPlayerWithActorID	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (the shooting body of the opponent's actor)	
 SeatEvidence.cs	SeatEvidence	ShotArrived	Sender	R	the seat evidence record: a raw fact written into the record the server judges; it decides no count, damage, block, hit or result (a shot is noted only from the opponent's actor)	
