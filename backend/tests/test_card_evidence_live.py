@@ -1664,6 +1664,86 @@ def test_m4_fix4_a_parked_game_is_re_probed_at_the_interval_and_heals(live, revs
     assert o["health_after"] == (0, 0)
 
 
+def test_m4_fix5_a_parked_game_whose_re_probe_fails_operationally_is_retried_on_time_and_recovers(
+        live, revs, monkeypatch):
+    """Deterministic faults park a game; past the re-probe interval its
+    re-probe fails operationally (the pool's own timeout error). The game
+    then waits out only the bounded retry: a pass inside retry_delay(0)
+    leaves it alone, and the first pass once that wait has passed visits it
+    (the park clock adds nothing). That visit fails operationally again and
+    waits retry_delay(1), again visited on time; the pool recovers and that
+    visit evaluates the game and clears every fault field."""
+    import sqlalchemy.exc as sx
+    mode = {"det": True, "op": False}
+    visited = []
+    target = {}
+
+    def hook(key):
+        visited.append(key)
+        if key == target.get("k"):
+            if mode["det"]:
+                raise RuntimeError("synthetic evaluator fault")
+            if mode["op"]:
+                raise sx.TimeoutError("QueuePool limit reached, connection timed out")
+    monkeypatch.setattr(ce, "_VISIT_HOOK", hook)
+    cap = ce.CARD_FAULT_LIMITS["attempts"]
+    rp = ce.CARD_RETRY_LIMITS["reprobe_s"]
+    back = ("UPDATE card_games SET processed_at = processed_at - make_interval(secs => CAST(:d AS int)), "
+            "retry_at = retry_at - make_interval(secs => CAST(:d AS int)) WHERE stable_game_key = :k")
+    gap_sql = ("SELECT EXTRACT(EPOCH FROM retry_at - processed_at) FROM card_games "
+               "WHERE stable_game_key = :k")
+
+    async def visit(sm, key):
+        visited.clear()
+        s = await ce.games_pass(sm, revs.shadow)
+        return key in visited, s, dict((await _rows(sm, WROW, k=key))[0])
+
+    async def go():
+        sm = live.sm
+        key, _g, _d = await _fresh_game(sm, "po")
+        target["k"] = key
+        for _i in range(cap + 2):
+            n = await _scalar(sm, "SELECT fault_attempts FROM card_games WHERE stable_game_key = :k", k=key)
+            if n is not None and n >= cap:
+                break
+            await ce.games_pass(sm, revs.shadow)
+        out = {"parked": dict((await _rows(sm, WROW, k=key))[0])}
+        out["inside_park"] = await visit(sm, key)                 # parked, inside the interval
+        await _exec(sm, back, d=rp + 1, k=key)                    # the re-probe is due
+        mode["det"], mode["op"] = False, True
+        out["reprobe"] = await visit(sm, key)                     # it fails operationally
+        out["steps"] = []
+        for i in range(2):
+            gap = await _scalar(sm, gap_sql, k=key)
+            inside = await visit(sm, key)                         # inside the bounded wait
+            await _exec(sm, back, d=ce.retry_delay(i), k=key)    # exactly that wait has passed
+            if i == 1:
+                mode["op"] = False                                # the pool recovers
+            out["steps"].append((float(gap), inside, await visit(sm, key)))
+        out["after"] = await visit(sm, key)
+        return out
+    o = live.run(go())
+    p = o["parked"]
+    assert p["fault_attempts"] == cap and p["parked_at"] is not None and p["retry_at"] is None
+    assert not o["inside_park"][0]                                # control: the park holds
+    hit, s, r = o["reprobe"]
+    assert hit and s.get("operational", 0) >= 1
+    assert r["op_attempts"] == 1 and r["retry_at"] is not None and r["derive_fault"] == "error:TimeoutError"
+    assert r["fault_attempts"] == cap and r["parked_at"] == p["parked_at"]   # still parked
+    (g0, in0, t0), (g1, in1, t1) = o["steps"]
+    assert (g0, g1) == (ce.retry_delay(0), ce.retry_delay(1))
+    assert not in0[0] and not in1[0]                              # the bounded wait holds
+    assert t0[0], "the bounded retry did not fire when its wait had passed"
+    assert t0[1].get("operational", 0) >= 1 and t0[2]["op_attempts"] == 2
+    assert t1[0] and not _errors(t1[1])                           # on time again, and recovered
+    h = t1[2]
+    assert h["finalized_at"] is not None and h["evaluated_rev"] == revs.shadow.ruleset.rev
+    for col in ("derive_fault", "fault_rev", "fault_inputs", "parked_at", "retry_at"):
+        assert h[col] is None, col
+    assert h["op_attempts"] == 0 and h["fault_attempts"] == 0
+    assert not o["after"][0]                                      # final: left alone
+
+
 # -- LOW 3: every completed visit clears derive_fault -------------------------------------------
 
 PRESET = ("UPDATE card_games SET derive_fault = 'error:Preset', fault_attempts = 2, fault_rev = NULL, "

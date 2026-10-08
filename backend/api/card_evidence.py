@@ -263,7 +263,11 @@ def _inputs_fp(rows, gens) -> str:
 # CARD_FAULT_LIMITS["attempts"] times in a row, unless its committed inputs
 # differ from the ones read before its last faulted visit (fault_inputs) or
 # its last visit is CARD_RETRY_LIMITS["reprobe_s"] old (the re-probe:
-# nothing is excluded for good). A visit that raises is recorded on the game
+# nothing is excluded for good), or it carries an operational retry (fix
+# pass 5: a parked game whose re-probe failed operationally waits out only
+# that bounded retry_at, never the park clock as well; the park clause
+# applies only to a game with no retry_at, and every recorded outcome other
+# than an operational failure clears it). A visit that raises is recorded on the game
 # (_fault) and the pass moves on; nothing about it is finalized or stamped
 # evaluated. A visit that completes without a fault clears every fault
 # field; a new revision restarts the count.
@@ -282,6 +286,7 @@ _CANDIDATES = text(
     "        OR g.evaluated_rev IS DISTINCT FROM CAST(:rev AS varchar) "
     "        OR g.seen_inputs IS DISTINCT FROM f.fp))) "
     "   AND NOT (COALESCE(g.fault_attempts, 0) >= CAST(:cap AS int) "
+    "        AND g.retry_at IS NULL "
     "        AND g.fault_rev IS NOT DISTINCT FROM CAST(:rev AS varchar) "
     "        AND g.fault_inputs IS NOT DISTINCT FROM f.fp "
     "        AND g.processed_at > now() - make_interval(secs => CAST(:reprobe AS int))) "
@@ -726,7 +731,8 @@ _FAULT_COUNT = (
     "  op_attempts = 0, retry_at = NULL ")
 
 # An operational failure on the game row: never counted toward the park; the
-# game waits out a backoff (retry_delay) and is then visited again.
+# game waits out a backoff (retry_delay) and is then visited again, parked or
+# not (the candidate query's park clause skips a game with a retry_at).
 _OP_RETRY = ("  op_attempts = op_attempts + 1, "
              "  retry_at = now() + make_interval(secs => CAST(:delay AS int)) ")
 
