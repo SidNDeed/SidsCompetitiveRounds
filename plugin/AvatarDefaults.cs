@@ -188,15 +188,25 @@ namespace CompetitiveRounds
                 // evaluation must see the remembered value already in place so
                 // it finds want == live and returns.
                 if (d.HomeChanged && Plugin.AvatarHomeSlot != null) Plugin.AvatarHomeSlot.Value = d.NewHome;
-                if (d.Apply < 0) return;
+                if (d.Apply >= 0) Apply(d.Apply, tag);
 
-                Apply(d.Apply, tag);
-                Plugin.Log.LogInfo("[AVATAR] " + tag + " applied slot " + d.Apply + " (facing " + d.Facing
-                    + ", nominee " + d.Nominee + ", other fighters " + OtherFighterCount(f)
-                    + ", was " + x.Live + ", home " + x.Home + "->" + d.NewHome + ")");
+                // The durable capture (S22, fix pass 1 M8): every applied change,
+                // and every classification on a room edge even when nothing moves,
+                // logs one line naming the facing, the nominee and the other-
+                // fighter count.
+                if (d.Apply >= 0 || rules.LogsClassification(tag))
+                    Plugin.Log.LogInfo(rules.ClassificationLine(tag, d, OtherFighterCount(f), f.ModIssuedRoom, x.Live, x.Home));
+                if (d.Apply < 0) return;
                 if (d.Switched != AvatarSwitched.None) Announce(SwitchedMessage(d.Switched));
             }
-            catch (Exception ex) { Plugin.Log.LogWarning("[AVATAR] " + tag + " evaluation failed: " + ex.Message); }
+            catch (Exception ex) { Warn("[AVATAR] " + tag + " evaluation failed: " + ex.Message); }
+        }
+
+        /// <summary>A warning that cannot itself throw out of a Harmony body or
+        /// the evaluator's catch (fix pass 1, BR-M1).</summary>
+        internal static void Warn(string msg)
+        {
+            try { Plugin.Log?.LogWarning(msg); } catch { }
         }
 
         private static string SwitchedMessage(AvatarSwitched s)

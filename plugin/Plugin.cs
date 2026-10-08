@@ -6655,49 +6655,58 @@ namespace CompetitiveRounds
     {
         public const string PROP_FACE = "cr_face";
 
-        public static void PublishLocal()
+        /// <summary>The one publish-or-clear helper behind all four callers
+        /// (item 19 fix pass 1, H3). Every attempt ends in exactly one of three
+        /// outcomes, decided by AvatarRules.CarrierAction: the current valid
+        /// face is published; or the attempt reached a definitive "no valid
+        /// face" (no face list, a null face, an all-zero face) and the carrier
+        /// is CLEARED, so a value an earlier attempt published can never be
+        /// re-read by the card-pick popup (TryReadAndApply skips an absent or
+        /// empty value and leaves vanilla's RPC in charge); or nothing is
+        /// written (a spectator, no handler yet, no local player).</summary>
+        public static FaceCarrierAction PublishLocal()
         {
             try
             {
                 // Spectator: publishes NO cosmetic properties (design §3.5) —
-                // guarded here at the source so no call site can leak one.
-                if (RoomActors.LocalIsSpectator) return;
+                // guarded here at the source so no call site can leak one. No
+                // reader consults a spectator's carrier (TryReadAndApply walks
+                // RoomActors.ActiveFighters), so Keep leaves nothing readable.
+                bool spectator = RoomActors.LocalIsSpectator;
                 var cch = CharacterCreatorHandler.instance;
-                if (cch == null)
+                bool listed = cch != null && cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0;
+                var face = listed ? cch.selectedPlayerFaces[0] : null;
+                var ids = face != null ? AvatarFaceIds.Of(face.eyeID, face.mouthID, face.detailID, face.detail2ID) : new AvatarFaceIds();
+                var action = new AvatarRules().CarrierAction(spectator, cch != null, PhotonNetwork.LocalPlayer != null, listed, ids);
+                if (action == FaceCarrierAction.Keep)
                 {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: CharacterCreatorHandler.instance is null (game state not ready)");
-                    return;
+                    if (spectator) return action;
+                    Plugin.Log.LogInfo(cch == null
+                        ? "[POPUP-DIAG] PublishLocal skipped: CharacterCreatorHandler.instance is null (game state not ready)"
+                        : "[POPUP-DIAG] PublishLocal skipped: LocalPlayer is null");
+                    return action;
                 }
-                if (cch.selectedPlayerFaces == null || cch.selectedPlayerFaces.Length == 0)
+                if (action == FaceCarrierAction.Clear)
                 {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: selectedPlayerFaces empty");
-                    return;
-                }
-                var face = cch.selectedPlayerFaces[0];
-                if (face == null)
-                {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: face[0] is null");
-                    return;
-                }
-                if (PhotonNetwork.LocalPlayer == null)
-                {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: LocalPlayer is null");
-                    return;
-                }
-                // If the local face is fully default (all four item IDs zero), skip
-                // publishing. Accounts that never opened the character creator
-                // have an uninitialized face — publishing all-zeros causes
-                // CharacterCreatorItemEquipper.EquipFace to call Equip(null) on
-                // each slot, which destroys the visualizer's stock face entirely
-                // and renders a featureless body. User reported: "2 of 4 missing
-                // in card-pick phase" pointed at Sid3/Sid4 (alts that never
-                // customized their face). Without our publish, vanilla's
-                // RPCA_SetFace on the picker's client falls back to the local
-                // visualizer's saved face.
-                if (face.eyeID == 0 && face.mouthID == 0 && face.detailID == 0 && face.detail2ID == 0)
-                {
-                    Plugin.Log.LogInfo("[2v2] FacePublisher: skipping publish (face is all-zero defaults — let vanilla RPC handle it)");
-                    return;
+                    // No valid face to publish: selectedPlayerFaces empty, face[0]
+                    // null, or a fully default face (all four item IDs zero).
+                    // Accounts that never opened the character creator have an
+                    // uninitialized face — publishing all-zeros causes
+                    // CharacterCreatorItemEquipper.EquipFace to call Equip(null)
+                    // on each slot, which destroys the visualizer's stock face
+                    // entirely and renders a featureless body ("2 of 4 missing in
+                    // card-pick phase", alts that never customized their face).
+                    // Without a carrier, vanilla's RPCA_SetFace on the picker's
+                    // client falls back to the local visualizer's saved face. The
+                    // clear removes a carrier an earlier attempt published, which
+                    // returning here used to leave in place for the popup.
+                    var clear = new ExitGames.Client.Photon.Hashtable();
+                    clear[PROP_FACE] = null;
+                    PhotonNetwork.LocalPlayer.SetCustomProperties(clear);
+                    Plugin.Log.LogInfo("[2v2] FacePublisher: cleared the face carrier ("
+                        + (!listed ? "selectedPlayerFaces empty" : face == null ? "face[0] is null" : "face is all-zero defaults")
+                        + " — let vanilla RPC handle it)");
+                    return action;
                 }
 
                 string serialized = string.Join("|", new[] {
@@ -6718,8 +6727,9 @@ namespace CompetitiveRounds
                 props[PROP_FACE] = serialized;
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
                 Plugin.Log.LogInfo($"[2v2] Published local face to Photon: {serialized}");
+                return FaceCarrierAction.Publish;
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish failed: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish failed: {ex.Message}"); return FaceCarrierAction.Keep; }
         }
 
         public static bool TryReadAndApply(int pickerActorNumber, GameObject visualizerRoot)

@@ -36,6 +36,17 @@ namespace CompetitiveRounds
     /// design (section 2.10, last paragraph).</summary>
     internal enum AvatarSwitched { None, ToVanilla, ToModded }
 
+    /// <summary>What FacePublisher.PublishLocal does with the face carrier on
+    /// one attempt (fix pass 1, H3). Publish: the current face is valid and
+    /// is written. Clear: the attempt reached a DEFINITIVE answer that there
+    /// is no valid face to publish (no face list, a null face, an all-zero
+    /// face), so any carrier an earlier attempt left is removed, and the
+    /// popup's reader (TryReadAndApply, which skips an absent or empty value)
+    /// falls back to vanilla's RPC instead of equipping the stale face. Keep:
+    /// nothing is known or nothing can be written (a spectator, whose carrier
+    /// no reader consults; no handler yet; no local player).</summary>
+    internal enum FaceCarrierAction { Publish, Clear, Keep }
+
     /// <summary>The four typed ids of one saved face. Present is false for a
     /// null playerFaces entry.</summary>
     internal struct AvatarFaceIds
@@ -344,6 +355,49 @@ namespace CompetitiveRounds
             // An out-of-domain value on disk that reads as empty is normalised to
             // -1 the first time an evaluation completes (one write, then stable).
             d.HomeChanged = homeAfter != homeBefore;
+        }
+
+        // ---------------------------------------------------------------
+        // The face carrier and the classification line
+        // ---------------------------------------------------------------
+
+        /// <summary>The one decision behind every FacePublisher.PublishLocal
+        /// attempt (fix pass 1, H3; all four callers reach it through that one
+        /// method). A definitive "no valid face" clears the carrier instead of
+        /// returning with the previous value still published.</summary>
+        internal virtual FaceCarrierAction CarrierAction(bool spectator, bool handlerReady, bool localPlayerReady,
+                                                         bool facesListed, AvatarFaceIds face0)
+        {
+            if (spectator || !handlerReady || !localPlayerReady) return FaceCarrierAction.Keep;
+            if (!facesListed || !face0.Present || face0.AllZero) return FaceCarrierAction.Clear;
+            return FaceCarrierAction.Publish;
+        }
+
+        /// <summary>The edges whose classification is logged even when nothing
+        /// is applied (fix pass 1, M8): the room edges a classification claim
+        /// is made about (join, entrant, departure, leave, disconnect). The
+        /// per-frame spawn prefix, the property and room-property edges, the
+        /// selection and settings edges log only an applied change.</summary>
+        internal virtual bool LogsClassification(string tag)
+        {
+            if (tag == null) return false;
+            return tag.StartsWith("E2-", StringComparison.Ordinal) || tag.StartsWith("E3-", StringComparison.Ordinal)
+                || tag.StartsWith("E6-", StringComparison.Ordinal) || tag.StartsWith("E7-", StringComparison.Ordinal)
+                || tag.StartsWith("E11-", StringComparison.Ordinal);
+        }
+
+        /// <summary>The one [AVATAR] classification line (fix pass 1, M8):
+        /// names the edge, what was applied or kept, the facing read, the
+        /// nominee the facing names, the other-fighter count, the room's
+        /// provenance (shown, not deciding), the selection before and the
+        /// remembered value before and after. AvatarDefaults.Evaluate logs
+        /// exactly this string; the harness replays it per case.</summary>
+        internal virtual string ClassificationLine(string tag, AvatarDecision d, int otherFighters, bool issuedRoom, int was, int homeBefore)
+        {
+            string head = d.Apply >= 0 ? " applied slot " + d.Apply : " kept slot " + was;
+            return "[AVATAR] " + tag + head + " (facing " + d.Facing + ", nominee " + d.Nominee
+                + ", other fighters " + otherFighters + ", issued room " + (issuedRoom ? "yes" : "no")
+                + ", want " + d.Want + ", was " + was + ", home " + homeBefore + "->" + d.NewHome + ")";
         }
 
         // ---------------------------------------------------------------
