@@ -49,11 +49,23 @@ What is asserted, for every rule of the revision:
     reproduce its stored findings: rows, grouping, details and text; A17:
     one snapshot, the old statements and the literal give the same digest of
     sorted result identities.
+
+Frozen sitting identities are RELATIVE to the run. A sitting identity is
+`lo|hi|day`; the fixture places its rows by days before the run's UTC today,
+so a frozen sitting expectation (a sitting mutation's `expect` entries) names
+its day as `@N`: `lo|hi|@N`, N the days before today, a decimal with no sign
+and no leading zero. The test thaws it with the same today its labels use
+(`_thaw_ident`); a frozen sitting identity holding a literal calendar date, or
+any third field not of that form, is REFUSED by name (FrozenDayRefused): a
+literal date would hold only on the day it was frozen. Game identities
+(`game name, kind`) carry no day and are compared as frozen. Every frozen list
+is compared as a set of entries (its order is free).
 """
 
 import ast
 import asyncio
 import copy
+import datetime
 import hashlib
 import inspect
 import json
@@ -86,7 +98,48 @@ ORACLE_ROLES = ("kinds", "cand_days", "pair_cols", "sql", "literal", "sitting_pa
                 "line", "line_helpers")
 MUTATION_KEYS = {"class", "expect", "kind", "path", "target", "value"}
 
-SUITE = os.environ.get("SCR_REVIEW_PRIVATE_SUITE") or ""
+# A frozen sitting identity's day: `@N`, days before the run's UTC today.
+REL_DAY = re.compile(r"@(0|[1-9][0-9]*)")
+LITERAL_DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+class FrozenDayRefused(AssertionError):
+    """A frozen sitting identity names a day the run cannot thaw."""
+
+
+def _sitting_day(today, days_ago):
+    return today - datetime.timedelta(days=days_ago)
+
+
+def _sitting_ident(pair, days_ago, today):
+    """The identity of a fixture sitting: its normalized pair and its UTC day."""
+    a, b = sorted(pair)
+    return "%s|%s|%s" % (a, b, _sitting_day(today, days_ago))
+
+
+def _thaw_ident(ident, today):
+    """A frozen `lo|hi|@N` sitting identity as of `today`; anything else is refused."""
+    parts = ident.split("|") if isinstance(ident, str) else []
+    if len(parts) != 3:
+        raise FrozenDayRefused("frozen sitting identity is not lo|hi|@days_ago: %r" % (ident,))
+    if LITERAL_DAY.fullmatch(parts[2]):
+        raise FrozenDayRefused("frozen sitting identity holds a literal calendar date, "
+                               "not @days_ago: %r" % (ident,))
+    day = REL_DAY.fullmatch(parts[2])
+    if day is None:
+        raise FrozenDayRefused("frozen sitting identity's day is not @days_ago: %r" % (ident,))
+    return "%s|%s|%s" % (parts[0], parts[1], _sitting_day(today, int(day.group(1))))
+
+
+def _thaw_expect(m, today):
+    """A sitting mutation with every frozen identity of its expectation thawed."""
+    out = dict(m)
+    out["expect"] = {side: [[_thaw_ident(e[0], today)] + list(e[1:]) for e in entries]
+                     for side, entries in m["expect"].items()}
+    return out
+
+
+SUITE =os.environ.get("SCR_REVIEW_PRIVATE_SUITE") or ""
 DSN = (os.environ.get("REVIEW_EQUIV_TEST_PG_DSN") or "").replace("postgresql+asyncpg://", "postgresql://")
 
 pytestmark = pytest.mark.skipif(
@@ -297,8 +350,9 @@ def _check_change(m, lose, gain, pos, neg):
         assert gain <= neg, kind
     else:
         assert (lose & pos) or (gain & neg), kind
-    assert sorted([list(t) for t in lose]) == m["expect"]["lose"], kind
-    assert sorted([list(t) for t in gain]) == m["expect"]["gain"], kind
+    # a frozen list is a set of entries: its order is free
+    assert sorted([list(t) for t in lose]) == sorted(m["expect"]["lose"]), kind
+    assert sorted([list(t) for t in gain]) == sorted(m["expect"]["gain"]), kind
 
 
 def _retained_equal(m, a, b, what):
@@ -551,14 +605,12 @@ def test_a16_sittings_reproduce_the_reference_rows_items_and_text(sittings):
 
 
 def test_a16_every_sitting_rule_has_a_positive_and_a_boundary_negative_case(sittings):
-    import datetime
     fx = _json("sitting_fixture")
     kindmap = _json("kindmap")
     today = sittings["today"]
 
     def ident(p):
-        a, b = sorted(p["pair"])
-        return "%s|%s|%s" % (a, b, today - datetime.timedelta(days=p["days_ago"]))
+        return _sitting_ident(p["pair"], p["days_ago"], today)
     for p in fx["pos"]:
         assert ident(p) in {d for d, _m, _i in sittings["kinds"][p["kind"]]["new"]}, p["kind"]
     for p in fx["neg"]:
@@ -569,15 +621,13 @@ def test_a16_every_sitting_rule_has_a_positive_and_a_boundary_negative_case(sitt
 
 
 def test_a16_every_sitting_rule_mutation_changes_exactly_its_intended_identities(sittings):
-    import datetime
     kindmap = _json("kindmap")
     fx = _json("sitting_fixture")
     rs = _ruleset()
     today = sittings["today"]
 
     def ident(p):
-        a, b = sorted(p["pair"])
-        return "%s|%s|%s" % (a, b, today - datetime.timedelta(days=p["days_ago"]))
+        return _sitting_ident(p["pair"], p["days_ago"], today)
     pos = {(ident(p), p["kind"]) for p in fx["pos"]}
     neg = {(ident(p), p["kind"]) for p in fx["neg"]}
     covered = set()
@@ -586,7 +636,8 @@ def test_a16_every_sitting_rule_mutation_changes_exactly_its_intended_identities
         _same_scope_and_posting(rs, _mutant(rs, m, kindmap), kind)
         b_new = {d: it for d, _m, it in sittings["kinds"][kind]["new"]}
         m_new = {d: it for d, _m, it in got}
-        _check_change(m, {(d, kind) for d in set(b_new) - set(m_new)},
+        # the frozen identities thawed with the same today the labels use
+        _check_change(_thaw_expect(m, today), {(d, kind) for d in set(b_new) - set(m_new)},
                       {(d, kind) for d in set(m_new) - set(b_new)}, pos, neg)
         for d in set(b_new) & set(m_new):
             _retained_equal(m, b_new[d], m_new[d], d)
