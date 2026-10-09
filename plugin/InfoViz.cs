@@ -246,48 +246,51 @@ namespace CompetitiveRounds
             float kw = 40f;
             float top = H - 76f;      // y of the top key row
             float pitch = 36f;
-            // Row 0: ESC + function keys (F5 is the mod menu).
+            // Fix pass 1 F4: every cap's fill is Fill(id), the side the rows
+            // bound to that cap NOW belong to (KeybindRules.BoardCapRole), so a
+            // moved control recolours the board; the defaults reproduce the
+            // board this replaced.
+            // Row 0: ESC + function keys.
             KeyRow(p, 14f, top, new[]
             {
-                new KeyDef("ESC", 52f, KEY_BOTH), new KeyDef("F1", kw, KEY_NONE), new KeyDef("F2", kw, KEY_NONE),
-                new KeyDef("F3", kw, KEY_NONE), new KeyDef("F4", kw, KEY_NONE), new KeyDef("F5", kw, KEY_MOD),
-                new KeyDef("F6", kw, KEY_NONE), new KeyDef("F7", kw, KEY_NONE), new KeyDef("F8", kw, KEY_NONE),
+                new KeyDef("ESC", 52f, Fill("ESC")), new KeyDef("F1", kw, Fill("F1")), new KeyDef("F2", kw, Fill("F2")),
+                new KeyDef("F3", kw, Fill("F3")), new KeyDef("F4", kw, Fill("F4")), new KeyDef("F5", kw, Fill("F5")),
+                new KeyDef("F6", kw, Fill("F6")), new KeyDef("F7", kw, Fill("F7")), new KeyDef("F8", kw, Fill("F8")),
             });
-            // Row 1: backquote + digits (plain since the Aug 31 wheel rework —
-            // the old 1-9/0 quick-chat picks are retired).
+            // Row 1: backquote + digits.
             KeyRow(p, 14f, top - pitch, new[]
             {
-                new KeyDef(I18n.Tr("`"), kw, KEY_NONE),
-                new KeyDef("1", kw, KEY_NONE), new KeyDef("2", kw, KEY_NONE), new KeyDef("3", kw, KEY_NONE),
-                new KeyDef("4", kw, KEY_NONE), new KeyDef("5", kw, KEY_NONE), new KeyDef("6", kw, KEY_NONE),
-                new KeyDef("7", kw, KEY_NONE), new KeyDef("8", kw, KEY_NONE), new KeyDef("9", kw, KEY_NONE),
-                new KeyDef("0", kw, KEY_NONE),
+                new KeyDef(I18n.Tr("`"), kw, Fill("`")),
+                new KeyDef("1", kw, Fill("1")), new KeyDef("2", kw, Fill("2")), new KeyDef("3", kw, Fill("3")),
+                new KeyDef("4", kw, Fill("4")), new KeyDef("5", kw, Fill("5")), new KeyDef("6", kw, Fill("6")),
+                new KeyDef("7", kw, Fill("7")), new KeyDef("8", kw, Fill("8")), new KeyDef("9", kw, Fill("9")),
+                new KeyDef("0", kw, Fill("0")),
             });
             // Row 2: TAB + top letters.
             KeyRow(p, 14f, top - 2f * pitch, new[]
             {
-                new KeyDef(I18n.Tr("TAB"), 62f, KEY_MOD),
-                new KeyDef("Q", kw, KEY_MOD), new KeyDef("W", kw, KEY_GAME),
-                new KeyDef("E", kw, KEY_MOD), new KeyDef("R", kw, KEY_NONE), new KeyDef("T", kw, KEY_MOD),
-                new KeyDef("Y", kw, KEY_NONE), new KeyDef("U", kw, KEY_NONE), new KeyDef("I", kw, KEY_NONE),
-                new KeyDef("O", kw, KEY_NONE), new KeyDef("P", kw, KEY_NONE),
+                new KeyDef(I18n.Tr("TAB"), 62f, Fill("TAB")),
+                new KeyDef("Q", kw, Fill("Q")), new KeyDef("W", kw, Fill("W")),
+                new KeyDef("E", kw, Fill("E")), new KeyDef("R", kw, Fill("R")), new KeyDef("T", kw, Fill("T")),
+                new KeyDef("Y", kw, Fill("Y")), new KeyDef("U", kw, Fill("U")), new KeyDef("I", kw, Fill("I")),
+                new KeyDef("O", kw, Fill("O")), new KeyDef("P", kw, Fill("P")),
             });
             // Row 3: CAPS + home row + ENTER.
             KeyRow(p, 14f, top - 3f * pitch, new[]
             {
-                new KeyDef(I18n.Tr("CAPS"), 73f, KEY_NONE),
-                new KeyDef("A", kw, KEY_GAME), new KeyDef("S", kw, KEY_GAME), new KeyDef("D", kw, KEY_GAME),
-                new KeyDef("F", kw, KEY_NONE), new KeyDef("G", kw, KEY_NONE), new KeyDef("H", kw, KEY_NONE),
-                new KeyDef("J", kw, KEY_NONE), new KeyDef("K", kw, KEY_NONE), new KeyDef("L", kw, KEY_NONE),
-                new KeyDef("ENTER", 76f, KEY_GAME),
+                new KeyDef(I18n.Tr("CAPS"), 73f, Fill("CAPS")),
+                new KeyDef("A", kw, Fill("A")), new KeyDef("S", kw, Fill("S")), new KeyDef("D", kw, Fill("D")),
+                new KeyDef("F", kw, Fill("F")), new KeyDef("G", kw, Fill("G")), new KeyDef("H", kw, Fill("H")),
+                new KeyDef("J", kw, Fill("J")), new KeyDef("K", kw, Fill("K")), new KeyDef("L", kw, Fill("L")),
+                new KeyDef("ENTER", 76f, Fill("ENTER")),
             });
             // Row 4: SHIFT + bottom letters.
             KeyRow(p, 14f, top - 4f * pitch, new[]
             {
-                new KeyDef(I18n.Tr("SHIFT"), 95f, KEY_MOD),
-                new KeyDef("Z", kw, KEY_NONE), new KeyDef("X", kw, KEY_NONE),
-                new KeyDef("C", kw, KEY_NONE), new KeyDef("V", kw, KEY_NONE), new KeyDef("B", kw, KEY_GAME),
-                new KeyDef("N", kw, KEY_NONE), new KeyDef("M", kw, KEY_MOD),
+                new KeyDef(I18n.Tr("SHIFT"), 95f, Fill("SHIFT")),
+                new KeyDef("Z", kw, Fill("Z")), new KeyDef("X", kw, Fill("X")),
+                new KeyDef("C", kw, Fill("C")), new KeyDef("V", kw, Fill("V")), new KeyDef("B", kw, Fill("B")),
+                new KeyDef("N", kw, Fill("N")), new KeyDef("M", kw, Fill("M")),
             });
             // ANSI stagger, measured from "1": Q +22, A +33, Z +55 pixels.
             // The home row is widest and ends at x=563, leaving 77px before
@@ -295,13 +298,13 @@ namespace CompetitiveRounds
             // right of it (x 441-511, inside the home-row edge) - Sept 8 item 3.
             KeyRow(p, 137f, top - 5f * pitch, new[]
             {
-                new KeyDef(I18n.Tr("SPACE"), 300f, KEY_GAME),
-                new KeyDef(I18n.Tr("ALT"), 70f, KEY_MOD),
+                new KeyDef(I18n.Tr("SPACE"), 300f, Fill("SPACE")),
+                new KeyDef(I18n.Tr("ALT"), 70f, Fill("ALT")),
             });
             // Mouse, to the right of the board.
             float mx = 640f, my = top - 3f * pitch;
-            Box(p, mx, my, 46f, 66f, KEY_GAME);
-            Box(p, mx + 50f, my, 46f, 66f, KEY_GAME);
+            Box(p, mx, my, 46f, 66f, Fill("LMB"));
+            Box(p, mx + 50f, my, 46f, 66f, Fill("RMB"));
             Lbl(p, I18n.Tr("LMB"), 12f, Color.white, mx, my + 20f, 46f, 22f, UIFactory.AlignMidCenter);
             Lbl(p, I18n.Tr("RMB"), 12f, Color.white, mx + 50f, my + 20f, 46f, 22f, UIFactory.AlignMidCenter);
             Lbl(p, I18n.Tr("Mouse"), 12f, TXT_DIM, mx, my - 24f, 96f, 20f, UIFactory.AlignMidCenter);
@@ -348,6 +351,18 @@ namespace CompetitiveRounds
         /// <summary>Item 17: a legend cap, the bound control's name in the
         /// legend's upper-case style.</summary>
         private static string Cap(int row) { return NativeUI.KeybindRowFace(row).ToUpperInvariant(); }
+
+        /// <summary>Fix pass 1 F4: a board cap's fill from the CURRENT
+        /// bindings - gold for a mod control, blue for a game control, purple
+        /// for both, plain for none.</summary>
+        private static Color Fill(string id)
+        {
+            int role = 0;
+            try { role = Keybinds.BoardCapRole(id); } catch { role = 0; }
+            if (role < 0) role = 0;
+            bool mod = (role & KeybindRules.BoardMod) != 0, game = (role & KeybindRules.BoardGame) != 0;
+            return mod && game ? KEY_BOTH : mod ? KEY_MOD : game ? KEY_GAME : KEY_NONE;
+        }
 
         /// <summary>The four movement caps: run together when each is one
         /// character (the default reads WASD), slash-separated otherwise.</summary>

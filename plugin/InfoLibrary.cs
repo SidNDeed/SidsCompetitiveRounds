@@ -296,7 +296,7 @@ The column on the left lists every article, grouped by category. Click a topic a
 
 If something looks wrong mid-match, file the report right after that session - the attached log is usually what makes a bug findable.", NativeUI.KeybindRowFace(KeybindRules.ChatOpen));
 
-        private static string ControlsIntro => I18n.Tr(@"The mod never rebinds anything - every vanilla control works exactly as it always has, and the competitive keys are added AROUND them. The board below shows every key that does something during competitive play: gold keys belong to the mod, blue keys to the base game, purple to both.");
+        private static string ControlsIntro => I18n.Tr(@"The board below shows every key that does something during competitive play, as you have them bound now: gold keys belong to the mod, blue keys to the base game, purple to both. Every control on it except Escape, Enter and B can be moved on the Settings tab's Controls page, and F5 always opens this menu whatever you set.");
 
         private static string ControlsOutro => I18n.TrF(@"<color=#FFD94D><b>THE KEYS IN PRACTICE</b></color>
 {0} works everywhere - menu, lobby, mid-game. While the menu is open your inputs stay out of the game: clicks do not fire your gun, {8} does not ready you up, and Escape only closes the menu - it will not cancel a match that is connecting. Close it and everything flows again.
@@ -309,7 +309,7 @@ Hold {6} during a match for the live scoreboard: score, cards, accuracy and conn
 
 {7} swaps between your equipped map color skins as a new round paints in. If you have none equipped, it does nothing.
 
-Vanilla rebinding lives in the game options; the mod keys themselves are fixed. For what to practice with all of this, read <color=#7FD4FF>Getting better</color>.", NativeUI.KeybindRowFace(KeybindRules.MenuToggle), NativeUI.KeybindRowFace(KeybindRules.ChatOpen), NativeUI.KeybindRowFace(KeybindRules.QuickChat), NativeUI.KeybindRowFace(KeybindRules.DanceWheel), NativeUI.KeybindRowFace(KeybindRules.ChatOverlayMode), NativeUI.KeybindRowFace(KeybindRules.ChatChannel), NativeUI.KeybindRowFace(KeybindRules.Scoreboard), NativeUI.KeybindRowFace(KeybindRules.MapSkinCycle), NativeUI.KeybindRowFace(KeybindRules.Jump));
+Every control named here except Escape and Enter can be moved on the Settings tab's Controls page - the mod's own and the game's movement, jump, fire and block. F5 always opens this menu, whatever you set there. For what to practice with all of this, read <color=#7FD4FF>Getting better</color>.", NativeUI.KeybindRowFace(KeybindRules.MenuToggle), NativeUI.KeybindRowFace(KeybindRules.ChatOpen), NativeUI.KeybindRowFace(KeybindRules.QuickChat), NativeUI.KeybindRowFace(KeybindRules.DanceWheel), NativeUI.KeybindRowFace(KeybindRules.ChatOverlayMode), NativeUI.KeybindRowFace(KeybindRules.ChatChannel), NativeUI.KeybindRowFace(KeybindRules.Scoreboard), NativeUI.KeybindRowFace(KeybindRules.MapSkinCycle), NativeUI.KeybindRowFace(KeybindRules.Jump));
 
         private static string GettingBetter => I18n.Tr(@"Getting better at competitive ROUNDS is mechanical, not mystical: blocking discipline, netcode awareness, drafting, and reading the numbers the mod already keeps on you. Every tip below is tied to a real mechanic you can go test.
 

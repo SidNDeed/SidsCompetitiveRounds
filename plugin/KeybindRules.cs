@@ -583,6 +583,85 @@ namespace CompetitiveRounds
             return true;
         }
 
+        // -- the keyboard guide (fix pass 1 F4) ------------------------------
+
+        internal const int BoardMod = 1, BoardGame = 2;
+
+        /// <summary>The Controls guide's board: each cap's id (its English
+        /// face), the KeyCodes it stands for, and the role it has whatever the
+        /// bindings are (Escape closes this menu and then the game's, Enter is
+        /// the room code box and vanilla chat, B adds a practice bot in a
+        /// lobby, F5 always opens this menu). Everything else is coloured by
+        /// the rows bound to it NOW.</summary>
+        private static readonly object[][] BoardCaps =
+        {
+            new object[] { "ESC", new[] { 27 }, BoardMod | BoardGame },
+            new object[] { "F1", new[] { 282 }, 0 }, new object[] { "F2", new[] { 283 }, 0 },
+            new object[] { "F3", new[] { 284 }, 0 }, new object[] { "F4", new[] { 285 }, 0 },
+            new object[] { "F5", new[] { 286 }, BoardMod }, new object[] { "F6", new[] { 287 }, 0 },
+            new object[] { "F7", new[] { 288 }, 0 }, new object[] { "F8", new[] { 289 }, 0 },
+            new object[] { "`", new[] { 96 }, 0 },
+            new object[] { "1", new[] { 49 }, 0 }, new object[] { "2", new[] { 50 }, 0 }, new object[] { "3", new[] { 51 }, 0 },
+            new object[] { "4", new[] { 52 }, 0 }, new object[] { "5", new[] { 53 }, 0 }, new object[] { "6", new[] { 54 }, 0 },
+            new object[] { "7", new[] { 55 }, 0 }, new object[] { "8", new[] { 56 }, 0 }, new object[] { "9", new[] { 57 }, 0 },
+            new object[] { "0", new[] { 48 }, 0 },
+            new object[] { "TAB", new[] { 9 }, 0 },
+            new object[] { "Q", new[] { 113 }, 0 }, new object[] { "W", new[] { 119 }, 0 }, new object[] { "E", new[] { 101 }, 0 },
+            new object[] { "R", new[] { 114 }, 0 }, new object[] { "T", new[] { 116 }, 0 }, new object[] { "Y", new[] { 121 }, 0 },
+            new object[] { "U", new[] { 117 }, 0 }, new object[] { "I", new[] { 105 }, 0 }, new object[] { "O", new[] { 111 }, 0 },
+            new object[] { "P", new[] { 112 }, 0 },
+            new object[] { "CAPS", new[] { 301 }, 0 },
+            new object[] { "A", new[] { 97 }, 0 }, new object[] { "S", new[] { 115 }, 0 }, new object[] { "D", new[] { 100 }, 0 },
+            new object[] { "F", new[] { 102 }, 0 }, new object[] { "G", new[] { 103 }, 0 }, new object[] { "H", new[] { 104 }, 0 },
+            new object[] { "J", new[] { 106 }, 0 }, new object[] { "K", new[] { 107 }, 0 }, new object[] { "L", new[] { 108 }, 0 },
+            new object[] { "ENTER", new[] { 13 }, BoardGame },
+            new object[] { "SHIFT", new[] { 304 }, 0 },
+            new object[] { "Z", new[] { 122 }, 0 }, new object[] { "X", new[] { 120 }, 0 }, new object[] { "C", new[] { 99 }, 0 },
+            new object[] { "V", new[] { 118 }, 0 }, new object[] { "B", new[] { 98 }, BoardGame }, new object[] { "N", new[] { 110 }, 0 },
+            new object[] { "M", new[] { 109 }, 0 },
+            new object[] { "SPACE", new[] { 32 }, 0 },
+            new object[] { "ALT", new[] { 308 }, 0 },
+            new object[] { "LMB", new[] { KeyCodeMouse0 }, 0 },
+            new object[] { "RMB", new[] { KeyCodeMouse0 + 1 }, 0 },
+        };
+
+        internal static int BoardCapCount { get { return BoardCaps.Length; } }
+        internal static string BoardCapId(int i) { return (string)BoardCaps[i][0]; }
+
+        /// <summary>The KeyCodes a bound source stands for: a key's table
+        /// codes, a mouse button's Mouse0+index, nothing for unbound.</summary>
+        internal static int[] SourceCodes(BindSource s, Func<int, int[]> codesFor)
+        {
+            if (s.Kind == BindKind.Key) return (codesFor ?? StaticCodesForKey)(s.Value);
+            if (s.Kind == BindKind.Mouse)
+            {
+                int u = MouseSourceToUnityIndex(s.Value);
+                return u >= 0 ? new[] { KeyCodeMouse0 + u } : new int[0];
+            }
+            return new int[0];
+        }
+
+        /// <summary>Fix pass 1 F4: a board cap's role under <paramref name="set"/>
+        /// - BoardMod when a mod row is bound to it, BoardGame when a game row
+        /// is, both bits for both, plus its fixed role; -1 for an id the board
+        /// does not carry. Mutation 24 is a22f80ed's board, whose colours were
+        /// the defaults' whatever the player bound.</summary>
+        internal static int BoardCapRole(string id, BindSource[] set, Func<int, int[]> codesFor)
+        {
+            int at = -1;
+            for (int i = 0; i < BoardCaps.Length; i++) if ((string)BoardCaps[i][0] == id) { at = i; break; }
+            if (at < 0) return -1;
+            var caps = (int[])BoardCaps[at][1];
+            int role = (int)BoardCaps[at][2];
+            var use = Mut == 24 || set == null ? Defaults() : set;
+            for (int r = 0; r < RowCount && r < use.Length; r++)
+            {
+                foreach (int c in SourceCodes(use[r], codesFor))
+                    if (Array.IndexOf(caps, c) >= 0) { role |= IsModRow(r) ? BoardMod : BoardGame; break; }
+            }
+            return role;
+        }
+
         // -- capture (design section 2.5) ------------------------------------
 
         /// <summary>One capture-poll input, as the KeyMappings row of the key
@@ -1153,6 +1232,21 @@ namespace CompetitiveRounds
                           && !CaptureTakesMouse(-1) && !CaptureTakesMouse(RowCount),
                     () => "menu=" + CaptureTakesMouse(MenuToggle) + "/" + Ref(MenuToggle, M("MiddleButton")) + " jump=" + Ref(Jump, M("MiddleButton")));
 
+            // -- fix pass 1 F4: the keyboard guide colours follow the bindings ------
+            // Guarded: DanceWheel moved E -> G and Fire moved LMB -> K recolour
+            // exactly those four caps. Control: the defaults reproduce the
+            // board a22f80ed hardcoded, cap for cap.
+            MutCase(r, 24, "KeybindRules.BoardCapRole", "a moved control recolours the board: its old cap empties and its new cap takes its side",
+                    () =>
+                    {
+                        var set = Defaults(); set[DanceWheel] = K("G"); set[Fire] = K("K");
+                        return BoardCapRole("E", set, null) == 0 && BoardCapRole("G", set, null) == BoardMod
+                               && BoardCapRole("LMB", set, null) == 0 && BoardCapRole("K", set, null) == BoardGame
+                               && BoardCapRole("Q", set, null) == BoardMod;
+                    },
+                    () => BoardMatchesTheDefaultBoard(),
+                    () => { var set = Defaults(); set[DanceWheel] = K("G"); return "E=" + BoardCapRole("E", set, null) + " G=" + BoardCapRole("G", set, null) + " defaults=" + BoardMatchesTheDefaultBoard(); });
+
             // case 16's own second control, outside the mutation: an unbound or
             // mouse-bound Jump cannot be described by the word SPACE either.
             Check(r, "T1 case 16b KeybindRules.ShouldOverrideReadyPrompt: mouse and unbound Jump also override",
@@ -1254,6 +1348,24 @@ namespace CompetitiveRounds
             string f;
             bool ok = Commit(reg, new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f);
             return !ok && f != null && SameSet(reg, start) && StoreMatches(store, start);
+        }
+
+        /// <summary>F4's control: under the sixteen defaults every board cap
+        /// has the colour a22f80ed's hardcoded board gave it.</summary>
+        private static bool BoardMatchesTheDefaultBoard()
+        {
+            var mod = new[] { "F5", "TAB", "Q", "E", "T", "SHIFT", "M", "ALT" };
+            var game = new[] { "W", "A", "S", "D", "ENTER", "B", "SPACE", "LMB", "RMB" };
+            var set = Defaults();
+            for (int i = 0; i < BoardCapCount; i++)
+            {
+                string id = BoardCapId(i);
+                int want = id == "ESC" ? BoardMod | BoardGame
+                         : Array.IndexOf(mod, id) >= 0 ? BoardMod
+                         : Array.IndexOf(game, id) >= 0 ? BoardGame : 0;
+                if (BoardCapRole(id, set, null) != want) return false;
+            }
+            return BoardCapCount == 54 && BoardCapRole("NUMLOCK", set, null) == -1;
         }
 
         private static List<string> ResolveNotes(BindSource[] parsed)

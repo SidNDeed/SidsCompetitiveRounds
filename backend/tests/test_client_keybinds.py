@@ -706,3 +706,97 @@ def test_f7_accept_ends_capture_and_records_the_refusal():
     assert "KeybindRefusalText(Keybinds.LastRefusal)" in pane
     refusal = _text(_src(KBUI), "private static string KeybindRefusalText(Refusal r)")
     assert "case Refusal.MouseOnModRow:" in refusal
+
+
+# ── Fix pass 1 F4: hints, help and the board follow the bindings ────────────
+# The board's colour decision is KeybindRules.BoardCapRole, executed by the
+# harness (T1 case 24: a moved control recolours its caps; the defaults
+# reproduce the previous board). These assert the surfaces consume it.
+
+CUI = PLUGIN / "CompetitiveUI.cs"
+LIB = PLUGIN / "InfoLibrary.cs"
+VIZ = PLUGIN / "InfoViz.cs"
+RULES = PLUGIN / "KeybindRules.cs"
+
+F4_HINTS = (
+    ('I18n.TrF("Loading your dances - try {0} again in a second.", NativeUI.KeybindRowFace(KeybindRules.DanceWheel))'),
+    ('I18n.TrF("point + release {0} to dance", NativeUI.KeybindRowFace(KeybindRules.DanceWheel))'),
+    ('I18n.TrF("point + release {0} to send", NativeUI.KeybindRowFace(KeybindRules.QuickChat))'),
+)
+
+
+@pytest.mark.parametrize("site", F4_HINTS)
+def test_f4_each_wheel_hint_names_the_bound_row(site):
+    assert strip_comments_only(_src(CUI)).count(site) == 1, site
+
+
+def test_f4_no_wheel_hint_names_a_fixed_letter():
+    text = strip_comments_only(_src(CUI))
+    for retired in ("try E again", "release E to dance", "release Q to send"):
+        assert retired not in text, retired
+    for loc, d in _blocks_of_catalogue().items():
+        for retired in ("Loading your dances - try E again in a second.",
+                        "point + release E to dance", "point + release Q to send"):
+            assert retired not in d, (loc, retired)
+
+
+def test_f4_the_controls_help_says_controls_can_be_moved():
+    text = strip_comments_only(_src(LIB))
+    a = text.index("private static string ControlsIntro =>")
+    b = text.index("NativeUI.KeybindRowFace(KeybindRules.Jump));", a)
+    help_text = text[a:b]
+    for retired in ("never rebinds", "themselves are fixed", "Vanilla rebinding lives in the game options"):
+        assert retired not in help_text, retired
+    assert help_text.count("Settings tab's Controls page") == 2
+    assert "F5 always opens this menu" in help_text
+
+
+def _board_ids_in_rules():
+    body = mask_code(_src(RULES))
+    a = body.index("private static readonly object[][] BoardCaps =")
+    b = body.index("};", body.index("{", a) + 1)
+    while body.count("{", a, b) != body.count("}", a, b):
+        b = body.index("};", b + 1)
+    raw = strip_comments_only(_src(RULES))[a:b]
+    return re.findall(r'new object\[\] \{ "([^"]*)",', raw)
+
+
+def test_f4_every_board_cap_is_filled_from_the_bindings():
+    raw = _text(_src(VIZ), "private static GameObject BuildKeyboard(Transform parent)")
+    masked = _code(_src(VIZ), "private static GameObject BuildKeyboard(Transform parent)")
+    keydefs = re.findall(r"new KeyDef\((?:I18n\.Tr\()?\"([^\"]*)\"\)?, [^,]+, ([^)]*\)?)\)", raw)
+    assert len(keydefs) == 52, len(keydefs)
+    for label, fill in keydefs:
+        assert fill == 'Fill("%s")' % label, (label, fill)
+    for cap in ("LMB", "RMB"):
+        assert raw.count('Fill("%s")' % cap) == 1, cap
+    ids = sorted(re.findall(r'Fill\("([^"]*)"\)', raw))
+    assert ids == sorted(_board_ids_in_rules()), set(ids) ^ set(_board_ids_in_rules())
+    # the KEY_* constants appear only on the three legend chips and in Fill
+    assert len(re.findall(r"\bKEY_(MOD|GAME|BOTH|NONE)\b", masked)) == 3
+    fill = _code(_src(VIZ), "private static Color Fill(string id)")
+    assert "Keybinds.BoardCapRole(id)" in fill
+    kb = _code(_src(KB), "internal static int BoardCapRole(string id)")
+    assert "KeybindRules.BoardCapRole(id, bound, CodesForKey)" in kb
+
+
+def test_f4_the_new_help_and_hints_are_translated_everywhere():
+    keys = [s for s in _kb_literals_of(CUI) + _kb_literals_of(LIB)
+            if "{0} again in a second" in s or "point + release {0}" in s
+            or s.startswith("The board below shows every key")
+            or "Every control named here except Escape and Enter" in s]
+    assert len(keys) == 5, keys
+    for loc, d in _blocks_of_catalogue().items():
+        for k in keys:
+            assert k in d, (loc, k[:60])
+            assert sorted(re.findall(r"\{\d+\}", k)) == sorted(re.findall(r"\{\d+\}", d[k])), (loc, k[:60])
+
+
+def _kb_literals_of(path):
+    src = strip_comments_only(_src(path))
+    out = []
+    for m in re.finditer(r'I18n\.Tr[F]?\(\s*(@?)"((?:[^"\\]|\\.|"")*)"', src):
+        s = m.group(2)
+        s = s.replace('""', '"') if m.group(1) else _unescape(s)
+        out.append(s.replace("\r\n", "\n"))
+    return out

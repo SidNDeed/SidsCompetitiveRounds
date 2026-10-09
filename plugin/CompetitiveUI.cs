@@ -8025,7 +8025,7 @@ namespace CompetitiveRounds
                         if (!string.IsNullOrEmpty(sid) && sid != "unknown") ApiClient.FetchShopItems(sid);
                     }
                     catch { }
-                    ShowNotification(I18n.Tr("Loading your dances - try E again in a second."),
+                    ShowNotification(I18n.TrF("Loading your dances - try {0} again in a second.", NativeUI.KeybindRowFace(KeybindRules.DanceWheel)),
                                      new Color(0.75f, 0.85f, 1f), 2.5f);
                     ev.Use();
                     return;
@@ -8099,7 +8099,7 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(cx - 120f, cy - 22f, 240f, 20f),
                 $"<color=#FFC8F0><b>{I18n.Tr("Dances")}</b></color>", qcHintStyle);
             GUI.Label(new Rect(cx - 120f, cy + 2f, 240f, 20f),
-                $"<color=#8899AA>{I18n.Tr("point + release E to dance")}</color>", qcHintStyle);
+                $"<color=#8899AA>{I18n.TrF("point + release {0} to dance", NativeUI.KeybindRowFace(KeybindRules.DanceWheel))}</color>", qcHintStyle);
             if (dwHighlight >= 0)
             {
                 Vector2 dirN = d.normalized;
@@ -8368,7 +8368,7 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(cx - Rx * 1.45f, cy - Ry * 1.45f, Rx * 2.9f, Ry * 2.9f),
                 qcDiscTex, ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.55f), 0, 0);
             string hint = qcStage == 0
-                ? I18n.Tr("point + release Q to send")
+                ? I18n.TrF("point + release {0} to send", NativeUI.KeybindRowFace(KeybindRules.QuickChat))
                 : I18n.Tr("click a phrase - Esc closes");
             GUI.Label(new Rect(cx - 120f, cy - 22f, 240f, 20f),
                 $"<color=#AECBFF><b>{I18n.Tr("Quick chat")}</b></color>", qcHintStyle);

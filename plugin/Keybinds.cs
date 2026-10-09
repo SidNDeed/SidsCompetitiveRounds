@@ -185,6 +185,11 @@ namespace CompetitiveRounds
 
         internal static BindSource[] BoundSnapshot() { return (BindSource[])bound.Clone(); }
 
+        /// <summary>F4: the keyboard guide cap's role under the CURRENT
+        /// bindings (KeybindRules.BoardCapRole over the registry and the live
+        /// key table).</summary>
+        internal static int BoardCapRole(string id) { return KeybindRules.BoardCapRole(id, bound, CodesForKey); }
+
         /// <summary>The rows can be written only while the accessor is
         /// validated: otherwise every row is read-only and every default
         /// stays in force (design section 2.1a).</summary>
