@@ -296,15 +296,32 @@ def test_t4_ReadCombatGate_is_total_and_unknown_on_failure():
 
 # ── T4: the unions, membership and occurrence ───────────────────────────────
 
-def _union(name: str):
+def _union_terms(name: str):
+    """The RAW term list of one union, in source order, duplicates kept
+    (fix pass 1 F9). Every comma-separated element must parse as a term,
+    so an element of an unknown shape fails here instead of vanishing."""
     src = strip_comments_only(_src(GSW))
     m = re.search(r"private static readonly Keybinds\.Src\[\] %s =\s*\{(.*?)\};" % name, src, re.S)
     assert m, name
-    terms = re.findall(r"Keybinds\.(?:Src\.(Row|Legacy|LegacyMouse)\(([^)]*)\)|(Action\w+))", m.group(1))
-    out = set()
-    for kind, arg, action in terms:
-        out.add(action if action else "%s:%s" % (kind, arg.replace("KeybindRules.", "").replace("KeyCode.", "")))
+    elements = [e.strip() for e in m.group(1).split(",") if e.strip()]
+    out = []
+    for e in elements:
+        t = re.fullmatch(r"Keybinds\.(?:Src\.(Row|Legacy|LegacyMouse)\(([^)]*)\)|(Action\w+))", e)
+        assert t, (name, e)
+        kind, arg, action = t.groups()
+        out.append(action if action else "%s:%s" % (kind, arg.replace("KeybindRules.", "").replace("KeyCode.", "")))
     return out
+
+
+def _union(name: str):
+    return set(_union_terms(name))
+
+
+@pytest.mark.parametrize("union,rows", (("FireUnion", 1), ("MoveUnion", 5), ("JumpUnion", 2)))
+def test_f9_each_union_carries_its_row_terms_exactly_once(union, rows):
+    terms = _union_terms(union)
+    assert sum(1 for t in terms if t.startswith("Row:")) == rows, terms
+    assert len(terms) == len(set(terms)), [t for t in terms if terms.count(t) > 1]
 
 
 def test_t4_fire_union_membership():
