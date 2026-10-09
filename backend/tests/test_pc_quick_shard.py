@@ -29,7 +29,14 @@ Required behaviour, each a named test:
   Q8  (fix pass 1, finding 1) every batch discard credits a print received
       by trade at the server's configured traded-discard value, exactly as
       the single discard does, and a batch whose traded-discard rule cannot
-      be established writes nothing.
+      be established writes nothing;
+  Q9  (fix pass 1, finding 2) a retired batch-shard generation changes
+      neither cached state nor the nonce or latch of a newer request
+      (PcShardFlight, executed in the harness; gate q9 pins the call sites);
+  Q10 (fix pass 1, finding 3) the pull tab's Shard dupes shards only the
+      shown pack's live duplicates, one live copy of each exact face kept
+      (PcQuickShardRules.DuplicateShardIds, executed in the harness; gate q10
+      pins the call sites); the Shard pack keeps board row 25's set.
 
 Each client gate runs on the real sources and, with its mutation and control,
 on edited copies (#391). The database tests use test_pc_shard_batch's harness
@@ -183,7 +190,7 @@ def gate_q9_a_retired_generation_touches_nothing(s):
     them where the answer lands."""
     ui = s["ui"]
     send = _code(_member(ui, "private static void SendShard("))
-    begin = _at(send, "int serial = shardFlight.Begin(Now, packId, quickPrintId);", "a batch request is not stamped with a generation")
+    begin = _at(send, "int serial = shardFlight.Begin(Now, packId, quickPrintId, dupesOf);", "a batch request is not stamped with a generation")
     call = _at(send, "ApiClient.PcDiscardBatch(id, key, ids, () => ep == uiEpoch && shardFlight.IsCurrent(serial), (ok, resp) =>",
                "the cache write does not test the request's generation")
     cb = send[call:]
@@ -206,12 +213,81 @@ def gate_q9_a_retired_generation_touches_nothing(s):
     assert "if (!IsCurrent(serial)) return false;" in settle_rule, "the answer is not checked against its own generation"
 
 
+def gate_q10_shard_dupes_sends_only_the_pack_s_duplicates(s):
+    """Fix pass 1, finding 3: the pull tab's one confirmed action that shards
+    only the shown pack's live duplicates, one live copy of each exact face
+    kept, through the same batch route. The selection itself is EXECUTED by
+    the harness (PcQuickShardRules.DupesCases, the A, A, A, B, C control);
+    this pins that the button reaches it and nothing else. The Shard pack
+    beside it keeps board row 25's set (every live print of the pack)."""
+    ui = s["ui"]
+    assert re.search(r'UIFactory\.CreateButton\("PcShardDupes", [^;]*?, OnShardDupesClick, sizeDelta', ui), (
+        "Shard dupes is not a guarded button wired to its click")
+    click = _code(_member(ui, "private static void OnShardDupesClick("))
+    pick = _at(click, "var ids = PackDupeIds(shown, col, out ready);", "Shard dupes does not send the pack's duplicates")
+    assert "PackShardIds(" not in click, "Shard dupes does not send the pack's duplicates"
+    wait = _at(click, "if (!ready) {", "Shard dupes sends against a collection that does not count the pack")
+    arm = _at(click, "if (!ShardConfirmed(set))", "Shard dupes does not ask first")
+    send = _at(click, "SendShard(id, key, ids, null, null, shown.pack_id);", "Shard dupes is not one batch request")
+    assert pick < wait < arm < send, "Shard dupes does not ask first"
+    assert "string set = DupesShardSet(shown.pack_id, ids);" in click, "Shard dupes does not arm its exact set"
+    assert click.count("SendShard(") == 1 and click.count("NewNonce()") == 1, "Shard dupes is not one batch request"
+    for loop in ("for (", "foreach (var x", "while (", "StartCoroutine("):
+        assert loop not in click, "Shard dupes is not one batch request"
+    ids = _code(_member(ui, "private static List<string> PackDupeIds("))
+    assert "bool live = p != null && !p.discarded && ShardToken(p.print_id) && !shardGone.Contains(p.print_id);" in ids, (
+        "a print that is not live is counted")
+    assert "faces.Add(live ? FaceKey(p) : null);" in ids, "a print that is not live is counted"
+    assert "c.discarded || shardGone.Contains(c.print_id)" in ids, "a print that is not live is counted"
+    assert "PcQuickShardRules.DuplicateShardIds(faces, pids, counts, held, out ready)" in ids, (
+        "Shard dupes does not send the pack's duplicates")
+    rule = _member(_code(s["rules"]), "internal static List<string> DuplicateShardIds(")
+    assert "if (outside == 0 && kept.Add(k)) continue;" in rule, "the duplicate rule can take a last copy"
+    refresh = _code(_member(ui, "private static void RefreshShardDupesButton("))
+    assert "bool up = ready && ids.Count > 0 && ids.Count <= ApiClient.PC_DISCARD_BATCH_CAP;" in refresh, (
+        "Shard dupes is offered without a duplicate")
+    assert "RefreshShardDupesButton(shown);" in _member(ui, "private static void RefreshShardPackButton("), (
+        "Shard dupes is never painted")
+    pack = _code(_member(ui, "private static void OnShardPackClick("))
+    assert "var ids = PackShardIds(shown);" in pack, "the Shard pack's set changed"
+
+
+NEW_KEYS = ("Shard dupes (+{0})", "Click Shard dupes again to shard {0} duplicates for {1} shards")
+_CAT_ENTRY = re.compile(r'^\s+\["((?:[^"\\]|\\.)*)"\] = "((?:[^"\\]|\\.)*)",$', re.M)
+
+
+def _cs_unescape(lit):
+    return re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), lit).replace('\\"', '"').replace("\\\\", "\\")
+
+
+def test_q10_the_new_strings_are_translated_in_every_catalogue():
+    """The two strings Shard dupes adds are client strings, in the extracted
+    registry and the compiled key list, and in each of the four catalogues
+    translated (not English) with the same placeholders."""
+    ui = FILES["ui"].read_text(encoding="utf-8")
+    reg = (ROOT / "tools" / "i18n_source.json").read_text(encoding="utf-8")
+    gen = (PLUGIN / "I18nSourceKeys.g.cs").read_text(encoding="utf-8")
+    cat = (PLUGIN / "I18nCatalogues.cs").read_text(encoding="utf-8")
+    blocks = cat.split("private static readonly Dictionary<string, string> ")[1:]
+    assert [b[:2] for b in blocks] == ["ES", "RU", "UK", "SV"]
+    for key in NEW_KEYS:
+        assert ('"%s"' % key) in ui, key
+        assert ('"%s",' % key) in reg and ('"%s",' % key) in gen, key
+        want = sorted(re.findall(r"\{\d+\}", key))
+        for b in blocks:
+            rows = dict((_cs_unescape(k), _cs_unescape(v)) for k, v in _CAT_ENTRY.findall(b[:b.index("\n        };")]))
+            assert key in rows, (b[:2], key)
+            assert rows[key] != key, (b[:2], key)
+            assert sorted(re.findall(r"\{\d+\}", rows[key])) == want, (b[:2], key)
+
+
 GATES = [gate_q1_the_strip_card_shards_in_place_on_a_confirmed_click,
          gate_q2_the_key_is_kept_for_the_card_until_an_answer,
          gate_q4_the_balance_and_the_stamp_come_only_from_an_answer,
          gate_q5_a_failure_reads_back_by_the_rule,
          gate_q6_one_request_per_shard,
-         gate_q9_a_retired_generation_touches_nothing]
+         gate_q9_a_retired_generation_touches_nothing,
+         gate_q10_shard_dupes_sends_only_the_pack_s_duplicates]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -247,10 +323,10 @@ MUTATIONS = [
      "            return true;\n        }\n\n        /// <summary>The give-up",
      "a refused strip shard drops its key outside the rule"),
     ("Q4a", gate_q4_the_balance_and_the_stamp_come_only_from_an_answer, "ui",
-     "            string key = shardFlight.KeyFor(set, () => NewNonce());\n",
+     "            string key = shardFlight.KeyFor(set, () => NewNonce());\n            SendShard(id, key, ids, null, p.print_id);",
      "            string key = shardFlight.KeyFor(set, () => NewNonce());\n"
-     "            HistoryMarkDiscarded(p.print_id, value0);\n",
-     "            string key = shardFlight.KeyFor(set, () => NewNonce());   // kept\n",
+     "            HistoryMarkDiscarded(p.print_id, value0);\n            SendShard(id, key, ids, null, p.print_id);",
+     "            string key = shardFlight.KeyFor(set, () => NewNonce());   // kept\n            SendShard(id, key, ids, null, p.print_id);",
      "the click changes the screen before the server answers"),
     ("Q5a", gate_q5_a_failure_reads_back_by_the_rule, "ui",
      "if (PcQuickShardRules.ReadBackAfter(code) && id != null) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }",
@@ -273,9 +349,9 @@ MUTATIONS = [
      "            SendShard(id, key, ids, null, p.print_id);   // once",
      "a confirmed click sends more than once"),
     ("Q6b", gate_q6_one_request_per_shard, "ui",
-     "                else FailShard(id, resp, packId, quickPrintId != null);",
-     "                else { FailShard(id, resp, packId, quickPrintId != null); SendShard(id, key, ids, packId, quickPrintId); }",
-     "                else FailShard(id, resp, packId, quickPrintId != null);   // never sent again",
+     "                else FailShard(id, resp, packId, keyed);",
+     "                else { FailShard(id, resp, packId, keyed); SendShard(id, key, ids, packId, quickPrintId); }",
+     "                else FailShard(id, resp, packId, keyed);   // never sent again",
      "an answer sends again"),
     ("Q9a", gate_q9_a_retired_generation_touches_nothing, "ui",
      "                if (!shardFlight.Settle(serial, code))",
@@ -293,10 +369,30 @@ MUTATIONS = [
      "            if (shardFlight.GiveUp(Now, 25f, out quick))   // retires the generation",
      "the give-up does not retire the generation"),
     ("Q9d", gate_q9_a_retired_generation_touches_nothing, "rules",
-     "            if (!IsCurrent(serial)) return false;\n            bool quick = QuickId != null;",
-     "            bool quick = QuickId != null;",
-     "            if (!IsCurrent(serial)) return false;   // retired: nothing\n            bool quick = QuickId != null;",
+     "            if (!IsCurrent(serial)) return false;\n            bool quick = Keyed;",
+     "            bool quick = Keyed;",
+     "            if (!IsCurrent(serial)) return false;   // retired: nothing\n            bool quick = Keyed;",
      "the answer is not checked against its own generation"),
+    ("Q10a", gate_q10_shard_dupes_sends_only_the_pack_s_duplicates, "ui",
+     "            var ids = PackDupeIds(shown, col, out ready);",
+     "            var ids = PackShardIds(shown); ready = true;",
+     "            var ids = PackDupeIds(shown, col, out ready);   // duplicates only",
+     "Shard dupes does not send the pack's duplicates"),
+    ("Q10b", gate_q10_shard_dupes_sends_only_the_pack_s_duplicates, "rules",
+     "                if (outside == 0 && kept.Add(k)) continue;",
+     "                if (false && kept.Add(k)) continue;",
+     "                if (outside == 0 && kept.Add(k)) continue;   // one live copy kept",
+     "the duplicate rule can take a last copy"),
+    ("Q10c", gate_q10_shard_dupes_sends_only_the_pack_s_duplicates, "ui",
+     "            string set = DupesShardSet(shown.pack_id, ids);\n            if (!ShardConfirmed(set))",
+     "            string set = DupesShardSet(shown.pack_id, ids);\n            if (false)",
+     "            string set = DupesShardSet(shown.pack_id, ids);\n            if (!ShardConfirmed(set))   // the first click asks",
+     "Shard dupes does not ask first"),
+    ("Q10d", gate_q10_shard_dupes_sends_only_the_pack_s_duplicates, "ui",
+     "                faces.Add(live ? FaceKey(p) : null); pids.Add(p?.print_id);",
+     "                faces.Add(FaceKey(p)); pids.Add(p?.print_id);",
+     "                faces.Add(live ? FaceKey(p) : null); pids.Add(p?.print_id);   // live only",
+     "a print that is not live is counted"),
 ]
 
 

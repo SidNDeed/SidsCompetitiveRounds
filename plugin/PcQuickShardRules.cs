@@ -94,6 +94,64 @@ namespace CompetitiveRounds
             return 1 + (ReadBackAfter(code) ? 2 : 0);
         }
 
+        /// <summary>The pull tab's Shard dupes (fix pass 1, finding 3; design
+        /// section 2.3's pull-wide control, sent through the batch shard's
+        /// route): which of the shown pack's prints are DUPLICATES, so that
+        /// one live copy of every exact face survives.
+        ///   pageFaceKeys   the pack's prints in display order, each print's
+        ///                  exact face (PlayerCardsUI.FaceKey: card, rarity,
+        ///                  foil, signed), null for a print that is not live
+        ///                  (discarded, or named gone by the server);
+        ///   pagePrintIds   parallel to pageFaceKeys;
+        ///   liveCountByFaceKey  the player's live copies of each face, over
+        ///                  the whole collection;
+        ///   livePrintIds   the collection's live print ids.
+        /// ready is true only when every live page print is in livePrintIds
+        /// (a positive signal that the collection read already counts this
+        /// pack; a collection read from before the pack would undercount);
+        /// not ready, or any input missing, answers an empty list. Walking
+        /// in display order, a print is taken only while its face has MORE
+        /// than one live copy left, so the first copy in order of a face new
+        /// to the player is kept, and a face the binder already holds has
+        /// every pack copy taken while the binder's copy survives. Never the
+        /// last copy: what is left of every face is at least one.</summary>
+        internal static List<string> DuplicateShardIds(IList<string> pageFaceKeys, IList<string> pagePrintIds,
+            IDictionary<string, int> liveCountByFaceKey, ICollection<string> livePrintIds, out bool ready)
+        {
+            var queue = new List<string>();
+            ready = false;
+            if (pageFaceKeys == null || pagePrintIds == null || pageFaceKeys.Count != pagePrintIds.Count
+                || liveCountByFaceKey == null || livePrintIds == null) return queue;
+            for (int i = 0; i < pageFaceKeys.Count; i++)
+                if (pageFaceKeys[i] != null && (pagePrintIds[i] == null || !livePrintIds.Contains(pagePrintIds[i]))) return queue;
+            ready = true;
+            var onPage = new Dictionary<string, int>(StringComparer.Ordinal);
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < pageFaceKeys.Count; i++)
+            {
+                string k = pageFaceKeys[i];
+                if (k == null || !seen.Add(pagePrintIds[i])) continue;
+                int m; onPage.TryGetValue(k, out m); onPage[k] = m + 1;
+            }
+            // A face the binder also holds OUTSIDE this pack keeps that copy,
+            // so every page copy goes; a face only this pack holds keeps its
+            // FIRST page copy in display order. A count below the page's own
+            // copies disagrees with the page: nothing of that face is taken.
+            var kept = new HashSet<string>(StringComparer.Ordinal);
+            seen.Clear();
+            for (int i = 0; i < pageFaceKeys.Count; i++)
+            {
+                string k = pageFaceKeys[i];
+                if (k == null || !seen.Add(pagePrintIds[i])) continue;
+                int total; liveCountByFaceKey.TryGetValue(k, out total);
+                int outside = total - onPage[k];
+                if (outside < 0) continue;
+                if (outside == 0 && kept.Add(k)) continue;
+                queue.Add(pagePrintIds[i]);
+            }
+            return queue;
+        }
+
         // -- self-test (EXECUTED by tools/client-rules-harness) --------------
 
         internal sealed class SelfTestResult
@@ -120,6 +178,18 @@ namespace CompetitiveRounds
         private static int RequestsWithAlwaysReadBack(string code)
         {
             return code == null ? 1 : 3;
+        }
+
+        /// <summary>Every live print of the pack, the Shard pack's set
+        /// (PlayerCardsUI.PackShardIds), which is all the pull-wide action
+        /// 6804a7e7 offered. NEGATIVE CONTROL for the duplicate cases: on a
+        /// pack holding a unique or last copy it must disagree with
+        /// DuplicateShardIds. Never called by anything that sends.</summary>
+        private static List<string> AllLivePrints(IList<string> pageFaceKeys, IList<string> pagePrintIds)
+        {
+            var all = new List<string>();
+            for (int i = 0; i < pageFaceKeys.Count; i++) if (pageFaceKeys[i] != null) all.Add(pagePrintIds[i]);
+            return all;
         }
 
         internal static SelfTestResult SelfTest()
@@ -167,7 +237,91 @@ namespace CompetitiveRounds
             Check(r, "key: dropped after key_reused", !KeepKeyAfter("key_reused"), "");
 
             FlightCases(r);
+            DupesCases(r);
             return r;
+        }
+
+        // -- fix pass 1, finding 3: the pack's duplicates, never a last copy --
+
+        private static List<string> Dupes(string[] faces, string[] ids, string counts, string[] live, out bool ready)
+        {
+            var map = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var part in counts.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var kv = part.Split('=');
+                map[kv[0]] = int.Parse(kv[1]);
+            }
+            return DuplicateShardIds(faces, ids, map, new HashSet<string>(live ?? ids, StringComparer.Ordinal), out ready);
+        }
+
+        private static string Ids(List<string> l) { return l == null ? "(null)" : "[" + string.Join(",", l.ToArray()) + "]"; }
+
+        private static void DupesCases(SelfTestResult r)
+        {
+            bool ready;
+            var faces = new[] { "A", "A", "A", "B", "C" };
+            var ids = new[] { "a1", "a2", "a3", "b1", "c1" };
+            var got = Dupes(faces, ids, "A=3,B=1,C=1", null, out ready);
+            Check(r, "dupes: a pack of A, A, A, B, C (C the last copy) yields exactly the two later A prints",
+                  ready && Ids(got) == "[a2,a3]", Ids(got));
+            Check(r, "dupes: never B, never C", !got.Contains("b1") && !got.Contains("c1"), Ids(got));
+            var all = AllLivePrints(faces, ids);
+            Check(r, "control: the all-prints set (Shard pack's) takes all five, B and C included",
+                  all.Count == 5 && all.Contains("b1") && all.Contains("c1") && Ids(all) != Ids(got), Ids(all));
+
+            got = Dupes(new[] { "A", "B", "C", "D", "E" }, new[] { "a", "b", "c", "d", "e" }, "A=1,B=1,C=1,D=1,E=1", null, out ready);
+            Check(r, "dupes: five faces, one live copy each: nothing", ready && got.Count == 0, Ids(got));
+            got = Dupes(new[] { "A", "A" }, new[] { "a1", "a2" }, "A=3", new[] { "a1", "a2", "a0" }, out ready);
+            Check(r, "dupes: a face the binder already holds has both pack copies taken (the binder's survives)",
+                  ready && Ids(got) == "[a1,a2]", Ids(got));
+            got = Dupes(new[] { "A", "A", "B" }, new[] { "a1", "a2", "b1" }, "A=2,B=1", new[] { "a1", "b1" }, out ready);
+            Check(r, "dupes: a pack print missing from the collection read: not ready, nothing", !ready && got.Count == 0, Ids(got));
+            got = Dupes(new[] { "A", "A", "B" }, new[] { "a1", "a2", "b1" }, "A=2,B=1", null, out ready);
+            Check(r, "dupes: a collection read holding every pack print: ready", ready && Ids(got) == "[a2]", Ids(got));
+            got = Dupes(new[] { "A|foil", "A|plain" }, new[] { "f", "p" }, "A|foil=1,A|plain=1", null, out ready);
+            Check(r, "dupes: a foil and a plain copy are different faces: nothing", ready && got.Count == 0, Ids(got));
+            got = Dupes(new[] { null, "A" }, new[] { "gone", "a1" }, "A=1", new[] { "a1" }, out ready);
+            Check(r, "dupes: a print not live (discarded or gone) is neither taken nor counted", ready && got.Count == 0, Ids(got));
+            got = Dupes(new[] { "A", "A" }, new[] { "a1", "a2" }, "A=2", null, out ready);
+            Check(r, "dupes: the first copy in display order survives", ready && Ids(got) == "[a2]", Ids(got));
+            got = Dupes(new string[0], new string[0], "", null, out ready);
+            Check(r, "dupes: an empty pack: ready, nothing", ready && got != null && got.Count == 0, Ids(got));
+            got = DuplicateShardIds(faces, ids, null, new HashSet<string>(ids), out ready);
+            Check(r, "dupes: a missing input is not ready and takes nothing", !ready && got.Count == 0, Ids(got));
+            Check(r, "dupes: on every pack of up to five A/B prints over every binder count, each face keeps a live copy",
+                  EveryFaceKeepsOne(), "");
+        }
+
+        /// <summary>Exhaustive over every pack of one to five prints drawn
+        /// from faces A and B and every binder holding of 0 or 1 extra copy
+        /// of each: what is taken never reaches a face's last live copy, and
+        /// every face with two or more live copies keeps exactly one.</summary>
+        private static bool EveryFaceKeepsOne()
+        {
+            for (int len = 1; len <= 5; len++)
+                for (int mask = 0; mask < (1 << len); mask++)
+                    for (int extraA = 0; extraA <= 1; extraA++)
+                        for (int extraB = 0; extraB <= 1; extraB++)
+                        {
+                            var faces = new List<string>(); var ids = new List<string>();
+                            var live = new HashSet<string>(StringComparer.Ordinal);
+                            var count = new Dictionary<string, int>(StringComparer.Ordinal) { { "A", extraA }, { "B", extraB } };
+                            for (int i = 0; i < len; i++)
+                            {
+                                string f = ((mask >> i) & 1) == 1 ? "B" : "A";
+                                faces.Add(f); ids.Add(f + i); live.Add(f + i); count[f]++;
+                            }
+                            bool ready;
+                            var took = DuplicateShardIds(faces, ids, count, live, out ready);
+                            if (!ready) return false;
+                            foreach (var f in new[] { "A", "B" })
+                            {
+                                int taken = 0;
+                                foreach (var t in took) if (t.StartsWith(f, StringComparison.Ordinal)) taken++;
+                                if (count[f] > 0 && count[f] - taken != 1) return false;
+                            }
+                        }
+            return true;
         }
 
         // -- fix pass 1, finding 2: a retired generation touches nothing ------
@@ -243,6 +397,16 @@ namespace CompetitiveRounds
             Check(r, "an identity reset retires the flight and its nonce",
                   !q.IsCurrent(sq) && !q.Settle(sq, null) && !q.InFlight && q.QuickKey == null, "");
             Check(r, "the cache write fails closed without a generation check", !PcShardFlight.Admits(null), "");
+
+            // finding 3: a Shard dupes is keyed by the flight's nonce too
+            var d = new PcShardFlight();
+            string kd = d.KeyFor("dupes|P|a2,a3", mint);
+            d.Begin(0f, null, null, "P");
+            bool dq;
+            Check(r, "a Shard dupes given up is read back and keeps its nonce",
+                  d.GiveUp(26f, 25f, out dq) && dq && d.QuickKey == kd && d.DupesOf == null, d.QuickKey);
+            int sd = d.Begin(30f, null, null, "P");
+            Check(r, "a Shard dupes success ends its nonce", d.Settle(sd, null) && d.QuickKey == null && d.DupesOf == null, d.QuickKey);
         }
 
         private static bool BinderUnchanged()
@@ -280,15 +444,23 @@ namespace CompetitiveRounds
         internal float At { get; private set; }
         internal string PackId { get; private set; }   // the pack a Shard pack in flight came from
         internal string QuickId { get; private set; }  // the strip card a one-card shard is for
+        internal string DupesOf { get; private set; }  // the pack a Shard dupes in flight came from (finding 3)
         internal int Serial { get; private set; }      // the current generation
-        internal string QuickKey { get; private set; }     // a strip card's nonce, kept until an answer
-        internal string QuickKeyFor { get; private set; }  // the card (its ArmSet) the nonce is for
+        // The flight's own nonce, kept until an answer: a strip card's, or a
+        // pack's duplicates set's (Shard dupes). One slot.
+        internal string QuickKey { get; private set; }
+        internal string QuickKeyFor { get; private set; }  // the set (ArmSet, or the dupes set) the nonce is for
+
+        /// <summary>Whether the request in flight is keyed by the flight's own
+        /// nonce (a strip card or a Shard dupes): its outcome is read back
+        /// after a give-up, and its nonce follows KeepKeyAfter.</summary>
+        internal bool Keyed { get { return QuickId != null || DupesOf != null; } }
 
         /// <summary>A new request: a new generation, the latch taken.</summary>
-        internal int Begin(float now, string packId, string quickId)
+        internal int Begin(float now, string packId, string quickId, string dupesOf = null)
         {
             Serial++;
-            InFlight = true; At = now; PackId = packId; QuickId = quickId;
+            InFlight = true; At = now; PackId = packId; QuickId = quickId; DupesOf = dupesOf;
             return Serial;
         }
 
@@ -307,33 +479,36 @@ namespace CompetitiveRounds
 
         /// <summary>The answer stamped `serial`: false, and NOTHING changed,
         /// when that generation is retired; else the latch is released and a
-        /// strip card's nonce is kept or dropped by
-        /// PcQuickShardRules.KeepKeyAfter(code) (null code: a success).</summary>
+        /// keyed request's nonce (a strip card's or a Shard dupes') is kept or
+        /// dropped by PcQuickShardRules.KeepKeyAfter(code) (null code: a
+        /// success).</summary>
         internal bool Settle(int serial, string code)
         {
             if (!IsCurrent(serial)) return false;
-            bool quick = QuickId != null;
-            InFlight = false; PackId = null; QuickId = null;
+            bool quick = Keyed;
+            InFlight = false; PackId = null; QuickId = null; DupesOf = null;
             if (quick && !PcQuickShardRules.KeepKeyAfter(code)) { QuickKey = null; QuickKeyFor = null; }
             return true;
         }
 
         /// <summary>The give-up: past `after` seconds with no answer the latch
         /// is released and the generation retired, so a late answer settles
-        /// nothing. `quick` says whether it was a strip card (whose outcome
-        /// is read back; its nonce is kept, the given_up rule).</summary>
+        /// nothing. `quick` says whether it was keyed by the flight's nonce, a
+        /// strip card or a Shard dupes (whose outcome is read back; its nonce
+        /// is kept, the given_up rule).</summary>
         internal bool GiveUp(float now, float after, out bool quick)
         {
             quick = false;
             if (!InFlight || now - At <= after) return false;
-            quick = QuickId != null;
+            quick = Keyed;
             Serial++;
-            InFlight = false; PackId = null; QuickId = null;
+            InFlight = false; PackId = null; QuickId = null; DupesOf = null;
             return true;
         }
 
-        /// <summary>The strip card's nonce for `set` (its ArmSet): kept while
-        /// it names the same card, minted otherwise.</summary>
+        /// <summary>The flight's nonce for `set` (a strip card's ArmSet, or a
+        /// Shard dupes' exact set): kept while it names the same set, minted
+        /// otherwise.</summary>
         internal string KeyFor(string set, Func<string> mint)
         {
             if (QuickKeyFor != set || string.IsNullOrEmpty(QuickKey)) { QuickKey = mint(); QuickKeyFor = set; }
@@ -345,7 +520,7 @@ namespace CompetitiveRounds
         internal void Reset()
         {
             Serial++;
-            InFlight = false; At = 0f; PackId = null; QuickId = null; QuickKey = null; QuickKeyFor = null;
+            InFlight = false; At = 0f; PackId = null; QuickId = null; DupesOf = null; QuickKey = null; QuickKeyFor = null;
         }
 
         /// <summary>NEGATIVE CONTROL for the harness only: the callback as
@@ -353,7 +528,7 @@ namespace CompetitiveRounds
         /// generation. Never called by anything that sends.</summary>
         internal bool SettleIgnoringSerial(bool quick, string code)
         {
-            InFlight = false; PackId = null; QuickId = null;
+            InFlight = false; PackId = null; QuickId = null; DupesOf = null;
             if (quick && !PcQuickShardRules.KeepKeyAfter(code)) { QuickKey = null; QuickKeyFor = null; }
             return true;
         }

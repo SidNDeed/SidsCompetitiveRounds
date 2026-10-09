@@ -206,6 +206,10 @@ namespace CompetitiveRounds
         // binder selection), one server transaction per click.
         private static GameObject btnShardPack, btnSelect, btnShardSel;
         private static object btnShardPackTxt, btnSelectTxt, btnShardSelTxt, txtBinderHint, txtBinderSelHint;
+        // Item 18 fix pass 1 (F3): the pull tab's Shard dupes -- the shown
+        // pack's duplicates only (PcQuickShardRules.DuplicateShardIds).
+        private static GameObject btnShardDupes;
+        private static object btnShardDupesTxt;
         private static bool selecting;                                        // the binder's Select mode
         private static readonly List<string> selectedIds = new List<string>();  // in the order they were clicked
         private static string armedShard; private static float armedShardAt;   // the exact request the first click armed
@@ -797,6 +801,14 @@ namespace CompetitiveRounds
             btnShardPackTxt = UIFactory.GetButtonText(btnShardPack);
             if (btnShardPackTxt != null) { UIFactory.SetOverflowMode(btnShardPackTxt, 2); UIFactory.SetWordWrap(btnShardPackTxt, false); }
             btnShardPack.SetActive(false);
+            // Item 18 fix pass 1 (F3): shard only the pack on show's
+            // duplicates, one live copy of every exact face kept, through the
+            // same batch route (two clicks; CreateButton routes the click
+            // through ClickGuard). Up only when the pack holds a duplicate.
+            btnShardDupes = UIFactory.CreateButton("PcShardDupes", hdrRow.transform, "", 12f, C_WHITE, C_DANGER, OnShardDupesClick, sizeDelta: new Vector2(150, 22));
+            btnShardDupesTxt = UIFactory.GetButtonText(btnShardDupes);
+            if (btnShardDupesTxt != null) { UIFactory.SetOverflowMode(btnShardDupesTxt, 2); UIFactory.SetWordWrap(btnShardDupesTxt, false); }
+            btnShardDupes.SetActive(false);
             btnHistOlder = UIFactory.CreateButton("PcHistOlder", hdrRow.transform, "< Older", 12f, C_WHITE, C_BTN, () => PageHistory(+1), sizeDelta: new Vector2(76, 22));
             txtHistPos = UIFactory.CreateText("PcHistPos", hdrRow.transform, "", 13f, C_LABEL, UIFactory.AlignMidCenter, sizeDelta: new Vector2(120, 22));
             btnHistNewer = UIFactory.CreateButton("PcHistNewer", hdrRow.transform, "Newer >", 12f, C_WHITE, C_BTN, () => PageHistory(-1), sizeDelta: new Vector2(76, 22));
@@ -1770,6 +1782,7 @@ namespace CompetitiveRounds
         /// click's label once armed), "sharding..." while a batch is out.</summary>
         private static void RefreshShardPackButton(ApiClient.PcPackAnswer shown)
         {
+            RefreshShardDupesButton(shown);
             if (btnShardPack == null) return;
             var ids = PackShardIds(shown);
             bool up = ids.Count > 0 && ids.Count <= ApiClient.PC_DISCARD_BATCH_CAP
@@ -1782,6 +1795,27 @@ namespace CompetitiveRounds
             UIFactory.SetTextRaw(btnShardPackTxt, busy ? I18n.Tr("sharding...")
                 : armed ? I18n.TrF("Sure? +{0} shards", total) : I18n.TrF("Shard pack (+{0})", total));
             UIFactory.SetImageColor(btnShardPack, SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
+        }
+
+        /// <summary>Item 18 fix pass 1 (F3): the Shard dupes button on the pack
+        /// on show -- up while the pack holds a duplicate (PackDupeIds, read
+        /// against a collection that already counts the pack), labelled with
+        /// the total those copies pay (the second click's label once armed),
+        /// "sharding..." while its batch is out.</summary>
+        private static void RefreshShardDupesButton(ApiClient.PcPackAnswer shown)
+        {
+            if (btnShardDupes == null) return;
+            bool ready;
+            var ids = PackDupeIds(shown, ApiClient.CachedPcCollection, out ready);
+            bool up = ready && ids.Count > 0 && ids.Count <= ApiClient.PC_DISCARD_BATCH_CAP;
+            bool busy = shardInFlight && shown != null && shardFlight.DupesOf == shown.pack_id;
+            btnShardDupes.SetActive(up || busy);
+            if (!up && !busy) return;
+            int total = ShardTotal(shown.prints, ids);
+            bool armed = armedShard != null && armedShard == DupesShardSet(shown.pack_id, ids) && Now - armedShardAt <= 6f;
+            UIFactory.SetTextRaw(btnShardDupesTxt, busy ? I18n.Tr("sharding...")
+                : armed ? I18n.TrF("Sure? +{0} shards", total) : I18n.TrF("Shard dupes (+{0})", total));
+            UIFactory.SetImageColor(btnShardDupes, SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
         }
 
         // ── pack history (the strip's pager) ──────────────────────────────
@@ -3016,6 +3050,75 @@ namespace CompetitiveRounds
             SendShard(id, shown.pack_id, ids, shown.pack_id);
         }
 
+        /// <summary>Item 18 fix pass 1 (F3): what a Shard dupes sends -- the
+        /// pack on show's DUPLICATES only, sorted: PcQuickShardRules.
+        /// DuplicateShardIds over the pack's live prints (in display order,
+        /// by exact face) and the collection's live copies, so one live copy
+        /// of every exact face is kept and a unique or last copy is never in
+        /// the set. A print discarded or named gone by the server is not
+        /// live. `ready` is false (and the set empty) until the collection
+        /// read holds every live print of the pack.</summary>
+        private static List<string> PackDupeIds(ApiClient.PcPackAnswer pack, ApiClient.PcCollection col, out bool ready)
+        {
+            ready = false;
+            var none = new List<string>();
+            if (pack == null || pack.prints == null || !ShardToken(pack.pack_id) || col == null || col.prints == null) return none;
+            var faces = new List<string>(); var pids = new List<string>();
+            foreach (var p in pack.prints)
+            {
+                bool live = p != null && !p.discarded && ShardToken(p.print_id) && !shardGone.Contains(p.print_id);
+                faces.Add(live ? FaceKey(p) : null); pids.Add(p?.print_id);
+            }
+            var held = new HashSet<string>(StringComparer.Ordinal);
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var c in col.prints)
+            {
+                if (c == null || c.print_id == null || c.discarded || shardGone.Contains(c.print_id) || !held.Add(c.print_id)) continue;
+                string k = FaceKey(c); int n; counts.TryGetValue(k, out n); counts[k] = n + 1;
+            }
+            var ids = PcQuickShardRules.DuplicateShardIds(faces, pids, counts, held, out ready);
+            ids.Sort(StringComparer.Ordinal);
+            return ids;
+        }
+
+        private static string DupesShardSet(string packId, List<string> ids) { return "dupes|" + packId + "|" + string.Join(",", ids.ToArray()); }
+
+        /// <summary>Item 18 fix pass 1 (F3): the pull tab's Shard dupes. Two
+        /// clicks inside six seconds, as every shard control: the first names
+        /// how many duplicates and what they pay; the second sends ONE batch
+        /// request with exactly that set, keyed by a nonce kept for that set
+        /// until an answer (PcShardFlight.KeyFor), so asking again after a
+        /// lost answer is a replay. The Shard pack beside it is unchanged
+        /// (board row 25: every live print of the pack, with the last-copy
+        /// note).</summary>
+        private static void OnShardDupesClick()
+        {
+            var id = LocalId();
+            if (id == null || shardInFlight || discardInFlight) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            var shown = ShownPack();
+            if (shown == null || !ShardToken(shown.pack_id)) return;
+            var col = ApiClient.CachedPcCollection;
+            bool ready;
+            var ids = PackDupeIds(shown, col, out ready);
+            if (!ready) { ApiClient.FetchPcCollection(id, true); Say(I18n.Tr("Loading your binder - try again in a moment"), C_WARN); return; }
+            if (ids.Count == 0) return;
+            if (ids.Count > ApiClient.PC_DISCARD_BATCH_CAP) { Say(I18n.TrF("You can shard up to {0} cards at once", ApiClient.PC_DISCARD_BATCH_CAP), C_WARN); return; }
+            var batch = new List<ApiClient.PcPrint>();
+            var want = new HashSet<string>(ids, StringComparer.Ordinal);
+            foreach (var p in shown.prints) if (p != null && p.print_id != null && want.Remove(p.print_id)) batch.Add(p);
+            int traded;
+            int total = ShardTotal(batch, ids, out traded);
+            string set = DupesShardSet(shown.pack_id, ids);
+            if (!ShardConfirmed(set))
+            {
+                Say(I18n.TrF("Click Shard dupes again to shard {0} duplicates for {1} shards", ids.Count, total) + TradedNote(traded), C_WARN);
+                return;
+            }
+            string key = shardFlight.KeyFor(set, () => NewNonce());
+            SendShard(id, key, ids, null, null, shown.pack_id);
+        }
+
         private static void OnSelectClick()
         {
             if (shardInFlight) return;
@@ -3129,16 +3232,22 @@ namespace CompetitiveRounds
         }
 
         /// <summary>quickPrintId: the pull-strip card a one-card shard is for
-        /// (item 18), null for a pack or a selection.</summary>
-        private static void SendShard(string id, string key, List<string> ids, string packId, string quickPrintId = null)
+        /// (item 18), null for a pack or a selection; dupesOf: the pack a
+        /// Shard dupes is for (fix pass 1, F3). Both are keyed by the flight's
+        /// own nonce and answered by FinishShard / FailShard's strip rules
+        /// (their `quick` flag).</summary>
+        private static void SendShard(string id, string key, List<string> ids, string packId, string quickPrintId = null, string dupesOf = null)
         {
             // F2: the request's generation. Its answer is checked against it
             // twice: by ApiClient before the balance is written into the
             // cache, and here before anything else is touched.
-            int serial = shardFlight.Begin(Now, packId, quickPrintId);
+            int serial = shardFlight.Begin(Now, packId, quickPrintId, dupesOf);
+            // A strip card and a Shard dupes are keyed by the flight's nonce,
+            // so their answers follow the strip's rules (F3).
+            bool keyed = quickPrintId != null || dupesOf != null;
             NativeUI.MarkDirty();
             int ep = uiEpoch;
-            Plugin.Log.LogInfo($"[PC] shard {(quickPrintId != null ? "quick" : packId != null ? "pack" : "selection")}: {ids.Count} card(s)");
+            Plugin.Log.LogInfo($"[PC] shard {(quickPrintId != null ? "quick" : dupesOf != null ? "dupes" : packId != null ? "pack" : "selection")}: {ids.Count} card(s)");
             ApiClient.PcDiscardBatch(id, key, ids, () => ep == uiEpoch && shardFlight.IsCurrent(serial), (ok, resp) =>
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
@@ -3148,8 +3257,8 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[PC] shard: answer for request {serial} dropped (given up)");
                     return;
                 }
-                if (ok) FinishShard(id, resp, ids, packId, quickPrintId != null);
-                else FailShard(id, resp, packId, quickPrintId != null);
+                if (ok) FinishShard(id, resp, ids, packId, keyed);
+                else FailShard(id, resp, packId, keyed);
                 NativeUI.MarkDirty();
             });
         }
