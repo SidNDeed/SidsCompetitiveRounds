@@ -44,6 +44,8 @@ def texts():
         "PS": _text("PoisonSync.cs"),
         "NU": _text("NativeUI.cs"),
         "VF": _text("VanillaFixes.cs"),
+        "CU": _text("CompetitiveUI.cs"),
+        "PL": _text("Plugin.cs"),
     }
 
 
@@ -87,6 +89,9 @@ SIG = {
     "corrective": "private static void ApplyCorrective(PhotonView view, StreamRec rec)",
     "paint": "private static void PaintDamageNumbers(object t, string level)",
     "driver": "internal sealed class DamageNumberDriver : MonoBehaviour",
+    "emit": "private static void Emit(int subject, DamageNumberRules.Kind kind, float magnitude, Vector3 bodyPosition)",
+    "bridge": "internal static void NoteDirectDrop(PhotonView view, float pre, float post)",
+    "drawui": "public static void DrawUI()",
     "update": "private void Update()",
 }
 
@@ -955,3 +960,152 @@ def test_B15_the_correction_funnel_notes_its_observed_drop_and_the_writer_set_is
     assert run(notify_args, gone)[0]
     o, e = _single_span(t["PS"], SIG["corrective"], RELEASE_SYMBOLS)
     assert re.search(FUNNELS["corrective"]["slice"], mask_code(t["PS"])[o:e])
+
+
+# ── B16: the observed delta reaches the engine (fix 1: a deletion guard) ────
+
+EMIT_DAMAGE = "if (drop > 0f) Emit(subject, DamageNumberRules.Kind.Damage, drop, __instance.transform.position);"
+
+
+def emit_bridge(t):
+    """The damage-delta-to-emit bridge, link by link: each Postfix measures
+    its observed delta and emits it with its own kind, only when positive;
+    the direct-writer bridge emits Damage; Emit hands every emission to Note
+    after the visibility test; Note hands it to the rules engine. Returns
+    (green, problems)."""
+    dn = t["DN"]
+    problems = []
+    for key, var, expr, kind in (("ddpost", "drop", "__state-data.health", "Damage"),
+                                 ("hpost", "rise", "data.health-__state", "Heal")):
+        _, m, _ = member(dn, SIG[key])
+        decl = [norm(d) for d in re.findall(r"\bfloat\s+%s\s*=\s*([^;]+);" % var, m)]
+        if decl != [expr]:
+            problems.append("%s: %s = %r, want [%r]" % (key, var, decl, expr))
+        calls = [norm(c) for c in re.findall(r"\bEmit\s*\(([^;]*)\)\s*;", m)]
+        want = "subject,DamageNumberRules.Kind.%s,%s,__instance.transform.position" % (kind, var)
+        if calls != [want]:
+            problems.append("%s: Emit calls %r, want [%r]" % (key, calls, want))
+        elif not re.search(r"\bif\s*\(\s*%s\s*>\s*0f\s*\)\s*Emit\s*\(" % var, m):
+            problems.append("%s: Emit is not under %s > 0f" % (key, var))
+    _, m, _ = member(dn, SIG["bridge"])
+    calls = [norm(c) for c in re.findall(r"\bEmit\s*\(([^;]*)\)\s*;", m)]
+    if calls != ["view.ViewID,DamageNumberRules.Kind.Damage,applied,view.transform.position"]:
+        problems.append("bridge: Emit calls %r" % calls)
+    if [norm(d) for d in re.findall(r"\bfloat\s+applied\s*=\s*([^;]+);", m)] != ["DamageNumberRules.AppliedDrop(pre,post)"]:
+        problems.append("bridge: applied is not AppliedDrop(pre, post)")
+    _, m, _ = member(dn, SIG["emit"])
+    notes = [norm(c) for c in re.findall(r"(?<![\w.])Note\s*\(([^;]*)\)\s*;", m)]
+    show = m.find("ShouldShow(")
+    if notes != ["subject,kind,magnitude,Time.unscaledTime"]:
+        problems.append("emit: Note calls %r" % notes)
+    elif not (0 <= show < m.find("Note(subject")):
+        problems.append("emit: Note is not after the visibility test")
+    _, m, _ = member(dn, SIG["note"])
+    if len(re.findall(r"\bDamageNumberRules\.Shared\.Note\s*\(\s*subject\s*,\s*kind\s*,\s*magnitude\s*,\s*now\s*,", m)) != 1:
+        problems.append("note: the engine call is not exactly once")
+    return not problems, problems
+
+
+def test_B16_the_observed_delta_reaches_the_engine_and_each_deletion_reds():
+    t = texts()
+    ok, why = run(emit_bridge, t)
+    assert ok, why
+    cases = [
+        ("the ordinary damage emission deleted (DoDamagePostfix)", "DN", EMIT_DAMAGE, "", "ddpost"),
+        ("the damage emitted as a heal", "DN", EMIT_DAMAGE,
+         EMIT_DAMAGE.replace("Kind.Damage", "Kind.Heal"), "ddpost"),
+        ("the damage delta reversed", "DN", "float drop = __state - data.health;",
+         "float drop = data.health - __state;", "ddpost"),
+        ("the heal emission deleted", "DN",
+         "if (rise > 0f) Emit(subject, DamageNumberRules.Kind.Heal, rise, __instance.transform.position);", "", "hpost"),
+        ("the direct-writer bridge emits nothing", "DN",
+         "Emit(view.ViewID, DamageNumberRules.Kind.Damage, applied, view.transform.position);", "", "bridge"),
+        ("Emit stops handing to Note", "DN", "Note(subject, kind, magnitude, Time.unscaledTime);", "", "emit"),
+        ("Note stops handing to the engine", "DN", "DamageNumberRules.Shared.Note(", "DamageNumberRules.Shared.Equals(", "note"),
+    ]
+    for label, key, old, new, where in cases:
+        mt = mutate(t, key, old, new)
+        ok, problems = run(emit_bridge, mt)
+        assert not ok, "%s stayed green" % label
+        # span-scoped: only the link the mutation touched is reported
+        assert all(p.startswith(where + ":") for p in problems), "%s: %r" % (label, problems)
+    # control: an unconditional emission (the > 0f test dropped) is red too,
+    # while the matcher still sees the heal row green beside it
+    mt = mutate(t, "DN", EMIT_DAMAGE, "Emit(subject, DamageNumberRules.Kind.Damage, drop, __instance.transform.position);")
+    ok, problems = run(emit_bridge, mt)
+    assert not ok and problems == ["ddpost: Emit is not under drop > 0f"], problems
+
+
+# ── B17: the draw is wired and the driver ticks (fix 1: a deletion guard) ───
+
+DRAW_CALL = "DamageNumbers.Draw();"
+
+
+def _depth_at(m, pos):
+    d = 0
+    for i in range(pos):
+        if m[i] == "{":
+            d += 1
+        elif m[i] == "}":
+            d -= 1
+    return d
+
+
+def draw_wiring(t):
+    """DrawUI calls DamageNumbers.Draw exactly once, unconditionally (brace
+    depth 0 of its body, on the mask, so a comment is not a call); the driver
+    is added exactly once and its Update ticks; the Unity tick reads the
+    rules' flush and stamps its text; Draw paints that text."""
+    problems = []
+    _, m, _ = member(t["CU"], SIG["drawui"])
+    at = [mm.start() for mm in re.finditer(re.escape(DRAW_CALL), m)]
+    if len(at) != 1:
+        problems.append("drawui: %d DamageNumbers.Draw() calls" % len(at))
+    elif _depth_at(m, at[0]) != 0:
+        problems.append("drawui: DamageNumbers.Draw() sits inside a block")
+    pl = mask_code(t["PL"])
+    n = len(re.findall(r"\bAddComponent\s*<\s*DamageNumberDriver\s*>\s*\(\s*\)", pl))
+    if n != 1:
+        problems.append("plugin: AddComponent<DamageNumberDriver>() %d times" % n)
+    src = t["DN"]
+    o, e = _single_span(src, SIG["driver"], RELEASE_SYMBOLS)
+    _, m, _ = member(src[o:e], SIG["update"])
+    if len(re.findall(r"\bDamageNumbers\.Tick\s*\(\s*Time\.unscaledTime\s*\)\s*;", m)) != 1:
+        problems.append("driver: Update does not tick exactly once")
+    _, m, _ = member(src, SIG["tick"])
+    if len(re.findall(r"\bvar\s+em\s*=\s*DamageNumberRules\.Tick\s*\(\s*now\s*\)\s*;", m)) != 1 \
+            or len(re.findall(r"_text\[slot\]\s*=\s*em\[i\]\.Text\s*;", m)) != 1:
+        problems.append("tick: the rules' flush is not read and stamped exactly once")
+    _, m, _ = member(src, SIG["draw"])
+    if len(re.findall(r"\bGUI\.Label\s*\(\s*rect\s*,\s*_text\[i\]\s*,\s*_style\s*\)\s*;", m)) != 1:
+        problems.append("draw: the number itself is not painted exactly once per entry")
+    return not problems, problems
+
+
+def test_B17_the_draw_call_and_the_driver_are_wired_and_each_deletion_reds():
+    t = texts()
+    ok, why = run(draw_wiring, t)
+    assert ok, why
+    line = "            " + DRAW_CALL
+    cases = [
+        ("the sole draw call deleted (CompetitiveUI.DrawUI)", "CU", line, "", "drawui"),
+        ("the draw call commented out", "CU", line, "            // " + DRAW_CALL, "drawui"),
+        ("the draw call put under a dead branch", "CU", line, "            if (PageImguiHidden && !PageImguiHidden) { " + DRAW_CALL + " }", "drawui"),
+        ("the draw call doubled", "CU", line, line + " " + DRAW_CALL, "drawui"),
+        ("the driver never added", "PL", "go.AddComponent<DamageNumberDriver>();", "", "plugin"),
+        ("the driver stops ticking", "DN", "DamageNumbers.Tick(Time.unscaledTime);", "", "driver"),
+        ("the tick drops the rules' text", "DN", "_text[slot] = em[i].Text;", "_text[slot] = null;", "tick"),
+        ("the number is never painted", "DN", "GUI.Label(rect, _text[i], _style);", "", "draw"),
+    ]
+    for label, key, old, new, where in cases:
+        mt = mutate(t, key, old, new)
+        ok, problems = run(draw_wiring, mt)
+        assert not ok, "%s stayed green" % label
+        assert all(p.startswith(where + ":") for p in problems), "%s: %r" % (label, problems)
+    # control: the same matcher finds the hold-Tab board's call beside it at
+    # depth 0, and a commented copy of the draw call elsewhere changes nothing
+    _, m, _ = member(t["CU"], SIG["drawui"])
+    tab = m.find("TabStatsOverlay.Draw();")
+    assert tab >= 0 and _depth_at(m, tab) == 0
+    mt = mutate(t, "CU", "            TabStatsOverlay.Draw();", "            // " + DRAW_CALL + "\n            TabStatsOverlay.Draw();")
+    assert run(draw_wiring, mt)[0]
