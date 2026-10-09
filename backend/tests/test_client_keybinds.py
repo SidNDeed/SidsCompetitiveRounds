@@ -662,3 +662,30 @@ def test_f6_the_failure_is_told_in_every_locale():
     blocks = _blocks_of_catalogue()
     for loc in ("ES", "RU", "UK", "SV"):
         assert key in blocks[loc], loc
+
+
+# ── Fix pass 1 F7: a mod row's mouse press ends capture with the refusal ────
+# The decision is KeybindRules.CaptureTakesMouse, executed by the harness
+# (T1 case 22, composed with Refuse's rule 4). These assert the poll asks it,
+# a mouse press reaches the one writer, and Accept always ends the capture
+# and records the refusal the pane renders.
+
+def test_f7_the_poll_reads_the_mouse_for_every_armed_row():
+    body = _code(_src(KB), "internal static bool PollCapture()")
+    assert len(re.findall(r"KeybindRules\.CaptureTakesMouse\(row\)", body)) == 1
+    assert "IsGameRow" not in body and "IsModRow" not in body
+    assert len(re.findall(r"\bAccept\(row, KeybindRules\.MouseIndexToSource\(n\), n\)", body)) == 1
+
+
+def test_f7_accept_ends_capture_and_records_the_refusal():
+    body = _ws(_code(_src(KB), "private static void Accept(int row, BindSource src, int mouseButton)"))
+    assert 'var r = Write(row, src, "capture", out other);' in _ws(
+        _text(_src(KB), "private static void Accept(int row, BindSource src, int mouseButton)"))
+    assert "captureRow = -1;" in body
+    assert "LastRefusal = r;" in body
+    assert "LastRefusalRow = r == Refusal.None ? -1 : row;" in body
+    assert not re.search(r"\bif\b[^;]*captureRow = -1", body)
+    pane = _code(_src(KBUI), "private static bool KeybindRenderPane(SettingsRowRec rec)")
+    assert "KeybindRefusalText(Keybinds.LastRefusal)" in pane
+    refusal = _text(_src(KBUI), "private static string KeybindRefusalText(Refusal r)")
+    assert "case Refusal.MouseOnModRow:" in refusal

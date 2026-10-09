@@ -881,8 +881,10 @@ namespace CompetitiveRounds
             var g = KeybindRules.CaptureGesture(hit, true);
             if (g == Gesture.Cancel) { CancelCapture("escape"); return true; }
             if (g == Gesture.Bind) { Accept(row, BindSource.Key(hit), -1); return true; }
-            // mouse, game rows only (rule 4 is a mechanism here: the poll never reads one for a mod row)
-            if (!KeybindRules.IsGameRow(row)) return true;
+            // mouse, every row (F7): a mod row's mouse press reaches Write,
+            // which refuses it by rule 4; Accept ends the capture and the
+            // pane shows the refusal. Only a game row can save the source.
+            if (!KeybindRules.CaptureTakesMouse(row)) return true;
             for (int n = 0; n < mouseSeenUp.Length; n++)
             {
                 bool drivenDown = DriveMouseButton == n;

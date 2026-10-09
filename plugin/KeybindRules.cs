@@ -596,6 +596,19 @@ namespace CompetitiveRounds
             return Gesture.Bind;
         }
 
+        /// <summary>Fix pass 1 F7: the capture poll reads the mouse for EVERY
+        /// armed row. A mouse press on a mod-control row then goes the one
+        /// write path, Refuse answers MouseOnModRow (rule 4), the capture
+        /// ends and the refusal shows; only a game-control row can save the
+        /// source. Mutation 22 is a22f80ed's poll, which skipped the mouse
+        /// for a mod row, so capture stayed armed and nothing was shown.</summary>
+        internal static bool CaptureTakesMouse(int row)
+        {
+            if (row < 0 || row >= RowCount) return false;
+            if (Mut == 22) return IsGameRow(row);
+            return true;
+        }
+
         /// <summary>The detection order: the LOWEST KeyMappings row among the
         /// rows whose key is down, so a physical left shift captures as
         /// Key.Shift (row 1), never Key.LeftShift (row 5). -1 for none.</summary>
@@ -1122,6 +1135,23 @@ namespace CompetitiveRounds
                     () => PromptSurfaceIsKeyboard(false, false, spaceJoin) && PromptSurfaceIsKeyboard(true, false, spaceJoin)
                           && PromptSurfaceIsKeyboard(false, false, null),
                     () => "controllerSeat=" + PromptSurfaceIsKeyboard(true, true, spaceJoin) + " southFace=" + PromptSurfaceIsKeyboard(false, false, southJoin));
+
+            // -- fix pass 1 F7: a mouse press during capture reaches the refusal ------
+            // The poll's two decisions composed: it reads the mouse for the armed
+            // row, and the one writer answers it. Every mod row must reach
+            // MouseOnModRow (the capture ends, the refusal shows); every game row
+            // whose default is a key saves a free mouse button.
+            MutCase(r, 22, "KeybindRules.CaptureTakesMouse", "a mouse press on an armed mod-control row reaches the MouseOnModRow refusal",
+                    () =>
+                    {
+                        for (int row = 0; row < FirstGameRow; row++)
+                            if (!CaptureTakesMouse(row) || Ref(row, M("MiddleButton")) != Refusal.MouseOnModRow) return false;
+                        return true;
+                    },
+                    () => CaptureTakesMouse(Jump) && Ref(Jump, M("MiddleButton")) == Refusal.None
+                          && CaptureTakesMouse(MoveUp) && Ref(MoveUp, M("Button4")) == Refusal.None
+                          && !CaptureTakesMouse(-1) && !CaptureTakesMouse(RowCount),
+                    () => "menu=" + CaptureTakesMouse(MenuToggle) + "/" + Ref(MenuToggle, M("MiddleButton")) + " jump=" + Ref(Jump, M("MiddleButton")));
 
             // case 16's own second control, outside the mutation: an unbound or
             // mouse-bound Jump cannot be described by the word SPACE either.
