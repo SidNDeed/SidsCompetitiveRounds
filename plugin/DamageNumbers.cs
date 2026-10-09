@@ -356,6 +356,9 @@ namespace CompetitiveRounds
                 if (first < 0) return;
 
                 // One global scale per Repaint: the camera is orthographic.
+                // `a` is also the first live entry's own projection and is
+                // reused for it below, so a Repaint at MaxLive live labels
+                // makes 2 + (MaxLive - 1) = 25 projections (design: 25).
                 Vector3 a = cam.WorldToScreenPoint(_world[first]);
                 Vector3 b = cam.WorldToScreenPoint(_world[first] + cam.transform.up);
                 float ppu = Mathf.Abs(b.y - a.y);
@@ -380,7 +383,7 @@ namespace CompetitiveRounds
                 {
                     if (_text[i] == null || !ring.IsLive(i, now)) continue;
                     float age = now - ring.Born[i];
-                    Vector3 sp = cam.WorldToScreenPoint(_world[i]);
+                    Vector3 sp = i == first ? a : cam.WorldToScreenPoint(_world[i]);
                     if (sp.z < 0f) continue;
                     float alpha = age <= DamageNumberRules.Life - FadeTail ? 1f
                         : Mathf.Clamp01((DamageNumberRules.Life - age) / FadeTail);

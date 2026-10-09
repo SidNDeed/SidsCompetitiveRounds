@@ -1,5 +1,8 @@
-"""v1.41.0 item 21 - damage and heal numbers: group B, the fourteen
-production-span structure invariants (design section 5, rows B1-B14).
+"""v1.41.0 item 21 - damage and heal numbers: group B, the eighteen
+production-span structure invariants (design section 5, rows B1-B14, and
+the build round 1 fix rows B15-B18: the correction funnel's feed and the
+direct-writer census, the delta-to-emit bridge, the draw and driver wiring,
+and the draw budget at saturation).
 
 Every row is one test, and every test does three things in the same run:
 
@@ -1109,3 +1112,97 @@ def test_B17_the_draw_call_and_the_driver_are_wired_and_each_deletion_reds():
     assert tab >= 0 and _depth_at(m, tab) == 0
     mt = mutate(t, "CU", "            TabStatsOverlay.Draw();", "            // " + DRAW_CALL + "\n            TabStatsOverlay.Draw();")
     assert run(draw_wiring, mt)[0]
+
+
+# ── B18: the draw budget at saturation (fix 1) ──────────────────────────────
+
+LOOP_HEAD = re.compile(r"\bfor\s*\(\s*int\s+i\s*=\s*0\s*;\s*i\s*<\s*DamageNumberRules\.MaxLive\s*;\s*i\+\+\s*\)")
+PROJ = re.compile(r"\bcam\.WorldToScreenPoint\s*\(")
+REUSE = re.compile(r"\bi\s*==\s*first\s*\?\s*a\s*:\s*cam\.WorldToScreenPoint\s*\(\s*_world\[i\]\s*\)")
+LABEL = re.compile(r"\bGUI\.Label\s*\(")
+VALUE_TYPES = {"Rect", "Color"}
+
+
+def _stmt_end(m, i):
+    """End of the statement starting at i: a block, an if with its body, or
+    up to the next semicolon."""
+    i = _ws(m, i)
+    if m[i] == "{":
+        return _match(m, i)
+    if m.startswith("if", i) and not _w(m, i + 2):
+        j = _ws(m, i + 2)
+        return _stmt_end(m, _match(m, j, "(", ")"))
+    return m.index(";", i) + 1
+
+
+def draw_budget(t):
+    """(projections, labels, problems) for one Repaint with MaxLive live
+    labels, counted from Draw's own span: a call outside every per-entry loop
+    runs once; a call inside one runs MaxLive times, less one when it is the
+    else-arm of `i == first ? a :` (the first entry reuses the scale's own
+    projection of _world[first])."""
+    max_live = int(re.search(r"internal const int MaxLive = (\d+);", t["DR"]).group(1))
+    _, m, _ = member(t["DN"], SIG["draw"])
+    loops = []
+    for mm in LOOP_HEAD.finditer(m):
+        loops.append((mm.start(), _stmt_end(m, mm.end())))
+    problems = []
+    proj = 0
+    for mm in PROJ.finditer(m):
+        inside = any(o < mm.start() < e for o, e in loops)
+        if not inside:
+            proj += 1
+            continue
+        reused = any(r.start() <= mm.start() < r.end() for r in REUSE.finditer(m))
+        proj += max_live - 1 if reused else max_live
+    labels = 0
+    for mm in LABEL.finditer(m):
+        labels += max_live if any(o < mm.start() < e for o, e in loops) else 1
+    for o, e in loops:
+        for nm in re.finditer(r"\bnew\s+(\w+)", m[o:e]):
+            if nm.group(1) not in VALUE_TYPES:
+                problems.append("a managed allocation per entry: new %s" % nm.group(1))
+    styles = [mm.start() for mm in re.finditer(r"\bnew\s+GUIStyle\s*\(", m)]
+    if len(styles) != 1:
+        problems.append("%d GUIStyle constructions" % len(styles))
+    else:
+        conds = guard_chain(t["DN"], SIG["draw"], "new GUIStyle(")
+        if not any(norm(c) == "_style==null||_styleScreenH!=Screen.height" for c in conds):
+            problems.append("the style is not cached (conds %r)" % conds)
+    if proj > 25:
+        problems.append("%d projections at MaxLive %d, budget 25" % (proj, max_live))
+    if labels > 48:
+        problems.append("%d labels at MaxLive %d, budget 48" % (labels, max_live))
+    return proj, labels, problems
+
+
+def test_B18_a_saturated_repaint_makes_at_most_25_projections_and_48_labels_and_allocates_nothing():
+    t = texts()
+    proj, labels, problems = draw_budget(t)
+    assert (proj, labels, problems) == (25, 48, []), (proj, labels, problems)
+    reuse = "Vector3 sp = i == first ? a : cam.WorldToScreenPoint(_world[i]);"
+    cases = [
+        ("no reuse (the form before fix 1)", "DN", reuse, "Vector3 sp = cam.WorldToScreenPoint(_world[i]);", 26, 48),
+        ("the reuse keyed on the wrong entry", "DN", reuse, "Vector3 sp = i == 0 ? a : cam.WorldToScreenPoint(_world[i]);", 26, 48),
+        ("an extra projection per entry", "DN", reuse, reuse + " Vector3 sp2 = cam.WorldToScreenPoint(_world[i]);", 49, 48),
+        ("a third label per entry", "DN", "GUI.Label(rect, _text[i], _style);",
+         "GUI.Label(rect, _text[i], _style); GUI.Label(rect, _text[i], _style);", 25, 72),
+        ("MaxLive raised to 25", "DR", "internal const int MaxLive = 24;", "internal const int MaxLive = 25;", 26, 50),
+    ]
+    for label, key, old, new, wp, wl in cases:
+        mt = mutate(t, key, old, new)
+        p, l, pr = draw_budget(mt)
+        assert (p, l) == (wp, wl) and pr, "%s: %d projections, %d labels, %r" % (label, p, l, pr)
+    # allocation mutations: counts unchanged, the allocation reds alone
+    mt = mutate(t, "DN", "Color c = _color[i];", "Color c = _color[i]; var gc = new GUIContent(_text[i]);")
+    p, l, pr = draw_budget(mt)
+    assert (p, l) == (25, 48) and pr == ["a managed allocation per entry: new GUIContent"], pr
+    mt = mutate(t, "DN", "if (_style == null || _styleScreenH != Screen.height)", "if (true)")
+    p, l, pr = draw_budget(mt)
+    assert (p, l) == (25, 48) and len(pr) == 1 and pr[0].startswith("the style is not cached"), pr
+    # control: the search loop runs MaxLive times but projects nothing, and a
+    # projection planted there is multiplied (so the loop scoping is real)
+    mt = mutate(t, "DN", "if (_text[i] != null && ring.IsLive(i, now)) { first = i; break; }",
+                "if (_text[i] != null && ring.IsLive(i, now)) { cam.WorldToScreenPoint(_world[i]); first = i; break; }")
+    p, l, pr = draw_budget(mt)
+    assert p == 25 + 24 and pr, (p, pr)
