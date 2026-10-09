@@ -1113,6 +1113,30 @@ internal static class Program
         bool allBad = true; string which = "";
         foreach (var b in bad) if (I.SeriesBodyShape(b) != -1) { allBad = false; which += "[" + b + "]"; }
         Check("seriesshape", "malformed_refused", allBad, which);
+        // fix pass 3, L13: only the JSON grammar is accepted, for strings
+        // (escapes) and numbers, beside an empty series list and inside an element
+        string[] badVals = { "\"\\x\"", "\"\\u12G4\"", "\"\\u12\"", "\"\\'\"", "\"\\a\"", "+1", "01", "-01", "1.", ".5", "1e", "1e+", "1.e5", "--1", "0x10",
+                             "NaN", "Infinity", "-Infinity", "tru", "nul", "truex", "falsey", "1x", "TRUE", "\"\t\"" };
+        // the core's nesting bound, read by reflection so this program also builds against an older core
+        var depthField = typeof(I).GetField("JSON_DEPTH_MAX", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        int depthMax = depthField != null ? (int)depthField.GetValue(null) : 64;
+        string deep = new string('[', depthMax + 1) + new string(']', depthMax + 1);
+        bool gBad = true; string gWhich = "";
+        foreach (var v in badVals)
+        {
+            if (I.SeriesBodyShape("{\"series\":[],\"k\":" + v + "}") != -1) { gBad = false; gWhich += "[top " + v + "]"; }
+            if (I.SeriesBodyShape("{\"series\":[{\"series_id\":\"a\",\"k\":" + v + "}]}") != -1) { gBad = false; gWhich += "[elem " + v + "]"; }
+        }
+        if (I.SeriesBodyShape("{\"series\":[],\"k\":" + deep + "}") != -1) { gBad = false; gWhich += "[deep]"; }
+        Check("seriesshape", "grammar_malformed_refused", gBad, gWhich);
+        string[] goodVals = { "\"\\\" \\\\ \\/ \\b \\f \\n \\r \\t \\u00e9 \\uABCD\"", "0", "-0", "0.5", "-1.5E-3", "1e10", "12e+3", "123", "true", "false", "null",
+                              "[1,[2,{\"a\":[]}]]", "{}", "[]", "\"\"" };
+        bool gGood = true; string gMiss = "";
+        foreach (var v in goodVals)
+            if (I.SeriesBodyShape("{\"series\":[{\"series_id\":\"a\",\"k\":" + v + "}],\"m\":" + v + "}") != 1) { gGood = false; gMiss += "[" + v + "]"; }
+        string okDeep = new string('[', depthMax - 2) + new string(']', depthMax - 2);
+        if (I.SeriesBodyShape("{\"series\":[],\"k\":" + okDeep + "}") != 0) { gGood = false; gMiss += "[depth under the bound]"; }
+        Check("seriesshape", "grammar_valid_accepted", gGood, gMiss);
         // a malformed body is never a complete read, so never "none"
         bool parsed = I.SeriesBodyShape("{\"detail\":\"series\"}") >= 0;
         Check("seriesshape", "malformed_never_none", I.SeriesStatus(true, false, true, parsed, 1, 60) == "unknown");

@@ -374,6 +374,13 @@ MUTANTS = [
     ("l13_shape_trailing_ignored", [("return TrailOk(body, i) ? found : -1;", "return found;")], "seriesshape", "series"),
     ("l13_shape_elements_unchecked", [("if (i >= n || body[i] != '{') return -1;\n                            if (!SkipValue(body, ref i)) return -1;",
                                        "if (!SkipValue(body, ref i)) return -1;")], "seriesshape", "series"),
+    # fix pass 3, L13 grammar: any escape, unchecked \u digits, a leading zero, unbounded nesting
+    ("l13_escape_any", [("default: return null;", "default: sb.Append(e); break;")], "seriesshape", "series"),
+    ("l13_unicode_unchecked", [(" || !IsHex(s[i]) || !IsHex(s[i + 1]) || !IsHex(s[i + 2]) || !IsHex(s[i + 3])", ""),
+                               ("sb.Append((char)int.Parse(s.Substring(i, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture));", "sb.Append('?');")],
+     "seriesshape", "series"),
+    ("l13_number_leading_zero", [("if (s[i] == '0') i++;", "if (s[i] == '0') { while (i < n && s[i] >= '0' && s[i] <= '9') i++; }")], "seriesshape", "series"),
+    ("l13_depth_unbounded", [("if (depth >= JSON_DEPTH_MAX) return false;", "")], "seriesshape", "series"),
     ("l13_cache_gen_ignored", [("return ageS >= 0 && ageS < maxS && readGen == genSeen;", "return ageS >= 0 && ageS < maxS;")], "seriesshape", "series"),
     ("flush_summary_removed", [('" quit flush ran: "', '" quit flush: "')], "flush", "boot"),
     ("flush_summary_in_loop", [('" quit flush ran: "', '" quit flush: "'), ("tried++;", 'tried++; info(" quit flush ran: ");')], "flush", "boot"),

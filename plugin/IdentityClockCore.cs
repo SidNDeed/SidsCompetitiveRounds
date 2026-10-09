@@ -1645,7 +1645,12 @@ namespace CompetitiveRounds
             while (i < s.Length && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) i++;
         }
 
-        /// <summary>A JSON string at i (escapes honoured), or null.</summary>
+        private static bool IsHex(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+
+        /// <summary>A JSON string at i, or null. Only the JSON escapes are
+        /// accepted: \" \\ \/ \b \f \n \r \t and \u followed by exactly four
+        /// hex digits; any other escape, a raw control character or a missing
+        /// close quote is malformed.</summary>
         private static string ReadStr(string s, ref int i)
         {
             if (i >= s.Length || s[i] != '"') return null;
@@ -1659,8 +1664,21 @@ namespace CompetitiveRounds
                 {
                     if (i >= s.Length) return null;
                     char e = s[i++];
-                    if (e == 'u') { if (i + 4 > s.Length) return null; i += 4; sb.Append('?'); }
-                    else sb.Append(e);
+                    switch (e)
+                    {
+                        case '"': case '\\': case '/': sb.Append(e); break;
+                        case 'b': sb.Append('\b'); break;
+                        case 'f': sb.Append('\f'); break;
+                        case 'n': sb.Append('\n'); break;
+                        case 'r': sb.Append('\r'); break;
+                        case 't': sb.Append('\t'); break;
+                        case 'u':
+                            if (i + 4 > s.Length || !IsHex(s[i]) || !IsHex(s[i + 1]) || !IsHex(s[i + 2]) || !IsHex(s[i + 3])) return null;
+                            sb.Append((char)int.Parse(s.Substring(i, 4), NumberStyles.HexNumber, CultureInfo.InvariantCulture));
+                            i += 4;
+                            break;
+                        default: return null;
+                    }
                 }
                 else if (c < 0x20) return null;
                 else sb.Append(c);
@@ -1668,8 +1686,49 @@ namespace CompetitiveRounds
             return null;
         }
 
+        /// <summary>A JSON number at i by the JSON grammar exactly:
+        /// -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?; false otherwise
+        /// (a leading +, a leading zero before digits, a bare or trailing
+        /// point, an empty exponent, NaN or Infinity are all malformed).</summary>
+        private static bool SkipNumber(string s, ref int i)
+        {
+            int n = s.Length;
+            if (i < n && s[i] == '-') i++;
+            if (i >= n) return false;
+            if (s[i] == '0') i++;
+            else if (s[i] >= '1' && s[i] <= '9') { while (i < n && s[i] >= '0' && s[i] <= '9') i++; }
+            else return false;
+            if (i < n && s[i] == '.')
+            {
+                i++;
+                if (i >= n || s[i] < '0' || s[i] > '9') return false;
+                while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+            }
+            if (i < n && (s[i] == 'e' || s[i] == 'E'))
+            {
+                i++;
+                if (i < n && (s[i] == '+' || s[i] == '-')) i++;
+                if (i >= n || s[i] < '0' || s[i] > '9') return false;
+                while (i < n && s[i] >= '0' && s[i] <= '9') i++;
+            }
+            return true;
+        }
+
+        private static bool Lit(string s, ref int i, string w)
+        {
+            if (string.CompareOrdinal(s, i, w, 0, w.Length) != 0) return false;
+            i += w.Length;
+            return true;
+        }
+
+        /// <summary>The nesting bound of SkipValue: a deeper body is malformed
+        /// (a work bound; the reader never recurses without limit).</summary>
+        internal const int JSON_DEPTH_MAX = 64;
+
         /// <summary>Skips one JSON value of any kind at i; false when malformed.</summary>
-        private static bool SkipValue(string s, ref int i)
+        private static bool SkipValue(string s, ref int i) { return SkipValue(s, ref i, 0); }
+
+        private static bool SkipValue(string s, ref int i, int depth)
         {
             SkipWs(s, ref i);
             if (i >= s.Length) return false;
@@ -1677,6 +1736,7 @@ namespace CompetitiveRounds
             if (c == '"') return ReadStr(s, ref i) != null;
             if (c == '{' || c == '[')
             {
+                if (depth >= JSON_DEPTH_MAX) return false;
                 char close = c == '{' ? '}' : ']';
                 i++;
                 SkipWs(s, ref i);
@@ -1691,20 +1751,17 @@ namespace CompetitiveRounds
                         if (i >= s.Length || s[i] != ':') return false;
                         i++;
                     }
-                    if (!SkipValue(s, ref i)) return false;
+                    if (!SkipValue(s, ref i, depth + 1)) return false;
                     SkipWs(s, ref i);
                     if (i < s.Length && s[i] == ',') { i++; continue; }
                     if (i < s.Length && s[i] == close) { i++; return true; }
                     return false;
                 }
             }
-            int st = i;
-            while (i < s.Length && "-+.eE0123456789truefalsn".IndexOf(s[i]) >= 0) i++;
-            if (i == st) return false;
-            string lit = s.Substring(st, i - st);
-            if (lit == "true" || lit == "false" || lit == "null") return true;
-            double d;
-            return double.TryParse(lit, NumberStyles.Float, CultureInfo.InvariantCulture, out d);
+            if (c == 't') return Lit(s, ref i, "true");
+            if (c == 'f') return Lit(s, ref i, "false");
+            if (c == 'n') return Lit(s, ref i, "null");
+            return SkipNumber(s, ref i);
         }
 
         /// <summary>L13: a cached series status may be reused only while it
