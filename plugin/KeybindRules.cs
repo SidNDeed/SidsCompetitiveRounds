@@ -638,6 +638,21 @@ namespace CompetitiveRounds
             return l.ToArray();
         }
 
+        /// <summary>Fix pass 1 F3: may a join or ready prompt be rewritten with
+        /// the bound keyboard key? Only on a keyboard surface: never while the
+        /// seat is held by a controller, and never over a vanilla face that
+        /// shows a controller glyph (ROUNDS draws every controller button as a
+        /// TMP sprite tag, in every locale - PROMPT_SOUTH_TO_JOIN,
+        /// PROMPT_START_WHEN_READY). An empty seat with a keyboard face is the
+        /// pre-join keyboard prompt, which is rewritten.</summary>
+        internal static bool PromptSurfaceIsKeyboard(bool seated, bool seatIsController, string vanillaFace)
+        {
+            if (Mut == 19) return true;   // a22f80ed: the join override carried no device gate
+            if (seated && seatIsController) return false;
+            if (vanillaFace != null && vanillaFace.IndexOf("<sprite", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+            return true;
+        }
+
         // -- names (design section 2.9) --------------------------------------
 
         private static readonly Dictionary<string, string> Glyphs = new Dictionary<string, string>
@@ -920,6 +935,16 @@ namespace CompetitiveRounds
                     () => "held+unnamed=" + tapRun(null, true, "", true));
             Check(r, "F2 KeybindRules.TapDetector: a foreign key on the ARMING frame keeps the tap from rotating",
                   !TapArmedWithForeign(tapAlias, tapScan), "rotated=" + TapArmedWithForeign(tapAlias, tapScan));
+
+            // -- fix pass 1 F3: prompt overrides target keyboard surfaces only -------
+            const string southJoin = "Press\n[<sprite name=BUTTON_SOUTH>]\nto join", spaceJoin = "Press\n[SPACE]\nto join";
+            const string ukSouthJoin = "Натисніть\n[<sprite name=BUTTON_SOUTH>]\nщоб приєднатися";
+            MutCase(r, 19, "KeybindRules.PromptSurfaceIsKeyboard", "a controller seat and a controller-glyph face keep the vanilla prompt",
+                    () => !PromptSurfaceIsKeyboard(true, true, spaceJoin) && !PromptSurfaceIsKeyboard(false, false, southJoin)
+                          && !PromptSurfaceIsKeyboard(false, false, ukSouthJoin) && !PromptSurfaceIsKeyboard(true, true, null),
+                    () => PromptSurfaceIsKeyboard(false, false, spaceJoin) && PromptSurfaceIsKeyboard(true, false, spaceJoin)
+                          && PromptSurfaceIsKeyboard(false, false, null),
+                    () => "controllerSeat=" + PromptSurfaceIsKeyboard(true, true, spaceJoin) + " southFace=" + PromptSurfaceIsKeyboard(false, false, southJoin));
 
             // case 16's own second control, outside the mutation: an unbound or
             // mouse-bound Jump cannot be described by the word SPACE either.

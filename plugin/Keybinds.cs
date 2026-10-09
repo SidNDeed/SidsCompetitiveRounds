@@ -1379,6 +1379,37 @@ namespace CompetitiveRounds
             catch { return false; }
         }
 
+        /// <summary>F3: the join surface's own gate, the counterpart of
+        /// KeyboardSeat for a surface that may have no seat yet. An empty seat
+        /// is the pre-join keyboard prompt only when its vanilla face is not a
+        /// controller glyph; a seated controller never takes the keyboard
+        /// face. The vanilla face is read only while the localizer still owns
+        /// the text (an overridden surface shows our own words).</summary>
+        private static bool JoinSurfaceIsKeyboard(CharacterSelectionInstance c)
+        {
+            bool seated, controller;
+            try
+            {
+                seated = c.currentPlayer != null;
+                controller = seated && c.currentPlayer.data.input.inputType == GeneralInput.InputType.Controller;
+            }
+            catch { return false; }
+            string face = overridden.Contains(c) ? null : VanillaFace(c.joinObj);
+            return KeybindRules.PromptSurfaceIsKeyboard(seated, controller, face);
+        }
+
+        private static string VanillaFace(GameObject obj)
+        {
+            try
+            {
+                var ui = obj != null ? obj.GetComponentInChildren<UILocalizedString>(true) : null;
+                if (ui == null || !ui.enabled) return null;
+                object tmp = fText != null ? fText.GetValue(ui) : null;
+                return UIFactory.GetTmpText(tmp);
+            }
+            catch { return null; }
+        }
+
         private static void WriteLabel(GameObject obj, string text)
         {
             if (obj == null) return;
@@ -1406,7 +1437,7 @@ namespace CompetitiveRounds
         internal static void ApplyJoin(CharacterSelectionInstance c)
         {
             if (c == null) return;
-            if (!Override()) { if (overridden.Remove(c)) RestoreJoin(c); return; }
+            if (!Override() || !JoinSurfaceIsKeyboard(c)) { if (overridden.Remove(c)) RestoreJoin(c); return; }
             WriteLabel(c.joinObj, NativeUI.KeybindJoinPrompt());
             overridden.Add(c);
         }

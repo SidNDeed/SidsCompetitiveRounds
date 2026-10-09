@@ -599,3 +599,19 @@ def test_f2_an_unknown_edge_is_never_the_mouse():
     for m in re.finditer(r"&= ~EdgeAttribution\.Unknown|& ~EdgeAttribution\.Unknown", body):
         line = body[body.rfind("\n", 0, m.start()) + 1:body.find("\n", m.end())]
         assert "Mut ==" in line, line
+
+
+# ── Fix pass 1 F3: prompt overrides target keyboard surfaces only ───────────
+
+def test_f3_the_join_override_carries_the_keyboard_surface_gate():
+    join = _code(_src(KB), "internal static void ApplyJoin(CharacterSelectionInstance c)")
+    head = join.split("WriteLabel")[0]
+    assert "JoinSurfaceIsKeyboard(c)" in head and "Override()" in head
+    gate = _code(_src(KB), "private static bool JoinSurfaceIsKeyboard(CharacterSelectionInstance c)")
+    assert "KeybindRules.PromptSurfaceIsKeyboard(" in gate
+    assert "GeneralInput.InputType.Controller" in gate
+
+
+def test_f3_the_ready_override_keeps_its_seat_gate():
+    ready = _code(_src(KB), "internal static void ApplyReady(CharacterSelectionInstance c)")
+    assert "KeyboardSeat(c)" in ready.split("WriteLabel")[0]
