@@ -260,8 +260,8 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
 
 
 # 1-17 the build's; fix pass 1: 18 and 23 F2 (the tap detector), 19 F3
-# (prompt surface gate), 20 F5 (the loaded set).
-KEYBIND_MUTATIONS = tuple(range(1, 18)) + (18, 19, 20, 23)
+# (prompt surface gate), 20 F5 (the loaded set), 21 F6 (the commit).
+KEYBIND_MUTATIONS = tuple(range(1, 18)) + (18, 19, 20, 21, 23)
 
 
 def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
@@ -279,7 +279,7 @@ def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= KEYBIND_CASES, "the keybinds suite shrank to %d cases" % run
 
 
-KEYBIND_CASES = 83
+KEYBIND_CASES = 86
 
 
 @pytest.mark.parametrize("n", KEYBIND_MUTATIONS)

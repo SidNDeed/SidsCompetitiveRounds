@@ -622,3 +622,43 @@ def test_f5_the_loader_ends_on_the_resolved_conflict_free_set():
 def test_f3_the_ready_override_keeps_its_seat_gate():
     ready = _code(_src(KB), "internal static void ApplyReady(CharacterSelectionInstance c)")
     assert "KeyboardSeat(c)" in ready.split("WriteLabel")[0]
+
+
+# ── Fix pass 1 F6: an accepted change is one transaction ────────────────────
+# The rollback is KeybindRules.Commit, executed by the harness (T1 case 21:
+# a throw in the apply or in a config write puts every prior state back).
+# These assert every writer reaches it and the apply step does not swallow.
+
+def test_f6_every_writer_commits_through_the_transaction():
+    src = _src(KB)
+    write = _code(src, "internal static Refusal Write(int row, BindSource src, string via, out int other)")
+    assert len(re.findall(r"\bCommitRows\(", write)) == 1
+    assert "return Refusal.ApplyFailed;" in write
+    assert not re.search(r"\bbound\[row\]\s*=", write)
+    assert "entries[" not in write
+    for sig in ("internal static Refusal ResetRow(int row)", "internal static void ResetAll()"):
+        body = _code(src, sig)
+        assert len(re.findall(r"\bCommitRows\(", body)) == 1, sig
+        assert not re.search(r"\bbound\[[^\]]+\]\s*=", body), sig
+        assert not re.search(r"\bWrite\(", body), sig
+    commit = _code(src, "private static bool CommitRows(int[] rows, BindSource[] values, string via)")
+    assert len(re.findall(r"KeybindRules\.Commit\(", commit)) == 1
+    assert "NativeUI.KeybindApplyFailedText()" in commit
+    masked = mask_code(src)
+    assert len(re.findall(r"KeybindRules\.Commit\(", masked)) == 1
+    assert "ReapplyAllLiveSets(" not in masked
+
+
+def test_f6_the_apply_step_lets_a_throw_reach_the_commit():
+    body = _code(_src(KB), "internal static void ApplyAllLiveSetsOrThrow(BindSource[] cfg)")
+    assert not re.search(r"\b(try|catch)\b", body)
+    store = _code(_src(KB), "private sealed class LiveStore : IBindStore")
+    assert "ApplyAllLiveSetsOrThrow(b)" in store and not re.search(r"\bcatch\b", store)
+
+
+def test_f6_the_failure_is_told_in_every_locale():
+    key = "That change could not be applied, so every control was put back as it was."
+    assert ('I18n.Tr("%s")' % key) in _src(KBUI)
+    blocks = _blocks_of_catalogue()
+    for loc in ("ES", "RU", "UK", "SV"):
+        assert key in blocks[loc], loc

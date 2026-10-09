@@ -184,8 +184,16 @@ namespace CompetitiveRounds
                 case Refusal.MouseOnModRow: return I18n.Tr("The mod's own controls cannot take a mouse button.");
                 case Refusal.RescueKey: return I18n.Tr("F5 stays on the menu control.");
                 case Refusal.WheelModifier: return I18n.Tr("The two wheels cannot take a modifier key.");
+                case Refusal.ApplyFailed: return KeybindApplyFailedText();
                 default: return "";
             }
+        }
+
+        /// <summary>Fix pass 1 F6: a valid change whose commit threw; every
+        /// control was put back as it was.</summary>
+        internal static string KeybindApplyFailedText()
+        {
+            return I18n.Tr("That change could not be applied, so every control was put back as it was.");
         }
 
         /// <summary>The vanilla join prompt, naming the bound Jump control.</summary>

@@ -243,10 +243,11 @@ namespace CompetitiveRounds
                 Plugin.Log.LogWarning("[KEYBIND] loaded set is not conflict-free after resolution");
         }
 
-        /// <summary>The ONE writer of a binding (validate, write the registry
-        /// and the config, re-apply every live set, then the caller refreshes
-        /// the face - design section 2.3's order, all inside the handler).
-        /// Returns the refusal; Refusal.None means written.</summary>
+        /// <summary>The ONE writer of a binding (validate, then commit the
+        /// registry, the config and every live set together - fix pass 1 F6 -
+        /// then the caller refreshes the face). Returns the refusal;
+        /// Refusal.None means written, Refusal.ApplyFailed means the commit
+        /// threw and every prior state was put back.</summary>
         internal static Refusal Write(int row, BindSource src, string via, out int other)
         {
             other = -1;
@@ -262,15 +263,44 @@ namespace CompetitiveRounds
                 }
             }
             var before = bound[row];
-            bound[row] = src;
-            try { if (entries[row] != null) entries[row].Value = KeybindRules.FormatToken(src); }
-            catch (Exception e) { Plugin.Log.LogWarning("[KEYBIND] config write " + KeybindRules.RowIds[row] + ": " + e.Message); }
-            ReapplyAllLiveSets();
-            if (!before.Equals(src)) announceOwed[row] = true;
-            Revision++;
+            if (!CommitRows(new[] { row }, new[] { src }, via)) return Refusal.ApplyFailed;
             Plugin.Log.LogInfo("[KEYBIND] write " + KeybindRules.RowIds[row] + " = " + KeybindRules.FormatToken(src)
                 + " (was " + KeybindRules.FormatToken(before) + ") via " + via);
             return Refusal.None;
+        }
+
+        /// <summary>BepInEx entries plus the registered action sets: the
+        /// store every commit lands in.</summary>
+        private sealed class LiveStore : IBindStore
+        {
+            public string ReadEntry(int row) { return entries[row] != null ? entries[row].Value : null; }
+            public void WriteEntry(int row, string token) { if (entries[row] != null) entries[row].Value = token; }
+            public void ApplyAll(BindSource[] b) { ApplyAllLiveSetsOrThrow(b); }
+        }
+
+        private static readonly LiveStore liveStore = new LiveStore();
+
+        /// <summary>F6: every accepted write, unbind, per-row reset and the
+        /// reset-all go through here. On success the announce flags, the
+        /// revision (the UI repaints from it) and the prompts follow; on
+        /// failure KeybindRules.Commit has put the registry, the entries and
+        /// the live sets back, and the player is told once.</summary>
+        private static bool CommitRows(int[] rows, BindSource[] values, string via)
+        {
+            var before = BoundSnapshot();
+            string failure;
+            bool ok = KeybindRules.Commit(bound, rows, values, liveStore, out failure);
+            Revision++;
+            if (!ok)
+            {
+                Plugin.Log.LogWarning("[KEYBIND] commit via " + via + " failed, prior state restored: " + failure);
+                try { CompetitiveUI.ShowNotification(NativeUI.KeybindApplyFailedText(), new Color(1f, 0.55f, 0.45f), 5f); } catch { }
+                return false;
+            }
+            foreach (int r in rows) if (!before[r].Equals(bound[r])) announceOwed[r] = true;
+            try { ReadyPromptPatches.RefreshAll(); } catch (Exception e) { Plugin.Log.LogWarning("[KEYBIND] prompt refresh: " + e.Message); }
+            Plugin.Log.LogInfo("[KEYBIND] re-applied " + LiveSetCount + " live set(s)");
+            return true;
         }
 
         /// <summary>_x: the only unbind.</summary>
@@ -280,34 +310,33 @@ namespace CompetitiveRounds
             Write(row, BindSource.None, "unbind", out other);
         }
 
-        /// <summary>_r: back to today's key, no confirm.</summary>
+        /// <summary>_r: back to today's key, no confirm. A default can collide
+        /// with a row the player moved onto it: the per-row reset frees that
+        /// row rather than refusing the reset, in the SAME commit.</summary>
         internal static Refusal ResetRow(int row)
         {
-            int other;
             if (row < 0 || row >= KeybindRules.RowCount || !RowsWritable) return Refusal.NoneAsBind;
             var d = KeybindRules.Default(row);
-            // A default can collide with a row the player moved onto it:
-            // the per-row reset frees that row rather than refusing the reset.
+            var rows = new List<int>();
+            var values = new List<BindSource>();
             for (int r = 0; r < KeybindRules.RowCount; r++)
-                if (r != row && KeybindRules.Overlap(d, bound[r], CodesForKey))
-                    Write(r, BindSource.None, "reset of " + KeybindRules.RowIds[row] + " freed it", out other);
-            return Write(row, d, "reset", out other);
+                if (r != row && KeybindRules.Overlap(d, bound[r], CodesForKey)) { rows.Add(r); values.Add(BindSource.None); }
+            rows.Add(row);
+            values.Add(d);
+            if (!CommitRows(rows.ToArray(), values.ToArray(), "reset of " + KeybindRules.RowIds[row])) return Refusal.ApplyFailed;
+            Plugin.Log.LogInfo("[KEYBIND] reset " + KeybindRules.RowIds[row] + " = " + KeybindRules.FormatToken(d)
+                + (rows.Count > 1 ? " (freed " + string.Join(",", rows.Take(rows.Count - 1).Select(x => KeybindRules.RowIds[x]).ToArray()) + ")" : ""));
+            return Refusal.None;
         }
 
-        /// <summary>Reset all, confirmed: every row to its default, applied once.</summary>
+        /// <summary>Reset all, confirmed: every row to its default, one commit.</summary>
         internal static void ResetAll()
         {
             if (!RowsWritable) return;
-            for (int i = 0; i < KeybindRules.RowCount; i++)
-            {
-                var d = KeybindRules.Default(i);
-                if (!bound[i].Equals(d)) announceOwed[i] = true;
-                bound[i] = d;
-                try { if (entries[i] != null) entries[i].Value = KeybindRules.FormatToken(d); } catch { }
-            }
-            ReapplyAllLiveSets();
-            Revision++;
-            Plugin.Log.LogInfo("[KEYBIND] reset all: every row at its default");
+            var rows = new int[KeybindRules.RowCount];
+            var values = new BindSource[KeybindRules.RowCount];
+            for (int i = 0; i < KeybindRules.RowCount; i++) { rows[i] = i; values[i] = KeybindRules.Default(i); }
+            if (CommitRows(rows, values, "reset all")) Plugin.Log.LogInfo("[KEYBIND] reset all: every row at its default");
         }
 
         // =================================================================
@@ -537,22 +566,20 @@ namespace CompetitiveRounds
 
         internal static int LiveSetCount { get { liveSets.RemoveAll(w => !w.IsAlive); return liveSets.Count; } }
 
-        /// <summary>Every accepted capture, every per-row reset and the
-        /// reset-all confirm call this before they return: two local sets in
-        /// a 2v2 lobby change together, in one synchronous call.</summary>
-        internal static void ReapplyAllLiveSets()
+        /// <summary>Every commit (KeybindRules.Commit through LiveStore)
+        /// applies the whole set here: two local sets in a 2v2 lobby change
+        /// together, in one synchronous call. The first set that throws ends
+        /// the call with that exception, so the commit can put every set
+        /// back (fix pass 1 F6) instead of leaving some changed.</summary>
+        internal static void ApplyAllLiveSetsOrThrow(BindSource[] cfg)
         {
             liveSets.RemoveAll(w => !w.IsAlive);
-            int n = 0;
             foreach (var w in liveSets.ToArray())
             {
                 var s = w.Target as PlayerActions;
                 if (s == null) continue;
-                try { ApplyGameBindings(s); n++; }
-                catch (Exception e) { Plugin.Log.LogWarning("[KEYBIND] apply: " + e.Message); }
+                ApplyGameBindings(s, cfg, live);
             }
-            try { ReadyPromptPatches.RefreshAll(); } catch (Exception e) { Plugin.Log.LogWarning("[KEYBIND] prompt refresh: " + e.Message); }
-            Plugin.Log.LogInfo("[KEYBIND] re-applied " + n + " live set(s)");
         }
 
         internal static void ApplyGameBindings(PlayerActions set)
@@ -1451,8 +1478,8 @@ namespace CompetitiveRounds
             overridden.Add(c);
         }
 
-        /// <summary>From ReapplyAllLiveSets: the row reset and reset-all
-        /// restore the prompts for free.</summary>
+        /// <summary>From Keybinds.CommitRows after every successful commit:
+        /// the row reset and reset-all restore the prompts for free.</summary>
         internal static void RefreshAll()
         {
             CharacterSelectionInstance[] all;

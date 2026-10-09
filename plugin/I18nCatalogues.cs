@@ -3516,6 +3516,7 @@ namespace CompetitiveRounds
             ["The two wheels cannot take a modifier key."] = "Las dos ruedas no admiten una tecla modificadora.",
             ["Controls cannot be changed on this game build; every control keeps its default."] = "Los controles no se pueden cambiar en esta versión del juego; cada control mantiene su valor predeterminado.",
             ["Your controls changed: {0}"] = "Tus controles cambiaron: {0}",
+            ["That change could not be applied, so every control was put back as it was."] = "Ese cambio no se pudo aplicar, así que cada control volvió a quedar como estaba.",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -6998,6 +6999,7 @@ namespace CompetitiveRounds
             ["The two wheels cannot take a modifier key."] = "Двум колёсам нельзя назначить клавишу-модификатор.",
             ["Controls cannot be changed on this game build; every control keeps its default."] = "В этой сборке игры управление изменить нельзя; каждый элемент управления остаётся по умолчанию.",
             ["Your controls changed: {0}"] = "Ваше управление изменено: {0}",
+            ["That change could not be applied, so every control was put back as it was."] = "Это изменение не удалось применить, поэтому всё управление возвращено как было.",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -10406,6 +10408,7 @@ namespace CompetitiveRounds
             ["The two wheels cannot take a modifier key."] = "Двом колесам не можна призначити клавішу-модифікатор.",
             ["Controls cannot be changed on this game build; every control keeps its default."] = "У цій збірці гри керування змінити не можна; кожен елемент керування лишається за замовчуванням.",
             ["Your controls changed: {0}"] = "Ваше керування змінено: {0}",
+            ["That change could not be applied, so every control was put back as it was."] = "Цю зміну не вдалося застосувати, тож усе керування повернуто як було.",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -13814,6 +13817,7 @@ namespace CompetitiveRounds
             ["The two wheels cannot take a modifier key."] = "De två hjulen kan inte ta en modifierartangent.",
             ["Controls cannot be changed on this game build; every control keeps its default."] = "Kontrollerna kan inte ändras i den här versionen av spelet; varje kontroll behåller sin standard.",
             ["Your controls changed: {0}"] = "Dina kontroller ändrades: {0}",
+            ["That change could not be applied, so every control was put back as it was."] = "Ändringen kunde inte tillämpas, så varje kontroll återställdes som den var.",
         };
     }
 }

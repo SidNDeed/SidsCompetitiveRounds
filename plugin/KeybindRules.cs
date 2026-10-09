@@ -26,7 +26,22 @@ namespace CompetitiveRounds
     }
 
     /// <summary>Why a check refused a binding (design section 2.6).</summary>
-    internal enum Refusal { None, Overlap, Reserved, RescueKey, MouseOnModRow, NoneAsBind, TypesText, WheelModifier }
+    /// ApplyFailed (fix pass 1 F6): the write was valid but committing it
+    /// threw, and every prior state was put back.
+    internal enum Refusal { None, Overlap, Reserved, RescueKey, MouseOnModRow, NoneAsBind, TypesText, WheelModifier, ApplyFailed }
+
+    /// <summary>Fix pass 1 F6: where an accepted write lands. Keybinds
+    /// implements it over the BepInEx entries and the registered action
+    /// sets; the harness with a fake that throws on a chosen step.</summary>
+    internal interface IBindStore
+    {
+        /// <summary>The persisted token of a row.</summary>
+        string ReadEntry(int row);
+        void WriteEntry(int row, string token);
+        /// <summary>Apply the whole set to every live action set; throws on
+        /// the first set that fails.</summary>
+        void ApplyAll(BindSource[] bound);
+    }
 
     /// <summary>What one capture-poll input means (design section 2.5).</summary>
     internal enum Gesture { Ignore, Bind, Cancel }
@@ -512,6 +527,46 @@ namespace CompetitiveRounds
                 }
             }
             return eff;
+        }
+
+        /// <summary>Fix pass 1 F6: one accepted write or reset, all or nothing.
+        /// The rows are written into <paramref name="bound"/> (the registry),
+        /// persisted, then applied to every live set. If any step throws,
+        /// every registry row, every persisted entry the commit touched and
+        /// every live set are put back as they were and false is returned;
+        /// <paramref name="failure"/> names what threw (and a restore step
+        /// that threw too).</summary>
+        internal static bool Commit(BindSource[] bound, int[] rows, BindSource[] values, IBindStore store, out string failure)
+        {
+            failure = null;
+            var before = (BindSource[])bound.Clone();
+            var tokens = new string[rows.Length];
+            for (int k = 0; k < rows.Length; k++)
+            {
+                try { tokens[k] = store.ReadEntry(rows[k]); }
+                catch { tokens[k] = FormatToken(before[rows[k]]); }
+            }
+            try
+            {
+                for (int k = 0; k < rows.Length; k++) bound[rows[k]] = values[k];
+                for (int k = 0; k < rows.Length; k++) store.WriteEntry(rows[k], FormatToken(values[k]));
+                store.ApplyAll(bound);
+                return true;
+            }
+            catch (Exception e)
+            {
+                failure = e.GetType().Name + ": " + e.Message;
+                if (Mut == 21) return true;   // a22f80ed: each step's own catch, success reported, nothing put back
+                Array.Copy(before, bound, bound.Length);
+                for (int k = 0; k < rows.Length; k++)
+                {
+                    try { store.WriteEntry(rows[k], tokens[k]); }
+                    catch (Exception e2) { failure += "; restoring " + RowIds[rows[k]] + ": " + e2.Message; }
+                }
+                try { store.ApplyAll(bound); }
+                catch (Exception e3) { failure += "; restoring the live sets: " + e3.Message; }
+                return false;
+            }
         }
 
         /// <summary>True when no two rows of the set conflict and every bound
@@ -1040,6 +1095,24 @@ namespace CompetitiveRounds
                   && ResolveNotes(handEdited())[0].EndsWith("unbound", StringComparison.Ordinal),
                   string.Join(" | ", ResolveNotes(handEdited()).ToArray()));
 
+            // -- fix pass 1 F6: an accepted write is all or nothing ------------------
+            // A two-row write (a reset that frees a row) whose live-set apply
+            // throws, and one whose second config write throws: the registry,
+            // the entries and the live sets equal the state before, and the
+            // commit reports failure. Mutation 21 is a22f80ed's per-step catches.
+            MutCase(r, 21, "KeybindRules.Commit", "a throw in the apply or in a config write puts every prior state back and reports failure",
+                    () => CommitRestores(1, -1) && CommitRestores(0, Jump),
+                    () =>
+                    {
+                        var reg = Defaults();
+                        var store = new FakeStore(Defaults());
+                        string f;
+                        bool ok = Commit(reg, new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f);
+                        var want = Defaults(); want[QuickChat] = K("G"); want[Jump] = K("K");
+                        return ok && f == null && SameSet(reg, want) && StoreMatches(store, want) && store.Applies == 1;
+                    },
+                    () => "apply-throws=" + CommitRestores(1, -1) + " write-throws=" + CommitRestores(0, Jump));
+
             // -- fix pass 1 F3: prompt overrides target keyboard surfaces only -------
             const string southJoin = "Press\n[<sprite name=BUTTON_SOUTH>]\nto join", spaceJoin = "Press\n[SPACE]\nto join";
             const string ukSouthJoin = "Натисніть\n[<sprite name=BUTTON_SOUTH>]\nщоб приєднатися";
@@ -1099,6 +1172,58 @@ namespace CompetitiveRounds
             Check(r, "KeybindRules.ParseToken: none parses to the unbound source and a mouse axis does not parse",
                   ParseToken("none", out ns) && ns.Kind == BindKind.None && !ParseToken("mouse:NegativeX", out ns) && !ParseToken("key:None", out ns),
                   "ok");
+        }
+
+        /// <summary>F6's fake store: entries in a dictionary, live sets as the
+        /// last applied copy; ApplyAll throws on the call numbered
+        /// <see cref="ThrowOnApply"/> (1-based; 0 never).</summary>
+        private sealed class FakeStore : IBindStore
+        {
+            internal readonly string[] Entries = new string[RowCount];
+            internal BindSource[] Applied;
+            internal int Applies, ThrowOnApply, ThrowOnWriteRow = -1;
+            internal FakeStore(BindSource[] start)
+            {
+                for (int i = 0; i < RowCount; i++) Entries[i] = FormatToken(start[i]);
+                Applied = (BindSource[])start.Clone();
+            }
+            public string ReadEntry(int row) { return Entries[row]; }
+            public void WriteEntry(int row, string token)
+            {
+                if (row == ThrowOnWriteRow) { ThrowOnWriteRow = -1; throw new InvalidOperationException("config write"); }
+                Entries[row] = token;
+            }
+            public void ApplyAll(BindSource[] b)
+            {
+                Applies++;
+                if (Applies == ThrowOnApply) throw new InvalidOperationException("live set apply");
+                Applied = (BindSource[])b.Clone();
+            }
+        }
+
+        private static bool SameSet(BindSource[] a, BindSource[] b)
+        {
+            if (a == null || b == null || a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++) if (!a[i].Equals(b[i])) return false;
+            return true;
+        }
+
+        private static bool StoreMatches(FakeStore s, BindSource[] set)
+        {
+            for (int i = 0; i < RowCount; i++) if (s.Entries[i] != FormatToken(set[i])) return false;
+            return SameSet(s.Applied, set);
+        }
+
+        /// <summary>A failed commit: false, and the registry, the entries and
+        /// the live sets all equal the state before it.</summary>
+        private static bool CommitRestores(int throwOnApply, int throwOnWriteRow)
+        {
+            var reg = Defaults();
+            var start = Defaults();
+            var store = new FakeStore(start) { ThrowOnApply = throwOnApply, ThrowOnWriteRow = throwOnWriteRow };
+            string f;
+            bool ok = Commit(reg, new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f);
+            return !ok && f != null && SameSet(reg, start) && StoreMatches(store, start);
         }
 
         private static List<string> ResolveNotes(BindSource[] parsed)
