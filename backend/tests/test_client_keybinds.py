@@ -754,10 +754,21 @@ def test_f4_the_controls_help_says_controls_can_be_moved():
 def _board_ids_in_rules():
     body = mask_code(_src(RULES))
     a = body.index("private static readonly object[][] BoardCaps =")
-    b = body.index("};", body.index("{", a) + 1)
-    while body.count("{", a, b) != body.count("}", a, b):
-        b = body.index("};", b + 1)
-    raw = strip_comments_only(_src(RULES))[a:b]
+    o = body.index("{", a)
+    # walk the brace depth from the table's opening brace to the brace that
+    # closes it, on the masked text (a brace in a string is not structure);
+    # the scan ends at the table end and never past it
+    depth, b = 0, -1
+    for i in range(o, len(body)):
+        if body[i] == "{":
+            depth += 1
+        elif body[i] == "}":
+            depth -= 1
+            if depth == 0:
+                b = i
+                break
+    assert b > o and body[b + 1:b + 2] == ";", "BoardCaps table end not found"
+    raw = strip_comments_only(_src(RULES))[o:b + 1]
     return re.findall(r'new object\[\] \{ "([^"]*)",', raw)
 
 
