@@ -563,3 +563,39 @@ def test_q1_f5_rescue_read_survives_beside_the_bound_menu_row():
     assert "menuF5 = Input.GetKeyDown(KeyCode.F5) && !Keybinds.CaptureOwnsInput;" in src
     assert "menuRow = Keybinds.Down(KeybindRules.MenuToggle);" in src
     assert re.search(r"if \(menuF5 \|\| menuRow\)\s*\{\s*CompetitiveUI\.ToggleOverlay\(\);", src)
+
+
+# ── Fix pass 1 F2: the tap detector attributes every edge ───────────────────
+# The decision lives in KeybindRules.TapDetector, which the harness executes
+# (T1 cases 18 and 23, the simultaneous-edge and the Unknown legs); these
+# assert the production wiring feeds it the observation it needs.
+
+def test_f2_the_detector_is_the_harness_executed_one():
+    masked = mask_code(_src(KB))
+    assert not re.search(r"\bclass\s+TapDetector\b", masked)
+    assert "new KeybindRules.TapDetector()" in masked
+    rules = mask_code(_src(PLUGIN / "KeybindRules.cs"))
+    assert len(re.findall(r"\bclass\s+TapDetector\b", rules)) == 1
+
+
+def test_f2_the_chat_tap_scans_every_keycode_member():
+    body = _code(_src(KB), "internal static bool ChatChannelTapped(bool chatInputOpen)")
+    assert "chatTap.Step(realInput, KeyCodesFor(ChatChannel), FullKeyScan());" in _ws(body)
+    assert "ScanSet()" not in body
+    full = _code(_src(KB), "internal static int[] FullKeyScan()")
+    assert "Enum.GetValues(typeof(KeyCode))" in full
+
+
+def test_f2_the_real_input_carries_the_typed_text_channel():
+    body = _text(_src(KB), "private sealed class RealInput : IFrameInput")
+    assert "return Input.inputString;" in body
+    assert "AnyMouseDown" not in body
+
+
+def test_f2_an_unknown_edge_is_never_the_mouse():
+    body = _text(_src(PLUGIN / "KeybindRules.cs"),
+                 "internal static EdgeAttribution Attribute(IFrameInput io, int[] alias, int[] scan)")
+    # every Unknown is set or cleared only under a named mutation
+    for m in re.finditer(r"&= ~EdgeAttribution\.Unknown|& ~EdgeAttribution\.Unknown", body):
+        line = body[body.rfind("\n", 0, m.start()) + 1:body.find("\n", m.end())]
+        assert "Mut ==" in line, line

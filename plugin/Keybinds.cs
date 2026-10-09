@@ -914,80 +914,56 @@ namespace CompetitiveRounds
         // 2.5 - the ChatChannel physical tap detector
         // =================================================================
 
-        /// <summary>One frame of physical input, so the detector runs on the
-        /// real stream in production and on a scripted one in T2 case j.</summary>
-        internal interface IFrameInput
-        {
-            bool KeyDown(int code);
-            bool KeyUp(int code);
-            bool AnyKeyDown();
-            bool AnyMouseDown();     // a same-frame mouse EDGE, never held state
-            bool AnyMouseHeld();     // the revision-3 shape, mutation 107's
-            float Now();
-            bool Focused();
-        }
-
+        /// <summary>The real frame source (KeybindRules.IFrameInput). KeyDown
+        /// is Input.GetKeyDown for any KeyCode, mouse buttons included
+        /// (Mouse0-Mouse6); TypedText is Input.inputString, the independent
+        /// keyboard channel that carries characters from keys no KeyCode
+        /// names. A key read that throws counts as a key edge and a thrown
+        /// inputString as typed text; a mouse read that throws counts as no
+        /// edge: unreadable input is attributed Key or Unknown, never the
+        /// mouse.</summary>
         private sealed class RealInput : IFrameInput
         {
-            public bool KeyDown(int code) { return KeyRead(code, Mode.Edge) == Read.Down; }
+            public bool KeyDown(int code)
+            {
+                var r = KeyRead(code, Mode.Edge);
+                return r == Read.Down || (r == Read.Unreadable && !KeybindRules.IsMouseCode(code));
+            }
             public bool KeyUp(int code) { try { return Input.GetKeyUp((KeyCode)code); } catch { return false; } }
             public bool AnyKeyDown() { try { return Input.anyKeyDown; } catch { return true; } }
-            public bool AnyMouseDown() { for (int n = 0; n < 7; n++) if (MouseDown(n)) return true; return false; }
+            public string TypedText() { try { return Input.inputString; } catch { return "?"; } }
             public bool AnyMouseHeld() { for (int n = 0; n < 7; n++) if (MouseHeld(n)) return true; return false; }
             public float Now() { return Time.unscaledTime; }
             public bool Focused() { return Application.isFocused; }
         }
 
-        internal sealed class TapDetector
-        {
-            internal bool Held, Clean;
-            internal float DownAt;
+        private static int[] fullKeyScan;
 
-            /// <summary>One frame. True on the release that is a clean tap.
-            /// The disarm keeps key IDENTITY: on an armed frame carrying a
-            /// fresh edge, a KeyCode outside the row's alias set disarms; an
-            /// edge from the alias set or a same-frame mouse click does not;
-            /// an edge nothing can attribute disarms (design section 2.5).</summary>
-            internal bool Step(IFrameInput io, int[] alias, int[] scan)
+        /// <summary>F2: the detector's scan is every member of Unity's KeyCode
+        /// enum - every key, mouse button and joystick button the legacy input
+        /// can report, the set Input.anyKeyDown is computed over - not
+        /// InControl's 127-code table. Resolved once.</summary>
+        internal static int[] FullKeyScan()
+        {
+            if (fullKeyScan != null) return fullKeyScan;
+            var seen = new HashSet<int>();
+            var l = new List<int>();
+            try
             {
-                bool fire = false;
-                bool aliasDown = false, aliasUp = false;
-                foreach (int c in alias) { if (io.KeyDown(c)) aliasDown = true; if (io.KeyUp(c)) aliasUp = true; }
-                if (Held && Clean && io.AnyKeyDown())
+                foreach (var v in Enum.GetValues(typeof(KeyCode)))
                 {
-                    bool attributed = aliasDown, other = false;
-                    var aliasSet = new HashSet<int>(alias);
-                    foreach (int c in scan)
-                    {
-                        if (aliasSet.Contains(c) || !io.KeyDown(c)) continue;
-                        other = true;
-                        break;
-                    }
-                    if (other) Clean = false;
-                    else if (!attributed)
-                    {
-                        bool mouse = KeybindRules.Mut == 107 ? io.AnyMouseHeld() : io.AnyMouseDown();
-                        if (!mouse) Clean = false;
-                    }
+                    int c = (int)(KeyCode)v;
+                    if (c > 0 && seen.Add(c)) l.Add(c);
                 }
-                if (aliasDown && !Held)
-                {
-                    Held = true;
-                    Clean = true;
-                    DownAt = io.Now();
-                }
-                if (aliasUp && Held)
-                {
-                    fire = Clean && io.Now() - DownAt < 0.6f;
-                    Held = false;
-                    Clean = false;
-                }
-                if (!io.Focused() && (Held || Clean)) { Held = false; Clean = false; }
-                return fire;
             }
+            catch (Exception e) { Plugin.Log.LogWarning("[KEYBIND] KeyCode enumeration: " + e.Message); }
+            foreach (int c in ScanSet()) if (seen.Add(c)) l.Add(c);
+            for (int c = KeybindRules.KeyCodeMouse0; c <= KeybindRules.KeyCodeMouse6; c++) if (seen.Add(c)) l.Add(c);
+            fullKeyScan = l.ToArray();
+            return fullKeyScan;
         }
 
-        private static readonly TapDetector chatTap = new TapDetector();
+        private static readonly KeybindRules.TapDetector chatTap = new KeybindRules.TapDetector();
         private static readonly RealInput realInput = new RealInput();
 
         /// <summary>The chat box opened or closed: drop any half-seen hold.</summary>
@@ -999,7 +975,7 @@ namespace CompetitiveRounds
         {
             if (CaptureOwnsInput) { chatTap.Held = chatTap.Clean = false; return false; }
             if (!chatInputOpen) { chatTap.Held = chatTap.Clean = false; return false; }
-            return chatTap.Step(realInput, KeyCodesFor(ChatChannel), ScanSet());
+            return chatTap.Step(realInput, KeyCodesFor(ChatChannel), FullKeyScan());
         }
 
         // =================================================================
@@ -1260,42 +1236,6 @@ namespace CompetitiveRounds
             CaseJ();
         }
 
-        private sealed class ScriptInput : IFrameInput
-        {
-            internal HashSet<int> Down = new HashSet<int>(), Up = new HashSet<int>();
-            internal bool Any, MouseEdge, MouseHeldNow;
-            internal float T;
-            public bool KeyDown(int code) { return Down.Contains(code); }
-            public bool KeyUp(int code) { return Up.Contains(code); }
-            public bool AnyKeyDown() { return Any; }
-            public bool AnyMouseDown() { return MouseEdge; }
-            public bool AnyMouseHeld() { return MouseHeldNow; }
-            public float Now() { return T; }
-            public bool Focused() { return true; }
-            internal void Frame(float t, int[] down, int[] up, bool any, bool mouseEdge, bool mouseHeld)
-            {
-                T = t; Down = new HashSet<int>(down ?? new int[0]); Up = new HashSet<int>(up ?? new int[0]);
-                Any = any; MouseEdge = mouseEdge; MouseHeldNow = mouseHeld;
-            }
-        }
-
-        /// <summary>One scripted tap: alt down, an optional middle frame,
-        /// alt up. True when the release rotated the channel.</summary>
-        private static bool ScriptTap(int[] alias, int[] scan, int[] midDown, bool midAny, bool midMouseEdge, bool midMouseHeld)
-        {
-            var d = new TapDetector();
-            var io = new ScriptInput();
-            io.Frame(0f, new[] { 308 }, null, true, false, midMouseHeld);
-            d.Step(io, alias, scan);
-            if (midDown != null || midAny || midMouseEdge)
-            {
-                io.Frame(0.1f, midDown, null, midAny, midMouseEdge, midMouseHeld);
-                d.Step(io, alias, scan);
-            }
-            io.Frame(0.2f, null, new[] { 308 }, false, false, false);
-            return d.Step(io, alias, scan);
-        }
-
         private static void CaseJ()
         {
             var failed = ResolveMapping("sourse");    // forced to fail through the seam
@@ -1307,21 +1247,33 @@ namespace CompetitiveRounds
                 var want = KeybindRules.StaticDefaults[i];
                 if (!new HashSet<int>(KeyCodesFor(failed, i)).SetEquals(want)) defaults = false;
             }
-            int[] alias = KeyCodesFor(failed, ChatChannel), scan = ScanSet(failed);
-            bool tap = ScriptTap(alias, scan, null, false, false, false);
-            bool jDisarms = !ScriptTap(alias, scan, new[] { (int)KeyCode.J }, true, false, false);
-            bool clickKeeps = ScriptTap(alias, scan, null, true, true, true);
-            bool unattributed = !ScriptTap(alias, scan, null, true, false, false);
-            bool heldMouseLeg = !ScriptTap(alias, scan, null, true, false, true);   // LMB held from before, no same-frame edge
+            // The production scan (every KeyCode member), not a table: F2.
+            int[] alias = KeyCodesFor(failed, ChatChannel), scan = FullKeyScan();
+            const int Menu = (int)KeyCode.Menu, M0 = (int)KeyCode.Mouse0;
+            EdgeAttribution m;
+            bool tap = KeybindRules.ScriptTap(alias, scan, null, false, "", false, out m);
+            bool jDisarms = !KeybindRules.ScriptTap(alias, scan, new[] { (int)KeyCode.J }, true, "j", false, out m)
+                            && m == EdgeAttribution.Key;
+            bool clickKeeps = KeybindRules.ScriptTap(alias, scan, new[] { M0 }, true, "", true, out m) && m == EdgeAttribution.Mouse;
+            // the simultaneous edge, ONE step: a key and a click are attributed to both
+            bool simBoth = !KeybindRules.ScriptTap(alias, scan, new[] { Menu, M0 }, true, "", true, out m)
+                           && m == (EdgeAttribution.Key | EdgeAttribution.Mouse);
+            // the unscannable edge: text no KeyCode names, beside a click, is Unknown
+            bool unknownLeg = !KeybindRules.ScriptTap(alias, scan, new[] { M0 }, true, "é", true, out m)
+                              && (m & EdgeAttribution.Unknown) != 0;
+            bool unattributed = !KeybindRules.ScriptTap(alias, scan, null, true, "", false, out m) && m == EdgeAttribution.Unknown;
+            bool heldMouseLeg = !KeybindRules.ScriptTap(alias, scan, null, true, "", true, out m);   // LMB held from before, no same-frame edge
             bool f5 = KeyCodesFor(failed, MenuToggle).Contains(KeybindRules.CodeF5);
             bool readOnly = !failed.Ready;   // RowsWritable reads the same flag on the live state
             stCaseOk["j-mouse"] = clickKeeps;
-            stCaseOk["j-unattributed"] = unattributed && heldMouseLeg;
-            Case("j failed validation: defaults in force, the tap rotates on LeftAlt, J disarms, a same-frame click keeps it, an unattributable edge disarms (also with LMB held), F5 answers, rows read-only",
-                 notReady && defaults && tap && jDisarms && clickKeeps && unattributed && heldMouseLeg && f5 && readOnly,
+            stCaseOk["j-unattributed"] = unattributed && heldMouseLeg && unknownLeg;
+            stCaseOk["j-simultaneous"] = simBoth;
+            Case("j failed validation: defaults in force, the tap rotates on LeftAlt, J disarms, a same-frame click keeps it, a key and a click in one frame are attributed to both, an unnamed edge is Unknown (also beside a click and with LMB held), F5 answers, rows read-only",
+                 notReady && defaults && tap && jDisarms && clickKeeps && simBoth && unknownLeg && unattributed && heldMouseLeg && f5 && readOnly,
                  "notReady=" + notReady + " defaults=" + defaults + " tap=" + tap + " J=" + jDisarms + " click=" + clickKeeps
+                 + " simultaneous=" + simBoth + " unknown+click=" + unknownLeg
                  + " unattributed=" + unattributed + " heldMouse=" + heldMouseLeg + " f5=" + f5 + " readOnly=" + readOnly
-                 + " failure=" + failed.Failure);
+                 + " scan=" + scan.Length + " failure=" + failed.Failure);
         }
 
         /// <summary>The mutation battery's own verdict: each mutation must

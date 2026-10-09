@@ -254,9 +254,10 @@ namespace CompetitiveRounds
                 PublishChatMuteState();
             }
             // Item 17: the ChatChannel tap is read from the PHYSICAL key stream
-            // once a frame (Keybinds.TapDetector), not from IMGUI events: the
-            // disarm keeps key identity, so a key held with it, a modifier use
-            // or an unattributable edge never rotates the channel.
+            // once a frame (KeybindRules.TapDetector over every KeyCode member
+            // plus the typed text), not from IMGUI events: a key pressed with
+            // it - also in the same frame as a click - a modifier use or an
+            // edge no KeyCode names never rotates the channel.
             try { if (Keybinds.ChatChannelTapped(chatInputOpen)) CycleChatSendChannel(); }
             catch (Exception e) { VanillaFixSupport.DiagLimited("KeybindChatTap", "[KEYBIND] chat tap: " + e.Message, 3); }
             NativeUI.Tick();

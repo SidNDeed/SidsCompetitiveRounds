@@ -259,7 +259,8 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= 44, "the SettingsModel suite shrank to %d cases" % run
 
 
-KEYBIND_MUTATIONS = 17
+# 1-17 the build's; 18 and 23 fix pass 1 F2 (the tap detector).
+KEYBIND_MUTATIONS = tuple(range(1, 18)) + (18, 23)
 
 
 def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
@@ -277,10 +278,10 @@ def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= KEYBIND_CASES, "the keybinds suite shrank to %d cases" % run
 
 
-KEYBIND_CASES = 69
+KEYBIND_CASES = 76
 
 
-@pytest.mark.parametrize("n", range(1, KEYBIND_MUTATIONS + 1))
+@pytest.mark.parametrize("n", KEYBIND_MUTATIONS)
 def test_each_keybind_mutation_reds_its_assertion_and_keeps_its_control(harness_run, n):
     """Every T1 mutation: unmutated green, the mutation reds the guarded
     assertion, the control stays green under it (#391)."""

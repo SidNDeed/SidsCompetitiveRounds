@@ -37,6 +37,36 @@ namespace CompetitiveRounds
     /// same false, and only one of them means the player did not act.</summary>
     internal enum Read { Down, Up, Unreadable }
 
+    /// <summary>What one frame's input edges were attributed to by the
+    /// ChatChannel tap detector (item 17 fix pass 1, F2). Flags: one frame
+    /// can carry a key edge AND a mouse edge, and both are recorded. Unknown
+    /// is an edge the platform reported that no KeyCode names - it is never
+    /// read as the mouse.</summary>
+    [Flags]
+    internal enum EdgeAttribution { None = 0, Alias = 1, Key = 2, Mouse = 4, Unknown = 8 }
+
+    /// <summary>One frame of physical input, so the tap detector runs on the
+    /// real stream in production (Keybinds) and on a scripted one in the
+    /// harness and in T2 case j.</summary>
+    internal interface IFrameInput
+    {
+        /// <summary>The KeyCode ordinal went down this frame (Input.GetKeyDown).
+        /// Mouse buttons are KeyCode.Mouse0-Mouse6 (323-329).</summary>
+        bool KeyDown(int code);
+        bool KeyUp(int code);
+        /// <summary>Input.anyKeyDown: some key or button went down.</summary>
+        bool AnyKeyDown();
+        /// <summary>Input.inputString: the text this frame's keys typed. A
+        /// second, independent keyboard channel: it carries characters from
+        /// keys no KeyCode names.</summary>
+        string TypedText();
+        /// <summary>Held mouse state; read only by mutation 23 (revision 3's
+        /// held-button shape).</summary>
+        bool AnyMouseHeld();
+        float Now();
+        bool Focused();
+    }
+
     /// <summary>
     /// Item 17 (v1.41.0, the keybind system): every decision the keybind
     /// system makes that needs no Unity, so tools/client-rules-harness can
@@ -470,6 +500,144 @@ namespace CompetitiveRounds
             return !(jump.Kind == BindKind.Key && jump.Value == KeySpace);
         }
 
+        // -- the ChatChannel tap detector (design section 2.5, fix pass 1 F2) --
+
+        /// <summary>Unity's KeyCode.Mouse0 and KeyCode.Mouse6: the seven mouse
+        /// buttons are KeyCodes too, so one scan of the KeyCode members sees a
+        /// keyboard edge and a mouse edge in the same frame, each by identity.</summary>
+        internal const int KeyCodeMouse0 = 323, KeyCodeMouse6 = 329;
+
+        internal static bool IsMouseCode(int code) { return code >= KeyCodeMouse0 && code <= KeyCodeMouse6; }
+
+        /// <summary>The tap detector's state machine. Unity-free: production
+        /// feeds it Keybinds' real input, the harness a scripted one.</summary>
+        internal sealed class TapDetector
+        {
+            internal bool Held, Clean;
+            internal float DownAt;
+            /// <summary>What the most recent Step attributed its edges to.</summary>
+            internal EdgeAttribution Last;
+
+            /// <summary>One frame's attribution. Every code of
+            /// <paramref name="scan"/> (production: every KeyCode member, the
+            /// keys Unity's input can report) that went down is named: an alias
+            /// code is Alias, Mouse0-Mouse6 is Mouse, anything else is Key. Text
+            /// typed this frame that no named key accounts for is Unknown (the
+            /// alias types nothing, rule 6), and so is an edge Input.anyKeyDown
+            /// reports that nothing names. Unknown is never read as the mouse.</summary>
+            internal static EdgeAttribution Attribute(IFrameInput io, int[] alias, int[] scan)
+            {
+                var a = EdgeAttribution.None;
+                var aliasSet = new HashSet<int>(alias ?? new int[0]);
+                foreach (int c in aliasSet) if (c > 0 && io.KeyDown(c)) a |= EdgeAttribution.Alias;
+                bool any = io.AnyKeyDown();
+                string text = io.TypedText();
+                bool typed = !string.IsNullOrEmpty(text);
+                if (!any && !typed) return a;
+                // Mutation 18 restores the a22f80ed observation: the scan saw only
+                // InControl's 127 codes and a mouse edge was a separate yes/no.
+                HashSet<int> legacy = Mut == 18 ? new HashSet<int>(StaticKeyScan) : null;
+                if (scan != null)
+                    foreach (int c in scan)
+                    {
+                        if (c <= 0 || aliasSet.Contains(c)) continue;
+                        if (legacy != null && !IsMouseCode(c) && !legacy.Contains(c)) continue;
+                        if (!io.KeyDown(c)) continue;
+                        a |= IsMouseCode(c) ? EdgeAttribution.Mouse : EdgeAttribution.Key;
+                    }
+                if (typed && (a & EdgeAttribution.Key) == 0 && Mut != 18) a |= EdgeAttribution.Unknown;
+                if (any && (a & (EdgeAttribution.Alias | EdgeAttribution.Key | EdgeAttribution.Mouse)) == 0) a |= EdgeAttribution.Unknown;
+                // a22f80ed: an edge nothing named, beside a same-frame mouse edge, read as mouse-only.
+                if (Mut == 18 && (a & EdgeAttribution.Mouse) != 0) a &= ~EdgeAttribution.Unknown;
+                // revision 3: a held button (not an edge) made the unnamed edge the mouse's.
+                if ((Mut == 23 || Mut == 107) && (a & EdgeAttribution.Unknown) != 0 && io.AnyMouseHeld()) a = (a & ~EdgeAttribution.Unknown) | EdgeAttribution.Mouse;
+                return a;
+            }
+
+            /// <summary>One frame. True on the release that is a clean tap: the
+            /// alias went down and up within 0.6 s and no frame in between, nor
+            /// the arming frame, carried a Key or an Unknown edge. A Mouse edge
+            /// alone keeps the tap (a click while holding the key); a Key edge
+            /// beside a Mouse edge is attributed to both and disarms.</summary>
+            internal bool Step(IFrameInput io, int[] alias, int[] scan)
+            {
+                bool fire = false, aliasUp = false;
+                if (alias != null) foreach (int c in alias) if (c > 0 && io.KeyUp(c)) aliasUp = true;
+                var a = Attribute(io, alias, scan);
+                Last = a;
+                bool aliasDown = (a & EdgeAttribution.Alias) != 0;
+                bool foreign = (a & (EdgeAttribution.Key | EdgeAttribution.Unknown)) != 0;
+                if (Held && Clean && foreign) Clean = false;
+                if (aliasDown && !Held)
+                {
+                    Held = true;
+                    Clean = Mut == 18 || !foreign;
+                    DownAt = io.Now();
+                }
+                if (aliasUp && Held)
+                {
+                    fire = Clean && io.Now() - DownAt < 0.6f;
+                    Held = false;
+                    Clean = false;
+                }
+                if (!io.Focused() && (Held || Clean)) { Held = false; Clean = false; }
+                return fire;
+            }
+        }
+
+        /// <summary>A scripted frame source: the harness's and T2 case j's.</summary>
+        internal sealed class ScriptInput : IFrameInput
+        {
+            internal HashSet<int> Down = new HashSet<int>(), Up = new HashSet<int>();
+            internal bool Any, MouseHeldNow;
+            internal string Text = "";
+            internal float T;
+            public bool KeyDown(int code) { return Down.Contains(code); }
+            public bool KeyUp(int code) { return Up.Contains(code); }
+            public bool AnyKeyDown() { return Any; }
+            public string TypedText() { return Text; }
+            public bool AnyMouseHeld() { return MouseHeldNow; }
+            public float Now() { return T; }
+            public bool Focused() { return true; }
+            internal void Frame(float t, int[] down, int[] up, bool any, string text, bool mouseHeld)
+            {
+                T = t; Down = new HashSet<int>(down ?? new int[0]); Up = new HashSet<int>(up ?? new int[0]);
+                Any = any; Text = text ?? ""; MouseHeldNow = mouseHeld;
+            }
+        }
+
+        /// <summary>One scripted tap on <paramref name="alias"/>[0]: down, an
+        /// optional middle frame, up. True when the release rotated the
+        /// channel; <paramref name="mid"/> is the middle frame's attribution.</summary>
+        internal static bool ScriptTap(int[] alias, int[] scan, int[] midDown, bool midAny, string midText,
+                                       bool midMouseHeld, out EdgeAttribution mid)
+        {
+            var d = new TapDetector();
+            var io = new ScriptInput();
+            int key = alias != null && alias.Length > 0 ? alias[0] : 0;
+            mid = EdgeAttribution.None;
+            io.Frame(0f, new[] { key }, null, true, "", midMouseHeld);
+            d.Step(io, alias, scan);
+            if (midDown != null || midAny || !string.IsNullOrEmpty(midText))
+            {
+                io.Frame(0.1f, midDown, null, midAny, midText, midMouseHeld);
+                d.Step(io, alias, scan);
+                mid = d.Last;
+            }
+            io.Frame(0.2f, null, new[] { key }, false, "", false);
+            return d.Step(io, alias, scan);
+        }
+
+        /// <summary>The harness's stand-in for the KeyCode member list: InControl's
+        /// 127 codes, plus codes it does not carry (Menu 319, Print 316, the
+        /// seven mouse buttons, joystick button 0 at 330).</summary>
+        internal static int[] HarnessKeyCodeScan()
+        {
+            var l = new List<int>(StaticKeyScan);
+            foreach (int c in new[] { 316, 319, 323, 324, 325, 326, 327, 328, 329, 330 }) if (!l.Contains(c)) l.Add(c);
+            return l.ToArray();
+        }
+
         // -- names (design section 2.9) --------------------------------------
 
         private static readonly Dictionary<string, string> Glyphs = new Dictionary<string, string>
@@ -722,6 +890,37 @@ namespace CompetitiveRounds
                           && Ref(ChatChannel, K("PageDown")) == Refusal.None && Ref(Scoreboard, K("Delete")) == Refusal.None,
                     () => "Delete@ChatChannel=" + Ref(ChatChannel, K("Delete")));
 
+            // -- fix pass 1 F2: the tap detector attributes every edge ---------------
+            // Case j rebuilt: a key InControl's table does not carry (Menu, 319)
+            // and a mouse edge (Mouse0, 323) in ONE frame are attributed to both,
+            // and the tap does not rotate. The UNKNOWN leg: a typed character no
+            // KeyCode names beside a mouse edge is Unknown, never mouse-only.
+            // Mutation 18 is the a22f80ed detector; both legs were mouse-only there.
+            int[] tapAlias = StaticDefaults[ChatChannel], tapScan = HarnessKeyCodeScan();
+            Func<int[], bool, string, bool, string> tapRun = (down, any, text, held) =>
+            {
+                EdgeAttribution mid;
+                bool rotated = ScriptTap(tapAlias, tapScan, down, any, text, held, out mid);
+                return (rotated ? "rotated" : "kept") + "/" + mid;
+            };
+            MutCase(r, 18, "KeybindRules.TapDetector", "a simultaneous key edge and mouse edge are attributed to both, and an unnamed edge beside a mouse edge is Unknown",
+                    () => tapRun(new[] { 319, KeyCodeMouse0 }, true, "", false) == "kept/" + (EdgeAttribution.Key | EdgeAttribution.Mouse)
+                          && tapRun(new[] { KeyCodeMouse0 }, true, "é", false) == "kept/" + (EdgeAttribution.Mouse | EdgeAttribution.Unknown),
+                    () => tapRun(null, false, "", false) == "rotated/None"
+                          && tapRun(new[] { KeyCodeMouse0 }, true, "", false) == "rotated/" + EdgeAttribution.Mouse
+                          && tapRun(new[] { 106 }, true, "j", false) == "kept/" + EdgeAttribution.Key,
+                    () => "sim=" + tapRun(new[] { 319, KeyCodeMouse0 }, true, "", false)
+                          + " unknown+mouse=" + tapRun(new[] { KeyCodeMouse0 }, true, "é", false));
+            // Revision 3's held-button shape, the in-game mutation 7 (107) ported here:
+            // an unnamed edge while a button is merely HELD (no edge) is Unknown.
+            MutCase(r, 23, "KeybindRules.TapDetector", "an unnamed edge while a mouse button is only held disarms",
+                    () => tapRun(null, true, "", true) == "kept/" + EdgeAttribution.Unknown,
+                    () => tapRun(new[] { KeyCodeMouse0 }, true, "", true) == "rotated/" + EdgeAttribution.Mouse
+                          && tapRun(null, true, "", false) == "kept/" + EdgeAttribution.Unknown,
+                    () => "held+unnamed=" + tapRun(null, true, "", true));
+            Check(r, "F2 KeybindRules.TapDetector: a foreign key on the ARMING frame keeps the tap from rotating",
+                  !TapArmedWithForeign(tapAlias, tapScan), "rotated=" + TapArmedWithForeign(tapAlias, tapScan));
+
             // case 16's own second control, outside the mutation: an unbound or
             // mouse-bound Jump cannot be described by the word SPACE either.
             Check(r, "T1 case 16b KeybindRules.ShouldOverrideReadyPrompt: mouse and unbound Jump also override",
@@ -771,6 +970,18 @@ namespace CompetitiveRounds
             Check(r, "KeybindRules.ParseToken: none parses to the unbound source and a mouse axis does not parse",
                   ParseToken("none", out ns) && ns.Kind == BindKind.None && !ParseToken("mouse:NegativeX", out ns) && !ParseToken("key:None", out ns),
                   "ok");
+        }
+
+        /// <summary>The alias and a foreign key go down in the same frame, then
+        /// the alias comes up: true if that rotated the channel.</summary>
+        private static bool TapArmedWithForeign(int[] alias, int[] scan)
+        {
+            var d = new TapDetector();
+            var io = new ScriptInput();
+            io.Frame(0f, new[] { alias[0], 106 }, null, true, "j", false);
+            d.Step(io, alias, scan);
+            io.Frame(0.2f, null, new[] { alias[0] }, false, "", false);
+            return d.Step(io, alias, scan);
         }
 
         private static int RefOther(int row, BindSource s)
