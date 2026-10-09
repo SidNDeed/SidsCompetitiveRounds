@@ -3706,7 +3706,7 @@ namespace CompetitiveRounds
                       I18n.Tr("<color=#FFD080>Match-found screen might be stuck</color>"),
                       stuckTitleStyle);
             GUI.Label(new Rect(x + 14, y + 32, w - 28, 50),
-                      I18n.TrF("<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try space again, or use the escape hatch below.</color>", secs),
+                      I18n.TrF("<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try {1} again, or use the escape hatch below.</color>", secs, NativeUI.KeybindRowFace(KeybindRules.Jump)),
                       stuckTextStyle);
 
             if (GUI.Button(new Rect(x + 14, y + h - 38, 220, 28), I18n.Tr("Force exit room"), stuckButtonStyle))

@@ -115,7 +115,7 @@ namespace CompetitiveRounds
                 case "SFPSCap": return I18n.Tr("it costs nothing while you are playing");
                 case "SHeavyFont": return I18n.Tr("the SDF face drops thin glyphs when light");
                 case "SHpPrec": return I18n.Tr("local display only; decimals help only when a card leaves max health on a fraction");
-                case "SIgChat": return I18n.Tr("M cycles the same state in game; Muted also tells the room you cannot read chat");
+                case "SIgChat": return I18n.Tr("the Chat overlay mode control cycles the same state in game; Muted also tells the room you cannot read chat");
                 case "SInactiveLb": return I18n.Tr("keeps boards to players you can actually meet");
                 case "SInfoOpen": return I18n.Tr("the Info library answers most rules questions");
                 case "SInpOv": return I18n.Tr("for streams and for spotting missed inputs");

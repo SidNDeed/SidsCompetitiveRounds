@@ -316,7 +316,7 @@
   "<color=#CCCCCC>Damage per second over the match</color>  <color=#99B3E6>{0}</color>",
   "<color=#CCCCCC>FPS over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>",
   "<color=#CCCCCC>FPS over the match</color>  <color=#99B3E6>{0}</color>",
-  "<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try space again, or use the escape hatch below.</color>",
+  "<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try {1} again, or use the escape hatch below.</color>",
   "<color=#CCCCCC>Latency (ms) over the match</color>  <color=#99B3E6>you</color> <color=#888>vs</color> <color=#E69988>opponent</color>",
   "<color=#CCCCCC>Latency (ms) over the match</color>  <color=#99B3E6>{0}</color>",
   "<color=#CCCCCC>Players in: <b>{0}</b>. Your player is in, but the other player has not pressed Jump to join — their game may be unfocused or stuck on its ready prompt. Leaving here costs nothing: no match has started.</color>",
@@ -1629,7 +1629,6 @@
   "Lucky green clovers tumble around you.",
   "Lumberjack",
   "Lv {0}",
-  "M cycles the same state in game; Muted also tells the room you cannot read chat",
   "MATCH FOUND!",
   "MATCH FOUND!  vs {0} ({1:F0})",
   "MATCH POINT - {0} are half a point from the win!",
@@ -3368,6 +3367,7 @@
   "swallows the one null reference the hit sound raises when its parent is gone",
   "team 1 {0}-{1} team 2",
   "tells you which region you are on",
+  "the Chat overlay mode control cycles the same state in game; Muted also tells the room you cannot read chat",
   "the Home chat log updates either way; this is the pop-up",
   "the Info library answers most rules questions",
   "the SDF face drops thin glyphs when light",
@@ -5089,7 +5089,7 @@
    "location": "PaintTeleGraph",
    "kind": "TrF"
   },
-  "<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try space again, or use the escape hatch below.</color>": {
+  "<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try {1} again, or use the escape hatch below.</color>": {
    "surface": "CompetitiveUI",
    "location": "DrawMatchFoundStuckOverlay",
    "kind": "TrF"
@@ -11653,11 +11653,6 @@
    "surface": "NativeUI, ProfileCard",
    "location": "BuildCompareBarChart, Render",
    "kind": "TrF"
-  },
-  "M cycles the same state in game; Muted also tells the room you cannot read chat": {
-   "surface": "SettingsDescriptors.g",
-   "location": "ReasonTr",
-   "kind": "Tr"
   },
   "MATCH FOUND!": {
    "surface": "NativeUI",
@@ -20345,6 +20340,11 @@
    "kind": "TrF"
   },
   "tells you which region you are on": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
+  "the Chat overlay mode control cycles the same state in game; Muted also tells the room you cannot read chat": {
    "surface": "SettingsDescriptors.g",
    "location": "ReasonTr",
    "kind": "Tr"
