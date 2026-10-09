@@ -1,7 +1,7 @@
 # tools/keybind_surfaces.py producer sites: file	method	producer	count	feeds (template ids, - for none)	note
 BroadcastHud.cs	DrawActionRow	KeybindSemanticCap	5	-	semantic caps drawn as labels (K)
 CompetitiveUI.cs	DrawChatInput	KeybindRowFace	1	c6877414da55b264	inside I18n.TrF
-CompetitiveUI.cs	DrawDanceWheel	KeybindRowFace	1	1ee7469705bf8cf5	inside I18n.TrF
+CompetitiveUI.cs	DrawDanceWheel	KeybindRowFace	2	1ee7469705bf8cf5,2f993c703c59434d	inside I18n.TrF
 CompetitiveUI.cs	DrawInputOverlay	KeybindOverlayCap	7	-	caps drawn as labels (K)
 CompetitiveUI.cs	DrawMatchFoundStuckOverlay	KeybindRowFace	1	2cc48659a9b9a51f	inside I18n.TrF
 CompetitiveUI.cs	DrawQuickChat	KeybindRowFace	1	0545b092d2bb9b65	inside I18n.TrF

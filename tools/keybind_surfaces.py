@@ -125,6 +125,104 @@ def kid(s):
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
 
 
+def mask_code(src):
+    """Length-preserving copy of a C# source with comments and literal TEXT
+    blanked, and the code inside interpolation holes KEPT: in
+    $"<b>{I18n.TrF("x {0}", NativeUI.KeybindRowFace(r))}</b>" the call and its
+    arguments stay visible (their own string literals blanked in turn), so a
+    producer call or a binding-root read inside a hole is enumerated like any
+    other. The extractor's _mask_cs blanks a whole interpolated string, hole
+    code included, which is right for its brace and signature reading and
+    blind for this oracle's site and reader scans. Newlines survive, so an
+    offset into the result is an offset into `src`."""
+    out = list(src)
+    n = len(src)
+
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if out[k] != "\n":
+                out[k] = " "
+
+    def string(q, verbatim, interp):
+        """q is the opening quote; returns the index after the closing one."""
+        j = q + 1
+        lit = j
+        while j < n:
+            ch = src[j]
+            if not verbatim and ch == "\\":
+                j += 2
+                continue
+            if ch == '"':
+                if verbatim and j + 1 < n and src[j + 1] == '"':
+                    j += 2
+                    continue
+                blank(lit, j)
+                return j + 1
+            if interp and ch == "{":
+                if j + 1 < n and src[j + 1] == "{":
+                    j += 2
+                    continue
+                blank(lit, j + 1)
+                e = code(j + 1, True)
+                blank(e, e + 1)
+                j = e + 1
+                lit = j
+                continue
+            if not verbatim and ch == "\n":
+                blank(lit, j)
+                return j
+            j += 1
+        blank(lit, n)
+        return n
+
+    def code(i, hole):
+        """Scan code from i; in a hole, return the index of its closing brace."""
+        depth = 0
+        while i < n:
+            c = src[i]
+            nx = src[i + 1] if i + 1 < n else ""
+            nx2 = src[i + 2] if i + 2 < n else ""
+            if c == "/" and nx == "/":
+                j = src.find("\n", i)
+                j = n if j < 0 else j
+                blank(i, j)
+                i = j
+            elif c == "/" and nx == "*":
+                j = src.find("*/", i + 2)
+                j = n if j < 0 else j + 2
+                blank(i, j)
+                i = j
+            elif c == "'":
+                j = i + 1
+                j += 2 if j < n and src[j] == "\\" else 1
+                k = src.find("'", j)
+                k = n if k < 0 else k
+                blank(i + 1, k)
+                i = k + 1
+            elif c == '"' or (c in "@$" and nx == '"') or (c in "@$" and nx in "@$" and nx2 == '"'):
+                q = src.index('"', i)
+                pre = src[i:q]
+                i = string(q, "@" in pre, "$" in pre)
+            elif c.isalnum() or c == "_":
+                j = i
+                while j < n and (src[j].isalnum() or src[j] == "_"):
+                    j += 1
+                i = j      # an identifier ending in @ or $ is not a prefix
+            else:
+                if hole:
+                    if c == "{":
+                        depth += 1
+                    elif c == "}":
+                        if depth == 0:
+                            return i
+                        depth -= 1
+                i += 1
+        return n
+
+    code(0, False)
+    return "".join(out)
+
+
 class Tree:
     def __init__(self, root):
         self.root = root
@@ -132,6 +230,8 @@ class Tree:
         self.ext = _load("i18n_extract_f1", os.path.join(root, "tools", "i18n_extract.py"))
         # the mask is a pure function of the text; every pass reuses it
         self.ext._mask_cs = functools.lru_cache(maxsize=None)(self.ext._mask_cs)
+        # the site and reader scans read code inside interpolation holes too
+        self.mask = functools.lru_cache(maxsize=None)(mask_code)
         self.src = {}
         for p in sorted(glob.glob(os.path.join(self.plugin, "*.cs"))):
             self.src[os.path.basename(p)] = self.ext.lf(io.open(p, encoding="utf-8", newline="").read())
@@ -211,7 +311,7 @@ def producer_spans(t):
 def trf_calls(t, fn):
     """[(start, end, [template keys])] for every I18n.TrF call in a file."""
     src = t.src[fn]
-    masked = t.ext._mask_cs(src)
+    masked = t.mask(src)
     out = []
     for m in re.finditer(r"I18n\s*\.\s*TrF\s*\(", masked):
         op = m.end() - 1
@@ -231,7 +331,7 @@ def code_sites(t, spans):
     call = re.compile(r"(?<![\w.])(?:(NativeUI|InfoViz|Keybinds)\s*\.\s*)?(%s)\s*\(" % "|".join(names))
     sites = {}
     for fn, src in t.src.items():
-        masked = t.ext._mask_cs(src)
+        masked = t.mask(src)
         mi = t.ext.method_index(src)
         calls = None
         for m in call.finditer(masked):
@@ -260,7 +360,7 @@ def code_sites(t, spans):
 def root_readers(t, spans):
     out = set()
     for fn, src in t.src.items():
-        masked = t.ext._mask_cs(src)
+        masked = t.mask(src)
         mi = t.ext.method_index(src)
         for m in ROOTS.finditer(masked):
             meth = t.ext.enclosing_method(mi, m.start())

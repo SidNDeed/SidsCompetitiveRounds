@@ -3707,7 +3707,7 @@ cf083d74ed75bf01	O		over 10 inside 0.35s: treat as Conditional
 37e9f30f33641428	N		painted-in glow stays whatever you pick
 871899515bc96016	N		player color
 2b5305a40a645b84	N		player effect
-2f993c703c59434d	N		point + release {0} to dance
+2f993c703c59434d	P		point + release {0} to dance
 0545b092d2bb9b65	P		point + release {0} to send
 edc079e759d1a31c	N		point lost
 84042146ce1d2bd8	N		point won
