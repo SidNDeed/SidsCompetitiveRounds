@@ -18,7 +18,9 @@ supplied by the operator — this file carries neither:
     python tools/refresh_shop_strings.py --dry-run  # report the diff only
 
 The strings list is sorted + de-duplicated (names and non-empty descriptions,
-CRLF-normalized) so reruns are byte-stable and diffs are honest.
+CRLF-normalized) so reruns are byte-stable and diffs are honest, and a
+description ending in the fixed dance-wheel phrase is stored as its "{0}"
+template (see template_stable), the key the client translates.
 """
 import argparse
 import io
@@ -35,6 +37,33 @@ QUERY = ("SELECT json_agg(json_build_object("
 
 def lf(s):
     return s.replace("\r\n", "\n").replace("\r", "\n")
+
+
+# The server's dance descriptions end with this fixed wheel phrase; the
+# client renders them through the "{0} wheel." template with the bound
+# DanceWheel key (plugin/NativeUI.Keybinds.cs KbShopItemDesc, the same
+# suffix rule), so the snapshot registers the TEMPLATE, never the legacy
+# text: copying the legacy text over the template would retire its
+# translations at the next extraction.
+LEGACY_WHEEL_SUFFIX = " with the E wheel."
+TEMPLATE_WHEEL_SUFFIX = " with the {0} wheel."
+
+
+def template_stable(s):
+    if s.endswith(LEGACY_WHEEL_SUFFIX):
+        return s[:-len(LEGACY_WHEEL_SUFFIX)] + TEMPLATE_WHEEL_SUFFIX
+    return s
+
+
+def snapshot_strings(items):
+    """Names and non-empty descriptions, CRLF-normalized, template-stable,
+    sorted and de-duplicated."""
+    strings = set()
+    for it in items:
+        for v in (it.get("n"), it.get("d")):
+            if v and v.strip():
+                strings.add(template_stable(lf(v)))
+    return sorted(strings)
 
 
 def main() -> int:
@@ -76,12 +105,7 @@ def main() -> int:
               f"{raw[:200]!r}", file=sys.stderr)
         return 1
 
-    strings = set()
-    for it in items:
-        for v in (it.get("n"), it.get("d")):
-            if v and v.strip():
-                strings.add(lf(v))
-    new = sorted(strings)
+    new = snapshot_strings(items)
 
     old = []
     if os.path.exists(SNAP):
