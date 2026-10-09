@@ -610,6 +610,10 @@ namespace CompetitiveRounds
             // (or on Settings) is retired all the same.
             RetireStuckLatches(id);
             if (id == null) return;
+            // Fix pass 2, finding 1: a read the answer fence dropped is sent
+            // again only while no shard and no discard is out, so one more
+            // answer of the same run cannot drop it again.
+            if (ApiClient.PcReadsOwed && !shardInFlight && !discardInFlight) ApiClient.PcSendOwedReads(id);
             if (HasIntent()) MaybeRecover(false);
             // Card trading (V8 6.4): ABOVE the early return below, so the
             // 120 s summary runs whichever tab is current while the overlay
@@ -2766,6 +2770,7 @@ namespace CompetitiveRounds
                     discardShards += gained;
                     var col = ApiClient.CachedPcCollection;
                     if (col != null) col.prints.RemoveAll(x => x.print_id == pid);
+                    ApiClient.PcAnswerFence.Wrote();   // fix pass 2, finding 1: a confirmed removal
                     HistoryMarkDiscarded(pid, gained);
                     DiscardNext(id, serial);
                     return;
@@ -3281,6 +3286,10 @@ namespace CompetitiveRounds
                 if (col != null) col.prints.RemoveAll(x => x.print_id == r.Key);
                 HistoryMarkDiscarded(r.Key, r.Value);
             }
+            // Fix pass 2, finding 1: the prints this answer removed are a
+            // confirmed write, so a collection read already on the wire (a
+            // retired shard's read-back included) cannot put them back.
+            if (results.Count > 0) ApiClient.PcAnswerFence.Wrote();
             selectedIds.RemoveAll(x => done.Contains(x));
             // a strip card's nonce was ended by PcShardFlight.Settle (a success)
             if (!quick) { if (packId == null) { shardKey = null; shardKeyFor = null; } }
@@ -4428,6 +4437,10 @@ namespace CompetitiveRounds
             int drawn = 0;
             foreach (var p in ans.get)
                 if (p != null && !p.gone && !string.IsNullOrEmpty(p.print_id) && !col.prints.Exists(x => x.print_id == p.print_id)) { col.prints.Add(p); drawn++; }
+            // Fix pass 2, finding 1 (the sibling writer): the accept's prints
+            // are a confirmed write, so a collection read already on the wire
+            // cannot undo them before AfterTradeAction's forced read lands.
+            ApiClient.PcAnswerFence.Wrote();
             Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] accept drew received=" + drawn + " gave=" + gave.Count);
         }
 

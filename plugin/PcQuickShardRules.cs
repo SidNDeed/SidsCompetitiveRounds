@@ -238,7 +238,112 @@ namespace CompetitiveRounds
 
             FlightCases(r);
             DupesCases(r);
+            RecoveryCases(r);
             return r;
+        }
+
+        // -- fix pass 2, finding 1: a read-back never undoes a newer shard ----
+
+        /// <summary>Request A (strip card a) is given up at 25 s, so its
+        /// collection and balance read-backs are dispatched, and the server
+        /// answers them from its state before B. Request B (strip card b,
+        /// +40) then succeeds and its answer writes the balance and removes b.
+        /// A's read-backs land LAST. honourFence false is the NEGATIVE
+        /// CONTROL: the read callbacks as a0a66027 wrote them, which replace
+        /// both caches unconditionally and must restore B's old balance and
+        /// its discarded card. rereads counts the reads sent again.</summary>
+        private static void RecoveryRead(bool honourFence, out int balance, out bool cardRestored, out int rereads)
+        {
+            var f = new PcShardFlight();
+            var fence = new PcCacheFence();
+            int minted = 0;
+            Func<string> mint = () => "nonce" + (++minted);
+            int cacheBal = 100, srvBal = 100;
+            var cache = new List<string> { "a", "b" };
+            var srv = new List<string> { "a", "b" };
+            f.KeyFor(ArmSet("a"), mint);
+            f.Begin(0f, null, "a");
+            bool quick;
+            f.GiveUp(26f, 25f, out quick);
+            // A's read-backs: stamped at dispatch, answered from the state before B.
+            int stampMe = fence.Stamp(), stampCol = fence.Stamp();
+            int snapBal = srvBal;
+            var snapCol = new List<string>(srv);
+            // B: the server commits, then answers; the answer writes the caches.
+            f.KeyFor(ArmSet("b"), mint);
+            int sB = f.Begin(30f, null, "b");
+            srvBal += 40; srv.Remove("b");
+            Func<bool> currentB = () => f.IsCurrent(sB);
+            if (PcShardFlight.Admits(currentB)) { cacheBal = srvBal; fence.Wrote(); }
+            if (f.Settle(sB, null)) { cache.Remove("b"); fence.Wrote(); }
+            // A's read-backs land last. A dropped read is owed and sent again
+            // once no shard is out (ApiClient.PcSendOwedReads), stamped then,
+            // and answered from the state after B.
+            if (f.InFlight) { balance = -1; cardRestored = true; rereads = -1; return; }
+            rereads = 0;
+            if (!honourFence || fence.Admits(stampMe)) cacheBal = snapBal;
+            else { rereads++; int again = fence.Stamp(); if (fence.Admits(again)) cacheBal = srvBal; }
+            if (!honourFence || fence.Admits(stampCol)) cache = snapCol;
+            else { rereads++; int again = fence.Stamp(); if (fence.Admits(again)) cache = new List<string>(srv); }
+            balance = cacheBal;
+            cardRestored = cache.Contains("b");
+        }
+
+        /// <summary>Every order of up to five events drawn from "a read is
+        /// dispatched", "a confirmed write" and "the read lands" (one read):
+        /// the read is admitted exactly when no write happened between its
+        /// dispatch and its landing.</summary>
+        private static bool FenceOnEveryOrder()
+        {
+            for (int len = 1; len <= 5; len++)
+            {
+                int total = 1; for (int i = 0; i < len; i++) total *= 3;
+                for (int code = 0; code < total; code++)
+                {
+                    var fence = new PcCacheFence();
+                    int c = code, stamp = -1;
+                    bool wroteSince = false;
+                    for (int i = 0; i < len; i++, c /= 3)
+                    {
+                        int ev = c % 3;
+                        if (ev == 0) { stamp = fence.Stamp(); wroteSince = false; }
+                        else if (ev == 1) { fence.Wrote(); wroteSince = true; }
+                        else if (stamp >= 0)
+                        {
+                            if (fence.Admits(stamp) != !wroteSince) return false;
+                            stamp = -1;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
+        private static void RecoveryCases(SelfTestResult r)
+        {
+            int bal, rr;
+            bool card;
+            RecoveryRead(true, out bal, out card, out rr);
+            Check(r, "recovery: a retired shard's balance read-back landing after a newer shard keeps the newer balance",
+                  bal == 140, bal.ToString());
+            Check(r, "recovery: a retired shard's collection read-back landing after a newer shard keeps the newer shard's card discarded",
+                  !card, card.ToString());
+            Check(r, "recovery: each dropped read-back is sent again once, stamped after the newer write", rr == 2, rr.ToString());
+            RecoveryRead(false, out bal, out card, out rr);
+            Check(r, "control: without the fence the late read-back restores the newer shard's old balance", bal == 100, bal.ToString());
+            Check(r, "control: without the fence the late read-back restores the newer shard's discarded card", card, card.ToString());
+
+            var fence = new PcCacheFence();
+            int s0 = fence.Stamp();
+            Check(r, "fence: a read with no confirmed write while it flew lands", fence.Admits(s0), "");
+            fence.Wrote();
+            Check(r, "fence: a read dispatched before a confirmed write is dropped", !fence.Admits(s0), "");
+            int s1 = fence.Stamp();
+            Check(r, "fence: a read dispatched after the write lands", fence.Admits(s1), "");
+            fence.Wrote(); fence.Wrote();
+            Check(r, "fence: two writes while it flew: still dropped", !fence.Admits(s1), "");
+            Check(r, "fence: on every order of dispatch, write and landing, a read lands exactly when no write happened in between",
+                  FenceOnEveryOrder(), "");
         }
 
         // -- fix pass 1, finding 3: the pack's duplicates, never a last copy --
@@ -531,6 +636,40 @@ namespace CompetitiveRounds
             InFlight = false; PackId = null; QuickId = null; DupesOf = null;
             if (quick && !PcQuickShardRules.KeepKeyAfter(code)) { QuickKey = null; QuickKeyFor = null; }
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Fix pass 2, finding 1: the generation of the Player Cards caches'
+    /// confirmed writes. A /pc/me or /pc/collection read is stamped when it
+    /// is dispatched (Stamp). Every answer that writes either cache from a
+    /// server confirmation moves the generation (Wrote): a shard's or a
+    /// discard's balance and the prints it removed, and a trade accept's
+    /// drawn prints. A read lands in the cache only when no such write
+    /// happened while it was on the wire (Admits). Otherwise its snapshot may
+    /// predate that write, so ApiClient drops it and owes the read, sent again
+    /// (stamped then) once no shard and no discard is out. A read-back
+    /// launched by a retired shard (the 25 s
+    /// give-up's) therefore cannot put back a balance or a print that a newer
+    /// shard's answer confirmed. The fence orders reads against this
+    /// client's own confirmed writes only. Free of Unity so the client rules
+    /// harness executes it (#391).
+    /// </summary>
+    internal sealed class PcCacheFence
+    {
+        internal int Writes { get; private set; }
+
+        /// <summary>The generation a read carries from its dispatch.</summary>
+        internal int Stamp() { return Writes; }
+
+        /// <summary>A confirmed answer wrote a cache.</summary>
+        internal void Wrote() { Writes++; }
+
+        /// <summary>Whether a read stamped `stamp` may land: no confirmed
+        /// write happened since it was dispatched.</summary>
+        internal bool Admits(int stamp)
+        {
+            return stamp == Writes;
         }
     }
 }

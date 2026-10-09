@@ -142,9 +142,10 @@ def test_the_quick_shard_suite_ran_every_case_and_none_failed(harness_run):
         "the suite declared run=%d but printed %d case lines" % (run, printed))
     # The suite ran 27 cases on the commit that added it, 45 once fix pass 1
     # added the batch shard's generation cases (PcShardFlight, finding 2),
-    # 60 once it added Shard dupes' duplicate cases (finding 3)
-    # (#342: a floor near the real count). Raise it when cases are added.
-    assert run >= 60, "the PcQuickShardRules suite shrank to %d cases" % run
+    # 60 once it added Shard dupes' duplicate cases (finding 3), 70 once fix
+    # pass 2 added the read-back fence's recovery cases (PcCacheFence,
+    # finding 1) (#342: a floor near the real count). Raise it when cases are added.
+    assert run >= 70, "the PcQuickShardRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [

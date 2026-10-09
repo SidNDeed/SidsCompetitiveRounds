@@ -37,6 +37,14 @@ Required behaviour, each a named test:
       shown pack's live duplicates, one live copy of each exact face kept
       (PcQuickShardRules.DuplicateShardIds, executed in the harness; gate q10
       pins the call sites); the Shard pack keeps board row 25's set.
+  Q11 (fix pass 2, finding 1) a read-back launched by a retired shard
+      generation never overwrites cache state a newer shard confirmed: every
+      /pc/me and /pc/collection read carries the answer fence's generation
+      from its dispatch (PcCacheFence.Stamp), every confirmed cache write
+      moves it, and a read lands only when it has not moved; a dropped read
+      is owed and sent again once no shard or discard is out (the recovery
+      model is EXECUTED by the harness, PcQuickShardRules.RecoveryCases;
+      gate q11 pins the call sites).
 
 Each client gate runs on the real sources and, with its mutation and control,
 on edited copies (#391). The database tests use test_pc_shard_batch's harness
@@ -252,6 +260,53 @@ def gate_q10_shard_dupes_sends_only_the_pack_s_duplicates(s):
     assert "var ids = PackShardIds(shown);" in pack, "the Shard pack's set changed"
 
 
+def _fenced_read(api, signature, write, owed, what):
+    code = _code(_member(api, signature))
+    stamp = _at(code, "int fence = PcAnswerFence.Stamp();", what)
+    start = _at(code, "Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>", what)
+    check = _at(code, "if (ok && !PcAnswerFence.Admits(fence))", what)
+    owe = check + _at(code[check:], owed, what)
+    ret = owe + _at(code[owe:], "return;", what)
+    land = _at(code, write, what)
+    assert stamp < start < check < owe < ret < land, what
+    assert code.count("PcAnswerFence.") == 2, what
+
+
+def gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard(s):
+    """Fix pass 2, finding 1: both reads carry the fence's generation from
+    their dispatch and land only when no confirmed write moved it; every
+    writer that applies a server confirmation moves it; a dropped read is
+    owed and sent again only while no shard and no discard is out. The
+    decisions are EXECUTED by the harness (PcQuickShardRules.RecoveryCases);
+    this pins that the client calls them where the answers land."""
+    api, ui = s["api"], s["ui"]
+    _fenced_read(api, "public static void FetchPcMe(", "CachedPcMe = me;", "pcMeReadOwed = true;",
+                 "the balance read lands without the fence")
+    _fenced_read(api, "public static void FetchPcCollection(", "CachedPcCollection = col;", "pcCollReadOwed = true;",
+                 "the collection read lands without the fence")
+    for sig, what in (("public static void PcDiscardBatch(", "a confirmed batch balance does not move the fence"),
+                      ("public static void PcDiscard(string steamId, string printId,", "a confirmed discard balance does not move the fence")):
+        assert "if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }" in _code(_member(api, sig)), what
+    finish = _code(_member(ui, "private static void FinishShard("))
+    assert "if (results.Count > 0) ApiClient.PcAnswerFence.Wrote();" in finish, "the prints a shard removed do not move the fence"
+    assert "ApiClient.PcAnswerFence.Wrote();" in _code(_member(ui, "private static void DrawReceived(")), (
+        "the prints a trade accept drew do not move the fence")
+    assert _code(ui).count("ApiClient.PcAnswerFence.Wrote();") == 3, "a confirmed removal does not move the fence"
+    tick = _code(_member(ui, "internal static void MaybeTick("))
+    assert tick.count("if (ApiClient.PcReadsOwed && !shardInFlight && !discardInFlight) ApiClient.PcSendOwedReads(id);") == 1, (
+        "an owed read is sent while a shard or a discard is out")
+    assert _code(ui).count("PcSendOwedReads(") == 1, "an owed read is sent while a shard or a discard is out"
+    owed = _code(_member(api, "internal static void PcSendOwedReads("))
+    assert owed.count("FetchPcMe(steamId, true, cb);") == 1 and owed.count("FetchPcCollection(steamId, true, cb);") == 1, (
+        "an owed read is not sent once")
+    for loop in ("for (", "foreach (", "while (", "StartCoroutine("):
+        assert loop not in owed, "an owed read is not sent once"
+    release = _code(_member(api, "private static void ReleasePcReadLatches("))
+    assert "pcMeReadOwed = false; pcCollReadOwed = false;" in release, "a read owed to the previous identity is sent"
+    admits = _member(_code(s["rules"]), "internal bool Admits(int stamp)")
+    assert "return stamp == Writes;" in admits, "the fence admits a read dispatched before a write"
+
+
 NEW_KEYS = ("Shard dupes (+{0})", "Click Shard dupes again to shard {0} duplicates for {1} shards")
 _CAT_ENTRY = re.compile(r'^\s+\["((?:[^"\\]|\\.)*)"\] = "((?:[^"\\]|\\.)*)",$', re.M)
 
@@ -287,7 +342,8 @@ GATES = [gate_q1_the_strip_card_shards_in_place_on_a_confirmed_click,
          gate_q5_a_failure_reads_back_by_the_rule,
          gate_q6_one_request_per_shard,
          gate_q9_a_retired_generation_touches_nothing,
-         gate_q10_shard_dupes_sends_only_the_pack_s_duplicates]
+         gate_q10_shard_dupes_sends_only_the_pack_s_duplicates,
+         gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -393,6 +449,45 @@ MUTATIONS = [
      "                faces.Add(FaceKey(p)); pids.Add(p?.print_id);",
      "                faces.Add(live ? FaceKey(p) : null); pids.Add(p?.print_id);   // live only",
      "a print that is not live is counted"),
+    ("Q11a", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "api",
+     "                if (ok && !PcAnswerFence.Admits(fence))\n                {\n"
+     "                    // Fix pass 2, finding 1: a confirmed write (a shard's or a",
+     "                if (ok && false)\n                {\n"
+     "                    // Fix pass 2, finding 1: a confirmed write (a shard's or a",
+     "                if (ok && !PcAnswerFence.Admits(fence))   // the fence\n                {\n"
+     "                    // Fix pass 2, finding 1: a confirmed write (a shard's or a",
+     "the balance read lands without the fence"),
+    ("Q11b", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "api",
+     "                if (ok && !PcAnswerFence.Admits(fence))\n                {\n"
+     "                    // Fix pass 2, finding 1: a confirmed write (prints a shard,",
+     "                if (ok && false)\n                {\n"
+     "                    // Fix pass 2, finding 1: a confirmed write (prints a shard,",
+     "                if (ok && !PcAnswerFence.Admits(fence))   // the fence\n                {\n"
+     "                    // Fix pass 2, finding 1: a confirmed write (prints a shard,",
+     "the collection read lands without the fence"),
+    ("Q11c", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "api",
+     "                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }\n                }\n"
+     "                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($\"[PC] discard-batch callback",
+     "                    if (sh != null) { CachedPcMe.shards = PcInt(sh); }\n                }\n"
+     "                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($\"[PC] discard-batch callback",
+     "                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }   // moves it\n                }\n"
+     "                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($\"[PC] discard-batch callback",
+     "a confirmed batch balance does not move the fence"),
+    ("Q11d", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "rules",
+     "            return stamp == Writes;",
+     "            return true;",
+     "            return stamp == Writes;   // no write since",
+     "the fence admits a read dispatched before a write"),
+    ("Q11e", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "ui",
+     "            if (results.Count > 0) ApiClient.PcAnswerFence.Wrote();",
+     "            if (results.Count > 0) { }",
+     "            if (results.Count > 0) ApiClient.PcAnswerFence.Wrote();   // a confirmed write",
+     "the prints a shard removed do not move the fence"),
+    ("Q11f", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "ui",
+     "            if (ApiClient.PcReadsOwed && !shardInFlight && !discardInFlight) ApiClient.PcSendOwedReads(id);",
+     "            if (ApiClient.PcReadsOwed) ApiClient.PcSendOwedReads(id);",
+     "            if (ApiClient.PcReadsOwed && !shardInFlight && !discardInFlight) ApiClient.PcSendOwedReads(id);   // after the run",
+     "an owed read is sent while a shard or a discard is out"),
 ]
 
 

@@ -4692,6 +4692,41 @@ namespace CompetitiveRounds
         private static bool pcMeInFlight, pcCollInFlight;
         private static float pcMeAttemptAt = -100f, pcCollAttemptAt = -100f;   // the throttle keys on the last ATTEMPT, so a failing fetch is not re-fired by every repaint
         private static int _pcCacheEpoch;   // advanced on every identity edge (c4): a landing from an older epoch never touches the cache
+        /// <summary>Item 18 fix pass 2, finding 1: the generation of the two
+        /// caches' confirmed writes (PcCacheFence). FetchPcMe and
+        /// FetchPcCollection stamp it at dispatch and land only if it has not
+        /// moved; the writers that apply a server confirmation (a shard's or a
+        /// discard's balance and removed prints, a trade accept's drawn
+        /// prints) move it.</summary>
+        internal static readonly PcCacheFence PcAnswerFence = new PcCacheFence();
+        // A read the fence dropped is owed (with the callers that waited on
+        // it) until PcSendOwedReads sends it again; an identity edge clears it.
+        private static bool pcMeReadOwed, pcCollReadOwed;
+        private static Action<bool, string> pcMeOwedCallback, pcCollOwedCallback;
+        internal static bool PcReadsOwed { get { return pcMeReadOwed || pcCollReadOwed; } }
+
+        /// <summary>Fix pass 2, finding 1: sends each read the fence dropped,
+        /// once, stamped now. PlayerCardsUI's tick calls it only while no
+        /// shard and no discard is out, so the read it sends is not itself
+        /// dropped by an answer of the same run, and one dropped read costs
+        /// at most one more request.</summary>
+        internal static void PcSendOwedReads(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            if (pcMeReadOwed && !pcMeInFlight)
+            {
+                pcMeReadOwed = false;
+                var cb = pcMeOwedCallback; pcMeOwedCallback = null;
+                FetchPcMe(steamId, true, cb);
+            }
+            if (pcCollReadOwed && !pcCollInFlight)
+            {
+                pcCollReadOwed = false;
+                var cb = pcCollOwedCallback; pcCollOwedCallback = null;
+                pcCollAttemptAt = -100f;
+                FetchPcCollection(steamId, true, cb);
+            }
+        }
 
         /// <summary>The identity/consent generation. It is bumped by
         /// OnLocalIdentityChanged and by the consent revoke, before either clears
@@ -4726,6 +4761,7 @@ namespace CompetitiveRounds
             float dispatched = pcMeAttemptAt;
             string url = PcUrl("me", steamId, $"pcread:{steamId}:me:-", null);
             int epoch = _pcCacheEpoch;
+            int fence = PcAnswerFence.Stamp();
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 pcMeInFlight = false;
@@ -4734,6 +4770,19 @@ namespace CompetitiveRounds
                     // dispatched for a previous identity: never repaint the cache (c4)
                     Plugin.Log.LogInfo("[PC] me answer dropped: identity changed");
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
+                    return;
+                }
+                if (ok && !PcAnswerFence.Admits(fence))
+                {
+                    // Fix pass 2, finding 1: a confirmed write (a shard's or a
+                    // discard's balance) landed while this read was on the
+                    // wire, so its balance may predate it. Dropped; the read
+                    // is OWED and sent again by PcSendOwedReads once no shard
+                    // or discard is out (never mid-run: a re-read per discard
+                    // answer is the request shape C2 removed). The caller
+                    // hears that read.
+                    Plugin.Log.LogInfo("[PC] me answer dropped: a confirmed write landed while it was in flight; read owed");
+                    pcMeReadOwed = true; if (callback != null) pcMeOwedCallback += callback;
                     return;
                 }
                 if (ok)
@@ -4769,6 +4818,7 @@ namespace CompetitiveRounds
             pcCollInFlight = true; pcCollAttemptAt = Time.realtimeSinceStartup;
             string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:-", null);
             int epoch = _pcCacheEpoch;
+            int fence = PcAnswerFence.Stamp();
             // The prints carry a face_locale and the faces are cached by it, so
             // the answer describes the language it was ASKED in. Committing one
             // asked in the previous language leaves every face keyed to a locale
@@ -4796,6 +4846,18 @@ namespace CompetitiveRounds
                     try { PlayerCardMotion.Clear(); } catch { }
                     pcCollAttemptAt = -100f;
                     FetchPcCollection(who, true, callback);
+                    return;
+                }
+                if (ok && !PcAnswerFence.Admits(fence))
+                {
+                    // Fix pass 2, finding 1: a confirmed write (prints a shard,
+                    // a discard or a trade accept removed or drew) landed while
+                    // this read was on the wire, so its prints may predate it.
+                    // Dropped; the read is OWED (PcSendOwedReads, as /pc/me's),
+                    // and that read also answers any demand remembered
+                    // meanwhile. The caller hears that read.
+                    Plugin.Log.LogInfo("[PC] collection answer dropped: a confirmed write landed while it was in flight; read owed");
+                    pcCollReadOwed = true; if (callback != null) pcCollOwedCallback += callback;
                     return;
                 }
                 if (again)
@@ -4897,7 +4959,7 @@ namespace CompetitiveRounds
                 if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
                 {
                     string sh = PcTopLevel(resp, "shards");
-                    if (sh != null) CachedPcMe.shards = PcInt(sh);
+                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }
                 }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] discard callback threw: {cex.Message}"); }
             }));
@@ -4923,7 +4985,9 @@ namespace CompetitiveRounds
         /// `current` says the request is still the caller's current one
         /// (item 18 fix pass 1, F2: PcShardFlight's generation), so a request
         /// given up whose answer arrives late writes no balance. A null
-        /// `current` writes none (PcShardFlight.Admits fails closed).</summary>
+        /// `current` writes none (PcShardFlight.Admits fails closed). A
+        /// balance it does write moves PcAnswerFence (fix pass 2, finding 1),
+        /// so a read already on the wire cannot put the older balance back.</summary>
         public static void PcDiscardBatch(string steamId, string key, IList<string> printIds, Func<bool> current, Action<bool, string> callback)
         {
             if (Plugin.Instance == null || !PcPlainToken(key) || printIds == null || printIds.Count == 0
@@ -4948,7 +5012,7 @@ namespace CompetitiveRounds
                 if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))
                 {
                     string sh = PcTopLevel(resp, "shards");
-                    if (sh != null) CachedPcMe.shards = PcInt(sh);
+                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }
                 }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] discard-batch callback threw: {cex.Message}"); }
             }));
@@ -5119,6 +5183,8 @@ namespace CompetitiveRounds
             pcTradeSummaryInFlight = false; pcTradesInFlight = false;
             pcCollInFlight = false; pcCollForceAgain = false;
             pcCollOfInFlight = false;
+            // fix pass 2, finding 1: a read owed to the previous identity is not sent
+            pcMeReadOwed = false; pcCollReadOwed = false; pcMeOwedCallback = null; pcCollOwedCallback = null;
         }
 
         /// <summary>GET /pc/trades?view=summary, HMAC over
