@@ -216,31 +216,31 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The loader: a token that parses is the binding,
-        /// anything else keeps the default (KeybindRules.LoadToken). A loaded
-        /// set that the rules refuse - two rows on one key, a reserved key,
-        /// a mouse button on a mod row - is not honoured: the offending row
-        /// falls back to its default and the line says so.</summary>
+        /// anything else keeps the default (KeybindRules.LoadToken). The
+        /// parsed set then goes through KeybindRules.ResolveLoaded, which ends
+        /// on a conflict-free effective set (fix pass 1 F5): a refused row
+        /// falls back to its default only when the default passes against the
+        /// rows already retained, and is otherwise left unbound. Every change
+        /// is one warning line. The config entries keep what the player
+        /// saved; only the effective set differs.</summary>
         private static void LoadFromConfig()
         {
+            var parsed = new BindSource[KeybindRules.RowCount];
             for (int i = 0; i < KeybindRules.RowCount; i++)
             {
-                bound[i] = KeybindRules.Default(i);
+                parsed[i] = KeybindRules.Default(i);
                 if (!live.Ready) continue;
                 string tok = null;
                 try { tok = entries[i] != null ? entries[i].Value : null; } catch { }
-                bound[i] = KeybindRules.LoadToken(i, tok);
+                parsed[i] = KeybindRules.LoadToken(i, tok);
             }
-            if (!live.Ready) return;
-            for (int i = 0; i < KeybindRules.RowCount; i++)
-            {
-                if (bound[i].Kind == BindKind.None) continue;
-                int other;
-                var refusal = KeybindRules.Refuse(i, bound[i], bound, CodesForKey, out other);
-                if (refusal == Refusal.None) continue;
-                Plugin.Log.LogWarning("[KEYBIND] config row " + KeybindRules.RowIds[i] + "=" + KeybindRules.FormatToken(bound[i])
-                    + " refused (" + refusal + (other >= 0 ? " with " + KeybindRules.RowIds[other] : "") + "); default kept");
-                bound[i] = KeybindRules.Default(i);
-            }
+            if (!live.Ready) { Array.Copy(parsed, bound, bound.Length); return; }
+            var notes = new List<string>();
+            var eff = KeybindRules.ResolveLoaded(parsed, CodesForKey, notes);
+            Array.Copy(eff, bound, bound.Length);
+            foreach (var n in notes) Plugin.Log.LogWarning("[KEYBIND] config row " + n);
+            if (!KeybindRules.ConflictFree(bound, CodesForKey))
+                Plugin.Log.LogWarning("[KEYBIND] loaded set is not conflict-free after resolution");
         }
 
         /// <summary>The ONE writer of a binding (validate, write the registry

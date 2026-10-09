@@ -612,6 +612,13 @@ def test_f3_the_join_override_carries_the_keyboard_surface_gate():
     assert "GeneralInput.InputType.Controller" in gate
 
 
+def test_f5_the_loader_ends_on_the_resolved_conflict_free_set():
+    body = _code(_src(KB), "private static void LoadFromConfig()")
+    assert len(re.findall(r"KeybindRules\.ResolveLoaded\(", body)) == 1
+    assert "KeybindRules.Refuse(" not in body
+    assert not re.search(r"\bbound\[i\]\s*=", body)
+
+
 def test_f3_the_ready_override_keeps_its_seat_gate():
     ready = _code(_src(KB), "internal static void ApplyReady(CharacterSelectionInstance c)")
     assert "KeyboardSeat(c)" in ready.split("WriteLabel")[0]

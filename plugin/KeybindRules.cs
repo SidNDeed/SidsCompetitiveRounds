@@ -462,6 +462,72 @@ namespace CompetitiveRounds
             return other >= 0 ? Refusal.Overlap : Refusal.None;
         }
 
+        /// <summary>Fix pass 1 F5: the loaded config made a conflict-free
+        /// effective set. Rows are taken in row order, each checked against
+        /// the rows already RETAINED (later rows are not yet in force). A row
+        /// the rules refuse falls back to its default, and the default is
+        /// checked against the retained rows the same way; a default they
+        /// refuse too leaves the row unbound, so one key never drives two
+        /// rows. <paramref name="notes"/> receives one line per row changed.</summary>
+        internal static BindSource[] ResolveLoaded(BindSource[] parsed, Func<int, int[]> codesFor, List<string> notes)
+        {
+            var eff = new BindSource[RowCount];
+            if (Mut == 20)
+            {
+                // a22f80ed: every row checked against the whole parsed set, the
+                // fallback default written unchecked into the same array.
+                for (int i = 0; i < RowCount; i++) eff[i] = parsed != null && i < parsed.Length ? parsed[i] : Default(i);
+                for (int i = 0; i < RowCount; i++)
+                {
+                    if (eff[i].Kind == BindKind.None) continue;
+                    int o;
+                    if (Refuse(i, eff[i], eff, codesFor, out o) != Refusal.None) eff[i] = Default(i);
+                }
+                return eff;
+            }
+            for (int i = 0; i < RowCount; i++)
+            {
+                var cand = parsed != null && i < parsed.Length ? parsed[i] : Default(i);
+                if (cand.Kind == BindKind.None) { eff[i] = cand; continue; }
+                int other;
+                var r = Refuse(i, cand, eff, codesFor, out other);
+                if (r == Refusal.None) { eff[i] = cand; continue; }
+                string why = FormatToken(cand) + " refused (" + r + (other >= 0 ? " with " + RowIds[other] : "") + ")";
+                var d = Default(i);
+                int otherD = -1;
+                Refusal rd;
+                if (d.Kind == BindKind.None) rd = Refusal.None;
+                else if (d.Equals(cand)) { rd = r; otherD = other; }
+                else rd = Refuse(i, d, eff, codesFor, out otherD);
+                if (rd == Refusal.None)
+                {
+                    eff[i] = d;
+                    if (notes != null) notes.Add(RowIds[i] + ": " + why + "; default " + FormatToken(d) + " kept");
+                }
+                else
+                {
+                    eff[i] = BindSource.None;
+                    if (notes != null) notes.Add(RowIds[i] + ": " + why + "; default " + FormatToken(d) + " refused too ("
+                                                 + rd + (otherD >= 0 ? " with " + RowIds[otherD] : "") + "); unbound");
+                }
+            }
+            return eff;
+        }
+
+        /// <summary>True when no two rows of the set conflict and every bound
+        /// row passes every rule against the rest (the effective-set invariant).</summary>
+        internal static bool ConflictFree(BindSource[] set, Func<int, int[]> codesFor)
+        {
+            if (set == null || set.Length != RowCount) return false;
+            for (int i = 0; i < RowCount; i++)
+            {
+                if (set[i].Kind == BindKind.None) continue;
+                int o;
+                if (Refuse(i, set[i], set, codesFor, out o) != Refusal.None) return false;
+            }
+            return true;
+        }
+
         // -- capture (design section 2.5) ------------------------------------
 
         /// <summary>One capture-poll input, as the KeyMappings row of the key
@@ -936,6 +1002,44 @@ namespace CompetitiveRounds
             Check(r, "F2 KeybindRules.TapDetector: a foreign key on the ARMING frame keeps the tap from rotating",
                   !TapArmedWithForeign(tapAlias, tapScan), "rotated=" + TapArmedWithForeign(tapAlias, tapScan));
 
+            // -- fix pass 1 F5: the loaded set is conflict-free ---------------------
+            // QuickChat moved off Q, MenuToggle saved on Q, then QuickChat hand-
+            // edited to the forbidden F5: QuickChat's default Q is revalidated
+            // against MenuToggle and refused, so QuickChat loads unbound.
+            // Mutation 20 is the a22f80ed loader: both rows end on Q.
+            Func<BindSource[]> handEdited = () =>
+            {
+                var p = Defaults();
+                p[MenuToggle] = K("Q");
+                p[QuickChat] = K("F5");
+                return p;
+            };
+            MutCase(r, 20, "KeybindRules.ResolveLoaded", "a fallback default is revalidated: the loaded set is conflict-free",
+                    () =>
+                    {
+                        var e = ResolveLoaded(handEdited(), null, null);
+                        return ConflictFree(e, null) && e[MenuToggle].Equals(K("Q")) && e[QuickChat].Kind == BindKind.None;
+                    },
+                    () =>
+                    {
+                        var d = ResolveLoaded(Defaults(), null, null);
+                        bool same = true;
+                        for (int i = 0; i < RowCount; i++) if (!d[i].Equals(Default(i))) same = false;
+                        var p = Defaults(); p[Jump] = K("Escape");
+                        var j = ResolveLoaded(p, null, null);
+                        return same && j[Jump].Equals(K("Space")) && ConflictFree(j, null);
+                    },
+                    () =>
+                    {
+                        var e = ResolveLoaded(handEdited(), null, null);
+                        return "MenuToggle=" + FormatToken(e[MenuToggle]) + " QuickChat=" + FormatToken(e[QuickChat])
+                               + " conflictFree=" + ConflictFree(e, null);
+                    });
+            Check(r, "F5 KeybindRules.ResolveLoaded: every row refused and its default refused too is noted and left unbound",
+                  ResolveNotes(handEdited()).Count == 1 && ResolveNotes(handEdited())[0].StartsWith("QuickChat: key:F5 refused (RescueKey)", StringComparison.Ordinal)
+                  && ResolveNotes(handEdited())[0].EndsWith("unbound", StringComparison.Ordinal),
+                  string.Join(" | ", ResolveNotes(handEdited()).ToArray()));
+
             // -- fix pass 1 F3: prompt overrides target keyboard surfaces only -------
             const string southJoin = "Press\n[<sprite name=BUTTON_SOUTH>]\nto join", spaceJoin = "Press\n[SPACE]\nto join";
             const string ukSouthJoin = "Натисніть\n[<sprite name=BUTTON_SOUTH>]\nщоб приєднатися";
@@ -995,6 +1099,13 @@ namespace CompetitiveRounds
             Check(r, "KeybindRules.ParseToken: none parses to the unbound source and a mouse axis does not parse",
                   ParseToken("none", out ns) && ns.Kind == BindKind.None && !ParseToken("mouse:NegativeX", out ns) && !ParseToken("key:None", out ns),
                   "ok");
+        }
+
+        private static List<string> ResolveNotes(BindSource[] parsed)
+        {
+            var n = new List<string>();
+            ResolveLoaded(parsed, null, n);
+            return n;
         }
 
         /// <summary>The alias and a foreign key go down in the same frame, then
