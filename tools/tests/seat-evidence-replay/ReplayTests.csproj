@@ -5,7 +5,10 @@
        stand-ins for Unity, Photon, ROUNDS and the plug-in members they touch)
        and drives scripted replays through the Unity-side classification.
        Mutants are built from COPIES of SeatEvidence.cs (SeatEvidenceSource
-       override); the tracked file is never modified. -->
+       override); the tracked file is never modified.
+       With IcRealEvidence=true the REAL plugin/IdentityClockEvidence.cs (or a
+       mutant COPY, IdentityEvidenceSource) is compiled too, in place of the
+       stub class, for the production quit flush case. -->
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -22,13 +25,23 @@
     <SeatEvidenceSource>$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidence.cs</SeatEvidenceSource>
   </PropertyGroup>
 
+  <PropertyGroup Condition="'$(IdentityEvidenceSource)' == ''">
+    <IdentityEvidenceSource>$(MSBuildThisFileDirectory)..\..\..\plugin\IdentityClockEvidence.cs</IdentityEvidenceSource>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IcRealEvidence)' == 'true'">
+    <DefineConstants>$(DefineConstants);IC_REAL_EVIDENCE</DefineConstants>
+  </PropertyGroup>
+
   <ItemGroup>
     <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs" />
     <Compile Include="$(SeatEvidenceSource)" />
     <!-- the identity-clock quit flush loop (FlushCaptures), run by the
          identity_closing_next_boot case against the real SpoolClosing -->
     <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\IdentityClockCore.cs" />
+    <Compile Include="$(IdentityEvidenceSource)" Condition="'$(IcRealEvidence)' == 'true'" />
     <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)StubsIc.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
   </ItemGroup>
 

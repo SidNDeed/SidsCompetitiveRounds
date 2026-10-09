@@ -29,7 +29,7 @@ PROJ = os.path.join(HERE, "ReplayTests.csproj")
 WORK = os.path.join(HERE, "work")
 SE = os.path.join(PLUGIN, "SeatEvidence.cs")
 TRACKED = ["SeatEvidence.cs", "SeatEvidenceCore.cs", "GameStateWatcher.cs", "Plugin.cs", "ApiClient.cs",
-           "HitEvidence.cs", "PoisonSync.cs", "CardDrawEvidence.cs"]
+           "HitEvidence.cs", "PoisonSync.cs", "CardDrawEvidence.cs", "IdentityClockEvidence.cs"]
 
 CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left", "cut_guards",
          "closing_next_boot", "compat_sender", "compat_bounds", "cut_422_kept", "path1_unstamped",
@@ -297,12 +297,12 @@ def read(path):
     return open(path, "rb").read().decode("utf-8-sig")
 
 
-def build(tag, source):
+def build(tag, source, extra=()):
     out = os.path.join(WORK, tag)
     cmd = ["dotnet", "build", PROJ, "-c", "Release", "-nologo", "-v", "q",
            "-p:IntermediateOutputPath=" + os.path.join(out, "obj") + os.sep,
            "-p:OutDir=" + os.path.join(out, "bin") + os.sep,
-           "-p:SeatEvidenceSource=" + source]
+           "-p:SeatEvidenceSource=" + source] + list(extra)
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout[-4000:], r.stderr[-2000:])
@@ -316,6 +316,60 @@ def run_case(dll, tag, case):
         shutil.rmtree(d)
     r = subprocess.run(["dotnet", dll, case, d], capture_output=True, text=True)
     return r.returncode, r.stdout.strip()
+
+
+# Identity-clock fix pass 3 (QF1): the REAL plugin/IdentityClockEvidence.cs compiled into the replay
+# (IcRealEvidence=true) and its production capture and quit flush driven; mutants planted into COPIES
+# of IdentityClockEvidence.cs (the tracked file is never written). (name, old, new): each mutant's
+# target is the production case, its control combat_gate in the same mutant build.
+IC_EVID = os.path.join(PLUGIN, "IdentityClockEvidence.cs")
+IC_CASE = "identity_production_quit_flush"
+IC_CONTROL = "combat_gate"
+IC_MUTANTS = [
+    ("ic_flush_to_queue", 'env => SeatEvidence.SpoolClosing("i", env)', "env => SeatEvidence.EnqueueIdentity(env)"),
+    ("ic_capture_dropped", "if (g == null || !rankedNow || !g.OneVOne) return;", "if (true) return;"),
+    ("ic_build_at_quit_none", "            return BuildEnv(c, out text);\n        }\n\n        /// <summary>The signed envelope",
+     "            text = null; return null;\n        }\n\n        /// <summary>The signed envelope"),
+]
+
+
+def ic_real_section():
+    ok = True
+    ic = ["-p:IcRealEvidence=true"]
+    dll = build("icreal", SE, ic)
+    if dll is None:
+        print("BUILD FAILED (icreal: the real IdentityClockEvidence.cs)")
+        return False
+    for case in (IC_CASE, IC_CONTROL, "identity_closing_next_boot"):
+        rc, out = run_case(dll, "icreal", case)
+        print("icreal " + out)
+        ok = ok and rc == 0
+    raw = open(IC_EVID, "rb").read().decode("utf-8")
+    nl = "\r\n" if "\r\n" in raw else "\n"
+    caught = 0
+    for name, old, new in IC_MUTANTS:
+        o, n = old.replace("\n", nl), new.replace("\n", nl)
+        if raw.count(o) != 1:
+            print("BAD ic mutant %s: anchor occurs %d times" % (name, raw.count(o)))
+            ok = False
+            continue
+        path = os.path.join(WORK, "icmut_" + name + ".cs")
+        open(path, "wb").write(raw.replace(o, n).encode("utf-8"))
+        mdll = build("icmut_" + name, SE, ic + ["-p:IdentityEvidenceSource=" + path])
+        if mdll is None:
+            print("BAD ic mutant %s: does not build" % name)
+            ok = False
+            continue
+        trc, tout = run_case(mdll, "icmut_" + name, IC_CASE)
+        crc, _ = run_case(mdll, "icmut_" + name, IC_CONTROL)
+        hit = trc != 0 and crc == 0
+        caught += hit
+        ok = ok and hit
+        print("%s ic mutant %s: target %s=%s; control %s=%s%s" % (
+            "CAUGHT" if hit else "MISSED", name, IC_CASE, "FAIL" if trc else "PASS", IC_CONTROL,
+            "PASS" if crc == 0 else "FAIL", "" if hit else " (" + tout[-200:] + ")"))
+    print("ic real evidence: production quit flush %s; ic mutants: %d of %d caught" % ("PASS" if ok else "FAIL", caught, len(IC_MUTANTS)))
+    return ok and caught == len(IC_MUTANTS)
 
 
 def wiring_ok(text, anchors):
@@ -387,6 +441,8 @@ def main():
             "CAUGHT" if hit else "MISSED", name, target, "FAIL" if trc else "PASS", control,
             "PASS" if crc == 0 else "FAIL", "" if hit else " (" + tout[-200:] + ")"))
     print("mutants: %d of %d caught" % (caught, len(MUTANTS)))
+
+    ok = ic_real_section() and ok
 
     unchanged = all(sha(os.path.join(PLUGIN, f)) == before[f] for f in TRACKED)
     print("tracked plugin files unchanged:", unchanged)
