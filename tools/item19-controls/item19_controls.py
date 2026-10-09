@@ -363,13 +363,16 @@ CLAIM_ROWS = {
     # M11 / L1: the exact assignment the nametag citation names (line-bound)
     "M11-assignment": dict(edit=("NametagStyler.cs", "                string styled = Wrap(_baseName, skus);",
                                  "\n                string styled = Wrap(_baseName, skus);"),
-                           twin=("NametagStyler.cs", "// keep fresh if Steam persona changed",
-                                 "// keep it fresh if the Steam persona changed")),
+                           # the twin must not touch the claim's own control anchor
+                           # (S30's control edits the "keep fresh" comment)
+                           twin=("NametagStyler.cs", "// leaked artifacts. Batch both into one SetCustomProperties call",
+                                 "// leaked artifacts. Batch the two into one SetCustomProperties call")),
     # M11: the refusal citation (the 2v2 patch's already-spawned refusal)
     "M11-refusal": dict(edit=("Plugin.cs", "if (__instance.hasCreatedLocalPlayer) return false;     // already done",
                               "// already done"),
-                        twin=("Plugin.cs", "if (__instance.hasCreatedLocalPlayer) return false;     // already done",
-                              "if (__instance.hasCreatedLocalPlayer) return false;     // done already")),
+                        # the twin must not touch the claim's own control anchor
+                        # (S31's control edits the refusal's comment)
+                        twin=("Plugin.cs", "// not a team-mode spawn", "// not a team spawn")),
     # L1: the dual ring (two bands)
     "L1-ring": dict(edit=(AD, "edge < 6 ? inner : clear", "edge < 6 ? outer : clear"),
                     twin=(AD, "            const int size = 64;", "            // two bands, outer then inner\n            const int size = 64;")),
