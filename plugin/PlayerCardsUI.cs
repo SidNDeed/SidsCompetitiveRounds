@@ -1802,8 +1802,8 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Item 18 fix pass 1 (F3): the Shard dupes button on the pack
-        /// on show -- up while the pack holds a duplicate (PackDupeIds, read
-        /// against a collection that already counts the pack), labelled with
+        /// on show -- up while the pack holds a duplicate the player owns now
+        /// (PackDupeIds; PcQuickShardRules.DupesOffered, fix pass 2), labelled with
         /// the total those copies pay (the second click's label once armed),
         /// "sharding..." while its batch is out.</summary>
         private static void RefreshShardDupesButton(ApiClient.PcPackAnswer shown)
@@ -1811,7 +1811,7 @@ namespace CompetitiveRounds
             if (btnShardDupes == null) return;
             bool ready;
             var ids = PackDupeIds(shown, ApiClient.CachedPcCollection, out ready);
-            bool up = ready && ids.Count > 0 && ids.Count <= ApiClient.PC_DISCARD_BATCH_CAP;
+            bool up = PcQuickShardRules.DupesOffered(ready, ids.Count, ApiClient.PC_DISCARD_BATCH_CAP);
             bool busy = shardInFlight && shown != null && shardFlight.DupesOf == shown.pack_id;
             btnShardDupes.SetActive(up || busy);
             if (!up && !busy) return;
@@ -3061,8 +3061,11 @@ namespace CompetitiveRounds
         /// by exact face) and the collection's live copies, so one live copy
         /// of every exact face is kept and a unique or last copy is never in
         /// the set. A print discarded or named gone by the server is not
-        /// live. `ready` is false (and the set empty) until the collection
-        /// read holds every live print of the pack.</summary>
+        /// live. The collection read is the current ownership (fix pass 2,
+        /// finding 2): a pack print it does not hold (traded away since the
+        /// pull) is neither taken nor counted, and one traded back counts
+        /// again. `ready` is false (and the set empty) only while no
+        /// collection read is loaded.</summary>
         private static List<string> PackDupeIds(ApiClient.PcPackAnswer pack, ApiClient.PcCollection col, out bool ready)
         {
             ready = false;

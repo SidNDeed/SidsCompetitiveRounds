@@ -45,6 +45,14 @@ Required behaviour, each a named test:
       is owed and sent again once no shard or discard is out (the recovery
       model is EXECUTED by the harness, PcQuickShardRules.RecoveryCases;
       gate q11 pins the call sites).
+  Q12 (fix pass 2, finding 2) Shard dupes ignores shown-pack prints no
+      longer owned, includes reacquired live prints, and stays available for
+      the shown pack's owned live duplicates: the fresh own collection is the
+      current ownership (PcQuickShardRules.DuplicateShardIds and DupesOffered,
+      EXECUTED by the harness, OwnershipCases; gate q12 pins them), and the
+      database half proves that ownership source on a real PostgreSQL: the
+      own collection omits a print traded away and holds it again once traded
+      back, while the pack history still lists it undiscarded.
 
 Each client gate runs on the real sources and, with its mutation and control,
 on edited copies (#391). The database tests use test_pc_shard_batch's harness
@@ -63,8 +71,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from test_pc_shard_batch import (  # noqa: E402,F401  (pg_build and env are fixtures)
-    _batch, _batches, _discarded, _err, _flat, _key, _pc, _player, _print, _q, _scenario, _shards, _single,
-    _val, env, main, pg_build,
+    REQ, _batch, _batches, _call, _discarded, _err, _flat, _key, _pc, _player, _print, _q, _scenario, _shards,
+    _sign, _single, _val, env, main, pg_build,
 )
 from test_pc_shard_batch import _code as _py_code, _fn_src  # noqa: E402
 
@@ -252,7 +260,7 @@ def gate_q10_shard_dupes_sends_only_the_pack_s_duplicates(s):
     rule = _member(_code(s["rules"]), "internal static List<string> DuplicateShardIds(")
     assert "if (outside == 0 && kept.Add(k)) continue;" in rule, "the duplicate rule can take a last copy"
     refresh = _code(_member(ui, "private static void RefreshShardDupesButton("))
-    assert "bool up = ready && ids.Count > 0 && ids.Count <= ApiClient.PC_DISCARD_BATCH_CAP;" in refresh, (
+    assert "bool up = PcQuickShardRules.DupesOffered(ready, ids.Count, ApiClient.PC_DISCARD_BATCH_CAP);" in refresh, (
         "Shard dupes is offered without a duplicate")
     assert "RefreshShardDupesButton(shown);" in _member(ui, "private static void RefreshShardPackButton("), (
         "Shard dupes is never painted")
@@ -307,6 +315,31 @@ def gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard(s):
     assert "return stamp == Writes;" in admits, "the fence admits a read dispatched before a write"
 
 
+def gate_q12_shard_dupes_counts_only_the_prints_owned_now(s):
+    """Fix pass 2, finding 2: the duplicate rule reads ownership from the
+    collection read, so a shown-pack print it does not hold is neither taken
+    nor counted and never makes the action not ready; the button is up for
+    the pack's owned duplicates. The decisions are EXECUTED by the harness
+    (PcQuickShardRules.OwnershipCases); this pins the rule and its caller."""
+    rules = _code(s["rules"])
+    rule = _member(rules, "internal static List<string> DuplicateShardIds(")
+    ready = _at(rule, "ready = true;", "an absent print makes the action not ready")
+    own = _at(rule, "owned[i] = pageFaceKeys[i] != null && pagePrintIds[i] != null && "
+                    "livePrintIds.Contains(pagePrintIds[i]) ? pageFaceKeys[i] : null;", "a print no longer owned is counted")
+    assert rule.count("return queue;") == 2 and rule.count("ready = true;") == 1 and ready < own, (
+        "an absent print makes the action not ready")
+    assert rule.count("string k = owned[i];") == 2 and "string k = pageFaceKeys[i];" not in rule, (
+        "a print no longer owned is counted")
+    offered = _member(rules, "internal static bool DupesOffered(")
+    assert "return ready && count > 0 && count <= cap;" in offered, "the button is not up for the owned duplicates"
+    refresh = _code(_member(s["ui"], "private static void RefreshShardDupesButton("))
+    assert "bool up = PcQuickShardRules.DupesOffered(ready, ids.Count, ApiClient.PC_DISCARD_BATCH_CAP);" in refresh, (
+        "the button is not up for the owned duplicates")
+    ids = _code(_member(s["ui"], "private static List<string> PackDupeIds("))
+    assert "held.Add(c.print_id)" in ids and "PcQuickShardRules.DuplicateShardIds(faces, pids, counts, held, out ready)" in ids, (
+        "a print no longer owned is counted")
+
+
 NEW_KEYS = ("Shard dupes (+{0})", "Click Shard dupes again to shard {0} duplicates for {1} shards")
 _CAT_ENTRY = re.compile(r'^\s+\["((?:[^"\\]|\\.)*)"\] = "((?:[^"\\]|\\.)*)",$', re.M)
 
@@ -343,7 +376,8 @@ GATES = [gate_q1_the_strip_card_shards_in_place_on_a_confirmed_click,
          gate_q6_one_request_per_shard,
          gate_q9_a_retired_generation_touches_nothing,
          gate_q10_shard_dupes_sends_only_the_pack_s_duplicates,
-         gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard]
+         gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard,
+         gate_q12_shard_dupes_counts_only_the_prints_owned_now]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -488,6 +522,23 @@ MUTATIONS = [
      "            if (ApiClient.PcReadsOwed) ApiClient.PcSendOwedReads(id);",
      "            if (ApiClient.PcReadsOwed && !shardInFlight && !discardInFlight) ApiClient.PcSendOwedReads(id);   // after the run",
      "an owed read is sent while a shard or a discard is out"),
+    ("Q12a", gate_q12_shard_dupes_counts_only_the_prints_owned_now, "rules",
+     "            ready = true;\n            // the page as the player owns it now",
+     "            for (int j = 0; j < pageFaceKeys.Count; j++)\n"
+     "                if (pageFaceKeys[j] != null && !livePrintIds.Contains(pagePrintIds[j])) return queue;\n"
+     "            ready = true;\n            // the page as the player owns it now",
+     "            ready = true;   // every input present\n            // the page as the player owns it now",
+     "an absent print makes the action not ready"),
+    ("Q12b", gate_q12_shard_dupes_counts_only_the_prints_owned_now, "rules",
+     "                owned[i] = pageFaceKeys[i] != null && pagePrintIds[i] != null && livePrintIds.Contains(pagePrintIds[i]) ? pageFaceKeys[i] : null;",
+     "                owned[i] = pageFaceKeys[i];",
+     "                owned[i] = pageFaceKeys[i] != null && pagePrintIds[i] != null && livePrintIds.Contains(pagePrintIds[i]) ? pageFaceKeys[i] : null;   // owned now",
+     "a print no longer owned is counted"),
+    ("Q12c", gate_q12_shard_dupes_counts_only_the_prints_owned_now, "rules",
+     "            return ready && count > 0 && count <= cap;",
+     "            return false;",
+     "            return ready && count > 0 && count <= cap;   // up",
+     "the button is not up for the owned duplicates"),
 ]
 
 
@@ -720,3 +771,64 @@ def test_q8_both_routes_read_the_one_traded_rule_before_the_gate_and_any_write()
         assert code.count("_pc . PC_TRADE [ \"traded_discard_shards\" ]") == 1, name
     rule = _py_code(_fn_src("_pc_traded_rule_governs"))
     assert rule.count("HTTPException (") == 2 and rule.count("await db . rollback ( )") == 2
+
+
+# ------------------- Q12: the ownership Shard dupes reads (fix pass 2, finding 2)
+
+async def _pack_print(owner, subject, rarity, pack, slot):
+    """One live print of `subject`'s card minted into `pack` at `slot`, as
+    _print mints one (pc_prints admits no later change to pack_id or slot)."""
+    return str(await _val("""
+        WITH card AS (
+            INSERT INTO pc_cards (subject_player_id, edition_id)
+            VALUES ($2::uuid, (SELECT id FROM pc_editions WHERE ended_at IS NULL ORDER BY id LIMIT 1))
+            ON CONFLICT (subject_player_id, edition_id, variant) DO UPDATE SET variant = EXCLUDED.variant
+            RETURNING id)
+        INSERT INTO pc_prints (card_id, owner_player_id, snapshot_id, rarity, pool_rank, source, pack_id, slot)
+        SELECT id, $1::uuid, 1, $3, 1, 'pack', $4::uuid, $5 FROM card RETURNING id""",
+        owner.pid, subject.pid, rarity, pack, slot))
+
+
+async def _own_ids(ctx, name, who):
+    status, ans = await _call(ctx, name, main.pc_collection, request=REQ, steam_id=who.steam,
+                              sig=_sign(_pc.canon_read(who.steam, "collection", "-")), subject=None)
+    assert status == 200, ans
+    return {p["print_id"]: p for p in ans["prints"]}
+
+
+async def _history_prints(ctx, name, who, pack):
+    status, ans = await _call(ctx, name, main.pc_packs_history, request=REQ, steam_id=who.steam,
+                              sig=_sign(_pc.canon_read(who.steam, "packs", "-")), before=None, limit=10)
+    assert status == 200, ans
+    page = [p for p in ans["packs"] if p["pack_id"] == pack]
+    assert len(page) == 1, ans
+    return {p["print_id"]: p for p in page[0]["prints"]}
+
+
+def test_q12_the_own_collection_is_the_current_ownership_of_a_pack_s_prints(env):
+    """The source Shard dupes reads ownership from (PlayerCardsUI.PackDupeIds
+    over ApiClient.CachedPcCollection): a pack of three copies of one face,
+    one traded away. The pack history still lists the traded print as live
+    (not discarded), which is why the client cannot take ownership from it;
+    the own collection omits it and holds the two still owned. Traded back,
+    the print is in the own collection again (marked traded), so it counts."""
+    async def body(ctx):
+        me = await _player(1)
+        other = await _player(3)
+        subject = await _player(2)
+        pack = await _val("INSERT INTO pc_packs (player_id, source, status, opened_at) "
+                          "VALUES ($1::uuid, 'daily', 'done', now()) RETURNING id::text", me.pid)
+        a1, a2, a3 = [await _pack_print(me, subject, "rare", pack, slot) for slot in range(3)]
+        await _traded(a2, other)
+        shown = await _history_prints(ctx, "h1", me, pack)
+        assert set(shown) == {a1, a2, a3}, shown
+        assert shown[a2]["discarded"] is False, shown[a2]
+        owned = await _own_ids(ctx, "c1", me)
+        assert a2 not in owned and {a1, a3} <= set(owned), sorted(owned)
+        assert a2 in await _own_ids(ctx, "c2", other)
+        await _traded(a2, me)
+        owned = await _own_ids(ctx, "c3", me)
+        assert {a1, a2, a3} <= set(owned), sorted(owned)
+        assert owned[a2].get("traded") is True, owned[a2]
+        assert (await _history_prints(ctx, "h2", me, pack))[a2]["discarded"] is False
+    _scenario(env, body)

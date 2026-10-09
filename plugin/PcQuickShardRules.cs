@@ -106,15 +106,22 @@ namespace CompetitiveRounds
         ///   liveCountByFaceKey  the player's live copies of each face, over
         ///                  the whole collection;
         ///   livePrintIds   the collection's live print ids.
-        /// ready is true only when every live page print is in livePrintIds
-        /// (a positive signal that the collection read already counts this
-        /// pack; a collection read from before the pack would undercount);
-        /// not ready, or any input missing, answers an empty list. Walking
-        /// in display order, a print is taken only while its face has MORE
-        /// than one live copy left, so the first copy in order of a face new
-        /// to the player is kept, and a face the binder already holds has
-        /// every pack copy taken while the binder's copy survives. Never the
-        /// last copy: what is left of every face is at least one.</summary>
+        /// liveCountByFaceKey and livePrintIds come from ONE collection read
+        /// (PlayerCardsUI.PackDupeIds builds both in one walk).
+        /// Fix pass 2, finding 2: that read is the CURRENT ownership of the
+        /// pack's prints. The pack history describes a print as the pull made
+        /// it, so a print traded away since still reads live there. A page
+        /// print that is not in livePrintIds is not the player's now (traded
+        /// away, or a read from before the pack): it is neither taken nor
+        /// counted, and it never makes the action not ready. A print traded
+        /// away and back is in the read again, so it counts. ready is false
+        /// (and the list empty) only when an input is missing. Walking the
+        /// owned page prints in display order, a print is taken only while its
+        /// face has MORE than one live copy left, so the first owned copy in
+        /// order of a face new to the player is kept, and a face the binder
+        /// holds outside this pack has every owned pack copy taken while that
+        /// copy survives. Never the last copy: within the read, what is left
+        /// of every face is at least one.</summary>
         internal static List<string> DuplicateShardIds(IList<string> pageFaceKeys, IList<string> pagePrintIds,
             IDictionary<string, int> liveCountByFaceKey, ICollection<string> livePrintIds, out bool ready)
         {
@@ -122,14 +129,16 @@ namespace CompetitiveRounds
             ready = false;
             if (pageFaceKeys == null || pagePrintIds == null || pageFaceKeys.Count != pagePrintIds.Count
                 || liveCountByFaceKey == null || livePrintIds == null) return queue;
-            for (int i = 0; i < pageFaceKeys.Count; i++)
-                if (pageFaceKeys[i] != null && (pagePrintIds[i] == null || !livePrintIds.Contains(pagePrintIds[i]))) return queue;
             ready = true;
+            // the page as the player owns it now: a face for an owned live print, null otherwise
+            var owned = new string[pageFaceKeys.Count];
+            for (int i = 0; i < pageFaceKeys.Count; i++)
+                owned[i] = pageFaceKeys[i] != null && pagePrintIds[i] != null && livePrintIds.Contains(pagePrintIds[i]) ? pageFaceKeys[i] : null;
             var onPage = new Dictionary<string, int>(StringComparer.Ordinal);
             var seen = new HashSet<string>(StringComparer.Ordinal);
-            for (int i = 0; i < pageFaceKeys.Count; i++)
+            for (int i = 0; i < owned.Length; i++)
             {
-                string k = pageFaceKeys[i];
+                string k = owned[i];
                 if (k == null || !seen.Add(pagePrintIds[i])) continue;
                 int m; onPage.TryGetValue(k, out m); onPage[k] = m + 1;
             }
@@ -139,9 +148,9 @@ namespace CompetitiveRounds
             // copies disagrees with the page: nothing of that face is taken.
             var kept = new HashSet<string>(StringComparer.Ordinal);
             seen.Clear();
-            for (int i = 0; i < pageFaceKeys.Count; i++)
+            for (int i = 0; i < owned.Length; i++)
             {
-                string k = pageFaceKeys[i];
+                string k = owned[i];
                 if (k == null || !seen.Add(pagePrintIds[i])) continue;
                 int total; liveCountByFaceKey.TryGetValue(k, out total);
                 int outside = total - onPage[k];
@@ -150,6 +159,16 @@ namespace CompetitiveRounds
                 queue.Add(pagePrintIds[i]);
             }
             return queue;
+        }
+
+        /// <summary>Fix pass 2, finding 2: whether the Shard dupes button is
+        /// up -- a ready answer naming at least one duplicate and no more than
+        /// one batch may carry. A pack whose only duplicate was traded away
+        /// has none, so the button is hidden; a pack with other owned
+        /// duplicates shows it.</summary>
+        internal static bool DupesOffered(bool ready, int count, int cap)
+        {
+            return ready && count > 0 && count <= cap;
         }
 
         // -- self-test (EXECUTED by tools/client-rules-harness) --------------
@@ -379,8 +398,9 @@ namespace CompetitiveRounds
             got = Dupes(new[] { "A", "A" }, new[] { "a1", "a2" }, "A=3", new[] { "a1", "a2", "a0" }, out ready);
             Check(r, "dupes: a face the binder already holds has both pack copies taken (the binder's survives)",
                   ready && Ids(got) == "[a1,a2]", Ids(got));
-            got = Dupes(new[] { "A", "A", "B" }, new[] { "a1", "a2", "b1" }, "A=2,B=1", new[] { "a1", "b1" }, out ready);
-            Check(r, "dupes: a pack print missing from the collection read: not ready, nothing", !ready && got.Count == 0, Ids(got));
+            got = Dupes(new[] { "A", "A", "B" }, new[] { "a1", "a2", "b1" }, "A=1,B=1", new[] { "a1", "b1" }, out ready);
+            Check(r, "dupes: a pack print absent from the collection read is not the player's: ready, neither taken nor counted",
+                  ready && got.Count == 0, Ids(got));
             got = Dupes(new[] { "A", "A", "B" }, new[] { "a1", "a2", "b1" }, "A=2,B=1", null, out ready);
             Check(r, "dupes: a collection read holding every pack print: ready", ready && Ids(got) == "[a2]", Ids(got));
             got = Dupes(new[] { "A|foil", "A|plain" }, new[] { "f", "p" }, "A|foil=1,A|plain=1", null, out ready);
@@ -395,6 +415,93 @@ namespace CompetitiveRounds
             Check(r, "dupes: a missing input is not ready and takes nothing", !ready && got.Count == 0, Ids(got));
             Check(r, "dupes: on every pack of up to five A/B prints over every binder count, each face keeps a live copy",
                   EveryFaceKeepsOne(), "");
+            OwnershipCases(r);
+        }
+
+        // -- fix pass 2, finding 2: the duplicates the player owns NOW --------
+
+        /// <summary>The readiness rule as fix pass 1 wrote it: not ready while
+        /// any live page print is absent from the collection read. NEGATIVE
+        /// CONTROL for the ownership cases: on a pack holding a print traded
+        /// away it must disagree with DuplicateShardIds. Never called by
+        /// anything that paints or sends.</summary>
+        private static bool ReadyAsFixPass1(IList<string> pageFaceKeys, IList<string> pagePrintIds, ICollection<string> livePrintIds)
+        {
+            for (int i = 0; i < pageFaceKeys.Count; i++)
+                if (pageFaceKeys[i] != null && (pagePrintIds[i] == null || !livePrintIds.Contains(pagePrintIds[i]))) return false;
+            return true;
+        }
+
+        private static void OwnershipCases(SelfTestResult r)
+        {
+            const int cap = 40;
+            bool ready;
+            // A pack of A, A, A, B; a2 traded away (the history still shows it
+            // live, the collection read omits it); a1 and a3 are still owned.
+            var faces = new[] { "A", "A", "A", "B" };
+            var ids = new[] { "a1", "a2", "a3", "b1" };
+            var live = new[] { "a1", "a3", "b1" };
+            var got = Dupes(faces, ids, "A=2,B=1", live, out ready);
+            Check(r, "ownership: a traded-away pack print with other owned duplicates: ready, the other duplicate taken",
+                  ready && Ids(got) == "[a3]", Ids(got));
+            Check(r, "ownership: the traded-away print is never in the set", !got.Contains("a2"), Ids(got));
+            Check(r, "ownership: and the button shows", DupesOffered(ready, got.Count, cap), "");
+            bool old = ReadyAsFixPass1(faces, ids, new HashSet<string>(live, StringComparer.Ordinal));
+            Check(r, "control: fix pass 1's readiness is not ready there, so its button stays hidden",
+                  !old && !DupesOffered(old, old ? got.Count : 0, cap), old.ToString());
+            // a2 traded away and back: the collection read holds it again
+            got = Dupes(faces, ids, "A=3,B=1", new[] { "a1", "a2", "a3", "b1" }, out ready);
+            Check(r, "ownership: a reacquired print is included", ready && Ids(got) == "[a2,a3]", Ids(got));
+            // a2 traded away and no other duplicate owned
+            got = Dupes(new[] { "A", "A", "B" }, new[] { "a1", "a2", "b1" }, "A=1,B=1", new[] { "a1", "b1" }, out ready);
+            Check(r, "ownership: no owned duplicates: nothing, and the button is hidden",
+                  ready && got.Count == 0 && !DupesOffered(ready, got.Count, cap), Ids(got));
+            // a collection read from before the pack: none of its prints, one older A
+            got = Dupes(new[] { "A", "A" }, new[] { "a1", "a2" }, "A=1", new[] { "a0" }, out ready);
+            Check(r, "ownership: a collection read from before the pack takes nothing (no pack print is counted)",
+                  ready && got.Count == 0, Ids(got));
+            Check(r, "offered: not ready hides it", !DupesOffered(false, 3, cap), "");
+            Check(r, "offered: over one batch hides it", !DupesOffered(true, cap + 1, cap) && DupesOffered(true, cap, cap), "");
+            Check(r, "ownership: on every pack of up to five A/B prints with any of them traded away, over every binder count, "
+                  + "no traded print is taken and each owned face keeps exactly one copy", EveryOwnedFaceKeepsOne(), "");
+        }
+
+        /// <summary>Exhaustive: every pack of one to five prints drawn from
+        /// faces A and B, every subset of them traded away (absent from the
+        /// collection read), and every binder holding of 0 or 1 copy of each
+        /// face outside the pack. Nothing traded is taken, and every face the
+        /// read holds keeps exactly one live copy.</summary>
+        private static bool EveryOwnedFaceKeepsOne()
+        {
+            for (int len = 1; len <= 5; len++)
+                for (int mask = 0; mask < (1 << len); mask++)
+                    for (int gone = 0; gone < (1 << len); gone++)
+                        for (int extraA = 0; extraA <= 1; extraA++)
+                            for (int extraB = 0; extraB <= 1; extraB++)
+                            {
+                                var faces = new List<string>(); var ids = new List<string>();
+                                var live = new HashSet<string>(StringComparer.Ordinal);
+                                var count = new Dictionary<string, int>(StringComparer.Ordinal) { { "A", extraA }, { "B", extraB } };
+                                if (extraA == 1) live.Add("xA");
+                                if (extraB == 1) live.Add("xB");
+                                for (int i = 0; i < len; i++)
+                                {
+                                    string f = ((mask >> i) & 1) == 1 ? "B" : "A";
+                                    faces.Add(f); ids.Add(f + i);
+                                    if (((gone >> i) & 1) == 0) { live.Add(f + i); count[f]++; }
+                                }
+                                bool ready;
+                                var took = DuplicateShardIds(faces, ids, count, live, out ready);
+                                if (!ready) return false;
+                                foreach (var t in took) if (!live.Contains(t)) return false;
+                                foreach (var f in new[] { "A", "B" })
+                                {
+                                    int taken = 0;
+                                    foreach (var t in took) if (t.StartsWith(f, StringComparison.Ordinal)) taken++;
+                                    if (count[f] > 0 && count[f] - taken != 1) return false;
+                                }
+                            }
+            return true;
         }
 
         /// <summary>Exhaustive over every pack of one to five prints drawn
