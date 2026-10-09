@@ -744,7 +744,9 @@ def failed_nodes(t):
 def compare(tip, base):
     tt, bt = text_of(tip), text_of(base)
     tf, bf = failed_nodes(tt), failed_nodes(bt)
-    ts, bs = [re.findall(r"^=+ (.*?) in [\d.]+s", x, re.M) for x in (tt, bt)]
+    # -q prints the closing summary without the ===== banner; -v prints it with one
+    summ = r"^(?:=+ )?(\d+ (?:failed|passed|skipped|errors?|deselected|xfailed|xpassed|warnings?)\b.*?) in [\d.]+s"
+    ts, bs = [re.findall(summ, x, re.M) for x in (tt, bt)]
     new = sorted(tf - bf)
     item19 = sorted(n for n in tf if n.startswith(("test_client_avatar_defaults", "test_client_rules_harness")))
     print("AFFECTED-COMPARE tip summary: %s" % (ts[-1] if ts else "none"))
