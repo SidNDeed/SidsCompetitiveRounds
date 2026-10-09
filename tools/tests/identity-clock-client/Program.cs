@@ -244,9 +244,33 @@ internal static class Program
         internal readonly Dictionary<string, byte[]> Files = new Dictionary<string, byte[]>();
         internal readonly HashSet<string> ListFail = new HashSet<string>(), OpenFail = new HashSet<string>();
         internal Func<bool> Combat = () => false;
-        internal long OpsInCombat, Ops;
+        internal long OpsInCombat, Ops, Reads, ReadsInCombat;
 
-        private void W() { Ops++; if (Combat()) OpsInCombat++; }
+        /// <summary>Runs after every operation that reached this fake disk
+        /// (the scenario's world may turn live in between).</summary>
+        internal Action OnOp;
+
+        private void W() { Ops++; if (Combat()) OpsInCombat++; if (OnOp != null) OnOp(); }
+        private void R() { Reads++; if (Combat()) ReadsInCombat++; if (OnOp != null) OnOp(); }
+
+        /// <summary>A stream of the fake disk whose every Read, Seek and
+        /// Length is counted (and counted in combat while the scenario's flag
+        /// is up): the witness of stream work the code under test does not see.</summary>
+        private sealed class CountStream : Stream
+        {
+            private readonly MemoryStream _m; private readonly FakeFs _f;
+            internal CountStream(byte[] b, FakeFs f) { _m = new MemoryStream(b, false); _f = f; }
+            public override bool CanRead { get { return true; } }
+            public override bool CanSeek { get { return true; } }
+            public override bool CanWrite { get { return false; } }
+            public override long Length { get { _f.R(); return _m.Length; } }
+            public override long Position { get { return _m.Position; } set { _f.R(); _m.Position = value; } }
+            public override int Read(byte[] buffer, int offset, int count) { _f.R(); return _m.Read(buffer, offset, count); }
+            public override long Seek(long offset, SeekOrigin origin) { _f.R(); return _m.Seek(offset, origin); }
+            public override void Flush() { }
+            public override void SetLength(long value) { throw new NotSupportedException(); }
+            public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+        }
 
         internal void File(string path, int size)
         {
@@ -284,7 +308,7 @@ internal static class Program
             W();
             missing = !Files.ContainsKey(path);
             if (missing || OpenFail.Contains(path)) return null;
-            return new MemoryStream(Files[path], false);
+            return new CountStream(Files[path], this);
         }
 
         public string AsmName(string path) { W(); return Path.GetFileNameWithoutExtension(path); }
@@ -322,6 +346,7 @@ internal static class Program
         if (On("series")) Series();
         if (On("budget")) BudgetCases();
         if (On("combat3")) Combat3();
+        if (On("late")) Late();
         if (On("adapter")) Adapter();
         if (On("flush")) Flush();
         if (On("seriesshape")) SeriesShape();
@@ -748,18 +773,29 @@ internal static class Program
             Check("combat3", names[c] + "_unknown", state() == C.CombatRead.UNKNOWN);
             Check("combat3", names[c] + "_zero_steps", units == 0 && s.StepsWorked == 0 && fs.Ops == 0 && s.UnknownSkips == 500,
                   "units " + units + " ops " + fs.Ops + " unknown skips " + s.UnknownSkips);
-            // the witness itself, on a disk call made while the state is unknown
+            // the gate itself, on a disk call made while the state is unknown:
+            // counted AND refused (the fake disk is never reached)
             var into = new List<I.FsEntry>();
-            wit.List("P", 10, into);
+            long opsAt = fs.Ops;
+            bool refused = false;
+            try { wit.List("P", 10, into); } catch (Exception) { refused = true; }
             Check("combat3", names[c] + "_witness_counts_unknown", wit.Unknown == 1 && wit.InCombat == 0, "unknown " + wit.Unknown + " in combat " + wit.InCombat);
+            Check("combat3", names[c] + "_witness_refuses_unknown", refused && fs.Ops == opsAt && into.Count == 0, "refused " + refused + " ops " + (fs.Ops - opsAt));
         }
-        // the witness counts a live frame as in combat, a not-live one as neither
+        // the gate counts and refuses a live frame, forwards a not-live one uncounted
         bool live = true;
-        var w2 = new I.WitnessFs(new FakeFs(), () => C.CombatRead.Of(() => live, () => false));
-        w2.List("P", 10, new List<I.FsEntry>());
+        var fsw = new FakeFs();
+        fsw.Dir("P", 2, null, 0);
+        var w2 = new I.WitnessFs(fsw, () => C.CombatRead.Of(() => live, () => false));
+        bool liveRefused = false;
+        try { w2.List("P", 10, new List<I.FsEntry>()); } catch (Exception) { liveRefused = true; }
+        long opsLive = fsw.Ops;
         live = false;
-        w2.List("P", 10, new List<I.FsEntry>());
+        var got = new List<I.FsEntry>();
+        int rc = w2.List("P", 10, got);
         Check("combat3", "witness_live_counted_not_live_not", w2.InCombat == 1 && w2.Unknown == 0);
+        Check("combat3", "witness_live_refused_not_live_forwarded", liveRefused && opsLive == 0 && rc == 0 && got.Count == 2 && fsw.Ops == 1,
+              "refused " + liveRefused + " ops at live " + opsLive + " rc " + rc + " got " + got.Count);
         // a step under a state read that turns unknown mid-run does nothing from then on
         bool fail = false;
         Func<int> st2 = () => C.CombatRead.Of(() => { if (fail) throw new Exception(); return false; }, () => false);
@@ -783,6 +819,188 @@ internal static class Program
         fs.Dir("Q", 2, null, 0);
         fs.File("G/game.dll", 10);
         return new I.Survey(disk, files, "P", "Q", "G/game.dll");
+    }
+
+    private static string D(object o)
+    {
+        var l = o as List<object>;
+        if (l != null)
+        {
+            var parts = new List<string>();
+            foreach (var e in l) parts.Add(D(e));
+            return "[" + string.Join(",", parts) + "]";
+        }
+        return o == null ? "null" : Convert.ToString(o, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>Everything a finished job read, units and bytes included.</summary>
+    private static string Dump(I.SurveyResult r)
+    {
+        if (r == null) return "none";
+        return "gdig=" + D(r.Gdig) + ";plugins=" + D(r.Ldir[0]) + ";patchers=" + D(r.Ldir[1]) + ";aload=" + r.AloadDiskState
+            + ";mvid=" + r.MvidDisk + ";trunc=" + r.Truncated + ";units=" + r.Units + ";bytes=" + r.Bytes;
+    }
+
+    private static I.Survey SmallSurveyOn(FakeFs fs, I.IFs disk)
+    {
+        var files = new List<I.FileTarget>();
+        for (int i = 0; i < 3; i++) { string f = "G/f" + i + ".dll"; fs.File(f, 150000); files.Add(new I.FileTarget { Id = i, Path = f }); }
+        fs.Dir("P", 3, "P/sub", 2);
+        fs.Dir("Q", 1, null, 0);
+        fs.File("G/game.dll", 10);
+        return new I.Survey(disk, files, "P", "Q", "G/game.dll");
+    }
+
+    /// <summary>One late-verdict run. The step's entry read is NOT_LIVE every
+    /// frame (an earlier verdict); the WORLD turns live (kind 0) or its read
+    /// starts failing (kind 1, UNKNOWN) after `permit(frame)` operations have
+    /// reached the fake disk in that frame (int.MaxValue: never), and is not
+    /// live again at the next frame. The gate reads the world itself; the fake
+    /// disk counts every operation (List, Open, AsmName, Read, Seek, Length)
+    /// that reaches it while the world is live. Returns the finished result.</summary>
+    private static I.SurveyResult LateRun(bool small, int kind, Func<int, int> permit, out FakeFs fsOut, out I.WitnessFs witOut,
+                                          out bool threw, out int lateFrames)
+    {
+        var fs = new FakeFs();
+        bool flipped = false;
+        int inFrame = 0, allow = int.MaxValue;
+        fs.Combat = () => flipped;
+        fs.OnOp = () => { if (++inFrame >= allow) flipped = true; };
+        int kk = kind;
+        Func<int> world = () =>
+        {
+            if (!flipped) return C.CombatRead.NOT_LIVE;
+            if (kk == 0) return C.CombatRead.LIVE;
+            throw new InvalidOperationException("late read fails");
+        };
+        var wit = new I.WitnessFs(fs, world);
+        List<I.FileTarget> files;
+        var s = small ? SmallSurveyOn(fs, wit) : BigSurveyOn(fs, wit, out files);
+        s.Request(1);
+        threw = false; lateFrames = 0;
+        for (int frame = 0; frame < 400000 && s.ResultFor(1) == null; frame++)
+        {
+            inFrame = 0; allow = permit(frame);
+            flipped = allow <= 0;
+            if (allow != int.MaxValue) lateFrames++;
+            try { s.Step(C.CombatRead.NOT_LIVE, 2000, () => 0); } catch (Exception) { threw = true; }
+        }
+        flipped = false;
+        fsOut = fs; witOut = wit;
+        return s.ResultFor(1);
+    }
+
+    private static string Reference(bool small, out long ops)
+    {
+        var fs0 = new FakeFs();
+        List<I.FileTarget> f0;
+        var s0 = small ? SmallSurveyOn(fs0, new I.WitnessFs(fs0, () => C.CombatRead.NOT_LIVE))
+                       : BigSurveyOn(fs0, new I.WitnessFs(fs0, () => C.CombatRead.NOT_LIVE), out f0);
+        s0.Request(1);
+        for (int k = 0; k < 400000 && s0.ResultFor(1) == null; k++) s0.Step(C.CombatRead.NOT_LIVE, 2000, () => 0);
+        ops = fs0.Ops + fs0.Reads;
+        return Dump(s0.ResultFor(1));
+    }
+
+    /// <summary>M1, late verdicts (round 2's open MEDIUM; design 9.3 "nothing
+    /// heavy in combat", and for the survey unknown counts as combat). The
+    /// step's entry read said NOT_LIVE, then the world turns LIVE or its read
+    /// fails (UNKNOWN) before a disk operation. Required: that operation and
+    /// every later one in the frame (stream reads included) never reach the
+    /// disk under the late verdict; the verdict is counted; the job is held,
+    /// not consumed: when frames are not live again the result equals an
+    /// uninterrupted run's, units and bytes included. Two runs per kind: a
+    /// SWEEP that turns the world live once before EACH operation index of a
+    /// small survey in turn (every operation kind is the late one at least
+    /// once; exactly one verdict is held per sweep run), and a long run over
+    /// the big survey with two frames in three late after 0 to 4 operations.</summary>
+    private static void Late()
+    {
+        long smallOps, bigOps;
+        string wantSmall = Reference(true, out smallOps), wantBig = Reference(false, out bigOps);
+        Check("late", "reference_finishes", wantSmall != "none" && wantBig != "none" && smallOps > 20, "small ops " + smallOps);
+        string[] kinds = { "late_live", "late_unknown" };
+        for (int kind = 0; kind < 2; kind++)
+        {
+            // the sweep: run j turns the world live just before operation j (counted across frames)
+            int forwardedBad = 0, consumed = 0, heldWrong = 0, threwN = 0;
+            string firstBad = "";
+            for (long j = 0; j < smallOps; j++)
+            {
+                FakeFs fs; I.WitnessFs wit; bool threw;
+                var r = LateRunSweep(kind, j, out fs, out wit, out threw);
+                long held = kind == 0 ? wit.InCombat : wit.Unknown;
+                long other = kind == 0 ? wit.Unknown : wit.InCombat;
+                if (fs.OpsInCombat != 0 || fs.ReadsInCombat != 0) { forwardedBad++; if (firstBad == "") firstBad = "op " + j + ": ops " + fs.OpsInCombat + " reads " + fs.ReadsInCombat; }
+                if (Dump(r) != wantSmall) { consumed++; if (firstBad == "") firstBad = "op " + j + ": result differs"; }
+                if (held != 1 || other != 0) { heldWrong++; if (firstBad == "") firstBad = "op " + j + ": held " + held + " other " + other; }
+                if (threw) threwN++;
+            }
+            Check("late", kinds[kind] + "_sweep_no_op_forwarded", forwardedBad == 0, forwardedBad + " of " + smallOps + " runs; " + firstBad);
+            Check("late", kinds[kind] + "_sweep_job_held_not_consumed", consumed == 0, consumed + " of " + smallOps + " runs; " + firstBad);
+            Check("late", kinds[kind] + "_sweep_verdict_recorded_once", heldWrong == 0, heldWrong + " of " + smallOps + " runs; " + firstBad);
+            Check("late", kinds[kind] + "_sweep_step_contained", threwN == 0, threwN + " runs threw");
+            // a frame late from its first operation: the job does not move
+            {
+                FakeFs fs; I.WitnessFs wit; bool threw; int lf;
+                int calls = 0;
+                var fsx = new FakeFs();
+                bool live = true;
+                fsx.Combat = () => live;
+                int kk = kind;
+                var witx = new I.WitnessFs(fsx, () => { calls++; if (kk == 0) return C.CombatRead.LIVE; throw new InvalidOperationException(); });
+                var sx = SmallSurveyOn(fsx, witx);
+                sx.Request(1);
+                for (int k = 0; k < 20; k++) sx.Step(C.CombatRead.NOT_LIVE, 2000, () => 0);
+                Check("late", kinds[kind] + "_first_op_late_job_still", fsx.Ops == 0 && fsx.Reads == 0 && sx.Running && sx.ResultFor(1) == null && calls == 20,
+                      "ops " + fsx.Ops + " reads " + fsx.Reads + " gate reads " + calls);
+                // the long run
+                var r = LateRun(false, kind, f => f % 3 != 0 ? f % 5 : int.MaxValue, out fs, out wit, out threw, out lf);
+                long held = kind == 0 ? wit.InCombat : wit.Unknown;
+                long other = kind == 0 ? wit.Unknown : wit.InCombat;
+                Check("late", kinds[kind] + "_long_no_op_forwarded", fs.OpsInCombat == 0 && fs.ReadsInCombat == 0,
+                      "ops under the late verdict " + fs.OpsInCombat + ", stream reads " + fs.ReadsInCombat);
+                Check("late", kinds[kind] + "_long_verdict_recorded", held > 0 && other == 0 && lf > 0, "held " + held + " late frames " + lf + " other " + other);
+                Check("late", kinds[kind] + "_long_step_contained", !threw);
+                string got = Dump(r);
+                Check("late", kinds[kind] + "_long_job_held_not_consumed", got == wantBig, "got " + got.Substring(0, Math.Min(200, got.Length)));
+            }
+        }
+    }
+
+    /// <summary>A sweep run over the small survey: the world turns live (or
+    /// its read fails) just before the operation with index `j` (operations
+    /// counted across frames as they reach the fake disk) and stays so until
+    /// the end of the frame in which a combat read first observes it; every
+    /// step's entry read is NOT_LIVE (the earlier verdict).</summary>
+    private static I.SurveyResult LateRunSweep(int kind, long j, out FakeFs fsOut, out I.WitnessFs witOut, out bool threw)
+    {
+        var fs = new FakeFs();
+        bool flipped = false, fired = false, observed = false;
+        long count = 0;
+        fs.Combat = () => flipped;
+        fs.OnOp = () => { if (++count == j && !fired) { fired = true; flipped = true; } };
+        int kk = kind;
+        Func<int> world = () =>
+        {
+            if (!flipped) return C.CombatRead.NOT_LIVE;
+            observed = true;
+            if (kk == 0) return C.CombatRead.LIVE;
+            throw new InvalidOperationException("late read fails");
+        };
+        var wit = new I.WitnessFs(fs, world);
+        var s = SmallSurveyOn(fs, wit);
+        s.Request(1);
+        threw = false;
+        for (int frame = 0; frame < 100000 && s.ResultFor(1) == null; frame++)
+        {
+            if (j == 0 && !fired) { fired = true; flipped = true; }
+            else flipped = fired && !observed;
+            try { s.Step(C.CombatRead.NOT_LIVE, 2000, () => 0); } catch (Exception) { threw = true; }
+        }
+        flipped = false;
+        fsOut = fs; witOut = wit;
+        return s.ResultFor(1);
     }
 
     /// <summary>M1 and L4 on the PRODUCTION adapter (I.DiskFs) over real

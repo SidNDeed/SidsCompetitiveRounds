@@ -32,9 +32,11 @@ namespace CompetitiveRounds
     /// states, read in the same frame; a failed read is UNKNOWN and does no
     /// work): there is no worker thread, so no survey or hashing work can
     /// overlap combat; each tick does at most a bounded number of bounded
-    /// units. The witness (io_in_combat, io_unknown): every disk call re-reads
-    /// the three-state combat state itself and counts a call made while a
-    /// battle is live or the state is unknown (both must stay 0).</summary>
+    /// units. The gate (I.WitnessFs): every disk operation, stream reads
+    /// included, re-reads the three-state combat state immediately before it
+    /// and runs only on NOT_LIVE; a late LIVE or UNKNOWN refuses the operation,
+    /// the unit stays pending for a later frame, and the verdict is counted
+    /// (io_held_live, io_held_unknown).</summary>
     internal static class IdentityClockEvidence
     {
         private const string TAG = "[IDENTITY-CLOCK]";
@@ -596,9 +598,10 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The survey's disk: the production adapter (I.DiskFs) under
-        /// the witness (I.WitnessFs), which reads the three-state combat
-        /// state itself before every disk call; its InCombat and Unknown
-        /// counts are io_in_combat and io_unknown, both must stay 0.</summary>
+        /// the gate (I.WitnessFs), which reads the three-state combat state
+        /// itself immediately before every disk operation and forwards it only
+        /// on NOT_LIVE; its InCombat and Unknown counts are the late verdicts
+        /// it held (io_held_live, io_held_unknown).</summary>
         private static I.WitnessFs _disk;
         internal static long IoInCombat { get { return _disk != null ? _disk.InCombat : 0; } }
         internal static long IoUnknown { get { return _disk != null ? _disk.Unknown : 0; } }
@@ -675,8 +678,8 @@ namespace CompetitiveRounds
             var g = c.G;
             return text.Length.ToString(CultureInfo.InvariantCulture) + " bytes, points " + g.Book.PtO.Count
                 + ", survey " + (_survey != null && _survey.ResultFor(g.Gen) != null ? "complete" : "not_yet")
-                + ", io_in_combat " + IoInCombat.ToString(CultureInfo.InvariantCulture)
-                + ", io_unknown " + IoUnknown.ToString(CultureInfo.InvariantCulture);
+                + ", io_held_live " + IoInCombat.ToString(CultureInfo.InvariantCulture)
+                + ", io_held_unknown " + IoUnknown.ToString(CultureInfo.InvariantCulture);
         }
 
         /// <summary>Application.quitting, after GameStateWatcher's quit hook

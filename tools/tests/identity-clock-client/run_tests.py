@@ -349,11 +349,21 @@ MUTANTS = [
     # M1 three states: unknown read as not live, at the survey's own gate
     ("m1_survey_unknown_runs", [("if (C.CombatRead.Live(combatState)) { CombatSkips++; return 0; }",
                                  "if (combatState == C.CombatRead.LIVE) { CombatSkips++; return 0; }")], "combat3", "gate"),
-    # the witness reusing a swallowing read: an unknown frame is not counted
-    ("m1_witness_swallows_unknown", [("else if (s == C.CombatRead.UNKNOWN) Unknown++;", "")], "combat3", "gate"),
-    ("m1_witness_read_swallowed", [("try { s = _state(); } catch { s = C.CombatRead.UNKNOWN; }\n                if (s == C.CombatRead.LIVE)",
-                                    "try { s = _state(); } catch { s = C.CombatRead.UNKNOWN; }\n                if (s == C.CombatRead.UNKNOWN) s = C.CombatRead.NOT_LIVE;\n                if (s == C.CombatRead.LIVE)")],
-     "combat3", "gate"),
+    # the gate reusing a swallowing read: an unknown frame is neither counted nor refused
+    ("m1_witness_swallows_unknown", [("else Unknown++;\n                throw new IoDeferred();", "else return;\n                throw new IoDeferred();")], "combat3", "gate"),
+    ("m1_witness_read_swallowed", [("try { s = _state(); } catch { s = C.CombatRead.UNKNOWN; }\n                if (s == C.CombatRead.NOT_LIVE)",
+                                    "try { s = _state(); } catch { s = C.CombatRead.NOT_LIVE; }\n                if (s == C.CombatRead.NOT_LIVE)")],
+     "late", "gate"),
+    # fix pass 3, M1 late verdicts: the round-2 behaviour (a late LIVE or UNKNOWN counted, the operation forwarded)
+    ("m1_late_verdict_forwarded", [("throw new IoDeferred();", "return;")], "late", "gate"),
+    # a stream the gate opened read without the gate
+    ("m1_stream_ungated", [("return s == null ? null : new GatedStream(s, this);", "return s;")], "late", "gate"),
+    # a refused operation settling its item (consuming the job) instead of holding it
+    ("m1_deferral_consumes", [("_deferred = true;\n                        return true;", "_deferred = true; Fault();\n                        return true;")], "late", "gate"),
+    # a refused listing dropping its folder
+    ("m1_refused_list_drops_folder", [("var d = _pending.Peek();", "var d = _pending.Dequeue();"),
+                                      ("_pending.Dequeue();             // only after the listing ran", "// only after the listing ran")],
+     "late", "gate"),
     ("m1_root_reparse_listed", [("if ((a & FileAttributes.ReparsePoint) != 0) return LIST_REFUSED_REPARSE;", "")], "adapter", "trunc"),
     ("l4_adapter_all_missing", [("catch (Exception ex) { missing = NotFound(ex); return null; }",
                                  "catch (Exception ex) { missing = true; return null; }")], "adapter", "trunc"),

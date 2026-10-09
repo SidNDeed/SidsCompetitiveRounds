@@ -484,30 +484,71 @@ namespace CompetitiveRounds
             }
         }
 
-        /// <summary>The survey's disk witness: wraps the adapter and, before
-        /// every disk call, reads the frame's combat state ITSELF (the
-        /// three-state read, never a read that turns a failure into not
-        /// live): a call in a live frame counts InCombat, a call in an
-        /// unknown frame counts Unknown. Both must stay 0.</summary>
+        /// <summary>A survey disk operation refused because the combat read
+        /// made immediately before it was not NOT_LIVE. The job catches it,
+        /// undoes the unit's count and keeps the unit for a later frame: a
+        /// refused operation consumes nothing and settles nothing.</summary>
+        internal sealed class IoDeferred : Exception
+        {
+            internal IoDeferred() : base("survey disk operation deferred: combat live or unknown") { }
+        }
+
+        /// <summary>The survey's disk gate and witness: wraps the adapter and,
+        /// immediately before EVERY disk operation (List, Open, AsmName, and
+        /// every Read, Seek and Length of a stream it opened), reads the
+        /// frame's combat state ITSELF with the three-state read. Only
+        /// NOT_LIVE forwards the operation. LIVE (counted InCombat), UNKNOWN
+        /// or a throwing read (counted Unknown) refuse it with IoDeferred
+        /// before the adapter is touched (design 9.3: nothing heavy in combat;
+        /// unknown counts as combat for the survey). The counts are the record
+        /// of late verdicts that were held; no disk operation is ever forwarded
+        /// under an earlier verdict.</summary>
         internal sealed class WitnessFs : IFs
         {
             private readonly IFs _inner;
             private readonly Func<int> _state;
-            internal long InCombat, Unknown;
+            internal long InCombat, Unknown, Forwarded;
 
             internal WitnessFs(IFs inner, Func<int> combatState) { _inner = inner; _state = combatState; }
 
-            private void W()
+            internal void Gate()
             {
                 int s;
                 try { s = _state(); } catch { s = C.CombatRead.UNKNOWN; }
+                if (s == C.CombatRead.NOT_LIVE) { Forwarded++; return; }
                 if (s == C.CombatRead.LIVE) InCombat++;
-                else if (s == C.CombatRead.UNKNOWN) Unknown++;
+                else Unknown++;
+                throw new IoDeferred();
             }
 
-            public int List(string dir, int max, List<FsEntry> into) { W(); return _inner.List(dir, max, into); }
-            public Stream Open(string path, out bool missing) { W(); return _inner.Open(path, out missing); }
-            public string AsmName(string path) { W(); return _inner.AsmName(path); }
+            public int List(string dir, int max, List<FsEntry> into) { Gate(); return _inner.List(dir, max, into); }
+            public Stream Open(string path, out bool missing)
+            {
+                Gate();
+                var s = _inner.Open(path, out missing);
+                return s == null ? null : new GatedStream(s, this);
+            }
+            public string AsmName(string path) { Gate(); return _inner.AsmName(path); }
+        }
+
+        /// <summary>A stream the gate opened: every Read, Seek, Length and
+        /// Position set passes the gate first; closing is never gated.</summary>
+        internal sealed class GatedStream : Stream
+        {
+            private readonly Stream _s;
+            private readonly WitnessFs _w;
+            internal GatedStream(Stream s, WitnessFs w) { _s = s; _w = w; }
+            public override bool CanRead { get { return _s.CanRead; } }
+            public override bool CanSeek { get { return _s.CanSeek; } }
+            public override bool CanWrite { get { return false; } }
+            public override long Length { get { _w.Gate(); return _s.Length; } }
+            public override long Position { get { return _s.Position; } set { _w.Gate(); _s.Position = value; } }
+            public override int Read(byte[] buffer, int offset, int count) { _w.Gate(); return _s.Read(buffer, offset, count); }
+            public override long Seek(long offset, SeekOrigin origin) { _w.Gate(); return _s.Seek(offset, origin); }
+            public override void Flush() { }
+            public override void SetLength(long value) { throw new NotSupportedException(); }
+            public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+            protected override void Dispose(bool disposing) { try { if (disposing) _s.Dispose(); } finally { base.Dispose(disposing); } }
         }
 
         /// <summary>Public bounds of one survey job (each a work bound, not a
@@ -553,7 +594,7 @@ namespace CompetitiveRounds
             private Job _job;
             private SurveyResult _result;
             internal long Wanted;
-            internal long StaleRefused, Abandoned, CombatSkips, UnknownSkips, StepsWorked, UnitsTotal;
+            internal long StaleRefused, Abandoned, CombatSkips, UnknownSkips, StepsWorked, UnitsTotal, Deferrals;
 
             internal Survey(IFs fs, IList<FileTarget> files, string pluginsDir, string patchersDir, string gameAsm)
             {
@@ -596,7 +637,10 @@ namespace CompetitiveRounds
             /// combat state (C.CombatRead). Live or UNKNOWN: nothing at all is
             /// done (each counted). Only a positively not-live frame runs at
             /// most STEP_UNITS_MAX units, stopping early once `budgetUs` has
-            /// elapsed on `clockUs`. Returns units done.</summary>
+            /// elapsed on `clockUs`. A unit whose disk operation the gate
+            /// refused (a later read was LIVE or UNKNOWN) ends the step at
+            /// once, is not counted and stays the job's next unit (Deferrals
+            /// counts it). Returns units done.</summary>
             internal int Step(int combatState, long budgetUs, Func<long> clockUs)
             {
                 if (combatState == C.CombatRead.UNKNOWN) UnknownSkips++;
@@ -607,6 +651,7 @@ namespace CompetitiveRounds
                 while (_job != null && n < STEP_UNITS_MAX)
                 {
                     bool more = _job.Unit();
+                    if (_job.TakeDeferred()) { Deferrals++; break; }
                     n++; UnitsTotal++;
                     if (!more)
                     {
@@ -649,7 +694,16 @@ namespace CompetitiveRounds
 
                 private int PartCap { get { return _phase == 1 ? LDIR_PLUGINS_MAX : LDIR_PATCHERS_MAX; } }
 
-                /// <summary>One bounded unit. False when the job is done.</summary>
+                private bool _deferred;
+
+                /// <summary>True once after a unit whose disk operation the
+                /// gate refused.</summary>
+                internal bool TakeDeferred() { bool d = _deferred; _deferred = false; return d; }
+
+                /// <summary>One bounded unit. False when the job is done. Every
+                /// unit changes no job state before its one disk operation, so a
+                /// refused operation (IoDeferred) leaves the job exactly as it
+                /// was: the unit is uncounted and runs again later.</summary>
                 internal bool Unit()
                 {
                     if (R.Units >= JOB_UNITS_MAX || R.Bytes >= JOB_BYTES_MAX) { Stop(); return false; }
@@ -662,6 +716,13 @@ namespace CompetitiveRounds
                             case 1: case 2: LdirUnit(); break;
                             case 3: AloadUnit(); break;
                         }
+                    }
+                    catch (IoDeferred)
+                    {
+                        // held, never settled: the same unit is the job's next unit
+                        R.Units--;
+                        _deferred = true;
+                        return true;
                     }
                     catch
                     {
@@ -724,10 +785,14 @@ namespace CompetitiveRounds
                     if (!_walked)
                     {
                         if (_pending.Count == 0) { _walked = true; return; }
-                        var d = _pending.Dequeue();
-                        _dirsSeen++;
+                        var d = _pending.Peek();
                         _entries.Clear();
-                        int st = _s._fs.List(d.Key, DIR_ENTRIES_MAX, _entries);
+                        int st;
+                        try { st = _s._fs.List(d.Key, DIR_ENTRIES_MAX, _entries); }
+                        catch (IoDeferred) { throw; }   // refused: the folder stays pending, nothing changed
+                        catch { _pending.Dequeue(); _dirsSeen++; throw; }   // a fault still moves past the folder
+                        _pending.Dequeue();             // only after the listing ran
+                        _dirsSeen++;
                         if (st != 0)
                         {
                             if (d.Value == 0) { _partState = st == 1 ? NO_FILE : READ_FAILED; EndPart(); return; }
