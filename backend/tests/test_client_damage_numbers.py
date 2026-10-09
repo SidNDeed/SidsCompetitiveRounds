@@ -83,6 +83,8 @@ SIG = {
     # the notify site: on this lane Apply(...) delegates the committed tick to
     # ApplyCommitted, where the inner try and the bar companion live
     "apply": "private static void ApplyCommitted(PhotonView view, StreamRec rec,",
+    # the correction funnel: the second direct writer, on fighter and spectator seats
+    "corrective": "private static void ApplyCorrective(PhotonView view, StreamRec rec)",
     "paint": "private static void PaintDamageNumbers(object t, string level)",
     "driver": "internal sealed class DamageNumberDriver : MonoBehaviour",
     "update": "private void Update()",
@@ -379,23 +381,44 @@ def test_B4_the_heal_magnitude_is_post_minus_pre_and_never_heal_amount():
 
 # ── B5: the poison notify is inside the inner try and under the drop predicate
 
-NOTIFY = "DamageNumbers.NoteSpectatorPoison(view, preTick - cds.health);"
+BRIDGE = "DamageNumbers.NoteDirectDrop("
+NOTIFY = "DamageNumbers.NoteDirectDrop(view, preTick, cds.health);"
 BAR = "hbBar.TakeDamage("
 
+# The two direct writers PoisonSync lowers health with (neither calls
+# DoDamage, so W1 cannot see them): the committed spectator tick and the
+# correction funnel. Each must hand the bridge its observed drop, once, inside
+# its bar companion's try and under its own drop predicate (fix 1: the
+# correction funnel was missing from the feed).
+FUNNELS = {
+    "committed": {
+        "sig": SIG["apply"], "notify": NOTIFY, "bar": BAR, "pred": "cds.health<preTick",
+        "args": ["view", "preTick", "cds.health"], "outer": "rec.Applied++;",
+        "slice": r"float\s+nh\s*=\s*cds\.health\s*-\s*rec\.Slice\.magnitude\s*;",
+    },
+    "corrective": {
+        "sig": SIG["corrective"], "notify": "DamageNumbers.NoteDirectDrop(view, pre, cd.health);",
+        "bar": "if (bar != null) bar.TakeDamage(", "pred": "cd.health<pre",
+        "args": ["view", "pre", "cd.health"], "outer": "rec.Applied++;",
+        "slice": r"float\s+nh\s*=\s*pre\s*-\s*rec\.Slice\.magnitude\s*;",
+    },
+}
 
-def poison_halves(t, needle=NOTIFY):
+
+def poison_halves(t, which="committed"):
+    f = FUNNELS[which]
     src = t["PS"]
-    o, e = _single_span(src, SIG["apply"], RELEASE_SYMBOLS)
+    o, e = _single_span(src, f["sig"], RELEASE_SYMBOLS)
     m = mask_code(src)[o:e]
-    bar_at = m.find(BAR)
-    at = m.find(needle.split("(")[0] + "(") if needle == NOTIFY else m.find(needle)
+    bar_at = m.find(f["bar"])
+    at = m.find(BRIDGE)
     if bar_at < 0 or at < 0:
-        return (False, False), "anchor missing bar=%d at=%d" % (bar_at, at)
+        return (False, False), "%s: anchor missing bar=%d at=%d" % (which, bar_at, at)
     tr = enclosing_try(m, bar_at)
     span_ok = tr is not None and tr[0] < at < tr[1]
-    conds = guard_chain(src, SIG["apply"], needle if needle != NOTIFY else "DamageNumbers.NoteSpectatorPoison(")
-    pred_ok = any(norm(c) == "cds.health<preTick" for c in conds)
-    return (span_ok, pred_ok), "span=%s predicate=%s conds=%r" % (span_ok, pred_ok, conds)
+    conds = guard_chain(src, f["sig"], BRIDGE)
+    pred_ok = any(norm(c) == f["pred"] for c in conds)
+    return (span_ok, pred_ok), "%s: span=%s predicate=%s conds=%r" % (which, span_ok, pred_ok, conds)
 
 
 def test_B5_the_poison_notify_sits_inside_the_bar_companions_try_and_under_its_drop_predicate():
@@ -588,24 +611,25 @@ def test_B8_whole_files_minus_one_selftest_carry_no_format_literal_or_worded_lab
 
 # ── B9: the poison magnitude is the APPLIED drop ────────────────────────────
 
-def notify_args(t):
+def notify_args(t, which="committed"):
+    f = FUNNELS[which]
     src = t["PS"]
-    o, e = _single_span(src, SIG["apply"], RELEASE_SYMBOLS)
+    o, e = _single_span(src, f["sig"], RELEASE_SYMBOLS)
     m = mask_code(src)[o:e]
-    at = m.find("DamageNumbers.NoteSpectatorPoison(")
+    at = m.find(BRIDGE)
     if at < 0:
-        return False, "no notify"
-    po = at + len("DamageNumbers.NoteSpectatorPoison")
+        return False, "%s: no notify" % which
+    po = at + len(BRIDGE) - 1
     args = src[o:e][po + 1:_match(m, po, "(", ")") - 1]
     parts = [norm(a) for a in args.split(",")]
-    ok = parts == ["view", "preTick-cds.health"] and "rec.Slice.magnitude" not in args
-    return ok, "args=%r" % parts
+    ok = parts == f["args"] and "rec.Slice.magnitude" not in args
+    return ok, "%s: args=%r" % (which, parts)
 
 
 def test_B9_the_poison_notify_passes_the_applied_drop_not_the_slice_magnitude():
     t = texts()
     assert run(notify_args, t)[0]
-    mt = mutate(t, "PS", NOTIFY, "DamageNumbers.NoteSpectatorPoison(view, rec.Slice.magnitude);")
+    mt = mutate(t, "PS", NOTIFY, "DamageNumbers.NoteDirectDrop(view, preTick + rec.Slice.magnitude, preTick);")
     assert not run(notify_args, mt)[0]
     # control: the method legitimately reads the slice magnitude for its own
     # write, and the argument-scoped row stays green beside it
@@ -753,7 +777,7 @@ def test_B13_no_emit_the_patch_set_is_exactly_damage_and_heal_and_no_lifecycle_m
              "            internal static void ResetPostfix(CharacterStatModifiers __instance)\n            {\n"
              "                try { Note(0, DamageNumberRules.Kind.Heal, 100f, Time.unscaledTime); } catch { }\n"
              "            }\n        }\n\n")
-    anchor = "        // ------------------------------------------------------------ W3: spectator poison\n"
+    anchor = "        // ------------------------------------------------------------ W3: direct poison writers\n"
     mt = mutate(t, "DN", anchor, plant + anchor)
     ok, why = run(patch_set, mt)
     assert not ok and "ResetStats" in why, why
@@ -850,3 +874,84 @@ def test_B14_no_left_hand_side_is_rooted_at_a_harmony_parameter_or_its_taint():
     lhs = {l for l, _ in _assignments(m)}
     for own in ("_text[slot]", "_mode", "__state", "_anchors[subject]", "_world[slot]"):
         assert own in lhs, "control write %s not seen by the scanner" % own
+
+
+# ── B15: every direct poison writer enters the feed exactly once (fix 1) ────
+
+_NOT_MEMBERS = ("if", "for", "foreach", "while", "switch", "catch", "using", "lock", "fixed")
+
+
+def member_name(m, pos):
+    """The innermost named member (method, local function) whose braces
+    enclose pos on a masked text, or '?'."""
+    stack = []
+    for i in range(pos):
+        if m[i] == "{":
+            stack.append(i)
+        elif m[i] == "}" and stack:
+            stack.pop()
+    for o in reversed(stack):
+        b = max(m.rfind(";", 0, o), m.rfind("{", 0, o), m.rfind("}", 0, o))
+        head = m[b + 1:o]
+        mm = re.search(r"(\w+)\s*\([^()]*(?:\([^()]*\)[^()]*)*\)\s*$", head)
+        if mm and mm.group(1) not in _NOT_MEMBERS:
+            return mm.group(1)
+    return "?"
+
+
+def corrective_feed(t):
+    (s, p), why = poison_halves(t, "corrective")
+    a, why2 = notify_args(t, "corrective")
+    return s and p and a, why + "; " + why2
+
+
+def writer_census(t):
+    """Exact set: the members of PoisonSync.cs holding a direct health write
+    are exactly the two funnels, one write each, and each holds exactly one
+    bridge call; no other member calls the bridge."""
+    m = mask_code(t["PS"])
+    writes, bridges = {}, {}
+    for mm in HEALTH_WRITE.finditer(m):
+        k = member_name(m, mm.start())
+        writes[k] = writes.get(k, 0) + 1
+    for mm in re.finditer(re.escape(BRIDGE), m):
+        k = member_name(m, mm.start())
+        bridges[k] = bridges.get(k, 0) + 1
+    want = {"ApplyCommitted": 1, "ApplyCorrective": 1}
+    return writes == want and bridges == want, "writes=%r bridges=%r" % (writes, bridges)
+
+
+def test_B15_the_correction_funnel_notes_its_observed_drop_and_the_writer_set_is_exact():
+    t = texts()
+    ok, why = run(corrective_feed, t)
+    assert ok, why
+    ok, why = run(writer_census, t)
+    assert ok, why
+    corr = FUNNELS["corrective"]["notify"]
+    line = "                    " + corr + "\n"
+    # mutation 1: the corrective notify deleted (the feed before fix 1) -> both red
+    gone = mutate(t, "PS", line, "")
+    assert not run(corrective_feed, gone)[0], "a funnel with no notify stayed green"
+    assert not run(writer_census, gone)[0], "the census missed a writer with no bridge call"
+    # mutation 2: the slice magnitude in place of the observed post-write health
+    mt = mutate(t, "PS", corr, "DamageNumbers.NoteDirectDrop(view, pre, pre - rec.Slice.magnitude);")
+    assert not run(corrective_feed, mt)[0], "the slice magnitude passed as the observed drop"
+    # mutation 3: moved above the drop predicate, outside the bar's try -> both halves red
+    mt = mutate(gone, "PS", "            cd.health = nh < floor ? floor : nh;\n",
+                "            cd.health = nh < floor ? floor : nh;\n            " + corr + "\n")
+    (s3, p3), why = poison_halves(mt, "corrective")
+    assert (s3, p3) == (False, False), "moving outside the try and the predicate: " + why
+    # mutation 4: a third direct writer with no bridge call -> the census reds
+    mt = mutate(t, "PS", "        private static Player FindPlayer(int playerId)\n",
+                "        private static void PlantWriter(CharacterData cd) { cd.health = 1f; }\n\n"
+                "        private static Player FindPlayer(int playerId)\n")
+    assert not run(writer_census, mt)[0], "a third writer stayed green"
+    # mutation 5: the corrective notes twice -> not exactly once
+    mt = mutate(t, "PS", line, line + line)
+    assert not run(writer_census, mt)[0], "a doubled notify stayed green"
+    # controls: the committed funnel stays green under mutation 1 (the row is
+    # span-scoped), and the funnel's own slice read still resolves beside it
+    assert poison_halves(gone, "committed")[0] == (True, True)
+    assert run(notify_args, gone)[0]
+    o, e = _single_span(t["PS"], SIG["corrective"], RELEASE_SYMBOLS)
+    assert re.search(FUNNELS["corrective"]["slice"], mask_code(t["PS"])[o:e])

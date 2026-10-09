@@ -1306,7 +1306,7 @@ def test_the_name_glyphs_guarantees_each_have_a_case(harness_run, name):
         "the case printed no measurement: " + line)
 
 
-DMGNUM_CASES = ["A%d" % i for i in range(1, 18)]
+DMGNUM_CASES = ["A%d" % i for i in range(1, 19)]
 
 
 def test_the_damage_numbers_suite_ran_every_case_and_none_failed(harness_run):
@@ -1315,7 +1315,7 @@ def test_the_damage_numbers_suite_ran_every_case_and_none_failed(harness_run):
     suites = _suites(harness_run)
     assert "dmgnumbers" in suites, "the DamageNumberRules suite did not report"
     run, fail, verdict = suites["dmgnumbers"]
-    assert (run, fail, verdict) == (17, 0, "PASS"), harness_run.stdout[-4000:]
+    assert (run, fail, verdict) == (18, 0, "PASS"), harness_run.stdout[-4000:]
     printed = len(re.findall(r"^\[dmgnumbers\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))

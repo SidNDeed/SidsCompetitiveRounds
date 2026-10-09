@@ -341,6 +341,17 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>The direct-writer rule: what a funnel that lowers health
+        /// WITHOUT DoDamage (PoisonSync's committed spectator tick and its
+        /// correction funnel) hands the feed. Health read before and after the
+        /// funnel's own write; the number is the observed applied drop, the
+        /// floor already taken, and nothing for no drop or a rise.</summary>
+        internal static float AppliedDrop(float pre, float post)
+        {
+            float d = pre - post;
+            return d > 0f ? d : 0f;
+        }
+
         // ------------------------------------------------------------ shared state
 
         internal static readonly Engine Shared = new Engine();
@@ -706,6 +717,44 @@ namespace CompetitiveRounds
                     p == want, aSplit && bRed, ctl,
                     "prod=" + p + " mutant(a Off shows local)=" + a + " mutant(b Me without the spectator degrade)=" + b
                     + " control(Everyone, spectator)=" + ctl);
+            }
+
+            // A18: an observed-drop correction is emitted. The correction
+            // funnel's own arithmetic (PoisonSync.ApplyCorrective: the floor is
+            // min(pre, 1), the write max(pre - slice, floor)) is driven here and
+            // its drop handed to the engine through the bridge rule, exactly as
+            // DamageNumbers.NoteDirectDrop does. Mutant a: the slice magnitude
+            // instead of the observed drop. Mutant b: the funnel lowers health
+            // and notes nothing, which is the behaviour before this case.
+            {
+                Func<float, float, float> correct = (pre, slice) =>
+                {
+                    float floor = pre < 1f ? pre : 1f;
+                    float nh = pre - slice;
+                    return nh < floor ? floor : nh;
+                };
+                float[] pres = { 50f, 5f, 1f, 0.6f };
+                float[] slices = { 12f, 12f, 12f, 3f };
+                Func<Func<float, float, float, float>, string> drive = bridge =>
+                {
+                    var e = new Engine();
+                    for (int i = 0; i < pres.Length; i++)
+                    {
+                        float post = correct(pres[i], slices[i]);
+                        float applied = bridge(pres[i], post, slices[i]);
+                        if (applied > 0f) e.Note(i + 1, Kind.Damage, applied, 0f, 12);
+                    }
+                    return Show(new List<Emission>(e.Tick(1f, F0)));
+                };
+                string want = "[1:-12 2:-4]";
+                string p = drive((pre, post, slice) => AppliedDrop(pre, post));
+                string a = drive((pre, post, slice) => slice);
+                string b = drive((pre, post, slice) => 0f);
+                bool ctl = AppliedDrop(10f, 12f) == 0f && AppliedDrop(10f, 10f) == 0f && Near(AppliedDrop(10f, 7.5f), 2.5f);
+                Check(r, "A18", "a correction that lowers health emits its observed applied drop (floor taken), and one that lowers nothing emits nothing",
+                    p == want, a != want && b != want, ctl,
+                    "prod=" + p + " mutant(a slice magnitude)=" + a + " mutant(b silent correction)=" + b
+                    + " control(rise and no-drop give 0, 10->7.5 gives 2.5)=" + ctl);
             }
 
             return r;

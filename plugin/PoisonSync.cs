@@ -1691,7 +1691,8 @@ namespace CompetitiveRounds
         /// <summary>THE CORRECTION FUNNEL (amendment A3), the only way a late
         /// tick moves health, on fighter and spectator seats alike. It lowers
         /// this replica's health by the slice, never below min(health, 1), and
-        /// arms the victim's own health-bar segment. It does not call DoDamage,
+        /// arms the victim's own health-bar segment and its local damage number
+        /// (v1.41.0 item 21, display only). It does not call DoDamage,
         /// so no DealtDamage chain runs (no lifesteal, refresh or card effect
         /// that spawns objects or deals more damage), no WasDealtDamage, no
         /// StopAllCoroutines and no RPC; it cannot raise a death and cannot
@@ -1713,6 +1714,14 @@ namespace CompetitiveRounds
                 {
                     var bar = view.GetComponentInChildren<HealthBar>(true);
                     if (bar != null) bar.TakeDamage(default, false);
+                    // v1.41.0 item 21: the damage number for the health this
+                    // correction lowered, display-only like the bar above and
+                    // through the same bridge as the committed tick. Health
+                    // before and after the write above, so the number is the
+                    // APPLIED drop (the floor already taken), on fighter and
+                    // spectator seats alike: this funnel never calls DoDamage,
+                    // so W1 cannot see it.
+                    DamageNumbers.NoteDirectDrop(view, pre, cd.health);
                 }
                 catch { }
             }
@@ -2417,11 +2426,12 @@ namespace CompetitiveRounds
                                 var hbBar = view.GetComponentInChildren<HealthBar>(true);
                                 if (hbBar != null) hbBar.TakeDamage(default, false);
                                 // v1.41.0 item 21: the damage number for this
-                                // tick, display-only like the bar above. The
-                                // APPLIED drop (the 1-HP floor already taken),
-                                // so this seat prints what every fighter seat
-                                // measures through DoDamage's own clamp.
-                                DamageNumbers.NoteSpectatorPoison(view, preTick - cds.health);
+                                // tick, display-only like the bar above. Health
+                                // before and after this write, so the number is
+                                // the APPLIED drop (the 1-HP floor already
+                                // taken): what every fighter seat measures
+                                // through DoDamage's own clamp.
+                                DamageNumbers.NoteDirectDrop(view, preTick, cds.health);
                             }
                         }
                         catch { }

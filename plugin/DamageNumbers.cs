@@ -199,17 +199,26 @@ namespace CompetitiveRounds
             }
         }
 
-        // ------------------------------------------------------------ W3: spectator poison
+        // ------------------------------------------------------------ W3: direct poison writers
 
-        /// <summary>PoisonSync's spectator seat applies authoritative poison by
-        /// a direct write that bypasses DoDamage (the #338 fence), so W1 never
-        /// sees it. Called beside that site's display companions, under its own
-        /// "health actually dropped" predicate, with the APPLIED drop.</summary>
-        internal static void NoteSpectatorPoison(PhotonView view, float applied)
+        /// <summary>The direct-writer bridge. PoisonSync lowers health in two
+        /// places by a direct write that bypasses DoDamage, so W1 never sees
+        /// either: the committed tick on a spectator seat (the #338 fence) and
+        /// the correction funnel ApplyCorrective, which runs on fighter and
+        /// spectator seats alike. Each calls this once, beside its own
+        /// health-bar companion and inside that companion's try, under its own
+        /// "health actually dropped" predicate, with health read before and
+        /// after its write. The number is the OBSERVED applied drop
+        /// (DamageNumberRules.AppliedDrop: the floor already taken), never the
+        /// slice magnitude, and the subject is the victim's own view, the same
+        /// rule W1 uses.</summary>
+        internal static void NoteDirectDrop(PhotonView view, float pre, float post)
         {
             try
             {
-                if (view == null || !(applied > 0f)) return;
+                if (view == null) return;
+                float applied = DamageNumberRules.AppliedDrop(pre, post);
+                if (!(applied > 0f)) return;
                 if (CurrentMode == DamageNumberRules.Mode.Off) return;
                 Emit(view.ViewID, DamageNumberRules.Kind.Damage, applied, view.transform.position);
             }
