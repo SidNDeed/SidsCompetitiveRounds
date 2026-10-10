@@ -4777,12 +4777,13 @@ namespace CompetitiveRounds
                 // refused or unanswered shard's balance read-back among
                 // them), and the read already on the wire (the tab's 30 s
                 // read, for one) was dispatched before whatever made the
-                // caller ask. When a shard committed with no answer this
-                // client admitted, nothing moved the answer fence, so that
-                // older read lands and installs the balance from before the
-                // commit. The demand is remembered (PcMeDemand, bound to this
-                // generation), and a fresh read is sent once the older one
-                // lands.
+                // caller ask, so its answer is not proven newer than that.
+                // When a shard committed with no answer this client
+                // admitted, nothing moved the answer fence, so that older
+                // read lands, and the balance it installs may be the one
+                // from before the commit. The demand is remembered
+                // (PcMeDemand, bound to this generation), and a fresh read
+                // is sent once the older one lands.
                 if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);
                 callback?.Invoke(false, "in-flight");
                 return;

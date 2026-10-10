@@ -219,9 +219,10 @@ def gate_q5_a_failure_reads_back_by_the_rule(s):
     """A failed or unanswered strip shard reads the collection and the
     balance back by the rule. Fix pass 4, finding 7: the balance read-back
     is DEMAND. A /pc/me read already on the wire when it is asked (the tab's
-    30 s read) was dispatched before the shard, and when the shard committed
-    with no admitted answer nothing moved the answer fence, so that read
-    lands the balance from before the commit. FetchPcMe remembers a forced
+    30 s read) was dispatched before the ask, so its answer is not proven
+    newer than the shard; when the shard committed with no admitted answer
+    nothing moved the answer fence, so that read lands, and the balance it
+    installs may be the one from before the commit. FetchPcMe remembers a forced
     ask made while a read flies (PcReadDemand, bound to the generation) and
     sends a fresh read once that read lands; the older answer never answers
     it, and an ask with no read on the wire is sent at once as before. The
