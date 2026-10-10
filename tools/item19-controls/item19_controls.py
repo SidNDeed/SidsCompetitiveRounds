@@ -14,6 +14,18 @@ Kinds of control:
   log      the certifying evidence for the tree's commit in the lane's
            evidence folder (logs headed "commit <sha> tree clean")
 
+Fix pass 2 (Codex BUILD round 2, ai-collab/v1410/CODEX-ITEM19-BUILD-R2-REPORT.md)
+adds two kinds, and re-judges H3 H6 H9 M3 M8 M10 M11 L1 BR-M4 (the FIX2 set,
+each red on the round 2 tree 49434006 and green on the fix tip):
+  prodprobe  prodprobe/ compiled against the tree's PRODUCTION
+             plugin/AvatarDefaults.cs and AvatarDefaultRules.cs (the fix tip's
+             probe: the behaviour the tree's production code has)
+  tipclaim   one of the fix tip's own source claims run over the tree's
+             sources (the behaviour, where the code is Plugin.cs)
+and extends "suite": every named closure's production expression is mutated
+and the tree's OWN tests (its pytest, which runs its own prodprobe at S35,
+and its harness) must go red, and stay green on a neighbouring twin.
+
 Nothing is edited in the tree: every build and every mutation happens in
 copies under --work. No path is hard-coded; the caller names every directory.
 
@@ -21,6 +33,7 @@ Subcommands:
   controls --root TREE --evidence DIR --decompiled DIR --work DIR
   binds PLUGIN_CS OUT_JSON            the Config.Bind list (M10's witness input)
   cfgwitness --root TREE --bepinex-core DIR [--managed DIR] --work DIR
+             [--old-root TREE --real-cfg FILE]   the real-config upgrade (fix pass 2)
   tally PYTEST_V_LOG                  every executed node, summed against the summary
   plant DLL OUT                       a copy with a UTF-16LE local-path marker
                                       at an odd offset (the scanner's negative control)
@@ -46,6 +59,10 @@ from _cs_structure import mask_code, strip_comments_only  # noqa: E402
 
 ITEMS = ["H3", "H6", "H8", "H9", "M3", "M8", "M10", "M11", "L1",
          "BR-H1", "BR-M1", "BR-M2", "BR-M3", "BR-M4", "BR-M5", "BR-L1", "BR-L2"]
+# the items the round 2 review left PARTLY (fix pass 2): each must be red on
+# the round 2 tree and green on the fix tip; the rest were closed and must
+# stay green on the fix tip
+FIX2 = ["H3", "H6", "H9", "M3", "M8", "M10", "M11", "L1", "BR-M4"]
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +139,8 @@ def src_h3(root):
     if cls is None:
         return False, "no FacePublisher class"
     seg = t[cls[0]:cls[1]]
-    m = re.search(r"public static \w+ PublishLocal\(\)", seg)
+    # fix pass 2: the body lives behind the out overload when there is one
+    m = re.search(r"public static \w+ PublishLocal\(out string \w+\)", seg) or re.search(r"public static \w+ PublishLocal\(\)", seg)
     if not m:
         return False, "no PublishLocal"
     body = method_body(seg, m.group(0))
@@ -309,7 +327,11 @@ DECOMPILED_FILES = ("CharacterCreatorItemLoader.cs", "CharacterCreatorItemEquipp
                     "CardChoiceVisuals.cs", "PlayerFace.cs")
 
 
-def claims_run(root, work, label, edit, decompiled, out, decompile_edit=None):
+def claims_run(root, work, label, edit, decompiled, out, decompile_edit=None, tests_from=None, select=None):
+    """The tree's own source claims (or, with tests_from, ANOTHER tree's
+    test file run over this tree's sources) against an optional mutation.
+    `edit` is (file, old, new) or a list of them, each anchor exactly once.
+    The tree's own prodprobe (S35) is copied when the tree has one."""
     d = os.path.join(work, "claims-" + label)
     if os.path.isdir(d):
         shutil.rmtree(d)
@@ -319,22 +341,30 @@ def claims_run(root, work, label, edit, decompiled, out, decompile_edit=None):
     for f in os.listdir(os.path.join(root, "plugin")):
         if f.endswith(".cs"):
             shutil.copyfile(os.path.join(root, "plugin", f), os.path.join(d, "plugin", f))
+    tests_root = tests_from or root
     for f in ("test_client_avatar_defaults.py", "_cs_structure.py"):
-        shutil.copyfile(os.path.join(root, "backend", "tests", f), os.path.join(d, "backend", "tests", f))
+        shutil.copyfile(os.path.join(tests_root, "backend", "tests", f), os.path.join(d, "backend", "tests", f))
     shutil.copyfile(os.path.join(root, "tools", "i18n_source.json"), os.path.join(d, "tools", "i18n_source.json"))
+    pp = os.path.join(tests_root, "tools", "item19-controls", "prodprobe")
+    if os.path.isdir(pp):
+        dst = os.path.join(d, "tools", "item19-controls", "prodprobe")
+        os.makedirs(dst)
+        for f in ("Stubs.cs", "ProdProbe.cs", "item19-prodprobe.csproj"):
+            shutil.copyfile(os.path.join(pp, f), os.path.join(dst, f))
+    edits = [] if edit is None else (list(edit) if isinstance(edit, list) else [edit])
+    for e in edits:
+        path = os.path.join(d, "plugin", e[0])
+        t = read(path)
+        if t.count(e[1]) != 1:
+            out.write("--- claims %s: anchor occurs %d times in %s ---\n" % (label, t.count(e[1]), e[0]))
+            return None
+        write(path, t.replace(e[1], e[2]))
     dec = os.path.join(d, "decompiled")
     os.makedirs(dec)
     for f in DECOMPILED_FILES:
         src = os.path.join(decompiled, f)
         if os.path.exists(src):
             shutil.copyfile(src, os.path.join(dec, f))
-    if edit is not None:
-        path = os.path.join(d, "plugin", edit[0])
-        t = read(path)
-        if t.count(edit[1]) != 1:
-            out.write("--- claims %s: anchor occurs %d times ---\n" % (label, t.count(edit[1])))
-            return None
-        write(path, t.replace(edit[1], edit[2]))
     if decompile_edit is not None:
         path = os.path.join(dec, decompile_edit[0])
         with open(path, "rb") as f:
@@ -346,14 +376,58 @@ def claims_run(root, work, label, edit, decompiled, out, decompile_edit=None):
             f.write(b"\n".join(lines))
     env = dict(os.environ)
     env["SCR_DECOMPILED_DIR"] = dec
-    rc, o = run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--noconftest",
-                 os.path.join(d, "backend", "tests", "test_client_avatar_defaults.py")], env=env, cwd=d)
+    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--noconftest",
+           os.path.join(d, "backend", "tests", "test_client_avatar_defaults.py")]
+    if select:
+        cmd += ["-k", select]
+    rc, o = run(cmd, env=env, cwd=d)
     tail = [l for l in o.splitlines() if re.search(r"\b(passed|failed|error)", l)]
-    failed = [l for l in o.splitlines() if l.startswith("FAILED ")]
+    failed = [l for l in o.splitlines() if l.startswith(("FAILED ", "ERROR "))]
     out.write("--- claims %s exit %d: %s ---\n" % (label, rc, tail[-1] if tail else "(no summary)"))
     for l in failed[:6]:
-        out.write("    " + l[:300] + "\n")
+        out.write("    " + l[:400] + "\n")
+    claims_run.last_failed = failed
     return rc
+
+
+claims_run.last_failed = []
+
+
+def prodprobe_run(probe_root, root, work, label, out, edit=None):
+    """probe_root's prodprobe compiled against root's PRODUCTION
+    AvatarDefaults.cs and AvatarDefaultRules.cs (with an optional edit).
+    {id: (pass, detail)}, or None when it cannot be built or run."""
+    pp = os.path.join(probe_root, "tools", "item19-controls", "prodprobe")
+    if not os.path.isdir(pp):
+        out.write("--- prodprobe %s: %s has no prodprobe ---\n" % (label, probe_root))
+        return None
+    d = os.path.join(work, "prodprobe-" + label)
+    if os.path.isdir(d):
+        shutil.rmtree(d)
+    os.makedirs(d)
+    for f in ("Stubs.cs", "ProdProbe.cs", "item19-prodprobe.csproj"):
+        shutil.copyfile(os.path.join(pp, f), os.path.join(d, f))
+    for f in (AD, AR):
+        shutil.copyfile(os.path.join(root, "plugin", f), os.path.join(d, f))
+    for e in ([] if edit is None else (edit if isinstance(edit, list) else [edit])):
+        path = os.path.join(d, e[0])
+        t = read(path)
+        if t.count(e[1]) != 1:
+            out.write("--- prodprobe %s: anchor occurs %d times ---\n" % (label, t.count(e[1])))
+            return None
+        write(path, t.replace(e[1], e[2]))
+    rc, o = run(["dotnet", "build", os.path.join(d, "item19-prodprobe.csproj"), "-c", "Release", "-nologo", "-v", "q"])
+    if rc != 0:
+        out.write("--- prodprobe %s build exit %d ---\n%s\n" % (label, rc, o[-3000:]))
+        return None
+    rc, o = run(["dotnet", os.path.join(d, "bin", "Release", "net10.0", "item19-prodprobe.dll")])
+    out.write("--- prodprobe %s run exit %d ---\n%s\n" % (label, rc, o.rstrip()))
+    res = {}
+    for line in o.splitlines():
+        m = re.match(r"PROBE (\S+) (PASS|FAIL) \| (.*)$", line)
+        if m:
+            res[m.group(1)] = (m.group(2) == "PASS", m.group(3))
+    return res
 
 
 AD = "AvatarDefaults.cs"
@@ -383,6 +457,67 @@ CLAIM_ROWS = {
     "L1-recovery": dict(edit=(AD, 'return first + "\\n" + RecoveryInstruction();', "return first;"),
                         twin=(AD, '            return first + "\\n" + RecoveryInstruction();',
                               '            // the recovery instruction rides with it\n            return first + "\\n" + RecoveryInstruction();')),
+
+    # ---- fix pass 2: every named closure mutated at its PRODUCTION expression;
+    # the tree's own tests (pytest, with its prodprobe at S35) must go red, and
+    # stay green on the neighbouring twin. Single-line anchors (Plugin.cs is CRLF).
+    # H3: restore the reread of the cache the pass has just published to
+    "H3-reread": dict(edit=("Plugin.cs", "string popupFace = new AvatarRules().PopupFace(picker.IsLocal, carrier, freshFace,",
+                            "string popupFace = FacePublisher.ReadCarrier(pickerActor); string unusedFace = new AvatarRules().PopupFace(picker.IsLocal, carrier, freshFace,"),
+                      twin=("Plugin.cs", '"the value this pass published"', '"the value published this pass"')),
+    # H6: each production liveness assignment (AvatarDefaults.ReadLiveness)
+    "H6-isPlaying": dict(edit=(AD, "{ l.IsPlaying = gm.isPlaying; l.BattleOngoing = gm.battleOngoing; }",
+                               "{ l.BattleOngoing = gm.battleOngoing; }"),
+                         twin=(AD, "{ l.IsPlaying = gm.isPlaying; l.BattleOngoing = gm.battleOngoing; }",
+                               "{ l.BattleOngoing = gm.battleOngoing; l.IsPlaying = gm.isPlaying; }")),
+    "H6-battleOngoing": dict(edit=(AD, "{ l.IsPlaying = gm.isPlaying; l.BattleOngoing = gm.battleOngoing; }",
+                                   "{ l.IsPlaying = gm.isPlaying; }"),
+                             twin=(AD, "{ l.IsPlaying = gm.isPlaying; l.BattleOngoing = gm.battleOngoing; }",
+                                   "{ l.IsPlaying = gm.isPlaying == true; l.BattleOngoing = gm.battleOngoing == true; }")),
+    # H9: the round 2 early return, before the rules see the debt
+    "H9-early-return": dict(edit=(AD, "var d = rules.Evaluate(x);",
+                                  "if (cch == null || cch.selectedFaceID == null || cch.selectedFaceID.Length == 0 || cch.playerFaces == null) return; var d = rules.Evaluate(x);"),
+                            twin=(AD, "var d = rules.Evaluate(x);", "if (tag == null) return; var d = rules.Evaluate(x);")),
+    # M3: the deferred-restoration edge removed from the tick
+    "M3-deferred-edge": dict(edit=(AD, "try { DeferredRestoration(); } catch { }", ""),
+                             twin=(AD, "try { DeferredRestoration(); } catch { }", "try { DeferredRestoration(); } catch (Exception) { }")),
+    # M8: each arm of the classification-line guard
+    "M8-apply-arm": dict(edit=(AD, "if (d.Apply >= 0 || rules.LogsClassification(tag))", "if (rules.LogsClassification(tag))"),
+                         twin=(AD, "                if (d.Apply >= 0 || rules.LogsClassification(tag))",
+                               "                // the line's guard: an applied change, or a room edge\n                if (d.Apply >= 0 || rules.LogsClassification(tag))")),
+    "M8-room-arm": dict(edit=(AD, "if (d.Apply >= 0 || rules.LogsClassification(tag))", "if (d.Apply >= 0)"),
+                        twin=(AD, "                Plugin.Log.LogInfo(rules.ClassificationLine(",
+                              "                    // one line per classification\n                    Plugin.Log.LogInfo(rules.ClassificationLine(")),
+    # BR-M4: partial assignment in ReadFacing (the first getter committed
+    # before the second runs, and the catch no longer resets it)
+    "BR-M4-partial": dict(edit=[(AD, "bool inRoom = PhotonNetwork.InRoom;", "f.InRoom = PhotonNetwork.InRoom; bool inRoom = f.InRoom;"),
+                                (AD, "catch { f.InRoom = false; f.OfflineMode = false; f.Unreadable = true; return f; }",
+                                 "catch { f.Unreadable = true; return f; }")],
+                          twin=(AD, "bool inRoom = PhotonNetwork.InRoom;", "bool inRoom = PhotonNetwork.InRoom == true;")),
+    # L1: each sink deleted in turn
+    "L1-sprite-sink": dict(edit=(AD, "UIFactory.SetImageSprite(ring, spr);", ""),
+                           twin=(AD, "ring.transform.SetAsLastSibling();", "ring.transform.SetAsLastSibling(); ring.SetActive(true);")),
+    "L1-announce-sink": dict(edit=(AD, "if (d.Unusable != AvatarUnusable.None) Announce(UnusableMessage(d.Unusable));", ""),
+                             twin=(AD, "if (d.Unusable != AvatarUnusable.None) Announce(UnusableMessage(d.Unusable));",
+                                   "if (AvatarUnusable.None != d.Unusable) Announce(UnusableMessage(d.Unusable));")),
+}
+
+# fix pass 2: the closures M11 names, by the rows that bind them
+M11_CLOSURES = {"H6": ["H6-isPlaying", "H6-battleOngoing"], "M8": ["M8-apply-arm", "M8-room-arm"],
+                "BR-M4": ["BR-M4-partial"], "L1": ["L1-sprite-sink", "L1-announce-sink"]}
+
+# fix pass 2: rule-level mutations the tree's own HARNESS must catch
+HARNESS2_ROWS = {
+    "H3-rule-reread": ((AR, "internal virtual string PopupFace(",
+                        "if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;",
+                        "if (pickerIsLocal) return readCarrier != null ? readCarrier() : null;"),
+                       (AR, "internal virtual string PopupFace(",
+                        "return readCarrier != null ? readCarrier() : null;",
+                        "return readCarrier == null ? null : readCarrier();")),
+    "H9-rule-deferral": ((AR, "internal virtual AvatarDecision Evaluate(AvatarEvalIn x)",
+                          "d.RestorationDeferred = RestorationOwed(", "d.RestorationDeferred = false && RestorationOwed("),
+                         (AR, "internal virtual AvatarDecision Evaluate(AvatarEvalIn x)",
+                          "d.NothingToRead = true;", "d.NothingToRead = !false;")),
 }
 
 
@@ -463,6 +598,23 @@ def gate_brl2(evidence, sha):
     return False, "no log for %s carries the planted negative control" % sha[:8]
 
 
+def gate_m10(evidence, sha):
+    """Fix pass 2 (M10): the real-config upgrade witness for this commit,
+    complete, with its three negative controls each DETECTED."""
+    for p in logs_for(evidence, sha):
+        t = text_of(p)
+        if not re.search(r"^CFGWITNESS-REAL verdict=PASS baseline=real-config", t, re.M):
+            continue
+        neg = re.search(r"^CFGWITNESS-REAL negative-control retype bool->string detected=True \| retype int->bool detected=True"
+                        r" \| description edit detected=True", t, re.M)
+        cnt = re.search(r"^CFGWITNESS-REAL pre-existing keys=(\d+) value kept=(\d+) type kept=(\d+)", t, re.M)
+        done = re.search(r"^EXIT 0\s*$", t, re.M)
+        ok = bool(neg and cnt and done and int(cnt.group(1)) > 0 and cnt.group(1) == cnt.group(2) == cnt.group(3))
+        return ok, "%s: %s | negative controls detected=%s | EXIT 0=%s" % (
+            os.path.basename(p), cnt.group(0) if cnt else "no key counts", bool(neg), bool(done))
+    return False, "no log for %s carries the real-config upgrade witness (old and new bind lists over the same backed-up real file)" % sha[:8]
+
+
 def gate_m8_replay(evidence, sha):
     for p in logs_for(evidence, sha):
         t = text_of(p)
@@ -485,9 +637,20 @@ def controls(args):
     res = {}
 
     # source gates
-    res["H3"] = src_h3(root)
+    srch3 = src_h3(root)
     res["BR-M1"] = src_brm1(root)
     srcm8 = src_m8(root)
+
+    # fix pass 2, behaviour: the fix tip's production probe over THIS tree's
+    # production files, and the fix tip's S33 over this tree's sources
+    tipprobe = prodprobe_run(LANE, root, args.work, "tip-over-tree", out) or {}
+
+    def tp(k):
+        return tipprobe.get(k, (False, "the tip's production probe did not report " + k))
+
+    s33rc = claims_run(root, args.work, "tip-s33", None, args.decompiled, out, tests_from=LANE,
+                       select="s33_no_pass_rereads")
+    s33why = "; ".join(l.split(" - ", 1)[-1][:300] for l in claims_run.last_failed) or "no reread after a publish"
 
     # the probe
     probe = build_probe(root, args.work, out)
@@ -498,10 +661,7 @@ def controls(args):
     brh1_src = src_brh1(root)
     res["BR-H1"] = (p("BRH1")[0] and p("H8")[0] and brh1_src[0],
                     "probe: " + p("BRH1")[1] + " | " + p("H8")[1] + " | source: " + brh1_src[1])
-    res["H9"] = p("H9")
-    res["M3"] = p("M3")
     res["BR-M3"] = p("BRM3")
-    res["BR-M4"] = p("BRM4")
 
     # the tree's own harness against mutations
     base = harness_run(root, args.work, "baseline", None, out)
@@ -518,6 +678,16 @@ def controls(args):
     ok8 = base == 0 and t8 == 0 and n8 is not None and n8 > 0 and p("H8")[0]
     res["H8"] = (ok8, "provenance-decides mutation -> the tree's harness fails %s, twin fails %s | probe: %s"
                  % (n8, t8, p("H8")[1]))
+    hrow = {}
+    for name, (edit, twin) in HARNESS2_ROWS.items():
+        hrow[name] = (harness_run(root, args.work, name, edit, out), harness_run(root, args.work, name + "-twin", twin, out))
+
+    def harness_ok(name):
+        m, t = hrow[name]
+        return base == 0 and m is not None and m > 0 and t == 0
+
+    def harness_detail(name):
+        return "%s: the tree's harness fails %s on the mutation, %s on the twin" % (name, hrow[name][0], hrow[name][1])
 
     # the tree's own source claims against mutations
     cbase = claims_run(root, args.work, "baseline", None, args.decompiled, out)
@@ -536,16 +706,45 @@ def controls(args):
     def claim_detail(names):
         return ", ".join("%s: mutation exit %s, twin exit %s" % (n, crow[n][0], crow[n][1]) for n in names)
 
+    def rows_ok(names):
+        return all(claim_ok(n) for n in names)
+
+    def probe_ok(ids):
+        return all(tp(i)[0] for i in ids)
+
+    def probe_detail(ids):
+        return " | ".join("tip probe %s %s: %s" % (i, "PASS" if tp(i)[0] else "FAIL", tp(i)[1]) for i in ids)
+
     m11 = ["M11-persistence", "M11-assignment", "M11-refusal"]
-    l1 = ["L1-ring", "L1-hybrid", "L1-recovery", "M11-assignment"]
-    res["M11"] = (all(claim_ok(n) for n in m11), "claims baseline exit %s | " % cbase + claim_detail(m11))
-    res["L1"] = (all(claim_ok(n) for n in l1), "claims baseline exit %s | " % cbase + claim_detail(l1))
+    l1 = ["L1-ring", "L1-hybrid", "L1-recovery", "M11-assignment", "L1-sprite-sink", "L1-announce-sink"]
+    closures = [n for k in ("H6", "M8", "BR-M4", "L1") for n in M11_CLOSURES[k]]
+    res["M11"] = (rows_ok(m11) and rows_ok(closures),
+                  "claims baseline exit %s | round 1 rows: " % cbase + claim_detail(m11)
+                  + " | the four closures (H6, M8, BR-M4, L1): " + claim_detail(closures))
+    res["L1"] = (rows_ok(l1) and probe_ok(["L1sprite", "L1announce"]),
+                 "claims baseline exit %s | " % cbase + claim_detail(l1) + " | " + probe_detail(["L1sprite", "L1announce"]))
+
+    # fix pass 2: the PARTLY items, behaviour on this tree AND binding by the tree's own tests
+    res["H3"] = (srch3[0] and s33rc == 0 and rows_ok(["H3-reread"]) and harness_ok("H3-rule-reread"),
+                 "source: " + srch3[1] + " | the tip's S33 over this tree exit %s: %s | " % (s33rc, s33why)
+                 + claim_detail(["H3-reread"]) + " | " + harness_detail("H3-rule-reread"))
+    ok6b = res["H6"][0] and rows_ok(M11_CLOSURES["H6"]) and probe_ok(["H6a", "H6b", "H6c"])
+    res["H6"] = (ok6b, res["H6"][1] + " | production: " + claim_detail(M11_CLOSURES["H6"]) + " | " + probe_detail(["H6a", "H6b", "H6c"]))
+    res["H9"] = (p("H9")[0] and probe_ok(["H9c", "H9s"]) and rows_ok(["H9-early-return"]) and harness_ok("H9-rule-deferral"),
+                 "rules probe: " + p("H9")[1] + " | " + probe_detail(["H9c", "H9s"]) + " | "
+                 + claim_detail(["H9-early-return"]) + " | " + harness_detail("H9-rule-deferral"))
+    res["M3"] = (p("M3")[0] and probe_ok(["M3t"]) and rows_ok(["M3-deferred-edge"]),
+                 "rules probe: " + p("M3")[1] + " | " + probe_detail(["M3t"]) + " | " + claim_detail(["M3-deferred-edge"]))
+    res["BR-M4"] = (p("BRM4")[0] and probe_ok(["BRM4"]) and rows_ok(M11_CLOSURES["BR-M4"]),
+                    "rules probe: " + p("BRM4")[1] + " | " + probe_detail(["BRM4"]) + " | " + claim_detail(M11_CLOSURES["BR-M4"]))
 
     # evidence gates
     ev = args.evidence
     rep = gate_m8_replay(ev, sha)
-    res["M8"] = (srcm8[0] and rep[0], "source: " + srcm8[1] + " | evidence: " + rep[1])
-    res["M10"] = log_gate(ev, sha, r"^CFGWITNESS verdict=PASS baseline=same-lineage", "same-lineage config witness")
+    res["M8"] = (srcm8[0] and rep[0] and rows_ok(M11_CLOSURES["M8"]) and probe_ok(["M8apply", "M8room"]),
+                 "source: " + srcm8[1] + " | evidence: " + rep[1] + " | production: " + claim_detail(M11_CLOSURES["M8"])
+                 + " | " + probe_detail(["M8apply", "M8room"]))
+    res["M10"] = gate_m10(ev, sha)
     res["BR-M2"] = log_gate(ev, sha, r"^AFFECTED-COMPARE verdict=PASS", "final-tip affected-set comparison")
     res["BR-M5"] = gate_brm5(ev, sha)
     res["BR-L1"] = gate_brl1(ev, sha)
@@ -557,6 +756,9 @@ def controls(args):
         green += 1 if ok else 0
         out.write("CONTROL %-6s %s | %s\n" % (k, "GREEN" if ok else "RED", why))
     out.write("CONTROLS commit=%s green=%d red=%d of %d\n" % (sha, green, len(ITEMS) - green, len(ITEMS)))
+    f2red = [k for k in FIX2 if not res[k][0]]
+    out.write("CONTROLS-FIX2 commit=%s red=%d green=%d of %d (red: %s)\n"
+              % (sha, len(f2red), len(FIX2) - len(f2red), len(FIX2), " ".join(f2red) or "none"))
     return 0 if green == len(ITEMS) else 1
 
 
@@ -656,6 +858,27 @@ def cfgwitness(args):
         shutil.copyfile(os.path.join(HERE, "cfgwitness", f), os.path.join(d, f))
     with open(os.path.join(d, "binds.json"), "w", encoding="utf-8") as f:
         json.dump({"binds": rows, "avatar": AVATAR_KEYS}, f)
+    real = getattr(args, "real_cfg", None)
+    if real:
+        # fix pass 2 (M10): the OLD same-lineage build's bind list (the tree
+        # this lane branched from) and the NEW one (this tree), each applied
+        # by BepInEx's own ConfigFile to its own copy of ONE backed-up real
+        # configuration file; the original is never opened by the witness
+        old_root = os.path.abspath(args.old_root)
+        old_rows = binds(os.path.join(old_root, "plugin", "Plugin.cs"))
+        print("old tree %s commit %s: binds extracted=%d, item 19 keys present=%s" % (
+            old_root, (git_head(old_root) or "?")[:8], len(old_rows), any(r["key"] in AVATAR_KEYS for r in old_rows)))
+        print("new tree %s commit %s: binds extracted=%d" % (root, (git_head(root) or "?")[:8], len(rows)))
+        old_keys = [(r["section"], r["key"]) for r in old_rows]
+        new_keys = [(r["section"], r["key"]) for r in rows if r["key"] not in AVATAR_KEYS]
+        print("non-avatar bind lists identical (section, key, kind, default, description)=%s" % (
+            [r for r in old_rows] == [r for r in rows if r["key"] not in AVATAR_KEYS]))
+        print("non-avatar bind keys identical=%s" % (old_keys == new_keys))
+        with open(os.path.join(d, "old-binds.json"), "w", encoding="utf-8") as f:
+            json.dump({"binds": old_rows, "avatar": AVATAR_KEYS}, f)
+        shutil.copyfile(real, os.path.join(d, "real-backup.cfg"))
+        print("real config backup %s sha256 %s (copied for the witness: %s)" % (
+            os.path.basename(real), sha256(real), sha256(os.path.join(d, "real-backup.cfg"))))
     cmd = ["dotnet", "build", os.path.join(d, "item19-cfgwitness.csproj"), "-c", "Release", "-nologo", "-v", "q",
            "-p:BepInExCore=" + args.bepinex_core]
     if args.managed:
@@ -665,11 +888,17 @@ def cfgwitness(args):
     if rc != 0:
         print(o[-3000:])
         return 1
-    rc, o = run(["dotnet", os.path.join(d, "bin", "Release", "net10.0", "item19-cfgwitness.dll"),
-                 os.path.join(d, "binds.json"), os.path.join(d, "out")])
+    dll = os.path.join(d, "bin", "Release", "net10.0", "item19-cfgwitness.dll")
+    rc, o = run(["dotnet", dll, os.path.join(d, "binds.json"), os.path.join(d, "out")])
     print(o.rstrip())
     print("witness exit %d" % rc)
-    return rc
+    if not real:
+        return rc
+    rc2, o = run(["dotnet", dll, "--real", os.path.join(d, "old-binds.json"), os.path.join(d, "binds.json"),
+                  os.path.join(d, "real-backup.cfg"), os.path.join(d, "real")])
+    print(o.rstrip())
+    print("real-config witness exit %d" % rc2)
+    return rc | rc2
 
 
 # ---------------------------------------------------------------------------
@@ -776,6 +1005,8 @@ def main():
     w.add_argument("--bepinex-core", required=True)
     w.add_argument("--managed", default=None)
     w.add_argument("--work", required=True)
+    w.add_argument("--old-root", default=None)
+    w.add_argument("--real-cfg", default=None)
     t = sub.add_parser("tally")
     t.add_argument("log")
     p = sub.add_parser("plant")
