@@ -40,9 +40,11 @@ namespace CompetitiveRounds
     /// one attempt (fix pass 1, H3). Publish: the current face is valid and
     /// is written. Clear: the attempt reached a DEFINITIVE answer that there
     /// is no valid face to publish (no face list, a null face, an all-zero
-    /// face), so any carrier an earlier attempt left is removed, and the
-    /// popup's reader (TryReadAndApply, which skips an absent or empty value)
-    /// falls back to vanilla's RPC instead of equipping the stale face. Keep:
+    /// face), so any carrier an earlier attempt left is removed: once the
+    /// write is delivered, the popup's reader (FacePublisher.ReadCarrier,
+    /// which skips an absent or empty value) finds nothing and vanilla's RPC
+    /// stays in charge; the pass that made the write applies nothing at all
+    /// (PopupFace, fix pass 2, H3). Keep:
     /// nothing is known or nothing can be written (a spectator, whose carrier
     /// no reader consults; no handler yet; no local player).</summary>
     internal enum FaceCarrierAction { Publish, Clear, Keep }
@@ -128,6 +130,13 @@ namespace CompetitiveRounds
         internal AvatarSwitched Switched;
         internal AvatarUnusable Unusable;
         internal int Nominee;                // the slot the facing names, -1 for none
+        /// <summary>Fix pass 2 (H9, M3): a confirmed exit found a remembered
+        /// selection but no character data to restore it with (no controller,
+        /// no selected face, no face table). Home is KEPT as written (it is
+        /// the durable record of the debt, a config int that outlives every
+        /// scene and the process), and the E13 tick repays it as soon as the
+        /// data reads again; a relaunch repays it at E1.</summary>
+        internal bool RestorationDeferred;
     }
 
     internal class AvatarRules
@@ -310,7 +319,16 @@ namespace CompetitiveRounds
             var c = Census(x.Liveness, x.Facing);
             d.Facing = c;
             if (Gate(c)) { d.Gated = true; return d; }
-            if (x.Faces == null || x.Live < 0) { d.NothingToRead = true; return d; }
+            if (x.Faces == null || x.Live < 0)
+            {
+                // Nothing to apply with. Home is left exactly as it is (NewHome
+                // is x.Home, HomeChanged false): never cleared on a missing
+                // read, so the debt survives until a readable evaluation pays
+                // it (fix pass 2, H9 and M3).
+                d.NothingToRead = true;
+                d.RestorationDeferred = RestorationOwed(x.Home, !x.Facing.InRoom && !x.Facing.Unreadable);
+                return d;
+            }
 
             int live = x.Live;
             var s = x.Setting;
@@ -355,6 +373,35 @@ namespace CompetitiveRounds
             // An out-of-domain value on disk that reads as empty is normalised to
             // -1 the first time an evaluation completes (one write, then stable).
             d.HomeChanged = homeAfter != homeBefore;
+        }
+
+        /// <summary>Fix pass 2 (H9, M3): a restoration is owed while a
+        /// remembered selection is held and the room read CONFIRMS there is
+        /// no room (it succeeded and says not in a room). Both inputs survive
+        /// every teardown: Home is a config int, the room read is Photon's own
+        /// state. No character data is consulted, so the debt cannot be lost
+        /// to a controller, a selected face or a face table that has gone; the
+        /// E13 tick (AvatarDefaults.Tick) asks this on every throttled frame
+        /// and re-runs the evaluator, which repays it the first time the data
+        /// reads. An unreadable room read is not a confirmed exit.</summary>
+        internal virtual bool RestorationOwed(int home, bool confirmedNoRoom)
+        {
+            return home >= 0 && confirmedNoRoom;
+        }
+
+        /// <summary>The face the card-pick popup applies for one Show pass
+        /// (fix pass 2, H3). A local picker's pass has just published (or
+        /// cleared, or kept) its own carrier, and PUN updates the local
+        /// player's cached properties only on the server's echo, so a reread
+        /// of the cache in the same pass returns the PREVIOUS value. The local
+        /// picker therefore uses the value it published, or nothing when the
+        /// attempt cleared or kept the carrier (vanilla's RPC stays in
+        /// charge), and never calls the reader. A remote picker's face is the
+        /// carrier as this seat last received it, read through the reader.</summary>
+        internal virtual string PopupFace(bool pickerIsLocal, FaceCarrierAction published, string publishedValue, Func<string> readCarrier)
+        {
+            if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;
+            return readCarrier != null ? readCarrier() : null;
         }
 
         // ---------------------------------------------------------------

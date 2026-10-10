@@ -19,7 +19,8 @@ namespace CompetitiveRounds
     ///
     /// Edges that call <see cref="Evaluate"/>: E1 the LoadFaces postfix, E2-E4,
     /// E6, E7, E11, E12 the Photon callbacks in Plugin.cs, E5 the CreatePlayer
-    /// prefix, E8 the three settings rows, E9 the SelectFace postfix. E10 (the
+    /// prefix, E8 the three settings rows, E9 the SelectFace postfix, E13 the
+    /// deferred restoration on the throttled tick (fix pass 2). E10 (the
     /// swap key) is item 17's Keybinds registry, absent on this lane, so there
     /// is no swap reader and no fallback binding (design 2.5, sentence 3).</summary>
     internal static class AvatarDefaults
@@ -138,6 +139,23 @@ namespace CompetitiveRounds
 
         private static int ReadHome() => Plugin.AvatarHomeSlot != null ? Plugin.AvatarHomeSlot.Value : -1;
 
+        /// <summary>The own selection, or -1 when there is no controller or
+        /// no selected-face array (fix pass 2, H9 and M3: read, never a
+        /// reason to return before the rules see the debt).</summary>
+        private static int ReadLive(CharacterCreatorHandler cch)
+        {
+            var ids = cch != null ? cch.selectedFaceID : null;
+            return ids != null && ids.Length > 0 ? ids[0] : -1;
+        }
+
+        private static string MissingCharacterData(CharacterCreatorHandler cch)
+        {
+            if (cch == null) return "no character controller";
+            if (cch.selectedFaceID == null || cch.selectedFaceID.Length == 0) return "no selected face";
+            if (cch.playerFaces == null) return "no face table";
+            return "character data unreadable";
+        }
+
         /// <summary>This seat's own spawned body, by IsMine view - the same
         /// resolution FaceResync.TrySendLocalFace uses.</summary>
         private static global::Player LocalBody()
@@ -169,17 +187,28 @@ namespace CompetitiveRounds
                 var f = ReadFacing();
                 if (rules.Gate(rules.Census(l, f))) return;              // THE GATE (DEVIATION 3)
 
+                // Fix pass 2 (H9, M3): no early return on missing character
+                // data. A missing controller, selected face or face table reads
+                // as Faces null / Live -1 and the rules decide: nothing is
+                // applied, Home is kept (never cleared), and on a confirmed
+                // exit the restoration is DEFERRED to the E13 tick (Tick below),
+                // which needs no character data to know the debt is owed.
                 var cch = CharacterCreatorHandler.instance;
-                if (cch == null || cch.selectedFaceID == null || cch.selectedFaceID.Length == 0 || cch.playerFaces == null) return;
-
                 var x = new AvatarEvalIn
                 {
                     Liveness = l, Facing = f, Setting = ReadSetting(),
                     Faces = ReadFaces(cch), Loader = ReadLoader(),
-                    Live = cch.selectedFaceID[0], Home = ReadHome(),
+                    Live = ReadLive(cch), Home = ReadHome(),
                 };
                 var d = rules.Evaluate(x);
-                if (d.Gated || d.NothingToRead) return;
+                if (d.Gated) return;
+                if (d.NothingToRead)
+                {
+                    if (d.RestorationDeferred && rules.LogsClassification(tag))
+                        Plugin.Log.LogInfo("[AVATAR] " + tag + " restoration deferred (" + MissingCharacterData(cch)
+                            + "): home " + x.Home + " kept, the E13 tick repays it once the character data reads");
+                    return;
+                }
 
                 if (d.Unusable != AvatarUnusable.None) Announce(UnusableMessage(d.Unusable));
 
@@ -413,6 +442,25 @@ namespace CompetitiveRounds
         {
             if (Time.frameCount % 15 != 0) return;
             try { PaintRings(); } catch { }
+            try { DeferredRestoration(); } catch { }
+        }
+
+        /// <summary>E13, the deferred restoration (fix pass 2, H9 and M3): a
+        /// confirmed exit that found no character data kept Home and applied
+        /// nothing. This edge needs no character data to know the debt is
+        /// owed (Home is a config int, the room read is Photon's own state),
+        /// so it runs the evaluator on every throttled frame while one is
+        /// owed; the evaluator repays it the first time the data reads, Home
+        /// becomes -1, and the edge goes quiet by itself. A relaunch repays it
+        /// at E1. Nothing is remembered here.</summary>
+        private static void DeferredRestoration()
+        {
+            int home = ReadHome();
+            if (home < 0) return;
+            bool inRoom;
+            try { inRoom = PhotonNetwork.InRoom; }
+            catch { return; }                                              // an unreadable room read is not a confirmed exit
+            if (new AvatarRules().RestorationOwed(home, !inRoom)) Evaluate("E13-deferred");
         }
 
         private static void PaintRings()

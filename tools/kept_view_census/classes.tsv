@@ -256,7 +256,7 @@ Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	PlayerList	N	the 2v2 DC election's
 Plugin.cs	Cr2v2DiagCallbacks	OnPlayerPropertiesUpdate	OnPlayerPropertiesUpdate	R	identity bookkeeping: a change of u_id, a spectator mark or the proximity capability invalidates the roster identity cache (Plugin.cs:4138)	
 Plugin.cs	Cr2v2DiagCallbacks	RepeatedCompetitiveCosmeticReapply	ActiveFighters	N	cosmetic reapply	
 Plugin.cs	Diag2v2	DescribeRoom	PlayerCount	N	diag text	
-Plugin.cs	FacePublisher	TryReadAndApply	ActiveFighters	N	cosmetic face	
+Plugin.cs	FacePublisher	ReadCarrier	ActiveFighters	N	cosmetic face
 Plugin.cs	FaceResync	TrySendLocalFace	players	N	cosmetic face	
 Plugin.cs	GMArmsRaceStartGameBlockResetPatch	RunSweep	players	R	game-start block reset over every body; a reset gives no body an effect	
 Plugin.cs	GMArmsRace_PlayerJoined_Diag_Patch	Prefix	players	N	diag log	
