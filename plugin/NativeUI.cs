@@ -13420,6 +13420,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private static object screenShakeToggleTxt, mapLightingToggleTxt, mapShadowsToggleTxt, animCosToggleTxt, bloomToggleTxt;
         private static GameObject healthPrecToggleBtn;
         private static object healthPrecToggleTxt;
+        private static GameObject dmgNumBtn;   // v1.41.0 item 21
+        private static object dmgNumTxt;
         // July 20 item 8: chromatic aberration toggle row.
         private static GameObject chromAbToggleBtn;
         private static object chromAbToggleTxt;
@@ -14188,6 +14190,21 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     dirty = true;
                 });
             healthPrecToggleTxt = UIFactory.GetButtonText(healthPrecToggleBtn);
+            // v1.41.0 item 21: damage and heal numbers above players. Local
+            // display only (DamageNumbers reads health and writes nothing, sends
+            // nothing), default Off. The three modes are chosen directly through
+            // the named writer; the option words are the value halves of the
+            // three painted literals below.
+            dmgNumBtn = SettingsSegmented(subIngame.transform, "SDmgNum", I18n.Tr("Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room."),
+                new[] { DamageNumbers.OFF, DamageNumbers.ME, DamageNumbers.EVERYONE },
+                () => DamageNumbers.Level,
+                id =>
+                {
+                    DamageNumbers.Set(id);
+                    Plugin.Log.LogInfo("[SETTINGS] Damage numbers -> " + DamageNumbers.Level);
+                    dirty = true;
+                });
+            dmgNumTxt = UIFactory.GetButtonText(dmgNumBtn);
             /* Room rules (Sept 10): the Same Cards preference for queue-matched
              * rooms (ranked 1v1, and the 2v2 / 1v2 auto-queue rooms, which have
              * no host) - a room gets the rule only when EVERY player in it has
@@ -14998,6 +15015,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (animCosToggleTxt != null && Plugin.AnimatedCosmetics != null) PaintAnimCos(animCosToggleTxt, Plugin.AnimatedCosmetics.Value);
             if (bloomToggleTxt != null && Plugin.BloomStrength != null) PaintBloom(bloomToggleTxt, MapPhysicalColorPatch.BloomStrengthSetting.Level);
             if (healthPrecToggleTxt != null) PaintHealthPrecision(healthPrecToggleTxt, TabStatsOverlay.HealthPrecisionSetting.Level);
+            if (dmgNumTxt != null) PaintDamageNumbers(dmgNumTxt, DamageNumbers.Level);
             if (chromAbToggleTxt != null && Plugin.ChromaticAberrationEnabled != null) PaintChromAb(chromAbToggleTxt, Plugin.ChromaticAberrationEnabled.Value);
             if (langToggleTxt != null && Plugin.ModLanguage != null) PaintLanguage(langToggleTxt, Plugin.ModLanguage.Value);
             if (dateFmtTxt != null)
@@ -15303,6 +15321,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     : level == TabStatsOverlay.HealthPrecisionSetting.ONE_DP
                         ? I18n.Tr("HP decimals: <color=#DDDD66>1 DECIMAL</color>")
                         : I18n.Tr("HP decimals: <color=#FF9966>ROUNDED</color>"));
+        }
+
+        /// <summary>v1.41.0 item 21. Each mode is its OWN literal inside its
+        /// own I18n.Tr (#295a), never Tr(variable); the segmented row's option
+        /// words are these literals' value halves, so they translate with
+        /// them.</summary>
+        private static void PaintDamageNumbers(object t, string level)
+        {
+            UIFactory.SetTextRaw(t,
+                level == DamageNumbers.EVERYONE
+                    ? I18n.Tr("Damage numbers: <color=#88FF88>EVERYONE</color>")
+                    : level == DamageNumbers.ME
+                        ? I18n.Tr("Damage numbers: <color=#DDDD66>ME</color>")
+                        : I18n.Tr("Damage numbers: <color=#FF9966>OFF</color>"));
         }
 
         private static void PaintChromAb(object t, bool on)

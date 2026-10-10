@@ -3406,6 +3406,13 @@ namespace CompetitiveRounds
             ["Wear it and win ranked games"] = "Llévalo puesto y gana partidas Ranked",
             ["Wind Up"] = "Carga",
             ["Wraith"] = "Espectro",
+            // v1.41.0 item 21: the damage-numbers row (its three painted
+            // states, its description and its reason).
+            ["Damage numbers: <color=#88FF88>EVERYONE</color>"] = "Números de daño: <color=#88FF88>TODOS</color>",
+            ["Damage numbers: <color=#DDDD66>ME</color>"] = "Números de daño: <color=#DDDD66>YO</color>",
+            ["Damage numbers: <color=#FF9966>OFF</color>"] = "Números de daño: <color=#FF9966>NO</color>",
+            ["Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room."] = "Números flotantes sobre un jugador que muestran el daño recibido y la vida recuperada, con los mismos decimales que el indicador de HP. Solo local — nada de lo que ves aquí se envía, y nada cambia para nadie más en la sala.",
+            ["Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."] = "Más movimiento sobre la pelea. Actívalo cuando quieras leer exactamente lo que costó un intercambio.",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -6778,6 +6785,13 @@ namespace CompetitiveRounds
             ["Wear it and win ranked games"] = "Носите его и выигрывайте рейтинговые игры",
             ["Wind Up"] = "Замах",
             ["Wraith"] = "Призрак",
+            // v1.41.0 item 21: the damage-numbers row (its three painted
+            // states, its description and its reason).
+            ["Damage numbers: <color=#88FF88>EVERYONE</color>"] = "Числа урона: <color=#88FF88>ВСЕ</color>",
+            ["Damage numbers: <color=#DDDD66>ME</color>"] = "Числа урона: <color=#DDDD66>Я</color>",
+            ["Damage numbers: <color=#FF9966>OFF</color>"] = "Числа урона: <color=#FF9966>ВЫКЛ</color>",
+            ["Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room."] = "Всплывающие числа над игроком: полученный урон и восстановленное здоровье, с теми же знаками после запятой, что и у показателя HP. Только локально — ничего из того, что вы здесь видите, не отправляется, и ни для кого в комнате ничего не меняется.",
+            ["Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."] = "Лишнее движение поверх боя. Включайте, когда хотите точно видеть, во что обошёлся размен.",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -10076,6 +10090,13 @@ namespace CompetitiveRounds
             ["Wear it and win ranked games"] = "Носіть його та вигравайте рейтингові ігри",
             ["Wind Up"] = "Замах",
             ["Wraith"] = "Привид",
+            // v1.41.0 item 21: the damage-numbers row (its three painted
+            // states, its description and its reason).
+            ["Damage numbers: <color=#88FF88>EVERYONE</color>"] = "Числа шкоди: <color=#88FF88>УСІ</color>",
+            ["Damage numbers: <color=#DDDD66>ME</color>"] = "Числа шкоди: <color=#DDDD66>Я</color>",
+            ["Damage numbers: <color=#FF9966>OFF</color>"] = "Числа шкоди: <color=#FF9966>ВИМК</color>",
+            ["Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room."] = "Спливні числа над гравцем: отримана шкода та відновлене здоров'я, з тими ж знаками після коми, що й у показнику HP. Лише локально — нічого з того, що ви тут бачите, не надсилається, і ні для кого в кімнаті нічого не змінюється.",
+            ["Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."] = "Зайвий рух поверх бою. Вмикайте, коли хочете точно бачити, чого коштував обмін.",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -13374,6 +13395,13 @@ namespace CompetitiveRounds
             ["Wear it and win ranked games"] = "Bär den och vinn Ranked-matcher",
             ["Wind Up"] = "Uppladdning",
             ["Wraith"] = "Vålnad",
+            // v1.41.0 item 21: the damage-numbers row (its three painted
+            // states, its description and its reason).
+            ["Damage numbers: <color=#88FF88>EVERYONE</color>"] = "Skadesiffror: <color=#88FF88>ALLA</color>",
+            ["Damage numbers: <color=#DDDD66>ME</color>"] = "Skadesiffror: <color=#DDDD66>JAG</color>",
+            ["Damage numbers: <color=#FF9966>OFF</color>"] = "Skadesiffror: <color=#FF9966>AV</color>",
+            ["Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room."] = "Flytande siffror ovanför en spelare som visar skada som tas och hälsa som fås, med samma decimaler som HP-visningen. Endast lokalt — inget du ser här skickas, och inget ändras för någon annan i rummet.",
+            ["Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."] = "Extra rörelse över striden. Slå på det när du vill läsa exakt vad ett utbyte kostade.",
         };
     }
 }

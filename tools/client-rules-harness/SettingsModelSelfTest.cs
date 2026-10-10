@@ -52,7 +52,7 @@ namespace CompetitiveRounds
         // entry of each row is the sub-tab's home id
         private static readonly string[][] LaneResetSets =
         {
-            new[] { "ingame", "SPing", "SLagNotice", "SInpOv", "SBlkDbg", "SHpPrec" },
+            new[] { "ingame", "SPing", "SLagNotice", "SInpOv", "SBlkDbg", "SHpPrec", "SDmgNum" },
             new[] { "chatmail", "SIgChat", "SChatTtl", "SNT" },
             new[] { "sound", "SMuteBg", "SMenuMus", "SMusCredit" },
             new[] { "visuals", "SAnimCos", "SBloom", "SChromAb", "SCursor", "SLight", "SPColor", "SShad", "SShake", "STrail" },

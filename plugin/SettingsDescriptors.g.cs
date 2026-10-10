@@ -41,6 +41,7 @@ namespace CompetitiveRounds
             new SettingsDescriptor("SDXBtn", "DESTRUCTIVE", "privacy", false, false, "SDR", "SDR_q", "when_to_press", "whenever you armed it by accident"),
             new SettingsDescriptor("SDateFmt", "DROPDOWN", "langmenus", false, true, "SDateFmt", "SDateFmt_q", "painted_literal", "Month/Day/Year (US)"),
             new SettingsDescriptor("SDeepIdle", "SWITCH", "perf", true, true, "SDeepIdle", "SDeepIdle_q", "painted_literal", "ON"),
+            new SettingsDescriptor("SDmgNum", "SEGMENTED", "ingame", true, true, "SDmgNum", "SDmgNum_q", "painted_literal", "OFF"),
             new SettingsDescriptor("SEBtn", "ACTION", "ingame", false, false, "SEBtn", "SEBtn_q", "when_to_press", "when the game thinks you are still queued"),
             new SettingsDescriptor("SFPS", "SWITCH", "perf", true, true, "SFPS", "SFPS_q", "painted_literal", "ON"),
             new SettingsDescriptor("SFPSCap", "SWITCH", "perf", true, true, "SFPSCap", "SFPSCap_q", "painted_literal", "ON"),
@@ -110,6 +111,7 @@ namespace CompetitiveRounds
                 case "SDXBtn": return I18n.Tr("cancelling costs nothing and re-arms cleanly");
                 case "SDateFmt": return I18n.Tr("the shipped default; menus only, never match data, so switch to the order you read fastest");
                 case "SDeepIdle": return I18n.Tr("never active in a room or on match-found");
+                case "SDmgNum": return I18n.Tr("Extra motion over the fight. Turn it on when you want to read exactly what a trade cost.");
                 case "SEBtn": return I18n.Tr("it leaves every queue at once and costs nothing if you are not in one");
                 case "SFPS": return I18n.Tr("it is the instrument you judge the rest of this tab with");
                 case "SFPSCap": return I18n.Tr("it costs nothing while you are playing");

@@ -484,6 +484,10 @@ namespace CompetitiveRounds
             // room-join edge (resumed-score reset + stash consume, bug 232/233;
             // NetworkReplicaDiagnostics room lifecycle, bug 235).
             go.AddComponent<Cr2v2DiagCallbacks>();
+            // v1.41.0 item 21: the damage-number driver - flushes and ages the
+            // labels every frame whether or not anything is drawn. Ungated,
+            // local, whole body guarded; it never touches gameplay.
+            go.AddComponent<DamageNumberDriver>();
         }
 
         private void Awake()
@@ -1376,6 +1380,8 @@ namespace CompetitiveRounds
                 // combat patch as attached, and the producers the census proves.
                 try { CombatEvidence.BootLine(); } catch { }
                 try { IdentityClockEvidence.BootLine(); } catch { }
+                // Item 21: one line naming both damage-number hook pairs as attached (#83).
+                try { DamageNumbers.BootLine(); } catch { }
             }
             catch (Exception ex)
             {

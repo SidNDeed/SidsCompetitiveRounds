@@ -147,6 +147,11 @@
     },
     {
       "class": "reason",
+      "key": "SDmgNum",
+      "text": "Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."
+    },
+    {
+      "class": "reason",
       "key": "SIgChat",
       "text": "M cycles the same state in game; Muted also tells the room you cannot read chat"
     },
@@ -556,5 +561,5 @@
       "text": "Privacy & account"
     }
   ],
-  "total": 109
+  "total": 110
 }

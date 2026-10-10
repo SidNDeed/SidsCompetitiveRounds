@@ -1691,7 +1691,8 @@ namespace CompetitiveRounds
         /// <summary>THE CORRECTION FUNNEL (amendment A3), the only way a late
         /// tick moves health, on fighter and spectator seats alike. It lowers
         /// this replica's health by the slice, never below min(health, 1), and
-        /// arms the victim's own health-bar segment. It does not call DoDamage,
+        /// arms the victim's own health-bar segment and its local damage number
+        /// (v1.41.0 item 21, display only). It does not call DoDamage,
         /// so no DealtDamage chain runs (no lifesteal, refresh or card effect
         /// that spawns objects or deals more damage), no WasDealtDamage, no
         /// StopAllCoroutines and no RPC; it cannot raise a death and cannot
@@ -1709,6 +1710,23 @@ namespace CompetitiveRounds
             if (cd.health < pre)
             {
                 rec.Applied++;
+                // v1.41.0 item 21: the damage number for the health this
+                // correction lowered, display only, through the same bridge
+                // as the committed tick. Health before and after the write
+                // above, so the number is the APPLIED drop (the floor already
+                // taken), on fighter and spectator seats alike: this funnel
+                // never calls DoDamage, so W1 cannot see it. Its own try,
+                // ahead of the bar companion and apart from it (build R2 HC):
+                // the bar is optional display, and a throw in it must not
+                // cost a drop that is already committed its number.
+                try
+                {
+                    DamageNumbers.NoteDirectDrop(view, pre, cd.health);
+                }
+                catch { }
+                // The victim's own health-bar segment, display only, in its
+                // own guard: a throw here reaches neither the number above
+                // nor the caller.
                 try
                 {
                     var bar = view.GetComponentInChildren<HealthBar>(true);
@@ -2410,15 +2428,28 @@ namespace CompetitiveRounds
                         // ACTUAL drop (design review, Aug 30): at the 1-HP
                         // clamp nothing was lost, and arming the timer there
                         // would paint a phantom red segment.
-                        try
+                        if (cds.health < preTick)
                         {
-                            if (cds.health < preTick)
+                            // v1.41.0 item 21: the damage number for this
+                            // tick, display only. Health before and after this
+                            // write, so the number is the APPLIED drop (the
+                            // 1-HP floor already taken): what every fighter
+                            // seat measures through DoDamage's own clamp. Its
+                            // own try, ahead of the bar companion and apart
+                            // from it (build R2 HC): a throw in the optional
+                            // bar must not cost a committed tick its number.
+                            try
+                            {
+                                DamageNumbers.NoteDirectDrop(view, preTick, cds.health);
+                            }
+                            catch { }
+                            try
                             {
                                 var hbBar = view.GetComponentInChildren<HealthBar>(true);
                                 if (hbBar != null) hbBar.TakeDamage(default, false);
                             }
+                            catch { }
                         }
-                        catch { }
                         // Bug 202: render the ATTACKER's LIFESTEAL for this
                         // tick — and ONLY lifesteal. Fighter seats get the
                         // full DealtDamage chain via DoDamage, so a

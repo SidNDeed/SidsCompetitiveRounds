@@ -975,6 +975,9 @@
   "Daily limit reached - paid packs reset at midnight UTC",
   "Damage",
   "Damage dealt (cumulative per game)",
+  "Damage numbers: <color=#88FF88>EVERYONE</color>",
+  "Damage numbers: <color=#DDDD66>ME</color>",
+  "Damage numbers: <color=#FF9966>OFF</color>",
   "Damage per game",
   "Damage types & buffs",
   "Dance is on cooldown - try again in a moment.",
@@ -1151,6 +1154,7 @@
   "Expires in {0}",
   "Export Tier List",
   "Export already in progress...",
+  "Extra motion over the fight. Turn it on when you want to read exactly what a trade cost.",
   "Eye-watering hot-pink body color.",
   "Eyes for those who are burning for a true battle",
   "Eyes for those who feel fiendish",
@@ -1223,6 +1227,7 @@
   "Flame Crest",
   "Flawless",
   "Floating Name",
+  "Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room.",
   "Floating pink hearts rise from your body.",
   "Follow my character",
   "For sale",
@@ -8274,6 +8279,21 @@
    "location": "Build",
    "kind": "Tr"
   },
+  "Damage numbers: <color=#88FF88>EVERYONE</color>": {
+   "surface": "NativeUI",
+   "location": "PaintDamageNumbers",
+   "kind": "Tr"
+  },
+  "Damage numbers: <color=#DDDD66>ME</color>": {
+   "surface": "NativeUI",
+   "location": "PaintDamageNumbers",
+   "kind": "Tr"
+  },
+  "Damage numbers: <color=#FF9966>OFF</color>": {
+   "surface": "NativeUI",
+   "location": "PaintDamageNumbers",
+   "kind": "Tr"
+  },
   "Damage per game": {
    "surface": "SessionReportModel",
    "location": "BuildTotalsPages",
@@ -9154,6 +9174,11 @@
    "location": "ExportCardTierList",
    "kind": "Tr"
   },
+  "Extra motion over the fight. Turn it on when you want to read exactly what a trade cost.": {
+   "surface": "SettingsDescriptors.g",
+   "location": "ReasonTr",
+   "kind": "Tr"
+  },
   "Eye-watering hot-pink body color.": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
@@ -9513,6 +9538,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room.": {
+   "surface": "NativeUI",
+   "location": "BuildSettingsTab",
+   "kind": "Tr"
   },
   "Floating pink hearts rise from your body.": {
    "surface": "shop catalog",

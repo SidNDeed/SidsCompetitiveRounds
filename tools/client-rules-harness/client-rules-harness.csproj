@@ -169,6 +169,7 @@
     <Compile Include="SessionReportRulesSelfTest.cs" />
     <Compile Include="../../plugin/ShowcaseRules.cs" />
     <Compile Include="../../plugin/FfaNumberingRules.cs" />
+    <Compile Include="../../plugin/DamageNumberRules.cs" />
   </ItemGroup>
 
 </Project>

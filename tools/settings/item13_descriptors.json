@@ -152,6 +152,11 @@
     },
     {
       "class": "reason",
+      "key": "SDmgNum",
+      "text": "Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."
+    },
+    {
+      "class": "reason",
       "key": "SIgChat",
       "text": "M cycles the same state in game; Muted also tells the room you cannot read chat"
     },
@@ -1914,6 +1919,86 @@
         "name": "NativeUI.SetDeepIdleUnfocused(bool)",
         "note": null,
         "source": "NativeUI.cs:14073",
+        "writes_entry_as_side_effect": null
+      }
+    },
+    "SDmgNum": {
+      "bulk_reset": true,
+      "config": {
+        "lane": [
+          "_entry=UI.DamageNumbers(OFF)"
+        ]
+      },
+      "help_body": {
+        "authored": null,
+        "description_chars": 216,
+        "source": "moved"
+      },
+      "help_entry_id": "help_SDmgNum",
+      "help_reachable_without_actuating": true,
+      "help_target_id": "SDmgNum_q",
+      "home": "ingame",
+      "home_label": "In game",
+      "i18n_literals": {
+        "option_words": [],
+        "reason": "Extra motion over the fight. Turn it on when you want to read exactly what a trade cost.",
+        "state_words": []
+      },
+      "key": "SDmgNum",
+      "kind": "SEGMENTED",
+      "present_on": [
+        "lane"
+      ],
+      "reason": "Extra motion over the fight. Turn it on when you want to read exactly what a trade cost.",
+      "recommendation": {
+        "kind": "painted_literal",
+        "new_i18n_key": false,
+        "painter": {
+          "file": "NativeUI.cs",
+          "line": null,
+          "method": "PaintDamageNumbers",
+          "source": "declared",
+          "tree": "lane",
+          "via": "handle",
+          "writer": "SetTextRaw"
+        },
+        "painter_token": "OFF",
+        "value": "OFF"
+      },
+      "reset_call": {
+        "args": [
+          "\"Off\""
+        ],
+        "server": null,
+        "writer": "DamageNumbers.Set(string level)"
+      },
+      "reset_excluded_reason": null,
+      "reset_operand": {
+        "canonical_set": [
+          "Off",
+          "Me",
+          "Everyone"
+        ],
+        "canonical_source": "lane DamageNumbers.cs OFF/ME/EVERYONE",
+        "expression": "\"Off\"",
+        "independent_of_painted": true,
+        "kind": "canonical_id",
+        "painted_value": "OFF",
+        "type": "string",
+        "writer_value_param": "string"
+      },
+      "reset_selectors": [],
+      "row_group": "SDmgNum",
+      "stores_value": true,
+      "sub_tab_body": "SubIngame",
+      "target_id": "SDmgNum",
+      "writer": {
+        "applies_on_same_value": true,
+        "captured_effects": [],
+        "kind": "semantic_setter",
+        "name": "DamageNumbers.Set(string level)",
+        "note": "item 21: the level is read where it is used (DamageNumbers.Tick caches it per frame)",
+        "source": "lane DamageNumbers.cs Set",
         "writes_entry_as_side_effect": null
       }
     },
@@ -5400,7 +5485,7 @@
   },
   "schema": "item13-descriptors/3",
   "summary": {
-    "bulk_reset_lane": 33,
+    "bulk_reset_lane": 34,
     "bulk_reset_pin": 32,
     "help_bodies_authored": [
       "SBugBtn",
@@ -5413,29 +5498,29 @@
       "SMailRelay",
       "SPerfH"
     ],
-    "help_bodies_moved": 48,
+    "help_bodies_moved": 49,
     "i18n": {
       "exclusion_reasons": 9,
       "help_bodies": 9,
       "option_words": 7,
-      "reasons": 57,
+      "reasons": 58,
       "recommendation_values": 0,
       "shared_templates": 8,
       "state_words": 6,
       "sub_tab_labels": 7,
-      "total": 112,
+      "total": 113,
       "when_to_press": 9
     },
-    "keys": 57,
+    "keys": 58,
     "operands": {
       "bool": 36,
-      "canonical_id": 8,
+      "canonical_id": 9,
       "delegate": 1,
       "enum_member": 1,
       "none": 9,
       "number": 2
     },
-    "painters_declared": 13,
+    "painters_declared": 14,
     "painters_derived": 35,
     "render_rows": [
       "SBloom",
@@ -5460,10 +5545,10 @@
       "SPerf_Stun"
     ],
     "value_less": 9,
-    "value_storing": 48,
+    "value_storing": 49,
     "writers_action": 9,
     "writers_named_new": 31,
-    "writers_semantic": 9,
+    "writers_semantic": 10,
     "writers_server": 8
   }
 }

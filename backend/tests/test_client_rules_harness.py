@@ -270,7 +270,7 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
     "A6 every row that stores no value has a when-to-press line",
     "A6 no row's help target is its own actuating control",
     # T5-g's selection half: one exact set per sub-tab, never a total
-    "T5-g ingame writes exactly its 5",
+    "T5-g ingame writes exactly its 6",
     "T5-g chatmail writes exactly its 3",
     "T5-g sound writes exactly its 3",
     "T5-g visuals writes exactly its 9",
@@ -954,7 +954,8 @@ def test_the_harness_compiles_only_the_rule_files():
                       "plugin/RoomRulesStrip.cs", "plugin/MusicLevels.cs",
                       "plugin/SecureRouteRules.cs", "plugin/SecureRouteText.cs",
                       "plugin/NameGlyphs.cs",
-                      "plugin/SessionReportRules.cs", "plugin/ShowcaseRules.cs"):
+                      "plugin/SessionReportRules.cs", "plugin/ShowcaseRules.cs",
+                      "plugin/DamageNumberRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial
@@ -1301,5 +1302,32 @@ def test_the_name_glyphs_suite_ran_every_case_and_none_failed(harness_run):
 def test_the_name_glyphs_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "nameglyphs")
     assert line.startswith("[nameglyphs] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)
+
+
+DMGNUM_CASES = ["A%d" % i for i in range(1, 20)]
+
+
+def test_the_damage_numbers_suite_ran_every_case_and_none_failed(harness_run):
+    """Item 21: DamageNumberRules, executed. Every case is one line carrying
+    its claim, its mutant (which must red) and its control (green)."""
+    suites = _suites(harness_run)
+    assert "dmgnumbers" in suites, "the DamageNumberRules suite did not report"
+    run, fail, verdict = suites["dmgnumbers"]
+    assert (run, fail, verdict) == (19, 0, "PASS"), harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[dmgnumbers\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+
+
+@pytest.mark.parametrize("case_id", DMGNUM_CASES)
+def test_the_damage_numbers_guarantees_each_have_a_case(harness_run, case_id):
+    hits = [l for l in harness_run.stdout.splitlines()
+            if l.startswith("[dmgnumbers] ") and (" " + case_id + " ") in l]
+    assert len(hits) == 1, "expected one %s case, found %d" % (case_id, len(hits))
+    line = hits[0]
+    assert line.startswith("[dmgnumbers] PASS " + case_id + " "), line
+    assert "| claim=green mutation=red control=green |" in line, line
     assert " | got=" in line and not line.rstrip().endswith("| got="), (
         "the case printed no measurement: " + line)

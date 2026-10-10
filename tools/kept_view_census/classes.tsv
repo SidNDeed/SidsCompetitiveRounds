@@ -19,6 +19,7 @@ CompetitiveUI.cs	CompetitiveUI	FfaMatchPointName	players	N	HUD label
 CompetitiveUI.cs	CompetitiveUI	MutedPlayersLine	PlayerList	N	chat UI	
 CompetitiveUI.cs	CompetitiveUI	RefreshFfaHudRows	players	N	HUD rows	
 CompetitiveUI.cs	CompetitiveUI	RefreshMatchStatusCache	ActiveFighters	N	HUD status	
+DamageNumbers.cs	DamageNumbers	ResolveLocalView	players	N	item 21 damage numbers, local display only: finds this seat's own fighter (view.IsMine) so Me mode knows whose numbers to draw; it decides no count, send gate, damage, pick or result, and an unfound fighter reads as a spectator (every number shown)	
 DanceEmotes.cs	DanceEmotes	OnEvent	GetPlayer	N	emote cosmetic; the sender must be a live non-spectator actor (DanceEmotes.cs:241-246)	
 DanceEmotes.cs	DanceEmotes	OnEvent	Sender	N	emote cosmetic; the sender must own the claimed actor (DanceEmotes.cs:234)	
 DanceEmotes.cs	DanceEmotes	ResolveActorPlayer	players	N	emote cosmetic; owner-actor lookup (DanceEmotes.cs:378-389)	

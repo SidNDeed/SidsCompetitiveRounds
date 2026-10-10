@@ -24,6 +24,7 @@ namespace CompetitiveRounds
                 case "SChromAb": MapPhysicalColorPatch.ChromaticAberrationSetting.Set(true); return true;
                 case "SCursor": CursorColorCosmetic.SetShape("default"); return true;
                 case "SDeepIdle": NativeUI.SetDeepIdleUnfocused(true); return true;
+                case "SDmgNum": DamageNumbers.Set("Off"); return true;
                 case "SFPS": NativeUI.SetShowFps(true); return true;
                 case "SFPSCap": NativeUI.SetCapFpsUnfocused(true); return true;
                 case "SHeavyFont": NativeUI.SetUiHeavyFont(true); return true;
@@ -72,6 +73,7 @@ namespace CompetitiveRounds
                 case "SCursor": return "default";
                 case "SDateFmt": return "MDY";
                 case "SDeepIdle": return true;
+                case "SDmgNum": return "Off";
                 case "SFPS": return true;
                 case "SFPSCap": return true;
                 case "SHeavyFont": return true;
