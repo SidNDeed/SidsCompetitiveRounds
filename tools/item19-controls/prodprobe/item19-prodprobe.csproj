@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Item 19 fix pass 2: the PRODUCTION probe. A caller (item19_controls.py,
+    or backend/tests/test_client_avatar_defaults.py S35) copies this project
+    and ONE tree's plugin/AvatarDefaults.cs and plugin/AvatarDefaultRules.cs
+    into a work directory and builds them together against Stubs.cs, so the
+    production evaluator itself runs. Never built in place.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>item19-prodprobe</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0169;CS0414;CS0649;CS8632</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Stubs.cs" />
+    <Compile Include="ProdProbe.cs" />
+    <Compile Include="AvatarDefaults.cs" />
+    <Compile Include="AvatarDefaultRules.cs" />
+  </ItemGroup>
+
+</Project>

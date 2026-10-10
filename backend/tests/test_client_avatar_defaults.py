@@ -730,12 +730,18 @@ def _s22(src):
     formatter the harness replays (case M8), logged for every applied change
     AND for every classification on a room edge, before the no-apply return."""
     body = _body(src[AD], "internal static void Evaluate(string tag)", ADC)
-    logs = [m.start() for m in re.finditer(r"Plugin\.Log\.LogInfo\(", body)]
-    assert len(logs) == 1, "the evaluator has %d info lines" % len(logs)
+    # fix pass 2: the evaluator carries two info lines, the classification
+    # line and the deferred-restoration line (H9/M3); exactly one of each
+    logs = [m.start() for m in re.finditer(r"Plugin\.Log\.LogInfo\(rules\.ClassificationLine\(", body)]
+    assert len(logs) == 1, "the evaluator has %d classification lines" % len(logs)
+    assert len(re.findall(r"Plugin\.Log\.LogInfo\(", body)) == 2, "an info line other than the two named ones"
     stmt = body[logs[0]:body.index(";", logs[0])]
     assert "rules.ClassificationLine(tag, d, OtherFighterCount(f)" in stmt, stmt
-    assert body.rfind("rules.LogsClassification(tag)", 0, logs[0]) != -1, \
-        "a kept classification on a room edge logs nothing"
+    # fix pass 2 (M8): BOTH arms of the guard, read from the production
+    # statement itself, immediately before the line
+    guard = body.rfind("if (", 0, logs[0])
+    assert body[guard:logs[0]].strip() == "if (d.Apply >= 0 || rules.LogsClassification(tag))", \
+        "the classification line's guard is %r" % body[guard:logs[0]].strip()
     assert body.index("if (d.Apply < 0) return;") > logs[0], "the line is logged only after an apply"
     fmt = _body(src[AR], "internal virtual string ClassificationLine(")
     for term in ('" (facing "', '", nominee "', '", other fighters "', "d.Facing", "d.Nominee", "otherFighters"):
@@ -753,6 +759,13 @@ def test_s22_the_evaluator_logs_each_applied_change():
            lambda s: _replace(s, AR, '" kept slot "', '" held slot "'))
 
 
+def test_s22_the_applied_arm_of_the_guard_reds():
+    # fix pass 2 (M8): the round 2 controls stayed green with this arm removed
+    _check(_s22,
+           lambda s: _replace(s, AD, "if (d.Apply >= 0 || rules.LogsClassification(tag))", "if (rules.LogsClassification(tag))"),
+           lambda s: _replace(s, AR, '" applied slot "', '" applied preset slot "'))
+
+
 def test_s22_the_line_names_the_other_fighter_count():
     _check(_s22,
            lambda s: _replace(s, AR, '+ ", other fighters " + otherFighters', '+ ""'),
@@ -762,7 +775,7 @@ def test_s22_the_line_names_the_other_fighter_count():
 # S27 (fix pass 1, H3): one publish-or-clear helper behind all four callers --
 
 FP = "internal static class FacePublisher"
-PUB = "public static FaceCarrierAction PublishLocal()"
+PUB = "public static FaceCarrierAction PublishLocal(out string published)"   # fix pass 2: the body behind both overloads
 
 
 def _s27(src):
@@ -982,6 +995,179 @@ def test_the_swap_rule_has_no_caller_until_item_17_lands():
     for t in (src[AD], src[PL], src[NU]):
         c = _code(t)
         assert "SwapPermitted(" not in c and "SwapTarget(" not in c
+
+
+# S33 (fix pass 2, H3): no pass rereads the cache it has just published to ----
+#
+# PUN updates the local player's cached properties only on the server's echo
+# (learning #428), so a method that publishes the carrier and then reads
+# cr_face from the cache in the same pass reads the PREVIOUS face. The sweep
+# covers every method that calls FacePublisher.PublishLocal (the four sites
+# S12 counts) and counts each cache read after the publish; a read handed to
+# AvatarRules.PopupFace as its remote-picker reader is the one exemption, and
+# the rule itself must answer a local picker without calling that reader.
+
+POPUP = "static void Postfix(CardChoiceVisuals __instance, int pickerID)"
+_METHOD_HEAD = re.compile(r"^(?:\[[^\]]*\]\s*)*(?:(?:public|private|internal|protected|static|override|virtual|async|unsafe)\s+)+"
+                          r"[\w<>\[\],.?]+(?:\s*<[^>]*>)?\s+\w+\s*\(.*\)$", re.S)
+_CACHE_READS = ("ReadCarrier(", "TryReadAndApply(", "CustomProperties[PROP_FACE]", 'CustomProperties["cr_face"]',
+                "CustomProperties[FacePublisher.PROP_FACE]")
+
+
+def _enclosing_method(masked, i):
+    """(open, close) of the innermost METHOD block around offset i: walk out
+    brace by brace, and take the first block whose head (the text back to the
+    previous ; { or }) is a member declaration with modifiers and a parameter
+    list - so if/foreach/try blocks and lambdas are walked past."""
+    depth, j = 0, i
+    while j > 0:
+        j -= 1
+        ch = masked[j]
+        if ch == "}":
+            depth += 1
+        elif ch == "{":
+            if depth:
+                depth -= 1
+                continue
+            k = max(masked.rfind(";", 0, j), masked.rfind("{", 0, j), masked.rfind("}", 0, j))
+            if _METHOD_HEAD.match(masked[k + 1:j].strip()):
+                d2 = 0
+                for e in range(j, len(masked)):
+                    if masked[e] == "{":
+                        d2 += 1
+                    elif masked[e] == "}":
+                        d2 -= 1
+                        if d2 == 0:
+                            return j, e + 1
+                return None
+    return None
+
+
+def _call_spans(code, name):
+    """(open, close) of every `name(` argument list in code."""
+    out = []
+    for m in re.finditer(re.escape(name) + r"\(", code):
+        depth, j = 0, m.end() - 1
+        for k in range(j, len(code)):
+            if code[k] == "(":
+                depth += 1
+            elif code[k] == ")":
+                depth -= 1
+                if depth == 0:
+                    out.append((j, k + 1))
+                    break
+    return out
+
+
+def _s33(src):
+    sites, rereads = 0, []
+    for fname, text in sorted(src.items()):
+        masked = _masked(text)
+        for m in re.finditer(r"\bFacePublisher\.PublishLocal\s*\(", masked):
+            sites += 1
+            span = _enclosing_method(masked, m.start())
+            assert span is not None, "%s: no enclosing method for the publish at %d" % (fname, m.start())
+            a, b = span
+            code = _code(text[a:b])
+            at = code.find("FacePublisher.PublishLocal", 0)
+            exempt = _call_spans(code, ".PopupFace")
+            for term in _CACHE_READS:
+                for r in re.finditer(re.escape(term), code):
+                    if r.start() < at:
+                        continue
+                    if any(x < r.start() < y for x, y in exempt):
+                        continue
+                    line = text[:a + r.start()].count("\n") + 1
+                    rereads.append("%s:%d %s after the publish (the cache still holds the previous face)" % (fname, line, term))
+    assert sites == 4, "%d PublishLocal sites swept, expected 4" % sites
+    assert not rereads, "reread-after-publish: %d site(s): %s" % (len(rereads), "; ".join(rereads))
+    body = _body(src[PL], POPUP, "class CardChoiceVisuals_Show_Competitive_Patch")
+    m = re.search(r"FacePublisher\.PublishLocal\(out (\w+)\)", body)
+    assert m, "the popup does not take the value it publishes"
+    assert re.search(r"\.PopupFace\(picker\.IsLocal, \w+, %s,\s*\(\) => FacePublisher\.ReadCarrier\(" % m.group(1), body), \
+        "the popup does not hand its published value to PopupFace"
+    rule = _body(src[AR], "internal virtual string PopupFace(")
+    local = rule.index("if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;")
+    assert rule.find("readCarrier()") > local, "the rule calls the reader before answering a local picker"
+    return sites, len(rereads)
+
+
+def test_s33_no_pass_rereads_the_carrier_it_published():
+    _check(_s33,
+           lambda s: _replace(s, PL, "string popupFace = new AvatarRules().PopupFace(picker.IsLocal, carrier, freshFace,\n"
+                                     "                    () => FacePublisher.ReadCarrier(pickerActor));",
+                              "string popupFace = FacePublisher.ReadCarrier(pickerActor);"),
+           lambda s: _replace(s, PL, '"the value this pass published"', '"the value published this pass"'))
+
+
+def test_s33_a_local_arm_that_calls_the_reader_reds():
+    _check(_s33,
+           lambda s: _replace(s, AR, "if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;",
+                              "if (pickerIsLocal && readCarrier != null) return readCarrier();\n"
+                              "            if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;"),
+           lambda s: _replace(s, AR, "return readCarrier != null ? readCarrier() : null;",
+                              "return readCarrier == null ? null : readCarrier();"))
+
+
+# S35 (fix pass 2, H6 M8 BR-M4 L1 H9 M3): the production probe ----------------
+#
+# tools/item19-controls/prodprobe compiles THIS tree's plugin/AvatarDefaults.cs
+# and plugin/AvatarDefaultRules.cs, unedited, against stand-ins for the game,
+# and drives the real evaluator; each id is one behaviour read at the sink a
+# player would see. item19_controls.py mutates the production expressions
+# (each liveness assignment, both log-guard arms, the staged room read, the
+# sprite and announcement sinks, the deferred restoration) and requires this
+# test to go red on each and stay green on a neighbouring twin.
+
+PRODPROBE = Path(REPO) / "tools" / "item19-controls" / "prodprobe"
+PRODPROBE_IDS = ("H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce")
+
+
+def _dotnet():
+    import shutil
+    found = shutil.which("dotnet")
+    if found:
+        return found
+    candidate = Path(os.path.expanduser("~")) / ".dotnet" / "dotnet.exe"
+    return str(candidate) if candidate.exists() else None
+
+
+@pytest.fixture(scope="module")
+def prodprobe(tmp_path_factory):
+    import shutil
+    import subprocess
+    dotnet = _dotnet()
+    if dotnet is None:
+        pytest.skip("dotnet CLI not on this machine")
+    d = tmp_path_factory.mktemp("prodprobe")
+    for f in ("Stubs.cs", "ProdProbe.cs", "item19-prodprobe.csproj"):
+        shutil.copyfile(str(PRODPROBE / f), str(d / f))
+    for f in (AD, AR):
+        shutil.copyfile(str(PLUGIN / f), str(d / f))
+    b = subprocess.run([dotnet, "build", str(d / "item19-prodprobe.csproj"), "-c", "Release", "-nologo", "-v", "q"],
+                       capture_output=True, text=True, timeout=600)
+    assert b.returncode == 0, "the production probe did not build:\n" + b.stdout[-4000:] + b.stderr[-2000:]
+    dll = d / "bin" / "Release" / "net10.0" / "item19-prodprobe.dll"
+    r = subprocess.run([dotnet, str(dll)], capture_output=True, text=True, timeout=300)
+    lines = {}
+    for line in r.stdout.splitlines():
+        m = re.match(r"PROBE (\S+) (PASS|FAIL) \| (.*)$", line)
+        if m:
+            lines[m.group(1)] = (m.group(2), m.group(3))
+    return lines, r.stdout
+
+
+def test_s35_the_production_probe_reports_every_id(prodprobe):
+    lines, out = prodprobe
+    assert sorted(lines) == sorted(PRODPROBE_IDS), "probe ids %s\n%s" % (sorted(lines), out[-3000:])
+
+
+@pytest.mark.parametrize("pid", PRODPROBE_IDS)
+def test_s35_the_production_evaluator_holds(prodprobe, pid):
+    lines, out = prodprobe
+    assert pid in lines, "the probe did not report %s\n%s" % (pid, out[-3000:])
+    verdict, detail = lines[pid]
+    assert verdict == "PASS", "%s: %s" % (pid, detail)
 
 
 # i18n gate part 3 (design 2.10): 25 new keys (the two swap refusals are not on
