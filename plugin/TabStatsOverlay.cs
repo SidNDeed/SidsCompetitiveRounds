@@ -100,11 +100,11 @@ namespace CompetitiveRounds
             private static BepInEx.Configuration.ConfigEntry<string> _entry;
 
             /// <summary>Bound here rather than in Plugin.cs because this file
-            /// owns the format site — the same local-bind pattern the lag-notice
-            /// lever uses (CompetitiveUI.cs:8065, DrawLagNotices, gated on
-            /// Plugin.LagNoticesEnabled). Lazy, and a null ConfigFile
-            /// (very early in startup) is retried on the next read instead of
-            /// being latched as "no setting".</summary>
+            /// owns the format site, through Plugin.ConfigFileForLevers — the
+            /// same local bind LagNotices.EnsureStartup makes for its self-test
+            /// lever (LagNotices.cs:583). Lazy, and unlike that one a null
+            /// ConfigFile (very early in startup) is retried on the next read
+            /// instead of being latched as "no setting".</summary>
             private static BepInEx.Configuration.ConfigEntry<string> Entry()
             {
                 if (_entry != null) return _entry;
@@ -1022,7 +1022,7 @@ namespace CompetitiveRounds
             stName = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
             // wordWrap/clipping explicit, for the same reason bug 239 made them
             // explicit on BroadcastHud's stName/stStat (BroadcastHud.cs:769,
-        // BroadcastHud.cs:776): GUI.skin.label
+            // BroadcastHud.cs:776): GUI.skin.label
             // defaults wordWrap ON, and both of this batch's changes make these
             // strings longer - the HP row can now render "87.50/100.00" instead of
             // "88/100", and the label column gained a "Scale" row. Three of the

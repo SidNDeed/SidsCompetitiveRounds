@@ -3124,13 +3124,13 @@ namespace CompetitiveRounds
                 // the body's centre, and the union centre is used instead.
                 //
                 // That is the whole of what the fallback detects, and it is narrower than the
-                // shapes it is reached by. A clone whose skin never spawned, and a re-root far
-                // enough to leave the span, fall outside and are caught. A re-root that keeps
-                // the transform INSIDE the span is NOT caught: the frame still centres on
-                // rigPos.x, which is then not the body centre. The only thing that shows that
-                // case is the report line below -- a bodyCx away from unionCx with no
-                // "using the union centre" line before it. Nothing here tests it and nothing
-                // here claims to.
+                // shapes it is reached by. It catches a rig transform OUTSIDE the span -- what a
+                // re-root far enough to leave it produces, and what a clone whose skin never
+                // spawned produces only when nothing else framed (limbs, gun, cosmetics)
+                // straddles the rig. A transform left INSIDE the span is NOT caught: the frame
+                // centres on rigPos.x, whatever that is on such a rig. The only thing that shows
+                // it is the report line below -- a bodyCx away from unionCx with no "using the
+                // union centre" line before it. Nothing here tests it and nothing claims to.
                 //
                 // An earlier version of this comment also offered a matte-erosion measurement
                 // (a body core on rig x -0.006, bbox mid -0.004, "the same at every erosion

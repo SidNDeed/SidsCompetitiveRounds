@@ -166,7 +166,7 @@ def test_the_constants_are_the_ones_the_source_declares():
     assert c["ROW_H_MIN"] <= c["ROW_H_MAX"], "the pitch clamp is inverted"
     # The band must BEGIN at the floor, not merely sit above it. `<=` here
     # held for every floor the source could declare at or below 15 -- which is
-    # the direction that leaves the fit untested (#441). A floor dropped to
+    # the direction that leaves the fit untested (#342). A floor dropped to
     # 10f widens the runtime range while this band still starts at 15, and the
     # old form passed. Equality is the only shape of this guard that can go
     # red, in either direction.

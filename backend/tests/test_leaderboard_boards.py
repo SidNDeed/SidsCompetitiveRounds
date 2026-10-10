@@ -677,7 +677,7 @@ def test_win_rate_unit_is_per_endpoint(ns):
 
     One field name, two units, decided by the endpoint. That is the defect
     this test exists to stop recurring: the 1v2 renderer multiplied by 100
-    like the other three and printed 5880%% for a 58.8%% player, and the
+    like the other three and printed 5880% for a 58.8% player, and the
     fixture encoded the same assumption so nothing failed.
 
     Both halves are pinned. The RENDERER half asserts that the one row
@@ -688,7 +688,7 @@ def test_win_rate_unit_is_per_endpoint(ns):
     below asserts exactly that. The SOURCE half asserts main.py still
     produces those units IN THE FOUR HANDLERS THEMSELVES, so that normalising
     the server fails HERE, with a message saying the renderers must change
-    too, rather than silently making every 1v2 row read 1%%.
+    too, rather than silently making every 1v2 row read 1%.
 
     The expected percentage is derived from the fixture rather than written
     out: a hardcoded "59%" stops measuring the moment the fixture moves.
@@ -1425,6 +1425,76 @@ def test_the_duplicate_removal_can_fail(ns):
     assert old_2v2 not in ch.deleted
     assert any(f"couldn't delete duplicate 2v2 board mid={old_2v2}" in ln
                for ln in ns["_log"]), ns["_log"]
+
+
+def test_every_refused_duplicate_is_found_again_however_many_there_are():
+    """R2-M2, driven rather than asserted by absence.
+
+    The queue this replaced held at most 24 owed deletes and forgot the
+    oldest when a 25th arrived; with the set complete and anchored, nothing
+    ever looked for the forgotten one again. Here THIRTY duplicates sit above
+    an anchored set while every delete is refused. Each one must be named as
+    refused on that tick, and on the first tick after the permission comes
+    back every one of them must go -- found by reading the channel, with no
+    record of the earlier refusals kept anywhere.
+    """
+    ns = _fresh()
+    ch = ns["_ch"]
+    for _ in range(11):                         # oldest first: 30 duplicates, then the keepers
+        for title in (T_1V1, T_2V2, T_FFA):
+            _seed_board_message(ch, title)
+    keepers = [m.id for m in ch.messages[-3:]]
+    dupes = {m.id for m in ch.messages[:-3]}
+    assert len(dupes) == 30
+    ch.delete_fails = set(dupes)
+    _tick(ns)
+
+    assert len(ch.messages) == 33
+    refused = [ln for ln in ns["_log"] if "couldn't delete duplicate" in ln]
+    assert len(refused) == 30, refused
+    assert [ns["_lb_message_ids"][CID][k] for k in ("1v1", "2v2", "ffa")] == keepers
+    assert not any("not at the channel bottom" in ln for ln in ns["_log"])
+
+    ch.delete_fails = set()
+    sent_before = len(ch.sent)
+    ns["_log"].clear()
+    _tick(ns)
+
+    assert dupes <= set(ch.deleted), sorted(dupes - set(ch.deleted))
+    assert [m.id for m in ch.messages] == keepers
+    assert ch.titles() == [T_1V1, T_2V2, T_FFA]
+    assert len(ch.sent) == sent_before          # removed, not reposted over
+    assert any("deleted 30 duplicate stale board message" in ln for ln in ns["_log"])
+
+
+def test_an_outage_tick_still_reads_the_channel_and_removes_a_duplicate(ns):
+    """R2-L01: an outage does not suspend what is owed to the channel.
+
+    The old sweep sat AFTER the "nothing rendered" return, so a tick on which
+    every board request failed retried no owed delete at all, for as long as
+    the outage lasted. The reconcile now runs before that return. Driven: a
+    refused repost delete leaves an older 2v2 message above the set, then
+    every board endpoint stops answering. That tick publishes nothing and
+    still removes the duplicate.
+    """
+    _tick(ns)
+    ch = ns["_ch"]
+    old_2v2 = ns["_lb_message_ids"][CID]["2v2"]
+    ch.post_from_someone_else()
+    ch.delete_fails = {old_2v2}
+    _tick(ns)                                   # re-anchored; the old 2v2 would not delete
+    assert [t for t in ch.titles() if t is not None].count(T_2V2) == 2
+
+    for url in (U_1V1, U_2V2, U_FFA):
+        ns["_api"].payloads[url] = None         # every board endpoint is out
+    ch.delete_fails = set()
+    ns["_log"].clear()
+    _tick(ns)
+
+    assert any("no board rendered this tick" in ln for ln in ns["_log"]), ns["_log"]
+    assert old_2v2 in ch.deleted
+    assert [t for t in ch.titles() if t is not None] == [T_1V1, T_2V2, T_FFA]
+    assert any("deleted 1 duplicate stale board message" in ln for ln in ns["_log"])
 
 
 def test_the_only_surviving_board_message_is_adopted_not_deleted(ns):

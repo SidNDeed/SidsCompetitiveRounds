@@ -8181,10 +8181,10 @@ def _lb_line_ovt(e, rank=None):
     Both directions of a "normalisation" are wrong, and they are wrong in
     opposite ways. Making /ovt/leaderboard return a FRACTION like the other
     three leaves the two renderers that do not scale — this row and
-    NativeUI.cs:5980 — printing a live 58.8%% player as "1%%". Making the
+    NativeUI.cs:5980 — printing a live 58.8% player as "1%". Making the
     three fraction endpoints return a PERCENT leaves the two renderers that
     DO scale — NativeUI.cs:4672 and NativeUI.cs:27204 — printing that same player as
-    "5880%%". The unit belongs to the endpoint, and every consumer is
+    "5880%". The unit belongs to the endpoint, and every consumer is
     written against its own endpoint's unit.
 
     test_win_rate_unit_is_per_endpoint pins the renderer half and the
@@ -8586,11 +8586,15 @@ async def publish_boards():
     page, then one fetch_message and one edit per board. The four-board
     configuration is seven backend GETs (1v2 has no probe) and nine Discord
     operations. A channel-cache miss adds one fetch_channel. A tick that has
-    to re-anchor adds three sends, three fetch_message and three deletes. A
-    cold start into a channel already carrying one stale set is one reconcile
-    page, three deletes and the steady six, i.e. about ten. There is no
-    separate tail read and no per-id retry sweep: both came out of the
-    reconcile read, which is the one place the channel is read from.
+    to re-anchor makes no edits: it trades the three fetch_message/edit pairs
+    for three sends, three fetch_message and three deletes, ten operations
+    with the history page. A cold start ADOPTS a set already on the channel
+    from that same page, deleting nothing, and then costs the steady seven,
+    or the re-anchor's ten when that set is buried. Every duplicate or
+    retired message the read finds adds one delete, of a message the read
+    already holds. There is no separate tail read and no per-id retry sweep:
+    both came out of the reconcile read, which is the one place the channel
+    is read from.
 
     ORDER. Render first (that touches only the API), then RECONCILE THE
     CHANNEL, and only then act on it. Nothing decides a deletion before the
