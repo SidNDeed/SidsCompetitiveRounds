@@ -532,7 +532,9 @@ CLAIM_ROWS = {
     # H3: restore the reread of the cache the pass has just published to
     "H3-reread": dict(edit=("Plugin.cs", "string popupFace = new AvatarRules().PopupFace(picker.IsLocal, carrier, freshFace,",
                             "string popupFace = FacePublisher.ReadCarrier(pickerActor); string unusedFace = new AvatarRules().PopupFace(picker.IsLocal, carrier, freshFace,"),
-                      twin=("Plugin.cs", '"the value this pass published"', '"the value published this pass"')),
+                      # the twin must not touch S33's own anchors: its in-test
+                      # control edits the log text "the value this pass published"
+                      twin=("Plugin.cs", "string freshFace = null;", "string freshFace = default(string);")),
     # H6: each production liveness assignment (AvatarDefaults.ReadLiveness)
     "H6-isPlaying": dict(edit=(AD, "{ l.IsPlaying = gm.isPlaying; l.BattleOngoing = gm.battleOngoing; }",
                                "{ l.BattleOngoing = gm.battleOngoing; }"),
