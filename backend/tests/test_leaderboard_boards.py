@@ -172,6 +172,14 @@ class _Msg:
             raise RuntimeError("403 Missing Permissions")
         self.ch.deleted.append(self.id)
         self.ch.messages = [m for m in self.ch.messages if m.id != self.id]
+        # The absence watch: a delete that leaves a watched board with no
+        # message on the channel AT ALL is recorded at the moment it happens,
+        # so "never absent" is a reading of every intermediate state rather
+        # than of the state a tick ends in.
+        left = set(self.ch.titles())
+        for title in self.ch.must_stay:
+            if title not in left:
+                self.ch.absences.append((title, self.id))
 
 
 class _Channel:
@@ -195,6 +203,16 @@ class _Channel:
         # message is removed here and NotFound raised, which is the only
         # failure that says a replacement is needed.
         self.vanish_on_fetch = set()
+        # A message the READ yields and that is gone the moment after: the
+        # read has handed it over, and before the tick acts on anything a
+        # moderator or a second process removes it. This is the gap between
+        # a read and every decision made from it -- the gap the round 3 H1
+        # race lived in -- driven deterministically.
+        self.vanish_after_read = set()
+        # Titles that must never have NO message on the channel; any delete
+        # that leaves one of them absent is recorded in `absences`.
+        self.must_stay = set()
+        self.absences = []
         # A live channel refuses sends, edits and deletes: a 5xx, a rate
         # limit, a revoked Manage-Messages. Without these the repost path --
         # the only code here that REMOVES a message -- has no failing case in
@@ -244,6 +262,9 @@ class _Channel:
                 if self.history_raises_after is not None and i >= self.history_raises_after:
                     raise RuntimeError("history boom part-way")
                 yield m
+                if m.id in self.vanish_after_read:
+                    self.vanish_after_read.discard(m.id)
+                    self.messages = [x for x in self.messages if x.id != m.id]
         return gen()
 
     def titles(self):
@@ -1380,8 +1401,8 @@ def test_a_failed_repost_delete_leaves_a_duplicate_and_the_next_read_removes_it(
     What must NOT happen is the duplicate being left there. Nothing remembers
     it: the next tick READS THE CHANNEL and finds an older message carrying
     an enabled board's title, with that board's newer keeper present -- which
-    is the definition of what the reconcile deletes. No queue is involved and
-    none is needed.
+    is the definition of an older copy -- and deletes it once that tick's
+    edit of the keeper has landed. No queue is involved and none is needed.
     """
     _tick(ns)
     ch = ns["_ch"]
@@ -1467,15 +1488,24 @@ def test_every_refused_duplicate_is_found_again_however_many_there_are():
     assert any("deleted 30 duplicate stale board message" in ln for ln in ns["_log"])
 
 
-def test_an_outage_tick_still_reads_the_channel_and_removes_a_duplicate(ns):
-    """R2-L01: an outage does not suspend what is owed to the channel.
+def test_an_outage_tick_reads_the_channel_and_deletes_no_copy_of_a_board(ns):
+    """Fix pass 3, item 1 (the outage control); supersedes R2-L01's "an outage
+    tick retries duplicate cleanup".
 
-    The old sweep sat AFTER the "nothing rendered" return, so a tick on which
-    every board request failed retried no owed delete at all, for as long as
-    the outage lasted. The reconcile now runs before that return. Driven: a
-    refused repost delete leaves an older 2v2 message above the set, then
-    every board endpoint stops answering. That tick publishes nothing and
-    still removes the duplicate.
+    An outage tick still READS the channel: the reconcile runs before the
+    no-render return, so the id map follows what is on the channel even
+    while nothing renders. What it may no longer do is delete a copy of a
+    board. A duplicate is deleted only after the same tick has proven a newer
+    copy of its board live, and a tick on which the board's endpoint failed
+    proves nothing -- so the round 3 shape, which deleted the older copy on
+    such a tick on the strength of the read alone, could leave the board
+    absent when its keeper vanished after the read.
+
+    Driven: a refused repost delete leaves an older 2v2 message above the
+    set; the process restarts, so only the read can re-derive the ids; every
+    board endpoint stops answering. That tick adopts the keepers and deletes
+    nothing. The first tick on which 2v2 renders again edits its keeper and
+    only then removes the older copy.
     """
     _tick(ns)
     ch = ns["_ch"]
@@ -1484,17 +1514,37 @@ def test_an_outage_tick_still_reads_the_channel_and_removes_a_duplicate(ns):
     ch.delete_fails = {old_2v2}
     _tick(ns)                                   # re-anchored; the old 2v2 would not delete
     assert [t for t in ch.titles() if t is not None].count(T_2V2) == 2
+    keepers = dict(ns["_lb_message_ids"][CID])
 
     for url in (U_1V1, U_2V2, U_FFA):
         ns["_api"].payloads[url] = None         # every board endpoint is out
     ch.delete_fails = set()
+    ns["_lb_message_ids"].clear()               # a restart: only the read knows the ids now
+    ch.must_stay = {T_1V1, T_2V2, T_FFA}
+    deleted_before = list(ch.deleted)
     ns["_log"].clear()
     _tick(ns)
 
     assert any("no board rendered this tick" in ln for ln in ns["_log"]), ns["_log"]
+    assert ch.deleted == deleted_before, (
+        "an outage tick deleted %r; a board that did not render proves no copy "
+        "of itself live, so it deletes nothing" % sorted(set(ch.deleted) - set(deleted_before)))
+    assert old_2v2 in [m.id for m in ch.messages]
+    assert ns["_lb_message_ids"][CID] == keepers, (
+        "the outage tick did not re-derive the ids from the channel -- the "
+        "read no longer runs on a tick that renders nothing")
+    assert any("2v2: 1 older copy/copies left as they are" in ln for ln in ns["_log"]), ns["_log"]
+
+    # The endpoint answers again: the keeper's edit lands, then the older
+    # copy goes, on the same tick.
+    for url in (U_1V1, U_2V2, U_FFA):
+        ns["_api"].payloads[url] = _payloads()[url]
+    ns["_log"].clear()
+    _tick(ns)
     assert old_2v2 in ch.deleted
     assert [t for t in ch.titles() if t is not None] == [T_1V1, T_2V2, T_FFA]
     assert any("deleted 1 duplicate stale board message" in ln for ln in ns["_log"])
+    assert ch.absences == [], ch.absences
 
 
 def test_the_only_surviving_board_message_is_adopted_not_deleted(ns):
@@ -1542,16 +1592,69 @@ def test_the_only_surviving_board_message_is_adopted_not_deleted(ns):
     assert old_1v1 not in ch.deleted
 
 
-def test_nothing_is_deleted_without_a_message_for_that_board_still_on_the_channel(ns):
-    """The bar property, asserted over the reconcile's own deletions rather
-    than argued.
+def test_an_older_copy_survives_a_keeper_that_vanishes_after_the_read(ns):
+    """Fix pass 3, item 1: the round 3 HIGH's interleaving, driven.
 
-    Every message the reconcile deletes is either a DUPLICATE -- an older
-    message whose board's newer keeper is on the channel, so that board is
-    never briefly absent -- or a RETIRED board's message, which this
-    deployment does not publish at all. This drives both kinds in one tick
-    and asserts that every enabled board still has exactly one message when
-    the reconcile is done.
+    The read yields keeper K and an older copy O of the 1v1 board. K is then
+    removed -- a moderator, a second process -- AFTER the read handed it over
+    and BEFORE anything was deleted. Round 3 deleted O inside the reconcile,
+    on the strength of a read that had already gone stale, and at that
+    moment the 1v1 board had no message on the channel at all.
+
+    Required: O is retained until the same tick has proven a copy of the
+    board live or sent its replacement. Here the edit of K fails with
+    NotFound, so the tick ADOPTS O by editing it -- removing nothing -- and
+    O is the board. The next tick finds O as its keeper again; because O
+    sits above chat it is re-anchored by the repost, which deletes O only
+    after O's replacement has been sent. At no point is the board absent.
+    """
+    _tick(ns)
+    ch = ns["_ch"]
+    old_1v1 = ns["_lb_message_ids"][CID]["1v1"]
+    ch.post_from_someone_else()                 # bury -> next tick reposts
+    ch.delete_fails = {old_1v1}                 # ...and the replaced 1v1 will not delete
+    _tick(ns)
+    keeper = ns["_lb_message_ids"][CID]["1v1"]
+    assert keeper != old_1v1
+    assert [t for t in ch.titles() if t is not None].count(T_1V1) == 2
+
+    ch.delete_fails = set()                     # every delete would succeed now
+    ch.vanish_after_read = {keeper}             # K: read, then gone before anything acts
+    ch.must_stay = {T_1V1, T_2V2, T_FFA}
+    ns["_log"].clear()
+    _tick(ns)
+
+    assert old_1v1 not in ch.deleted, (
+        "mid=%d (O) was deleted although its keeper had vanished after the read: "
+        "the delete followed the read, not a proof" % old_1v1)
+    assert ch.absences == [], (
+        "a delete left a board with no message on the channel: %r" % ch.absences)
+    assert old_1v1 in [m.id for m in ch.messages]
+    assert [t for t in ch.titles() if t is not None].count(T_1V1) == 1
+    assert ns["_lb_message_ids"][CID]["1v1"] == old_1v1, "O was not adopted as the board"
+    assert any(f"1v1: board mid={keeper} is gone" in ln for ln in ns["_log"]), ns["_log"]
+    assert any(f"1v1: edited board mid={old_1v1} (an older copy, adopted" in ln
+               for ln in ns["_log"]), ns["_log"]
+
+    # The next tick: O is the keeper on the read; buried under chat, it is
+    # replaced by the repost, whose send comes before O's delete.
+    ns["_log"].clear()
+    _tick(ns)
+    assert ch.absences == [], ch.absences
+    assert [t for t in ch.titles() if t is not None].count(T_1V1) == 1
+    assert ch.titles()[-3:] == [T_1V1, T_2V2, T_FFA]
+
+
+def test_nothing_is_deleted_without_a_message_for_that_board_still_on_the_channel(ns):
+    """The bar property, asserted over one tick's deletions rather than
+    argued.
+
+    Every message a tick deletes is either an older COPY of an enabled board,
+    deleted only after that tick proved a newer copy live -- or a RETIRED
+    board's message, which this deployment does not publish at all. This
+    drives both kinds in one tick and asserts that every enabled board still
+    has exactly one message when the tick is done, and that no delete along
+    the way left a board with none (the absence watch).
     """
     n2 = _fresh()
     _tick(n2)
@@ -1564,6 +1667,7 @@ def test_nothing_is_deleted_without_a_message_for_that_board_still_on_the_channe
     retired = _seed_board_message(ch, "⚔️ 1v2 Leaderboard")
 
     n3 = _bot_ns(_Api(_payloads()), _Bot(ch), boards_raw="1v1,2v2,ffa")
+    ch.must_stay = {T_1V1, T_2V2, T_FFA}
     _run(n3["publish_boards"]())
 
     titles = [t for t in ch.titles() if t is not None]
@@ -1572,6 +1676,7 @@ def test_nothing_is_deleted_without_a_message_for_that_board_still_on_the_channe
     assert "⚔️ 1v2 Leaderboard" not in titles
     assert retired.id in ch.deleted
     assert sorted(ch.deleted) == sorted(list(first.values()) + [retired.id])
+    assert ch.absences == [], ch.absences
 
 
 def test_a_channel_read_that_dies_part_way_deletes_nothing(ns):
@@ -1744,7 +1849,7 @@ def test_a_board_message_of_someone_elses_is_never_touched(ns):
     """"Ours" is the BOT ACCOUNT, and the author check comes before anything
     else is asked about a message.
 
-    Driven in both of the reconcile's deleting shapes, because a title alone
+    Driven in both of the publisher's deleting shapes, because a title alone
     is not ownership: a message carrying an enabled board's title (where it
     would otherwise be a keeper or a duplicate) and one carrying a RETIRED
     board's title (where every copy of ours goes). Neither is touched, and
