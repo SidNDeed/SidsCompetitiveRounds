@@ -275,7 +275,7 @@ SERIES_REUSE_WINDOW_MIN = int(os.getenv("SERIES_REUSE_WINDOW_MIN", "25"))
 # rank column, the dynamic 'Current Rank' title, and rank colors. Colors are
 # synced from the live Discord roles into rank_role_colors by the bot; the
 # fallback palette below covers names the bot hasn't pushed yet.
-# July 28 rank reorganization (Stan's proposal): base-tier floors move to
+# July 28 rank reorganization: base-tier floors move to
 # Beginner 0 / Intermediate 1500 / Advanced 1675 / Master 1980 / GM 2330,
 # with wider sub-tiers low and the numbered "I" spelled out on every tier.
 # Keep names in lockstep with the bot's RANK_ROLES (range suffix stripped).
@@ -7047,7 +7047,7 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # and every explicit opt-in path (queue join, toggle) sets it, so a FALSE
     # here means the player deliberately turned ranked off. The old behavior
     # force-enabled both players whenever a client claimed is_ranked=true,
-    # which overrode a player's opt-out (Stan vs dgnfly: dgnfly had ranked
+    # which overrode a player's opt-out (one of the two had ranked
     # disabled, yet the pairing produced a series + gambler ping). Mod-issued
     # rooms (ranked_*/sct-*) are exempt: joining the queue IS consent, and
     # queue join already flipped the flag. For everything else (code-join /
@@ -10668,7 +10668,7 @@ async def get_player_matches(
 ):
     """Get a player's match history.
 
-    name_filter (bug 263, Stan): case-insensitive substring match against the
+    name_filter (bug 263): case-insensitive substring match against the
     viewer-relative OPPONENT display name (matches stores no name snapshot, so
     this matches players' CURRENT names; anonymized deleted accounts are
     unsearchable by design). The /matches/summary totals are deliberately NOT
@@ -13593,7 +13593,7 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
 QUEUE_EXPIRE_MINUTES = 30
 QUEUE_BLOCK_MINUTES = 5
 # Window for both players to click Ready Up after being matched. Was 30s but
-# lopi/NotNic reported "both readied, match canceled" — both alt-tabbed into
+# two players reported "both readied, match canceled" — both alt-tabbed into
 # ROUNDS, found the F5 menu, clicked Ready, and one of them consistently
 # tripped the timeout. 90s gives real humans enough slack for Discord-to-game
 # context switching. Additionally, /queue/ready resets matched_at on the
@@ -14361,8 +14361,7 @@ async def _locked_in_other_queue(db: AsyncSession, player_id, joining_table: str
 # took; (b) mutating that helper's contract globally, which reaches many
 # leave/poll/lobby routes and still misses ranked; (c) having it acquire
 # identities itself, when it only ever knows the caller's own group and never
-# the counterparties chosen later. The why is written up in
-# ai-collab/rejoin/A1-BRIEF.md. What survives is a caller-owned loop:
+# the counterparties chosen later. What survives is a caller-owned loop:
 #
 #   1. finish and COMMIT any independent preflight maintenance
 #   2. UNLOCKED discovery of the exact roster and the full lock footprint
@@ -15576,8 +15575,8 @@ def _region_pings_from_header(value):
 
 
 # ── Multiplayer room region (2v2 / 1v2 / FFA rooms and hosted lobbies) ──────
-# Sept 10 batch — ai-collab/sept10-batch/02-region-v4.md (policy) over
-# ai-collab/sept9-plans/02-multiplayer-region.md §2 (data path). Each member's
+# Sept 10 batch — the region v4 policy over the Sept 9 multiplayer-region
+# plan's data path. Each member's
 # own ping map is stored in player_region_pings (migration 307) by the four
 # session-bound writer polls — the 2v2 / 1v2 / FFA queue polls and the 2v2 /
 # 1v2 lobby state poll — from the same X-Region-Pings header the 1v1 poll
@@ -19116,7 +19115,7 @@ async def get_recent_series(
           -- Series completion commits status='completed' first, then writes
           -- p1/p2_rating_change in a second commit a beat later. The Discord
           -- series feed polls this endpoint on status and would otherwise
-          -- catch that window and post "+0" permanently (bug #18 — Stan saw
+          -- catch that window and post "+0" permanently (bug #18 — seen as
           -- a real +2 posted as +0). Every real series finalizes to a
           -- non-NULL value (0 of 535 are permanently NULL), so this never
           -- hides a series for good — it just defers it to the next poll
@@ -19168,7 +19167,7 @@ async def get_recent_series(
                        else (br["payout"] or 0) > br["amount"],
             })
 
-    # Bug 179 (Stan): per-series game CODES (first 12 hex of each match uuid,
+    # Bug 179: per-series game CODES (first 12 hex of each match uuid,
     # the exact form /matches/by-code and the bot's /game command take) so the
     # Discord result post can carry them. One batched query.
     games_by_series: dict[str, list] = {}
@@ -19615,8 +19614,8 @@ def _chat_spam_ok(conn_key: int, message: str) -> bool:
     return True
 
 
-# ── Cross-platform chat moderation support (design: ai-collab/chat-moderation-
-# design.md v3). Everything below is single-worker in-process state (#125). ──
+# ── Cross-platform chat moderation support (design v3). Everything below is
+# single-worker in-process state (#125). ──
 
 import unicodedata as _unicodedata
 
@@ -27253,8 +27252,8 @@ async def internal_pc_card(
 
 
 # ── Player Cards: portraits, delivery leases and faces ──────────────────────
-# Design: ai-collab/sept10-batch/21-player-cards-look-v22.md §1.7, §2.2, §3,
-# §6, §8 as amended by look-r18-dispositions.md. Pure helpers live in
+# Design: the Sept 10 player-cards look (v22), as amended by its r18
+# dispositions. Pure helpers live in
 # pc_portrait.py, pixels in pc_face.py. Every route here is answered by the
 # PRIMARY only (§2.2 routing): the face route is not on the edge's routed
 # list and the bot calls the primary's local api.
@@ -31316,7 +31315,7 @@ async def series_preflight(
     # force-enabled both players here "for first-launch races", which
     # overrode real opt-outs: a casual code-join game against a
     # ranked-disabled player still spawned a series row + a Discord gambler
-    # ping (Stan vs dgnfly, 6/24). Mod-issued rooms are exempt — queueing is
+    # ping (6/24). Mod-issued rooms are exempt — queueing is
     # itself the opt-in and queue join already set the flag.
     rl = (room_id or "").lower()
     _mod_room = rl.startswith("ranked_") or rl.startswith("sct-")
@@ -34560,50 +34559,111 @@ _CHANNEL_POST_PENDING_SQL = (
 _CHANNEL_POST_WHERE_UNRENDERED = "p.posted_revision IS DISTINCT FROM p.revision"
 _CHANNEL_POST_WHERE_UNPOSTED = "p.posted_at IS NULL"
 
-# The ack, as ONE compare-and-set. Everything it does — authorize, record,
-# release — is decided inside this statement, so there is no window between a
-# check and the write it justifies (#208).
+# THE ACK, AS ONE COMPARE-AND-SET AGAINST A ROW THIS STATEMENT HAS LOCKED.
+# Everything it does — authorize, record, release — is decided against the row
+# as it stands when the write happens, and NOTHING is carried into the write
+# from a read taken before it (#208: work that follows a read re-reads the row
+# and re-checks the predicate that justified it, inside the lock; #202: the
+# weakest mode that still conflicts with this statement's own later write —
+# a plain non-key UPDATE — is FOR NO KEY UPDATE, so that is the mode taken).
 #
-# `target` reads the row once and derives the two ways a caller can be
-# authorized:
+# WHY THE SHAPE, AND NOT JUST THE LINES, HAD TO CHANGE. Round three authorized
+# a caller and then re-read the row to decide what to answer. Round four moved
+# the decision into one statement but still MATERIALIZED it: a CTE read the row
+# at the statement's snapshot, derived holds_claim / legacy_caller there, and
+# the UPDATE beneath it consumed those booleans. Under READ COMMITTED an UPDATE
+# that meets a row somebody else has changed re-checks ITS OWN conditions
+# against the new version — but a boolean already computed in a CTE is not a
+# condition any more, it is a value, and it is not re-checked. So a caller
+# whose claim lapsed between the snapshot and the write was still admitted by a
+# frozen "yes", and could clear a claim a second poller had taken in between,
+# leaving two pollers rendering one row and a third eligible to be handed it.
+# The finding landed INSIDE the round-four replacement, so what changed here is
+# the method: authorization is not something this statement computes and then
+# uses. It IS the WHERE of the write, spelled against the live row, and the
+# same live columns decide every arm of the SET.
+#
+# `locked` EXISTS TO TAKE THE LOCK, NOT TO DECIDE ANYTHING. It selects the row
+# FOR NO KEY UPDATE: a concurrent hand-out picks with FOR NO KEY UPDATE SKIP
+# LOCKED and therefore passes this row by rather than claiming it, and a
+# hand-out or ack that got there first is waited for, with its committed state
+# the state this statement then reads and writes against. The UPDATE reads no
+# column through `locked` — the join is the primary key and nothing else — so
+# there is no value inside the write that could have gone stale before it was
+# used. The columns `locked` does carry are for the REPLY: what to tell a
+# caller whose write was refused, which is the state the statement found and
+# left alone. They are exact for that, because the row is locked for the whole
+# statement and NOW() is the transaction timestamp, so "the lease, as the
+# database sees it" is ONE value from the lock to the last arm of the SET.
+#
+# THE LOCK ADDS NO DEADLOCK. This statement takes exactly one row lock. The
+# hand-out takes up to twenty, in (sort_order, id) order, but with SKIP LOCKED,
+# so it never waits for anything; a cycle needs two waiters (#204).
+#
+# WHY THE WHERE MAY BE READ ON THE SNAPSHOT. The UPDATE's scan first tests its
+# WHERE against the row version its snapshot sees, and re-tests it against the
+# live version only for a row that passed — a row the snapshot refuses is never
+# looked at again. So every admitting term has to be one that cannot be false
+# on the snapshot and true on the live row, and each is: the delivery term is a
+# property of the call; holds_claim compares a token that one hand-out writes,
+# once, together with the timestamp beside it, so a version that does not carry
+# this caller's live claim is never followed by one that does; and legacy_caller
+# admits only a delivery-shaped call (it excludes a bind and a release), which
+# the delivery term admits anyway. A refused row is therefore refused on the
+# live version too, and `authorized` read off the locked row agrees with what
+# the write did for every call shape.
+#
+# THE TWO WAYS A CALLER IS AUTHORIZED, both written against the live row:
 #   holds_claim    it presented the token this row's claim carries, and the
 #                  claim has not expired. Required of anything that records a
-#                  revision, moves the fingerprint, replaces an id, or lets
-#                  go of the claim. It is three-valued — a token presented
-#                  against a row whose claim was already released compares
-#                  NULL — so every arm that reads it treats NULL as "no", and
-#                  the reported `authorized` is squashed with IS TRUE rather
-#                  than handed to the caller as an empty third answer.
-#   legacy_caller  it presented no token, named no revision, is not binding,
-#                  AND the row's last hand-out went to a poller that did not
-#                  declare it can name one — the pre-338 bot meeting its own
-#                  hand-out. That caller cannot hold a claim, so it is
-#                  authorized by the pair, and is recorded at what the
+#                  revision, moves the fingerprint, replaces an id, or lets go
+#                  of the claim. It is three-valued — a token presented against
+#                  a row whose claim was already released compares NULL — so
+#                  every site that reads it treats NULL as "no", and the
+#                  reported `authorized` is squashed with IS TRUE rather than
+#                  handed to the caller as an empty third answer.
+#   legacy_caller  it presented no token, named no revision, neither binds nor
+#                  releases — the one call the pre-338 bot makes, which sends a
+#                  post id and nothing else — AND the row's last hand-out went
+#                  to a poller that did not declare it can name one: that bot
+#                  meeting its own hand-out. That caller cannot hold a claim,
+#                  so it is authorized by the pair, and is recorded at what the
 #                  hand-out served. The call SHAPE alone is not enough: the
-#                  handed_* pair belongs to whoever polled last, so a
-#                  tokenless ack arriving after a revision-capable poller took
-#                  the row would otherwise stamp that poller's record onto it
-#                  and clear that poller's claim mid-render.
+#                  handed_* pair belongs to whoever polled last, so a tokenless
+#                  ack arriving after a revision-capable poller took the row
+#                  would otherwise stamp that poller's record onto it and clear
+#                  that poller's claim mid-render. A tokenless RELEASE is not
+#                  that bot's call (it predates the parameter), and admitting it
+#                  would let a hand-back write the handed_* revision on a row
+#                  nobody rendered — so it is refused like any other stranger.
+# Each is written out at every site that depends on it instead of being
+# computed once, because "computed once, used later" is precisely what made the
+# frozen answer possible. The copies are held to one spelling and to their
+# number by test_the_ack_decides_authorization_in_the_statement_that_writes, so
+# a copy that drifts is a red test rather than a second rule (#432).
 #
-# NEITHER OF THOSE GOVERNS THE DELIVERY FACTS. `reports_delivery` is exactly
-# the call shape that stamps posted_at — anything that is neither a bind nor a
-# pure hand-back — and for that shape posted_at, plus a message id on a row
-# that has none, are recorded whether or not the caller holds the claim. They
-# say a message is in the channel, and the one thing a dropped delivery fact
-# produces is a second copy of that message: the bot's sent-memory is
-# in-process, so a lease that expires inside a Discord call leaves a sent row
-# reading "never posted", and the next restart sends it again (#105 — a
-# poller's in-memory dedup is not a delivery record, and a restart is exactly
-# when it is lost). What an unauthorized caller may NOT do is claim a revision,
-# move the fingerprint, replace an id the row already has, or release somebody
-# else's claim. A bind and a pure hand-back carry no delivery fact, so from a
+# NEITHER OF THOSE GOVERNS THE DELIVERY FACTS. The delivery arm is exactly the
+# call shape that stamps posted_at — anything that is neither a bind nor a pure
+# hand-back — and for that shape posted_at, plus a message id on a row that has
+# none, are recorded whether or not the caller holds the claim. It is the one
+# term in the WHERE that reads no column at all: it is a property of the call,
+# so there is nothing about it that could be stale. Those two columns say a
+# message is in the channel, and the one thing a dropped delivery fact produces
+# is a second copy of that message: the bot's sent-memory is in-process, so a
+# lease that expires inside a Discord call leaves a sent row reading "never
+# posted", and the next restart sends it again (#105 — a poller's in-memory
+# dedup is not a delivery record, and a restart is exactly when it is lost).
+# What an unauthorized caller may NOT do is claim a revision, move the
+# fingerprint, replace an id the row already has, or release somebody else's
+# claim. A bind and a pure hand-back carry no delivery fact, so from a
 # non-claimant they write nothing at all.
 #
-# The outer SELECT reports AUTHORIZATION — not "did anything get written",
-# which is no longer the same question. Round three answered a losing caller
-# by re-reading the row, which another poller had already advanced, and
-# reported success; the database then suppressed every repair, because the row
-# looked finished to everyone.
+# THE OUTER SELECT REPORTS AUTHORIZATION — not "did anything get written",
+# which is no longer the same question, and not "does the row look finished",
+# which is the question round three answered. A losing caller was told success
+# because another poller had already advanced the row to the state it wanted;
+# the database then suppressed every repair, because the row looked finished to
+# everyone.
 #
 # A RELEASE THAT NAMES NO REVISION IS A PURE HAND-BACK: it clears the claim and
 # writes nothing else, not even posted_at. That is what the bot sends when it
@@ -34614,14 +34674,14 @@ _CHANNEL_POST_WHERE_UNPOSTED = "p.posted_at IS NULL"
 # ENTITLED TO IT. `:rev = revision` means the row is fully current
 # (posted_revision is bounded by revision at every writer, so naming the
 # current revision implies the write was accepted), the explicit `:release` is
-# the two-render cap saying "record what I rendered and let go", and a legacy
+# the render cap saying "record what I rendered and let go", and a legacy
 # caller lets go by construction because it can render nothing further. Those
 # three, plus lease expiry, are ALL the routes out of a claim, and each of the
-# three requires holds_claim or legacy_caller — so a caller that reports a
-# delivery without holding the claim records the delivery and leaves the claim
-# where it found it. A STALE answer releases nothing: the same holder renders
-# forward under the same token. bind_only releases nothing either — that row
-# is mid-render.
+# three is conditioned on the live claim columns — so an ack whose lease lapsed
+# while it was inside Discord records the delivery it reports and leaves the
+# claim exactly where it found it, including when a second poller now holds it.
+# A STALE answer releases nothing: the same holder renders forward under the
+# same token. bind_only releases nothing either — that row is mid-render.
 #
 # adopt_fingerprint IS THE TEXT THE ROW'S MESSAGE CARRIES, and this statement
 # keeps it that way. It used to be written once — by 338's backfill, or by a
@@ -34645,22 +34705,12 @@ _CHANNEL_POST_WHERE_UNPOSTED = "p.posted_at IS NULL"
 # ever edited, so no scan is keyed on its text any more, and the lag closes at
 # the next ack that makes the row current.
 _CHANNEL_POST_ACK_SQL = (
-    "WITH target AS ("
+    "WITH locked AS ("
     "  SELECT p.id, p.revision, p.posted_revision, p.content,"
-    "         p.handed_revision, p.handed_fingerprint,"
-    "         (CAST(:token AS uuid) IS NOT NULL"
-    "          AND p.claimed_token = CAST(:token AS uuid)"
-    "          AND p.claimed_at > NOW() - make_interval(secs => :lease))"
-    "             AS holds_claim,"
-    "         (CAST(:token AS uuid) IS NULL"
-    "          AND CAST(:rev AS INTEGER) IS NULL"
-    "          AND NOT CAST(:bind AS BOOLEAN)"
-    "          AND p.handed_revisionless) AS legacy_caller,"
-    "         (NOT (CAST(:bind AS BOOLEAN)"
-    "               OR (CAST(:release AS BOOLEAN)"
-    "                   AND CAST(:rev AS INTEGER) IS NULL)))"
-    "             AS reports_delivery"
-    "    FROM pending_channel_posts p WHERE p.id = :pid"
+    "         p.claimed_token, p.claimed_at, p.handed_revisionless"
+    "    FROM pending_channel_posts p"
+    "   WHERE p.id = :pid"
+    "     FOR NO KEY UPDATE"
     "), written AS ("
     "  UPDATE pending_channel_posts p SET"
     "     posted_at = CASE"
@@ -34668,64 +34718,145 @@ _CHANNEL_POST_ACK_SQL = (
     "              OR (CAST(:release AS BOOLEAN) AND CAST(:rev AS INTEGER) IS NULL)"
     "         THEN p.posted_at ELSE COALESCE(p.posted_at, NOW()) END,"
     "     message_id = CASE"
-    "         WHEN t.holds_claim OR t.legacy_caller"
+    "         WHEN (CAST(:token AS uuid) IS NOT NULL"
+    "               AND p.claimed_token = CAST(:token AS uuid)"
+    "               AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "           OR (CAST(:token AS uuid) IS NULL"
+    "               AND CAST(:rev AS INTEGER) IS NULL"
+    "               AND NOT CAST(:bind AS BOOLEAN)"
+    "               AND NOT CAST(:release AS BOOLEAN)"
+    "               AND p.handed_revisionless)"
     "         THEN COALESCE(CAST(:mid AS TEXT), p.message_id)"
     "         ELSE COALESCE(p.message_id, CAST(:mid AS TEXT)) END,"
     "     posted_revision = CASE"
     "         WHEN CAST(:bind AS BOOLEAN) THEN p.posted_revision"
-    "         WHEN t.legacy_caller THEN"
-    "              CASE WHEN t.handed_revision IS NOT NULL"
-    "                    AND t.handed_revision <= p.revision"
-    "                    AND t.handed_revision >= COALESCE(p.posted_revision, 0)"
-    "                   THEN t.handed_revision ELSE p.posted_revision END"
-    "         WHEN t.holds_claim"
+    "         WHEN (CAST(:token AS uuid) IS NULL"
+    "               AND CAST(:rev AS INTEGER) IS NULL"
+    "               AND NOT CAST(:bind AS BOOLEAN)"
+    "               AND NOT CAST(:release AS BOOLEAN)"
+    "               AND p.handed_revisionless) THEN"
+    "              CASE WHEN p.handed_revision IS NOT NULL"
+    "                    AND p.handed_revision <= p.revision"
+    "                    AND p.handed_revision >= COALESCE(p.posted_revision, 0)"
+    "                   THEN p.handed_revision ELSE p.posted_revision END"
+    "         WHEN (CAST(:token AS uuid) IS NOT NULL"
+    "               AND p.claimed_token = CAST(:token AS uuid)"
+    "               AND p.claimed_at > NOW() - make_interval(secs => :lease))"
     "              AND CAST(:rev AS INTEGER) IS NOT NULL"
     "              AND CAST(:rev AS INTEGER) <= p.revision"
     "              AND CAST(:rev AS INTEGER) >= COALESCE(p.posted_revision, 0)"
     "         THEN CAST(:rev AS INTEGER)"
     "         ELSE p.posted_revision END,"
     "     adopt_fingerprint = CASE"
-    "         WHEN t.legacy_caller AND p.adopt_fingerprint IS NULL"
-    "         THEN t.handed_fingerprint"
-    "         WHEN t.holds_claim AND NOT CAST(:bind AS BOOLEAN)"
+    "         WHEN (CAST(:token AS uuid) IS NULL"
+    "               AND CAST(:rev AS INTEGER) IS NULL"
+    "               AND NOT CAST(:bind AS BOOLEAN)"
+    "               AND NOT CAST(:release AS BOOLEAN)"
+    "               AND p.handed_revisionless)"
+    "              AND p.adopt_fingerprint IS NULL"
+    "         THEN p.handed_fingerprint"
+    "         WHEN (CAST(:token AS uuid) IS NOT NULL"
+    "               AND p.claimed_token = CAST(:token AS uuid)"
+    "               AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "              AND NOT CAST(:bind AS BOOLEAN)"
     "              AND CAST(:rev AS INTEGER) = p.revision"
     "              AND p.content NOT LIKE '[MODCASE:%'"
     "         THEN LEFT(p.content, 2000)"
     "         ELSE p.adopt_fingerprint END,"
     "     claimed_token = CASE"
     "         WHEN NOT CAST(:bind AS BOOLEAN)"
-    "              AND (t.holds_claim OR t.legacy_caller)"
-    "              AND (CAST(:release AS BOOLEAN) OR t.legacy_caller"
-    "                   OR CAST(:rev AS INTEGER) = p.revision)"
+    "              AND ((CAST(:token AS uuid) IS NOT NULL"
+    "                    AND p.claimed_token = CAST(:token AS uuid)"
+    "                    AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "                OR (CAST(:token AS uuid) IS NULL"
+    "                    AND CAST(:rev AS INTEGER) IS NULL"
+    "                    AND NOT CAST(:bind AS BOOLEAN)"
+    "                    AND NOT CAST(:release AS BOOLEAN)"
+    "                    AND p.handed_revisionless))"
+    "              AND (CAST(:release AS BOOLEAN)"
+    "                OR (CAST(:token AS uuid) IS NULL"
+    "                    AND CAST(:rev AS INTEGER) IS NULL"
+    "                    AND NOT CAST(:bind AS BOOLEAN)"
+    "                    AND NOT CAST(:release AS BOOLEAN)"
+    "                    AND p.handed_revisionless)"
+    "                OR CAST(:rev AS INTEGER) = p.revision)"
     "         THEN NULL ELSE p.claimed_token END,"
     "     claimed_at = CASE"
     "         WHEN NOT CAST(:bind AS BOOLEAN)"
-    "              AND (t.holds_claim OR t.legacy_caller)"
-    "              AND (CAST(:release AS BOOLEAN) OR t.legacy_caller"
-    "                   OR CAST(:rev AS INTEGER) = p.revision)"
+    "              AND ((CAST(:token AS uuid) IS NOT NULL"
+    "                    AND p.claimed_token = CAST(:token AS uuid)"
+    "                    AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "                OR (CAST(:token AS uuid) IS NULL"
+    "                    AND CAST(:rev AS INTEGER) IS NULL"
+    "                    AND NOT CAST(:bind AS BOOLEAN)"
+    "                    AND NOT CAST(:release AS BOOLEAN)"
+    "                    AND p.handed_revisionless))"
+    "              AND (CAST(:release AS BOOLEAN)"
+    "                OR (CAST(:token AS uuid) IS NULL"
+    "                    AND CAST(:rev AS INTEGER) IS NULL"
+    "                    AND NOT CAST(:bind AS BOOLEAN)"
+    "                    AND NOT CAST(:release AS BOOLEAN)"
+    "                    AND p.handed_revisionless)"
+    "                OR CAST(:rev AS INTEGER) = p.revision)"
     "         THEN NULL ELSE p.claimed_at END"
-    "   FROM target t"
-    "  WHERE p.id = t.id"
-    "    AND (t.holds_claim OR t.legacy_caller OR t.reports_delivery)"
+    "   FROM locked k"
+    "  WHERE p.id = k.id"
+    "    AND ((CAST(:token AS uuid) IS NOT NULL"
+    "          AND p.claimed_token = CAST(:token AS uuid)"
+    "          AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "      OR (CAST(:token AS uuid) IS NULL"
+    "          AND CAST(:rev AS INTEGER) IS NULL"
+    "          AND NOT CAST(:bind AS BOOLEAN)"
+    "          AND NOT CAST(:release AS BOOLEAN)"
+    "          AND p.handed_revisionless)"
+    "      OR NOT (CAST(:bind AS BOOLEAN)"
+    "              OR (CAST(:release AS BOOLEAN)"
+    "                  AND CAST(:rev AS INTEGER) IS NULL)))"
     "  RETURNING p.id, p.revision, p.posted_revision, p.content"
-    ") SELECT t.id AS id,"
-    "         COALESCE(w.revision, t.revision) AS revision,"
-    "         COALESCE(w.posted_revision, t.posted_revision) AS posted_revision,"
-    "         COALESCE(w.content, t.content) AS content,"
-    "         ((t.holds_claim OR t.legacy_caller) IS TRUE) AS authorized"
-    "    FROM target t LEFT JOIN written w ON w.id = t.id"
+    ") SELECT k.id AS id,"
+    "         CASE WHEN w.id IS NULL THEN k.revision"
+    "              ELSE w.revision END AS revision,"
+    "         CASE WHEN w.id IS NULL THEN k.posted_revision"
+    "              ELSE w.posted_revision END AS posted_revision,"
+    "         CASE WHEN w.id IS NULL THEN k.content"
+    "              ELSE w.content END AS content,"
+    "         (((CAST(:token AS uuid) IS NOT NULL"
+    "            AND k.claimed_token = CAST(:token AS uuid)"
+    "            AND k.claimed_at > NOW() - make_interval(secs => :lease))"
+    "        OR (CAST(:token AS uuid) IS NULL"
+    "            AND CAST(:rev AS INTEGER) IS NULL"
+    "            AND NOT CAST(:bind AS BOOLEAN)"
+    "            AND NOT CAST(:release AS BOOLEAN)"
+    "            AND k.handed_revisionless)) IS TRUE) AS authorized"
+    "    FROM locked k LEFT JOIN written w ON w.id = k.id"
 )
 
 
 def _channel_post_ack_reply(post_id, named_revision, row):
     """What the ack tells the caller: refused, finished, or still behind.
 
-    NOT_CLAIMANT comes first and is never reported as success. The statement
-    wrote nothing for this caller, either because it does not hold the row's
-    claim or because the claim expired under it. Reading the row's columns to
-    decide the answer — which is what round three did — asks the wrong
-    question: another poller may have advanced the row to exactly the state
-    this caller wanted, and "it looks finished" is not "you finished it".
+    NOT_CLAIMANT comes first and is never reported as success. It says the
+    statement REFUSED THIS CALLER'S RENDER: it does not hold the row's claim,
+    or the claim expired under it, so no revision was recorded, no fingerprint
+    moved, no message id the row already carried was replaced, and no claim was
+    released.
+
+    IT DOES NOT MEAN NOTHING WAS WRITTEN. Saying that here would be a false
+    claim about the statement above (#302/#351). A refused ack that REPORTS A
+    DELIVERY — any shape that is neither a bind nor a pure hand-back — still
+    persists posted_at on a row that has none, and still persists the id it
+    supplied on a row that has none. Those two columns say a message is in the
+    channel; dropping them costs a second copy of that message after the next
+    restart (#105). Every other column is left exactly as it was found. So the
+    caller is told "not yours to record", and the one fact only it could know
+    is kept anyway.
+
+    Reading the row's columns to decide the answer — which is what round three
+    did — asks the wrong question: another poller may have advanced the row to
+    exactly the state this caller wanted, and "it looks finished" is not "you
+    finished it". `authorized` is decided inside the statement that does the
+    write, against the row while it is locked, so it answers about THIS caller
+    rather than about the row.
 
     STALE means the row is still behind its own revision AFTER this write,
     whether or not the caller's own number was the one declined: either the
@@ -34745,8 +34876,9 @@ def _channel_post_ack_reply(post_id, named_revision, row):
 
       not_claimant  posted_revision — how far the row is actually rendered,
                     which is NULL when nothing has rendered it. It is NOT this
-                    caller's work and NOT the row's current revision; the
-                    caller wrote nothing, and this is only the state it found.
+                    caller's work and NOT the row's current revision; this
+                    caller recorded no revision, and this is only the state it
+                    found (its delivery half, if it reported one, was kept).
       stale         revision — where the row is NOW, which is what the caller
                     must edit forward to. `content` comes with it.
       acked         posted_revision — what this caller's write recorded, i.e.
@@ -34918,6 +35050,18 @@ async def ack_channel_post(
     reached the state it asked for. That reading is gone: the answer reports
     whether THIS caller held the claim, never what the row looks like now.
 
+    AUTHORIZATION IS DECIDED INSIDE THE STATEMENT THAT WRITES, AND NOWHERE
+    ELSE. The row is taken FOR NO KEY UPDATE first, then every authorization
+    term — the token equality, the lease as the database sees it, the pre-338
+    pairing — is a condition of the UPDATE itself and of each arm of its SET,
+    read from the row being written. No boolean is derived beforehand and
+    carried in. An earlier build did derive them, in a CTE above the UPDATE,
+    and a value read at the statement's snapshot is not re-checked when the
+    write meets a row somebody else has changed: a caller whose claim had just
+    lapsed was admitted by a frozen "yes" and could clear the claim a second
+    poller had taken. Everything the caller is told comes back from that one
+    statement.
+
     A REFUSAL IS NOT A REASON TO FORGET A MESSAGE. The delivery facts —
     posted_at, and a message id for a row that has none — are recorded for
     whoever reports them, claim or no claim. A tick whose lease expires inside
@@ -34942,7 +35086,8 @@ async def ack_channel_post(
     exceed the row's revision (nobody renders a future text), and it may not
     move posted_revision backwards.
 
-    WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot) AND THE ROW
+    WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot), NEITHER
+    BINDS NOR RELEASES (that bot sends a post id and nothing else) AND THE ROW
     WAS HANDED TO A REVISIONLESS POLLER, the row is recorded at WHAT IT WAS
     HANDED. The hand-out wrote handed_revision and handed_fingerprint when it
     put that text on the wire, and a bot that cannot name a revision can only
@@ -36854,7 +36999,7 @@ async def get_achievement_earners(key: str, db: AsyncSession = Depends(get_db)):
 # percentages (bug #66): most rows are modless quickplay opponents auto-created
 # by match reports — 2,847 rows vs ~200 real mod users — and those players get
 # exactly one incidental session, so including them made every percentage read
-# as 0.x% and "not representative at all" (Stan). Numerator joins on the same
+# as 0.x% — "not representative at all". Numerator joins on the same
 # filter so pct <= 100 by construction. Cached 5 min; single process, so a
 # plain module dict is safe.
 _ach_pct_cache: dict = {"at": 0.0, "pcts": {}}
@@ -37017,7 +37162,7 @@ BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-roun
 # SCRUBBED -- real-world identity, no diagnostic value:
 #   * OS usernames inside filesystem paths. The client interpolates the
 #     ABSOLUTE log path into every bundle header, so each report carries
-#     C:\Users\<person>\... in a machine-parseable position. That is a third
+#     <drive>:\Users\<person>\... in a machine-parseable position. That is a third
 #     party's real name, in a project that has twice force-pushed git history
 #     to scrub exactly that class of leak from the maintainer's OWN name.
 #     Enforcing the rule in one direction only was a bug, not a policy.
@@ -42081,7 +42226,7 @@ async def team_series_report_dc(
     # independent current-game fact separates a stale low from an incorrect high.
     # The series-wide live-points columns cannot stand in: they are stored with
     # GREATEST across the series, so in game 2 or 3 they still carry game 1's
-    # crossing. Designed and specified in ai-collab/sept16-bugs/LOG.md.
+    # crossing.
     total_points = (t1_points_total or 0) + (t2_points_total or 0)
 
     # ── Anti-abuse lead-forfeit (v1.28) ───────────────────────────────────
@@ -44428,7 +44573,7 @@ def _ffa_pool_shape(place: int, beaten: int, n_live: int) -> float:
 # Rating movement per game is bounded: each player is compared against at
 # most this many placement-adjacent opponents (see submit_ffa_match).
 FFA_MAX_RATED_OPPONENTS = 4
-# Bug 195 (Stan's report, Sid-approved Aug 21): UPSET INCLUSION. Adjacency
+# Bug 195 (Sid-approved Aug 21): UPSET INCLUSION. Adjacency
 # alone let a 300+-gap inverted result escape rating entirely (a 1000-rated
 # player beating a 2000-rated one four placements away — neither entered the
 # other's comparison set). A replay of all 158 ranked FFA games showed the
@@ -44522,7 +44667,7 @@ FFA_CONFIG_DEFAULTS = {
     "sudden_death": False,
 }
 
-# ── Room rules (Sept 10 batch, ai-collab/sept10-batch/01-room-rules.md) ──────
+# ── Room rules (Sept 10 batch) ──────────────────────────────────────────────
 # Every server-issued 1v1 / 2v2 / 1v2 room carries a rules record {ff, sc}:
 # friendly fire (default ON, which is today's behaviour) and the Same Cards
 # rule (default OFF). Decided BEFORE the room exists (host knobs on the 2v2 /
@@ -50160,7 +50305,7 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                 # absent row. `.get` so a pre-column row degrades to false.
                 "absent": bool(r.get("absent")),
                 "rating_change": float(r["rating_change"]) if r["rating_change"] is not None else None,
-                # Bug 178 (Stan): absolute before/after — stamped at match
+                # Bug 178: absolute before/after — stamped at match
                 # time in the fmp row, so history stays true after later games.
                 "rating_before": float(r["rating_before"]) if r["rating_before"] is not None else None,
                 "rating_after": float(r["rating_after"]) if r["rating_after"] is not None else None,
@@ -53000,7 +53145,7 @@ async def team_series_recent(minutes: int = Query(5, ge=1, le=60), db: AsyncSess
         ORDER BY s.completed_at DESC
     """)
     rows = (await db.execute(q, {"mins": minutes})).mappings().all()
-    # Bug 179 (Stan): per-series game codes (12-hex uuid prefixes — the exact
+    # Bug 179: per-series game codes (12-hex uuid prefixes — the exact
     # form the bot's /game command takes) so the announcement can carry them.
     _codes: dict[str, list] = {}
     if rows:
@@ -56906,8 +57051,8 @@ async def get_set_report(request: Request, steam_id: str = "",
 # ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──
 
 # Routes: in-game mail (Sept 6 batch, Group 4 item b — server half;
-# migration 297). Design: ai-collab/sept6-triage/group4-design-v2.md §b
-# (B-1 .. B-14, B-L1 .. B-L3); the schema's shape decisions are recorded on
+# migration 297), design v2 section b (B-1 .. B-14, B-L1 .. B-L3); the
+# schema's shape decisions are recorded on
 # the migration. Player routes resolve their caller from X-Session-Token
 # ALONE — the API contract carries no steam_id — and then run the SAME
 # fail-closed gate the h2h route uses on the id the token names

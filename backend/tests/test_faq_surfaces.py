@@ -32,6 +32,9 @@ hermetic:
     FAQ_TEST_PG_DSN="postgresql://postgres@127.0.0.1:55432/faqtest" \
         python -m pytest backend/tests/test_faq_surfaces.py -q
 
+The client is psql, found on PATH or named by FAQ_TEST_PSQL; with neither,
+the Postgres tests skip and say so.
+
 55432 is this seat's standing port for that PostgreSQL 16.9 instance and the
 port the other two DSN-gated test files document. It is NOT a property of the
 data directory: that cluster's postgresql.conf leaves `port` commented out, so
@@ -45,10 +48,12 @@ the server the DSN asked for, and reds if the line above does not reach that
 same server. It does NOT compare port literals — the port is a correlate of
 the server, not the server (#732).
 """
+import hashlib
 import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 
@@ -157,7 +162,7 @@ def test_surfaces_agree():
 
 
 def test_a_client_lane_surface_is_recorded_as_owed_not_as_present():
-    """Three of item 11's numbers live in text only plugin/InfoLibrary.cs can
+    """Five of item 11's numbers live in text only plugin/InfoLibrary.cs can
     state, and round four restored every plugin/ file to the branch base: that
     half is the client lane's step, written down for it in
     docs/faq-refresh-client-contract.md. Listing those as surfaces would
@@ -166,22 +171,36 @@ def test_a_client_lane_surface_is_recorded_as_owed_not_as_present():
     moment the client lane applies them, so the row moves back into `surfaces`
     in the same change instead of being forgotten there.
 
+    THE TWO GOLD-LADDER ROWS ARE HERE FOR A SECOND REASON. They used to sit
+    under `surfaces`, asserting a PREFIX of the ladder line — the part the
+    correction does not touch. That is true before the client lane's edit and
+    equally true after it, so nothing in this file could fire for the ladder at
+    all: the tripwire existed for three of the five numbers and not for the two
+    where the edit is an append (#342 — a check that cannot fail). As owed rows
+    they carry the whole line, before and after, so the predecessor is pinned
+    and the successor fires.
+
     THIS FIXTURE ROW IS THE HAND-OFF, and the fuller note with the code
-    anchors is TRACKED beside it in docs/. It used to live in ai-collab/,
-    which is gitignored, so every file that pointed at it pointed at nothing
-    on every other checkout — the row said work was owed and the document
-    saying WHAT was owed did not exist there.
-    test_no_shipped_file_points_into_the_gitignored_scratch is what holds that
-    now. The row still carries what the client lane needs on its own — the
-    file, the sentence to write and the sentence it replaces — so it remains
-    checkable without reading any prose.
+    anchors is TRACKED beside it in docs/. It used to live in the gitignored
+    scratch tree, so every file that pointed at it pointed at nothing on every
+    other checkout — the row said work was owed and the document saying WHAT
+    was owed did not exist there.
+    test_no_file_this_item_touches_names_a_person_a_local_path_or_the_scratch_tree
+    is what holds that now. The row still carries what the client lane needs on
+    its own — the file, the sentence to write and the sentence it replaces — so
+    it remains checkable without reading any prose.
 
     Each owed row is held to four things: it states the claim's number, it
     names a file under plugin/ (the lane that owes it), that file still carries
-    the text the correction replaces and NOT the corrected text, and applying
-    REKEY_EDITS — the same table 340's bijection is checked against — produces
-    it. The last is what keeps the fixture and the migration describing ONE
-    edit rather than two independent guesses."""
+    the text the correction replaces and NOT the corrected text, and exactly
+    one edit of REKEY_EDITS — the same table 340's bijection is checked
+    against — turns the row's own predecessor into it. That last check is
+    applied to the ROW's strings, never to the client file: the file is what
+    is being judged, and a check that applied the table to it first would
+    repair a partial application before looking at it. It is what keeps the
+    fixture and the migration describing ONE edit rather than two independent
+    guesses. Each row is judged on its own, so a ladder applied in part reds
+    on the row that was applied."""
     every_edit = [pair for edits in REKEY_EDITS.values() for pair in edits]
 
     owed = 0
@@ -213,110 +232,274 @@ def test_a_client_lane_surface_is_recorded_as_owed_not_as_present():
                     "its half, so this row belongs under `surfaces` where "
                     "test_surfaces_agree holds it"
                     % (c["id"], row["file"], row["text"]))
-            corrected = body
-            for before, after in every_edit:
-                corrected = corrected.replace(before, after)
-            if row["text"] not in corrected:
+            # The row's two strings are tied to the table by ONE edit applied
+            # to the row's own predecessor — never to the client file, which
+            # is the thing being judged here and may not be repaired before it
+            # is judged (#342/#391).
+            produced = [after for before, after in every_edit
+                        if before in row["replaces"]
+                        and row["text"] in row["replaces"].replace(before, after)]
+            if len(produced) != 1:
                 problems.append(
-                    "%s: applying the correction table to %s does not produce "
-                    "%r — the fixture and 340 describe different edits"
-                    % (c["id"], row["file"], row["text"]))
+                    "%s: %d of the correction table's edits turn the row's "
+                    "predecessor into %r (expected exactly one) — the fixture "
+                    "and 340 describe different edits"
+                    % (c["id"], len(produced), row["text"]))
     assert not problems, "\n".join(problems)
-    assert owed == 3, (
-        "expected item 11's three client-lane surfaces to be recorded as "
+    assert owed == 5, (
+        "expected item 11's five client-lane surfaces to be recorded as "
         "owed, found %d" % owed)
 
 
-_SHIPPED_TREES = (
-    ("backend", (".py", ".sql")),
-    ("docs", (".md",)),
-    ("plugin", (".cs",)),
-    ("tools", (".py", ".json")),
-)
-_SCRATCH_REF = re.compile(r"ai-collab/[A-Za-z0-9_./-]+")
-
-# Files this item owns outright, where EVERY scratch reference is one this work
-# wrote. Scoping the sweep by the PATH's spelling alone missed the one that
-# mattered — 338's header cited a batch-wide register whose filename says
-# neither "item11" nor "v1410" — because the spelling is a correlate of "this
-# work created it" and not the thing itself (#732). Ownership is the other
-# half, and between them they still leave other lanes' comments alone.
-_ITEM11_OWN_FILES = (
+# ── 3. No file this item touches carries a local path, a scratch reference
+#       or an attribution────────────────────────────────────────────────────
+#
+# THE SCOPE IS EVERY LINE OF EVERY FILE THIS ITEM TOUCHES. Round 4's control
+# swept only the lines the range ADDED, read off `git diff <branch point>`,
+# and left the lines other lanes had written into the same files to a scrub
+# lane that was never opened. Both halves fell short of the review's bar. A
+# file ships whole: a scratch reference or an attribution another lane wrote
+# into main.py ships with this item's merge exactly as much as one written
+# here, and round 4's review found unresolved scratch references and an
+# attribution in precisely that gap. And a range read from the branch point
+# does not stay this item's: once the branch merges, `git diff <branch point>`
+# on main names every file every other lane has changed since (427 under the
+# shipped trees at the time of writing), so the control would go red on work
+# it never saw — the kind of guard somebody turns off rather than fixes (#430).
+#
+# So the files are RECORDED, and the record is checked against the history it
+# summarises by test_the_hygiene_scope_is_every_file_this_item_touches: every
+# file a commit of this item touched is either swept or handed back, and
+# nothing is swept that no commit of this item touched. The sweep reads the
+# working tree, so it is live while a change is being written, and it needs
+# no history, so it runs on any checkout, a shallow clone included.
+#
+# THE HANDED-BACK FILES are the client lane's. Earlier commits of this item
+# edited them and later ones restored each byte-for-byte to the branch point
+# (a diff of plugin/ and tools/ against it is empty), so this item's net
+# change to them is nothing and their content is not its to rewrite: they ship
+# with the client lane, under that lane's review.
+#
+# THE DETECTOR DOES NOT SPELL ITS OWN TARGET. This file is in the scope, so a
+# pattern written out as a literal would match its own source, and the only
+# way to keep the control green would then be to exclude the control — which
+# is how a check stops being able to fail (#342). Every token below is
+# assembled from pieces, the path patterns are written as patterns and never
+# as examples, and the handles are present only as digests.
+_HYGIENE_SCOPE = (
+    "backend/api/main.py",
+    "backend/api/tournaments.py",
+    "backend/discord_bot.py",
     "backend/sql/338_faq_channel_post_revisions.sql",
     "backend/sql/340_i18n_keys_item11.sql",
     "backend/sql/341_seed_machine_translations_item11.sql",
+    "backend/tests/fixtures/faq_claims.json",
+    "backend/tests/route_manifest_net_seat.json",
     "backend/tests/test_faq_surfaces.py",
+    "backend/tests/test_mail_bot.py",
+    "docs/FAQ.md",
     "docs/faq-refresh-client-contract.md",
 )
 
+_HANDED_BACK = (
+    "plugin/I18nCatalogues.cs",
+    "plugin/I18nSourceKeys.g.cs",
+    "plugin/InfoLibrary.cs",
+    "plugin/NativeUI.cs",
+    "tools/i18n_source.json",
+)
 
-def _shipped_files():
-    for top, exts in _SHIPPED_TREES:
-        root = os.path.join(REPO, top)
-        if not os.path.isdir(root):
-            continue
-        for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames
-                           if d not in ("__pycache__", "bin", "obj", "node_modules")]
-            for name in filenames:
-                if name.endswith(exts):
-                    yield os.path.join(dirpath, name)
+# The commit this item's first commit sits on. Only the scope check needs it.
+_BRANCH_POINT = "0266237"
+
+# Every commit of this item that changes code or prose touches one of these,
+# which is how its commits are told apart from other lanes' once the branch
+# has merged. A re-pin of the route manifest is committed alone and touches
+# neither, so it is not counted — and needs no counting, because the manifest
+# is in the scope by record.
+_ITEM_ANCHORS = ("backend/tests/test_faq_surfaces.py",
+                 "backend/tests/fixtures/faq_claims.json")
+
+# A DRIVE-LETTER PATH, any of them and not only one under a home directory: a
+# path that resolves on one seat is wrong on every other (round 4's psql
+# default was one, and a fresh checkout with only the DSN set selected a client
+# that was not there). Not preceded by a word character, so a seeded locale's
+# "word:\n" is prose; not followed by a second separator, so a URL scheme is
+# not a drive.
+_DRIVE_PATH = re.compile(r"(?<!\w)[A-Za-z]:[\\/](?![\\/])")
+_HOME_PATH = re.compile(
+    r"(?<![\w.])/(?:" + "ho" + "me|" + "Us" + r"ers)/[A-Za-z0-9_.-]+")
+_SCRATCH_TOKEN = "ai" + "-collab"
+_SANDBOX_TOKENS = ("scr" + "-wt-", "scr" + "-codex")
+
+_WORD = re.compile(r"[A-Za-z][A-Za-z0-9_]*")
+
+# A PUBLIC salt and the salted sha256 of each handle that may not appear in a
+# tracked file. The plaintext list is not in the repo: a blocklist written out
+# is the disclosure it exists to prevent, and a scrub that signposts itself is
+# not a scrub (#133/#134). The salt is not doing a secret's work — it only
+# stops the digests being readable straight off a table of bare words — and a
+# short word's digest can be recovered by brute force, so nothing the pre-push
+# guard protects is ever listed here: that class is the guard's
+# (test_the_privacy_oracle_is_the_pre_push_hook). "Sid" is the sanctioned
+# maintainer name and is not among them.
+_HANDLE_SALT = "scr-faq-item11-handle-blocklist-v1"
+_HANDLE_DIGESTS = frozenset([
+    "422aec928bf8edfddc358c6f59ede0b2b7306bebcd6cf798e900044d0309e9f8",
+    "4412d9ea108a8a78983534ec345969267c9e40b53c88b7a6079177a23c85a673",
+    "73f5adebce4448ae85fc7f6c505207716e70f88e3b0bff43072afb7508850c04",
+    "fe7ed63ab5330c6fe2cd7fa73aa921339026008bbd51adca63fda318c424eaee",
+])
+
+# PRODUCT TERMS THAT CONTAIN ONE OF THOSE WORDS, and are allowed anyway,
+# hashed the same way as two-word phrases. One of the mod's shipped
+# achievements is named after a community member; the name is a product noun
+# that every locale of 340 and 341 carries and that the in-game ladder prints,
+# so a guard refusing it would be a guard somebody turns off rather than fixes
+# (#430 — a guard is worth what its refusal costs). The exception is a LINE's:
+# a line that carries the product name may use the word elsewhere on it too,
+# because the achievement's own description says whom the player beats. A
+# line that does not carry it is refused, which is the case that matters: an
+# attribution.
+_HANDLE_PHRASE_DIGESTS = frozenset([
+    "ebb19cba72cc945dea5699e279070c7c66564fb432113301a04ab69627d3d0a6",
+])
+
+# AN ATTRIBUTION TO SOMEBODY THE DIGESTS DO NOT KNOW. A closed list cannot
+# name everybody, so the shapes attributions in these files have taken are
+# refused whatever the word in them: a capitalised word before reported,
+# asked, noticed and the like; after "reported by", "thanks to" and the like;
+# before a possessive report, ask or question; inside "Bug N (" and "(per ".
+# Such a word has to be on the list below of words that are NOT people — the
+# maintainer, and the sentence openers and nouns those shapes meet in these
+# files. An all-capitals word or a single letter is a term or a variable,
+# never a handle here. The list is what the guard costs, and it stays short
+# because the shapes are narrow.
+_NAME = r"([A-Z][A-Za-z0-9_]*)"
+_ATTRIBUTION_SHAPES = (
+    re.compile(_NAME + r"(?:/[A-Za-z0-9_]+)*\s+(?:reported|noticed|asked|"
+               r"suggested|proposed|requested|spotted|flagged|found|wanted|"
+               r"said|saw)\b"),
+    re.compile(r"\b(?:reported|requested|suggested|proposed|found|spotted|"
+               r"flagged|noticed|asked)\s+by\s+" + _NAME),
+    re.compile(r"\b(?:[Tt]hanks to|[Cc]redit to|[Cc]ourtesy of)\s+" + _NAME),
+    re.compile(_NAME + r"'s\s+(?:report|request|question|idea|suggestion|"
+               r"bug|ask|proposal|repro|clip|screenshot|log)s?\b"),
+    re.compile(r"\b[Bb]ug\s*#?\d+\s*[(,:\-—]\s*" + _NAME),
+    re.compile(r"\((?:per|via|from|thanks|h/t|cc)\s+" + _NAME + r"\s*[),]"),
+)
+_NOT_PEOPLE = frozenset([
+    "Sid",
+    "Aug", "GameStateWatcher", "Games", "Match", "None", "Not", "Nothing",
+    "Question", "Queue", "That", "The",
+])
 
 
-def test_no_shipped_file_points_into_the_gitignored_scratch():
-    """A shipped file may not send its reader to a path no other clone has.
+def _git(*args):
+    # utf-8 explicitly: git emits the tree's own bytes, the FAQ bodies and the
+    # seeded locales are not ASCII, and Python's default on this platform is
+    # cp1252 — which raises halfway through the diff and leaves the sweep with
+    # nothing to read rather than with something to judge (#441).
+    return subprocess.run(["git", "-C", REPO] + list(args),
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
 
-    `ai-collab/` is gitignored (.gitignore), so a comment, a migration header
-    or a test docstring naming a file under it resolves to nothing on the
-    desktop seat, in a fresh checkout, in the client lane's own worktree and
-    on GitHub. The rationale it pointed at — what the client lane still owes,
-    why a constant reads the way it does, which document the two halves of a
-    re-key meet in — is simply absent there, and nothing goes red to say so:
-    the backend ships claiming its twin is "recorded" while the record is
-    local (#302 — a claim that cannot be traced to the tree is a finding).
 
-    So the rule is mechanical rather than remembered, and it is swept over the
-    whole shipped tree rather than over the four files this round repointed: a
-    flag names a line, the defect is a class (#432).
+_SALTED = {}
 
-    WHAT THE SWEEP IS SCOPED TO, and why it is not the whole class. Every
-    scratch path THIS work created must be gone from backend/, docs/, plugin/
-    and tools/, and "this work created it" is asked two ways because one way
-    was not enough:
 
-      by PATH — anything under ai-collab/ naming item 11 or the v1.41.0
-        batch, anywhere in the shipped tree, which is what reaches the shared
-        files (main.py, discord_bot.py) that this item only edits in part;
-      by FILE — any ai-collab/ path at all in one of this item's OWN files
-        (_ITEM11_OWN_FILES), because there every reference is ours.
+def _salted(word):
+    # Cached: the sweep hashes every word of tens of thousands of lines, and
+    # the same few thousand words make up nearly all of them.
+    key = word.lower()
+    if key not in _SALTED:
+        _SALTED[key] = hashlib.sha256(
+            (_HANDLE_SALT + key).encode("utf-8")).hexdigest()
+    return _SALTED[key]
 
-    The second rule is here because the first one silently passed 338's header,
-    which cited the batch's register of migration numbers — a filename saying
-    neither "item11" nor "v1410", so a scratch path this branch itself added
-    sat in a shipped migration through three review rounds. A spelling is a
-    correlate of authorship, not authorship (#732), and a guard bound to a
-    correlate does not go noisy, it goes quiet.
 
-    It is still not the whole directory, because dozens of comments written by
-    OTHER lanes point into ai-collab/ from the shared files and from plugin/;
-    that is the same defect, recorded as an open item rather than swept from
-    here, since rewriting another lane's comments is not this branch's to
-    do."""
-    scratch = []
-    for path in _shipped_files():
-        rel = os.path.relpath(path, REPO).replace("\\", "/")
-        mine = rel in _ITEM11_OWN_FILES
-        for hit in set(_SCRATCH_REF.findall(_read(path))):
-            if mine or "item11" in hit.lower() or "v1410" in hit.lower():
-                scratch.append("%s -> %s" % (rel, hit))
-    assert not scratch, (
-        "shipped files point into the gitignored scratch directory, so the "
-        "reasoning they cite does not exist on any other checkout:\n"
-        + "\n".join(sorted(scratch)))
-    # The positive half. The rule above is satisfied by deleting every
-    # reference as surely as by tracking the document, so the document the
-    # client lane is sent to has to be there AND has to carry the three
-    # corrections the fixture records as owed.
+def _hygiene_hits(rel, lineno, text):
+    """What is wrong with one line, said WITHOUT quoting the thing that is
+    wrong with it. A guard that prints the identifier it found writes it into
+    every CI log and every pasted failure, which is the leak again by another
+    route."""
+    where = "%s:%d" % (rel, lineno)
+    hits = []
+    if _DRIVE_PATH.search(text):
+        hits.append(where + " a drive-letter path, which resolves on one seat "
+                    "only")
+    if _HOME_PATH.search(text):
+        hits.append(where + " a path under a home directory")
+    if _SCRATCH_TOKEN in text:
+        hits.append(where + " names the gitignored scratch tree, which exists "
+                    "on no other checkout")
+    if any(token in text for token in _SANDBOX_TOKENS):
+        hits.append(where + " names a local sandbox checkout")
+    words = _WORD.findall(text)
+    product = {a.lower() for a, b in zip(words, words[1:])
+               if _salted(a + " " + b) in _HANDLE_PHRASE_DIGESTS}
+    for w in words:
+        if _salted(w) in _HANDLE_DIGESTS and w.lower() not in product:
+            hits.append("%s a personal handle (%d characters) — the maintainer "
+                        "is 'Sid' in every artifact that leaves this machine, "
+                        "and testers are not named at all" % (where, len(w)))
+            break
+    for shape in _ATTRIBUTION_SHAPES:
+        for m in shape.finditer(text):
+            who = m.group(1)
+            if who in _NOT_PEOPLE or len(who) == 1 or who.isupper():
+                continue
+            hits.append("%s an attribution to a word (%d characters) that is "
+                        "not on the list of words that are not people"
+                        % (where, len(who)))
+    return hits
+
+
+def _swept_lines():
+    """(path, line number, text) for every line of every file in the scope,
+    read from the working tree."""
+    out = []
+    for rel in _HYGIENE_SCOPE:
+        assert os.path.isfile(os.path.join(REPO, rel)), (
+            "%s is in the hygiene scope and is not on disk — the record and the "
+            "tree disagree, and the sweep would pass by not reading it" % rel)
+        out += [(rel, i, text)
+                for i, text in enumerate(_read(rel).split("\n"), 1)]
+    return out
+
+
+def test_no_file_this_item_touches_names_a_person_a_local_path_or_the_scratch_tree():
+    """The hygiene control, over every line of every file this item touches.
+
+    Five classes, one sweep, because a flag names a line and the defect is a
+    class (#432): a drive-letter or home-directory path resolves on one
+    machine, and under a home directory is a personal identifier besides; a
+    scratch-tree reference points at reasoning that exists on no other
+    checkout, so the file ships claiming its rationale is recorded while the
+    record is local (#302); a sandbox checkout's name is the same leak spelt
+    another way; and a tester's handle, or an attribution to anybody but the
+    maintainer, is the one thing that has had to be force-pushed away twice.
+
+    The POSITIVE half is below the sweep: deleting every scratch reference
+    satisfies the rule exactly as well as tracking the document does, so the
+    document the client lane is sent to has to be present, has to carry the
+    corrections the fixture records as owed, and must not be excluded by
+    name."""
+    swept = _swept_lines()
+    # The sweep is evidence only if it read the files. main.py alone runs to
+    # tens of thousands of lines, so a short count means the scope was read
+    # wrong, not that nothing in it was wrong (#304).
+    assert len(swept) > 50000, (
+        "the sweep read only %d lines from the %d files in its scope"
+        % (len(swept), len(_HYGIENE_SCOPE)))
+    problems = []
+    for rel, lineno, text in swept:
+        problems += _hygiene_hits(rel, lineno, text)
+    assert not problems, (
+        "a file this item touches carries something that may not ship:\n"
+        + "\n".join(sorted(set(problems))))
+
+    # The positive half.
     contract = os.path.join(REPO, "docs", "faq-refresh-client-contract.md")
     assert os.path.isfile(contract), (
         "docs/faq-refresh-client-contract.md is gone — the owed_to_client_lane "
@@ -328,12 +511,239 @@ def test_no_shipped_file_points_into_the_gitignored_scratch():
                 "%s: the contract does not carry the owed text %r, so the "
                 "fixture row names work no tracked document specifies"
                 % (c["id"], row["text"]))
-    # ...and it is not gitignored by name, which is how the internal docs in
-    # the same directory are excluded.
-    ignored = [ln.strip() for ln in _read(".gitignore").splitlines()]
+            assert row["replaces"] in body, (
+                "%s: the contract does not carry the text %r this row says "
+                "the client lane replaces, so the lane is told what to write "
+                "but not where" % (c["id"], row["replaces"]))
+    ignored =[ln.strip() for ln in _read(".gitignore").splitlines()]
     assert "docs/faq-refresh-client-contract.md" not in ignored, (
         ".gitignore excludes the client contract by name — it would be local "
         "again with every reference to it still in shipped files")
+
+
+def test_the_hygiene_scope_is_every_file_this_item_touches():
+    """The recorded scope, checked in both directions against the history it
+    summarises.
+
+    This item's commits are the ones after the branch point that touch this
+    module or the claims fixture. Every commit of the item that changes code
+    or prose does (a route-manifest re-pin, committed alone, does not, and the
+    manifest is in the scope by record), and the path
+    filter is what keeps the answer the same after the branch merges, when
+    everything after the branch point on main also holds every other lane's
+    work. A file one of those commits touched is either swept or handed back,
+    so the scope cannot silently miss one; and a recorded file is one a commit
+    of the item touched, so the scope cannot be padded with files it does not
+    own. A clone without the branch point skips this half and says why; the
+    sweep itself needs no history."""
+    if _git("rev-parse", "--verify", _BRANCH_POINT + "^{commit}").returncode != 0:
+        pytest.skip("the branch point %s is not in this clone, so this item's "
+                    "commits cannot be listed" % _BRANCH_POINT)
+    proc = _git("log", "--no-merges", "--format=%H",
+                _BRANCH_POINT + "..HEAD", "--", *_ITEM_ANCHORS)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    commits = proc.stdout.split()
+    # Seven commits of this item precede round 5. Fewer means the log read
+    # the wrong range, and both assertions below would hold vacuously (#304).
+    assert len(commits) >= 7, (
+        "git log found %d commits of this item after %s; it has at least seven"
+        % (len(commits), _BRANCH_POINT))
+    touched = set()
+    for sha in commits:
+        shown = _git("show", "--format=", "--name-only", sha)
+        assert shown.returncode == 0, shown.stderr or shown.stdout
+        touched.update(n.strip() for n in shown.stdout.split("\n") if n.strip())
+    recorded = set(_HYGIENE_SCOPE) | set(_HANDED_BACK)
+    assert not set(_HYGIENE_SCOPE) & set(_HANDED_BACK), (
+        "a file is recorded as both swept and handed back")
+    unrecorded = sorted(touched - recorded)
+    assert not unrecorded, (
+        "a commit of this item touched %s, which the hygiene scope neither "
+        "sweeps nor records as handed back" % unrecorded)
+    unowned = sorted(recorded - touched)
+    assert not unowned, (
+        "the hygiene scope records %s, which no commit of this item touched"
+        % unowned)
+
+
+def test_the_hygiene_sweep_can_actually_fail():
+    """Every detector shown rejecting and shown accepting.
+
+    Each is a pattern this file may not contain, so none of them can be
+    demonstrated by the sweep's own corpus: a detector that has never matched
+    anything is indistinguishable from one whose pattern is wrong (#342/#391 —
+    a mutation, and a negative control). These are synthetic lines, each
+    assembled from pieces so that the line in this file is not itself what it
+    demonstrates, run through the same _hygiene_hits the sweep uses.
+
+    The handle case is built by hashing, not by spelling: the test states that
+    a word whose digest is listed is rejected, without the word."""
+    global _HANDLE_DIGESTS, _HANDLE_PHRASE_DIGESTS
+    colon, back = ":", "\\"
+
+    def refused(line):
+        return bool(_hygiene_hits("x.py", 1, line))
+
+    # Drive-letter paths: either separator, under a home directory or not.
+    assert refused("PSQL = " + "D" + colon + "/pg/bin/psql.exe"), (
+        "a drive-letter path outside any home directory was accepted")
+    assert refused("copy it to " + "E" + colon + back + "builds" + back + "x.dll"), (
+        "a backslash drive-letter path was accepted")
+    assert not refused("see https" + colon + "//example.org/x"), (
+        "a URL scheme was taken for a drive")
+    assert not refused("om den inte listas här" + colon + back + "n"), (
+        "a seeded locale's escaped newline was taken for a drive")
+    # Home directories on the other platforms.
+    assert refused("see /" + "ho" + "me/someone/notes.md"), (
+        "a POSIX home-directory path was accepted")
+    assert refused("see /" + "Us" + "ers/someone/notes.md"), (
+        "a macOS home-directory path was accepted")
+    assert not refused("GET /api/v1/users/42/stats"), (
+        "an API route was taken for a home directory")
+    # The scratch tree, with a path after it and bare.
+    assert refused("designed in " + _SCRATCH_TOKEN + "/v1410/NOTES.md section 4"), (
+        "a scratch-tree reference was accepted")
+    assert refused("the reasoning is in the " + _SCRATCH_TOKEN + " notes"), (
+        "a bare mention of the scratch tree was accepted")
+    assert not refused("designed in docs/NOTES.md section 4"), (
+        "a tracked path was rejected as a scratch reference")
+    for token in _SANDBOX_TOKENS:
+        assert refused("built in " + token + "item11"), (
+            "a sandbox checkout's name was accepted")
+
+    # Attribution shapes, with a probe word that is nobody's handle: the
+    # shapes refuse it although no digest lists it.
+    probe = "Zzprobeword"
+    for line in (probe + " reported the crash",
+                 "reported by " + probe,
+                 "thanks to " + probe + " for the repro",
+                 probe + "'s report",
+                 "Bug 12 (" + probe + ", Aug 1)",
+                 "(per " + probe + ")"):
+        assert refused(line), "an attribution shape was accepted: %r" % line
+    for line in ("Sid asked for the floor",
+                 "Match found — set both to matched",
+                 "the ROW's question",
+                 "game N's report",
+                 "thanks, " + probe):
+        assert not refused(line), (
+            "a line with no attribution shape and no listed handle was "
+            "refused: %r" % line)
+    assert not [w for w in _NOT_PEOPLE if _salted(w) in _HANDLE_DIGESTS], (
+        "a listed handle is on the list of words that are not people, which "
+        "would let the attribution half admit it")
+
+    # The handle detector, with the PROBE as the handle: the blocklist is
+    # extended for the length of these assertions with the digest of a word
+    # invented here, so what is demonstrated is the mechanism — a word whose
+    # salted digest is listed is refused where no shape applies, an ordinary
+    # one is not — and no handle enters this file to demonstrate it.
+    assert _HANDLE_DIGESTS, "the handle blocklist is empty"
+    original, original_phrases = _HANDLE_DIGESTS, _HANDLE_PHRASE_DIGESTS
+    try:
+        _HANDLE_DIGESTS = frozenset(original | {_salted(probe)})
+        assert refused("thanks, %s" % probe), (
+            "a word whose salted digest is on the blocklist was accepted")
+        assert not refused("thanks, a tester"), (
+            "a neutral word was rejected as a handle")
+        # The product-name exception is exactly as wide as a line that
+        # carries the phrase it lists.
+        _HANDLE_PHRASE_DIGESTS = frozenset(
+            original_phrases | {_salted(probe + " widget")})
+        assert not refused("the %s Widget pays 500g" % probe), (
+            "an allowed two-word product name was refused")
+        assert not refused("the %s Widget: beat %s in a ranked series"
+                           % (probe, probe)), (
+            "the product's own description was refused on its own line")
+        assert refused("the %s gadget pays 500g" % probe), (
+            "the exception admitted a pairing it does not list")
+        assert refused("thanks, %s" % probe), (
+            "the exception admitted the bare word on a line without the "
+            "product name")
+    finally:
+        _HANDLE_DIGESTS = original
+        _HANDLE_PHRASE_DIGESTS = original_phrases
+    assert _HANDLE_DIGESTS is original, "the blocklist was not restored"
+    assert _HANDLE_PHRASE_DIGESTS is original_phrases, (
+        "the product-name exception was not restored")
+
+
+# ── A test a file names is a test that exists ──────────────────────────────
+#
+# The files this item touches cite tests by name: as the pin for a sentence,
+# or as the guard a comment sends the next reader to. A rename leaves such a
+# citation pointing at nothing, and it still reads exactly like a working pin
+# — round five renamed this file's hygiene sweep, and 338's header went on
+# naming it by its old name. So every test_* identifier on a swept line has to
+# name a test function, or a test module, under backend/tests. A name wrapped
+# across two comment lines (one ending in an underscore, the next carrying the
+# rest) is joined before it is looked up.
+_CITED_TEST = re.compile(r"(?<![A-Za-z0-9_])(test_[A-Za-z0-9_]+)")
+_CITED_TAIL = re.compile(r"^[\s#*/-]*([A-Za-z0-9_]+)")
+
+
+def _tests_defined():
+    names = set()
+    for root, _dirs, files in os.walk(os.path.join(REPO, "backend", "tests")):
+        for fn in files:
+            if fn.endswith(".py"):
+                names.add(fn[:-3])
+                names.update(re.findall(
+                    r"^[ \t]*(?:async[ \t]+)?def[ \t]+(test_[A-Za-z0-9_]+)",
+                    _read(os.path.join(root, fn)), re.M))
+    return names
+
+
+def _unresolved_citations(lines, defined):
+    """One entry per cited test name that names nothing. `lines` is
+    (path, line number, text) in file order, as _swept_lines() returns it."""
+    out = []
+    for i, (rel, lineno, text) in enumerate(lines):
+        for m in _CITED_TEST.finditer(text):
+            name = m.group(1)
+            if (name.endswith("_") and not text[m.end():].strip()
+                    and i + 1 < len(lines) and lines[i + 1][0] == rel):
+                tail = _CITED_TAIL.match(lines[i + 1][2])
+                if tail:
+                    name += tail.group(1)
+            if name not in defined:
+                out.append("%s:%d names %s" % (rel, lineno, name))
+    return out
+
+
+def test_every_test_a_touched_file_cites_exists():
+    """A citation of a test is a claim that the test is there to run.
+
+    Checked over the same lines the hygiene sweep reads, against every test
+    function and test module under backend/tests, and shown to be able to
+    fail before it is believed (#342): a citation of a test that does not
+    exist is reported, and a wrapped name is joined rather than reported or
+    accepted by its first half."""
+    defined = _tests_defined()
+    assert len(defined) > 1000, (
+        "only %d test names were found under backend/tests — the lookup is "
+        "reading the wrong tree, and every citation would be judged against "
+        "almost nothing" % len(defined))
+    swept = _swept_lines()
+    cited = sum(len(_CITED_TEST.findall(text)) for _rel, _n, text in swept)
+    assert cited > 100, (
+        "only %d test citations were found in the touched files — the "
+        "pattern is not matching what the files spell" % cited)
+    bad = _unresolved_citations(swept, defined)
+    assert not bad, (
+        "a touched file cites a test that does not exist, so the sentence it "
+        "supports reads as pinned and is not:\n" + "\n".join(bad))
+
+    head = "test" + "_every_test_a_touched_file_"
+    gone = "test" + "_every_test_a_touched_file_cites_nothing"
+    assert _unresolved_citations([("probe", 1, "pinned by %s." % gone)], defined), (
+        "a citation of a test that does not exist was accepted")
+    assert not _unresolved_citations(
+        [("probe", 1, "pinned by " + head), ("probe", 2, "# cites_exists.")],
+        defined), "a name wrapped across two comment lines was not joined"
+    assert _unresolved_citations(
+        [("probe", 1, "pinned by " + head), ("probe", 2, "-- cites_nothing.")],
+        defined), "a wrapped name was accepted by its first half alone"
 
 
 def test_no_claim_unknown():
@@ -427,11 +837,25 @@ def test_every_achievement_is_on_the_tier_line_that_pays_it():
     InfoLibrary.cs is the client lane's file and this branch restored it, so
     the article in this tree is still the PREDECESSOR — it lists the ladder
     without the four tournament achievements. It is checked anyway, and
-    against the same table the contract hands the client lane
-    (REKEY_EDITS["economy article"], docs/faq-refresh-client-contract.md):
-    applying that correction to the article must produce 340's ladder exactly.
+    against the same correction the contract hands the client lane
+    (REKEY_EDITS["economy article"], docs/faq-refresh-client-contract.md
+    section 1b): every tier line, as declared, must list exactly 340's members.
     So the two lanes are still held to one list — this one just says which
-    lane owes which half instead of pretending both have landed."""
+    lane owes which half instead of pretending both have landed.
+
+    THE LADDER IS APPLIED WHOLE OR NOT AT ALL, and that is asserted before any
+    comparison. An earlier version applied the correction table to the article
+    in memory and then compared, which is blind to a PARTIAL application:
+    `replace` is a no-op for a step the client lane has already made, so a
+    tree carrying only the 500g append was repaired before it was judged and
+    read as green, with the 300g line left short in the article, in its
+    translations and in the game. So every step is first classified against the
+    article as it stands — applied, or still owed — and a tree holding some of
+    each is the failure. After that NOTHING is applied to the article: an
+    applied ladder is judged on the article's own lines, an owed one on the
+    successor lines the fixture records for it, each tier against 340's
+    (#342/#391 — a test may not supply the value the thing under test is
+    missing and then compare against what it supplied)."""
     overrides = _achievement_overrides()
     names = _achievement_names()
     default = int(re.search(r"^ACHIEVEMENT_GOLD = (\d+)$",
@@ -450,14 +874,55 @@ def test_every_achievement_is_on_the_tier_line_that_pays_it():
     article_src = _read(_INFO_LIBRARY)
     assert _ladder_tiers(article_src), (
         "InfoLibrary.cs no longer carries the gold-tier ladder")
-    for before, after in REKEY_EDITS["economy article"]:
-        article_src = article_src.replace(before, after)
-    corrected_article = _ladder_tiers(article_src)
+
+    # Every step of the ladder correction, classified against the article as
+    # it stands — before anything is applied to it in memory.
+    ladder = REKEY_EDITS["economy article"]
+    assert ladder, "the contract's economy-article correction table is empty"
+    owed = [(b, a) for b, a in ladder if b in article_src and a not in article_src]
+    applied = [(b, a) for b, a in ladder if a in article_src and b not in article_src]
+    assert len(owed) + len(applied) == len(ladder), (
+        "%d of the %d ladder steps match the article neither as owed nor as "
+        "applied — the contract and the article describe different lines"
+        % (len(ladder) - len(owed) - len(applied), len(ladder)))
+    assert not (owed and applied), (
+        "the gold ladder is %d step(s) applied and %d still owed. A ladder "
+        "half-corrected is the state this test exists to catch: the finished "
+        "steps read as done, a check that repaired the rest in memory would "
+        "read them as done too, and the article, its translations and the "
+        "game go on listing a tier line that is short" % (len(applied), len(owed)))
+
+    # Then each tier line is compared with 340's as it is DECLARED, and nothing
+    # is applied to the article to get there. Once the client lane's half has
+    # landed, the article itself is what is judged. While it is still owed, a
+    # tier the correction does not touch is judged on the article, and a tier
+    # it does touch on the successor line the fixture's owed row records. That
+    # row is tied to this table and to the article's predecessor line by
+    # test_a_client_lane_surface_is_recorded_as_owed_not_as_present, and to
+    # the tracked contract by the hygiene test's positive half; the article's
+    # own copy of the tier is never edited here to look like the successor.
+    article = _ladder_tiers(article_src)
     migration = _ladder_tiers(_read(MIG_340))
-    assert corrected_article == migration, (
-        "the in-game article with item 11's correction applied and 340's "
-        "re-keyed source list different tier members — the two lanes would "
-        "ship two different ladders")
+    assert set(article) == set(migration), (
+        "the article prices tiers %s and 340 prices %s — a tier was added or "
+        "removed on one side only" % (sorted(article), sorted(migration)))
+    successors = {}
+    if owed:
+        successors = _ladder_tiers("\n".join(
+            row["text"] for c in claims()
+            for row in c.get("owed_to_client_lane", [])
+            if row["file"] == "plugin/InfoLibrary.cs"
+            and _LADDER_LINE.search(row["text"])))
+        assert len(successors) == len(owed), (
+            "%d ladder steps are owed but the fixture records successor lines "
+            "for %d tiers (%s)" % (len(owed), len(successors), sorted(successors)))
+    for gold in sorted(migration):
+        declared = successors.get(gold, article[gold])
+        assert declared == migration[gold], (
+            "the %dg tier: %s lists %s, 340's re-keyed source lists %s — the "
+            "two lanes would ship two different ladders"
+            % (gold, "the owed successor line" if gold in successors
+               else "the article", sorted(declared), sorted(migration[gold])))
     assert paid == migration, (
         "the code pays %s; the ladder lists %s. Every achievement has to sit "
         "on the line that pays it, or a re-priced key silently keeps its old "
@@ -490,7 +955,7 @@ def test_refund_surfaces_state_the_tournament_exemption():
     # re-checks use make_interval(mins => ...), and all four are places a
     # tournament series must not be selected by a clock.
     fn = None
-    for node in ast.walk(ast.parse(_read(API_MAIN), API_MAIN)):
+    for node in ast.walk(_parsed(API_MAIN)[1]):
         if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.name == "_prune_stale_series"):
             fn = node
@@ -701,6 +1166,113 @@ def test_the_uploader_error_texts_quote_the_limits_they_enforce():
         "whether or not it is written down")
 
 
+_THIS_FILE = os.path.abspath(__file__)
+
+
+def test_the_scoped_residuals_are_stated_where_the_next_reader_meets_them():
+    """A residual this branch chose to carry has to survive a tidy-up.
+
+    The uploader residual is a sentence rather than code, and a sentence with
+    nothing asserting it is deleted by the next person who reads it as waffle.
+    That is exactly the state it was in: its whole SCOPE paragraph could be
+    removed and every assertion in the test carrying it stayed green, so the
+    branch would have shipped saying the client half was swept when it is not
+    (#302 — a claim that cannot be traced to the tree is a finding).
+
+    So the paragraph is pinned from OUTSIDE the test that carries it: this
+    reds when only the SCOPE paragraph goes, while the uploader test goes on
+    asserting the limits themselves."""
+    scope = re.sub(r"\s+", " ", _docstring(
+        _THIS_FILE, "test_the_uploader_error_texts_quote_the_limits_they_enforce"))
+    for sentence in (
+            "SCOPE, and why one half of the pair is missing.",
+            "Only the SERVER's refusal is pinned.",
+            "this branch does not change that file, and nothing here goes red "
+            "for it.",
+            "the file belongs to the client lane and the required change is "
+            "written down for it in docs/faq-refresh-client-contract.md"):
+        assert sentence in scope, (
+            "the uploader test no longer states the scope of what it pins. "
+            "The half it does NOT pin — the client's own refusal message, "
+            "still wrong about its own check — is a residual whether or not "
+            "anybody writes it down, and that paragraph is where the next "
+            "reader meets it. Missing: %r" % sentence[:56])
+
+
+def _hooks_dir():
+    """The hook directory this checkout actually uses.
+
+    A linked worktree's .git is a file pointing at that worktree's gitdir, and
+    hooks live in the COMMON dir rather than there — so the path is asked of
+    git instead of constructed, and a checkout with no hooks is reported as
+    that rather than passing quietly."""
+    proc = _git("rev-parse", "--git-common-dir")
+    if proc.returncode != 0:
+        return None
+    common = (proc.stdout or "").strip()
+    if not common:
+        return None
+    if not os.path.isabs(common):
+        common = os.path.join(REPO, common)
+    hooks = os.path.join(common, "hooks")
+    return hooks if os.path.isdir(hooks) else None
+
+
+def test_the_privacy_oracle_is_the_pre_push_hook():
+    """WHICH hook is authoritative, asked of the hooks rather than remembered.
+
+    The comment above _MENTION used to call the staged pre-commit hook the
+    oracle for the identifier class. It is not, and its own first line says
+    so: it is a fast local catch. The authoritative gate is pre-push, because
+    it is the only one that sees a RANGE — a rebase, a cherry-pick, an amended
+    merge or a squash produces commits with no staged-hook run at all, and a
+    tip that is clean can still carry an identifier in a blob the push makes
+    reachable.
+
+    Hooks are not tracked content, so a clone that has not installed them
+    skips and says so. What is not allowed is this file naming one hook while
+    both hooks sit there declaring the other.
+
+    Both markers are assembled from fragments here. A test that searched for a
+    literal it also contains would find its own source and pass whatever the
+    comment said (#342)."""
+    hooks = _hooks_dir()
+    if hooks is None:
+        pytest.skip("no hooks directory in this checkout, so which hook is "
+                    "authoritative cannot be read from it")
+    pre_push = os.path.join(hooks, "pre-push")
+    pre_commit = os.path.join(hooks, "pre-commit")
+    if not os.path.isfile(pre_push) or not os.path.isfile(pre_commit):
+        pytest.skip("the privacy hooks are not installed in this checkout")
+
+    push_body = _read(pre_push)
+    commit_body = _read(pre_commit)
+
+    assert "authoritative" in push_body.lower(), (
+        "the pre-push hook no longer declares itself the authoritative gate, "
+        "which is what this file's comment says it is")
+    assert "outgoing" in push_body, (
+        "the pre-push hook no longer runs the guard over the outgoing range — "
+        "the range is the only reason it is the authoritative one")
+    assert "NOT the authoritative" in commit_body, (
+        "the pre-commit hook no longer says it is the fast local catch. If it "
+        "has become the gate, this test and the comment above _MENTION are "
+        "both now wrong about which hook to trust")
+    assert "staged" in commit_body, (
+        "the pre-commit hook no longer scans the staged set")
+
+    src = _read(_THIS_FILE)
+    wanted = "THE IDENTIFIER CLASS IS THE PRE-" + "PUSH GUARD'S JOB"
+    wrong = "THE IDENTIFIER CLASS IS THE PRE-" + "COMMIT GUARD'S JOB"
+    assert src.count(wanted) == 1, (
+        "the comment above _MENTION names the authoritative hook %d times, "
+        "expected once" % src.count(wanted))
+    assert wrong not in src, (
+        "the comment above _MENTION is back to naming the staged hook as the "
+        "oracle for the identifier class; a rebased or cherry-picked commit "
+        "is created without that hook running at all")
+
+
 # ── 4. docs/FAQ.md and the migration that posts it cannot drift ──────────────
 
 _SECTION = re.compile(r"^## Message (\d+)[^\n]*$", re.M)
@@ -741,14 +1313,24 @@ SEED_110 = os.path.join(REPO, "backend", "sql", "110_faq_channel_post.sql")
 # #bug-reports", or any bare identifier at all — is invisible to it. So is any
 # name that appears as prose rather than as a destination.
 #
-# THE IDENTIFIER CLASS IS THE PRE-COMMIT GUARD'S JOB, not this test's. That
-# hook is the oracle for "a personal identifier reached a repo artifact", it
-# runs on every commit, and it is what must never be bypassed. What this test
-# adds is narrower and different: 338 REWRITES all six bodies, so every
-# sentence is re-stated whether or not it changed, and "did this file author a
-# new way to reach a person, or state an existing one twice" cannot be answered
-# by reading the diff. This answers that mechanically, over the multiset,
-# against 110's own bodies.
+# THE IDENTIFIER CLASS IS THE PRE-PUSH GUARD'S JOB, not this test's. The
+# pre-push hook is the oracle for "a personal identifier reached a repo
+# artifact": it scans every commit in the range being pushed, together with
+# every blob those commits make reachable, so it still sees the histories a
+# creation-time hook cannot — a rebase or cherry-pick sequencer commit, a
+# fast-forward, an amended merge, a tip that is clean because the identifier
+# was added and removed again on the way. The pre-commit hook runs the same
+# body over the STAGED files only and says so in its own first line: a fast
+# local catch, explicitly not the authoritative gate. An earlier version of
+# this comment named that one, which is the narrower of the two and the one a
+# rebase walks around. test_the_privacy_oracle_is_the_pre_push_hook holds the
+# two to what they declare.
+#
+# What this test adds is narrower and different again: 338 REWRITES all six
+# bodies, so every sentence is re-stated whether or not it changed, and "did
+# this file author a new way to reach a person, or state an existing one
+# twice" cannot be answered by reading the diff. This answers that
+# mechanically, over the multiset, against 110's own bodies.
 #
 # A guard is worth what its refusal costs (#430), and the cost of this one
 # refusing wrongly is a false failure on a legitimate rewording — so it judges
@@ -849,7 +1431,32 @@ def test_338_revision_columns():
 # ── 5. ...and it applies, twice, against a real server ───────────────────────
 
 DSN = os.environ.get("FAQ_TEST_PG_DSN")
-PSQL = os.environ.get("FAQ_TEST_PSQL", r"C:/pg16/pgsql/bin/psql.exe")
+
+
+def _resolve_psql():
+    """The client these tests drive, FOUND rather than assumed.
+
+    This used to fall back to one seat's unpacked install. On any other
+    checkout — a fresh clone, another seat, a CI runner — setting only
+    FAQ_TEST_PG_DSN therefore selected a path that is not there, and every
+    Postgres test below died with FileNotFoundError instead of saying what was
+    missing. A guard whose failure mode is an error about a path nobody
+    configured tells the next reader nothing (#438: acceptance is a positive
+    signal, and so is a refusal that names its own cause).
+
+    So the environment wins, then whatever is on PATH, and nothing else: no
+    path in this file names a seat (the hygiene sweep refuses one), and
+    test_the_psql_client_is_found_not_assumed holds the order. A FAQ_TEST_PSQL
+    that names nothing runnable counts as nothing found. Nothing found means
+    the Postgres tests skip with a reason naming both ways to supply one,
+    rather than erroring."""
+    named = os.environ.get("FAQ_TEST_PSQL")
+    if named:
+        return named if (os.path.isfile(named) or shutil.which(named)) else None
+    return shutil.which("psql")
+
+
+PSQL = _resolve_psql()
 
 # These tests DROP and recreate the tables they exercise. A DSN is a string
 # somebody types, and the cost of typing the wrong one here is a production
@@ -859,8 +1466,46 @@ if DSN and not re.search(r"/[^/?]*test[^/?]*(\?|$)", DSN):
     DSN = None
     _DSN_REASON = ("FAQ_TEST_PG_DSN does not name a *test* database; refusing "
                    "to run the destructive migration checks against it")
+elif DSN and not PSQL:
+    DSN = None
+    _DSN_REASON = ("no psql client found: set FAQ_TEST_PSQL, or put psql on "
+                   "PATH — these tests drive a real client rather than "
+                   "connecting from Python")
 else:
     _DSN_REASON = "FAQ_TEST_PG_DSN unset; live-Postgres migration check"
+
+
+def test_the_psql_client_is_found_not_assumed(monkeypatch, tmp_path):
+    """A checkout with only FAQ_TEST_PG_DSN set finds psql the way a shell
+    would, or says it found none: it never falls back to a path that exists on
+    one seat. The stand-in client is an empty file — found, never run."""
+    monkeypatch.delenv("FAQ_TEST_PSQL", raising=False)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    assumed = _resolve_psql()
+    assert assumed is None, (
+        "with FAQ_TEST_PSQL unset and nothing on PATH a client was still "
+        "chosen (%r) — a path assumed, not found" % assumed)
+
+    name = "psql.exe" if os.name == "nt" else "psql"
+    on_path = tmp_path / name
+    on_path.write_bytes(b"")
+    on_path.chmod(0o755)
+    found = _resolve_psql()
+    assert found and (os.path.normcase(os.path.abspath(found))
+                      == os.path.normcase(str(on_path))), (
+        "the psql on PATH was not the client chosen: %r" % found)
+
+    named = tmp_path / "named" / name
+    named.parent.mkdir()
+    named.write_bytes(b"")
+    named.chmod(0o755)
+    monkeypatch.setenv("FAQ_TEST_PSQL", str(named))
+    assert _resolve_psql() == str(named), "FAQ_TEST_PSQL did not win over PATH"
+
+    monkeypatch.setenv("FAQ_TEST_PSQL", str(tmp_path / "absent" / name))
+    assert _resolve_psql() is None, (
+        "a FAQ_TEST_PSQL naming nothing runnable was accepted, so the tests "
+        "below would die on a missing file instead of skipping with a reason")
 
 # 109's shape, reduced to the columns 338 touches. Built here rather than by
 # running 109 so this test says what it depends on.
@@ -917,7 +1562,7 @@ def _psql_file(path, expect_ok=True):
 def _psql_background(sql, marker):
     """Start a psql that holds a transaction open. `marker` must appear in the
     SQL so _await_session can find this backend in pg_stat_activity."""
-    assert marker in sql or marker in ("pollerhold", "reviewhold")
+    assert marker in sql or marker in ("pollerhold", "reviewhold", _RACE_MARKER)
     tagged = "/* %s */ %s" % (marker, sql)
     return subprocess.Popen(
         [PSQL, "-v", "ON_ERROR_STOP=1", "-q", "-X", "-t", "-A", "-d", DSN,
@@ -1074,9 +1719,31 @@ def test_338_applies_twice():
 
 API_MAIN = os.path.join(REPO, "backend", "api", "main.py")
 
+_PARSED = {}
+
+
+def _parsed(path):
+    """(source, ast.parse of it) for one file, parsed once per CONTENT.
+
+    main.py runs to tens of thousands of lines and one parse of it takes
+    seconds; every lift below used to parse it again, which made the Postgres
+    tests spend most of their time parsing and once put that time inside a
+    race test's timed window. The key is a digest of the text that was just
+    read, never the name or a modification time, so a file that changed on
+    disk — a mutation control, an edit between two runs — is parsed afresh.
+    One tree is kept per path. Callers read the tree and never edit it: the
+    two that remove a decorator do it on a deep copy."""
+    src = _read(path)
+    digest = hashlib.sha256(src.encode("utf-8")).hexdigest()
+    hit = _PARSED.get(path)
+    if hit is None or hit[0] != digest:
+        hit = (digest, src, ast.parse(src, path))
+        _PARSED[path] = hit
+    return hit[1], hit[2]
+
 
 def _lift_sql(func_name, needle):
-    tree = ast.parse(_read(API_MAIN), API_MAIN)
+    tree = _parsed(API_MAIN)[1]
     for node in ast.walk(tree):
         if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.name == func_name):
@@ -1097,7 +1764,7 @@ def _lift_module_str(name):
     placeholder precisely so it exists as ONE literal: a statement assembled
     from fragments at the call site can only be re-assembled here, and a test
     that re-assembles the thing it is checking is checking itself (#391)."""
-    tree = ast.parse(_read(API_MAIN), API_MAIN)
+    tree = _parsed(API_MAIN)[1]
     for node in tree.body:
         if isinstance(node, ast.Assign):
             for t in node.targets:
@@ -1118,8 +1785,7 @@ def _docstring(path, name):
     the one function, never a file-wide substring: discord_bot.py is 12k lines
     and main.py 57k, so a file-wide check would pass on a sentence that had
     moved somewhere it is no longer true (#432)."""
-    src = _read(path)
-    tree = ast.parse(src, path)
+    tree = _parsed(path)[1]
     for node in ast.walk(tree):
         if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.name == name):
@@ -1137,8 +1803,7 @@ def _function_source(path, name):
     about. Scoped to the one function for _docstring's reason (#432): main.py
     is 57k lines, so a file-wide substring would pass on a sentence that had
     moved somewhere it is no longer true."""
-    src = _read(path)
-    tree = ast.parse(src, path)
+    src, tree = _parsed(path)
     for node in ast.walk(tree):
         if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
                 and node.name == name):
@@ -1164,7 +1829,7 @@ def _lift_py(*names):
     import), and a rule that is only re-implemented here is a test agreeing
     with itself (#391). These functions are self-contained, so lifting the
     real definitions and running them is the honest version."""
-    tree = ast.parse(_read(API_MAIN), API_MAIN)
+    tree = _parsed(API_MAIN)[1]
     picked, seen = [], set()
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
@@ -1629,9 +2294,10 @@ def test_a_legacy_ack_records_what_the_hand_out_gave_it():
     assert _state(13) == "1|null|null|posted", _state(13)
 
     _states_at(API_MAIN, "ack_channel_post",
-               "WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot) "
-               "AND THE ROW\nWAS HANDED TO A REVISIONLESS POLLER, the row is "
-               "recorded at WHAT IT WAS\nHANDED.",
+               "WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot), "
+               "NEITHER\nBINDS NOR RELEASES (that bot sends a post id and "
+               "nothing else) AND THE ROW\nWAS HANDED TO A REVISIONLESS POLLER, "
+               "the row is recorded at WHAT IT WAS\nHANDED.",
                "BOTH HALVES ARE REQUIRED, and handed_revisionless is the second.")
 
 
@@ -1819,6 +2485,11 @@ def test_a_refused_ack_records_the_delivery_and_nothing_else():
     # nothing", the next reader re-derives the duplicate this test rules out.
     _states_at(BOT, "poll_channel_posts",
                "A REFUSED ACK STILL RECORDS THE MESSAGE.")
+    # ...and the reply's, which is what tells the caller what a refusal means.
+    # If it goes back to saying a refused ack wrote nothing, it contradicts the
+    # delivery this test has just watched persist.
+    _states_at(API_MAIN, "_channel_post_ack_reply",
+               "IT DOES NOT MEAN NOTHING WAS WRITTEN.")
 
 
 @pytest.mark.skipif(not DSN, reason=_DSN_REASON)
@@ -2130,6 +2801,15 @@ def test_a_live_lease_is_not_voided_by_a_missing_token():
 
     _states_at(API_MAIN, "pending_channel_posts",
                "asking only whether the LEASE is live")
+    # The four routes are the ACK endpoint's claim, and the paragraph at the
+    # top of this test repeats it. Prose that restates a rule without
+    # asserting it is how the rule gets reverted in one file and kept in the
+    # other, so the sentences are pinned where they live (#302/#351). Without
+    # this the reference was decoration: the ack's docstring could say
+    # anything and every assertion here stayed green.
+    _states_at(API_MAIN, "ack_channel_post",
+               "RELEASE, and the whole list of routes",
+               "Everything else is lease expiry")
 
 
 @pytest.mark.skipif(not DSN, reason=_DSN_REASON)
@@ -2294,6 +2974,270 @@ def test_an_ack_releases_the_claim_when_and_only_when_the_row_is_current():
     _psql(_bind(full, _pid(22), rev="2", mid="'66'", token=tok))
     assert _claim(22).startswith(TOKEN_A), (
         "the claim was released while the row was still behind: %s" % _claim(22))
+
+
+# ── The ack's authorization is a condition of the write, not a value ────────
+#
+# These two are the control for the method, and they are deliberately a pair:
+# the first reads the deployed statement and says what shape it has, the second
+# drives two real backends through the interleaving the shape exists for. The
+# first alone would be a spelling check; the second alone would leave the next
+# editor free to re-introduce a derived boolean anywhere the interleaving does
+# not happen to reach.
+
+# The two authorization terms, spelled as they must appear AGAINST THE ROW THE
+# UPDATE IS WRITING. Written out here rather than lifted, because a test that
+# re-derives the thing it checks is checking itself (#391); the counts below
+# are what stops one of the copies drifting (#432).
+_ACK_HOLDS_CLAIM = (
+    "(CAST(:token AS uuid) IS NOT NULL AND p.claimed_token = "
+    "CAST(:token AS uuid) AND p.claimed_at > NOW() - "
+    "make_interval(secs => :lease))")
+_ACK_LEGACY_CALLER = (
+    "(CAST(:token AS uuid) IS NULL AND CAST(:rev AS INTEGER) IS NULL AND NOT "
+    "CAST(:bind AS BOOLEAN) AND NOT CAST(:release AS BOOLEAN) AND "
+    "p.handed_revisionless)")
+
+
+def test_the_ack_decides_authorization_in_the_statement_that_writes():
+    """No authorization value may be computed before the write and used by it.
+
+    The defect this is the control for was not a wrong predicate: it was a
+    RIGHT predicate, evaluated once into a CTE column and then consumed by the
+    UPDATE beneath it. Under READ COMMITTED an UPDATE that meets a row another
+    transaction has changed re-checks its own conditions against the new
+    version — and a boolean already computed is not a condition, so it is not
+    re-checked. A caller whose claim had lapsed was admitted by that frozen
+    value and could clear the claim a second poller had taken.
+
+    So the shape is asserted, not just the behaviour: the row is taken FOR NO
+    KEY UPDATE before anything reads it; every authorization term appears
+    against `p`, the row being written, at each of the sites that depends on
+    it; nothing inside the UPDATE reads a column through the locking CTE; and
+    no derived authorization column exists to be read. The occurrence counts
+    are exact, so a copy that drifts to a different spelling reds here rather
+    than becoming a second rule nobody compares (#432).
+
+    test_an_ack_cannot_clear_a_claim_taken_while_it_was_in_flight is the other
+    half: this one says the statement has the shape, that one says the shape
+    does the work."""
+    sql = re.sub(r"\s+", " ", _ack_sql()).strip()
+
+    assert "FOR NO KEY UPDATE" in sql, (
+        "the ack no longer locks the row before reading it, so everything it "
+        "reads is a snapshot that a concurrent hand-out can invalidate before "
+        "the write lands (#202/#208)")
+    assert "FOR UPDATE" not in sql.replace("FOR NO KEY UPDATE", ""), (
+        "the ack takes a stronger row lock than its own write needs; "
+        "FOR UPDATE conflicts with the FOR KEY SHARE every foreign-key insert "
+        "takes (#202)")
+
+    for name in ("AS holds_claim", "AS legacy_caller", "AS reports_delivery",
+                 "AS target", "target AS ("):
+        assert name not in sql, (
+            "the ack derives %r before the write. That is the round-four "
+            "shape: a value, not a condition, and not re-checked when the "
+            "write meets a row somebody else has changed" % name)
+
+    assert sql.count(_ACK_HOLDS_CLAIM) == 6, (
+        "the holds-claim term appears against the written row %d times, not "
+        "the 6 sites that depend on it (message_id, posted_revision, "
+        "adopt_fingerprint, claimed_token, claimed_at, and the WHERE)"
+        % sql.count(_ACK_HOLDS_CLAIM))
+    assert sql.count(_ACK_LEGACY_CALLER) == 8, (
+        "the legacy-caller term appears against the written row %d times, not "
+        "the 8 sites that depend on it (message_id, posted_revision, "
+        "adopt_fingerprint, the two release arms twice each, and the WHERE)"
+        % sql.count(_ACK_LEGACY_CALLER))
+
+    # The WHERE admits three kinds and no more: the two authorized ones and
+    # the delivery shape, which reads no column at all.
+    where = sql.split("FROM locked k WHERE ")[1].split(" RETURNING ")[0]
+    assert _ACK_HOLDS_CLAIM in where and _ACK_LEGACY_CALLER in where, (
+        "the WHERE of the ack no longer carries both authorization terms, so "
+        "admission is decided somewhere the write does not re-check")
+
+    # Nothing in the write reads the locked CTE except the key it joins on.
+    written = sql.split("), written AS (")[1].split(") SELECT k.id AS id")[0]
+    refs = sorted(set(re.findall(r"k\.[a-z_]+", written)))
+    assert refs == ["k.id"], (
+        "the UPDATE reads %s from the locking CTE. The write is decided "
+        "against the row it writes so that it stays right on its own: a "
+        "column read through `locked` makes the lock the only thing standing "
+        "between the write and a value read before it, which is the "
+        "round-four shape the moment that lock is weakened" % refs)
+
+    _states_at(API_MAIN, "ack_channel_post",
+               "AUTHORIZATION IS DECIDED INSIDE THE STATEMENT THAT WRITES",
+               "RELEASE, and the whole list of routes")
+
+
+_RACE_MARKER = "ackrace"
+_RACE_ROW = """
+INSERT INTO pending_channel_posts (channel_id, content, sort_order,
+                                   posted_at, message_id, posted_revision, revision)
+VALUES ('907', 'the row two pollers want', 77, now(), '700', 1, 2);
+"""
+
+
+def _await_row_lock(marker, timeout=30.0):
+    """Block until the marked backend holds its transaction's own lock.
+
+    Waiting for the backend to be `active` is not enough here: it is active
+    from the BEGIN onwards, and the interleaving this sets up needs the UPDATE
+    to have RUN and not yet committed. A write holds an exclusive lock on its
+    own transaction id for exactly that window, so that is what is waited for
+    — the server's view of the state, never a sleep (#342). The poll's own
+    query must not match the marker or the check answers itself, so the
+    literal is split and re-joined by the server. Bounded (#361)."""
+    head, tail = marker[:4], marker[4:]
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        n = _psql(
+            "SELECT count(*) FROM pg_locks l "
+            "  JOIN pg_stat_activity a ON a.pid = l.pid "
+            " WHERE l.locktype = 'transactionid' AND l.mode = 'ExclusiveLock' "
+            "   AND l.granted AND a.pid <> pg_backend_pid() "
+            "   AND a.query LIKE '%%' || '%s' || '%s' || '%%';"
+            % (head, tail)).stdout.strip()
+        if n and int(n) >= 1:
+            return
+        time.sleep(0.2)
+    raise AssertionError(
+        "the %s transaction never took a row lock within %ss" % (marker, timeout))
+
+
+@pytest.mark.skipif(not DSN, reason=_DSN_REASON)
+def test_an_ack_cannot_clear_a_claim_taken_while_it_was_in_flight():
+    """Two backends, one row, and the ack arriving through the other's lock.
+
+    THE INTERLEAVING, which is the whole test: poller A is handed the row and
+    takes token A. Before A's ack lands, poller B claims the row — its lease
+    had run out, or the hand-out re-took it — in a transaction it has not
+    committed. A's ack then starts, meets the row through B's lock, and
+    finishes after B commits. The question is what A's ack does with a claim
+    that is no longer A's.
+
+    It must record what an unauthorized caller may record — the delivery — and
+    it must leave B's claim exactly where it found it. The round-four
+    statement did not: it read the row at its own snapshot, where the claim was
+    still A's, derived "authorized" there, and the UPDATE beneath consumed that
+    value without re-checking it, so A cleared B's claim while B was rendering
+    and a third poller became eligible for the same row.
+
+    Nothing about this is provable from a single session, and reasoning about
+    it on paper is how the shape got written twice. The elapsed time is
+    asserted for the same reason: if A's statement did not WAIT, the
+    interleaving did not happen and a green result would mean nothing (#342).
+
+    THE STATEMENT IS BOUND BEFORE B STARTS, and only the ack itself is timed.
+    Lifting it parses main.py, which takes seconds on a loaded seat. Round
+    five found this test lifting it INSIDE the window: B committed while the
+    parse ran, A's ack met a row that was already B's and refused correctly
+    on any statement, and the elapsed time, which included the parse, still
+    read as a wait. The round-four statement passed it. So the window now
+    holds nothing but the ack, B is checked to be still open the moment the
+    ack is sent, and the time measured is the ack's own."""
+    _psql(_BASE_TABLE)
+    _psql_file(MIGRATION)
+    _psql("DELETE FROM pending_channel_posts;")
+    _psql(_RACE_ROW)
+    ack = _bind(_ack_sql(), _pid(77), rev="2", mid="'700'",
+                token="'%s'" % TOKEN_A)
+
+    assert _handed_orders(token=TOKEN_A) == ["77"], (
+        "the fixture row was not handed to the first poller: %s" % _claim(77))
+
+    holder = _psql_background(
+        "BEGIN; UPDATE pending_channel_posts SET claimed_at = NOW(), "
+        "claimed_token = '%s' WHERE sort_order = 77; "
+        "SELECT pg_sleep(6); COMMIT;" % TOKEN_B, _RACE_MARKER)
+    try:
+        _await_row_lock(_RACE_MARKER)
+        still_open = holder.poll() is None
+        started = time.time()
+        out = _psql(ack).stdout.strip()
+        waited = time.time() - started
+    finally:
+        holder.wait(timeout=30)
+
+    assert still_open, (
+        "the other transaction had already finished when the ack was sent, "
+        "so the ack never met the row through its lock and this run proves "
+        "nothing about the interleaving")
+    assert waited > 1.0, (
+        "the ack did not wait for the other transaction (%.2fs), so it never "
+        "met the row through another writer's lock and this run proves "
+        "nothing about the interleaving" % waited)
+
+    assert _claim(77).startswith(TOKEN_B), (
+        "the ack of the poller whose claim had been taken released the claim "
+        "the SECOND poller holds. That row is now free while somebody is "
+        "rendering it, and a third poller can be handed it: %s" % _claim(77))
+
+    assert out.endswith("|f"), (
+        "the ack reported itself authorized against a claim it does not "
+        "hold: %s" % out)
+
+    # ...and the one thing it MAY record, it did: the delivery it reported.
+    assert _state(77).endswith("|700|posted"), _state(77)
+    assert _state(77).startswith("1|"), (
+        "the refused ack advanced posted_revision, which only the claim "
+        "holder may do: %s" % _state(77))
+
+
+@pytest.mark.skipif(not DSN, reason=_DSN_REASON)
+def test_a_tokenless_release_is_refused_and_writes_nothing():
+    """The pre-338 call is a post id and nothing else; a release is not it.
+
+    legacy_caller authorizes the old bot by the PAIR — its call shape, and a
+    row whose last hand-out was revisionless — because that bot cannot hold a
+    claim. The shape used to be "no token, no revision, not a bind", which
+    also admitted a tokenless RELEASE: a call that bot cannot make, since it
+    predates the parameter. Admitted, that hand-back wrote the handed_*
+    revision and fingerprint onto a row nothing had rendered and cleared the
+    claim, so a never-delivered row read as rendered and dropped out of the
+    revision-capable poll for good.
+
+    It also kept the ack's WHERE from being safe to read on the statement's
+    snapshot: a hand-back is not a delivery, so its admission rested on
+    handed_revisionless alone, a column a concurrent revisionless hand-out can
+    flip between the snapshot and the lock — and a row the snapshot refuses is
+    never re-checked. Excluding the release puts the old bot's admission back
+    behind the delivery term, which reads no column.
+
+    So the row is handed to a revisionless poller, a tokenless release
+    arrives, and nothing may move: not the delivery columns, not the claim,
+    and the answer is a refusal. The last assertion is the consequence the
+    defect had in the field: the row must still be in the poll that delivers
+    it."""
+    _psql(_BASE_TABLE)
+    _psql_file(MIGRATION)
+    _psql("DELETE FROM pending_channel_posts;")
+    _psql("INSERT INTO pending_channel_posts (channel_id, content, sort_order) "
+          "VALUES ('908', 'a row an old bot was handed', 78);")
+
+    assert _handed_orders(token=TOKEN_A, revisions=False) == ["78"], (
+        "the fixture row was not handed to the revisionless poller: %s"
+        % _claim(78))
+    assert _handed_kind(78) == "t", (
+        "the hand-out did not record a revisionless poller: %s" % _handed_kind(78))
+    state, claim = _state(78), _claim(78)
+    assert state == "null|null|null|unposted", state
+    assert claim.startswith(TOKEN_A + "|1|"), claim
+
+    out = _psql(_bind(_ack_sql(), _pid(78), release="true")).stdout.strip()
+
+    assert out.endswith("|f"), (
+        "a tokenless release was answered as authorized: %s" % out)
+    assert _state(78) == state, (
+        "a tokenless release wrote onto a row nothing rendered: %s -> %s"
+        % (state, _state(78)))
+    assert _claim(78) == claim, (
+        "a tokenless release moved the claim: %s -> %s" % (claim, _claim(78)))
+    assert _handed_orders(token=TOKEN_B, revisions=True, lease=0) == ["78"], (
+        "the never-delivered row is no longer handed to the revision-capable "
+        "poller, so nothing will ever deliver it: %s" % _state(78))
 
 
 @pytest.mark.skipif(not DSN, reason=_DSN_REASON)
@@ -2877,7 +3821,11 @@ import types        # noqa: E402
 _BOT_SRC = os.path.join(REPO, "backend", "discord_bot.py")
 _WANT_FUNC = {"_modcase_parse", "poll_channel_posts", "_channel_post_ack_params",
               "_adopt_channel_post_message", "_release_channel_post_claim"}
-_WANT_ASSIGN = {"MODCASE_MARKER", "_channel_post_sent"}
+# _CHANNEL_POST_MAX_RENDERS is LIFTED, never re-declared here: it is the cap
+# both render paths are bound by, so a test that supplied its own number would
+# be exercising a bot whose cap is not the deployed one (#391).
+_WANT_ASSIGN = {"MODCASE_MARKER", "_channel_post_sent",
+                "_CHANNEL_POST_MAX_RENDERS"}
 
 
 class _Forbidden(Exception):
@@ -3029,7 +3977,7 @@ def _releases(api):
 
 
 def _lift_bot():
-    tree = ast.parse(_read(_BOT_SRC), _BOT_SRC)
+    tree = _parsed(_BOT_SRC)[1]
     picked, seen = [], set()
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -3359,6 +4307,16 @@ def test_the_unambiguous_row_of_a_batch_still_binds():
         "of everything, which is a check that cannot fail (#342)")
     assert [c["post_id"] for c in _acks(api)] == [3, 3], _acks(api)
 
+    # WHERE the decision lives, pinned on BOTH sides of the wire. Round three
+    # moved ambiguity out of the bot and into the hand-out, and the bot kept
+    # no implementation of it to anchor on — so a reader looking for one in
+    # discord_bot.py lands in whatever prose happens to sit at the old line.
+    # These two sentences are the anchor, asserted rather than remembered.
+    _states_at(API_MAIN, "pending_channel_posts",
+               "`ambiguous` IS COMPUTED HERE, NOT IN THE BOT")
+    _states_at(BOT, "_adopt_channel_post_message",
+               "Neither list is the ownership rule")
+
 
 def test_equal_text_in_two_channels_binds_both():
     """Two channels that happen to carry the same sentence are not a
@@ -3483,6 +4441,78 @@ def test_a_fresh_post_corrected_between_send_and_ack_is_edited_not_duplicated():
         {"post_id": 7, "revision": 2, "message_id": str(ch.sent[0].id),
          "claim_token": _TOK},
     ]
+
+
+def test_the_render_cap_is_one_rule_and_both_paths_are_bound_by_it():
+    """One cap, one place — asserted as a property of the source, not hoped for.
+
+    The correction path's comment has said for three rounds that its cap is
+    "the ONLY thing bounding that, deliberately in one place — a second copy
+    would let one of them be lifted while the other held, and the test could
+    not tell". The send path carried the second copy anyway, spelled as
+    control flow: a single `if` admitting exactly one corrective edit, which
+    is the number 2 written as a shape. Nothing named it, so nothing could
+    compare the two, and raising the constant would have moved one path only.
+
+    This is the class sweep the comment implies (#432): the constant is
+    defined once, both loops are bound by that name, and no local cap
+    survives anywhere in the loop."""
+    src = _read(BOT)
+    defined = re.findall(r"^_CHANNEL_POST_MAX_RENDERS = (\d+)$", src, re.M)
+    assert len(defined) == 1, (
+        "_CHANNEL_POST_MAX_RENDERS is defined %d times; a cap with two "
+        "definitions is two caps" % len(defined))
+
+    loop = _function_source(BOT, "poll_channel_posts")
+    bounds = re.findall(r"renders < _CHANNEL_POST_MAX_RENDERS", loop)
+    assert len(bounds) == 2, (
+        "%d of the two render paths are bound by the named cap. The one that "
+        "is not has a cap of its own, and the two can be moved apart without "
+        "anything going red" % len(bounds))
+    assert "max_renders" not in loop, (
+        "a local render cap is back in the loop beside the module constant")
+
+
+def test_the_send_path_stops_at_the_same_cap_and_hands_the_claim_back():
+    """The send path's own chase, bounded and then handed back.
+
+    Send revision 1; the ack comes back stale at revision 2; edit forward;
+    that ack comes back stale at revision 3. Two renders have happened — the
+    send and one edit — so the cap is reached and this tick stops, exactly as
+    the correction path does at the same number. The row is delivered and
+    carries its id, so the next poll edits it rather than sending again.
+
+    THE HAND-BACK IS PURE: no revision is named. The delivery ack already
+    recorded the revision that went out, and naming one here could only repeat
+    it or name a revision nobody rendered. Naming the newer one would mark a
+    text delivered that is not on Discord.
+
+    This is the case the second, unnamed cap used to answer: it stopped at the
+    same count, but by the shape of the code rather than by the constant."""
+    ch = _Channel(555, existing=[])
+    api = _Api([_row(7, 555, "first text", revision=1, posted_revision=None,
+                     posted_at=None)],
+               ack_script=[{"status": "stale", "id": 7, "revision": 2,
+                            "content": "second text"},
+                           {"status": "stale", "id": 7, "revision": 3,
+                            "content": "third text"}])
+    out = []
+    ns = _bot_ns(api, _Bot({555: ch}), out=out)
+    asyncio.run(ns["poll_channel_posts"]())
+
+    assert len(ch.sent) == 1, (
+        "a correction was posted as a second message: %d sends"
+        % len(ch.sent))
+    assert ch.sent[0].content == "second text", (
+        "the send path's chase ended on %r, not on the second text — the one "
+        "render the cap allows after the send" % ch.sent[0].content)
+    assert len(_acks(api)) == 2, (
+        "the send path rendered past the cap: %s" % _acks(api))
+    assert any("still behind" in line for line in out), out
+    assert _releases(api) == [{"post_id": 7, "release": "true",
+                               "claim_token": _TOK}], (
+        "the send path's cap did not hand the claim back as a PURE hand-back: "
+        "%s" % _releases(api))
 
 
 def test_one_batch_never_adopts_the_same_message_for_two_rows():

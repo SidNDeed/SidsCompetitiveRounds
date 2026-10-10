@@ -60,8 +60,9 @@
 -- is a scratch file that does not exist outside the seat that wrote it, so
 -- this comment is the tracked copy of the part that concerns 338 — a header
 -- citing that file would send every other checkout somewhere empty, which is
--- the defect test_no_shipped_file_points_into_the_gitignored_scratch exists
--- for, and which that sweep did not catch here until round 7 widened it.
+-- the defect the touched-file sweep in test_faq_surfaces.py exists for
+-- (test_no_file_this_item_touches_names_a_person_a_local_path_or_the_scratch_tree),
+-- and which that sweep did not catch here until round 7 widened it.
 --
 -- RUN ORDER
 --   1. this file          — the api's pending SELECT names the new columns

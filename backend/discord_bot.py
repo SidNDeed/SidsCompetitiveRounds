@@ -190,7 +190,7 @@ TROPHY_X2_SUFFIX = " (x2)"
 # concrete match IS in hand, render m["deadline_at"] instead of this number.
 ASYNC_DEADLINE_DAYS = 7
 
-# July 28 rank reorganization (Stan's proposal): base-tier floors move to
+# July 28 rank reorganization: base-tier floors move to
 # Intermediate 1500 / Advanced 1675 / Master 1980 (GM stays 2330), sub-tiers
 # widen toward the bottom, and tier I is spelled out on every rank. Must stay
 # in lockstep with main.py's RANK_TIERS (which strips the range suffix).
@@ -1768,7 +1768,7 @@ FAQ_ENTRIES = [
     {
         # Sits immediately ABOVE how_ffa so a rating-specific FFA question gets
         # the rating answer, not the 12-line generic FFA wall ("right topic,
-        # wrong answer" — Snail's placement question). Still below
+        # wrong answer", as a player's placement question found). Still below
         # bug_report/tournaments like the rest of the broad FFA cluster.
         "key": "ffa_rating",
         "title": "FFA rating & placement",
@@ -3343,7 +3343,7 @@ async def chat_ws_listener():
 # Twitch: the VM overlay keeps its own native IRC read, so bridged twitch
 # copies are dropped there by source. YouTube: this bridge is the ONLY reader
 # anywhere — the VM overlay renders the bridged copies it receives over the
-# SCR websocket (ai-collab/streaming-design-addendum-chat.md).
+# SCR websocket (the streaming design's chat addendum).
 STREAM_BRIDGE_TWITCH_CHANNEL = os.getenv("STREAM_BRIDGE_TWITCH_CHANNEL", "sidscompetitiverounds").lower().lstrip("#")
 # The prefix (`:login!login@login.tmi...`) carries the sender's LOGIN — the
 # stable lowercase handle, captured for mute identity (design S1). The tags
@@ -3515,7 +3515,7 @@ async def youtube_chat_bridge():
     (video id via poll_stream_posts). Polls the OFFICIAL YouTube Data API —
     the previous chat_downloader reader was deleted, not bypassed (#310):
     0.2.8 (its latest release, 2023) is parse-broken against current YouTube
-    page variants, reproduced in ai-collab/streaming-design-addendum-chat.md.
+    page variants, reproduced when the streaming chat addendum was designed.
     Missing creds degrade to a one-time log; Twitch is unaffected. Replays
     after a re-attach are harmless — the server's native-id guard drops them.
 
@@ -6279,7 +6279,7 @@ def _render_game_detail_png_locked(game):
                        None, 3.0, None, "time (M:SS)"))
     damage_taken_series = []
     blocks_series = []
-    # Bug 181 (Stan): v2 block pairs are activated:successful — the honest
+    # Bug 181: v2 block pairs are activated:successful — the honest
     # block-rate pairing. Legacy rows keep the damage-taken labels; the
     # format is per-row, so one mixed game labels by majority.
     _blk_v2_votes = 0
@@ -7123,7 +7123,7 @@ async def log_ffa_match_result(guild, m):
     for p in sorted(players, key=lambda q: q.get("placement", 99)):
         rc = p.get("rating_change")
         rc_s = "" if rc is None else (f" (+{rc:.1f})" if rc > 0 else f" ({rc:.1f})")
-        # Bug 178 (Stan): absolute before→after, like the 1v1/2v2 posts.
+        # Bug 178: absolute before→after, like the 1v1/2v2 posts.
         # Match-time stamps from the row, so later games can't rewrite them.
         rb, ra = p.get("rating_before"), p.get("rating_after")
         ba_s = f" {rb:.0f}→{ra:.0f}" if (rb is not None and ra is not None) else ""
@@ -7154,7 +7154,7 @@ async def log_ffa_match_result(guild, m):
     _settings_line = _ffa_settings_summary(m.get("settings"))
     if _settings_line:
         embed.add_field(name="Settings", value=_settings_line, inline=False)
-    # Bug 179 (Stan): carry the /game code so nobody has to open the game.
+    # Bug 179: carry the /game code so nobody has to open the game.
     _code = str(m.get("match_id") or "").replace("-", "")[:12].upper()
     _foot = f"{dur // 60}m{dur % 60:02d}s" if dur else ""
     if _code:
@@ -7541,7 +7541,7 @@ async def log_team_series_result(guild, s):
     _rules_line = _rules_summary(s.get("rules"))
     if _rules_line:
         embed.add_field(name="Rules", value=_rules_line, inline=False)
-    # Bug 179 (Stan): per-game /game codes in the footer.
+    # Bug 179: per-game /game codes in the footer.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]
     if _codes:
         embed.set_footer(text=" · ".join(f"/game {c}" for c in _codes))
@@ -7648,7 +7648,7 @@ async def log_series_result(guild, s):
     _rules_line = _rules_summary(s.get("rules"))
     if _rules_line:
         embed.add_field(name="Rules", value=_rules_line, inline=False)
-    # Bug 179 (Stan): the per-game /game codes, so nobody has to open the
+    # Bug 179: the per-game /game codes, so nobody has to open the
     # game to inspect a result. Server sends them oldest-first.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]
     if _codes:
@@ -8924,6 +8924,14 @@ async def poll_pc_events():
         _pc_face_tries.clear()        # bounded the same way; a clear only grants more tries
 
 
+# How many times ONE tick may put text on Discord for ONE row: the send or
+# first edit, plus one correction that landed while it was doing so. Module
+# level and used by both render paths, because the cap is one rule: a copy of
+# it — a literal, or an `if` that admits exactly one more render — can be
+# lifted while the other holds, and nothing goes red to say the two disagree.
+_CHANNEL_POST_MAX_RENDERS = 2
+
+
 @tasks.loop(seconds=30)
 async def poll_channel_posts():
     """Generic announce queue (v1.30): the API's pending_channel_posts table
@@ -8998,12 +9006,24 @@ async def poll_channel_posts():
     correction rather than as a send.
 
     RELEASING: this loop hands a row back when it DECIDES not to render it
-    (nothing to adopt, the message is gone, the render cap) — a decision made
-    while the api is demonstrably answering. ANYTHING THAT IS NOT A DECISION
-    KEEPS THE CLAIM: an ack or a bind the api did not answer, a send or an edit
-    that raised, a tick that died. None of those can say what reached Discord,
-    so the row stays held until the 120 s lease expires rather than being
-    offered to a second poller that knows even less (#276).
+    (nothing to adopt, the message is gone, the render cap on either path) — a
+    decision made while the api is demonstrably answering.
+    ANYTHING THAT IS NOT A DECISION KEEPS THE CLAIM: an ack or a bind the api
+    did not answer, a send or an edit that raised, a tick that died. None of
+    those can say what reached Discord, so the row stays held until the 120 s
+    lease expires rather than being offered to a second poller that knows even
+    less (#276).
+
+    EVERY ONE OF THOSE HAND-BACKS PRESENTS THIS TICK'S TOKEN, and the api
+    decides against the row as it stands: a hand-back whose lease has lapsed,
+    or whose row a second poller now holds, releases nothing and is answered
+    "not_claimant". So this loop cannot free a claim that is no longer its own,
+    whichever of the release sites it reaches — that is a property of the ack
+    statement, not of the care taken at each call here.
+
+    BOTH RENDER PATHS SHARE ONE CAP, _CHANNEL_POST_MAX_RENDERS. The correction
+    path loops under it; the send path counts the send itself as the first
+    render and edits forward under the same number.
 
     ORDER WITHIN A CORRECTION: adopt, then make the id durable (bind_only),
     then edit, then ack the revision THAT WAS RENDERED. The edit is what
@@ -9130,13 +9150,16 @@ async def poll_channel_posts():
                 # allowed to go round again — no other poller can be handed the
                 # row while this one is still inside it.
                 #
-                # max_renders is the ONLY thing bounding that, deliberately in
-                # one place — a second copy of the cap would let one of them be
-                # lifted while the other held, and the test could not tell.
-                # Without it this is an unbounded chase after a writer the loop
-                # does not control (#361), starving every row behind it; with
-                # it, a third correction inside one tick simply waits.
-                max_renders = 2
+                # _CHANNEL_POST_MAX_RENDERS is the ONLY thing bounding that,
+                # deliberately in one place — a second copy of the cap would
+                # let one of them be lifted while the other held, and the test
+                # could not tell. Without it this is an unbounded chase after a
+                # writer the loop does not control (#361), starving every row
+                # behind it; with it, a third correction inside one tick
+                # simply waits. The SEND path below renders under the same
+                # constant: it used to bound its own corrective edit by having
+                # exactly one `if`, which was the second copy this comment
+                # forbids, spelled as control flow instead of as a number.
                 renders = 0
                 # The revision of the text that LAST went on Discord, kept
                 # separately from `revision` because a stale answer moves
@@ -9145,7 +9168,7 @@ async def poll_channel_posts():
                 # nobody displayed, which is the whole defect this bus exists
                 # to avoid.
                 rendered = None
-                while renders < max_renders:
+                while renders < _CHANNEL_POST_MAX_RENDERS:
                     renders += 1
                     rendered = revision
                     await msg.edit(content=content[:2000],
@@ -9217,8 +9240,18 @@ async def poll_channel_posts():
                                      p["id"], revision,
                                      remembered if isinstance(remembered, int) else None,
                                      claim_token=token))
-            if (ack and ack.get("status") == "stale"
-                    and msg is not None and isinstance(remembered, int)):
+            # THE SEND IS THIS TICK'S FIRST RENDER, so the corrective edits
+            # below run under the SAME cap the correction path uses, counted
+            # from one. This used to be a single `if`, which bounded the send
+            # path at two renders by the shape of the code rather than by the
+            # constant — a second copy of the cap, and the kind that cannot be
+            # read off beside the first (#432: the flag named one line, the
+            # defect is the class). Raising or lowering the constant now moves
+            # both paths together, and neither can be lifted alone.
+            renders = 1
+            while (renders < _CHANNEL_POST_MAX_RENDERS
+                   and ack and ack.get("status") == "stale"
+                   and msg is not None and isinstance(remembered, int)):
                 # The row was corrected between this send and its ack. The api
                 # recorded the revision that WAS sent — so nothing reads as
                 # delivered that is not — and handed back the newer text. The
@@ -9227,15 +9260,18 @@ async def poll_channel_posts():
                 # failure here just leaves a pending row with posted_at set,
                 # which the correction path picks up next tick without sending.
                 _, newer = _modcase_parse(ack.get("content") or "")
-                if newer and ack.get("revision"):
-                    newer_rev = ack["revision"]
-                    await msg.edit(content=newer[:2000],
-                                   allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
-                    print(f"[CHANNEL-POST] {p['id']} was corrected mid-send — edited to rev {newer_rev}")
-                    ack = await api_post("/internal/channel-posts/ack",
-                                         params=_channel_post_ack_params(
-                                             p["id"], newer_rev, remembered,
-                                             claim_token=token))
+                if not newer or not ack.get("revision"):
+                    break   # a stale answer that carries no newer text is not
+                            # actionable; the next tick re-reads the row
+                newer_rev = ack["revision"]
+                renders += 1
+                await msg.edit(content=newer[:2000],
+                               allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+                print(f"[CHANNEL-POST] {p['id']} was corrected mid-send — edited to rev {newer_rev}")
+                ack = await api_post("/internal/channel-posts/ack",
+                                     params=_channel_post_ack_params(
+                                         p["id"], newer_rev, remembered,
+                                         claim_token=token))
             if ack and ack.get("status") == "stale":
                 print(f"[CHANNEL-POST] {p['id']} delivered but still behind — correction next tick")
                 # Same decision as the correction path's cap: this tick has
@@ -9598,7 +9634,7 @@ async def _ack_anticheat_flag(flag_id: str, evidence_revision: int) -> bool:
 async def poll_chat_catchup():
     """Backfill any ingame chat messages the WS broadcast missed.
 
-    Background: lopidav reported that his ingame messages persisted to the DB
+    Background: a player reported that their in-game messages persisted to the DB
     (so the server received them on the WS) but never reached Discord — the
     bot's WS subscription appeared healthy yet only some senders' messages
     came through. Rather than chase the broadcast bug, we drain the

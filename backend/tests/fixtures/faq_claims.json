@@ -167,10 +167,13 @@
         {
           "file": "backend/discord_bot.py",
           "text": "the harder ones pay 300g, 500g or 1000g"
-        },
+        }
+      ],
+      "owed_to_client_lane": [
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep"
+          "text": "- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount, Sync Champion, Async Champion.",
+          "replaces": "- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount."
         }
       ],
       "verdict": "verified"
@@ -202,10 +205,13 @@
         {
           "file": "backend/discord_bot.py",
           "text": "the harder ones pay 300g, 500g or 1000g"
-        },
+        }
+      ],
+      "owed_to_client_lane": [
         {
           "file": "plugin/InfoLibrary.cs",
-          "text": "- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless"
+          "text": "- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman, Sync Finalist, Async Finalist.",
+          "replaces": "- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman."
         }
       ],
       "verdict": "verified"
