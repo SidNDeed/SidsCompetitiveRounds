@@ -21,7 +21,13 @@ Required behaviour, each a named test:
       from a success;
   Q5  a failed or unanswered request changes nothing on screen and reads the
       collection and balance back (PcQuickShardRules.ReadBackAfter, executed
-      in the client rules harness), the given-up latch included;
+      in the client rules harness), the given-up latch included; and (fix
+      pass 4, finding 7) that balance read-back, asked while a /pc/me read
+      is already on the wire, is remembered and sent again once that read
+      lands, whose answer never answers it (PcReadDemand; the overlap is
+      EXECUTED by the harness, MeDemandCases, and test_client_rules_harness
+      requires each overlap case to pass by name; gate q5 pins that
+      FetchPcMe runs it);
   Q6  one shard is ONE request: the route is called once per confirmed click,
       never in a loop, never retried by itself;
   Q7  the shard writes only card rows, the shard balance and the key's row:
@@ -208,6 +214,21 @@ def gate_q4_the_balance_and_the_stamp_come_only_from_an_answer(s):
 
 
 def gate_q5_a_failure_reads_back_by_the_rule(s):
+    """A failed or unanswered strip shard reads the collection and the
+    balance back by the rule. Fix pass 4, finding 7: the balance read-back
+    is DEMAND. A /pc/me read already on the wire when it is asked (the tab's
+    30 s read) was dispatched before the shard, and when the shard committed
+    with no admitted answer nothing moved the answer fence, so that read
+    lands the balance from before the commit. FetchPcMe remembers a forced
+    ask made while a read flies (PcReadDemand, bound to the generation) and
+    sends a fresh read once that read lands; the older answer never answers
+    it, and an ask with no read on the wire is sent at once as before. The
+    overlap is EXECUTED by the harness (PcQuickShardRules.MeDemandCases: the
+    30 s read in flight, the shard committed with no admitted answer, the
+    read-back asked, the older read landing, the fresh read landing with the
+    committed balance, and the 59fcf3f6 control), and test_client_rules_
+    harness requires each overlap case to pass by name; this pins that the
+    client runs that path."""
     ui = s["ui"]
     fail = _code(_member(ui, "private static void FailShard("))
     quick = fail[:_at(fail, "switch (code)", "FailShard lost its switch")]
@@ -218,6 +239,48 @@ def gate_q5_a_failure_reads_back_by_the_rule(s):
     tick = _code(_member(ui, "internal static void MaybeTick("))
     assert 'if (PcQuickShardRules.ReadBackAfter("given_up")) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }' in tick, (
         "a strip shard given up does not read back")
+    # Fix pass 4, finding 7: the balance those read-backs ask for, while a
+    # /pc/me read is on the wire, is remembered and read again after it.
+    api = s["api"]
+    what = "a forced balance read asked while one is in flight is dropped"
+    me = _code(_member(api, "public static void FetchPcMe("))
+    busy = _at(me, "if (pcMeInFlight)", what)
+    ask = _at(me, "if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);", what)
+    refused = _at(me, 'callback?.Invoke(false, "in-flight");', what)
+    num = _at(me, "int read = PcMeDemand.Dispatched();", what)
+    start = _at(me, "Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>", what)
+    assert busy < ask < refused < num < start, what
+    demand = _member(_code(s["rules"]), "internal void Demand(string who, int gen)")
+    assert "open = true; openAt = dispatched; openGen = gen; openFor = who;" in demand, what
+    what = "the older read answers the balance demand"
+    cb = me[start:]
+    free = _at(cb, "pcMeInFlight = false;", what)
+    landed = _at(cb, "string again = PcMeDemand.Landed(read, _pcCacheEpoch);", what)
+    stale = _at(cb, "if (epoch != _pcCacheEpoch)", what)
+    again1 = _at(cb, "PcMeReadAgain(again);", what)
+    ret1 = again1 + _at(cb[again1:], "return;", what)
+    fenced = _at(cb, "if (ok && !PcAnswerFence.Admits(fence))", what)
+    ret2 = fenced + _at(cb[fenced:], "return;", what)
+    again2 = ret2 + _at(cb[ret2:], "PcMeReadAgain(again);", what)
+    land = _at(cb, "CachedPcMe = me;", what)
+    assert free < landed < stale < again1 < ret1 < fenced < ret2 < again2 < land, what
+    assert cb.count("PcMeReadAgain(again);") == 2 and me.count("PcMeDemand.") == 3, what
+    assert "Plugin.Instance.StartCoroutine(RefetchPcMeNextFrame(steamId, _pcCacheEpoch));" in _code(
+        _member(api, "private static void PcMeReadAgain(")), what
+    rule = _member(_code(s["rules"]), "internal string Landed(int read, int gen)")
+    assert "bool again = openGen == gen && read <= openAt;" in rule, what
+    what = "the balance demand's read is not bound to its generation"
+    nxt = _code(_member(api, "private static IEnumerator RefetchPcMeNextFrame("))
+    wait = _at(nxt, "yield return null;", what)
+    gen = _at(nxt, "if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))", what)
+    busy = _at(nxt, "if (pcMeInFlight)", what)
+    fetch = _at(nxt, "FetchPcMe(steamId, true);", what)
+    assert wait < gen < busy < fetch and nxt.count("yield break;") == 2, what
+    assert "PcMeDemand.Clear();" in _code(_member(api, "private static void ReleasePcReadLatches(")), (
+        "a balance demand outlives its identity")
+    assert _code(api).count("PcMeDemand.") == 4, "a balance demand has a writer outside FetchPcMe and the identity edge"
+    assert "MeDemandCases(r);" in _member(_code(s["rules"]), "internal static SelfTestResult SelfTest("), (
+        "the balance demand's overlap is not executed")
 
 
 def gate_q6_one_request_per_shard(s):
@@ -578,6 +641,45 @@ MUTATIONS = [
      "{ }",
      'if (PcQuickShardRules.ReadBackAfter("given_up")) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }  ',
      "a strip shard given up does not read back"),
+    # Fix pass 4, finding 7: the balance demand made while a /pc/me read flies.
+    ("Q5c", gate_q5_a_failure_reads_back_by_the_rule, "api",
+     "                if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);\n",
+     "",
+     "                if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);   // remembered\n",
+     "a forced balance read asked while one is in flight is dropped"),
+    ("Q5d", gate_q5_a_failure_reads_back_by_the_rule, "rules",
+     "            open = true; openAt = dispatched; openGen = gen; openFor = who;",
+     "            openAt = dispatched; openGen = gen; openFor = who;",
+     "            open = true; openAt = dispatched; openGen = gen; openFor = who;   // the latch",
+     "a forced balance read asked while one is in flight is dropped"),
+    ("Q5e", gate_q5_a_failure_reads_back_by_the_rule, "api",
+     "                PcMeReadAgain(again);   // fix pass 4, finding 7: this answer lands, then the demand's own read goes\n",
+     "",
+     "                PcMeReadAgain(again);   // the demand's own read\n",
+     "the older read answers the balance demand"),
+    ("Q5f", gate_q5_a_failure_reads_back_by_the_rule, "rules",
+     "            bool again = openGen == gen && read <= openAt;",
+     "            bool again = openGen == gen && read > openAt;",
+     "            bool again = openGen == gen && read <= openAt;   // an older read never answers it",
+     "the older read answers the balance demand"),
+    ("Q5g", gate_q5_a_failure_reads_back_by_the_rule, "api",
+     "            if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))\n            {\n"
+     "                Plugin.Log.LogInfo(\"[PC] me deferred re-read dropped",
+     "            if (false)\n            {\n"
+     "                Plugin.Log.LogInfo(\"[PC] me deferred re-read dropped",
+     "            if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))   // this generation's\n            {\n"
+     "                Plugin.Log.LogInfo(\"[PC] me deferred re-read dropped",
+     "the balance demand's read is not bound to its generation"),
+    ("Q5h", gate_q5_a_failure_reads_back_by_the_rule, "api",
+     "            PcMeDemand.Clear();\n",
+     "",
+     "            PcMeDemand.Clear();   // released\n",
+     "a balance demand outlives its identity"),
+    ("Q5i", gate_q5_a_failure_reads_back_by_the_rule, "rules",
+     "            MeDemandCases(r);\n",
+     "",
+     "            MeDemandCases(r);   // executed\n",
+     "the balance demand's overlap is not executed"),
     ("Q6a", gate_q6_one_request_per_shard, "ui",
      "            SendShard(id, key, ids, null, p.print_id);",
      "            foreach (var x in ids) SendShard(id, key, new List<string> { x }, null, p.print_id);",

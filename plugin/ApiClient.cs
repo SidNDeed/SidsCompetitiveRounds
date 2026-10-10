@@ -4707,6 +4707,13 @@ namespace CompetitiveRounds
         /// before that dispatch whose print the read holds, so a print traded
         /// away and back returns to the pull tab's walks.</summary>
         internal static readonly PcShardTombstones PcShardGone = new PcShardTombstones();
+        /// <summary>Item 18 fix pass 4, finding 7: a forced /pc/me read asked
+        /// for while one is already on the wire (PcReadDemand). FetchPcMe
+        /// remembers it, bound to the identity generation it was asked in,
+        /// and once the read on the wire lands a fresh read is sent: that
+        /// older answer never answers it. ReleasePcReadLatches releases it at
+        /// an identity or consent edge.</summary>
+        internal static readonly PcReadDemand PcMeDemand = new PcReadDemand();
         // A read the fence dropped is owed (with the callers that waited on
         // it) until PcSendOwedReads sends it again; an identity edge clears it.
         private static bool pcMeReadOwed, pcCollReadOwed;
@@ -4764,19 +4771,44 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
             if (!force && Time.realtimeSinceStartup - pcMeAttemptAt < 10f) { callback?.Invoke(CachedPcMe != null, null); return; }
-            if (pcMeInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            if (pcMeInFlight)
+            {
+                // Fix pass 4, finding 7: a forced read is DEMAND (a failed,
+                // refused or unanswered shard's balance read-back among
+                // them), and the read already on the wire (the tab's 30 s
+                // read, for one) was dispatched before whatever made the
+                // caller ask. When a shard committed with no answer this
+                // client admitted, nothing moved the answer fence, so that
+                // older read lands and installs the balance from before the
+                // commit. The demand is remembered (PcMeDemand, bound to this
+                // generation), and a fresh read is sent once the older one
+                // lands.
+                if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);
+                callback?.Invoke(false, "in-flight");
+                return;
+            }
             pcMeInFlight = true; pcMeAttemptAt = Time.realtimeSinceStartup;
             float dispatched = pcMeAttemptAt;
             string url = PcUrl("me", steamId, $"pcread:{steamId}:me:-", null);
             int epoch = _pcCacheEpoch;
             int fence = PcAnswerFence.Stamp();
+            int read = PcMeDemand.Dispatched();   // fix pass 4, finding 7: which demand this read can answer
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 pcMeInFlight = false;
+                // Fix pass 4, finding 7: whatever this answer is, a demand
+                // made while it was on the wire is closed here. This read was
+                // dispatched before that demand, so it never answers it; a
+                // fresh read is sent the next frame (PcMeReadAgain) unless
+                // the fence drops this answer, whose owed read is dispatched
+                // later and answers it. A demand of another generation is
+                // dropped.
+                string again = PcMeDemand.Landed(read, _pcCacheEpoch);
                 if (epoch != _pcCacheEpoch)
                 {
                     // dispatched for a previous identity: never repaint the cache (c4)
                     Plugin.Log.LogInfo("[PC] me answer dropped: identity changed");
+                    PcMeReadAgain(again);   // a demand the current identity made while this one flew
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
                     return;
                 }
@@ -4788,11 +4820,14 @@ namespace CompetitiveRounds
                     // is OWED and sent again by PcSendOwedReads once no shard
                     // or discard is out (never mid-run: a re-read per discard
                     // answer is the request shape C2 removed). The caller
-                    // hears that read.
+                    // hears that read. That read, dispatched later, also
+                    // answers a demand made while this one flew (fix pass 4,
+                    // finding 7), so no second read is sent for it.
                     Plugin.Log.LogInfo("[PC] me answer dropped: a confirmed write landed while it was in flight; read owed");
                     pcMeReadOwed = true; if (callback != null) pcMeOwedCallback += callback;
                     return;
                 }
+                PcMeReadAgain(again);   // fix pass 4, finding 7: this answer lands, then the demand's own read goes
                 if (ok)
                 {
                     var me = ParsePcMe(resp);
@@ -4915,6 +4950,38 @@ namespace CompetitiveRounds
                 yield break;
             }
             FetchPcCollection(steamId, true);
+        }
+
+        /// <summary>Fix pass 4, finding 7: the fresh /pc/me read that a
+        /// demand made while a read was on the wire asks for, once that read
+        /// has landed (PcMeDemand.Landed named the identity), sent the next
+        /// frame. Null: nothing was demanded.</summary>
+        private static void PcMeReadAgain(string steamId)
+        {
+            if (steamId == null) return;
+            try { Plugin.Instance.StartCoroutine(RefetchPcMeNextFrame(steamId, _pcCacheEpoch)); } catch { }
+        }
+
+        /// <summary>Fix pass 4, finding 7: the next-frame /pc/me re-read,
+        /// bound to the Player Cards generation that scheduled it (TC-M2, as
+        /// RefetchCollectionNextFrame): an identity or consent edge before
+        /// the frame comes round drops it. A read on the wire by then was
+        /// sent after the older answer landed, so after the demand: it
+        /// answers the demand, and no second read is sent.</summary>
+        private static IEnumerator RefetchPcMeNextFrame(string steamId, int genAtSchedule)
+        {
+            yield return null;                       // let the older answer commit first
+            if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))
+            {
+                Plugin.Log.LogInfo("[PC] me deferred re-read dropped: identity changed gen_at_schedule=" + genAtSchedule + " gen_now=" + _pcCacheEpoch);
+                yield break;
+            }
+            if (pcMeInFlight)
+            {
+                Plugin.Log.LogInfo("[PC] me deferred re-read not sent: a read sent after the demand is on the wire");
+                yield break;
+            }
+            FetchPcMe(steamId, true);
         }
 
         /// <summary>Buy and open a pack. The caller persists its intent (nonce,
@@ -5219,6 +5286,8 @@ namespace CompetitiveRounds
             pcCollOfInFlight = false;
             // fix pass 2, finding 1: a read owed to the previous identity is not sent
             pcMeReadOwed = false; pcCollReadOwed = false; pcMeOwedCallback = null; pcCollOwedCallback = null;
+            // fix pass 4, finding 7: nor a balance read the previous identity demanded
+            PcMeDemand.Clear();
         }
 
         /// <summary>GET /pc/trades?view=summary, HMAC over

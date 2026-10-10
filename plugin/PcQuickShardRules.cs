@@ -314,7 +314,282 @@ namespace CompetitiveRounds
             TombstoneCases(r);
             DiscardLateCases(r);
             SettingsLateCases(r);
+            MeDemandCases(r);
             return r;
+        }
+
+        // -- fix pass 4, finding 7: a balance read asked while one flies -----
+
+        /// <summary>ApiClient's /pc/me read path, step for step, over the
+        /// classes it runs (PcReadDemand, PcCacheFence), the server's balance
+        /// a number and every step one tick of a clock. Ask is FetchPcMe(id,
+        /// true). Serve is the server reading the balance for the read on the
+        /// wire, so a snapshot can predate whatever happens while that read
+        /// flies (Land serves it if nothing did). Land is the answer landing
+        /// (ok false: a failed answer). Frame is the next frame: the deferred
+        /// re-read (RefetchPcMeNextFrame), then the owed read
+        /// (PcSendOwedReads; no shard or discard is out). Edge is an identity
+        /// or consent edge (ReleasePcReadLatches; the read latch stays until
+        /// the read on the wire lands, as FetchPcMe's landing clears it).
+        /// latch false is the NEGATIVE CONTROL: FetchPcMe as 59fcf3f6 wrote
+        /// it, which answered a forced ask made while a read flew "in-flight"
+        /// and remembered nothing. Never called by anything that
+        /// sends.</summary>
+        private sealed class MeReadPath
+        {
+            private readonly bool latch;
+            private readonly PcReadDemand demand = new PcReadDemand();
+            private readonly PcCacheFence fence = new PcCacheFence();
+            internal int Server = 100, Cache = 100, CacheAt, Clock, Sent, Drops, Gen = 1;
+            internal bool InFlight, Owed;
+            internal string Deferred;          // the identity a deferred re-read is for
+            private int deferredGen, flyRead, flyStamp, flyGen, snap, snapAt;
+            private bool served;
+
+            internal MeReadPath(bool latch) { this.latch = latch; }
+
+            internal bool DemandOpen { get { return demand.Open; } }
+
+            internal void Ask(string who)
+            {
+                Clock++;
+                if (InFlight) { if (latch) demand.Demand(who, Gen); return; }
+                InFlight = true; served = false; Sent++;
+                flyGen = Gen; flyStamp = fence.Stamp(); flyRead = demand.Dispatched();
+            }
+
+            internal void Serve()
+            {
+                Clock++;
+                if (InFlight && !served) { served = true; snap = Server; snapAt = Clock; }
+            }
+
+            /// <summary>A shard commits on the server; no answer of it is
+            /// admitted here, so nothing moves the fence.</summary>
+            internal void CommitUnanswered(int d) { Clock++; Server += d; }
+
+            /// <summary>A shard's or a discard's answer is admitted: its
+            /// balance installed, the fence moved.</summary>
+            internal void ConfirmedWrite(int d) { Clock++; Server += d; Cache = Server; CacheAt = Clock; fence.Wrote(); }
+
+            internal void Land(bool ok)
+            {
+                if (!InFlight) return;
+                if (!served) Serve();
+                Clock++;
+                InFlight = false;
+                string again = demand.Landed(flyRead, Gen);
+                if (flyGen != Gen) { Defer(again); return; }
+                if (ok && !fence.Admits(flyStamp)) { Owed = true; Drops++; return; }
+                Defer(again);
+                if (ok) { Cache = snap; CacheAt = snapAt; }
+            }
+
+            private void Defer(string who)
+            {
+                if (who != null) { Deferred = who; deferredGen = Gen; }
+            }
+
+            internal void Frame()
+            {
+                Clock++;
+                if (Deferred != null)
+                {
+                    string who = Deferred; Deferred = null;
+                    if (deferredGen == Gen && !InFlight) Ask(who);
+                }
+                if (Owed && !InFlight) { Owed = false; Ask("me"); }
+            }
+
+            internal void Edge() { Clock++; Gen++; demand.Clear(); Owed = false; Cache = 0; CacheAt = Clock; }
+        }
+
+        /// <summary>The overlap round 4 named (finding 7). The tab's 30 s
+        /// read is dispatched and served at 100. A strip shard commits on the
+        /// server (115) and its answer is never admitted (lost, then given up
+        /// at 25 s), so nothing moves the fence. The give-up's balance
+        /// read-back, FetchPcMe(id, true), is asked while the 30 s read still
+        /// flies. That older read lands (olderOk false: it fails), then the
+        /// next frame, and the read it sends lands.</summary>
+        private static void MeOverlap(bool latch, bool olderOk, out int afterOlder, out bool deferred, out int balance, out int sent)
+        {
+            var m = new MeReadPath(latch);
+            m.Ask("me");
+            m.Serve();
+            m.CommitUnanswered(15);
+            m.Ask("me");
+            m.Land(olderOk);
+            afterOlder = m.Cache; deferred = m.Deferred != null;
+            m.Frame();
+            m.Land(true);
+            m.Frame();
+            balance = m.Cache; sent = m.Sent;
+        }
+
+        /// <summary>The same read-back asked with no read on the wire.</summary>
+        private static void MeNoFlight(bool latch, out int balance, out int sent, out bool opened)
+        {
+            var m = new MeReadPath(latch);
+            m.CommitUnanswered(15);
+            m.Ask("me");
+            opened = m.DemandOpen;
+            m.Land(true);
+            m.Frame();
+            balance = m.Cache; sent = m.Sent;
+        }
+
+        /// <summary>The overlap, with a discard's answer admitted (+20, the
+        /// fence moved) while the older read flies: that read is dropped and
+        /// owed.</summary>
+        private static void MeFenced(out int balance, out int sent, out int drops)
+        {
+            var m = new MeReadPath(true);
+            m.Ask("me");
+            m.Serve();
+            m.CommitUnanswered(15);
+            m.Ask("me");
+            m.ConfirmedWrite(20);
+            m.Land(true);
+            m.Frame();
+            m.Land(true);
+            m.Frame();
+            balance = m.Cache; sent = m.Sent; drops = m.Drops;
+        }
+
+        /// <summary>An identity edge while the previous identity's read
+        /// flies: the demand asked before the edge (askedAfterEdge false), or
+        /// asked by the new identity after it.</summary>
+        private static void MeEdge(bool askedAfterEdge, out string deferredFor, out int sent)
+        {
+            var m = new MeReadPath(true);
+            m.Ask("old");
+            if (!askedAfterEdge) m.Ask("old");
+            m.Edge();
+            if (askedAfterEdge) m.Ask("new");
+            m.Land(true);
+            deferredFor = m.Deferred;
+            m.Frame();
+            m.Land(true);
+            m.Frame();
+            sent = m.Sent;
+        }
+
+        /// <summary>The overlap, with the tab sending a read of its own after
+        /// the older read landed and before the deferred re-read's
+        /// frame.</summary>
+        private static void MeDeferredMeetsRead(out int balance, out int sent)
+        {
+            var m = new MeReadPath(true);
+            m.Ask("me");
+            m.Serve();
+            m.CommitUnanswered(15);
+            m.Ask("me");
+            m.Land(true);
+            m.Ask("me");
+            m.Frame();
+            m.Land(true);
+            m.Frame();
+            balance = m.Cache; sent = m.Sent;
+        }
+
+        /// <summary>Every order of up to six events drawn from "a forced
+        /// ask", "the server serves the read on the wire", "a shard commits
+        /// with no admitted answer", "the read on the wire lands" and "the
+        /// next frame", then the path run until nothing is on the wire, owed
+        /// or scheduled: the cache ends on a snapshot the server served AFTER
+        /// the latest ask, the demand is closed, and no more reads went than
+        /// asks. False on the first order that breaks any of it.</summary>
+        private static bool MeDemandOnEveryOrder(bool latch)
+        {
+            for (int len = 1; len <= 6; len++)
+            {
+                int total = 1; for (int i = 0; i < len; i++) total *= 5;
+                for (int code = 0; code < total; code++)
+                {
+                    var m = new MeReadPath(latch);
+                    int c = code, asks = 0, lastAsk = -1;
+                    for (int i = 0; i < len; i++, c /= 5)
+                    {
+                        switch (c % 5)
+                        {
+                            case 0: m.Ask("me"); asks++; lastAsk = m.Clock; break;
+                            case 1: m.Serve(); break;
+                            case 2: m.CommitUnanswered(1); break;
+                            case 3: m.Land(true); break;
+                            default: m.Frame(); break;
+                        }
+                    }
+                    for (int k = 0; k < 8 && (m.InFlight || m.Deferred != null || m.Owed); k++) { m.Land(true); m.Frame(); }
+                    if (m.InFlight || m.Deferred != null || m.Owed || m.DemandOpen) return false;
+                    if (m.Sent > asks) return false;
+                    if (asks > 0 && m.CacheAt <= lastAsk) return false;
+                }
+            }
+            return true;
+        }
+
+        private static void MeDemandCases(SelfTestResult r)
+        {
+            int after, bal, sent;
+            bool deferred;
+            MeOverlap(true, true, out after, out deferred, out bal, out sent);
+            Check(r, "me overlap: a balance read-back asked while the 30 s read flies is sent once that read lands, and the committed balance is cached",
+                  bal == 115, bal.ToString());
+            Check(r, "me overlap: the older read never answers it: it lands its balance from before the commit, and a fresh read is scheduled",
+                  after == 100 && deferred, after + " " + deferred);
+            Check(r, "me overlap: two reads in all, the 30 s one and the demand's own", sent == 2, sent.ToString());
+            MeOverlap(true, false, out after, out deferred, out bal, out sent);
+            Check(r, "me overlap: the same when the older read fails", bal == 115 && sent == 2 && deferred, bal + " " + sent + " " + deferred);
+            MeOverlap(false, true, out after, out deferred, out bal, out sent);
+            Check(r, "control: without the latch (59fcf3f6's FetchPcMe) the read-back asked while the 30 s read flies is lost",
+                  !deferred && sent == 1, deferred + " " + sent);
+            Check(r, "control: and the balance from before the commit stays cached", bal == 100, bal.ToString());
+
+            int bal0, sent0;
+            bool opened, opened0;
+            MeNoFlight(true, out bal, out sent, out opened);
+            MeNoFlight(false, out bal0, out sent0, out opened0);
+            Check(r, "me demand: a read-back asked with no read on the wire is sent at once: one read, the committed balance, no demand",
+                  bal == 115 && sent == 1 && !opened, bal + " " + sent + " " + opened);
+            Check(r, "me demand: exactly as 59fcf3f6 sent it", bal == bal0 && sent == sent0 && opened == opened0, bal0 + " " + sent0 + " " + opened0);
+
+            int drops;
+            MeFenced(out bal, out sent, out drops);
+            Check(r, "me demand: when the fence drops the older read, its owed read answers the demand: one more read, not two",
+                  sent == 2 && drops == 1, sent + " " + drops);
+            Check(r, "me demand: and the newest balance is cached", bal == 135, bal.ToString());
+
+            string forWho;
+            MeEdge(false, out forWho, out sent);
+            Check(r, "me demand: an identity change releases a demand made before it: no read for the previous identity",
+                  forWho == null && sent == 1, (forWho ?? "(null)") + " " + sent);
+            MeEdge(true, out forWho, out sent);
+            Check(r, "me demand: a demand the new identity makes while the previous identity's read flies is sent for it once that read lands",
+                  forWho == "new" && sent == 2, (forWho ?? "(null)") + " " + sent);
+
+            MeDeferredMeetsRead(out bal, out sent);
+            Check(r, "me demand: a read sent after the older read landed answers the demand: the deferred re-read sends nothing more",
+                  sent == 2 && bal == 115, sent + " " + bal);
+
+            var d = new PcReadDemand();
+            int r1 = d.Dispatched(), r2 = d.Dispatched();
+            Check(r, "me demand: reads are numbered at dispatch", r1 == 1 && r2 == 2, r1 + " " + r2);
+            d.Demand(null, 1); d.Demand("", 1);
+            Check(r, "me demand: an ask with no identity is not a demand", !d.Open, "");
+            d.Demand("me", 1); d.Demand("me", 1);
+            Check(r, "me demand: asks while the same read flies are one demand, and the read on the wire never answers it",
+                  d.Landed(r2, 1) == "me" && !d.Open && d.Landed(r2, 1) == null, "");
+            d.Demand("me", 1);
+            int r3 = d.Dispatched();
+            Check(r, "me demand: a read dispatched after the demand answers it", d.Landed(r3, 1) == null && !d.Open, "");
+            d.Demand("me", 1);
+            Check(r, "me demand: a demand of another generation is dropped", d.Landed(r3, 2) == null && !d.Open, "");
+            d.Demand("me", 2); d.Clear();
+            Check(r, "me demand: an identity change releases it", !d.Open && d.Landed(r3, 2) == null, "");
+
+            Check(r, "me demand: on every order of up to six asks, serves, unanswered commits, landings and frames, the cache ends on a "
+                  + "snapshot served after the latest ask, the demand closed, and never more reads than asks", MeDemandOnEveryOrder(true), "");
+            Check(r, "control: without the latch some order ends on a snapshot served before the latest ask", !MeDemandOnEveryOrder(false), "");
         }
 
         // -- fix pass 3, finding 5: a settings answer never writes the balance --
@@ -1129,6 +1404,74 @@ namespace CompetitiveRounds
         internal void Clear()
         {
             gone.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Fix pass 4, finding 7: a forced /pc/me read asked for while one is
+    /// already on the wire. ApiClient.FetchPcMe sends one read at a time, and
+    /// a forced ask made while one flew used to be answered "in-flight" and
+    /// forgotten. The read on the wire was dispatched before whatever made
+    /// the caller ask (a failed, refused or unanswered shard's balance
+    /// read-back among them), so its answer is not proven newer than that;
+    /// and when the shard committed with no answer this client admitted,
+    /// nothing moved the answer fence (PcCacheFence) to drop it. The ask is
+    /// remembered here (Demand), bound to the identity generation it was
+    /// made in, and closed when the read on the wire lands (Landed). Only a
+    /// read dispatched AFTER the demand answers it, so that older read never
+    /// does: Landed names the identity a fresh read is sent for. A demand of
+    /// another generation is dropped, and an identity or consent edge
+    /// releases it (Clear, ApiClient.ReleasePcReadLatches). Free of Unity so
+    /// the client rules harness executes it (#391).
+    /// </summary>
+    internal sealed class PcReadDemand
+    {
+        private int dispatched;    // /pc/me reads dispatched so far
+        private bool open;
+        private int openAt;        // the reads dispatched when the open demand was made
+        private int openGen;       // the identity generation it was made in
+        private string openFor;    // the identity it was made for
+
+        /// <summary>Whether a demand is open.</summary>
+        internal bool Open { get { return open; } }
+
+        /// <summary>A /pc/me read is dispatched: its number, carried to its
+        /// landing (Landed).</summary>
+        internal int Dispatched()
+        {
+            return ++dispatched;
+        }
+
+        /// <summary>A forced read for `who` was asked for while a read was on
+        /// the wire, in identity generation `gen`. Asks made while the same
+        /// read flies are one demand.</summary>
+        internal void Demand(string who, int gen)
+        {
+            if (string.IsNullOrEmpty(who)) return;
+            open = true; openAt = dispatched; openGen = gen; openFor = who;
+        }
+
+        /// <summary>The read numbered `read` landed, whatever its answer, with
+        /// the identity generation now `gen`. Closes the open demand and
+        /// returns the identity a fresh read is sent for, or null: null when
+        /// no demand is open, when the demand belongs to another generation,
+        /// and when this read was dispatched after the demand (it answers
+        /// it). A read dispatched at or before the demand never answers
+        /// it.</summary>
+        internal string Landed(int read, int gen)
+        {
+            if (!open) return null;
+            string who = openFor;
+            bool again = openGen == gen && read <= openAt;
+            Clear();
+            return again ? who : null;
+        }
+
+        /// <summary>An identity or consent edge: the previous generation's
+        /// demand goes.</summary>
+        internal void Clear()
+        {
+            open = false; openAt = 0; openGen = 0; openFor = null;
         }
     }
 }
