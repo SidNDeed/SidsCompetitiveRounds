@@ -313,7 +313,55 @@ namespace CompetitiveRounds
             RecoveryCases(r);
             TombstoneCases(r);
             DiscardLateCases(r);
+            SettingsLateCases(r);
             return r;
+        }
+
+        // -- fix pass 3, finding 5: a settings answer never writes the balance --
+
+        /// <summary>A settings write (announce on, against revision 5) is sent
+        /// while the cached balance is 100. The server commits it (revision 6)
+        /// and its answer, the full settings row, carries the balance the
+        /// server read at that commit: 100. A strip shard then commits (the
+        /// server: 115) and its answer lands first: current, so it installs
+        /// 115 and moves the answer fence. The settings answer lands LAST,
+        /// through ApiClient.PcSetSetting's cache write (PcApplySettings): the
+        /// settings and the revision, not the balance. applyBalance true is
+        /// the NEGATIVE CONTROL: PcApplySettings as 8fb4ea4b wrote it, which
+        /// also wrote the row's shards.</summary>
+        private static void SettingsLate(bool applyBalance, out int balance, out int revision, out bool announce, out int fenceWrites)
+        {
+            var fence = new PcCacheFence();
+            var flight = new PcShardFlight();
+            int cacheBal = 100, cacheRev = 5, srvBal = 100, srvRev = 5;
+            bool cacheAnnounce = false;
+            // the settings write commits; its answer is the row as of that commit
+            srvRev++;
+            int rowBal = srvBal, rowRev = srvRev;
+            bool rowAnnounce = true;
+            // a strip shard commits; its answer, current, lands first
+            int g = flight.Begin(1f, null, "s1");
+            srvBal += 15;
+            if (PcShardFlight.Admits(() => flight.IsCurrent(g))) { cacheBal = srvBal; fence.Wrote(); }
+            flight.Settle(g, null);
+            // the settings answer lands last
+            cacheAnnounce = rowAnnounce;
+            cacheRev = rowRev;
+            if (applyBalance) cacheBal = rowBal;
+            balance = cacheBal; revision = cacheRev; announce = cacheAnnounce; fenceWrites = fence.Writes;
+        }
+
+        private static void SettingsLateCases(SelfTestResult r)
+        {
+            int bal, rev, w;
+            bool ann;
+            SettingsLate(false, out bal, out rev, out ann, out w);
+            Check(r, "settings late: a settings answer landing after a newer shard balance keeps the newer balance", bal == 115, bal.ToString());
+            Check(r, "settings late: and applies the settings and the revision", ann && rev == 6, ann + " " + rev);
+            Check(r, "settings late: the shard's answer installed its balance and moved the fence first", w == 1, w.ToString());
+            SettingsLate(true, out bal, out rev, out ann, out w);
+            Check(r, "control: applying the row's shards puts the older balance back", bal == 100, bal.ToString());
+            Check(r, "control: with the same settings and revision applied", ann && rev == 6, ann + " " + rev);
         }
 
         // -- fix pass 3, finding 4: a retired single-discard answer writes nothing --

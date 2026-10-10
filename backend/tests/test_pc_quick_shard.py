@@ -67,6 +67,14 @@ Required behaviour, each a named test:
       write and the fence move (the late-answer model is EXECUTED by the
       harness, DiscardLateCases; gate q11 now asserts that currency for both
       answers, not only the call).
+  Q15 (fix pass 3, finding 5) a settings answer never writes the balance:
+      PcSetSetting applies the settings and the revision only, since its
+      answer row carries the balance as of its own commit, older than a shard
+      confirmed while it was on the wire (the late-answer model is EXECUTED
+      by the harness, SettingsLateCases, with the 8fb4ea4b control); the
+      /pc/me answer's top-level balance is kept, and gate q11 lists every
+      response path that may write the balance, the settings answer included
+      and excluded.
 
 Each client gate runs on the real sources and, with its mutation and control,
 on edited copies (#391). The database tests use test_pc_shard_batch's harness
@@ -126,6 +134,21 @@ def _at(text, needle, what):
 def _code(cs):
     """C# text without // comments, so prose never satisfies a gate."""
     return "\n".join(re.sub(r"//.*$", "", line) for line in cs.splitlines())
+
+
+# A write of a PcMe's shard balance: x.shards = / += / -= / ++ / --, ++x.shards,
+# out/ref x.shards (fix pass 3, finding 5's class sweep).
+_BALANCE_WRITE = re.compile(r"\.shards\s*(?:[-+*/]?=(?!=)|\+\+|--)"
+                            r"|(?:\+\+|--)\s*[\w.\[\]]*\.shards\b"
+                            r"|\b(?:out|ref)\s+[\w.\[\]]*\.shards\b")
+
+
+def _plugin_texts(s):
+    """The scope of a class sweep: the three gated sources as given (so a
+    mutant's copy is the one counted) and every other plugin source from disk."""
+    gated = set(FILES.values())
+    return [s["api"], s["ui"], s["rules"]] + [p.read_text(encoding="utf-8") for p in sorted(PLUGIN.glob("*.cs"))
+                                              if p not in gated]
 
 
 # ---------------------------------------------------------------- the gates
@@ -334,6 +357,40 @@ def gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard(s):
         assert guard < write and body.count("CachedPcMe.shards =") == 1 and body.count("PcAnswerFence.Wrote();") == 1, what
     assert "public static void PcDiscard(string steamId, string printId, Func<bool> current, Action<bool, string> callback)" in api, (
         "a retired single-discard answer writes the balance")
+    # Fix pass 3, finding 5: every response path that may write the cached
+    # balance, listed. Included: the /pc/me answer (FetchPcMe installs
+    # ParsePcMe's PcMe through the fence, _fenced_read above; its balance is
+    # the answer's top-level shards) and the two discard answers (each
+    # current and each moving the fence, asserted above). Listed and
+    # EXCLUDED by the rule: the settings answer (PcSetSetting through
+    # PcApplySettings) applies the settings and the revision, never the
+    # balance. A balance write anywhere else in the plugin, or another
+    # install of a PcMe, is a path this list does not hold.
+    for sig, line, what in (
+            ("internal static PcMe ParsePcMe(", 'me.shards = PcInt(PcTopLevel(json, "shards"));',
+             "the /pc/me answer's balance is not its top-level shards"),
+            ("public static void PcDiscardBatch(", "CachedPcMe.shards = PcInt(sh);",
+             "a retired batch answer writes the balance"),
+            ("public static void PcDiscard(string steamId, string printId,", "CachedPcMe.shards = PcInt(sh);",
+             "a retired single-discard answer writes the balance")):
+        body = _code(_member(api, sig))
+        assert len(_BALANCE_WRITE.findall(body)) == 1 and line in body, what
+    parse = _code(_member(api, "internal static PcMe ParsePcMe("))
+    assert (_at(parse, "PcApplySettings(me, settings);", "the /pc/me answer's balance is not its top-level shards")
+            < _at(parse, 'me.shards = PcInt(PcTopLevel(json, "shards"));', "the /pc/me answer's balance is not its top-level shards")), (
+        "the /pc/me answer's balance is not its top-level shards")
+    assert (_code(api).count("ParsePcMe(") == 2
+            and _code(_member(api, "public static void FetchPcMe(")).count("var me = ParsePcMe(resp);") == 1), (
+        "another answer installs a parsed PcMe")
+    installs = sorted(m for t in _plugin_texts(s) for m in re.findall(r"CachedPcMe\s*=(?!=)\s*([^;]*);", _code(t)))
+    assert installs == ["me", "null", "null"], "another answer installs a parsed PcMe (%r)" % installs
+    applier = _code(_member(api, "private static void PcApplySettings("))
+    assert not _BALANCE_WRITE.search(applier) and '"shards"' not in applier, "a settings answer writes the balance"
+    setting = _code(_member(api, "public static void PcSetSetting("))
+    assert (setting.count("PcApplySettings(CachedPcMe, resp);") == 1 and not _BALANCE_WRITE.search(setting)
+            and '"shards"' not in setting), "a settings answer writes the balance"
+    writes = sum(len(_BALANCE_WRITE.findall(_code(t))) for t in _plugin_texts(s))
+    assert writes == 3, "a response path outside the list writes the balance (%d writes)" % writes
     nxt = _code(_member(ui, "private static void DiscardNext(string id, int serial)"))
     assert nxt.count("ApiClient.PcDiscard(") == 1 and (
         "ApiClient.PcDiscard(id, pid, () => PcQuickShardRules.DiscardStepCurrent(ep == uiEpoch, discardInFlight, serial, discardSerial), "
@@ -655,6 +712,24 @@ MUTATIONS = [
      "            return sameIdentity && runOut;",
      "            return sameIdentity && runOut && sentSerial == runSerial;   // the run's serial",
      "a single-discard step is not tested against its run"),
+    ("Q11j", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "api",
+     "            if (PcHas(settingsObj, \"revision\")) me.revision = PcInt(PcTopLevel(settingsObj, \"revision\"));\n",
+     "            if (PcHas(settingsObj, \"revision\")) me.revision = PcInt(PcTopLevel(settingsObj, \"revision\"));\n"
+     "            if (PcHas(settingsObj, \"shards\")) me.shards = PcInt(PcTopLevel(settingsObj, \"shards\"));\n",
+     "            if (PcHas(settingsObj, \"revision\")) me.revision = PcInt(PcTopLevel(settingsObj, \"revision\"));\n"
+     "            // the balance is not a setting\n",
+     "a settings answer writes the balance"),
+    ("Q11k", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "api",
+     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null) PcApplySettings(CachedPcMe, resp);",
+     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null) { PcApplySettings(CachedPcMe, resp); "
+     "CachedPcMe.shards = PcInt(PcTopLevel(resp, \"shards\")); }",
+     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null) { PcApplySettings(CachedPcMe, resp); }",
+     "a settings answer writes the balance"),
+    ("Q11l", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "ui",
+     "            if (me != null) bal += (bal.Length > 0 ? \"  -  \" : \"\") + I18n.TrF(\"{0} shards\", me.shards);",
+     "            if (me != null) { me.shards += 0; bal += (bal.Length > 0 ? \"  -  \" : \"\") + I18n.TrF(\"{0} shards\", me.shards); }",
+     "            if (me != null) { bal += (bal.Length > 0 ? \"  -  \" : \"\") + I18n.TrF(\"{0} shards\", me.shards); }",
+     "a response path outside the list writes the balance"),
     ("Q12a", gate_q12_shard_dupes_counts_only_the_prints_owned_now, "rules",
      "            ready = true;\n            // the page as the player owns it now",
      "            for (int j = 0; j < pageFaceKeys.Count; j++)\n"

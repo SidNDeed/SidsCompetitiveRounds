@@ -5086,8 +5086,13 @@ namespace CompetitiveRounds
 
         /// <summary>Compare-and-set one setting: the revision the caller read
         /// must still be current (409 stale_revision otherwise). The answer is
-        /// the full settings row and is written into the cache before the
-        /// callback runs.</summary>
+        /// the full settings row; its settings and its revision are written
+        /// into the cache before the callback runs, its shard balance is not
+        /// (fix pass 3, finding 5). That balance is the one the server read
+        /// when this write committed: a shard confirmed while the answer was
+        /// on the wire installs a newer balance, which this answer landing
+        /// later would put back. The cached balance comes from the /pc/me
+        /// answer and the discard answers only (PcApplySettings).</summary>
         public static void PcSetSetting(string steamId, string nonce, int revision, string key, int value, Action<bool, string> callback)
         {
             string url = PcUrl("settings", steamId, $"pcset:{steamId}:{nonce}:{revision}:{key}:{value}",
@@ -6052,13 +6057,22 @@ namespace CompetitiveRounds
             return list;
         }
 
+        /// <summary>The settings and the revision of a settings object, never
+        /// the shard balance (fix pass 3, finding 5). Two callers: ParsePcMe,
+        /// whose settings object carries no balance and which reads the
+        /// answer's top-level shards itself, and PcSetSetting, whose answer
+        /// row carries the balance as of its own commit, older than any shard
+        /// confirmed while that answer was on the wire. The cached balance is
+        /// written by three answers only: /pc/me (ParsePcMe, installed by
+        /// FetchPcMe through the answer fence) and the two discard answers
+        /// (PcDiscard, PcDiscardBatch, each current and each moving the
+        /// fence).</summary>
         private static void PcApplySettings(PcMe me, string settingsObj)
         {
             if (me == null || string.IsNullOrEmpty(settingsObj)) return;
             if (PcHas(settingsObj, "collection_public")) me.collection_public = PcBool(PcTopLevel(settingsObj, "collection_public"));
             if (PcHas(settingsObj, "announce")) me.announce = PcBool(PcTopLevel(settingsObj, "announce"));
             if (PcHas(settingsObj, "revision")) me.revision = PcInt(PcTopLevel(settingsObj, "revision"));
-            if (PcHas(settingsObj, "shards")) me.shards = PcInt(PcTopLevel(settingsObj, "shards"));
             if (PcHas(settingsObj, "trades_open")) { me.trades_open = PcBool(PcTopLevel(settingsObj, "trades_open")); me.has_trades_open = true; }
         }
 
