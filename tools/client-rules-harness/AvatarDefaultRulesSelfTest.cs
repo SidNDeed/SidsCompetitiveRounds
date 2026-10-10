@@ -572,6 +572,92 @@ namespace CompetitiveRounds
             return ok && quiet;
         }
 
+        // ---- fix pass 2 (Codex BUILD round 2) ------------------------------
+
+        /// <summary>H3: an ASYNCHRONOUS model of a seat's own property cache.
+        /// PUN's SetCustomProperties on the local player in a room changes
+        /// nothing locally; the cache takes the value on the server's echo.
+        /// Publish stores into a pending slot, Read returns the cached (old)
+        /// value until Echo moves the pending one in. Read counts every call,
+        /// so a pass that rereads the cache is seen even when it is lucky.</summary>
+        private sealed class AsyncCarrierStore
+        {
+            private string cached, pending;
+            private bool hasPending;
+            internal int Reads;
+            internal AsyncCarrierStore(string echoed) { cached = echoed; }
+            internal void Publish(FaceCarrierAction a, string value)
+            {
+                if (a == FaceCarrierAction.Keep) return;
+                pending = a == FaceCarrierAction.Publish ? value : null;
+                hasPending = true;
+            }
+            internal string Read() { Reads++; return cached; }
+            internal void Echo() { if (hasPending) { cached = pending; hasPending = false; } }
+        }
+
+        /// <summary>One card-pick Show pass for the LOCAL picker in the order
+        /// the postfix runs it: the publish attempt (into the pending slot),
+        /// the popup's face from the rule, then the server's echo.</summary>
+        private static string LocalPass(AvatarRules r, AsyncCarrierStore st, AvatarFaceIds face, string serialized, out int reads)
+        {
+            var a = r.CarrierAction(false, true, true, true, face);
+            string fresh = a == FaceCarrierAction.Publish ? serialized : null;
+            st.Publish(a, fresh);
+            int before = st.Reads;
+            string shown = r.PopupFace(true, a, fresh, st.Read);
+            reads = st.Reads - before;
+            st.Echo();
+            return shown;
+        }
+
+        private static bool H3Async(AvatarRules r, out string got)
+        {
+            var st = new AsyncCarrierStore("face-old");                       // an earlier pass's carrier, echoed
+            int r1, r2, r3;
+            string first = LocalPass(r, st, AvatarFaceIds.Of(3, 3, 3, 3), "face-new", out r1);
+            string cleared = LocalPass(r, st, AvatarFaceIds.Of(0, 0, 0, 0), null, out r2);   // a definitive no-face attempt
+            string again = LocalPass(r, st, AvatarFaceIds.Of(4, 4, 4, 4), "face-4", out r3);
+            var remote = new AsyncCarrierStore("face-remote");
+            string seen = r.PopupFace(false, FaceCarrierAction.Keep, null, remote.Read);
+            got = "publish, read, echo (cache still face-old at the read): shown=" + (first ?? "none") + " cache reads=" + r1
+                + " | then a clear (cache still face-new at the read): shown=" + (cleared ?? "none") + " reads=" + r2
+                + " | then face-4: shown=" + (again ?? "none") + " reads=" + r3
+                + " | a remote picker: shown=" + (seen ?? "none") + " reads=" + remote.Reads;
+            return first == "face-new" && r1 == 0 && cleared == null && r2 == 0 && again == "face-4" && r3 == 0
+                && seen == "face-remote" && remote.Reads == 1;
+        }
+
+        /// <summary>H9 and M3: a seat forced 3 -> 1 in a vanilla room (home 3),
+        /// then a confirmed exit while the character data is missing, twice
+        /// (the repeated exit edge), then the deferred edge with the data back.</summary>
+        private static bool MissingData(AvatarRules r, AvatarFaceIds[] faces, int live, string what, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var seat = new Seat(3);
+            seat.Step(r, NotLive(), Room(false, Unmodded()), s);                  // 3 -> 1, home 3
+            int forced = seat.Live, held = seat.Home;
+            var x = new AvatarEvalIn { Liveness = Live(), Facing = Menu(), Setting = s, Faces = faces, Loader = Loader(), Live = live, Home = seat.Home };
+            var e1 = r.Evaluate(x);                                               // E6, the data gone
+            var e2 = r.Evaluate(x);                                               // E7, a repeated exit edge
+            bool kept = e1.NothingToRead && e2.NothingToRead && e1.NewHome == held && e2.NewHome == held && !e1.HomeChanged && !e2.HomeChanged;
+            bool deferred = e1.RestorationDeferred && e2.RestorationDeferred;
+            bool owed = r.RestorationOwed(e2.NewHome, true);
+            bool notInRoom = !r.RestorationOwed(e2.NewHome, false);
+            seat.Home = e2.NewHome;
+            var e13 = seat.Step(r, NotLive(), Menu(), s);                         // E13, the data back
+            bool quiet = !r.RestorationOwed(seat.Home, true);
+            got = what + ": forced live=" + forced + " home=" + held + " | exit x2 with the data missing: home kept=" + kept
+                + " deferred=" + deferred + " owed=" + owed + " owed in a room=" + !notInRoom
+                + " | the deferred edge: apply=" + e13.Apply + " live=" + seat.Live + " home=" + seat.Home + " then owed=" + !quiet;
+            return forced == 1 && held == 3 && kept && deferred && owed && notInRoom && e13.Apply == 3 && seat.Live == 3
+                && seat.Home == -1 && quiet;
+        }
+
+        private static bool H9Controller(AvatarRules r, out string got) => MissingData(r, null, -1, "no controller", out got);
+        private static bool H9Selected(AvatarRules r, out string got) => MissingData(r, Faces(), -1, "no selected face", out got);
+        private static bool M3Table(AvatarRules r, out string got) => MissingData(r, null, 1, "no face table", out got);
+
         // ---- the mutants and the controls -------------------------------
 
         // fix pass 1 mutants: each restores the build-round-1 behaviour (or
@@ -666,6 +752,39 @@ namespace CompetitiveRounds
         {
             internal override string ClassificationLine(string tag, AvatarDecision d, int otherFighters, bool issuedRoom, int was, int homeBefore)
                 => string.Concat(base.ClassificationLine(tag, d, otherFighters, issuedRoom, was, homeBefore), "");
+        }
+
+        // fix pass 2 mutants and controls
+        private sealed class M_H3Reread : AvatarRules
+        {   // the round 2 postfix: the pass rereads the cache it has just published to
+            internal override string PopupFace(bool pickerIsLocal, FaceCarrierAction published, string publishedValue, Func<string> readCarrier)
+                => readCarrier != null ? readCarrier() : null;
+        }
+        private sealed class K_H3Pop : AvatarRules
+        {
+            internal override string PopupFace(bool pickerIsLocal, FaceCarrierAction published, string publishedValue, Func<string> readCarrier)
+            {
+                if (!pickerIsLocal) return readCarrier == null ? null : readCarrier();
+                return published != FaceCarrierAction.Publish ? null : publishedValue;
+            }
+        }
+        private sealed class M_ClearOnMissing : AvatarRules
+        {   // a missing read "settles" the debt by forgetting it
+            internal override AvatarDecision Evaluate(AvatarEvalIn x)
+            {
+                var d = base.Evaluate(x);
+                if (d.NothingToRead) { d.NewHome = -1; d.HomeChanged = x.Home != -1; d.RestorationDeferred = false; }
+                return d;
+            }
+        }
+        private sealed class M_NoDeferral : AvatarRules
+        {   // the round 2 shape: nothing records that a restoration is owed
+            internal override AvatarDecision Evaluate(AvatarEvalIn x) { var d = base.Evaluate(x); d.RestorationDeferred = false; return d; }
+        }
+        private sealed class M_NeverOwed : AvatarRules { internal override bool RestorationOwed(int home, bool confirmedNoRoom) => false; }
+        private sealed class K_Owed : AvatarRules
+        {
+            internal override bool RestorationOwed(int home, bool confirmedNoRoom) { if (!confirmedNoRoom) return false; return home > -1; }
         }
 
         private sealed class M_T1 : AvatarRules { internal override bool ResolvesOnABaseSeat(int id, bool[] arr) => id < 1000; }
@@ -933,6 +1052,15 @@ namespace CompetitiveRounds
             Pair(r, "BRM4", "an unreadable facing is Vanilla only inside an established online room", BRM4, new M_UnreadableFirst(), new K_FacingSame());
             Pair(r, "H3", "a definitive no-face publish attempt clears the carrier", H3, new M_H3(), new K_H3());
             Pair(r, "M8", "the classification line names facing, nominee and other fighters for the five room cases", M8, new M_M8(), new K_M8());
+
+            // fix pass 2 (Codex BUILD round 2). The production bindings of H6,
+            // M8, BR-M4 and L1, and the production half of H9 and M3, are
+            // executed by tools/item19-controls/prodprobe (pytest S35), which
+            // compiles plugin/AvatarDefaults.cs itself.
+            Pair(r, "H3async", "the local picker's popup uses the value it published: publish, read, echo over an asynchronous cache", H3Async, new M_H3Reread(), new K_H3Pop());
+            Pair(r, "H9c", "a confirmed exit with no character controller keeps the debt, defers it, and the deferred edge repays it", H9Controller, new M_ClearOnMissing(), new K_Eval());
+            Pair(r, "H9s", "a confirmed exit with no selected face keeps the debt, defers it, and the deferred edge repays it", H9Selected, new M_NoDeferral(), new K_Eval());
+            Pair(r, "M3t", "a confirmed exit with no face table keeps the debt, defers it, and the deferred edge repays it", M3Table, new M_NeverOwed(), new K_Owed());
             return r;
         }
 
