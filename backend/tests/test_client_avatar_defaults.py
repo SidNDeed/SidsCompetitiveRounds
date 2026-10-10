@@ -653,11 +653,15 @@ CARRIERS = {"AvatarFaceIds", "AvatarLoaderView", "AvatarSetting", "AvatarLivenes
 # carrier ledger is the one stateful type in the rules file. It holds, per
 # REMOTE actor, carrier values RECEIVED for the open popup, bound to one room
 # object, in memory only: never this seat's own face, never persisted, never
-# static. One instance, owned by Plugin.cs's PopupCarriers.
+# static. One instance, owned by Plugin.cs's PopupCarriers. Fix pass 4 (H3, the
+# pick binding): per actor the value held is bound to one pick (Pick, Value,
+# Clear), and the ledger keeps the games this seat saw start in the room and
+# the pick of the popup it shows.
 LEDGER_FIELDS = ["private readonly AvatarRules rules;",
                  "private readonly Dictionary<int, Entry> entries = new Dictionary<int, Entry>();",
-                 "private object room;", "private int shown = -1;", "private string note;"]
-ENTRY_FIELDS = ["internal long Seq = -1;", "internal string Fresh;", "internal double ArrivedAt = -1;",
+                 "private object room;", "private int game;", "private int shown = -1;", "private string shownPick;",
+                 "private string note;"]
+ENTRY_FIELDS = ["internal string Pick;", "internal string Value;", "internal bool Clear;",
                 "internal double DeferredSince = -1;"]
 PCARRIERS = "internal static class PopupCarriers"
 
@@ -1158,7 +1162,7 @@ def _s33(src):
     assert not stale, "carrier cache reads (a remote copy can be an earlier pick's face): %d: %s" % (len(stale), "; ".join(stale))
     body = _body(src[PL], POPUP, "class CardChoiceVisuals_Show_Competitive_Patch")
     m = re.search(r"FacePublisher\.PublishLocal\(out (\w+), forPick: true\)", body)
-    assert m, "the popup does not take the value it publishes, tagged for the pick"
+    assert m, "the popup does not take the value it publishes, bound to the pick"
     assert re.search(r"\.PopupFace\(picker\.IsLocal, \w+, %s,\s*\(\) => \{ string v = PopupCarriers\.ForShow\(pickerActor\);"
                      % m.group(1), body), "the popup's remote arm is not the carrier ledger"
     for term in _CACHE_READS:
@@ -1191,9 +1195,104 @@ def test_s33_a_local_arm_that_calls_the_reader_reds():
 def test_s33_a_carrier_cache_read_anywhere_reds():
     # fix pass 3 (H3): the sweep is plugin-wide, not the popup's alone
     _check(_s33,
-           lambda s: _replace(s, PL, "string v = Ledger.Show(Room(), actor, Now());",
-                              "string v = Ledger.Show(Room(), actor, Now()) ?? (PhotonNetwork.CurrentRoom.GetPlayer(actor)"
+           lambda s: _replace(s, PL, "string v = Ledger.Show(Room(), actor, pick, Now());",
+                              "string v = Ledger.Show(Room(), actor, pick, Now()) ?? (PhotonNetwork.CurrentRoom.GetPlayer(actor)"
                               ".CustomProperties[FacePublisher.PROP_FACE] as string);"),
+           lambda s: _replace(s, PL, '"on arrival"', '"when it arrived"'))
+
+
+# S36 (fix pass 4, H3): the pick binding, wired --------------------------------
+#
+# The picker binds its card-pick publish to the identity of the popup it shows
+# (PopupCarriers.PickNow: the games this seat saw start in the room, counted by
+# a DoStartGame prefix, and the rounds completed); a remote seat's popup
+# derives the same identity, and the ledger applies a face or takes a clear
+# only through AvatarRules.BoundToPopup. The consumer sweep: ONE read of a
+# carrier value in the whole plugin (PopupCarriers.Arrived, the property
+# callback's changed table) and THREE binding checks (the ledger's Show,
+# Arrived and Tick), which are every path from a received value to an apply.
+
+LEDGER = "internal sealed class PopupCarrierLedger"
+_CARRIER_VALUE = re.compile(r'\[\s*(?:FacePublisher\.)?PROP_FACE\s*\]|\[\s*"cr_face"\s*\]')
+
+
+def _carrier_value_reads(src):
+    """Every carrier key subscript in code that is not an assignment target."""
+    out = []
+    for fname, text in sorted(src.items()):
+        code = _code(text)
+        for r in _CARRIER_VALUE.finditer(code):
+            rest = code[r.end():r.end() + 4].lstrip()
+            if rest.startswith("=") and not rest.startswith("=="):
+                continue
+            out.append("%s:%d" % (fname, code[:r.start()].count("\n") + 1))
+    return out
+
+
+def _s36(src):
+    reads = _carrier_value_reads(src)
+    assert len(reads) == 1, "carrier value reads %d, expected 1 (PopupCarriers.Arrived): %s" % (len(reads), reads)
+    arr = _body(src[PL], "internal static void Arrived(Photon.Realtime.Player target", PCARRIERS)
+    assert ("string v = Ledger.Arrived(Room(), target.ActorNumber, changed[FacePublisher.PROP_FACE] as string, PickNow(), Now());"
+            in arr), "the one read does not reach the ledger with this seat's pick identity"
+    show = _body(src[PL], "internal static string ForShow(int actor)", PCARRIERS)
+    assert "string pick = PickNow();" in show and "Ledger.Show(Room(), actor, pick, Now())" in show, \
+        "the popup's remote arm does not hand the ledger the pick it shows"
+    a, b = _span(src[AR], LEDGER)
+    ledger = _code(src[AR][a:b])
+    checks = ledger.count("rules.BoundToPopup(")
+    assert checks == 3, "binding checks in the ledger: %d, expected 3 (Show, Arrived, Tick)" % checks
+    for sig in ("internal string Show(object currentRoom, int actor, string popupPick, double now)",
+                "internal string Arrived(object currentRoom, int actor, string value, string currentPick, double now)",
+                "internal string Tick(object currentRoom, double now)"):
+        assert _body(src[AR], sig, LEDGER).count("rules.BoundToPopup(") == 1, sig
+    assert ledger.count("rules.PickBinding(") == 1, "the ledger reads a value's binding more than once"
+    outside = sum(_code(t).count("BoundToPopup(") for f, t in src.items() if f != AR)
+    assert outside == 0, "a binding check outside the ledger: %d" % outside
+    # the picker's own publish at its popup is bound to that popup's pick
+    pub = _body(src[PL], "public static FaceCarrierAction PublishLocal(out string published, bool forPick = false)",
+                "internal static class FacePublisher")
+    assert pub.count("string pick = forPick ? PopupCarriers.PickNow() : null;") == 1, "the card-pick publish takes no pick"
+    assert pub.count("PopupCarrierLedger.BoundFace(serialized, pick)") == 1, "the published face is not bound to the pick"
+    assert pub.count("PopupCarrierLedger.BoundClear(pick)") == 1, "the published clear is not bound to the pick"
+    # the game half of the identity: a DoStartGame prefix
+    t = src[PL]
+    pa, pb = _span(t, "internal static class GMArmsRace_DoStartGame_PopupCarrier_Patch")
+    assert '[HarmonyPatch(typeof(GM_ArmsRace), "DoStartGame")]' in t[max(0, pa - 300):pa], \
+        "the game counter is not a DoStartGame patch"
+    pre = _code(t[pa:pb])
+    assert "private static void Prefix()" in pre and pre.count("PopupCarriers.GameStarted();") == 1, \
+        "no game is counted at DoStartGame"
+    return len(reads), checks
+
+
+def test_s36_the_carrier_is_bound_to_the_pick_and_read_once():
+    _check(_s36,
+           lambda s: _replace(s, AR, "if (actor == shown && rules.BoundToPopup(pick, shownPick))",
+                              "if (actor == shown && pick != null)"),
+           lambda s: _replace(s, PL, '"[POPUP] carrier ledger game start failed: "',
+                              '"[POPUP] the carrier ledger game start failed: "'))
+
+
+def test_s36_an_unbound_card_pick_publish_reds():
+    _check(_s36,
+           lambda s: _replace(s, PL, "if (pick != null) serialized = PopupCarrierLedger.BoundFace(serialized, pick);", ""),
+           lambda s: _replace(s, PL, "if (pick != null) serialized = PopupCarrierLedger.BoundFace(serialized, pick);",
+                              "if (null != pick) serialized = PopupCarrierLedger.BoundFace(serialized, pick);"))
+
+
+def test_s36_a_popup_that_hands_over_no_pick_reds():
+    _check(_s36,
+           lambda s: _replace(s, PL, "string v = Ledger.Show(Room(), actor, pick, Now());",
+                              "string v = Ledger.Show(Room(), actor, null, Now());"),
+           lambda s: _replace(s, PL, "published bound to this pick, {when})", "published, bound to this pick, {when})"))
+
+
+def test_s36_a_second_carrier_value_read_reds():
+    _check(_s36,
+           lambda s: _replace(s, PL, "            if (v != null) ApplyNow(target.ActorNumber, v, \"on arrival\");",
+                              "            if (v != null) ApplyNow(target.ActorNumber, v, \"on arrival\");\n"
+                              "            else v = target.CustomProperties[FacePublisher.PROP_FACE] as string;"),
            lambda s: _replace(s, PL, '"on arrival"', '"when it arrived"'))
 
 
@@ -1212,7 +1311,10 @@ PRODPROBE_IDS = ("H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M
                  # fix pass 3 (Codex BUILD round 3): a debt cleared only on a committed
                  # read-back (H9t, H9r, M3x), the line on every exit (M8e2, M8e3,
                  # M8def, M8exc), the popup's remote arm (H3remote)
-                 "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc", "H3remote")
+                 "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc", "H3remote",
+                 # fix pass 4 (Codex BUILD round 4): the pick binding
+                 # (H3late, H3after, H3before)
+                 "H3late", "H3after", "H3before")
 
 
 def _dotnet():

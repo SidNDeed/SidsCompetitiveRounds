@@ -25,10 +25,11 @@ namespace CompetitiveRounds
     /// evaluation, so nothing here can carry state between edges.
     ///
     /// The one class in this file that keeps state is PopupCarrierLedger (fix
-    /// pass 3, H3): what this seat has RECEIVED from remote pickers' face
-    /// carriers, and since when. It never holds this seat's own face and
-    /// never decides it; it decides only which received value the card-pick
-    /// popup may show for a remote picker.</summary>
+    /// pass 3, H3; rebuilt on a pick binding by fix pass 4): what this seat
+    /// has RECEIVED from remote pickers' face carriers, each bound to the pick
+    /// it was published for, and the games this seat has seen start. It never
+    /// holds this seat's own face and never decides it; it decides only which
+    /// received value the card-pick popup may show for a remote picker.</summary>
     internal enum AvatarFacing { Locked, Undecided, Modded, Vanilla }
 
     /// <summary>Why a nominee the setting names cannot be used (case 2 of the
@@ -434,36 +435,59 @@ namespace CompetitiveRounds
         /// cleared or kept the carrier (vanilla's RPC stays in charge), and
         /// never calls the reader.
         ///
-        /// Remote picker (fix pass 3, H3): the same defect from the other
-        /// side. This seat's copy of a remote carrier is the last update it
-        /// received, which can belong to an earlier pick, so the reader handed
-        /// in answers only with a value whose provenance is at or after the
-        /// pick that raised this popup (PopupCarrierLedger.Show, through
-        /// PopupCarriers.ForShow in Plugin.cs), and with null while that value
-        /// has not arrived. It is never a read of the cache.</summary>
+        /// Remote picker (fix pass 3, H3; fix pass 4): the same defect from
+        /// the other side. This seat's copy of a remote carrier is the last
+        /// update it received, which can belong to an earlier pick, so the
+        /// reader handed in answers only with a value BOUND to the pick this
+        /// popup shows (PopupCarrierLedger.Show, through PopupCarriers.ForShow
+        /// in Plugin.cs; the binding check is BoundToPopup), and with null
+        /// while that value has not arrived. It is never a read of the cache.</summary>
         internal virtual string PopupFace(bool pickerIsLocal, FaceCarrierAction published, string publishedValue, Func<string> remoteForThisPick)
         {
             if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;
             return remoteForThisPick != null ? remoteForThisPick() : null;
         }
 
-        /// <summary>Fix pass 3 (H3): the pick provenance of a carrier value as
-        /// it ARRIVES on a remote seat (PopupCarrierLedger.Arrived). True, with
-        /// the pick seq, only for a value its picker tagged at its own
-        /// card-pick Show (PopupCarrierLedger.Tag). An untagged value (a
-        /// 1.40.3 client's, or a publish outside a pick) has no provenance:
-        /// stale-unknown, never applied to the popup.</summary>
-        internal virtual bool PickProvenance(string value, out long seq)
+        /// <summary>Fix pass 4 (H3): the identity of the pick a card-pick popup
+        /// shows, as every seat derives it from the same two events: the games
+        /// this seat has seen start in the room (GM_ArmsRace.DoStartGame,
+        /// counted by PopupCarrierLedger.GameStarted) and the rounds completed
+        /// in the current game (GM_ArmsRace.p1Rounds + p2Rounds: zero for the
+        /// game-start picks, and set on every seat by the master's
+        /// RPCA_NextRound before any pick of that round's phase). Each player
+        /// picks at most once per phase, so (game, rounds) names one pick of
+        /// any one actor, and every Show of that actor inside the phase is the
+        /// popup of that pick. Null when this seat has seen no game start in
+        /// this room (a spectator, which the DoStartGame prefix never counts,
+        /// or a seat that joined a game already running) or the rounds are
+        /// unreadable: no carrier can be bound to its popups.</summary>
+        internal virtual string PopupPick(int game, int rounds)
         {
-            return PopupCarrierLedger.TryReadTag(value, out seq);
+            if (game <= 0 || rounds < 0) return null;
+            return PopupCarrierLedger.PickPrefix + game.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + "." + rounds.ToString(System.Globalization.CultureInfo.InvariantCulture);
         }
 
-        /// <summary>Fix pass 3 (H3): whether a value held for an actor whose
-        /// popup was not open may be applied when that popup opens: it arrived
-        /// within PopupCarrierLedger.DeferralBoundSeconds of the opening.</summary>
-        internal virtual bool HeldForPopup(double arrivedAt, double openedAt)
+        /// <summary>Fix pass 4 (H3): the pick a carrier value is bound to, as
+        /// it ARRIVES on a remote seat (PopupCarrierLedger.Arrived). True, with
+        /// the pick, only for a value its picker published at its own card-pick
+        /// Show with that popup's identity (PopupCarrierLedger.BoundFace, a 13th
+        /// field; or PopupCarrierLedger.BoundClear, the clear tombstone, for
+        /// which clear is true). False for an unbound value: a 1.40.3 client's
+        /// 12 fields, a publish outside a pick, a removed key.</summary>
+        internal virtual bool PickBinding(string value, out string pick, out bool clear)
         {
-            return openedAt - arrivedAt <= PopupCarrierLedger.DeferralBoundSeconds;
+            return PopupCarrierLedger.TryReadBinding(value, out pick, out clear);
+        }
+
+        /// <summary>Fix pass 4 (H3): THE binding check. A carrier value, face or
+        /// clear, is applied to a popup only when the pick it is bound to is
+        /// exactly the pick that popup shows; a popup with no identity on this
+        /// seat (popupPick null) applies nothing. Every value the ledger hands
+        /// to an apply, or takes as a clear, passes here (Show, Arrived, Tick).</summary>
+        internal virtual bool BoundToPopup(string pick, string popupPick)
+        {
+            return popupPick != null && pick == popupPick;
         }
 
         /// <summary>Fix pass 3 (H3): whether a popup face the ledger owes is
@@ -583,87 +607,84 @@ namespace CompetitiveRounds
         }
     }
 
-    /// <summary>Item 19 fix pass 3 (H3, the remote arm): which received
-    /// carrier value the card-pick popup may apply for a REMOTE picker.
+    /// <summary>Item 19 fix pass 3 (H3, the remote arm), rebuilt by fix pass 4
+    /// on a PICK BINDING: which received carrier value the card-pick popup
+    /// may apply for a REMOTE picker.
     ///
     /// The carrier (cr_face) is a Photon player property, and this seat's
     /// copy of a remote picker's carrier is whatever update it received
-    /// last. When the popup opens for that picker before the picker's
-    /// publish for THIS pick has arrived, the copy is the face of an earlier
-    /// pick (or of a publish made outside any pick), and applying it shows a
-    /// stale face for the whole pick. So the popup never reads the copy.
-    /// The picker tags the one publish it makes at its own card-pick Show
-    /// with a pick sequence (a 13th field, "p" + seq, see Tag); this ledger
-    /// keeps, per remote actor, the newest TAGGED value that ARRIVED (the
-    /// property callback; the join snapshot never comes through it) since
-    /// that actor's popup last ended on this seat. Show applies that value,
-    /// or, when none has arrived, owes the apply and Arrived completes it.
+    /// last, which can be an earlier pick's face; so the popup never reads
+    /// the copy. Fix pass 3 tagged the picker's card-pick publish with a
+    /// sequence and took the newest tagged arrival by age, which a late
+    /// carrier of the picker's previous show also satisfied (build round 4,
+    /// H3). Fix pass 4 binds the value to the pick instead. The picker
+    /// publishes at its own card-pick Show with the identity of the popup it
+    /// shows (AvatarRules.PopupPick: the game this seat saw start in the room
+    /// and the rounds completed in it, which every seat derives from the same
+    /// DoStartGame and RPCA_NextRound), as a 13th field after the face
+    /// (BoundFace) or, when it has no valid face, as the clear tombstone
+    /// (BoundClear). This seat derives the identity of the popup it shows
+    /// from the same events, and applies a face, or takes a clear, only when
+    /// the two are equal (AvatarRules.BoundToPopup). Nothing else decides:
+    /// not the order of arrival, not the age of a value.
     ///
-    /// Why "since that actor's popup last ended" is the provenance: one
-    /// sender's reliable operations reach every other seat in the order they
-    /// were sent. A picker publishes for pick k only after it has sent
-    /// RPCA_DonePicking for its own pick k-1, and this seat processes that
-    /// RPC before its pick loop hides the pick k-1 popup. Everything held
-    /// for the actor when its popup ends therefore belongs to that pick or an
-    /// earlier one and is discarded there; a tagged value that arrives later
-    /// belongs to a later pick. (The window this leaves: a picker publishing
-    /// for its next pick before this seat has hidden the popup of its
-    /// previous one. The pick flows this mod runs put another picker's pick
-    /// or a round between two picks of one picker; and if the window were
-    /// ever hit, the value is dropped and vanilla's face shows, never an
-    /// older face.)
+    /// Per remote actor the ledger keeps the one value most recently received
+    /// bound to a pick no older than this seat's own: the picker's seat can be
+    /// ahead, so its publish for a pick can arrive before this seat's popup of
+    /// that pick opens, and is applied when it does. A value bound to an older
+    /// pick than this seat has reached, or than the one held, is STALE: it is
+    /// logged, never applied, and nothing held or owed changes. An unbound
+    /// value (a 1.40.3 client's 12 fields, a publish outside a pick, a removed
+    /// key) is logged as stale and changes nothing either. A seat that has
+    /// seen no game start in this room (a spectator, which the DoStartGame
+    /// prefix never counts; a seat that joined a running game) has no
+    /// identity to bind to: it holds nothing, applies no carrier, and
+    /// vanilla's face stands. Two seats whose game counts differ (one joined
+    /// or rejoined the room after a game had started in it) never derive the
+    /// same identity, so neither applies the other's carrier: each deferral
+    /// ends at the bound with its line, and vanilla's face stands.
     ///
-    /// Two more rules bound what is held for an actor whose popup is not
-    /// open. An UNTAGGED value arriving from it discards the held one: that
-    /// publish (a room edge's republish, or item 19's own apply, which is
-    /// how a face changes) was sent after it, so the held value may carry a
-    /// face the actor no longer has. And a held value is applied only when
-    /// the actor's popup opens within DeferralBoundSeconds of its arrival.
-    /// The early arrival this hold exists for (the picker's seat ahead of
-    /// this one by the network delay) lands well inside that bound; the
-    /// value of a show this seat had already moved past (a popup of a
-    /// picker's body outside its own pick, such as the 2v2 round-win show
-    /// of a player who does not pick, arriving after this seat's popup moved
-    /// on) is the one held value that is not this pick's, and it can be
-    /// applied only inside the bound, within the same game, where the face
-    /// cannot have changed: item 19 never applies a face during a live game
-    /// (the evaluator gates on it), and the creator is not reachable in one.
-    /// The popup's own value for the pick re-applies on arrival either way.
+    /// When the popup opens and nothing bound to its pick has arrived, the
+    /// apply is OWED and the arrival completes it, with the restoration-debt
+    /// rules of E13: cleared only when the apply is observed to complete
+    /// (ApplySerialized returned true) or a clear bound to the pick arrives,
+    /// kept when the apply throws or finds no visualizer to equip, retried on
+    /// the throttled tick, recorded once however often the popup is re-shown
+    /// while it is owed, and dropped only when the popup ends or shows another
+    /// pick, the room changes, or DeferralBoundSeconds pass, each with a line.
     ///
-    /// An owed apply follows the restoration-debt rules of E13: it is cleared
-    /// only when the apply is observed to complete (ApplySerialized returned
-    /// true), kept when the apply throws or finds no visualizer to equip,
-    /// retried on the throttled tick, recorded once per actor however often
-    /// the popup is re-shown, and dropped only when the popup ends, the room
-    /// changes, the picker clears its carrier, or DeferralBoundSeconds pass,
-    /// each with a line. An untagged value (a 1.40.3 client's publish, or a
-    /// publish outside a pick) is stale-unknown and is never applied.
-    ///
-    /// Pure (no Unity, no Photon): the caller passes the room object and the
-    /// clock, and logs Note after each call. Main thread only.</summary>
+    /// Pure (no Unity, no Photon): the caller passes the room object, the
+    /// rounds and the clock, and logs Note after each call. Main thread only.</summary>
     internal sealed class PopupCarrierLedger
     {
         /// <summary>How long the popup waits for a remote picker's carrier
         /// for the pick before it stops waiting (vanilla's face stands).</summary>
         internal const double DeferralBoundSeconds = 10.0;
 
+        /// <summary>The binding field's prefix ("pick" + game + "." + rounds)
+        /// and the clear tombstone's first field (fix pass 4, H3).</summary>
+        internal const string PickPrefix = "pick";
+        internal const string ClearMark = "clear";
+
         /// <summary>One remote actor's record, for the room it was made in.</summary>
         private sealed class Entry
         {
-            internal long Seq = -1;              // the newest pick tag received from this actor in this room
-            internal string Fresh;               // the newest TAGGED value that ARRIVED since this actor's popup last ended here
-            internal double ArrivedAt = -1;      // when Fresh arrived, on this seat's clock
-            internal double DeferredSince = -1;  // >= 0: the popup shows this actor and still owes it the value
+            internal string Pick;                // the pick the held value is bound to ("pick<game>.<rounds>")
+            internal string Value;               // the held value: a face bound to Pick, or the clear tombstone
+            internal bool Clear;                 // Value is the clear tombstone
+            internal double DeferredSince = -1;  // >= 0: the popup shows this actor and still owes it its pick's value
         }
 
-        private readonly AvatarRules rules;      // the three decisions: provenance, the hold, the owed bound
+        private readonly AvatarRules rules;      // the decisions: the identity, the binding, the binding check, the owed bound
         private readonly Dictionary<int, Entry> entries = new Dictionary<int, Entry>();
         private object room;                     // the room incarnation the entries belong to (Photon's Room object)
+        private int game;                        // the games this seat has seen start in that room (DoStartGame)
         private int shown = -1;                  // the remote actor the popup shows; -1 for none or the local picker
+        private string shownPick;                // the pick that popup shows; null when this seat has no identity for it
         private string note;                     // what the last call decided, for the log
 
-        /// <summary>The ledger asks its rules (AvatarRules.PickProvenance,
-        /// HeldForPopup, OwedWithin) and keeps the rest itself.</summary>
+        /// <summary>The ledger asks its rules (AvatarRules.PopupPick,
+        /// PickBinding, BoundToPopup, OwedWithin) and keeps the rest itself.</summary>
         internal PopupCarrierLedger(AvatarRules rules)
         {
             this.rules = rules ?? new AvatarRules();
@@ -675,28 +696,67 @@ namespace CompetitiveRounds
         /// <summary>What the last call decided; null when nothing is worth a line.</summary>
         internal string Note => note;
 
-        /// <summary>The pick tag a picker appends to the one publish it makes
-        /// at its own card-pick Show: a 13th '|' field, "p" + seq.</summary>
-        internal static string Tag(string face, long seq)
+        /// <summary>The value a picker publishes at its own card-pick Show
+        /// (fix pass 4, H3): the 12 face fields and a 13th, the pick of the
+        /// popup it shows. A 1.40.3 reader takes fields 0 to 11.</summary>
+        internal static string BoundFace(string face, string pick)
         {
-            return face + "|p" + seq.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return face + "|" + pick;
         }
 
-        /// <summary>The pick tag of a carrier value; false for an untagged
-        /// value (12 fields: a 1.40.3 client, or a publish outside a pick).</summary>
-        internal static bool TryReadTag(string value, out long seq)
+        /// <summary>The clear tombstone a picker publishes at its own card-pick
+        /// Show when it has no valid face (fix pass 4, H3): "clear|" + the
+        /// popup's pick. Two fields, so a reader that needs 12 (a 1.40.3 seat)
+        /// refuses it and applies nothing, as for a removed carrier.</summary>
+        internal static string BoundClear(string pick)
         {
-            seq = -1;
+            return ClearMark + "|" + pick;
+        }
+
+        /// <summary>The pick a carrier value is bound to, and whether it is the
+        /// clear tombstone; false for an unbound value (12 fields: a 1.40.3
+        /// client, or a publish outside a pick; a removed key; anything else).</summary>
+        internal static bool TryReadBinding(string value, out string pick, out bool clear)
+        {
+            pick = null;
+            clear = false;
             if (string.IsNullOrEmpty(value)) return false;
             var parts = value.Split('|');
-            if (parts.Length != 13) return false;
-            string t = parts[12];
-            if (t.Length < 2 || t[0] != 'p') return false;
-            long n;
-            if (!long.TryParse(t.Substring(1), System.Globalization.NumberStyles.None,
-                               System.Globalization.CultureInfo.InvariantCulture, out n)) return false;
-            seq = n;
+            string last;
+            bool tomb;
+            if (parts.Length == 13) { last = parts[12]; tomb = false; }
+            else if (parts.Length == 2 && parts[0] == ClearMark) { last = parts[1]; tomb = true; }
+            else return false;
+            int g, r;
+            if (!TryParsePick(last, out g, out r)) return false;
+            pick = last;
+            clear = tomb;
             return true;
+        }
+
+        /// <summary>"pick" + game + "." + rounds, each a plain decimal.</summary>
+        private static bool TryParsePick(string s, out int game, out int rounds)
+        {
+            game = -1;
+            rounds = -1;
+            if (s == null || !s.StartsWith(PickPrefix, StringComparison.Ordinal)) return false;
+            string rest = s.Substring(PickPrefix.Length);
+            int dot = rest.IndexOf('.');
+            if (dot <= 0 || dot == rest.Length - 1) return false;
+            var ns = System.Globalization.NumberStyles.None;
+            var ic = System.Globalization.CultureInfo.InvariantCulture;
+            return int.TryParse(rest.Substring(0, dot), ns, ic, out game) && int.TryParse(rest.Substring(dot + 1), ns, ic, out rounds);
+        }
+
+        /// <summary>Orders two well-formed picks: the game first, then the
+        /// rounds. It decides only whether a value is held or stale, never
+        /// whether one is applied (that is AvatarRules.BoundToPopup alone).</summary>
+        private static int ComparePicks(string a, string b)
+        {
+            int ga, ra, gb, rb;
+            TryParsePick(a, out ga, out ra);
+            TryParsePick(b, out gb, out rb);
+            return ga != gb ? ga.CompareTo(gb) : ra.CompareTo(rb);
         }
 
         private void Say(string s)
@@ -712,9 +772,10 @@ namespace CompetitiveRounds
         }
 
         /// <summary>Every entry point binds the room first: a different room
-        /// object (another room, a rejoin, or none) drops everything, since
-        /// nothing received in one room belongs to another.</summary>
-        private void Bind(object currentRoom)
+        /// object (another room, a rejoin, or none) drops everything, the game
+        /// count included, since nothing received or counted in one room
+        /// belongs to another.</summary>
+        private void BindRoom(object currentRoom)
         {
             if (ReferenceEquals(currentRoom, room)) return;
             Entry e;
@@ -722,54 +783,87 @@ namespace CompetitiveRounds
                 Say("actor " + shown + "'s popup face is no longer owed: the room changed before its carrier arrived");
             entries.Clear();
             shown = -1;
+            shownPick = null;
+            game = 0;
             room = currentRoom;
         }
 
         /// <summary>Ends the popup's session with the actor it shows: an owed
-        /// apply is dropped, and the value held for that actor is discarded,
-        /// since everything that has arrived from it so far belongs to this
-        /// pick or an earlier one.</summary>
+        /// apply is dropped. What is held stays: it is bound to its pick, so it
+        /// can only ever be taken by a popup of that same pick (a re-Show).</summary>
         private void EndShown()
         {
             if (shown < 0) return;
             var e = Get(shown);
             if (e.DeferredSince >= 0)
-                Say("actor " + shown + "'s popup ended before its carrier for the pick arrived: vanilla's face stood");
+                Say("actor " + shown + "'s popup of " + shownPick + " ended before a carrier bound to it arrived: vanilla's face stood");
             e.DeferredSince = -1;
-            e.Fresh = null;
             shown = -1;
+            shownPick = null;
+        }
+
+        /// <summary>GM_ArmsRace.DoStartGame on this seat (a prefix, so it runs
+        /// on every seat that starts the game whatever a sibling prefix
+        /// decides, #352): the picks of the game starting now are bound to the
+        /// new count.</summary>
+        internal void GameStarted(object currentRoom)
+        {
+            note = null;
+            BindRoom(currentRoom);
+            EndShown();
+            game++;
+            Say("game " + game + " started in this room on this seat: its card-pick popups are bound to "
+                + PickPrefix + game + ".<rounds completed>");
+        }
+
+        /// <summary>The identity of the pick a popup opening now shows, from the
+        /// rounds completed in the current game (AvatarRules.PopupPick); null
+        /// when this seat has no identity to give.</summary>
+        internal string PopupPick(object currentRoom, int rounds)
+        {
+            note = null;
+            BindRoom(currentRoom);
+            return rules.PopupPick(game, rounds);
         }
 
         /// <summary>The popup now shows a REMOTE picker (the Show postfix,
-        /// through AvatarRules.PopupFace). Returns the value to apply now, or
-        /// null: nothing published for this pick has arrived, so the apply is
-        /// owed and Arrived completes it. A re-Show of the same picker hands
-        /// the same value back (the skin is new) and never opens a second debt.
-        /// A value held from before the popup opened is taken only when it
-        /// arrived within DeferralBoundSeconds of the opening.</summary>
-        internal string Show(object currentRoom, int actor, double now)
+        /// through AvatarRules.PopupFace), for the pick popupPick (PopupPick at
+        /// that Show). Returns the value to apply now: the held value, when it
+        /// is a face bound to exactly that pick. Otherwise null: a clear bound
+        /// to the pick (nothing to apply, vanilla's face stands), no identity
+        /// on this seat, or nothing bound to the pick has arrived, so the apply
+        /// is owed and Arrived completes it. A re-Show of the same pick hands
+        /// the same value back (the skin is new) and never opens a second debt.</summary>
+        internal string Show(object currentRoom, int actor, string popupPick, double now)
         {
             note = null;
-            Bind(currentRoom);
+            BindRoom(currentRoom);
             var e = Get(actor);
-            if (shown != actor)
+            bool opened = shown != actor || shownPick != popupPick;
+            if (opened)
             {
                 EndShown();
-                if (e.Fresh != null && !rules.HeldForPopup(e.ArrivedAt, now))
-                {
-                    Say("actor " + actor + "'s held carrier (pick seq " + e.Seq + ") arrived more than "
-                        + DeferralBoundSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture)
-                        + " s before its popup opened: an earlier show's value, discarded unapplied");
-                    e.Fresh = null;
-                }
+                shown = actor;
+                shownPick = popupPick;
             }
-            shown = actor;
-            if (e.Fresh != null) return e.Fresh;          // the caller reports the outcome through Applied
+            if (popupPick == null)
+            {
+                if (opened)
+                    Say("actor " + actor + "'s popup has no pick identity on this seat (no game start seen in this room):"
+                        + " no carrier can be bound to it, vanilla's face stands");
+                return null;
+            }
+            if (e.Value != null && rules.BoundToPopup(e.Pick, popupPick))
+            {
+                if (!e.Clear) return e.Value;             // the caller reports the outcome through Applied
+                if (opened) Say("actor " + actor + " cleared its carrier for " + popupPick + ": nothing is applied, vanilla's face stands");
+                return null;
+            }
             if (e.DeferredSince < 0)
             {
                 e.DeferredSince = now;
-                Say("actor " + actor + "'s popup face deferred: no carrier published for this pick has arrived"
-                    + " (the copy held is older or untagged), so none is applied until it does");
+                Say("actor " + actor + "'s popup face for " + popupPick + " deferred: no carrier bound to that pick has arrived"
+                    + (e.Value != null ? " (the value held is bound to " + e.Pick + ")" : "") + ", so none is applied until it does");
             }
             return null;
         }
@@ -783,7 +877,7 @@ namespace CompetitiveRounds
             var e = Get(actor);
             if (committed)
             {
-                if (e.DeferredSince >= 0) Say("actor " + actor + "'s owed popup face applied (pick seq " + e.Seq + ")");
+                if (e.DeferredSince >= 0) Say("actor " + actor + "'s owed popup face applied (bound to " + e.Pick + ")");
                 e.DeferredSince = -1;
                 return;
             }
@@ -792,74 +886,84 @@ namespace CompetitiveRounds
             Say("actor " + actor + "'s popup face did not apply (no visualizer to equip, or the equip failed): still owed, the tick retries it");
         }
 
-        /// <summary>A carrier update ARRIVED for a remote actor. Returns the
-        /// value to apply now (the popup shows that actor, and the value is a
-        /// pick-tagged one newer than any before it), or null: held for that
-        /// actor's next popup, or not applicable at all.</summary>
-        internal string Arrived(object currentRoom, int actor, string value, double now)
+        /// <summary>A carrier update ARRIVED for a remote actor: the property
+        /// callback's changed value (a removed key arrives as null). currentPick
+        /// is the identity a popup opening on this seat now would show
+        /// (PopupPick). Returns the value to apply now: a face bound to exactly
+        /// the pick of the popup showing this actor. Otherwise null: a clear
+        /// bound to that pick (it settles what is owed), a value held for a
+        /// later popup of this actor, or a value never applied (unbound, or
+        /// bound to an older pick: stale, and nothing held or owed changes).</summary>
+        internal string Arrived(object currentRoom, int actor, string value, string currentPick, double now)
         {
             note = null;
-            Bind(currentRoom);
+            BindRoom(currentRoom);
+            string pick;
+            bool clear;
+            if (!rules.PickBinding(value, out pick, out clear))
+            {
+                Say((value == null ? "actor " + actor + " removed its carrier" : "an unbound carrier arrived from actor " + actor)
+                    + " (a 1.40.3 client's publish, or one made outside a pick): bound to no pick, stale, never applied to a"
+                    + " popup; nothing held or owed changes");
+                return null;
+            }
             var e = Get(actor);
-            if (string.IsNullOrEmpty(value))
+            if (actor == shown && rules.BoundToPopup(pick, shownPick))
             {
-                e.Fresh = null;
-                if (actor == shown && e.DeferredSince >= 0)
-                {
-                    e.DeferredSince = -1;
-                    Say("actor " + actor + " cleared its carrier: its popup face is no longer owed, vanilla's face stands");
-                }
+                e.Pick = pick;
+                e.Value = value;
+                e.Clear = clear;
+                if (!clear) return value;                 // the caller applies it and reports through Applied
+                Say("actor " + actor + " cleared its carrier for " + pick + (e.DeferredSince >= 0 ? ": no longer owed" : "")
+                    + ", vanilla's face stands");
+                e.DeferredSince = -1;
                 return null;
             }
-            long seq;
-            if (!rules.PickProvenance(value, out seq))
+            if (currentPick == null)
             {
-                Say("an untagged carrier arrived from actor " + actor
-                    + " (a 1.40.3 client, or a publish outside a pick): stale-unknown, never applied to the popup");
-                if (actor != shown && e.Fresh != null)
-                {
-                    e.Fresh = null;
-                    Say("the value held for actor " + actor + "'s next popup is discarded: it was published before this one");
-                }
+                Say("a carrier bound to " + pick + " arrived from actor " + actor + ", and this seat has seen no game start in"
+                    + " this room: none of its popups is bound to a pick, so it is never applied and not held");
                 return null;
             }
-            if (seq <= e.Seq)
+            string reached = e.Value != null && ComparePicks(e.Pick, currentPick) > 0 ? e.Pick : currentPick;
+            if (ComparePicks(pick, reached) < 0)
             {
-                Say("a carrier arrived from actor " + actor + " with pick seq " + seq + ", not newer than seq " + e.Seq + ": ignored");
+                Say("a carrier bound to " + pick + " arrived from actor " + actor + " after this seat reached " + reached
+                    + ": stale, never applied; nothing held or owed changes");
                 return null;
             }
-            e.Seq = seq;
-            e.Fresh = value;
-            e.ArrivedAt = now;
-            return actor == shown ? value : null;
+            e.Pick = pick;                                // held for this actor's popup of that pick
+            e.Value = value;
+            e.Clear = clear;
+            return null;
         }
 
         /// <summary>The popup was hidden, or moved to the local picker.</summary>
         internal void EndSession(object currentRoom)
         {
             note = null;
-            Bind(currentRoom);
+            BindRoom(currentRoom);
             EndShown();
         }
 
         /// <summary>The throttled tick: drops an owed apply past the bound;
-        /// otherwise returns a held value whose apply has not completed (the
-        /// retry), or null.</summary>
+        /// otherwise returns the held face bound to the shown popup's pick
+        /// whose apply has not completed (the retry), or null.</summary>
         internal string Tick(object currentRoom, double now)
         {
             note = null;
-            Bind(currentRoom);
+            BindRoom(currentRoom);
             if (shown < 0) return null;
             var e = Get(shown);
             if (e.DeferredSince < 0) return null;
             if (!rules.OwedWithin(e.DeferredSince, now))
             {
                 e.DeferredSince = -1;
-                Say("actor " + shown + "'s popup face is no longer owed: nothing for this pick completed within "
+                Say("actor " + shown + "'s popup face for " + shownPick + " is no longer owed: nothing bound to that pick completed within "
                     + DeferralBoundSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture) + " s, vanilla's face stands");
                 return null;
             }
-            return e.Fresh;
+            return e.Value != null && !e.Clear && rules.BoundToPopup(e.Pick, shownPick) ? e.Value : null;
         }
     }
 }

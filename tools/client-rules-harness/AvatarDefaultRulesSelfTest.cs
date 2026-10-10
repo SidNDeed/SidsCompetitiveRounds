@@ -661,13 +661,14 @@ namespace CompetitiveRounds
             // Fix pass 3 (H3, the remote arm): a REMOTE seat whose settled copy
             // of the picker's carrier is stale (face 1: an earlier publish that
             // arrived and settled) raises the popup and applies, and only then
-            // receives the echo of the picker's publish for this pick (face 4).
+            // receives the echo of the picker's publish for this pick (face 4,
+            // bound to this pick since fix pass 4).
             var remote = new RemoteSeat(r);
             remote.Arrive(7, Wire(1));                                        // the settled, stale copy
             remote.Show(7);                                                   // raise the popup and apply
             int atShow = remote.Equipped.Count;
             remote.Now = 0.3;
-            remote.Arrive(7, PopupCarrierLedger.Tag(Wire(4), 2));             // the echo, late
+            remote.Arrive(7, Bd(Wire(4), 1, 0));                              // the echo, late
             string onEcho = remote.Equipped.Count > 0 ? remote.Equipped[remote.Equipped.Count - 1] : null;
             got = "publish, read, echo (cache still face-old at the read): shown=" + (first ?? "none") + " cache reads=" + r1
                 + " | then a clear (cache still face-new at the read): shown=" + (cleared ?? "none") + " reads=" + r2
@@ -675,7 +676,7 @@ namespace CompetitiveRounds
                 + " | a remote picker, settled copy " + Short(Wire(1)) + ": faces equipped at the popup " + atShow
                 + ", on the late echo " + Short(onEcho) + ", equipped in all " + remote.Faces() + ", reads of the settled copy " + remote.Reads;
             return first == "face-new" && r1 == 0 && cleared == null && r2 == 0 && again == "face-4" && r3 == 0
-                && atShow == 0 && onEcho == PopupCarrierLedger.Tag(Wire(4), 2) && remote.Equipped.Count == 1 && remote.Reads == 0;
+                && atShow == 0 && onEcho == Bd(Wire(4), 1, 0) && remote.Equipped.Count == 1 && remote.Reads == 0;
         }
 
         // ---- fix pass 3 (Codex BUILD round 3) ------------------------------
@@ -688,13 +689,25 @@ namespace CompetitiveRounds
             return string.Join("|", new[] { n, z, z, n, z, z, n, z, z, n, z, z });
         }
 
-        /// <summary>A carrier value as got= prints it: "face N", plus its pick tag.</summary>
+        /// <summary>A carrier value as got= prints it: "face N" plus the pick
+        /// it is bound to, or the clear tombstone with its pick.</summary>
         private static string Short(string v)
         {
             if (v == null) return "none";
             var p = v.Split('|');
-            return "face " + p[0] + (p.Length == 13 ? " " + p[12] : p.Length == 12 ? " (untagged)" : " (?)");
+            if (p.Length == 2) return "clear " + p[1];
+            return "face " + p[0] + (p.Length == 13 ? " " + p[12] : p.Length == 12 ? " (unbound)" : " (?)");
         }
+
+        /// <summary>Fix pass 4 (H3): a pick identity as both seats derive it
+        /// ("pick" + the game this seat saw start + "." + the rounds completed).</summary>
+        private static string Pk(int game, int rounds)
+            => PopupCarrierLedger.PickPrefix + game.ToString(System.Globalization.CultureInfo.InvariantCulture)
+               + "." + rounds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+        /// <summary>Fix pass 4 (H3): a face bound to a pick, as its picker
+        /// publishes it at its own card-pick Show.</summary>
+        private static string Bd(string face, int game, int rounds) => PopupCarrierLedger.BoundFace(face, Pk(game, rounds));
 
         /// <summary>H3, the remote arm (fix pass 3): a REMOTE seat as PUN feeds
         /// it. A carrier update ARRIVES (OnPlayerPropertiesUpdate) and is from
@@ -703,7 +716,11 @@ namespace CompetitiveRounds
         /// wires it (PopupCarriers.ForShow: the ledger); arrival and the tick
         /// apply what the ledger hands back, and every outcome is reported to
         /// it (Applied), as PopupCarriers does. Every face equipped on the
-        /// popup is recorded in order, with the ledger's notes.</summary>
+        /// popup is recorded in order, with the ledger's notes. Fix pass 4
+        /// (H3): the seat derives the pick identity as production does
+        /// (PopupCarriers.PickNow: the games it saw start in the room, from
+        /// GameStart, and Rounds), hands it to every Show and Arrived, and a
+        /// seat built with started false has seen no game start in its room.</summary>
         private sealed class RemoteSeat
         {
             internal readonly Dictionary<int, string> Settled = new Dictionary<int, string>();
@@ -713,27 +730,47 @@ namespace CompetitiveRounds
             internal readonly PopupCarrierLedger Ledger;
             internal object Room = new object();
             internal double Now;
+            internal int Rounds;                  // the rounds completed in the current game on this seat
             internal int Reads;                   // reads of the settled copy: the popup makes none
             internal int FailNext;                // the next N equips fail (no visualizer to equip)
             private readonly AvatarRules rules;
 
-            internal RemoteSeat(AvatarRules r) { rules = r; Ledger = new PopupCarrierLedger(r); }
+            internal RemoteSeat(AvatarRules r, bool started = true)
+            {
+                rules = r;
+                Ledger = new PopupCarrierLedger(r);
+                if (started) GameStart();
+            }
 
             internal string ReadSettled(int actor) { Reads++; string v; return Settled.TryGetValue(actor, out v) ? v : null; }
 
             private void Note() { if (Ledger.Note != null) Notes.Add(Ledger.Note); }
 
+            /// <summary>GM_ArmsRace.DoStartGame on this seat: a game starts in
+            /// its room, with no rounds completed.</summary>
+            internal void GameStart() { Ledger.GameStarted(Room); Note(); Rounds = 0; }
+
+            /// <summary>The identity of a popup opening now (PopupCarriers.PickNow).</summary>
+            internal string PickNow() { string p = Ledger.PopupPick(Room, Rounds); Note(); return p; }
+
             internal void Arrive(int actor, string value)
             {
                 Settled[actor] = value;
-                string v = Ledger.Arrived(Room, actor, value, Now);
+                string pick = PickNow();
+                string v = Ledger.Arrived(Room, actor, value, pick, Now);
                 Note();
                 if (v != null) Equip(actor, v);
             }
 
             internal void Show(int actor)
             {
-                string v = rules.PopupFace(false, FaceCarrierAction.Keep, null, () => { string h = Ledger.Show(Room, actor, Now); Note(); return h; });
+                string v = rules.PopupFace(false, FaceCarrierAction.Keep, null, () =>
+                {
+                    string pick = PickNow();
+                    string h = Ledger.Show(Room, actor, pick, Now);
+                    Note();
+                    return h;
+                });
                 if (v != null) Equip(actor, v);
             }
 
@@ -760,49 +797,55 @@ namespace CompetitiveRounds
             internal int NotesWith(string s) => Notes.FindAll(n => n.Contains(s)).Count;
         }
 
-        /// <summary>H3 (fix pass 3), what the popup's remote arm applies: never
-        /// the settled copy, only a value its picker published for the pick
-        /// that raised the popup, completed on arrival when it comes late.</summary>
+        /// <summary>H3 (fix pass 3; bound in fix pass 4), what the popup's
+        /// remote arm applies: never the settled copy, only a value its picker
+        /// published bound to the pick that raised the popup, completed on
+        /// arrival when it comes late; nothing on a seat with no pick identity.</summary>
         private static bool H3Remote(AvatarRules r, out string got)
         {
             const int P = 7;
             string old = Wire(1), face = Wire(3);
-            // A: an untagged publish arrived earlier and settled; popup, apply, then the late echo
+            // A: an unbound publish arrived earlier and settled; popup, apply, then the late echo
             var a = new RemoteSeat(r);
             a.Arrive(P, old);
             a.Show(P);
             int aShow = a.Equipped.Count;
             a.Now = 0.4;
-            a.Arrive(P, PopupCarrierLedger.Tag(face, 2));
-            bool okA = aShow == 0 && a.Equipped.Count == 1 && a.Equipped[0] == PopupCarrierLedger.Tag(face, 2) && a.Reads == 0;
-            // B: the picker's previous pick settled; its next popup is raised before that pick's echo
+            a.Arrive(P, Bd(face, 1, 0));
+            bool okA = aShow == 0 && a.Equipped.Count == 1 && a.Equipped[0] == Bd(face, 1, 0) && a.Reads == 0
+                && a.NotesWith("stale") == 1;
+            // B: the picker's previous pick applied; its next popup is raised before that pick's echo
             var b = new RemoteSeat(r);
             b.Show(P);
-            b.Arrive(P, PopupCarrierLedger.Tag(old, 1));                      // pick 1, applied on arrival
+            b.Arrive(P, Bd(old, 1, 0));                                       // pick1.0, applied on arrival
             b.Hide();
+            b.Rounds = 1;
             b.Now = 6;
-            b.Show(P);                                                        // pick 2: nothing for it yet
+            b.Show(P);                                                        // pick1.1: nothing bound to it yet
             int bShow = b.Equipped.Count;
             b.Now = 6.3;
-            b.Arrive(P, PopupCarrierLedger.Tag(face, 2));
-            bool okB = bShow == 1 && b.Equipped.Count == 2 && b.Equipped[1] == PopupCarrierLedger.Tag(face, 2);
-            // C: a pick tag not newer than the last one received is never applied
-            var c = new RemoteSeat(r);
+            b.Arrive(P, Bd(face, 1, 1));
+            bool okB = bShow == 1 && b.Equipped.Count == 2 && b.Equipped[1] == Bd(face, 1, 1);
+            // C: a seat that has seen no game start in its room (a spectator,
+            // a seat that joined a running game) applies no carrier at all
+            var c = new RemoteSeat(r, started: false);
+            c.Arrive(P, Bd(face, 1, 0));
             c.Show(P);
-            c.Arrive(P, PopupCarrierLedger.Tag(face, 9));
-            c.Arrive(P, PopupCarrierLedger.Tag(old, 8));
-            bool okC = c.Equipped.Count == 1 && c.Equipped[0] == PopupCarrierLedger.Tag(face, 9);
-            got = "A settled untagged " + Short(old) + ", popup, late echo: equipped at the popup " + aShow + ", in all " + a.Faces()
-                + ", settled reads " + a.Reads
-                + " | B the previous pick's value settled: equipped at the second popup " + (bShow - 1) + " new, in all " + b.Faces()
-                + " | C seq 9 then seq 8: " + c.Faces();
+            c.Now = 0.5;
+            c.Arrive(P, Bd(face, 1, 0));
+            bool okC = c.Equipped.Count == 0 && c.NotesWith("no pick identity") == 1;
+            got = "A settled unbound " + Short(old) + ", popup, late echo: equipped at the popup " + aShow + ", in all " + a.Faces()
+                + ", settled reads " + a.Reads + ", stale lines " + a.NotesWith("stale")
+                + " | B the previous pick's value applied: equipped at the popup of pick1.1 " + (bShow - 1) + " new, in all " + b.Faces()
+                + " | C no game start seen: " + c.Faces() + ", no-identity lines " + c.NotesWith("no pick identity");
             return okA && okB && okC;
         }
 
-        /// <summary>H3 (fix pass 3), what is held for a picker whose popup is
-        /// not open: the early arrival is applied when its popup opens; a value
-        /// held past the bound, a value followed by an untagged publish, and a
-        /// value from another room are never applied.</summary>
+        /// <summary>H3 (fix pass 4), what is held for a picker whose popup is
+        /// not open: a value is applied at the popup of the pick it is bound to
+        /// (the picker's seat can be ahead), never at another pick's popup
+        /// however long it waited; an unbound publish changes nothing held;
+        /// another room drops what was held.</summary>
         private static bool H3Hold(AvatarRules r, out string got)
         {
             const int P = 7, Q = 8;
@@ -810,35 +853,39 @@ namespace CompetitiveRounds
             // D: the picker's seat is ahead: its value lands while this seat shows another picker
             var d = new RemoteSeat(r);
             d.Show(Q);
-            d.Arrive(P, PopupCarrierLedger.Tag(f3, 3));
+            d.Arrive(P, Bd(f3, 1, 0));
             d.Now = 0.5;
             d.Hide();
             d.Show(P);
-            bool okD = d.Equipped.Count == 1 && d.Equipped[0] == PopupCarrierLedger.Tag(f3, 3);
-            // E: held past the bound before its popup opens: an earlier show's value
+            bool okD = d.Equipped.Count == 1 && d.Equipped[0] == Bd(f3, 1, 0);
+            // E: a value bound to the previous pick is held; the next pick's
+            // popup opens long after, before its own value
             var e = new RemoteSeat(r);
-            e.Arrive(P, PopupCarrierLedger.Tag(f3, 4));
-            e.Now = PopupCarrierLedger.DeferralBoundSeconds + 1;
+            e.Arrive(P, Bd(f3, 1, 0));
+            e.Rounds = 1;
+            e.Now = 3 * PopupCarrierLedger.DeferralBoundSeconds;
             e.Show(P);
             int eShow = e.Equipped.Count;
             e.Now += 0.2;
-            e.Arrive(P, PopupCarrierLedger.Tag(f4, 5));
-            bool okE = eShow == 0 && e.Equipped.Count == 1 && e.Equipped[0] == PopupCarrierLedger.Tag(f4, 5);
-            // F: an untagged publish after a held value discards it
+            e.Arrive(P, Bd(f4, 1, 1));
+            bool okE = eShow == 0 && e.Equipped.Count == 1 && e.Equipped[0] == Bd(f4, 1, 1);
+            // F: an unbound publish after a held bound value changes nothing held
             var f = new RemoteSeat(r);
-            f.Arrive(P, PopupCarrierLedger.Tag(f3, 6));
+            f.Arrive(P, Bd(f3, 1, 0));
             f.Arrive(P, f4);
             f.Show(P);
-            bool okF = f.Equipped.Count == 0;
-            // G: a new room drops what was held in the old one
+            bool okF = f.Equipped.Count == 1 && f.Equipped[0] == Bd(f3, 1, 0);
+            // G: a new room drops what was held in the old one (its first game is game 1 again)
             var g = new RemoteSeat(r);
-            g.Arrive(P, PopupCarrierLedger.Tag(f3, 7));
+            g.Arrive(P, Bd(f3, 1, 0));
             g.Room = new object();
+            g.GameStart();
             g.Show(P);
             bool okG = g.Equipped.Count == 0;
             got = "D early arrival under another popup: " + d.Faces()
-                + " | E held " + e.Now.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " s: at the popup " + eShow + ", in all " + e.Faces()
-                + " | F held, then an untagged publish: " + f.Faces() + " | G held, then another room: " + g.Faces();
+                + " | E bound to pick1.0, the popup of pick1.1 at " + e.Now.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture)
+                + " s: at the popup " + eShow + ", in all " + e.Faces()
+                + " | F held, then an unbound publish: " + f.Faces() + " | G held, then another room: " + g.Faces();
             return okD && okE && okF && okG;
         }
 
@@ -858,7 +905,7 @@ namespace CompetitiveRounds
             int deferrals = h.NotesWith("deferred");
             h.FailNext = 1;
             h.Now = 0.3;
-            h.Arrive(P, PopupCarrierLedger.Tag(f3, 1));
+            h.Arrive(P, Bd(f3, 1, 0));
             int afterFail = h.Equipped.Count;
             h.Now = 0.6;
             h.Tick();
@@ -871,7 +918,7 @@ namespace CompetitiveRounds
             i.Show(P);
             i.FailNext = 1000;
             i.Now = 0.2;
-            i.Arrive(P, PopupCarrierLedger.Tag(f3, 2));
+            i.Arrive(P, Bd(f3, 1, 0));
             for (int k = 1; k <= 60; k++) { i.Now = 0.2 + k * 0.25; i.Tick(); }
             double last = i.Attempts.Count > 0 ? i.Attempts[i.Attempts.Count - 1] : -1;
             bool okI = i.Attempts.Count > 2 && last <= PopupCarrierLedger.DeferralBoundSeconds && i.NotesWith("no longer owed") == 1;
@@ -928,6 +975,105 @@ namespace CompetitiveRounds
                 + " | the deferred edge: apply " + e13.Apply + " live " + seat.Live + " home " + seat.Home + " applies " + seat.Applies;
             return e1.NothingToRead && e1.RestorationDeferred && h1 == 3 && e2.Apply == 3 && h2 == 3 && e3.Apply == 3 && h3 == 3
                 && e13.Apply == 3 && seat.Live == 3 && seat.Home == -1 && seat.Applies == 2;
+        }
+
+        // ---- fix pass 4 (Codex BUILD round 4) ------------------------------
+
+        /// <summary>H3 (fix pass 4, build round 4): the popup of a picker's
+        /// pick N opens, then the carrier that picker published at pick N-1
+        /// arrives LATE, after every earlier one (the newest arrival). It is
+        /// never applied (logged stale) and nothing owed changes; the carrier
+        /// bound to pick N completes the owed apply when it arrives.</summary>
+        private static bool H3Late(AvatarRules r, out string got)
+        {
+            const int P = 7;
+            var s = new RemoteSeat(r);
+            s.Arrive(P, Bd(Wire(2), 1, 0));                                   // pick N-2 (pick1.0), in time
+            s.Show(P);
+            s.Hide();
+            s.Rounds = 1;                                                     // pick N-1 (pick1.1): its carrier is late
+            s.Now = 5;
+            s.Show(P);
+            s.Now = 9;
+            s.Hide();
+            s.Rounds = 2;                                                     // pick N (pick1.2)
+            s.Now = 12;
+            s.Show(P);
+            int atShow = s.Equipped.Count;
+            s.Now = 12.5;
+            s.Arrive(P, Bd(Wire(3), 1, 1));                                   // pick N-1's carrier, the newest arrival
+            int afterLate = s.Equipped.Count, stale = s.NotesWith("stale");
+            s.Now = 13;
+            s.Tick();
+            int afterTick = s.Equipped.Count;
+            s.Now = 13.2;
+            s.Arrive(P, Bd(Wire(4), 1, 2));                                   // pick N's own carrier
+            int completed = s.NotesWith("owed popup face applied");
+            got = "pick1.0 in time: " + Short(Bd(Wire(2), 1, 0)) + " | the popup of pick1.2 opens: equipped " + (atShow - 1)
+                + " new | pick1.1's carrier arrives late: equipped " + (afterLate - atShow) + " new, stale lines " + stale
+                + " | the tick: " + (afterTick - afterLate) + " new | pick1.2's own carrier: in all " + s.Faces()
+                + ", owed applies completed " + completed;
+            return atShow == 1 && afterLate == 1 && stale == 1 && afterTick == 1 && s.Equipped.Count == 2
+                && s.Equipped[1] == Bd(Wire(4), 1, 2) && completed == 1;
+        }
+
+        /// <summary>H3 (fix pass 4): a bound carrier arriving AFTER its popup
+        /// opened: the apply is deferred (one line), then completed on
+        /// arrival; at the next pick's popup the value bound to the previous
+        /// pick is not applied, and a clear bound to that popup's pick settles
+        /// what is owed with nothing applied.</summary>
+        private static bool H3After(AvatarRules r, out string got)
+        {
+            const int P = 7;
+            var s = new RemoteSeat(r);
+            s.Show(P);                                                        // the popup of pick1.0: nothing bound to it yet
+            int atShow = s.Equipped.Count, deferred = s.NotesWith("deferred");
+            s.Now = 0.4;
+            s.Arrive(P, Bd(Wire(4), 1, 0));                                   // its bound carrier
+            int onArrival = s.Equipped.Count, completed = s.NotesWith("owed popup face applied");
+            s.Hide();
+            s.Rounds = 1;
+            s.Now = 6;
+            s.Show(P);                                                        // the popup of pick1.1
+            int atShow2 = s.Equipped.Count;
+            s.Now = 6.2;
+            s.Arrive(P, PopupCarrierLedger.BoundClear(Pk(1, 1)));             // the picker cleared its carrier for pick1.1
+            int settled = s.NotesWith("cleared its carrier for " + Pk(1, 1) + ": no longer owed");
+            s.Now = 7;
+            s.Tick();
+            got = "the popup of pick1.0 opens first: equipped " + atShow + ", deferral lines " + deferred
+                + " | its bound carrier arrives: equipped " + onArrival + " (" + s.Faces() + "), owed applies completed " + completed
+                + " | the popup of pick1.1: equipped " + (atShow2 - onArrival) + " new | the clear bound to pick1.1: settled lines " + settled
+                + ", equipped in all " + s.Equipped.Count;
+            return atShow == 0 && deferred == 1 && onArrival == 1 && s.Equipped[0] == Bd(Wire(4), 1, 0) && completed == 1
+                && atShow2 == 1 && settled == 1 && s.Equipped.Count == 1;
+        }
+
+        /// <summary>H3 (fix pass 4): a bound carrier arriving BEFORE its popup
+        /// opens is applied at once when it opens, with no deferral; also when
+        /// the picker's seat is ahead and its value, bound to a pick this seat
+        /// has not reached yet, lands first.</summary>
+        private static bool H3Before(AvatarRules r, out string got)
+        {
+            const int P = 7;
+            var s = new RemoteSeat(r);
+            s.Arrive(P, Bd(Wire(4), 1, 0));                                   // before the popup of pick1.0
+            int onArrival = s.Equipped.Count;
+            s.Now = 0.5;
+            s.Show(P);
+            int atShow = s.Equipped.Count;
+            s.Hide();
+            s.Now = 3;
+            s.Arrive(P, Bd(Wire(6), 1, 1));                                   // the picker ahead: bound to pick1.1, this seat at pick1.0
+            int ahead = s.Equipped.Count;
+            s.Rounds = 1;
+            s.Now = 4;
+            s.Show(P);
+            got = "arrived first: equipped on arrival " + onArrival + " | the popup of pick1.0: equipped " + atShow
+                + " | the picker ahead, bound to pick1.1: equipped on arrival " + (ahead - atShow)
+                + " | the popup of pick1.1: in all " + s.Faces() + ", deferral lines " + s.NotesWith("deferred");
+            return onArrival == 0 && atShow == 1 && s.Equipped[0] == Bd(Wire(4), 1, 0) && ahead == 1
+                && s.Equipped.Count == 2 && s.Equipped[1] == Bd(Wire(6), 1, 1) && s.NotesWith("deferred") == 0;
         }
 
         /// <summary>M8 (fix pass 3): the line of every exit, as
@@ -1124,34 +1270,8 @@ namespace CompetitiveRounds
             internal override bool RestorationOwed(int home, bool confirmedNoRoom) { if (!confirmedNoRoom) return false; return home > -1; }
         }
 
-        // fix pass 3 mutants and controls
-        private sealed class M_H3NoProvenance : AvatarRules
-        {   // the provenance check dropped: any value that arrives counts as this pick's
-            private long n;
-            internal override bool PickProvenance(string value, out long seq)
-            {
-                if (base.PickProvenance(value, out seq)) return true;
-                seq = ++n;
-                return !string.IsNullOrEmpty(value);
-            }
-        }
-        private sealed class K_H3Prov : AvatarRules
-        {
-            internal override bool PickProvenance(string value, out long seq)
-            {
-                seq = -1;
-                return value != null && PopupCarrierLedger.TryReadTag(value, out seq);
-            }
-        }
-        private sealed class M_H3HeldForever : AvatarRules
-        {   // a held value is applied however long ago it arrived
-            internal override bool HeldForPopup(double arrivedAt, double openedAt) => true;
-        }
-        private sealed class K_H3Held : AvatarRules
-        {
-            internal override bool HeldForPopup(double arrivedAt, double openedAt)
-                => !(openedAt - arrivedAt > PopupCarrierLedger.DeferralBoundSeconds);
-        }
+        // fix pass 3 mutants and controls (fix pass 4 replaced the provenance
+        // and hold mutants with the binding's, below: their rules are gone)
         private sealed class M_H3OwedForever : AvatarRules
         {   // the deferral never ends
             internal override bool OwedWithin(double deferredSince, double now) => true;
@@ -1182,6 +1302,21 @@ namespace CompetitiveRounds
                 return homeHeld;
             }
         }
+        // fix pass 4 mutants and controls
+        private sealed class M_H3NoBinding : AvatarRules
+        {   // the binding check dropped: a value bound to any pick is taken for the popup's
+            internal override bool BoundToPopup(string pick, string popupPick) => popupPick != null;
+        }
+        private sealed class M_H3NeverBound : AvatarRules
+        {   // no value is ever bound to the popup's pick
+            internal override bool BoundToPopup(string pick, string popupPick) => false;
+        }
+        private sealed class K_H3Binding : AvatarRules
+        {
+            internal override bool BoundToPopup(string pick, string popupPick)
+                => popupPick != null && string.Equals(popupPick, pick, StringComparison.Ordinal);
+        }
+
         private sealed class M_M8NomineeLate : AvatarRules
         {   // the round 3 rules: the nominee is read only after the missing-data exit
             internal override AvatarDecision Evaluate(AvatarEvalIn x)
@@ -1479,13 +1614,22 @@ namespace CompetitiveRounds
             // and M8 (the debt cleared after the read-back, the line written
             // before the apply) is executed by tools/item19-controls/prodprobe
             // (pytest S35) over plugin/AvatarDefaults.cs itself.
-            Pair(r, "H3remote", "a remote popup applies only a value published for its pick: never a settled untagged copy, never the previous pick's, never an older seq", H3Remote, new M_H3NoProvenance(), new K_H3Prov());
-            Pair(r, "H3hold", "a value held for a closed popup: the early arrival is applied; one held past the bound, one followed by an untagged publish, one from another room are not", H3Hold, new M_H3HeldForever(), new K_H3Held());
+            // Fix pass 4 rebuilt H3remote and H3hold on the pick binding.
+            Pair(r, "H3remote", "a remote popup applies only a value bound to the pick it shows: never a settled unbound copy, never the previous pick's, nothing on a seat with no pick identity", H3Remote, new M_H3NoBinding(), new K_H3Binding());
+            Pair(r, "H3hold", "a held value is applied at the popup of the pick it is bound to (the picker ahead), never at another pick's however long it waited; an unbound publish changes nothing held; another room drops it", H3Hold, new M_H3NoBinding(), new K_H3Binding());
             Pair(r, "H3owed", "the owed popup face: recorded once, cleared only by a completed apply, retried on the tick, dropped with a line at the bound", H3Owed, new M_H3OwedForever(), new K_H3Owed());
             Pair(r, "H9t", "a restoration whose select throws before it commits keeps the debt, and the retry restores", H9Throw, new M_PayBeforeCommit(), new K_HomeOrder());
             Pair(r, "H9r", "a restoration whose read-back shows the selection unmoved keeps the debt, and the retry restores", H9Readback, new M_IgnoreReadback(), new K_HomeOrder());
             Pair(r, "M3x", "repeated confirmed exits (data missing, a throw, no commit) keep the one debt record until a restoration commits", M3Repeat, new M_PayBeforeCommit(), new K_HomeOrder());
             Pair(r, "M8x", "every exit's line names facing, nominee and other fighters: E2 and E3 with the data missing, the deferred exit, an applied change", M8Exits, new M_M8NomineeLate(), new K_M8Note());
+
+            // fix pass 4 (Codex BUILD round 4). H3: the carrier is bound to
+            // the pick its popup shows (the asynchronous remote-seat model).
+            // The production half is executed by tools/item19-controls/prodprobe
+            // (pytest S35: H3late, H3after, H3before).
+            Pair(r, "H3late", "the popup of pick N never applies the late carrier of pick N-1 (logged stale, nothing owed changes); pick N's own carrier completes it", H3Late, new M_H3NoBinding(), new K_H3Binding());
+            Pair(r, "H3after", "a bound carrier arriving after its popup opened is deferred, then applied on arrival; the next pick's popup is not given it; a clear bound to that pick settles what is owed", H3After, new M_H3NoBinding(), new K_H3Binding());
+            Pair(r, "H3before", "a bound carrier arriving before its popup opens (also from a picker ahead) is applied at once, with no deferral", H3Before, new M_H3NeverBound(), new K_H3Binding());
             return r;
         }
 

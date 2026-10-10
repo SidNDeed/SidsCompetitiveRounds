@@ -6660,9 +6660,11 @@ namespace CompetitiveRounds
     /// picker" or no face at all. A property has its own race, the other way
     /// round: a seat's copy of a remote carrier is the last update it received,
     /// which can belong to an earlier pick. So the popup never reads that copy
-    /// (item 19 fix pass 3, H3): the picker tags the publish it makes at its own
-    /// popup with a pick sequence, and a remote seat applies only a tagged value
-    /// that arrived for this pick (PopupCarrierLedger, through PopupCarriers).</summary>
+    /// (item 19 fix pass 3, H3): the picker BINDS the publish it makes at its
+    /// own popup to that popup's pick (fix pass 4: the game and rounds every
+    /// seat derives from the same events), and a remote seat applies a face or
+    /// a clear only when it is bound to the pick of the popup it shows
+    /// (PopupCarrierLedger, through PopupCarriers).</summary>
     internal static class FacePublisher
     {
         public const string PROP_FACE = "cr_face";
@@ -6684,10 +6686,15 @@ namespace CompetitiveRounds
         /// H3: PUN updates the local player's cached properties only on the
         /// server's echo, so a caller that needs its own face in the same pass
         /// uses this value and never rereads the cache. Fix pass 3, H3: forPick
-        /// is the card-pick popup's own publish (the local picker's Show); that
-        /// one value carries the pick tag (PopupCarrierLedger.Tag, a 13th field)
-        /// that lets a remote seat tell this pick's value from an older one.
-        /// Every other publish stays the 12 fields it always was.</summary>
+        /// is the card-pick popup's own publish (the local picker's Show). Fix
+        /// pass 4, H3: that one value is BOUND to the pick of the popup the
+        /// picker shows (PopupCarriers.PickNow): a face carries the pick as a
+        /// 13th field (PopupCarrierLedger.BoundFace), a clear is the tombstone
+        /// "clear|" + the pick (PopupCarrierLedger.BoundClear). A remote seat
+        /// applies either only to its popup of that same pick. When this seat
+        /// has no pick identity (no game start seen in this room) the publish
+        /// goes out unbound. Every other publish stays the 12 fields it always
+        /// was, and a clear outside a pick still removes the key.</summary>
         public static FaceCarrierAction PublishLocal(out string published, bool forPick = false)
         {
             published = null;
@@ -6712,6 +6719,12 @@ namespace CompetitiveRounds
                         : "[POPUP-DIAG] PublishLocal skipped: LocalPlayer is null");
                     return action;
                 }
+                // Fix pass 4 (H3): the card-pick popup's own publish is bound to
+                // the pick that popup shows; null outside a pick, or when this
+                // seat has no pick identity (the publish then goes out unbound).
+                string pick = forPick ? PopupCarriers.PickNow() : null;
+                if (forPick && pick == null)
+                    Plugin.Log.LogInfo("[POPUP] card-pick publish unbound: this seat has seen no game start in this room, so no remote popup applies it");
                 if (action == FaceCarrierAction.Clear)
                 {
                     // No valid face to publish: selectedPlayerFaces empty, face[0]
@@ -6725,13 +6738,20 @@ namespace CompetitiveRounds
                     // Without a carrier, vanilla's RPCA_SetFace on the picker's
                     // client falls back to the local visualizer's saved face. The
                     // clear removes a carrier an earlier attempt published, which
-                    // returning here used to leave in place for the popup.
+                    // returning here used to leave in place for the popup. Fix
+                    // pass 4 (H3): at a pick the clear is the tombstone bound to
+                    // the popup's pick, so a remote popup of that pick stops
+                    // owing a face at once; the key stays present until the next
+                    // publish (the facing census skips the carrier key by name,
+                    // AvatarRules.CarriesModSignature), and a reader that needs 12
+                    // fields (a 1.40.3 seat) refuses it and applies nothing.
                     var clear = new ExitGames.Client.Photon.Hashtable();
-                    clear[PROP_FACE] = null;
+                    if (pick == null) clear[PROP_FACE] = null;
+                    else clear[PROP_FACE] = PopupCarrierLedger.BoundClear(pick);
                     PhotonNetwork.LocalPlayer.SetCustomProperties(clear);
                     Plugin.Log.LogInfo("[2v2] FacePublisher: cleared the face carrier ("
                         + (!listed ? "selectedPlayerFaces empty" : face == null ? "face[0] is null" : "face is all-zero defaults")
-                        + " — let vanilla RPC handle it)");
+                        + (pick != null ? ", bound to " + pick : "") + " — let vanilla RPC handle it)");
                     return action;
                 }
 
@@ -6749,7 +6769,7 @@ namespace CompetitiveRounds
                     face.detail2Offset.x.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
                     face.detail2Offset.y.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
                 });
-                if (forPick) serialized = PopupCarrierLedger.Tag(serialized, NextPickSeq());
+                if (pick != null) serialized = PopupCarrierLedger.BoundFace(serialized, pick);
                 var props = new ExitGames.Client.Photon.Hashtable();
                 props[PROP_FACE] = serialized;
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
@@ -6758,20 +6778,6 @@ namespace CompetitiveRounds
                 return FaceCarrierAction.Publish;
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish failed: {ex.Message}"); return FaceCarrierAction.Keep; }
-        }
-
-        // The last pick tag this process published (fix pass 3, H3).
-        private static long lastPickSeq;
-
-        /// <summary>The next pick tag: strictly increasing within the process,
-        /// and wall-clock milliseconds so that a restarted client rejoining
-        /// under the same actor number still tags above what it sent before.
-        /// Only this seat's own tags are ever compared with each other.</summary>
-        private static long NextPickSeq()
-        {
-            long now = DateTime.UtcNow.Ticks / TimeSpan.TicksPerMillisecond;
-            lastPickSeq = Math.Max(lastPickSeq + 1, now);
-            return lastPickSeq;
         }
 
         /// <summary>Equip a serialized face on the popup's visualizer. A null
@@ -6819,17 +6825,21 @@ namespace CompetitiveRounds
         }
     }
 
-    /// <summary>Item 19 fix pass 3 (H3, the remote arm): the Unity and Photon
-    /// half of PopupCarrierLedger (AvatarDefaultRules.cs). The card-pick popup
-    /// (CardChoiceVisuals_Show_Competitive_Patch) applies the picker's face from
-    /// the cr_face carrier after vanilla's RPC-broadcast attempt, which has
-    /// timing races in 2v2 (only the picker's client fires it; a remote seat can
-    /// show the previous picker's face, or none, when the RPC lands after the
-    /// next picker's Show re-instantiated the skin). The local picker applies
-    /// the value it has just published (fix pass 2, H3). A remote picker's face
-    /// is the value that picker published for THIS pick, as the ledger decides:
-    /// applied at Show when it has arrived, and on arrival when it has not.
-    /// This class feeds the ledger from the places that move it (the Show
+    /// <summary>Item 19 fix pass 3 (H3, the remote arm), bound in fix pass 4:
+    /// the Unity and Photon half of PopupCarrierLedger (AvatarDefaultRules.cs).
+    /// The card-pick popup (CardChoiceVisuals_Show_Competitive_Patch) applies
+    /// the picker's face from the cr_face carrier after vanilla's RPC-broadcast
+    /// attempt, which has timing races in 2v2 (only the picker's client fires
+    /// it; a remote seat can show the previous picker's face, or none, when the
+    /// RPC lands after the next picker's Show re-instantiated the skin). The
+    /// local picker applies the value it has just published (fix pass 2, H3).
+    /// A remote picker's face is the value that picker published BOUND to the
+    /// pick this popup shows (fix pass 4, H3: the pick identity PickNow, which
+    /// every seat derives from the same two events, the game start it saw in
+    /// the room and the rounds the master's RPCA_NextRound set): applied at
+    /// Show when it has arrived, and on arrival when it has not; a value bound
+    /// to another pick, or to none, is never applied. This class feeds the
+    /// ledger from the places that move it (the DoStartGame prefix, the Show
     /// postfix, the property callback, the Hide postfix, the behaviour's tick),
     /// applies what it hands back, and logs each decision as [POPUP]. Every
     /// entry point runs on the main thread.</summary>
@@ -6850,12 +6860,48 @@ namespace CompetitiveRounds
             if (n != null) Plugin.Log.LogInfo("[POPUP] " + n);
         }
 
+        /// <summary>The rounds completed in the current game on this seat
+        /// (GM_ArmsRace.p1Rounds + p2Rounds: zeroed for a game start by a new
+        /// GM or ResetMatch, and set on every seat by RPCA_NextRound before
+        /// that round's picks), or -1 when there is no game to read.</summary>
+        private static int Rounds()
+        {
+            try
+            {
+                var gm = GM_ArmsRace.instance;
+                return gm != null ? gm.p1Rounds + gm.p2Rounds : -1;
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>The identity of the pick a card-pick popup opening now
+        /// shows (fix pass 4, H3): "pick" + the games this seat saw start in
+        /// the room + "." + the rounds completed; null when this seat has none.
+        /// The picker binds its card-pick publish to it (FacePublisher.PublishLocal)
+        /// and a remote seat's popup of that pick derives the same value.</summary>
+        internal static string PickNow()
+        {
+            string pick = Ledger.PopupPick(Room(), Rounds());
+            Say();
+            return pick;
+        }
+
+        /// <summary>GM_ArmsRace.DoStartGame on a fighter seat (the first game
+        /// through StartGame, every same-room rematch through IDoRematch, #138).</summary>
+        internal static void GameStarted()
+        {
+            Ledger.GameStarted(Room());
+            Say();
+        }
+
         /// <summary>The popup's remote arm (AvatarRules.PopupFace calls it for
-        /// a remote picker only): the value that picker published for this
-        /// pick, or null while it has not arrived, which leaves the apply owed.</summary>
+        /// a remote picker only): the value that picker published bound to the
+        /// pick this popup shows, or null while it has not arrived (the apply
+        /// is owed) or when nothing can be applied.</summary>
         internal static string ForShow(int actor)
         {
-            string v = Ledger.Show(Room(), actor, Now());
+            string pick = PickNow();
+            string v = Ledger.Show(Room(), actor, pick, Now());
             Say();
             return v;
         }
@@ -6875,12 +6921,15 @@ namespace CompetitiveRounds
         }
 
         /// <summary>OnPlayerPropertiesUpdate: a carrier update from a remote
-        /// actor ARRIVED (a clear arrives as a null value). The join snapshot
-        /// never comes through here, so it is never taken for this pick's value.</summary>
+        /// actor ARRIVED (a bound clear arrives as the tombstone, a removed key
+        /// as null). The join snapshot never comes through here, so it is never
+        /// taken for a pick's value. This is the one read of a carrier VALUE
+        /// (fix pass 4, H3): the ledger applies it only through the binding
+        /// check, AvatarRules.BoundToPopup.</summary>
         internal static void Arrived(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changed)
         {
             if (target == null || target.IsLocal || changed == null || !changed.ContainsKey(FacePublisher.PROP_FACE)) return;
-            string v = Ledger.Arrived(Room(), target.ActorNumber, changed[FacePublisher.PROP_FACE] as string, Now());
+            string v = Ledger.Arrived(Room(), target.ActorNumber, changed[FacePublisher.PROP_FACE] as string, PickNow(), Now());
             Say();
             if (v != null) ApplyNow(target.ActorNumber, v, "on arrival");
         }
@@ -6901,7 +6950,7 @@ namespace CompetitiveRounds
             bool ok = vis != null && FacePublisher.ApplySerialized(value, actor, vis.gameObject);
             Ledger.Applied(actor, ok, Now());
             Say();
-            if (ok) Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face (the value its picker published for this pick, {when}) (actor={actor})");
+            if (ok) Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face (the value its picker published bound to this pick, {when}) (actor={actor})");
         }
     }
 
@@ -7252,10 +7301,13 @@ namespace CompetitiveRounds
                 // on the server's echo, so this pass uses the value it has just
                 // published (or nothing when the attempt cleared or kept the
                 // carrier) and never rereads the cache. Fix pass 3 (H3, the
-                // remote arm): that publish carries the pick tag, and a remote
-                // picker's face is the value it published for THIS pick, never
-                // this seat's cached copy: PopupCarriers.ForShow hands it over
-                // when it has arrived, and otherwise owes the apply, which
+                // remote arm), bound in fix pass 4: that publish is bound to
+                // the pick this popup shows (PopupCarriers.PickNow), and a
+                // remote picker's face is the value it published bound to the
+                // pick THIS seat's popup shows, never this seat's cached copy
+                // and never a value bound to another pick or to none:
+                // PopupCarriers.ForShow hands it over when it has arrived, and
+                // otherwise owes the apply, which
                 // PopupCarriers.Arrived completes. AvatarRules.PopupFace decides
                 // which arm runs.
                 string freshFace = null;
@@ -7270,7 +7322,7 @@ namespace CompetitiveRounds
                 bool ok = FacePublisher.ApplySerialized(popupFace, pickerActor, __instance.gameObject);
                 if (remoteShown && popupFace != null) PopupCarriers.Applied(pickerActor, ok);
                 if (ok)
-                    Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face ({(picker.IsLocal ? "the value this pass published" : "the value its picker published for this pick")}) (pickerID={pickerID}, actor={pickerActor})");
+                    Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face ({(picker.IsLocal ? "the value this pass published" : "the value its picker published bound to this pick")}) (pickerID={pickerID}, actor={pickerActor})");
                 else if (picker.IsLocal && carrier != FaceCarrierAction.Publish)
                     Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: local picker carrier {carrier}, no face applied; vanilla's RPC in charge (pickerID={pickerID})");
 
@@ -7333,6 +7385,28 @@ namespace CompetitiveRounds
         {
             try { PopupCarriers.Ended(); }
             catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] Hide postfix error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Item 19 fix pass 4 (H3): the game half of the pick identity.
+    /// GM_ArmsRace.DoStartGame runs on every fighter seat once per game (the
+    /// first game through StartGame, every same-room rematch through
+    /// IDoRematch, #138; never from RoundTransition), so the games each seat
+    /// counts in a room agree across the seats that saw them start. A void
+    /// prefix: it runs whatever a sibling prefix returns (#352) and changes
+    /// nothing the game reads. A spectator is not counted (its popups get no
+    /// identity, so no carrier is applied there and vanilla's face stands).</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "DoStartGame")]
+    internal static class GMArmsRace_DoStartGame_PopupCarrier_Patch
+    {
+        private static void Prefix()
+        {
+            try
+            {
+                if (PhotonNetwork.OfflineMode || RoomActors.LocalIsSpectator) return;
+                PopupCarriers.GameStarted();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[POPUP] carrier ledger game start failed: " + ex.Message); }
         }
     }
 

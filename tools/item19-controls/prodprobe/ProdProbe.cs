@@ -29,12 +29,18 @@ namespace CompetitiveRounds
     /// select that throws or does not commit (H9t, H9r, M3x), M8's line on
     /// every exit (M8e2, M8e3, M8def, M8exc) and H3's remote arm (H3remote,
     /// the tree's ledger reached by reflection, so the probe still compiles
-    /// against a tree without one).</summary>
+    /// against a tree without one).
+    ///
+    /// Fix pass 4 (Codex BUILD round 4): H3late, H3after and H3before
+    /// drive the tree's ledger with the pick binding: a late carrier of the
+    /// previous pick refused as stale, a bound carrier after the popup
+    /// opened (deferred, then applied), and one before it (applied at once).</summary>
     internal static class ProdProbe
     {
         internal static readonly string[] Ids =
             { "H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce",
-              "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc", "H3remote" };
+              "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc", "H3remote",
+              "H3late", "H3after", "H3before" };
 
         internal static void SelectFacePostfix(int faceID)
         {
@@ -335,7 +341,29 @@ namespace CompetitiveRounds
             return string.Join("|", new[] { i, "0.000", "0.000", i, "0.000", "0.000", i, "0.000", "0.000", i, "0.000", "0.000" });
         }
 
-        private static string Short(string v) => v == null ? "nothing" : "face " + v.Split('|')[0] + (v.Split('|').Length == 13 ? " (" + v.Split('|')[12] + ")" : " (untagged)");
+        private static string Short(string v) => v == null ? "nothing"
+            : v.Split('|').Length == 2 ? "the clear (" + v.Split('|')[1] + ")"
+            : "face " + v.Split('|')[0] + (v.Split('|').Length == 13 ? " (" + v.Split('|')[12] + ")" : " (untagged)");
+
+        /// <summary>Fix pass 4: the tree's ledger, and whether it binds values
+        /// to a pick (its Show takes the popup's pick: four parameters). A fix
+        /// pass 3 ledger's Show takes three (room, actor, clock).</summary>
+        private static object NewLedger(out bool binds)
+        {
+            binds = false;
+            var t = typeof(AvatarRules).Assembly.GetType("CompetitiveRounds.PopupCarrierLedger");
+            if (t == null) return null;
+            var show = t.GetMethod("Show", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            binds = show != null && show.GetParameters().Length == 4;
+            return Activator.CreateInstance(t, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                                            null, new object[] { new AvatarRules() }, null);
+        }
+
+        private static bool Says(object ledger, string needle)
+        {
+            string n = Note(ledger);
+            return n != null && n.Contains(needle);
+        }
 
         private static object Call(object target, string name, params object[] args)
         {
@@ -359,13 +387,17 @@ namespace CompetitiveRounds
         /// has one; reflection, so the same probe compiles against a tree
         /// without it). The remote arm's wiring in Plugin.cs, the ledger
         /// through PopupCarriers.ForShow and never a read of the copy, is
-        /// bound by the tree's pytest S33.</summary>
+        /// bound by the tree's pytest S33. Fix pass 4: a ledger that binds
+        /// values to a pick runs the same story with bound values
+        /// (RemoteArmBound); a fix pass 3 ledger runs it as before.</summary>
         private static string RemoteArm()
         {
             string settled = Wire(1);                          // this seat's copy: the actor's face at an earlier pick
             string fresh = Wire(4) + "|p2";                    // the actor's publish for THIS pick, arriving late
             var rules = new AvatarRules();
             var t = typeof(AvatarRules).Assembly.GetType("CompetitiveRounds.PopupCarrierLedger");
+            bool binds;
+            if (t != null && NewLedger(out binds) != null && binds) return RemoteArmBound();
             if (t == null)
             {
                 // No ledger: the remote arm is a read of the copy (round 3:
@@ -398,6 +430,152 @@ namespace CompetitiveRounds
                 + ") | the late publish arrives: applied " + Short(onEcho) + ", owed apply completed=" + (noteApplied != null && noteApplied.Contains("owed popup face applied"))
                 + " | the next popup, previous pick's value newest: " + Short(b)
                 + " | an untagged value while it shows: applied " + Short(c) + " (stale-unknown=" + (noteC != null && noteC.Contains("stale-unknown")) + ")";
+        }
+
+        /// <summary>H3remote on a binding ledger (fix pass 4): the settled copy
+        /// is the actor's face bound to its previous pick; the popup of this
+        /// pick defers, the value bound to this pick completes it on arrival,
+        /// the next popup is not given the previous pick's value, and an
+        /// unbound value (a 1.40.3 client's) is logged stale and never applied.</summary>
+        private static string RemoteArmBound()
+        {
+            bool binds;
+            var ledger = NewLedger(out binds);
+            var rules = new AvatarRules();
+            var room = new object();
+            string settled = Wire(1) + "|pick1.0";             // the actor's face at its previous pick, applied then
+            string fresh = Wire(4) + "|pick1.1";               // the actor's publish bound to THIS pick, arriving late
+            Call(ledger, "GameStarted", room);
+            Call(ledger, "Arrived", room, 7, settled, "pick1.0", 90.0);
+            Call(ledger, "Show", room, 7, "pick1.0", 90.1);
+            Call(ledger, "Applied", 7, true, 90.1);
+            Call(ledger, "EndSession", room);
+            // A: the popup of pick1.1 opens for actor 7; this seat holds only the settled copy.
+            string a = rules.PopupFace(false, FaceCarrierAction.Keep, null, () => (string)Call(ledger, "Show", room, 7, "pick1.1", 100.0));
+            bool deferredA = Says(ledger, "deferred");
+            string onEcho = (string)Call(ledger, "Arrived", room, 7, fresh, "pick1.1", 100.4);
+            Call(ledger, "Applied", 7, true, 100.4);
+            bool completed = Says(ledger, "owed popup face applied");
+            // B: actor 7's next popup (pick1.2); the newest value it sent is bound to pick1.1.
+            Call(ledger, "EndSession", room);
+            string b = rules.PopupFace(false, FaceCarrierAction.Keep, null, () => (string)Call(ledger, "Show", room, 7, "pick1.2", 160.0));
+            // C: an unbound value (a 1.40.3 client's, or a publish outside a pick) arrives while it shows.
+            string c = (string)Call(ledger, "Arrived", room, 7, Wire(5), "pick1.2", 160.2);
+            bool staleC = Says(ledger, "stale");
+            ok3r = a == null && deferredA && onEcho == fresh && completed && b == null && c == null && staleC;
+            return "settled copy " + Short(settled) + ": at the popup of pick1.1 the popup applies " + Short(a) + " (deferred=" + deferredA
+                + ") | the late publish bound to pick1.1 arrives: applied " + Short(onEcho) + ", owed apply completed=" + completed
+                + " | the next popup (pick1.2), the newest value bound to pick1.1: " + Short(b)
+                + " | an unbound value while it shows: applied " + Short(c) + " (logged stale=" + staleC + ")";
+        }
+
+        private static bool ok3late;
+
+        /// <summary>Fix pass 4 (H3, build round 4): the popup of actor 7's
+        /// pick N opens, then the carrier its picker published at pick N-1
+        /// arrives LATE, after every earlier one (the newest arrival). A
+        /// binding ledger refuses it (logged stale), keeps the apply owed, and
+        /// applies the carrier bound to pick N when that arrives. A fix pass 3
+        /// ledger (pick tags taken by age) applies pick N-1's face to the
+        /// popup of pick N.</summary>
+        private static string LateEarlierPick()
+        {
+            bool binds;
+            var ledger = NewLedger(out binds);
+            var room = new object();
+            if (ledger == null) { ok3late = false; return "this tree has no PopupCarrierLedger"; }
+            if (!binds)
+            {
+                // fix pass 3: the tag is p<seq>, increasing per sender
+                Call(ledger, "Arrived", room, 7, Wire(2) + "|p1000", 90.0);       // pick N-2's carrier, in time
+                Call(ledger, "Show", room, 7, 90.1);
+                Call(ledger, "Applied", 7, true, 90.1);
+                Call(ledger, "EndSession", room);
+                string atShow3 = (string)Call(ledger, "Show", room, 7, 100.0);      // the popup of pick N opens
+                string late3 = (string)Call(ledger, "Arrived", room, 7, Wire(3) + "|p2000", 100.5);   // pick N-1's, late
+                ok3late = late3 == null;
+                return "a fix pass 3 ledger (pick tags taken by age): the popup of pick N applies " + Short(atShow3)
+                    + " at Show | pick N-1's carrier arrives late: applied " + Short(late3)
+                    + (late3 != null ? " (the previous pick's face, applied to the popup of pick N because it is the newest arrival)" : "");
+            }
+            Call(ledger, "GameStarted", room);
+            Call(ledger, "Arrived", room, 7, Wire(2) + "|pick1.0", "pick1.0", 90.0);   // pick N-2's carrier, in time
+            string first = (string)Call(ledger, "Show", room, 7, "pick1.0", 90.1);
+            Call(ledger, "Applied", 7, true, 90.1);
+            Call(ledger, "EndSession", room);
+            string atShow = (string)Call(ledger, "Show", room, 7, "pick1.2", 100.0);    // the popup of pick N opens
+            bool deferred = Says(ledger, "deferred");
+            string late = (string)Call(ledger, "Arrived", room, 7, Wire(3) + "|pick1.1", "pick1.2", 100.5);   // pick N-1's, late
+            bool stale = Says(ledger, "stale");
+            string tick = (string)Call(ledger, "Tick", room, 101.0);
+            string own = (string)Call(ledger, "Arrived", room, 7, Wire(4) + "|pick1.2", "pick1.2", 101.2);
+            Call(ledger, "Applied", 7, true, 101.2);
+            bool completed = Says(ledger, "owed popup face applied");
+            ok3late = first == Wire(2) + "|pick1.0" && atShow == null && deferred && late == null && stale && tick == null
+                && own == Wire(4) + "|pick1.2" && completed;
+            return "pick N-2 applied in time: " + Short(first) + " | the popup of pick N (pick1.2) applies " + Short(atShow)
+                + " (deferred=" + deferred + ") | pick N-1's carrier arrives late: applied " + Short(late) + " (logged stale=" + stale
+                + "), the tick then applies " + Short(tick) + " | the carrier bound to pick N arrives: applied " + Short(own)
+                + ", owed apply completed=" + completed;
+        }
+
+        private static bool ok3after;
+
+        /// <summary>Fix pass 4 (H3): the bound carrier arrives AFTER the popup
+        /// opened: the apply is deferred, then completed on arrival; and a
+        /// clear bound to the popup's pick settles what is owed.</summary>
+        private static string BoundAfter()
+        {
+            bool binds;
+            var ledger = NewLedger(out binds);
+            if (ledger == null || !binds) { ok3after = false; return "this tree's ledger binds no value to a pick (its Show takes no pick)"; }
+            var room = new object();
+            Call(ledger, "GameStarted", room);
+            string atShow = (string)Call(ledger, "Show", room, 7, "pick1.0", 50.0);
+            bool deferred = Says(ledger, "deferred");
+            string arrive = (string)Call(ledger, "Arrived", room, 7, Wire(4) + "|pick1.0", "pick1.0", 50.3);
+            Call(ledger, "Applied", 7, true, 50.3);
+            bool completed = Says(ledger, "owed popup face applied");
+            string tick = (string)Call(ledger, "Tick", room, 51.0);
+            Call(ledger, "EndSession", room);
+            string atShow2 = (string)Call(ledger, "Show", room, 7, "pick1.1", 60.0);
+            string clear = (string)Call(ledger, "Arrived", room, 7, "clear|pick1.1", "pick1.1", 60.2);
+            bool settled = Says(ledger, "cleared its carrier for pick1.1: no longer owed");
+            string tick2 = (string)Call(ledger, "Tick", room, 61.0);
+            ok3after = atShow == null && deferred && arrive == Wire(4) + "|pick1.0" && completed && tick == null
+                && atShow2 == null && clear == null && settled && tick2 == null;
+            return "the popup of pick1.0 opens first: applies " + Short(atShow) + " (deferred=" + deferred + ") | its bound carrier arrives: applied "
+                + Short(arrive) + ", owed apply completed=" + completed + " | the tick: " + Short(tick)
+                + " | the popup of pick1.1: " + Short(atShow2) + ", then the clear bound to it arrives: applied " + Short(clear)
+                + " (no longer owed=" + settled + "), the tick: " + Short(tick2);
+        }
+
+        private static bool ok3before;
+
+        /// <summary>Fix pass 4 (H3): the bound carrier arrives BEFORE the
+        /// popup opens (also when the picker's seat is ahead and this seat
+        /// has not yet reached that pick): it is held and applied at once
+        /// when the popup of that pick opens.</summary>
+        private static string BoundBefore()
+        {
+            bool binds;
+            var ledger = NewLedger(out binds);
+            if (ledger == null || !binds) { ok3before = false; return "this tree's ledger binds no value to a pick (its Show takes no pick)"; }
+            var room = new object();
+            Call(ledger, "GameStarted", room);
+            string held = (string)Call(ledger, "Arrived", room, 7, Wire(4) + "|pick1.0", "pick1.0", 49.0);
+            string atShow = (string)Call(ledger, "Show", room, 7, "pick1.0", 50.0);
+            bool quiet = !Says(ledger, "deferred");
+            Call(ledger, "Applied", 7, true, 50.0);
+            Call(ledger, "EndSession", room);
+            // the picker is ahead: its publish bound to pick1.1 arrives while this seat is still at pick1.0
+            string ahead = (string)Call(ledger, "Arrived", room, 7, Wire(6) + "|pick1.1", "pick1.0", 55.0);
+            string atShow2 = (string)Call(ledger, "Show", room, 7, "pick1.1", 58.0);
+            bool quiet2 = !Says(ledger, "deferred");
+            ok3before = held == null && atShow == Wire(4) + "|pick1.0" && quiet && ahead == null && atShow2 == Wire(6) + "|pick1.1" && quiet2;
+            return "the bound carrier arrives first: on arrival it applies " + Short(held) + " (held) | the popup of pick1.0 opens: applies "
+                + Short(atShow) + " at once (no deferral=" + quiet + ") | the carrier bound to pick1.1 arrives while this seat is at pick1.0: "
+                + Short(ahead) + " | the popup of pick1.1 opens: applies " + Short(atShow2) + " at once (no deferral=" + quiet2 + ")";
         }
 
         private static int Main()
@@ -559,6 +737,12 @@ namespace CompetitiveRounds
             }, () => ok8x);
 
             Case("H3remote", RemoteArm, () => ok3r);
+
+            // ---- fix pass 4 (Codex BUILD round 4: H3) ----
+
+            Case("H3late", LateEarlierPick, () => ok3late);
+            Case("H3after", BoundAfter, () => ok3after);
+            Case("H3before", BoundBefore, () => ok3before);
             return 0;
         }
     }
