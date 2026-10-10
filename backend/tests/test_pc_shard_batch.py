@@ -1189,6 +1189,42 @@ def test_both_discard_routes_refuse_through_the_one_gate(env):
     _scenario(env, body)
 
 
+def test_a_repeated_single_discard_is_a_no_op(env):
+    """Bugs #364/#368: the same single discard sent twice (an answer lost on
+    the way back and the click repeated, or a retry that crossed the first)
+    changes nothing the second time. The first pays and marks the print; the
+    repeat is refused not_owned by the shared gate and leaves the balance,
+    the print's discarded_at and discard_shards, and the print count exactly
+    as the first left them. The refusal (rather than a replayed 200) is the
+    board row 25 contract the test above pins, and it is what keeps a single
+    discard that lost a race to a batch from reporting the batch's shards a
+    second time.
+
+    Control: the FIRST call is not a no-op -- the balance and the print both
+    move -- so the snapshot below is taken after a state change, not of a
+    state nothing could have changed."""
+    async def body(ctx):
+        me = await _player(1, shards=7)
+        subject = await _player(2)
+        p = await _print(me, subject, "rare")
+        before = await _discarded([p])
+        first = await _single(ctx, "first", me, p)
+        assert first[0] == 200 and first[1]["status"] == "discarded", first
+        paid = first[1]["shards_gained"]
+        assert paid > 0 and first[1]["shards"] == 7 + paid
+        after_first = (await _discarded([p]), await _shards(me),
+                       await _q("SELECT discarded_at FROM pc_prints WHERE id = $1::uuid", p),
+                       await _val("SELECT COUNT(*) FROM pc_prints WHERE owner_player_id = $1::uuid", me.pid))
+        assert before[p] == (False, None) and after_first[0][p] == (True, paid) and after_first[1] == 7 + paid
+        again = await _single(ctx, "again", me, p)
+        assert _err(again) == (404, "not_owned"), again
+        after_repeat = (await _discarded([p]), await _shards(me),
+                        await _q("SELECT discarded_at FROM pc_prints WHERE id = $1::uuid", p),
+                        await _val("SELECT COUNT(*) FROM pc_prints WHERE owner_player_id = $1::uuid", me.pid))
+        assert after_repeat == after_first, (after_first, after_repeat)
+    _scenario(env, body)
+
+
 def test_both_routes_call_the_gate_once_and_only_after_the_players_lock():
     """Structure, per FUNCTION (#279): each discard route calls
     _pc_discard_gate exactly once, after its players-row lock and before its
