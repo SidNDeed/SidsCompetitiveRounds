@@ -303,8 +303,9 @@ def test_the_keybind_fix2_controls_ran_and_none_failed(harness_run):
 
 # Item 17 fix pass 3: the round-3 findings' controls, one instrument that
 # compiles on the reviewed pin (6e74c910) and on the fix tip (red there,
-# green here): M1 the event-level keyboard accumulator.
-KEYBIND_FIX3_CASES = 7
+# green here): M1 the event-level keyboard accumulator (7), M2 a revision
+# painted only after its repaint completed (3).
+KEYBIND_FIX3_CASES = 10
 
 
 def test_the_keybind_fix3_controls_ran_and_none_failed(harness_run):

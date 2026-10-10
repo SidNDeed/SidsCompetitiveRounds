@@ -181,18 +181,58 @@ def test_m1_the_chat_tap_drains_the_accumulator_on_every_call():
     assert step < body.index("KeyboardEvents.Corroborate(chatTap.LastNamedKeyboard);")
 
 
-# -- M2 (round-2 F4): built help surfaces repaint after a binding revision ----
+# -- M2 (round-2 F4; round-3 F3, fix pass 3): built help surfaces repaint ----
+# after a binding revision, and a revision is marked painted only after its
+# repaint completed. The gate's decisions (stamp after the render, a throw
+# stays due, blank, log once) are executed by the harness (keybindfix3 suite);
+# these assert the production order.
 
 NUI = PLUGIN / "NativeUI.cs"
 NUIS = PLUGIN / "NativeUI.Settings.cs"
 NUIK = PLUGIN / "NativeUI.Keybinds.cs"
+REPAINT = "internal bool Repaint(int revision, Action render, Action blank, Action<string> log)"
 
 
-def test_m2_the_article_render_stamps_the_revision_it_reads():
-    body = _code(_src(NUI), "private static void SelectInfoArticle(string key)")
-    stamp = body.index("infoKbGate.Painted(Keybinds.Revision);")
-    assert stamp < body.index("RenderInfoBody(art);")
-    assert body.count("infoKbGate.Painted(") == 1
+def _call_args(body: str, call: str) -> str:
+    """The argument text of the one `call(` in body, by parenthesis depth."""
+    assert body.count(call) == 1, (call, body.count(call))
+    a = body.index(call) + len(call)
+    depth = 1
+    for i in range(a, len(body)):
+        if body[i] == "(":
+            depth += 1
+        elif body[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return body[a:i]
+    raise AssertionError("unbalanced %s" % call)
+
+
+def test_m2_the_article_revision_is_stamped_only_after_the_render_completes():
+    # round 3, F3: a revision stamped before the render is red here
+    body = _ws(_code(_src(NUI), "private static void SelectInfoArticle(string key)"))
+    assert "infoKbGate.Painted(" not in body
+    args = _call_args(body, "infoKbGate.Repaint(")
+    # the title, the body text and the keyboard guide are the gate's render
+    for step in ("UIFactory.SetTextRaw(infoTitleTxt, art.Title());", "RenderInfoBody(art);", "KbBlankInfoArticle"):
+        assert step in args, step
+    gate = _ws(_code(_src(RULES), REPAINT))
+    assert gate.count("Painted(revision);") == 1
+    assert gate.index("render();") < gate.index("catch (Exception e)") < gate.index("return false;") \
+        < gate.index("Painted(revision);")
+
+
+def test_m2_a_repaint_that_threw_stays_due_shows_nothing_and_logs_once():
+    gate = _ws(_code(_src(RULES), REPAINT))
+    catch = gate[gate.index("catch (Exception e)"):gate.index("return false;")]
+    assert "failed = true;" in catch and "blank();" in catch
+    assert "logged.Add(what)" in catch
+    assert "(failed || (painted && paintedAt != revision))" in _ws(_code(_src(RULES), "internal bool Due(int revision)"))
+    assert "failed = false;" in _ws(_code(_src(RULES), "internal void Painted(int revision)"))
+    blank = _ws(_text(_src(NUIK), "private static void KbBlankInfoArticle()"))
+    for step in ('UIFactory.SetTextRaw(infoBodyTxt, "");', 'UIFactory.SetTextRaw(infoTitleTxt, "");',
+                 "UnityEngine.Object.Destroy(g);", "infoBodyExtraGOs.Clear();"):
+        assert step in blank, step
 
 
 def test_m2_returning_to_the_info_tab_repaints_before_it_is_shown():
@@ -216,11 +256,16 @@ def test_m2_a_due_revision_rerenders_the_selected_article():
 def test_m2_the_language_note_repaints_before_it_is_shown():
     show = _code(_src(NUIS), "private static void SettingsShowExtras(string key)")
     assert show.index("KbRepaintLangNoteIfDue();") < show.index("SettingsSetActive(setExtraLangNote")
-    build = _ws(_code(_src(NUI), "private static void BuildSettingsPaneTexts(Transform extras)"))
-    assert "setLangNoteGate.Painted(Keybinds.Revision);" in build and "setLangNoteTxt = note;" in build
-    rep = _ws(_code(_src(NUIK), "private static void KbRepaintLangNoteIfDue()"))
+    # fix pass 3: built empty, then painted through the gate - the revision is
+    # stamped only after the text is set, at the build and at every repaint
+    build = _ws(_text(_src(NUI), "private static void BuildSettingsPaneTexts(Transform extras)"))
+    assert "setLangNoteGate.Painted(" not in build
+    assert build.index('var note = UIFactory.CreateText("SLangChatNote", extras, "",') < build.index("setLangNoteTxt = note;")
+    assert "UIFactory.SetTextRaw(note, LangChatNoteText())" in _call_args(build, "setLangNoteGate.Repaint(")
+    rep = _ws(_text(_src(NUIK), "private static void KbRepaintLangNoteIfDue()"))
     assert "if (setLangNoteTxt == null || !setLangNoteGate.Due(Keybinds.Revision)) return;" in rep
-    assert "UIFactory.SetTextRaw(setLangNoteTxt, LangChatNoteText());" in rep
+    assert "setLangNoteGate.Painted(" not in rep
+    assert "UIFactory.SetTextRaw(setLangNoteTxt, LangChatNoteText())" in _call_args(rep, "setLangNoteGate.Repaint(")
 
 
 # -- M3 (round-2 F6): success only when every store agrees ---------------------

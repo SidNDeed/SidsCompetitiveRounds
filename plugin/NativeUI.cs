@@ -13700,13 +13700,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // LinkifyInfoBody wraps each cross-ref span in a TMP <link>
                 // tag AT RENDER TIME — never in the source bodies, which
                 // would re-key every translation (#289).
-                UIFactory.SetTextRaw(infoTitleTxt, art.Title());
-                UIFactory.SetColor(infoTitleTxt, InfoLibrary.ColorOf(key));
-                // Item 17 fix pass 2 (M2): the binding revision this render
-                // reads; stamped before the render so a render that throws is
-                // not retried every frame.
-                infoKbGate.Painted(Keybinds.Revision);
-                RenderInfoBody(art);
+                // Item 17 fix pass 3 (M2): the binding revision this render
+                // reads is stamped only AFTER the title, the body text and
+                // the keyboard guide finished rendering (RepaintGate.Repaint).
+                // A render that throws leaves the revision due - the Info tick
+                // repaints again (KbRepaintInfoIfDue) - and shows an empty
+                // article until a repaint completes, never stale or partial
+                // help; its exception is logged once by class and message.
+                int revision = Keybinds.Revision;
+                infoKbGate.Repaint(revision, () =>
+                {
+                    UIFactory.SetTextRaw(infoTitleTxt, art.Title());
+                    UIFactory.SetColor(infoTitleTxt, InfoLibrary.ColorOf(key));
+                    RenderInfoBody(art);
+                }, KbBlankInfoArticle, KbRepaintFailed("Info article '" + key + "'"));
                 // Snap back to the top for the new article (both the content
                 // offset and the normalized position — the layout rebuild
                 // lands next frame and clamps whichever survives).
@@ -13731,6 +13738,8 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         // screen was painted at. The Controls article's text and its keyboard
         // guide read the bindings only when the article renders, so a later
         // revision repaints it (KbRepaintInfoIfDue) before it is shown again.
+        // Fix pass 3 (M2): stamped only after a render completed; a render
+        // that threw keeps it due.
         private static readonly KeybindRules.RepaintGate infoKbGate = new KeybindRules.RepaintGate();
 
         // Sept 1: true while the rewards article is up with its gold chart
@@ -14838,11 +14847,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // key, so it keeps its text object and the binding revision it was
             // painted at; SettingsShowExtras repaints it before it is shown
             // again when the bindings moved since (KbRepaintLangNoteIfDue).
-            setLangNoteGate.Painted(Keybinds.Revision);
-            var note = UIFactory.CreateText("SLangChatNote", extras, LangChatNoteText(),
+            // Fix pass 3 (M2): created empty and painted through the gate, so
+            // the revision is stamped only after the text is set; a paint
+            // that throws leaves the note empty and due.
+            var note = UIFactory.CreateText("SLangChatNote", extras, "",
                 13f, C_DIM, sizeDelta: new Vector2(748, 18));
             setLangNoteTxt = note;
             UIFactory.SetWordWrap(note, true); UIFactory.SetTextAutoHeight(note, 18f);
+            setLangNoteGate.Repaint(Keybinds.Revision, () => UIFactory.SetTextRaw(note, LangChatNoteText()),
+                () => UIFactory.SetTextRaw(note, ""), KbRepaintFailed("Settings language note"));
             var sdd = UIFactory.CreateText("SDD", extras,
                 "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' " +
                 "Elo and histories aren't affected. You will no longer appear on leaderboards.\n" +

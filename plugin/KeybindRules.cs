@@ -809,15 +809,53 @@ namespace CompetitiveRounds
         /// the Settings language-channel note) stamps the binding revision it
         /// was painted at; every later revision is due, and the surface
         /// repaints before it is shown again. Never due before the first
-        /// paint: the first build reads the bindings itself.</summary>
+        /// paint: the first build reads the bindings itself. Fix pass 3 (M2):
+        /// a revision is stamped only after its repaint completed (Repaint);
+        /// a repaint that threw stays due.</summary>
         internal sealed class RepaintGate
         {
-            private bool painted;
+            private bool painted, failed;
             private int paintedAt;
-            internal void Painted(int revision) { painted = true; paintedAt = revision; }
+            private readonly HashSet<string> logged = new HashSet<string>();
+            internal void Painted(int revision) { painted = true; failed = false; paintedAt = revision; }
             /// <summary>Mutation 26 is the 2811a621 tab switch: nothing
-            /// repaints.</summary>
-            internal bool Due(int revision) { return Mut != 26 && painted && paintedAt != revision; }
+            /// repaints. A repaint that threw is due whatever the revision.</summary>
+            internal bool Due(int revision) { return Mut != 26 && (failed || (painted && paintedAt != revision)); }
+            /// <summary>The last repaint threw and none has completed since.</summary>
+            internal bool Failed { get { return failed; } }
+
+            /// <summary>Fix pass 3 (M2): one repaint of the surface at
+            /// <paramref name="revision"/>. The render runs first and the
+            /// revision is stamped only after it returns. A render that throws
+            /// leaves the gate due (the next repaint check runs it again), runs
+            /// <paramref name="blank"/> so the surface shows nothing rather
+            /// than stale or partial help, and hands the exception to
+            /// <paramref name="log"/> once per class and message: the same
+            /// failure on later ticks is not logged again, a different one is
+            /// (at most sixteen kinds). True when the render completed.</summary>
+            internal bool Repaint(int revision, Action render, Action blank, Action<string> log)
+            {
+                try
+                {
+                    render();
+                }
+                catch (Exception e)
+                {
+                    failed = true;
+                    string what = e.GetType().Name + ": " + e.Message;
+                    if (logged.Count < 16 && logged.Add(what) && log != null)
+                    {
+                        try { log(what); } catch { }
+                    }
+                    if (blank != null)
+                    {
+                        try { blank(); } catch { }
+                    }
+                    return false;
+                }
+                Painted(revision);
+                return true;
+            }
         }
 
         // -- the ChatChannel tap detector (design section 2.5, fix pass 1 F2) --

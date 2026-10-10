@@ -473,7 +473,10 @@ namespace CompetitiveRounds
         /// is up. The Controls article's text and its keyboard guide (caps and
         /// their colours) read the bindings only when the article renders.
         /// The reader's scroll offset is kept, the way the gold chart's
-        /// re-render keeps it (MaybeRefreshInfoGold).</summary>
+        /// re-render keeps it (MaybeRefreshInfoGold). Fix pass 3 (M2): the
+        /// gate is stamped only by a render that completed (SelectInfoArticle
+        /// through RepaintGate.Repaint), so after a render that threw this
+        /// runs again on the next frame the Info tab is up.</summary>
         private static void KbRepaintInfoIfDue()
         {
             if (!infoKbGate.Due(Keybinds.Revision)) return;
@@ -498,12 +501,42 @@ namespace CompetitiveRounds
 
         /// <summary>Fix pass 2 (M2): the Settings language-channel note names
         /// the ChatChannel key; when the bindings moved since it was painted,
-        /// it is repainted as its row's extras are shown.</summary>
+        /// it is repainted as its row's extras are shown. Fix pass 3 (M2): the
+        /// revision is stamped only after the text is set; a paint that throws
+        /// leaves the note empty and due, repainted the next time its row's
+        /// extras are shown.</summary>
         private static void KbRepaintLangNoteIfDue()
         {
             if (setLangNoteTxt == null || !setLangNoteGate.Due(Keybinds.Revision)) return;
-            setLangNoteGate.Painted(Keybinds.Revision);
-            UIFactory.SetTextRaw(setLangNoteTxt, LangChatNoteText());
+            setLangNoteGate.Repaint(Keybinds.Revision, () => UIFactory.SetTextRaw(setLangNoteTxt, LangChatNoteText()),
+                () => UIFactory.SetTextRaw(setLangNoteTxt, ""), KbRepaintFailed("Settings language note"));
+        }
+
+        /// <summary>Fix pass 3 (M2): what the Info article shows while a
+        /// repaint has not completed - nothing. The title and the body text
+        /// are emptied and the extra body blocks (text, and visuals such as
+        /// the keyboard guide) destroyed, so stale or partial help is never
+        /// shown as current; infoKbGate stays due and the Info tick repaints
+        /// again.</summary>
+        private static void KbBlankInfoArticle()
+        {
+            foreach (var g in infoBodyExtraGOs)
+            {
+                if (g == null) continue;
+                try { g.SetActive(false); UnityEngine.Object.Destroy(g); } catch { }
+            }
+            infoBodyExtraGOs.Clear();
+            infoBodyExtraTexts.Clear();
+            try { UIFactory.SetTextRaw(infoBodyTxt, ""); } catch { }
+            try { UIFactory.SetTextRaw(infoTitleTxt, ""); } catch { }
+        }
+
+        /// <summary>Fix pass 3 (M2): the warning a repaint that threw logs,
+        /// once per exception class and message (RepaintGate.Repaint).</summary>
+        private static Action<string> KbRepaintFailed(string surface)
+        {
+            return what => Plugin.Log.LogWarning("[KEYBIND] the " + surface + " did not repaint (" + what
+                + "); it shows nothing until a repaint completes");
         }
 
         /// <summary>The capture poll's place in the settings key ladder,

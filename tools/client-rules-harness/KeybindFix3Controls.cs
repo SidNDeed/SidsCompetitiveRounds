@@ -39,6 +39,7 @@ namespace CompetitiveRounds
         {
             var r = new Result();
             M1(r);
+            M2(r);
             return r;
         }
 
@@ -271,6 +272,139 @@ namespace CompetitiveRounds
             }
             Check(r, "M1 a source that never delivers while the KeyCodes name keyboard keys is unavailable after two such frames, and a click with the ChatChannel key held then disarms the tap",
                   silent == "first rotated, second kept, unavailable True", silent);
+        }
+
+        // =================================================================
+        // M2 (round-3 F3): a revision is painted only after its repaint
+        // completed
+        // =================================================================
+
+        private static BindSource[] DefaultSet()
+        {
+            var s = new BindSource[KeybindRules.RowCount];
+            for (int i = 0; i < s.Length; i++) s[i] = KeybindRules.Default(i);
+            return s;
+        }
+
+        /// <summary>What the built Controls surface shows for a binding set:
+        /// QuickChat's key in the text, and the Q and G caps' colours in the
+        /// keyboard guide.</summary>
+        private static Func<string> PaintOf(BindSource[] reg)
+        {
+            return () => "QuickChat=" + KeybindRules.FormatToken(reg[KeybindRules.QuickChat])
+                         + " Q=" + KeybindRules.BoardCapRole("Q", reg, null)
+                         + " G=" + KeybindRules.BoardCapRole("G", reg, null);
+        }
+
+        /// <summary>One built surface and the tree's repaint decision. Fix tip:
+        /// RepaintGate.Repaint, reached by reflection. Pin: RepaintGate has no
+        /// Repaint, so the pin's order is modelled - SelectInfoArticle at
+        /// 6e74c910 stamps the revision (RepaintGate.Painted), then renders,
+        /// and its catch logs a throw on every call. The render writes half
+        /// its text before it throws, the way a body whose guide fails to
+        /// build would.</summary>
+        private sealed class Surface
+        {
+            internal string Shown = "";
+            internal int Logs, ThrowsLeft;
+            internal string ThrowMessage = "the keyboard guide's cap was missing";
+            internal readonly string How;
+            private readonly Func<string> paint;
+            private readonly object gate;
+            private readonly MethodInfo painted, due, repaint;
+
+            internal Surface(Func<string> p)
+            {
+                paint = p;
+                var gt = typeof(KeybindRules).GetNestedType("RepaintGate", BindingFlags.Public | BindingFlags.NonPublic);
+                gate = gt != null ? Activator.CreateInstance(gt, true) : null;
+                painted = gt != null ? gt.GetMethod("Painted", Any) : null;
+                due = gt != null ? gt.GetMethod("Due", Any) : null;
+                repaint = gt != null ? gt.GetMethod("Repaint", Any) : null;
+                How = repaint != null ? "RepaintGate.Repaint"
+                    : "a model of the pin's order: RepaintGate.Painted, then the render (SelectInfoArticle at 6e74c910)";
+            }
+
+            private void Render()
+            {
+                Shown = "partial";
+                if (ThrowsLeft > 0)
+                {
+                    ThrowsLeft--;
+                    throw new InvalidOperationException(ThrowMessage);
+                }
+                Shown = paint();
+            }
+
+            internal void Build(int revision)
+            {
+                Shown = paint();
+                painted.Invoke(gate, new object[] { revision });
+            }
+
+            internal bool Due(int revision) { return (bool)due.Invoke(gate, new object[] { revision }); }
+
+            /// <summary>One tick of the surface while it is up: a due revision
+            /// repaints.</summary>
+            internal void Tick(int revision)
+            {
+                if (!Due(revision)) return;
+                if (repaint != null)
+                {
+                    Action render = Render;
+                    Action blank = () => { Shown = ""; };
+                    Action<string> log = what => { Logs++; };
+                    repaint.Invoke(gate, new object[] { revision, render, blank, log });
+                    return;
+                }
+                painted.Invoke(gate, new object[] { revision });
+                try { Render(); }
+                catch (Exception) { Logs++; }
+            }
+        }
+
+        private static void M2(Result r)
+        {
+            string fresh = "QuickChat=key:G Q=0 G=" + KeybindRules.BoardMod;
+            var g = BindSource.Key(KeybindRules.KeyOrdinal("G"));
+
+            var reg = DefaultSet();
+            var s = new Surface(PaintOf(reg));
+            s.Build(0);
+            reg[KeybindRules.QuickChat] = g;
+            s.ThrowsLeft = 1;
+            s.Tick(1);
+            string afterThrow = "due " + s.Due(1) + ", shown '" + s.Shown + "', logged " + s.Logs;
+            s.Tick(1);
+            string afterNext = "due " + s.Due(1) + ", shown '" + s.Shown + "'";
+            Check(r, "M2 a Controls repaint whose render throws leaves the revision unstamped (due), shows nothing and logs once; the next tick repaints and stamps it",
+                  afterThrow == "due True, shown '', logged 1" && afterNext == "due False, shown '" + fresh + "'",
+                  "after the throw: " + afterThrow + "; after the next tick: " + afterNext + " (" + s.How + ")");
+
+            reg = DefaultSet();
+            reg[KeybindRules.QuickChat] = g;
+            s = new Surface(PaintOf(reg));
+            s.Build(1);
+            s.ThrowsLeft = 3;
+            for (int i = 0; i < 3; i++) s.Tick(2);
+            int same = s.Logs;
+            s.ThrowsLeft = 1;
+            s.ThrowMessage = "the article body was missing";
+            s.Tick(2);
+            int other = s.Logs - same;
+            s.Tick(2);
+            string logs = "the same failure on three ticks logged " + same + ", a different one " + other + ", then due " + s.Due(2);
+            Check(r, "M2 the same repaint failure on three ticks is logged once, a different one is logged again, and the surface stays due until a repaint completes",
+                  logs == "the same failure on three ticks logged 1, a different one 1, then due False", logs + " (" + s.How + ")");
+
+            reg = DefaultSet();
+            s = new Surface(PaintOf(reg));
+            s.Build(0);
+            reg[KeybindRules.QuickChat] = g;
+            s.Tick(1);
+            string ok = "due " + s.Due(1) + ", shown '" + s.Shown + "', logged " + s.Logs;
+            Check(r, "M2 control: a repaint that completes stamps the revision: nothing more is due and the new bindings show",
+                  ok == "due False, shown '" + fresh + "', logged 0", ok + " (" + s.How + ")");
         }
     }
 }
