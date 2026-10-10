@@ -8285,7 +8285,10 @@ _lb_message_ids: dict = {}
 # How many messages ONE reconcile read will take before it stops trying to see
 # the whole channel. This is not a scan depth: the read stops as soon as the
 # channel ENDS, so a board channel holding a handful of messages costs one
-# history page and never approaches this number. It is reached only by a
+# history request and never approaches this number (a longer channel costs
+# one request per 100 messages on every tick, at most
+# LB_RECONCILE_CEILING // 100 + 1 -- _reconcile_board_messages has the
+# count). It is reached only by a
 # channel holding more than this many messages, and reaching it means the read
 # did not establish what lies behind it -- on such a tick the publisher
 # deletes nothing and posts nothing fresh, and says so per board.
@@ -8418,9 +8421,20 @@ async def _reconcile_board_messages(ch, boards: list, ids: dict) -> tuple:
     messages there is nothing behind it and a previous set cannot be left
     undiscovered -- which is the whole failure the old fixed 200-message scan
     could not close, because a set buried deeper than the scan was re-posted
-    fresh and the old one orphaned. One page is 100 messages, so a board
-    channel costs one history call; the ceiling is reached only by a channel
-    holding more than that many messages.
+    fresh and the old one orphaned.
+
+    WHAT THE READ COSTS. The read is ONE iterator, `ch.history(...)`, and it
+    is NOT one request: discord.py fetches history in REST requests of at
+    most 100 messages and asks again until a request comes back short. A
+    channel of N messages therefore costs
+
+        min(N, LB_RECONCILE_CEILING) // 100 + 1
+
+    history requests, on every tick: one while the channel holds fewer than
+    100 messages (the normal state of a board channel), two from 100, three
+    from 200, and at most LB_RECONCILE_CEILING // 100 + 1 = 21, which a
+    channel reaches at LB_RECONCILE_CEILING messages and never exceeds,
+    because the read stops one message past the ceiling.
 
     WHICH DIRECTION THE UNHANDLED CASE FAILS. A read that raises, a read that
     dies part-way, and a read that reaches the ceiling are all treated the
@@ -8467,7 +8481,7 @@ async def _reconcile_board_messages(ch, boards: list, ids: dict) -> tuple:
     read rather than from a second one.
 
     ANCHORED comes out of this read as well, so the tick pays no extra
-    history call for it: it is whether the channel's last len(boards)
+    history request for it: it is whether the channel's last len(boards)
     messages, leaving out every older copy and retired message this read
     classified (the messages a tick deletes once their proof is in), are
     exactly this set in BOARDS order, oldest to newest. An EDIT never moves a
@@ -8670,20 +8684,28 @@ async def publish_boards():
     seven Discord calls a time.
 
     WHAT ONE TICK COSTS. Three boards, steady state, nothing stale on the
-    channel: SIX backend GETs (three board fetches and three one-row inactive
-    probes) and SEVEN logical Discord operations -- one reconcile history
-    page, then one fetch_message and one edit per board. The four-board
+    channel, and fewer than 100 messages on it: SIX backend GETs (three
+    board fetches and three one-row inactive probes) and SEVEN Discord
+    requests -- the reconcile read, which on a channel that short is ONE
+    history request, then one fetch_message and one edit per board. The
+    read is one `history()` iterator but not one request: a channel of N
+    messages costs min(N, LB_RECONCILE_CEILING) // 100 + 1 history requests,
+    so every further 100 messages on the channel adds a request to EVERY
+    tick, up to LB_RECONCILE_CEILING // 100 + 1 = 21. The four-board
     configuration is seven backend GETs (1v2 has no probe) and nine Discord
-    operations. A channel-cache miss adds one fetch_channel. A tick that has
-    to re-anchor makes no edits: it trades the three fetch_message/edit pairs
-    for three sends, three fetch_message and three deletes, ten operations
-    with the history page. A cold start ADOPTS a set already on the channel
-    from that same page, deleting nothing, and then costs the steady seven,
-    or the re-anchor's ten when that set is buried. Every duplicate or
-    retired message the read finds adds one delete, of a message the read
-    already holds. There is no separate tail read and no per-id retry sweep:
-    both came out of the reconcile read, which is the one place the channel
-    is read from.
+    requests on the short channel. A channel-cache miss adds one
+    fetch_channel. A tick that has to re-anchor makes no edits: it trades
+    the three fetch_message/edit pairs for three sends, three fetch_message
+    and three deletes, ten requests with the one history request. A cold
+    start ADOPTS a set already on the channel from that same read, deleting
+    nothing, and then costs the steady seven, or the re-anchor's ten when
+    that set is buried -- each plus the read's further requests on a longer
+    channel. Every older copy or retired message the read finds adds one
+    delete once it may go, of a message the read already holds; a keeper
+    found gone costs its fetch_message, and each older copy tried in its
+    place another fetch_message and the edit. There is no separate tail
+    read and no per-id retry sweep: both came out of the reconcile read,
+    which is the one place the channel is read from.
 
     ORDER. Render first (that touches only the API), then RECONCILE THE
     CHANNEL, and only then act on it. Nothing decides a deletion before the

@@ -235,6 +235,34 @@ class _Channel:
         self.send_fails_for_titles = set()
         self.delete_fails = set()
         self.edit_fails = set()
+        # The READ's cost, counted where Discord would bill it: one per REST
+        # request discord.py's own paging makes (GET .../messages, at most
+        # 100 messages each). An in-memory iterator could not show that one
+        # `history()` call is many requests on a long channel.
+        self.history_requests = 0
+        self._state = types.SimpleNamespace(
+            http=types.SimpleNamespace(logs_from=self._logs_from),
+            create_message=lambda channel, data: data["msg"])
+
+    async def _get_channel(self):
+        return self
+
+    async def _logs_from(self, channel_id, limit, before=None, after=None, around=None):
+        """GET /channels/{id}/messages as discord.py's paging calls it: newest
+        first, at most `limit` (never over 100) messages older than `before`."""
+        self.history_requests += 1
+        if self.history_raises:
+            raise RuntimeError("history boom")
+        assert after is None and around is None, "the reconcile read pages backwards only"
+        assert 1 <= limit <= 100, limit
+        newest_first = list(self.messages)[::-1]
+        if before is not None:
+            # Paging resumes by id, as Discord's does: real ids are snowflakes,
+            # in channel order. A test that reorders messages stays on one page.
+            ids = [m.id for m in self.messages]
+            assert ids == sorted(ids), "paged past a channel whose ids are out of order"
+            newest_first = [m for m in newest_first if m.id < before]
+        return [{"id": str(m.id), "msg": m} for m in newest_first[:limit]]
 
     async def send(self, embeds=None, view=None):
         title = embeds[0].title if embeds else None
@@ -268,15 +296,20 @@ class _Channel:
         raise _not_found(f"Unknown Message {mid}")
 
     def history(self, limit=100):
-        if self.history_raises:
-            raise RuntimeError("history boom")
-        snapshot = list(self.messages)[-limit:][::-1]      # newest first, as Discord answers
+        """discord.py's OWN Messageable.history -- the library's paging, over
+        _logs_from -- with this fake's failure and timing levers around it. A
+        `history_raises` read fails on its first request, as a real one does
+        (the call itself does no I/O); a part-way failure is modelled at any
+        message, which covers the real one at a page boundary."""
+        pages = discord.abc.Messageable.history(self, limit=limit)
 
         async def gen():
-            for i, m in enumerate(snapshot):
+            i = 0
+            async for m in pages:
                 if self.history_raises_after is not None and i >= self.history_raises_after:
                     raise RuntimeError("history boom part-way")
                 yield m
+                i += 1
                 if m.id in self.vanish_after_read:
                     self.vanish_after_read.discard(m.id)
                     self.messages = [x for x in self.messages if x.id != m.id]
@@ -2416,6 +2449,41 @@ def test_the_ceiling_is_the_only_bound_left_and_it_is_pinned():
     silently. Everything below it is read to the end of the channel."""
     ns = _fresh()
     assert ns["LB_RECONCILE_CEILING"] == 2000
+
+
+READ_COST = "min(N, LB_RECONCILE_CEILING) // 100 + 1"
+
+
+def test_the_read_costs_a_history_request_per_hundred_messages_as_the_text_says():
+    """One reconcile read is one `history()` iterator and NOT one request:
+    discord.py pages the REST endpoint 100 messages at a time and asks again
+    until a page comes back short. The text used to say a board channel
+    "costs one history call" -- true of the iterator, and of no channel of
+    100 messages or more, so a long channel's REST reads were missing from
+    the budget the docstrings gave. The fake now runs the library's own
+    paging and counts the requests; the formula both docstrings state is
+    evaluated against that count, for channels of one page and of many."""
+    ns0 = _fresh()
+    ceiling = ns0["LB_RECONCILE_CEILING"]
+    for name in ("_reconcile_board_messages", "publish_boards"):
+        flat = " ".join(ns0[name].__doc__.split())
+        assert READ_COST in flat, f"{name}'s docstring does not state the read's cost as {READ_COST}"
+        cap = re.search(r"LB_RECONCILE_CEILING // 100 \+ 1 = (\d+)", flat)
+        assert cap and int(cap.group(1)) == ceiling // 100 + 1, (
+            f"{name}'s docstring does not state the most one read costs")
+        assert "costs one history call" not in flat and "history page" not in flat, name
+
+    for n in (0, 99, 100, 250, ceiling - 1, ceiling, ceiling + 600):
+        ns = _fresh()
+        ch = ns["_ch"]
+        for _ in range(n):
+            ch.post_from_someone_else()
+        _tick(ns)
+        want = eval(READ_COST, {"min": min}, {"N": n, "LB_RECONCILE_CEILING": ceiling})
+        assert ch.history_requests == want, (
+            f"a channel of {n} messages cost {ch.history_requests} history requests, "
+            f"the text says {want}")
+    assert want == ceiling // 100 + 1 == 21
 
 
 # ── player-authored names ─────────────────────────────────────────────────
