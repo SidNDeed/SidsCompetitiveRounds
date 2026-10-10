@@ -1,18 +1,27 @@
-"""Item 17 fix pass 1 F1: the binding-surface oracle, run.
+"""Item 17 fix pass 1 F1, fix pass 2 H1: the binding-surface oracle, run.
 
 tools/keybind_surfaces.py enumerates every harvested display string (every
-plugin file, the shop snapshot, the catalogue keys, the vanilla tables),
-every binding-producer call site and every binding reader, and requires a
-disposition for each (tools/keybind_surfaces.tsv, the sites manifest). An
-undispositioned string, a new site or a new reader is red. These run it on
-this tree and pin the dispositions of the surfaces the round-1 report named.
-The oracle's own mutants (a new catalogue entry, a new hardcoded hint, a new
-producer site, a new reader, and a comment-only control) are run by the lane
-evidence, each on a copied tree.
+plugin file, the shop snapshot, the catalogue keys, every occurrence of the
+vanilla tables), every binding-producer call site and every member that
+reads a binding root, and requires a disposition for each
+(tools/keybind_surfaces.tsv, the sites manifest, the readers manifest). An
+undispositioned string, a new site or a new reader is red; so is a reader
+whose content changed, a review whose display role changed, and a row with
+no rule and no review. These run it on this tree, pin the dispositions of
+the surfaces the round-1 report named, and pin the H1 shape: no file is
+exempt, the ready-prompt override is a display reader, every locale
+occurrence is its own row, and no row takes a disposition by default. The
+oracle's own mutants (fix 1: a new catalogue entry, a new hardcoded hint, a
+new producer site, a new reader, a comment-only control; fix 2: a display
+reader in a formerly exempt file, one locale occurrence changed beneath an
+unchanged path, a default-N row gaining a display role, and the comment-
+and whitespace-only controls) are run by the lane evidence, each on a
+copied tree.
 """
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
@@ -86,3 +95,59 @@ def test_f1_no_retired_fixed_binding_string_is_harvested(run):
 def test_f1_the_keyboard_board_is_a_known_site(run):
     _, _, (t, u, found, disp) = run
     assert found[("InfoViz.cs", "BuildKeyboard", "Fill")][0] == 54
+
+
+# -- fix pass 2 H1 ----------------------------------------------------------
+
+def _readers():
+    read = getattr(KS, "read_readers", None)
+    assert read is not None, "the oracle has no readers manifest"
+    rman, probs = read(str(REPO / "tools" / "keybind_surfaces_readers.tsv"))
+    assert probs == [], probs
+    return rman
+
+
+def test_h1_no_file_is_exempt_from_the_reader_census():
+    assert not hasattr(KS, "NON_DISPLAY"), "a whole-file reader exemption is back"
+    st = KS.State(str(REPO))
+    files = {fn for fn, _ in st.reads}
+    # the two files the round-1 oracle exempted whole are now read member by member
+    assert "Keybinds.cs" in files and "KeybindRules.cs" in files, sorted(files)
+    assert ("Keybinds.cs", "Override") in st.reads
+
+
+def test_h1_the_ready_prompt_override_is_a_display_reader():
+    rman = _readers()
+    count, digest, role, via, note = rman[("Keybinds.cs", "Override")]
+    assert role == "display"
+    assert via == ["ApplyJoin", "ApplyReady"]
+
+
+def test_h1_every_reader_row_has_a_role_and_a_reason():
+    rman = _readers()
+    assert rman
+    for k, (count, digest, role, via, note) in rman.items():
+        assert role in KS.ROLES, k
+        assert note.strip(), k
+        assert count >= 1, k
+
+
+_ENTRY = re.compile(r'(?m)^\s*\["(?:[^"\\\n]|\\.)*"\]\s*=\s*new\[\]\s*\{')
+
+
+def test_h1_every_locale_occurrence_is_its_own_row(run):
+    _, _, (t, u, found, disp) = run
+    src = (REPO / "plugin" / "GameLocaleCatalogues.cs").read_text(encoding="utf-8")
+    entries = len(_ENTRY.findall(src))
+    vrows = [text for o, text, s in u.values() if o == "V"]
+    assert entries > 0
+    assert len(vrows) == entries, (len(vrows), entries)
+    # one path in both tables: two rows, never collapsed under the path
+    join = [v for v in vrows if ":StringTableDefault/PROMPT_SPACE_TO_JOIN#" in v]
+    assert len(join) == 2 and len({KS.kid(v) for v in join}) == 2, join
+
+
+def test_h1_no_row_takes_a_disposition_by_default(run):
+    _, _, (t, u, found, disp) = run
+    bare = [i for i, d in disp.items() if not (d[1].startswith("rule:") or d[1].startswith("rev:"))]
+    assert bare == [], bare[:10]
