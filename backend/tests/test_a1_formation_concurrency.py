@@ -32,6 +32,7 @@ What it asserts, in one scenario:
 
 import asyncio
 import os
+import time
 import uuid
 
 import pytest
@@ -314,16 +315,34 @@ def test_cross_mode_live_lease_is_what_the_gate_actually_catches():
 
 
 async def _exclusive():
+    """True when the second connection did NOT get the identity lock.
+
+    Since A1 round 2 the barrier's wait is bounded: a contended acquire gives
+    up after FORMATION_LOCK_TIMEOUT_MS with lock_not_available, which
+    _identity_lock_many answers with the 503 "queue_contended" the formation
+    paths already give. That refusal is the block, observed to its end, so it
+    counts -- but only after the whole bounded wait, which is the part that
+    shows the lock was held. A second acquire that RETURNS is the one outcome
+    that means the lock is not exclusive. The outer bound sits past the lock
+    timeout so that the refusal is what ends the wait; a wait still running
+    at the outer bound counts as blocked too."""
+    bound = main.FORMATION_LOCK_TIMEOUT_MS / 1000.0
     engine, sm, _pa, _pb = await _setup()
     try:
         async with sm() as one, sm() as two:
             await main._identity_lock_many(one, [SID_A])
             blocked = False
+            started = time.monotonic()
             try:
                 await asyncio.wait_for(
-                    main._identity_lock_many(two, [SID_A]), timeout=3.0)
+                    main._identity_lock_many(two, [SID_A]), timeout=bound + 3.0)
             except asyncio.TimeoutError:
                 blocked = True
+            except main.HTTPException as exc:
+                waited = time.monotonic() - started
+                blocked = (exc.status_code == 503
+                           and exc.detail == "queue_contended"
+                           and waited >= bound * 0.9)
             await one.rollback()
             await two.rollback()
         return blocked

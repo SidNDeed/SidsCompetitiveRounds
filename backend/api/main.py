@@ -14600,7 +14600,7 @@ _RANKED_CANDIDATE_SQL = """
       AND NOT EXISTS (SELECT 1 FROM player_bans pb
                        WHERE pb.steam_id = ranked_queue.steam_id
                          AND pb.unbanned_at IS NULL)
-      -- A1 r2 (review MEDIUM :16675). Discovery must not SELECT a seat the
+      -- A1 r2 (a review MEDIUM). Discovery must not SELECT a seat the
       -- gate under the locks is going to refuse. The gate stays the
       -- authority -- this read is unlocked by design -- but a filter that
       -- disagrees with its gate is how a select-then-refuse loop gets built:
