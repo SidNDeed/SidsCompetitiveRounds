@@ -803,6 +803,18 @@ def lit(s):
         return txt
 
 
+def const_decl(folder, name):
+    """(type, literal) of `const <type> <name> = <literal>;` declared once in
+    the folder's .cs files, or (None, None)."""
+    found = []
+    for f in sorted(os.listdir(folder)):
+        if f.endswith(".cs"):
+            for m in re.finditer(r"\bconst\s+(int|bool|float|string)\s+" + re.escape(name) + r"\s*=\s*([^;]+);",
+                                 read(os.path.join(folder, f))):
+                found.append((m.group(1), m.group(2).strip()))
+    return found[0] if len(set(found)) == 1 else (None, None)
+
+
 def binds(plugin_cs):
     t = read(plugin_cs)
     code = strip_comments_only(t)
@@ -825,6 +837,18 @@ def binds(plugin_cs):
         if len(a) != 4:
             continue
         sec, key, dv, desc = lit(a[0]), lit(a[1]), a[2].strip(), lit(a[3])
+        # a named constant default (MusicLevels.DEFAULT_PERCENT): resolve it
+        # from its declaration in the same plugin folder, so the bind's TYPE
+        # is the declared one (fix pass 2, M10: an int const read as a string
+        # retyped MusicVolume in the real-config witness)
+        if re.fullmatch(r"[A-Za-z_][\w.]*", dv) and dv not in ("true", "false"):
+            ctype, cval = const_decl(os.path.dirname(plugin_cs), dv.split(".")[-1])
+            if ctype == "string":
+                dv = cval
+            elif ctype in ("int", "bool"):
+                dv = cval
+            elif ctype == "float":
+                dv = cval if cval.endswith("f") else cval + "f"
         if dv in ("true", "false"):
             kind, val = "bool", dv
         elif re.fullmatch(r"-?\d+", dv):
