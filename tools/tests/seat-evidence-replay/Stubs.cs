@@ -21,7 +21,7 @@ namespace UnityEngine
             return null;
         }
     }
-    public static class Time { public static float unscaledTime; }
+    public static class Time { public static float unscaledTime, realtimeSinceStartup; }
 }
 
 namespace ExitGames.Client.Photon
@@ -78,6 +78,8 @@ namespace Photon.Pun
         public static Photon.Realtime.LoadBalancingClient NetworkingClient = new Photon.Realtime.LoadBalancingClient();
         public static ExitGames.Client.Photon.Hashtable rpcEvent = new ExitGames.Client.Photon.Hashtable();
         public static int Ping = 40;
+        public static int SendRate = 30, SerializationRate = 10;
+        public static bool InRoom = true;
         public static readonly Dictionary<int, PhotonView> Views = new Dictionary<int, PhotonView>();
         public static PhotonView GetPhotonView(int id) { PhotonView v; return Views.TryGetValue(id, out v) ? v : null; }
         public static int GetPing() { return Ping; }
@@ -101,6 +103,7 @@ namespace BepInEx
         public static string ConfigPath = "";
         public static string PluginPath = "";
         public static string PatcherPluginPath = "";
+        public static string ManagedPath = "", GameRootPath = "", BepInExAssemblyDirectory = "";
     }
 }
 
@@ -116,10 +119,19 @@ namespace HarmonyLib
     public class HarmonyPrefix : Attribute { }
     public class HarmonyPostfix : Attribute { }
     public class HarmonyFinalizer : Attribute { }
-    public class Patches { public IEnumerable<string> Owners = new string[0]; }
+    public class Patches
+    {
+        public IEnumerable<string> Owners = new string[0];
+        public IList<Patch> Prefixes = new List<Patch>(), Postfixes = new List<Patch>(), Transpilers = new List<Patch>(), Finalizers = new List<Patch>();
+    }
     public class Harmony
     {
+        public Harmony() { }
+        public Harmony(string id) { }
         public static Patches GetPatchInfo(MethodBase m) { return null; }
+        public static IEnumerable<MethodBase> GetAllPatchedMethods() { return new MethodBase[0]; }
+        public MethodInfo Patch(MethodBase original, HarmonyMethod prefix = null, HarmonyMethod postfix = null,
+                                HarmonyMethod transpiler = null, HarmonyMethod finalizer = null) { return null; }
     }
     public static class AccessTools
     {
@@ -129,6 +141,8 @@ namespace HarmonyLib
             return args == null ? t.GetMethod(name, All) : t.GetMethod(name, All, null, args, null);
         }
         public static FieldInfo Field(Type t, string name) { return t.GetField(name, All); }
+        public static Type TypeByName(string name) { return null; }
+        public static List<MethodInfo> GetDeclaredMethods(Type t) { return new List<MethodInfo>(t.GetMethods(All | BindingFlags.DeclaredOnly)); }
     }
 }
 
@@ -149,6 +163,7 @@ public class CharacterData : UnityEngine.Component
     public bool isPlaying = true, dead;
     public PlayerVelocity playerVel = new PlayerVelocity();
     public WeaponHandler weaponHandler = new WeaponHandler();
+    public GeneralInput input = new GeneralInput();
 }
 public class HealthHandler : UnityEngine.Component { }
 public class ProjectileHit : UnityEngine.Component { }
@@ -159,6 +174,8 @@ public class PlayerManager
     public static PlayerManager instance = new PlayerManager();
     public readonly Dictionary<int, Player> ByActor = new Dictionary<int, Player>();
     public Player GetPlayerWithActorID(int a) { Player p; return ByActor.TryGetValue(a, out p) ? p : null; }
+    public readonly List<Player> players = new List<Player>();
+    public UnityEngine.AnimationCurve playerMoveCurve = new UnityEngine.AnimationCurve();
 }
 public static class TimeHandler { public static float deltaTime; }
 public class GameManager { public static GameManager instance = new GameManager(); public bool battleOngoing; }
@@ -171,6 +188,7 @@ namespace CompetitiveRounds
         public readonly List<string> Lines = new List<string>();
         public void LogInfo(object o) { Lines.Add("I " + o); }
         public void LogWarning(object o) { Lines.Add("W " + o); }
+        public void LogError(object o) { Lines.Add("E " + o); }
     }
 
     public class ConfigValue<T> { public T Value; }
@@ -190,6 +208,17 @@ namespace CompetitiveRounds
         internal static bool DataConsentGranted { get { return Consent; } }
         internal static ConfigValue<string> ApiBaseUrl = new ConfigValue<string> { Value = "https://replay.invalid:8444" };
     }
+
+    // The identity-clock lane's clock reader, which SeatEvidence's pump hands
+    // the evidence POST for route "i" only (identity_closing_next_boot queues
+    // route "i"; the replay asserts the queue, not that POST's header).
+#if !IC_REAL_EVIDENCE
+    // (with IcRealEvidence=true the REAL plugin/IdentityClockEvidence.cs is compiled instead)
+    internal static class IdentityClockEvidence
+    {
+        internal static string ClockHeaderNow() { return null; }
+    }
+#endif
 
     internal static class SteamAuth
     {
@@ -236,7 +265,7 @@ namespace CompetitiveRounds
         {
             Held[i](true, ok, text, true);
         }
-        internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Action<bool, bool, string, bool> callback)
+        internal static bool SeatEvidencePost(string path, string body, Func<bool> beforeSend, Func<string> clockHeader, Action<bool, bool, string, bool> callback)
         {
             if (string.IsNullOrEmpty(Base) || !Plugin.DataConsentGranted) return false;
             if (RefuseInside) { NotSent++; callback(false, false, "insecure-transport", false); return true; }

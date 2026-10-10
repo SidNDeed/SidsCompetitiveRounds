@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Identity-clock evidence, client half: executes the REAL
+       plugin/IdentityClockCore.cs (with plugin/SeatEvidenceCore.cs, whose
+       serializer it reuses) and writes the records, envelopes and clock
+       headers that run_tests.py hands to the SERVER lane's own
+       backend/api/identity_clock_evidence.py (read by path, never written).
+       Mutants are built from COPIES of the core (CoreSource override); the
+       tracked file is never modified. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>IdentityClockTests</AssemblyName>
+    <RootNamespace>IdentityClockTests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(CoreSource)' == ''">
+    <CoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\IdentityClockCore.cs</CoreSource>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(SeatCoreSource)' == ''">
+    <SeatCoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\SeatEvidenceCore.cs</SeatCoreSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(SeatCoreSource)" />
+    <Compile Include="$(CoreSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>

@@ -29,7 +29,7 @@ PROJ = os.path.join(HERE, "ReplayTests.csproj")
 WORK = os.path.join(HERE, "work")
 SE = os.path.join(PLUGIN, "SeatEvidence.cs")
 TRACKED = ["SeatEvidence.cs", "SeatEvidenceCore.cs", "GameStateWatcher.cs", "Plugin.cs", "ApiClient.cs",
-           "HitEvidence.cs", "PoisonSync.cs", "CardDrawEvidence.cs"]
+           "HitEvidence.cs", "PoisonSync.cs", "CardDrawEvidence.cs", "IdentityClockEvidence.cs"]
 
 CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left", "cut_guards",
          "closing_next_boot", "compat_sender", "compat_bounds", "cut_422_kept", "path1_unstamped",
@@ -43,6 +43,8 @@ CASES = ["victim_block_hit", "shooter_paths", "unkeyed_and_nesting", "cut_left",
          "opponent_sample_outside_combat",
          # fix pass 4
          "closing_no_trailer", "closing_bad_trailer",
+         # identity-clock fix pass 2: the positive identity quit flush
+         "identity_closing_next_boot",
          # fix pass 5: amended B7 (reset at hit_sent index 9)
          "last_reset_states",
          # merge pass 6, item 2: the stand-in server's not-found, refusal and no-answer bounds
@@ -107,9 +109,11 @@ MUTANTS = [
     ("gate_ignores_zero", "if (!nonzero) return false;", "", "damage_predicate", "shooter_paths"),
     ("gate_ignores_dead", "d.isPlaying && !d.dead && d.playerVel", "d.isPlaying && d.playerVel", "damage_predicate", "shooter_paths"),
     # F3: current-frame combat state, before any load
-    ("combat_stale_flag", "try { live = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }", "",
-     "combat_gate", "victim_block_hit"),
-    ("combat_after_load", "if (CombatLive()) return;       // before any load", "Load(); if (CombatLive()) return;       // before any load",
+    ("combat_stale_flag", "return C.CombatRead.Of(() => GameManager.instance != null && GameManager.instance.battleOngoing,",
+     "return C.CombatRead.Of(() => false,", "combat_gate", "victim_block_hit"),
+    # identity-clock fix pass 2: the positive quit flush needs the closing file persisted
+    ("identity_closing_not_persisted", "fs.Write(bytes, 0, bytes.Length);\n                    fs.Flush(true);\n                }\n                return true;",
+     "fs.Flush(true);\n                }\n                return true;", "identity_closing_next_boot", "combat_gate"),    ("combat_after_load", "if (CombatLive()) return;       // before any load", "Load(); if (CombatLive()) return;       // before any load",
      "combat_gate", "victim_block_hit"),
     # F4: the dispatch only captures
     ("dispatch_builds_inline", "_nextCaptureTryMs = 0;\n            }", "_nextCaptureTryMs = 0;\n                BuildCaptures(false);\n            }",
@@ -217,11 +221,15 @@ WIRING = [
     ("Plugin.cs", "the evidence ticks run above the modDisabled return (F5), the drain first (F4)",
      [r"try \{ SeatEvidence\.CompatTick\(\); \} catch \{ \}", r"try \{ PointEvidence\.Drain\(\); \} catch \{ \}\s*"
       r"try \{ SeatEvidence\.Tick\(\); \} catch \{ \}\s*try \{ CardDrawEvidence\.Tick\(\); \} catch \{ \}\s*"
-      r"try \{ CombatEvidence\.Tick\(\); \} catch \{ \}\s*if \(Plugin\.modDisabled\) return;"]),
+      r"try \{ CombatEvidence\.Tick\(\); \} catch \{ \}\s*"
+      r"try \{ IdentityClockEvidence\.Tick\(\); \} catch \{ \}\s*"
+      r"if \(Plugin\.modDisabled\) return;"]),
 ]
 
 # F10: the evidence POST's own bare path. The headers it sets, exactly.
-F10_HEADERS = {"Content-Type", "X-Mod-Version", "X-Session-Token"}
+# X-Seat-Clock: the identity-clock contract's own header (server lane 00608251,
+# notes section 2), set only when the caller passes a clock reader (route "i").
+F10_HEADERS = {"Content-Type", "X-Mod-Version", "X-Session-Token", "X-Seat-Clock"}
 F10_FORBIDDEN = ["StampVersionHeader(", "PostRequest(", "PostRequestRaw(", "X-Locale"]
 
 
@@ -315,12 +323,12 @@ def read(path):
     return open(path, "rb").read().decode("utf-8-sig")
 
 
-def build(tag, source):
+def build(tag, source, extra=()):
     out = os.path.join(WORK, tag)
     cmd = ["dotnet", "build", PROJ, "-c", "Release", "-nologo", "-v", "q",
            "-p:IntermediateOutputPath=" + os.path.join(out, "obj") + os.sep,
            "-p:OutDir=" + os.path.join(out, "bin") + os.sep,
-           "-p:SeatEvidenceSource=" + source]
+           "-p:SeatEvidenceSource=" + source] + list(extra)
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout[-4000:], r.stderr[-2000:])
@@ -334,6 +342,60 @@ def run_case(dll, tag, case):
         shutil.rmtree(d)
     r = subprocess.run(["dotnet", dll, case, d], capture_output=True, text=True)
     return r.returncode, r.stdout.strip()
+
+
+# Identity-clock fix pass 3 (QF1): the REAL plugin/IdentityClockEvidence.cs compiled into the replay
+# (IcRealEvidence=true) and its production capture and quit flush driven; mutants planted into COPIES
+# of IdentityClockEvidence.cs (the tracked file is never written). (name, old, new): each mutant's
+# target is the production case, its control combat_gate in the same mutant build.
+IC_EVID = os.path.join(PLUGIN, "IdentityClockEvidence.cs")
+IC_CASE = "identity_production_quit_flush"
+IC_CONTROL = "combat_gate"
+IC_MUTANTS = [
+    ("ic_flush_to_queue", 'env => SeatEvidence.SpoolClosing("i", env)', "env => SeatEvidence.EnqueueIdentity(env)"),
+    ("ic_capture_dropped", "if (g == null || !rankedNow || !g.OneVOne) return;", "if (true) return;"),
+    ("ic_build_at_quit_none", "            return BuildEnv(c, out text);\n        }\n\n        /// <summary>The signed envelope",
+     "            text = null; return null;\n        }\n\n        /// <summary>The signed envelope"),
+]
+
+
+def ic_real_section():
+    ok = True
+    ic = ["-p:IcRealEvidence=true"]
+    dll = build("icreal", SE, ic)
+    if dll is None:
+        print("BUILD FAILED (icreal: the real IdentityClockEvidence.cs)")
+        return False
+    for case in (IC_CASE, IC_CONTROL, "identity_closing_next_boot"):
+        rc, out = run_case(dll, "icreal", case)
+        print("icreal " + out)
+        ok = ok and rc == 0
+    raw = open(IC_EVID, "rb").read().decode("utf-8")
+    nl = "\r\n" if "\r\n" in raw else "\n"
+    caught = 0
+    for name, old, new in IC_MUTANTS:
+        o, n = old.replace("\n", nl), new.replace("\n", nl)
+        if raw.count(o) != 1:
+            print("BAD ic mutant %s: anchor occurs %d times" % (name, raw.count(o)))
+            ok = False
+            continue
+        path = os.path.join(WORK, "icmut_" + name + ".cs")
+        open(path, "wb").write(raw.replace(o, n).encode("utf-8"))
+        mdll = build("icmut_" + name, SE, ic + ["-p:IdentityEvidenceSource=" + path])
+        if mdll is None:
+            print("BAD ic mutant %s: does not build" % name)
+            ok = False
+            continue
+        trc, tout = run_case(mdll, "icmut_" + name, IC_CASE)
+        crc, _ = run_case(mdll, "icmut_" + name, IC_CONTROL)
+        hit = trc != 0 and crc == 0
+        caught += hit
+        ok = ok and hit
+        print("%s ic mutant %s: target %s=%s; control %s=%s%s" % (
+            "CAUGHT" if hit else "MISSED", name, IC_CASE, "FAIL" if trc else "PASS", IC_CONTROL,
+            "PASS" if crc == 0 else "FAIL", "" if hit else " (" + tout[-200:] + ")"))
+    print("ic real evidence: production quit flush %s; ic mutants: %d of %d caught" % ("PASS" if ok else "FAIL", caught, len(IC_MUTANTS)))
+    return ok and caught == len(IC_MUTANTS)
 
 
 def wiring_ok(text, anchors):
@@ -405,6 +467,8 @@ def main():
             "CAUGHT" if hit else "MISSED", name, target, "FAIL" if trc else "PASS", control,
             "PASS" if crc == 0 else "FAIL", "" if hit else " (" + tout[-200:] + ")"))
     print("mutants: %d of %d caught" % (caught, len(MUTANTS)))
+
+    ok = ic_real_section() and ok
 
     unchanged = all(sha(os.path.join(PLUGIN, f)) == before[f] for f in TRACKED)
     print("tracked plugin files unchanged:", unchanged)

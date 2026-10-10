@@ -36,6 +36,7 @@ namespace CompetitiveRounds
         private const string ROUTE_COMPAT = "/api/v1/client/compat-outcome";
         private const string ROUTE_CARD = "/api/v1/matches/card-evidence";
         private const string ROUTE_COMBAT = "/api/v1/matches/combat-evidence";
+        private const string ROUTE_IDENTITY = "/api/v1/matches/identity-clock-evidence";
 
         private static readonly Stopwatch _sw = Stopwatch.StartNew();
         internal static long SwMs { get { return _sw.ElapsedMilliseconds; } }
@@ -656,16 +657,24 @@ namespace CompetitiveRounds
             catch { }
         }
 
-        /// <summary>Whether a battle is live in the CURRENT frame: the game's
+        /// <summary>The CURRENT frame's combat state (C.CombatRead): the game's
         /// own GameManager.battleOngoing read now (FfaMode and vanilla both
-        /// write it), or the diagnostics flag (the spectator path drives it).
-        /// Either one live is live.</summary>
+        /// write it) and the diagnostics flag (the spectator path drives it).
+        /// Either one live is LIVE; a read that fails makes the frame UNKNOWN
+        /// unless the other read says live.</summary>
+        internal static int CombatState()
+        {
+            return C.CombatRead.Of(() => GameManager.instance != null && GameManager.instance.battleOngoing,
+                                   () => NetworkReplicaDiagnostics.BattleActive);
+        }
+
+        /// <summary>Whether this frame must do no main-thread evidence work:
+        /// a live battle or an unknown combat state. Every caller (this
+        /// class's ticks and send gate, the card-draw tick) does main-thread
+        /// work, so UNKNOWN counts as live for all of them.</summary>
         internal static bool CombatLive()
         {
-            bool live = false;
-            try { live = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
-            try { live = live || NetworkReplicaDiagnostics.BattleActive; } catch { }
-            return live;
+            return C.CombatRead.Live(CombatState());
         }
 
         private static void ReadOffset()
@@ -1467,7 +1476,7 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (body == null || (route != "e" && route != "k" && route != "c" && route != "x")) return false;
+                if (body == null || (route != "e" && route != "k" && route != "c" && route != "x" && route != "i")) return false;
                 var p = new C.Pending { Route = route, Body = body, FirstUnix = UnixNow() };
                 string name = SPOOL_PREFIX + DateTime.UtcNow.Ticks.ToString("D19", CultureInfo.InvariantCulture) + "-"
                               + (++_spoolSeq).ToString("D4", CultureInfo.InvariantCulture) + ".jsonl";
@@ -1575,13 +1584,23 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>An identity-clock envelope (route "i"), persisted like the
+        /// others and sent by the same pump, outside combat, with its clock
+        /// header stamped at each send. False: not persisted, the caller keeps it.</summary>
+        internal static bool EnqueueIdentity(string body)
+        {
+            return Enqueue("i", body);
+        }
+
         private static string RouteOf(string route)
         {
+            if (route == "i") return ROUTE_IDENTITY;
             return route == "c" ? ROUTE_COMPAT : (route == "k" ? ROUTE_CARD : (route == "x" ? ROUTE_COMBAT : ROUTE_RECORD));
         }
 
         private static string What(string route)
         {
+            if (route == "i") return "identity-clock record";
             return route == "c" ? "compat outcome" : (route == "k" ? "card record" : (route == "x" ? "combat record" : "record"));
         }
 
@@ -1627,6 +1646,7 @@ namespace CompetitiveRounds
             try
             {
                 started = ApiClient.SeatEvidencePost(RouteOf(route), body, () => BeforeSend(route, body),
+                    route == "i" ? (Func<string>)IdentityClockEvidence.ClockHeaderNow : null,
                     (left, ok, text, carried) => OnAnswer(id, route, left, ok, text, carried));
             }
             catch { started = false; }

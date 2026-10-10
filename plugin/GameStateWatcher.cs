@@ -5839,6 +5839,8 @@ namespace CompetitiveRounds
             try { SeatEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
             // Combat evidence (B1-B3, B5): the same window, its own collectors. Contained.
             try { CombatEvidence.BeginGame(oneVOneMatchAtStart); } catch { }
+            // Identity-clock evidence: its window, moment 1. Contained.
+            try { IdentityClockEvidence.BeginGame(oneVOneMatchAtStart, matchIsRanked); } catch { }
 
             // Spawn the cosmetic trail for this match (if the player owns one).
             TrailCosmetic.OnMatchStart();
@@ -6845,6 +6847,8 @@ namespace CompetitiveRounds
                 try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
                 // Combat evidence: after the card record, same gate, O(1) capture.
                 try { CombatEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
+                // Identity-clock evidence: after the seat record, same gate.
+                try { IdentityClockEvidence.Dispatch(localSteamId, opponentSteamId, reportRoomId, matchIsRanked && oneVOneMatchAtStart); } catch { }
             }
 
             // Evaluate achievements before clearing match state
@@ -9165,6 +9169,8 @@ namespace CompetitiveRounds
                 // Card draw evidence (B4): the same game cut short, same attach key.
                 try { CardDrawEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
                 try { CombatEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
+                // Identity-clock evidence: the same game cut short, same attach key.
+                try { IdentityClockEvidence.Dispatch(localSteamId, opponentSteamId, BuildReportRoomId(s[0], s[1]), matchIsRanked && oneVOneMatchAtStart); } catch { }
             }
             catch { }
         }
