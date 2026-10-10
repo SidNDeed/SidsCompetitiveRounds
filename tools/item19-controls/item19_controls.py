@@ -438,7 +438,9 @@ def classify_failures(o, failed):
     Returns (genuine, scaffold, unread), lists of test names."""
     blocks = {}
     for sec in re.finditer(r"^=+ (?:FAILURES|ERRORS) =+[ \t]*$(.*?)(?=^=+ |\Z)", o, re.M | re.S):
-        parts = re.split(r"^_{3,} (.+?) _{3,}[ \t]*$", sec.group(1), flags=re.M)
+        # a title wider than the terminal is framed by ONE underscore a side
+        # (a parametrized id); a title never starts with "_" or a blank
+        parts = re.split(r"^_+ ([^_ \t].*?) _+[ \t]*$", sec.group(1), flags=re.M)
         for i in range(1, len(parts) - 1, 2):
             blocks[parts[i].strip()] = parts[i + 1]
     genuine, scaffold, unread = [], [], []
