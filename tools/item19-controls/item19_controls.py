@@ -260,7 +260,17 @@ def harness_compile_set(root):
 
 
 def harness_run(root, work, label, edit, out):
-    d = os.path.join(work, "harness-" + label)
+    # A short build directory (fix pass 2). The label-named one put the SDK's
+    # apphost (obj/Release/net10.0/apphost.exe) past the Windows path limit
+    # for the longest labels: H3-rule-reread-twin (247 characters) and
+    # H9-rule-deferral-twin (249) failed with MSB3030, which read as "None on
+    # the twin"; 244 built. The label stays in every line written.
+    d = os.path.join(work, "h-" + hashlib.sha256(label.encode("utf-8")).hexdigest()[:8])
+    host = os.path.join(os.path.abspath(d), "tools", "client-rules-harness", "obj", "Release", "net10.0", "apphost.exe")
+    if len(host) > 240:
+        out.write("--- harness %s: build path %d characters, over 240 (the apphost would not be written) ---\n"
+                  % (label, len(host)))
+        return None
     if os.path.isdir(d):
         shutil.rmtree(d)
     plugin, local = harness_compile_set(root)
