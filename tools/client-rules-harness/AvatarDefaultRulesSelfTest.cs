@@ -86,11 +86,19 @@ namespace CompetitiveRounds
             return new AvatarEvalIn { Liveness = l, Facing = f, Setting = s, Faces = Faces(), Loader = Loader(), Live = live, Home = home };
         }
 
+        /// <summary>How the next apply of a seat ends (fix pass 3, H9 and M3).
+        /// Commit: the selection moves. Throw: an exception leaves the
+        /// evaluator before the selection moves, so nothing after the apply
+        /// runs. NoCommit: the apply returns and the read-back shows the
+        /// selection unmoved.</summary>
+        private enum ApplyOutcome { Commit, Throw, NoCommit }
+
         /// <summary>A seat: the live selection and the remembered value, moved
         /// by each decision exactly as AvatarDefaults moves them.</summary>
         private sealed class Seat
         {
             internal int Live, Home = -1, Applies, Switches, Publishes;
+            internal ApplyOutcome Next = ApplyOutcome.Commit;
             internal Seat(int live) { Live = live; }
             internal AvatarDecision Step(AvatarRules r, AvatarLivenessIn l, AvatarFacingIn f, AvatarSetting s)
             {
@@ -100,6 +108,38 @@ namespace CompetitiveRounds
                 if (d.Publish) Publishes++;
                 if (d.Switched != AvatarSwitched.None) Switches++;
                 Home = d.NewHome;
+                return d;
+            }
+
+            /// <summary>Fix pass 3 (H9, M3): the same evaluation moved in the
+            /// order AvatarDefaults.Evaluate moves it since fix pass 3: Home as
+            /// AvatarRules.HomeBeforeApply holds it, then the apply (ending as
+            /// Next says, once), then Home as AvatarRules.HomeAfterApply reads
+            /// it from the selection read back. A Throw leaves the evaluator
+            /// with Home as it was held. Step above keeps the decision-only
+            /// model the fix pass 1 and 2 cases were written against.</summary>
+            internal AvatarDecision StepThrough(AvatarRules r, AvatarLivenessIn l, AvatarFacingIn f, AvatarSetting s, AvatarFaceIds[] faces = null, bool facesMissing = false)
+            {
+                var x = In(l, f, s, Live, Home);
+                if (facesMissing) { x.Faces = null; }
+                else if (faces != null) x.Faces = faces;
+                var d = r.Evaluate(x);
+                if (d.Gated || d.NothingToRead) return d;
+                int held = r.HomeBeforeApply(Home, d);
+                Home = held;
+                int after = Live;
+                if (d.Apply >= 0)
+                {
+                    var how = Next;
+                    Next = ApplyOutcome.Commit;
+                    if (how == ApplyOutcome.Throw) return d;
+                    if (how == ApplyOutcome.Commit) { Live = d.Apply; Applies++; }
+                    after = Live;
+                }
+                Home = r.HomeAfterApply(held, d, after);
+                if (d.Apply >= 0 && after != d.Apply) return d;
+                if (d.Publish) Publishes++;
+                if (d.Switched != AvatarSwitched.None) Switches++;
                 return d;
             }
         }
@@ -628,6 +668,91 @@ namespace CompetitiveRounds
                 && seen == "face-remote" && remote.Reads == 1;
         }
 
+        // ---- fix pass 3 (Codex BUILD round 3) ------------------------------
+
+        /// <summary>H9 (fix pass 3): a restoration whose apply does not commit
+        /// keeps the debt, and the next retry restores the remembered face.</summary>
+        private static bool Uncommitted(AvatarRules r, ApplyOutcome how, string what, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var seat = new Seat(3);
+            seat.StepThrough(r, NotLive(), Room(false, Unmodded()), s);       // 3 -> 1, home 3
+            int forced = seat.Live, held = seat.Home;
+            seat.Next = how;
+            var e6 = seat.StepThrough(r, NotLive(), Menu(), s);               // E6: the restoration does not commit
+            int liveFail = seat.Live, homeFail = seat.Home;
+            bool owed = r.RestorationOwed(seat.Home, true);                   // what E13 asks
+            var retry = seat.StepThrough(r, NotLive(), Menu(), s);            // E13 (or a later E6, E7)
+            got = what + ": forced live=" + forced + " home=" + held
+                + " | the restoration (apply " + e6.Apply + ") did not commit: live " + liveFail + " home " + homeFail
+                + " | owed to the tick=" + owed + " | the retry: apply " + retry.Apply + " live " + seat.Live + " home " + seat.Home;
+            return forced == 1 && held == 3 && e6.Apply == 3 && liveFail == 1 && homeFail == 3 && owed
+                && retry.Apply == 3 && seat.Live == 3 && seat.Home == -1;
+        }
+
+        private static bool H9Throw(AvatarRules r, out string got) => Uncommitted(r, ApplyOutcome.Throw, "the select throws before it commits", out got);
+        private static bool H9Readback(AvatarRules r, out string got) => Uncommitted(r, ApplyOutcome.NoCommit, "the read-back shows the selection unmoved", out got);
+
+        /// <summary>M3 (fix pass 3): repeated confirmed exits, the first with the
+        /// character data missing and the next two with applies that do not
+        /// commit, keep the one debt record until a restoration commits.</summary>
+        private static bool M3Repeat(AvatarRules r, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var seat = new Seat(3);
+            seat.StepThrough(r, NotLive(), Room(false, Unmodded()), s);       // 3 -> 1, home 3
+            var e1 = seat.StepThrough(r, Live(), Menu(), s, facesMissing: true); // E6, the data missing
+            int h1 = seat.Home;
+            seat.Next = ApplyOutcome.Throw;
+            var e2 = seat.StepThrough(r, Live(), Menu(), s);                  // E7, the select throws
+            int h2 = seat.Home;
+            seat.Next = ApplyOutcome.NoCommit;
+            var e3 = seat.StepThrough(r, NotLive(), Menu(), s);               // E6 again, nothing commits
+            int h3 = seat.Home;
+            var e13 = seat.StepThrough(r, NotLive(), Menu(), s);              // the deferred edge, which commits
+            got = "exit with the data missing: deferred=" + e1.RestorationDeferred + " home " + h1
+                + " | exit, the select throws: apply " + e2.Apply + " home " + h2
+                + " | exit, no commit: apply " + e3.Apply + " home " + h3
+                + " | the deferred edge: apply " + e13.Apply + " live " + seat.Live + " home " + seat.Home + " applies " + seat.Applies;
+            return e1.NothingToRead && e1.RestorationDeferred && h1 == 3 && e2.Apply == 3 && h2 == 3 && e3.Apply == 3 && h3 == 3
+                && e13.Apply == 3 && seat.Live == 3 && seat.Home == -1 && seat.Applies == 2;
+        }
+
+        /// <summary>M8 (fix pass 3): the line of every exit, as
+        /// AvatarDefaults.Evaluate writes it before any fallible work
+        /// (ClassificationLine, then MissingDataNote): E2 and E3 with the
+        /// character data missing, the deferred exit, and an applied change.
+        /// Each names the facing, the nominee and the other-fighter count.</summary>
+        private static bool M8Exits(AvatarRules r, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var sb = new StringBuilder();
+            Func<string, AvatarEvalIn, string, string> line = (tag, x, missing) =>
+            {
+                var d = r.Evaluate(x);
+                int n = x.Facing.OtherFighterKeys != null ? x.Facing.OtherFighterKeys.Count : 0;
+                string l = r.LogsClassification(tag) || d.Apply >= 0
+                    ? r.ClassificationLine(tag, d, n, x.Facing.ModIssuedRoom, x.Live, x.Home) + r.MissingDataNote(d, d.NothingToRead ? missing : null, x.Home)
+                    : "(no line)";
+                sb.Append(" || ").Append(l);
+                return l;
+            };
+            var e2x = In(NotLive(), Room(false, Unmodded()), s, -1, -1);
+            e2x.Faces = null;
+            string e2 = line("E2-joined", e2x, "no character controller");
+            string e3 = line("E3-entered", In(NotLive(), Room(true, Modded()), s, -1, -1), "no selected face");
+            var defx = In(Live(), Menu(), s, 1, 3);
+            defx.Faces = null;
+            string def = line("E6-left", defx, "no face table");
+            string app = line("E2-joined", In(NotLive(), Room(false, Unmodded()), s, 3, -1), null);
+            bool ok = e2.Contains("(facing Vanilla, nominee 1, other fighters 1,") && e2.EndsWith(": nothing applied (no character controller)")
+                && e3.Contains("(facing Modded, nominee 2, other fighters 1,") && e3.EndsWith(": nothing applied (no selected face)")
+                && def.Contains("(facing Undecided, nominee -1, other fighters 0,") && def.Contains(": restoration deferred (no face table), home 3 kept")
+                && app.StartsWith("[AVATAR] E2-joined applied slot 1 (facing Vanilla, nominee 1, other fighters 1,") && app.EndsWith(")");
+            got = "E2 and E3 with the data missing, the deferred exit, an applied change" + sb;
+            return ok;
+        }
+
         /// <summary>H9 and M3: a seat forced 3 -> 1 in a vanilla room (home 3),
         /// then a confirmed exit while the character data is missing, twice
         /// (the repeated exit edge), then the deferred edge with the data back.</summary>
@@ -785,6 +910,46 @@ namespace CompetitiveRounds
         private sealed class K_Owed : AvatarRules
         {
             internal override bool RestorationOwed(int home, bool confirmedNoRoom) { if (!confirmedNoRoom) return false; return home > -1; }
+        }
+
+        // fix pass 3 mutants and controls
+        private sealed class M_PayBeforeCommit : AvatarRules
+        {   // the round 3 order: the debt is cleared before the apply runs
+            internal override int HomeBeforeApply(int homeBefore, AvatarDecision d) => d.HomeChanged ? d.NewHome : homeBefore;
+        }
+        private sealed class M_IgnoreReadback : AvatarRules
+        {   // the debt is cleared after the apply whatever the read-back shows
+            internal override int HomeAfterApply(int homeHeld, AvatarDecision d, int liveAfter) => d.HomeChanged ? d.NewHome : homeHeld;
+        }
+        private sealed class K_HomeOrder : AvatarRules
+        {
+            internal override int HomeBeforeApply(int homeBefore, AvatarDecision d)
+            {
+                if (!d.HomeChanged) return homeBefore;
+                return d.NewHome < 0 ? homeBefore : d.NewHome;
+            }
+            internal override int HomeAfterApply(int homeHeld, AvatarDecision d, int liveAfter)
+            {
+                if (d.HomeChanged && d.NewHome < 0 && liveAfter == (d.Apply >= 0 ? d.Apply : d.Want)) return d.NewHome;
+                return homeHeld;
+            }
+        }
+        private sealed class M_M8NomineeLate : AvatarRules
+        {   // the round 3 rules: the nominee is read only after the missing-data exit
+            internal override AvatarDecision Evaluate(AvatarEvalIn x)
+            {
+                var d = base.Evaluate(x);
+                if (d.NothingToRead) d.Nominee = -1;
+                return d;
+            }
+        }
+        private sealed class K_M8Note : AvatarRules
+        {
+            internal override string MissingDataNote(AvatarDecision d, string missing, int home)
+            {
+                if (d.NothingToRead == false) return string.Empty;
+                return base.MissingDataNote(d, missing, home);
+            }
         }
 
         private sealed class M_T1 : AvatarRules { internal override bool ResolvesOnABaseSeat(int id, bool[] arr) => id < 1000; }
@@ -1061,6 +1226,15 @@ namespace CompetitiveRounds
             Pair(r, "H9c", "a confirmed exit with no character controller keeps the debt, defers it, and the deferred edge repays it", H9Controller, new M_ClearOnMissing(), new K_Eval());
             Pair(r, "H9s", "a confirmed exit with no selected face keeps the debt, defers it, and the deferred edge repays it", H9Selected, new M_NoDeferral(), new K_Eval());
             Pair(r, "M3t", "a confirmed exit with no face table keeps the debt, defers it, and the deferred edge repays it", M3Table, new M_NeverOwed(), new K_Owed());
+
+            // fix pass 3 (Codex BUILD round 3). The production order of H9, M3
+            // and M8 (the debt cleared after the read-back, the line written
+            // before the apply) is executed by tools/item19-controls/prodprobe
+            // (pytest S35) over plugin/AvatarDefaults.cs itself.
+            Pair(r, "H9t", "a restoration whose select throws before it commits keeps the debt, and the retry restores", H9Throw, new M_PayBeforeCommit(), new K_HomeOrder());
+            Pair(r, "H9r", "a restoration whose read-back shows the selection unmoved keeps the debt, and the retry restores", H9Readback, new M_IgnoreReadback(), new K_HomeOrder());
+            Pair(r, "M3x", "repeated confirmed exits (data missing, a throw, no commit) keep the one debt record until a restoration commits", M3Repeat, new M_PayBeforeCommit(), new K_HomeOrder());
+            Pair(r, "M8x", "every exit's line names facing, nominee and other fighters: E2 and E3 with the data missing, the deferred exit, an applied change", M8Exits, new M_M8NomineeLate(), new K_M8Note());
             return r;
         }
 

@@ -279,14 +279,25 @@ public class CharacterCreatorHandler
     public PlayerFace[] selectedPlayerFaces = new PlayerFace[4];
     internal int SelectCalls;
 
+    // Fix pass 3 (H9, M3, M8): how the next selects end, each a count of the
+    // selects it applies to. ThrowBeforeCommit: the select throws before it
+    // writes the selection. NoCommit: it returns without writing it (the
+    // read-back shows the selection unmoved). ThrowAfterCommit: it writes the
+    // selection, the postfix runs, then it throws (vanilla's ClickButton
+    // repainting the portrait frames after the select).
+    internal static int ThrowBeforeCommit, NoCommit, ThrowAfterCommit;
+
     /// <summary>Vanilla's single writer of the selection, then item 19's
     /// Harmony postfix on it (edge E9), exactly as the patched game runs it.</summary>
     internal void SelectFace(int faceID, PlayerFace selectedFace, int faceSlot)
     {
+        SelectCalls++;
+        if (ThrowBeforeCommit > 0) { ThrowBeforeCommit--; throw new NullReferenceException("probe: the select threw before it committed"); }
+        if (NoCommit > 0) { NoCommit--; return; }
         selectedFaceID[faceID] = faceSlot;
         selectedPlayerFaces[faceID] = selectedFace;
-        SelectCalls++;
         CompetitiveRounds.ProdProbe.SelectFacePostfix(faceID);
+        if (ThrowAfterCommit > 0) { ThrowAfterCommit--; throw new NullReferenceException("probe: the frame repaint threw after the select committed"); }
     }
 }
 
@@ -339,7 +350,31 @@ namespace CompetitiveRounds
     {
         public const string PROP_FACE = "cr_face";
         internal static int Publishes;
-        public static FaceCarrierAction PublishLocal() { Publishes++; return FaceCarrierAction.Publish; }
+        internal static int Throws;                    // fix pass 3 (M8): the next N publishes throw
+        public static FaceCarrierAction PublishLocal()
+        {
+            Publishes++;
+            if (Throws > 0) { Throws--; throw new InvalidOperationException("probe: the carrier publish threw"); }
+            return FaceCarrierAction.Publish;
+        }
+    }
+
+    /// <summary>Fix pass 3: the bounded diagnostic budget the evaluator's E13
+    /// lines draw on (VanillaFixes.cs), with its semantics: a key's count up
+    /// to its maximum, dropped by ResetDiag.</summary>
+    internal static class VanillaFixSupport
+    {
+        internal static readonly Dictionary<string, int> Counts = new Dictionary<string, int>();
+        internal static bool TryReserveDiag(string key, int maximum)
+        {
+            if (string.IsNullOrEmpty(key) || maximum <= 0) return false;
+            int n;
+            Counts.TryGetValue(key, out n);
+            if (n >= maximum) return false;
+            Counts[key] = n + 1;
+            return true;
+        }
+        internal static void ResetDiag(string key) { if (!string.IsNullOrEmpty(key)) Counts.Remove(key); }
     }
 
     internal static class FaceResync

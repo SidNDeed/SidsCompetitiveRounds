@@ -352,7 +352,7 @@ def test_s8_each_settings_row_is_edge_e8(row, other):
 
 # S9 / S10 / S13 / S25 (the apply) -------------------------------------------
 
-APPLY = "private static void Apply(int slot, string tag)"
+APPLY = "private static int Apply(int slot, string tag)"   # fix pass 3 (H9, M3): returns the read-back
 ADC = "internal static class AvatarDefaults"
 
 
@@ -725,24 +725,46 @@ def test_s21_the_decompiled_spans_are_what_the_design_records(fname, a, b, want)
 
 # S22 (the durable capture) ---------------------------------------------------
 
+E13_WRITE = "bool written = line != null && Line(tag, line);"
+
+
 def _s22(src):
-    """Fix pass 1 (M8): one info line in the evaluator, built by the pure
-    formatter the harness replays (case M8), logged for every applied change
-    AND for every classification on a room edge, before the no-apply return."""
+    """Fix pass 1 (M8): one classification line in the evaluator, built by
+    the pure formatter the harness replays (case M8), for every applied
+    change AND every classification on a room edge. Fix pass 3 (M8): it is
+    composed and WRITTEN before any fallible step (the missing-data return,
+    the announcement, the debt writes, the apply), so no exit and no
+    exception can suppress it; a missing-data exit carries MissingDataNote's
+    tail naming what could not be read."""
     body = _body(src[AD], "internal static void Evaluate(string tag)", ADC)
-    # fix pass 2: the evaluator carries two info lines, the classification
-    # line and the deferred-restoration line (H9/M3); exactly one of each
-    logs = [m.start() for m in re.finditer(r"Plugin\.Log\.LogInfo\(rules\.ClassificationLine\(", body)]
-    assert len(logs) == 1, "the evaluator has %d classification lines" % len(logs)
-    assert len(re.findall(r"Plugin\.Log\.LogInfo\(", body)) == 2, "an info line other than the two named ones"
-    stmt = body[logs[0]:body.index(";", logs[0])]
+    comp = [m.start() for m in re.finditer(r"\brules\.ClassificationLine\(", body)]
+    assert len(comp) == 1, "the evaluator composes %d classification lines" % len(comp)
+    stmt = body[comp[0]:body.index(";", comp[0])]
     assert "rules.ClassificationLine(tag, d, OtherFighterCount(f)" in stmt, stmt
+    assert "rules.MissingDataNote(d, " in stmt, "the missing-data tail is not part of the line: %s" % stmt
     # fix pass 2 (M8): BOTH arms of the guard, read from the production
-    # statement itself, immediately before the line
-    guard = body.rfind("if (", 0, logs[0])
-    assert body[guard:logs[0]].strip() == "if (d.Apply >= 0 || rules.LogsClassification(tag))", \
-        "the classification line's guard is %r" % body[guard:logs[0]].strip()
-    assert body.index("if (d.Apply < 0) return;") > logs[0], "the line is logged only after an apply"
+    # statement itself, immediately before the composition
+    head = body.rfind("line = ", 0, comp[0])
+    guard = body.rfind("if (", 0, head)
+    assert body[guard:head].strip() == "if (d.Apply >= 0 || rules.LogsClassification(tag))", \
+        "the classification line's guard is %r" % body[guard:head].strip()
+    # fix pass 3 (M8): written once, before every fallible step
+    assert body.count(E13_WRITE) == 1, "the line is not written exactly once before the work"
+    w = body.index(E13_WRITE)
+    assert w > comp[0]
+    for later in ("if (d.NothingToRead) return;", "Announce(UnusableMessage(d.Unusable))", "WriteHome(",
+                  "Apply(d.Apply, tag)", "if (d.Apply < 0) return;"):
+        assert later in body and body.index(later) > w, "%s runs before the line is written" % later
+    # the one other info write: an E13 line the budget held back, recorded
+    # when its apply commits
+    infos = [m.start() for m in re.finditer(r"Plugin\.Log\.LogInfo\(", body)]
+    assert len(infos) == 1, "an info line other than the held-back E13 line"
+    assert body[:infos[0]].rstrip().endswith("if (!written)"), "the second write is not the held-back line"
+    assert infos[0] > body.index("if (after != d.Apply) return;"), "a held-back line is written before its commit"
+    # the budget holds back E13's lines only; every room edge writes every line
+    ln = _body(src[AD], "private static bool Line(string tag, string text)", ADC)
+    assert 'tag.StartsWith("E13-", StringComparison.Ordinal)' in ln, ln
+    assert ln.count("Plugin.Log.LogInfo(text);") == 1 and "return true;" in ln, ln
     fmt = _body(src[AR], "internal virtual string ClassificationLine(")
     for term in ('" (facing "', '", nominee "', '", other fighters "', "d.Facing", "d.Nominee", "otherFighters"):
         assert term in fmt, term
@@ -770,6 +792,24 @@ def test_s22_the_line_names_the_other_fighter_count():
     _check(_s22,
            lambda s: _replace(s, AR, '+ ", other fighters " + otherFighters', '+ ""'),
            lambda s: _replace(s, AR, '+ ", issued room " +', '+ ", issued " +'))
+
+
+def test_s22_a_line_written_after_the_missing_data_return_reds():
+    # fix pass 3 (M8): round 3 wrote nothing on a missing-data room edge
+    _check(_s22,
+           lambda s: _replace(s, AD, E13_WRITE + "\n                if (d.NothingToRead) return;",
+                              "if (d.NothingToRead) return;\n                " + E13_WRITE),
+           lambda s: _replace(s, AD, "The durable capture (S22; fix pass 3, M8): written FIRST",
+                              "The durable capture (S22; fix pass 3, M8): written first"))
+
+
+def test_s22_a_line_written_only_after_the_apply_reds():
+    # fix pass 3 (M8): round 3 logged the line after Apply, so an exception
+    # out of the apply suppressed it
+    _check(_s22,
+           lambda s: _replace(s, AD, E13_WRITE, "bool written = false;"),
+           lambda s: _replace(s, AD, "if (!written) Plugin.Log.LogInfo(line);                // an E13 line",
+                              "if (!written) Plugin.Log.LogInfo(line);                // a held-back E13 line"))
 
 
 # S27 (fix pass 1, H3): one publish-or-clear helper behind all four callers --
@@ -1120,7 +1160,11 @@ def test_s33_a_local_arm_that_calls_the_reader_reds():
 # test to go red on each and stay green on a neighbouring twin.
 
 PRODPROBE = Path(REPO) / "tools" / "item19-controls" / "prodprobe"
-PRODPROBE_IDS = ("H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce")
+PRODPROBE_IDS = ("H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce",
+                 # fix pass 3 (Codex BUILD round 3): a debt cleared only on a committed
+                 # read-back (H9t, H9r, M3x), the line on every exit (M8e2, M8e3,
+                 # M8def, M8exc)
+                 "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc")
 
 
 def _dotnet():

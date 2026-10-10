@@ -319,6 +319,10 @@ namespace CompetitiveRounds
             var c = Census(x.Liveness, x.Facing);
             d.Facing = c;
             if (Gate(c)) { d.Gated = true; return d; }
+            // The nominee the facing names, read before the missing-data exit
+            // (fix pass 3, M8): the line that exit writes names it as well.
+            int nom = c == AvatarFacing.Modded ? x.Setting.Modded : c == AvatarFacing.Vanilla ? x.Setting.Vanilla : -1;
+            d.Nominee = nom;
             if (x.Faces == null || x.Live < 0)
             {
                 // Nothing to apply with. Home is left exactly as it is (NewHome
@@ -345,8 +349,6 @@ namespace CompetitiveRounds
 
             // Case 2: the room calls for a nominee the setting NAMES but cannot
             // use. Derived from the same inputs on whatever edge reaches it.
-            int nom = c == AvatarFacing.Modded ? s.Modded : c == AvatarFacing.Vanilla ? s.Vanilla : -1;
-            d.Nominee = nom;
             if (s.Auto && BothPresetsSet(s) && nom >= 0) d.Unusable = WhyUnusable(nom, c, x.Faces, x.Loader);
 
             if (want == live)
@@ -387,6 +389,34 @@ namespace CompetitiveRounds
         internal virtual bool RestorationOwed(int home, bool confirmedNoRoom)
         {
             return home >= 0 && confirmedNoRoom;
+        }
+
+        /// <summary>Fix pass 3 (H9, M3): the value Home holds while the apply
+        /// runs. A debt the decision RECORDS or re-bases (NewHome >= 0) is
+        /// written first, before the selection moves, so an apply that throws
+        /// after displacing the player's own choice still leaves the record of
+        /// it. A debt the decision PAYS (NewHome -1) is not touched here: only
+        /// HomeAfterApply clears it, on a read-back of the restored selection.</summary>
+        internal virtual int HomeBeforeApply(int homeBefore, AvatarDecision d)
+        {
+            return d.HomeChanged && d.NewHome >= 0 ? d.NewHome : homeBefore;
+        }
+
+        /// <summary>Fix pass 3 (H9, M3): the value Home holds after the apply,
+        /// given the selection READ BACK from the character controller once
+        /// the apply returned (liveAfter; for a decision that applies nothing,
+        /// the selection the evaluation itself read). A debt is paid only when
+        /// that read shows the slot the decision restores. Any other read (the
+        /// select threw before it committed, the controller is gone, the
+        /// selection did not move) keeps the debt exactly as it was, so the
+        /// next E6, E7 or E13 retries it; an apply that throws out of the
+        /// evaluator never reaches this method, which keeps it the same way.</summary>
+        internal virtual int HomeAfterApply(int homeHeld, AvatarDecision d, int liveAfter)
+        {
+            if (!d.HomeChanged || d.NewHome >= 0) return homeHeld;   // nothing to pay (a record was written before)
+            int restored = d.Apply >= 0 ? d.Apply : d.Want;
+            if (liveAfter != restored) return homeHeld;              // not committed: the debt stays
+            return d.NewHome;                                        // the read-back shows it: paid
         }
 
         /// <summary>The face the card-pick popup applies for one Show pass
@@ -438,13 +468,38 @@ namespace CompetitiveRounds
         /// nominee the facing names, the other-fighter count, the room's
         /// provenance (shown, not deciding), the selection before and the
         /// remembered value before and after. AvatarDefaults.Evaluate logs
-        /// exactly this string; the harness replays it per case.</summary>
+        /// this string followed by MissingDataNote, BEFORE any fallible work
+        /// (fix pass 3, M8), so "applied" records the decision; an apply that
+        /// does not commit adds NotCommittedLine. The harness replays both.</summary>
         internal virtual string ClassificationLine(string tag, AvatarDecision d, int otherFighters, bool issuedRoom, int was, int homeBefore)
         {
             string head = d.Apply >= 0 ? " applied slot " + d.Apply : " kept slot " + was;
             return "[AVATAR] " + tag + head + " (facing " + d.Facing + ", nominee " + d.Nominee
                 + ", other fighters " + otherFighters + ", issued room " + (issuedRoom ? "yes" : "no")
                 + ", want " + d.Want + ", was " + was + ", home " + homeBefore + "->" + d.NewHome + ")";
+        }
+
+        /// <summary>Fix pass 3 (M8): the tail of the classification line on a
+        /// missing-data exit, naming what could not be read; on a confirmed
+        /// exit with a debt held it names the deferral E13 repays. Empty on
+        /// every other exit.</summary>
+        internal virtual string MissingDataNote(AvatarDecision d, string missing, int home)
+        {
+            if (!d.NothingToRead) return "";
+            string what = string.IsNullOrEmpty(missing) ? "character data unreadable" : missing;
+            return d.RestorationDeferred
+                ? ": restoration deferred (" + what + "), home " + home + " kept, the E13 tick repays it once the character data reads"
+                : ": nothing applied (" + what + ")";
+        }
+
+        /// <summary>Fix pass 3 (H9, M3): the line for an apply whose read-back
+        /// does not show the slot it was to select (why: what went wrong, or
+        /// null). The debt it names is the one still held.</summary>
+        internal virtual string NotCommittedLine(string tag, int slot, int readBack, int homeHeld, string why)
+        {
+            return "[AVATAR] " + tag + " slot " + slot + " not committed (the selection reads " + readBack
+                + (why != null ? "; " + why : "") + "): home " + homeHeld
+                + " kept, a later E6, E7 or E13 retries it";
         }
 
         // ---------------------------------------------------------------

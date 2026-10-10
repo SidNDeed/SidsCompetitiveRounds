@@ -23,11 +23,16 @@ namespace CompetitiveRounds
     /// classification-line guard; L1, the sprite sink and the announcement
     /// sink. Each line is "PROBE id PASS|FAIL | detail". It uses only entry
     /// points both the round 2 tree and the fix tip have, so the same probe
-    /// runs against either. Exit 0 always: the verdicts are the output.</summary>
+    /// runs against either. Exit 0 always: the verdicts are the output.
+    ///
+    /// Fix pass 3 (Codex BUILD round 3) adds H9 and M3 with a restoring
+    /// select that throws or does not commit (H9t, H9r, M3x) and M8's line
+    /// on every exit (M8e2, M8e3, M8def, M8exc).</summary>
     internal static class ProdProbe
     {
         internal static readonly string[] Ids =
-            { "H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce" };
+            { "H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce",
+              "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc" };
 
         internal static void SelectFacePostfix(int faceID)
         {
@@ -51,6 +56,11 @@ namespace CompetitiveRounds
         private static int Home => Plugin.AvatarHomeSlot.Value;
         private static bool Logged(string needle) => Plugin.Log.Lines.Any(l => l.Contains(needle));
 
+        /// <summary>One log line carrying every needle (fix pass 3: the
+        /// classification line and its missing-data tail are one line).</summary>
+        private static bool LoggedLine(params string[] needles) =>
+            Plugin.Log.Lines.Any(l => needles.All(n => l.Contains(n)));
+
         /// <summary>The menu, no room, nobody playing; live selection `live`;
         /// both defaults named (modded 2, vanilla 1), automatic switching on.</summary>
         private static void Reset(int live)
@@ -71,6 +81,11 @@ namespace CompetitiveRounds
             Plugin.AvatarModdedPreset.Value = 2;
             Plugin.AvatarVanillaPreset.Value = 1;
             Plugin.AvatarHomeSlot.Value = -1;
+            CharacterCreatorHandler.ThrowBeforeCommit = 0;     // fix pass 3: every select commits
+            CharacterCreatorHandler.NoCommit = 0;
+            CharacterCreatorHandler.ThrowAfterCommit = 0;
+            FacePublisher.Throws = 0;                          // and every carrier publish completes
+            VanillaFixSupport.Counts.Clear();                  // E13's line budget starts full
             var faces = Faces();
             var cch = new CharacterCreatorHandler { playerFaces = faces };
             cch.selectedFaceID[0] = live;
@@ -156,7 +171,7 @@ namespace CompetitiveRounds
             AvatarDefaults.Evaluate("E6-left");
             AvatarDefaults.Evaluate("E7-disconnect");          // a repeated confirmed-exit edge
             int kept = Home;
-            bool deferredLine = Logged("E6-left restoration deferred");
+            bool deferredLine = LoggedLine("[AVATAR] E6-left", "restoration deferred (");
             restore();
             int selectsBefore = Cch.SelectCalls;
             Time.frameCount = 30;
@@ -237,6 +252,76 @@ namespace CompetitiveRounds
             return "one preset both defaults: dual ring (gold outer, blue inner)=" + both + " sprites " + first
                 + " | modded 3, vanilla 5 (not clean): gold=" + gold + " red=" + red + " others bare=" + none
                 + " sprites " + UIFactory.Sprites.Count;
+        }
+
+        // ---- H9 and M3 (fix pass 3): a debt is cleared only on a committed read-back --
+
+        private static bool ok9x;
+
+        /// <summary>A confirmed exit whose restoring select does not commit
+        /// (fail arms the stub's failure for that one select), then the
+        /// throttled tick with the select working again.</summary>
+        private static string NotCommitted(Action fail, string what)
+        {
+            Reset(3);
+            Room(false);
+            AvatarDefaults.Evaluate("E2-joined");              // 3 -> 1, home 3
+            int forced = LiveSel, held = Home;
+            Leave();
+            fail();
+            AvatarDefaults.Evaluate("E6-left");                // restores 3: the select fails
+            int liveExit = LiveSel, homeExit = Home;
+            bool named = LoggedLine("[AVATAR] E6-left slot 3 not committed");
+            int selectsBefore = Cch.SelectCalls;
+            Time.frameCount = 30;
+            AvatarDefaults.Tick();                             // E13: the debt is still owed
+            int liveAfter = LiveSel, homeAfter = Home, applied = Cch.SelectCalls - selectsBefore;
+            ok9x = forced == 1 && held == 3 && liveExit == 1 && homeExit == 3 && named
+                && liveAfter == 3 && homeAfter == -1 && applied == 1;
+            return what + ": forced live=" + forced + " home=" + held
+                + " | the exit's select fails: live " + liveExit + " home " + homeExit
+                + (homeExit == 3 ? "" : " (the debt was cleared before the selection committed)")
+                + ", not-committed line=" + named
+                + " | the tick: live " + liveAfter + " home " + homeAfter + " selections " + applied
+                + (liveAfter == 3 ? "" : " (the remembered selection is never given back)");
+        }
+
+        private static bool ok3x;
+
+        /// <summary>M3: repeated confirmed exits, each failing differently
+        /// (missing data, a throwing select, an uncommitted select), keep the
+        /// one record (Home 3) until the tick repays it once.</summary>
+        private static string RepeatedExits()
+        {
+            Reset(3);
+            Room(false);
+            AvatarDefaults.Evaluate("E2-joined");              // 3 -> 1, home 3
+            Leave();
+            GameManager.instance.isPlaying = true;             // the old manager still reports a game
+            var saved = Cch;
+            CharacterCreatorHandler.instance = null;           // no character controller
+            AvatarDefaults.Evaluate("E6-left");
+            int h1 = Home;
+            CharacterCreatorHandler.instance = saved;
+            CharacterCreatorHandler.ThrowBeforeCommit = 1;
+            AvatarDefaults.Evaluate("E7-disconnect");          // the select throws before it commits
+            int h2 = Home, l2 = LiveSel;
+            CharacterCreatorHandler.NoCommit = 1;
+            AvatarDefaults.Evaluate("E6-left");                // the select returns without committing
+            int h3 = Home, l3 = LiveSel;
+            int selectsBefore = Cch.SelectCalls;
+            Time.frameCount = 30;
+            AvatarDefaults.Tick();
+            int liveAfter = LiveSel, homeAfter = Home, applied = Cch.SelectCalls - selectsBefore;
+            Time.frameCount = 45;
+            AvatarDefaults.Tick();
+            int again = Cch.SelectCalls - selectsBefore - applied;
+            ok3x = h1 == 3 && h2 == 3 && h3 == 3 && l2 == 1 && l3 == 1
+                && liveAfter == 3 && homeAfter == -1 && applied == 1 && again == 0;
+            return "exit with no controller: home " + h1 + " | exit whose select throws: home " + h2 + " live " + l2
+                + " | exit whose select does not commit: home " + h3 + " live " + l3
+                + " (one record, 3, through every edge) | the tick: live " + liveAfter + " home " + homeAfter
+                + " selections " + applied + " | a second tick: selections " + again;
         }
 
         private static int Main()
@@ -326,6 +411,76 @@ namespace CompetitiveRounds
                 return "an unusable vanilla default in a vanilla room: toasts " + shown.Count + ", reason named=" + named
                     + ", recovery instruction carried=" + recovery + ", live " + LiveSel;
             }, () => okAn);
+
+            // ---- fix pass 3 (Codex BUILD round 3: H9, M3, M8) ----
+
+            Case("H9t", () => NotCommitted(() => CharacterCreatorHandler.ThrowBeforeCommit = 1,
+                                           "the restoring select throws before it commits"), () => ok9x);
+            Case("H9r", () => NotCommitted(() => CharacterCreatorHandler.NoCommit = 1,
+                                           "the restoring select returns without committing (the read-back is unmoved)"), () => ok9x);
+            Case("M3x", RepeatedExits, () => ok3x);
+
+            // M8: every exit writes the classification line (facing, nominee,
+            // other-fighter count) before any fallible step, missing data included.
+            bool ok8e2 = false;
+            Case("M8e2", () =>
+            {
+                Reset(3);
+                Room(false);
+                CharacterCreatorHandler.instance = null;       // no character controller
+                AvatarDefaults.Evaluate("E2-joined");
+                ok8e2 = LoggedLine("[AVATAR] E2-joined kept slot -1 (facing Vanilla, nominee 1, other fighters 1,",
+                                   ": nothing applied (no character controller)");
+                return "E2 with no character controller: one line naming facing, nominee, other fighters and what was missing=" + ok8e2;
+            }, () => ok8e2);
+
+            bool ok8e3 = false;
+            Case("M8e3", () =>
+            {
+                Reset(2);
+                Room(true);
+                Cch.selectedFaceID = new int[0];               // no selected face
+                AvatarDefaults.Evaluate("E3-entered");
+                ok8e3 = LoggedLine("[AVATAR] E3-entered kept slot -1 (facing Modded, nominee 2, other fighters 1,",
+                                   ": nothing applied (no selected face)");
+                return "E3 with no selected face: one line naming facing, nominee, other fighters and what was missing=" + ok8e3;
+            }, () => ok8e3);
+
+            bool ok8d = false;
+            Case("M8def", () =>
+            {
+                Reset(3);
+                Room(false);
+                AvatarDefaults.Evaluate("E2-joined");          // 3 -> 1, home 3
+                Leave();
+                Cch.playerFaces = null;                        // no face table
+                AvatarDefaults.Evaluate("E6-left");
+                bool line = LoggedLine("[AVATAR] E6-left kept slot 1 (facing Undecided, nominee -1, other fighters 0,",
+                                       ": restoration deferred (no face table), home 3 kept");
+                ok8d = line && Home == 3;
+                return "E6 deferring its restoration (no face table): one line naming facing, nominee, other fighters and the deferral="
+                    + line + ", home " + Home;
+            }, () => ok8d);
+
+            bool ok8x = false;
+            Case("M8exc", () =>
+            {
+                Reset(3);
+                Room(false);
+                FacePublisher.Throws = 1;                      // the carrier publish throws after the select committed
+                AvatarDefaults.Evaluate("E2-joined");
+                int livePub = LiveSel;
+                bool pub = LoggedLine("[AVATAR] E2-joined applied slot 1 (facing Vanilla, nominee 1, other fighters 1,");
+                Reset(3);
+                Room(false);
+                CharacterCreatorHandler.ThrowAfterCommit = 1;  // the select commits, then throws (vanilla's frame repaint)
+                AvatarDefaults.Evaluate("E2-joined");
+                int liveSel = LiveSel;
+                bool sel = LoggedLine("[AVATAR] E2-joined applied slot 1 (facing Vanilla, nominee 1, other fighters 1,");
+                ok8x = pub && sel && livePub == 1 && liveSel == 1;
+                return "the carrier publish throws: live " + livePub + ", applied line=" + pub
+                    + " | the select throws after committing: live " + liveSel + ", applied line=" + sel;
+            }, () => ok8x);
             return 0;
         }
     }

@@ -177,7 +177,11 @@ namespace CompetitiveRounds
         /// <summary>Recompute f from its three inputs and apply the answer.
         /// Main thread only (every caller is a Unity or Photon callback). The
         /// gate is read FIRST: during a live game nothing is read, written,
-        /// published or announced, and Home is left exactly as it is.</summary>
+        /// published or announced, and Home is left exactly as it is.
+        ///
+        /// Fix pass 3: the classification line is written before any fallible
+        /// work (M8), and a restoration debt (Home) is cleared only after the
+        /// selection it restores is read back committed (H9, M3).</summary>
         internal static void Evaluate(string tag)
         {
             try
@@ -202,33 +206,83 @@ namespace CompetitiveRounds
                 };
                 var d = rules.Evaluate(x);
                 if (d.Gated) return;
-                if (d.NothingToRead)
-                {
-                    if (d.RestorationDeferred && rules.LogsClassification(tag))
-                        Plugin.Log.LogInfo("[AVATAR] " + tag + " restoration deferred (" + MissingCharacterData(cch)
-                            + "): home " + x.Home + " kept, the E13 tick repays it once the character data reads");
-                    return;
-                }
+                if (rules.LogsClassification(tag)) RenewE13Budget();   // a room edge starts a new retry streak
+
+                // The durable capture (S22; fix pass 3, M8): written FIRST, before
+                // any fallible work (the announcement, the selection, the
+                // carrier, the body), so neither a missing read nor an exception
+                // can suppress it. Every room edge (E2, E3, E6, E7, E11) writes it
+                // on every exit, missing character data included; every other
+                // edge writes it when it applies. It names the facing, the
+                // nominee and the other-fighter count, and on a missing-data exit
+                // what could not be read and whether a restoration was deferred.
+                string line = null;
+                if (d.Apply >= 0 || rules.LogsClassification(tag))
+                    line = rules.ClassificationLine(tag, d, OtherFighterCount(f), f.ModIssuedRoom, x.Live, x.Home)
+                         + rules.MissingDataNote(d, d.NothingToRead ? MissingCharacterData(cch) : null, x.Home);
+                bool written = line != null && Line(tag, line);
+                if (d.NothingToRead) return;
 
                 if (d.Unusable != AvatarUnusable.None) Announce(UnusableMessage(d.Unusable));
 
-                // Home is written BEFORE the apply: the apply re-enters this
-                // method through the SelectFace postfix (E9), and the re-entrant
-                // evaluation must see the remembered value already in place so
-                // it finds want == live and returns.
-                if (d.HomeChanged && Plugin.AvatarHomeSlot != null) Plugin.AvatarHomeSlot.Value = d.NewHome;
-                if (d.Apply >= 0) Apply(d.Apply, tag);
-
-                // The durable capture (S22, fix pass 1 M8): every applied change,
-                // and every classification on a room edge even when nothing moves,
-                // logs one line naming the facing, the nominee and the other-
-                // fighter count.
-                if (d.Apply >= 0 || rules.LogsClassification(tag))
-                    Plugin.Log.LogInfo(rules.ClassificationLine(tag, d, OtherFighterCount(f), f.ModIssuedRoom, x.Live, x.Home));
+                // The debt (fix pass 3, H9 and M3). A debt the decision records
+                // or re-bases is written BEFORE the selection moves: the apply
+                // re-enters this method through the SelectFace postfix (E9),
+                // which must find it in place, and an apply that throws after the
+                // displacement must still leave the record. A debt the decision
+                // PAYS is cleared only AFTER the apply, and only when the
+                // selection read back from the controller is the restored slot;
+                // an exception out of the apply never reaches that write, so the
+                // debt stays for E6, E7 and E13 to retry.
+                int held = rules.HomeBeforeApply(x.Home, d);
+                if (held != x.Home) WriteHome(held);
+                int after = d.Apply >= 0 ? Apply(d.Apply, tag) : x.Live;
+                int paid = rules.HomeAfterApply(held, d, after);
+                if (paid != held) WriteHome(paid);
                 if (d.Apply < 0) return;
+                if (after != d.Apply) return;                          // not committed: Apply wrote the line
+                if (!written) Plugin.Log.LogInfo(line);                // an E13 line the budget held back: a commit is always recorded
+                RenewE13Budget();                                      // committed: a later failing streak starts afresh
                 if (d.Switched != AvatarSwitched.None) Announce(SwitchedMessage(d.Switched));
             }
             catch (Exception ex) { Warn("[AVATAR] " + tag + " evaluation failed: " + ex.Message); }
+        }
+
+        private static void WriteHome(int v)
+        {
+            if (Plugin.AvatarHomeSlot != null) Plugin.AvatarHomeSlot.Value = v;
+        }
+
+        // E13's line budget (fix pass 3): the diagnostic keys and the count.
+        private const string E13Budget = "avatar-e13-lines";
+        private const string E13Cut = "avatar-e13-cut";
+        private const int E13Lines = 6;
+
+        /// <summary>The evaluator's info writer (fix pass 3); true when the line
+        /// was written. E13 runs on the throttled tick, so a restoration that
+        /// keeps failing would write its lines every 15 frames: E13's lines
+        /// draw on a bounded budget (E13Lines per failing streak, one line more
+        /// saying the rest are held back), renewed when an apply commits and on
+        /// every room edge, and the evaluator writes a held-back line anyway
+        /// when its apply commits. Every other edge writes every line.</summary>
+        private static bool Line(string tag, string text)
+        {
+            if (tag != null && tag.StartsWith("E13-", StringComparison.Ordinal)
+                && !VanillaFixSupport.TryReserveDiag(E13Budget, E13Lines))
+            {
+                if (VanillaFixSupport.TryReserveDiag(E13Cut, 1))
+                    Plugin.Log.LogInfo("[AVATAR] " + tag + ": the restoration keeps failing; its next lines are held back"
+                        + " until an apply commits or a room edge (E2, E3, E6, E7, E11) runs");
+                return false;
+            }
+            Plugin.Log.LogInfo(text);
+            return true;
+        }
+
+        private static void RenewE13Budget()
+        {
+            VanillaFixSupport.ResetDiag(E13Budget);
+            VanillaFixSupport.ResetDiag(E13Cut);
         }
 
         /// <summary>A warning that cannot itself throw out of a Harmony body or
@@ -296,26 +350,61 @@ namespace CompetitiveRounds
         /// <summary>Select slot through vanilla's own API. Through the live
         /// menu portrait when exactly one carries the slot (so vanilla's Frame
         /// marker moves with it), else SelectFace(0, ...) directly, whose player
-        /// index is a literal. Then publish the face carrier, and equip this
-        /// seat's own body and re-send the face to the others when a body
-        /// exists.</summary>
-        private static void Apply(int slot, string tag)
+        /// index is a literal. Then read the selection back (fix pass 3, H9 and
+        /// M3) and return it: the evaluator clears a paid debt only when it is
+        /// the slot. Only a committed selection is published as the face
+        /// carrier, re-sent to the others and equipped on this seat's own body,
+        /// and none of those steps can undo it.</summary>
+        private static int Apply(int slot, string tag)
         {
             var cch = CharacterCreatorHandler.instance;
             var face = cch.playerFaces[slot];
+            if (face == null)
+            {
+                // Missing data at the slot itself: selecting it would commit a
+                // null face. Nothing is selected and the debt stays.
+                int unchanged = ReadLive(cch);
+                Line(tag, new AvatarRules().NotCommittedLine(tag, slot, unchanged, ReadHome(), "no face at that slot in the face table"));
+                return unchanged;
+            }
             CharacterCreatorPortrait hit = null;
             int hits = 0;
             foreach (var p in MenuPortraits())
                 if (p.transform.GetSiblingIndex() == slot) { hit = p; hits++; }
-            if (hits == 1 && hit.myFace != null) hit.ClickButton();
-            else cch.SelectFace(0, face, slot);
-            FacePublisher.PublishLocal();                                  // the one carrier (cr_face)
+            // The select is fallible (vanilla's ClickButton also repaints the
+            // portrait frames after it selects). Its exception is caught so the
+            // read-back decides: the selection either reads as the slot
+            // (committed, whatever threw after) or it does not (the debt stays,
+            // and the line names the fault).
+            string fault = null;
+            try
+            {
+                if (hits == 1 && hit.myFace != null) hit.ClickButton();
+                else cch.SelectFace(0, face, slot);
+            }
+            catch (Exception ex) { fault = "the select threw " + ex.GetType().Name + ": " + ex.Message; }
+            int now = ReadLive(CharacterCreatorHandler.instance);
+            if (now != slot)
+            {
+                Line(tag, new AvatarRules().NotCommittedLine(tag, slot, now, ReadHome(), fault));
+                return now;
+            }
+            if (fault != null) Warn("[AVATAR] " + tag + " slot " + slot + " committed; after it, " + fault);
 
-            var lp = LocalBody();
-            if (lp == null) return;
-            FaceResync.TrySendLocalFace("AVATAR");                       // the others (RpcTarget.Others)
-            var eq = lp.GetComponentInChildren<CharacterCreatorItemEquipper>();
-            if (eq != null) eq.EquipFace(face);                           // this seat's own body
+            try { FacePublisher.PublishLocal(); }                          // the one carrier (cr_face)
+            catch (Exception ex) { Warn("[AVATAR] " + tag + " slot " + slot + " committed; the carrier publish failed: " + ex.Message); }
+            try
+            {
+                var lp = LocalBody();
+                if (lp != null)
+                {
+                    FaceResync.TrySendLocalFace("AVATAR");               // the others (RpcTarget.Others)
+                    var eq = lp.GetComponentInChildren<CharacterCreatorItemEquipper>();
+                    if (eq != null) eq.EquipFace(face);                   // this seat's own body
+                }
+            }
+            catch (Exception ex) { Warn("[AVATAR] " + tag + " slot " + slot + " committed; re-sending or equipping the face failed: " + ex.Message); }
+            return now;
         }
 
         // ---------------------------------------------------------------
