@@ -171,6 +171,45 @@ namespace CompetitiveRounds
             return ready && count > 0 && count <= cap;
         }
 
+        /// <summary>Fix pass 3, finding 2: PlayerCardsUI.PackDupeIds' two
+        /// walks, free of Unity, with the not_owned tombstones applied to
+        /// both, so the client rules harness drives the whole path the
+        /// button reads and not the duplicate rule alone.
+        ///   pageFaceKeys / pagePrintIds  the shown pack's prints in display
+        ///                  order; a face is null for a print the strip itself
+        ///                  knows is not live (discarded, no usable id);
+        ///   colFaceKeys / colPrintIds    the collection read's prints,
+        ///                  parallel; both null for a print the read does not
+        ///                  hold live (discarded);
+        ///   gone           the tombstones (PcShardTombstones): prints a
+        ///                  refused shard named not_owned that no collection
+        ///                  read dispatched after that refusal has held since.
+        /// A tombstoned print is neither taken nor counted on either walk;
+        /// what is left goes through DuplicateShardIds, sorted. ready is false
+        /// (and the list empty) when an input is missing.</summary>
+        internal static List<string> PackDupes(IList<string> pageFaceKeys, IList<string> pagePrintIds,
+            IList<string> colFaceKeys, IList<string> colPrintIds, PcShardTombstones gone, out bool ready)
+        {
+            ready = false;
+            if (pageFaceKeys == null || pagePrintIds == null || pageFaceKeys.Count != pagePrintIds.Count
+                || colFaceKeys == null || colPrintIds == null || colFaceKeys.Count != colPrintIds.Count || gone == null)
+                return new List<string>();
+            var faces = new List<string>(pageFaceKeys.Count);
+            for (int i = 0; i < pageFaceKeys.Count; i++)
+                faces.Add(pageFaceKeys[i] != null && !gone.Contains(pagePrintIds[i]) ? pageFaceKeys[i] : null);
+            var held = new HashSet<string>(StringComparer.Ordinal);
+            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int i = 0; i < colPrintIds.Count; i++)
+            {
+                string c = colPrintIds[i], k = colFaceKeys[i];
+                if (c == null || k == null || gone.Contains(c) || !held.Add(c)) continue;
+                int n; counts.TryGetValue(k, out n); counts[k] = n + 1;
+            }
+            var ids = DuplicateShardIds(faces, pagePrintIds, counts, held, out ready);
+            ids.Sort(StringComparer.Ordinal);
+            return ids;
+        }
+
         // -- self-test (EXECUTED by tools/client-rules-harness) --------------
 
         internal sealed class SelfTestResult
@@ -258,7 +297,136 @@ namespace CompetitiveRounds
             FlightCases(r);
             DupesCases(r);
             RecoveryCases(r);
+            TombstoneCases(r);
             return r;
+        }
+
+        // -- fix pass 3, finding 2: a not_owned tombstone lifts when a later read holds the print --
+
+        private static readonly string[] TombFaces = { "A", "A", "B" };
+        private static readonly string[] TombIds = { "a1", "a2", "b1" };
+
+        /// <summary>One landing of the tombstone path: the collection read
+        /// `held` (each id's face is its first letter, upper-cased) walked
+        /// with the tombstones by PackDupes, then the button's answer.</summary>
+        private static string TombDupes(PcShardTombstones gone, string[] held, out bool offered)
+        {
+            var colFaces = new List<string>(); var colIds = new List<string>();
+            foreach (var id in held) { colIds.Add(id); colFaces.Add(id.Substring(0, 1).ToUpperInvariant()); }
+            bool ready;
+            var ids = PackDupes(TombFaces, TombIds, colFaces, colIds, gone, out ready);
+            offered = DupesOffered(ready, ids.Count, 40);
+            return Ids(ids);
+        }
+
+        /// <summary>The tombstone path the client runs, step by step, on a
+        /// pack of A (a1), A (a2), B (b1) the player owned whole when it was
+        /// pulled. Step 0: the cached collection read holds all three. a2 is
+        /// traded away and the strip's Discard on it is refused not_owned:
+        /// FailShard tombstones a2 (step 1, the cached read still holding it).
+        /// Step 2: the refusal's read-back, dispatched after it, lacks a2.
+        /// a2 is traded back; step 3: a read holds it again. Each read is
+        /// numbered at dispatch and reconciles the set when it lands, as
+        /// ApiClient.FetchPcCollection does. reconcile false is the NEGATIVE
+        /// CONTROL: 8fb4ea4b's tombstone, which nothing ever lifted.</summary>
+        private static void TombstonePath(bool reconcile, string[] dupes, bool[] offered, bool[] tomb)
+        {
+            var gone = new PcShardTombstones();
+            var whole = new[] { "a1", "a2", "b1" };
+            int r0 = gone.Dispatched();
+            if (reconcile) gone.Reconcile(whole, r0);
+            dupes[0] = TombDupes(gone, whole, out offered[0]); tomb[0] = gone.Contains("a2");
+            gone.Add("a2");
+            dupes[1] = TombDupes(gone, whole, out offered[1]); tomb[1] = gone.Contains("a2");
+            var absent = new[] { "a1", "b1" };
+            int r1 = gone.Dispatched();
+            if (reconcile) gone.Reconcile(absent, r1);
+            dupes[2] = TombDupes(gone, absent, out offered[2]); tomb[2] = gone.Contains("a2");
+            int r2 = gone.Dispatched();
+            if (reconcile) gone.Reconcile(whole, r2);
+            dupes[3] = TombDupes(gone, whole, out offered[3]); tomb[3] = gone.Contains("a2");
+        }
+
+        /// <summary>Every order of up to six events drawn from "a collection
+        /// read is dispatched", "a refusal names the print" and "the oldest
+        /// read on the wire lands holding the print": the print is tombstoned
+        /// exactly when a refusal named it and no read dispatched after the
+        /// LATEST refusal has landed since. The expectation counts refusals;
+        /// the class compares dispatch numbers.</summary>
+        private static bool TombstoneOnEveryOrder()
+        {
+            for (int len = 1; len <= 6; len++)
+            {
+                int total = 1; for (int i = 0; i < len; i++) total *= 3;
+                for (int code = 0; code < total; code++)
+                {
+                    var g = new PcShardTombstones();
+                    var wire = new Queue<KeyValuePair<int, int>>();   // (read number, refusals at its dispatch)
+                    int refusals = 0, c = code;
+                    bool expect = false;
+                    for (int i = 0; i < len; i++, c /= 3)
+                    {
+                        int ev = c % 3;
+                        if (ev == 0) wire.Enqueue(new KeyValuePair<int, int>(g.Dispatched(), refusals));
+                        else if (ev == 1) { g.Add("p"); refusals++; expect = true; }
+                        else if (wire.Count > 0)
+                        {
+                            var rd = wire.Dequeue();
+                            g.Reconcile(new[] { "p" }, rd.Key);
+                            if (refusals > 0 && rd.Value == refusals) expect = false;
+                        }
+                        if (g.Contains("p") != expect) return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        private static void TombstoneCases(SelfTestResult r)
+        {
+            var dupes = new string[4]; var offered = new bool[4]; var tomb = new bool[4];
+            TombstonePath(true, dupes, offered, tomb);
+            Check(r, "tombstone path: before the refusal the pack's duplicate a2 is offered",
+                  dupes[0] == "[a2]" && offered[0] && !tomb[0], dupes[0]);
+            Check(r, "tombstone path: a print the server named not_owned leaves both walks at once (the cached read still holds it)",
+                  tomb[1] && dupes[1] == "[]" && !offered[1], dupes[1]);
+            Check(r, "tombstone path: a refresh that lacks the print keeps it excluded",
+                  tomb[2] && dupes[2] == "[]", dupes[2]);
+            Check(r, "tombstone path: and the button state is unchanged by that refresh", offered[2] == offered[1], offered[2].ToString());
+            Check(r, "tombstone path: a refresh that holds the print again lifts its tombstone", !tomb[3], tomb[3].ToString());
+            Check(r, "tombstone path: the reacquired print is included", dupes[3] == "[a2]", dupes[3]);
+            Check(r, "tombstone path: and the button shows, the reacquired print being the pack's only duplicate", offered[3], offered[3].ToString());
+            Check(r, "tombstone path: the strip's Discard on the reacquired print is offered again",
+                  DiscardOffered(true, false, tomb[3], false), tomb[3].ToString());
+            var cd = new string[4]; var co = new bool[4]; var ct = new bool[4];
+            TombstonePath(false, cd, co, ct);
+            Check(r, "control: without the reconcile (8fb4ea4b's permanent tombstone) the reacquired print stays excluded",
+                  ct[3] && cd[3] == "[]" && cd[3] != dupes[3], cd[3]);
+            Check(r, "control: and the button stays hidden", !co[3] && co[3] != offered[3], co[3].ToString());
+
+            var g = new PcShardTombstones();
+            int stale = g.Dispatched();
+            g.Add("a2");
+            g.Reconcile(new[] { "a1", "a2", "b1" }, stale);
+            Check(r, "tombstone: a read dispatched before the refusal does not lift it, though it holds the print", g.Contains("a2"), "");
+            int fresh = g.Dispatched();
+            g.Reconcile(new[] { "a1", "a2", "b1" }, fresh);
+            Check(r, "tombstone: a read dispatched after the refusal that holds the print lifts it", !g.Contains("a2"), "");
+            g.Add("x"); g.Add("y");
+            int both = g.Dispatched();
+            g.Reconcile(new[] { "x" }, both);
+            Check(r, "tombstone: a read lifts only the prints it holds", !g.Contains("x") && g.Contains("y") && g.Count == 1, g.Count.ToString());
+            g.Add("x");
+            Check(r, "tombstone: a print named again after it was lifted is out again", g.Contains("x"), "");
+            g.Clear();
+            Check(r, "tombstone: an identity change clears every tombstone", g.Count == 0 && !g.Contains("y"), g.Count.ToString());
+            g.Add(null); g.Add("");
+            Check(r, "tombstone: no id is never a tombstone", g.Count == 0 && !g.Contains(null), g.Count.ToString());
+            Check(r, "tombstone: on every order of up to six dispatches, refusals and landings, a print is out exactly while no read "
+                  + "dispatched after the latest refusal has landed holding it", TombstoneOnEveryOrder(), "");
+            bool ready;
+            var none = PackDupes(TombFaces, TombIds, null, new List<string>(), new PcShardTombstones(), out ready);
+            Check(r, "pack dupes: a missing input is not ready and takes nothing", !ready && none.Count == 0, Ids(none));
         }
 
         // -- fix pass 2, finding 1: a read-back never undoes a newer shard ----
@@ -777,6 +945,72 @@ namespace CompetitiveRounds
         internal bool Admits(int stamp)
         {
             return stamp == Writes;
+        }
+    }
+
+    /// <summary>
+    /// Fix pass 3, finding 2: the prints a refused shard's not_owned named
+    /// (PlayerCardsUI.FailShard), kept out of the strip's Discard, the Shard
+    /// pack's set and both Shard dupes walks (PcQuickShardRules.PackDupes).
+    /// A tombstone is not permanent: every successful own-collection read
+    /// reconciles the set when it lands (ApiClient.FetchPcCollection), lifting
+    /// each tombstone whose print the read positively holds, so a print traded
+    /// away and back returns to both walks. Only a read DISPATCHED after the
+    /// refusal that wrote a tombstone can lift it: a read already on the wire
+    /// when the refusal landed describes the collection from before that
+    /// answer, so it cannot say the print came back. Each read carries its
+    /// dispatch number (Dispatched) to its landing. An identity change clears
+    /// the set (PlayerCardsUI). Free of Unity so the client rules harness
+    /// executes it (#391).
+    /// </summary>
+    internal sealed class PcShardTombstones
+    {
+        // print id -> the number of own-collection reads dispatched when a refusal named it
+        private readonly Dictionary<string, int> gone = new Dictionary<string, int>(StringComparer.Ordinal);
+        private int dispatched;
+
+        internal int Count { get { return gone.Count; } }
+
+        /// <summary>Whether `printId` is tombstoned.</summary>
+        internal bool Contains(string printId)
+        {
+            return printId != null && gone.ContainsKey(printId);
+        }
+
+        /// <summary>An own-collection read is dispatched: its number, carried
+        /// to its landing (Reconcile).</summary>
+        internal int Dispatched()
+        {
+            return ++dispatched;
+        }
+
+        /// <summary>A refused shard named `printId` not_owned: out until a read
+        /// dispatched after this holds it.</summary>
+        internal void Add(string printId)
+        {
+            if (!string.IsNullOrEmpty(printId)) gone[printId] = dispatched;
+        }
+
+        /// <summary>A successful own-collection read, number `read`, that
+        /// positively holds `heldPrintIds`: every tombstone it names that was
+        /// written before the read was dispatched is lifted. Returns how many
+        /// were.</summary>
+        internal int Reconcile(IEnumerable<string> heldPrintIds, int read)
+        {
+            if (heldPrintIds == null || gone.Count == 0) return 0;
+            int lifted = 0;
+            foreach (var id in heldPrintIds)
+            {
+                int at;
+                if (id != null && gone.TryGetValue(id, out at) && read > at) { gone.Remove(id); lifted++; }
+            }
+            return lifted;
+        }
+
+        /// <summary>An identity change: the previous account's tombstones go.</summary>
+        internal void Clear()
+        {
+            gone.Clear();
         }
     }
 }

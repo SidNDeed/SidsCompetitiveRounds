@@ -225,10 +225,14 @@ namespace CompetitiveRounds
         private static string shardQuickId => shardFlight.QuickId;  // the strip card a one-card shard is for
         private static string shardKey, shardKeyFor;   // a selection's nonce and the exact request it was made for (#172)
         // Prints the server named as no longer this account's (a refused
-        // batch), kept out of the next Shard pack; and packs whose key an
-        // earlier batch already used with other cards, whose button stays
-        // down (single discards and the binder selection still reach them).
-        private static readonly HashSet<string> shardGone = new HashSet<string>(StringComparer.Ordinal);
+        // shard's not_owned), kept out of the strip's Discard, the next Shard
+        // pack and both Shard dupes walks until an own-collection read
+        // dispatched after that refusal holds them again (item 18 fix pass 3,
+        // finding 2: ApiClient.FetchPcCollection reconciles the set, which
+        // ApiClient owns for that reason); and packs whose key an earlier
+        // batch already used with other cards, whose button stays down
+        // (single discards and the binder selection still reach them).
+        private static PcShardTombstones shardGone => ApiClient.PcShardGone;
         private static readonly HashSet<string> packShardBurned = new HashSet<string>(StringComparer.Ordinal);
         private static bool setInFlight; private static float setAt;
         // the dance row (dance cards S5.8): the choice lives on the server; a
@@ -3064,8 +3068,12 @@ namespace CompetitiveRounds
         /// live. The collection read is the current ownership (fix pass 2,
         /// finding 2): a pack print it does not hold (traded away since the
         /// pull) is neither taken nor counted, and one traded back counts
-        /// again. `ready` is false (and the set empty) only while no
-        /// collection read is loaded.</summary>
+        /// again. A print the server named not_owned (shardGone) is out of
+        /// both walks until a collection read dispatched after that refusal
+        /// holds it again (fix pass 3, finding 2): the walks themselves run in
+        /// PcQuickShardRules.PackDupes, which the client rules harness
+        /// executes with the tombstones. `ready` is false (and the set empty)
+        /// only while no collection read is loaded.</summary>
         private static List<string> PackDupeIds(ApiClient.PcPackAnswer pack, ApiClient.PcCollection col, out bool ready)
         {
             ready = false;
@@ -3074,19 +3082,16 @@ namespace CompetitiveRounds
             var faces = new List<string>(); var pids = new List<string>();
             foreach (var p in pack.prints)
             {
-                bool live = p != null && !p.discarded && ShardToken(p.print_id) && !shardGone.Contains(p.print_id);
+                bool live = p != null && !p.discarded && ShardToken(p.print_id);
                 faces.Add(live ? FaceKey(p) : null); pids.Add(p?.print_id);
             }
-            var held = new HashSet<string>(StringComparer.Ordinal);
-            var counts = new Dictionary<string, int>(StringComparer.Ordinal);
+            var colFaces = new List<string>(); var colIds = new List<string>();
             foreach (var c in col.prints)
             {
-                if (c == null || c.print_id == null || c.discarded || shardGone.Contains(c.print_id) || !held.Add(c.print_id)) continue;
-                string k = FaceKey(c); int n; counts.TryGetValue(k, out n); counts[k] = n + 1;
+                bool own = c != null && c.print_id != null && !c.discarded;
+                colFaces.Add(own ? FaceKey(c) : null); colIds.Add(own ? c.print_id : null);
             }
-            var ids = PcQuickShardRules.DuplicateShardIds(faces, pids, counts, held, out ready);
-            ids.Sort(StringComparer.Ordinal);
-            return ids;
+            return PcQuickShardRules.PackDupes(faces, pids, colFaces, colIds, shardGone, out ready);
         }
 
         private static string DupesShardSet(string packId, List<string> ids) { return "dupes|" + packId + "|" + string.Join(",", ids.ToArray()); }

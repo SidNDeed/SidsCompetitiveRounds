@@ -53,6 +53,13 @@ Required behaviour, each a named test:
       database half proves that ownership source on a real PostgreSQL: the
       own collection omits a print traded away and holds it again once traded
       back, while the pack history still lists it undiscarded.
+  Q13 (fix pass 3, finding 2) a print a refused shard named not_owned is out
+      of both Shard dupes walks only until an own-collection read DISPATCHED
+      after that refusal lands holding it: every successful collection
+      landing reconciles the tombstones (PcShardTombstones), so a reacquired
+      print returns to both walks and the button shows for it (the path is
+      EXECUTED by the harness, TombstoneCases, with the no-reconcile control;
+      gate q13 pins that the client runs it).
 
 Each client gate runs on the real sources and, with its mutation and control,
 on edited copies (#391). The database tests use test_pc_shard_batch's harness
@@ -251,11 +258,23 @@ def gate_q10_shard_dupes_sends_only_the_pack_s_duplicates(s):
     for loop in ("for (", "foreach (var x", "while (", "StartCoroutine("):
         assert loop not in click, "Shard dupes is not one batch request"
     ids = _code(_member(ui, "private static List<string> PackDupeIds("))
-    assert "bool live = p != null && !p.discarded && ShardToken(p.print_id) && !shardGone.Contains(p.print_id);" in ids, (
-        "a print that is not live is counted")
+    assert "bool live = p != null && !p.discarded && ShardToken(p.print_id);" in ids, "a print that is not live is counted"
     assert "faces.Add(live ? FaceKey(p) : null);" in ids, "a print that is not live is counted"
-    assert "c.discarded || shardGone.Contains(c.print_id)" in ids, "a print that is not live is counted"
-    assert "PcQuickShardRules.DuplicateShardIds(faces, pids, counts, held, out ready)" in ids, (
+    assert "bool own = c != null && c.print_id != null && !c.discarded;" in ids, "a print that is not live is counted"
+    assert "colFaces.Add(own ? FaceKey(c) : null); colIds.Add(own ? c.print_id : null);" in ids, (
+        "a print that is not live is counted")
+    assert "return PcQuickShardRules.PackDupes(faces, pids, colFaces, colIds, shardGone, out ready);" in ids, (
+        "Shard dupes does not send the pack's duplicates")
+    # Fix pass 3, finding 2: a print a refused shard named not_owned is out of
+    # BOTH walks, inside the rule the harness executes with the tombstones
+    # (PcQuickShardRules.PackDupes); gate q13 pins that a tombstone lifts once
+    # a later collection read holds the print, so none of this is permanent.
+    walk = _member(_code(s["rules"]), "internal static List<string> PackDupes(")
+    assert "faces.Add(pageFaceKeys[i] != null && !gone.Contains(pagePrintIds[i]) ? pageFaceKeys[i] : null);" in walk, (
+        "a print that is not live is counted")
+    assert "if (c == null || k == null || gone.Contains(c) || !held.Add(c)) continue;" in walk, (
+        "a print that is not live is counted")
+    assert "var ids = DuplicateShardIds(faces, pagePrintIds, counts, held, out ready);" in walk, (
         "Shard dupes does not send the pack's duplicates")
     rule = _member(_code(s["rules"]), "internal static List<string> DuplicateShardIds(")
     assert "if (outside == 0 && kept.Add(k)) continue;" in rule, "the duplicate rule can take a last copy"
@@ -336,11 +355,54 @@ def gate_q12_shard_dupes_counts_only_the_prints_owned_now(s):
     assert "bool up = PcQuickShardRules.DupesOffered(ready, ids.Count, ApiClient.PC_DISCARD_BATCH_CAP);" in refresh, (
         "the button is not up for the owned duplicates")
     ids = _code(_member(s["ui"], "private static List<string> PackDupeIds("))
-    assert "held.Add(c.print_id)" in ids and "PcQuickShardRules.DuplicateShardIds(faces, pids, counts, held, out ready)" in ids, (
+    assert "return PcQuickShardRules.PackDupes(faces, pids, colFaces, colIds, shardGone, out ready);" in ids, (
+        "a print no longer owned is counted")
+    walk = _member(rules, "internal static List<string> PackDupes(")
+    assert "!held.Add(c)" in walk and "var ids = DuplicateShardIds(faces, pagePrintIds, counts, held, out ready);" in walk, (
         "a print no longer owned is counted")
 
 
-NEW_KEYS = ("Shard dupes (+{0})", "Click Shard dupes again to shard {0} duplicates for {1} shards")
+def gate_q13_a_not_owned_tombstone_lifts_once_a_later_read_holds_the_print(s):
+    """Fix pass 3, finding 2: a print a refused shard named not_owned is out
+    of both Shard dupes walks (and of the strip's Discard and the Shard
+    pack's set) only until an own-collection read DISPATCHED after that
+    refusal lands holding it: every successful collection landing reconciles
+    the tombstones, so a print traded away and back returns, while a read
+    already on the wire when the refusal landed lifts nothing. The path is
+    EXECUTED by the harness (PcQuickShardRules.TombstoneCases: tombstone, a
+    refresh without the print, a refresh with it, and the control without the
+    reconcile); this pins that the client runs that path."""
+    api, ui = s["api"], s["ui"]
+    assert "internal static readonly PcShardTombstones PcShardGone = new PcShardTombstones();" in api, (
+        "the tombstones do not live where the collection reads land")
+    assert "private static PcShardTombstones shardGone => ApiClient.PcShardGone;" in ui, (
+        "the pull tab keeps a second set of tombstones")
+    assert "HashSet<string> shardGone" not in _code(ui), "the pull tab keeps a second set of tombstones"
+    coll = _code(_member(api, "public static void FetchPcCollection("))
+    what = "a collection read does not reconcile the tombstones"
+    num = _at(coll, "int read = PcShardGone.Dispatched();", "a collection read is not numbered at dispatch")
+    start = _at(coll, "Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>", "a collection read is not numbered at dispatch")
+    assert num < start, "a collection read is not numbered at dispatch"
+    fenced = _at(coll, "if (ok && !PcAnswerFence.Admits(fence))", what)
+    land = _at(coll, "CachedPcCollection = col;", what)
+    held = _at(coll, "foreach (var p in col.prints) if (p != null && p.print_id != null && !p.discarded && !p.gone) held.Add(p.print_id);", what)
+    rec = _at(coll, "PcShardGone.Reconcile(held, read);", what)
+    parse = _at(coll, 'else { PcCollectionError = "parse"; ok = false; }', what)
+    assert fenced < land < held < rec < parse, what
+    assert coll.count("PcShardGone.") == 2 and _code(api).count("PcShardGone.Reconcile(") == 1, what
+    fail = _code(_member(ui, "private static void FailShard("))
+    assert fail.count("shardGone.Add(g);") == 2, "a not_owned refusal does not tombstone the prints it names"
+    rules = _code(s["rules"])
+    add = _member(rules, "internal void Add(string printId)")
+    assert "if (!string.IsNullOrEmpty(printId)) gone[printId] = dispatched;" in add, (
+        "a read dispatched before the refusal lifts its tombstone")
+    lift = _member(rules, "internal int Reconcile(")
+    assert "if (id != null && gone.TryGetValue(id, out at) && read > at) { gone.Remove(id); lifted++; }" in lift, (
+        "a read dispatched before the refusal lifts its tombstone")
+    assert "TombstoneCases(r);" in _member(rules, "internal static SelfTestResult SelfTest("), "the tombstone path is not executed"
+
+
+NEW_KEYS =("Shard dupes (+{0})", "Click Shard dupes again to shard {0} duplicates for {1} shards")
 _CAT_ENTRY = re.compile(r'^\s+\["((?:[^"\\]|\\.)*)"\] = "((?:[^"\\]|\\.)*)",$', re.M)
 
 
@@ -377,7 +439,8 @@ GATES = [gate_q1_the_strip_card_shards_in_place_on_a_confirmed_click,
          gate_q9_a_retired_generation_touches_nothing,
          gate_q10_shard_dupes_sends_only_the_pack_s_duplicates,
          gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard,
-         gate_q12_shard_dupes_counts_only_the_prints_owned_now]
+         gate_q12_shard_dupes_counts_only_the_prints_owned_now,
+         gate_q13_a_not_owned_tombstone_lifts_once_a_later_read_holds_the_print]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -483,6 +546,11 @@ MUTATIONS = [
      "                faces.Add(FaceKey(p)); pids.Add(p?.print_id);",
      "                faces.Add(live ? FaceKey(p) : null); pids.Add(p?.print_id);   // live only",
      "a print that is not live is counted"),
+    ("Q10e", gate_q10_shard_dupes_sends_only_the_pack_s_duplicates, "rules",
+     "                if (c == null || k == null || gone.Contains(c) || !held.Add(c)) continue;",
+     "                if (c == null || k == null || !held.Add(c)) continue;",
+     "                if (c == null || k == null || gone.Contains(c) || !held.Add(c)) continue;   // tombstones out",
+     "a print that is not live is counted"),
     ("Q11a", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "api",
      "                if (ok && !PcAnswerFence.Admits(fence))\n                {\n"
      "                    // Fix pass 2, finding 1: a confirmed write (a shard's or a",
@@ -539,6 +607,26 @@ MUTATIONS = [
      "            return false;",
      "            return ready && count > 0 && count <= cap;   // up",
      "the button is not up for the owned duplicates"),
+    ("Q13a", gate_q13_a_not_owned_tombstone_lifts_once_a_later_read_holds_the_print, "api",
+     "                        PcShardGone.Reconcile(held, read);",
+     "                        // the reconcile dropped",
+     "                        PcShardGone.Reconcile(held, read);   // lift",
+     "a collection read does not reconcile the tombstones"),
+    ("Q13b", gate_q13_a_not_owned_tombstone_lifts_once_a_later_read_holds_the_print, "rules",
+     "if (id != null && gone.TryGetValue(id, out at) && read > at) { gone.Remove(id); lifted++; }",
+     "if (id != null && gone.TryGetValue(id, out at) && read >= at) { gone.Remove(id); lifted++; }",
+     "if (id != null && gone.TryGetValue(id, out at) && read > at) { gone.Remove(id); lifted++; }   // later reads only",
+     "a read dispatched before the refusal lifts its tombstone"),
+    ("Q13c", gate_q13_a_not_owned_tombstone_lifts_once_a_later_read_holds_the_print, "rules",
+     "            if (!string.IsNullOrEmpty(printId)) gone[printId] = dispatched;",
+     "            if (!string.IsNullOrEmpty(printId)) gone[printId] = 0;",
+     "            if (!string.IsNullOrEmpty(printId)) gone[printId] = dispatched;   // as of now",
+     "a read dispatched before the refusal lifts its tombstone"),
+    ("Q13d", gate_q13_a_not_owned_tombstone_lifts_once_a_later_read_holds_the_print, "rules",
+     "            TombstoneCases(r);\n            return r;",
+     "            return r;",
+     "            TombstoneCases(r);   // executed\n            return r;",
+     "the tombstone path is not executed"),
 ]
 
 

@@ -4699,6 +4699,14 @@ namespace CompetitiveRounds
         /// discard's balance and removed prints, a trade accept's drawn
         /// prints) move it.</summary>
         internal static readonly PcCacheFence PcAnswerFence = new PcCacheFence();
+        /// <summary>Item 18 fix pass 3, finding 2: the prints a refused
+        /// shard's not_owned named (PcShardTombstones; PlayerCardsUI reads
+        /// and writes it as shardGone). It lives here because the reads that
+        /// lift a tombstone land here: FetchPcCollection numbers each read at
+        /// dispatch and, when a read lands, lifts every tombstone written
+        /// before that dispatch whose print the read holds, so a print traded
+        /// away and back returns to the pull tab's walks.</summary>
+        internal static readonly PcShardTombstones PcShardGone = new PcShardTombstones();
         // A read the fence dropped is owed (with the callers that waited on
         // it) until PcSendOwedReads sends it again; an identity edge clears it.
         private static bool pcMeReadOwed, pcCollReadOwed;
@@ -4819,6 +4827,7 @@ namespace CompetitiveRounds
             string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:-", null);
             int epoch = _pcCacheEpoch;
             int fence = PcAnswerFence.Stamp();
+            int read = PcShardGone.Dispatched();   // fix pass 3, finding 2: which tombstones this read may lift
             // The prints carry a face_locale and the faces are cached by it, so
             // the answer describes the language it was ASKED in. Committing one
             // asked in the previous language leaves every face keyed to a locale
@@ -4872,7 +4881,18 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     var col = ParsePcCollection(resp);
-                    if (col != null) { CachedPcCollection = col; PcCollectionFetchedAt = Time.realtimeSinceStartup; PcCollectionError = null; }
+                    if (col != null)
+                    {
+                        CachedPcCollection = col; PcCollectionFetchedAt = Time.realtimeSinceStartup; PcCollectionError = null;
+                        // Fix pass 3, finding 2: this landed read is the current
+                        // ownership, so every not_owned tombstone written before
+                        // it was dispatched whose print it holds live is lifted:
+                        // a print traded away and back is the player's again.
+                        var held = new List<string>();
+                        if (col.prints != null)
+                            foreach (var p in col.prints) if (p != null && p.print_id != null && !p.discarded && !p.gone) held.Add(p.print_id);
+                        PcShardGone.Reconcile(held, read);
+                    }
                     else { PcCollectionError = "parse"; ok = false; }
                 }
                 else { PcCollectionError = resp; Plugin.Log.LogInfo($"[PC] collection fetch failed: {PcShort(resp)}"); }

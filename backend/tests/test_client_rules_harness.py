@@ -144,9 +144,11 @@ def test_the_quick_shard_suite_ran_every_case_and_none_failed(harness_run):
     # added the batch shard's generation cases (PcShardFlight, finding 2),
     # 60 once it added Shard dupes' duplicate cases (finding 3), 70 once fix
     # pass 2 added the read-back fence's recovery cases (PcCacheFence,
-    # finding 1), 80 once it added the ownership cases (finding 2)
-    # (#342: a floor near the real count). Raise it when cases are added.
-    assert run >= 80, "the PcQuickShardRules suite shrank to %d cases" % run
+    # finding 1), 80 once it added the ownership cases (finding 2), 98 once
+    # fix pass 3 added the tombstone path's cases (PcShardTombstones,
+    # finding 2) (#342: a floor near the real count). Raise it when cases
+    # are added.
+    assert run >= 98, "the PcQuickShardRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
