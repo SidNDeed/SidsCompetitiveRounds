@@ -262,8 +262,8 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
 # 1-17 the build's; fix pass 1: 18 and 23 F2 (the tap detector), 19 F3
 # (prompt surface gate), 20 F5 (the loaded set), 21 F6 (the commit), 22 F7
 # (capture reads the mouse for every row), 24 F4 (the board follows the
-# bindings).
-KEYBIND_MUTATIONS = tuple(range(1, 18)) + (18, 19, 20, 21, 22, 23, 24)
+# bindings). Fix pass 2: 25 M1 (the independent keyboard-edge source).
+KEYBIND_MUTATIONS = tuple(range(1, 18)) + (18, 19, 20, 21, 22, 23, 24, 25)
 
 
 def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
@@ -281,7 +281,21 @@ def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= KEYBIND_CASES, "the keybinds suite shrank to %d cases" % run
 
 
-KEYBIND_CASES = 92
+KEYBIND_CASES = 95
+
+
+# Item 17 fix pass 2: the round-2 findings' controls, one instrument that
+# compiles on the reviewed pin and on the fix tip (red there, green here).
+KEYBIND_FIX2_CASES = 5
+
+
+def test_the_keybind_fix2_controls_ran_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "keybindfix2" in suites, "the keybindfix2 suite did not report"
+    run, fail, verdict = suites["keybindfix2"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[keybindfix2\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run == KEYBIND_FIX2_CASES, (run, printed)
 
 
 @pytest.mark.parametrize("n", KEYBIND_MUTATIONS)

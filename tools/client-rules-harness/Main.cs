@@ -145,6 +145,16 @@ namespace CompetitiveRounds.Harness
                           }))
                 return 2;
 
+            // Item 17 fix pass 2: the round-2 findings' controls - the same
+            // instrument the controls run executes on the reviewed pin.
+            if (!RunSuite("keybindfix2", quiet, ref totalRun, ref totalFail, ref suites,
+                          () =>
+                          {
+                              var r = KeybindFix2Controls.Run();
+                              return new Suite(r.Run, r.Fail, r.Report.ToString());
+                          }))
+                return 2;
+
             string verdict = suites > 0 && totalRun > 0 && totalFail == 0 ? "PASS" : "FAIL";
             Console.WriteLine("client-rules-harness suites=" + suites
                               + " run=" + totalRun + " fail=" + totalFail

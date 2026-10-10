@@ -170,6 +170,7 @@
     <Compile Include="SessionReportRulesSelfTest.cs" />
     <Compile Include="../../plugin/ShowcaseRules.cs" />
     <Compile Include="../../plugin/FfaNumberingRules.cs" />
+    <Compile Include="KeybindFix2Controls.cs" />
   </ItemGroup>
 
 </Project>

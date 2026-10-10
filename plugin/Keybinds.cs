@@ -4,6 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Runtime.InteropServices;
 using BepInEx.Configuration;
 using HarmonyLib;
 using InControl;
@@ -955,7 +956,8 @@ namespace CompetitiveRounds
         /// names. A key read that throws counts as a key edge and a thrown
         /// inputString as typed text; a mouse read that throws counts as no
         /// edge: unreadable input is attributed Key or Unknown, never the
-        /// mouse.</summary>
+        /// mouse. Fix pass 2 (M1): KeyboardEdges is the third, independent
+        /// keyboard channel, KeyboardEdgeLatch.</summary>
         private sealed class RealInput : IFrameInput
         {
             public bool KeyDown(int code)
@@ -969,6 +971,87 @@ namespace CompetitiveRounds
             public bool AnyMouseHeld() { for (int n = 0; n < 7; n++) if (MouseHeld(n)) return true; return false; }
             public float Now() { return Time.unscaledTime; }
             public bool Focused() { return Application.isFocused; }
+            public int KeyboardEdges() { return KeyboardEdgeLatch.EdgesThisFrame(); }
+        }
+
+        /// <summary>Fix pass 2 (M1): the keyboard-edge source the ChatChannel
+        /// tap detector reads beside Unity's KeyCode edges, independent of the
+        /// KeyCode table, of the mouse and of the typed text. Once a frame it
+        /// copies the game thread's keyboard state (user32 GetKeyboardState:
+        /// one byte per virtual key, the state as of the keyboard messages
+        /// this thread has taken from its queue - the same messages Unity's
+        /// legacy key edges are made from) and counts the virtual keys that
+        /// went down since the previous frame's copy: the down bit newly set,
+        /// or the toggle bit flipped (a press inside one frame). The previous
+        /// copy is the latch. Never counted: the mouse buttons (VK 1, 2, 4,
+        /// 5, 6), the generic SHIFT, CONTROL and MENU codes (their left and
+        /// right codes are counted instead, as Unity names them), and the two
+        /// synthetic codes PROCESSKEY (229) and PACKET (231), which stand for
+        /// another key or for injected text. A frame that does not directly
+        /// follow the previous read, or an unfocused game, re-baselines: no
+        /// edges that frame. A read that fails is -1, and the detector then
+        /// treats a frame with a mouse edge as possibly hiding a keyboard
+        /// edge. The first edge it ever reads is logged once, the positive
+        /// signal that the source is live on this seat.</summary>
+        internal static class KeyboardEdgeLatch
+        {
+            [DllImport("user32.dll")]
+            private static extern bool GetKeyboardState([Out] byte[] lpKeyState);
+
+            private static readonly byte[] cur = new byte[256], prev = new byte[256];
+            private static int readFrame = int.MinValue, edges;
+            private static bool broken, firstEdgeLogged;
+
+            internal static bool Counted(int vk)
+            {
+                if (vk < 3 || vk > 254) return false;
+                if (vk == 4 || vk == 5 || vk == 6) return false;
+                if (vk == 0x10 || vk == 0x11 || vk == 0x12) return false;
+                if (vk == 0xE5 || vk == 0xE7) return false;
+                return true;
+            }
+
+            /// <summary>The keyboard edges of this frame; the first call of a
+            /// frame reads and latches, later calls return the same count.</summary>
+            internal static int EdgesThisFrame()
+            {
+                if (broken) return -1;
+                int f;
+                bool focused;
+                try { f = Time.frameCount; focused = Application.isFocused; }
+                catch { return -1; }
+                if (f == readFrame) return edges;
+                bool baseline = readFrame == int.MinValue || f != readFrame + 1 || !focused;
+                readFrame = f;
+                bool ok;
+                try { ok = GetKeyboardState(cur); }
+                catch (Exception e)
+                {
+                    broken = true;
+                    Plugin.Log.LogWarning("[KEYBIND] keyboard-edge source unavailable (" + e.GetType().Name + ": " + e.Message
+                        + ") - a click while the ChatChannel key is held now disarms the tap");
+                    edges = -1;
+                    return -1;
+                }
+                if (!ok) { readFrame = int.MinValue; edges = -1; return -1; }
+                int n = 0;
+                if (!baseline)
+                    for (int vk = 3; vk < 255; vk++)
+                    {
+                        if (!Counted(vk)) continue;
+                        bool down = (cur[vk] & 0x80) != 0, wasDown = (prev[vk] & 0x80) != 0;
+                        bool flipped = ((cur[vk] ^ prev[vk]) & 0x01) != 0;
+                        if ((down && !wasDown) || flipped) n++;
+                    }
+                Buffer.BlockCopy(cur, 0, prev, 0, 256);
+                edges = n;
+                if (n > 0 && !firstEdgeLogged)
+                {
+                    firstEdgeLogged = true;
+                    Plugin.Log.LogInfo("[KEYBIND] keyboard-edge source live: first edge read (" + n + ")");
+                }
+                return n;
+            }
         }
 
         private static int[] fullKeyScan;
@@ -1007,6 +1090,10 @@ namespace CompetitiveRounds
         /// true on the frame the bound ChatChannel key was tapped.</summary>
         internal static bool ChatChannelTapped(bool chatInputOpen)
         {
+            // M1: the independent keyboard source is read on every call, the
+            // chat box open or not, so its latch is current on the frame the
+            // box opens (a gap between reads re-baselines that frame).
+            KeyboardEdgeLatch.EdgesThisFrame();
             if (CaptureOwnsInput) { chatTap.Held = chatTap.Clean = false; return false; }
             if (!chatInputOpen) { chatTap.Held = chatTap.Clean = false; return false; }
             return chatTap.Step(realInput, KeyCodesFor(ChatChannel), FullKeyScan());

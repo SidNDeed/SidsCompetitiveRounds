@@ -80,6 +80,13 @@ namespace CompetitiveRounds
         bool AnyMouseHeld();
         float Now();
         bool Focused();
+        /// <summary>Fix pass 2 (M1): how many keyboard keys went down this
+        /// frame according to a source that is independent of the KeyCode
+        /// table, of the mouse and of the typed text (production: the game
+        /// thread's own keyboard state, read once a frame and latched against
+        /// the previous frame's read, Keybinds.KeyboardEdgeLatch). Mouse
+        /// buttons are never counted. -1 when that source cannot be read.</summary>
+        int KeyboardEdges();
     }
 
     /// <summary>
@@ -722,6 +729,11 @@ namespace CompetitiveRounds
 
         internal static bool IsMouseCode(int code) { return code >= KeyCodeMouse0 && code <= KeyCodeMouse6; }
 
+        /// <summary>A keyboard KeyCode: below Mouse0. The joystick buttons
+        /// (330 and up) and the mouse buttons are not keyboard keys, so the
+        /// independent keyboard-edge source never counts them.</summary>
+        internal static bool IsKeyboardCode(int code) { return code > 0 && code < KeyCodeMouse0; }
+
         /// <summary>The tap detector's state machine. Unity-free: production
         /// feeds it Keybinds' real input, the harness a scripted one.</summary>
         internal sealed class TapDetector
@@ -737,16 +749,28 @@ namespace CompetitiveRounds
             /// code is Alias, Mouse0-Mouse6 is Mouse, anything else is Key. Text
             /// typed this frame that no named key accounts for is Unknown (the
             /// alias types nothing, rule 6), and so is an edge Input.anyKeyDown
-            /// reports that nothing names. Unknown is never read as the mouse.</summary>
+            /// reports that nothing names. Fix pass 2 (M1): the independent
+            /// keyboard-edge source (IFrameInput.KeyboardEdges) is compared with
+            /// the keyboard keys the KeyCodes named this frame; more keyboard
+            /// edges than named keys is Unknown whatever the mouse did in the
+            /// frame, and an unreadable source beside a mouse edge is Unknown
+            /// too. Unknown is never read as the mouse.</summary>
             internal static EdgeAttribution Attribute(IFrameInput io, int[] alias, int[] scan)
             {
                 var a = EdgeAttribution.None;
                 var aliasSet = new HashSet<int>(alias ?? new int[0]);
-                foreach (int c in aliasSet) if (c > 0 && io.KeyDown(c)) a |= EdgeAttribution.Alias;
+                int named = 0;   // keyboard keys a KeyCode named this frame, the alias's included
+                foreach (int c in aliasSet)
+                    if (c > 0 && io.KeyDown(c)) { a |= EdgeAttribution.Alias; if (IsKeyboardCode(c)) named++; }
                 bool any = io.AnyKeyDown();
                 string text = io.TypedText();
                 bool typed = !string.IsNullOrEmpty(text);
-                if (!any && !typed) return a;
+                // M1: read before the early return - a key no KeyCode names can
+                // leave anyKeyDown and the typed text both empty. Mutation 25 is
+                // the 2811a621 detector (no independent source); mutation 18 is
+                // the a22f80ed one, which had none either.
+                int kb = Mut == 25 || Mut == 18 ? 0 : io.KeyboardEdges();
+                if (!any && !typed && kb <= 0) return a;
                 // Mutation 18 restores the a22f80ed observation: the scan saw only
                 // InControl's 127 codes and a mouse edge was a separate yes/no.
                 HashSet<int> legacy = Mut == 18 ? new HashSet<int>(StaticKeyScan) : null;
@@ -757,9 +781,15 @@ namespace CompetitiveRounds
                         if (legacy != null && !IsMouseCode(c) && !legacy.Contains(c)) continue;
                         if (!io.KeyDown(c)) continue;
                         a |= IsMouseCode(c) ? EdgeAttribution.Mouse : EdgeAttribution.Key;
+                        if (IsKeyboardCode(c)) named++;
                     }
                 if (typed && (a & EdgeAttribution.Key) == 0 && Mut != 18) a |= EdgeAttribution.Unknown;
                 if (any && (a & (EdgeAttribution.Alias | EdgeAttribution.Key | EdgeAttribution.Mouse)) == 0) a |= EdgeAttribution.Unknown;
+                // M1: a keyboard edge no KeyCode named - beside a click or not.
+                if (kb > named) a |= EdgeAttribution.Unknown;
+                // M1: the independent source cannot be read, so a frame with a
+                // mouse edge may hide a keyboard edge: never mouse-only.
+                if (kb < 0 && (a & EdgeAttribution.Mouse) != 0) a |= EdgeAttribution.Unknown;
                 // a22f80ed: an edge nothing named, beside a same-frame mouse edge, read as mouse-only.
                 if (Mut == 18 && (a & EdgeAttribution.Mouse) != 0) a &= ~EdgeAttribution.Unknown;
                 // revision 3: a held button (not an edge) made the unnamed edge the mouse's.
@@ -805,6 +835,11 @@ namespace CompetitiveRounds
             internal bool Any, MouseHeldNow;
             internal string Text = "";
             internal float T;
+            /// <summary>M1: keyboard keys that went down this frame which no
+            /// KeyCode names (the independent source sees them, the scan
+            /// cannot), and an unreadable independent source.</summary>
+            internal int KbExtra;
+            internal bool KbUnavailable;
             public bool KeyDown(int code) { return Down.Contains(code); }
             public bool KeyUp(int code) { return Up.Contains(code); }
             public bool AnyKeyDown() { return Any; }
@@ -812,10 +847,25 @@ namespace CompetitiveRounds
             public bool AnyMouseHeld() { return MouseHeldNow; }
             public float Now() { return T; }
             public bool Focused() { return true; }
+            /// <summary>The independent source's count: every keyboard code
+            /// of the frame (named or not, the alias's included) plus the keys
+            /// no KeyCode names.</summary>
+            public int KeyboardEdges()
+            {
+                if (KbUnavailable) return -1;
+                int n = KbExtra;
+                foreach (int c in Down) if (IsKeyboardCode(c)) n++;
+                return n;
+            }
             internal void Frame(float t, int[] down, int[] up, bool any, string text, bool mouseHeld)
+            {
+                Frame(t, down, up, any, text, mouseHeld, 0, false);
+            }
+            internal void Frame(float t, int[] down, int[] up, bool any, string text, bool mouseHeld, int kbExtra, bool kbUnavailable)
             {
                 T = t; Down = new HashSet<int>(down ?? new int[0]); Up = new HashSet<int>(up ?? new int[0]);
                 Any = any; Text = text ?? ""; MouseHeldNow = mouseHeld;
+                KbExtra = kbExtra; KbUnavailable = kbUnavailable;
             }
         }
 
@@ -825,15 +875,24 @@ namespace CompetitiveRounds
         internal static bool ScriptTap(int[] alias, int[] scan, int[] midDown, bool midAny, string midText,
                                        bool midMouseHeld, out EdgeAttribution mid)
         {
+            return ScriptTap(alias, scan, midDown, midAny, midText, midMouseHeld, 0, false, out mid);
+        }
+
+        /// <summary>M1: the same tap with the middle frame's independent
+        /// keyboard source scripted: <paramref name="midKbExtra"/> keys no
+        /// KeyCode names went down, or the source is unreadable.</summary>
+        internal static bool ScriptTap(int[] alias, int[] scan, int[] midDown, bool midAny, string midText,
+                                       bool midMouseHeld, int midKbExtra, bool midKbUnavailable, out EdgeAttribution mid)
+        {
             var d = new TapDetector();
             var io = new ScriptInput();
             int key = alias != null && alias.Length > 0 ? alias[0] : 0;
             mid = EdgeAttribution.None;
             io.Frame(0f, new[] { key }, null, true, "", midMouseHeld);
             d.Step(io, alias, scan);
-            if (midDown != null || midAny || !string.IsNullOrEmpty(midText))
+            if (midDown != null || midAny || !string.IsNullOrEmpty(midText) || midKbExtra != 0 || midKbUnavailable)
             {
-                io.Frame(0.1f, midDown, null, midAny, midText, midMouseHeld);
+                io.Frame(0.1f, midDown, null, midAny, midText, midMouseHeld, midKbExtra, midKbUnavailable);
                 d.Step(io, alias, scan);
                 mid = d.Last;
             }
@@ -1149,6 +1208,36 @@ namespace CompetitiveRounds
             Check(r, "F2 KeybindRules.TapDetector: a foreign key on the ARMING frame keeps the tap from rotating",
                   !TapArmedWithForeign(tapAlias, tapScan), "rotated=" + TapArmedWithForeign(tapAlias, tapScan));
 
+            // -- fix pass 2 M1: the independently latched keyboard-edge source -------
+            // ChatChannel armed; in one frame a keyboard key no KeyCode names
+            // (no typed text) goes down beside a click: the independent source
+            // counts one keyboard edge the scan did not name, so the frame is
+            // Unknown as well as Mouse and the release does not rotate. Also
+            // with no anyKeyDown at all, on the arming frame, and with the source
+            // unreadable beside a click. Mutation 25 is the 2811a621 detector,
+            // which had no independent source: every guarded leg rotated there.
+            // The controls hold either way: a click alone rotates, a named key
+            // beside a click and typed text beside a click do not.
+            Func<int[], bool, string, int, bool, string> tapKb = (down, any, text, kbExtra, kbOff) =>
+            {
+                EdgeAttribution mid;
+                bool rotated = ScriptTap(tapAlias, tapScan, down, any, text, false, kbExtra, kbOff, out mid);
+                return (rotated ? "rotated" : "kept") + "/" + mid;
+            };
+            MutCase(r, 25, "KeybindRules.TapDetector", "an unattributable non-text keyboard edge disarms ChatChannel independently of the mouse, a same-frame click included",
+                    () => tapKb(new[] { KeyCodeMouse0 }, true, "", 1, false) == "kept/" + (EdgeAttribution.Mouse | EdgeAttribution.Unknown)
+                          && tapKb(null, false, "", 1, false) == "kept/" + EdgeAttribution.Unknown
+                          && tapKb(new[] { KeyCodeMouse0 }, true, "", 0, true) == "kept/" + (EdgeAttribution.Mouse | EdgeAttribution.Unknown)
+                          && !TapArmedWithUnnamed(tapAlias, tapScan),
+                    () => tapKb(null, false, "", 0, false) == "rotated/None"
+                          && tapKb(new[] { KeyCodeMouse0 }, true, "", 0, false) == "rotated/" + EdgeAttribution.Mouse
+                          && tapKb(new[] { 319, KeyCodeMouse0 }, true, "", 0, false) == "kept/" + (EdgeAttribution.Key | EdgeAttribution.Mouse)
+                          && tapKb(new[] { KeyCodeMouse0 }, true, "é", 1, false) == "kept/" + (EdgeAttribution.Mouse | EdgeAttribution.Unknown),
+                    () => "unnamed+click=" + tapKb(new[] { KeyCodeMouse0 }, true, "", 1, false)
+                          + " unnamed-alone=" + tapKb(null, false, "", 1, false)
+                          + " unreadable+click=" + tapKb(new[] { KeyCodeMouse0 }, true, "", 0, true)
+                          + " armed-with-unnamed-rotated=" + TapArmedWithUnnamed(tapAlias, tapScan));
+
             // -- fix pass 1 F5: the loaded set is conflict-free ---------------------
             // QuickChat moved off Q, MenuToggle saved on Q, then QuickChat hand-
             // edited to the forbidden F5: QuickChat's default Q is revalidated
@@ -1382,6 +1471,20 @@ namespace CompetitiveRounds
             var d = new TapDetector();
             var io = new ScriptInput();
             io.Frame(0f, new[] { alias[0], 106 }, null, true, "j", false);
+            d.Step(io, alias, scan);
+            io.Frame(0.2f, null, new[] { alias[0] }, false, "", false);
+            return d.Step(io, alias, scan);
+        }
+
+        /// <summary>M1: the alias and a key no KeyCode names go down in the
+        /// same frame (the independent source counts two keyboard edges, the
+        /// scan names one), then the alias comes up: true if that rotated the
+        /// channel.</summary>
+        private static bool TapArmedWithUnnamed(int[] alias, int[] scan)
+        {
+            var d = new TapDetector();
+            var io = new ScriptInput();
+            io.Frame(0f, new[] { alias[0] }, null, true, "", false, 1, false);
             d.Step(io, alias, scan);
             io.Frame(0.2f, null, new[] { alias[0] }, false, "", false);
             return d.Step(io, alias, scan);
