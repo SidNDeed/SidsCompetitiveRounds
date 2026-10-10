@@ -383,10 +383,16 @@ def claims_run(root, work, label, edit, decompiled, out, decompile_edit=None, te
     rc, o = run(cmd, env=env, cwd=d)
     tail = [l for l in o.splitlines() if re.search(r"\b(passed|failed|error)", l)]
     failed = [l for l in o.splitlines() if l.startswith(("FAILED ", "ERROR "))]
-    out.write("--- claims %s exit %d: %s ---\n" % (label, rc, tail[-1] if tail else "(no summary)"))
+    out.write("--- claims %s exit %d%s: %s ---\n" % (label, rc, (" (-k %s)" % select) if select else "",
+                                                     tail[-1] if tail else "(no summary)"))
     for l in failed[:6]:
         out.write("    " + l[:400] + "\n")
     claims_run.last_failed = failed
+    if rc == 5:
+        # pytest's "no tests collected": the tree has no test that binds the
+        # claim, which is neither a catch nor a pass
+        out.write("    no test of this tree matches the selection: not a catch\n")
+        return None
     return rc
 
 
@@ -501,6 +507,17 @@ CLAIM_ROWS = {
                              twin=(AD, "if (d.Unusable != AvatarUnusable.None) Announce(UnusableMessage(d.Unusable));",
                                    "if (AvatarUnusable.None != d.Unusable) Announce(UnusableMessage(d.Unusable));")),
 }
+
+# fix pass 2: the tests each row runs (pytest -k). The source-claim rows
+# skip S35, whose production probe is a dotnet build per run; the rows whose
+# claim lives in the production probe run S35 alone; M8's arms run S22 (the
+# production guard expression) and S35 (the production log sink).
+CLAIM_SELECT = {n: "not s35" for n in ("M11-persistence", "M11-assignment", "M11-refusal", "L1-ring",
+                                       "L1-hybrid", "L1-recovery", "H3-reread")}
+CLAIM_SELECT.update({n: "s35" for n in ("H6-isPlaying", "H6-battleOngoing", "H9-early-return",
+                                         "M3-deferred-edge", "BR-M4-partial", "L1-sprite-sink",
+                                         "L1-announce-sink")})
+CLAIM_SELECT.update({n: "s22 or s35" for n in ("M8-apply-arm", "M8-room-arm")})
 
 # fix pass 2: the closures M11 names, by the rows that bind them
 M11_CLOSURES = {"H6": ["H6-isPlaying", "H6-battleOngoing"], "M8": ["M8-apply-arm", "M8-room-arm"],
@@ -693,10 +710,13 @@ def controls(args):
     cbase = claims_run(root, args.work, "baseline", None, args.decompiled, out)
     crow = {}
     for name, row in CLAIM_ROWS.items():
+        # a row names the tests that bind its claim (pytest -k); the mutation
+        # and its twin run the SAME selection, and the baseline runs them all
+        sel = CLAIM_SELECT.get(name)
         m = claims_run(root, args.work, name, row.get("edit"), args.decompiled, out,
-                       decompile_edit=row.get("decompile_edit"))
+                       decompile_edit=row.get("decompile_edit"), select=sel)
         t = claims_run(root, args.work, name + "-twin", row.get("twin"), args.decompiled, out,
-                       decompile_edit=row.get("twin_decompile_edit"))
+                       decompile_edit=row.get("twin_decompile_edit"), select=sel)
         crow[name] = (m, t)
 
     def claim_ok(name):
