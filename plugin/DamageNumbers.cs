@@ -379,25 +379,33 @@ namespace CompetitiveRounds
                 }
                 if (_fontSize != size) { _style.fontSize = size; _fontSize = size; }
 
+                // The incoming colour comes back from a finally (build R2 N2,
+                // the CompetitiveUI banner shape): the catch below swallows a
+                // throw from inside the loop, and a restore placed after the
+                // loop would then be skipped, leaking the last tint written
+                // here into every surface drawn later in the pass.
                 Color keep = GUI.color;
-                for (int i = 0; i < DamageNumberRules.MaxLive; i++)
+                try
                 {
-                    if (_text[i] == null || !ring.IsLive(i, now)) continue;
-                    float age = now - ring.Born[i];
-                    Vector3 sp = i == first ? a : cam.WorldToScreenPoint(_world[i]);
-                    if (sp.z < 0f) continue;
-                    float alpha = age <= DamageNumberRules.Life - FadeTail ? 1f
-                        : Mathf.Clamp01((DamageNumberRules.Life - age) / FadeTail);
-                    float x = sp.x + (i % 3 - 1) * 16f;
-                    float y = Screen.height - sp.y - (age / DamageNumberRules.Life) * RisePx;
-                    var rect = new Rect(x - 70f, y - 18f, 140f, 36f);
-                    GUI.color = new Color(0f, 0f, 0f, 0.85f * alpha);
-                    GUI.Label(new Rect(rect.x + 1f, rect.y + 1f, rect.width, rect.height), _text[i], _style);
-                    Color c = _color[i];
-                    GUI.color = new Color(c.r, c.g, c.b, alpha);
-                    GUI.Label(rect, _text[i], _style);
+                    for (int i = 0; i < DamageNumberRules.MaxLive; i++)
+                    {
+                        if (_text[i] == null || !ring.IsLive(i, now)) continue;
+                        float age = now - ring.Born[i];
+                        Vector3 sp = i == first ? a : cam.WorldToScreenPoint(_world[i]);
+                        if (sp.z < 0f) continue;
+                        float alpha = age <= DamageNumberRules.Life - FadeTail ? 1f
+                            : Mathf.Clamp01((DamageNumberRules.Life - age) / FadeTail);
+                        float x = sp.x + (i % 3 - 1) * 16f;
+                        float y = Screen.height - sp.y - (age / DamageNumberRules.Life) * RisePx;
+                        var rect = new Rect(x - 70f, y - 18f, 140f, 36f);
+                        GUI.color = new Color(0f, 0f, 0f, 0.85f * alpha);
+                        GUI.Label(new Rect(rect.x + 1f, rect.y + 1f, rect.width, rect.height), _text[i], _style);
+                        Color c = _color[i];
+                        GUI.color = new Color(c.r, c.g, c.b, alpha);
+                        GUI.Label(rect, _text[i], _style);
+                    }
                 }
-                GUI.color = keep;
+                finally { GUI.color = keep; }
             }
             catch (Exception ex) { VanillaFixSupport.DiagLimited("DmgNum-draw", "[DMGNUM] draw failed: " + ex.Message, 3); }
         }

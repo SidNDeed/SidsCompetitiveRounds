@@ -1591,3 +1591,135 @@ def test_B19_a_throw_in_the_bar_companion_cannot_cost_a_committed_drop_its_numbe
     # row is span-scoped)
     assert run(companion_faults, old_ordering(t, "committed"), "corrective")[0]
     assert run(companion_faults, old_ordering(t, "corrective"), "committed")[0]
+
+
+# ── B21: Draw gives back the incoming GUI.color on every exit (fix 2, build
+#    R2 N2.2: Draw's own body is executed with a throw injected mid-loop, and
+#    the colour it leaves behind is compared with the one it was handed)
+
+_CAPTURE = re.compile(r"^(?:(?:Color|var)\s+)?(\w+)\s*=\s*GUI\.color\s*;$")
+_PAINT = re.compile(r"^GUI\.color\s*=\s*(.+?)\s*;$")
+_PROJ_ANY = re.compile(r"\bWorldToScreenPoint\s*\(")
+
+
+def color_run(tree, fault, iterations=2):
+    """Execute a statement tree with GUI.color modelled by identity: it starts
+    as INCOMING, `Color x = GUI.color;` (or `x = GUI.color;`) captures the
+    value it holds at that moment, `GUI.color = x;` gives a captured value
+    back, and every other write is a new tint.
+    `fault` is None or (kind, n): the n-th statement reached that calls
+    GUI.Label ('label') or WorldToScreenPoint ('projection') throws instead
+    of completing. Returns (colour after, labels completed, outcome, fired)."""
+    st = {"color": "INCOMING", "vars": {}, "labels": 0, "tints": 0,
+          "seen": {"label": 0, "projection": 0}, "fired": False}
+
+    def probe(text):
+        s = " ".join(text.split())
+        kind = "label" if LABEL.search(s) else "projection" if _PROJ_ANY.search(s) else None
+        if kind is not None:
+            st["seen"][kind] += 1
+            if fault is not None and fault == (kind, st["seen"][kind]):
+                st["fired"] = True
+                raise _Fault(kind)
+        mc = _CAPTURE.match(s)
+        if mc:
+            st["vars"][mc.group(1)] = st["color"]
+            return
+        mp = _PAINT.match(s)
+        if mp:
+            if mp.group(1) in st["vars"]:
+                st["color"] = st["vars"][mp.group(1)]
+            else:
+                st["tints"] += 1
+                st["color"] = "TINT%d" % st["tints"]
+            return
+        if kind == "label":
+            st["labels"] += 1
+
+    outcome = execute(tree, probe, iterations)
+    return st["color"], st["labels"], outcome, st["fired"]
+
+
+# None: a clean pass over two live entries. ("label", 1): the first entry's
+# shadow label throws, its tint already written. ("projection", 4): the
+# second entry's projection throws (two scale projections, then one per
+# entry), the first entry's two tints already written.
+DRAW_FAULTS = (None, ("label", 1), ("projection", 4))
+
+
+def draw_color_faults(t):
+    """(green, detail). Draw's own body, run once per DRAW_FAULTS row with two
+    live entries. Green when every run leaves GUI.color holding the value
+    Draw was handed, no throw leaves Draw, every injected throw fired, and the
+    clean run completed all four labels of its two entries (the path through
+    the label loop is real)."""
+    _, m, _ = member(t["DN"], SIG["draw"])
+    tree = parse_body(m)
+    ok, rows = True, []
+    for fault in DRAW_FAULTS:
+        color, labels, outcome, fired = color_run(tree, fault)
+        good = color == "INCOMING" and outcome == "completed" and (fault is None or fired)
+        if fault is None:
+            good = good and labels == 4
+        ok = ok and good
+        rows.append("%s=%s/%d/%s%s" % ("none" if fault is None else "%s#%d" % fault, color, labels,
+                                       outcome, "" if fault is None or fired else "/NOT-FIRED"))
+    return ok, " ".join(rows)
+
+
+# Programs whose C# answer is not in doubt, run through the same interpreter
+# and colour model: (program, fault, (colour after, labels, outcome)). The
+# injected throw is a plain Exception, so only a bare catch or a catch of
+# Exception stops it.
+COLOR_SYNTH = {
+    "a throw through try/finally: restored, and the throw leaves": (
+        "Color k = GUI.color; try { GUI.color = new Color(1f, 0f, 0f, 1f); GUI.Label(r, s); }"
+        " finally { GUI.color = k; }", ("label", 1), ("INCOMING", 0, "escaped")),
+    "catch only, the restore after the label: stopped, the restore skipped": (
+        "Color k = GUI.color; try { GUI.color = new Color(1f, 0f, 0f, 1f); GUI.Label(r, s);"
+        " GUI.color = k; } catch { }", ("label", 1), ("TINT1", 0, "completed")),
+    "a return through a finally: restored": (
+        "Color k = GUI.color; try { GUI.color = new Color(1f, 0f, 0f, 1f); return; }"
+        " finally { GUI.color = k; }", None, ("INCOMING", 0, "returned")),
+    "a break through a finally inside a loop: restored, the loop ends": (
+        "Color k = GUI.color; for (int i = 0; i < 3; i++) { try { GUI.color = new Color(1f, 0f, 0f, 1f);"
+        " GUI.Label(r, s); break; } finally { GUI.color = k; } }", None, ("INCOMING", 1, "completed")),
+    "the innermost try stops the throw, the outer catch never runs": (
+        "try { try { GUI.Label(r, s); } catch { GUI.color = new Color(0f, 1f, 0f, 1f); } }"
+        " catch { GUI.color = new Color(0f, 0f, 1f, 1f); GUI.color = new Color(0f, 0f, 1f, 1f); }",
+        ("label", 1), ("TINT1", 0, "completed")),
+    "a typed catch of another type does not stop the throw": (
+        "Color k = GUI.color; try { GUI.color = new Color(1f, 0f, 0f, 1f); GUI.Label(r, s); }"
+        " catch (NullReferenceException) { GUI.color = k; }", ("label", 1), ("TINT1", 0, "escaped")),
+}
+
+
+def test_B21_draw_gives_back_the_incoming_gui_color_on_every_exit():
+    t = texts()
+    ok, why = run(draw_color_faults, t)
+    assert ok, why
+    restore = "finally { GUI.color = keep; }"
+    # mutation 1: the restore moved after the try, out of the finally (the
+    # form before fix 2, in effect) -> a clean pass still restores, a throw
+    # mid-loop leaks the tint
+    ok, why = run(draw_color_faults, mutate(t, "DN", restore, "finally { }\nGUI.color = keep;"))
+    assert (not ok and "none=INCOMING/4/completed" in why and "label#1=TINT" in why
+            and "projection#4=TINT" in why), why
+    # mutation 2: the restore deleted -> even a clean pass leaks
+    ok, why = run(draw_color_faults, mutate(t, "DN", restore, "finally { }"))
+    assert not ok and "none=TINT" in why, why
+    # mutation 3: a fixed colour put back, not the incoming one
+    ok, why = run(draw_color_faults, mutate(t, "DN", restore, "finally { GUI.color = Color.white; }"))
+    assert not ok and "none=TINT" in why and "label#1=TINT" in why, why
+    # mutation 4: the capture taken inside the loop, after the entry's shadow
+    # tint -> the finally faithfully gives back a tint (identity, not "some
+    # restore ran")
+    mt = mutate(t, "DN", "Color keep = GUI.color;", "Color keep = Color.clear;")
+    mt = mutate(mt, "DN", "Color c = _color[i];", "Color c = _color[i]; keep = GUI.color;")
+    ok, why = run(draw_color_faults, mt)
+    assert not ok and "none=TINT3/4/completed" in why, why
+    # control: the interpreter and the colour model give the C# answer on
+    # programs where it is not in doubt
+    for name, (prog, fault, want) in COLOR_SYNTH.items():
+        got = color_run(parse_body(prog), fault)
+        assert got[:3] == want and (fault is None or got[3]), (name, got)
