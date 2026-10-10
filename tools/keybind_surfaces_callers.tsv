@@ -1,0 +1,117 @@
+# tools/keybind_surfaces.py callers (fix pass 3 H1): source	consumer	references	digest	class	note
+CompetitiveUI.cs:OverlaySmall	CompetitiveUI.cs:DrawInputOverlay	4	86fd3e02f1ba9af3	display	the input overlay's cap font size
+GameStateWatcher.cs:UnionActed	GameStateWatcher.cs:TickAchievementInput	3	09da2d096ee02127	nondisplay	achievement input: whether the player shot, moved or jumped sets an achievement flag; renders nothing
+InfoViz.cs:Cap	InfoViz.cs:BuildKeyboard	12	a9b2796df0c43156	display	the keyboard guide's legend lines name each bound key's cap
+InfoViz.cs:Cap	InfoViz.cs:MoveCaps	4	5d93a93c5cb25d83	producer	the move legend's four caps
+InfoViz.cs:Fill	InfoViz.cs:BuildKeyboard	54	a9b2796df0c43156	display	the keyboard guide's cap colours
+InfoViz.cs:MoveCaps	InfoViz.cs:BuildKeyboard	1	a9b2796df0c43156	display	the keyboard guide's move legend line
+KeybindRules.cs:BoardCapRole	KeybindRules.cs:BoardMatchesTheDefaultBoard	2	3d57f73611b873dd	nondisplay	self-test helper
+KeybindRules.cs:BoardCapRole	KeybindRules.cs:ControlsSurfaceAfter	2	d94b9afbdb5f6bbd	nondisplay	self-test T1 case 26
+KeybindRules.cs:BoardCapRole	KeybindRules.cs:Run	7	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:BoardCapRole	Keybinds.cs:BoardCapRole	1	939fc47c00dafb60	producer	the board role of the registry for one cap
+KeybindRules.cs:BoardMatchesTheDefaultBoard	KeybindRules.cs:Run	2	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:BuildKeyIndex	KeybindRules.cs:(file scope)	1	bf6416e3117bb2b2	nondisplay	initialises keyIndex, the token parser's key index (rules)
+KeybindRules.cs:ControlsSurfaceAfter	KeybindRules.cs:Run	4	1e5d1f0181f9ee8f	nondisplay	self-test T1 case 26
+KeybindRules.cs:Default	KeybindRules.cs:Defaults	1	67c52db4997f5c22	pass	the default set
+KeybindRules.cs:Default	KeybindRules.cs:LoadToken	1	a2721eb1bc06e2c2	pass	the default a refused or unreadable token loads
+KeybindRules.cs:Default	KeybindRules.cs:ResolveLoaded	4	a1bfe00b2c9776d6	pass	the default a refused loaded row keeps, in the resolved set it returns
+KeybindRules.cs:Default	KeybindRules.cs:Run	3	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:Default	Keybinds.cs:Cfg	1	4c3706e9f3cf36c2	nondisplay	self-test: a config built from the defaults
+KeybindRules.cs:Default	Keybinds.cs:LoadFromConfig	1	d6c9585ff0663b8f	nondisplay	the registry load before the mapping is ready; the registry's readers are the readers manifest
+KeybindRules.cs:Default	Keybinds.cs:ReadRow	1	06a82eed25985501	nondisplay	input: the source a row reads before the mapping is ready
+KeybindRules.cs:Default	Keybinds.cs:ResetAll	1	99d7b2a5d470671c	nondisplay	the values reset-all commits to the registry
+KeybindRules.cs:Default	Keybinds.cs:ResetRow	1	d976ad13014a4086	nondisplay	the value a row reset commits to the registry
+KeybindRules.cs:Default	NativeUI.Keybinds.cs:KeybindRowFace	1	8ad08b4f28d18909	producer	a row's face before the mapping is ready
+KeybindRules.cs:Defaults	KeybindRules.cs:AllDefaultsAccepted	1	8709a54ff87c9c6b	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:BoardCapRole	1	89613ac7a8b0550d	pass	a board cap's role under the default set (no set given, or mutation 24)
+KeybindRules.cs:Defaults	KeybindRules.cs:BoardMatchesTheDefaultBoard	1	3d57f73611b873dd	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:CommitRestores	2	5ca75bebba254660	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:CommitText	1	2f323cc321a0893c	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:CommitsCleanly	2	b74bb719e1c2af87	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:ControlsSurfaceAfter	1	d94b9afbdb5f6bbd	nondisplay	self-test T1 case 26
+KeybindRules.cs:Defaults	KeybindRules.cs:OutcomeOf	1	30cb1d3d25cf0f39	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:PartialNames	2	d3513dd3ecfe7453	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:Ref#2	1	2c81ab5dd82a1561	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:RefOther	1	d0cd5515a6491b7d	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:RefusedUntouched	3	ef9e72cb15cf1c65	nondisplay	self-test helper
+KeybindRules.cs:Defaults	KeybindRules.cs:Run	23	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:FormatToken	KeybindRules.cs:(file scope)	1	bdea44746806dc75	nondisplay	self-test: the FakeStore constructor's config entries
+KeybindRules.cs:FormatToken	KeybindRules.cs:Commit#2	2	82eb58ede9f35a6c	nondisplay	persistence: the config tokens the commit writes and reads back
+KeybindRules.cs:FormatToken	KeybindRules.cs:ControlsSurfaceAfter	1	d94b9afbdb5f6bbd	nondisplay	self-test T1 case 26: the modelled surface
+KeybindRules.cs:FormatToken	KeybindRules.cs:ResolveLoaded	3	a1bfe00b2c9776d6	nondisplay	the load notes, which Keybinds.LoadFromConfig logs
+KeybindRules.cs:FormatToken	KeybindRules.cs:Run	14	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:FormatToken	KeybindRules.cs:StoreMatches	1	416dcb9ee5d89feb	nondisplay	self-test: compares the FakeStore's entries
+KeybindRules.cs:FormatToken	KeybindRules.cs:ToString	1	786c7dc4c7925e92	nondisplay	BindSource's string form is its config token; an implicit ToString call (concatenation, interpolation) is not derived - a disclosed limit; every face a player sees comes from the KeybindFace producer
+KeybindRules.cs:FormatToken	KeybindRules.cs:VerifyLive	2	1b07f762c50304ca	nondisplay	self-test: the FakeStore's live-set diagnostic
+KeybindRules.cs:FormatToken	Keybinds.cs:Init	1	e7e29d0dfbf8d457	nondisplay	log: the bindings at start
+KeybindRules.cs:FormatToken	Keybinds.cs:ResetRow	1	d976ad13014a4086	nondisplay	log: the row reset
+KeybindRules.cs:FormatToken	Keybinds.cs:VerifyAction	1	16ebc885563ea657	nondisplay	a live-set diagnostic that ends in the commit's failure text, which is logged; the player's notice is the fixed KeybindNotSavedText
+KeybindRules.cs:FormatToken	Keybinds.cs:Write	3	fba55cff50524b42	nondisplay	log: the write and the refusal
+KeybindRules.cs:FunctionNumber	KeybindRules.cs:Run	1	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:FunctionNumber	NativeUI.Keybinds.cs:KeybindKeyName	1	2f5fd09b0543b031	producer	an F-key's face
+KeybindRules.cs:GlyphFor	KeybindRules.cs:IsGlyphKey	1	e93704e2ea2444a9	pass	whether the key prints a glyph
+KeybindRules.cs:GlyphFor	NativeUI.Keybinds.cs:KeybindKeyName	1	2f5fd09b0543b031	producer	a glyph key's face
+KeybindRules.cs:IsGlyphKey	KeybindRules.cs:IsTextChanging	1	56126f6eca9a652c	pass	rule 6's glyph arm
+KeybindRules.cs:IsGlyphKey	KeybindRules.cs:Run	1	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:IsTextChanging	KeybindRules.cs:Refuse	1	b55de04bea7fec35	nondisplay	rules verdict: a text-changing key cannot take ChatChannel (TypesText); the player sees only that reason's fixed sentence, which names no key
+KeybindRules.cs:IsTextChanging	KeybindRules.cs:Run	1	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:LoadToken	KeybindRules.cs:Run	3	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:LoadToken	Keybinds.cs:LoadFromConfig	1	d6c9585ff0663b8f	nondisplay	the registry load; the registry's readers are the readers manifest
+KeybindRules.cs:M	KeybindRules.cs:Run	16	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:ParseToken	KeybindRules.cs:Default	1	3b3eb989b38e8cbd	pass	a row's default binding
+KeybindRules.cs:ParseToken	KeybindRules.cs:LoadToken	1	a2721eb1bc06e2c2	pass	a loaded config token's binding
+KeybindRules.cs:ParseToken	KeybindRules.cs:Run	6	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:ResolveLoaded	KeybindRules.cs:ResolveNotes	1	d06f0329cf293ac8	nondisplay	self-test helper
+KeybindRules.cs:ResolveLoaded	KeybindRules.cs:Run	4	1e5d1f0181f9ee8f	nondisplay	self-test T1
+KeybindRules.cs:ResolveLoaded	Keybinds.cs:LoadFromConfig	1	d6c9585ff0663b8f	nondisplay	the registry load: the resolved set becomes the registry, whose readers are the readers manifest
+Keybinds.cs:BoardCapRole	InfoViz.cs:Fill	1	6057685b4137b0c2	producer	the keyboard guide's cap colour
+Keybinds.cs:Override	Keybinds.cs:ApplyJoin	1	299f79c617f04fad	display	writes the join prompt's label, or restores the vanilla one
+Keybinds.cs:Override	Keybinds.cs:ApplyReady	1	af1649f08e31c9bb	display	writes the ready-up prompt's label, or restores the vanilla one
+Keybinds.cs:Override	Keybinds.cs:RefreshAll	1	77055b81e0837fd7	display	after every commit: restores every overridden prompt, or re-applies each visible one
+NativeUI.Keybinds.cs:KbDescHpPrecision	NativeUI.Keybinds.cs:KbRefreshNamedDescs	1	c5f21af97f724f1e	display	re-sets the setting's description, the record field the Settings tab shows
+NativeUI.Keybinds.cs:KbDescHpPrecision	NativeUI.cs:BuildSettingsTab	1	f635113cc2fb5f3f	display	builds the setting with its description
+NativeUI.Keybinds.cs:KbDescInGameChat	NativeUI.Keybinds.cs:KbRefreshNamedDescs	1	c5f21af97f724f1e	display	re-sets the setting's description, the record field the Settings tab shows
+NativeUI.Keybinds.cs:KbDescInGameChat	NativeUI.cs:BuildSettingsTab	1	f635113cc2fb5f3f	display	builds the setting with its description
+NativeUI.Keybinds.cs:KbDescInputOverlay	NativeUI.Keybinds.cs:KbRefreshNamedDescs	1	c5f21af97f724f1e	display	re-sets the setting's description, the record field the Settings tab shows
+NativeUI.Keybinds.cs:KbDescInputOverlay	NativeUI.cs:BuildSettingsTab	1	f635113cc2fb5f3f	display	builds the setting with its description
+NativeUI.Keybinds.cs:KbMoveAndJumpFaces	NativeUI.Keybinds.cs:KbDescInputOverlay	1	8594568d04fc1e1e	pass	the input overlay setting's description
+NativeUI.Keybinds.cs:KbShopItemDesc	NativeUI.cs:ApplyShopRow	1	34c81894b9442b91	display	a shop row's description
+NativeUI.Keybinds.cs:KbShopTabDesc	NativeUI.cs:BuildShopTab	1	9ad00e7d5574301b	display	the shop tab's first description
+NativeUI.Keybinds.cs:KbShopTabDesc	NativeUI.cs:RefreshShop	1	8b8203cc5001dd68	display	the shop category's description
+NativeUI.Keybinds.cs:KeybindChangedToast	Keybinds.cs:OnRoundStart	1	9e044bb0ab3c4cd7	display	shows the binding-changed toast at the round start
+NativeUI.Keybinds.cs:KeybindFace	NativeUI.Keybinds.cs:KeybindRowFace	1	8ad08b4f28d18909	producer	a row's face
+NativeUI.Keybinds.cs:KeybindJoinPrompt	Keybinds.cs:ApplyJoin	1	299f79c617f04fad	display	writes the join prompt's label
+NativeUI.Keybinds.cs:KeybindKeyName	NativeUI.Keybinds.cs:KeybindFace	1	19f7566b5caf28bc	producer	a key binding's face
+NativeUI.Keybinds.cs:KeybindMouseName	NativeUI.Keybinds.cs:KeybindFace	1	19f7566b5caf28bc	producer	a mouse binding's face
+NativeUI.Keybinds.cs:KeybindOverlayCap	CompetitiveUI.cs:DrawInputOverlay	7	86fd3e02f1ba9af3	display	the input overlay's cap labels
+NativeUI.Keybinds.cs:KeybindOverlayCap	CompetitiveUI.cs:OverlaySmall	1	334e56040f37e9d3	pass	whether an input overlay cap label takes the small font
+NativeUI.Keybinds.cs:KeybindOverlayCap	NativeUI.Keybinds.cs:KeybindSemanticCap	1	2a6753ea506e8ca2	producer	the broadcast HUD's cap label
+NativeUI.Keybinds.cs:KeybindReadyPrompt	Keybinds.cs:ApplyReady	1	af1649f08e31c9bb	display	writes the ready-up prompt's label
+NativeUI.Keybinds.cs:KeybindRowFace	CompetitiveUI.cs:DrawChatInput	1	4be333f13d21acf3	display	the chat input's channel hint
+NativeUI.Keybinds.cs:KeybindRowFace	CompetitiveUI.cs:DrawDanceWheel	2	a3b6dcb6d2012b67	display	the dance wheel's hint and its loading notice
+NativeUI.Keybinds.cs:KeybindRowFace	CompetitiveUI.cs:DrawMatchFoundStuckOverlay	1	5aed2f90e72a9624	display	the stuck-room overlay's text
+NativeUI.Keybinds.cs:KeybindRowFace	CompetitiveUI.cs:DrawQuickChat	1	6ea6e40bf85a9330	display	the quick-chat wheel's hint
+NativeUI.Keybinds.cs:KeybindRowFace	InfoLibrary.cs:ControlsOutro	9	a54cf12152ac3e29	display	an Info article's text: the article table's Body / Segments delegates read it and the Info tab renders it through SelectInfoArticle's repaint gate; the derivation stops at the delegate (a disclosed limit)
+NativeUI.Keybinds.cs:KeybindRowFace	InfoLibrary.cs:Cosmetics	1	24b3d09ed8e4e910	display	an Info article's text: the article table's Body / Segments delegates read it and the Info tab renders it through SelectInfoArticle's repaint gate; the derivation stops at the delegate (a disclosed limit)
+NativeUI.Keybinds.cs:KeybindRowFace	InfoLibrary.cs:Spectating	1	9768193b3172cf7f	display	an Info article's text: the article table's Body / Segments delegates read it and the Info tab renders it through SelectInfoArticle's repaint gate; the derivation stops at the delegate (a disclosed limit)
+NativeUI.Keybinds.cs:KeybindRowFace	InfoLibrary.cs:StartHere	1	65e13f7a1edd01ca	display	an Info article's text: the article table's Body / Segments delegates read it and the Info tab renders it through SelectInfoArticle's repaint gate; the derivation stops at the delegate (a disclosed limit)
+NativeUI.Keybinds.cs:KeybindRowFace	InfoLibrary.cs:VanillaBugs	1	4013c6bbff6f4694	display	an Info article's text: the article table's Body / Segments delegates read it and the Info tab renders it through SelectInfoArticle's repaint gate; the derivation stops at the delegate (a disclosed limit)
+NativeUI.Keybinds.cs:KeybindRowFace	InfoViz.cs:Cap	1	68e1511be6dabb5a	producer	the keyboard guide's cap
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KbDescHpPrecision	1	63d5bf327f739dbb	pass	the HP precision setting's description
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KbDescInGameChat	2	32d765596772943b	pass	the in-game chat setting's description
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KbMoveAndJumpFaces	5	0cf5d9cbcfe01b6f	producer	the move and jump faces
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KbShopItemDesc	1	811c0dc09736136d	pass	a dance item's shop description
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KbShopTabDesc	1	7d48383e735d6caf	pass	a shop tab's description
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KeybindChangedToast	1	eb3ea4f80d78430c	pass	the binding-changed toast's text
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KeybindJoinPrompt	1	946fbd2796b0356d	pass	the join prompt's text
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KeybindOverlayCap	1	a021ca9b932a57f7	producer	the input overlay's cap
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KeybindPaintRow	1	befb2074ef840355	display	the Controls row's key face
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KeybindReadyPrompt	1	d6ed6b5d91337bfb	pass	the ready-up prompt's text
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.Keybinds.cs:KeybindRenderPane	1	5c52385ad591cdba	display	the Controls pane's Currently line
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.cs:BuildHomeTab	1	2856179c91037de4	display	the Home tab's chat header
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.cs:LangChatNoteText	1	70fe946c6fc4e401	pass	the Settings language note's text
+NativeUI.Keybinds.cs:KeybindRowFace	NativeUI.cs:RefreshChatLog	3	3b5e2bc0ec7d3713	display	the chat log's viewing and typing headers
+NativeUI.Keybinds.cs:KeybindRowFace	TabStatsOverlay.cs:EnsureLocaleStrings	1	93fc783d6c55ee7a	display	the scoreboard overlay's hint, cached in a field the overlay draws; the derivation stops at the field (a disclosed limit)
+NativeUI.Keybinds.cs:KeybindSemanticCap	BroadcastHud.cs:DrawActionRow	5	678af5032a0311e6	display	the broadcast HUD's action-row cap labels
+NativeUI.cs:LangChatNoteText	NativeUI.Keybinds.cs:KbRepaintLangNoteIfDue	1	0a4ff18e05f501c4	display	repaints the language note through its gate
+NativeUI.cs:LangChatNoteText	NativeUI.cs:BuildSettingsPaneTexts	1	f8921f79e088de5d	display	builds the language note and paints it through its gate

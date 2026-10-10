@@ -36,7 +36,7 @@ Keybinds.cs	KeyCodesFor#2	1	a4cc8dd5dc30f931	input	-	a row's KeyCodes for input 
 Keybinds.cs	LoadFromConfig	5	d6c9585ff0663b8f	registry	-	loads, revalidates and installs the registry
 Keybinds.cs	Matches	1	d6dfadd927536164	input	-	whether an IMGUI key event is a bound row's key
 Keybinds.cs	MatchesUp	1	58ce800912bef01d	input	-	whether an IMGUI key-up event is a bound row's key
-Keybinds.cs	Override	1	ad3447ebe0625520	display	ApplyJoin,ApplyReady	whether the vanilla join and ready-up prompts take the mod's KeybindJoinPrompt / KeybindReadyPrompt face (Jump moved off Space)
+Keybinds.cs	Override	1	69018163e7a18ad0	display	ApplyJoin,ApplyReady,RefreshAll	whether the vanilla join and ready-up prompts take the mod's KeybindJoinPrompt / KeybindReadyPrompt face (Jump moved off Space); RefreshAll re-decides every prompt after a commit
 Keybinds.cs	ReadBoundSource#1	1	f174e813ba89c24a	input	-	a bound source's input state
 Keybinds.cs	ReadBoundSource#2	1	f59a7c9ec6cbb851	input	-	a bound row's input state
 Keybinds.cs	ReadRow	2	06a82eed25985501	input	-	a bound row's input state

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Item 17 fix pass 1 F1, fix pass 2 H1: the binding-surface oracle.
+"""Item 17 fix pass 1 F1, fix pass 2 H1, fix pass 3 H1: the binding-surface oracle.
 
 Every player-visible string that depends on a binding, and every member that
 reads a binding, is ENUMERATED FROM ITS SOURCES, not matched against a
@@ -81,20 +81,67 @@ disposition by default and no file is exempt.
    member), a stale row, a producer not marked producer, and a display row
    whose consumers do not call it are each FATAL.
 
+4. CALLERS (fix pass 3 H1). A reader row is one member; its VALUE travels on
+   to every member that calls it. The callers are DERIVED FROM SOURCE, never
+   listed by hand. The followed members are every value-returning reader
+   except the registry accessors (class Keybinds' value-returning members
+   that read the registry: they ARE roots, so every caller of one is a reader
+   row already), every producer, and every pass consumer below. Every
+   reference to a followed member's name across plugin/ is an edge to the
+   member that encloses it (unqualified inside a type whose chain holds the
+   member's own type, by name since NativeUI is partial; qualified by that
+   type; and for an instance or extension member at every `.Name`, the
+   receiver's type not being resolved - more edges, never fewer;
+   declarations, enum members, an assignment target when the member is a
+   method (a method cannot be assigned: the name is another member's), and
+   the member's own body excluded). Every edge is a row of
+   tools/keybind_surfaces_callers.tsv: source, consumer, the number of
+   references, the digest of the consumer's text (as for a reader row), a
+   class and a note. The class is
+     display     the consumer puts the value, or a decision taken on it, in
+                 front of the player - a display sink (also a member that
+                 returns display text to a path the derivation cannot follow
+                 by name, a delegate table or a field: the note says which);
+     nondisplay  input, a rules verdict, persistence, logging or self-test -
+                 a declared non-display sink (a verdict the player sees only
+                 as a fixed sentence that names no binding is a rules
+                 verdict: the note says so);
+     pass        the consumer returns the value (or one computed from it) to
+                 its own callers, which are derived and dispositioned in turn
+                 (followed caller to caller); it must return a value;
+     producer    the consumer is a binding producer, itself followed.
+   A derived edge with no row (REVERSE DISCOVERY: a caller in any file, the
+   list never consulted), a row whose edge no longer exists (a caller removed
+   or moved), a reference count or consumer digest that differs, a class
+   that does not fit, and a row with no note are each FATAL. The DISPLAY-
+   REACHABLE set of a followed reader is every display consumer reached
+   through pass consumers, with those pass consumers; a display reader's via
+   must EQUAL it (so via is derived output, and the reader's digest hashes
+   every consumer through which its value reaches the player), and a reader
+   of any other role but producer whose value reaches a display consumer is
+   FATAL. The summary prints a digest of the whole graph.
+
 Every P key must be in all four catalogue blocks with the same placeholders,
 and every F payload's keys must be in FIXED_KEYS and occur in the string.
 
 WHAT IT CANNOT SEE (the residual): display text the extractor does not
 harvest - a literal rendered without I18n.Tr or a harvested helper, text
 composed at run time from fragments, a key name produced by an implicit
-ToString of a KeyCode; a binding value carried through a parameter or a
+ToString of a KeyCode or of a BindSource (whose string form is the config
+token); a binding value carried through a parameter or a
 field into a member that reads no root itself (the reader that read it is
-the row, and a display row names its consumers); and a manifest "feeds"
-declaration, which is reviewed, not proven.
+the row, and its callers are derived only as far as a returned value goes:
+a value a consumer stores in a field, hands to a delegate that is invoked
+elsewhere, or passes as an argument is followed no further, and the class
+of the edge where it leaves is reviewed, not proven); a caller reached by
+reflection, by Harmony's own invocation of a patch, through an interface or
+a virtual override, or by an unqualified call from a derived type; and a
+manifest "feeds" declaration, which is reviewed, not proven.
 
 USAGE
     python tools/keybind_surfaces.py check [--tree T]
     python tools/keybind_surfaces.py readers [--tree T]   # census, manifest shape
+    python tools/keybind_surfaces.py callers [--tree T]   # derived caller graph, manifest shape
     python tools/keybind_surfaces.py review [--tree T]    # the rows a review must cover
     python tools/keybind_surfaces.py candidates | sites [--tree T]
 Exit 0 green, 1 red, 2 usage.
@@ -117,6 +164,8 @@ REPO = os.path.dirname(HERE)
 DISP = os.path.join(HERE, "keybind_surfaces.tsv")
 SITES_TSV = os.path.join(HERE, "keybind_surfaces_sites.tsv")
 READERS_TSV = os.path.join(HERE, "keybind_surfaces_readers.tsv")
+CALLERS_TSV = os.path.join(HERE, "keybind_surfaces_callers.tsv")
+CALLER_CLASSES = ("display", "nondisplay", "pass", "producer")
 CODES = ("P", "K", "F", "G", "D", "O", "N")
 RULES = {"P": "P", "K": "K", "O": "O", "N1": "N"}      # rule -> the code it derives
 REVIEWABLE = ("F", "G", "D", "K", "N")   # K only when another site shares the msgid (section 4)
@@ -513,6 +562,232 @@ def read_readers(path):
     return rows, probs
 
 
+# -- callers (fix pass 3 H1): derived from source, never hand-listed --------
+
+TYPE_OPEN = re.compile(r"\b(?:class|struct|interface)\s+(\w+)")
+ENUM_OPEN = re.compile(r"\benum\s+\w+\s*(?::\s*\w+\s*)?\{")
+EXTENSION = re.compile(r"\s*(?:<[^<>()]*>)?\s*\(\s*this\b")
+
+
+def _types(t, fn):
+    """[(name, start, end)]: every class, struct and interface body of fn, in
+    source order (an enclosing type before the types nested in it)."""
+    cache = t.__dict__.setdefault("_type_spans", {})
+    if fn not in cache:
+        masked = t.ext._mask_cs(t.src[fn])
+        out = []
+        for m in TYPE_OPEN.finditer(masked):
+            ob = masked.find("{", m.end())
+            semi = masked.find(";", m.end())
+            if ob < 0 or 0 <= semi < ob:
+                continue
+            out.append((m.group(1), m.start(), t.ext._block_end(masked, ob)))
+        cache[fn] = out
+    return cache[fn]
+
+
+def _enums(t, fn):
+    cache = t.__dict__.setdefault("_enum_spans", {})
+    if fn not in cache:
+        masked = t.mask(t.src[fn])
+        cache[fn] = [(e.start(), t.ext._block_end(masked, e.end() - 1)) for e in ENUM_OPEN.finditer(masked)]
+    return cache[fn]
+
+
+def _member_by_id(t, fn, mid):
+    if fn not in t.src:
+        return None
+    mem = t.members(fn)
+    ids = member_ids(mem)
+    for m in mem:
+        if ids[m.start] == mid:
+            return m
+    return None
+
+
+def value_returning(m):
+    """A property, or a method whose return type is not void."""
+    return m.kind == "property" or not re.search(r"\bvoid\s*$", m.header)
+
+
+def caller_sources(st):
+    """{"File.cs:Member": (file, member id, Member)}: the members whose value
+    the derivation follows - every value-returning member that reads a root,
+    except the value-returning readers of the registry class (they ARE roots:
+    every reader of one is a reader row already), and every producer."""
+    t = st.t
+    a0, z0 = class_span(t, REGISTRY_FILE, REGISTRY_CLASS)
+    out = {}
+    for fn, mid in st.reads:
+        if mid == "(file scope)":
+            continue
+        m = _member_by_id(t, fn, mid)
+        if m is None or not value_returning(m):
+            continue
+        if fn == REGISTRY_FILE and a0 <= m.start < z0 and m.name in st.acc:
+            continue
+        out["%s:%s" % (fn, mid)] = (fn, mid, m)
+    for pfn, pname in PRODUCERS:
+        if pfn not in t.src:
+            continue
+        mem = t.members(pfn)
+        ids = member_ids(mem)
+        for m in mem:
+            if m.name == pname:
+                out["%s:%s" % (pfn, ids[m.start])] = (pfn, ids[m.start], m)
+    return out
+
+
+def caller_refs(t, fn, mid, m):
+    """{(file, consumer id): [positions]}: every reference to member m (id mid
+    of fn) by its name across plugin/. Unqualified, a reference counts inside
+    a type whose chain holds m's own type (by name: NativeUI is partial across
+    files); qualified, `T.Name` counts when T is that type, and every `.Name`
+    counts when m is an instance or extension member (the receiver's type is
+    not resolved: more edges, never fewer). Not references: a declaration of
+    the name (a member, field, local or parameter with an initializer), an
+    enum member, an assignment target when m is a method (a method cannot be
+    assigned: the name is another member's, e.g. a nested type's field), and
+    m's own body."""
+    name = m.name
+    chain = [n for n, a, b in _types(t, fn) if a <= m.start < b]
+    if not chain:
+        return {}
+    own = chain[-1]
+    after = t.ext._mask_cs(t.src[fn])[m.name_at + len(name):m.name_at + len(name) + 200]
+    receiver_free = bool(re.search(r"\bstatic\b", m.header)) and not EXTENSION.match(after)
+    pat = re.compile(r"(?<![\w@])%s\b" % re.escape(name))
+    decls = t.__dict__.setdefault("_decl_at", {})
+    out = {}
+    for fn2 in sorted(t.src):
+        masked = t.mask(t.src[fn2])
+        if name not in masked:
+            continue
+        mem2 = t.members(fn2)
+        ids2 = member_ids(mem2)
+        if fn2 not in decls:
+            decls[fn2] = {x.name_at for x in mem2}
+        enums = _enums(t, fn2)
+        types2 = _types(t, fn2)
+        for h in pat.finditer(masked):
+            p = h.start()
+            if p in decls[fn2] or any(a <= p < b for a, b in enums) or _is_declaration(masked, p, len(name)):
+                continue
+            if m.kind != "property" and re.match(r"\s*(?:=(?![=>])|[-+*/%&|^]=|\?\?=)", masked[p + len(name):p + len(name) + 8]):
+                continue
+            q = p - 1
+            while q >= 0 and masked[q] in " \t\r\n":
+                q -= 1
+            if q >= 0 and masked[q] == ".":
+                if receiver_free:
+                    e = q - 1
+                    if e >= 0 and masked[e] == "?":
+                        e -= 1
+                    while e >= 0 and masked[e] in " \t\r\n":
+                        e -= 1
+                    s = e
+                    while s >= 0 and (masked[s].isalnum() or masked[s] == "_"):
+                        s -= 1
+                    if masked[s + 1:e + 1] != own:
+                        continue
+            elif own not in [n for n, a, b in types2 if a <= p < b]:
+                continue
+            cmid, _ = enclosing(mem2, ids2, p)
+            if fn2 == fn and cmid == mid:
+                continue
+            out.setdefault((fn2, cmid), []).append(p)
+    return out
+
+
+def derive_callers(st, cman):
+    """The caller graph {(source key, consumer key): [positions]}, each key
+    "File.cs:Member". The sources are caller_sources(st); a consumer the
+    callers manifest classes `pass` that returns a value becomes a source in
+    turn, so a value is followed caller to caller until every path ends at a
+    display sink or a declared non-display sink. Sets st.caller_srcs."""
+    t = st.t
+    srcs = caller_sources(st)
+    graph = {}
+    queue = sorted(srcs)
+    done = set()
+    while queue:
+        k = queue.pop(0)
+        if k in done:
+            continue
+        done.add(k)
+        fn, mid, m = srcs[k]
+        for (fn2, cmid), pos in sorted(caller_refs(t, fn, mid, m).items()):
+            ck = "%s:%s" % (fn2, cmid)
+            graph[(k, ck)] = pos
+            row = cman.get((k, ck))
+            if row and row[2] == "pass" and ck not in srcs and cmid != "(file scope)":
+                cm = _member_by_id(t, fn2, cmid)
+                if cm is not None and value_returning(cm):
+                    srcs[ck] = (fn2, cmid, cm)
+                    queue.append(ck)
+    st.caller_srcs = srcs
+    return graph
+
+
+def display_reach(graph, cman):
+    """{source key: set of consumer keys}: the consumers through which the
+    source's value reaches the player - every display consumer, and every
+    pass consumer from which one is reached, with the consumers on that path."""
+    outs = collections.defaultdict(set)
+    for s, c in graph:
+        outs[s].add(c)
+    memo = {}
+
+    def reach(s, path):
+        if s in memo:
+            return memo[s]
+        res = set()
+        for c in sorted(outs.get(s, ())):
+            row = cman.get((s, c))
+            cls = row[2] if row else None
+            if cls == "display":
+                res.add(c)
+            elif cls == "pass" and c not in path:
+                sub = reach(c, path | {c})
+                if sub:
+                    res.add(c)
+                    res |= sub
+        memo[s] = res
+        return res
+
+    return {s: reach(s, {s}) for s in sorted(outs)}
+
+
+def via_name(reader_file, key):
+    """A consumer key as a readers-manifest via entry: "Member" in the
+    reader's own file, "File.cs:Member" elsewhere."""
+    fn, mid = key.split(":", 1)
+    return mid if fn == reader_file else key
+
+
+def caller_digest(t, key, positions):
+    fn, mid = key.split(":", 1)
+    return kid(member_text(t, fn, mid, positions) or "")
+
+
+def read_callers(path):
+    rows, probs = {}, []
+    if not os.path.exists(path):
+        return rows, ["callers manifest %s missing" % path]
+    for n, line in enumerate(io.open(path, encoding="utf-8").read().split("\n"), 1):
+        if not line or line.startswith("#"):
+            continue
+        f = line.split("\t")
+        if len(f) < 6 or ":" not in f[0] or ":" not in f[1] or not f[2].isdigit() \
+                or not re.fullmatch(r"[0-9a-f]{16}", f[3]):
+            probs.append("callers line %d malformed: %r" % (n, line[:80]))
+            continue
+        if (f[0], f[1]) in rows:
+            probs.append("callers line %d: %s of %s twice" % (n, f[1], f[0]))
+        rows[(f[0], f[1])] = (int(f[2]), f[3], f[4], f[5])
+    return rows, probs
+
+
 # -- strings ----------------------------------------------------------------
 
 def harvested(t):
@@ -769,14 +1044,23 @@ class State:
         return True, ""
 
 
-def check(root=REPO, disp_path=None, sites_path=None, verbose=True, readers_path=None):
-    st = State(root)
+def check(root=REPO, disp_path=None, sites_path=None, verbose=True, readers_path=None, callers_path=None,
+          state=None):
+    """state: a State of this same tree to reuse (a test that varies only the
+    readers or callers manifest); built afresh when None."""
+    st = state if state is not None else State(root)
     t, u, blocks = st.t, st.u, st.blocks
     disp, problems = read_disp(disp_path or os.path.join(root, "tools", "keybind_surfaces.tsv"))
     man, p2 = read_sites(sites_path or os.path.join(root, "tools", "keybind_surfaces_sites.tsv"))
     problems += p2
     rman, p3 = read_readers(readers_path or os.path.join(root, "tools", "keybind_surfaces_readers.tsv"))
     problems += p3
+    cman, p4 = read_callers(callers_path or os.path.join(root, "tools", "keybind_surfaces_callers.tsv"))
+    problems += p4
+    # the caller graph, derived from source (section 4 of the docstring)
+    graph = derive_callers(st, cman)
+    srcs = st.caller_srcs
+    reach = display_reach(graph, cman)
 
     # 1. every id dispositioned, every disposition live
     for i, (origin, text, _) in sorted(u.items()):
@@ -831,22 +1115,67 @@ def check(root=REPO, disp_path=None, sites_path=None, verbose=True, readers_path
             problems.append("reader %s:%s role %r unknown" % (fn, mid, role))
         if ((fn, base(mid)) in prod_set) != (role == "producer"):
             problems.append("reader %s:%s role %s, producer %s" % (fn, mid, role, (fn, base(mid)) in prod_set))
+        # fix pass 3 H1: a followed reader's display consumers are DERIVED
+        sk = "%s:%s" % (fn, mid)
+        derived = sorted(via_name(fn, c) for c in reach.get(sk, ())) if sk in srcs else None
         if role == "display":
             if not via:
                 problems.append("display reader %s:%s names no consumer (via, or self)" % (fn, mid))
-            for v in via:
-                if v == "self":
-                    continue
-                vfn, m = resolve_member(t, fn, v)
-                if m is None:
-                    problems.append("display reader %s:%s consumer %s not found once" % (fn, mid, v))
-                elif not re.search(r"(?<![\w])%s\s*\(" % re.escape(base(mid)),
-                                   t.mask(t.src[vfn])[m.start:m.end]):
-                    problems.append("display reader %s:%s consumer %s does not call it" % (fn, mid, v))
+            if derived is not None:
+                named = sorted(v for v in via if v != "self")
+                if named != derived:
+                    problems.append("VIA DIFFERS display reader %s:%s: the manifest names %s, the source reaches "
+                                    "the player through %s" % (fn, mid, ",".join(named) or "-", ",".join(derived) or "-"))
+            else:
+                for v in via:
+                    if v == "self":
+                        continue
+                    vfn, m = resolve_member(t, fn, v)
+                    if m is None:
+                        problems.append("display reader %s:%s consumer %s not found once" % (fn, mid, v))
+                    elif not re.search(r"(?<![\w])%s\s*\(" % re.escape(base(mid)),
+                                       t.mask(t.src[vfn])[m.start:m.end]):
+                        problems.append("display reader %s:%s consumer %s does not call it" % (fn, mid, v))
+        elif derived and role != "producer":
+            problems.append("reader %s:%s role %s, but its value reaches the player through %s: it is a display "
+                            "reader" % (fn, mid, role, ",".join(derived)))
         if not note.strip():
             problems.append("reader %s:%s has no review note" % (fn, mid))
     for k in sorted(set(rman) - set(reads)):
         problems.append("STALE reader %s:%s" % k)
+
+    # 3b. callers (fix pass 3 H1): every edge of the derived graph is a row,
+    # counted and content-addressed; every row is an edge (reverse discovery)
+    edge_digests = []
+    classes = collections.Counter()
+    for (s, c), pos in sorted(graph.items()):
+        fn2, cmid = c.split(":", 1)
+        dg = caller_digest(t, c, pos)
+        edge_digests.append("%s>%s=%s" % (s, c, dg))
+        row = cman.get((s, c))
+        if row is None:
+            problems.append("NEW caller %s of %s (%d reference(s)) is not in the callers manifest" % (c, s, len(pos)))
+            continue
+        cnt, cdg, cls, note = row
+        classes[cls] += 1
+        if cnt != len(pos):
+            problems.append("caller %s of %s references it %d time(s), manifest %d" % (c, s, len(pos), cnt))
+        if cdg != dg:
+            problems.append("CALLER CHANGED %s of %s content %s, manifest %s: review its class again" % (c, s, dg, cdg))
+        is_prod = (fn2, base(cmid)) in prod_set
+        if cls not in CALLER_CLASSES:
+            problems.append("caller %s of %s class %r unknown" % (c, s, cls))
+        elif (cls == "producer") != is_prod:
+            problems.append("caller %s of %s class %s, but it is %sa producer" % (c, s, cls, "" if is_prod else "not "))
+        elif cls == "pass":
+            cm = None if cmid == "(file scope)" else _member_by_id(t, fn2, cmid)
+            if cm is None or not value_returning(cm):
+                problems.append("caller %s of %s is pass, but it returns no value to follow" % (c, s))
+        if not note.strip():
+            problems.append("caller %s of %s has no review note" % (c, s))
+    for k in sorted(set(cman) - set(graph)):
+        problems.append("STALE caller %s of %s: the derived graph has no such edge" % (k[1], k[0]))
+    graph_digest = kid("\n".join(edge_digests))
 
     # 4. every row's note: a rule the derivation agrees with, or a live review
     bdm = st.binding_dependent(rman)
@@ -943,7 +1272,21 @@ def check(root=REPO, disp_path=None, sites_path=None, verbose=True, readers_path
         sum(1 for x in u.values() if x[0] == "V"), len(disp), " ".join("%s=%d" % (c, counts[c]) for c in CODES),
         " ".join("%s=%d" % kv for kv in sorted(tally.items())), len(found), len(fed), len(reads),
         " ".join("%s=%d" % kv for kv in sorted(roles.items())), len(st.acc), len(bdm))
+    summary += " callers=%d [%s] followed=%d graph=%s" % (
+        len(graph), " ".join("%s=%d" % kv for kv in sorted(classes.items())), len(srcs), graph_digest)
     return problems, summary, (t, u, found, disp)
+
+
+def _callers_rows(st, cman):
+    """The derived caller graph in the callers manifest's shape (class and
+    note carried from the manifest when the row exists)."""
+    graph = derive_callers(st, cman)
+    rows = []
+    for (s, c), pos in sorted(graph.items()):
+        old = cman.get((s, c))
+        rows.append((s, c, len(pos), caller_digest(st.t, c, pos), old[2] if old else "?",
+                     old[3] if old else "", pos))
+    return rows
 
 
 def _readers_rows(st, rman):
@@ -964,7 +1307,7 @@ def main(argv=None):
     except Exception:
         pass
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("check", "candidates", "sites", "readers", "review"))
+    ap.add_argument("mode", choices=("check", "candidates", "sites", "readers", "callers", "review"))
     ap.add_argument("--tree", default=REPO)
     a = ap.parse_args(argv)
     if a.mode == "check":
@@ -997,6 +1340,21 @@ def main(argv=None):
                 a0 = src.rfind("\n", 0, p) + 1
                 b0 = src.find("\n", p)
                 print("#READ %s:%s L%d %s" % (fn, mid, src.count("\n", 0, p) + 1, ws(src[a0:b0])[:200]))
+        return 0
+    if a.mode == "callers":
+        # the derived caller graph in the callers manifest's shape, then
+        # each reference's line (fix pass 3 H1)
+        cman, _ = read_callers(os.path.join(a.tree, "tools", "keybind_surfaces_callers.tsv"))
+        rows = _callers_rows(st, cman)
+        for s, c, n, dg, cls, note, pos in rows:
+            print("\t".join([s, c, str(n), dg, cls, note]))
+        for s, c, n, dg, cls, note, pos in rows:
+            fn2 = c.split(":", 1)[0]
+            src = st.t.strip(st.t.src[fn2])
+            for p in pos:
+                a0 = src.rfind("\n", 0, p) + 1
+                b0 = src.find("\n", p)
+                print("#REF %s > %s L%d %s" % (s, c, src.count("\n", 0, p) + 1, ws(src[a0:b0])[:200]))
         return 0
     # review: every row a rule cannot derive, with the digest a review records
     man, _ = read_sites(os.path.join(a.tree, "tools", "keybind_surfaces_sites.tsv"))
