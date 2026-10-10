@@ -165,3 +165,104 @@ def test_m2_the_language_note_repaints_before_it_is_shown():
     rep = _ws(_code(_src(NUIK), "private static void KbRepaintLangNoteIfDue()"))
     assert "if (setLangNoteTxt == null || !setLangNoteGate.Due(Keybinds.Revision)) return;" in rep
     assert "UIFactory.SetTextRaw(setLangNoteTxt, LangChatNoteText());" in rep
+
+
+# -- M3 (round-2 F6): success only when every store agrees ---------------------
+# The decision (pre-check, read-backs, verified rollback) is KeybindRules.Commit,
+# executed by the harness (T1 cases 21 and 27-29, and the keybindfix2 suite's
+# M3 cases). These assert the live store feeds it truthfully and that the one
+# writer tells the player what is true for each outcome.
+
+CAT = PLUGIN / "I18nCatalogues.cs"
+NOT_SAVED = "That control could not be saved to your settings, so nothing was changed."
+RESTORE_UNVERIFIED = ("That change could not be applied, and some controls could not be put back as "
+                      "they were. Restart the game before you play.")
+
+
+def _unescape(s: str) -> str:
+    return re.sub(r'\\(u[0-9a-fA-F]{4}|.)',
+                  lambda m: chr(int(m.group(1)[1:], 16)) if m.group(1).startswith("u") else
+                  {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}.get(m.group(1), m.group(1)), s)
+
+
+def _catalogue_blocks():
+    parts = _src(CAT).split("private static readonly Dictionary<string, string> ")[1:]
+    assert [p[:2] for p in parts] == ["ES", "RU", "UK", "SV"]
+    out = {}
+    for p in parts:
+        out[p[:2]] = {_unescape(m.group(1)): _unescape(m.group(2)) for m in re.finditer(
+            r'^            \["((?:[^"\\]|\\.)*)"\] = "((?:[^"\\]|\\.)*)",\r?$', p, re.M)}
+    return out
+
+
+def _segment(body: str, start: str, ends) -> str:
+    a = body.index(start)
+    b = min([body.index(e, a + len(start)) for e in ends if e in body[a + len(start):]] or [len(body)])
+    return body[a:b]
+
+
+def test_m3_the_live_store_has_no_silent_write():
+    store = _ws(_text(_src(KB), "private sealed class LiveStore : IBindStore"))
+    assert "public string ReadEntry(int row) { return entries[row] != null ? entries[row].Value : null; }" in store
+    write = _ws(_text(_src(KB), "public void WriteEntry(int row, string token)"))
+    # a row without an entry throws; the value is set only past that check
+    assert write.index('if (entries[row] == null) throw new InvalidOperationException("no config entry for "') \
+        < write.index("entries[row].Value = token;")
+    assert "public string VerifyLive(BindSource[] b) { return VerifyAllLiveSets(b); }" in store
+
+
+def test_m3_every_applied_action_is_read_back():
+    src = _src(KB)
+    applied = re.findall(r"ApplyAction\(set\.(\w+), cfg\[(\w+)\]\)",
+                         _code(src, "private static void ApplyGameBindings(PlayerActions set, BindSource[] cfg, MappingState st)"))
+    verified = re.findall(r"VerifyAction\(s\.(\w+), cfg\[(\w+)\], (\w+)\)",
+                          _code(src, "internal static string VerifyAllLiveSets(BindSource[] cfg)"))
+    assert len(applied) == 7
+    assert sorted(applied) == sorted((a, c) for a, c, _ in verified)
+    assert all(c == r for _, c, r in verified), verified
+
+
+def test_m3_the_read_back_asks_inputcontrol_whether_each_source_is_bound():
+    body = _ws(_code(_src(KB), "private static string VerifyAction(PlayerAction a, BindSource want, int row)"))
+    assert "var desired = MakeSource(want);" in body
+    assert "if (desired != null && !a.HasBinding(desired))" in body
+    assert "foreach (var b in a.UnfilteredBindings)" in body
+    assert "if (!(b is KeyBindingSource) && !(b is MouseBindingSource)) continue;" in body
+    assert "if (desired != null && b.Equals(desired)) continue;" in body
+    assert "if (a.HasBinding(b)) return" in body
+    verify = _ws(_code(_src(KB), "internal static string VerifyAllLiveSets(BindSource[] cfg)"))
+    assert "if (!live.Ready) return null;" in verify
+
+
+def test_m3_the_one_writer_tells_what_is_true_for_each_outcome():
+    rules = _ws(_code(_src(RULES), "internal enum CommitOutcome"))
+    # the default branch below is Partial only while the outcome has four values
+    assert rules.strip() == "{ Committed, Refused, RolledBack, Partial }", rules
+    body = _ws(_code(_src(KB), "private static Refusal CommitRows(int[] rows, BindSource[] values, string via)"))
+    assert body.count("KeybindRules.Commit(bound, rows, values, liveStore, out failure, out notRestored);") == 1
+    stops = ("case CommitOutcome.", "default:")
+    refused = _segment(body, "case CommitOutcome.Refused:", stops)
+    assert "NativeUI.KeybindNotSavedText()" in refused and "return Refusal.NotSaved;" in refused
+    rolled = _segment(body, "case CommitOutcome.RolledBack:", stops)
+    assert "NativeUI.KeybindApplyFailedText()" in rolled and "return Refusal.ApplyFailed;" in rolled
+    partial = _segment(body, "default:", ("foreach (int r in rows)",))
+    assert "NativeUI.KeybindRestoreUnverifiedText()" in partial and "return Refusal.RestoreUnverified;" in partial
+    assert "case CommitOutcome.Committed: break;" in body
+    tail = body[body.index("foreach (int r in rows)"):]
+    assert "announceOwed[r] = true;" in tail and tail.rstrip(" }").endswith("return Refusal.None;")
+
+
+def test_m3_the_pane_names_each_new_refusal():
+    body = _ws(_code(_src(NUIK), "private static string KeybindRefusalText(Refusal r)"))
+    assert "case Refusal.NotSaved: return KeybindNotSavedText();" in body
+    assert "case Refusal.RestoreUnverified: return KeybindRestoreUnverifiedText();" in body
+
+
+def test_m3_the_new_outcomes_are_told_in_every_locale():
+    blocks = _catalogue_blocks()
+    for key, sig in ((NOT_SAVED, "internal static string KeybindNotSavedText()"),
+                     (RESTORE_UNVERIFIED, "internal static string KeybindRestoreUnverifiedText()")):
+        assert ('I18n.Tr("%s")' % key) in _text(_src(NUIK), sig), sig
+        for loc in ("ES", "RU", "UK", "SV"):
+            assert blocks[loc].get(key), (loc, key)
+            assert blocks[loc][key] != key, (loc, key)

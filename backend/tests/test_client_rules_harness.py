@@ -263,8 +263,10 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
 # (prompt surface gate), 20 F5 (the loaded set), 21 F6 (the commit), 22 F7
 # (capture reads the mouse for every row), 24 F4 (the board follows the
 # bindings). Fix pass 2: 25 M1 (the independent keyboard-edge source), 26 M2
-# (built help surfaces repaint after a binding revision).
-KEYBIND_MUTATIONS = tuple(range(1, 18)) + (18, 19, 20, 21, 22, 23, 24, 25, 26)
+# (built help surfaces repaint after a binding revision), 27-29 M3 (the
+# commit: a restore is read back, a missing entry refuses, an unsaved entry or
+# a live set that did not take the change is never a success).
+KEYBIND_MUTATIONS = tuple(range(1, 18)) + (18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)
 
 
 def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
@@ -282,12 +284,12 @@ def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= KEYBIND_CASES, "the keybinds suite shrank to %d cases" % run
 
 
-KEYBIND_CASES = 98
+KEYBIND_CASES = 107
 
 
 # Item 17 fix pass 2: the round-2 findings' controls, one instrument that
 # compiles on the reviewed pin and on the fix tip (red there, green here).
-KEYBIND_FIX2_CASES = 7
+KEYBIND_FIX2_CASES = 14
 
 
 def test_the_keybind_fix2_controls_ran_and_none_failed(harness_run):

@@ -26,21 +26,42 @@ namespace CompetitiveRounds
     }
 
     /// <summary>Why a check refused a binding (design section 2.6).</summary>
-    /// ApplyFailed (fix pass 1 F6): the write was valid but committing it
-    /// threw, and every prior state was put back.
-    internal enum Refusal { None, Overlap, Reserved, RescueKey, MouseOnModRow, NoneAsBind, TypesText, WheelModifier, ApplyFailed }
+    /// <remarks>ApplyFailed (fix pass 1 F6, fix pass 2 M3): the write was
+    /// valid but committing it failed, and every prior value was put back AND
+    /// read back equal. NotSaved (M3): a row of the change has no config
+    /// entry, so the change was refused before anything changed.
+    /// RestoreUnverified (M3): the commit failed and some prior value could
+    /// not be verified restored.</remarks>
+    internal enum Refusal { None, Overlap, Reserved, RescueKey, MouseOnModRow, NoneAsBind, TypesText, WheelModifier, ApplyFailed,
+                            NotSaved, RestoreUnverified }
+
+    /// <summary>Fix pass 2 (M3): how one commit ended. Committed: the
+    /// persisted entries, the registry and every live set agree on the new
+    /// values (each read back). Refused: a row has no config entry, and
+    /// nothing changed. RolledBack: the change failed and every prior value
+    /// was put back and read back equal. Partial: the change failed and some
+    /// prior value could not be verified restored - never reported as
+    /// restored.</summary>
+    internal enum CommitOutcome { Committed, Refused, RolledBack, Partial }
 
     /// <summary>Fix pass 1 F6: where an accepted write lands. Keybinds
     /// implements it over the BepInEx entries and the registered action
-    /// sets; the harness with a fake that throws on a chosen step.</summary>
+    /// sets; the harness with a fake that fails on a chosen step.</summary>
     internal interface IBindStore
     {
-        /// <summary>The persisted token of a row.</summary>
+        /// <summary>The persisted token of a row; null when the row has no
+        /// config entry (fix pass 2 M3: the commit then refuses the change
+        /// before anything moves).</summary>
         string ReadEntry(int row);
+        /// <summary>Persist a token; throws when the row has no entry.</summary>
         void WriteEntry(int row, string token);
         /// <summary>Apply the whole set to every live action set; throws on
         /// the first set that fails.</summary>
         void ApplyAll(BindSource[] bound);
+        /// <summary>Fix pass 2 (M3): read every live action set back. Null
+        /// when each carries exactly the game rows of
+        /// <paramref name="bound"/>; otherwise the first disagreement.</summary>
+        string VerifyLive(BindSource[] bound);
     }
 
     /// <summary>What one capture-poll input means (design section 2.5).</summary>
@@ -536,34 +557,72 @@ namespace CompetitiveRounds
             return eff;
         }
 
-        /// <summary>Fix pass 1 F6: one accepted write or reset, all or nothing.
-        /// The rows are written into <paramref name="bound"/> (the registry),
-        /// persisted, then applied to every live set. If any step throws,
-        /// every registry row, every persisted entry the commit touched and
-        /// every live set are put back as they were and false is returned;
-        /// <paramref name="failure"/> names what threw (and a restore step
-        /// that threw too).</summary>
-        internal static bool Commit(BindSource[] bound, int[] rows, BindSource[] values, IBindStore store, out string failure)
+        /// <summary>One accepted write or reset, all or nothing (fix pass 1
+        /// F6, fix pass 2 M3); see the six-argument form.</summary>
+        internal static CommitOutcome Commit(BindSource[] bound, int[] rows, BindSource[] values, IBindStore store, out string failure)
+        {
+            string[] notRestored;
+            return Commit(bound, rows, values, store, out failure, out notRestored);
+        }
+
+        /// <summary>One accepted write or reset, all or nothing. Every row of
+        /// the change must have a config entry to persist to: a row without
+        /// one refuses the whole change before anything moves (Refused).
+        /// Then the rows are written into <paramref name="bound"/> (the
+        /// registry) and persisted, each entry read back equal to what was
+        /// saved, then applied to every live set and every live set read back
+        /// (IBindStore.VerifyLive): Committed only when all of them agree. If
+        /// any step throws or reads back different, every registry row, every
+        /// entry the change touched and every live set are put back, and then
+        /// READ BACK: RolledBack only when every prior value reads back equal,
+        /// otherwise Partial with <paramref name="notRestored"/> naming what
+        /// did not. <paramref name="failure"/> names what failed, each
+        /// restore step that threw, and the verified state. Mutations: 21 the
+        /// a22f80ed commit (success reported, nothing put back), 27 the
+        /// 2811a621 restore (claimed, never read back), 28 the 2811a621
+        /// persistence (no entry check, no read-back), 29 no live-set read
+        /// back.</summary>
+        internal static CommitOutcome Commit(BindSource[] bound, int[] rows, BindSource[] values, IBindStore store,
+                                             out string failure, out string[] notRestored)
         {
             failure = null;
+            notRestored = new string[0];
             var before = (BindSource[])bound.Clone();
             var tokens = new string[rows.Length];
             for (int k = 0; k < rows.Length; k++)
             {
-                try { tokens[k] = store.ReadEntry(rows[k]); }
-                catch { tokens[k] = FormatToken(before[rows[k]]); }
+                string t = null, why = null;
+                try { t = store.ReadEntry(rows[k]); }
+                catch (Exception e0) { why = e0.GetType().Name + ": " + e0.Message; }
+                if (t == null && Mut != 28)
+                {
+                    failure = "no config entry for " + RowIds[rows[k]] + (why != null ? " (" + why + ")" : "") + "; nothing changed";
+                    return CommitOutcome.Refused;
+                }
+                tokens[k] = t ?? FormatToken(before[rows[k]]);
             }
             try
             {
                 for (int k = 0; k < rows.Length; k++) bound[rows[k]] = values[k];
-                for (int k = 0; k < rows.Length; k++) store.WriteEntry(rows[k], FormatToken(values[k]));
+                for (int k = 0; k < rows.Length; k++)
+                {
+                    string want = FormatToken(values[k]);
+                    store.WriteEntry(rows[k], want);
+                    if (Mut == 28) continue;
+                    string got = store.ReadEntry(rows[k]);
+                    if (got != want)
+                        throw new InvalidOperationException("the config entry " + RowIds[rows[k]] + " reads "
+                                                            + (got ?? "nothing") + " after saving " + want);
+                }
                 store.ApplyAll(bound);
-                return true;
+                string live = Mut == 29 ? null : store.VerifyLive(bound);
+                if (live != null) throw new InvalidOperationException("the live sets disagree after the apply: " + live);
+                return CommitOutcome.Committed;
             }
             catch (Exception e)
             {
                 failure = e.GetType().Name + ": " + e.Message;
-                if (Mut == 21) return true;   // a22f80ed: each step's own catch, success reported, nothing put back
+                if (Mut == 21) return CommitOutcome.Committed;   // a22f80ed: each step's own catch, success reported, nothing put back
                 Array.Copy(before, bound, bound.Length);
                 for (int k = 0; k < rows.Length; k++)
                 {
@@ -572,7 +631,26 @@ namespace CompetitiveRounds
                 }
                 try { store.ApplyAll(bound); }
                 catch (Exception e3) { failure += "; restoring the live sets: " + e3.Message; }
-                return false;
+                // Read every prior value back: only what reads back equal is restored.
+                var lost = new List<string>();
+                for (int k = 0; k < rows.Length; k++)
+                {
+                    string got = null;
+                    try { got = store.ReadEntry(rows[k]); } catch { got = null; }
+                    if (got != tokens[k]) lost.Add("entry " + RowIds[rows[k]]);
+                }
+                string liveBack;
+                try { liveBack = store.VerifyLive(bound); }
+                catch (Exception e4) { liveBack = e4.GetType().Name + ": " + e4.Message; }
+                if (liveBack != null) lost.Add("live sets (" + liveBack + ")");
+                if (lost.Count == 0 || Mut == 27)
+                {
+                    failure += "; every prior value restored and read back";
+                    return CommitOutcome.RolledBack;
+                }
+                notRestored = lost.ToArray();
+                failure += "; registry restored; NOT restored: " + string.Join(", ", notRestored);
+                return CommitOutcome.Partial;
             }
         }
 
@@ -1314,16 +1392,40 @@ namespace CompetitiveRounds
             // commit reports failure. Mutation 21 is a22f80ed's per-step catches.
             MutCase(r, 21, "KeybindRules.Commit", "a throw in the apply or in a config write puts every prior state back and reports failure",
                     () => CommitRestores(1, -1) && CommitRestores(0, Jump),
-                    () =>
-                    {
-                        var reg = Defaults();
-                        var store = new FakeStore(Defaults());
-                        string f;
-                        bool ok = Commit(reg, new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f);
-                        var want = Defaults(); want[QuickChat] = K("G"); want[Jump] = K("K");
-                        return ok && f == null && SameSet(reg, want) && StoreMatches(store, want) && store.Applies == 1;
-                    },
+                    () => CommitsCleanly(new FakeStore(Defaults())),
                     () => "apply-throws=" + CommitRestores(1, -1) + " write-throws=" + CommitRestores(0, Jump));
+
+            // -- fix pass 2 M3: success only when every store agrees; a restore is read back --
+            // 27: the forward apply changes the live sets and throws, and the
+            // rollback's apply throws too - or the rollback's config write
+            // throws: the outcome is Partial, naming exactly what did not read
+            // back, never RolledBack. Mutation 27 is the 2811a621 restore,
+            // claimed and never read back. Control: a rollback that works
+            // reads back and is RolledBack.
+            MutCase(r, 27, "KeybindRules.Commit", "a failed restore is reported as partial with the verified state, never as restored",
+                    () => PartialNames(new FakeStore(Defaults()) { ThrowAfterApplyOn = 1, ThrowOnApply = 2 }, "live sets (")
+                          && PartialNames(new FakeStore(Defaults()) { ThrowOnApply = 1, FailWriteRow = Jump, FailWriteFrom = 2 }, "entry Jump"),
+                    () => CommitRestores(1, -1),
+                    () => "apply-and-restore-throw=" + CommitText(new FakeStore(Defaults()) { ThrowAfterApplyOn = 1, ThrowOnApply = 2 })
+                          + " | restore-write-throws=" + CommitText(new FakeStore(Defaults()) { ThrowOnApply = 1, FailWriteRow = Jump, FailWriteFrom = 2 }));
+            // 28: a row with no config entry (its write a silent no-op, as the
+            // 2811a621 store's was) refuses the change before anything moves;
+            // an entry that does not keep the saved token fails and rolls
+            // back. Mutation 28 is the 2811a621 persistence: no entry check,
+            // no read-back, so both report success. Control: a clean commit.
+            MutCase(r, 28, "KeybindRules.Commit", "a missing config entry is a refused change and an unsaved entry is never a success",
+                    () => RefusedUntouched(new FakeStore(Defaults()) { MissingRow = Jump })
+                          && OutcomeOf(new FakeStore(Defaults()) { DropWriteRow = Jump }) == CommitOutcome.RolledBack,
+                    () => CommitsCleanly(new FakeStore(Defaults())),
+                    () => "missing=" + CommitText(new FakeStore(Defaults()) { MissingRow = Jump })
+                          + " | dropped=" + CommitText(new FakeStore(Defaults()) { DropWriteRow = Jump }));
+            // 29: the apply returns but a live set did not take the change:
+            // the live-set read-back fails it and it rolls back. Mutation 29
+            // skips that read-back (success reported). Control: a clean commit.
+            MutCase(r, 29, "KeybindRules.Commit", "a live set that did not take the change is never a success",
+                    () => OutcomeOf(new FakeStore(Defaults()) { IgnoreApply = true }) == CommitOutcome.RolledBack,
+                    () => CommitsCleanly(new FakeStore(Defaults())),
+                    () => "ignored-apply=" + CommitText(new FakeStore(Defaults()) { IgnoreApply = true }));
 
             // -- fix pass 1 F3: prompt overrides target keyboard surfaces only -------
             const string southJoin = "Press\n[<sprite name=BUTTON_SOUTH>]\nto join", spaceJoin = "Press\n[SPACE]\nto join";
@@ -1418,30 +1520,50 @@ namespace CompetitiveRounds
                   "ok");
         }
 
-        /// <summary>F6's fake store: entries in a dictionary, live sets as the
-        /// last applied copy; ApplyAll throws on the call numbered
-        /// <see cref="ThrowOnApply"/> (1-based; 0 never).</summary>
+        /// <summary>F6's fake store: entries as tokens, live sets as the last
+        /// applied copy. ApplyAll throws BEFORE applying on the call numbered
+        /// <see cref="ThrowOnApply"/>, and AFTER applying on the call numbered
+        /// <see cref="ThrowAfterApplyOn"/> (1-based; 0 never). Fix pass 2
+        /// (M3): <see cref="MissingRow"/> has no entry (ReadEntry null, its
+        /// write a silent no-op, the 2811a621 store's shape);
+        /// <see cref="DropWriteRow"/>'s entry does not keep a write;
+        /// <see cref="FailWriteRow"/>'s writes throw from the one numbered
+        /// <see cref="FailWriteFrom"/>; <see cref="IgnoreApply"/> makes every
+        /// apply return without the live sets taking the change.</summary>
         private sealed class FakeStore : IBindStore
         {
             internal readonly string[] Entries = new string[RowCount];
             internal BindSource[] Applied;
-            internal int Applies, ThrowOnApply, ThrowOnWriteRow = -1;
+            internal int Applies, ThrowOnApply, ThrowAfterApplyOn, ThrowOnWriteRow = -1;
+            internal int MissingRow = -1, DropWriteRow = -1, FailWriteRow = -1, FailWriteFrom;
+            internal bool IgnoreApply;
+            private readonly int[] writes = new int[RowCount];
             internal FakeStore(BindSource[] start)
             {
                 for (int i = 0; i < RowCount; i++) Entries[i] = FormatToken(start[i]);
                 Applied = (BindSource[])start.Clone();
             }
-            public string ReadEntry(int row) { return Entries[row]; }
+            public string ReadEntry(int row) { return row == MissingRow ? null : Entries[row]; }
             public void WriteEntry(int row, string token)
             {
+                writes[row]++;
                 if (row == ThrowOnWriteRow) { ThrowOnWriteRow = -1; throw new InvalidOperationException("config write"); }
+                if (row == FailWriteRow && writes[row] >= FailWriteFrom) throw new InvalidOperationException("config write " + writes[row]);
+                if (row == MissingRow || row == DropWriteRow) return;
                 Entries[row] = token;
             }
             public void ApplyAll(BindSource[] b)
             {
                 Applies++;
                 if (Applies == ThrowOnApply) throw new InvalidOperationException("live set apply");
-                Applied = (BindSource[])b.Clone();
+                if (!IgnoreApply) Applied = (BindSource[])b.Clone();
+                if (Applies == ThrowAfterApplyOn) throw new InvalidOperationException("live set apply, after the first set took it");
+            }
+            public string VerifyLive(BindSource[] b)
+            {
+                for (int i = 0; i < RowCount; i++)
+                    if (!Applied[i].Equals(b[i])) return RowIds[i] + " live " + FormatToken(Applied[i]) + ", want " + FormatToken(b[i]);
+                return null;
             }
         }
 
@@ -1458,16 +1580,69 @@ namespace CompetitiveRounds
             return SameSet(s.Applied, set);
         }
 
-        /// <summary>A failed commit: false, and the registry, the entries and
-        /// the live sets all equal the state before it.</summary>
+        /// <summary>A failed commit: RolledBack, and the registry, the entries
+        /// and the live sets all equal the state before it.</summary>
         private static bool CommitRestores(int throwOnApply, int throwOnWriteRow)
         {
             var reg = Defaults();
             var start = Defaults();
             var store = new FakeStore(start) { ThrowOnApply = throwOnApply, ThrowOnWriteRow = throwOnWriteRow };
             string f;
-            bool ok = Commit(reg, new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f);
-            return !ok && f != null && SameSet(reg, start) && StoreMatches(store, start);
+            var o = Commit(reg, new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f);
+            return o == CommitOutcome.RolledBack && f != null && SameSet(reg, start) && StoreMatches(store, start);
+        }
+
+        // -- fix pass 2 M3's two-row change (QuickChat to G, Jump to K) -----------
+
+        private static CommitOutcome OutcomeOf(FakeStore store)
+        {
+            string f;
+            return Commit(Defaults(), new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f);
+        }
+
+        private static string CommitText(FakeStore store)
+        {
+            string f;
+            string[] lost;
+            var o = Commit(Defaults(), new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f, out lost);
+            return o + " [" + string.Join(", ", lost) + "] " + f;
+        }
+
+        /// <summary>A clean commit: Committed, no failure, and the registry,
+        /// the entries and the live sets all carry the change after one apply.</summary>
+        private static bool CommitsCleanly(FakeStore store)
+        {
+            var reg = Defaults();
+            string f;
+            var o = Commit(reg, new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f);
+            var want = Defaults(); want[QuickChat] = K("G"); want[Jump] = K("K");
+            return o == CommitOutcome.Committed && f == null && SameSet(reg, want) && StoreMatches(store, want) && store.Applies == 1;
+        }
+
+        /// <summary>Partial: the not-restored list names
+        /// <paramref name="lostPrefix"/>, the failure says NOT restored, and
+        /// the registry is back as it was.</summary>
+        private static bool PartialNames(FakeStore store, string lostPrefix)
+        {
+            var reg = Defaults();
+            string f;
+            string[] lost;
+            var o = Commit(reg, new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f, out lost);
+            bool named = false;
+            foreach (var l in lost) if (l.StartsWith(lostPrefix, StringComparison.Ordinal)) named = true;
+            return o == CommitOutcome.Partial && named && f != null && f.Contains("NOT restored") && SameSet(reg, Defaults());
+        }
+
+        /// <summary>Refused, the failure names the row, and nothing moved: the
+        /// registry, the entries and the live sets are as before and no apply
+        /// ran.</summary>
+        private static bool RefusedUntouched(FakeStore store)
+        {
+            var reg = Defaults();
+            string f;
+            var o = Commit(reg, new[] { QuickChat, Jump }, new[] { K("G"), K("K") }, store, out f);
+            return o == CommitOutcome.Refused && f != null && f.Contains("no config entry for Jump")
+                   && SameSet(reg, Defaults()) && StoreMatches(store, Defaults()) && store.Applies == 0;
         }
 
         /// <summary>F4's control: under the sixteen defaults every board cap

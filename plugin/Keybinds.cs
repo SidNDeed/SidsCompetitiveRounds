@@ -250,10 +250,11 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The ONE writer of a binding (validate, then commit the
-        /// registry, the config and every live set together - fix pass 1 F6 -
-        /// then the caller refreshes the face). Returns the refusal;
-        /// Refusal.None means written, Refusal.ApplyFailed means the commit
-        /// threw and every prior state was put back.</summary>
+        /// registry, the config and every live set together - fix pass 1 F6,
+        /// fix pass 2 M3 - then the caller refreshes the face). Returns the
+        /// refusal: Refusal.None means written and every store read back
+        /// agreeing; NotSaved, ApplyFailed and RestoreUnverified are the
+        /// commit's Refused, RolledBack and Partial (CommitRows).</summary>
         internal static Refusal Write(int row, BindSource src, string via, out int other)
         {
             other = -1;
@@ -269,44 +270,70 @@ namespace CompetitiveRounds
                 }
             }
             var before = bound[row];
-            if (!CommitRows(new[] { row }, new[] { src }, via)) return Refusal.ApplyFailed;
+            var committed = CommitRows(new[] { row }, new[] { src }, via);
+            if (committed != Refusal.None) return committed;
             Plugin.Log.LogInfo("[KEYBIND] write " + KeybindRules.RowIds[row] + " = " + KeybindRules.FormatToken(src)
                 + " (was " + KeybindRules.FormatToken(before) + ") via " + via);
             return Refusal.None;
         }
 
         /// <summary>BepInEx entries plus the registered action sets: the
-        /// store every commit lands in.</summary>
+        /// store every commit lands in. A row whose entry could not be bound
+        /// at Init has none: it reads null (the commit refuses the change)
+        /// and a write to it throws, never a silent no-op (fix pass 2 M3).</summary>
         private sealed class LiveStore : IBindStore
         {
             public string ReadEntry(int row) { return entries[row] != null ? entries[row].Value : null; }
-            public void WriteEntry(int row, string token) { if (entries[row] != null) entries[row].Value = token; }
+            public void WriteEntry(int row, string token)
+            {
+                if (entries[row] == null) throw new InvalidOperationException("no config entry for " + KeybindRules.RowIds[row]);
+                entries[row].Value = token;
+            }
             public void ApplyAll(BindSource[] b) { ApplyAllLiveSetsOrThrow(b); }
+            public string VerifyLive(BindSource[] b) { return VerifyAllLiveSets(b); }
         }
 
         private static readonly LiveStore liveStore = new LiveStore();
 
-        /// <summary>F6: every accepted write, unbind, per-row reset and the
-        /// reset-all go through here. On success the announce flags, the
-        /// revision (the UI repaints from it) and the prompts follow; on
-        /// failure KeybindRules.Commit has put the registry, the entries and
-        /// the live sets back, and the player is told once.</summary>
-        private static bool CommitRows(int[] rows, BindSource[] values, string via)
+        /// <summary>F6, fix pass 2 M3: every accepted write, unbind, per-row
+        /// reset and the reset-all go through here. Committed (every store
+        /// read back agreeing): the announce flags, the prompts and the
+        /// revision (the UI repaints from it) follow, and None is returned.
+        /// Otherwise the player is told once, by what is TRUE: Refused (a row
+        /// has no config entry, nothing changed) is NotSaved; RolledBack
+        /// (every prior value put back and read back) is ApplyFailed; Partial
+        /// (some prior value not verified restored) is RestoreUnverified,
+        /// logged as an error with what did not read back.</summary>
+        private static Refusal CommitRows(int[] rows, BindSource[] values, string via)
         {
             var before = BoundSnapshot();
             string failure;
-            bool ok = KeybindRules.Commit(bound, rows, values, liveStore, out failure);
+            string[] notRestored;
+            var outcome = KeybindRules.Commit(bound, rows, values, liveStore, out failure, out notRestored);
             Revision++;
-            if (!ok)
+            var warn = new Color(1f, 0.55f, 0.45f);
+            switch (outcome)
             {
-                Plugin.Log.LogWarning("[KEYBIND] commit via " + via + " failed, prior state restored: " + failure);
-                try { CompetitiveUI.ShowNotification(NativeUI.KeybindApplyFailedText(), new Color(1f, 0.55f, 0.45f), 5f); } catch { }
-                return false;
+                case CommitOutcome.Committed:
+                    break;
+                case CommitOutcome.Refused:
+                    Plugin.Log.LogWarning("[KEYBIND] commit via " + via + " refused, nothing changed: " + failure);
+                    try { CompetitiveUI.ShowNotification(NativeUI.KeybindNotSavedText(), warn, 5f); } catch { }
+                    return Refusal.NotSaved;
+                case CommitOutcome.RolledBack:
+                    Plugin.Log.LogWarning("[KEYBIND] commit via " + via + " failed, every prior value restored and read back: " + failure);
+                    try { CompetitiveUI.ShowNotification(NativeUI.KeybindApplyFailedText(), warn, 5f); } catch { }
+                    return Refusal.ApplyFailed;
+                default:
+                    Plugin.Log.LogError("[KEYBIND] commit via " + via + " failed and NOT every prior value could be restored ("
+                        + string.Join(", ", notRestored) + "): " + failure);
+                    try { CompetitiveUI.ShowNotification(NativeUI.KeybindRestoreUnverifiedText(), warn, 8f); } catch { }
+                    return Refusal.RestoreUnverified;
             }
             foreach (int r in rows) if (!before[r].Equals(bound[r])) announceOwed[r] = true;
             try { ReadyPromptPatches.RefreshAll(); } catch (Exception e) { Plugin.Log.LogWarning("[KEYBIND] prompt refresh: " + e.Message); }
-            Plugin.Log.LogInfo("[KEYBIND] re-applied " + LiveSetCount + " live set(s)");
-            return true;
+            Plugin.Log.LogInfo("[KEYBIND] re-applied " + LiveSetCount + " live set(s), every one read back");
+            return Refusal.None;
         }
 
         /// <summary>_x: the only unbind.</summary>
@@ -329,7 +356,8 @@ namespace CompetitiveRounds
                 if (r != row && KeybindRules.Overlap(d, bound[r], CodesForKey)) { rows.Add(r); values.Add(BindSource.None); }
             rows.Add(row);
             values.Add(d);
-            if (!CommitRows(rows.ToArray(), values.ToArray(), "reset of " + KeybindRules.RowIds[row])) return Refusal.ApplyFailed;
+            var committed = CommitRows(rows.ToArray(), values.ToArray(), "reset of " + KeybindRules.RowIds[row]);
+            if (committed != Refusal.None) return committed;
             Plugin.Log.LogInfo("[KEYBIND] reset " + KeybindRules.RowIds[row] + " = " + KeybindRules.FormatToken(d)
                 + (rows.Count > 1 ? " (freed " + string.Join(",", rows.Take(rows.Count - 1).Select(x => KeybindRules.RowIds[x]).ToArray()) + ")" : ""));
             return Refusal.None;
@@ -342,7 +370,7 @@ namespace CompetitiveRounds
             var rows = new int[KeybindRules.RowCount];
             var values = new BindSource[KeybindRules.RowCount];
             for (int i = 0; i < KeybindRules.RowCount; i++) { rows[i] = i; values[i] = KeybindRules.Default(i); }
-            if (CommitRows(rows, values, "reset all")) Plugin.Log.LogInfo("[KEYBIND] reset all: every row at its default");
+            if (CommitRows(rows, values, "reset all") == Refusal.None) Plugin.Log.LogInfo("[KEYBIND] reset all: every row at its default");
         }
 
         // =================================================================
@@ -586,6 +614,54 @@ namespace CompetitiveRounds
                 if (s == null) continue;
                 ApplyGameBindings(s, cfg, live);
             }
+        }
+
+        /// <summary>Fix pass 2 M3: the read-back of every live set against
+        /// the bindings a commit (or its rollback) meant to leave there,
+        /// through InControl's public HasBinding (an equal source is in the
+        /// action AND bound to it). Null when every set agrees, or when the
+        /// accessor is not validated (ApplyGameBindings changed nothing then,
+        /// so there is nothing to disagree); otherwise the first
+        /// disagreement, named by set and row.</summary>
+        internal static string VerifyAllLiveSets(BindSource[] cfg)
+        {
+            if (!live.Ready) return null;
+            liveSets.RemoveAll(w => !w.IsAlive);
+            int i = 0;
+            foreach (var w in liveSets.ToArray())
+            {
+                var s = w.Target as PlayerActions;
+                if (s == null) continue;
+                i++;
+                string bad = VerifyAction(s.Up, cfg[MoveUp], MoveUp)
+                             ?? VerifyAction(s.Down, cfg[MoveDown], MoveDown)
+                             ?? VerifyAction(s.Left, cfg[MoveLeft], MoveLeft)
+                             ?? VerifyAction(s.Right, cfg[MoveRight], MoveRight)
+                             ?? VerifyAction(s.Jump, cfg[Jump], Jump)
+                             ?? VerifyAction(s.Fire, cfg[Fire], Fire)
+                             ?? VerifyAction(s.Block, cfg[Block], Block);
+                if (bad != null) return "live set " + i + ": " + bad;
+            }
+            return null;
+        }
+
+        /// <summary>One action against the one keyboard/mouse source it must
+        /// carry (none for an unbound row): the desired source is bound to
+        /// it, and no other keyboard or mouse source is. Controller sources
+        /// are outside the partition, as in ApplyAction.</summary>
+        private static string VerifyAction(PlayerAction a, BindSource want, int row)
+        {
+            if (a == null) return null;
+            var desired = MakeSource(want);
+            if (desired != null && !a.HasBinding(desired))
+                return KeybindRules.RowIds[row] + " does not carry " + KeybindRules.FormatToken(want);
+            foreach (var b in a.UnfilteredBindings)
+            {
+                if (!(b is KeyBindingSource) && !(b is MouseBindingSource)) continue;
+                if (desired != null && b.Equals(desired)) continue;
+                if (a.HasBinding(b)) return KeybindRules.RowIds[row] + " still carries " + b.Name;
+            }
+            return null;
         }
 
         internal static void ApplyGameBindings(PlayerActions set)

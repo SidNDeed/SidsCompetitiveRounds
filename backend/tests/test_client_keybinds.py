@@ -647,10 +647,13 @@ def test_f3_the_ready_override_keeps_its_seat_gate():
 # These assert every writer reaches it and the apply step does not swallow.
 
 def test_f6_every_writer_commits_through_the_transaction():
+    # Fix pass 2 M3: CommitRows returns the refusal its outcome maps to, and
+    # each writer returns it unchanged (NotSaved / ApplyFailed /
+    # RestoreUnverified), so the pane and the toast say what is true.
     src = _src(KB)
     write = _code(src, "internal static Refusal Write(int row, BindSource src, string via, out int other)")
     assert len(re.findall(r"\bCommitRows\(", write)) == 1
-    assert "return Refusal.ApplyFailed;" in write
+    assert "if (committed != Refusal.None) return committed;" in write
     assert not re.search(r"\bbound\[row\]\s*=", write)
     assert "entries[" not in write
     for sig in ("internal static Refusal ResetRow(int row)", "internal static void ResetAll()"):
@@ -658,7 +661,9 @@ def test_f6_every_writer_commits_through_the_transaction():
         assert len(re.findall(r"\bCommitRows\(", body)) == 1, sig
         assert not re.search(r"\bbound\[[^\]]+\]\s*=", body), sig
         assert not re.search(r"\bWrite\(", body), sig
-    commit = _code(src, "private static bool CommitRows(int[] rows, BindSource[] values, string via)")
+    reset_row = _code(src, "internal static Refusal ResetRow(int row)")
+    assert "if (committed != Refusal.None) return committed;" in reset_row
+    commit = _code(src, "private static Refusal CommitRows(int[] rows, BindSource[] values, string via)")
     assert len(re.findall(r"KeybindRules\.Commit\(", commit)) == 1
     assert "NativeUI.KeybindApplyFailedText()" in commit
     masked = mask_code(src)

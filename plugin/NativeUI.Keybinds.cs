@@ -185,15 +185,33 @@ namespace CompetitiveRounds
                 case Refusal.RescueKey: return I18n.Tr("F5 stays on the menu control.");
                 case Refusal.WheelModifier: return I18n.Tr("The two wheels cannot take a modifier key.");
                 case Refusal.ApplyFailed: return KeybindApplyFailedText();
+                case Refusal.NotSaved: return KeybindNotSavedText();
+                case Refusal.RestoreUnverified: return KeybindRestoreUnverifiedText();
                 default: return "";
             }
         }
 
-        /// <summary>Fix pass 1 F6: a valid change whose commit threw; every
-        /// control was put back as it was.</summary>
+        /// <summary>Fix pass 1 F6, fix pass 2 M3: a valid change whose commit
+        /// failed; every prior value was put back AND read back as it was
+        /// (CommitOutcome.RolledBack only).</summary>
         internal static string KeybindApplyFailedText()
         {
             return I18n.Tr("That change could not be applied, so every control was put back as it was.");
+        }
+
+        /// <summary>Fix pass 2 M3: a row the change touches has no config
+        /// entry (CommitOutcome.Refused); nothing was changed.</summary>
+        internal static string KeybindNotSavedText()
+        {
+            return I18n.Tr("That control could not be saved to your settings, so nothing was changed.");
+        }
+
+        /// <summary>Fix pass 2 M3: a failed change whose rollback could not
+        /// be verified everywhere (CommitOutcome.Partial); never claims the
+        /// controls were restored.</summary>
+        internal static string KeybindRestoreUnverifiedText()
+        {
+            return I18n.Tr("That change could not be applied, and some controls could not be put back as they were. Restart the game before you play.");
         }
 
         /// <summary>The vanilla join prompt, naming the bound Jump control.</summary>
