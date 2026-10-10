@@ -583,7 +583,7 @@
           ],
           "main",
           "submit_match",
-          "d37dc52d8ebeede8cf91c6a2c9ab0e3a6d641ba6"
+          "b6ee189901b1a4bb8e79e4277f8ceb98ce867a4e"
         ],
         [
           "/api/v1/matches/casual-dc",
@@ -961,7 +961,7 @@
           ],
           "main",
           "get_player_matches",
-          "88b0f32892ea85bf4cdc279846441415717bdf2b"
+          "db5feb3d050c47995bddf11cd100da2eaf145760"
         ],
         [
           "/api/v1/players/{steam_id}/matches/summary",
@@ -1096,7 +1096,7 @@
           ],
           "main",
           "series_preflight",
-          "5fa3f4c18bd73fb795110216575fa1c6e06d91bb"
+          "27e392198f3a0f37515f61f111d0e88140734707"
         ],
         [
           "/api/v1/series/recent",
@@ -1105,7 +1105,7 @@
           ],
           "main",
           "get_recent_series",
-          "e1fb6d77b47e91259f797bb4b1a5a5af411de2a9"
+          "3d345abe93d4ac9782c9f38529454ae057b1bf9d"
         ],
         [
           "/api/v1/series/recent-multimode",
@@ -1195,7 +1195,7 @@
           ],
           "main",
           "team_series_recent",
-          "f4e42d21fed88c5e3d97cfccca928da6d0525b6b"
+          "f957a830b3cd7efa2262600daec92d17d6d1c24c"
         ],
         [
           "/api/v1/team/series/{series_id}/live-points",
@@ -1213,7 +1213,7 @@
           ],
           "main",
           "team_series_report_dc",
-          "34380c55bf36a31315d98f6c000b51059c191ab3"
+          "8abce0df2720c46c3a5cffb43e91f6d3baed4ff7"
         ],
         [
           "/api/v1/team/series/{series_id}/spawn-confirm",
@@ -1768,7 +1768,7 @@
           ],
           "main",
           "ffa_recent",
-          "0b25590cf53d7345c4bb28aaba24735d3073c2ea"
+          "0b3c2dbd00d2b9c485b43ac1b20e05860572c367"
         ],
         [
           "/api/v1/health",
@@ -1912,7 +1912,7 @@
           ],
           "main",
           "ack_channel_post",
-          "10f801722b67bd4fcdf83da08cb4779932f38493"
+          "0bff1daa1884ad0ae50030d173c1cddad4e97509"
         ],
         [
           "/api/v1/internal/channel-posts/pending",
