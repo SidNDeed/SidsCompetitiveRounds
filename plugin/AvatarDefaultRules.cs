@@ -490,6 +490,20 @@ namespace CompetitiveRounds
             return popupPick != null && pick == popupPick;
         }
 
+        /// <summary>Fix pass 4 (H9, M3): whether the SelectFace postfix (E9)
+        /// defers instead of evaluating. True while item 19's own apply is
+        /// selecting (AvatarDefaults.Apply holds the depth around its select):
+        /// that apply's read-back decides whether the selection committed, and
+        /// a debt it keeps is retried by a LATER E6, E7 or E13. A synchronous
+        /// re-entry chose the same restoration again before the outer
+        /// read-back, and a select that returns without committing recursed
+        /// with no bound. A selection the player makes (depth 0) is evaluated
+        /// as before.</summary>
+        internal virtual bool DefersSelectEdge(int ownedApplyDepth)
+        {
+            return ownedApplyDepth > 0;
+        }
+
         /// <summary>Fix pass 3 (H3): whether a popup face the ledger owes is
         /// still owed (the deferral is bounded; past the bound vanilla's face
         /// stands and the ledger says so).</summary>

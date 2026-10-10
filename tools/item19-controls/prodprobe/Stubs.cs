@@ -285,19 +285,50 @@ public class CharacterCreatorHandler
     // read-back shows the selection unmoved). ThrowAfterCommit: it writes the
     // selection, the postfix runs, then it throws (vanilla's ClickButton
     // repainting the portrait frames after the select).
-    internal static int ThrowBeforeCommit, NoCommit, ThrowAfterCommit;
+    //
+    // Fix pass 4 (H9, M3): a select that returns NORMALLY runs the postfix
+    // whether or not it wrote the selection, as Harmony runs a postfix
+    // whenever the original returns normally; so NoCommit now runs it too.
+    // NoCommitNoPostfix is the fix pass 3 form (it returned before the
+    // postfix, which hid the postfix's re-entry from the probe), kept only
+    // as the separately named negative (H9rmask, M3xmask).
+    // PersistentNoCommit: every select returns normally without writing (a
+    // persistent no-op), postfix included.
+    internal static int ThrowBeforeCommit, NoCommit, ThrowAfterCommit, NoCommitNoPostfix;
+    internal static bool PersistentNoCommit;
+
+    // Fix pass 4 (H9): the selects in progress (a postfix that selects again
+    // from inside a select nests one deeper), the deepest nesting seen, and
+    // the bound: a select nested past MaxDepth throws, so a re-entry without
+    // a bound ends in a counted fault the caller catches instead of a stack
+    // overflow, and DeepestDepth shows it.
+    internal static int Depth, DeepestDepth;
+    internal const int MaxDepth = 8;
 
     /// <summary>Vanilla's single writer of the selection, then item 19's
     /// Harmony postfix on it (edge E9), exactly as the patched game runs it.</summary>
     internal void SelectFace(int faceID, PlayerFace selectedFace, int faceSlot)
     {
         SelectCalls++;
-        if (ThrowBeforeCommit > 0) { ThrowBeforeCommit--; throw new NullReferenceException("probe: the select threw before it committed"); }
-        if (NoCommit > 0) { NoCommit--; return; }
-        selectedFaceID[faceID] = faceSlot;
-        selectedPlayerFaces[faceID] = selectedFace;
-        CompetitiveRounds.ProdProbe.SelectFacePostfix(faceID);
-        if (ThrowAfterCommit > 0) { ThrowAfterCommit--; throw new NullReferenceException("probe: the frame repaint threw after the select committed"); }
+        Depth++;
+        try
+        {
+            if (Depth > DeepestDepth) DeepestDepth = Depth;
+            if (Depth > MaxDepth) throw new InvalidOperationException("probe: the select re-entered past the depth bound " + MaxDepth);
+            if (ThrowBeforeCommit > 0) { ThrowBeforeCommit--; throw new NullReferenceException("probe: the select threw before it committed"); }
+            if (NoCommitNoPostfix > 0) { NoCommitNoPostfix--; return; }
+            bool commit = true;
+            if (PersistentNoCommit) commit = false;
+            else if (NoCommit > 0) { NoCommit--; commit = false; }
+            if (commit)
+            {
+                selectedFaceID[faceID] = faceSlot;
+                selectedPlayerFaces[faceID] = selectedFace;
+            }
+            CompetitiveRounds.ProdProbe.SelectFacePostfix(faceID);
+            if (commit && ThrowAfterCommit > 0) { ThrowAfterCommit--; throw new NullReferenceException("probe: the frame repaint threw after the select committed"); }
+        }
+        finally { Depth--; }
     }
 }
 

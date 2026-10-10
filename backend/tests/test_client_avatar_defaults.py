@@ -664,13 +664,16 @@ LEDGER_FIELDS = ["private readonly AvatarRules rules;",
 ENTRY_FIELDS = ["internal string Pick;", "internal string Value;", "internal bool Clear;",
                 "internal double DeferredSince = -1;"]
 PCARRIERS = "internal static class PopupCarriers"
+# Fix pass 4 (H9, M3): the depth of item 19's own select and the E9 postfixes
+# it deferred, raised and restored around that one select (S36 pins where).
+AD_STATE = ["private static Sprite ringGold, ringBlue, ringBoth, ringRed;", "private static bool ringsBuilt;",
+            "private static int ownedApplyDepth;", "private static int deferredSelectEdges;"]
 
 
 def _s20(src):
     fd = _class_fields(src[AD])
     state = [st for st in fd["AvatarDefaults"] if " const " not in " " + st]
-    assert state == ["private static Sprite ringGold, ringBlue, ringBoth, ringRed;",
-                     "private static bool ringsBuilt;"], state
+    assert state == AD_STATE, state
     for patch in ("AvatarLoadFacesPatch", "AvatarSelectFacePatch", "AvatarCreatePlayerPatch"):
         assert fd[patch] == [], (patch, fd[patch])
     fr = _class_fields(src[AR])
@@ -1296,6 +1299,48 @@ def test_s36_a_second_carrier_value_read_reds():
            lambda s: _replace(s, PL, '"on arrival"', '"when it arrived"'))
 
 
+# S36 (fix pass 4, H9 and M3): the depth guard ---------------------------------
+#
+# Harmony runs the SelectFace postfix (E9) whenever SelectFace returns
+# normally, also when the selection did not move. Inside item 19's own apply
+# the postfix defers (AvatarRules.DefersSelectEdge over the depth Apply holds
+# around its one select), so Apply's read-back alone decides and a LATER edge
+# retries; no synchronous re-entry of the evaluator.
+
+SELECT_PATCH = "internal static class AvatarSelectFacePatch"
+GUARD = "if (new AvatarRules().DefersSelectEdge(AvatarDefaults.OwnedApplyDepth)) { AvatarDefaults.SelectEdgeDeferred(); return; }"
+
+
+def _s36_guard(src):
+    post = _body(src[AD], "private static void Postfix(int faceID)", SELECT_PATCH)
+    g, e = post.find(GUARD), post.find('AvatarDefaults.Evaluate("E9-select");')
+    assert g != -1 and e != -1 and g < e, "the E9 postfix does not defer inside the owned apply before it evaluates"
+    assert post.count("AvatarDefaults.Evaluate(") == 1, "the E9 postfix evaluates more than once"
+    ap = _body(src[AD], "private static int Apply(int slot, string tag)", ADC)
+    assert ap.count("ownedApplyDepth++;") == 1 and ap.count("finally { ownedApplyDepth--; }") == 1, \
+        "the depth is not held once around the select"
+    inc, dec = ap.find("ownedApplyDepth++;"), ap.find("finally { ownedApplyDepth--; }")
+    sel = [ap.find("hit.ClickButton();"), ap.find("cch.SelectFace(0, face, slot);")]
+    assert all(inc < s < dec for s in sel), "a select outside the held depth"
+    assert ap.find("int now = ReadLive(CharacterCreatorHandler.instance);") > dec, "the read-back does not follow the select"
+    whole = _code(src[AD])
+    assert whole.count("ownedApplyDepth++") == 1 and whole.count("ownedApplyDepth--") == 1 \
+        and "ownedApplyDepth =" not in whole, "the depth is written outside Apply's select"
+    return True
+
+
+def test_s36_the_e9_postfix_defers_inside_the_owned_apply():
+    _check(_s36_guard,
+           lambda s: _replace(s, AD, GUARD, ""),
+           lambda s: _replace(s, AD, "if (faceID != 0) return;", "if (faceID != 0) { return; }"))
+
+
+def test_s36_a_select_outside_the_held_depth_reds():
+    _check(_s36_guard,
+           lambda s: _replace(s, AD, "ownedApplyDepth++;", ""),
+           lambda s: _replace(s, AD, 'fault = "the select threw " + ex.GetType().Name', 'fault = "the select threw: " + ex.GetType().Name'))
+
+
 # S35 (fix pass 2, H6 M8 BR-M4 L1 H9 M3): the production probe ----------------
 #
 # tools/item19-controls/prodprobe compiles THIS tree's plugin/AvatarDefaults.cs
@@ -1312,9 +1357,12 @@ PRODPROBE_IDS = ("H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M
                  # read-back (H9t, H9r, M3x), the line on every exit (M8e2, M8e3,
                  # M8def, M8exc), the popup's remote arm (H3remote)
                  "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc", "H3remote",
-                 # fix pass 4 (Codex BUILD round 4): the pick binding
+                 # fix pass 4 (Codex BUILD round 4): the fix pass 3 non-commit
+                 # forms as named negatives (H9rmask, M3xmask; H9r and M3x now
+                 # run the E9 postfix), a persistent no-op select (H9loop), the
+                 # postfix deferred then retried (H9defer), the pick binding
                  # (H3late, H3after, H3before)
-                 "H3late", "H3after", "H3before")
+                 "H9rmask", "M3xmask", "H9loop", "H9defer", "H3late", "H3after", "H3before")
 
 
 def _dotnet():

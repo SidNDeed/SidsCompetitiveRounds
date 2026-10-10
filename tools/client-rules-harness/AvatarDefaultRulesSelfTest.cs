@@ -1076,6 +1076,137 @@ namespace CompetitiveRounds
                 && s.Equipped.Count == 2 && s.Equipped[1] == Bd(Wire(6), 1, 1) && s.NotesWith("deferred") == 0;
         }
 
+        /// <summary>H9 and M3 (fix pass 4): a seat moved as AvatarDefaults moves
+        /// it, whose apply is the OWNED select with the SelectFace postfix (E9)
+        /// that Harmony runs on every normal return of the select. The postfix
+        /// defers when AvatarRules.DefersSelectEdge says so (the select's depth
+        /// is held around it, as AvatarDefaults.Apply holds it), else it
+        /// evaluates again, one select deeper. A select nested past Bound gives
+        /// up (the harness's depth bound: in production the stand-in throws and
+        /// Apply catches it), so a re-entry without a bound ends here instead of
+        /// overflowing the stack, and Deepest shows it. NoOp: every select
+        /// returns normally without committing (a persistent no-op);
+        /// NoCommitOnce: the next one does; ThrowOnce: the next one throws
+        /// before it commits (no postfix runs).</summary>
+        private sealed class ReentrantSeat
+        {
+            internal const int Bound = 8;
+            internal int Live, Home = -1, Selects, Depth, Deepest, Deferred;
+            internal bool NoOp;
+            internal int NoCommitOnce, ThrowOnce;
+            private readonly AvatarRules rules;
+
+            internal ReentrantSeat(AvatarRules r, int live) { rules = r; Live = live; }
+
+            internal AvatarDecision Evaluate(AvatarLivenessIn l, AvatarFacingIn f, AvatarSetting s, bool facesMissing = false)
+            {
+                var x = In(l, f, s, Live, Home);
+                if (facesMissing) x.Faces = null;
+                var d = rules.Evaluate(x);
+                if (d.Gated || d.NothingToRead) return d;
+                int held = rules.HomeBeforeApply(Home, d);
+                Home = held;
+                int after = d.Apply >= 0 ? Apply(d.Apply, l, f, s) : Live;
+                Home = rules.HomeAfterApply(held, d, after);
+                return d;
+            }
+
+            private int Apply(int slot, AvatarLivenessIn l, AvatarFacingIn f, AvatarSetting s)
+            {
+                Selects++;
+                Depth++;
+                if (Depth > Deepest) Deepest = Depth;
+                try
+                {
+                    if (Depth > Bound) return Live;                    // the bound: this select gives up
+                    if (ThrowOnce > 0) { ThrowOnce--; return Live; }  // threw before committing: no postfix
+                    bool commit = !NoOp;
+                    if (commit && NoCommitOnce > 0) { NoCommitOnce--; commit = false; }
+                    if (commit) Live = slot;
+                    if (rules.DefersSelectEdge(Depth)) Deferred++;     // E9 inside the owned apply
+                    else Evaluate(l, f, s);                            // E9 re-entering the evaluator
+                }
+                finally { Depth--; }
+                return Live;                                           // the read-back
+            }
+        }
+
+        /// <summary>H9 (fix pass 4): a persistent no-op select. Each confirmed
+        /// exit (E6, E7) and the deferred edge (E13) makes ONE select and keeps
+        /// the one debt; nothing nests; the first trigger after the select
+        /// works again repays it.</summary>
+        private static bool H9Loop(AvatarRules r, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var seat = new ReentrantSeat(r, 3);
+            seat.Evaluate(NotLive(), Room(false, Unmodded()), s);             // 3 -> 1, home 3
+            int forced = seat.Live, held = seat.Home;
+            seat.NoOp = true;
+            int s0 = seat.Selects;
+            seat.Evaluate(NotLive(), Menu(), s);                              // E6
+            int e6 = seat.Selects - s0, deep6 = seat.Deepest, h6 = seat.Home;
+            seat.Evaluate(NotLive(), Menu(), s);                              // E7
+            int e7 = seat.Selects - s0 - e6, h7 = seat.Home;
+            seat.Evaluate(NotLive(), Menu(), s);                              // E13
+            int e13 = seat.Selects - s0 - e6 - e7, h13 = seat.Home, deep = seat.Deepest;
+            seat.NoOp = false;
+            seat.Evaluate(NotLive(), Menu(), s);                              // the next trigger, the select working
+            got = "forced live=" + forced + " home=" + held + " | a no-op select: E6 selects " + e6 + " (deepest " + deep6
+                + ", bound " + ReentrantSeat.Bound + ") home " + h6 + " | E7 selects " + e7 + " home " + h7
+                + " | E13 selects " + e13 + " home " + h13 + " | deepest overall " + deep
+                + " | the select works again: live " + seat.Live + " home " + seat.Home + ", E9 deferrals " + seat.Deferred;
+            return forced == 1 && held == 3 && e6 == 1 && e7 == 1 && e13 == 1 && deep6 == 1 && deep == 1
+                && h6 == 3 && h7 == 3 && h13 == 3 && seat.Live == 3 && seat.Home == -1;
+        }
+
+        /// <summary>H9 (fix pass 4): the E9 postfix fires inside the owned apply
+        /// of a confirmed exit whose select returns without committing: it
+        /// defers, the read-back keeps the debt, and a LATER confirmed exit
+        /// (E7) retries and commits.</summary>
+        private static bool H9Defer(AvatarRules r, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var seat = new ReentrantSeat(r, 3);
+            seat.Evaluate(NotLive(), Room(false, Unmodded()), s);             // 3 -> 1, home 3
+            seat.NoCommitOnce = 1;
+            int s0 = seat.Selects, d0 = seat.Deferred;
+            seat.Evaluate(NotLive(), Menu(), s);                              // E6: not committed
+            int e6 = seat.Selects - s0, deferred = seat.Deferred - d0, l6 = seat.Live, h6 = seat.Home;
+            seat.Evaluate(NotLive(), Menu(), s);                              // E7, the later trigger
+            int e7 = seat.Selects - s0 - e6;
+            got = "E6 whose select does not commit: selects " + e6 + ", E9 deferred " + deferred + ", live " + l6 + " home " + h6
+                + " | E7 retries: selects " + e7 + ", live " + seat.Live + " home " + seat.Home;
+            return e6 == 1 && deferred == 1 && l6 == 1 && h6 == 3 && e7 == 1 && seat.Live == 3 && seat.Home == -1;
+        }
+
+        /// <summary>M3 (fix pass 4, the fix pass 3 M3x re-run with the E9
+        /// postfix): repeated confirmed exits, the first with the character
+        /// data missing, the second whose select throws before it commits, the
+        /// third whose select returns normally without committing (the postfix
+        /// runs), keep the one debt until a later trigger commits it.</summary>
+        private static bool M3Reentry(AvatarRules r, out string got)
+        {
+            var s = Set(true, 2, 1);
+            var seat = new ReentrantSeat(r, 3);
+            seat.Evaluate(NotLive(), Room(false, Unmodded()), s);             // 3 -> 1, home 3
+            var e1 = seat.Evaluate(Live(), Menu(), s, facesMissing: true);    // E6, the data missing
+            int h1 = seat.Home;
+            seat.ThrowOnce = 1;
+            seat.Evaluate(Live(), Menu(), s);                                 // E7, the select throws
+            int h2 = seat.Home, l2 = seat.Live;
+            seat.NoCommitOnce = 1;
+            int s0 = seat.Selects;
+            seat.Evaluate(NotLive(), Menu(), s);                              // E6 again: no commit, the postfix runs
+            int e3 = seat.Selects - s0, h3 = seat.Home, l3 = seat.Live;
+            seat.Evaluate(NotLive(), Menu(), s);                              // E13, which commits
+            got = "exit with the data missing: deferred=" + e1.RestorationDeferred + " home " + h1
+                + " | exit, the select throws: live " + l2 + " home " + h2
+                + " | exit, no commit with the postfix: selects " + e3 + " live " + l3 + " home " + h3
+                + " | the deferred edge: live " + seat.Live + " home " + seat.Home + ", deepest " + seat.Deepest;
+            return e1.NothingToRead && e1.RestorationDeferred && h1 == 3 && h2 == 3 && l2 == 1 && e3 == 1 && h3 == 3 && l3 == 1
+                && seat.Live == 3 && seat.Home == -1 && seat.Deepest == 1;
+        }
+
         /// <summary>M8 (fix pass 3): the line of every exit, as
         /// AvatarDefaults.Evaluate writes it before any fallible work
         /// (ClassificationLine, then MissingDataNote): E2 and E3 with the
@@ -1315,6 +1446,14 @@ namespace CompetitiveRounds
         {
             internal override bool BoundToPopup(string pick, string popupPick)
                 => popupPick != null && string.Equals(popupPick, pick, StringComparison.Ordinal);
+        }
+        private sealed class M_NoDepthGuard : AvatarRules
+        {   // the depth guard removed: the E9 postfix re-enters the evaluator inside the owned apply
+            internal override bool DefersSelectEdge(int ownedApplyDepth) => false;
+        }
+        private sealed class K_DepthGuard : AvatarRules
+        {
+            internal override bool DefersSelectEdge(int ownedApplyDepth) => !(ownedApplyDepth <= 0);
         }
 
         private sealed class M_M8NomineeLate : AvatarRules
@@ -1624,12 +1763,17 @@ namespace CompetitiveRounds
             Pair(r, "M8x", "every exit's line names facing, nominee and other fighters: E2 and E3 with the data missing, the deferred exit, an applied change", M8Exits, new M_M8NomineeLate(), new K_M8Note());
 
             // fix pass 4 (Codex BUILD round 4). H3: the carrier is bound to
-            // the pick its popup shows (the asynchronous remote-seat model).
-            // The production half is executed by tools/item19-controls/prodprobe
-            // (pytest S35: H3late, H3after, H3before).
+            // the pick its popup shows (the asynchronous remote-seat model);
+            // H9 and M3: the E9 postfix Harmony runs inside the owned apply
+            // defers to its read-back (the re-entrant seat model). The
+            // production halves are executed by tools/item19-controls/prodprobe
+            // (pytest S35: H3late, H3after, H3before, H9loop, H9defer, M3x).
             Pair(r, "H3late", "the popup of pick N never applies the late carrier of pick N-1 (logged stale, nothing owed changes); pick N's own carrier completes it", H3Late, new M_H3NoBinding(), new K_H3Binding());
             Pair(r, "H3after", "a bound carrier arriving after its popup opened is deferred, then applied on arrival; the next pick's popup is not given it; a clear bound to that pick settles what is owed", H3After, new M_H3NoBinding(), new K_H3Binding());
             Pair(r, "H3before", "a bound carrier arriving before its popup opens (also from a picker ahead) is applied at once, with no deferral", H3Before, new M_H3NeverBound(), new K_H3Binding());
+            Pair(r, "H9loop", "a persistent no-op select is bounded: one select per trigger, one debt kept, no nesting, repaid when the select works", H9Loop, new M_NoDepthGuard(), new K_DepthGuard());
+            Pair(r, "H9defer", "the E9 postfix inside an owned apply that does not commit defers; the debt is kept and a later E7 retries it", H9Defer, new M_NoDepthGuard(), new K_DepthGuard());
+            Pair(r, "M3e9", "repeated confirmed exits with the E9 postfix run (data missing, a throw, a normal return without commit) keep the one debt until a later trigger commits", M3Reentry, new M_NoDepthGuard(), new K_DepthGuard());
             return r;
         }
 

@@ -31,7 +31,14 @@ namespace CompetitiveRounds
     /// the tree's ledger reached by reflection, so the probe still compiles
     /// against a tree without one).
     ///
-    /// Fix pass 4 (Codex BUILD round 4): H3late, H3after and H3before
+    /// Fix pass 4 (Codex BUILD round 4): the stub's select that returns
+    /// without committing now runs the E9 postfix, as Harmony does, so H9r
+    /// and M3x see a postfix that re-enters the evaluator inside the apply;
+    /// their fix pass 3 forms (the select returning before the postfix) are
+    /// kept as the named negatives H9rmask and M3xmask. H9loop is a
+    /// persistent no-op select (bounded: one select per trigger, no
+    /// nesting); H9defer is the postfix deferred inside the apply and the
+    /// restoration retried by a later exit. H3late, H3after and H3before
     /// drive the tree's ledger with the pick binding: a late carrier of the
     /// previous pick refused as stale, a bound carrier after the popup
     /// opened (deferred, then applied), and one before it (applied at once).</summary>
@@ -40,7 +47,7 @@ namespace CompetitiveRounds
         internal static readonly string[] Ids =
             { "H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce",
               "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc", "H3remote",
-              "H3late", "H3after", "H3before" };
+              "H9rmask", "M3xmask", "H9loop", "H9defer", "H3late", "H3after", "H3before" };
 
         internal static void SelectFacePostfix(int faceID)
         {
@@ -92,6 +99,10 @@ namespace CompetitiveRounds
             CharacterCreatorHandler.ThrowBeforeCommit = 0;     // fix pass 3: every select commits
             CharacterCreatorHandler.NoCommit = 0;
             CharacterCreatorHandler.ThrowAfterCommit = 0;
+            CharacterCreatorHandler.NoCommitNoPostfix = 0;     // fix pass 4: and runs the postfix,
+            CharacterCreatorHandler.PersistentNoCommit = false;
+            CharacterCreatorHandler.Depth = 0;                 // with nothing nested yet
+            CharacterCreatorHandler.DeepestDepth = 0;
             FacePublisher.Throws = 0;                          // and every carrier publish completes
             VanillaFixSupport.Counts.Clear();                  // E13's line budget starts full
             var faces = Faces();
@@ -298,8 +309,11 @@ namespace CompetitiveRounds
 
         /// <summary>M3: repeated confirmed exits, each failing differently
         /// (missing data, a throwing select, an uncommitted select), keep the
-        /// one record (Home 3) until the tick repays it once.</summary>
-        private static string RepeatedExits()
+        /// one record (Home 3) until the tick repays it once. Fix pass 4: the
+        /// uncommitted select is armed by noCommit (NoCommit, which runs the
+        /// postfix as Harmony does; or NoCommitNoPostfix, the fix pass 3
+        /// form, for the named negative).</summary>
+        private static string RepeatedExits(Action noCommit)
         {
             Reset(3);
             Room(false);
@@ -314,7 +328,7 @@ namespace CompetitiveRounds
             CharacterCreatorHandler.ThrowBeforeCommit = 1;
             AvatarDefaults.Evaluate("E7-disconnect");          // the select throws before it commits
             int h2 = Home, l2 = LiveSel;
-            CharacterCreatorHandler.NoCommit = 1;
+            noCommit();
             AvatarDefaults.Evaluate("E6-left");                // the select returns without committing
             int h3 = Home, l3 = LiveSel;
             int selectsBefore = Cch.SelectCalls;
@@ -330,6 +344,76 @@ namespace CompetitiveRounds
                 + " | exit whose select does not commit: home " + h3 + " live " + l3
                 + " (one record, 3, through every edge) | the tick: live " + liveAfter + " home " + homeAfter
                 + " selections " + applied + " | a second tick: selections " + again;
+        }
+
+        // ---- H9 and M3 (fix pass 4): no synchronous E9 re-entry inside the owned apply --
+
+        private static bool ok9l;
+
+        /// <summary>A persistent no-op select: every select returns normally
+        /// without writing the selection, and the E9 postfix runs each time,
+        /// as Harmony runs it. The owned apply defers its E9, so each
+        /// confirmed exit makes ONE select, keeps the one debt (Home 3) and
+        /// names the deferral; a later trigger (E7, then E13) retries once
+        /// each; nothing nests. Where the postfix re-enters the evaluator the
+        /// selects nest until the stub's depth bound throws.</summary>
+        private static string PersistentNoOp()
+        {
+            Reset(3);
+            Room(false);
+            AvatarDefaults.Evaluate("E2-joined");              // 3 -> 1, home 3
+            int forced = LiveSel, held = Home;
+            Leave();
+            CharacterCreatorHandler.PersistentNoCommit = true;
+            int s0 = Cch.SelectCalls;
+            AvatarDefaults.Evaluate("E6-left");
+            int s1 = Cch.SelectCalls - s0, h1 = Home, l1 = LiveSel, deep1 = CharacterCreatorHandler.DeepestDepth;
+            bool named = LoggedLine("[AVATAR] E6-left slot 3 not committed", "its E9 deferred to this read-back", "home 3 kept");
+            AvatarDefaults.Evaluate("E7-disconnect");          // a repeated confirmed exit, still a no-op select
+            int s2 = Cch.SelectCalls - s0 - s1, h2 = Home;
+            Time.frameCount = 30;
+            AvatarDefaults.Tick();                             // E13, a later trigger: one more select
+            int s3 = Cch.SelectCalls - s0 - s1 - s2, h3 = Home;
+            int deep = CharacterCreatorHandler.DeepestDepth;
+            CharacterCreatorHandler.PersistentNoCommit = false;
+            Time.frameCount = 45;
+            AvatarDefaults.Tick();                             // the select works again: repaid once
+            int liveAfter = LiveSel, homeAfter = Home;
+            ok9l = forced == 1 && held == 3 && s1 == 1 && s2 == 1 && s3 == 1 && deep1 == 1 && deep == 1
+                && h1 == 3 && h2 == 3 && h3 == 3 && l1 == 1 && named && liveAfter == 3 && homeAfter == -1;
+            return "a persistent no-op select: E6 selects " + s1 + " (deepest nesting " + deep1 + ", bound "
+                + CharacterCreatorHandler.MaxDepth + "), home " + h1 + ", deferral named=" + named
+                + " | E7 selects " + s2 + ", home " + h2 + " | E13 selects " + s3 + ", home " + h3
+                + " | deepest nesting overall " + deep + (deep > 1 ? " (the E9 postfix re-entered the evaluator inside the apply)" : "")
+                + " | the select works again, E13: live " + liveAfter + " home " + homeAfter;
+        }
+
+        private static bool ok9d;
+
+        /// <summary>The E9 postfix fires inside the owned apply of a confirmed
+        /// exit whose select returns without committing (once): it defers,
+        /// the apply's read-back keeps the debt and names the deferral, and a
+        /// LATER confirmed exit (E7) retries and commits. Where the postfix
+        /// re-enters the evaluator, the restoration is selected again inside
+        /// the first edge, before that edge's own read-back.</summary>
+        private static string DeferredThenRetried()
+        {
+            Reset(3);
+            Room(false);
+            AvatarDefaults.Evaluate("E2-joined");              // 3 -> 1, home 3
+            Leave();
+            CharacterCreatorHandler.NoCommit = 1;              // this select returns normally, uncommitted; the postfix runs
+            int s0 = Cch.SelectCalls;
+            AvatarDefaults.Evaluate("E6-left");
+            int s1 = Cch.SelectCalls - s0, h1 = Home, l1 = LiveSel, deep1 = CharacterCreatorHandler.DeepestDepth;
+            bool named = LoggedLine("[AVATAR] E6-left slot 3 not committed", "its E9 deferred to this read-back", "home 3 kept");
+            AvatarDefaults.Evaluate("E7-disconnect");          // the later trigger
+            int s2 = Cch.SelectCalls - s0 - s1, liveAfter = LiveSel, homeAfter = Home;
+            ok9d = s1 == 1 && deep1 == 1 && h1 == 3 && l1 == 1 && named && s2 == 1 && liveAfter == 3 && homeAfter == -1;
+            return "E6 whose select does not commit: selects " + s1 + " (deepest nesting " + deep1 + "), live " + l1 + " home " + h1
+                + ", the deferral named in its not-committed line=" + named
+                + (s1 > 1 ? " (the E9 postfix selected the restoration again inside the apply)" : "")
+                + " | E7 retries: selects " + s2 + ", live " + liveAfter + " home " + homeAfter;
         }
 
         // ---- H3 (fix pass 3): the popup's remote arm applies only this pick's value --
@@ -671,8 +755,8 @@ namespace CompetitiveRounds
             Case("H9t", () => NotCommitted(() => CharacterCreatorHandler.ThrowBeforeCommit = 1,
                                            "the restoring select throws before it commits"), () => ok9x);
             Case("H9r", () => NotCommitted(() => CharacterCreatorHandler.NoCommit = 1,
-                                           "the restoring select returns without committing (the read-back is unmoved)"), () => ok9x);
-            Case("M3x", RepeatedExits, () => ok3x);
+                                           "the restoring select returns without committing (the read-back is unmoved), the E9 postfix runs"), () => ok9x);
+            Case("M3x", () => RepeatedExits(() => CharacterCreatorHandler.NoCommit = 1), () => ok3x);
 
             // M8: every exit writes the classification line (facing, nominee,
             // other-fighter count) before any fallible step, missing data included.
@@ -738,8 +822,15 @@ namespace CompetitiveRounds
 
             Case("H3remote", RemoteArm, () => ok3r);
 
-            // ---- fix pass 4 (Codex BUILD round 4: H3) ----
+            // ---- fix pass 4 (Codex BUILD round 4: H9, M3, H3) ----
 
+            // the fix pass 3 forms, the select returning BEFORE the postfix:
+            // the named negatives (they pass where the postfix re-enters)
+            Case("H9rmask", () => NotCommitted(() => CharacterCreatorHandler.NoCommitNoPostfix = 1,
+                                               "NEGATIVE, the fix pass 3 stub: the select returns before the E9 postfix"), () => ok9x);
+            Case("M3xmask", () => RepeatedExits(() => CharacterCreatorHandler.NoCommitNoPostfix = 1), () => ok3x);
+            Case("H9loop", PersistentNoOp, () => ok9l);
+            Case("H9defer", DeferredThenRetried, () => ok9d);
             Case("H3late", LateEarlierPick, () => ok3late);
             Case("H3after", BoundAfter, () => ok3after);
             Case("H3before", BoundBefore, () => ok3before);

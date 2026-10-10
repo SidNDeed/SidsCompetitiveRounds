@@ -15,7 +15,9 @@ namespace CompetitiveRounds
     /// Design: ai-collab/v1410/ITEM19-DUAL-AVATAR-DESIGN.md revision 3,
     /// "derive, do not latch". The only persisted state is the config int
     /// UI/AvatarHomeSlot (the pre-switch own selection). The only fields here
-    /// are the four cached ring sprites and their ensure-once flag.
+    /// are the four cached ring sprites and their ensure-once flag, and (fix
+    /// pass 4, H9 and M3) the depth of item 19's own select with the count of
+    /// E9 postfixes it deferred, both zero outside that select.
     ///
     /// Edges that call <see cref="Evaluate"/>: E1 the LoadFaces postfix, E2-E4,
     /// E6, E7, E11, E12 the Photon callbacks in Plugin.cs, E5 the CreatePlayer
@@ -25,10 +27,18 @@ namespace CompetitiveRounds
     /// is no swap reader and no fallback binding (design 2.5, sentence 3).</summary>
     internal static class AvatarDefaults
     {
-        // The four ring sprites and their ensure-once flag (design 2.6) - the
-        // only statics this feature adds.
+        // The four ring sprites and their ensure-once flag (design 2.6).
         private static Sprite ringGold, ringBlue, ringBoth, ringRed;
         private static bool ringsBuilt;
+
+        // Fix pass 4 (H9, M3): > 0 while Apply's own select runs (it is raised
+        // and lowered around that one call, the lowering in a finally), so the
+        // SelectFace postfix (E9) can defer to Apply's read-back instead of
+        // re-entering the evaluator. With it, the number of E9 postfixes that
+        // deferred during the select, which Apply reads and zeroes. Neither
+        // outlives the select: not a latch, and not a stored face.
+        private static int ownedApplyDepth;
+        private static int deferredSelectEdges;
 
         private const string RingName = "CR_AvatarRing";
         private const string LegendName = "CR_AvatarLegend";
@@ -226,14 +236,16 @@ namespace CompetitiveRounds
                 if (d.Unusable != AvatarUnusable.None) Announce(UnusableMessage(d.Unusable));
 
                 // The debt (fix pass 3, H9 and M3). A debt the decision records
-                // or re-bases is written BEFORE the selection moves: the apply
-                // re-enters this method through the SelectFace postfix (E9),
-                // which must find it in place, and an apply that throws after the
-                // displacement must still leave the record. A debt the decision
-                // PAYS is cleared only AFTER the apply, and only when the
-                // selection read back from the controller is the restored slot;
-                // an exception out of the apply never reaches that write, so the
-                // debt stays for E6, E7 and E13 to retry.
+                // or re-bases is written BEFORE the selection moves, so an apply
+                // that throws after the displacement still leaves the record. A
+                // debt the decision PAYS is cleared only AFTER the apply, and
+                // only when the selection read back from the controller is the
+                // restored slot; an exception out of the apply never reaches that
+                // write, so the debt stays for E6, E7 and E13 to retry. Fix pass 4
+                // (H9, M3): the SelectFace postfix (E9) that fires inside the
+                // apply's own select defers (AvatarRules.DefersSelectEdge), so
+                // this read-back alone decides, once per edge: no synchronous
+                // re-entry selects the same restoration again before it.
                 int held = rules.HomeBeforeApply(x.Home, d);
                 if (held != x.Home) WriteHome(held);
                 int after = d.Apply >= 0 ? Apply(d.Apply, tag) : x.Live;
@@ -347,6 +359,17 @@ namespace CompetitiveRounds
             catch { return empty; }
         }
 
+        /// <summary>Fix pass 4 (H9, M3): the depth of item 19's own select
+        /// (Apply), which the E9 postfix hands to AvatarRules.DefersSelectEdge.</summary>
+        internal static int OwnedApplyDepth => ownedApplyDepth;
+
+        /// <summary>Fix pass 4 (H9, M3): the E9 postfix deferred to the owned
+        /// select's read-back (Apply names it on a select that did not commit).</summary>
+        internal static void SelectEdgeDeferred()
+        {
+            deferredSelectEdges++;
+        }
+
         /// <summary>Select slot through vanilla's own API. Through the live
         /// menu portrait when exactly one carries the slot (so vanilla's Frame
         /// marker moves with it), else SelectFace(0, ...) directly, whose player
@@ -375,18 +398,30 @@ namespace CompetitiveRounds
             // portrait frames after it selects). Its exception is caught so the
             // read-back decides: the selection either reads as the slot
             // (committed, whatever threw after) or it does not (the debt stays,
-            // and the line names the fault).
+            // and the line names the fault). Fix pass 4 (H9, M3): the select is
+            // OWNED while it runs, so the E9 postfix it fires defers to this
+            // read-back (a select that returns without committing, as when a
+            // prefix skips vanilla's body and Harmony still runs the postfix,
+            // used to re-enter the evaluator and recurse without bound).
             string fault = null;
+            int outerDeferred = deferredSelectEdges;
+            deferredSelectEdges = 0;
+            ownedApplyDepth++;
             try
             {
                 if (hits == 1 && hit.myFace != null) hit.ClickButton();
                 else cch.SelectFace(0, face, slot);
             }
             catch (Exception ex) { fault = "the select threw " + ex.GetType().Name + ": " + ex.Message; }
+            finally { ownedApplyDepth--; }
+            int deferred = deferredSelectEdges;
+            deferredSelectEdges = outerDeferred;
             int now = ReadLive(CharacterCreatorHandler.instance);
             if (now != slot)
             {
-                Line(tag, new AvatarRules().NotCommittedLine(tag, slot, now, ReadHome(), fault));
+                string why = fault;
+                if (deferred > 0) why = (why != null ? why + "; " : "") + "its E9 deferred to this read-back";
+                Line(tag, new AvatarRules().NotCommittedLine(tag, slot, now, ReadHome(), why));
                 return now;
             }
             if (fault != null) Warn("[AVATAR] " + tag + " slot " + slot + " committed; after it, " + fault);
@@ -703,7 +738,11 @@ namespace CompetitiveRounds
 
     /// <summary>E9, an own-selection change. SelectFace is the single writer
     /// of selectedFaceID; only faceID 0 is this seat's own selection (the
-    /// local-multiplayer grids pass 1..3).</summary>
+    /// local-multiplayer grids pass 1..3). Fix pass 4 (H9, M3): Harmony runs
+    /// this postfix whenever SelectFace returns normally, also when the
+    /// selection did not move; inside item 19's own apply it DEFERS
+    /// (AvatarRules.DefersSelectEdge), so the apply's read-back decides and a
+    /// later E6, E7 or E13 retries, never a synchronous re-entry.</summary>
     [HarmonyPatch(typeof(CharacterCreatorHandler), "SelectFace")]
     internal static class AvatarSelectFacePatch
     {
@@ -712,6 +751,7 @@ namespace CompetitiveRounds
             try
             {
                 if (faceID != 0) return;
+                if (new AvatarRules().DefersSelectEdge(AvatarDefaults.OwnedApplyDepth)) { AvatarDefaults.SelectEdgeDeferred(); return; }
                 AvatarDefaults.Evaluate("E9-select");
             }
             catch (Exception ex) { AvatarDefaults.Warn("[AVATAR] E9-select hook failed: " + ex.Message); }
