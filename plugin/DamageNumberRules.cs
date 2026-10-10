@@ -17,8 +17,9 @@ namespace CompetitiveRounds
     /// readout's format, the mode predicate, and the label text. Time arrives
     /// as a parameter, so the harness drives it.
     ///
-    /// What does not: anchors, colours and drawing (DamageNumbers.cs), which
-    /// need UnityEngine. Formatting happens HERE and only here; the Unity-side
+    /// What does not: anchor positions, colours and drawing (DamageNumbers.cs),
+    /// which need UnityEngine; the anchor map's eviction rule (CapAnchors) is
+    /// here. Formatting happens HERE and only here; the Unity-side
     /// Tick stamps what this file returns and formats nothing.
     /// </summary>
     internal static class DamageNumberRules
@@ -350,6 +351,37 @@ namespace CompetitiveRounds
         {
             float d = pre - post;
             return d > 0f ? d : 0f;
+        }
+
+        // ------------------------------------------------------------ the anchor bound
+
+        /// <summary>The bound on DamageNumbers' anchor map (one world position
+        /// per subject, stamped at emit and read when that subject's label
+        /// flushes). Twice SubjectCeiling, so the eviction below always
+        /// leaves room.</summary>
+        internal const int AnchorCap = 32;
+
+        private static readonly List<int> _staleAnchors = new List<int>();
+
+        /// <summary>Called before a subject's anchor is stamped (build R2 N1).
+        /// Below AnchorCap, or for a subject already in the map, it does
+        /// nothing. At the cap, for a NEW subject, it evicts only STALE
+        /// anchors: the keys of subjects the engine no longer holds, so none of
+        /// theirs is waiting to flush. Every anchor of a subject with an
+        /// accepted emission still pending is kept, so that label finds its
+        /// anchor when it flushes. Every cap the plugin hands the engine comes
+        /// from SubjectCapFor, at most SubjectCeiling (16), so at most 16
+        /// anchors survive an eviction and the map never exceeds AnchorCap
+        /// (A19 floods it). Generic over the position type so the harness
+        /// executes it without UnityEngine.</summary>
+        internal static void CapAnchors<T>(Dictionary<int, T> anchors, int incoming, Engine engine)
+        {
+            if (anchors == null || anchors.Count < AnchorCap || anchors.ContainsKey(incoming)) return;
+            _staleAnchors.Clear();
+            foreach (var k in anchors.Keys)
+                if (engine == null || engine.Find(k) == null) _staleAnchors.Add(k);
+            for (int i = 0; i < _staleAnchors.Count; i++) anchors.Remove(_staleAnchors[i]);
+            _staleAnchors.Clear();
         }
 
         // ------------------------------------------------------------ shared state
@@ -755,6 +787,75 @@ namespace CompetitiveRounds
                     p == want, a != want && b != want, ctl,
                     "prod=" + p + " mutant(a slice magnitude)=" + a + " mutant(b silent correction)=" + b
                     + " control(rise and no-drop give 0, 10->7.5 gives 2.5)=" + ctl);
+            }
+
+            // A19: the anchor bound evicts only stale anchors (build R2 N1).
+            // DamageNumbers.Emit runs CapAnchors, stamps the anchor, then
+            // notes; its Tick drops a flushed label whose anchor is gone. The
+            // same sequence here: 31 subjects whose labels already flushed,
+            // then subject 100 noted (pending; the map is now at AnchorCap),
+            // then a NEW subject 200 before 100 flushes. Mutant: the policy
+            // before this case, the whole map cleared at the cap.
+            {
+                Func<Action<Dictionary<int, int>, int, Engine>, string> drive = cap =>
+                {
+                    var eng = new Engine();
+                    var map = new Dictionary<int, int>();
+                    Action<int, float, float> emit = (sid, mag, at) =>
+                    {
+                        cap(map, sid, eng);
+                        map[sid] = sid;
+                        eng.Note(sid, Kind.Damage, mag, at, SubjectCeiling);
+                    };
+                    for (int k = 1; k <= 31; k++) { emit(k, 5f, k); eng.Tick(k + 0.5f, F0); }
+                    emit(100, 7f, 40f);
+                    emit(200, 3f, 40.1f);
+                    var sb = new StringBuilder();
+                    foreach (var em in eng.Tick(40.5f, F0))
+                        sb.Append(em.Subject.ToString(CultureInfo.InvariantCulture))
+                          .Append(map.ContainsKey(em.Subject) ? ":kept " : ":LOST ");
+                    return sb.Append("size=").Append(map.Count.ToString(CultureInfo.InvariantCulture)).ToString();
+                };
+                string want = "100:kept 200:kept size=2";
+                string p = drive((d, sid, eng) => CapAnchors(d, sid, eng));
+                string m = drive((d, sid, eng) => { if (d.Count >= AnchorCap && !d.ContainsKey(sid)) d.Clear(); });
+                // Control: a flood of 200 new subjects, ticking every 0.1 s as
+                // it goes (two still pending at each stamp), never grows the
+                // map past AnchorCap, evicts more than once, and never evicts
+                // a key the engine holds; a re-stamp at the cap evicts nothing;
+                // and the bound's premise holds.
+                int maxSize = 0, evictions = 0, heldLost = 0;
+                {
+                    var eng = new Engine();
+                    var map = new Dictionary<int, int>();
+                    var held = new List<int>();
+                    for (int j = 0; j < 200; j++)
+                    {
+                        float at = j * 0.1f;
+                        eng.Tick(at, F0);
+                        int sid = 1000 + j;
+                        held.Clear();
+                        foreach (var k in map.Keys) if (eng.Find(k) != null) held.Add(k);
+                        int before = map.Count;
+                        CapAnchors(map, sid, eng);
+                        if (map.Count < before) evictions++;
+                        for (int h = 0; h < held.Count; h++) if (!map.ContainsKey(held[h])) heldLost++;
+                        map[sid] = sid;
+                        eng.Note(sid, Kind.Damage, 1f, at, SubjectCeiling);
+                        if (map.Count > maxSize) maxSize = map.Count;
+                    }
+                }
+                var full = new Dictionary<int, int>();
+                for (int k = 0; k < AnchorCap; k++) full[k] = k;
+                CapAnchors(full, 5, new Engine());
+                bool restamp = full.Count == AnchorCap;
+                bool premise = SubjectCeiling * 2 == AnchorCap;
+                bool ctl = maxSize <= AnchorCap && evictions > 1 && heldLost == 0 && restamp && premise;
+                Check(r, "A19", "at the anchor cap a new subject evicts only stale anchors: a pending label keeps its anchor and the map stays bounded",
+                    p == want, m != want, ctl,
+                    "prod=" + p + " mutant(the map cleared at the cap)=" + m
+                    + " control(flood max=" + maxSize + " evictions=" + evictions + " held lost=" + heldLost
+                    + " re-stamp at cap kept=" + restamp + " cap=2*ceiling=" + premise + ")");
             }
 
             return r;

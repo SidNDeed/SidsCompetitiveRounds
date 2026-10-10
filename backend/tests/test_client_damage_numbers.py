@@ -1593,6 +1593,96 @@ def test_B19_a_throw_in_the_bar_companion_cannot_cost_a_committed_drop_its_numbe
     assert run(companion_faults, old_ordering(t, "corrective"), "committed")[0]
 
 
+# ── B20: the anchor map is capped by evicting only stale anchors (fix 2,
+#    build R2 N1; harness case A19 executes CapAnchors, this row pins that
+#    Emit is wired to it and that nothing else clears the map)
+
+CAP_CALL = re.compile(r"\bDamageNumberRules\s*\.\s*CapAnchors\s*\(\s*_anchors\s*,\s*subject\s*,"
+                      r"\s*DamageNumberRules\s*\.\s*Shared\s*\)\s*;")
+STAMP = re.compile(r"\b_anchors\s*\[\s*subject\s*\]\s*=(?!=)")
+EMIT_NOTE = re.compile(r"(?<![\w.])Note\s*\(\s*subject\s*,")
+CAP_SIG = "internal static void CapAnchors<T>(Dictionary<int, T> anchors, int incoming, Engine engine)"
+CAP_LINE = "DamageNumberRules.CapAnchors(_anchors, subject, DamageNumberRules.Shared);"
+STAMP_LINE = "_anchors[subject] = bodyPosition + Vector3.up * 0.55f;"
+OLD_CAP = "if (_anchors.Count >= 32 && !_anchors.ContainsKey(subject)) _anchors.Clear();"
+
+
+def anchor_bound(t):
+    """(green, detail). Emit: after its visibility test, exactly one
+    CapAnchors call at the top level of its body, then exactly one anchor
+    stamp, then the note, in that order; nothing in DamageNumbers.cs clears
+    or removes from the anchor map. CapAnchors: it returns early below the
+    cap or for a key already present, asks the engine (Find) before it
+    evicts, evicts by Remove, and never clears the map it is handed."""
+    problems = []
+    _, m, _ = member(t["DN"], SIG["emit"])
+    show = m.find("ShouldShow(")
+    caps = [x.start() for x in CAP_CALL.finditer(m)]
+    stamps = [x.start() for x in STAMP.finditer(m)]
+    notes = [x.start() for x in EMIT_NOTE.finditer(m)]
+    if (len(caps), len(stamps), len(notes)) != (1, 1, 1) or show < 0:
+        problems.append("emit: %d cap calls, %d stamps, %d notes, visibility test at %d"
+                        % (len(caps), len(stamps), len(notes), show))
+    else:
+        if not show < caps[0] < stamps[0] < notes[0]:
+            problems.append("emit: order show=%d cap=%d stamp=%d note=%d" % (show, caps[0], stamps[0], notes[0]))
+        top = [n for n in parse_body(m)["body"] if n["kind"] == "plain" and CAP_CALL.search(n["text"])]
+        if len(top) != 1:
+            problems.append("emit: the cap call is not a statement of its own at the top level of the body")
+    dn = mask_code(t["DN"])
+    other = re.findall(r"\b_anchors\s*\.\s*(Clear|Remove)\s*\(", dn)
+    if other:
+        problems.append("DamageNumbers.cs: _anchors.%s outside CapAnchors" % "/".join(other))
+    _, c, _ = member(t["DR"], CAP_SIG)
+    guard = re.search(r"\bif\s*\(\s*anchors\s*==\s*null\s*\|\|\s*anchors\s*\.\s*Count\s*<\s*AnchorCap\s*\|\|"
+                      r"\s*anchors\s*\.\s*ContainsKey\s*\(\s*incoming\s*\)\s*\)\s*return\s*;", c)
+    find = re.search(r"\bengine\s*\.\s*Find\s*\(\s*k\s*\)\s*==\s*null", c)
+    remove = re.search(r"\banchors\s*\.\s*Remove\s*\(", c)
+    clear = re.search(r"\banchors\s*\.\s*Clear\s*\(", c)
+    if not guard:
+        problems.append("CapAnchors: no early return below the cap or for a present key")
+    if not find:
+        problems.append("CapAnchors: evicts without asking the engine")
+    if not remove or clear:
+        problems.append("CapAnchors: remove=%s clear=%s" % (bool(remove), bool(clear)))
+    return not problems, "; ".join(problems) or "ok"
+
+
+def test_B20_the_anchor_map_is_capped_by_evicting_only_stale_anchors():
+    t = texts()
+    ok, why = run(anchor_bound, t)
+    assert ok, why
+    cases = [
+        ("the whole map cleared at the cap (the form before fix 2)", "DN", CAP_LINE, OLD_CAP,
+         ["emit: 0 cap calls", "_anchors.Clear outside CapAnchors"]),
+        ("the cap after the stamp", "DN", CAP_LINE + "\n            " + STAMP_LINE,
+         STAMP_LINE + "\n            " + CAP_LINE, ["emit: order"]),
+        ("the cap deleted", "DN", CAP_LINE, "", ["emit: 0 cap calls"]),
+        ("the cap under a condition", "DN", CAP_LINE, "if (subject > 0) " + CAP_LINE,
+         ["the cap call is not a statement of its own at the top level"]),
+        ("CapAnchors evicts every key", "DR", "if (engine == null || engine.Find(k) == null) _staleAnchors.Add(k);",
+         "_staleAnchors.Add(k);", ["evicts without asking the engine"]),
+        ("CapAnchors clears the map", "DR", "for (int i = 0; i < _staleAnchors.Count; i++) anchors.Remove(_staleAnchors[i]);",
+         "anchors.Clear();", ["remove=False clear=True"]),
+        ("CapAnchors without its early return", "DR",
+         "if (anchors == null || anchors.Count < AnchorCap || anchors.ContainsKey(incoming)) return;",
+         "if (anchors == null) return;", ["no early return"]),
+    ]
+    for label, key, old, new, want in cases:
+        ok, why = run(anchor_bound, mutate(t, key, old, new))
+        assert not ok and all(w in why for w in want), "%s: %s" % (label, why)
+    # control: under the Emit mutations the rules-side checks stay green, and
+    # under the rules-side mutations the Emit checks stay green (the row is
+    # span-scoped), and Tick still reads the map it is handed
+    ok, why = run(anchor_bound, mutate(t, "DN", CAP_LINE, ""))
+    assert "CapAnchors:" not in why, why
+    ok, why = run(anchor_bound, mutate(t, "DR", "if (engine == null || engine.Find(k) == null) _staleAnchors.Add(k);",
+                                       "_staleAnchors.Add(k);"))
+    assert "emit:" not in why and "DamageNumbers.cs:" not in why, why
+    _, tm, _ = member(t["DN"], SIG["tick"])
+    assert len(re.findall(r"\b_anchors\s*\.\s*TryGetValue\s*\(\s*em\s*\[\s*i\s*\]\s*\.\s*Subject\s*,", tm)) == 1
+
+
 # ── B21: Draw gives back the incoming GUI.color on every exit (fix 2, build
 #    R2 N2.2: Draw's own body is executed with a throw injected mid-loop, and
 #    the colour it leaves behind is compared with the one it was handed)

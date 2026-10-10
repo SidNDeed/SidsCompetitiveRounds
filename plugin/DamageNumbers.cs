@@ -228,6 +228,11 @@ namespace CompetitiveRounds
 
         // ------------------------------------------------------------ notify
 
+        /// <summary>One world position per subject, stamped at emit and read
+        /// by Tick when that subject's label flushes. Bounded by
+        /// DamageNumberRules.CapAnchors (build R2 N1), which evicts only the
+        /// anchors of subjects the engine no longer holds: a cap reached while
+        /// a label is pending no longer drops that label.</summary>
         private static readonly Dictionary<int, Vector3> _anchors = new Dictionary<int, Vector3>();
         private static int _localView = DamageNumberRules.SpectatorSentinel;
         private static int _expirySeen;
@@ -235,7 +240,7 @@ namespace CompetitiveRounds
         private static void Emit(int subject, DamageNumberRules.Kind kind, float magnitude, Vector3 bodyPosition)
         {
             if (!DamageNumberRules.ShouldShow(CurrentMode, subject, _localView)) return;
-            if (_anchors.Count >= 32 && !_anchors.ContainsKey(subject)) _anchors.Clear();
+            DamageNumberRules.CapAnchors(_anchors, subject, DamageNumberRules.Shared);
             _anchors[subject] = bodyPosition + Vector3.up * 0.55f;
             Note(subject, kind, magnitude, Time.unscaledTime);
         }
