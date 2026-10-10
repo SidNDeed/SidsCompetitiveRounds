@@ -9155,13 +9155,18 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         private const int CosmeticGifMaxBytes = 2_200_000;
         private const int CosmeticMaxFrames = 16;
 
-        /// <summary>A byte cap as a message states it ("1.2 MB"). Invariant
-        /// culture: the figure is part of a JSON detail string and must read
-        /// the same whatever the machine's number format is.</summary>
+        /// <summary>A byte cap as a message states it: the exact number of
+        /// bytes the check compares against, digit-grouped ("1,200,000
+        /// bytes"). Exact, because a rounded figure is a different number:
+        /// the "0.# MB" this replaced rounded to a tenth of a million bytes,
+        /// so a cap raised by 40,000 bytes still read "1.2 MB", and a file
+        /// browser that counts a megabyte as 1,048,576 bytes shows a file
+        /// this check refuses as smaller than that. Invariant culture: the
+        /// figure is part of a JSON detail string and must read the same
+        /// whatever the machine's number format is.</summary>
         private static string SizeCapLabel(int bytes)
         {
-            return (bytes / 1_000_000.0).ToString(
-                "0.#", System.Globalization.CultureInfo.InvariantCulture) + " MB";
+            return bytes.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + " bytes";
         }
 
         private static string CosmeticUploadDir()
