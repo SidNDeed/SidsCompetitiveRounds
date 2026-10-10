@@ -171,6 +171,7 @@
     <Compile Include="../../plugin/ShowcaseRules.cs" />
     <Compile Include="../../plugin/FfaNumberingRules.cs" />
     <Compile Include="KeybindFix2Controls.cs" />
+    <Compile Include="KeybindFix3Controls.cs" />
   </ItemGroup>
 
 </Project>

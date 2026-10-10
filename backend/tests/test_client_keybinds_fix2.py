@@ -78,7 +78,15 @@ def _ws(s: str) -> str:
     return re.sub(r"\s+", " ", s)
 
 
-# -- M1 (round-2 F2): the independently latched keyboard-edge source ---------
+# -- M1 (round-2 F2; round-3 F2, fix pass 3): the independent keyboard ------
+# channel. Fix pass 3 replaced the once-a-frame GetKeyboardState latch by an
+# event accumulator: the platform's key-down messages are counted as they are
+# delivered and drained once a frame. The attribution itself is executed by
+# the harness (keybindfix3 suite); these gates assert the production feed.
+
+ATTR3 = "internal static EdgeAttribution Attribute(IFrameInput io, int[] alias, int[] scan)"
+ATTR4 = "internal static EdgeAttribution Attribute(IFrameInput io, int[] alias, int[] scan, out int namedKeyboard)"
+
 
 def test_m1_the_frame_source_carries_the_independent_keyboard_channel():
     body = _ws(_text(_src(RULES), "internal interface IFrameInput"))
@@ -86,11 +94,15 @@ def test_m1_the_frame_source_carries_the_independent_keyboard_channel():
 
 
 def test_m1_the_attribution_reads_the_source_before_its_early_return():
-    body = _ws(_text(_src(RULES), "internal static EdgeAttribution Attribute(IFrameInput io, int[] alias, int[] scan)"))
+    src = _src(RULES)
+    # fix pass 3 keeps the three-argument form as a wrapper of the form that
+    # also returns the named-key count; the attribution is the body with the read
+    body = _ws(_text(src, ATTR4 if ATTR4 in _mask(src) else ATTR3))
     assert body.count("io.KeyboardEdges()") == 1
     read = body.index("io.KeyboardEdges()")
-    early = body.index("if (!any && !typed && kb <= 0) return a;")
-    assert read < early
+    early = re.search(r"if \(!any && !typed && kb <= 0\) (\{ namedKeyboard = named; )?return a;", body)
+    assert early is not None
+    assert read < early.start()
     # the comparison is independent of the mouse: no Mouse term on its line
     assert "if (kb > named) a |= EdgeAttribution.Unknown;" in body
     assert "if (kb < 0 && (a & EdgeAttribution.Mouse) != 0) a |= EdgeAttribution.Unknown;" in body
@@ -98,31 +110,75 @@ def test_m1_the_attribution_reads_the_source_before_its_early_return():
     assert body.count("if (IsKeyboardCode(c)) named++;") == 2
 
 
-def test_m1_the_real_input_reads_the_latch():
+def test_m1_the_real_input_reads_the_event_accumulator():
     body = _ws(_text(_src(KB), "private sealed class RealInput : IFrameInput"))
-    assert "public int KeyboardEdges() { return KeyboardEdgeLatch.EdgesThisFrame(); }" in body
+    assert "public int KeyboardEdges() { return KeyboardEvents.EdgesThisFrame(); }" in body
 
 
-def test_m1_the_latch_reads_the_thread_keyboard_state_once_a_frame():
-    cls = _ws(_text(_src(KB), "internal static class KeyboardEdgeLatch"))
-    assert '[DllImport("user32.dll")] private static extern bool GetKeyboardState([Out] byte[] lpKeyState);' in cls
+_STATE_READS = ("GetKeyboardState", "GetAsyncKeyState", "GetKeyState")
+
+
+def test_m1_the_keyboard_channel_is_an_event_accumulator_never_a_key_state_snapshot():
+    # no read of key STATE anywhere in the keybind code: a once-a-frame copy
+    # of key state cannot show a key that went down and up between two copies,
+    # and its low bit is meaningless for a non-toggle key (round 3, F2)
+    for path in (KB, RULES):
+        code = _strip(_src(path))
+        for api in _STATE_READS:
+            assert re.search(r"\b%s\b" % api, code) is None, "%s reads key state (%s)" % (path.name, api)
+    acc = _ws(_text(_src(RULES), "internal sealed class KeyEventAccumulator"))
+    # a press is counted from the key-down message, once; an auto-repeat is no edge
+    down = _ws(_text(_src(RULES), "internal void KeyDown(int vk, bool repeat)"))
+    assert down.index("if (repeat) return;") < down.index("pending++;")
+    assert down.count("pending++;") == 1
+    up = _ws(_text(_src(RULES), "internal void KeyUp(int vk)"))
+    assert "pending" not in up
+    # drained once a frame: a second read in the frame repeats the count
+    drain = _ws(_text(_src(RULES), "internal int DrainForFrame(int frame)"))
+    assert drain.index("if (unavailable) return -1;") < drain.index("if (frame == drainedFrame) return drained;")
+    assert drain.index("if (frame == drainedFrame) return drained;") < drain.index("drained = pending;")
+    assert drain.index("drained = pending;") < drain.index("pending = 0;")
+    assert "byte[]" not in acc and "bool[]" not in acc
+    # the production feed: the hook hands every removed key-down message to
+    # the accumulator with its previous-key-state bit, every key-up as a release
+    hook = _ws(_text(_src(KB), "private static IntPtr OnMessage(int code, IntPtr wParam, IntPtr lParam)"))
+    assert "if (code == HC_ACTION && wParam.ToInt64() == PM_REMOVE && lParam != IntPtr.Zero)" in hook
+    assert ("if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) Accumulator.KeyDown(vk, (flags & 0x40000000L) != 0);"
+            " else Accumulator.KeyUp(vk);") in hook
     edges = _ws(_text(_src(KB), "internal static int EdgesThisFrame()"))
-    assert "if (f == readFrame) return edges;" in edges
-    assert "ok = GetKeyboardState(cur);" in edges
-    assert "if ((down && !wasDown) || flipped) n++;" in edges
-    assert "Buffer.BlockCopy(cur, 0, prev, 0, 256);" in edges
-    counted = _ws(_text(_src(KB), "internal static bool Counted(int vk)"))
-    # the mouse buttons and the generic modifiers are never keyboard edges
-    assert "if (vk < 3 || vk > 254) return false;" in counted
-    assert "if (vk == 4 || vk == 5 || vk == 6) return false;" in counted
-    assert "if (vk == 0x10 || vk == 0x11 || vk == 0x12) return false;" in counted
+    assert edges.count("Accumulator.DrainForFrame(f)") == 1
+    inst = _ws(_text(_src(KB), "private static void EnsureInstalled()"))
+    assert "hook = SetWindowsHookEx(WH_GETMESSAGE, proc, IntPtr.Zero, GetCurrentThreadId());" in inst
+    cls = _ws(_text(_src(KB), "internal static class KeyboardEvents"))
+    assert "private const int WH_GETMESSAGE = 3, HC_ACTION = 0, PM_REMOVE = 1;" in cls
+    assert "private const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;" in cls
 
 
-def test_m1_the_chat_tap_reads_the_latch_on_every_call():
+def test_m1_the_hook_only_counts_and_always_passes_the_message_on():
+    hook = _ws(_code(_src(KB), "private static IntPtr OnMessage(int code, IntPtr wParam, IntPtr lParam)"))
+    # one return, the next hook's answer: the message is never consumed or changed
+    assert hook.count("return ") == 1
+    assert hook.rstrip(" }").endswith("return CallNextHookEx(hook, code, wParam, lParam);")
+    assert "Marshal.Write" not in hook
+
+
+def test_m1_a_source_that_cannot_be_read_or_stays_silent_is_conservative():
+    inst = _ws(_code(_src(KB), "private static void EnsureInstalled()"))
+    # an install that fails or throws makes the source unavailable (-1)
+    assert inst.count("Accumulator.MarkUnavailable();") == 2
+    acc_cor = _ws(_code(_src(RULES), "internal void Corroborate(int namedKeyboard)"))
+    assert "if (unavailable || EverDelivered || namedKeyboard <= 0) return;" in acc_cor
+    assert "if (++silentFrames >= 2) unavailable = true;" in acc_cor
+
+
+def test_m1_the_chat_tap_drains_the_accumulator_on_every_call():
     body = _code(_src(KB), "internal static bool ChatChannelTapped(bool chatInputOpen)")
-    first = body.index("KeyboardEdgeLatch.EdgesThisFrame();")
+    first = body.index("KeyboardEvents.EdgesThisFrame();")
     assert first < body.index("if (CaptureOwnsInput)")
     assert first < body.index("if (!chatInputOpen)")
+    # the liveness check reads the step's own evidence, after the step
+    step = body.index("chatTap.Step(realInput, KeyCodesFor(ChatChannel), FullKeyScan())")
+    assert step < body.index("KeyboardEvents.Corroborate(chatTap.LastNamedKeyboard);")
 
 
 # -- M2 (round-2 F4): built help surfaces repaint after a binding revision ----

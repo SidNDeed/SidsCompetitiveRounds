@@ -255,11 +255,13 @@ namespace CompetitiveRounds
             }
             // Item 17: the ChatChannel tap is read from the PHYSICAL key stream
             // once a frame (KeybindRules.TapDetector over every KeyCode member,
-            // the typed text and, fix pass 2 M1, the thread's own keyboard
-            // state latched once a frame), not from IMGUI events: a key pressed
-            // with it - also in the same frame as a click - or a modifier use
-            // disarms the tap, and so does a keyboard edge no KeyCode names
-            // whenever that keyboard state can be read.
+            // the typed text and, fix pass 3 M1, the key-down messages the game
+            // thread took from its queue since the previous frame, drained from
+            // an event accumulator), not from IMGUI events: a key pressed with
+            // it - also in the same frame as a click - or a modifier use
+            // disarms the tap, and so does a keyboard press no KeyCode names,
+            // also one that went down and up between two frames, whenever that
+            // event source is live.
             try { if (Keybinds.ChatChannelTapped(chatInputOpen)) CycleChatSendChannel(); }
             catch (Exception e) { VanillaFixSupport.DiagLimited("KeybindChatTap", "[KEYBIND] chat tap: " + e.Message, 3); }
             NativeUI.Tick();

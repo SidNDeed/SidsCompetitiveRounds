@@ -26,7 +26,7 @@ Keybinds.cs	Bound	1	bdada45bcb646a03	registry	-	the registry accessor
 Keybinds.cs	BoundSnapshot	1	61639c71b1da9668	registry	-	the registry copy a commit compares against
 Keybinds.cs	BoundSourceUnreadable	1	4a655aea11311aa0	registry	-	whether a row's bound mouse button is above the readable cap; its display consumer is KeybindPaintRow, a reader row of its own
 Keybinds.cs	CaseJ	3	2acaa2fe31325e3b	selftest	-	T2 case j (in-game self-test)
-Keybinds.cs	ChatChannelTapped	1	aa1b93440fc7dd87	input	-	the ChatChannel tap detector over the bound keys
+Keybinds.cs	ChatChannelTapped	1	bd3b7ae384f2cc01	input	-	the ChatChannel tap detector over the bound keys
 Keybinds.cs	CommitRows	3	9430a06cef1c1738	registry	-	the one commit; its outcome text is rendered by the toast and KeybindRefusalText
 Keybinds.cs	Down	1	61ae1762a1d418b9	input	-	a bound row's edge
 Keybinds.cs	Held	1	b23c70bad9686600	input	-	a bound row's held state

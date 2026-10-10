@@ -101,12 +101,15 @@ namespace CompetitiveRounds
         bool AnyMouseHeld();
         float Now();
         bool Focused();
-        /// <summary>Fix pass 2 (M1): how many keyboard keys went down this
-        /// frame according to a source that is independent of the KeyCode
-        /// table, of the mouse and of the typed text (production: the game
-        /// thread's own keyboard state, read once a frame and latched against
-        /// the previous frame's read, Keybinds.KeyboardEdgeLatch). Mouse
-        /// buttons are never counted. -1 when that source cannot be read.</summary>
+        /// <summary>Fix pass 2 (M1), fix pass 3 (M1): how many keyboard keys
+        /// went down this frame according to a source that is independent of
+        /// the KeyCode table, of the mouse and of the typed text. Production:
+        /// KeyEventAccumulator drained once a frame, fed by the key-down
+        /// messages the game thread takes from its queue between frames
+        /// (Keybinds.KeyboardEvents) - every press counted, also one that went
+        /// down and up between two frames; never a snapshot of key state.
+        /// Mouse buttons are never counted. -1 when that source cannot be
+        /// read.</summary>
         int KeyboardEdges();
     }
 
@@ -839,6 +842,11 @@ namespace CompetitiveRounds
             internal float DownAt;
             /// <summary>What the most recent Step attributed its edges to.</summary>
             internal EdgeAttribution Last;
+            /// <summary>Fix pass 3 (M1): how many keyboard keys the KeyCodes
+            /// named in the most recent Step (the alias's included): the
+            /// evidence KeyEventAccumulator.Corroborate checks the event
+            /// source against.</summary>
+            internal int LastNamedKeyboard;
 
             /// <summary>One frame's attribution. Every code of
             /// <paramref name="scan"/> (production: every KeyCode member, the
@@ -854,6 +862,16 @@ namespace CompetitiveRounds
             /// too. Unknown is never read as the mouse.</summary>
             internal static EdgeAttribution Attribute(IFrameInput io, int[] alias, int[] scan)
             {
+                int namedKeyboard;
+                return Attribute(io, alias, scan, out namedKeyboard);
+            }
+
+            /// <summary>The same attribution, also returning how many keyboard
+            /// keys the KeyCodes named this frame (fix pass 3: the liveness
+            /// evidence for the event source).</summary>
+            internal static EdgeAttribution Attribute(IFrameInput io, int[] alias, int[] scan, out int namedKeyboard)
+            {
+                namedKeyboard = 0;
                 var a = EdgeAttribution.None;
                 var aliasSet = new HashSet<int>(alias ?? new int[0]);
                 int named = 0;   // keyboard keys a KeyCode named this frame, the alias's included
@@ -867,7 +885,7 @@ namespace CompetitiveRounds
                 // the 2811a621 detector (no independent source); mutation 18 is
                 // the a22f80ed one, which had none either.
                 int kb = Mut == 25 || Mut == 18 ? 0 : io.KeyboardEdges();
-                if (!any && !typed && kb <= 0) return a;
+                if (!any && !typed && kb <= 0) { namedKeyboard = named; return a; }
                 // Mutation 18 restores the a22f80ed observation: the scan saw only
                 // InControl's 127 codes and a mouse edge was a separate yes/no.
                 HashSet<int> legacy = Mut == 18 ? new HashSet<int>(StaticKeyScan) : null;
@@ -891,6 +909,7 @@ namespace CompetitiveRounds
                 if (Mut == 18 && (a & EdgeAttribution.Mouse) != 0) a &= ~EdgeAttribution.Unknown;
                 // revision 3: a held button (not an edge) made the unnamed edge the mouse's.
                 if ((Mut == 23 || Mut == 107) && (a & EdgeAttribution.Unknown) != 0 && io.AnyMouseHeld()) a = (a & ~EdgeAttribution.Unknown) | EdgeAttribution.Mouse;
+                namedKeyboard = named;
                 return a;
             }
 
@@ -903,7 +922,7 @@ namespace CompetitiveRounds
             {
                 bool fire = false, aliasUp = false;
                 if (alias != null) foreach (int c in alias) if (c > 0 && io.KeyUp(c)) aliasUp = true;
-                var a = Attribute(io, alias, scan);
+                var a = Attribute(io, alias, scan, out LastNamedKeyboard);
                 Last = a;
                 bool aliasDown = (a & EdgeAttribution.Alias) != 0;
                 bool foreign = (a & (EdgeAttribution.Key | EdgeAttribution.Unknown)) != 0;
@@ -963,6 +982,85 @@ namespace CompetitiveRounds
                 T = t; Down = new HashSet<int>(down ?? new int[0]); Up = new HashSet<int>(up ?? new int[0]);
                 Any = any; Text = text ?? ""; MouseHeldNow = mouseHeld;
                 KbExtra = kbExtra; KbUnavailable = kbUnavailable;
+            }
+        }
+
+        /// <summary>
+        /// Fix pass 3 (M1): the event-level keyboard-down accumulator the
+        /// ChatChannel tap detector's independent keyboard channel reads. The
+        /// platform's key events are fed in as they are delivered, between
+        /// frames (production: Keybinds.KeyboardEvents, a thread message hook
+        /// that sees every WM_KEYDOWN / WM_SYSKEYDOWN and WM_KEYUP /
+        /// WM_SYSKEYUP the game thread takes from its queue; the harness: the
+        /// events a case scripts), and drained once a frame. A press counts
+        /// once, whatever happens to the key before the drain: a key that
+        /// went down and up wholly between two drains is one edge. An
+        /// auto-repeat of a key that is already down (the message's previous
+        /// key state bit) is never a new edge. Nothing here reads, keeps or
+        /// compares a snapshot of key state. Unity-free, so the harness feeds
+        /// it events and executes it.
+        /// </summary>
+        internal sealed class KeyEventAccumulator
+        {
+            private int pending, drained, drainedFrame = int.MinValue, silentFrames;
+            private bool unavailable;
+
+            /// <summary>Some key event was delivered since the source was
+            /// installed: the positive signal that it is live.</summary>
+            internal bool EverDelivered { get; private set; }
+            /// <summary>Fresh presses delivered since the source was installed.</summary>
+            internal int Presses { get; private set; }
+            /// <summary>The source cannot be read: drains answer -1.</summary>
+            internal bool Unavailable { get { return unavailable; } }
+
+            /// <summary>A key-down message for virtual key <paramref name="vk"/>;
+            /// <paramref name="repeat"/> is its previous-key-state bit (set for
+            /// an auto-repeat of a key that is already down).</summary>
+            internal void KeyDown(int vk, bool repeat)
+            {
+                if (vk <= 0 || vk > 254) return;
+                EverDelivered = true;
+                if (repeat) return;
+                pending++;
+                Presses++;
+            }
+
+            /// <summary>A key-up message: never an edge, but a delivery.</summary>
+            internal void KeyUp(int vk)
+            {
+                if (vk <= 0 || vk > 254) return;
+                EverDelivered = true;
+            }
+
+            internal void MarkUnavailable() { unavailable = true; }
+
+            /// <summary>The keyboard edges of frame <paramref name="frame"/>:
+            /// the first call of a frame takes every press delivered since the
+            /// previous drain; later calls of the same frame return the same
+            /// count. Presses delivered while no frame drained (a frame that
+            /// skipped its tick) are counted on the next drain: more edges,
+            /// never fewer. -1 when the source is unavailable.</summary>
+            internal int DrainForFrame(int frame)
+            {
+                if (unavailable) return -1;
+                if (frame == drainedFrame) return drained;
+                drainedFrame = frame;
+                drained = pending;
+                pending = 0;
+                return drained;
+            }
+
+            /// <summary>Liveness, from the detector's own evidence: a frame in
+            /// which the KeyCodes named <paramref name="namedKeyboard"/>
+            /// keyboard keys while this source has never delivered a single key
+            /// event is silent. Two silent frames and the source is declared
+            /// unavailable (a hook installed on a thread that does not take the
+            /// keyboard's messages): from then on a frame with a mouse edge is
+            /// never mouse-only, the conservative direction.</summary>
+            internal void Corroborate(int namedKeyboard)
+            {
+                if (unavailable || EverDelivered || namedKeyboard <= 0) return;
+                if (++silentFrames >= 2) unavailable = true;
             }
         }
 
@@ -1305,7 +1403,9 @@ namespace CompetitiveRounds
             Check(r, "F2 KeybindRules.TapDetector: a foreign key on the ARMING frame keeps the tap from rotating",
                   !TapArmedWithForeign(tapAlias, tapScan), "rotated=" + TapArmedWithForeign(tapAlias, tapScan));
 
-            // -- fix pass 2 M1: the independently latched keyboard-edge source -------
+            // -- fix pass 2 M1: the independent keyboard-edge channel, its count
+            // scripted here (fix pass 3: production fills it from the event
+            // accumulator, executed by the harness's keybindfix3 suite) -------
             // ChatChannel armed; in one frame a keyboard key no KeyCode names
             // (no typed text) goes down beside a click: the independent source
             // counts one keyboard edge the scan did not name, so the frame is

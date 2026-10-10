@@ -1032,8 +1032,10 @@ namespace CompetitiveRounds
         /// names. A key read that throws counts as a key edge and a thrown
         /// inputString as typed text; a mouse read that throws counts as no
         /// edge: unreadable input is attributed Key or Unknown, never the
-        /// mouse. Fix pass 2 (M1): KeyboardEdges is the third, independent
-        /// keyboard channel, KeyboardEdgeLatch.</summary>
+        /// mouse. Fix pass 2 (M1), fix pass 3 (M1): KeyboardEdges is the
+        /// third, independent keyboard channel: the key events the game thread
+        /// took from its queue since the previous frame, drained from
+        /// KeyboardEvents' accumulator once a frame.</summary>
         private sealed class RealInput : IFrameInput
         {
             public bool KeyDown(int code)
@@ -1047,87 +1049,128 @@ namespace CompetitiveRounds
             public bool AnyMouseHeld() { for (int n = 0; n < 7; n++) if (MouseHeld(n)) return true; return false; }
             public float Now() { return Time.unscaledTime; }
             public bool Focused() { return Application.isFocused; }
-            public int KeyboardEdges() { return KeyboardEdgeLatch.EdgesThisFrame(); }
+            public int KeyboardEdges() { return KeyboardEvents.EdgesThisFrame(); }
         }
 
-        /// <summary>Fix pass 2 (M1): the keyboard-edge source the ChatChannel
-        /// tap detector reads beside Unity's KeyCode edges, independent of the
-        /// KeyCode table, of the mouse and of the typed text. Once a frame it
-        /// copies the game thread's keyboard state (user32 GetKeyboardState:
-        /// one byte per virtual key, the state as of the keyboard messages
-        /// this thread has taken from its queue - the same messages Unity's
-        /// legacy key edges are made from) and counts the virtual keys that
-        /// went down since the previous frame's copy: the down bit newly set,
-        /// or the toggle bit flipped (a press inside one frame). The previous
-        /// copy is the latch. Never counted: the mouse buttons (VK 1, 2, 4,
-        /// 5, 6), the generic SHIFT, CONTROL and MENU codes (their left and
-        /// right codes are counted instead, as Unity names them), and the two
-        /// synthetic codes PROCESSKEY (229) and PACKET (231), which stand for
-        /// another key or for injected text. A frame that does not directly
-        /// follow the previous read, or an unfocused game, re-baselines: no
-        /// edges that frame. A read that fails is -1, and the detector then
-        /// treats a frame with a mouse edge as possibly hiding a keyboard
-        /// edge. The first edge it ever reads is logged once, the positive
-        /// signal that the source is live on this seat.</summary>
-        internal static class KeyboardEdgeLatch
+        /// <summary>Fix pass 3 (M1): the platform's key events, the ChatChannel
+        /// tap detector's independent keyboard channel. A thread-local
+        /// WH_GETMESSAGE hook on the game thread (SetWindowsHookEx with no
+        /// module and this thread's id: the hook procedure runs on this
+        /// thread, inside its own GetMessage / PeekMessage, before the message
+        /// is returned to Unity) sees every message the thread takes from its
+        /// queue - the keyboard messages Unity's legacy key edges are made
+        /// from. Each removed (PM_REMOVE) WM_KEYDOWN / WM_SYSKEYDOWN is fed to
+        /// KeybindRules.KeyEventAccumulator as a press, its previous-key-state
+        /// bit (lParam bit 30) marking an auto-repeat that is no new edge; each
+        /// WM_KEYUP / WM_SYSKEYUP as a release. The detector drains the
+        /// accumulator once a frame (EdgesThisFrame): a key that went down and
+        /// up wholly between two frames is one edge, which no snapshot of key
+        /// state can show. The hook only counts: it never changes, consumes or
+        /// delays a message and always passes it on (CallNextHookEx). It is
+        /// installed once, by the first frame's chat tick, on the main thread.
+        /// A hook that cannot be installed, or one the detector's own evidence
+        /// shows silent (KeyEventAccumulator.Corroborate), makes the source
+        /// unavailable: -1, and a frame with a mouse edge is never mouse-only.
+        /// The install and the first delivered key event are each logged
+        /// once: the positive signals that the source is live on a seat.</summary>
+        internal static class KeyboardEvents
         {
+            [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+            private delegate IntPtr HookProc(int code, IntPtr wParam, IntPtr lParam);
+
+            [DllImport("user32.dll", SetLastError = true)]
+            private static extern IntPtr SetWindowsHookEx(int idHook, HookProc lpfn, IntPtr hMod, uint dwThreadId);
+
             [DllImport("user32.dll")]
-            private static extern bool GetKeyboardState([Out] byte[] lpKeyState);
+            private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
-            private static readonly byte[] cur = new byte[256], prev = new byte[256];
-            private static int readFrame = int.MinValue, edges;
-            private static bool broken, firstEdgeLogged;
+            [DllImport("kernel32.dll")]
+            private static extern uint GetCurrentThreadId();
 
-            internal static bool Counted(int vk)
+            private const int WH_GETMESSAGE = 3, HC_ACTION = 0, PM_REMOVE = 1;
+            private const int WM_KEYDOWN = 0x0100, WM_KEYUP = 0x0101, WM_SYSKEYDOWN = 0x0104, WM_SYSKEYUP = 0x0105;
+
+            internal static readonly KeybindRules.KeyEventAccumulator Accumulator = new KeybindRules.KeyEventAccumulator();
+            private static HookProc proc;   // held for the life of the hook: native code keeps a pointer to it
+            private static IntPtr hook;
+            private static bool installTried, liveLogged, unavailableLogged;
+            private static int firstVk = -1;
+
+            private static void EnsureInstalled()
             {
-                if (vk < 3 || vk > 254) return false;
-                if (vk == 4 || vk == 5 || vk == 6) return false;
-                if (vk == 0x10 || vk == 0x11 || vk == 0x12) return false;
-                if (vk == 0xE5 || vk == 0xE7) return false;
-                return true;
-            }
-
-            /// <summary>The keyboard edges of this frame; the first call of a
-            /// frame reads and latches, later calls return the same count.</summary>
-            internal static int EdgesThisFrame()
-            {
-                if (broken) return -1;
-                int f;
-                bool focused;
-                try { f = Time.frameCount; focused = Application.isFocused; }
-                catch { return -1; }
-                if (f == readFrame) return edges;
-                bool baseline = readFrame == int.MinValue || f != readFrame + 1 || !focused;
-                readFrame = f;
-                bool ok;
-                try { ok = GetKeyboardState(cur); }
+                if (installTried) return;
+                installTried = true;
+                try
+                {
+                    proc = OnMessage;
+                    hook = SetWindowsHookEx(WH_GETMESSAGE, proc, IntPtr.Zero, GetCurrentThreadId());
+                    if (hook != IntPtr.Zero)
+                    {
+                        Plugin.Log.LogInfo("[KEYBIND] keyboard-event source installed (thread message hook)");
+                        return;
+                    }
+                    Accumulator.MarkUnavailable();
+                    unavailableLogged = true;
+                    Plugin.Log.LogWarning("[KEYBIND] keyboard-event source unavailable (SetWindowsHookEx error "
+                        + Marshal.GetLastWin32Error() + ") - a click while the ChatChannel key is held now disarms the tap");
+                }
                 catch (Exception e)
                 {
-                    broken = true;
-                    Plugin.Log.LogWarning("[KEYBIND] keyboard-edge source unavailable (" + e.GetType().Name + ": " + e.Message
+                    Accumulator.MarkUnavailable();
+                    unavailableLogged = true;
+                    Plugin.Log.LogWarning("[KEYBIND] keyboard-event source unavailable (" + e.GetType().Name + ": " + e.Message
                         + ") - a click while the ChatChannel key is held now disarms the tap");
-                    edges = -1;
-                    return -1;
                 }
-                if (!ok) { readFrame = int.MinValue; edges = -1; return -1; }
-                int n = 0;
-                if (!baseline)
-                    for (int vk = 3; vk < 255; vk++)
-                    {
-                        if (!Counted(vk)) continue;
-                        bool down = (cur[vk] & 0x80) != 0, wasDown = (prev[vk] & 0x80) != 0;
-                        bool flipped = ((cur[vk] ^ prev[vk]) & 0x01) != 0;
-                        if ((down && !wasDown) || flipped) n++;
-                    }
-                Buffer.BlockCopy(cur, 0, prev, 0, 256);
-                edges = n;
-                if (n > 0 && !firstEdgeLogged)
+            }
+
+            /// <summary>The hook procedure (GetMsgProc). MSG is read in place -
+            /// the message at one pointer's offset, wParam at two, lParam at
+            /// three, on x86 and x64 alike - and nothing is allocated.</summary>
+            private static IntPtr OnMessage(int code, IntPtr wParam, IntPtr lParam)
+            {
+                try
                 {
-                    firstEdgeLogged = true;
-                    Plugin.Log.LogInfo("[KEYBIND] keyboard-edge source live: first edge read (" + n + ")");
+                    if (code == HC_ACTION && wParam.ToInt64() == PM_REMOVE && lParam != IntPtr.Zero)
+                    {
+                        int msg = Marshal.ReadInt32(lParam, IntPtr.Size);
+                        if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYUP)
+                        {
+                            int vk = (int)(Marshal.ReadIntPtr(lParam, 2 * IntPtr.Size).ToInt64() & 0xFF);
+                            long flags = Marshal.ReadIntPtr(lParam, 3 * IntPtr.Size).ToInt64();
+                            if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) Accumulator.KeyDown(vk, (flags & 0x40000000L) != 0);
+                            else Accumulator.KeyUp(vk);
+                            if (firstVk < 0) firstVk = vk;
+                        }
+                    }
+                }
+                catch { }
+                return CallNextHookEx(hook, code, wParam, lParam);
+            }
+
+            /// <summary>The keyboard edges of this frame: the first call of a
+            /// frame drains the accumulator, later calls return the same count.</summary>
+            internal static int EdgesThisFrame()
+            {
+                EnsureInstalled();
+                int f;
+                try { f = Time.frameCount; } catch { return -1; }
+                int n = Accumulator.DrainForFrame(f);
+                if (!liveLogged && firstVk >= 0)
+                {
+                    liveLogged = true;
+                    Plugin.Log.LogInfo("[KEYBIND] keyboard-event source live: first key event delivered (vk " + firstVk + ")");
+                }
+                if (n < 0 && !unavailableLogged)
+                {
+                    unavailableLogged = true;
+                    Plugin.Log.LogWarning("[KEYBIND] keyboard-event source silent: KeyCodes named keyboard keys it never delivered"
+                        + " - a click while the ChatChannel key is held now disarms the tap");
                 }
                 return n;
             }
+
+            /// <summary>The detector's own evidence for the liveness check.</summary>
+            internal static void Corroborate(int namedKeyboard) { Accumulator.Corroborate(namedKeyboard); }
         }
 
         private static int[] fullKeyScan;
@@ -1166,13 +1209,16 @@ namespace CompetitiveRounds
         /// true on the frame the bound ChatChannel key was tapped.</summary>
         internal static bool ChatChannelTapped(bool chatInputOpen)
         {
-            // M1: the independent keyboard source is read on every call, the
-            // chat box open or not, so its latch is current on the frame the
-            // box opens (a gap between reads re-baselines that frame).
-            KeyboardEdgeLatch.EdgesThisFrame();
+            // M1 (fix pass 3): the event accumulator is drained on every call,
+            // the chat box open or not, so each frame's drain holds only the
+            // presses delivered since the previous frame - a press made while
+            // the box was closed never reaches the frame the box opens.
+            KeyboardEvents.EdgesThisFrame();
             if (CaptureOwnsInput) { chatTap.Held = chatTap.Clean = false; return false; }
             if (!chatInputOpen) { chatTap.Held = chatTap.Clean = false; return false; }
-            return chatTap.Step(realInput, KeyCodesFor(ChatChannel), FullKeyScan());
+            bool tapped = chatTap.Step(realInput, KeyCodesFor(ChatChannel), FullKeyScan());
+            KeyboardEvents.Corroborate(chatTap.LastNamedKeyboard);
+            return tapped;
         }
 
         // =================================================================

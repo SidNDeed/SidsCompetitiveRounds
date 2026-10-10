@@ -301,6 +301,21 @@ def test_the_keybind_fix2_controls_ran_and_none_failed(harness_run):
     assert printed == run == KEYBIND_FIX2_CASES, (run, printed)
 
 
+# Item 17 fix pass 3: the round-3 findings' controls, one instrument that
+# compiles on the reviewed pin (6e74c910) and on the fix tip (red there,
+# green here): M1 the event-level keyboard accumulator.
+KEYBIND_FIX3_CASES = 7
+
+
+def test_the_keybind_fix3_controls_ran_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "keybindfix3" in suites, "the keybindfix3 suite did not report"
+    run, fail, verdict = suites["keybindfix3"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[keybindfix3\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run == KEYBIND_FIX3_CASES, (run, printed)
+
+
 @pytest.mark.parametrize("n", KEYBIND_MUTATIONS)
 def test_each_keybind_mutation_reds_its_assertion_and_keeps_its_control(harness_run, n):
     """Every T1 mutation: unmutated green, the mutation reds the guarded
