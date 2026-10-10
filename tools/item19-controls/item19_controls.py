@@ -28,12 +28,23 @@ and extends "suite": every named closure's production expression is mutated
 and the tree's OWN tests (its pytest, which runs its own prodprobe at S35,
 and its harness) must go red, and stay green on a neighbouring twin.
 
+Fix pass 3 (Codex BUILD round 3, ai-collab/v1410/CODEX-ITEM19-BUILD-R3-REPORT.md)
+re-judges H3 H9 M3 M8 and adds N1 (the FIX3 set, each red on the round 3
+tree bdc30732 and green on the fix tip): the tip's prodprobe gains H3remote,
+H9t, H9r, M3x, M8e2, M8e3, M8def and M8exc; new production rows (the remote
+arm turned back into a cache read, the debt paid before the commit or
+without the read-back, the line written only after the apply) must red the
+tree's own pytest; new rule rows (HARNESS3_ROWS: the ledger's provenance,
+hold and owed bounds and session end, the debt order) must red the tree's
+own harness; and N1 is a gate over the design file the caller names
+(--design), which is gitignored and so is not part of either tree.
+
 Nothing is edited in the tree: every build and every mutation happens in
 copies under --work. No path is hard-coded; the caller names every directory.
 
 Subcommands:
-  controls --root TREE --evidence DIR --decompiled DIR --work DIR
-  binds PLUGIN_CS OUT_JSON            the Config.Bind list (M10's witness input)
+  controls --root TREE --evidence DIR --decompiled DIR --work DIR [--design FILE]
+  binds PLUGIN_CS OUT_JSON           the Config.Bind list (M10's witness input)
   cfgwitness --root TREE --bepinex-core DIR [--managed DIR] --work DIR
              [--old-root TREE --real-cfg FILE]   the real-config upgrade (fix pass 2)
   tally PYTEST_V_LOG                  every executed node, summed against the summary
@@ -60,11 +71,14 @@ sys.path.insert(0, os.path.join(LANE, "backend", "tests"))
 from _cs_structure import mask_code, strip_comments_only  # noqa: E402
 
 ITEMS = ["H3", "H6", "H8", "H9", "M3", "M8", "M10", "M11", "L1",
-         "BR-H1", "BR-M1", "BR-M2", "BR-M3", "BR-M4", "BR-M5", "BR-L1", "BR-L2"]
+         "BR-H1", "BR-M1", "BR-M2", "BR-M3", "BR-M4", "BR-M5", "BR-L1", "BR-L2", "N1"]
 # the items the round 2 review left PARTLY (fix pass 2): each must be red on
 # the round 2 tree and green on the fix tip; the rest were closed and must
 # stay green on the fix tip
 FIX2 = ["H3", "H6", "H9", "M3", "M8", "M10", "M11", "L1", "BR-M4"]
+# fix pass 3 (Codex BUILD round 3, ai-collab/v1410/CODEX-ITEM19-BUILD-R3-REPORT.md):
+# each must be red on the round 3 tree (bdc30732) and green on the fix tip
+FIX3 = ["H3", "H9", "M3", "M8", "N1"]
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +156,9 @@ def src_h3(root):
         return False, "no FacePublisher class"
     seg = t[cls[0]:cls[1]]
     # fix pass 2: the body lives behind the out overload when there is one
-    m = re.search(r"public static \w+ PublishLocal\(out string \w+\)", seg) or re.search(r"public static \w+ PublishLocal\(\)", seg)
+    # (fix pass 3: that overload also takes the optional pick tag flag)
+    m = (re.search(r"public static \w+ PublishLocal\(out string \w+(?:, bool \w+ = false)?\)", seg)
+         or re.search(r"public static \w+ PublishLocal\(\)", seg))
     if not m:
         return False, "no PublishLocal"
     body = method_body(seg, m.group(0))
@@ -204,16 +220,71 @@ def src_brh1(root):
 
 
 def src_m8(root):
+    """Fix pass 3 (M8): the classification line is composed under both arms
+    of its guard, carries the missing-data tail, and is WRITTEN before the
+    missing-data return and before the apply (round 3 wrote it after the
+    apply, and not at all on a missing-data room edge)."""
     t = read(os.path.join(root, "plugin", "AvatarDefaults.cs"))
     body = method_body(t, "internal static void Evaluate(string tag)", "internal static class AvatarDefaults")
     if body is None:
         return False, "no Evaluate"
-    guard = body.find("rules.LogsClassification(tag)")
-    ret = body.find("if (d.Apply < 0) return;")
-    log = body.find("Plugin.Log.LogInfo(rules.ClassificationLine(")
-    ok = guard >= 0 and log > guard and ret > log
-    return ok, ("a classification line on room edges before the no-apply return: guard=%s log=%s return-after=%s"
-                % (guard >= 0, log >= 0, ret > log >= 0))
+    code = strip_comments_only(body)
+    guard = code.find("if (d.Apply >= 0 || rules.LogsClassification(tag))")
+    comp = code.find("rules.ClassificationLine(")
+    w = re.search(r"\bLine\(tag, line\)|Plugin\.Log\.LogInfo\(rules\.ClassificationLine\(", code)
+    write = w.start() if w else -1
+    early = code.find("if (d.NothingToRead)")
+    apply_ = code.find("Apply(d.Apply, tag)")
+    tail = "rules.MissingDataNote(" in code
+    before_early = write >= 0 and early > write
+    before_apply = write >= 0 and apply_ > write
+    ok = guard >= 0 and comp > guard and write >= comp and before_early and before_apply and tail
+    return ok, ("the classification line: both guard arms=%s, composed=%s, missing-data tail=%s, written before the "
+                "missing-data return=%s, written before the apply=%s"
+                % (guard >= 0, comp > guard >= 0, tail, before_early, before_apply))
+
+
+# fix pass 3 (N1): the design file is gitignored, so the caller names it
+# (--design): the round 3 review's frozen copy for the red run, the amended
+# ai-collab copy for the green run.
+E13_FALSE = "E13 is local to the seat and writes no property."
+
+
+def section(text, num):
+    m = re.search(r"^## %d\. .*$" % num, text, re.M)
+    if not m:
+        return None
+    n = re.search(r"^## \d+\. ", text[m.end():], re.M)
+    return text[m.start():m.end() + (n.start() if n else len(text) - m.end())]
+
+
+def gate_n1(design):
+    """N1: section 13 records that E13's repayment publishes the carrier
+    (FacePublisher.PublishLocal, SetCustomProperties on the local player)
+    while adding no new key and no new wire format, and that the face RPC
+    is suppressed out of a room (TrySendLocalFace's InRoom guard), and no
+    longer says E13 writes no property; section 14 records the fix pass 3
+    wire change (the pick tag) and 1.40.3."""
+    if not design or not os.path.exists(design):
+        return False, "no design file given (--design)"
+    t = read(design)
+    s13, s14 = section(t, 13), section(t, 14)
+    flat13 = " ".join((s13 or "").split())
+    false_kept = E13_FALSE in flat13
+    # one paragraph about E13 must carry both records (a mention of the
+    # publisher elsewhere in the section is not a record of what E13 writes)
+    paras = [" ".join(p.split()) for p in re.split(r"\n\s*\n", s13 or "")]
+    e13 = [p for p in paras if "E13" in p]
+    pub = any(all(k in p for k in ("FacePublisher.PublishLocal", "SetCustomProperties", "cr_face",
+                                   "no new key", "no new wire format")) for p in e13)
+    rpc = any("TrySendLocalFace" in p and "PhotonNetwork.InRoom" in p for p in e13)
+    flat14 = " ".join((s14 or "").split())
+    wire = s14 is not None and "PopupCarrierLedger" in flat14 and "|p" in flat14 and "1.40.3" in flat14
+    ok = s13 is not None and not false_kept and pub and rpc and wire
+    return ok, ("design %s sha256 %s: section 13 present=%s, keeps 'E13 ... writes no property'=%s, records E13's carrier "
+                "publication (the existing key, no new key or wire format)=%s, records the suppressed out-of-room RPC=%s"
+                " | section 14 (the pick tag, 1.40.3)=%s"
+                % (os.path.basename(design), sha256(design), s13 is not None, false_kept, pub, rpc, wire))
 
 
 # ---------------------------------------------------------------------------
@@ -558,8 +629,9 @@ CLAIM_ROWS = {
                          twin=(AD, "                if (d.Apply >= 0 || rules.LogsClassification(tag))",
                                "                // the line's guard: an applied change, or a room edge\n                if (d.Apply >= 0 || rules.LogsClassification(tag))")),
     "M8-room-arm": dict(edit=(AD, "if (d.Apply >= 0 || rules.LogsClassification(tag))", "if (d.Apply >= 0)"),
-                        twin=(AD, "                Plugin.Log.LogInfo(rules.ClassificationLine(",
-                              "                    // one line per classification\n                    Plugin.Log.LogInfo(rules.ClassificationLine(")),
+                        # fix pass 3: the round 2 twin anchored on the log call the
+                        # line no longer goes through; this one is in both trees
+                        twin=(AD, "if (d.Gated) return;", "if (d.Gated == true) return;")),
     # BR-M4: partial assignment in ReadFacing (the first getter committed
     # before the second runs, and the catch no longer resets it)
     "BR-M4-partial": dict(edit=[(AD, "bool inRoom = PhotonNetwork.InRoom;", "f.InRoom = PhotonNetwork.InRoom; bool inRoom = f.InRoom;"),
@@ -572,6 +644,29 @@ CLAIM_ROWS = {
     "L1-announce-sink": dict(edit=(AD, "if (d.Unusable != AvatarUnusable.None) Announce(UnusableMessage(d.Unusable));", ""),
                              twin=(AD, "if (d.Unusable != AvatarUnusable.None) Announce(UnusableMessage(d.Unusable));",
                                    "if (AvatarUnusable.None != d.Unusable) Announce(UnusableMessage(d.Unusable));")),
+
+    # ---- fix pass 3: the round 3 findings at their PRODUCTION expressions;
+    # each anchor exists only on the fix tip, so on the round 3 tree the row
+    # cannot run (None) and the item stays red there.
+    # H3: the popup's remote arm turned back into a read of this seat's cached copy
+    "H3-remote-read": dict(edit=("Plugin.cs", "() => { string v = PopupCarriers.ForShow(pickerActor); remoteShown = true; return v; });",
+                                 "() => pv.Owner.CustomProperties[FacePublisher.PROP_FACE] as string);"),
+                           twin=("Plugin.cs", "bool remoteShown = false;", "bool remoteShown = default(bool);")),
+    # H9 / M3: the debt cleared before the apply runs (the round 3 order)
+    "H9-pay-before-commit": dict(edit=(AD, "int held = rules.HomeBeforeApply(x.Home, d);",
+                                       "int held = d.HomeChanged ? d.NewHome : x.Home;"),
+                                 twin=(AD, "int held = rules.HomeBeforeApply(x.Home, d);",
+                                       "int held = rules.HomeBeforeApply(x.Home, d) + 0;")),
+    # H9: the debt cleared whatever the read-back shows
+    "H9-readback-ignored": dict(edit=(AD, "int paid = rules.HomeAfterApply(held, d, after);",
+                                      "int paid = rules.HomeAfterApply(held, d, d.Apply >= 0 ? d.Apply : after);"),
+                                twin=(AD, "int paid = rules.HomeAfterApply(held, d, after);",
+                                      "int paid = rules.HomeAfterApply(held, d, after + 0);")),
+    # M8: the line written only after the apply (an exception or a
+    # missing-data exit suppresses it)
+    "M8-line-after-apply": dict(edit=(AD, "bool written = line != null && Line(tag, line);", "bool written = false;"),
+                                twin=(AD, "bool written = line != null && Line(tag, line);",
+                                      "bool written = line != null && Line(tag, line);   // before any fallible step")),
 }
 
 # fix pass 2: the tests each row runs (pytest -k). The source-claim rows
@@ -584,24 +679,79 @@ CLAIM_SELECT.update({n: "s35" for n in ("H6-isPlaying", "H6-battleOngoing", "H9-
                                          "M3-deferred-edge", "BR-M4-partial", "L1-sprite-sink",
                                          "L1-announce-sink")})
 CLAIM_SELECT.update({n: "s22 or s35" for n in ("M8-apply-arm", "M8-room-arm")})
+# fix pass 3: the remote arm is S33's (source); the debt order is the
+# production probe's (S35: H9t, H9r, M3x); the line's place is both S22's and S35's
+CLAIM_SELECT.update({"H3-remote-read": "s33", "H9-pay-before-commit": "s35", "H9-readback-ignored": "s35",
+                     "M8-line-after-apply": "s22 or s35"})
 
 # fix pass 2: the closures M11 names, by the rows that bind them
 M11_CLOSURES = {"H6": ["H6-isPlaying", "H6-battleOngoing"], "M8": ["M8-apply-arm", "M8-room-arm"],
                 "BR-M4": ["BR-M4-partial"], "L1": ["L1-sprite-sink", "L1-announce-sink"]}
 
-# fix pass 2: rule-level mutations the tree's own HARNESS must catch
+# fix pass 2: rule-level mutations the tree's own HARNESS must catch. "{p}"
+# is the name of PopupFace's fourth parameter in the tree under test
+# (readCarrier at round 3, remoteForThisPick since fix pass 3), read by
+# popupface_param.
 HARNESS2_ROWS = {
     "H3-rule-reread": ((AR, "internal virtual string PopupFace(",
                         "if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;",
-                        "if (pickerIsLocal) return readCarrier != null ? readCarrier() : null;"),
+                        "if (pickerIsLocal) return {p} != null ? {p}() : null;"),
                        (AR, "internal virtual string PopupFace(",
-                        "return readCarrier != null ? readCarrier() : null;",
-                        "return readCarrier == null ? null : readCarrier();")),
+                        "return {p} != null ? {p}() : null;",
+                        "return {p} == null ? null : {p}();")),
     "H9-rule-deferral": ((AR, "internal virtual AvatarDecision Evaluate(AvatarEvalIn x)",
                           "d.RestorationDeferred = RestorationOwed(", "d.RestorationDeferred = false && RestorationOwed("),
                          (AR, "internal virtual AvatarDecision Evaluate(AvatarEvalIn x)",
                           "d.NothingToRead = true;", "d.NothingToRead = !false;")),
 }
+
+# fix pass 3: the round 3 findings at their RULE expressions, which the
+# tree's own harness must catch (cases H3remote, H3hold, H3owed, H9t, H9r,
+# M3x, M8x). Every anchor exists only on the fix tip.
+PROV = "internal virtual bool PickProvenance(string value, out long seq)"
+HELD = "internal virtual bool HeldForPopup(double arrivedAt, double openedAt)"
+OWED = "internal virtual bool OwedWithin(double deferredSince, double now)"
+HBA = "internal virtual int HomeBeforeApply(int homeBefore, AvatarDecision d)"
+HAA = "internal virtual int HomeAfterApply(int homeHeld, AvatarDecision d, int liveAfter)"
+EVAL_RULES = "internal virtual AvatarDecision Evaluate(AvatarEvalIn x)"
+HARNESS3_ROWS = {
+    # H3: the provenance check dropped (an untagged arrival counts as this pick's)
+    "H3-provenance": ((AR, PROV, "return PopupCarrierLedger.TryReadTag(value, out seq);",
+                       "if (PopupCarrierLedger.TryReadTag(value, out seq)) return true;\n"
+                       "            seq = System.Environment.TickCount64;\n"
+                       "            return !string.IsNullOrEmpty(value);"),
+                      (AR, PROV, "return PopupCarrierLedger.TryReadTag(value, out seq);",
+                       "bool tagged = PopupCarrierLedger.TryReadTag(value, out seq);\n            return tagged;")),
+    # H3: a held value applied however long ago it arrived
+    "H3-hold": ((AR, HELD, "return openedAt - arrivedAt <= PopupCarrierLedger.DeferralBoundSeconds;", "return true;"),
+                (AR, HELD, "return openedAt - arrivedAt <= PopupCarrierLedger.DeferralBoundSeconds;",
+                 "return !(openedAt - arrivedAt > PopupCarrierLedger.DeferralBoundSeconds);")),
+    # H3: the deferral never ends
+    "H3-owed": ((AR, OWED, "return now - deferredSince <= PopupCarrierLedger.DeferralBoundSeconds;", "return true;"),
+                (AR, OWED, "return now - deferredSince <= PopupCarrierLedger.DeferralBoundSeconds;",
+                 "return !(now - deferredSince > PopupCarrierLedger.DeferralBoundSeconds);")),
+    # H3: a popup's end keeps what arrived during it (the previous pick's value)
+    "H3-session-end": ((AR, "private void EndShown()", "e.Fresh = null;", ""),
+                       (AR, "private void EndShown()", "e.Fresh = null;", "e.Fresh = default(string);")),
+    # H9: the debt cleared whatever the read-back shows
+    "H9-readback": ((AR, HAA, "if (liveAfter != restored) return homeHeld;", ""),
+                    (AR, HAA, "if (liveAfter != restored) return homeHeld;", "if (restored != liveAfter) return homeHeld;")),
+    # H9 / M3: the paid debt written before the apply (the round 3 order)
+    "M3-pay-first": ((AR, HBA, "return d.HomeChanged && d.NewHome >= 0 ? d.NewHome : homeBefore;",
+                      "return d.HomeChanged ? d.NewHome : homeBefore;"),
+                     (AR, HBA, "return d.HomeChanged && d.NewHome >= 0 ? d.NewHome : homeBefore;",
+                      "return (d.HomeChanged && d.NewHome >= 0) ? d.NewHome : homeBefore;")),
+    # M8: the nominee left unread on the missing-data exit
+    "M8-rule-nominee": ((AR, EVAL_RULES, "d.Nominee = nom;", ""),
+                        (AR, EVAL_RULES, "d.Nominee = nom;", "d.Nominee = nom + 0;")),
+}
+
+
+def popupface_param(root):
+    """The name of PopupFace's fourth parameter in the tree under test."""
+    t = read(os.path.join(root, "plugin", AR))
+    m = re.search(r"internal virtual string PopupFace\(bool \w+, FaceCarrierAction \w+, string \w+, Func<string> (\w+)\)", t)
+    return m.group(1) if m else None
 
 
 # ---------------------------------------------------------------------------
@@ -762,8 +912,14 @@ def controls(args):
     res["H8"] = (ok8, "provenance-decides mutation -> the tree's harness fails %s, twin fails %s | probe: %s"
                  % (n8, t8, p("H8")[1]))
     hrow = {}
-    for name, (edit, twin) in HARNESS2_ROWS.items():
-        hrow[name] = (harness_run(root, args.work, name, edit, out), harness_run(root, args.work, name + "-twin", twin, out))
+    pname = popupface_param(root) or "readCarrier"
+
+    def named(e):
+        return tuple(x.replace("{p}", pname) for x in e)
+
+    for name, (edit, twin) in list(HARNESS2_ROWS.items()) + list(HARNESS3_ROWS.items()):
+        hrow[name] = (harness_run(root, args.work, name, named(edit), out),
+                      harness_run(root, args.work, name + "-twin", named(twin), out))
 
     def harness_ok(name):
         m, t = hrow[name]
@@ -815,26 +971,47 @@ def controls(args):
     res["L1"] = (rows_ok(l1) and probe_ok(["L1sprite", "L1announce"]),
                  "claims baseline exit %s | " % cbase + claim_detail(l1) + " | " + probe_detail(["L1sprite", "L1announce"]))
 
-    # fix pass 2: the PARTLY items, behaviour on this tree AND binding by the tree's own tests
-    res["H3"] = (srch3[0] and s33rc == 0 and rows_ok(["H3-reread"]) and harness_ok("H3-rule-reread"),
-                 "source: " + srch3[1] + " | the tip's S33 over this tree exit %s: %s | " % (s33rc, s33why)
-                 + claim_detail(["H3-reread"]) + " | " + harness_detail("H3-rule-reread"))
+    def harnesses_ok(names):
+        return all(harness_ok(n) for n in names)
+
+    def harnesses_detail(names):
+        return " | ".join(harness_detail(n) for n in names)
+
+    # fix pass 2: the PARTLY items, behaviour on this tree AND binding by the tree's own tests;
+    # fix pass 3 (FIX3) adds each round 3 finding's own parts to its item
+    h3x = ["H3-provenance", "H3-hold", "H3-owed", "H3-session-end"]
+    ok3 = srch3[0] and s33rc == 0 and rows_ok(["H3-reread"]) and harness_ok("H3-rule-reread")
+    ok3x = probe_ok(["H3remote"]) and rows_ok(["H3-remote-read"]) and harnesses_ok(h3x)
+    res["H3"] = (ok3 and ok3x,
+                 "source: " + srch3[1] + " | the tip's S33 (the plugin-wide carrier cache-read sweep, the remote arm"
+                 " through the ledger) over this tree exit %s: %s | " % (s33rc, s33why)
+                 + claim_detail(["H3-reread", "H3-remote-read"]) + " | " + harnesses_detail(["H3-rule-reread"] + h3x)
+                 + " | " + probe_detail(["H3remote"]))
     ok6b = res["H6"][0] and rows_ok(M11_CLOSURES["H6"]) and probe_ok(["H6a", "H6b", "H6c"])
     res["H6"] = (ok6b, res["H6"][1] + " | production: " + claim_detail(M11_CLOSURES["H6"]) + " | " + probe_detail(["H6a", "H6b", "H6c"]))
-    res["H9"] = (p("H9")[0] and probe_ok(["H9c", "H9s"]) and rows_ok(["H9-early-return"]) and harness_ok("H9-rule-deferral"),
-                 "rules probe: " + p("H9")[1] + " | " + probe_detail(["H9c", "H9s"]) + " | "
-                 + claim_detail(["H9-early-return"]) + " | " + harness_detail("H9-rule-deferral"))
-    res["M3"] = (p("M3")[0] and probe_ok(["M3t"]) and rows_ok(["M3-deferred-edge"]),
-                 "rules probe: " + p("M3")[1] + " | " + probe_detail(["M3t"]) + " | " + claim_detail(["M3-deferred-edge"]))
+    h9x = ["H9-pay-before-commit", "H9-readback-ignored"]
+    res["H9"] = (p("H9")[0] and probe_ok(["H9c", "H9s"]) and rows_ok(["H9-early-return"]) and harness_ok("H9-rule-deferral")
+                 and probe_ok(["H9t", "H9r"]) and rows_ok(h9x) and harnesses_ok(["H9-readback", "M3-pay-first"]),
+                 "rules probe: " + p("H9")[1] + " | " + probe_detail(["H9c", "H9s", "H9t", "H9r"]) + " | "
+                 + claim_detail(["H9-early-return"] + h9x) + " | "
+                 + harnesses_detail(["H9-rule-deferral", "H9-readback", "M3-pay-first"]))
+    res["M3"] = (p("M3")[0] and probe_ok(["M3t"]) and rows_ok(["M3-deferred-edge"])
+                 and probe_ok(["M3x"]) and rows_ok(["H9-pay-before-commit"]) and harness_ok("M3-pay-first"),
+                 "rules probe: " + p("M3")[1] + " | " + probe_detail(["M3t", "M3x"]) + " | "
+                 + claim_detail(["M3-deferred-edge", "H9-pay-before-commit"]) + " | " + harness_detail("M3-pay-first"))
     res["BR-M4"] = (p("BRM4")[0] and probe_ok(["BRM4"]) and rows_ok(M11_CLOSURES["BR-M4"]),
                     "rules probe: " + p("BRM4")[1] + " | " + probe_detail(["BRM4"]) + " | " + claim_detail(M11_CLOSURES["BR-M4"]))
 
     # evidence gates
     ev = args.evidence
     rep = gate_m8_replay(ev, sha)
-    res["M8"] = (srcm8[0] and rep[0] and rows_ok(M11_CLOSURES["M8"]) and probe_ok(["M8apply", "M8room"]),
-                 "source: " + srcm8[1] + " | evidence: " + rep[1] + " | production: " + claim_detail(M11_CLOSURES["M8"])
-                 + " | " + probe_detail(["M8apply", "M8room"]))
+    m8x = ["M8e2", "M8e3", "M8def", "M8exc"]
+    res["M8"] = (srcm8[0] and rep[0] and rows_ok(M11_CLOSURES["M8"]) and probe_ok(["M8apply", "M8room"])
+                 and probe_ok(m8x) and rows_ok(["M8-line-after-apply"]) and harness_ok("M8-rule-nominee"),
+                 "source: " + srcm8[1] + " | evidence: " + rep[1] + " | production: "
+                 + claim_detail(M11_CLOSURES["M8"] + ["M8-line-after-apply"]) + " | " + harness_detail("M8-rule-nominee")
+                 + " | " + probe_detail(["M8apply", "M8room"] + m8x))
+    res["N1"] = gate_n1(args.design)
     res["M10"] = gate_m10(ev, sha)
     res["BR-M2"] = log_gate(ev, sha, r"^AFFECTED-COMPARE verdict=PASS", "final-tip affected-set comparison")
     res["BR-M5"] = gate_brm5(ev, sha)
@@ -850,6 +1027,9 @@ def controls(args):
     f2red = [k for k in FIX2 if not res[k][0]]
     out.write("CONTROLS-FIX2 commit=%s red=%d green=%d of %d (red: %s)\n"
               % (sha, len(f2red), len(FIX2) - len(f2red), len(FIX2), " ".join(f2red) or "none"))
+    f3red = [k for k in FIX3 if not res[k][0]]
+    out.write("CONTROLS-FIX3 commit=%s red=%d green=%d of %d (red: %s)\n"
+              % (sha, len(f3red), len(FIX3) - len(f3red), len(FIX3), " ".join(f3red) or "none"))
     return 0 if green == len(ITEMS) else 1
 
 
@@ -1112,6 +1292,7 @@ def main():
     c.add_argument("--evidence", required=True)
     c.add_argument("--decompiled", required=True)
     c.add_argument("--work", required=True)
+    c.add_argument("--design", default=None)      # fix pass 3 (N1): the design file to judge
     b = sub.add_parser("binds")
     b.add_argument("plugin_cs")
     b.add_argument("out")
