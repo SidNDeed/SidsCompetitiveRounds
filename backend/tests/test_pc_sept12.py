@@ -574,3 +574,104 @@ def test_the_extracted_source_registry_matches_the_client_sources_byte_for_byte(
     assert len(set(listed)) == len(listed)   # the generated file lists each key once (r8: a dict's keys compared with themselves)
     for s in entries:   # every one (r7: sampling the ends let a middle substitution through)
         assert '"' + ex.cs_escape(s) + '",' in keys
+
+
+# Registered client keys with no row in at least one bundled catalogue, as
+# key_ids (sha1 of "client\0" + English, the sync tool's build_client_keys).
+# Each of these 201 was already absent at 5fc9a64c, before wave A, and
+# belongs to the batch that registered it. It is a RECORDED GAP, not an
+# approval: whether those strings are translated now or ship English and are
+# seeded later is the batch-close decision learning #578 gives to Sid. It may
+# only SHRINK -- a key that gains all four rows, or leaves the registry, must
+# leave this list in the same change, or the test below fails.
+_CATALOGUE_GAP_KEY_IDS = frozenset({
+    "009938a72c78a165", "00ee52283a370c22", "01f6612a88fb7f2e", "038a0b06714e18b8", "039b85ed360c892c",
+    "0688bed8d4269036", "08697623347a7e5f", "093f3a6c6fae5294", "098f12da49c845cd", "0eb9d390e9bc1332",
+    "0ed7e38c708b3a2b", "0eeafe13444eadc0", "0f97cbe4322477c6", "1048f83aab6b00f4", "11edb88202bebbb4",
+    "12788a3b5f878f99", "1408f779a3cde02c", "1433e2e3d2524fb8", "161970b49a18c03f", "168c217e01ee25d6",
+    "17127a1e1073eb95", "1930838335e1b282", "1ae6c2bfc16d2223", "1c5ca8998520e7b6", "1c965c61e0820139",
+    "1de437d1a86de5a9", "2122be0039721c75", "21614e82182fa2bb", "2292fa557a2dbb7f", "229b71f8adf8e843",
+    "2413a1bb101ca46e", "24d648cc4161b24d", "26707a1c8e1cdd1f", "26b495cee7627e37", "277adba289bdb3bc",
+    "2b15656d65d9b82b", "2b4173329e12fc5c", "2d45a2b0e7622c60", "2de30062b4b77264", "2fb7778ce06e90d3",
+    "300f86d80b8d9186", "30c4d0eaecaffed1", "30c705a5b9565018", "3117175935e906b8", "32a2196887f35f53",
+    "33d4d392c9be3105", "358e5dcea7fb1153", "3614bc3931db4efc", "362a28f491e72ac5", "36a21225aae8c594",
+    "387e433edf0794f6", "392549a2685eedaa", "39d3224cdc75aaf1", "3a97a7463290776c", "3b41b3003fe62032",
+    "3b7874944a76f79e", "3c85c6b1e187fb93", "3ee2cebf9685275f", "436285baa5547368", "48aa4e808227909c",
+    "497de7efe9baa376", "4c1b4e6d2c55dbb6", "4c9883d62dfac8a4", "4ccc3990308035c7", "50e343ebd5674637",
+    "52093600fe30dfd9", "53dbca2fef57d9e2", "54b9610f5c99d951", "567d2c353e31dfc1", "584f4917d5df1c58",
+    "58dd5c9261b1d87f", "5aac2b3522c46b6b", "5e9556fd03d2183f", "5f8050bf63a306fa", "5fa0ddf519965bae",
+    "5fa43bb8596cc56e", "61704fa740093a1f", "6332702ff393a497", "63dcaa18c5838a02", "649b3b30b87875e3",
+    "679714879d01cc42", "6a96f642595a284d", "6ac4e0a90e36d59f", "6ca867d22a13cbd8", "6fc40cd842c4d19b",
+    "70c9a1091004264a", "73dbfda49aa9e141", "75fd9a71e82d0e55", "783580abb3a7a558", "78624af8fab45ef5",
+    "78e9e5d12627a6b8", "79258b6f506e9b43", "7ab44213445cb2aa", "7af5559f371db40e", "7b4a361c79fd81e4",
+    "7ec243afa6b98d4c", "8233e51d0ebbd3b9", "83369f65f38c1463", "84a3e55555f79ce0", "85ff474cabe20ad3",
+    "86b1bea1dd26c1b7", "88864a6ea826dcf4", "893af1248ef639a5", "8a947e5171fcfe9c", "8abde5adb8d080da",
+    "8b7f3f68f2b2a6be", "8d2b5e3300bf0cb4", "8db15a39284ef8a1", "8ea6727cee3b71a2", "90a79fed970c2530",
+    "915708e594e9c494", "9240c6f8bf4ffaf7", "9271d8d6c9641f4b", "9513c0c659b79924", "951717ba05be00ef",
+    "9910c408b19e9929", "9a7167c3ce3357d2", "9b2af658f3a49a54", "9c79e7cdb34bcfc0", "9cbad68b903cfa8c",
+    "9e224e6faaf4a32e", "9f1a921f27d9f8b7", "a129c6ff8e7ae04e", "a37a0bfe15ff4654", "a47bdec6b41a02d6",
+    "a4a14938fad11b8d", "a5bf966e5b932455", "a641e26374e228e5", "a91f68125d236ee4", "acd99861498c86bc",
+    "ae7941abc9908b89", "b2798fbf249fbb18", "b40e17e80dad60e9", "b427abd7704b4891", "b6306fb3949a5446",
+    "b7190d12e8059923", "b9f70b17a07ec48f", "ba7076d9a0d0c982", "bb4f45737f45fa97", "bc73b248f0e1b359",
+    "bdef3eab309b6d4f", "beb9cf4cb1f60b03", "bec80e1ec69b9d80", "c076e7c805e99ed5", "c0e08fd8bdc8c6a1",
+    "c2356579ce07992c", "c2bb75f2c5a9fe80", "c38cc4830a4bb2df", "c3b275ac7a9a2616", "c4c802689b1c1079",
+    "c85b1d98a5f42714", "cba608429af0142f", "cd7d7d222723e41b", "d1f89ccf47715eb4", "d2b6d79b4f892ce6",
+    "d420c87e2da0fce7", "d42926afd9d521da", "d4d3bcd127e71244", "d53f4a6494e52fc0", "d552da5b128fed44",
+    "d61b40d365632337", "d6ec0c9d961e72d5", "d9792f3bfbbd83ec", "d9fc490580aac7d4", "dbfd0eaf569962a6",
+    "dc41544e285f87e1", "dcd14e4c10fc12cb", "dce81dcc7010a8ba", "de07a6a162a4f5f4", "de18f3040b883b5b",
+    "df4b15513b35bf9f", "e0cd5f18d21aea86", "e0d0b433a171e197", "e188efd45c8c5593", "e1af94f6500e61c9",
+    "e33f5d96f2fad1f8", "e3a91193fd1ee34c", "e6bea932bd6381bc", "e877a1fcfe29885e", "e9f082ac6d69f0fa",
+    "ee1a59a01ad44392", "ee95be13bd6568ef", "eea1dc710257f4e6", "eebe408eccb38d52", "f154da60d126569f",
+    "f1a40a0e8692e70f", "f2a136f46f3f09b9", "f55728ab65b58c94", "f629fca8d7d75ba6", "f6a1adbc04a6cdf5",
+    "f799b2c261baeb4f", "f7b9f3b70c1b3096", "f80f244cb0ae0907", "f840a0d158c1b1f7", "fa3c7fa2c12e25e5",
+    "faa8e23012aae76e", "fb23076688b0c4ef", "fde13d6dfeb98727", "fdf9c5620b40fa13", "ff1408b4ed0bcd5a",
+    "ff775368c6e67bef",
+})
+
+
+def test_every_registered_client_key_ships_in_every_bundled_catalogue():
+    """Wave A fix pass 3, item 5. The client renders from the DLL-bundled
+    catalogues (learning #583): a registered key with no row there renders
+    English in that locale whatever the server holds, unless an approved
+    server overlay happens to cover it. The registry tests above prove a
+    key EXISTS; nothing proved it is TRANSLATED, and the HP precision lever's
+    four keys shipped with no row in any of the four locales. So every key the
+    extractor registers must have a row in ES, RU, UK and SV, apart from the
+    recorded gap above -- and every row this admits must pass the validator
+    the translation portal applies (learning #298e: the client and the
+    server rules are mirrored)."""
+    import importlib.util
+    import pathlib
+    root = pathlib.Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("i18n_extract_for_coverage", str(root / "tools" / "i18n_extract.py"))
+    ex = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ex)
+    found, _sites = ex.extract()
+    ids = {r["msgctxt"]: r["key_id"]
+           for r in _sync_tool().build_client_keys({"format": 1, "strings": sorted(found)})}
+    catalogue = _bundled_catalogues()
+    assert sorted(catalogue) == ["es", "ru", "sv", "uk"], sorted(catalogue)
+
+    absent = {}
+    for s in found:
+        langs = sorted(lang for lang, rows in catalogue.items() if s not in rows)
+        if langs:
+            absent[s] = langs
+    new = sorted((s, langs) for s, langs in absent.items() if ids[s] not in _CATALOGUE_GAP_KEY_IDS)
+    assert not new, (
+        "%d registered client key(s) have no row in a bundled catalogue and would "
+        "render English there: %r" % (len(new), [(s[:90], langs) for s, langs in new[:12]]))
+    stale = sorted(_CATALOGUE_GAP_KEY_IDS - {ids[s] for s in absent})
+    assert not stale, (
+        "the recorded gap names %d key(s) that are no longer absent -- translated, or "
+        "gone from the registry. Take them off the list: %r" % (len(stale), stale[:12]))
+
+    bad = []
+    for s in sorted(found):
+        if s in absent:
+            continue
+        for lang, rows in sorted(catalogue.items()):
+            errors = main._i18n_validate(s, rows[s], lang)
+            if errors:
+                bad.append((s[:60], lang, errors))
+    assert not bad, "%d bundled row(s) fail the portal's validator: %r" % (len(bad), bad[:8])
