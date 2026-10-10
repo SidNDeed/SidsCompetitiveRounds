@@ -39,11 +39,35 @@ hold and owed bounds and session end, the debt order) must red the tree's
 own harness; and N1 is a gate over the design file the caller names
 (--design), which is gitignored and so is not part of either tree.
 
+Fix pass 4 (Codex BUILD round 4, ai-collab/v1410/CODEX-ITEM19-BUILD-R4-REPORT.md)
+re-judges H3 H9 M3 and adds N2 and ITEM5 (the FIX4 set, each red on the
+round 4 tree b963d618 and green on the fix tip). H3: the tip's prodprobe
+gains H3late (the late carrier of the previous pick, refused as stale),
+H3after and H3before; a rule row drops the binding check (HARNESS4_ROWS)
+and production rows weaken the check, unbind the card-pick publish, hand
+the popup no pick or count no game, each of which must red the tree's own
+harness or pytest. The fix pass 3 rows on the age-based consumption
+(PickProvenance, HeldForPopup, the popup end's discard) are SUPERSEDED and
+no longer judged: those rules are gone. H9 and M3: the stub's select runs
+the E9 postfix as Harmony does (H9r and M3x re-targeted; their fix pass 3
+forms are the negatives H9rmask and M3xmask, reported, never judged),
+H9loop (the rules probe and the prodprobe) bounds a persistent no-op
+select, H9defer retries on a later trigger, and the depth guard removed
+(rule and production rows) must red the tree's own tests. N2: the
+documentation-anchor check (anchors) over the design the caller names.
+ITEM5: a controls run refuses a populated --work and logs the fresh one it
+starts in; the tree's own tool is handed a work directory holding a
+planted stale file and must refuse it (freshwork).
+
 Nothing is edited in the tree: every build and every mutation happens in
 copies under --work. No path is hard-coded; the caller names every directory.
 
 Subcommands:
   controls --root TREE --evidence DIR --decompiled DIR --work DIR [--design FILE]
+                                      DIR must be absent or empty (fix pass 4, ITEM5)
+  anchors --root TREE --design FILE [--decompiled DIR]
+                                      the design's code citations at their trees (N2)
+  freshwork --tool TOOL --work DIR    a planted stale file must make TOOL refuse (ITEM5)
   binds PLUGIN_CS OUT_JSON           the Config.Bind list (M10's witness input)
   cfgwitness --root TREE --bepinex-core DIR [--managed DIR] --work DIR
              [--old-root TREE --real-cfg FILE]   the real-config upgrade (fix pass 2)
@@ -71,7 +95,7 @@ sys.path.insert(0, os.path.join(LANE, "backend", "tests"))
 from _cs_structure import mask_code, strip_comments_only  # noqa: E402
 
 ITEMS = ["H3", "H6", "H8", "H9", "M3", "M8", "M10", "M11", "L1",
-         "BR-H1", "BR-M1", "BR-M2", "BR-M3", "BR-M4", "BR-M5", "BR-L1", "BR-L2", "N1"]
+         "BR-H1", "BR-M1", "BR-M2", "BR-M3", "BR-M4", "BR-M5", "BR-L1", "BR-L2", "N1", "N2", "ITEM5"]
 # the items the round 2 review left PARTLY (fix pass 2): each must be red on
 # the round 2 tree and green on the fix tip; the rest were closed and must
 # stay green on the fix tip
@@ -79,6 +103,9 @@ FIX2 = ["H3", "H6", "H9", "M3", "M8", "M10", "M11", "L1", "BR-M4"]
 # fix pass 3 (Codex BUILD round 3, ai-collab/v1410/CODEX-ITEM19-BUILD-R3-REPORT.md):
 # each must be red on the round 3 tree (bdc30732) and green on the fix tip
 FIX3 = ["H3", "H9", "M3", "M8", "N1"]
+# fix pass 4 (Codex BUILD round 4, ai-collab/v1410/CODEX-ITEM19-BUILD-R4-REPORT.md):
+# each must be red on the round 4 tree (b963d618) and green on the fix tip
+FIX4 = ["H3", "H9", "M3", "N2", "ITEM5"]
 
 
 # ---------------------------------------------------------------------------
@@ -669,6 +696,35 @@ CLAIM_ROWS = {
                                 # in-test mutation moves the write line together
                                 # with the missing-data return that follows it
                                 twin=(AD, "string line = null;", "string line = default(string);")),
+
+    # ---- fix pass 4: the round 4 findings at their PRODUCTION expressions;
+    # each anchor exists only on the fix tip, so on the round 4 tree the row
+    # cannot run (None) and the item stays red there. No twin touches an
+    # anchor of the selected tests' own in-test mutations (S35, S36).
+    # H3: the binding check weakened to "the popup has an identity" (the
+    # production probe's H3late reds: the late carrier of pick N-1 applied)
+    "H3-binding-production": dict(edit=(AR, "return popupPick != null && pick == popupPick;", "return popupPick != null;"),
+                                  twin=(AR, "return popupPick != null && pick == popupPick;",
+                                        "return popupPick != null && popupPick == pick;")),
+    # H3: the card-pick publish no longer bound to the pick its popup shows
+    "H3-unbound-publish": dict(edit=("Plugin.cs", "if (pick != null) serialized = PopupCarrierLedger.BoundFace(serialized, pick);", ""),
+                               twin=("Plugin.cs", "else clear[PROP_FACE] = PopupCarrierLedger.BoundClear(pick);",
+                                     "else { clear[PROP_FACE] = PopupCarrierLedger.BoundClear(pick); }")),
+    # H3: the popup's remote arm hands the ledger no pick (nothing can bind)
+    "H3-popup-unbound": dict(edit=("Plugin.cs", "string v = Ledger.Show(Room(), actor, pick, Now());",
+                                   "string v = Ledger.Show(Room(), actor, null, Now());"),
+                             twin=("Plugin.cs", "string pick = PickNow();", "string pick = PickNow();   // the pick it shows")),
+    # H3: no game counted at DoStartGame (the identity loses its game half)
+    "H3-game-uncounted": dict(edit=("Plugin.cs", "PopupCarriers.GameStarted();", ""),
+                              twin=("Plugin.cs", "if (PhotonNetwork.OfflineMode || RoomActors.LocalIsSpectator) return;",
+                                    "if (RoomActors.LocalIsSpectator || PhotonNetwork.OfflineMode) return;")),
+    # H9 / M3: the E9 postfix no longer defers inside the owned apply
+    "H9-postfix-unguarded": dict(edit=(AD, "if (new AvatarRules().DefersSelectEdge(AvatarDefaults.OwnedApplyDepth)) "
+                                           "{ AvatarDefaults.SelectEdgeDeferred(); return; }", ""),
+                                 twin=(AD, "deferredSelectEdges++;", "deferredSelectEdges += 1;")),
+    # H9 / M3: the apply's select no longer holds the depth
+    "H9-depth-unheld": dict(edit=(AD, "ownedApplyDepth++;", ""),
+                            twin=(AD, "int outerDeferred = deferredSelectEdges;", "int outerDeferred = deferredSelectEdges + 0;")),
 }
 
 # fix pass 2: the tests each row runs (pytest -k). The source-claim rows
@@ -685,6 +741,11 @@ CLAIM_SELECT.update({n: "s22 or s35" for n in ("M8-apply-arm", "M8-room-arm")})
 # production probe's (S35: H9t, H9r, M3x); the line's place is both S22's and S35's
 CLAIM_SELECT.update({"H3-remote-read": "s33", "H9-pay-before-commit": "s35", "H9-readback-ignored": "s35",
                      "M8-line-after-apply": "s22 or s35"})
+# fix pass 4: the binding rule is the production probe's (S35: H3late,
+# H3after, H3before); the binding's wiring is S36's (source); the depth
+# guard is both (S36's source claim, S35's H9loop, H9defer, H9r, M3x)
+CLAIM_SELECT.update({"H3-binding-production": "s35", "H3-unbound-publish": "s36", "H3-popup-unbound": "s36",
+                     "H3-game-uncounted": "s36", "H9-postfix-unguarded": "s35 or s36", "H9-depth-unheld": "s35 or s36"})
 
 # fix pass 2: the closures M11 names, by the rows that bind them
 M11_CLOSURES = {"H6": ["H6-isPlaying", "H6-battleOngoing"], "M8": ["M8-apply-arm", "M8-room-arm"],
@@ -708,33 +769,21 @@ HARNESS2_ROWS = {
 }
 
 # fix pass 3: the round 3 findings at their RULE expressions, which the
-# tree's own harness must catch (cases H3remote, H3hold, H3owed, H9t, H9r,
-# M3x, M8x). Every anchor exists only on the fix tip.
-PROV = "internal virtual bool PickProvenance(string value, out long seq)"
-HELD = "internal virtual bool HeldForPopup(double arrivedAt, double openedAt)"
+# tree's own harness must catch (cases H3owed, H9t, H9r, M3x, M8x). Every
+# anchor exists only on the fix tip. Fix pass 4 SUPERSEDED the three rows
+# on fix pass 3's age-based consumption ("H3-provenance" on PickProvenance,
+# "H3-hold" on HeldForPopup, "H3-session-end" on the popup end's discard):
+# the pick binding replaced those rules, so the rows are no longer judged;
+# HARNESS4_ROWS' "H3-binding" is the rule control now.
 OWED = "internal virtual bool OwedWithin(double deferredSince, double now)"
 HBA = "internal virtual int HomeBeforeApply(int homeBefore, AvatarDecision d)"
 HAA = "internal virtual int HomeAfterApply(int homeHeld, AvatarDecision d, int liveAfter)"
 EVAL_RULES = "internal virtual AvatarDecision Evaluate(AvatarEvalIn x)"
 HARNESS3_ROWS = {
-    # H3: the provenance check dropped (an untagged arrival counts as this pick's)
-    "H3-provenance": ((AR, PROV, "return PopupCarrierLedger.TryReadTag(value, out seq);",
-                       "if (PopupCarrierLedger.TryReadTag(value, out seq)) return true;\n"
-                       "            seq = System.Environment.TickCount64;\n"
-                       "            return !string.IsNullOrEmpty(value);"),
-                      (AR, PROV, "return PopupCarrierLedger.TryReadTag(value, out seq);",
-                       "bool tagged = PopupCarrierLedger.TryReadTag(value, out seq);\n            return tagged;")),
-    # H3: a held value applied however long ago it arrived
-    "H3-hold": ((AR, HELD, "return openedAt - arrivedAt <= PopupCarrierLedger.DeferralBoundSeconds;", "return true;"),
-                (AR, HELD, "return openedAt - arrivedAt <= PopupCarrierLedger.DeferralBoundSeconds;",
-                 "return !(openedAt - arrivedAt > PopupCarrierLedger.DeferralBoundSeconds);")),
     # H3: the deferral never ends
     "H3-owed": ((AR, OWED, "return now - deferredSince <= PopupCarrierLedger.DeferralBoundSeconds;", "return true;"),
                 (AR, OWED, "return now - deferredSince <= PopupCarrierLedger.DeferralBoundSeconds;",
                  "return !(now - deferredSince > PopupCarrierLedger.DeferralBoundSeconds);")),
-    # H3: a popup's end keeps what arrived during it (the previous pick's value)
-    "H3-session-end": ((AR, "private void EndShown()", "e.Fresh = null;", ""),
-                       (AR, "private void EndShown()", "e.Fresh = null;", "e.Fresh = default(string);")),
     # H9: the debt cleared whatever the read-back shows
     "H9-readback": ((AR, HAA, "if (liveAfter != restored) return homeHeld;", ""),
                     (AR, HAA, "if (liveAfter != restored) return homeHeld;", "if (restored != liveAfter) return homeHeld;")),
@@ -746,6 +795,23 @@ HARNESS3_ROWS = {
     # M8: the nominee left unread on the missing-data exit
     "M8-rule-nominee": ((AR, EVAL_RULES, "d.Nominee = nom;", ""),
                         (AR, EVAL_RULES, "d.Nominee = nom;", "d.Nominee = nom + 0;")),
+}
+
+# fix pass 4: the round 4 findings at their RULE expressions, which the
+# tree's own harness must catch (cases H3remote, H3hold, H3late, H3after;
+# H9loop, H9defer, M3e9). Every anchor exists only on the fix tip.
+BOUND = "internal virtual bool BoundToPopup(string pick, string popupPick)"
+DEFERS = "internal virtual bool DefersSelectEdge(int ownedApplyDepth)"
+HARNESS4_ROWS = {
+    # H3: the binding check dropped (any value applied to any popup with an
+    # identity: the late carrier of pick N-1 applied to pick N's popup)
+    "H3-binding": ((AR, BOUND, "return popupPick != null && pick == popupPick;", "return popupPick != null;"),
+                   (AR, BOUND, "return popupPick != null && pick == popupPick;",
+                    "return popupPick != null && popupPick == pick;")),
+    # H9 / M3: the depth guard removed (E9 re-enters the evaluator inside
+    # the owned apply, and a persistent no-op select nests to the bound)
+    "H9-depth-guard": ((AR, DEFERS, "return ownedApplyDepth > 0;", "return false;"),
+                       (AR, DEFERS, "return ownedApplyDepth > 0;", "return 0 < ownedApplyDepth;")),
 }
 
 
@@ -864,11 +930,14 @@ def gate_m8_replay(evidence, sha):
 # ---------------------------------------------------------------------------
 
 def controls(args):
+    out = sys.stdout
+    # ITEM5 (fix pass 4): a run starts only in a fresh work directory; a
+    # populated one is refused before anything is read, built or written
+    if not fresh_work(args.work, out):
+        return 2
     root = os.path.abspath(args.root)
     sha = git_head(root)
-    out = sys.stdout
     out.write("controls root=%s commit=%s\n" % (root, sha))
-    os.makedirs(args.work, exist_ok=True)
     res = {}
 
     # source gates
@@ -919,7 +988,7 @@ def controls(args):
     def named(e):
         return tuple(x.replace("{p}", pname) for x in e)
 
-    for name, (edit, twin) in list(HARNESS2_ROWS.items()) + list(HARNESS3_ROWS.items()):
+    for name, (edit, twin) in list(HARNESS2_ROWS.items()) + list(HARNESS3_ROWS.items()) + list(HARNESS4_ROWS.items()):
         hrow[name] = (harness_run(root, args.work, name, named(edit), out),
                       harness_run(root, args.work, name + "-twin", named(twin), out))
 
@@ -980,27 +1049,47 @@ def controls(args):
         return " | ".join(harness_detail(n) for n in names)
 
     # fix pass 2: the PARTLY items, behaviour on this tree AND binding by the tree's own tests;
-    # fix pass 3 (FIX3) adds each round 3 finding's own parts to its item
-    h3x = ["H3-provenance", "H3-hold", "H3-owed", "H3-session-end"]
+    # fix pass 3 (FIX3) adds each round 3 finding's own parts to its item;
+    # fix pass 4 (FIX4) adds each round 4 finding's own parts (the fix pass
+    # 3 rows on the age-based consumption are superseded, see HARNESS3_ROWS)
+    h3x = ["H3-owed"]
+    h3y = ["H3-binding-production", "H3-unbound-publish", "H3-popup-unbound", "H3-game-uncounted"]
+    h3p = ["H3late", "H3after", "H3before"]
     ok3 = srch3[0] and s33rc == 0 and rows_ok(["H3-reread"]) and harness_ok("H3-rule-reread")
     ok3x = probe_ok(["H3remote"]) and rows_ok(["H3-remote-read"]) and harnesses_ok(h3x)
-    res["H3"] = (ok3 and ok3x,
+    ok3y = probe_ok(h3p) and rows_ok(h3y) and harness_ok("H3-binding")
+    res["H3"] = (ok3 and ok3x and ok3y,
                  "source: " + srch3[1] + " | the tip's S33 (the plugin-wide carrier cache-read sweep, the remote arm"
                  " through the ledger) over this tree exit %s: %s | " % (s33rc, s33why)
-                 + claim_detail(["H3-reread", "H3-remote-read"]) + " | " + harnesses_detail(["H3-rule-reread"] + h3x)
-                 + " | " + probe_detail(["H3remote"]))
+                 + claim_detail(["H3-reread", "H3-remote-read"] + h3y) + " | "
+                 + harnesses_detail(["H3-rule-reread"] + h3x + ["H3-binding"])
+                 + " | " + probe_detail(["H3remote"] + h3p))
     ok6b = res["H6"][0] and rows_ok(M11_CLOSURES["H6"]) and probe_ok(["H6a", "H6b", "H6c"])
     res["H6"] = (ok6b, res["H6"][1] + " | production: " + claim_detail(M11_CLOSURES["H6"]) + " | " + probe_detail(["H6a", "H6b", "H6c"]))
     h9x = ["H9-pay-before-commit", "H9-readback-ignored"]
+    h9y = ["H9-postfix-unguarded", "H9-depth-unheld"]
+    neg = ["H9rmask", "M3xmask"]
+
+    def negatives():
+        # the fix pass 3 stub (the select returning before the E9 postfix):
+        # reported beside the re-targeted cases, never judged
+        return " | ".join("negative %s (the fix pass 3 stub, no postfix) %s: %s"
+                          % (i, "PASS" if tp(i)[0] else "FAIL", tp(i)[1]) for i in neg)
+
     res["H9"] = (p("H9")[0] and probe_ok(["H9c", "H9s"]) and rows_ok(["H9-early-return"]) and harness_ok("H9-rule-deferral")
-                 and probe_ok(["H9t", "H9r"]) and rows_ok(h9x) and harnesses_ok(["H9-readback", "M3-pay-first"]),
-                 "rules probe: " + p("H9")[1] + " | " + probe_detail(["H9c", "H9s", "H9t", "H9r"]) + " | "
-                 + claim_detail(["H9-early-return"] + h9x) + " | "
-                 + harnesses_detail(["H9-rule-deferral", "H9-readback", "M3-pay-first"]))
+                 and probe_ok(["H9t", "H9r"]) and rows_ok(h9x) and harnesses_ok(["H9-readback", "M3-pay-first"])
+                 and p("H9loop")[0] and probe_ok(["H9loop", "H9defer"]) and rows_ok(h9y) and harness_ok("H9-depth-guard"),
+                 "rules probe: " + p("H9")[1] + " | rules probe H9loop %s: %s | " % ("PASS" if p("H9loop")[0] else "FAIL", p("H9loop")[1])
+                 + probe_detail(["H9c", "H9s", "H9t", "H9r", "H9loop", "H9defer"]) + " | "
+                 + claim_detail(["H9-early-return"] + h9x + h9y) + " | "
+                 + harnesses_detail(["H9-rule-deferral", "H9-readback", "M3-pay-first", "H9-depth-guard"])
+                 + " | " + negatives())
     res["M3"] = (p("M3")[0] and probe_ok(["M3t"]) and rows_ok(["M3-deferred-edge"])
-                 and probe_ok(["M3x"]) and rows_ok(["H9-pay-before-commit"]) and harness_ok("M3-pay-first"),
+                 and probe_ok(["M3x"]) and rows_ok(["H9-pay-before-commit"]) and harness_ok("M3-pay-first")
+                 and rows_ok(["H9-depth-unheld"]) and harness_ok("H9-depth-guard"),
                  "rules probe: " + p("M3")[1] + " | " + probe_detail(["M3t", "M3x"]) + " | "
-                 + claim_detail(["M3-deferred-edge", "H9-pay-before-commit"]) + " | " + harness_detail("M3-pay-first"))
+                 + claim_detail(["M3-deferred-edge", "H9-pay-before-commit", "H9-depth-unheld"]) + " | "
+                 + harnesses_detail(["M3-pay-first", "H9-depth-guard"]) + " | " + negatives())
     res["BR-M4"] = (p("BRM4")[0] and probe_ok(["BRM4"]) and rows_ok(M11_CLOSURES["BR-M4"]),
                     "rules probe: " + p("BRM4")[1] + " | " + probe_detail(["BRM4"]) + " | " + claim_detail(M11_CLOSURES["BR-M4"]))
 
@@ -1014,6 +1103,11 @@ def controls(args):
                  + claim_detail(M11_CLOSURES["M8"] + ["M8-line-after-apply"]) + " | " + harness_detail("M8-rule-nominee")
                  + " | " + probe_detail(["M8apply", "M8room"] + m8x))
     res["N1"] = gate_n1(args.design)
+    # fix pass 4: N2, the design's code citations at their trees; ITEM5, the
+    # tree's OWN controls tool handed a populated work directory
+    res["N2"] = anchors_check(args.design, root, out, args.decompiled)
+    res["ITEM5"] = freshwork(os.path.join(root, "tools", "item19-controls", "item19_controls.py"),
+                             os.path.join(os.path.abspath(args.work), "freshwork"), out)
     res["M10"] = gate_m10(ev, sha)
     res["BR-M2"] = log_gate(ev, sha, r"^AFFECTED-COMPARE verdict=PASS", "final-tip affected-set comparison")
     res["BR-M5"] = gate_brm5(ev, sha)
@@ -1032,7 +1126,219 @@ def controls(args):
     f3red = [k for k in FIX3 if not res[k][0]]
     out.write("CONTROLS-FIX3 commit=%s red=%d green=%d of %d (red: %s)\n"
               % (sha, len(f3red), len(FIX3) - len(f3red), len(FIX3), " ".join(f3red) or "none"))
+    f4red = [k for k in FIX4 if not res[k][0]]
+    out.write("CONTROLS-FIX4 commit=%s red=%d green=%d of %d (red: %s)\n"
+              % (sha, len(f4red), len(FIX4) - len(f4red), len(FIX4), " ".join(f4red) or "none"))
     return 0 if green == len(ITEMS) else 1
+
+
+# ---------------------------------------------------------------------------
+# ITEM5 (fix pass 4): a fresh work directory per run, and its control
+# ---------------------------------------------------------------------------
+
+def fresh_work(work, out):
+    """A controls run starts only in a work directory that is absent or
+    empty, and creates it; a populated one is refused before anything is
+    read, built or written (fix pass 3 reused a stale one twice, notes
+    "Slips" 1). True when the run may start."""
+    w = os.path.abspath(work)
+    if os.path.exists(w):
+        entries = sorted(os.listdir(w)) if os.path.isdir(w) else ["(not a directory)"]
+        if entries:
+            out.write("REFUSED: the work directory %s is populated (%d entries: %s); every controls run starts "
+                      "in a fresh one\n" % (w, len(entries), ", ".join(entries[:5])))
+            return False
+    os.makedirs(w, exist_ok=True)
+    out.write("WORK fresh %s (absent or empty when the run started)\n" % w)
+    return True
+
+
+PLANTED = "stale-from-an-earlier-run.txt"
+PLANTED_TEXT = "planted by the ITEM5 control: a controls run must refuse this directory\n"
+
+
+def freshwork(tool, work, out):
+    """ITEM5's control: a work directory holding a planted stale file is
+    handed to TOOL's controls, with a root that does not exist (so a tool
+    that does not refuse fails fast instead of running a whole pass). GREEN
+    only when the tool refuses it (exit 2 and a REFUSED line), the planted
+    file is untouched and nothing was added to the directory."""
+    if not os.path.exists(tool):
+        return False, "no controls tool at %s" % tool
+    w = os.path.abspath(work)
+    if os.path.exists(w):
+        return False, "the control's own directory %s already exists" % w
+    os.makedirs(w)
+    planted = os.path.join(w, PLANTED)
+    write(planted, PLANTED_TEXT)
+    before = sorted(os.listdir(w))
+    noroot = w + "-no-tree"
+    if os.path.exists(noroot):
+        return False, "the control's absent root %s exists" % noroot
+    cmd = [sys.executable, tool, "controls", "--root", noroot, "--evidence", noroot, "--decompiled", noroot, "--work", w]
+    try:
+        pr = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace", timeout=300)
+        rc, o = pr.returncode, pr.stdout
+    except subprocess.TimeoutExpired as ex:
+        rc, o = None, (ex.output or "") + "\n(timed out after 300 s: the tool started a run)"
+    after = sorted(os.listdir(w))
+    kept = os.path.exists(planted) and read(planted) == PLANTED_TEXT
+    refused = rc == 2 and "REFUSED" in o
+    out.write("--- freshwork: python %s controls --root <absent> --evidence <absent> --decompiled <absent> --work %s "
+              "(holding %s) exit %s ---\n%s\n" % (tool, w, PLANTED, rc, o.rstrip()[-1500:]))
+    ok = refused and kept and after == before
+    return ok, ("tool sha256 %s: a work directory holding a planted stale file -> exit %s, refused=%s, the planted file "
+                "untouched=%s, entries before %d after %d" % (sha256(tool), rc, refused, kept, len(before), len(after)))
+
+
+# ---------------------------------------------------------------------------
+# N2 (fix pass 4): the design's code citations, each at the tree it names
+# ---------------------------------------------------------------------------
+
+DES_PL, DES_AR, DES_AD = "plugin/Plugin.cs", "plugin/AvatarDefaultRules.cs", "plugin/AvatarDefaults.cs"
+# Every citation of section 13's A2-N1 and of section 14's A3 amendments: a
+# pattern over the design (its first group the cited line, an optional
+# second the end of a cited span), the file, the tree the text names (A2-N1
+# names bdc30732 and the fix pass 3 tip; section 14 places its A3
+# citations at b963d618; the 1.40.3 reader is at the v1.40.3 tag), and the
+# statement the citation must land on (anywhere inside a cited span). Each
+# pattern matches the design before and after fix pass 4's corrections, so
+# the same check reds on the round 4 copy and greens on the corrected one.
+ANCHORS = [
+    ("A2-N1 publish at bdc30732", r"`plugin/Plugin\.cs:(\d+)(?:-(\d+))?` at\s+bdc30732;", DES_PL, "bdc30732",
+     "PhotonNetwork.LocalPlayer.SetCustomProperties(props);"),
+    ("A2-N1 publish at the fix pass 3 tip", r"`:(\d+)(?:-(\d+))?` at the fix pass 3 tip", DES_PL, "b963d618",
+     "PhotonNetwork.LocalPlayer.SetCustomProperties(props);"),
+    ("A2-N1 TrySendLocalFace at bdc30732", r"`plugin/Plugin\.cs:(\d+)(?:-(\d+))?` at bdc30732, the guard", DES_PL,
+     "bdc30732", "internal static bool TrySendLocalFace(string tag)"),
+    ("A2-N1 the no-room guard at bdc30732", r"at bdc30732, the guard at :(\d+)", DES_PL, "bdc30732",
+     "if (!PhotonNetwork.InRoom) return false;"),
+    ("A2-N1 the no-room guard at b963d618", r"the guard at :\d+; `:(\d+)(?:-(\d+))?` at", DES_PL, "b963d618",
+     "if (!PhotonNetwork.InRoom) return false;"),
+    ("A3-H3 the card-pick publish", r"`CardChoiceVisuals_Show_Competitive_Patch`\s+\(`plugin/Plugin\.cs:(\d+)`", DES_PL,
+     "b963d618", "FacePublisher.PublishLocal(out freshFace, forPick: true)"),
+    ("A3-H3 the pick tag", r"`PopupCarrierLedger\.Tag`, `plugin/AvatarDefaultRules\.cs:(\d+)`", DES_AR, "b963d618",
+     "internal static string Tag(string face, long seq)"),
+    ("A3-H3 the pick sequence", r"within its process, `Plugin\.cs:(\d+)`", DES_PL, "b963d618", "private static long NextPickSeq()"),
+    ("A3-H3 ForShow", r"`PopupCarriers\.ForShow` \(`Plugin\.cs:(\d+)`", DES_PL, "b963d618",
+     "internal static string ForShow(int actor)"),
+    ("A3-H3 the ledger's Show", r"`PopupCarrierLedger\.Show`\s+\(`AvatarDefaultRules\.cs:(\d+)`", DES_AR, "b963d618",
+     "internal string Show(object currentRoom, int actor, double now)"),
+    ("A3-H3 the arrival", r"\(`PopupCarriers\.Arrived`, `Plugin\.cs:(\d+)`\)", DES_PL, "b963d618",
+     "PopupCarriers.Arrived(target, changedProps)"),
+    ("A3-H3 the Hide postfix", r"the `Hide` postfix, `Plugin\.cs:(\d+)`", DES_PL, "b963d618", "PopupCarriers.Ended()"),
+    ("A3-H3 the 1.40.3 reader", r"`TryReadAndApply`\s+\(`plugin/Plugin\.cs:(\d+)` at v1\.40\.3\)", DES_PL, "v1.40.3",
+     "public static bool TryReadAndApply("),
+    ("A3-H9 HomeBeforeApply", r"`AvatarRules\.HomeBeforeApply`, `AvatarDefaultRules\.cs:(\d+)`", DES_AR, "b963d618",
+     "internal virtual int HomeBeforeApply("),
+    ("A3-H9 HomeAfterApply", r"`AvatarRules\.HomeAfterApply` \(`:(\d+)`\)", DES_AR, "b963d618",
+     "internal virtual int HomeAfterApply("),
+    ("A3-H9 Apply", r"`AvatarDefaults\.Apply`\s+\(`AvatarDefaults\.cs:(\d+)`\)", DES_AD, "b963d618",
+     "private static int Apply(int slot, string tag)"),
+    ("A3-M8 the line before the apply", r"the apply \(`AvatarDefaults\.cs:(\d+)(?:-(\d+))?`\)", DES_AD, "b963d618",
+     "bool written = line != null && Line(tag, line);"),
+]
+# Section 14's fix pass 4 amendments cite with the statement in brackets:
+# `path:N` [statement], or `path:N-M` [statement], at the fix pass 4 tip
+# (the tree judged) unless " at <tree>" follows; a `decompiled/<file>`
+# citation is read from the local decompile (--decompiled), which is the
+# game's code, not the repository's. At least A4_MIN of them.
+CITE_A4 = re.compile(r"`((?:plugin|tools|backend|decompiled)/[\w./-]+):(\d+)(?:-(\d+))?` \[([^\]\n]+)\]"
+                     r"(?: at (v?[0-9][\w.]*|[0-9a-f]{7,40}))?")
+A4_MIN = 12
+
+
+def tree_lines(root, rev, path, cache, decompiled=None):
+    """The file's lines at rev ("tip": the judged tree's HEAD), or for a
+    decompiled/ path the local decompile's file; None when unreadable."""
+    key = (rev, path)
+    if key not in cache:
+        if path.startswith("decompiled/"):
+            f = os.path.join(decompiled, path[len("decompiled/"):]) if decompiled else None
+            cache[key] = [l.rstrip("\r") for l in read(f).split("\n")] if f and os.path.exists(f) else None
+        else:
+            rc, o = run(["git", "-C", root, "show", "%s:%s" % ("HEAD" if rev == "tip" else rev, path)])
+            cache[key] = [l.rstrip("\r") for l in o.split("\n")] if rc == 0 else None
+    return cache[key]
+
+
+def lands(lines, n, m, needle):
+    end = n if m is None else m
+    if lines is None or n < 1 or end < n or end > len(lines):
+        return False
+    return any(needle in lines[i - 1] for i in range(n, end + 1))
+
+
+def anchor_rows(text, root, cache, decompiled=None):
+    """[(label, n, m, path, rev, needle, ok, why)] for the table and for
+    every bracketed fix pass 4 citation in section 14."""
+    rows = []
+    for label, pat, path, rev, needle in ANCHORS:
+        ms = list(re.finditer(pat, text))
+        if len(ms) != 1:
+            rows.append((label, None, None, path, rev, needle, False, "cited %d times in the design" % len(ms)))
+            continue
+        g = ms[0].groups()
+        n, m = int(g[0]), (int(g[1]) if len(g) > 1 and g[1] else None)
+        lines = tree_lines(root, rev, path, cache)
+        ok = lands(lines, n, m, needle)
+        got = "" if lines is None or n > len(lines) else lines[n - 1].strip()[:90]
+        rows.append((label, n, m, path, rev, needle, ok, "line %d reads %r" % (n, got)))
+    s14 = section(text, 14) or ""
+    for c in CITE_A4.finditer(s14):
+        path, n, m, needle = c.group(1), int(c.group(2)), (int(c.group(3)) if c.group(3) else None), c.group(4)
+        rev = "game" if path.startswith("decompiled/") else (c.group(5) or "tip")
+        lines = tree_lines(root, rev, path, cache, decompiled)
+        ok = lands(lines, n, m, needle)
+        got = "(unreadable)" if lines is None else ("" if n > len(lines) else lines[n - 1].strip()[:90])
+        rows.append(("A4 %s:%d" % (path, n), n, m, path, rev, needle, ok, "line %d reads %r" % (n, got)))
+    return rows
+
+
+def anchors_check(design, root, out, decompiled=None):
+    """N2 (fix pass 4): every provenance-method and guard citation of the
+    fix pass amendments lands on the named statement at the tree it names
+    (the round 4 report: ForShow and the ledger's Show were cited at their
+    class declarations, and the no-room guard one line early). Negative
+    controls: every single-line citation moved one line either way reds,
+    and a citation removed from the design reds."""
+    if not design or not os.path.exists(design):
+        return False, "no design file given (--design)"
+    text = read(design)
+    cache = {}
+    rows = anchor_rows(text, root, cache, decompiled)
+    for label, n, m, path, rev, needle, ok, why in rows:
+        span = "-" if n is None else (("%d-%d" % (n, m)) if m else str(n))
+        out.write("ANCHOR %-40s %s:%s at %s -> %s [%s] | %s\n"
+                  % (label, path, span, rev, "PASS" if ok else "FAIL", needle, why))
+    bad = [r[0] for r in rows if not r[6]]
+    a4 = sum(1 for r in rows if r[0].startswith("A4 "))
+    # control 1: a shifted line (every passing single-line citation, +1 and -1)
+    single = [r for r in rows if r[6] and r[2] is None]
+    shifted_red = 0
+    for label, n, m, path, rev, needle, ok, why in single:
+        lines = tree_lines(root, rev, path, cache, decompiled)
+        if not lands(lines, n + 1, None, needle) and not lands(lines, n - 1, None, needle):
+            shifted_red += 1
+        else:
+            out.write("ANCHOR-CONTROL a shifted line did not red: %s (the statement is also on a neighbouring line)\n" % label)
+    # control 2: a citation removed from the design
+    first = re.search(ANCHORS[0][1], text)
+    absent_red = False
+    if first is not None:
+        cut = text[:first.start()] + text[first.end():]
+        absent_red = not [r for r in anchor_rows(cut, root, cache, decompiled) if r[0] == ANCHORS[0][0]][0][6]
+    ctl_ok = bool(single) and shifted_red == len(single) and absent_red
+    out.write("ANCHOR-CONTROL a shifted line reds: %d of %d single-line citations\n" % (shifted_red, len(single)))
+    out.write("ANCHOR-CONTROL a citation removed from the design reds: %s (%s)\n" % (absent_red, ANCHORS[0][0]))
+    ok = not bad and a4 >= A4_MIN and ctl_ok
+    detail = ("design %s sha256 %s: %d citations, %d land, %d do not%s | bracketed fix pass 4 citations in section 14: %d"
+              " (at least %d) | controls: a shifted line reds %d of %d, a removed citation reds %s"
+              % (os.path.basename(design), sha256(design), len(rows), len(rows) - len(bad), len(bad),
+                 (" (" + "; ".join(bad[:8]) + ")") if bad else "", a4, A4_MIN, shifted_red, len(single), absent_red))
+    out.write("ANCHORS verdict=%s | %s\n" % ("PASS" if ok else "FAIL", detail))
+    return ok, detail
 
 
 # ---------------------------------------------------------------------------
@@ -1313,9 +1619,24 @@ def main():
     k = sub.add_parser("compare")
     k.add_argument("tip")
     k.add_argument("base")
+    n = sub.add_parser("anchors")                 # fix pass 4 (N2)
+    n.add_argument("--root", required=True)
+    n.add_argument("--design", required=True)
+    n.add_argument("--decompiled", default=None)  # the local decompile, for decompiled/ citations
+    f = sub.add_parser("freshwork")               # fix pass 4 (ITEM5)
+    f.add_argument("--tool", required=True)
+    f.add_argument("--work", required=True)
     a = ap.parse_args()
     if a.cmd == "controls":
         return controls(a)
+    if a.cmd == "anchors":
+        root = os.path.abspath(a.root)
+        print("anchors root=%s commit=%s design=%s decompiled=%s" % (root, git_head(root), a.design, a.decompiled))
+        return 0 if anchors_check(a.design, root, sys.stdout, a.decompiled)[0] else 1
+    if a.cmd == "freshwork":
+        ok, why = freshwork(os.path.abspath(a.tool), a.work, sys.stdout)
+        print("FRESHWORK verdict=%s | %s" % ("PASS" if ok else "FAIL", why))
+        return 0 if ok else 1
     if a.cmd == "binds":
         with open(a.out, "w", encoding="utf-8") as f:
             json.dump(binds(a.plugin_cs), f, indent=1)
