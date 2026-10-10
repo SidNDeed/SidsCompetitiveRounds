@@ -2759,7 +2759,11 @@ namespace CompetitiveRounds
             string pid = discardQueue[0]; discardQueue.RemoveAt(0);
             int ep = uiEpoch;
             discardSentAt = Now;
-            ApiClient.PcDiscard(id, pid, (ok, resp) =>
+            // Item 18 fix pass 3, finding 4: ApiClient writes the answer's
+            // balance, and moves the answer fence, only while this step is
+            // still the current run's -- the test this callback makes below,
+            // made before that write as well.
+            ApiClient.PcDiscard(id, pid, () => PcQuickShardRules.DiscardStepCurrent(ep == uiEpoch, discardInFlight, serial, discardSerial), (ok, resp) =>
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
                 if (serial != discardSerial)

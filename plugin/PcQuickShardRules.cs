@@ -210,6 +210,20 @@ namespace CompetitiveRounds
             return ids;
         }
 
+        /// <summary>Fix pass 3, finding 4: whether a single-discard step's
+        /// answer is the CURRENT run's -- the predicate ApiClient.PcDiscard
+        /// tests (PcShardFlight.Admits, PcDiscardBatch's rule) before it
+        /// writes the answer's balance into the cache and moves the answer
+        /// fence. The identity the step was sent under is still the current
+        /// one, a run is out, and the run's serial is the one the step was
+        /// sent with. The 25 s give-up bumps the serial and ends the run
+        /// (PlayerCardsUI.RetireStuckLatches), so a retired run's late success
+        /// changes neither the cached balance nor the fence.</summary>
+        internal static bool DiscardStepCurrent(bool sameIdentity, bool runOut, int sentSerial, int runSerial)
+        {
+            return sameIdentity && runOut && sentSerial == runSerial;
+        }
+
         // -- self-test (EXECUTED by tools/client-rules-harness) --------------
 
         internal sealed class SelfTestResult
@@ -298,7 +312,63 @@ namespace CompetitiveRounds
             DupesCases(r);
             RecoveryCases(r);
             TombstoneCases(r);
+            DiscardLateCases(r);
             return r;
+        }
+
+        // -- fix pass 3, finding 4: a retired single-discard answer writes nothing --
+
+        /// <summary>Single-discard run A sends its step; the server commits it
+        /// (100 -> 110) and the answer is delayed. The 25 s give-up retires A
+        /// (the serial bumped, the run ended) and its read-backs land (110,
+        /// admitted: no confirmed write since their dispatch). Run B's step
+        /// then succeeds (the server: 130) and its answer writes the balance
+        /// and moves the fence. A's older success (110) lands LAST, through
+        /// ApiClient.PcDiscard's cache write with the run predicate
+        /// DiscardNext builds (DiscardStepCurrent over the run's serial).
+        /// bStillOut: B's run has another step out when A lands. honourRun
+        /// false is the NEGATIVE CONTROL: PcDiscard as 8fb4ea4b wrote it,
+        /// which wrote every success's balance and moved the fence.</summary>
+        private static void DiscardLate(bool honourRun, bool bStillOut, out int balance, out int writesBefore, out int writesAfter)
+        {
+            var fence = new PcCacheFence();
+            int cacheBal = 100, srvBal = 100, runSerial = 0;
+            bool runOut;
+            int sA = ++runSerial; runOut = true;
+            srvBal += 10;
+            int answerA = srvBal;
+            Func<bool> currentA = () => DiscardStepCurrent(true, runOut, sA, runSerial);
+            runSerial++; runOut = false;
+            int stamp = fence.Stamp();
+            int snap = srvBal;
+            if (fence.Admits(stamp)) cacheBal = snap;
+            int sB = ++runSerial; runOut = true;
+            srvBal += 20;
+            Func<bool> currentB = () => DiscardStepCurrent(true, runOut, sB, runSerial);
+            if (PcShardFlight.Admits(currentB)) { cacheBal = srvBal; fence.Wrote(); }
+            if (!bStillOut) runOut = false;
+            writesBefore = fence.Writes;
+            if (honourRun ? PcShardFlight.Admits(currentA) : true) { cacheBal = answerA; fence.Wrote(); }
+            writesAfter = fence.Writes;
+            balance = cacheBal;
+        }
+
+        private static void DiscardLateCases(SelfTestResult r)
+        {
+            int bal, w0, w1;
+            DiscardLate(true, false, out bal, out w0, out w1);
+            Check(r, "discard late: a retired run's success landing after a newer run's keeps the newer run's balance", bal == 130, bal.ToString());
+            Check(r, "discard late: and leaves the answer fence where the newer run put it", w1 == w0, w0 + "->" + w1);
+            DiscardLate(true, true, out bal, out w0, out w1);
+            Check(r, "discard late: the same while the newer run still has a step out", bal == 130 && w1 == w0, bal + " " + w0 + "->" + w1);
+            DiscardLate(false, false, out bal, out w0, out w1);
+            Check(r, "control: without the run's predicate the late success writes the retired run's balance", bal == 110, bal.ToString());
+            Check(r, "control: and moves the fence", w1 == w0 + 1, w0 + "->" + w1);
+            Check(r, "discard step: the current run's step is current", DiscardStepCurrent(true, true, 3, 3), "");
+            Check(r, "discard step: a step of a run given up is not (the serial moved on)",
+                  !DiscardStepCurrent(true, true, 1, 3) && !DiscardStepCurrent(true, false, 1, 2), "");
+            Check(r, "discard step: a step sent under another identity is not", !DiscardStepCurrent(false, true, 3, 3), "");
+            Check(r, "discard step: a step of a run that has ended is not", !DiscardStepCurrent(true, false, 3, 3), "");
         }
 
         // -- fix pass 3, finding 2: a not_owned tombstone lifts when a later read holds the print --

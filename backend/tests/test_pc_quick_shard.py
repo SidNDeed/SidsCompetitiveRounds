@@ -60,6 +60,13 @@ Required behaviour, each a named test:
       print returns to both walks and the button shows for it (the path is
       EXECUTED by the harness, TombstoneCases, with the no-reconcile control;
       gate q13 pins that the client runs it).
+  Q14 (fix pass 3, finding 4) a retired single-discard answer changes neither
+      the cached balance nor the answer fence: PcDiscard carries the current
+      run predicate PcDiscardBatch carries (PcShardFlight.Admits(current)
+      over PcQuickShardRules.DiscardStepCurrent), guarding both the balance
+      write and the fence move (the late-answer model is EXECUTED by the
+      harness, DiscardLateCases; gate q11 now asserts that currency for both
+      answers, not only the call).
 
 Each client gate runs on the real sources and, with its mutation and control,
 on edited copies (#391). The database tests use test_pc_shard_batch's harness
@@ -314,6 +321,29 @@ def gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard(s):
     for sig, what in (("public static void PcDiscardBatch(", "a confirmed batch balance does not move the fence"),
                       ("public static void PcDiscard(string steamId, string printId,", "a confirmed discard balance does not move the fence")):
         assert "if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }" in _code(_member(api, sig)), what
+    # Fix pass 3, finding 4: currency, not only the call. Each answer writes
+    # the balance and moves the fence only while its request is still the
+    # caller's current one: the batch for its shard generation, the single
+    # discard for its run (PcQuickShardRules.DiscardStepCurrent, which the
+    # harness executes in DiscardLateCases).
+    for sig, what in (("public static void PcDiscardBatch(", "a retired batch answer writes the balance"),
+                      ("public static void PcDiscard(string steamId, string printId,", "a retired single-discard answer writes the balance")):
+        body = _code(_member(api, sig))
+        guard = _at(body, "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))", what)
+        write = _at(body, "CachedPcMe.shards = PcInt(sh);", what)
+        assert guard < write and body.count("CachedPcMe.shards =") == 1 and body.count("PcAnswerFence.Wrote();") == 1, what
+    assert "public static void PcDiscard(string steamId, string printId, Func<bool> current, Action<bool, string> callback)" in api, (
+        "a retired single-discard answer writes the balance")
+    nxt = _code(_member(ui, "private static void DiscardNext(string id, int serial)"))
+    assert nxt.count("ApiClient.PcDiscard(") == 1 and (
+        "ApiClient.PcDiscard(id, pid, () => PcQuickShardRules.DiscardStepCurrent(ep == uiEpoch, discardInFlight, serial, discardSerial), "
+        "(ok, resp) =>") in nxt, "a single-discard step is not tested against its run"
+    step = _member(_code(s["rules"]), "internal static bool DiscardStepCurrent(")
+    assert "return sameIdentity && runOut && sentSerial == runSerial;" in step, "a single-discard step is not tested against its run"
+    give = _code(_member(ui, "private static void RetireStuckLatches("))
+    gave = give[_at(give, "if (discardInFlight && Now - discardSentAt > 25f)", "a run given up keeps its serial"):]
+    assert (_at(gave, "discardSerial++;", "a run given up keeps its serial")
+            < _at(gave, 'FinishDiscard(id, "transport");', "a run given up keeps its serial")), "a run given up keeps its serial"
     finish = _code(_member(ui, "private static void FinishShard("))
     assert "if (results.Count > 0) ApiClient.PcAnswerFence.Wrote();" in finish, "the prints a shard removed do not move the fence"
     assert "ApiClient.PcAnswerFence.Wrote();" in _code(_member(ui, "private static void DrawReceived(")), (
@@ -511,10 +541,21 @@ MUTATIONS = [
      "                if (!shardFlight.Settle(shardFlight.Serial, code))",
      "                if (!shardFlight.Settle(serial, code))   // its own generation",
      "the answer is not checked against its own generation"),
+    # Fix pass 3: the single discard now carries the same guard (finding 4),
+    # so the search text names the batch's own callback to stay unique.
     ("Q9b", gate_q9_a_retired_generation_touches_nothing, "api",
-     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))",
-     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)",
-     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))   ",
+     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))\n                {\n"
+     "                    string sh = PcTopLevel(resp, \"shards\");\n"
+     "                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }\n                }\n"
+     "                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($\"[PC] discard-batch callback",
+     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)\n                {\n"
+     "                    string sh = PcTopLevel(resp, \"shards\");\n"
+     "                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }\n                }\n"
+     "                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($\"[PC] discard-batch callback",
+     "if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))   \n                {\n"
+     "                    string sh = PcTopLevel(resp, \"shards\");\n"
+     "                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }\n                }\n"
+     "                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($\"[PC] discard-batch callback",
      "the balance is written for a retired request"),
     ("Q9c", gate_q9_a_retired_generation_touches_nothing, "ui",
      "            if (shardFlight.GiveUp(Now, 25f, out quick))",
@@ -590,6 +631,30 @@ MUTATIONS = [
      "            if (ApiClient.PcReadsOwed) ApiClient.PcSendOwedReads(id);",
      "            if (ApiClient.PcReadsOwed && !shardInFlight && !discardInFlight) ApiClient.PcSendOwedReads(id);   // after the run",
      "an owed read is sent while a shard or a discard is out"),
+    ("Q11g", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "api",
+     "                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))\n                {\n"
+     "                    string sh = PcTopLevel(resp, \"shards\");\n"
+     "                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }\n                }\n"
+     "                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($\"[PC] discard callback",
+     "                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)\n                {\n"
+     "                    string sh = PcTopLevel(resp, \"shards\");\n"
+     "                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }\n                }\n"
+     "                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($\"[PC] discard callback",
+     "                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))   // this run's\n                {\n"
+     "                    string sh = PcTopLevel(resp, \"shards\");\n"
+     "                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }\n                }\n"
+     "                try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($\"[PC] discard callback",
+     "a retired single-discard answer writes the balance"),
+    ("Q11h", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "ui",
+     "ApiClient.PcDiscard(id, pid, () => PcQuickShardRules.DiscardStepCurrent(ep == uiEpoch, discardInFlight, serial, discardSerial), (ok, resp) =>",
+     "ApiClient.PcDiscard(id, pid, () => true, (ok, resp) =>",
+     "ApiClient.PcDiscard(id, pid, () => PcQuickShardRules.DiscardStepCurrent(ep == uiEpoch, discardInFlight, serial, discardSerial), (ok, resp) =>   // this run",
+     "a single-discard step is not tested against its run"),
+    ("Q11i", gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard, "rules",
+     "            return sameIdentity && runOut && sentSerial == runSerial;",
+     "            return sameIdentity && runOut;",
+     "            return sameIdentity && runOut && sentSerial == runSerial;   // the run's serial",
+     "a single-discard step is not tested against its run"),
     ("Q12a", gate_q12_shard_dupes_counts_only_the_prints_owned_now, "rules",
      "            ready = true;\n            // the page as the player owns it now",
      "            for (int j = 0; j < pageFaceKeys.Count; j++)\n"
@@ -623,9 +688,9 @@ MUTATIONS = [
      "            if (!string.IsNullOrEmpty(printId)) gone[printId] = dispatched;   // as of now",
      "a read dispatched before the refusal lifts its tombstone"),
     ("Q13d", gate_q13_a_not_owned_tombstone_lifts_once_a_later_read_holds_the_print, "rules",
-     "            TombstoneCases(r);\n            return r;",
-     "            return r;",
-     "            TombstoneCases(r);   // executed\n            return r;",
+     "            TombstoneCases(r);\n",
+     "",
+     "            TombstoneCases(r);   // executed\n",
      "the tombstone path is not executed"),
 ]
 

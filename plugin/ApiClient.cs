@@ -4969,14 +4969,23 @@ namespace CompetitiveRounds
             }));
         }
 
-        public static void PcDiscard(string steamId, string printId, Action<bool, string> callback)
+        /// <summary>One print discarded: a step of the binder's per-copy run
+        /// (PlayerCardsUI.DiscardNext), one request per copy. The balance in
+        /// the answer is written into the cache before the callback runs, and
+        /// moves PcAnswerFence, only while `current` says the step is still
+        /// the caller's current run (item 18 fix pass 3, finding 4:
+        /// PcQuickShardRules.DiscardStepCurrent, PcDiscardBatch's
+        /// PcShardFlight.Admits(current) rule). A run given up whose answer
+        /// arrives late therefore changes neither the cached balance nor the
+        /// fence. A null `current` writes none (Admits fails closed).</summary>
+        public static void PcDiscard(string steamId, string printId, Func<bool> current, Action<bool, string> callback)
         {
             string url = PcUrl("prints/discard", steamId, $"pcdiscard:{steamId}:{printId}", $"print_id={printId}");
             int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[PC] discard {printId} ok={ok} resp={PcShort(resp)}");
-                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))
                 {
                     string sh = PcTopLevel(resp, "shards");
                     if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }
