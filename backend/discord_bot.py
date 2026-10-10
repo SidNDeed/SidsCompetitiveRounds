@@ -8027,11 +8027,19 @@ class LeaderboardPaginator(discord.ui.View):
         # comment said the scope made a stray interaction attributable "in
         # the logs", and there is no such log line — what carries the board
         # key is the id in the interaction Discord itself reports. What the
-        # scope does buy is distinct ids if these views are ever made
-        # persistent (a persistent view is stored under message_id None,
-        # where a shared id across boards WOULD collide). The random token is
-        # per-view and deliberately prevents persistent re-registration
-        # across a restart; these views time out instead.
+        # scope does buy is two things. It is the board's IDENTITY on the
+        # channel: _reconcile_board_messages reads the key back out of a
+        # message's components to adopt or retire it, so a renamed display
+        # title cannot orphan the message (the title is only the fallback,
+        # for a message posted before this marker existed). That reading
+        # takes the format exactly as written here, four colon-separated
+        # parts, so change both together. And it keeps the ids distinct if
+        # these views are ever made persistent (a persistent view is stored
+        # under message_id None, where a shared id across boards WOULD
+        # collide). The random token is per-view and deliberately prevents
+        # persistent re-registration across a restart; these views time out
+        # instead, and Discord keeps the components -- and so the key -- on
+        # the message when they do.
         token = os.urandom(4).hex()
         for child in self.children:
             if isinstance(child, discord.ui.Button):
@@ -8098,10 +8106,20 @@ class LeaderboardPaginator(discord.ui.View):
 # returns", which is a different rule and not one #153 states; a later one said
 # every path carries an explicit minimum, which the 1v2 row above refutes.)
 #
-#   key    — LEADERBOARD_BOARDS token, log prefix, paginator custom_id scope
-#   title  — embed title, and the string the restart rescan adopts a message
-#            by (EXACT match: renaming a title orphans the message already in
-#            the channel — nothing will adopt it and nothing deletes it)
+#   key    — LEADERBOARD_BOARDS token, log prefix, and the board's IDENTITY on
+#            the channel: the paginator stamps it into every button's
+#            custom_id, and the reconcile read adopts and retires a message
+#            by it. Never rename a key; it is what the message is.
+#   title  — embed title. NOT the identity: renaming it edits the existing
+#            message into the new title on the next tick (adopted by its
+#            key), or retires it by its key if the board is off. It is the
+#            FALLBACK identity only, matched exactly, for a board message
+#            posted before the key marker existed.
+#   retired_titles — optional: titles this board was published under before
+#            the current one. A rename adds the old title here, so a message
+#            from before the marker that still carries it is adopted or
+#            retired too. Titles and retired titles are distinct across the
+#            whole catalogue (a test pins that).
 #   path   — the GET this board renders
 #   probe  — 1-row fetch whose total_players gives the population INCLUDING
 #            inactives, for the "N inactive hidden" footer. None where the
@@ -8361,13 +8379,27 @@ async def _reconcile_board_messages(ch, boards: list, ids: dict) -> tuple:
     THE CHANNEL IS THE ONLY RECORD. Every decision this tick makes about a
     message is made from messages this read just saw, never from an id held
     in memory, so a message id can only mean one thing at a time. Within one
-    read a message of ours carrying an enabled board's title is either the
-    NEWEST one -- that board's keeper, which is what `ids` is set to -- or an
-    older COPY, listed newest-first under its board key in `dupes`. A message
-    carrying the title of a board this deployment no longer publishes is
-    listed in `retired` as (message, key). The queue that used to hold a
+    read a message of ours that IS an enabled board (IDENTITY, below) is
+    either the NEWEST one -- that board's keeper, which is what `ids` is set
+    to -- or an older COPY, listed newest-first under its board key in
+    `dupes`. A message that is a board this deployment no longer publishes
+    is listed in `retired` as (message, key). The queue that used to hold a
     second reading of an id, and the cap that used to evict from it, are
     gone.
+
+    IDENTITY. Which board a message is comes from the BOARD KEY its buttons
+    carry: LeaderboardPaginator stamps it into every custom_id
+    ("scrlb:<key>:<slot>:<token>"), every board message is posted and edited
+    with that view, and Discord keeps a message's components when its view
+    times out. A display title is NOT the identity, because a title can be
+    renamed and the message under it is still that board: after a rename
+    and a restart the old message is adopted by its key and edited into the
+    new title, or retired by its key if the board is off -- never left
+    beside a fresh post. The TITLE is the fallback, for a message posted
+    before the marker existed (the single-board publisher's 1v1): its
+    current title, or any title in its BOARDS entry's `retired_titles`. A
+    marker naming a key no BOARDS entry has is not this build's board, and
+    the message is left exactly as it is.
 
     WHY THIS FUNCTION DELETES NOTHING. A read shows what was on the channel
     when it was read, and nothing more. The keeper it picks can be removed
@@ -8394,20 +8426,20 @@ async def _reconcile_board_messages(ch, boards: list, ids: dict) -> tuple:
     dies part-way, and a read that reaches the ceiling are all treated the
     same: the channel picture is INCOMPLETE, so the caller deletes nothing
     and posts nothing fresh on this tick. It still ADOPTS what it saw, which is
-    sound at any depth -- history is newest-first, so the first message
-    carrying a title is that title's newest message in the channel whether or
+    sound at any depth -- history is newest-first, so the first message that
+    is a given board is that board's newest message in the channel whether or
     not the read went on to finish. And it does not drop a remembered id it
     did not see, because it has not shown that message is gone. Only a
     COMPLETE read may do that, and only a complete read may delete.
 
     WHAT CAN BE DELETED, AND WHAT IS NEVER DELETED. Only messages whose
-    author is this BOT ACCOUNT and which carry a board embed title. A message
-    posted by any other account is skipped before anything else is asked
-    about it, on every path. Of ours, two kinds can go: an older COPY of an
-    enabled board, once the same tick has proven a newer copy of that board
-    live (its edit landed) or sent its replacement, and a RETIRED board's
-    message (a title in BOARDS whose key this deployment no longer
-    publishes, which is a deliberate removal).
+    author is this BOT ACCOUNT, which carry an embed, and which are a board
+    by the identity above. A message posted by any other account is skipped
+    before anything else is asked about it, on every path. Of ours, two
+    kinds can go: an older COPY of an enabled board, once the same tick has
+    proven a newer copy of that board live (its edit landed) or sent its
+    replacement, and a RETIRED board's message (a board in BOARDS this
+    deployment no longer publishes, which is a deliberate removal).
 
     WHAT THAT GUARANTEES, AND WHAT IT CANNOT. This process never deletes a
     copy of a board on the strength of a read alone: at the moment of every
@@ -8446,9 +8478,36 @@ async def _reconcile_board_messages(ch, boards: list, ids: dict) -> tuple:
     the direction to fail in is editing in place, never moving a set whose
     position was not established.
     """
-    enabled_titles = {b["title"]: b["key"] for b in boards}
-    retire = ({b["title"]: b["key"] for b in BOARDS if b["key"] not in enabled_titles.values()}
-              if not _lb_unknown_board_keys else {})
+    enabled = {b["key"] for b in boards}
+    # A catalogue board this deployment does not publish is RETIRED -- unless
+    # a LEADERBOARD_BOARDS token failed to resolve, and then nothing is (#430).
+    retiring = ({b["key"] for b in BOARDS} - enabled) if not _lb_unknown_board_keys else set()
+    # The fallback identity: every title a board has been published under.
+    # Current titles go in first, so a retired title can never take a title
+    # that another board carries now.
+    by_title: dict = {}
+    for b in BOARDS:
+        by_title.setdefault(b["title"], b["key"])
+    for b in BOARDS:
+        for t in b.get("retired_titles", ()):
+            by_title.setdefault(t, b["key"])
+
+    def board_key(msg):
+        """The board a message of ours IS: the key its buttons carry, else
+        (a message from before the marker) the key its title names, else
+        None. A marker is never second-guessed by the title under it."""
+        todo, i = list(getattr(msg, "components", None) or ()), 0
+        while i < len(todo):                  # action rows, then their children
+            c = todo[i]
+            i += 1
+            cid = getattr(c, "custom_id", None)
+            if isinstance(cid, str) and cid.startswith("scrlb:"):
+                parts = cid.split(":")
+                if len(parts) == 4 and parts[1]:
+                    return parts[1]
+            todo.extend(getattr(c, "children", None) or ())
+        return by_title.get(msg.embeds[0].title or "")
+
     keepers: dict = {}
     dupes: dict = {}
     retired: list = []
@@ -8465,16 +8524,16 @@ async def _reconcile_board_messages(ch, boards: list, ids: dict) -> tuple:
             order.append(msg.id)
             if msg.author != bot.user or not msg.embeds:
                 continue                      # never ours: not touched, not counted
-            title = msg.embeds[0].title or ""
-            key = enabled_titles.get(title)
-            if key is not None:
+            key = board_key(msg)
+            if key in enabled:
                 if key in keepers:
                     dupes.setdefault(key, []).append(msg)    # an older copy, newest-first
                 else:
                     keepers[key] = msg        # newest-first: the first one wins
-                continue
-            if title in retire:
-                retired.append((msg, retire[title]))
+            elif key in retiring:
+                retired.append((msg, key))
+            # Anything else -- no board, a board this build does not know, or
+            # a retirement refused -- is left exactly as it is.
     except Exception as e:
         complete = False
         print(f"[LB] channel read failed ({e}) -- this tick deletes nothing "
@@ -8535,8 +8594,9 @@ async def _repost_board_set(ch, boards: list, rendered: dict, ids: dict, dupes: 
     message and every older copy in place: stale and out of order, but
     present, and the next tick re-anchors. A failed delete leaves a duplicate
     above the new set, and the next tick's reconcile finds it by READING THE
-    CHANNEL -- it is an older message carrying an enabled board's title,
-    which is exactly what that read classifies as an older copy, deleted on
+    CHANNEL -- it is an older message of an enabled board (its key, or for
+    a message from before the marker its title), which is exactly what that
+    read classifies as an older copy, deleted on
     that tick once a newer copy is proven live -- and it needs nothing
     remembered here to be found. Neither direction can empty the channel.
     The deletes on this path are of messages whose board's REPLACEMENT HAS

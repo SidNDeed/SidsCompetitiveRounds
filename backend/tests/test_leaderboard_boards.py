@@ -154,6 +154,21 @@ class _Msg:
         self.id, self.ch, self.author, self.embeds, self.view = _Msg._next, ch, author, embeds, view
         self.edits = []
 
+    @property
+    def components(self):
+        """discord.py's own Message.components for a message sent or last
+        edited with a view: the library's ActionRow, built from the payload
+        Discord returns (one row of buttons, each with the custom_id the view
+        gave it), so the identity read runs against the real component
+        classes and not a stand-in that could only confirm itself. A message
+        sent with no view has none -- the shape of a board posted before the
+        key marker existed."""
+        if self.view is None:
+            return []
+        return [discord.components.ActionRow({"type": 1, "components": [
+            {"type": 2, "style": 2, "label": c.label or "", "custom_id": c.custom_id}
+            for c in self.view.children]})]
+
     async def edit(self, **kw):
         if self.id in self.ch.edit_fails:
             raise RuntimeError("503 Service Unavailable")
@@ -1843,6 +1858,127 @@ def test_restart_adopts_by_title_and_sweeps_duplicates(ns):
     assert any("duplicate stale board message" in ln for ln in ns["_log"])
     assert ch.titles() == [T_1V1, T_2V2, T_FFA]
     assert [len(m.edits) for m in ch.messages] == [1, 1, 1]      # adopted, then edited
+
+
+# ── identity: the key the buttons carry, never the display title ──────────
+
+T_1V1_RENAMED = "🏆 1v1 Ranked Leaderboard"
+
+
+def _keys_on_channel(ch):
+    """The board key each message's buttons carry, oldest first; None for a
+    message with no marker."""
+    out = []
+    for m in ch.messages:
+        key = None
+        for row in m.components:
+            for c in row.children:
+                if (c.custom_id or "").startswith("scrlb:"):
+                    key = c.custom_id.split(":")[1]
+        out.append(key)
+    return out
+
+
+def _boards_titled(ch, *titles):
+    return [m for m in ch.messages if m.embeds and m.embeds[0].title in titles]
+
+
+def test_a_renamed_board_is_adopted_by_its_key_after_a_restart(ns):
+    """A display-title rename, then a restart.
+
+    The title is what a reader sees and the field a maintainer will want to
+    change; the message under it is still that board. While the title was
+    the identity, the restarted process looked for the NEW title, found
+    nothing, posted a fresh board and left the old one -- adopted by nothing,
+    retired by nothing -- on the channel for good: two 1v1 boards, one of
+    them never updated again. The key in the buttons survives the rename, so
+    the old message is adopted and edited into the new title.
+    """
+    _tick(ns)
+    ch = ns["_ch"]
+    old_1v1 = ns["_lb_message_ids"][CID]["1v1"]
+    assert _keys_on_channel(ch) == ["1v1", "2v2", "ffa"]      # every board carries its key
+    ns["BOARDS"][0]["title"] = T_1V1_RENAMED                  # the rename...
+    ns["_lb_message_ids"].clear()                             # ...and the restart
+    ns["_log"].clear()
+    _tick(ns)
+    ones = _boards_titled(ch, T_1V1, T_1V1_RENAMED)
+    assert len(ones) == 1, (
+        f"{len(ones)} 1v1 boards on the channel after a rename and a restart: {ch.titles()}")
+    assert ones[0].id == old_1v1, "the old 1v1 message was replaced, not adopted"
+    assert ch.titles() == [T_1V1_RENAMED, T_2V2, T_FFA]
+    assert ch.deleted == []
+    assert not any("posted fresh" in ln for ln in ns["_log"]), ns["_log"]
+
+
+def test_a_board_from_before_the_marker_is_adopted_by_a_retired_title():
+    """The fallback half. A board posted before the key marker existed (the
+    single-board publisher's 1v1 is one) carries no key, only its title. A
+    rename lists the old title in `retired_titles`, so that message is still
+    adopted -- and the edit gives it the marker."""
+    n2 = _fresh()
+    ch = n2["_ch"]
+    old = _seed_board_message(ch, T_1V1)            # no view, so no marker
+    _seed_board_message(ch, T_2V2)
+    _seed_board_message(ch, T_FFA)
+    assert _keys_on_channel(ch) == [None, None, None]
+    n2["BOARDS"][0]["title"] = T_1V1_RENAMED
+    n2["BOARDS"][0]["retired_titles"] = (T_1V1,)
+    _tick(n2)
+    ones = _boards_titled(ch, T_1V1, T_1V1_RENAMED)
+    assert [m.id for m in ones] == [old.id], (
+        f"the board from before the marker was not adopted: {ch.titles()}")
+    assert ch.titles() == [T_1V1_RENAMED, T_2V2, T_FFA]
+    assert _keys_on_channel(ch) == ["1v1", "2v2", "ffa"]
+
+
+def test_a_board_switched_off_is_retired_by_its_key_whatever_its_title_now():
+    """Retirement takes the same identity. A board published under one
+    title, then renamed AND switched off in the next build: the restarted
+    process still knows the message as that board's, and retires it."""
+    n2 = _fresh(boards_raw="1v1,2v2,ffa,1v2")
+    _tick(n2)
+    ch = n2["_ch"]
+    assert _keys_on_channel(ch) == ["1v1", "2v2", "ffa", "1v2"]
+    n3 = _bot_ns(_Api(_payloads()), _Bot(ch), boards_raw="1v1,2v2,ffa")
+    n3["BOARDS"][3]["title"] = "⚔️ 1v2 Board"
+    _run(n3["publish_boards"]())
+    assert "1v2" not in _keys_on_channel(ch), (
+        f"a switched-off, renamed board's message was left on the channel: {ch.titles()}")
+    assert [t for t in ch.titles() if t is not None] == [T_1V1, T_2V2, T_FFA]
+    assert any("retired 1 board message" in ln for ln in n3["_log"]), n3["_log"]
+
+
+def test_a_key_this_build_does_not_know_is_never_touched_whatever_its_title(ns):
+    """A marker is never second-guessed by the title under it. A key no
+    BOARDS entry has is some other build's board -- a newer one sharing the
+    token, or a board this build dropped from its catalogue -- so its message
+    is neither adopted (even under a title this build publishes) nor
+    retired."""
+    _tick(ns)
+    ch = ns["_ch"]
+    ours = dict(ns["_lb_message_ids"][CID])
+    alien = _run(ch.send(embeds=[_Embed(title=T_1V1)], view=types.SimpleNamespace(
+        children=[_Button(label="◀ Prev", custom_id="scrlb:records:prev:0a0b0c0d")])))
+    ns["_log"].clear()
+    _tick(ns)
+    assert alien.edits == [], "a board this build does not know was edited as its own"
+    assert alien.id not in ch.deleted, "a board this build does not know was deleted"
+    assert alien.id not in ns["_lb_message_ids"][CID].values()
+    # It counts as any other message below the set: ours re-anchors beneath it.
+    assert ch.messages[0].id == alien.id and ch.messages[0].embeds[0].title == T_1V1
+    assert ch.titles()[1:] == [T_1V1, T_2V2, T_FFA]
+    assert sorted(ch.deleted) == sorted(ours.values())
+
+
+def test_every_title_and_retired_title_names_one_board(ns):
+    """The fallback identity is a title, so no title may name two boards --
+    a retired title included."""
+    seen = {}
+    for b in ns["BOARDS"]:
+        for t in (b["title"], *b.get("retired_titles", ())):
+            assert t not in seen, f"{t!r} names both {seen[t]} and {b['key']}"
+            seen[t] = b["key"]
 
 
 def test_a_board_message_of_someone_elses_is_never_touched(ns):
