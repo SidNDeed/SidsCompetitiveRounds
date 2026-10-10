@@ -146,6 +146,10 @@ namespace CompetitiveRounds
         private static GameObject setDetMoreBtn, setResetBtn, setResetConfirmBtn, setResetCancelBtn, setDetSkipGO;
         private static object setDetTitleTxt, setDetCurTxt, setDetRecTxt, setDetReasonTxt, setDetDetectedTxt, setDetBodyTxt;
         private static GameObject setExtraSCS, setExtraSDD, setExtraSDD2, setExtraSDS, setExtraLangNote, setExtraPcInfo;
+        // Item 17 fix pass 2 (M2): the language-channel note's text object and
+        // the binding revision it was painted at (it names the ChatChannel key).
+        private static object setLangNoteTxt;
+        private static readonly KeybindRules.RepaintGate setLangNoteGate = new KeybindRules.RepaintGate();
         private static string settingsMoreKey;
 
         // reset
@@ -203,6 +207,7 @@ namespace CompetitiveRounds
             setDetailGO = setDetCurGO = setDetRecGO = setDetDetectedGO = setDetExtrasGO = setDetPrevGO = null;
             setDetMoreBtn = setResetBtn = setResetConfirmBtn = setResetCancelBtn = setDetSkipGO = null;
             setExtraSCS = setExtraSDD = setExtraSDD2 = setExtraSDS = setExtraLangNote = setExtraPcInfo = null;
+            setLangNoteTxt = null;
             kbRows.Clear();
             kbResetAllBtn = kbResetAllConfirmBtn = kbResetAllCancelBtn = null;
         }
@@ -1276,6 +1281,7 @@ namespace CompetitiveRounds
             SettingsSetActive(setExtraSDD, key == "SDR");
             SettingsSetActive(setExtraSDD2, key == "SDR");
             SettingsSetActive(setExtraSDS, key == "SDR");
+            if (key == "SLang") KbRepaintLangNoteIfDue();
             SettingsSetActive(setExtraLangNote, key == "SLang");
             SettingsSetActive(setExtraPcInfo, pc);
             SettingsSetActive(setDetPrevGO, key == "SPcPre");

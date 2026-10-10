@@ -2038,6 +2038,9 @@ namespace CompetitiveRounds
                 string q=histSearch?.Trim()??"";
                 if(q.Length>0){try{ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,q,append:false);}catch{}}
             }
+            // Item 17 fix pass 2 (M2): a binding revision while the Info tab is
+            // up repaints its article too (SwitchTab covers the return to it).
+            if (currentTab == TAB_INFO) { try { KbRepaintInfoIfDue(); } catch (Exception kbe) { Plugin.Log.LogWarning("[KEYBIND] Info repaint: " + kbe.Message); } }
             // Info tab: cross-ref link clicks are a raw Input poll (edge
             // trigger, so it must live on this per-frame path — #120).
             if (currentTab == TAB_INFO) TickInfoLinkClicks();
@@ -6656,7 +6659,7 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning("[NATIVE] dev open tab threw: " + ex.Message); }
         }
 
-        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}try{TitleLaddersUI.CollapseDropdown();}catch{}/* five-tier ladders: the ladder dropdown belongs to the Shop page it was opened on */}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */TitleLaddersUI.OnShopEntered();/* item 12 follow-up: the ladder entries live in the Shop's Titles section */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
+        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}try{TitleLaddersUI.CollapseDropdown();}catch{}/* five-tier ladders: the ladder dropdown belongs to the Shop page it was opened on */}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();/* Item 17 fix pass 2 (M2): the Info article repaints here, before the frame that shows it, when the bindings moved since it was painted */if(idx==TAB_INFO){try{KbRepaintInfoIfDue();}catch(Exception kbe){Plugin.Log.LogWarning("[KEYBIND] Info repaint: "+kbe.Message);}}if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */TitleLaddersUI.OnShopEntered();/* item 12 follow-up: the ladder entries live in the Shop's Titles section */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
 tournaments"): the My Match panel — Ready Up / Play Now / FORFEIT — is gated by the
 sub-tab kind fence, so a participant whose live match sits under the OTHER kind's
 sub-tab opened the tab and saw nothing concedable. On tab entry only (manual sub-tab
@@ -13699,6 +13702,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // would re-key every translation (#289).
                 UIFactory.SetTextRaw(infoTitleTxt, art.Title());
                 UIFactory.SetColor(infoTitleTxt, InfoLibrary.ColorOf(key));
+                // Item 17 fix pass 2 (M2): the binding revision this render
+                // reads; stamped before the render so a render that throws is
+                // not retried every frame.
+                infoKbGate.Painted(Keybinds.Revision);
                 RenderInfoBody(art);
                 // Snap back to the top for the new article (both the content
                 // offset and the normalized position — the layout rebuild
@@ -13719,6 +13726,12 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[INFO-TAB] select '" + key + "': " + ex.Message); }
         }
+
+        // Item 17 fix pass 2 (M2): the binding revision the Info article on
+        // screen was painted at. The Controls article's text and its keyboard
+        // guide read the bindings only when the article renders, so a later
+        // revision repaints it (KbRepaintInfoIfDue) before it is shown again.
+        private static readonly KeybindRules.RepaintGate infoKbGate = new KeybindRules.RepaintGate();
 
         // Sept 1: true while the rewards article is up with its gold chart
         // still waiting on the local player's /gold-sources fetch.
@@ -14807,16 +14820,28 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         /// delete result - built into the help pane's extras slot, where each
         /// shows beside the row it explains (NativeUI.Settings.cs,
         /// SettingsShowExtras). Same keys as when they sat in the list.</summary>
+        /// <summary>The Settings language-channel note, naming the CURRENT
+        /// ChatChannel key (built with the pane, repainted by fix pass 2 M2).</summary>
+        private static string LangChatNoteText()
+        {
+            return I18n.TrF("Chat has language channels - use the dropdown on the Home tab, or tap {0} while typing, to switch.",
+                KeybindRowFace(KeybindRules.ChatChannel));
+        }
+
         private static void BuildSettingsPaneTexts(Transform extras)
         {
             txtConsentStatus = UIFactory.CreateText("SCS", extras, "",
                 15f, C_LABEL, sizeDelta: new Vector2(748, 22));
             UIFactory.SetWordWrap(txtConsentStatus, true); UIFactory.SetTextAutoHeight(txtConsentStatus, 22f);
             // Item 5 companion: point players at the chat language channels.
-            var note = UIFactory.CreateText("SLangChatNote", extras,
-                I18n.TrF("Chat has language channels - use the dropdown on the Home tab, or tap {0} while typing, to switch.",
-                    KeybindRowFace(KeybindRules.ChatChannel)),
+            // Item 17 fix pass 2 (M2): the note names the bound ChatChannel
+            // key, so it keeps its text object and the binding revision it was
+            // painted at; SettingsShowExtras repaints it before it is shown
+            // again when the bindings moved since (KbRepaintLangNoteIfDue).
+            setLangNoteGate.Painted(Keybinds.Revision);
+            var note = UIFactory.CreateText("SLangChatNote", extras, LangChatNoteText(),
                 13f, C_DIM, sizeDelta: new Vector2(748, 18));
+            setLangNoteTxt = note;
             UIFactory.SetWordWrap(note, true); UIFactory.SetTextAutoHeight(note, 18f);
             var sdd = UIFactory.CreateText("SDD", extras,
                 "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' " +

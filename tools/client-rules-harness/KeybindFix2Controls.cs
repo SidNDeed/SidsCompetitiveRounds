@@ -13,7 +13,8 @@ namespace CompetitiveRounds
     /// only members both trees carry. What the fix adds is reached without
     /// naming it: IFrameInput.KeyboardEdges by a public method of that name
     /// and shape on the instrument's own frame source (an interface member at
-    /// the fix tip, a method nothing calls at the pin).
+    /// the fix tip, a method nothing calls at the pin); the repaint gate by
+    /// reflection (absent at the pin, where nothing decides to repaint).
     /// </summary>
     internal static class KeybindFix2Controls
     {
@@ -35,7 +36,45 @@ namespace CompetitiveRounds
         {
             var r = new Result();
             M1(r);
+            M2(r);
             return r;
+        }
+
+        private static BindSource[] DefaultSet()
+        {
+            var s = new BindSource[KeybindRules.RowCount];
+            for (int i = 0; i < s.Length; i++) s[i] = KeybindRules.Default(i);
+            return s;
+        }
+
+        private static BindSource Key(string id) { return BindSource.Key(KeybindRules.KeyOrdinal(id)); }
+
+        /// <summary>A store in memory: config entries as tokens, live sets as
+        /// the last applied copy. VerifyLive is the fix tip's live-set read
+        /// back (an interface member there, unused at the pin).</summary>
+        private sealed class Store : IBindStore
+        {
+            internal readonly string[] Entries = new string[KeybindRules.RowCount];
+            internal BindSource[] Applied;
+            internal int Applies, ThrowOnApplyFrom;
+            internal Store(BindSource[] start)
+            {
+                for (int i = 0; i < Entries.Length; i++) Entries[i] = KeybindRules.FormatToken(start[i]);
+                Applied = (BindSource[])start.Clone();
+            }
+            public string ReadEntry(int row) { return Entries[row]; }
+            public void WriteEntry(int row, string token) { Entries[row] = token; }
+            public void ApplyAll(BindSource[] b)
+            {
+                Applies++;
+                if (ThrowOnApplyFrom > 0 && Applies >= ThrowOnApplyFrom) throw new InvalidOperationException("live set apply " + Applies);
+                Applied = (BindSource[])b.Clone();
+            }
+            public string VerifyLive(BindSource[] b)
+            {
+                for (int i = 0; i < b.Length; i++) if (!Applied[i].Equals(b[i])) return KeybindRules.RowIds[i] + " live=" + KeybindRules.FormatToken(Applied[i]);
+                return null;
+            }
         }
 
         // =================================================================
@@ -110,6 +149,59 @@ namespace CompetitiveRounds
             string clickAlone = Tap(new[] { Mouse0 }, true, "", 0);
             Check(r, "M1 control: a click alone keeps the tap: the channel rotates",
                   clickAlone == "rotated", clickAlone);
+        }
+
+        // =================================================================
+        // M2 (round-2 F4): a built Controls help surface repaints
+        // =================================================================
+
+        /// <summary>The Controls article is built from the bindings (its text
+        /// names QuickChat's key, its keyboard guide colours the Q and G
+        /// caps); optionally QuickChat moves from Q to G through the commit
+        /// and the binding revision counts; then the Info tab is shown again
+        /// and whatever repaint decision the tree has is taken. At the pin
+        /// there is none: the article stays as it was built.</summary>
+        private static string ControlsArticleShown(bool rebind, out string how)
+        {
+            var reg = DefaultSet();
+            Func<string> paint = () => "QuickChat=" + KeybindRules.FormatToken(reg[KeybindRules.QuickChat])
+                                       + " Q=" + KeybindRules.BoardCapRole("Q", reg, null)
+                                       + " G=" + KeybindRules.BoardCapRole("G", reg, null);
+            const BindingFlags Any = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            var gateType = typeof(KeybindRules).GetNestedType("RepaintGate", BindingFlags.Public | BindingFlags.NonPublic);
+            object gate = gateType != null ? Activator.CreateInstance(gateType, true) : null;
+            MethodInfo painted = gateType != null ? gateType.GetMethod("Painted", Any) : null;
+            MethodInfo due = gateType != null ? gateType.GetMethod("Due", Any) : null;
+            int revision = 0;
+            string shown = paint();
+            if (painted != null) painted.Invoke(gate, new object[] { revision });
+            if (rebind)
+            {
+                string f;
+                var outcome = KeybindRules.Commit(reg, new[] { KeybindRules.QuickChat }, new[] { Key("G") }, new Store(reg), out f);
+                revision++;
+                how = "commit=" + outcome;
+            }
+            else how = "no rebind";
+            if (due == null) { how += ", no repaint decision in this tree"; return shown; }
+            if ((bool)due.Invoke(gate, new object[] { revision }))
+            {
+                shown = paint();
+                painted.Invoke(gate, new object[] { revision });
+                how += ", repainted";
+            }
+            return shown;
+        }
+
+        private static void M2(Result r)
+        {
+            string how;
+            string rebound = ControlsArticleShown(true, out how);
+            Check(r, "M2 Controls article built, QuickChat rebound from Q to G, Info shown again: the key name and the cap colours read are the new ones",
+                  rebound == "QuickChat=key:G Q=0 G=" + KeybindRules.BoardMod, rebound + " (" + how + ")");
+            string untouched = ControlsArticleShown(false, out how);
+            Check(r, "M2 control: with no rebind the built article already shows the bindings",
+                  untouched == "QuickChat=key:Q Q=" + KeybindRules.BoardMod + " G=0", untouched + " (" + how + ")");
         }
     }
 }

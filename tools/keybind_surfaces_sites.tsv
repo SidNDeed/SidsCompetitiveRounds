@@ -21,6 +21,6 @@ NativeUI.Keybinds.cs	KeybindPaintRow	KeybindRowFace	1	-	the row's face on its _b
 NativeUI.Keybinds.cs	KeybindReadyPrompt	KeybindRowFace	1	86df78d70f5dd74c	inside I18n.TrF
 NativeUI.Keybinds.cs	KeybindRenderPane	KeybindRowFace	1	02e09889c563a0ef	inside I18n.TrF
 NativeUI.cs	BuildHomeTab	KeybindRowFace	1	4bf1b342b634b8cc	inside I18n.TrF
-NativeUI.cs	BuildSettingsPaneTexts	KeybindRowFace	1	3cd7ffe9c90f5595	inside I18n.TrF
+NativeUI.cs	LangChatNoteText	KeybindRowFace	1	3cd7ffe9c90f5595	inside I18n.TrF
 NativeUI.cs	RefreshChatLog	KeybindRowFace	3	148886cba3727dba,be2aacc29e7b8ad4	inside I18n.TrF
 TabStatsOverlay.cs	EnsureLocaleStrings	KeybindRowFace	1	941068397def1de6	inside I18n.TrF

@@ -123,3 +123,45 @@ def test_m1_the_chat_tap_reads_the_latch_on_every_call():
     first = body.index("KeyboardEdgeLatch.EdgesThisFrame();")
     assert first < body.index("if (CaptureOwnsInput)")
     assert first < body.index("if (!chatInputOpen)")
+
+
+# -- M2 (round-2 F4): built help surfaces repaint after a binding revision ----
+
+NUI = PLUGIN / "NativeUI.cs"
+NUIS = PLUGIN / "NativeUI.Settings.cs"
+NUIK = PLUGIN / "NativeUI.Keybinds.cs"
+
+
+def test_m2_the_article_render_stamps_the_revision_it_reads():
+    body = _code(_src(NUI), "private static void SelectInfoArticle(string key)")
+    stamp = body.index("infoKbGate.Painted(Keybinds.Revision);")
+    assert stamp < body.index("RenderInfoBody(art);")
+    assert body.count("infoKbGate.Painted(") == 1
+
+
+def test_m2_returning_to_the_info_tab_repaints_before_it_is_shown():
+    body = re.sub(r"\s+", "", _code(_src(NUI), "private static void SwitchTab(int idx)"))
+    shown = body.index("tabPanels[i].SetActive(i==idx);")
+    repaint = body.index("if(idx==TAB_INFO){try{KbRepaintInfoIfDue();}")
+    assert shown < repaint
+
+
+def test_m2_the_info_tab_repaints_while_it_is_up():
+    body = _ws(_code(_src(NUI), "public static void Tick()"))
+    assert "if (currentTab == TAB_INFO) { try { KbRepaintInfoIfDue(); }" in body
+
+
+def test_m2_a_due_revision_rerenders_the_selected_article():
+    body = _ws(_code(_src(NUIK), "private static void KbRepaintInfoIfDue()"))
+    assert body.index("if (!infoKbGate.Due(Keybinds.Revision)) return;") < body.index("SelectInfoArticle(key);")
+    assert "string key = infoSelectedKey;" in body
+
+
+def test_m2_the_language_note_repaints_before_it_is_shown():
+    show = _code(_src(NUIS), "private static void SettingsShowExtras(string key)")
+    assert show.index("KbRepaintLangNoteIfDue();") < show.index("SettingsSetActive(setExtraLangNote")
+    build = _ws(_code(_src(NUI), "private static void BuildSettingsPaneTexts(Transform extras)"))
+    assert "setLangNoteGate.Painted(Keybinds.Revision);" in build and "setLangNoteTxt = note;" in build
+    rep = _ws(_code(_src(NUIK), "private static void KbRepaintLangNoteIfDue()"))
+    assert "if (setLangNoteTxt == null || !setLangNoteGate.Due(Keybinds.Revision)) return;" in rep
+    assert "UIFactory.SetTextRaw(setLangNoteTxt, LangChatNoteText());" in rep

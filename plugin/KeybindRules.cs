@@ -720,6 +720,25 @@ namespace CompetitiveRounds
             return !(jump.Kind == BindKind.Key && jump.Value == KeySpace);
         }
 
+        // -- built binding surfaces repaint (fix pass 2 M2) --
+
+        /// <summary>Fix pass 2 (M2): when a surface built from the bindings
+        /// must repaint. A surface that reads the bindings only when it is
+        /// built (the Info tab's Controls article with its keyboard guide,
+        /// the Settings language-channel note) stamps the binding revision it
+        /// was painted at; every later revision is due, and the surface
+        /// repaints before it is shown again. Never due before the first
+        /// paint: the first build reads the bindings itself.</summary>
+        internal sealed class RepaintGate
+        {
+            private bool painted;
+            private int paintedAt;
+            internal void Painted(int revision) { painted = true; paintedAt = revision; }
+            /// <summary>Mutation 26 is the 2811a621 tab switch: nothing
+            /// repaints.</summary>
+            internal bool Due(int revision) { return Mut != 26 && painted && paintedAt != revision; }
+        }
+
         // -- the ChatChannel tap detector (design section 2.5, fix pass 1 F2) --
 
         /// <summary>Unity's KeyCode.Mouse0 and KeyCode.Mouse6: the seven mouse
@@ -1238,6 +1257,18 @@ namespace CompetitiveRounds
                           + " unreadable+click=" + tapKb(new[] { KeyCodeMouse0 }, true, "", 0, true)
                           + " armed-with-unnamed-rotated=" + TapArmedWithUnnamed(tapAlias, tapScan));
 
+            // -- fix pass 2 M2: a built Controls help surface repaints ------------
+            // The Controls article is built (its text names QuickChat's key, its
+            // keyboard guide colours the caps), QuickChat moves from Q to G
+            // through the commit, and the Info tab is shown again: the surface
+            // the harness reads names key:G, colours G as a mod cap and Q as
+            // none. Mutation 26 is the 2811a621 tab switch (nothing repaints).
+            // The control: with no rebind the built surface is already right.
+            MutCase(r, 26, "KeybindRules.RepaintGate", "a binding revision after the Controls help was built repaints it before it is shown again",
+                    () => ControlsSurfaceAfter(true) == "QuickChat=key:G Q=0 G=" + BoardMod,
+                    () => ControlsSurfaceAfter(false) == "QuickChat=key:Q Q=" + BoardMod + " G=0",
+                    () => "rebound=" + ControlsSurfaceAfter(true) + " untouched=" + ControlsSurfaceAfter(false));
+
             // -- fix pass 1 F5: the loaded set is conflict-free ---------------------
             // QuickChat moved off Q, MenuToggle saved on Q, then QuickChat hand-
             // edited to the forbidden F5: QuickChat's default Q is revalidated
@@ -1474,6 +1505,31 @@ namespace CompetitiveRounds
             d.Step(io, alias, scan);
             io.Frame(0.2f, null, new[] { alias[0] }, false, "", false);
             return d.Step(io, alias, scan);
+        }
+
+        /// <summary>M2's model of a built help surface: the Controls article's
+        /// QuickChat key name and two keyboard-guide caps, painted from the
+        /// registry when it is built; then, when <paramref name="rebind"/>,
+        /// QuickChat moves to G through the commit and the revision counts,
+        /// as Keybinds.CommitRows counts it; then the Info tab is shown again
+        /// and a due gate repaints. Returns what the surface shows.</summary>
+        private static string ControlsSurfaceAfter(bool rebind)
+        {
+            var reg = Defaults();
+            int revision = 0;
+            var gate = new RepaintGate();
+            Func<string> paint = () => "QuickChat=" + FormatToken(reg[QuickChat])
+                                       + " Q=" + BoardCapRole("Q", reg, null) + " G=" + BoardCapRole("G", reg, null);
+            string shown = paint();
+            gate.Painted(revision);
+            if (rebind)
+            {
+                string f;
+                Commit(reg, new[] { QuickChat }, new[] { K("G") }, new FakeStore(reg), out f);
+                revision++;
+            }
+            if (gate.Due(revision)) { shown = paint(); gate.Painted(revision); }
+            return shown;
         }
 
         /// <summary>M1: the alias and a key no KeyCode names go down in the

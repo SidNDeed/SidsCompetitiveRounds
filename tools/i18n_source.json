@@ -7561,7 +7561,7 @@
   },
   "Chat has language channels - use the dropdown on the Home tab, or tap {0} while typing, to switch.": {
    "surface": "NativeUI",
-   "location": "BuildSettingsPaneTexts",
+   "location": "LangChatNoteText",
    "kind": "TrF"
   },
   "Chat is currently LOCKED.": {

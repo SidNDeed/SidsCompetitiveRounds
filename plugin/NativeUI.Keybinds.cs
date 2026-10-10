@@ -449,6 +449,45 @@ namespace CompetitiveRounds
             settingsPaneDirty = true;
         }
 
+        /// <summary>Fix pass 2 (M2): a binding revision since the Info article
+        /// was painted re-renders it in place before it is shown again - from
+        /// SwitchTab when the Info tab is selected, and once a frame while it
+        /// is up. The Controls article's text and its keyboard guide (caps and
+        /// their colours) read the bindings only when the article renders.
+        /// The reader's scroll offset is kept, the way the gold chart's
+        /// re-render keeps it (MaybeRefreshInfoGold).</summary>
+        private static void KbRepaintInfoIfDue()
+        {
+            if (!infoKbGate.Due(Keybinds.Revision)) return;
+            string key = infoSelectedKey;
+            if (string.IsNullOrEmpty(key) || InfoLibrary.Find(key) == null) { infoKbGate.Painted(Keybinds.Revision); return; }
+            float keep = -1f;
+            try
+            {
+                if (infoBodyScrollGO != null && UIFactory.tScrollRect != null)
+                {
+                    var sr = infoBodyScrollGO.GetComponent(UIFactory.tScrollRect);
+                    var p = UIFactory.tScrollRect.GetProperty("verticalNormalizedPosition",
+                        System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+                    if (sr != null && p != null) keep = 1f - Mathf.Clamp01((float)p.GetValue(sr));
+                }
+            }
+            catch { keep = -1f; }
+            SelectInfoArticle(key);
+            if (keep > 0.001f && pendingInfoScroll < 0f)
+            { pendingInfoScroll = keep; pendingInfoScrollFrame = Time.frameCount + 3; pendingInfoScrollKey = key; }
+        }
+
+        /// <summary>Fix pass 2 (M2): the Settings language-channel note names
+        /// the ChatChannel key; when the bindings moved since it was painted,
+        /// it is repainted as its row's extras are shown.</summary>
+        private static void KbRepaintLangNoteIfDue()
+        {
+            if (setLangNoteTxt == null || !setLangNoteGate.Due(Keybinds.Revision)) return;
+            setLangNoteGate.Painted(Keybinds.Revision);
+            UIFactory.SetTextRaw(setLangNoteTxt, LangChatNoteText());
+        }
+
         /// <summary>The capture poll's place in the settings key ladder,
         /// after the modal, chat and page gates: while it owns input the
         /// page's own key dispatch stands down this frame.</summary>
