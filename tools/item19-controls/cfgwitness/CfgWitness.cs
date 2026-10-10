@@ -153,7 +153,7 @@ namespace CompetitiveRounds.Item19
         private sealed class Verdict
         {
             public int Pre, ValueKept, TypeKept, Blocks, BlocksSame;
-            public List<string> Added = new List<string>(), Lost = new List<string>();
+            public List<string> Added = new List<string>(), Lost = new List<string>(), Retyped = new List<string>(), Revalued = new List<string>();
             public bool AddedOnlyAvatar;
             public bool Pass => Pre > 0 && ValueKept == Pre && TypeKept == Pre && BlocksSame == Blocks && AddedOnlyAvatar && Lost.Count == 0;
         }
@@ -171,6 +171,9 @@ namespace CompetitiveRounds.Item19
                 string t0 = kv.Value.Type;
                 bool typeOk = (eb.Type ?? t0) == (t0 ?? eb.Type) && (ea.Type == null || eb.Type == null || ea.Type == eb.Type);
                 if (typeOk) v.TypeKept++;
+                else v.Retyped.Add(KeyName(kv.Key) + " (" + (t0 ?? "none") + " -> old " + (ea.Type ?? "none") + ", new " + (eb.Type ?? "none") + ")");
+                if (ea.Value != kv.Value.Value || eb.Value != kv.Value.Value)
+                    v.Revalued.Add(KeyName(kv.Key) + " (old build kept=" + (ea.Value == kv.Value.Value) + ", new build kept=" + (eb.Value == kv.Value.Value) + ")");
             }
             foreach (var k in a.Keys.Union(b.Keys))
             {
@@ -204,6 +207,8 @@ namespace CompetitiveRounds.Item19
             Console.WriteLine("CFGWITNESS-REAL pre-existing keys=" + v.Pre + " value kept=" + v.ValueKept + " type kept=" + v.TypeKept
                 + " lost=" + v.Lost.Count + " non-avatar blocks identical=" + v.BlocksSame + "/" + v.Blocks
                 + " keys added by the new build=[" + string.Join(",", v.Added) + "] (all item 19 keys=" + v.AddedOnlyAvatar + ")");
+            Console.WriteLine("CFGWITNESS-REAL retyped (key names and type names only)=[" + string.Join("; ", v.Retyped)
+                + "] revalued (key names only)=[" + string.Join("; ", v.Revalued) + "] lost=[" + string.Join(",", v.Lost) + "]");
 
             // the three negative controls: each perturbs ONE pre-existing,
             // non-avatar bind in the NEW list; Compare must then fail
