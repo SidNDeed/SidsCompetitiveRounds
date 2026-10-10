@@ -1,0 +1,675 @@
+{
+  "_README": [
+    "Item 11 (v1.41.0). The FAQ is told in four places that drift independently:",
+    "docs/FAQ.md, the Discord responder's FAQ_ENTRIES, the in-game Info library, and",
+    "the messages already posted in #scr-faq (which carry docs/FAQ.md's text via a",
+    "migration). Nothing failed when they disagreed, so a prose 'checked every",
+    "number' table would have decayed into a false verified (#302/#342/#431).",
+    "",
+    "This is that table as a FIXTURE, read by backend/tests/test_faq_surfaces.py.",
+    "Each claim names ONE number, the single line of code that decides it, and every",
+    "surface that states it. The test re-reads the code, so a knob changed anywhere",
+    "turns the suite red instead of leaving four documents quietly wrong.",
+    "",
+    "Fields:",
+    "  value    the number the code produces, as text",
+    "  display  how a surface is allowed to write it (defaults to value); present",
+    "           only where the player-facing unit differs from the code's, e.g. 360",
+    "           seconds written as '6 minutes'",
+    "  anchor   {file, pattern}: one regex with ONE capture group that must match",
+    "           EXACTLY once in that file, and whose capture must equal value",
+    "  surfaces [{file, text}]: text must appear verbatim in the file, and must",
+    "           itself contain display - so a surface cannot pass by mentioning the",
+    "           subject without the number",
+    "  verdict  'verified' once the surfaces and the anchor agree. 'unknown' is",
+    "           rejected outright by test_no_claim_unknown: a row nobody resolved is",
+    "           worse than no row."
+  ],
+  "claims": [
+    {
+      "id": "bug_reports_per_day",
+      "what": "bug reports one Steam account may file per 24h",
+      "value": "10",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^BUG_REPORT_PER_STEAM_PER_DAY = (\\d+)$"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "You can file up to 10/day."
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "Up to 10 reports/day."
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "queue_search_cap_minutes",
+      "what": "how long a queue search runs before the server drops you",
+      "value": "30",
+      "anchor": {
+        "file": "plugin/ApiClient.cs",
+        "pattern": "Removed from queue after (\\d+) minutes of searching"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "Queue searches cap at **30 minutes** in every mode"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "After 30 minutes of searching you're removed from the queue."
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "ranked_ready_seconds",
+      "what": "the ready-up window after a 1v1 queue match",
+      "value": "90",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^READY_TIMEOUT_SECONDS = (\\d+)$"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "both players have 90 seconds to click Ready"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "You have 90 seconds, and when either player clicks Ready"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "achievement_gold_default",
+      "what": "gold paid by an achievement with no override",
+      "value": "100",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^ACHIEVEMENT_GOLD = (\\d+)$"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "one-time challenges paying **100g** by default"
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "**Earn achievements** — 100g by default"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "Every achievement pays <color=#7FE87F>100g</color> unless listed here"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "achievement_gold_top_tier",
+      "what": "the top achievement payout tier",
+      "value": "1000",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^    \"regicide\": (\\d+), \"stan_slayer\": \\d+, \"grand_master\": \\d+, \"touch_grass\": \\d+,$"
+      },
+      "also": [
+        {
+          "file": "backend/api/main.py",
+          "pattern": "\"rosetta\": 100, \"dragoman\": 300, \"babel\": (\\d+),"
+        }
+      ],
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "the hardest pay 300g, 500g or 1000g"
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "the harder ones pay 300g, 500g or 1000g"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "up to <color=#7FE87F>1000</color> for the hardest"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "achievement_gold_mid_tier",
+      "what": "the middle achievement payout tier",
+      "value": "500",
+      "display": "500g",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^    \"master_rank\": (\\d+), \"team_sweep\": \\d+, \"rise_from_the_ashes\": \\d+,$"
+      },
+      "also": [
+        {
+          "file": "backend/api/main.py",
+          "pattern": "^    \"ffa_shutout_5\": (\\d+),"
+        },
+        {
+          "file": "backend/api/main.py",
+          "pattern": "\"tourn_champion_sync\": (\\d+), \"tourn_champion_async\": \\d+,"
+        }
+      ],
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "the hardest pay 300g, 500g or 1000g"
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "the harder ones pay 300g, 500g or 1000g"
+        }
+      ],
+      "owed_to_client_lane": [
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount, Sync Champion, Async Champion.",
+          "replaces": "- <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount."
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "achievement_gold_hard_tier",
+      "what": "the lowest above-default achievement payout tier",
+      "value": "300",
+      "display": "300g",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^    \"stacked_deck\": (\\d+), \"flawless\": \\d+, \"silent_drill\": \\d+,$"
+      },
+      "also": [
+        {
+          "file": "backend/api/main.py",
+          "pattern": "^    \"ffa_shutout_4\": (\\d+),"
+        },
+        {
+          "file": "backend/api/main.py",
+          "pattern": "\"tourn_second_sync\": (\\d+), \"tourn_second_async\": \\d+,"
+        }
+      ],
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "the hardest pay 300g, 500g or 1000g"
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "the harder ones pay 300g, 500g or 1000g"
+        }
+      ],
+      "owed_to_client_lane": [
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman, Sync Finalist, Async Finalist.",
+          "replaces": "- <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman."
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "async_tournament_cadence_days",
+      "what": "days after a completed async tournament before the next one opens",
+      "value": "2",
+      "anchor": {
+        "file": "backend/api/tournaments.py",
+        "pattern": "^ASYNC_POST_COMPLETION_DAYS = (\\d+)$"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "opens **2 days after the previous one finishes**"
+        },
+        {
+          "file": "backend/sql/338_faq_channel_post_revisions.sql",
+          "text": "opens **2 days after the previous one finishes**"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "async_match_deadline_days",
+      "what": "the per-round deadline in an async tournament",
+      "value": "7",
+      "anchor": {
+        "file": "backend/api/tournaments.py",
+        "pattern": "^ASYNC_MATCH_DEADLINE_DAYS = (\\d+) "
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "a **7-day** deadline"
+        },
+        {
+          "file": "backend/sql/338_faq_channel_post_revisions.sql",
+          "text": "a **7-day** deadline"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "7-day deadline"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "lone_room_return_seconds_1v1",
+      "what": "seconds alone in a 1v1 ranked room before the mod returns you to the menu",
+      "value": "60",
+      "anchor": {
+        "file": "plugin/GameStateWatcher.cs",
+        "pattern": "double bailAfter = isTournamentRoom \\? 360 : \\(isFfaRoom \\? 120 : \\(\\(isOvtRoom \\|\\| isTeamRoom\\) \\? 90 : (\\d+)\\)\\);"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "60s in 1v1"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "then an automatic return to the menu at 60."
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "lone_room_warn_seconds_1v1",
+      "what": "seconds alone in a 1v1 ranked room before the mod explains the wait",
+      "value": "15",
+      "anchor": {
+        "file": "plugin/GameStateWatcher.cs",
+        "pattern": "double warnAfter = isTournamentRoom \\? 90 : \\(isFfaRoom \\? 45 : \\(isOvtRoom \\? 35 : \\(isTeamRoom \\? 30 : (\\d+)\\)\\)\\);"
+      },
+      "surfaces": [],
+      "owed_to_client_lane": [
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "a warning at 15 seconds",
+          "replaces": "a warning at 25 seconds"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "lone_room_return_seconds_tournament",
+      "what": "seconds alone in a tournament room before the mod returns you to the menu",
+      "value": "360",
+      "display": "6 min",
+      "anchor": {
+        "file": "plugin/GameStateWatcher.cs",
+        "pattern": "double bailAfter = isTournamentRoom \\? (\\d+) :"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "6 min in a tournament room"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "returns you to the menu after 6 minutes"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "lone_room_warn_seconds_tournament",
+      "what": "seconds alone in a tournament room before the mod explains the wait",
+      "value": "90",
+      "anchor": {
+        "file": "plugin/GameStateWatcher.cs",
+        "pattern": "double warnAfter = isTournamentRoom \\? (\\d+) :"
+      },
+      "surfaces": [
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "the mod warns you at 90 seconds"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "bet_refund_nogame_minutes",
+      "what": "minutes with no game reported before a series is abandoned and its bets refunded",
+      "value": "30",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^    cutoff_min = (\\d+)$"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "after 30 minutes when no game was ever reported"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "no game reported in its first 30 minutes"
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "stakes **auto-refund** — there are two windows: after 30 minutes"
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "auto-refund: 30 minutes when no game was "
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "bet_refund_stalled_minutes",
+      "what": "minutes a series may stall mid-way before its bets are refunded",
+      "value": "60",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^    stalled_min = (\\d+)$"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "after 60 minutes when it stalls mid-series"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "A series stalled for 60 minutes mid-series refunds its bets"
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "reported, after 60 minutes when it stalls mid-series."
+        },
+        {
+          "file": "backend/discord_bot.py",
+          "text": "ever reported, 60 minutes when it stalls mid-series."
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "cosmetic_max_frames",
+      "what": "frames the cosmetic uploader accepts in one animated submission",
+      "value": "16",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^COSMETIC_MAX_FRAMES = (\\d+)$"
+      },
+      "also": [
+        {
+          "file": "plugin/NativeUI.cs",
+          "pattern": "for \\(int n = 2; n <= (\\d+); n\\+\\+\\)"
+        }
+      ],
+      "surfaces": [
+        {
+          "file": "backend/discord_bot.py",
+          "text": "up to **16 frames**"
+        }
+      ],
+      "owed_to_client_lane": [
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "or up to 16 numbered PNG frames",
+          "replaces": "a PNG or animated frames"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "cosmetic_max_png_bytes",
+      "what": "bytes the in-game uploader accepts per PNG frame",
+      "value": "1_200_000",
+      "display": "1.2 MB",
+      "anchor": {
+        "file": "plugin/NativeUI.cs",
+        "pattern": "bytes == null \\|\\| bytes\\.Length > ([\\d_]+)\\)"
+      },
+      "surfaces": [
+        {
+          "file": "backend/discord_bot.py",
+          "text": "with real transparency, **up to 1.2 MB** per file"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "cosmetic_max_gif_bytes",
+      "what": "bytes the in-game uploader accepts for a GIF submission",
+      "value": "2_200_000",
+      "display": "2.2 MB",
+      "anchor": {
+        "file": "plugin/NativeUI.cs",
+        "pattern": "if \\(bytes\\.Length > ([\\d_]+)\\)$"
+      },
+      "surfaces": [
+        {
+          "file": "backend/discord_bot.py",
+          "text": "2.2 MB**), or name your frames"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "cosmetic_upload_max_b64",
+      "what": "base64 characters the submission endpoint accepts for one image",
+      "value": "1_600_000",
+      "display": "1,600,000 base64 characters",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^COSMETIC_MAX_B64 = ([\\d_]+)\\s"
+      },
+      "surfaces": [
+        {
+          "file": "backend/discord_bot.py",
+          "text": "**1,600,000 base64 characters**, so the in-game check"
+        },
+        {
+          "file": "backend/api/main.py",
+          "text": "1,600,000 base64 characters max"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "artist_royalty_percent",
+      "what": "share of a sale paid to the item's artist",
+      "value": "30",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "THEN FLOOR\\(pi\\.purchase_price \\* 0\\.(\\d+)\\)::int ELSE 0 END\\) AS earned"
+      },
+      "surfaces": [
+        {
+          "file": "backend/discord_bot.py",
+          "text": "earn a **30% royalty** on every sale"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "The artist earns <color=#7FE87F>a 30% royalty</color>"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "booster_gold_monthly",
+      "what": "gold a Discord server booster is granted each month",
+      "value": "2000",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^BOOSTER_MONTHLY_GOLD = (\\d+)$"
+      },
+      "surfaces": [
+        {
+          "file": "backend/discord_bot.py",
+          "text": "**Boost the Discord server** — 2000g/month"
+        },
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "Discord server boosters are paid 2000g monthly"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "ffa_min_players",
+      "what": "the smallest FFA lobby that may start",
+      "value": "3",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^FFA_MIN_PLAYERS = (\\d+)$"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "3-10 players, everyone for themselves"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "ffa_max_players",
+      "what": "the largest FFA lobby",
+      "value": "10",
+      "anchor": {
+        "file": "backend/api/main.py",
+        "pattern": "^FFA_MAX_PLAYERS = (\\d+)$"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "3-10 players, everyone for themselves"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "ffa_default_target_score",
+      "what": "points that win an FFA game when the host changes nothing",
+      "value": "5",
+      "note": "A game plays to the LOBBY ROW's score_target, whose DEFAULT is the SQL column default (176) and which _ffa_lobby_config reads through FFA_CONFIG_DEFAULTS. FFA_ROUNDS_TO_WIN is the validation fallback for a row predating the column, so anchoring there let the gameplay default move without failing anything.",
+      "anchor": {
+        "file": "backend/sql/176_ffa_lobby_config.sql",
+        "pattern": "score_target\\s+SMALLINT\\s+NOT NULL DEFAULT (\\d+);"
+      },
+      "also": [
+        {
+          "file": "backend/api/main.py",
+          "pattern": "^    \"score_target\": (\\d+), \"card_candidates\": \\d+, \"initial_picks\": \\d+,$"
+        },
+        {
+          "file": "plugin/FfaMode.cs",
+          "pattern": "public static int RoundsToWin = (\\d+);"
+        }
+      ],
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "first to **5** points wins by default"
+        },
+        {
+          "file": "plugin/FfaMode.cs",
+          "text": "public static int RoundsToWin = 5;"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "ffa_target_score_min",
+      "what": "the lowest point target an FFA host may set",
+      "value": "3",
+      "anchor": {
+        "file": "backend/sql/176_ffa_lobby_config.sql",
+        "pattern": "CHECK \\(score_target BETWEEN (\\d+) AND \\d+\\)"
+      },
+      "also": [
+        {
+          "file": "plugin/FfaMode.cs",
+          "pattern": "RoundsToWin = Mathf\\.Clamp\\(scoreTarget, (\\d+), \\d+\\);"
+        }
+      ],
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "the host can set that target anywhere from 3 to 10"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "ffa_target_score_max",
+      "what": "the highest point target an FFA host may set",
+      "value": "10",
+      "anchor": {
+        "file": "backend/sql/176_ffa_lobby_config.sql",
+        "pattern": "CHECK \\(score_target BETWEEN \\d+ AND (\\d+)\\)"
+      },
+      "also": [
+        {
+          "file": "plugin/FfaMode.cs",
+          "pattern": "RoundsToWin = Mathf\\.Clamp\\(scoreTarget, \\d+, (\\d+)\\);"
+        }
+      ],
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "the host can set that target anywhere from 3 to 10"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "async_tournament_safety_net_hours",
+      "what": "hours since the previous async tournament's creation before another may open, whatever state it ended in",
+      "value": "24",
+      "anchor": {
+        "file": "backend/api/tournaments.py",
+        "pattern": "\\(now - last_async\\.created_at\\) < timedelta\\(hours=(\\d+)\\)"
+      },
+      "surfaces": [
+        {
+          "file": "docs/FAQ.md",
+          "text": "only **24 hours** after it was created"
+        },
+        {
+          "file": "backend/sql/338_faq_channel_post_revisions.sql",
+          "text": "only **24 hours** after it was created"
+        }
+      ],
+      "verdict": "verified"
+    },
+    {
+      "id": "cosmetic_png_dimension",
+      "what": "the exact square the in-game uploader requires of a PNG frame",
+      "value": "512",
+      "anchor": {
+        "file": "plugin/NativeUI.cs",
+        "pattern": "if \\(w != (\\d+) \\|\\| h != \\d+\\)"
+      },
+      "also": [
+        {
+          "file": "plugin/NativeUI.cs",
+          "pattern": "if \\(w != \\d+ \\|\\| h != (\\d+)\\)"
+        }
+      ],
+      "surfaces": [
+        {
+          "file": "backend/discord_bot.py",
+          "text": "Format: **512×512 PNG**"
+        }
+      ],
+      "owed_to_client_lane": [
+        {
+          "file": "plugin/InfoLibrary.cs",
+          "text": "one 512x512 PNG",
+          "replaces": "a PNG or animated frames"
+        }
+      ],
+      "verdict": "verified"
+    }
+  ]
+}

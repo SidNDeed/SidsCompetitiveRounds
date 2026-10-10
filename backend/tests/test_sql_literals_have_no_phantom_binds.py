@@ -16,6 +16,13 @@ string constant in the backend rather than pinning the one that bit us. The
 detector is compared against a comment-stripped copy of the same literal, so
 it cannot be fooled by a legitimate bind that merely happens to appear near a
 comment.
+
+BOTH comment forms count. `--` lines and `/* */` blocks are equally
+un-stripped by text(), so a citation in either is equally a required bind.
+The first version of this file handled only `--` and said so in a docstring
+that also claimed the block form was covered; a detector blind to half its
+class is the shape of a check that cannot fail (#342), so the negative
+control below now drives a block comment through the same subtraction.
 """
 import ast
 import io
@@ -38,12 +45,26 @@ SQL_HINT = re.compile(
     re.IGNORECASE,
 )
 LINE_COMMENT = re.compile(r"--[^\n]*")
+BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
 
 def _strip_sql_comments(sql):
-    """Remove `--` line comments. Block comments are not used in this repo's
-    literals; if that changes, this needs /* */ handling too."""
-    return LINE_COMMENT.sub("", sql)
+    """Remove both comment forms PostgreSQL accepts: `/* ... */` blocks and
+    `--` lines.
+
+    Both are stripped because SQLAlchemy's text() strips neither, so a
+    colon-prefixed token is a required bind wherever it sits. An earlier
+    version of this file handled only `--` while its docstring said block
+    comments were not used in the repo's literals: that made the detector
+    silently blind to the block form rather than merely unexercised by it,
+    because a phantom is computed as (binds with comments) minus (binds
+    without), and a comment that is not stripped contributes to both sides
+    and cancels itself out. `test_the_detector_can_fail` now drives both
+    forms through that subtraction.
+
+    Blocks are removed before lines so a `--` inside a block comment goes
+    with its block rather than truncating at the block's own text."""
+    return LINE_COMMENT.sub("", BLOCK_COMMENT.sub("", sql))
 
 
 def _binds(sql):
@@ -63,7 +84,12 @@ def _sql_constants(path):
     out = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            if SQL_HINT.search(node.value) and "--" in node.value:
+            # EITHER comment form qualifies the literal for scanning. Gating
+            # on "--" alone meant a literal whose only comment was a /* */
+            # block was never even collected, so the sweep's class claim
+            # covered one of the two forms the database accepts.
+            if SQL_HINT.search(node.value) and ("--" in node.value
+                                                or "/*" in node.value):
                 out.append((node.lineno, node.value))
     return out
 
@@ -104,6 +130,31 @@ def test_the_detector_can_fail():
 
     good = "SELECT 1 FROM players\n-- see review MEDIUM 16675\nWHERE id = :pid"
     assert _phantoms(good) == set(), "the sweep flags a comment that is actually fine"
+
+    # The BLOCK form, which the detector used to be blind to: the comment was
+    # not stripped, so the same phantom appeared on both sides of the
+    # subtraction and the literal came back clean. SQLAlchemy registers the
+    # bind either way, which is what makes the block form a real defect and
+    # not a theoretical one.
+    block = "SELECT 1 /* review :16675 */"
+    assert _binds(block) == {"16675"}, "text() takes a bind from a block comment"
+    assert _phantoms(block) == {"16675"}, (
+        "a colon citation inside /* */ is invisible to the sweep")
+
+    # A literal whose ONLY comment is a block comment must be COLLECTED, or
+    # the stripping above never runs against it in the real sweep.
+    src = 'x = """SELECT 1 FROM players /* note :16675 */ WHERE id = :pid"""\n'
+    tmp = Path(__file__).resolve().parent / "_phantom_block_probe.py"
+    tmp.write_text(src, encoding="utf-8")
+    try:
+        found = _sql_constants(tmp)
+        assert found and _phantoms(found[0][1]) == {"16675"}, (
+            "a literal carrying only a block comment is never scanned")
+    finally:
+        tmp.unlink()
+
+    # And a block comment with no colon token stays clean.
+    assert _phantoms("SELECT 1 /* review 16675 */ FROM players WHERE id = :pid") == set()
 
     # A genuine bind must never be mistaken for a phantom just because a
     # comment sits beside it.

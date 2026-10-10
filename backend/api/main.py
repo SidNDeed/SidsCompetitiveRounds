@@ -277,7 +277,7 @@ SERIES_REUSE_WINDOW_MIN = int(os.getenv("SERIES_REUSE_WINDOW_MIN", "25"))
 # rank column, the dynamic 'Current Rank' title, and rank colors. Colors are
 # synced from the live Discord roles into rank_role_colors by the bot; the
 # fallback palette below covers names the bot hasn't pushed yet.
-# July 28 rank reorganization (Stan's proposal): base-tier floors move to
+# July 28 rank reorganization: base-tier floors move to
 # Beginner 0 / Intermediate 1500 / Advanced 1675 / Master 1980 / GM 2330,
 # with wider sub-tiers low and the numbered "I" spelled out on every tier.
 # Keep names in lockstep with the bot's RANK_ROLES (range suffix stripped).
@@ -365,12 +365,52 @@ def _rank_fallback_color(name: str) -> str:
 
 # 5-minute cache over rank_role_colors so per-row leaderboard lookups don't
 # hammer the table. Refreshed lazily; bot pushes invalidate it directly.
-_rank_colors_cache: dict = {"at": 0.0, "ok": False, "map": {}}
+# `failed_at` is the NEGATIVE half of the same cache: the monotonic stamp of
+# the last refresh that raised, or None for "no refresh has failed since the
+# last good fill". None rather than 0.0 for the same reason `ok` exists beside
+# `at` — "never failed" is a fact to record, not something to infer from the
+# magnitude of a monotonic clock, which starts near zero on a fresh host.
+_RANK_COLORS_TTL_SECONDS = 300.0
+_rank_colors_cache: dict = {"at": 0.0, "ok": False, "map": {}, "failed_at": None}
+
+
+def _rank_colors_invalidate() -> None:
+    """Drop the cached colour map so the next read refetches.
+
+    Clears all three state fields together. `at = 0.0` alone did not
+    invalidate anything during the first 300 seconds of process uptime: the
+    staleness test is `now - at > 300`, and with `ok` still True and
+    time.monotonic() still under 300 on a fresh host, `now - 0.0 > 300` is
+    False, so a pushed colour was ignored until uptime passed the TTL.
+    Clearing `ok` is what makes the push win, because the refresh gate reads
+    `not ok` first and that test does not involve the clock at all. Clearing
+    `failed_at` is what lets a push retry immediately after a failed refresh
+    rather than waiting out the suppression window below."""
+    _rank_colors_cache["ok"] = False
+    _rank_colors_cache["at"] = 0.0
+    _rank_colors_cache["failed_at"] = None
 
 
 async def _rank_colors(db: AsyncSession) -> dict:
     now = time.monotonic()
-    if not _rank_colors_cache["ok"] or now - _rank_colors_cache["at"] > 300:
+    if not _rank_colors_cache["ok"] or now - _rank_colors_cache["at"] > _RANK_COLORS_TTL_SECONDS:
+        # NEGATIVE CACHING. A persistent fault — the table absent because code
+        # reached production ahead of its migration is the realistic one —
+        # leaves the map permanently stale, so without this every render call
+        # on every board re-issued the same failing SELECT and logged the same
+        # line. That multiplies one outage by the request rate across ~21 call
+        # sites. A failed refresh is therefore cached for the same 300s a
+        # successful one is: the map served in that window is exactly what the
+        # previous behaviour served (the last good map, or {} when there has
+        # never been one), and the only thing suppressed is the repeat of a
+        # read that has just been shown to fail.
+        # The suppression is bounded and clock-forward: it expires after the
+        # window, and a bot push clears it outright via
+        # _rank_colors_invalidate(), so an operator fixing the table does not
+        # have to wait it out.
+        _failed_at = _rank_colors_cache["failed_at"]
+        if _failed_at is not None and now - _failed_at <= _RANK_COLORS_TTL_SECONDS:
+            return _rank_colors_cache["map"]
         try:
             # Savepoint (#235): this swallows its own error and serves the
             # stale map, but 21 call sites carry on issuing SQL on the same
@@ -384,12 +424,17 @@ async def _rank_colors(db: AsyncSession) -> dict:
             # caches. It does NOT raise when cold, and that is deliberate: the
             # cost of an empty map is a rank title rendering without its colour,
             # which is cosmetic, and 21 call sites should not 500 over a colour.
-            # Stamping on success alone is still worth it — it turns a failure
-            # cached for a full 300s into one that retries on the next call.
+            # `ok` and `at` therefore mean "a read completed at this moment",
+            # and the handler below records a failure under its own key rather
+            # than under these — so the freshness test and the suppression test
+            # never have to be told apart by the magnitude of one timestamp.
             _rank_colors_cache["ok"] = True
             _rank_colors_cache["at"] = now
+            _rank_colors_cache["failed_at"] = None
         except Exception as ex:
-            print(f"[RANK] color cache refresh failed: {ex}")
+            _rank_colors_cache["failed_at"] = now
+            print(f"[RANK] color cache refresh failed, suppressed for "
+                  f"{int(_RANK_COLORS_TTL_SECONDS)}s: {ex}")
     return _rank_colors_cache["map"]
 
 
@@ -461,7 +506,11 @@ PODIUM_TITLES = {
 # DESC. Shared by the 'title_podium' dynamic title and the Top-3 x3 match XP
 # multiplier. Keys/values are str(player_id) so UUIDs from text() queries and
 # ORM lookups compare equal.
-_podium_cache: dict = {"at": 0.0, "ok": False, "ids": [], "map": {}}
+# `refresh_failed` records whether the LAST attempt to refresh these ids
+# completed. It is what tells a renderer (which may serve the kept copy)
+# apart from an award decision (which may not) — see _podium_map_for_award.
+_podium_cache: dict = {"at": 0.0, "ok": False, "ids": [], "map": {},
+                       "refresh_failed": False}
 
 # Item d: the same LEADERBOARD_ACTIVE_DAYS filter the boards apply, so the
 # titles and the doubled bonus follow the ACTIVE top 3 (a returning player's
@@ -610,9 +659,16 @@ async def _grant_podium_titles(player_ids: list) -> None:
 
 async def _podium_player_ids(db: AsyncSession) -> list:
     """Ordered [1st, 2nd, 3rd] player ids (as strings) per the visible
-    leaderboard. 60s TTL. A refresh failure serves the last GOOD copy; if there
-    has never been one it RAISES, because an empty list is indistinguishable
-    from a real "nobody qualifies" answer."""
+    leaderboard. 60s TTL. COSMETIC POLARITY: a refresh failure serves the last
+    GOOD copy; if there has never been one it RAISES, because an empty list is
+    indistinguishable from a real "nobody qualifies" answer.
+
+    Serving a stale copy is the right answer for a renderer and the wrong one
+    for a payment, so the two questions are asked through two entry points
+    (#412): this one and `_podium_map` for rendering, `_podium_map_for_award`
+    for anything that pays on podium membership. The difference is recorded in
+    `_podium_cache["refresh_failed"]`, which says out loud whether the ids
+    below are a completed read or a copy kept past its bound."""
     now = time.monotonic()
     if not _podium_cache["ok"] or now - _podium_cache["at"] > 60:
         try:
@@ -641,21 +697,62 @@ async def _podium_player_ids(db: AsyncSession) -> list:
             # entering the except, and therefore without raising.
             _podium_cache["ok"] = True
             _podium_cache["at"] = now
-            await _grant_podium_titles(ids)
+            # The read completed, so the copy below is current. Cleared here
+            # and nowhere else, so this field answers exactly one question:
+            # did the most recent attempt to refresh these ids finish?
+            _podium_cache["refresh_failed"] = False
         except Exception as ex:
             print(f"[PODIUM] cache refresh failed: {ex}")
+            _podium_cache["refresh_failed"] = True
             # Cold: never once populated, so `ids` below is [] — which is not
             # "nobody is on the podium" but "we do not know". Callers that
             # award on this must not be handed the first as if it were the
             # second.
             if not _podium_cache["ok"]:
                 raise
+        else:
+            # The title sync is OUTSIDE the read's try on purpose. It opens its
+            # own session and writes shop rows; its failure says nothing about
+            # whether the podium read completed, and inside the try it would
+            # have marked a podium we did fetch as unfetched — the same
+            # conflation `refresh_failed` exists to prevent. It is logged and
+            # dropped here, which is what the previous shape did with it too
+            # (`ok`/`at` were already stamped before it ran).
+            try:
+                await _grant_podium_titles(ids)
+            except Exception as ex:
+                print(f"[PODIUM] holder sync after refresh failed: {ex}")
     return _podium_cache["ids"]
 
 
 async def _podium_map(db: AsyncSession) -> dict:
-    """{str(player_id): 1|2|3} for the current leaderboard podium."""
+    """{str(player_id): 1|2|3} for the current leaderboard podium.
+
+    COSMETIC polarity — see `_podium_player_ids`. Use
+    `_podium_map_for_award` wherever the answer decides gold or XP."""
     await _podium_player_ids(db)
+    return _podium_cache["map"]
+
+
+async def _podium_map_for_award(db: AsyncSession) -> dict:
+    """{str(player_id): 1|2|3}, but only from a podium read that COMPLETED.
+
+    DECISION polarity, the opposite of `_podium_map` (#412). A renderer that
+    shows last minute's podium for another few seconds is showing a slightly
+    old truth; a payment that reads membership from a copy kept past its
+    bound pays for a position the player may no longer hold, and there is no
+    later pass that corrects it. So when the refresh did not complete, this
+    refuses with a retryable 503 instead of answering from the kept copy.
+
+    What the refusal costs (#430): the caller is a match report, nothing in it
+    has committed when this is asked, and the client's outbox redelivers a
+    5xx. A redelivery, against a silent overpayment or underpayment that
+    stands permanently."""
+    await _podium_player_ids(db)
+    if _podium_cache["refresh_failed"]:
+        print("[PODIUM] refusing an award decision on a podium copy whose "
+              "refresh did not complete")
+        raise HTTPException(status_code=503, detail="podium_unavailable")
     return _podium_cache["map"]
 
 
@@ -8226,6 +8323,184 @@ async def submit_macro_evidence(
     }
 
 
+async def _apply_series_rating_pass(db: AsyncSession, series, p1, p2) -> bool:
+    """Apply the completed series' Glicko period, its history snapshots and
+    the rating achievements it unlocks, in the CALLER's transaction.
+
+    Returns True when both players had a glicko_ratings row and the period was
+    applied, False when one of them had none — a read that succeeded and
+    correctly found nothing, which is a player's first-ever rated series.
+
+    NO savepoint and NO swallow, and that is the point of the function. This
+    pass used to run AFTER the match had committed, inside a savepoint, under
+    a handler that printed and carried on: a failed players lock or a failed
+    glicko read then returned 200 for a completed series with no rating
+    change, no rating_history rows and no rating achievement, and the
+    identical retry collided with the committed match row rather than
+    re-deriving any of it. Run inside the report's own transaction, a failure
+    propagates, the report rolls back whole, and the retry is an ordinary
+    first report.
+
+    LOCK ORDER. The sorted players pass comes first and is kept even though
+    the caller already holds those rows: it is the statement that records the
+    players-then-glicko order this pass shares with admin_reverse_series, and
+    it also serializes two completions sharing a player, whose unlocked glicko
+    read-modify-writes could otherwise clobber each other's update. FOR NO KEY
+    UPDATE, not FOR UPDATE — the weakest mode that still conflicts with the
+    writes below, so it does not enrol every FK insert against players in this
+    lock graph (#202)."""
+    for _pid in sorted([p1.id, p2.id], key=str):
+        await db.execute(
+            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
+            {"pid": _pid},
+        )
+    # Read both ratings BEFORE any updates (avoids ordering bug)
+    g1 = (await db.execute(
+        select(GlickoRating).where(GlickoRating.player_id == p1.id))).scalar_one_or_none()
+    g2 = (await db.execute(
+        select(GlickoRating).where(GlickoRating.player_id == p2.id))).scalar_one_or_none()
+    if not (g1 and g2):
+        return False
+
+    p1_won_series = (series.winner_id == p1.id)
+
+    # Calculate both new ratings using pre-update opponent values
+    new_r1, new_rd1, new_vol1 = calculate_new_rating(
+        g1.rating, g1.rating_deviation, g1.volatility,
+        [(g2.rating, g2.rating_deviation, 1.0 if p1_won_series else 0.0)],
+        GLICKO2_TAU,
+    )
+    new_r2, new_rd2, new_vol2 = calculate_new_rating(
+        g2.rating, g2.rating_deviation, g2.volatility,
+        [(g1.rating, g1.rating_deviation, 0.0 if p1_won_series else 1.0)],
+        GLICKO2_TAU,
+    )
+
+    # Store rating changes on the series for UI display
+    # Must map match-report p1/p2 to the series' player1/player2
+    # (match report order can differ from series order)
+    rc_match_p1 = round(new_r1 - g1.rating, 1)
+    rc_match_p2 = round(new_r2 - g2.rating, 1)
+    if p1.id == series.player1_id:
+        series.p1_rating_change = rc_match_p1
+        series.p2_rating_change = rc_match_p2
+    else:
+        series.p1_rating_change = rc_match_p2
+        series.p2_rating_change = rc_match_p1
+
+    # Apply updates
+    now = datetime.now(timezone.utc)
+    g1.rating = new_r1
+    g1.rating_deviation = new_rd1
+    g1.volatility = new_vol1
+    g1.peak_rating = max(g1.peak_rating or new_r1, new_r1)
+    g1.updated_at = now
+    g2.rating = new_r2
+    g2.rating_deviation = new_rd2
+    g2.volatility = new_vol2
+    g2.peak_rating = max(g2.peak_rating or new_r2, new_r2)
+    g2.updated_at = now
+
+    # Save rating history snapshots (powers the Elo-over-time graph)
+    snapshot_ids = []
+    for pid, r, rd, vol in [
+        (p1.id, new_r1, new_rd1, new_vol1),
+        (p2.id, new_r2, new_rd2, new_vol2),
+    ]:
+        snapshot_id = uuid.uuid4()
+        snapshot_ids.append(str(snapshot_id))
+        db.add(RatingHistory(
+            id=snapshot_id,
+            player_id=pid,
+            rating=r,
+            rating_deviation=rd,
+            volatility=vol,
+            period_end=now,
+        ))
+    # Sept 6 batch (Group 4 item c, migration 299): link the two snapshots to
+    # THIS series by identity, so the session report joins
+    # rating_history.series_id instead of guessing from a time window. Raw SQL
+    # under a SAVEPOINT on purpose, and this savepoint STAYS while the pass's
+    # outer one goes: the column is deliberately NOT declared on the model
+    # (see RatingHistory), so a box whose schema predates 299 skips the link
+    # and keeps the rating update. That is a schema-window tolerance for a
+    # column no rating depends on — not a swallow of the rating work
+    # (#477/#235).
+    await db.flush()
+    try:
+        async with db.begin_nested():
+            await db.execute(text(_RATING_HISTORY_LINK_SQL),
+                             {"sid": str(series.id), "ids": snapshot_ids})
+    except Exception as _lx:
+        print(f"[REPORT] rating_history series link skipped: {_lx}")
+
+    # Auto-grant rating achievements (Master / Grand Master) when either
+    # player crosses a threshold on this Glicko update.
+    await _grant_rating_achievements(db, p1.id, new_r1)
+    await _grant_rating_achievements(db, p2.id, new_r2)
+    return True
+
+
+async def _take_early_series_lock(db: AsyncSession, p1_id, p2_id, room_id) -> None:
+    """Take the pair's current-series row lock at the top of a match report.
+
+    Lock-only: the authoritative load happens later in the report, and holding
+    the row means it cannot change underneath that load. Taking it here, the
+    moment both players are known, is what stops a concurrent /bets from
+    taking the series lock first, reading the persisted pre-report score and
+    accepting a wager on a game that has already been decided.
+
+    A fault FAILS THE REQUEST with a retryable 503. It used to be swallowed
+    for ordinary (non-tournament) series, and the swallow is what made the
+    wager window reachable by ordinary means: a lock wait that times out is
+    the normal way this statement fails, the report then continued unlocked
+    through every line the lock exists to cover, and the wager it admitted
+    settled against the result the same request was recording. Re-raising as
+    503 costs a redelivery — nothing in the handler has committed at this
+    point — and that is the only outcome that keeps the window shut.
+
+    Tournament series already refused, on the separate ground that skipping
+    the cross-path action gate reopens the report-vs-action state race. They
+    refused by re-raising the original error, which surfaced as a 500; they
+    now take the same 503 as every other series, so the distinction no longer
+    has to be carried as a special case. Both are 5xx and both are redelivered
+    by the report outbox, so nothing about the tournament path's outcome
+    changes beyond the status code.
+
+    SAVEPOINT (#235): under asyncpg a failed statement leaves the TRANSACTION
+    aborted, so without the savepoint the 503 below could not be raised
+    cleanly — the caller's later statements would die first and the report
+    would surface as whatever ran next. On SUCCESS the savepoint is RELEASED,
+    and Postgres retains work released that way, so the FOR NO KEY UPDATE row
+    lock is still held for the rest of the request, which is the entire point
+    of taking it early."""
+    try:
+        async with db.begin_nested():
+            _pre_series = await _find_current_active_series(
+                db, p1_id, p2_id, room_id=room_id)
+            if _pre_series is not None:
+                # Shared with deadline check-in actions. Deliberately acquired
+                # before the RankedSeries row lock so neither path can form
+                # series<->match ABBA.
+                _pre_tournament_match_id = (
+                    await _acquire_tournament_report_action_gate(db, _pre_series))
+                await db.execute(
+                    text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
+                    {"sid": _pre_series.id},
+                )
+                # The bracket row may have closed while this report waited on
+                # the action gate. Never award/rate a closed bracket row.
+                await _assert_tournament_report_match_open(
+                    db, _pre_tournament_match_id)
+    except HTTPException:
+        # Already a decided answer (409 on a closed bracket row) — pass it
+        # through rather than restating it as an availability problem.
+        raise
+    except Exception as _ple:
+        print(f"[SERIES-LOCK] early series lock FAILED, refusing the report: {_ple}")
+        raise HTTPException(status_code=503, detail="series_lock_unavailable")
+
+
 @app.post("/api/v1/matches", response_model=MatchResponse, tags=["Matches"])
 async def submit_match(report: MatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """
@@ -8384,65 +8659,12 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     # the upgrade path would then run all its work before any lock. Locking an
     # existing current series for this pair is harmless when the report really
     # is casual (the row is simply left alone).
-    if True:
-        _pre_series = None
-        _pre_is_tournament = False
-        try:
-            # SAVEPOINT (#235) — the one swallow-prone read the Sept 16 sweep
-            # missed. Without it a caught statement error here left the
-            # TRANSACTION aborted, and the report then died several hundred
-            # lines downstream under InFailedSQLTransaction, logged as whatever
-            # statement happened to run next rather than as this one.
-            # SPAN, stated because it is the load-bearing part: the savepoint
-            # opens INSIDE this block and closes at the end of it. On SUCCESS
-            # it is RELEASED, and Postgres retains work released that way — so
-            # the FOR NO KEY UPDATE row lock this block exists to take is still
-            # held for the rest of the request, which is the entire point of
-            # taking it early. Only ROLLBACK TO SAVEPOINT undoes it, and that
-            # is precisely the path where the lock was not taken anyway.
-            # The advisory-lock asymmetry does not reach this path. A savepoint
-            # rollback releases row locks while NOT releasing advisory xact
-            # locks, but the only advisory lock reachable here comes from
-            # _acquire_tournament_report_action_gate, which returns None
-            # immediately for a non-tournament series — and tournament series
-            # re-raise below instead of being swallowed. So the swallowed path
-            # never holds one.
-            async with db.begin_nested():
-                _pre_series = await _find_current_active_series(
-                    db, p1.id, p2.id, room_id=report.photon_room_id)
-                if _pre_series is not None:
-                    # Captured as a plain bool BEFORE anything can roll back:
-                    # the handler below decides whether re-raising is REQUIRED,
-                    # and it must not have to read a rolled-back ORM object to
-                    # find that out.
-                    _pre_is_tournament = bool(_pre_series.is_tournament)
-                    # Shared with deadline-check-in actions. Deliberately
-                    # acquired before the RankedSeries row lock so neither path
-                    # can form series<->match ABBA.
-                    _pre_tournament_match_id = (
-                        await _acquire_tournament_report_action_gate(db, _pre_series))
-                    await db.execute(
-                        text("SELECT 1 FROM ranked_series WHERE id = :sid FOR NO KEY UPDATE"),
-                        {"sid": _pre_series.id},
-                    )
-                    # The bracket row may have closed while this report waited on
-                    # the action gate. Never award/rate a closed bracket row.
-                    await _assert_tournament_report_match_open(
-                        db, _pre_tournament_match_id)
-        except HTTPException:
-            raise
-        except Exception as _ple:
-            # Tournament reports must never bypass the cross-path gate: that
-            # would reopen the report-vs-action state race. Preserve
-            # the historical best-effort behavior only for ordinary series.
-            if _pre_is_tournament:
-                raise
-            print(f"[SERIES-LOCK] early lock skipped: {_ple}")
+    await _take_early_series_lock(db, p1.id, p2.id, report.photon_room_id)
     # Server-side ranked enforcement (bug #42). ranked_enabled defaults TRUE
     # and every explicit opt-in path (queue join, toggle) sets it, so a FALSE
     # here means the player deliberately turned ranked off. The old behavior
     # force-enabled both players whenever a client claimed is_ranked=true,
-    # which overrode a player's opt-out (Stan vs dgnfly: dgnfly had ranked
+    # which overrode a player's opt-out (one of the two had ranked
     # disabled, yet the pairing produced a series + gambler ping). Mod-issued
     # rooms (ranked_*/sct-*) are exempt: joining the queue IS consent, and
     # queue join already flipped the flag. For everything else (code-join /
@@ -8963,18 +9185,22 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
                         " GREATEST(COALESCE(record_bounce_kill, 0), :v) WHERE id = :pid"
                     ), {"v": int(_bounce), "pid": str(_pid)})
     except Exception as _rec_ex:
-        # DELIBERATELY still swallows, and this is the ONE site in the Sept 18
-        # sweep that keeps the swallow. The other seven re-raise, so the
-        # exception is worth stating rather than leaving to be "corrected" by a
-        # future reader applying the rule uniformly.
-        # The rule those seven follow is that a contained failure must not be
-        # indistinguishable from a successful negative result. It still applies
+        # DELIBERATELY still swallows. It is NOT the only swallow left in this
+        # handler's neighbourhood and the earlier note claiming a count was
+        # wrong to state one: the bet settlement, the earned-pack grant, the
+        # rating_history series link and the cosmetic colour/podium caches all
+        # still contain their own failures on purpose, each for a reason
+        # written where it sits. What this note is for is the reason THIS one
+        # stays, so a future reader applying the re-raise rule uniformly can
+        # see the trade rather than guess at it.
+        # The rule the re-raising sites follow is that a contained failure
+        # must not be indistinguishable from a successful negative result. It still applies
         # here, and the omission is real: these records are per-match maxima, so
         # a record set in THIS match is lost permanently — the next match
         # re-attempts with its own values, never with these.
         # What differs is the PROPORTION. Everywhere else the omission was XP,
-        # gold or an award — value the player is owed, where an outage costs one
-        # retry and silence costs them the payment. Here the omission is a
+        # gold or an award — value the player is owed, where an outage costs a
+        # redelivery and silence costs them the payment. Here the omission is a
         # leaderboard maximum, and the worst failure mode is persistent rather
         # than transient: code reaching production ahead of its migration, which
         # fails EVERY report identically. Re-raising would convert a cosmetic
@@ -9337,15 +9563,19 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
             winner_bonus = int(SERIES_GOLD_BASE * _w_mult) * 2
             if _w_mult > 1.0:
                 _series_gold_winner_labels.append(f"{_w_label} opp x{_w_mult:g}")
-            # NOT wrapped in a swallow. _podium_map raises only when the
-            # podium could not be determined AND no good copy has ever been
-            # cached; "this player is not on the podium" returns normally and
-            # is the common case. Swallowing here made those two outcomes
-            # identical, so an undeterminable podium silently withheld a x2 the
-            # winner had earned. Nothing has committed at this point in the
-            # handler, so letting it raise returns 5xx and the client's outbox
-            # redelivers the report.
-            if str(series_loser.id) in await _podium_map(db):
+            # The AWARD-polarity accessor, and NOT wrapped in a swallow.
+            # "This player is not on the podium" returns normally and is the
+            # common case. The two ways the answer can be unavailable both
+            # raise: no good copy has ever been cached, and — the case the
+            # cosmetic accessor serves through — a refresh that did not
+            # complete, leaving a copy from before the standings moved.
+            # Doubling this bonus on membership the server did not re-read
+            # pays a x2 for a position the loser may no longer hold, and
+            # withholding it on a copy we could not fetch takes away a x2 the
+            # winner earned; neither is correctable afterwards, and only a
+            # refusal is. Nothing has committed at this point in the handler,
+            # so raising returns 5xx and the client's outbox redelivers.
+            if str(series_loser.id) in await _podium_map_for_award(db):
                 winner_bonus *= 2
                 # "Podium", not "Top 3": shipped v1.33.0 clients scan the
                 # raw response with Contains("Top 3") to render a defunct
@@ -9453,6 +9683,102 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
         except Exception as _lex:
             print(f"[LADDER-CREDIT] 1v1 credit dropped (game={_lref}): {_lex}")
 
+    # ── Series finalization, INSIDE the match's own transaction ────────────
+    # (for non-ranked matches, Glicko is not affected)
+    #
+    # The match write used to commit HERE, above this point, and the rating
+    # pass and the grants then ran afterwards in transactions of their own,
+    # each under a handler that swallowed. A failure in any of them returned
+    # 200 with the Glicko update, the rating_history rows, the rating
+    # achievements or the slayer title and its gold simply absent, and
+    # nothing re-derived them afterwards: the only retry is the client
+    # resending the identical report, and that report collides with the match
+    # row the first attempt had already committed. The note that used to sit
+    # here — "at most a skipped grant that the next report re-derives" —
+    # described a repair that does not exist.
+    #
+    # Moving the commit BELOW this work removes the class rather than the
+    # instances. The report now records the match, the ratings, the history
+    # and the grants together, or records none of them and answers 5xx; and
+    # because a refused report writes no match row, the identical retry is an
+    # ordinary first report that derives all of it. Longer lock retention is
+    # the accepted cost.
+    #
+    # The lock ORDER the split pass was built to preserve survives the merge.
+    # By the time this runs, the transaction already holds both players' rows
+    # and has held them since before it touched any rating table: the sorted
+    # pass at the top of the handler takes the rows that already existed, the
+    # sorted steam-id advisory pass beside it covers a player whose row this
+    # report creates, and the XP and gold deltas above take both again. So
+    # the sequence is still players-then-glicko, which is the order
+    # admin_reverse_series takes.
+    #
+    # The two authoritative re-reads the split shape needed are gone with the
+    # gap they guarded. There is no window between the match commit and the
+    # rating pass any more, and a concurrent admin_reverse_series must take
+    # these same players rows and this series row, so it waits for this
+    # transaction to finish rather than landing inside it. A re-read that
+    # could only ever return this transaction's own uncommitted write would
+    # be a check that cannot fail (#342).
+    if series_completed:
+        # Achievement gold this pass pays reaches this game's Gold Rush count
+        # through _ladder_add_late_gold, carried by the report's one commit below.
+        _ladder_late_mark = _ladder_achievement_mark(db)
+        await _apply_series_rating_pass(db, series, p1, p2)
+        await _ladder_add_late_gold(
+            db, match.id, _ladder_late_mark, _ladder_achievement_mark(db), "rating")
+
+        # ── Auto-grant slayer achievements (Sid Slayer / Stan Slayer) ──
+        # Beat one of the SLAYER_TARGETS players in a ranked series → unlock.
+        # _grant_achievement_inline also grants the matching equippable title.
+        # No separate transaction and no swallow: these hand out a permanent
+        # title and gold for the series THIS transaction is completing, so
+        # they belong to it, and a failure takes the report down with them
+        # rather than reporting a win that paid nothing.
+        # The winner is read from the series row this handler just wrote,
+        # which is the authoritative value inside this transaction. Both
+        # series players are p1 and p2 because the series was located for
+        # exactly this pair, so no second lookup is needed to turn the id
+        # into a steam_id — but that is an invariant, so it is TESTED rather
+        # than assumed. This block hands out a permanent title and gold, and
+        # picking a player from an id that resolves to neither is a worse
+        # answer than refusing the report.
+        if series.winner_id not in (p1.id, p2.id):
+            print(f"[ACH] series {series.id} completed with winner_id "
+                  f"{series.winner_id}, which is neither reported player — "
+                  f"refusing rather than granting against a guess")
+            raise HTTPException(status_code=500, detail="series_winner_unresolved")
+        _winner_player = p1 if series.winner_id == p1.id else p2
+        _loser_player = p2 if _winner_player is p1 else p1
+        winner_steam = _winner_player.steam_id
+        loser_steam = _loser_player.steam_id
+        # Gold Rush late gold (trunk e9a3f1e1, round 3 finding 1): the
+        # slayer and streak payouts each reach the game's count as their
+        # own source, so the note is marked before each and both
+        # supplements ride the report's one commit below.
+        _ladder_mark_slayer = _ladder_achievement_mark(db)
+        slayer_key = SLAYER_TARGETS.get(loser_steam or "")
+        if slayer_key and winner_steam and winner_steam != loser_steam:
+            if await _grant_achievement_inline(db, _winner_player.id, slayer_key):
+                print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
+        _ladder_mark_streak = _ladder_achievement_mark(db)
+        # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
+        if winner_steam:
+            streak = await get_ranked_streak(db, winner_steam)
+            granted_streak = False
+            if streak >= 25:
+                granted_streak |= await _grant_achievement_inline(db, _winner_player.id, "on_fire")
+            if streak >= 50:
+                granted_streak |= await _grant_achievement_inline(db, _winner_player.id, "unstoppable")
+            if streak >= 100:
+                granted_streak |= await _grant_achievement_inline(db, _winner_player.id, "immortal")
+            if granted_streak:
+                print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
+        await _ladder_add_late_gold(
+            db, match.id, _ladder_mark_slayer, _ladder_mark_streak, "slayer")
+        await _ladder_add_late_gold(
+            db, match.id, _ladder_mark_streak, _ladder_achievement_mark(db), "streak")
+
     try:
         await db.commit()
     except IntegrityError:
@@ -9485,291 +9811,47 @@ async def submit_match(report: MatchReport, request: Request, db: AsyncSession =
     if _region_sighting:
         _note_region_seen(*_region_sighting)
 
-    # Trigger Glicko recalculation only when a series completes
-    # (for non-ranked matches, Glicko is not affected)
-    if series_completed:
-        # Set before the try so the post-rating blocks below can never NameError
-        # on it if the rating pass throws before the authoritative re-read — and
-        # set FALSE, because the only honest answer before that re-read is "we
-        # have not checked". It defaulted True, which was safe only while the
-        # whole pass either completed or 500'd. Now that the pass is savepointed
-        # and its handler swallows, an exception BEFORE the re-read (the lock
-        # waits below are the realistic one: an admin reversal holding the
-        # players rows) rolled the SAVEPOINT back and left this Python flag
-        # still True — and the slayer grant, the title and 1000 gold then went
-        # out for a series that had just been reversed. A SAVEPOINT rolls back
-        # DATABASE state; it cannot roll back a local. Failing closed here costs
-        # at most a skipped grant that the next report re-derives.
-        _series_still_valid = False
-        # Achievement gold this pass pays reaches this game's Gold Rush count
-        # through _ladder_commit_with_late_gold at each of its commits.
-        _ladder_late_mark = _ladder_achievement_mark(db)
-        # Inline recalculation for the two series players
+    # Tournament bracket advancement. Noop for non-tournament series.
+    #
+    # DELIBERATELY STILL A SECOND TRANSACTION, and the one piece of the
+    # finalization that the merge above does not cover. Folding it in was
+    # considered and rejected: this transaction holds both reporters' players
+    # rows, and the advance writes rows for players OUTSIDE this pair (third
+    # place, prizes). Holding participant locks across it is the exact shape
+    # tournament review rounds 25-27 built and refuted — a third-place advance
+    # ABBA'ing against a semifinal reversal through out-of-pair podium writes
+    # — and `advance_tournament_match`'s own SCOPE NOTE records that saga and
+    # says not to reintroduce it.
+    #
+    # So its failure direction is a known, NAMED residual rather than a
+    # closure: the report is already committed when this runs, an exception
+    # leaves the bracket unadvanced, and the only retry the client has is a
+    # resend that collides with the committed match row. It is logged as an
+    # operator-actionable line, NOT swallowed quietly, and it is deliberately
+    # not turned into a 5xx: the report itself succeeded, and answering 5xx
+    # would have the outbox redeliver a report that can never do anything but
+    # collide, without advancing the bracket either. Closing it properly needs
+    # an idempotent finalizer the duplicate path can also reach; that
+    # mechanism does not exist and is reported rather than improvised (#331).
+    #
+    # No `_series_still_valid` gate any more. That flag described a re-read
+    # across a gap this handler no longer has, and the authority on whether a
+    # reversal has landed since the commit is advance_tournament_match itself:
+    # it re-reads the series with populate_existing and returns without
+    # advancing when the row is invalidated or no longer completed.
+    if series_completed and series.is_tournament:
         try:
-            # SAVEPOINT (#235): the rating pass is the whole point of this
-            # block, but its handler below swallows and the request carries
-            # on into the slayer grant and the tournament advance. Under
-            # asyncpg a caught statement error still leaves the TRANSACTION
-            # aborted, so those continuations died instead, logged as a
-            # Glicko error. begin_nested makes the pass atomic: it is either
-            # applied and committed below, or rolled back to the savepoint
-            # with the transaction still usable. The commit itself stays
-            # OUTSIDE the savepoint.
-            async with db.begin_nested():
-                # This is a NEW transaction (the match write committed above), so
-                # it holds no locks. Its old shape — glicko reads, ORM updates,
-                # then players achievement-gold UPDATEs — acquired glicko-then-
-                # players in report order, invertible against admin_reverse_series
-                # (players-then-glicko, sorted). Same canonical pass first; it
-                # also serializes two completions sharing a player, whose
-                # unlocked glicko read-modify-writes could otherwise clobber
-                # each other's rating update.
-                for _pid in sorted([p1.id, p2.id], key=str):
-                    await db.execute(
-                        text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
-                        {"pid": _pid},
-                    )
-                # AUTHORITATIVE RE-READ under the locks (learning #197's own rule,
-                # which the first version of this block invoked and then skipped —
-                # Codex cold review). `series` is a pre-commit ORM object and
-                # expire_on_commit=False, so its attributes are a snapshot from
-                # BEFORE the commit above. An admin_reverse_series that wins these
-                # locks in the gap between the two transactions invalidates the
-                # series and claws its gold/XP back — and this block would then
-                # happily apply a FORWARD Glicko period, rating achievements,
-                # slayer/streak titles and a tournament advance to a series that
-                # no longer exists. Re-read the row and bail if it is gone,
-                # invalidated, or no longer completed.
-                _live = (await db.execute(
-                    text("SELECT status, invalidated_at, winner_id FROM ranked_series WHERE id = :sid"),
-                    {"sid": series.id},
-                )).mappings().first()
-                _series_still_valid = (
-                    _live is not None
-                    and _live["invalidated_at"] is None
-                    and _live["status"] == "completed"
-                )
-                if not _series_still_valid:
-                    print(f"[MATCH] series {series.id} was invalidated/changed between the match "
-                          f"commit and the rating pass — skipping Glicko, achievements and "
-                          f"tournament advance for it")
-                # Read both ratings BEFORE any updates (avoids ordering bug)
-                g1_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p1.id))
-                g1 = g1_r.scalar_one_or_none()
-                g2_r = await db.execute(select(GlickoRating).where(GlickoRating.player_id == p2.id))
-                g2 = g2_r.scalar_one_or_none()
-
-                if g1 and g2 and _series_still_valid:
-                    p1_won_series = (series.winner_id == p1.id)
-
-                    # Calculate both new ratings using pre-update opponent values
-                    new_r1, new_rd1, new_vol1 = calculate_new_rating(
-                        g1.rating, g1.rating_deviation, g1.volatility,
-                        [(g2.rating, g2.rating_deviation, 1.0 if p1_won_series else 0.0)],
-                        GLICKO2_TAU,
-                    )
-                    new_r2, new_rd2, new_vol2 = calculate_new_rating(
-                        g2.rating, g2.rating_deviation, g2.volatility,
-                        [(g1.rating, g1.rating_deviation, 0.0 if p1_won_series else 1.0)],
-                        GLICKO2_TAU,
-                    )
-
-                    # Store rating changes on the series for UI display
-                    # Must map match-report p1/p2 to the series' player1/player2
-                    # (match report order can differ from series order)
-                    rc_match_p1 = round(new_r1 - g1.rating, 1)
-                    rc_match_p2 = round(new_r2 - g2.rating, 1)
-                    if p1.id == series.player1_id:
-                        series.p1_rating_change = rc_match_p1
-                        series.p2_rating_change = rc_match_p2
-                    else:
-                        series.p1_rating_change = rc_match_p2
-                        series.p2_rating_change = rc_match_p1
-
-                    # Apply updates
-                    now = datetime.now(timezone.utc)
-                    g1.rating = new_r1
-                    g1.rating_deviation = new_rd1
-                    g1.volatility = new_vol1
-                    g1.peak_rating = max(g1.peak_rating or new_r1, new_r1)
-                    g1.updated_at = now
-                    g2.rating = new_r2
-                    g2.rating_deviation = new_rd2
-                    g2.volatility = new_vol2
-                    g2.peak_rating = max(g2.peak_rating or new_r2, new_r2)
-                    g2.updated_at = now
-
-                    # Save rating history snapshots (powers the Elo-over-time graph)
-                    snapshot_ids = []
-                    for pid, r, rd, vol in [
-                        (p1.id, new_r1, new_rd1, new_vol1),
-                        (p2.id, new_r2, new_rd2, new_vol2),
-                    ]:
-                        snapshot_id = uuid.uuid4()
-                        snapshot_ids.append(str(snapshot_id))
-                        db.add(RatingHistory(
-                            id=snapshot_id,
-                            player_id=pid,
-                            rating=r,
-                            rating_deviation=rd,
-                            volatility=vol,
-                            period_end=now,
-                        ))
-                    # Sept 6 batch (Group 4 item c, migration 299): link the two
-                    # snapshots to THIS series by identity, so the session report
-                    # joins rating_history.series_id instead of guessing from a
-                    # time window. Raw SQL under a SAVEPOINT on purpose: the column
-                    # is deliberately NOT declared on the model (see RatingHistory),
-                    # so a box whose schema predates 299 skips the link here and
-                    # keeps the rating update — an ORM column would have failed the
-                    # whole Glicko commit in the deploy window (#477/#235).
-                    await db.flush()
-                    try:
-                        async with db.begin_nested():
-                            await db.execute(text(_RATING_HISTORY_LINK_SQL),
-                                             {"sid": str(series.id), "ids": snapshot_ids})
-                    except Exception as _lx:
-                        print(f"[REPORT] rating_history series link skipped: {_lx}")
-
-                    # Auto-grant rating achievements (Master / Grand Master) when
-                    # either player crosses a threshold on this Glicko update.
-                    await _grant_rating_achievements(db, p1.id, new_r1)
-                    await _grant_rating_achievements(db, p2.id, new_r2)
-
-            await _ladder_commit_with_late_gold(db, match.id, _ladder_late_mark, "rating")
+            from tournaments import advance_tournament_match
+            await advance_tournament_match(db, series.id)
+            await db.commit()
         except Exception as ex:
-            print(f"Series Glicko update error: {ex}")
-            # The savepoint rolled this pass back (or its commit failed), so no
-            # achievement gold it noted was paid: the Gold Rush note returns to
-            # the mark taken before the pass, and holds only gold that was paid.
-            # (The slayer block below measures from marks of its own.)
-            _ladder_achievement_restore(db, _ladder_late_mark)
-
-        # ── Auto-grant slayer achievements (Sid Slayer / Stan Slayer) ──
-        # Beat one of the SLAYER_TARGETS players in a ranked series → unlock.
-        # _grant_achievement_inline also grants the matching equippable title.
-        # Gated on the authoritative re-read above: these grant permanent
-        # titles + gold off `series.winner_id`, which is stale ORM state, so a
-        # series reversed in the gap must not hand out a slayer title for a
-        # win that no longer stands (Codex cold review).
-        try:
-            if _series_still_valid:
-                # RE-VERIFY, UNDER THE LOCKS, IN THIS TRANSACTION.
-                # `_series_still_valid` was decided in the rating pass above —
-                # which then COMMITTED, and a commit releases every lock it
-                # held. The flag is therefore a statement about a moment that
-                # has passed, and an admin reversal landing in the gap left it
-                # saying True while the series it describes no longer stands:
-                # a permanent Slayer title and 1000 gold for a reversed winner
-                # (r2 HIGH). Re-taking the players locks in the same canonical
-                # order admin_reverse_series uses (sorted, players first) makes
-                # the reversal either finish before this read — so the re-read
-                # sees it — or wait behind this transaction's commit. The
-                # winner is then taken from the ROW rather than from the stale
-                # ORM object, so a reversal that rewrote it cannot be granted
-                # against either.
-                #
-                # Savepoint (#235) around the reads: the handler below swallows
-                # and the request continues into the tournament advance, so an
-                # unguarded failure here aborted the TRANSACTION and took that
-                # with it. The grants below commit, and a commit never goes in
-                # a savepoint.
-                winner_steam = loser_steam = None
-                live_winner_id = None
-                async with db.begin_nested():
-                    for _pid in sorted([p1.id, p2.id], key=str):
-                        await db.execute(
-                            text("SELECT 1 FROM players WHERE id = :pid FOR NO KEY UPDATE"),
-                            {"pid": _pid},
-                        )
-                    _live2 = (await db.execute(
-                        text("SELECT status, invalidated_at, winner_id "
-                             "  FROM ranked_series WHERE id = :sid"),
-                        {"sid": series.id},
-                    )).mappings().first()
-                    if (_live2 is not None
-                            and _live2["invalidated_at"] is None
-                            and _live2["status"] == "completed"
-                            and _live2["winner_id"] is not None):
-                        live_winner_id = _live2["winner_id"]
-                        winner_steam = (await db.execute(
-                            select(Player.steam_id).where(Player.id == live_winner_id)
-                        )).scalar_one_or_none()
-                        loser_id = (series.player2_id if live_winner_id == series.player1_id
-                                    else series.player1_id)
-                        loser_steam = (await db.execute(
-                            select(Player.steam_id).where(Player.id == loser_id)
-                        )).scalar_one_or_none()
-                if live_winner_id is None:
-                    print(f"[ACH] series {series.id} no longer stands at the slayer grant — "
-                          f"skipping achievements and titles for it")
-                    # Commit anyway: the re-verification above took FOR NO KEY
-                    # UPDATE on both players, and those locks must not be
-                    # carried into the tournament advance below — that saga is
-                    # deliberately lock-free precisely because early player
-                    # locks ABBA'd against it (see its SCOPE NOTE), and holding
-                    # them across it would hand it the shape four review rounds
-                    # removed.
-                    await db.commit()
-                else:
-                    # Gold Rush late gold (trunk e9a3f1e1, round 3 finding 1): the
-                    # slayer and streak payouts each reach the game's count as their
-                    # own source, so the note is marked before each and both
-                    # supplements ride the ONE commit at the end of this branch.
-                    _ladder_mark_slayer = _ladder_achievement_mark(db)
-                    slayer_key = SLAYER_TARGETS.get(loser_steam or "")
-                    if slayer_key and winner_steam and winner_steam != loser_steam:
-                        if await _grant_achievement_inline(db, live_winner_id, slayer_key):
-                            print(f"[ACH] {slayer_key} auto-granted to {winner_steam} for beating {loser_steam} in a ranked series")
-                    _ladder_mark_streak = _ladder_achievement_mark(db)
-                    # v1.30 streak achievements (thresholds per Sid July 12: 25/50/100).
-                    if winner_steam:
-                        streak = await get_ranked_streak(db, winner_steam)
-                        granted_streak = False
-                        if streak >= 25:
-                            granted_streak |= await _grant_achievement_inline(db, live_winner_id, "on_fire")
-                        if streak >= 50:
-                            granted_streak |= await _grant_achievement_inline(db, live_winner_id, "unstoppable")
-                        if streak >= 100:
-                            granted_streak |= await _grant_achievement_inline(db, live_winner_id, "immortal")
-                        if granted_streak:
-                            print(f"[ACH] streak achievement(s) granted to {winner_steam} (streak={streak})")
-                    # ONE commit, unconditional, covering everything the block
-                    # may have written. The old shape committed only when a
-                    # grant returned True — and `_grant_achievement_inline`
-                    # returns False for an ALREADY-UNLOCKED achievement even
-                    # when it repaired that achievement's missing title on the
-                    # way through, so a winner who earned no new tier dropped
-                    # out of here with the repair still uncommitted and lost it
-                    # on the next rollback (r2 MEDIUM). Committing an empty
-                    # session is free; guessing whether it is empty is not.
-                    await _ladder_add_late_gold(
-                        db, match.id, _ladder_mark_slayer, _ladder_mark_streak, "slayer")
-                    await _ladder_commit_with_late_gold(
-                        db, match.id, _ladder_mark_streak, "streak",
-                        restore_to=_ladder_mark_slayer)
-        except Exception as ex:
-            print(f"Slayer auto-grant error: {ex}")
-            # Same reason as the skip path: an exception after the
-            # re-verification leaves this transaction holding FOR NO KEY UPDATE
-            # on both players, and the lock-free tournament advance below must
-            # not inherit them. Nothing here is worth keeping after a failure,
-            # so let the transaction go.
+            print(f"[TOURNAMENT] advance FAILED for series {series.id}; the match "
+                  f"is recorded and rated but the bracket is NOT advanced and no "
+                  f"retry re-derives it — needs an operator: {ex}")
             try:
                 await db.rollback()
             except Exception as _rbx:
-                print(f"[ACH] rollback after slayer-grant failure also failed: {_rbx}")
-
-        # Tournament bracket advancement. Noop for non-tournament series.
-        # Also gated: advancing a bracket off a reversed series would promote
-        # the wrong player and is not self-correcting.
-        try:
-            if series.is_tournament and _series_still_valid:
-                from tournaments import advance_tournament_match
-                await advance_tournament_match(db, series.id)
-                await db.commit()
-        except Exception as ex:
-            print(f"[TOURNAMENT] advance_tournament_match error: {ex}")
+                print(f"[TOURNAMENT] rollback after a failed advance also failed: {_rbx}")
 
     # Compile gold breakdown for the reporter so the notification can show
     # "+12 gold [XP +4]  [Series win +10]" type details. July 20 item 6: uses
@@ -12254,7 +12336,7 @@ async def get_player_matches(
 ):
     """Get a player's match history.
 
-    name_filter (bug 263, Stan): case-insensitive substring match against the
+    name_filter (bug 263): case-insensitive substring match against the
     viewer-relative OPPONENT display name (matches stores no name snapshot, so
     this matches players' CURRENT names; anonymized deleted accounts are
     unsearchable by design). The /matches/summary totals are deliberately NOT
@@ -15052,18 +15134,23 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
     enforcement is armed: key set AND (caller claims >= STEAM_AUTH_MIN_VERSION
     OR the claimed account is per-account armed — see below); otherwise one
     soft-fail log line. X-Mod-Version is attacker-controlled, so the version
-    check alone is a compatibility carve-out, not a security boundary. Infra
-    failures (table missing mid-deploy, DB blip) are always soft — this must
-    never take down the write path it protects. Internal callers (bot) send
-    no X-Mod-Version, so enforce is always False for them; `request` may be
-    None on direct internal function calls (place_discord_bet → place_bet)."""
+    check alone is a compatibility carve-out, not a security boundary. A read
+    that does not COMPLETE (table missing mid-deploy, DB blip) is neither
+    valid nor invalid, and is answered 503: it is not soft-failed, because
+    that admits a write whose subject was never established, and it is not
+    401'd, because no read supports calling the token invalid. Internal
+    callers (bot) send no X-Mod-Version, so enforce is always False for them;
+    `request` may be None on direct internal function calls
+    (place_discord_bet → place_bet), and those never reach the SELECT because
+    a request-less call carries no token."""
     # Record the verdict on the request so a caller can ask whether the
     # claimed steam_id was ESTABLISHED, not merely accepted. The soft-fail
-    # conditions above are deliberate — this check must never take down the
-    # write path it protects — but that makes "we did not raise" a weaker fact
-    # than "we verified", and anything treating the id as evidence needs the
-    # stronger one. Set false first: every later exit either raises or leaves
-    # this alone, so an unreachable code path cannot read as verified.
+    # exit for a token that is MISSING or that read as unverified is
+    # deliberate and unchanged — that is the soak carve-out — but it makes "we
+    # did not raise" a weaker fact than "we verified", and anything treating
+    # the id as evidence needs the stronger one. Set false first: every later
+    # exit either raises or leaves this alone, so an unreachable code path
+    # cannot read as verified.
     _mark_session_verified(request, False)
     token = None
     try:
@@ -15091,23 +15178,33 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
                 reason = "steam_id_mismatch"
         except Exception as ex:
             print(f"[STEAM-AUTH] session lookup UNDETERMINED: {type(ex).__name__}")
-            # A `reason`, NOT a `return`. The bare return exited before the
-            # enforcement decision below was ever evaluated, so a request whose
-            # session could not be read was handled more permissively than one
-            # whose session was read and found unverified — the failure removed
-            # the check instead of failing it.
-            # Required behaviour: a session that cannot be read is not a
-            # verified session. Setting a reason lets this fall through to the
-            # same decision every other unverified request reaches, so an
-            # unreadable session and a rejected session are treated alike.
-            # `_mark_session_verified(request, False)` at the top of this
-            # function already stands, so callers asking whether the claimed id
-            # was ESTABLISHED still correctly get "no".
-            # This does not make the check able to take down the write path it
-            # protects: under the soak switch the decision below is log-only,
-            # and once armed it returns the same 401 any unverified request
-            # gets rather than propagating the database error.
-            reason = "lookup_undetermined"
+            # REFUSE, RETRYABLY. Neither of the two outcomes this could fall
+            # through to is correct for a read that did not complete:
+            #   - the soft-fail exit admits the request, so the mutation below
+            #     records a result, rating, XP and gold against a claimed
+            #     steam_id this function never matched to a session row;
+            #   - the 401 exit reports the session as INVALID, which is a
+            #     statement about the token that no read supports; the player
+            #     is told to re-authenticate over what is a server-side fault.
+            # 503 is the only answer the evidence supports: the check could
+            # not be performed, so ask again. The report outbox redelivers a
+            # 5xx — its permanent cases are a 4xx response or a duplicate-key
+            # body, with 401 and 429 carved back out as transient — so the
+            # cost of being wrong here is a redelivery, bounded by that
+            # outbox's own attempt cap.
+            # This DOES mean a steam_sessions outage refuses the write path
+            # this check guards, which the earlier note said it must never do.
+            # That trade is taken deliberately and is stated here rather than
+            # left to be discovered: the alternative is admitting writes whose
+            # subject was never established, and this endpoint's writes are
+            # match results, ratings and money. The savepoint above is what
+            # keeps the refusal clean — the transaction is still usable, so
+            # the 503 is raised by this function and not by some later
+            # statement dying on an aborted transaction.
+            # `_mark_session_verified(request, False)` at the top of the
+            # function already stands and is not weakened by the raise.
+            raise HTTPException(status_code=503,
+                                detail="session_check_unavailable")
     if reason is None:
         _mark_session_verified(request, True)
         return
@@ -15176,22 +15273,27 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
                 enforce = True
         except Exception as ex:
             print(f"[STEAM-AUTH] per-account arm lookup UNDETERMINED: {type(ex).__name__}")
-            # Deliberately does NOT arm on an undetermined read, and this is
-            # the one place in this sweep that keeps the permissive outcome.
-            # The asymmetry with the session-lookup handler above is intended:
-            # that one resolves an unreadable session to "not verified", which
-            # is the same outcome an ordinary unverified request already gets.
-            # This one would resolve an unreadable row to "this account is
-            # armed", which asserts a fact about the account that was never
-            # read, and the consequence of being wrong is refusing a core
-            # action to a player who may never have been armed at all.
-            # So the fallback is the version gate's answer — the documented
-            # carve-out for accounts that cannot mint tickets yet. The residual
-            # is real and named rather than hidden: while this read is failing,
-            # an armed account is enforced only if the version gate already
-            # enforces it. Whether that should instead fail closed once
-            # STEAM_AUTH_ENFORCE is armed is an owner's call, not this sweep's;
-            # it is inert today because the master switch is off.
+            # REFUSE, RETRYABLY — the same answer as the session lookup, for
+            # the same reason. This block is only reached when the master
+            # switch and the key are both set, so the question being asked is
+            # "may this request skip the session requirement because the
+            # account has never been seen with a ticket-auth client?". An
+            # unreadable arming row does not answer that, and the two ways of
+            # pretending it did are not symmetric in cost:
+            #   - treating it as NOT armed lets the version carve-out stand,
+            #     and X-Mod-Version is supplied by the caller, so the skip is
+            #     available for the asking while this read is failing;
+            #   - treating it as ARMED asserts nothing about the account and
+            #     simply does not let the guarded mutation proceed.
+            # The second is the conservative direction and the correct answer
+            # here is the second one expressed honestly: the mutation does not
+            # proceed, and the status says "ask again" rather than "your
+            # session is invalid", because no read supports the latter.
+            # Refusal cost (#430): a retry, and only while this SELECT is
+            # failing, and only once STEAM_AUTH_ENFORCE is on. It is inert
+            # today because the master switch is off.
+            raise HTTPException(status_code=503,
+                                detail="session_check_unavailable")
     if enforce:
         raise HTTPException(status_code=401, detail="session_required")
     path = ""
@@ -15208,7 +15310,7 @@ async def _check_steam_session(request, steam_id: str, db: AsyncSession) -> None
 QUEUE_EXPIRE_MINUTES = 30
 QUEUE_BLOCK_MINUTES = 5
 # Window for both players to click Ready Up after being matched. Was 30s but
-# lopi/NotNic reported "both readied, match canceled" — both alt-tabbed into
+# two players reported "both readied, match canceled" — both alt-tabbed into
 # ROUNDS, found the F5 menu, clicked Ready, and one of them consistently
 # tripped the timeout. 90s gives real humans enough slack for Discord-to-game
 # context switching. Additionally, /queue/ready resets matched_at on the
@@ -17244,8 +17346,9 @@ def _region_pings_from_header(value):
 
 
 # ── Multiplayer room region (2v2 / 1v2 / FFA rooms and hosted lobbies) ──────
-# Sept 10 batch: a bounded-minimax pick over a cost bound (policy) reading the
-# per-member ping map of migration 307 (data path). Each member's
+# Sept 10 batch: the region v4 policy (a bounded-minimax pick over a cost
+# bound) over the Sept 9 multiplayer-region plan's data path (the per-member
+# ping map of migration 307). Each member's
 # own ping map is stored in player_region_pings (migration 307) by the four
 # session-bound writer polls — the 2v2 / 1v2 / FFA queue polls and the 2v2 /
 # 1v2 lobby state poll — from the same X-Region-Pings header the 1v1 poll
@@ -18161,6 +18264,18 @@ async def presence_ping(request: Request,
     # recorded MEMBER of the named group. A failed check drops the claim —
     # the ping itself (presence, last_seen) is still answered, and old clients
     # never send in_match at all.
+    #
+    # THAT SWALLOW IS DELIBERATE AND IS THE CONSERVATIVE DIRECTION HERE,
+    # stated because `_check_steam_session` now refuses an unreadable session
+    # with a 503 and this is the one caller that catches it. This claim only
+    # ever ADDS protection: it vetoes destruction and renews a lease.
+    # Dropping it lets the lease expire and the group be cleaned up, which is
+    # the self-healing direction (#276); honouring an unverified claim is what
+    # would let a ping naming a public series id hold a group open. So a
+    # session check that cannot complete must LOSE the claim, not keep it —
+    # the opposite polarity to the write paths, for the opposite reason. The
+    # check contains its own failure in a savepoint, so the transaction the
+    # last_seen stamp below needs is still usable after this.
     if in_match:
         _im_ok = False
         _im_mode = None
@@ -18533,8 +18648,12 @@ async def push_rank_role_colors(
         ), {"n": name, "c": color})
         updated += 1
     await db.commit()
-    # Invalidate the cache so the new colors serve immediately.
-    _rank_colors_cache["at"] = 0.0
+    # Invalidate the cache so the new colors serve immediately. Through the
+    # helper, not by stamping `at`: clearing `at` alone left `ok` True, and on
+    # a host whose uptime is still under the TTL the staleness test
+    # (`now - at > 300`) is False, so the pushed colour did not serve until
+    # the process had been up 300 seconds.
+    _rank_colors_invalidate()
     return {"updated": updated}
 
 
@@ -20852,7 +20971,9 @@ async def get_ranked_streak(db: AsyncSession, steam_id: str) -> int:
     called from submit_match's achievement block, where the name simply does not
     exist - so every streak-achievement grant since v1.30.0 has died on
     `NameError: name 'get_ranked_streak' is not defined`, caught and logged as
-    "Slayer auto-grant error". on_fire and its 25/50/100 tiers have never been
+    "Slayer auto-grant error" by the swallow that used to wrap that block (the
+    swallow is gone now; the grants run inside the report's transaction).
+    on_fire and its 25/50/100 tiers had never been
     awarded to anyone. Third occurrence of learning #135 (a function-local name
     referenced from another function); the general rule is that anything called
     from more than one place belongs at module scope, and `db` is a parameter
@@ -20928,7 +21049,7 @@ async def get_recent_series(
           -- Series completion commits status='completed' first, then writes
           -- p1/p2_rating_change in a second commit a beat later. The Discord
           -- series feed polls this endpoint on status and would otherwise
-          -- catch that window and post "+0" permanently (bug #18 — Stan saw
+          -- catch that window and post "+0" permanently (bug #18 — seen as
           -- a real +2 posted as +0). Every real series finalizes to a
           -- non-NULL value (0 of 535 are permanently NULL), so this never
           -- hides a series for good — it just defers it to the next poll
@@ -20980,7 +21101,7 @@ async def get_recent_series(
                        else (br["payout"] or 0) > br["amount"],
             })
 
-    # Bug 179 (Stan): per-series game CODES (first 12 hex of each match uuid,
+    # Bug 179: per-series game CODES (first 12 hex of each match uuid,
     # the exact form /matches/by-code and the bot's /game command take) so the
     # Discord result post can carry them. One batched query.
     games_by_series: dict[str, list] = {}
@@ -21427,8 +21548,9 @@ def _chat_spam_ok(conn_key: int, message: str) -> bool:
     return True
 
 
-# ── Cross-platform chat moderation support (schema: migration 263, which
-# carries the shape decisions). Single-worker in-process state (#125). ──
+# ── Cross-platform chat moderation support (design v3; schema: migration 263,
+# which carries the shape decisions). Everything below is single-worker
+# in-process state (#125). ──
 
 import unicodedata as _unicodedata
 
@@ -31385,8 +31507,9 @@ async def internal_pc_card(
 
 
 # ── Player Cards: portraits, delivery leases and faces ──────────────────────
-# Schema: migrations 308, 310 and 311, which carry the shape decisions.
-# Pure helpers live in
+# Design: the Sept 10 player-cards look (v22), as amended by its r18
+# dispositions; schema: migrations 308, 310 and 311, which carry the shape
+# decisions. Pure helpers live in
 # pc_portrait.py, pixels in pc_face.py. Every route here is answered by the
 # PRIMARY only (§2.2 routing): the face route is not on the edge's routed
 # list and the bot calls the primary's local api.
@@ -37096,7 +37219,7 @@ async def series_preflight(
     # force-enabled both players here "for first-launch races", which
     # overrode real opt-outs: a casual code-join game against a
     # ranked-disabled player still spawned a series row + a Discord gambler
-    # ping (Stan vs dgnfly, 6/24). Mod-issued rooms are exempt — queueing is
+    # ping (6/24). Mod-issued rooms are exempt — queueing is
     # itself the opt-in and queue join already set the flag.
     rl = (room_id or "").lower()
     _mod_room = rl.startswith("ranked_") or rl.startswith("sct-")
@@ -39586,7 +39709,24 @@ async def artist_submit_cosmetic(request: Request, payload: dict = Body(...),
     if len(name) < 2:
         raise HTTPException(status_code=400, detail="name too short (letters/numbers/spaces only)")
     if not b64 or len(b64) > COSMETIC_MAX_B64:
-        raise HTTPException(status_code=400, detail=f"PNG missing or too large ({COSMETIC_MAX_BYTES / 1_000_000:.1f} MB max)")
+        # The number in the message is the number the check enforces. The two
+        # said different things: COSMETIC_MAX_B64 is 1,600,000 base64
+        # characters and the text said 1 MB, so an artist with a 1.1 MB file
+        # was told to shrink something the endpoint would have accepted. The
+        # message gives the one cap in both of its units: the decoded size,
+        # formatted from COSMETIC_MAX_BYTES (derived from COSMETIC_MAX_B64),
+        # and the base64 length this check counts.
+        #
+        # THE CLIENT TWIN IS NOT SWEPT WITH IT on the item 11 branch, which
+        # left plugin/NativeUI.cs alone and wrote the required change down in
+        # docs/faq-refresh-client-contract.md. The v1.41.0 client lane swept
+        # it in a change of its own: NativeUI.cs refuses a PNG over
+        # CosmeticPngMaxBytes (1,200,000 bytes, this cap decoded) and quotes
+        # SizeCapLabel(CosmeticPngMaxBytes) in its message.
+        raise HTTPException(
+            status_code=400,
+            detail=f"PNG missing or too large ({COSMETIC_MAX_BYTES / 1_000_000:.1f} MB, "
+                   "1,600,000 base64 characters max)")
     if submission_fingerprint is not None:
         existing_id = (await db.execute(text(
             "SELECT id FROM cosmetic_submissions "
@@ -40938,35 +41078,756 @@ async def internal_linked_players(
     ]}
 
 
+# How long one poller's claim on a channel-post row lasts. Deliberately LONGER
+# than the bot's 30 s tick: the claim is what makes rendering EXCLUSIVE, and a
+# lease shorter than a tick's work would expire while the holder was still
+# inside it. Lease expiry is the only way out of a claim that a crash can take,
+# so the cost of the longer lease is that a row whose tick died is re-driven up
+# to four ticks later — nothing, for a queued announcement or an in-place
+# correction. The cost of the shorter one is two renderers on one message
+# (#276 — decide which direction the unhandled case fails).
+CHANNEL_POST_CLAIM_SECONDS = 120
+
+# Hand out and claim, in one statement. Held as a module constant with ONE
+# placeholder so the whole statement exists as a single literal a test can lift
+# and execute verbatim: reimplementing it in the test would prove only that the
+# test agrees with itself (#391). `{where}` is filled from two fixed literals
+# chosen by a bool — no caller text reaches the SQL.
+#
+# FOR NO KEY UPDATE is the weakest mode that conflicts with this statement's
+# own later write (claimed_at is not a key column), so it self-conflicts
+# between two pollers without enrolling anybody's foreign-key check in the wait
+# graph (#202). SKIP LOCKED makes the second poller take the next rows instead
+# of queueing behind the first (#207).
+#
+# THE CLAIM CARRIES A TOKEN. One token is minted per poll and written on every
+# row that poll takes, so a later ack can prove it is the SAME caller that was
+# handed the row. Without it a claim says only "somebody is rendering", which
+# is not enough to keep a second poller from finishing a render the first one
+# is still inside.
+#
+# THE PICK ASKS ONLY ABOUT THE LEASE, and the token is deliberately not part of
+# that question. claimed_at and claimed_token are written together by this
+# statement and cleared together by the ack, and :token is a uuid minted per
+# call that is never NULL, so "claimed_at fresh, claimed_token NULL" is a state
+# no writer produces. Reading the token here anyway — as a third way to decide
+# a row is free — would hand out a row whose lease is live on the strength of a
+# column that says nothing about whether anybody is rendering, and it made the
+# predicate admit a route out of a claim that this endpoint's docstring denies.
+# A row that somehow reached that state is still freed, by lease expiry, which
+# is the route the docstring already names for a holder that cannot speak for
+# itself (#276 — the unhandled case has to fail toward self-healing, and a
+# 120-second wait is the cheap direction; a second renderer is not).
+#
+# THE HAND-OUT RECORDS WHAT IT HANDED, AND WHO IT HANDED IT TO. handed_revision
+# and handed_fingerprint are the api's note of what it put on the wire — not a
+# delivery fact, since nothing here says anything reached Discord. They are what
+# lets a caller that CANNOT name a revision (a pre-338 bot) still be recorded
+# accurately: it rendered what it was handed, whatever the row says by the time
+# its ack arrives. handed_revisionless records which KIND of caller that note
+# was made for — `revisions=true` is the bot declaring it can name a revision
+# and will present its token, so a hand-out to it sets the flag false. The ack
+# needs that half: a tokenless ack is only "the poller this row was handed to"
+# when the hand-out it is answering was revisionless. Without it the call shape
+# alone would let a tokenless ack take whichever handed_* pair happened to be
+# on the row and clear whichever claim happened to be live.
+#
+# AMBIGUITY IS COMPUTED HERE, OVER THE WHOLE CHANNEL. A row is ambiguous when
+# any other UNBOUND row in the same channel — in this response or not — would
+# scan for the same text. The bot cannot compute this: it sees one response, so
+# a LIMIT boundary or a concurrent poller would change its answer, and two
+# channels that happen to carry the same text would block each other.
+# Fingerprints are scoped per (channel_id, text) by construction here.
+#
+# A ROW THAT ALREADY HOLDS AN ID IS NOT A COLLISION SOURCE — but only because
+# this statement also takes its message OUT OF EVERY SCAN in the channel.
+# `bound_message_ids` is that list, and the two are one mechanism: a bound row
+# never scans (it edits by id), and its message is excluded from the scans of
+# the rows that do, so a sibling with the same recorded text can no longer be
+# confused with it. Excluding bound rows from the EXISTS without publishing
+# that list would be the unsafe half on its own: the sibling would be told it
+# is unambiguous and would then find the bound row's message and adopt it,
+# leaving two rows editing one message. The pair is computed in ONE statement,
+# so the sibling cannot be told "unambiguous" against a snapshot in which the
+# twin was still unbound; and no writer here ever sets message_id back to NULL
+# (every arm COALESCEs onto it), so a binding observed once stays observed and
+# the list can only grow. Without this, a delivered twin blocked its sibling
+# for the life of the row on the strength of text it had already been edited
+# past — the r5 fingerprint refresh ends that only for a twin somebody
+# CORRECTS, and an uncorrected one blocked forever.
+#
+# The adopt_fingerprint projection is a DERIVATION, not a stored value: see the
+# endpoint's docstring for why revision = 1 on a delivered row is a proof that
+# the stored content is still the text that was sent, and why no delivery fact
+# is written on the strength of it.
+_CHANNEL_POST_PENDING_SQL = (
+    "WITH pick AS ("
+    "  SELECT p.id FROM pending_channel_posts p"
+    "   WHERE {where}"
+    "     AND (p.claimed_at IS NULL"
+    "          OR p.claimed_at < NOW() - make_interval(secs => :lease))"
+    "   ORDER BY p.sort_order, p.id LIMIT 20"
+    "   FOR NO KEY UPDATE SKIP LOCKED"
+    "), taken AS ("
+    "  UPDATE pending_channel_posts p"
+    "     SET claimed_at           = NOW(),"
+    "         claimed_token        = CAST(:token AS uuid),"
+    "         handed_revision      = p.revision,"
+    "         handed_revisionless  = CAST(:revisionless AS BOOLEAN),"
+    "         handed_fingerprint   = CASE WHEN p.content NOT LIKE '[MODCASE:%'"
+    "                                     THEN LEFT(p.content, 2000) END"
+    "    FROM pick k WHERE p.id = k.id"
+    "  RETURNING p.id, p.channel_id, p.content, p.revision, p.posted_revision,"
+    "            p.posted_at, p.message_id, p.sort_order,"
+    "            CASE WHEN p.adopt_fingerprint IS NOT NULL"
+    "                 THEN p.adopt_fingerprint"
+    "                 WHEN p.posted_at IS NOT NULL AND p.revision = 1"
+    "                      AND p.content NOT LIKE '[MODCASE:%'"
+    "                 THEN LEFT(p.content, 2000) END AS adopt_fingerprint"
+    ") SELECT t.id, t.channel_id, t.content, t.revision, t.posted_revision,"
+    "         t.posted_at, t.message_id, t.adopt_fingerprint,"
+    "         CAST(CAST(:token AS uuid) AS TEXT) AS claim_token,"
+    "         ARRAY(SELECT o.message_id FROM pending_channel_posts o"
+    "                WHERE o.channel_id = t.channel_id AND o.id <> t.id"
+    "                  AND o.message_id IS NOT NULL) AS bound_message_ids,"
+    "         (t.adopt_fingerprint IS NOT NULL AND EXISTS ("
+    "             SELECT 1 FROM pending_channel_posts o"
+    "              WHERE o.channel_id = t.channel_id AND o.id <> t.id"
+    "                AND o.message_id IS NULL"
+    "                AND CASE WHEN o.adopt_fingerprint IS NOT NULL"
+    "                         THEN o.adopt_fingerprint"
+    "                         WHEN o.posted_at IS NOT NULL AND o.revision = 1"
+    "                              AND o.content NOT LIKE '[MODCASE:%'"
+    "                         THEN LEFT(o.content, 2000) END"
+    "                    = t.adopt_fingerprint)) AS ambiguous"
+    "    FROM taken t ORDER BY t.sort_order, t.id"
+)
+_CHANNEL_POST_WHERE_UNRENDERED = "p.posted_revision IS DISTINCT FROM p.revision"
+_CHANNEL_POST_WHERE_UNPOSTED = "p.posted_at IS NULL"
+
+# THE ACK, AS ONE COMPARE-AND-SET AGAINST A ROW THIS STATEMENT HAS LOCKED.
+# Everything it does — authorize, record, release — is decided against the row
+# as it stands when the write happens, and NOTHING is carried into the write
+# from a read taken before it (#208: work that follows a read re-reads the row
+# and re-checks the predicate that justified it, inside the lock; #202: the
+# weakest mode that still conflicts with this statement's own later write —
+# a plain non-key UPDATE — is FOR NO KEY UPDATE, so that is the mode taken).
+#
+# WHY THE SHAPE, AND NOT JUST THE LINES, HAD TO CHANGE. Round three authorized
+# a caller and then re-read the row to decide what to answer. Round four moved
+# the decision into one statement but still MATERIALIZED it: a CTE read the row
+# at the statement's snapshot, derived holds_claim / legacy_caller there, and
+# the UPDATE beneath it consumed those booleans. Under READ COMMITTED an UPDATE
+# that meets a row somebody else has changed re-checks ITS OWN conditions
+# against the new version — but a boolean already computed in a CTE is not a
+# condition any more, it is a value, and it is not re-checked. So a caller
+# whose claim lapsed between the snapshot and the write was still admitted by a
+# frozen "yes", and could clear a claim a second poller had taken in between,
+# leaving two pollers rendering one row and a third eligible to be handed it.
+# The finding landed INSIDE the round-four replacement, so what changed here is
+# the method: authorization is not something this statement computes and then
+# uses. It IS the WHERE of the write, spelled against the live row, and the
+# same live columns decide every arm of the SET.
+#
+# `locked` EXISTS TO TAKE THE LOCK, NOT TO DECIDE ANYTHING. It selects the row
+# FOR NO KEY UPDATE: a concurrent hand-out picks with FOR NO KEY UPDATE SKIP
+# LOCKED and therefore passes this row by rather than claiming it, and a
+# hand-out or ack that got there first is waited for, with its committed state
+# the state this statement then reads and writes against. The UPDATE reads no
+# column through `locked` — the join is the primary key and nothing else — so
+# there is no value inside the write that could have gone stale before it was
+# used. The columns `locked` does carry are for the REPLY: what to tell a
+# caller whose write was refused, which is the state the statement found and
+# left alone. They are exact for that, because the row is locked for the whole
+# statement and NOW() is the transaction timestamp, so "the lease, as the
+# database sees it" is ONE value from the lock to the last arm of the SET.
+#
+# THE LOCK ADDS NO DEADLOCK. This statement takes exactly one row lock. The
+# hand-out takes up to twenty, in (sort_order, id) order, but with SKIP LOCKED,
+# so it never waits for anything; a cycle needs two waiters (#204).
+#
+# WHY THE WHERE MAY BE READ ON THE SNAPSHOT. The UPDATE's scan first tests its
+# WHERE against the row version its snapshot sees, and re-tests it against the
+# live version only for a row that passed — a row the snapshot refuses is never
+# looked at again. So every admitting term has to be one that cannot be false
+# on the snapshot and true on the live row, and each is: the delivery term is a
+# property of the call; holds_claim compares a token that one hand-out writes,
+# once, together with the timestamp beside it, so a version that does not carry
+# this caller's live claim is never followed by one that does; and legacy_caller
+# admits only a delivery-shaped call (it excludes a bind and a release), which
+# the delivery term admits anyway. A refused row is therefore refused on the
+# live version too, and `authorized` read off the locked row agrees with what
+# the write did for every call shape.
+#
+# THE TWO WAYS A CALLER IS AUTHORIZED, both written against the live row:
+#   holds_claim    it presented the token this row's claim carries, and the
+#                  claim has not expired. Required of anything that records a
+#                  revision, moves the fingerprint, replaces an id, or lets go
+#                  of the claim. It is three-valued — a token presented against
+#                  a row whose claim was already released compares NULL — so
+#                  every site that reads it treats NULL as "no", and the
+#                  reported `authorized` is squashed with IS TRUE rather than
+#                  handed to the caller as an empty third answer.
+#   legacy_caller  it presented no token, named no revision, neither binds nor
+#                  releases — the one call the pre-338 bot makes, which sends a
+#                  post id and nothing else — AND the row's last hand-out went
+#                  to a poller that did not declare it can name one: that bot
+#                  meeting its own hand-out. That caller cannot hold a claim,
+#                  so it is authorized by the pair, and is recorded at what the
+#                  hand-out served. The call SHAPE alone is not enough: the
+#                  handed_* pair belongs to whoever polled last, so a tokenless
+#                  ack arriving after a revision-capable poller took the row
+#                  would otherwise stamp that poller's record onto it and clear
+#                  that poller's claim mid-render. A tokenless RELEASE is not
+#                  that bot's call (it predates the parameter), and admitting it
+#                  would let a hand-back write the handed_* revision on a row
+#                  nobody rendered — so it is refused like any other stranger.
+# Each is written out at every site that depends on it instead of being
+# computed once, because "computed once, used later" is precisely what made the
+# frozen answer possible. The copies are held to one spelling and to their
+# number by test_the_ack_decides_authorization_in_the_statement_that_writes, so
+# a copy that drifts is a red test rather than a second rule (#432).
+#
+# NEITHER OF THOSE GOVERNS THE DELIVERY FACTS. The delivery arm is exactly the
+# call shape that stamps posted_at — anything that is neither a bind nor a pure
+# hand-back — and for that shape posted_at, plus a message id on a row that has
+# none, are recorded whether or not the caller holds the claim. It is the one
+# term in the WHERE that reads no column at all: it is a property of the call,
+# so there is nothing about it that could be stale. Those two columns say a
+# message is in the channel, and the one thing a dropped delivery fact produces
+# is a second copy of that message: the bot's sent-memory is in-process, so a
+# lease that expires inside a Discord call leaves a sent row reading "never
+# posted", and the next restart sends it again (#105 — a poller's in-memory
+# dedup is not a delivery record, and a restart is exactly when it is lost).
+# What an unauthorized caller may NOT do is claim a revision, move the
+# fingerprint, replace an id the row already has, or release somebody else's
+# claim. A bind and a pure hand-back carry no delivery fact, so from a
+# non-claimant they write nothing at all.
+#
+# THE OUTER SELECT REPORTS AUTHORIZATION — not "did anything get written",
+# which is no longer the same question, and not "does the row look finished",
+# which is the question round three answered. A losing caller was told success
+# because another poller had already advanced the row to the state it wanted;
+# the database then suppressed every repair, because the row looked finished to
+# everyone.
+#
+# A RELEASE THAT NAMES NO REVISION IS A PURE HAND-BACK: it clears the claim and
+# writes nothing else, not even posted_at. That is what the bot sends when it
+# DECIDES not to render a row this tick (nothing to adopt, message deleted), and
+# a hand-back must never be able to mark an undelivered row delivered.
+#
+# THE CLAIM IS RELEASED ONLY WHEN THE ROW IS DONE WITH, AND ONLY BY SOMEBODY
+# ENTITLED TO IT. `:rev = revision` means the row is fully current
+# (posted_revision is bounded by revision at every writer, so naming the
+# current revision implies the write was accepted), the explicit `:release` is
+# the render cap saying "record what I rendered and let go", and a legacy
+# caller lets go by construction because it can render nothing further. Those
+# three, plus lease expiry, are ALL the routes out of a claim, and each of the
+# three is conditioned on the live claim columns — so an ack whose lease lapsed
+# while it was inside Discord records the delivery it reports and leaves the
+# claim exactly where it found it, including when a second poller now holds it.
+# A STALE answer releases nothing: the same holder renders forward under the
+# same token. bind_only releases nothing either — that row is mid-render.
+#
+# adopt_fingerprint IS THE TEXT THE ROW'S MESSAGE CARRIES, and this statement
+# keeps it that way. It used to be written once — by 338's backfill, or by a
+# revisionless ack — and then left alone, which made it a claim about Discord
+# that went stale the moment its holder edited the message. Two consumers read
+# it and both want the live text: the adoption scan, which compares it byte for
+# byte against the messages in the channel, and the hand-out's ambiguity test,
+# which asks whether any OTHER row in the channel would match the same text. A
+# stale value is wrong for both, and for the second one it is wrong
+# permanently: a twin already corrected and edited went on blocking its sibling
+# on the strength of text its message no longer carried. So an ack that holds
+# the claim and names the row's CURRENT revision refreshes it to the content it
+# just rendered. Only that ack — a stale ack rendered a text nobody stored, a
+# bind renders nothing at all, and a moderation-case row keeps the NULL 338
+# gave it, because the bot strips that row's marker before sending and the
+# stored string is therefore not what is on Discord.
+#
+# THE ONE WINDOW IN WHICH IT LAGS, stated rather than assumed away: between a
+# stale ack and the ack that finishes the row, the message shows a revision
+# whose text nothing stored. That row was bound to its message before it was
+# ever edited, so no scan is keyed on its text any more, and the lag closes at
+# the next ack that makes the row current.
+_CHANNEL_POST_ACK_SQL = (
+    "WITH locked AS ("
+    "  SELECT p.id, p.revision, p.posted_revision, p.content,"
+    "         p.claimed_token, p.claimed_at, p.handed_revisionless"
+    "    FROM pending_channel_posts p"
+    "   WHERE p.id = :pid"
+    "     FOR NO KEY UPDATE"
+    "), written AS ("
+    "  UPDATE pending_channel_posts p SET"
+    "     posted_at = CASE"
+    "         WHEN CAST(:bind AS BOOLEAN)"
+    "              OR (CAST(:release AS BOOLEAN) AND CAST(:rev AS INTEGER) IS NULL)"
+    "         THEN p.posted_at ELSE COALESCE(p.posted_at, NOW()) END,"
+    "     message_id = CASE"
+    "         WHEN (CAST(:token AS uuid) IS NOT NULL"
+    "               AND p.claimed_token = CAST(:token AS uuid)"
+    "               AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "           OR (CAST(:token AS uuid) IS NULL"
+    "               AND CAST(:rev AS INTEGER) IS NULL"
+    "               AND NOT CAST(:bind AS BOOLEAN)"
+    "               AND NOT CAST(:release AS BOOLEAN)"
+    "               AND p.handed_revisionless)"
+    "         THEN COALESCE(CAST(:mid AS TEXT), p.message_id)"
+    "         ELSE COALESCE(p.message_id, CAST(:mid AS TEXT)) END,"
+    "     posted_revision = CASE"
+    "         WHEN CAST(:bind AS BOOLEAN) THEN p.posted_revision"
+    "         WHEN (CAST(:token AS uuid) IS NULL"
+    "               AND CAST(:rev AS INTEGER) IS NULL"
+    "               AND NOT CAST(:bind AS BOOLEAN)"
+    "               AND NOT CAST(:release AS BOOLEAN)"
+    "               AND p.handed_revisionless) THEN"
+    "              CASE WHEN p.handed_revision IS NOT NULL"
+    "                    AND p.handed_revision <= p.revision"
+    "                    AND p.handed_revision >= COALESCE(p.posted_revision, 0)"
+    "                   THEN p.handed_revision ELSE p.posted_revision END"
+    "         WHEN (CAST(:token AS uuid) IS NOT NULL"
+    "               AND p.claimed_token = CAST(:token AS uuid)"
+    "               AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "              AND CAST(:rev AS INTEGER) IS NOT NULL"
+    "              AND CAST(:rev AS INTEGER) <= p.revision"
+    "              AND CAST(:rev AS INTEGER) >= COALESCE(p.posted_revision, 0)"
+    "         THEN CAST(:rev AS INTEGER)"
+    "         ELSE p.posted_revision END,"
+    "     adopt_fingerprint = CASE"
+    "         WHEN (CAST(:token AS uuid) IS NULL"
+    "               AND CAST(:rev AS INTEGER) IS NULL"
+    "               AND NOT CAST(:bind AS BOOLEAN)"
+    "               AND NOT CAST(:release AS BOOLEAN)"
+    "               AND p.handed_revisionless)"
+    "              AND p.adopt_fingerprint IS NULL"
+    "         THEN p.handed_fingerprint"
+    "         WHEN (CAST(:token AS uuid) IS NOT NULL"
+    "               AND p.claimed_token = CAST(:token AS uuid)"
+    "               AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "              AND NOT CAST(:bind AS BOOLEAN)"
+    "              AND CAST(:rev AS INTEGER) = p.revision"
+    "              AND p.content NOT LIKE '[MODCASE:%'"
+    "         THEN LEFT(p.content, 2000)"
+    "         ELSE p.adopt_fingerprint END,"
+    "     claimed_token = CASE"
+    "         WHEN NOT CAST(:bind AS BOOLEAN)"
+    "              AND ((CAST(:token AS uuid) IS NOT NULL"
+    "                    AND p.claimed_token = CAST(:token AS uuid)"
+    "                    AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "                OR (CAST(:token AS uuid) IS NULL"
+    "                    AND CAST(:rev AS INTEGER) IS NULL"
+    "                    AND NOT CAST(:bind AS BOOLEAN)"
+    "                    AND NOT CAST(:release AS BOOLEAN)"
+    "                    AND p.handed_revisionless))"
+    "              AND (CAST(:release AS BOOLEAN)"
+    "                OR (CAST(:token AS uuid) IS NULL"
+    "                    AND CAST(:rev AS INTEGER) IS NULL"
+    "                    AND NOT CAST(:bind AS BOOLEAN)"
+    "                    AND NOT CAST(:release AS BOOLEAN)"
+    "                    AND p.handed_revisionless)"
+    "                OR CAST(:rev AS INTEGER) = p.revision)"
+    "         THEN NULL ELSE p.claimed_token END,"
+    "     claimed_at = CASE"
+    "         WHEN NOT CAST(:bind AS BOOLEAN)"
+    "              AND ((CAST(:token AS uuid) IS NOT NULL"
+    "                    AND p.claimed_token = CAST(:token AS uuid)"
+    "                    AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "                OR (CAST(:token AS uuid) IS NULL"
+    "                    AND CAST(:rev AS INTEGER) IS NULL"
+    "                    AND NOT CAST(:bind AS BOOLEAN)"
+    "                    AND NOT CAST(:release AS BOOLEAN)"
+    "                    AND p.handed_revisionless))"
+    "              AND (CAST(:release AS BOOLEAN)"
+    "                OR (CAST(:token AS uuid) IS NULL"
+    "                    AND CAST(:rev AS INTEGER) IS NULL"
+    "                    AND NOT CAST(:bind AS BOOLEAN)"
+    "                    AND NOT CAST(:release AS BOOLEAN)"
+    "                    AND p.handed_revisionless)"
+    "                OR CAST(:rev AS INTEGER) = p.revision)"
+    "         THEN NULL ELSE p.claimed_at END"
+    "   FROM locked k"
+    "  WHERE p.id = k.id"
+    "    AND ((CAST(:token AS uuid) IS NOT NULL"
+    "          AND p.claimed_token = CAST(:token AS uuid)"
+    "          AND p.claimed_at > NOW() - make_interval(secs => :lease))"
+    "      OR (CAST(:token AS uuid) IS NULL"
+    "          AND CAST(:rev AS INTEGER) IS NULL"
+    "          AND NOT CAST(:bind AS BOOLEAN)"
+    "          AND NOT CAST(:release AS BOOLEAN)"
+    "          AND p.handed_revisionless)"
+    "      OR NOT (CAST(:bind AS BOOLEAN)"
+    "              OR (CAST(:release AS BOOLEAN)"
+    "                  AND CAST(:rev AS INTEGER) IS NULL)))"
+    "  RETURNING p.id, p.revision, p.posted_revision, p.content"
+    ") SELECT k.id AS id,"
+    "         CASE WHEN w.id IS NULL THEN k.revision"
+    "              ELSE w.revision END AS revision,"
+    "         CASE WHEN w.id IS NULL THEN k.posted_revision"
+    "              ELSE w.posted_revision END AS posted_revision,"
+    "         CASE WHEN w.id IS NULL THEN k.content"
+    "              ELSE w.content END AS content,"
+    "         (((CAST(:token AS uuid) IS NOT NULL"
+    "            AND k.claimed_token = CAST(:token AS uuid)"
+    "            AND k.claimed_at > NOW() - make_interval(secs => :lease))"
+    "        OR (CAST(:token AS uuid) IS NULL"
+    "            AND CAST(:rev AS INTEGER) IS NULL"
+    "            AND NOT CAST(:bind AS BOOLEAN)"
+    "            AND NOT CAST(:release AS BOOLEAN)"
+    "            AND k.handed_revisionless)) IS TRUE) AS authorized"
+    "    FROM locked k LEFT JOIN written w ON w.id = k.id"
+)
+
+
+def _channel_post_ack_reply(post_id, named_revision, row):
+    """What the ack tells the caller: refused, finished, or still behind.
+
+    NOT_CLAIMANT comes first and is never reported as success. It says the
+    statement REFUSED THIS CALLER'S RENDER: it does not hold the row's claim,
+    or the claim expired under it, so no revision was recorded, no fingerprint
+    moved, no message id the row already carried was replaced, and no claim was
+    released.
+
+    IT DOES NOT MEAN NOTHING WAS WRITTEN. Saying that here would be a false
+    claim about the statement above (#302/#351). A refused ack that REPORTS A
+    DELIVERY — any shape that is neither a bind nor a pure hand-back — still
+    persists posted_at on a row that has none, and still persists the id it
+    supplied on a row that has none. Those two columns say a message is in the
+    channel; dropping them costs a second copy of that message after the next
+    restart (#105). Every other column is left exactly as it was found. So the
+    caller is told "not yours to record", and the one fact only it could know
+    is kept anyway.
+
+    Reading the row's columns to decide the answer — which is what round three
+    did — asks the wrong question: another poller may have advanced the row to
+    exactly the state this caller wanted, and "it looks finished" is not "you
+    finished it". `authorized` is decided inside the statement that does the
+    write, against the row while it is locked, so it answers about THIS caller
+    rather than about the row.
+
+    STALE means the row is still behind its own revision AFTER this write,
+    whether or not the caller's own number was the one declined: either the
+    text moved on while it was rendering, or it rendered an intermediate
+    revision. The caller holds the claim and is handed the current revision AND
+    content, so it edits forward in the same tick rather than leaving the
+    channel behind until the next one. The claim is deliberately NOT released
+    on this answer.
+
+    A caller that named NO revision is never told stale: it has no way to act
+    on the answer (it cannot edit, which is why it could not name one), and its
+    delivery was recorded either way. Telling it otherwise would make every
+    pre-338 ack look like a failure in its own logs.
+
+    WHAT `revision` REPORTS DEPENDS ON `status`, and the three are different
+    questions, so read the status first:
+
+      not_claimant  posted_revision — how far the row is actually rendered,
+                    which is NULL when nothing has rendered it. It is NOT this
+                    caller's work and NOT the row's current revision; this
+                    caller recorded no revision, and this is only the state it
+                    found (its delivery half, if it reported one, was kept).
+      stale         revision — where the row is NOW, which is what the caller
+                    must edit forward to. `content` comes with it.
+      acked         posted_revision — what this caller's write recorded, i.e.
+                    the revision it rendered.
+
+    A consumer that reads `revision` without branching on `status` will read a
+    refusal as progress; the field is stated here rather than left to be
+    inferred because the bot branches on status alone and would not catch it.
+
+    A named predicate rather than an inline condition, because a rule inlined
+    at its only call site can only be re-implemented by a test, never
+    exercised by one (#391)."""
+    if not row["authorized"]:
+        return {"status": "not_claimant", "id": post_id,
+                "revision": row["posted_revision"]}
+    if named_revision is not None and row["posted_revision"] != row["revision"]:
+        return {"status": "stale", "id": post_id,
+                "revision": row["revision"], "content": row["content"]}
+    return {"status": "acked", "id": post_id, "revision": row["posted_revision"]}
+
+
 @app.get("/api/v1/internal/channel-posts/pending", tags=["Internal"])
 async def pending_channel_posts(
+    revisions: bool = Query(False),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
+    """Channel-bus rows the bot still has to render.
+
+    Migration 338 gave this table the revision-acked shape
+    stream_channel_posts already had, so a correction now edits the posted
+    message instead of appending a new one under the wrong text — which is
+    what 134's Part C had to do.
+
+    `revisions` is the bot DECLARING that it can edit in place. A pre-338 bot
+    omits it and still gets the fire-once set (posted_at IS NULL), so it never
+    meets a correction row at all.
+
+    THIS ENDPOINT RECORDS NO DELIVERY FACT. It DOES write: it claims each row
+    it hands out (claimed_at, claimed_token) and records what it served
+    (handed_revision, handed_fingerprint). None of those says anything is on
+    Discord. It never writes posted_at, posted_revision or adopt_fingerprint.
+    An earlier build did: every row carrying posted_at without a rendered
+    revision was set to revision 1 here. That is a statement about what is on
+    Discord, made by the side of the wire that cannot see Discord — and when
+    the row had been corrected to revision 2 since the old bot delivered it,
+    the write recorded a revision while capturing no fingerprint, which left
+    the correction findable by neither of the two handles. Only the bot can
+    prove which text is up, so only the bot's ack may record a revision
+    (round-3 findings at this endpoint and at ack_channel_post).
+
+    WHAT IT HANDED IS RECORDED HERE, and that is what makes a pre-338 bot's
+    ack honest. That bot cannot name a revision; it can only have rendered the
+    text this endpoint just gave it. handed_revision / handed_fingerprint are
+    that text, taken at the moment it went on the wire, so a correction
+    committed between this hand-out and that ack leaves posted_revision behind
+    revision with an EXACT fingerprint for the message that is up — which the
+    upgraded bot adopts, binds and edits forward. Nothing needs a hand-supplied
+    message id for that state.
+
+    `ambiguous` IS COMPUTED HERE, NOT IN THE BOT. A row is ambiguous when any
+    other row in the SAME channel would scan for the same text, in any state
+    and whether or not it appears in this response. The bot sees one response,
+    so computing it there made the answer depend on where the LIMIT fell and on
+    what a concurrent poller happened to take, and made two independent
+    channels carrying the same text block each other forever. The bot binds
+    only rows this endpoint calls unambiguous.
+
+    WHAT posted_revision DOES NOT MEAN. "posted_revision IS DISTINCT FROM
+    revision" alone is NOT a delivery test, and a row can carry posted_at with
+    posted_revision still NULL: the pre-338 ack wrote only posted_at, and this
+    build's ack deliberately leaves posted_revision NULL for a caller that
+    cannot name the revision it rendered AND whose row has moved on. posted_at
+    is the delivery fact, and it is returned so the bot keys on it (see
+    poll_channel_posts) rather than on a revision number a mixed fleet can
+    legitimately leave NULL.
+
+    adopt_fingerprint IS DERIVED HERE WHEN THE COLUMN IS EMPTY. message_id is
+    NULL for every row delivered before 338 — those ids were never captured —
+    and adopt_fingerprint is the exact text that was sent (content[:2000],
+    because the bot sends content[:2000]), which is how the bot identifies the
+    live message once and records its id from then on. 338's backfill stored
+    it for the rows that predate the column; a row an OLD bot delivered
+    against the OLD api afterwards has neither. For that row the projection
+    supplies LEFT(content, 2000) — but ONLY while revision = 1, because any
+    rewrite bumps revision, so revision = 1 on a delivered row is a PROOF that
+    the stored content is still the text that was sent. A row that was
+    rewritten in the meantime is offered no fingerprint, because nobody can
+    reconstruct the superseded text; it stays pending and the bot leaves the
+    old message alone rather than posting a second one (#276). Nothing is
+    written either way, so the proof is re-derived on every poll rather than
+    frozen into a column by the one caller that could not check it.
+
+    ONE STATEMENT HANDS OUT AND CLAIMS. The batch is claimed as it is read, in
+    a single CTE: the previous SELECT had no claim, so two pollers could both
+    receive one posted_at-NULL row and both send it, with the ack — which
+    happens after the send — as the only thing between them and two copies.
+    One token is minted per poll and returned on every row as `claim_token`;
+    every ack that records a revision, moves the fingerprint or releases the
+    claim must present it back, and an ack that cannot is refused by name
+    rather than answered "acked" — though it still records a delivery it
+    reports, because a dropped delivery fact is a second message. The claim is
+    released when the row is fully current, when the caller asks for release at
+    its render cap, when the revisionless poller this row was handed to acks,
+    or by LEASE EXPIRY — the only route a crashed poller can take and the
+    reason the lease exists at all. A stale answer releases nothing: the holder
+    is still rendering. Those four are the whole list, and the pick keeps it
+    that way by asking only whether the LEASE is live: a released claim is a
+    NULL claimed_at, and no writer leaves a fresh claimed_at behind without the
+    token that goes with it.
+
+    A ROW THAT HOLDS AN ID DOES NOT SCAN, AND ITS MESSAGE IS OFF THE TABLE FOR
+    THE ROWS THAT DO. `ambiguous` asks whether another UNBOUND row in the
+    channel would scan for this row's recorded text, and `bound_message_ids`
+    carries the ids every other row in the channel already owns so the scan can
+    skip them. The two are answered together, from one snapshot, because either
+    on its own is wrong: the flag alone blocked a correction behind a twin that
+    had long since been bound and edited, and the exclusion alone would let the
+    sibling adopt that twin's message. A binding is never undone here, so the
+    list a caller is given can only have grown by the time it scans.
+
+    WHICH KIND OF CALLER WAS SERVED IS RECORDED TOO. `revisions=true` is the
+    bot declaring it can name the revision it rendered and will present its
+    token; a poll without it can do neither, and handed_revisionless says so on
+    every row that poll takes. The ack reads it to tell a pre-338 bot answering
+    its own hand-out apart from a tokenless call arriving after a
+    revision-capable poller has taken the row."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
-    rows = (await db.execute(text(
-        "SELECT id, channel_id, content FROM pending_channel_posts "
-        "WHERE posted_at IS NULL ORDER BY sort_order, id LIMIT 20"
-    ))).mappings().all()
-    return {"posts": [{"id": r["id"], "channel_id": r["channel_id"], "content": r["content"]} for r in rows]}
+    where = (_CHANNEL_POST_WHERE_UNRENDERED if revisions
+             else _CHANNEL_POST_WHERE_UNPOSTED)
+    # One token per POLL, not per row: it identifies the caller, and every row
+    # this call takes is taken by the same caller. `revisionless` is the same
+    # declaration read the other way round — a caller that did not ask for
+    # revisions cannot name one back, and the ack refuses to treat a tokenless
+    # answer as that caller's unless the row says this is who it was handed to.
+    rows = (await db.execute(
+        text(_CHANNEL_POST_PENDING_SQL.format(where=where)),
+        {"lease": CHANNEL_POST_CLAIM_SECONDS,
+         "revisionless": not revisions,
+         "token": str(uuid.uuid4())})).mappings().all()
+    await db.commit()
+    return {"posts": [{k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                       for k, v in r.items()} for r in rows]}
 
 
 @app.post("/api/v1/internal/channel-posts/ack", tags=["Internal"])
 async def ack_channel_post(
     post_id: int = Query(...),
+    revision: int | None = Query(None, ge=1),
+    message_id: str | None = Query(None, max_length=32),
+    bind_only: bool = Query(False),
+    release: bool = Query(False),
+    claim_token: str | None = Query(None, max_length=36),
     x_internal_key: str | None = Header(None, alias="X-Internal-Key"),
     db: AsyncSession = Depends(get_db),
 ):
+    """Record the revision the bot ACTUALLY RENDERED, and nothing else (#175).
+
+    THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING. Anything that records a
+    revision, moves the fingerprint, replaces a stored message id or releases
+    the claim must present the claim_token the hand-out gave it, and the claim
+    must not have expired. An ack that cannot is answered "not_claimant" and
+    none of those things happen. Round three released the claim on the FIRST
+    ack of any kind — including the "stale" one that exists to say "keep
+    going" — so a second poller could take a row the first was still rendering,
+    and the loser's late ack was then reported as success because the ROW had
+    reached the state it asked for. That reading is gone: the answer reports
+    whether THIS caller held the claim, never what the row looks like now.
+
+    AUTHORIZATION IS DECIDED INSIDE THE STATEMENT THAT WRITES, AND NOWHERE
+    ELSE. The row is taken FOR NO KEY UPDATE first, then every authorization
+    term — the token equality, the lease as the database sees it, the pre-338
+    pairing — is a condition of the UPDATE itself and of each arm of its SET,
+    read from the row being written. No boolean is derived beforehand and
+    carried in. An earlier build did derive them, in a CTE above the UPDATE,
+    and a value read at the statement's snapshot is not re-checked when the
+    write meets a row somebody else has changed: a caller whose claim had just
+    lapsed was admitted by a frozen "yes" and could clear the claim a second
+    poller had taken. Everything the caller is told comes back from that one
+    statement.
+
+    A REFUSAL IS NOT A REASON TO FORGET A MESSAGE. The delivery facts —
+    posted_at, and a message id for a row that has none — are recorded for
+    whoever reports them, claim or no claim. A tick whose lease expires inside
+    a Discord call has already put the message in the channel; refusing its ack
+    outright leaves the row reading "never posted", and since the bot's
+    sent-memory is in-process, the next restart sends a second copy (#105 — an
+    in-memory dedup is not a delivery record, and a restart is exactly when it
+    is lost). So such a caller is told "not_claimant", which is true and which
+    stops it editing, while the fact that a message exists is kept. It cannot
+    replace an id the row already carries: an unauthorized caller may fill that
+    column, never overwrite it. The two shapes that report NO delivery — a bind
+    and a pure hand-back — write nothing at all from a non-claimant, so a tick
+    that has rendered nothing cannot leave a mark on a row it does not hold.
+
+    COMPARE-AND-SET, NOT COALESCE. An older statement wrote
+    `posted_revision = COALESCE(:rev, revision)`, so an ack that named no
+    revision recorded whatever the row happened to say at ack time. A
+    correction landing between a pre-338 bot's send and its ack was therefore
+    consumed by that ack: the row read "revision 2 rendered" while Discord
+    still showed revision 1, and the correction was never delivered by anyone.
+    Now the ack's own number is the only one that can be written, it may not
+    exceed the row's revision (nobody renders a future text), and it may not
+    move posted_revision backwards.
+
+    WHEN THE ACK NAMES NO REVISION (a pre-338 bot, which cannot), NEITHER
+    BINDS NOR RELEASES (that bot sends a post id and nothing else) AND THE ROW
+    WAS HANDED TO A REVISIONLESS POLLER, the row is recorded at WHAT IT WAS
+    HANDED. The hand-out wrote handed_revision and handed_fingerprint when it
+    put that text on the wire, and a bot that cannot name a revision can only
+    have rendered what it was given. So a correction committed between the
+    hand-out and the ack leaves posted_revision behind revision, with
+    adopt_fingerprint holding the exact text that is on Discord — and the
+    upgraded bot locates that message, binds its id and edits forward. This
+    replaces a derivation that only worked while revision was still 1, and with
+    it the state where a corrected row held neither handle. A moderation-case
+    row gets no fingerprint either way (338's exclusion: its stored content
+    opens with a marker the bot strips before sending).
+
+    BOTH HALVES ARE REQUIRED, and handed_revisionless is the second. The
+    handed_* pair describes the LAST hand-out, so on a row taken since by a
+    revision-capable poller it describes that poller's render, not this
+    caller's. A tokenless ack authorized by its shape alone would stamp that
+    record and clear that poller's live claim — a row nobody had delivered
+    could be marked delivered at a revision nobody rendered, and it would then
+    be in neither poll set. The flag is what the hand-out wrote about the
+    caller it served, so the two must agree before the pair is read back.
+
+    posted_at keeps its ORIGINAL stamp — it records when the message first
+    appeared, not when it was last edited — and it is stamped on EVERY
+    delivery ack including a stale one, because a delivery that is not
+    recorded is a delivery that gets made twice.
+
+    STALE ANSWER, AND THE CLAIM IT KEEPS. When the row is still behind its own
+    revision after the write, the response says so and carries the current
+    revision and content — and the caller KEEPS the claim, so it edits forward
+    and acks again inside the same tick while no other poller can be handed the
+    row. An ack that named no revision is never reported stale: that caller has
+    no way to act on it, and its delivery is recorded either way.
+
+    RELEASE, and the whole list of routes. The claim is dropped when the ack
+    names the row's current revision (it is done), when the caller passes
+    release=true — the render cap, which says "record what I rendered and let
+    go; the next poll continues" — and when the revisionless poller this row
+    was handed to acks, which is a release because that caller can render
+    nothing further. Each of the three is refused to a caller that is neither
+    the holder nor that poller. Everything else is lease expiry: a crashed
+    holder releases nothing, and neither does a stale answer, a bind, or an ack
+    whose lease ran out while it was inside Discord. Nothing is sent twice by a
+    hand-off, because by then the row carries posted_at and its message id and
+    the send path only runs for a row with no posted_at.
+
+    THE FINGERPRINT IS REFRESHED BY THE ACK THAT FINISHES THE ROW. An ack that
+    holds the claim and names the row's current revision has just put that
+    text on Discord, so adopt_fingerprint becomes LEFT(content, 2000) — the
+    column goes on describing what the message carries instead of what it
+    carried the first time anyone wrote the column. Two readers depend on that
+    being true: the bot's adoption scan, and the hand-out's ambiguity test,
+    which asks whether another row in the channel would scan for the same
+    text. Left stale, an already-corrected twin blocked its sibling's
+    correction on every tick, for ever, over text its own message no longer
+    carried. A stale ack refreshes nothing (it rendered a revision whose text
+    is not the one stored), a bind refreshes nothing (it has rendered nothing
+    yet), and a moderation-case row keeps its NULL. So the column lags for one
+    window — between a stale ack and the ack that finishes the row — on a row
+    that by then carries its message id and is therefore never found by text
+    again.
+
+    bind_only=true writes the message id and NOTHING else, and keeps the claim.
+    It exists because editing a message destroys the only other way to find it
+    again: the fingerprint describes the text that is on Discord, and the edit
+    replaces that text. So the bot persists the id it just adopted, gets a
+    committed answer, and only then edits — a restart anywhere in that sequence
+    finds the row still pending, with either a fingerprint that still matches
+    or an id that does. Advancing posted_revision here would mark the
+    correction delivered before it had been rendered, so this arm touches
+    neither it nor posted_at."""
     expected = os.getenv("API_SECRET_KEY", "")
     if not expected or x_internal_key != expected:
         raise HTTPException(status_code=403, detail="Invalid internal key")
-    await db.execute(text(
-        "UPDATE pending_channel_posts SET posted_at = NOW() WHERE id = :pid"
-    ), {"pid": post_id})
+    token = None
+    if claim_token:
+        # A token that is not a token cannot be confused with "named no
+        # token", which is the pre-338 shape and is authorized by its shape.
+        try:
+            token = str(UUID(claim_token))
+        except ValueError:
+            raise HTTPException(status_code=400,
+                                detail="claim_token is not a token this api issued")
+    row = (await db.execute(text(_CHANNEL_POST_ACK_SQL), {
+        "pid": post_id, "rev": revision, "mid": message_id,
+        "token": token, "bind": bool(bind_only), "release": bool(release),
+        "lease": CHANNEL_POST_CLAIM_SECONDS,
+    })).mappings().first()
     await db.commit()
-    return {"status": "acked", "id": post_id}
+    if row is None:
+        raise HTTPException(status_code=404, detail="unknown channel post")
+    reply = _channel_post_ack_reply(post_id, revision, row)
+    if bind_only and reply["status"] == "acked":
+        reply["bound"] = True
+    return reply
 
 
 @app.get("/api/v1/internal/stream-posts/pending", tags=["Internal"])
@@ -43339,7 +44200,7 @@ async def get_achievement_earners(key: str, db: AsyncSession = Depends(get_db)):
 # percentages (bug #66): most rows are modless quickplay opponents auto-created
 # by match reports — 2,847 rows vs ~200 real mod users — and those players get
 # exactly one incidental session, so including them made every percentage read
-# as 0.x% and "not representative at all" (Stan). Numerator joins on the same
+# as 0.x% — "not representative at all". Numerator joins on the same
 # filter so pct <= 100 by construction. Cached 5 min; single process, so a
 # plain module dict is safe.
 _ach_pct_cache: dict = {"at": 0.0, "pcts": {}}
@@ -43502,7 +44363,7 @@ BUG_REPORT_LOG_DIR = os.environ.get("BUG_REPORT_LOG_DIR", "/opt/competitive-roun
 # SCRUBBED -- real-world identity, no diagnostic value:
 #   * OS usernames inside filesystem paths. The client interpolates the
 #     ABSOLUTE log path into every bundle header, so each report carries
-#     C:\Users\<person>\... in a machine-parseable position. That is a third
+#     <drive>:\Users\<person>\... in a machine-parseable position. That is a third
 #     party's real name, in a project that has twice force-pushed git history
 #     to scrub exactly that class of leak from the maintainer's OWN name.
 #     Enforcing the rule in one direction only was a bug, not a policy.
@@ -49869,7 +50730,9 @@ OVT_REPORT_ROOM_LOCK_CLASS = 391120
 # NOT _podium_map (1v1-only) and deliberately does NOT grant title_podium: that
 # shop item is defined as the 1v1 podium, and cross-granting would silently
 # widen an existing cosmetic's meaning.
-_ovt_podium_cache: dict = {"at": 0.0, "ok": False, "ids": []}
+# `refresh_failed`: same role as the 1v1 podium cache's field — see there.
+_ovt_podium_cache: dict = {"at": 0.0, "ok": False, "ids": [],
+                           "refresh_failed": False}
 
 # Item d: activity filter as on /ovt/leaderboard (f-string over the int).
 _OVT_PODIUM_QUERY = """
@@ -49898,9 +50761,15 @@ _OVT_PODIUM_QUERY = """
 
 
 async def _ovt_podium_ids(db: AsyncSession) -> list:
-    """[1st, 2nd, 3rd] player ids as strings. 60s TTL. A refresh failure serves
-    the last GOOD copy; if there has never been one it RAISES, because an empty
-    list is indistinguishable from a real "nobody qualifies" answer."""
+    """[1st, 2nd, 3rd] player ids as strings. 60s TTL. COSMETIC POLARITY: a
+    refresh failure serves the last GOOD copy; if there has never been one it
+    RAISES, because an empty list is indistinguishable from a real "nobody
+    qualifies" answer.
+
+    `_ovt_podium_ids_for_award` is the decision-polarity twin (#412). The
+    report sink's XP and gold read THAT one, because a kept copy answers
+    "this player was top-3 a while ago", and the reward is paid for being
+    top-3 now."""
     now = time.monotonic()
     if not _ovt_podium_cache["ok"] or now - _ovt_podium_cache["at"] > 60:
         try:
@@ -49917,11 +50786,65 @@ async def _ovt_podium_ids(db: AsyncSession) -> list:
             # was never fetched, and records the failure as a fresh result.
             _ovt_podium_cache["ok"] = True
             _ovt_podium_cache["at"] = now
+            # The read completed, so the ids below are current. Set here and
+            # nowhere else: this field answers one question only — did the
+            # most recent refresh attempt finish?
+            _ovt_podium_cache["refresh_failed"] = False
         except Exception as ex:
             print(f"[OVT-PODIUM] cache refresh failed: {ex}")
+            _ovt_podium_cache["refresh_failed"] = True
             if not _ovt_podium_cache["ok"]:
                 raise
     return _ovt_podium_cache["ids"]
+
+
+async def _ovt_podium_ids_for_award(db: AsyncSession) -> list:
+    """[1st, 2nd, 3rd] ids, but only from a podium read that COMPLETED.
+
+    DECISION polarity, opposite to `_ovt_podium_ids` (#412). The 1v2 report
+    sink multiplies XP — and the gold derived from it — on membership of this
+    list, so a copy kept past its 60s bound pays a podium bonus for standings
+    that have since changed, with nothing downstream to correct it. When the
+    refresh did not complete, refuse with a retryable 503.
+
+    Refusal cost (#430): the sink has committed nothing when this is asked,
+    and the client's outbox redelivers a 5xx, weighed against a mispayment
+    that stands."""
+    await _ovt_podium_ids(db)
+    if _ovt_podium_cache["refresh_failed"]:
+        print("[OVT-PODIUM] refusing an award decision on a podium copy whose "
+              "refresh did not complete")
+        raise HTTPException(status_code=503, detail="podium_unavailable")
+    return _ovt_podium_cache["ids"]
+
+
+async def _ovt_tier_ratings(db: AsyncSession, solo_id, duo_a_id, duo_b_id) -> dict:
+    """{str(player_id): rating} from glicko_ratings for the three 1v2 seats.
+
+    A player with no rating row is simply absent from the map, and the caller
+    substitutes 1500 for them — that read SUCCEEDED and correctly found
+    nothing. A read that FAILED is a different answer and this raises it,
+    because the substitute is not economically neutral: `_tier_mult_for` maps
+    1500 to Intermediate x1.5 on the `>=` row, so swallowing here would pay a
+    measured-looking multiplier on XP and on the gold derived from it for a
+    tier nobody measured. Same rule and same shape as the 2v2 fetch.
+
+    begin_nested (#235) keeps the failure legible rather than survivable:
+    under asyncpg a caught statement error leaves the TRANSACTION aborted, so
+    without the savepoint the caller's own error handling would run against a
+    dead transaction and surface some later statement instead of this one."""
+    out: dict = {}
+    try:
+        async with db.begin_nested():
+            for _row in (await db.execute(text(
+                "SELECT player_id, rating FROM glicko_ratings "
+                " WHERE player_id IN (:a, :b, :c)"
+            ), {"a": solo_id, "b": duo_a_id, "c": duo_b_id})).mappings().all():
+                out[str(_row["player_id"])] = float(_row["rating"])
+    except Exception as ex:
+        print(f"[OVT-ECON] 1v1 tier-mult rating READ FAILED: {ex}")
+        raise
+    return out
 
 
 def _verify_ovt_hmac(report: OvtMatchReport) -> bool:
@@ -50860,39 +51783,35 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         raise HTTPException(400, "Report room does not match the series room")
 
     # ── Difficulty inputs (bug #129) ──────────────────────────────────────
-    # Opponents' 1v1 Glicko drives the tier multiplier; guarded exactly like
-    # 2v2's fetch so a ratings hiccup degrades to the 1500 DEFAULT RATING
-    # instead of failing the report.
+    # Opponents' 1v1 Glicko drives the tier multiplier. A MISSING rating row
+    # degrades to the 1500 DEFAULT RATING; a FAILED read does not degrade at
+    # all, it fails the report — see `_ovt_tier_ratings`.
     #
-    # That default is Intermediate **x1.5**, NOT x1.0: the multiplier table's
-    # 1500 row is `>=` and the substituted value is exactly 1500 (see
-    # `_tier_mult_for`). A hiccup here is therefore NOT economically neutral —
-    # it pays the Intermediate multiplier on XP and gold.
+    # Why the two are not interchangeable: 1500 is Intermediate **x1.5**, NOT
+    # x1.0, because the multiplier table's 1500 row is `>=` and the
+    # substituted value is exactly 1500 (see `_tier_mult_for`). Substituting
+    # it for a read that never completed pays a multiplier on XP and gold for
+    # a tier nobody measured.
     #
-    # This line used to read "x1.0-at-1500", which is the exact sentence
-    # `_tier_mult_for`'s own docstring records as having hidden the
-    # 1v2-vs-2v2 economy gap for a release (bug #129) — written again, in the
-    # feature that bug was about. Do not restate the multiplier here; name the
-    # RATING and let the one table own the mapping.
-    # begin_nested, not a bare try/except (#235, and review-confirmed): under
-    # asyncpg a caught statement error still leaves the TRANSACTION aborted, so
-    # the "degrade to 1500" promise below would be a lie — the very next
-    # statement (the ovt_matches INSERT) would raise InFailedSQLTransaction and
-    # 500 the whole report. The SAVEPOINT is what makes the fallback real.
-    _r_by_pid: dict = {}
-    try:
-        async with db.begin_nested():
-            for _row in (await db.execute(text(
-                "SELECT player_id, rating FROM glicko_ratings "
-                " WHERE player_id IN (:a, :b, :c)"
-            ), {"a": solo_id, "b": duo_a_id, "c": duo_b_id})).mappings().all():
-                _r_by_pid[str(_row["player_id"])] = float(_row["rating"])
-    except Exception as ex:
-        print(f"[OVT-ECON] 1v1 tier-mult rating fetch failed (defaulting 1500): {ex}")
+    # Two corrections have landed on this comment. It first read
+    # "x1.0-at-1500" — the exact sentence `_tier_mult_for`'s own docstring
+    # records as having hidden the 1v2-vs-2v2 economy gap for a release (bug
+    # #129), written again in the feature that bug was about. It then said
+    # this fetch was guarded "exactly like 2v2's", which was also untrue: 2v2
+    # re-raised and this one caught. The code is what changed this time. Do
+    # not restate the multiplier here; name the RATING and let the one table
+    # own the mapping.
+    # A FAILED read re-raises, exactly as the 2v2 twin does. The two used to
+    # be described as matching and did not: 2v2 re-raises before its only
+    # commit, while this one caught, substituted 1500 for all three players
+    # and committed Intermediate-rate XP and gold. Nothing has committed in
+    # this handler at this point, so the raise rolls the report back and the
+    # client's outbox redelivers it.
+    _r_by_pid = await _ovt_tier_ratings(db, solo_id, duo_a_id, duo_b_id)
     _solo_r = _r_by_pid.get(str(solo_id), 1500.0)
     _duo_avg_r = (_r_by_pid.get(str(duo_a_id), 1500.0)
                   + _r_by_pid.get(str(duo_b_id), 1500.0)) / 2.0
-    _ovt_pod = set(await _ovt_podium_ids(db))
+    _ovt_pod = set(await _ovt_podium_ids_for_award(db))
     # Verify the three reported players are exactly the series' three (a client
     # can't swap in a different opponent). Keep the client's solo/duo LABELING
     # though — it's derived from the actual in-game team sizes (team-of-1 = solo),
@@ -52216,7 +53135,7 @@ def _ffa_pool_shape(place: int, beaten: int, n_live: int) -> float:
 # Rating movement per game is bounded: each player is compared against at
 # most this many placement-adjacent opponents (see submit_ffa_match).
 FFA_MAX_RATED_OPPONENTS = 4
-# Bug 195 (Stan's report, Sid-approved Aug 21): UPSET INCLUSION. Adjacency
+# Bug 195 (Sid-approved Aug 21): UPSET INCLUSION. Adjacency
 # alone let a 300+-gap inverted result escape rating entirely (a 1000-rated
 # player beating a 2000-rated one four placements away — neither entered the
 # other's comparison set). A replay of all 158 ranked FFA games showed the
@@ -62651,7 +63570,7 @@ async def ffa_recent(page: int = Query(0, ge=0), page_size: int = Query(5, ge=1,
                 # absent row. `.get` so a pre-column row degrades to false.
                 "absent": bool(r.get("absent")),
                 "rating_change": float(r["rating_change"]) if r["rating_change"] is not None else None,
-                # Bug 178 (Stan): absolute before/after — stamped at match
+                # Bug 178: absolute before/after — stamped at match
                 # time in the fmp row, so history stays true after later games.
                 "rating_before": float(r["rating_before"]) if r["rating_before"] is not None else None,
                 "rating_after": float(r["rating_after"]) if r["rating_after"] is not None else None,
@@ -65807,7 +66726,7 @@ async def team_series_recent(minutes: int = Query(5, ge=1, le=60), db: AsyncSess
         ORDER BY s.completed_at DESC
     """)
     rows = (await db.execute(q, {"mins": minutes})).mappings().all()
-    # Bug 179 (Stan): per-series game codes (12-hex uuid prefixes — the exact
+    # Bug 179: per-series game codes (12-hex uuid prefixes — the exact
     # form the bot's /game command takes) so the announcement can carry them.
     _codes: dict[str, list] = {}
     if rows:
@@ -67670,21 +68589,46 @@ async def _assert_no_service_subject(
 
 
 _service_player_uuid_cache: "set[str] | None" = None
+# When the next refresh is ATTEMPTED. Deliberately moved backwards after an
+# empty fill (see below), so it is a schedule and not an age.
 _service_uuid_cache_monotonic = 0.0
+# When the cached set was actually READ. Never adjusted, so it is the only
+# field an age bound may be computed from. None means "never filled".
+_service_uuid_cache_filled_monotonic: "float | None" = None
+# The refresh is ATTEMPTED at 50 minutes; the fill HARD-EXPIRES at 60. The gap
+# between the two is what makes the "<= 1 h" staleness bound a bound rather
+# than a description: a refresh that fails may serve the previous set through
+# the remaining ten minutes, and past that the guard refuses rather than
+# answering from a set whose subject rows may since have been replaced. Two
+# numbers rather than one so that both arms are reachable — a keep-previous
+# arm that could never be taken is decoration, and so is a bound that could
+# never be exceeded.
+_SERVICE_UUID_REFRESH_SECONDS = 3000.0
+_SERVICE_UUID_MAX_AGE_SECONDS = 3600.0
 
 
 async def _service_player_uuids(db: AsyncSession) -> "set[str]":
     """Player-UUID mirror of SPECTATE_BROADCAST_STEAM_IDS, cached hourly.
 
-    Staleness bound: a service players row created after a cache fill is
-    invisible for <=1 h. Acceptable because the set is a hand-edited constant
-    (SHOP_OWNER pattern) whose rows predate the policy; extending the set is
-    a deploy, which restarts the process and empties the cache anyway.
+    Staleness bound, ENFORCED rather than described: a fill is served for at
+    most _SERVICE_UUID_MAX_AGE_SECONDS. Past that, a failing refresh refuses
+    with 503 instead of serving the old set. The bound matters because these
+    UUIDs identify the accounts a ~90-site policy guard REFUSES: if a service
+    players row is replaced, the cached UUID no longer names that account, and
+    an unbounded reuse would let every UUID-only guard pass the replacement —
+    including ones that credit gold. A refusal costs a retry; passing costs a
+    payment that stands.
+
+    A row created after a fill is likewise invisible until the bound expires,
+    which stays acceptable for the same reason as before: the set is a
+    hand-edited constant (SHOP_OWNER pattern) and extending it is a deploy,
+    which restarts the process and empties the cache anyway.
     """
     global _service_player_uuid_cache, _service_uuid_cache_monotonic
+    global _service_uuid_cache_filled_monotonic
     now_mono = time.monotonic()
     if (_service_player_uuid_cache is None
-            or now_mono - _service_uuid_cache_monotonic > 3600.0):
+            or now_mono - _service_uuid_cache_monotonic > _SERVICE_UUID_REFRESH_SECONDS):
         # SAVEPOINT the refresh. This is the one hour-marked moment when a
         # ~90-call-site policy guard executes SQL, and several of those callers
         # sit inside handlers that swallow — so an unguarded failure here left
@@ -67713,8 +68657,14 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
             # traffic this cache was added for.
             _service_uuid_cache_monotonic = (
                 now_mono if _service_player_uuid_cache
-                else now_mono - 3540.0   # empty: re-ask in ~60s, not in an hour
+                # empty: re-ask in ~60s rather than at the normal interval
+                else now_mono - (_SERVICE_UUID_REFRESH_SECONDS - 60.0)
             )
+            # The AGE stamp is the real read time in both cases. The schedule
+            # above is moved backwards to bring the next attempt forward, and
+            # an age computed from a moved stamp would report this fill as
+            # nearly an hour old the moment it was taken.
+            _service_uuid_cache_filled_monotonic = now_mono
         except Exception as ex:
             # FAILURE DIRECTION (#276). An empty set here does not mean "no
             # service accounts" — it means "we could not look". Answering with
@@ -67741,8 +68691,25 @@ async def _service_player_uuids(db: AsyncSession) -> "set[str]":
                     status_code=503,
                     detail="service_policy_unavailable",
                 )
+            # AGE BOUND. Reuse of the previous fill is what the docstring
+            # promises and it is promised for a bounded time, so the bound is
+            # tested here rather than assumed from the refresh interval. Past
+            # it, these UUIDs are no longer evidence about which players rows
+            # the service steam_ids resolve to: a row replaced in the interim
+            # keeps the guard matching an id that is not the account any more,
+            # and every UUID-only guard downstream would then pass the
+            # replacement. Refuse, retryably, rather than decide on it.
+            _filled = _service_uuid_cache_filled_monotonic
+            if (_filled is None
+                    or now_mono - _filled > _SERVICE_UUID_MAX_AGE_SECONDS):
+                print(f"[SERVICE-POLICY] uuid cache refresh failed and the "
+                      f"previous set is past its age bound: {ex}")
+                raise HTTPException(
+                    status_code=503,
+                    detail="service_policy_unavailable",
+                )
             print(f"[SERVICE-POLICY] uuid cache refresh failed, keeping the "
-                  f"previous set: {ex}")
+                  f"previous set within its age bound: {ex}")
     return _service_player_uuid_cache
 
 
@@ -71659,8 +72626,8 @@ async def _session_report_probe(db) -> int:
 # ── Sept 6 item b1: in-game mail (server half) follows the session-report block ──
 
 # Routes: in-game mail (Sept 6 batch, Group 4 item b — server half;
-# migration 297), items B-1 .. B-14 and B-L1 .. B-L3. The schema's shape
-# decisions are recorded on
+# migration 297), design v2 section b, items B-1 .. B-14 and B-L1 .. B-L3.
+# The schema's shape decisions are recorded on
 # the migration. Player routes resolve their caller from X-Session-Token
 # ALONE — the API contract carries no steam_id — and then run the SAME
 # fail-closed gate the h2h route uses on the id the token names

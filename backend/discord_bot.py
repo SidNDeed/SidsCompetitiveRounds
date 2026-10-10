@@ -197,7 +197,7 @@ TROPHY_X2_SUFFIX = " (x2)"
 # concrete match IS in hand, render m["deadline_at"] instead of this number.
 ASYNC_DEADLINE_DAYS = 7
 
-# July 28 rank reorganization (Stan's proposal): base-tier floors move to
+# July 28 rank reorganization: base-tier floors move to
 # Intermediate 1500 / Advanced 1675 / Master 1980 (GM stays 2330), sub-tiers
 # widen toward the bottom, and tier I is spelled out on every rank. Must stay
 # in lockstep with main.py's RANK_TIERS (which strips the range suffix).
@@ -1494,7 +1494,10 @@ FAQ_ENTRIES = [
                    "• Bets **lock** once game 1 reaches 2 points or any game is decided.\n"
                    "• Gross payout = stake × odds. A winning heavy-favorite bet (stored odds ≤ 1.5×) can redirect part "
                    "of its profit—not the stake—to the fighter/team you backed. If a series never finishes, "
-                   "stakes **auto-refund** (~1 hour).\n"
+                   "stakes **auto-refund** — there are two windows: after 30 minutes when no game was ever "
+                   "reported, after 60 minutes when it stalls mid-series. **Tournament series sit outside both "
+                   "clocks**: a tournament bet settles on the bracket instead, and a forfeited or bye'd match "
+                   "refunds its stakes.\n"
                    "• Want a ping when betting opens? Grab the **Gambler** role — react 🎲 on the signup message "
                    "in the bets channel."),
     },
@@ -1677,7 +1680,8 @@ FAQ_ENTRIES = [
                    "start time you can make; it locks once **8+ players agree on one time** and at that time you "
                    "just **have ROUNDS open** — the mod auto-connects every bracket match, with a short "
                    "skippable breather between your matches.\n"
-                   "• **Async** (rolling: a new one opens 2 days after the previous one ends): one round per week, 7-day deadline per match — nothing to be "
+                   "• **Async** (rolling: a new one opens 2 days after the previous one finishes, and if that one was "
+                   "cancelled (or never recorded a finish) only **24 hours** after it was created): one round per week, 7-day deadline per match — nothing to be "
                    "online for. You agree a time with your opponent on Discord (`/dm-opponent`), then play a "
                    "normal private lobby together and it records automatically; no room code from the bracket, "
                    "no Ready Up.\n"
@@ -1704,7 +1708,7 @@ FAQ_ENTRIES = [
                    "team's tier) on top of match XP.\n"
                    "• **Play up in ranked** — gold and XP scale by your opponent's tier (up to ×3 vs a "
                    "Grand Master), win or lose; series wins pay 10-30g and even series losses pay 5-15g.\n"
-                   "• **Earn achievements** — 100g each, the Sid/Stan Slayer trophies pay 1000g.\n"
+                   "• **Earn achievements** — 100g by default; the harder ones pay 300g, 500g or 1000g.\n"
                    "• **Win tournaments** — trophy payouts.\n"
                    "• **Make and sell cosmetics** — artists earn a 30% royalty on every sale "
                    "(ask me *how do I become an artist*).\n"
@@ -1746,14 +1750,36 @@ FAQ_ENTRIES = [
             r"my \b(art|drawing|design)\b.{0,25}\b(game|mod|shop)\b",
         ],
         "examples": ["how do i make cosmetics", "how do i become an artist"],
+        # Every NUMBER here is pinned by backend/tests/fixtures/faq_claims.json
+        # to the constant that enforces it, so a knob that moves without this
+        # text fails a test rather than quietly making the answer wrong —
+        # 512 included: the claim reads ValidateCosmeticPngBytes' own
+        # `w != 512 || h != 512` refusal, so changing that check to any other
+        # square reds test_every_claim_has_an_anchor. (Round two anchored the
+        # sizes and left 512 unanchored while this comment said otherwise.)
+        # The 512x512 / transparency / size
+        # checks are NativeUI.ValidateCosmeticPngBytes (1,200,000 bytes per PNG)
+        # and ValidateAndNameGifCosmetic (2,200,000 bytes for a GIF); the
+        # server's own upload ceiling is COSMETIC_MAX_B64 = 1,600,000 base64
+        # characters, so for a PNG the in-game number is the one a submission
+        # meets first. The GIF branch and the __fN frame walk are
+        # ValidateAndNameCosmetic, and the frame cap is enforced twice —
+        # COSMETIC_MAX_FRAMES on the server and the client's own scan bound —
+        # which the fixture cross-checks rather than trusting either copy. The
+        # contact line is unchanged from its parent; routing artist
+        # applications is a community decision, not a code fact. The previous
+        # answer said animation was not supported yet and routed it to a side
+        # channel — it had been supported since Aug 7.
         "answer": ("**DM Sid** with some art you'd like to upload — that's the whole application.\n"
-                   "Format: **512×512 PNG** with real transparency, drawn for a character slot (eyes, mouth, or "
-                   "detail/accessory).\n"
-                   "The in-game uploader currently submits **one static PNG** and lets you preview its true size "
-                   "against the player body before review. It does **not** bundle animation frames yet.\n"
-                   "For an animated submission, upload frame 1 for review and send the remaining frames plus the "
-                   "intended FPS to Sid separately. Shipped files use `myitem.png`, then `myitem__f2.png`, "
-                   "`myitem__f3.png`, …\n"
+                   "Format: **512×512 PNG** with real transparency, **up to 1.2 MB** per file, drawn for a "
+                   "character slot (eyes, mouth, or detail/accessory). The upload endpoint's own ceiling is "
+                   "**1,600,000 base64 characters**, so the in-game check is the one you meet first.\n"
+                   "**Animated work goes through the in-game uploader too.** Either drop a **GIF** (**up to "
+                   "2.2 MB**), or name your frames `myitem.png`, `myitem__f2.png`, `myitem__f3.png`, … and "
+                   "pick the base file — up to **16 frames**. Every PNG frame gets the same size and "
+                   "transparency check.\n"
+                   "Either way you position the art on a live on-body preview — slot, scale and offset — at "
+                   "true size before it goes to review.\n"
                    "Approved artists get the in-game **Artist tab** (F5): upload cosmetics, set price and stock "
                    "after the art ships, gift copies, and earn a **30% royalty** on every sale."),
     },
@@ -1976,7 +2002,9 @@ FAQ_ENTRIES = [
                    "• In 2v2, leaving can immediately forfeit the series when the other team was already up a "
                    "game and the abandoned game had meaningful play. Other 2v2 DCs are marked incomplete for "
                    "an admin to award or void; they do not silently become a loss.\n"
-                   "• If a series never finishes, any bets on it auto-refund (~1 hour).\n"
+                   "• If a series never finishes, any bets on it auto-refund: 30 minutes when no game was "
+                   "ever reported, 60 minutes when it stalls mid-series. Tournament series sit outside both "
+                   "clocks — those bets settle on the bracket.\n"
                    "• Game crashed mid-match? Relaunch and rejoin your opponent — the series picks back up."),
     },
     {
@@ -2176,7 +2204,7 @@ FAQ_ENTRIES = [
     {
         # Sits immediately ABOVE how_ffa so a rating-specific FFA question gets
         # the rating answer, not the 12-line generic FFA wall ("right topic,
-        # wrong answer" — Snail's placement question). Still below
+        # wrong answer", as a player's placement question found). Still below
         # bug_report/tournaments like the rest of the broad FFA cluster.
         "key": "ffa_rating",
         "title": "FFA rating & placement",
@@ -3805,7 +3833,7 @@ async def chat_ws_listener():
 # Twitch: the VM overlay keeps its own native IRC read, so bridged twitch
 # copies are dropped there by source. YouTube: this bridge is the ONLY reader
 # anywhere — the VM overlay renders the bridged copies it receives over the
-# SCR websocket.
+# SCR websocket (the streaming design's chat addendum).
 STREAM_BRIDGE_TWITCH_CHANNEL = os.getenv("STREAM_BRIDGE_TWITCH_CHANNEL", "sidscompetitiverounds").lower().lstrip("#")
 # The prefix (`:login!login@login.tmi...`) carries the sender's LOGIN — the
 # stable lowercase handle, captured for mute identity (design S1). The tags
@@ -3977,7 +4005,7 @@ async def youtube_chat_bridge():
     (video id via poll_stream_posts). Polls the OFFICIAL YouTube Data API —
     the previous chat_downloader reader was deleted, not bypassed (#310):
     0.2.8 (its latest release, 2023) is parse-broken against current YouTube
-    page variants.
+    page variants, reproduced when the streaming chat addendum was designed.
     Missing creds degrade to a one-time log; Twitch is unaffected. Replays
     after a re-attach are harmless — the server's native-id guard drops them.
 
@@ -6913,7 +6941,7 @@ def _render_game_detail_png_locked(game):
                        None, 3.0, None, "time (M:SS)"))
     damage_taken_series = []
     blocks_series = []
-    # Bug 181 (Stan): v2 block pairs are activated:successful — the honest
+    # Bug 181: v2 block pairs are activated:successful — the honest
     # block-rate pairing. Legacy rows keep the damage-taken labels; the
     # format is per-row, so one mixed game labels by majority.
     _blk_v2_votes = 0
@@ -7763,7 +7791,7 @@ async def log_ffa_match_result(guild, m):
     for p in sorted(players, key=lambda q: q.get("placement", 99)):
         rc = p.get("rating_change")
         rc_s = "" if rc is None else (f" (+{rc:.1f})" if rc > 0 else f" ({rc:.1f})")
-        # Bug 178 (Stan): absolute before→after, like the 1v1/2v2 posts.
+        # Bug 178: absolute before→after, like the 1v1/2v2 posts.
         # Match-time stamps from the row, so later games can't rewrite them.
         rb, ra = p.get("rating_before"), p.get("rating_after")
         ba_s = f" {rb:.0f}→{ra:.0f}" if (rb is not None and ra is not None) else ""
@@ -7797,7 +7825,7 @@ async def log_ffa_match_result(guild, m):
     _settings_line = _ffa_settings_summary(m.get("settings"))
     if _settings_line:
         embed.add_field(name="Settings", value=_settings_line, inline=False)
-    # Bug 179 (Stan): carry the /game code so nobody has to open the game.
+    # Bug 179: carry the /game code so nobody has to open the game.
     _code = str(m.get("match_id") or "").replace("-", "")[:12].upper()
     _foot = f"{dur // 60}m{dur % 60:02d}s" if dur else ""
     if _code:
@@ -8184,7 +8212,7 @@ async def log_team_series_result(guild, s):
     _rules_line = _rules_summary(s.get("rules"))
     if _rules_line:
         embed.add_field(name="Rules", value=_rules_line, inline=False)
-    # Bug 179 (Stan): per-game /game codes in the footer.
+    # Bug 179: per-game /game codes in the footer.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]
     if _codes:
         embed.set_footer(text=" · ".join(f"/game {c}" for c in _codes))
@@ -8291,7 +8319,7 @@ async def log_series_result(guild, s):
     _rules_line = _rules_summary(s.get("rules"))
     if _rules_line:
         embed.add_field(name="Rules", value=_rules_line, inline=False)
-    # Bug 179 (Stan): the per-game /game codes, so nobody has to open the
+    # Bug 179: the per-game /game codes, so nobody has to open the
     # game to inspect a result. Server sends them oldest-first.
     _codes = [c for c in (s.get("game_codes") or []) if c][:5]
     if _codes:
@@ -11432,6 +11460,14 @@ async def poll_pc_events():
         _pc_face_tries.clear()        # bounded the same way; a clear only grants more tries
 
 
+# How many times ONE tick may put text on Discord for ONE row: the send or
+# first edit, plus one correction that landed while it was doing so. Module
+# level and used by both render paths, because the cap is one rule: a copy of
+# it — a literal, or an `if` that admits exactly one more render — can be
+# lifted while the other holds, and nothing goes red to say the two disagree.
+_CHANNEL_POST_MAX_RENDERS = 2
+
+
 @tasks.loop(seconds=30)
 async def poll_channel_posts():
     """Generic announce queue (v1.30): the API's pending_channel_posts table
@@ -11445,12 +11481,108 @@ async def poll_channel_posts():
     notified stamp — is retried by the outbox itself on the next tick, while
     the sent-memory above keeps that retry from posting twice. A row whose
     ack did not answer "acked" stays pending and is re-driven, never treated
-    as done."""
+    as done.
+
+    Migration 338 added a SECOND case: a row whose content was corrected. It
+    is EDITED in place, never re-sent — a correction posted as a new message
+    sits below the wrong text, which is what 134's Part C had to do and why
+    #scr-faq has a duplicate RANKED section. `revisions=true` is this build
+    declaring it can do that; an older api ignores the parameter and simply
+    answers with never-posted rows, so nothing about the old behaviour
+    depends on the new one.
+
+    THE SEND/EDIT DECISION IS posted_at. Not posted_revision: a row delivered
+    by a pre-338 bot after 338 had been applied can carry posted_at with a
+    NULL posted_revision, because that bot's ack cannot name a revision and
+    the api refuses to invent one it cannot prove. Treating NULL as "never
+    delivered" would post a second copy of every such row — the exact
+    duplicate this item exists to remove. This loop refuses to send anything
+    that already carries a posted_at, whatever its revision columns say.
+
+    A row with no stored id is adopted from adopt_fingerprint — the exact
+    text that was sent — and only when exactly one of the bot's own messages
+    in that channel carries it. When nothing matches, or more than one does,
+    the row is skipped and the old text stays up; this path must never fall
+    through to a send, because the only failure it could produce that way is
+    the duplicate it exists to prevent (#276: pick which direction the
+    unhandled case fails).
+
+    AMBIGUITY IS DECIDED BY THE SERVER, AND THIS LOOP ONLY OBEYS IT. Two rows
+    in one channel whose recorded text is byte-identical are indistinguishable
+    from outside, so neither may bind: whichever ran first would otherwise take
+    a message on an exactly-one match that is only exactly-one because it was
+    evaluated one row at a time. REFUSING LEAVES THE CHANNEL EXACTLY AS IT
+    IS — one surviving message or two, whichever it happens to hold — where
+    binding one edits a message as likely to belong to the other row. (Round
+    three said "both old messages" here, which describes the two-message case
+    as though it were the only one; the one-message case is the harder half
+    and the one a per-row scan cannot tell apart.) The
+    api computes that over the WHOLE channel and returns `ambiguous` per row —
+    this loop computed it over one response, which made the answer depend on
+    where the 20-row LIMIT fell and on what a concurrent poller had taken, and
+    made two unrelated channels carrying the same text block each other.
+
+    THE CLAIM IS THE UNIT OF EXCLUSIVE RENDERING. The hand-out returns a
+    `claim_token`; every ack this loop makes presents it. An ack from a caller
+    that does not hold the claim records no revision and comes back
+    "not_claimant" — never "acked" — so a tick that lost its lease learns that
+    instead of believing it finished. A "stale" answer KEEPS the claim, which
+    is what lets this loop render forward under the same token while no other
+    poller can be handed the row.
+
+    A REFUSED ACK STILL RECORDS THE MESSAGE. The one thing this loop knows and
+    the api cannot is whether a message went out, and the sent-memory that
+    holds it here is in-process: a restart drops it. So the api keeps the
+    DELIVERY half of a refused ack — posted_at, and an id for a row that has
+    none — and refuses only the revision, the fingerprint and the claim. That
+    is what stops a tick whose lease expired inside ch.send from becoming a
+    second copy of the announcement after the next bot restart (#105). The
+    answer is still a failure here, and this loop still stops: the row belongs
+    to whoever holds the claim, and it will be handed out again as a
+    correction rather than as a send.
+
+    RELEASING: this loop hands a row back when it DECIDES not to render it
+    (nothing to adopt, the message is gone, the render cap on either path) — a
+    decision made while the api is demonstrably answering.
+    ANYTHING THAT IS NOT A DECISION KEEPS THE CLAIM: an ack or a bind the api
+    did not answer, a send or an edit that raised, a tick that died. None of
+    those can say what reached Discord, so the row stays held until the 120 s
+    lease expires rather than being offered to a second poller that knows even
+    less (#276).
+
+    EVERY ONE OF THOSE HAND-BACKS PRESENTS THIS TICK'S TOKEN, and the api
+    decides against the row as it stands: a hand-back whose lease has lapsed,
+    or whose row a second poller now holds, releases nothing and is answered
+    "not_claimant". So this loop cannot free a claim that is no longer its own,
+    whichever of the release sites it reaches — that is a property of the ack
+    statement, not of the care taken at each call here.
+
+    BOTH RENDER PATHS SHARE ONE CAP, _CHANNEL_POST_MAX_RENDERS. The correction
+    path loops under it; the send path counts the send itself as the first
+    render and edits forward under the same number.
+
+    ORDER WITHIN A CORRECTION: adopt, then make the id durable (bind_only),
+    then edit, then ack the revision THAT WAS RENDERED. The edit is what
+    invalidates the fingerprint, so it must not be the step that a crash can
+    leave unrecorded — after the bind, the row can be found by its id; before
+    it, by its fingerprint; there is no window in which it can be found by
+    neither. The ack names the revision of the text that was actually put on
+    Discord, and the api will not record any other; if the row moved on while
+    this tick was rendering, the ack comes back "stale" with the newer text
+    and the loop edits forward and acks again rather than leaving the channel
+    on the old revision for another tick."""
     if http_session is None or not API_SECRET_KEY:
         return
-    data = await api_get("/internal/channel-posts/pending")
+    data = await api_get("/internal/channel-posts/pending?revisions=true")
     if not data or not data.get("posts"):
         return
+    # Ids already spoken for this tick: a message another row in THIS batch
+    # already owns is not a candidate for adoption. Six FAQ rows arrive
+    # together, so this is where two of them could otherwise select one
+    # message. This is a within-tick detail, not the ownership rule — the
+    # ownership rule is the api's `ambiguous` flag, computed over the whole
+    # channel, and it is the only thing that decides whether a row may bind.
+    claimed = {str(q["message_id"]) for q in data["posts"] if q.get("message_id")}
     for p in data["posts"]:
         try:
             ch = bot.get_channel(int(p["channel_id"]))
@@ -11467,6 +11599,157 @@ async def poll_channel_posts():
             # Mute/Ban/Dismiss buttons (custom_id = case id only, B-2), stamp
             # notified_at, THEN ack. Any other post is unchanged.
             case_id, content = _modcase_parse(p["content"])
+            revision = p.get("revision")
+            # The claim this row was handed to US under. Absent against a
+            # pre-338 api, where every ack degrades to the fire-once shape.
+            token = p.get("claim_token")
+            # DELIVERY IS posted_at, NOT posted_revision. A row an OLD bot
+            # delivered while 338 was already applied can carry posted_at with
+            # posted_revision still NULL — indistinguishable from a never-posted
+            # row by the revision columns alone, and re-sending it is the
+            # duplicate this whole item exists to prevent. A pre-338 api omits
+            # the key, and .get() then reads None, which is the same answer it
+            # gave before the column existed — that build only ever returns
+            # rows with posted_at NULL, so every row it hands over is genuinely
+            # a first post.
+            first_post = p.get("posted_at") is None
+
+            if not first_post:
+                # ── Correction: edit the live message, or do nothing ──
+                # Memory before the stored id, for the stream loop's reason
+                # (round-2 f2): the in-process id is only ever set by our own
+                # send or adopt, so after an ack failure it is the fresher of
+                # the two.
+                mid = _channel_post_sent.get(p["id"]) or p.get("message_id")
+                if mid is True:          # legacy marker from a send that
+                    mid = None           # could not report its id
+                if not mid:
+                    mid = await _adopt_channel_post_message(ch, p, claimed)
+                if not mid:
+                    print(f"[CHANNEL-POST] no message id for {p['id']} in {p['channel_id']} — "
+                          f"correction skipped, existing text left in place")
+                    # A DECISION, not a failure: nothing here will render, and
+                    # the api just answered the poll, so hand the claim back
+                    # rather than making the next tick wait out a lease for a
+                    # row this one already finished thinking about.
+                    await _release_channel_post_claim(p["id"], token)
+                    continue   # an edit has no position, so skipping it cannot
+                               # disorder the queue — and returning here would
+                               # stall every later announcement behind it
+                claimed.add(str(mid))
+                if not p.get("message_id"):
+                    # PERSIST THE ID BEFORE THE EDIT. The edit is what destroys
+                    # the fingerprint's subject: after it, the live message no
+                    # longer reads as the text 338 recorded, so a restart that
+                    # happened between "edited" and "acked" could never find
+                    # this message again and the row would stay pending
+                    # forever. Binding first is ordered the other way round —
+                    # if the bind commits and nothing else does, the next tick
+                    # re-reads the row with a durable id; if the bind does not
+                    # commit, the fingerprint is still true because no edit has
+                    # happened yet. bind_only leaves posted_revision alone, so
+                    # the row stays pending either way and the correction is
+                    # re-driven rather than marked delivered.
+                    bound = await api_post(
+                        "/internal/channel-posts/ack",
+                        params=_channel_post_ack_params(p["id"], None, mid,
+                                                        bind_only=True,
+                                                        claim_token=token))
+                    if not bound or bound.get("status") != "acked":
+                        # Including "not_claimant": the lease expired under
+                        # this tick and somebody else may already be rendering
+                        # the row. Nothing to hand back — the claim is not
+                        # ours — and nothing to edit.
+                        print(f"[CHANNEL-POST] could not persist message id {mid} for {p['id']}: "
+                              f"{bound} — correction deferred, existing text left in place")
+                        continue
+                try:
+                    msg = await ch.fetch_message(int(mid))
+                except discord.NotFound:
+                    # Somebody deleted the message. Re-sending would put the
+                    # sheet back in a channel it was removed from; leave it.
+                    print(f"[CHANNEL-POST] message {mid} for post {p['id']} is gone — correction skipped")
+                    await _release_channel_post_claim(p["id"], token)
+                    continue
+                except discord.Forbidden:
+                    print(f"[CHANNEL-POST] cannot read history in {p['channel_id']} (forbidden) — "
+                          f"post {p['id']} left pending")
+                    await _release_channel_post_claim(p["id"], token)
+                    continue
+                ack = None
+                # The ack names the revision that was RENDERED and the api
+                # records that one and no other, so a correction landing while
+                # this tick was editing comes back as "stale" carrying the
+                # newer text: edit forward and ack that instead of leaving the
+                # channel a revision behind until the next tick. A stale answer
+                # KEEPS this tick's claim, which is why the loop below is
+                # allowed to go round again — no other poller can be handed the
+                # row while this one is still inside it.
+                #
+                # _CHANNEL_POST_MAX_RENDERS is the ONLY thing bounding that,
+                # deliberately in one place — a second copy of the cap would
+                # let one of them be lifted while the other held, and the test
+                # could not tell. Without it this is an unbounded chase after a
+                # writer the loop does not control (#361), starving every row
+                # behind it; with it, a third correction inside one tick
+                # simply waits. The SEND path below renders under the same
+                # constant: it used to bound its own corrective edit by having
+                # exactly one `if`, which was the second copy this comment
+                # forbids, spelled as control flow instead of as a number.
+                renders = 0
+                # The revision of the text that LAST went on Discord, kept
+                # separately from `revision` because a stale answer moves
+                # `revision` forward to a text this tick has not rendered yet.
+                # Naming that newer number anywhere would record a revision
+                # nobody displayed, which is the whole defect this bus exists
+                # to avoid.
+                rendered = None
+                while renders < _CHANNEL_POST_MAX_RENDERS:
+                    renders += 1
+                    rendered = revision
+                    await msg.edit(content=content[:2000],
+                                   allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+                    _channel_post_sent[p["id"]] = msg.id
+                    print(f"[CHANNEL-POST] edited {p['id']} (rev {rendered}) in {p['channel_id']}")
+                    ack = await api_post("/internal/channel-posts/ack",
+                                         params=_channel_post_ack_params(
+                                             p["id"], rendered, msg.id,
+                                             claim_token=token))
+                    if not ack or ack.get("status") != "stale":
+                        break
+                    if not ack.get("content") or not ack.get("revision"):
+                        break   # a stale answer that carries no newer text is
+                                # not actionable; the next tick re-reads the row
+                    revision = ack.get("revision")
+                    _, content = _modcase_parse(ack["content"])
+                if ack and ack.get("status") == "stale":
+                    print(f"[CHANNEL-POST] {p['id']} is still behind after this tick's renders — "
+                          f"left pending, the id is stored and the next tick edits it")
+                    # THE CAP IS A DECISION TO STOP, so it hands the claim back
+                    # explicitly, naming the revision that WAS RENDERED — never
+                    # the newer one the stale answer carried. Without this the
+                    # row would sit under a claim nobody is using for the rest
+                    # of the lease. Nothing is re-sent by the hand-off: the row
+                    # carries posted_at and its message id, so the next poll
+                    # takes the correction path, not the send path.
+                    await _release_channel_post_claim(p["id"], token, rendered)
+                    continue
+                if not ack or ack.get("status") != "acked":
+                    # "not_claimant" arrives here too, and it is NOT success:
+                    # no revision was recorded, so the row stays pending for
+                    # whoever does hold the claim. The delivery half the api
+                    # keeps from a refused ack changes nothing on this path —
+                    # a correction row already carries posted_at and its id.
+                    print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, edit remembered")
+                    return
+                _channel_post_sent.pop(p["id"], None)
+                continue
+
+            # None when this tick did not do the sending (a retry after a
+            # failed ack). The stale arm below needs the message OBJECT, and a
+            # name that only exists on some paths would raise inside the broad
+            # except and be printed as a transport failure.
+            msg = None
             if p["id"] not in _channel_post_sent:
                 send_kw = {"allowed_mentions": discord.AllowedMentions(users=True, everyone=False, roles=False)}
                 if case_id:
@@ -11483,8 +11766,66 @@ async def poll_channel_posts():
                 if not stamped or stamped.get("status") != "ok":
                     print(f"[MODCASE] notified stamp failed for {case_id}: {stamped} — will retry")
                     return
-            ack = await api_post("/internal/channel-posts/ack", params={"post_id": p["id"]})
+            # The id rides along so the NEXT correction can edit this message
+            # rather than adopting it. `revision` is None against a pre-338
+            # api, which records the delivery without a rendered revision — the
+            # old fire-once ack, unchanged.
+            remembered = _channel_post_sent.get(p["id"])
+            ack = await api_post("/internal/channel-posts/ack",
+                                 params=_channel_post_ack_params(
+                                     p["id"], revision,
+                                     remembered if isinstance(remembered, int) else None,
+                                     claim_token=token))
+            # THE SEND IS THIS TICK'S FIRST RENDER, so the corrective edits
+            # below run under the SAME cap the correction path uses, counted
+            # from one. This used to be a single `if`, which bounded the send
+            # path at two renders by the shape of the code rather than by the
+            # constant — a second copy of the cap, and the kind that cannot be
+            # read off beside the first (#432: the flag named one line, the
+            # defect is the class). Raising or lowering the constant now moves
+            # both paths together, and neither can be lifted alone.
+            renders = 1
+            while (renders < _CHANNEL_POST_MAX_RENDERS
+                   and ack and ack.get("status") == "stale"
+                   and msg is not None and isinstance(remembered, int)):
+                # The row was corrected between this send and its ack. The api
+                # recorded the revision that WAS sent — so nothing reads as
+                # delivered that is not — and handed back the newer text. The
+                # claim is still ours (a stale answer releases nothing), so the
+                # message exists, its id is known, and this tick corrects it; a
+                # failure here just leaves a pending row with posted_at set,
+                # which the correction path picks up next tick without sending.
+                _, newer = _modcase_parse(ack.get("content") or "")
+                if not newer or not ack.get("revision"):
+                    break   # a stale answer that carries no newer text is not
+                            # actionable; the next tick re-reads the row
+                newer_rev = ack["revision"]
+                renders += 1
+                await msg.edit(content=newer[:2000],
+                               allowed_mentions=discord.AllowedMentions(users=True, everyone=False, roles=False))
+                print(f"[CHANNEL-POST] {p['id']} was corrected mid-send — edited to rev {newer_rev}")
+                ack = await api_post("/internal/channel-posts/ack",
+                                     params=_channel_post_ack_params(
+                                         p["id"], newer_rev, remembered,
+                                         claim_token=token))
+            if ack and ack.get("status") == "stale":
+                print(f"[CHANNEL-POST] {p['id']} delivered but still behind — correction next tick")
+                # Same decision as the correction path's cap: this tick has
+                # stopped rendering, so the claim goes back rather than sitting
+                # idle for the rest of the lease. The row is delivered and
+                # carries its id, so the next poll edits — it cannot re-send.
+                # A PURE hand-back: the delivery ack above already recorded the
+                # revision that went out, and naming one here could only repeat
+                # it or name one nobody rendered.
+                await _release_channel_post_claim(p["id"], token)
+                continue
             if not ack or ack.get("status") != "acked":
+                # "not_claimant" lands here as a failure, which is what it is
+                # for the RENDER: no revision was recorded and this tick may
+                # not edit. The SEND is not lost with it — the api records
+                # posted_at and the reported id from a refused ack too, which
+                # is what makes a lost lease cost a retry instead of a second
+                # message after the next restart clears the memory below.
                 print(f"[CHANNEL-POST] ack failed for {p['id']}: {ack} — row stays pending, send remembered")
                 return
             _channel_post_sent.pop(p["id"], None)
@@ -11494,6 +11835,159 @@ async def poll_channel_posts():
         except Exception as e:
             print(f"[CHANNEL-POST] send failed for {p['id']}: {e} — will retry")
             return  # keep strict ordering; retry from this post next tick
+
+
+def _channel_post_ack_params(post_id, revision, message_id, bind_only=False,
+                             claim_token=None, release=False):
+    """Query params for the channel-post ack, with the optional halves
+    dropped rather than sent as None — aiohttp refuses a None param value,
+    and the endpoint treats an absent field as "leave it alone". Against a
+    pre-338 api `revision` and `claim_token` both arrive None here and the ack
+    degrades to exactly the call this loop used to make.
+
+    An omitted `revision` is not a shorthand for "whatever is current": the
+    endpoint will not advance a row past a revision nobody claims to have
+    rendered, so a caller that cannot name one gets its delivery recorded at
+    what the hand-out gave it, and nothing else.
+
+    claim_token is the row's claim, handed over by the poll that took it. The
+    endpoint requires it of anything that names a revision or binds an id and
+    refuses the call by name without it, so dropping it here is not a degraded
+    ack — it is a refused one.
+
+    bind_only asks the endpoint for the id write ALONE — no posted_at, no
+    posted_revision — which is how a correction makes its message id durable
+    without claiming to have rendered anything yet. release asks it to drop the
+    claim: with a revision, "record this and let go" at the render cap; without
+    one, a pure hand-back that writes nothing at all."""
+    params = {"post_id": post_id}
+    if revision is not None:
+        params["revision"] = int(revision)
+    if message_id is not None:
+        params["message_id"] = str(message_id)
+    if bind_only:
+        params["bind_only"] = "true"
+    if release:
+        params["release"] = "true"
+    if claim_token is not None:
+        params["claim_token"] = str(claim_token)
+    return params
+
+
+async def _release_channel_post_claim(post_id, claim_token, revision=None):
+    """Hand a row's claim back because this tick DECIDED to stop rendering it.
+
+    The claim is exclusive by design: while it is held, no other poller is
+    handed the row. That is what makes forward re-rendering safe, and it is
+    also why a tick that walks away — nothing to adopt, the message is gone,
+    the render cap reached — must say so rather than let the row sit idle for
+    the rest of the 120 s lease.
+
+    `revision` is the revision that WAS RENDERED, or None for a pure
+    hand-back that writes no delivery fact whatsoever. It is never the newer
+    revision a stale answer carried: this tick did not put that text on
+    Discord.
+
+    A failed release is not worth handling: the lease expires anyway, which is
+    the same cleanup a crashed tick gets. There is no token against a pre-338
+    api, and nothing to release there either."""
+    if not claim_token:
+        return
+    await api_post("/internal/channel-posts/ack",
+                   params=_channel_post_ack_params(post_id, revision, None,
+                                                   claim_token=claim_token,
+                                                   release=True))
+
+
+async def _adopt_channel_post_message(ch, p, claimed=()):
+    """Recover the Discord message id of a row that was delivered before its
+    id was ever recorded, or return None.
+
+    The six #scr-faq messages were posted by a bot that discarded the id, and
+    nobody has them written down. The row carries adopt_fingerprint — exactly
+    what was sent for it, i.e. content[:2000], which for a message Discord
+    accepted IS its whole text — and this walks the channel oldest-first
+    looking for messages of OURS that carry it.
+
+    WHAT IS COMPARED: nothing is hashed, no prefix is taken and nothing is
+    normalized. The candidate's entire content and the entire fingerprint are
+    compared byte for byte. An earlier version stripped both operands, which
+    made two bodies differing only in edge whitespace compare EQUAL — it
+    widened the set of messages a row would accept in order to tolerate a
+    difference that, if it existed, would mean the stored text is not what was
+    posted. Refusing is the right answer to that: a fingerprint that does not
+    match exactly identifies nothing, and the row keeps its old text (#276).
+    Position is never consulted either — a positional guess would adopt
+    confidently and edit the wrong message, the class of check that cannot
+    fail (#342/#431).
+
+    AMBIGUITY REFUSES, AND THE SERVER IS WHAT DECIDES IT. The scan does not
+    stop at the first hit; it collects every match in the window and adopts
+    only when there is exactly ONE. But exactly-one inside one row's scan does
+    not make the OWNERSHIP unambiguous: two rows whose sent text is identical —
+    or which differ only past Discord's 2,000-character ceiling, so that the
+    same text was posted for both — would each see one surviving message and
+    the one that ran first would take it. The api answers that question over
+    the WHOLE CHANNEL and sends `ambiguous` with the row; nothing is computed
+    here. An earlier version computed it across one response, which made the
+    answer depend on where the 20-row LIMIT fell and on what a concurrent
+    poller had already taken, and treated equal text in two unrelated channels
+    as a collision. REFUSING LEAVES THE CHANNEL EXACTLY AS IT IS — one
+    surviving message or two, whichever it happens to hold — which beats one
+    correct message overwritten with the wrong row's text.
+
+    IDS THAT BELONG TO SOMEBODY ELSE ARE SKIPPED, and there are two sources.
+    `claimed` is the within-tick one: ids another row in THIS response already
+    owns, including ones adopted or sent a moment ago in this same loop, which
+    the api's snapshot predates. `bound_message_ids` is the api's, and it is
+    channel-wide: every id another row in this channel already holds, in this
+    response or not. The api excludes a BOUND row from the `ambiguous` test on
+    the strength of this list being applied here — a bound twin is no longer
+    treated as a rival for the same text, so if its message were left in the
+    scan this row would find it and adopt somebody else's message. Skipping
+    them is not an optimisation; it is the other half of that flag.
+
+    Neither list is the ownership rule. That is `ambiguous`, and it is the
+    api's.
+
+    Returns None on anything unexpected, and the caller then leaves the post
+    alone. Bounded scan — a channel whose sheet has scrolled past the limit
+    reports nothing rather than adopting something plausible."""
+    fingerprint = p.get("adopt_fingerprint") or ""
+    if not fingerprint:
+        return None
+    if p.get("ambiguous"):
+        print(f"[CHANNEL-POST] post {p['id']} shares its recorded text with another "
+              f"row in {p['channel_id']} — ownership is ambiguous, no adoption")
+        return None
+    me = getattr(bot, "user", None)
+    if me is None:
+        return None
+    claimed = {str(c) for c in claimed}
+    claimed.update(str(b) for b in (p.get("bound_message_ids") or []) if b)
+    hits = []
+    try:
+        async for msg in ch.history(limit=200, oldest_first=True):
+            if msg.author.id != me.id:
+                continue
+            if str(msg.id) in claimed:
+                continue
+            if (msg.content or "") == fingerprint:
+                hits.append(msg.id)
+    except discord.Forbidden:
+        print(f"[CHANNEL-POST] cannot read history in {p['channel_id']} (forbidden) — no adoption")
+        return None
+    except Exception as e:
+        print(f"[CHANNEL-POST] history scan failed in {p['channel_id']}: {e} — no adoption")
+        return None
+    if len(hits) != 1:
+        if hits:
+            print(f"[CHANNEL-POST] {len(hits)} messages in {p['channel_id']} carry post {p['id']}'s "
+                  f"recorded text — ambiguous, no adoption")
+        return None
+    print(f"[CHANNEL-POST] adopted message {hits[0]} for post {p['id']} "
+          f"in {p['channel_id']} (content match)")
+    return hits[0]
 
 
 @poll_channel_posts.before_loop
@@ -11676,7 +12170,7 @@ async def _ack_anticheat_flag(flag_id: str, evidence_revision: int) -> bool:
 async def poll_chat_catchup():
     """Backfill any ingame chat messages the WS broadcast missed.
 
-    Background: lopidav reported that his ingame messages persisted to the DB
+    Background: a player reported that their in-game messages persisted to the DB
     (so the server received them on the WS) but never reached Discord — the
     bot's WS subscription appeared healthy yet only some senders' messages
     came through. Rather than chase the broadcast bug, we drain the
