@@ -1183,30 +1183,66 @@ def test_the_footer_days_and_the_window_the_api_applies_are_one_number():
 
 PLUGIN_DIR = Path(__file__).resolve().parents[2] / "plugin"
 
-# `I18n.Tr("...")` / `I18n.TrF("...", ...)` -- the first argument is the
-# ENGLISH source string, which is what a player on the default locale reads
-# and what every catalogue is keyed by.
-_TR_CALL = re.compile(r'I18n\.TrF?\(\s*"((?:[^"\\]|\\.)*)"')
 _WINDOW_WORD = re.compile(r"inactiv", re.I)
-# "90d", "90 d", "90d+", "90 days". NOT "{0}d" -- a placeholder carries no
-# digits, which is the whole difference this asserts.
-_LITERAL_DAYS = re.compile(r"\b\d+\s*(?:d\b|d\+|days?\b)", re.I)
+# "90d", "90 d", "90d+", "90 days", "90+ days". NOT "{0}d" -- a placeholder
+# carries no digits, which is the whole difference this asserts. (The "+"
+# before the unit is the form the settings help and the configuration
+# description used; the pattern without it could not see either.)
+_LITERAL_DAYS = re.compile(r"\b\d+\s*\+?\s*(?:d\b|d\+|days?\b)", re.I)
 
 # Generated or translated, and pinned by the i18n suite instead: the
 # catalogues are keyed BY these English strings, so a literal that got past
 # the sweep below would be visible there as a key with no placeholder.
 _NOT_A_SURFACE = {"I18nCatalogues.cs", "I18nSourceKeys.g.cs"}
 
+_EXTRACTOR = []
+
+
+def _extractor():
+    """tools/i18n_extract.py, loaded once. The tool that decides which client
+    strings exist decides what this sweep reads, so a surface it harvests --
+    a Tr/TrF call, a CreateText or SetText label, the settings help passed
+    through SettingsToggle, a table it ingests -- cannot be missed here."""
+    if not _EXTRACTOR:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "i18n_extract_for_the_window_sweep",
+            str(PLUGIN_DIR.parent / "tools" / "i18n_extract.py"))
+        ex = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(ex)
+        _EXTRACTOR.append(ex)
+    return _EXTRACTOR[0]
+
+
+_CONFIG_BIND = re.compile(r"Config\.Bind\s*\(")
+_STR_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
+
+
+def _window_strings_in(fn, src):
+    """(file, helper, string) for every string in ONE source that talks about
+    the inactive window: each string the i18n extractor harvests from it,
+    with the helper it went through, and each string literal inside a
+    Config.Bind call -- the description BepInEx writes into the .cfg, which
+    is English-only and which the extractor, rightly, never harvests."""
+    ex = _extractor()
+    src = ex.lf(src)
+    found, sites = {}, {}
+    ex.harvest_source(fn, src, found, sites)
+    out = [(fn, kind, s) for s in sorted(found) for kind in sorted({k for _f, _m, k in sites[s]})]
+    for m in _CONFIG_BIND.finditer(src):
+        out += [(fn, "Config.Bind", s) for s in _STR_LITERAL.findall(ex.find_call_body(src, m.end() - 1))]
+    return [row for row in out if _WINDOW_WORD.search(row[2])]
+
 
 def _client_inactivity_strings():
-    """Every translated client string that talks about the inactive window."""
+    """Every client string -- a translated surface or a configuration
+    description -- that talks about the inactive window, in every plugin
+    source (a file the extractor's list forgot is swept all the same)."""
     out = []
     for cs in sorted(PLUGIN_DIR.glob("*.cs")):
         if cs.name in _NOT_A_SURFACE:
             continue
-        for m in _TR_CALL.finditer(cs.read_text(encoding="utf-8")):
-            if _WINDOW_WORD.search(m.group(1)):
-                out.append((cs.name, m.group(1)))
+        out += _window_strings_in(cs.name, cs.read_text(encoding="utf-8"))
     return out
 
 
@@ -1270,42 +1306,61 @@ def test_the_day_count_the_client_prints_is_the_one_the_api_advertises():
             '"leaderboard_active_days");') in flat_client, (
         "the client does not read the advertised window out of the "
         "mod-version answer")
-    assert "if (lbDays > 0) LeaderboardActiveDays = lbDays;" in flat_client, (
-        "the client takes the advertised window unconditionally; a malformed "
-        "or absent value would turn a label that states the window into one "
-        "that states 0d")
+    assert ("if (lbDays > 0 && lbDays != LeaderboardActiveDays) { "
+            "LeaderboardActiveDays = lbDays; NativeUI.MarkDirty(); }") in flat_client, (
+        "the client does not take the advertised window as it must: only a "
+        "positive value (a malformed or absent one would turn a label that "
+        "states the window into one that states 0d), and a CHANGED value "
+        "marks the UI dirty -- the answer arrives after the panel may have "
+        "drawn its labels, and an open surface repaints only when dirty")
     assert ("public static int LeaderboardActiveDays { get; private set; } = 0;"
             in flat_client), (
         "the client carries a compiled default for a server setting again -- "
         "0 is the only value that means 'the server has not told us'")
+    ui = re.sub(r"\s+", " ", (PLUGIN_DIR / "NativeUI.cs").read_text(encoding="utf-8"))
+    assert "public static void MarkDirty()=>dirty=true;" in ui and \
+        "if(dirty){dirty=false;RefreshCurrentTab();}" in ui, (
+        "MarkDirty no longer feeds the repaint the update loop honours, so "
+        "marking the UI dirty repaints nothing")
 
     surfaces = _client_inactivity_strings()
     assert surfaces, (
         "no client string about the inactive window was found at all, so the "
         "sweep below measured nothing")
-    for name, s in surfaces:
+    kinds = {kind for _f, kind, _s in surfaces}
+    assert {"SettingsToggle", "Config.Bind", "TrF"} <= kinds, (
+        "the sweep no longer reaches the settings help, the configuration "
+        "descriptions and the translated labels together: it saw %r" % sorted(kinds))
+    for name, kind, s in surfaces:
         assert not _LITERAL_DAYS.search(s), (
-            "%s states the inactivity window as a literal: %r. The window is "
-            "a server setting; print the value the api advertised, or print "
-            "no count." % (name, s))
-    assert any("{0}d" in s or "{1}d" in s for _, s in surfaces), (
+            "%s (%s) states the inactivity window as a literal: %r. The window "
+            "is a server setting; print the value the api advertised, or print "
+            "no count." % (name, kind, s))
+    assert any("{0}d" in s or "{1}d" in s for _f, _k, s in surfaces), (
         "no client surface prints the advertised window at all any more, so "
         "nothing carries it to the player")
 
 
 def test_the_literal_day_count_detector_can_fail():
     """The control for the sweep above (#391). Both halves of it: the reader
-    must find a Tr string that mentions the window, and the pattern must call
-    a literal a literal. A sweep over an empty list, or one whose pattern
-    matched nothing, passes silently and forever."""
-    planted = ('x = I18n.TrF("Show inactive players (90d+): ON"); '
-               'y = I18n.Tr("Show inactive players: ON");')
-    found = [m.group(1) for m in _TR_CALL.finditer(planted)
-             if _WINDOW_WORD.search(m.group(1))]
-    assert len(found) == 2, found
-    assert _LITERAL_DAYS.search(found[0]), (
-        "the detector does not see a literal day count in %r" % found[0])
-    assert not _LITERAL_DAYS.search(found[1])
+    must find every KIND of surface that mentions the window -- a translated
+    label, the settings help passed through SettingsToggle, a Config.Bind
+    description -- and the pattern must call each literal form a literal. A
+    sweep over an empty list, one that reads only Tr calls, or one whose
+    pattern matched nothing, passes silently and forever."""
+    planted = (
+        'class Planted { void Build() {\n'
+        '    btn = SettingsToggle(box, "SX", size, () => { }, '
+        '"Lists players who have not run the mod for 90+ days, tagged (inactive).");\n'
+        '    x = I18n.TrF("Show inactive players (90d+): ON", d);\n'
+        '    y = I18n.Tr("Show inactive players: ON");\n'
+        '    K = Config.Bind("UI", "K", false, "Show players inactive for 90+ days on the leaderboards");\n'
+        '} }\n')
+    got = _window_strings_in("Planted.cs", planted)
+    assert {kind for _f, kind, _s in got} == {"SettingsToggle", "TrF", "Tr", "Config.Bind"}, got
+    flagged = sorted(kind for _f, kind, s in got if _LITERAL_DAYS.search(s))
+    assert flagged == ["Config.Bind", "SettingsToggle", "TrF"], (
+        "the detector does not see every literal day count it was handed: %r" % got)
     assert not _LITERAL_DAYS.search("Show inactive players ({0}d+): ON"), (
         "the detector calls the PLACEHOLDER form a literal, so the sweep "
         "would fail on the fix as well as on the defect")

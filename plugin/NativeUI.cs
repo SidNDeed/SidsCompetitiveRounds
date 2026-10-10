@@ -14135,6 +14135,10 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // them greyed with an "(inactive)" tag. Zeroing the 1v1/FFA/1v2 tab
             // refresh timers makes the next look at a board refetch with the new
             // flag; the 2v2 board has no timer, so it is refetched here directly.
+            // The help line states NO day count: it is built once, before the
+            // version check can have answered, and the window is a server
+            // setting. The button label above it prints the advertised window
+            // (RefreshSettings), and only when the server has stated one.
             inactiveBoardsToggleBtn = SettingsToggle(intBox.transform, "SInactiveLb", new Vector2(260, 28),
                 () =>
                 {
@@ -14144,7 +14148,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     ApiClient.FetchTeamLeaderboard(200, ApiClient.CachedTeamLeaderboardSort ?? "rating");
                     dirty = true;
                 },
-                "Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactive).");
+                "Lists players who have not run the mod recently on every leaderboard, greyed and tagged (inactive).");
             inactiveBoardsToggleTxt = UIFactory.GetButtonText(inactiveBoardsToggleBtn);
             // Release B §4 (bug 332): lag notices, default off. Sits under the
             // ping/region row because both describe the same corner label.

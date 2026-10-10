@@ -1864,9 +1864,17 @@ namespace CompetitiveRounds
                 // it: ExtractJsonInt answers 0, which is the same "not told"
                 // state the printing surfaces already handle. Only a positive
                 // value is taken, so a malformed answer cannot turn a label that
-                // states the window into one that states "0d".
+                // states the window into one that states "0d". A CHANGED value
+                // marks the UI dirty: this answer arrives asynchronously, often
+                // after the F5 panel has drawn its labels without a count (or
+                // with the previous one), and an open surface repaints only
+                // when it is dirty (NativeUI's update loop).
                 int lbDays = ExtractJsonInt(req.downloadHandler.text, "leaderboard_active_days");
-                if (lbDays > 0) LeaderboardActiveDays = lbDays;
+                if (lbDays > 0 && lbDays != LeaderboardActiveDays)
+                {
+                    LeaderboardActiveDays = lbDays;
+                    NativeUI.MarkDirty();
+                }
                 if (!string.IsNullOrEmpty(ver))
                 {
                     LatestModVersion = ver;
