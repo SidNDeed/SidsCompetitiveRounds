@@ -10,7 +10,9 @@ Kinds of control:
   suite    a mutation of the tree's production source (or of a copy of the
            local decompile) run against the tree's OWN tests: GREEN only when
            the tree's tests go red on the mutation AND stay green on its inert
-           twin and on the unmutated baseline (#391, #342)
+           twin and on the unmutated baseline (#391, #342); since fix pass 2
+           the red must be a claim failing, never only a test's own in-test
+           scaffolding losing its anchor (classify_failures)
   log      the certifying evidence for the tree's commit in the lane's
            evidence folder (logs headed "commit <sha> tree clean")
 
@@ -376,7 +378,9 @@ def claims_run(root, work, label, edit, decompiled, out, decompile_edit=None, te
             f.write(b"\n".join(lines))
     env = dict(os.environ)
     env["SCR_DECOMPILED_DIR"] = dec
-    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--noconftest",
+    # --tb=short: every frame prints as "path:line: in func" plus its source
+    # line, which is what classify_failures reads
+    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--noconftest", "--tb=short",
            os.path.join(d, "backend", "tests", "test_client_avatar_defaults.py")]
     if select:
         cmd += ["-k", select]
@@ -388,6 +392,12 @@ def claims_run(root, work, label, edit, decompiled, out, decompile_edit=None, te
     for l in failed[:6]:
         out.write("    " + l[:400] + "\n")
     claims_run.last_failed = failed
+    genuine, scaffold, unread = classify_failures(o, failed)
+    claims_run.last_genuine = genuine
+    if failed:
+        out.write("    the claim itself failed in %d; the test's own scaffolding alone in %d%s; unread %d%s\n"
+                  % (len(genuine), len(scaffold), (" (" + ", ".join(scaffold[:4]) + ")") if scaffold else "",
+                     len(unread), (" (" + ", ".join(unread[:4]) + ")") if unread else ""))
     if rc == 5:
         # pytest's "no tests collected": the tree has no test that binds the
         # claim, which is neither a catch nor a pass
@@ -397,6 +407,48 @@ def claims_run(root, work, label, edit, decompiled, out, decompile_edit=None, te
 
 
 claims_run.last_failed = []
+claims_run.last_genuine = []
+
+
+def classify_failures(o, failed):
+    """Fix pass 2 (M8, from the relaunched sitting's red dev run): which of a
+    claims run's failures are the CLAIM failing on the mutated tree.
+
+    The tree's three-way helper _check(claim, mutation, control) first runs
+    claim(src) over the tree as given, then its OWN in-test mutation and
+    control. A production mutation that deletes the text an in-test mutation
+    anchors on fails the test inside that scaffolding (_replace: "edit anchor
+    ... occurs 0 times") while the claim itself passed: the claim never read
+    what was removed, so that is not a catch. Only a failure raised from
+    _check's first call (claim(src)), or from a test that does not use
+    _check, counts. A parse failure is never the claim's red (the helper's
+    own rule). An ERROR entry (setup or collection: the tree's own probe
+    fixture on the mutated tree) is kept as before. A FAILED entry whose
+    block cannot be read is never counted (fail closed).
+    Returns (genuine, scaffold, unread), lists of test names."""
+    blocks = {}
+    for sec in re.finditer(r"^=+ (?:FAILURES|ERRORS) =+[ \t]*$(.*?)(?=^=+ |\Z)", o, re.M | re.S):
+        parts = re.split(r"^_{3,} (.+?) _{3,}[ \t]*$", sec.group(1), flags=re.M)
+        for i in range(1, len(parts) - 1, 2):
+            blocks[parts[i].strip()] = parts[i + 1]
+    genuine, scaffold, unread = [], [], []
+    for line in failed:
+        kind, rest = line.split(" ", 1)
+        name = rest.split(" - ", 1)[0].strip().split("::")[-1]
+        if kind == "ERROR":
+            genuine.append(name)
+            continue
+        b = blocks.get(name)
+        if b is None:
+            unread.append(name)
+            continue
+        elines = "\n".join(x for x in b.splitlines() if x.startswith("E "))
+        m = re.search(r": in _check[ \t]*\r?\n[ \t]+(\S[^\r\n]*)", b)
+        if "CsParseError" in elines or (m is not None and m.group(1).strip() != "claim(src)"):
+            scaffold.append(name)
+        else:
+            genuine.append(name)
+    return genuine, scaffold, unread
 
 
 def prodprobe_run(probe_root, root, work, label, out, edit=None):
@@ -715,6 +767,11 @@ def controls(args):
         sel = CLAIM_SELECT.get(name)
         m = claims_run(root, args.work, name, row.get("edit"), args.decompiled, out,
                        decompile_edit=row.get("decompile_edit"), select=sel)
+        if m not in (None, 0) and not claims_run.last_genuine:
+            # every failure is the tests' own scaffolding: the tree's claims
+            # never read the mutated expression (classify_failures)
+            out.write("    no failure is the claim itself: not a catch\n")
+            m = None
         t = claims_run(root, args.work, name + "-twin", row.get("twin"), args.decompiled, out,
                        decompile_edit=row.get("twin_decompile_edit"), select=sel)
         crow[name] = (m, t)
