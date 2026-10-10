@@ -665,8 +665,10 @@ CLAIM_ROWS = {
     # M8: the line written only after the apply (an exception or a
     # missing-data exit suppresses it)
     "M8-line-after-apply": dict(edit=(AD, "bool written = line != null && Line(tag, line);", "bool written = false;"),
-                                twin=(AD, "bool written = line != null && Line(tag, line);",
-                                      "bool written = line != null && Line(tag, line);   // before any fallible step")),
+                                # the twin must not touch S22's own anchors: its
+                                # in-test mutation moves the write line together
+                                # with the missing-data return that follows it
+                                twin=(AD, "string line = null;", "string line = default(string);")),
 }
 
 # fix pass 2: the tests each row runs (pytest -k). The source-claim rows
