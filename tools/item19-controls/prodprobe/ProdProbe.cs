@@ -26,13 +26,15 @@ namespace CompetitiveRounds
     /// runs against either. Exit 0 always: the verdicts are the output.
     ///
     /// Fix pass 3 (Codex BUILD round 3) adds H9 and M3 with a restoring
-    /// select that throws or does not commit (H9t, H9r, M3x) and M8's line
-    /// on every exit (M8e2, M8e3, M8def, M8exc).</summary>
+    /// select that throws or does not commit (H9t, H9r, M3x), M8's line on
+    /// every exit (M8e2, M8e3, M8def, M8exc) and H3's remote arm (H3remote,
+    /// the tree's ledger reached by reflection, so the probe still compiles
+    /// against a tree without one).</summary>
     internal static class ProdProbe
     {
         internal static readonly string[] Ids =
             { "H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce",
-              "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc" };
+              "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc", "H3remote" };
 
         internal static void SelectFacePostfix(int faceID)
         {
@@ -324,6 +326,80 @@ namespace CompetitiveRounds
                 + " selections " + applied + " | a second tick: selections " + again;
         }
 
+        // ---- H3 (fix pass 3): the popup's remote arm applies only this pick's value --
+
+        /// <summary>A carrier value as a picker publishes it: 12 fields.</summary>
+        private static string Wire(int id)
+        {
+            string i = id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            return string.Join("|", new[] { i, "0.000", "0.000", i, "0.000", "0.000", i, "0.000", "0.000", i, "0.000", "0.000" });
+        }
+
+        private static string Short(string v) => v == null ? "nothing" : "face " + v.Split('|')[0] + (v.Split('|').Length == 13 ? " (" + v.Split('|')[12] + ")" : " (untagged)");
+
+        private static object Call(object target, string name, params object[] args)
+        {
+            var m = target.GetType().GetMethod(name, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            if (m == null) throw new MissingMethodException(target.GetType().Name, name);
+            return m.Invoke(target, args);
+        }
+
+        private static string Note(object ledger)
+        {
+            var p = ledger.GetType().GetProperty("Note", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+            return p != null ? (string)p.GetValue(ledger) : null;
+        }
+
+        private static bool ok3r;
+
+        /// <summary>The remote arm against this seat's settled copy of an
+        /// actor's carrier (its face from an earlier pick) and the actor's
+        /// publish for THIS pick arriving after the popup opened. The tree's
+        /// own rules decide (PopupFace, and PopupCarrierLedger when the tree
+        /// has one; reflection, so the same probe compiles against a tree
+        /// without it). The remote arm's wiring in Plugin.cs, the ledger
+        /// through PopupCarriers.ForShow and never a read of the copy, is
+        /// bound by the tree's pytest S33.</summary>
+        private static string RemoteArm()
+        {
+            string settled = Wire(1);                          // this seat's copy: the actor's face at an earlier pick
+            string fresh = Wire(4) + "|p2";                    // the actor's publish for THIS pick, arriving late
+            var rules = new AvatarRules();
+            var t = typeof(AvatarRules).Assembly.GetType("CompetitiveRounds.PopupCarrierLedger");
+            if (t == null)
+            {
+                // No ledger: the remote arm is a read of the copy (round 3:
+                // FacePublisher.ReadCarrier), which the popup applies at once.
+                string atShow = rules.PopupFace(false, FaceCarrierAction.Keep, null, () => settled);
+                ok3r = false;
+                return "this tree has no PopupCarrierLedger: its remote arm reads the settled copy, and the popup applies "
+                    + Short(atShow) + " at Show, the earlier pick's face; the late publish for this pick (" + Short(fresh)
+                    + ") is never applied";
+            }
+            var ledger = Activator.CreateInstance(t, BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public,
+                                                  null, new object[] { rules }, null);
+            var room = new object();
+            // A: the popup opens for actor 7; this seat holds only the settled copy.
+            string a = rules.PopupFace(false, FaceCarrierAction.Keep, null, () => (string)Call(ledger, "Show", room, 7, 100.0));
+            string noteA = Note(ledger);
+            string onEcho = (string)Call(ledger, "Arrived", room, 7, fresh, 100.4);
+            Call(ledger, "Applied", 7, true, 100.4);
+            string noteApplied = Note(ledger);
+            // B: actor 7's next popup; the newest value it sent is the previous pick's.
+            Call(ledger, "EndSession", room);
+            string b = rules.PopupFace(false, FaceCarrierAction.Keep, null, () => (string)Call(ledger, "Show", room, 7, 160.0));
+            // C: an untagged value (a 1.40.3 client's, or a publish outside a pick) arrives while it shows.
+            string c = (string)Call(ledger, "Arrived", room, 7, Wire(5), 160.2);
+            string noteC = Note(ledger);
+            ok3r = a == null && noteA != null && noteA.Contains("deferred") && onEcho == fresh
+                && noteApplied != null && noteApplied.Contains("owed popup face applied")
+                && b == null && c == null && noteC != null && noteC.Contains("stale-unknown");
+            return "settled copy " + Short(settled) + ": at Show the popup applies " + Short(a) + " (deferred=" + (noteA != null && noteA.Contains("deferred"))
+                + ") | the late publish arrives: applied " + Short(onEcho) + ", owed apply completed=" + (noteApplied != null && noteApplied.Contains("owed popup face applied"))
+                + " | the next popup, previous pick's value newest: " + Short(b)
+                + " | an untagged value while it shows: applied " + Short(c) + " (stale-unknown=" + (noteC != null && noteC.Contains("stale-unknown")) + ")";
+        }
+
         private static int Main()
         {
             Case("H6a", () => Liveness(() => GameManager.instance.isPlaying = true, () => GameManager.instance.isPlaying = false,
@@ -412,7 +488,7 @@ namespace CompetitiveRounds
                     + ", recovery instruction carried=" + recovery + ", live " + LiveSel;
             }, () => okAn);
 
-            // ---- fix pass 3 (Codex BUILD round 3: H9, M3, M8) ----
+            // ---- fix pass 3 (Codex BUILD round 3: H9, M3, M8, H3) ----
 
             Case("H9t", () => NotCommitted(() => CharacterCreatorHandler.ThrowBeforeCommit = 1,
                                            "the restoring select throws before it commits"), () => ok9x);
@@ -481,6 +557,8 @@ namespace CompetitiveRounds
                 return "the carrier publish throws: live " + livePub + ", applied line=" + pub
                     + " | the select throws after committing: live " + liveSel + ", applied line=" + sel;
             }, () => ok8x);
+
+            Case("H3remote", RemoteArm, () => ok3r);
             return 0;
         }
     }

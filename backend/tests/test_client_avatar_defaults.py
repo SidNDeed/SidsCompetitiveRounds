@@ -649,6 +649,18 @@ def _class_fields(text):
 CARRIERS = {"AvatarFaceIds", "AvatarLoaderView", "AvatarSetting", "AvatarLivenessIn",
             "AvatarFacingIn", "AvatarEvalIn", "AvatarDecision"}
 
+# Fix pass 3 (H3, the remote arm; design section 14): the card-pick popup's
+# carrier ledger is the one stateful type in the rules file. It holds, per
+# REMOTE actor, carrier values RECEIVED for the open popup, bound to one room
+# object, in memory only: never this seat's own face, never persisted, never
+# static. One instance, owned by Plugin.cs's PopupCarriers.
+LEDGER_FIELDS = ["private readonly AvatarRules rules;",
+                 "private readonly Dictionary<int, Entry> entries = new Dictionary<int, Entry>();",
+                 "private object room;", "private int shown = -1;", "private string note;"]
+ENTRY_FIELDS = ["internal long Seq = -1;", "internal string Fresh;", "internal double ArrivedAt = -1;",
+                "internal double DeferredSince = -1;"]
+PCARRIERS = "internal static class PopupCarriers"
+
 
 def _s20(src):
     fd = _class_fields(src[AD])
@@ -659,10 +671,18 @@ def _s20(src):
         assert fd[patch] == [], (patch, fd[patch])
     fr = _class_fields(src[AR])
     assert fr["AvatarRules"] == [], fr["AvatarRules"]
-    assert set(fr) == CARRIERS | {"AvatarRules"}, sorted(fr)
+    assert set(fr) == CARRIERS | {"AvatarRules", "PopupCarrierLedger", "Entry"}, sorted(fr)
     for name in CARRIERS:
         for st in fr[name]:
             assert "static" not in st.split(), (name, st)
+    led = [st for st in fr["PopupCarrierLedger"] if " const " not in " " + st]
+    assert led == LEDGER_FIELDS, led
+    assert fr["Entry"] == ENTRY_FIELDS, fr["Entry"]
+    a, b = _span(src[PL], PCARRIERS)
+    pc = _class_fields(PCARRIERS + " " + src[PL][a:b])
+    assert pc["PopupCarriers"] == ["private static readonly PopupCarrierLedger Ledger = new PopupCarrierLedger(new AvatarRules());"], \
+        pc["PopupCarriers"]
+    assert sum(_code(t).count("new PopupCarrierLedger(") for t in src.values()) == 1, "a second carrier ledger"
     # the only persisted item-19 state: four config entries, one of them Home
     for f in NEW_FILES:
         c = _code(src[f])
@@ -681,6 +701,15 @@ def test_s20_a_static_in_the_rules_reds():
     m = _insert_after_open(_tree(), AR, "internal class AvatarRules", "        private static int lastApplied;")
     with pytest.raises(AssertionError):
         _s20(m)
+
+
+def test_s20_a_shown_face_in_the_carrier_ledger_reds():
+    # fix pass 3 (H3): the ledger keeps received values only; a field that
+    # remembers what the popup showed is a latch
+    _check(_s20,
+           lambda s: _replace(s, AR, "private string note;", "private string note;\n        private string lastShownFace;"),
+           lambda s: _replace(s, AR, "private string note;                     // what the last call decided, for the log",
+                              "private string note;                     // the last call's decision, for the log"))
 
 
 # S21 (the decompiled spans the design rests on) -----------------------------
@@ -815,7 +844,7 @@ def test_s22_a_line_written_only_after_the_apply_reds():
 # S27 (fix pass 1, H3): one publish-or-clear helper behind all four callers --
 
 FP = "internal static class FacePublisher"
-PUB = "public static FaceCarrierAction PublishLocal(out string published)"   # fix pass 2: the body behind both overloads
+PUB = "public static FaceCarrierAction PublishLocal(out string published, bool forPick = false)"   # the body behind both overloads (fix pass 3: forPick tags the Show-time publish)
 
 
 def _s27(src):
@@ -1043,9 +1072,10 @@ def test_the_swap_rule_has_no_caller_until_item_17_lands():
 # (learning #428), so a method that publishes the carrier and then reads
 # cr_face from the cache in the same pass reads the PREVIOUS face. The sweep
 # covers every method that calls FacePublisher.PublishLocal (the four sites
-# S12 counts) and counts each cache read after the publish; a read handed to
-# AvatarRules.PopupFace as its remote-picker reader is the one exemption, and
-# the rule itself must answer a local picker without calling that reader.
+# S12 counts) and counts each cache read after the publish, with no
+# exemption since fix pass 3 (the remote arm is no longer a cache read, see
+# below), and the rule itself must answer a local picker without calling the
+# remote arm.
 
 POPUP = "static void Postfix(CardChoiceVisuals __instance, int pickerID)"
 _METHOD_HEAD = re.compile(r"^(?:\[[^\]]*\]\s*)*(?:(?:public|private|internal|protected|static|override|virtual|async|unsafe)\s+)+"
@@ -1083,19 +1113,25 @@ def _enclosing_method(masked, i):
     return None
 
 
-def _call_spans(code, name):
-    """(open, close) of every `name(` argument list in code."""
+# Fix pass 3 (H3, the remote arm): the same defect from the other side. This
+# seat's cached copy of a REMOTE picker's carrier is the last update it
+# received, which can be an earlier pick's face, so no code reads a carrier
+# value out of a player's cached properties at all: the popup's remote arm is
+# the carrier ledger (PopupCarriers.ForShow), fed by values as they ARRIVE
+# (OnPlayerPropertiesUpdate's changed table). The plugin-wide sweep of carrier
+# cache reads counts 3 terms at bdc30732 (ReadCarrier's definition, its cache
+# read, and its one caller, the popup's remote arm) and 0 here.
+_CARRIER_CACHE_READ = re.compile(
+    r'CustomProperties\s*\[\s*(?:FacePublisher\.)?PROP_FACE\s*\]|CustomProperties\s*\[\s*"cr_face"\s*\]'
+    r'|TryGetValue\(\s*(?:FacePublisher\.)?PROP_FACE\b|TryGetValue\(\s*"cr_face"|\bReadCarrier\(|\bTryReadAndApply\(')
+
+
+def _carrier_cache_reads(src):
     out = []
-    for m in re.finditer(re.escape(name) + r"\(", code):
-        depth, j = 0, m.end() - 1
-        for k in range(j, len(code)):
-            if code[k] == "(":
-                depth += 1
-            elif code[k] == ")":
-                depth -= 1
-                if depth == 0:
-                    out.append((j, k + 1))
-                    break
+    for fname, text in sorted(src.items()):
+        code = _code(text)
+        for r in _CARRIER_CACHE_READ.finditer(code):
+            out.append("%s:%d %s" % (fname, code[:r.start()].count("\n") + 1, r.group(0)))
     return out
 
 
@@ -1110,43 +1146,55 @@ def _s33(src):
             a, b = span
             code = _code(text[a:b])
             at = code.find("FacePublisher.PublishLocal", 0)
-            exempt = _call_spans(code, ".PopupFace")
             for term in _CACHE_READS:
                 for r in re.finditer(re.escape(term), code):
                     if r.start() < at:
-                        continue
-                    if any(x < r.start() < y for x, y in exempt):
                         continue
                     line = text[:a + r.start()].count("\n") + 1
                     rereads.append("%s:%d %s after the publish (the cache still holds the previous face)" % (fname, line, term))
     assert sites == 4, "%d PublishLocal sites swept, expected 4" % sites
     assert not rereads, "reread-after-publish: %d site(s): %s" % (len(rereads), "; ".join(rereads))
+    stale = _carrier_cache_reads(src)
+    assert not stale, "carrier cache reads (a remote copy can be an earlier pick's face): %d: %s" % (len(stale), "; ".join(stale))
     body = _body(src[PL], POPUP, "class CardChoiceVisuals_Show_Competitive_Patch")
-    m = re.search(r"FacePublisher\.PublishLocal\(out (\w+)\)", body)
-    assert m, "the popup does not take the value it publishes"
-    assert re.search(r"\.PopupFace\(picker\.IsLocal, \w+, %s,\s*\(\) => FacePublisher\.ReadCarrier\(" % m.group(1), body), \
-        "the popup does not hand its published value to PopupFace"
+    m = re.search(r"FacePublisher\.PublishLocal\(out (\w+), forPick: true\)", body)
+    assert m, "the popup does not take the value it publishes, tagged for the pick"
+    assert re.search(r"\.PopupFace\(picker\.IsLocal, \w+, %s,\s*\(\) => \{ string v = PopupCarriers\.ForShow\(pickerActor\);"
+                     % m.group(1), body), "the popup's remote arm is not the carrier ledger"
+    for term in _CACHE_READS:
+        assert term not in body, "the popup reads the carrier cache: %s" % term
     rule = _body(src[AR], "internal virtual string PopupFace(")
     local = rule.index("if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;")
-    assert rule.find("readCarrier()") > local, "the rule calls the reader before answering a local picker"
+    assert rule.find("remoteForThisPick()") > local, "the rule calls the reader before answering a local picker"
+    # the ledger's arrival feed: the property callback hands the CHANGED value
+    upd = _body(src[PL], "public void OnPlayerPropertiesUpdate(Photon.Realtime.Player target")
+    assert upd.count("PopupCarriers.Arrived(target, changedProps);") == 1, "the ledger is not fed on arrival"
     return sites, len(rereads)
 
 
 def test_s33_no_pass_rereads_the_carrier_it_published():
     _check(_s33,
-           lambda s: _replace(s, PL, "string popupFace = new AvatarRules().PopupFace(picker.IsLocal, carrier, freshFace,\n"
-                                     "                    () => FacePublisher.ReadCarrier(pickerActor));",
-                              "string popupFace = FacePublisher.ReadCarrier(pickerActor);"),
+           lambda s: _replace(s, PL, "() => { string v = PopupCarriers.ForShow(pickerActor); remoteShown = true; return v; });",
+                              "() => pv.Owner.CustomProperties[FacePublisher.PROP_FACE] as string);"),
            lambda s: _replace(s, PL, '"the value this pass published"', '"the value published this pass"'))
 
 
 def test_s33_a_local_arm_that_calls_the_reader_reds():
     _check(_s33,
            lambda s: _replace(s, AR, "if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;",
-                              "if (pickerIsLocal && readCarrier != null) return readCarrier();\n"
+                              "if (pickerIsLocal && remoteForThisPick != null) return remoteForThisPick();\n"
                               "            if (pickerIsLocal) return published == FaceCarrierAction.Publish ? publishedValue : null;"),
-           lambda s: _replace(s, AR, "return readCarrier != null ? readCarrier() : null;",
-                              "return readCarrier == null ? null : readCarrier();"))
+           lambda s: _replace(s, AR, "return remoteForThisPick != null ? remoteForThisPick() : null;",
+                              "return remoteForThisPick == null ? null : remoteForThisPick();"))
+
+
+def test_s33_a_carrier_cache_read_anywhere_reds():
+    # fix pass 3 (H3): the sweep is plugin-wide, not the popup's alone
+    _check(_s33,
+           lambda s: _replace(s, PL, "string v = Ledger.Show(Room(), actor, Now());",
+                              "string v = Ledger.Show(Room(), actor, Now()) ?? (PhotonNetwork.CurrentRoom.GetPlayer(actor)"
+                              ".CustomProperties[FacePublisher.PROP_FACE] as string);"),
+           lambda s: _replace(s, PL, '"on arrival"', '"when it arrived"'))
 
 
 # S35 (fix pass 2, H6 M8 BR-M4 L1 H9 M3): the production probe ----------------
@@ -1163,8 +1211,8 @@ PRODPROBE = Path(REPO) / "tools" / "item19-controls" / "prodprobe"
 PRODPROBE_IDS = ("H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce",
                  # fix pass 3 (Codex BUILD round 3): a debt cleared only on a committed
                  # read-back (H9t, H9r, M3x), the line on every exit (M8e2, M8e3,
-                 # M8def, M8exc)
-                 "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc")
+                 # M8def, M8exc), the popup's remote arm (H3remote)
+                 "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc", "H3remote")
 
 
 def _dotnet():
