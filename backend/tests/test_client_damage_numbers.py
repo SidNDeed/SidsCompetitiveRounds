@@ -1,8 +1,11 @@
-"""v1.41.0 item 21 - damage and heal numbers: group B, the eighteen
-production-span structure invariants (design section 5, rows B1-B14, and
-the build round 1 fix rows B15-B18: the correction funnel's feed and the
-direct-writer census, the delta-to-emit bridge, the draw and driver wiring,
-and the draw budget at saturation).
+"""v1.41.0 item 21 - damage and heal numbers: group B, the production-span
+invariants (design section 5, rows B1-B14; the build round 1 fix rows
+B15-B18: the correction funnel's feed and the direct-writer census, the
+delta-to-emit bridge, the draw and driver wiring, and the draw budget at
+saturation; and the build round 2 fix rows: B5 restated and B19 for the
+poison notify's own guard, B20 for the anchor bound, B21 for the colour
+restore). B19 and B21 EXECUTE their production span with one statement made
+to throw, through the statement interpreter below.
 
 Every row is one test, and every test does three things in the same run:
 
@@ -238,6 +241,235 @@ def norm(s):
     return re.sub(r"\s+", "", s)
 
 
+# ── fault injection over a production span (build R2: HC.2 and N2.2) ───────
+#
+# A statement interpreter for the C# subset the poison companions and Draw are
+# written in: blocks, try with catch and finally clauses, if/else, for,
+# foreach and while, return/break/continue/throw, and plain statements ending
+# in a semicolon (brackets balanced, so an object initialiser is one
+# statement). It runs the PRODUCTION statement tree, parsed from the mask (a
+# brace or a semicolon inside a string or a comment is not structure), with
+# one plain statement made to throw, and reports what ran. It evaluates no
+# expression, so the path is the scenario's own: an if whose branch is a bare
+# jump (`return;`, `break;`, `continue;`, `throw ...;`) is a guard and is
+# declined (its else, if any, runs), every other if is entered and its else
+# skipped, and a loop body runs `iterations` times. A statement form outside
+# the subset raises CsParseError, which a row reports RED, never as a pass.
+# The semantics carried are the three the findings turn on: a throw unwinds to
+# the innermost enclosing try; a bare catch, or a catch of Exception, stops
+# it; a finally runs on every exit, a throw, a return and a break included.
+# B21's control runs small programs whose C# answer is not in doubt through
+# the same interpreter, so a broken interpreter reds there first.
+
+
+class _Fault(Exception):
+    """The injected throw (or a `throw` statement reached)."""
+
+
+class _Jump(Exception):
+    def __init__(self, word):
+        Exception.__init__(self, word)
+        self.word = word
+
+
+_LOOPS = ("foreach", "for", "while")
+_JUMPS = ("return", "break", "continue", "throw")
+_OUTSIDE = ("switch", "do", "using", "lock", "goto", "yield", "checked", "unchecked",
+            "fixed", "unsafe", "else")
+_CATCH_ALL = ("", "Exception", "System.Exception")
+
+
+def _kw(m, i, word):
+    return m.startswith(word, i) and not _w(m, i - 1) and not _w(m, i + len(word))
+
+
+def _plain_end(m, i):
+    """Just past the `;` that ends the plain statement starting at i."""
+    depth = 0
+    for k in range(i, len(m)):
+        ch = m[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                break
+        elif ch == ";" and depth == 0:
+            return k + 1
+    raise CsParseError("no statement end after %d: %r" % (i, m[i:i + 40]))
+
+
+def _stmts(m, i, end):
+    out = []
+    i = _ws(m, i)
+    while i < end:
+        st = _stmt(m, i)
+        out.append(st)
+        i = _ws(m, st["end"])
+    return out
+
+
+def _block(m, o):
+    if o >= len(m) or m[o] != "{":
+        raise CsParseError("a block was expected at %d" % o)
+    e = _match(m, o)
+    return {"kind": "block", "start": o, "end": e, "body": _stmts(m, o + 1, e - 1)}
+
+
+def _stmt(m, i):
+    i = _ws(m, i)
+    if m[i] == "{":
+        return _block(m, i)
+    for w in _OUTSIDE:
+        if _kw(m, i, w):
+            raise CsParseError("statement form %r at %d is outside the interpreter's subset" % (w, i))
+    if _kw(m, i, "try"):
+        body = _block(m, _ws(m, i + 3))
+        catches, fin, k = [], None, body["end"]
+        while True:
+            k2 = _ws(m, k)
+            if _kw(m, k2, "catch"):
+                k3 = _ws(m, k2 + 5)
+                typ = ""
+                if m[k3] == "(":
+                    ce = _match(m, k3, "(", ")")
+                    words = m[k3 + 1:ce - 1].split()
+                    typ = words[0] if words else ""
+                    k3 = _ws(m, ce)
+                if _kw(m, k3, "when"):
+                    raise CsParseError("an exception filter at %d" % k3)
+                cb = _block(m, k3)
+                catches.append((typ, cb))
+                k = cb["end"]
+            elif _kw(m, k2, "finally"):
+                fin = _block(m, _ws(m, k2 + 7))
+                k = fin["end"]
+            else:
+                break
+        if not catches and fin is None:
+            raise CsParseError("a try with neither catch nor finally at %d" % i)
+        return {"kind": "try", "start": i, "end": k, "body": body, "catches": catches, "finally": fin}
+    if _kw(m, i, "if"):
+        j = _ws(m, i + 2)
+        ce = _match(m, j, "(", ")")
+        then = _stmt(m, ce)
+        k, els = then["end"], None
+        k2 = _ws(m, k)
+        if _kw(m, k2, "else"):
+            els = _stmt(m, k2 + 4)
+            k = els["end"]
+        return {"kind": "if", "start": i, "end": k, "cond": m[j + 1:ce - 1], "then": then, "else": els}
+    for w in _LOOPS:
+        if _kw(m, i, w):
+            body = _stmt(m, _match(m, _ws(m, i + len(w)), "(", ")"))
+            return {"kind": "loop", "start": i, "end": body["end"], "body": body}
+    end = _plain_end(m, i)
+    for w in _JUMPS:
+        if _kw(m, i, w):
+            return {"kind": "jump", "start": i, "end": end, "word": w}
+    return {"kind": "plain", "start": i, "end": end, "text": m[i:end]}
+
+
+def parse_body(m):
+    """The statement tree of a masked member body (braces excluded)."""
+    return {"kind": "block", "start": 0, "end": len(m), "body": _stmts(m, 0, len(m))}
+
+
+def _kids(n):
+    k = n["kind"]
+    if k == "block":
+        return n["body"]
+    if k == "if":
+        return [n["then"]] + ([n["else"]] if n["else"] is not None else [])
+    if k == "loop":
+        return [n["body"]]
+    if k == "try":
+        return [n["body"]] + [c for _, c in n["catches"]] + ([n["finally"]] if n["finally"] is not None else [])
+    return []
+
+
+def region_of(tree, offsets):
+    """The deepest statement whose span holds every offset. A try's own body,
+    catch or finally block is not a statement of its own, so a region found
+    there is widened to its try."""
+    best = [None, None]
+
+    def walk(n, parent):
+        if not all(n["start"] <= p < n["end"] for p in offsets):
+            return
+        best[0], best[1] = n, parent
+        for c in _kids(n):
+            walk(c, n)
+
+    walk(tree, None)
+    node, parent = best
+    if node is not None and node["kind"] == "block" and parent is not None and parent["kind"] == "try":
+        return parent
+    return node
+
+
+class Interp:
+    """One execution of a statement tree. `probe(text)` sees every plain
+    statement reached, before it takes effect, and may raise _Fault."""
+
+    def __init__(self, probe, iterations=1):
+        self.probe = probe
+        self.iterations = iterations
+
+    def run(self, n):
+        k = n["kind"]
+        if k == "block":
+            for c in n["body"]:
+                self.run(c)
+        elif k == "plain":
+            self.probe(n["text"])
+        elif k == "jump":
+            if n["word"] == "throw":
+                raise _Fault("a throw statement")
+            raise _Jump(n["word"])
+        elif k == "if":
+            if n["then"]["kind"] != "jump":
+                self.run(n["then"])
+            elif n["else"] is not None:
+                self.run(n["else"])
+        elif k == "loop":
+            for _ in range(self.iterations):
+                try:
+                    self.run(n["body"])
+                except _Jump as j:
+                    if j.word == "break":
+                        break
+                    if j.word != "continue":
+                        raise
+        elif k == "try":
+            try:
+                try:
+                    self.run(n["body"])
+                except _Fault:
+                    handlers = [c for typ, c in n["catches"] if typ in _CATCH_ALL]
+                    if not handlers:
+                        raise
+                    self.run(handlers[0])
+            finally:
+                if n["finally"] is not None:
+                    self.run(n["finally"])
+        else:
+            raise CsParseError("unknown node %r" % k)
+
+
+def execute(n, probe, iterations=1):
+    """'completed', 'returned', or 'escaped' (a throw left the node)."""
+    try:
+        Interp(probe, iterations).run(n)
+    except _Fault:
+        return "escaped"
+    except _Jump as j:
+        if j.word == "return":
+            return "returned"
+        raise CsParseError("a %s left the executed node" % j.word)
+    return "completed"
+
+
 # ── B1: each hook body is one try/catch, armed sentinel, Exit in finally ────
 
 def hook_shape(t, key):
@@ -387,74 +619,195 @@ def test_B4_the_heal_magnitude_is_post_minus_pre_and_never_heal_amount():
     assert run(prefix_captures_pre, mt)[0], "the Prefix control reddened"
 
 
-# ── B5: the poison notify is inside the inner try and under the drop predicate
+# ── B5: the poison notify has a guard of its own, under the drop predicate ──
 
 BRIDGE = "DamageNumbers.NoteDirectDrop("
 NOTIFY = "DamageNumbers.NoteDirectDrop(view, preTick, cds.health);"
 BAR = "hbBar.TakeDamage("
+LOOKUP = "GetComponentInChildren<HealthBar>"
 
 # The two direct writers PoisonSync lowers health with (neither calls
 # DoDamage, so W1 cannot see them): the committed spectator tick and the
-# correction funnel. Each must hand the bridge its observed drop, once, inside
-# its bar companion's try and under its own drop predicate (fix 1: the
-# correction funnel was missing from the feed).
+# correction funnel. Each hands the bridge its observed drop, once, under its
+# own drop predicate (fix 1: the correction funnel was missing from the feed),
+# in a try of its own that holds no part of its health-bar companion, while
+# the companion's own try holds no notify (build R2 HC: the bar ran first
+# inside one swallowed try, so a bar-side throw after the health commit
+# skipped the notify). `feed_try` and `bar_try` are the production texts the
+# mutations below rearrange.
 FUNNELS = {
     "committed": {
         "sig": SIG["apply"], "notify": NOTIFY, "bar": BAR, "pred": "cds.health<preTick",
         "args": ["view", "preTick", "cds.health"], "outer": "rec.Applied++;",
         "slice": r"float\s+nh\s*=\s*cds\.health\s*-\s*rec\.Slice\.magnitude\s*;",
+        "predicate_line": "                        if (cds.health < preTick)\n",
+        "feed_try": ("                            try\n"
+                     "                            {\n"
+                     "                                DamageNumbers.NoteDirectDrop(view, preTick, cds.health);\n"
+                     "                            }\n"
+                     "                            catch { }\n"),
+        "bar_try": ("                            try\n"
+                    "                            {\n"
+                    "                                var hbBar = view.GetComponentInChildren<HealthBar>(true);\n"
+                    "                                if (hbBar != null) hbBar.TakeDamage(default, false);\n"
+                    "                            }\n"
+                    "                            catch { }\n"),
     },
     "corrective": {
         "sig": SIG["corrective"], "notify": "DamageNumbers.NoteDirectDrop(view, pre, cd.health);",
         "bar": "if (bar != null) bar.TakeDamage(", "pred": "cd.health<pre",
         "args": ["view", "pre", "cd.health"], "outer": "rec.Applied++;",
         "slice": r"float\s+nh\s*=\s*pre\s*-\s*rec\.Slice\.magnitude\s*;",
+        "predicate_line": "            if (cd.health < pre)\n",
+        "feed_try": ("                try\n"
+                     "                {\n"
+                     "                    DamageNumbers.NoteDirectDrop(view, pre, cd.health);\n"
+                     "                }\n"
+                     "                catch { }\n"),
+        "bar_try": ("                try\n"
+                    "                {\n"
+                    "                    var bar = view.GetComponentInChildren<HealthBar>(true);\n"
+                    "                    if (bar != null) bar.TakeDamage(default, false);\n"
+                    "                }\n"
+                    "                catch { }\n"),
     },
 }
 
 
+def _inside(tr, pos):
+    return tr is not None and tr[0] < pos < tr[1]
+
+
 def poison_halves(t, which="committed"):
+    """(guard, predicate) for one funnel's notify. guard: the notify sits in a
+    try, that innermost try holds neither half of the bar companion (the
+    lookup nor the TakeDamage call), and the companion's own innermost try
+    holds no notify. predicate: guard_chain returns the funnel's drop
+    predicate."""
     f = FUNNELS[which]
     src = t["PS"]
     o, e = _single_span(src, f["sig"], RELEASE_SYMBOLS)
     m = mask_code(src)[o:e]
-    bar_at = m.find(f["bar"])
-    at = m.find(BRIDGE)
-    if bar_at < 0 or at < 0:
-        return (False, False), "%s: anchor missing bar=%d at=%d" % (which, bar_at, at)
-    tr = enclosing_try(m, bar_at)
-    span_ok = tr is not None and tr[0] < at < tr[1]
+    at, bar_at, look_at = m.find(BRIDGE), m.find(f["bar"]), m.find(LOOKUP)
+    if min(at, bar_at, look_at) < 0:
+        return (False, False), "%s: anchor missing notify=%d bar=%d lookup=%d" % (which, at, bar_at, look_at)
+    ft, bt = enclosing_try(m, at), enclosing_try(m, bar_at)
+    guard_ok = (ft is not None and bt is not None and not _inside(ft, bar_at)
+                and not _inside(ft, look_at) and not _inside(bt, at))
     conds = guard_chain(src, f["sig"], BRIDGE)
     pred_ok = any(norm(c) == f["pred"] for c in conds)
-    return (span_ok, pred_ok), "%s: span=%s predicate=%s conds=%r" % (which, span_ok, pred_ok, conds)
+    return (guard_ok, pred_ok), "%s: guard=%s predicate=%s conds=%r" % (which, guard_ok, pred_ok, conds)
 
 
-def test_B5_the_poison_notify_sits_inside_the_bar_companions_try_and_under_its_drop_predicate():
+def old_ordering(t, which):
+    """Mutation, the form before fix 2: the notify's own try removed and the
+    notify put back inside the bar companion's try, after the bar."""
+    f = FUNNELS[which]
+    bar_line = f["bar_try"].splitlines(True)[3]
+    ind = re.match(r" *", bar_line).group(0)
+    mt = mutate(t, "PS", f["feed_try"], "")
+    return mutate(mt, "PS", f["bar_try"], f["bar_try"].replace(bar_line, bar_line + ind + f["notify"] + "\n"))
+
+
+def shared_try(t, which):
+    """Mutation: the notify first, but inside the bar companion's try."""
+    f = FUNNELS[which]
+    look_line = f["bar_try"].splitlines(True)[2]
+    ind = re.match(r" *", look_line).group(0)
+    mt = mutate(t, "PS", f["feed_try"], "")
+    return mutate(mt, "PS", f["bar_try"], f["bar_try"].replace(look_line, ind + f["notify"] + "\n" + look_line))
+
+
+def test_B5_the_poison_notify_has_a_guard_of_its_own_under_its_drop_predicate():
     t = texts()
-    (s, p), why = poison_halves(t)
-    assert s and p, why
-    # mutation 1: below the try, keeping its own predicate inline -> span half alone
-    mt = mutate(t, "PS", "                                " + NOTIFY + "\n", "")
-    mt = mutate(mt, "PS", "                        catch { }\n                        // Bug 202",
-                "                        catch { }\n                        if (cds.health < preTick) " + NOTIFY + "\n                        // Bug 202")
-    (s1, p1), why = poison_halves(mt)
-    assert (s1, p1) == (False, True), "moving below the try: " + why
-    # mutation 2: above the if, inside the try -> predicate half alone
-    mt = mutate(t, "PS", "                                " + NOTIFY + "\n", "")
-    mt = mutate(mt, "PS", "                        try\n                        {\n                            if (cds.health < preTick)",
-                "                        try\n                        {\n                            " + NOTIFY + "\n                            if (cds.health < preTick)")
-    (s2, p2), why = poison_halves(mt)
-    assert (s2, p2) == (True, False), "moving above the if: " + why
-    # control: the bar companion resolves inside the same try and under the same
-    # condition; Apply's outer body (rec.Applied++) is not inside that try
+    for which in FUNNELS:
+        halves, why = poison_halves(t, which)
+        assert halves == (True, True), why
+    for which, f in FUNNELS.items():
+        # mutation 1: the form before fix 2 -> the guard half alone
+        halves, why = poison_halves(old_ordering(t, which), which)
+        assert halves == (False, True), "the old ordering: " + why
+        # mutation 2: the notify's own try dropped, a bare call under the
+        # predicate (its innermost try, if any, also holds the bar) -> the
+        # guard half alone
+        bare = f["feed_try"].splitlines(True)[2]
+        halves, why = poison_halves(mutate(t, "PS", f["feed_try"], bare), which)
+        assert halves == (False, True), "a bare notify: " + why
+        # mutation 3: its own try kept, moved above the drop predicate -> the
+        # predicate half alone
+        mt = mutate(t, "PS", f["feed_try"], "")
+        mt = mutate(mt, "PS", f["predicate_line"], f["feed_try"] + f["predicate_line"])
+        halves, why = poison_halves(mt, which)
+        assert halves == (True, False), "above the predicate: " + why
+    # control: each bar companion resolves under the same drop predicate in a
+    # try that holds no notify, and the funnel's outer body (rec.Applied++)
+    # lies in neither try
     src = t["PS"]
-    o, e = _single_span(src, SIG["apply"], RELEASE_SYMBOLS)
-    m = mask_code(src)[o:e]
-    tr = enclosing_try(m, m.find(BAR))
-    conds = guard_chain(src, SIG["apply"], BAR)
-    assert any(norm(c) == "cds.health<preTick" for c in conds)
-    outer = m.find("rec.Applied++;")
-    assert outer >= 0 and not (tr[0] < outer < tr[1]), "the outer body resolved into the try"
+    for which, f in FUNNELS.items():
+        o, e = _single_span(src, f["sig"], RELEASE_SYMBOLS)
+        m = mask_code(src)[o:e]
+        at, bar_at = m.find(BRIDGE), m.find(f["bar"])
+        ft, bt = enclosing_try(m, at), enclosing_try(m, bar_at)
+        assert bt is not None and not _inside(bt, at), which
+        assert any(norm(c) == f["pred"] for c in guard_chain(src, f["sig"], f["bar"])), which
+        outer = m.find(f["outer"])
+        assert outer >= 0 and not _inside(bt, outer) and not _inside(ft, outer), which
+
+
+def companion_region(t, which):
+    """The smallest statement of the funnel's own body holding its notify and
+    both halves of its bar companion (the lookup and the TakeDamage call)."""
+    f = FUNNELS[which]
+    src = t["PS"]
+    o, e = _single_span(src, f["sig"], RELEASE_SYMBOLS)
+    m = mask_code(src)[o + 1:e - 1]
+    at, look_at, bar_at = m.find(BRIDGE), m.find(LOOKUP), m.find(f["bar"])
+    if min(at, look_at, bar_at) < 0:
+        raise CsParseError("%s: notify=%d lookup=%d bar=%d" % (which, at, look_at, bar_at))
+    return region_of(parse_body(m), (at, look_at, bar_at))
+
+
+def companion_run(region, fault):
+    """Execute the companion statement with `fault` thrown by 'bar-lookup',
+    'bar-call' or 'feed' (or nothing: 'none'). Returns (notify calls
+    completed, bar calls completed, outcome, whether the fault fired); the
+    outcome is relative to that statement: 'escaped' means the throw left it,
+    and whatever followed the throw inside it was skipped."""
+    seen = {"feed": 0, "bar": 0, "fired": False}
+
+    def probe(text):
+        hit = ("feed" if BRIDGE in text else "bar-lookup" if LOOKUP in text
+               else "bar-call" if ".TakeDamage(" in text else None)
+        if hit is None:
+            return
+        if hit == fault:
+            seen["fired"] = True
+            raise _Fault(hit)
+        if hit == "feed":
+            seen["feed"] += 1
+        elif hit == "bar-call":
+            seen["bar"] += 1
+
+    outcome = execute(region, probe)
+    return seen["feed"], seen["bar"], outcome, seen["fired"]
+
+
+COMPANION_WANT = {"none": (1, 1, "completed"), "bar-lookup": (1, 0, "completed"),
+                  "bar-call": (1, 0, "completed"), "feed": (0, 1, "completed")}
+
+
+def companion_faults(t, which):
+    """(green, detail). Green when a throw in either half of the bar companion
+    leaves the notify completed exactly once and nothing leaves the companion
+    statement; a throw in the notify leaves the bar completed once (the two
+    are isolated both ways); and with no throw both complete once, so the
+    path is real. Every injected throw must actually fire."""
+    region = companion_region(t, which)
+    rows = {k: companion_run(region, k) for k in COMPANION_WANT}
+    ok = all(rows[k][:3] == w and (k == "none" or rows[k][3]) for k, w in COMPANION_WANT.items())
+    return ok, "%s: %s" % (which, " ".join(
+        "%s=%d/%d/%s%s" % (k, r[0], r[1], r[2], "" if k == "none" or r[3] else "/NOT-FIRED")
+        for k, r in rows.items()))
 
 
 # ── B6: the pause gate fails closed and is one of six early returns ─────────
@@ -1206,3 +1559,35 @@ def test_B18_a_saturated_repaint_makes_at_most_25_projections_and_48_labels_and_
                 "if (_text[i] != null && ring.IsLive(i, now)) { cam.WorldToScreenPoint(_world[i]); first = i; break; }")
     p, l, pr = draw_budget(mt)
     assert p == 25 + 24 and pr, (p, pr)
+
+
+# ── B19: a throw in the bar companion cannot cost a committed drop its number
+#    (fix 2, build R2 HC.2: the companion statement is executed with each half
+#    of the bar made to throw, not described)
+
+def test_B19_a_throw_in_the_bar_companion_cannot_cost_a_committed_drop_its_number():
+    t = texts()
+    for which in FUNNELS:
+        ok, why = run(companion_faults, t, which)
+        assert ok, why
+    for which, f in FUNNELS.items():
+        # mutation 1, HC.2's own: the old ordering (the notify after the bar
+        # inside one swallowed try) -> a bar throw skips the notify
+        ok, why = run(companion_faults, old_ordering(t, which), which)
+        assert not ok and "bar-lookup=0/0/" in why and "bar-call=0/0/" in why, why
+        # mutation 2: the notify first, inside the bar's try -> a throw in the
+        # notify costs the bar its segment
+        ok, why = run(companion_faults, shared_try(t, which), which)
+        assert not ok and "feed=0/0/" in why, why
+        # mutation 3: the notify doubled inside its own try -> not exactly once
+        line = f["feed_try"].splitlines(True)[2]
+        ok, why = run(companion_faults, mutate(t, "PS", line, line + line), which)
+        assert not ok and "none=2/1/" in why, why
+        # mutation 4: the notify's own try dropped (a bare call) -> a throw in
+        # the notify leaves the companion statement
+        ok, why = run(companion_faults, mutate(t, "PS", f["feed_try"], line), which)
+        assert not ok and "/escaped" in why, why
+    # control: under one funnel's mutation the other funnel stays green (the
+    # row is span-scoped)
+    assert run(companion_faults, old_ordering(t, "committed"), "corrective")[0]
+    assert run(companion_faults, old_ordering(t, "corrective"), "committed")[0]

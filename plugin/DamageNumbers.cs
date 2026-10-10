@@ -205,13 +205,14 @@ namespace CompetitiveRounds
         /// places by a direct write that bypasses DoDamage, so W1 never sees
         /// either: the committed tick on a spectator seat (the #338 fence) and
         /// the correction funnel ApplyCorrective, which runs on fighter and
-        /// spectator seats alike. Each calls this once, beside its own
-        /// health-bar companion and inside that companion's try, under its own
-        /// "health actually dropped" predicate, with health read before and
-        /// after its write. The number is the OBSERVED applied drop
-        /// (DamageNumberRules.AppliedDrop: the floor already taken), never the
-        /// slice magnitude, and the subject is the victim's own view, the same
-        /// rule W1 uses.</summary>
+        /// spectator seats alike. Each calls this once, under its own "health
+        /// actually dropped" predicate, with health read before and after its
+        /// write, in a try of its own ahead of its health-bar companion's try
+        /// (build R2 HC): the bar is optional display, and a throw in it can
+        /// no longer cost a committed drop its number. The number is the
+        /// OBSERVED applied drop (DamageNumberRules.AppliedDrop: the floor
+        /// already taken), never the slice magnitude, and the subject is the
+        /// victim's own view, the same rule W1 uses.</summary>
         internal static void NoteDirectDrop(PhotonView view, float pre, float post)
         {
             try
