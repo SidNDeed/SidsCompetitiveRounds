@@ -20,8 +20,11 @@ THE DETECTOR is the FAQ server lane's (backend/tests/test_faq_surfaces.py,
 its section 3), ported with its salt, its handle digests and its attribution
 shapes unchanged, so this lane refuses everything that one does. Five
 differences, each stated where it lives below: words are Unicode words; one
-handle is added; shipped product strings that name a community member on
-purpose are exempt by their exact English text, on catalogue lines only; an
+handle is added; a catalogue row whose English key is a shipped product
+string that names a community member on purpose may carry that key's own
+handle words, in the key and in its translation, and no other handle (the
+translated value is scanned like any line, and every class reads a
+catalogue row both as written and decoded as the game reads it); an
 attribution may carry the maintainer's name and no other name (the server
 lane's escapes for any one-letter word and any word in capitals are gone, and
 the words that are not people are listed one by one); and account labels and
@@ -101,10 +104,15 @@ _HANDLE_PHRASE_DIGESTS = frozenset([
 # (difference 3): that achievement's description, the shop title's
 # description, the articles that mention the achievement, and the research the
 # Info library reproduces under its author's credit. A catalogue line whose
-# English KEY is exactly one of these is product content, translated, and its
-# handle words are not refused. Exact text, so a new sentence naming either
-# person is refused until somebody decides it is product content too and
-# lists it. Each digest is sha256(salt + "string:" + the English source).
+# English KEY is exactly one of these is product content, translated: the
+# handle words of that key are the product's own and pass wherever they stand
+# on the row, its translated value included. Nothing else on the row is
+# exempt: any other listed handle, in the key or in the translated value, is
+# refused like anywhere else, and the value is read both as written and
+# decoded (a handle spelled with escapes is a word too). Exact text, so a new
+# sentence naming either person is refused until somebody decides it is
+# product content too and lists it. Each digest is sha256(salt + "string:" +
+# the English source).
 _PRODUCT_STRING_DIGESTS = frozenset([
     "cefbde002b74d7bdf2a13678a5c3d80f07c40c0b92c6cd3ed6a797f95aaaedc4",
     "c7c9ffdf362b3781593d3712ebc4eb5778c1592c355189ab93e085188d082f82",
@@ -198,13 +206,36 @@ def _cs_literal(body):
     return "".join(out)
 
 
-def _product_line(text):
+def _catalogue_text(text):
+    """A catalogue row's key and translated value as the game reads them
+    (escapes decoded), one per line; empty for any other line."""
     m = _CATALOGUE_ENTRY.match(text)
     if not m:
-        return False
+        return ""
+    return _cs_literal(m.group(1)) + "\n" + _cs_literal(m.group(2))
+
+
+def _key_handles(text):
+    """The listed handle words a catalogue row may carry (difference 3): those
+    of its own English key, lower-cased, when that key is exactly a listed
+    product string; none for any other line."""
+    m = _CATALOGUE_ENTRY.match(text)
+    if not m:
+        return frozenset()
     key = _cs_literal(m.group(1))
     digest = hashlib.sha256((_HANDLE_SALT + "string:" + key).encode("utf-8")).hexdigest()
-    return digest in _PRODUCT_STRING_DIGESTS
+    if digest not in _PRODUCT_STRING_DIGESTS:
+        return frozenset()
+    return frozenset(w.lower() for w in _WORD.findall(key) if _salted(w) in _HANDLE_DIGESTS)
+
+
+def _phrase_handles(words):
+    return {a.lower() for a, b in zip(words, words[1:]) if _salted(a + " " + b) in _HANDLE_PHRASE_DIGESTS}
+
+
+def _escaped(word):
+    """A word as a C# literal spells it with escapes only (the probes' form)."""
+    return "".join("\\u%04x" % ord(c) for c in word)
 
 
 def hygiene_hits(rel, lineno, text):
@@ -219,28 +250,37 @@ def hygiene_hits(rel, lineno, text):
         hits.append(where + " names the gitignored scratch tree, which exists on no other checkout")
     if any(token in text for token in _SANDBOX_TOKENS):
         hits.append(where + " names a local sandbox checkout")
-    if _ACCOUNT_LABEL.search(text):
+    decoded = _catalogue_text(text)
+    if _ACCOUNT_LABEL.search(text) or _ACCOUNT_LABEL.search(decoded):
         hits.append(where + " an account label (the maintainer's name joined to a seat number): "
                     "a seat is described by its role, never by its label")
-    if _ACCOUNT_NUMBER.search(text):
+    if _ACCOUNT_NUMBER.search(text) or _ACCOUNT_NUMBER.search(decoded):
         hits.append(where + " a 17-digit run, the form of an account number")
-    words = _WORD.findall(text)
-    product = {a.lower() for a, b in zip(words, words[1:]) if _salted(a + " " + b) in _HANDLE_PHRASE_DIGESTS}
-    if not _product_line(text):
-        for w in words:
-            if _salted(w) in _HANDLE_DIGESTS and w.lower() not in product:
-                hits.append("%s a personal handle (%d characters): the maintainer is 'Sid' "
-                            "in every artifact that leaves this machine, and testers are not "
-                            "named at all" % (where, len(w)))
-                break
-    for shape in _ATTRIBUTION_SHAPES:
-        for m in shape.finditer(text):
-            who = m.group(1)
-            if who == _MAINTAINER or who in _NOT_PEOPLE:
-                continue
-            hits.append("%s an attribution to a word (%d characters) that is neither the "
-                        "maintainer's name nor on the list of words that are not people"
-                        % (where, len(who)))
+    raw_words = _WORD.findall(text)
+    decoded_words = _WORD.findall(decoded)
+    # The handle words this line may carry: the server lane's product phrase
+    # (its word, on the line that carries the phrase) and, on an exempt
+    # catalogue row, its own key's handle words. Every other listed handle is
+    # refused, in the key and in the translated value alike.
+    allowed = _phrase_handles(raw_words) | _phrase_handles(decoded_words) | _key_handles(text)
+    for w in raw_words + decoded_words:
+        if _salted(w) in _HANDLE_DIGESTS and w.lower() not in allowed:
+            hits.append("%s a personal handle (%d characters): the maintainer is 'Sid' "
+                        "in every artifact that leaves this machine, and testers are not "
+                        "named at all" % (where, len(w)))
+            break
+    # Attributions are read in the line as written and, on a catalogue row, in
+    # its key and translated value as the game reads them (an attribution
+    # spelled with escapes is one too); a word the written reading already
+    # captured is not reported a second time.
+    raw_who = [m.group(1) for shape in _ATTRIBUTION_SHAPES for m in shape.finditer(text)]
+    decoded_who = [m.group(1) for shape in _ATTRIBUTION_SHAPES for m in shape.finditer(decoded)]
+    for who in raw_who + [w for w in decoded_who if w not in raw_who]:
+        if who == _MAINTAINER or who in _NOT_PEOPLE:
+            continue
+        hits.append("%s an attribution to a word (%d characters) that is neither the "
+                    "maintainer's name nor on the list of words that are not people"
+                    % (where, len(who)))
     return hits
 
 
@@ -305,6 +345,14 @@ def test_the_detector_refuses_each_class_it_exists_for():
     assert label, "an account label was accepted"
     number = refused("// account " + "7" * 17)
     assert number, "a 17-digit account number was accepted"
+    # A catalogue value is read as the game reads it: a label written with
+    # escapes is a label (difference 3's decoded reading).
+    escaped = refused('["Probe"] = "seen on ' + _escaped(_MAINTAINER[0]) + _MAINTAINER[1:] + str(3)
+                      + ' only",')
+    assert escaped, "an account label written with escapes in a catalogue value was accepted"
+    escaped_attribution = any(" an attribution to a word " in h for h in hygiene_hits(
+        "probe", 1, '["Probe"] = "' + _escaped(who) + ' reported it twice",'))
+    assert escaped_attribution, "an attribution written with escapes in a catalogue value was accepted"
     assert not refused("// Sid reported it twice"), "the maintainer was refused"
     possessive = refused("/// " + _MAINTAINER + "'s screenshot shows it")
     assert not possessive, "the maintainer's screenshot was refused"
@@ -331,8 +379,9 @@ def test_the_gate_lets_no_identifier_through():
     assert handles == 0, "%d entries of the list of words that are not people are listed handles" % handles
     met = set()
     for _rel, _lineno, text in _swept_lines():
-        for shape in _ATTRIBUTION_SHAPES:
-            met.update(m.group(1) for m in shape.finditer(text))
+        for reading in (text, _catalogue_text(text)):
+            for shape in _ATTRIBUTION_SHAPES:
+                met.update(m.group(1) for m in shape.finditer(reading))
     unmet = len(_NOT_PEOPLE - met)
     assert unmet == 0, (
         "%d entries of the list of words that are not people are met by no attribution "
@@ -381,6 +430,57 @@ def test_a_second_seat_label_planted_in_a_scratch_copy_is_refused(tmp_path):
     clean_hits, _n = _file_hits(str(clean), rel)
     n_clean = len(clean_hits)
     assert n_clean == 0, "the maintainer's name alone was refused (%d hits on the copy)" % n_clean
+
+
+def test_an_exempt_row_lets_only_its_own_key_s_handle_words_through():
+    """Difference 3 on the real catalogue. Every exempt row passes as it
+    stands, and its own product token appended to its translated value again
+    still passes; the same row with a listed handle its key does not carry
+    appended to its translated value is refused, written plainly or with
+    escapes only. The foreign handle is taken from another exempt row by its
+    digest at run time, so this file spells none, and every mutated row is
+    built in memory, never written. A failure reports line numbers and counts
+    only."""
+    rel = "plugin/I18nCatalogues.cs"
+    rows = []
+    for lineno, text in enumerate(_read(rel).split("\n"), 1):
+        own = _key_handles(text)
+        if own:
+            rows.append((lineno, text, own))
+    n_rows = len(rows)
+    assert n_rows > 0, "no exempt catalogue row was read: this probe has no subject"
+    handles = set()
+    for _lineno, _text, own in rows:
+        handles |= own
+    n_handles = len(handles)
+    assert n_handles >= 2, (
+        "the exempt rows carry %d listed handle(s); appending one row's to another's "
+        "translation needs two" % n_handles)
+    refused_as_is, passed_foreign, refused_own, foreign_tries = [], [], [], 0
+    for lineno, text, own in rows:
+        if hygiene_hits(rel, lineno, text):
+            refused_as_is.append(lineno)
+        at = _CATALOGUE_ENTRY.match(text).end(2)
+        for word in sorted(handles - own):
+            for spelled in (word, _escaped(word)):
+                foreign_tries += 1
+                mutated = text[:at] + " " + spelled + text[at:]
+                if not any(" a personal handle " in h for h in hygiene_hits(rel, lineno, mutated)):
+                    passed_foreign.append(lineno)
+        for word in sorted(own):
+            for spelled in (word, _escaped(word)):
+                again = text[:at] + " " + spelled + text[at:]
+                if hygiene_hits(rel, lineno, again):
+                    refused_own.append(lineno)
+    n_as_is, n_foreign, n_own = len(refused_as_is), len(passed_foreign), len(refused_own)
+    assert n_as_is == 0, "%d exempt rows refused as they stand (lines %s)" % (n_as_is, refused_as_is[:10])
+    assert foreign_tries > 0, "no foreign handle could be appended to any exempt row"
+    assert n_foreign == 0, (
+        "%d of %d exempt rows passed with a listed handle their key does not carry appended to "
+        "the translated value (lines %s)" % (n_foreign, foreign_tries, passed_foreign[:10]))
+    assert n_own == 0, (
+        "%d exempt rows were refused with their own product token appended again (lines %s)"
+        % (n_own, refused_own[:10]))
 
 
 def test_the_scope_is_every_file_this_lane_touches():
