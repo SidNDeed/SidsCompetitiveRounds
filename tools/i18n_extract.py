@@ -146,6 +146,11 @@ FILES = [
     # re-form, dissolve and joined toasts, all literal notification or
     # I18n.Tr/TrF arguments.
     "FfaAssembly.cs", "FfaLateEntry.cs",
+    # Item 19 (two default avatars by queue kind): the switch, unusable and
+    # recovery notices, the portrait-grid legend and the preset option
+    # labels, all at I18n.Tr/TrF sites. Its sibling AvatarDefaultRules.cs is
+    # deliberately absent: pure decision code with no display text.
+    "AvatarDefaults.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

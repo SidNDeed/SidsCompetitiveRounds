@@ -877,6 +877,9 @@ namespace CompetitiveRounds
                 case "SInpOv": PaintInputOverlay(t, SettingsAsBool(v)); return true;
                 case "SBlkDbg": PaintBlockDebug(t, SettingsAsBool(v)); return true;
                 case "SCursor": PaintCursorShape(t, SettingsAsStr(v)); return true;
+                case "SAvAuto": PaintAvatarAuto(t, SettingsAsBool(v)); return true;
+                case "SAvMod": PaintAvatarModded(t, SettingsAsInt(v)); return true;
+                case "SAvVan": PaintAvatarVanilla(t, SettingsAsInt(v)); return true;
                 case "STrail": PaintTrails(t, SettingsAsBool(v)); return true;
                 case "SPColor": PaintPlayerColors(t, SettingsAsBool(v)); return true;
                 case "SAnimCos": PaintAnimCos(t, SettingsAsBool(v)); return true;
@@ -1148,7 +1151,7 @@ namespace CompetitiveRounds
                 case "SCT": case "SAutoLog": k = "tracking"; break;
                 case "SPcPub": case "SPcAnn": case "SPcTrd": k = "cards"; break;
                 case "SPcPre": case "SPcDnc": k = "cards-pictures"; break;
-                case "SAnimCos": case "STrail": case "SCursor": k = "cosmetics"; break;
+                case "SAnimCos": case "STrail": case "SCursor": case "SAvAuto": case "SAvMod": case "SAvVan": k = "cosmetics"; break;
                 case "SPColor": k = "colors"; break;
             }
             try { return (k != null && InfoLibrary.Find(k) != null) ? k : null; } catch { return null; }
@@ -1763,7 +1766,7 @@ namespace CompetitiveRounds
             "SCT", "SChatTtl", "SCursor", "SBloom", "SShake", "SHpPrec", "SLang", "SDateFmt", "SPerfH",
             "SPerf_Master", "SPerf_Stun", "SPerf_OOB", "SPerf_HitSnd", "SPerf_EdgeBn", "SPerf_Menu",
             "SPerf_BulletCap", "SPerf_PoolInit", "SMailFrom", "SMailRelay", "SMailBlocked", "SPcPre",
-            "SPcDnc", "SDmgNum",
+            "SPcDnc", "SDmgNum", "SAvMod", "SAvVan",
         };
 
         private static void SettingsSelfTestStart(string why, string mutation = "")

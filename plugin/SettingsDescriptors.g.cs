@@ -30,6 +30,9 @@ namespace CompetitiveRounds
             new SettingsDescriptor("SAnimCos", "SWITCH", "visuals", true, true, "SAnimCos", "SAnimCos_q", "painted_literal", "ON"),
             new SettingsDescriptor("SAppOff", "SWITCH", "privacy", false, true, "SAppOff", "SAppOff_q", "painted_literal", "OFF"),
             new SettingsDescriptor("SAutoLog", "SWITCH", "privacy", false, true, "SAutoLog", "SAutoLog_q", "painted_literal", "ON"),
+            new SettingsDescriptor("SAvAuto", "SWITCH", "visuals", false, true, "SAvAuto", "SAvAuto_q", "painted_literal", "ON"),
+            new SettingsDescriptor("SAvMod", "DROPDOWN", "visuals", false, true, "SAvMod", "SAvMod_q", "painted_runtime", null),
+            new SettingsDescriptor("SAvVan", "DROPDOWN", "visuals", false, true, "SAvVan", "SAvVan_q", "painted_runtime", null),
             new SettingsDescriptor("SBlkDbg", "SWITCH", "ingame", true, true, "SBlkDbg", "SBlkDbg_q", "painted_literal", "OFF"),
             new SettingsDescriptor("SBloom", "SEGMENTED", "visuals", true, true, "SBloom", "SBloom_q", "painted_runtime", null),
             new SettingsDescriptor("SCT", "SWITCH", "privacy", false, true, "SCT", "SCT_q", "painted_after_change", "Granted"),
@@ -100,6 +103,9 @@ namespace CompetitiveRounds
                 case "SAnimCos": return I18n.Tr("turn it off on a weak GPU; nothing is hidden");
                 case "SAppOff": return I18n.Tr("it only hides you from Home lists; it does not hide matches");
                 case "SAutoLog": return I18n.Tr("sends the same logs the report form sends without you filing one; worth turning on if you have ever filed a report");
+                case "SAvAuto": return I18n.Tr("keeps a modded avatar out of games where it renders with holes");
+                case "SAvMod": return I18n.Tr("any preset; this is the one you wear everywhere else");
+                case "SAvVan": return I18n.Tr("only presets an unmodded opponent's own loader can resolve are visible to them");
                 case "SBlkDbg": return I18n.Tr("a debugging overlay, not a HUD");
                 case "SBloom": return I18n.Tr("painted-in glow stays whatever you pick");
                 case "SCT": return I18n.Tr("ranked is disabled until you grant it; revoking it again turns ranked back off");
@@ -162,6 +168,9 @@ namespace CompetitiveRounds
         {
             switch (key)
             {
+                case "SAvAuto": return I18n.Tr("Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot where each one should be. This picks the plain preset for you in games where that would happen, and gives you your own face back when you leave.");
+                case "SAvMod": return I18n.Tr("The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where everyone has the mod.");
+                case "SAvVan": return I18n.Tr("The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.");
                 case "SDBtn": return I18n.Tr("Arms the deletion. This press deletes nothing: the row swaps to a confirm button and a cancel button, and only the confirm performs it.");
                 case "SDXBtn": return I18n.Tr("Puts the delete row back to its normal state. Nothing has been deleted at this point, so cancelling costs nothing and the row can be armed again.");
                 case "SEBtn": return I18n.Tr("Leaves every queue this client believes it is in - ranked, casual and tournament - and clears the local queue state with them. It is safe to press when you are not queued.");
@@ -196,6 +205,9 @@ namespace CompetitiveRounds
         {
             switch (key)
             {
+                case "SAvAuto":
+                case "SAvMod":
+                case "SAvVan":
                 case "SPcPre":
                     return I18n.Tr("a picture choice has no right answer");
                 case "SLang":

@@ -7,6 +7,8 @@ ApiClient.cs	ApiClient	ParseFfaRecentList	players	N	JSON record field, no body
 ApiClient.cs	ApiClient	SpectateValidateActors	ActiveFighters	V	the attest roster's fighter ids read ActiveFighters(), the kept view; the send is the master-only validation (MasterMaySend, row 48)	
 ApiClient.cs	ApiClient	SpectateValidateActors	GetPlayer	F	resolves the invalid spectator the master closes; the master-only validation send is fenced (row 48), and the close in its answer reads MasterMaySend() (V9, N5)	
 ApiClient.cs	ApiClient	SpectateValidateActors	MasterMaySend	F	master-only spectator validation send; reads MasterMaySend()	
+AvatarDefaults.cs	AvatarDefaults	LocalBody	players	N	item 19 avatar liveness: finds the local body only to tell whether a game is live (no manager); decides no count, send gate, damage, pick or result	
+AvatarDefaults.cs	AvatarDefaults	ReadFacing	ActiveFighters	V	item 19 avatar census: the other fighters' published keys are read over ActiveFighters(), the kept view; the outcome is the local player's own face only	
 CardDrawEvidence.cs	CardDrawEvidence	C5	GetPlayerWithActorID	R	the card-draw evidence record: a raw fact of the pick phase written into the record the server judges; it decides no count, send gate, damage, pick or result (each target actor's role, read at the card's own event)	
 CardDrawEvidence.cs	CardDrawEvidence	FirstPhase	players	R	the card-draw evidence record: a raw fact of the pick phase written into the record the server judges; it decides no count, send gate, damage, pick or result (every body at the first pick phase, recorded as seen)	
 CardDrawEvidence.cs	CardDrawEvidence	GateRoom	ActiveFighterCount	V	the record is kept only for a two-fighter room, counted by ActiveFighterCount(), the kept view	
@@ -256,9 +258,8 @@ Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	OnPlayerLeftRoom	R	the actor-left 
 Plugin.cs	Cr2v2DiagCallbacks	OnPlayerLeftRoom	PlayerList	N	the 2v2 DC election's survivor walk; OnPlayerLeftRoom returns before it for an OVT or FFA room (Diag2v2.IsOvt() || Diag2v2.IsFfa())	
 Plugin.cs	Cr2v2DiagCallbacks	OnPlayerPropertiesUpdate	OnPlayerPropertiesUpdate	R	identity bookkeeping: a change of u_id, a spectator mark or the proximity capability invalidates the roster identity cache (Plugin.cs:4138)	
 Plugin.cs	Cr2v2DiagCallbacks	RepeatedCompetitiveCosmeticReapply	ActiveFighters	N	cosmetic reapply	
-Plugin.cs	Diag2v2	DescribeRoom	PlayerCount	N	diag text	
-Plugin.cs	FacePublisher	TryReadAndApply	ActiveFighters	N	cosmetic face	
-Plugin.cs	FaceResync	TrySendLocalFace	players	N	cosmetic face	
+Plugin.cs	Diag2v2	DescribeRoom	PlayerCount	N	diag text
+Plugin.cs	FaceResync	TrySendLocalFace	players	N	cosmetic face
 Plugin.cs	GMArmsRaceStartGameBlockResetPatch	RunSweep	players	R	game-start block reset over every body; a reset gives no body an effect	
 Plugin.cs	GMArmsRace_PlayerJoined_Diag_Patch	Prefix	players	N	diag log	
 Plugin.cs	GameCrownHandler2v2Patch	Prefix	players	N	crown cosmetic	

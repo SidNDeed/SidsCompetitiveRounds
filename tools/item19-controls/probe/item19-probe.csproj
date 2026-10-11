@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Item 19 fix pass 1: the behaviour probe. item19_controls.py copies this
+    project and ONE tree's plugin/AvatarDefaultRules.cs into a work directory
+    and builds them together, so the same scenarios run against any tree.
+    Never built in place.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>item19-probe</AssemblyName>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Probe.cs" />
+    <Compile Include="AvatarDefaultRules.cs" />
+  </ItemGroup>
+
+</Project>

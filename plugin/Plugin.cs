@@ -90,6 +90,12 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> ShowBlockDebug;
         internal static ConfigEntry<bool> ShowPlayerColors;
         internal static ConfigEntry<bool> ShowInputOverlay;
+        // Item 19 (two default avatars): the setting (three keys) and the ONE
+        // remembered value, the pre-switch own selection (-1 = none).
+        internal static ConfigEntry<bool> AvatarAutoSwitch;
+        internal static ConfigEntry<int> AvatarModdedPreset;
+        internal static ConfigEntry<int> AvatarVanillaPreset;
+        internal static ConfigEntry<int> AvatarHomeSlot;
         // v1.32 items 7+8 — standalone accessibility/FPS toggles. Deliberately
         // NOT under the Performance master switch: these are user preferences
         // that should survive a perf-master flip (map note, settings tab).
@@ -841,6 +847,29 @@ namespace CompetitiveRounds
                 "UI", "ShowInputOverlay",
                 false,
                 "Show a bottom-left WASD + Space + L/R-click input visualizer during matches. Keys glow red when pressed."
+            );
+
+            // Item 19: two default avatars chosen by the kind of room. New keys
+            // only; nothing above is renamed, retyped or moved.
+            AvatarAutoSwitch = Config.Bind(
+                "UI", "AvatarAutoSwitch",
+                true,
+                "Wear your vanilla avatar preset in games where somebody does not have the mod, and your modded preset where everyone does. Does nothing until the presets below are set."
+            );
+            AvatarModdedPreset = Config.Bind(
+                "UI", "AvatarModdedPreset",
+                -1,
+                "Character preset slot (0-based) worn where everyone has the mod. -1 = not set."
+            );
+            AvatarVanillaPreset = Config.Bind(
+                "UI", "AvatarVanillaPreset",
+                -1,
+                "Character preset slot (0-based) worn where somebody does not have the mod; only presets made from base-game items can be used. -1 = not set."
+            );
+            AvatarHomeSlot = Config.Bind(
+                "UI", "AvatarHomeSlot",
+                -1,
+                "Written by the mod: the preset you were wearing before a room switched it, given back when the room ends. -1 = none. Do not edit."
             );
 
             // LEGACY. Kept bound so the one-time migration below can read what the
@@ -3533,6 +3562,14 @@ namespace CompetitiveRounds
                 CompetitiveUI.ToggleOverlay();
             }
 
+            // Item 19: the avatar-default rings on the character menu's portrait
+            // grid. Here, not in NativeUI.Tick, because this tick runs with the
+            // mod's overlay closed (the F5 read above can only open it from here).
+            try { AvatarDefaults.Tick(); } catch { }
+            // Item 19 fix pass 3 (H3): retries an owed card-pick popup face
+            // whose carrier is held, and stops owing it past the bound.
+            try { PopupCarriers.Tick(); } catch { }
+
             // Per-frame FPS sampling (active only while a match is being tracked).
             try { GameStateWatcher.TickFrame(); } catch { }
 
@@ -4645,6 +4682,8 @@ namespace CompetitiveRounds
             try { RoomActors.InvalidateFighterCache(); } catch { }
             // Poison convergence v3 (A2b): any entry, spectators included.
             try { PoisonSync.V3RoomEvent("player-entered", p); } catch { }
+            // Item 19 edge E3: the roster grew, so the room's facing may have moved.
+            AvatarDefaults.Evaluate("E3-entered");
 
             // Local classification cache. Best effort and LOCAL by design
             // (r9 deleted the announced-verdict property): the cross-client
@@ -4827,6 +4866,9 @@ namespace CompetitiveRounds
             try { RoomActors.InvalidateFighterCache(); } catch { }
             // Poison convergence v3 (A2b): any departure, spectators included.
             try { PoisonSync.V3RoomEvent("player-left", p); } catch { }
+            // Item 19 edge E11: a departure raises no property update, so this
+            // is the only edge on which the facing can return to Modded.
+            AvatarDefaults.Evaluate("E11-left");
 
             // A 2v2 DC fallback watch, if one is armed, is watching for exactly
             // this: the ELECTED seat leaving. Before any of the classification
@@ -5369,6 +5411,14 @@ namespace CompetitiveRounds
             try { DcReportSync.NoteActorProps(target); } catch { }
             // Poison convergence v3 (A2b): a cr_pois3 change on any actor.
             try { PoisonSync.V3PropsChanged(target, changedProps); } catch { }
+            // Item 19 fix pass 3 (H3): a remote picker's face carrier ARRIVED
+            // (the join snapshot never comes through here); the card-pick popup
+            // applies it only when it is that picker's value for this pick.
+            try { PopupCarriers.Arrived(target, changedProps); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] carrier arrival failed: {ex.Message}"); }
+            // Item 19 edge E4: a peer's cr_* properties (or this seat's own role)
+            // may have arrived, which can move the room's facing either way.
+            AvatarDefaults.Evaluate("E4-props");
 
             // r8 M4: identity and role are what the lag-notice window keys on,
             // and both of them change through this callback. A change that
@@ -5395,7 +5445,14 @@ namespace CompetitiveRounds
             }
             catch { }
         }
-        public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged) { }
+        public void OnRoomPropertiesUpdate(ExitGames.Client.Photon.Hashtable propertiesThatChanged)
+        {
+            // Item 19 edge E12: cr_ff (read by IsModIssuedRoom) is a ROOM
+            // property that can land after the join. It triggers a fresh
+            // evaluation and is logged; it never decides the face (fix pass 1,
+            // BR-H1: only the every-fighter census can answer Modded).
+            AvatarDefaults.Evaluate("E12-roomprops");
+        }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {
             // Bug #269: a handoff revokes our authority to speak for the room,
@@ -5525,6 +5582,11 @@ namespace CompetitiveRounds
             try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
+            // Item 19 edge E7: a disconnect may produce no OnLeftRoom. Never inside
+            // an InRoom test: the census reads InRoom itself, and an evaluation
+            // with no room is where a forced face is given back, even while the
+            // old GameManager still reports a game (fix pass 1, M3).
+            AvatarDefaults.Evaluate("E7-disconnect");
             // lag-332 W1 (impl-review r5 MEDIUM 7): a disconnect that produces no
             // OnLeftRoom must still close the room/game telemetry — first
             // statement, before any early return below. Idempotent: with no
@@ -5570,6 +5632,9 @@ namespace CompetitiveRounds
                 if (tgnLine != null) Plugin.Log.LogInfo(tgnLine);
             }
             catch { }
+            // Item 19 edge E2: the join. The room's facing is derived from the
+            // room and its fighters' published properties, on every edge.
+            AvatarDefaults.Evaluate("E2-joined");
             // V11 I1: joined_room, for every join.
             try
             {
@@ -6244,6 +6309,10 @@ namespace CompetitiveRounds
             try { CardDrawEvidence.FreezeRoomFacts(); } catch { }     // the card record's room facts, before the reset (CD-M2)
             try { RoomRules.ResetLatched(); } catch { }              // room rules die with the room (§5.2)
             try { VanillaCardSequence.OnRoomLeft(); } catch { }      // and the vanilla-mode card sequence with them (§6)
+            // Item 19 edge E6: never inside an InRoom test - the InRoom poll turns
+            // false during Leaving, before this callback. The census reads it,
+            // and a confirmed no-room outranks a still-live manager (fix pass 1, H9).
+            AvatarDefaults.Evaluate("E6-left");
             // A teardown window is bound to the room it was opened in. Without
             // this a seat that leaves between the round call-in and the call-in
             // of new players carries the open window across the room boundary
@@ -6604,61 +6673,108 @@ namespace CompetitiveRounds
     }
 
     /// <summary>Publishes the local player's selected face to a Photon LocalPlayer
-    /// custom property `cr_face` so that in cr_ff rooms, every client can read any
-    /// other player's face without depending on RPC timing. Vanilla's
-    /// CardChoiceVisuals.Show fires `RPCA_SetFace` with `RpcTarget.All` only from
-    /// the picker's client — in 2v2 with 4 sequential pickers, the RPC for picker N
-    /// can arrive AFTER picker N+1's Show() has already torn down and re-rendered
-    /// the visualizer locally, so remote clients see "yesterday's picker" or no
-    /// face at all. Reading from custom props on each Show() call eliminates the
-    /// timing race entirely.</summary>
+    /// custom property `cr_face` so that every client can apply any other
+    /// player's face on the card-pick popup without depending on RPC timing.
+    /// Vanilla's CardChoiceVisuals.Show fires `RPCA_SetFace` with `RpcTarget.All`
+    /// only from the picker's client — in 2v2 with 4 sequential pickers, the RPC
+    /// for picker N can arrive AFTER picker N+1's Show() has already torn down and
+    /// re-rendered the visualizer locally, so remote clients see "yesterday's
+    /// picker" or no face at all. A property has its own race, the other way
+    /// round: a seat's copy of a remote carrier is the last update it received,
+    /// which can belong to an earlier pick. So the popup never reads that copy
+    /// (item 19 fix pass 3, H3): the picker BINDS the publish it makes at its
+    /// own popup to that popup's pick (fix pass 4: the game and rounds every
+    /// seat derives from the same events), and a remote seat applies a face or
+    /// a clear only when it is bound to the pick of the popup it shows
+    /// (PopupCarrierLedger, through PopupCarriers).</summary>
     internal static class FacePublisher
     {
         public const string PROP_FACE = "cr_face";
 
-        public static void PublishLocal()
+        /// <summary>The one publish-or-clear helper behind all four callers
+        /// (item 19 fix pass 1, H3). Every attempt ends in exactly one of three
+        /// outcomes, decided by AvatarRules.CarrierAction: the current valid
+        /// face is published; or the attempt reached a definitive "no valid
+        /// face" (no face list, a null face, an all-zero face) and the carrier
+        /// is CLEARED (once that write arrives, a remote seat's popup stops
+        /// owing this face and vanilla's RPC stays in charge); or nothing is written (a
+        /// spectator, no handler yet, no local player). A write reaches the
+        /// local cache only on the server's echo, so it is not observable in
+        /// the pass that made it: see the overload below (fix pass 2, H3).</summary>
+        public static FaceCarrierAction PublishLocal() => PublishLocal(out _);
+
+        /// <summary>The same attempt, also handing back the exact value it
+        /// published (null when it cleared or kept the carrier). Fix pass 2,
+        /// H3: PUN updates the local player's cached properties only on the
+        /// server's echo, so a caller that needs its own face in the same pass
+        /// uses this value and never rereads the cache. Fix pass 3, H3: forPick
+        /// is the card-pick popup's own publish (the local picker's Show). Fix
+        /// pass 4, H3: that one value is BOUND to the pick of the popup the
+        /// picker shows (PopupCarriers.PickNow): a face carries the pick as a
+        /// 13th field (PopupCarrierLedger.BoundFace), a clear is the tombstone
+        /// "clear|" + the pick (PopupCarrierLedger.BoundClear). A remote seat
+        /// applies either only to its popup of that same pick. When this seat
+        /// has no pick identity (no game start seen in this room) the publish
+        /// goes out unbound. Every other publish stays the 12 fields it always
+        /// was, and a clear outside a pick still removes the key.</summary>
+        public static FaceCarrierAction PublishLocal(out string published, bool forPick = false)
         {
+            published = null;
             try
             {
                 // Spectator: publishes NO cosmetic properties (design §3.5) —
-                // guarded here at the source so no call site can leak one.
-                if (RoomActors.LocalIsSpectator) return;
+                // guarded here at the source so no call site can leak one. No
+                // reader consults a spectator's carrier (the popup applies only
+                // the carrier of the picker it shows, and a spectator never
+                // picks), so Keep leaves nothing readable.
+                bool spectator = RoomActors.LocalIsSpectator;
                 var cch = CharacterCreatorHandler.instance;
-                if (cch == null)
+                bool listed = cch != null && cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0;
+                var face = listed ? cch.selectedPlayerFaces[0] : null;
+                var ids = face != null ? AvatarFaceIds.Of(face.eyeID, face.mouthID, face.detailID, face.detail2ID) : new AvatarFaceIds();
+                var action = new AvatarRules().CarrierAction(spectator, cch != null, PhotonNetwork.LocalPlayer != null, listed, ids);
+                if (action == FaceCarrierAction.Keep)
                 {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: CharacterCreatorHandler.instance is null (game state not ready)");
-                    return;
+                    if (spectator) return action;
+                    Plugin.Log.LogInfo(cch == null
+                        ? "[POPUP-DIAG] PublishLocal skipped: CharacterCreatorHandler.instance is null (game state not ready)"
+                        : "[POPUP-DIAG] PublishLocal skipped: LocalPlayer is null");
+                    return action;
                 }
-                if (cch.selectedPlayerFaces == null || cch.selectedPlayerFaces.Length == 0)
+                // Fix pass 4 (H3): the card-pick popup's own publish is bound to
+                // the pick that popup shows; null outside a pick, or when this
+                // seat has no pick identity (the publish then goes out unbound).
+                string pick = forPick ? PopupCarriers.PickNow() : null;
+                if (forPick && pick == null)
+                    Plugin.Log.LogInfo("[POPUP] card-pick publish unbound: this seat has seen no game start in this room, so no remote popup applies it");
+                if (action == FaceCarrierAction.Clear)
                 {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: selectedPlayerFaces empty");
-                    return;
-                }
-                var face = cch.selectedPlayerFaces[0];
-                if (face == null)
-                {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: face[0] is null");
-                    return;
-                }
-                if (PhotonNetwork.LocalPlayer == null)
-                {
-                    Plugin.Log.LogInfo("[POPUP-DIAG] PublishLocal skipped: LocalPlayer is null");
-                    return;
-                }
-                // If the local face is fully default (all four item IDs zero), skip
-                // publishing. Accounts that never opened the character creator
-                // have an uninitialized face — publishing all-zeros causes
-                // CharacterCreatorItemEquipper.EquipFace to call Equip(null) on
-                // each slot, which destroys the visualizer's stock face entirely
-                // and renders a featureless body. User reported: "2 of 4 missing
-                // in card-pick phase" pointed at Sid3/Sid4 (alts that never
-                // customized their face). Without our publish, vanilla's
-                // RPCA_SetFace on the picker's client falls back to the local
-                // visualizer's saved face.
-                if (face.eyeID == 0 && face.mouthID == 0 && face.detailID == 0 && face.detail2ID == 0)
-                {
-                    Plugin.Log.LogInfo("[2v2] FacePublisher: skipping publish (face is all-zero defaults — let vanilla RPC handle it)");
-                    return;
+                    // No valid face to publish: selectedPlayerFaces empty, face[0]
+                    // null, or a fully default face (all four item IDs zero).
+                    // Accounts that never opened the character creator have an
+                    // uninitialized face — publishing all-zeros causes
+                    // CharacterCreatorItemEquipper.EquipFace to call Equip(null)
+                    // on each slot, which destroys the visualizer's stock face
+                    // entirely and renders a featureless body ("2 of 4 missing in
+                    // card-pick phase", alts that never customized their face).
+                    // Without a carrier, vanilla's RPCA_SetFace on the picker's
+                    // client falls back to the local visualizer's saved face. The
+                    // clear removes a carrier an earlier attempt published, which
+                    // returning here used to leave in place for the popup. Fix
+                    // pass 4 (H3): at a pick the clear is the tombstone bound to
+                    // the popup's pick, so a remote popup of that pick stops
+                    // owing a face at once; the key stays present until the next
+                    // publish (the facing census skips the carrier key by name,
+                    // AvatarRules.CarriesModSignature), and a reader that needs 12
+                    // fields (a 1.40.3 seat) refuses it and applies nothing.
+                    var clear = new ExitGames.Client.Photon.Hashtable();
+                    if (pick == null) clear[PROP_FACE] = null;
+                    else clear[PROP_FACE] = PopupCarrierLedger.BoundClear(pick);
+                    PhotonNetwork.LocalPlayer.SetCustomProperties(clear);
+                    Plugin.Log.LogInfo("[2v2] FacePublisher: cleared the face carrier ("
+                        + (!listed ? "selectedPlayerFaces empty" : face == null ? "face[0] is null" : "face is all-zero defaults")
+                        + (pick != null ? ", bound to " + pick : "") + " — let vanilla RPC handle it)");
+                    return action;
                 }
 
                 string serialized = string.Join("|", new[] {
@@ -6675,37 +6791,24 @@ namespace CompetitiveRounds
                     face.detail2Offset.x.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
                     face.detail2Offset.y.ToString("F3", System.Globalization.CultureInfo.InvariantCulture),
                 });
+                if (pick != null) serialized = PopupCarrierLedger.BoundFace(serialized, pick);
                 var props = new ExitGames.Client.Photon.Hashtable();
                 props[PROP_FACE] = serialized;
                 PhotonNetwork.LocalPlayer.SetCustomProperties(props);
                 Plugin.Log.LogInfo($"[2v2] Published local face to Photon: {serialized}");
+                published = serialized;
+                return FaceCarrierAction.Publish;
             }
-            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish failed: {ex.Message}"); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] Face publish failed: {ex.Message}"); return FaceCarrierAction.Keep; }
         }
 
-        public static bool TryReadAndApply(int pickerActorNumber, GameObject visualizerRoot)
+        /// <summary>Equip a serialized face on the popup's visualizer. A null
+        /// or empty value applies nothing (vanilla's RPC stays in charge).</summary>
+        public static bool ApplySerialized(string s, int pickerActorNumber, GameObject visualizerRoot)
         {
             try
             {
-                Photon.Realtime.Player photonPlayer = null;
-                foreach (var pp in RoomActors.ActiveFighters())   // census: a picker is always a fighter
-                    if (pp != null && pp.ActorNumber == pickerActorNumber) { photonPlayer = pp; break; }
-                if (photonPlayer == null || photonPlayer.CustomProperties == null)
-                {
-                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: photonPlayer={(photonPlayer == null ? "null" : "found")} props={(photonPlayer?.CustomProperties == null ? "null" : "ok")}");
-                    return false;
-                }
-                if (!photonPlayer.CustomProperties.ContainsKey(PROP_FACE))
-                {
-                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: cr_face property not set on remote player (their client never published, or property not yet replicated)");
-                    return false;
-                }
-                string s = photonPlayer.CustomProperties[PROP_FACE]?.ToString() ?? "";
-                if (string.IsNullOrEmpty(s))
-                {
-                    Plugin.Log.LogInfo($"[POPUP-DIAG] Face apply skipped actor={pickerActorNumber}: cr_face value is empty string");
-                    return false;
-                }
+                if (string.IsNullOrEmpty(s)) return false;
                 var parts = s.Split('|');
                 if (parts.Length < 12)
                 {
@@ -6723,7 +6826,7 @@ namespace CompetitiveRounds
                 float d2Ox = float.Parse(parts[10], ic), d2Oy = float.Parse(parts[11], ic);
                 // Skip all-zero faces (uninitialized accounts). Applying a
                 // default face wipes the visualizer's stock face. Caller will
-                // see TryReadAndApply return false and won't log "applied".
+                // see ApplySerialized return false and won't log "applied".
                 if (eyeID == 0 && mouthID == 0 && detailID == 0 && detail2ID == 0) return false;
                 var face = PlayerFace.CreateFace(
                     eyeID, new Vector2(eOx, eOy),
@@ -6738,18 +6841,141 @@ namespace CompetitiveRounds
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning($"[2v2] Face read+apply failed: {ex.Message}");
+                Plugin.Log.LogWarning($"[2v2] Face apply failed: {ex.Message}");
                 return false;
             }
         }
     }
 
-    /// <summary>Patch CardChoiceVisuals.Show Postfix to apply the picker's face from
-    /// Photon custom props after vanilla's RPC-broadcast attempt. In 2v2 the vanilla
-    /// RPC has timing races (only the picker's client fires it; remote clients can
-    /// see stale faces from the previous picker, or nothing if the RPC arrived
-    /// AFTER the next picker's Show tore down and re-instantiated the skin). Reading
-    /// from custom props each Show() guarantees the right face on every client.</summary>
+    /// <summary>Item 19 fix pass 3 (H3, the remote arm), bound in fix pass 4:
+    /// the Unity and Photon half of PopupCarrierLedger (AvatarDefaultRules.cs).
+    /// The card-pick popup (CardChoiceVisuals_Show_Competitive_Patch) applies
+    /// the picker's face from the cr_face carrier after vanilla's RPC-broadcast
+    /// attempt, which has timing races in 2v2 (only the picker's client fires
+    /// it; a remote seat can show the previous picker's face, or none, when the
+    /// RPC lands after the next picker's Show re-instantiated the skin). The
+    /// local picker applies the value it has just published (fix pass 2, H3).
+    /// A remote picker's face is the value that picker published BOUND to the
+    /// pick this popup shows (fix pass 4, H3: the pick identity PickNow, which
+    /// every seat derives from the same two events, the game start it saw in
+    /// the room and the rounds the master's RPCA_NextRound set): applied at
+    /// Show when it has arrived, and on arrival when it has not; a value bound
+    /// to another pick, or to none, is never applied. This class feeds the
+    /// ledger from the places that move it (the DoStartGame prefix, the Show
+    /// postfix, the property callback, the Hide postfix, the behaviour's tick),
+    /// applies what it hands back, and logs each decision as [POPUP]. Every
+    /// entry point runs on the main thread.</summary>
+    internal static class PopupCarriers
+    {
+        private static readonly PopupCarrierLedger Ledger = new PopupCarrierLedger(new AvatarRules());
+
+        private static object Room()
+        {
+            try { return PhotonNetwork.CurrentRoom; } catch { return null; }
+        }
+
+        private static double Now() => Time.realtimeSinceStartup;
+
+        private static void Say()
+        {
+            string n = Ledger.Note;
+            if (n != null) Plugin.Log.LogInfo("[POPUP] " + n);
+        }
+
+        /// <summary>The rounds completed in the current game on this seat
+        /// (GM_ArmsRace.p1Rounds + p2Rounds: zeroed for a game start by a new
+        /// GM or ResetMatch, and set on every seat by RPCA_NextRound before
+        /// that round's picks), or -1 when there is no game to read.</summary>
+        private static int Rounds()
+        {
+            try
+            {
+                var gm = GM_ArmsRace.instance;
+                return gm != null ? gm.p1Rounds + gm.p2Rounds : -1;
+            }
+            catch { return -1; }
+        }
+
+        /// <summary>The identity of the pick a card-pick popup opening now
+        /// shows (fix pass 4, H3): "pick" + the games this seat saw start in
+        /// the room + "." + the rounds completed; null when this seat has none.
+        /// The picker binds its card-pick publish to it (FacePublisher.PublishLocal)
+        /// and a remote seat's popup of that pick derives the same value.</summary>
+        internal static string PickNow()
+        {
+            string pick = Ledger.PopupPick(Room(), Rounds());
+            Say();
+            return pick;
+        }
+
+        /// <summary>GM_ArmsRace.DoStartGame on a fighter seat (the first game
+        /// through StartGame, every same-room rematch through IDoRematch, #138).</summary>
+        internal static void GameStarted()
+        {
+            Ledger.GameStarted(Room());
+            Say();
+        }
+
+        /// <summary>The popup's remote arm (AvatarRules.PopupFace calls it for
+        /// a remote picker only): the value that picker published bound to the
+        /// pick this popup shows, or null while it has not arrived (the apply
+        /// is owed) or when nothing can be applied.</summary>
+        internal static string ForShow(int actor)
+        {
+            string pick = PickNow();
+            string v = Ledger.Show(Room(), actor, pick, Now());
+            Say();
+            return v;
+        }
+
+        /// <summary>The Show postfix applied a value ForShow handed it.</summary>
+        internal static void Applied(int actor, bool committed)
+        {
+            Ledger.Applied(actor, committed, Now());
+            Say();
+        }
+
+        /// <summary>The popup moved to the local picker, or was hidden.</summary>
+        internal static void Ended()
+        {
+            Ledger.EndSession(Room());
+            Say();
+        }
+
+        /// <summary>OnPlayerPropertiesUpdate: a carrier update from a remote
+        /// actor ARRIVED (a bound clear arrives as the tombstone, a removed key
+        /// as null). The join snapshot never comes through here, so it is never
+        /// taken for a pick's value. This is the one read of a carrier VALUE
+        /// (fix pass 4, H3): the ledger applies it only through the binding
+        /// check, AvatarRules.BoundToPopup.</summary>
+        internal static void Arrived(Photon.Realtime.Player target, ExitGames.Client.Photon.Hashtable changed)
+        {
+            if (target == null || target.IsLocal || changed == null || !changed.ContainsKey(FacePublisher.PROP_FACE)) return;
+            string v = Ledger.Arrived(Room(), target.ActorNumber, changed[FacePublisher.PROP_FACE] as string, PickNow(), Now());
+            Say();
+            if (v != null) ApplyNow(target.ActorNumber, v, "on arrival");
+        }
+
+        /// <summary>The behaviour's tick, every 15 frames: retries an owed
+        /// apply whose value is held, and drops one past the bound.</summary>
+        internal static void Tick()
+        {
+            if (Time.frameCount % 15 != 0) return;
+            string v = Ledger.Tick(Room(), Now());
+            Say();
+            if (v != null) ApplyNow(Ledger.Shown, v, "on retry");
+        }
+
+        private static void ApplyNow(int actor, string value, string when)
+        {
+            var vis = CardChoiceVisuals.instance;
+            bool ok = vis != null && FacePublisher.ApplySerialized(value, actor, vis.gameObject);
+            Ledger.Applied(actor, ok, Now());
+            Say();
+            if (ok) Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face (the value its picker published bound to this pick, {when}) (actor={actor})");
+        }
+    }
+
     /// <summary>Re-tint the card-pick visualizer body to match the picker's
     /// actual team. Vanilla CardChoiceVisuals spawns a skin clone that displays
     /// fine in 1v1, but in 2v2 our PlayerSkinBank patch can't reach the visualizer
@@ -7060,6 +7286,12 @@ namespace CompetitiveRounds
         static void Postfix(CardChoiceVisuals __instance, int pickerID)
         {
             LastShownPickerIndex = pickerID;
+            // Item 19 fix pass 3 (H3): set once this Show reached the carrier
+            // ledger as a REMOTE picker's popup; every other Show (the local
+            // picker, offline, or any early return or fault below) ends the
+            // ledger's popup session in the finally, so a carrier arriving
+            // later is never equipped onto a skin that is not its picker's.
+            bool remoteShown = false;
             try
             {
                 // Bug: "my skin wasn't Mustard during card pick" (casual room,
@@ -7087,14 +7319,34 @@ namespace CompetitiveRounds
                 // race between OnJoinedRoom and the first card-pick on a peer.
                 // A republish here gives the remote a fresh property right
                 // before they need it.
-                if (picker.IsLocal) FacePublisher.PublishLocal();
+                // Item 19 fix pass 2 (H3): the local cache takes that write only
+                // on the server's echo, so this pass uses the value it has just
+                // published (or nothing when the attempt cleared or kept the
+                // carrier) and never rereads the cache. Fix pass 3 (H3, the
+                // remote arm), bound in fix pass 4: that publish is bound to
+                // the pick this popup shows (PopupCarriers.PickNow), and a
+                // remote picker's face is the value it published bound to the
+                // pick THIS seat's popup shows, never this seat's cached copy
+                // and never a value bound to another pick or to none:
+                // PopupCarriers.ForShow hands it over when it has arrived, and
+                // otherwise owes the apply, which
+                // PopupCarriers.Arrived completes. AvatarRules.PopupFace decides
+                // which arm runs.
+                string freshFace = null;
+                var carrier = picker.IsLocal ? FacePublisher.PublishLocal(out freshFace, forPick: true) : FaceCarrierAction.Keep;
                 // Instinct achievement (v1.30): remember whose pick popup this is
                 // so the RPCA_SetCurrentSelected postfix only counts LOCAL scrolls.
                 CardPickSelectionTracker.CurrentPickerIsLocal = picker.IsLocal;
 
-                bool ok = FacePublisher.TryReadAndApply(pv.Owner.ActorNumber, __instance.gameObject);
+                int pickerActor = pv.Owner.ActorNumber;
+                string popupFace = new AvatarRules().PopupFace(picker.IsLocal, carrier, freshFace,
+                    () => { string v = PopupCarriers.ForShow(pickerActor); remoteShown = true; return v; });
+                bool ok = FacePublisher.ApplySerialized(popupFace, pickerActor, __instance.gameObject);
+                if (remoteShown && popupFace != null) PopupCarriers.Applied(pickerActor, ok);
                 if (ok)
-                    Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face from Photon (pickerID={pickerID}, actor={pv.Owner.ActorNumber})");
+                    Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: applied picker face ({(picker.IsLocal ? "the value this pass published" : "the value its picker published bound to this pick")}) (pickerID={pickerID}, actor={pickerActor})");
+                else if (picker.IsLocal && carrier != FaceCarrierAction.Publish)
+                    Plugin.Log.LogInfo($"[POPUP] CardChoiceVisuals: local picker carrier {carrier}, no face applied; vanilla's RPC in charge (pickerID={pickerID})");
 
                 // Diagnostic for "2 of 4 pickers don't show a character" bug.
                 // Log currentSkin state + transform so we can tell if the GO
@@ -7132,6 +7384,51 @@ namespace CompetitiveRounds
                 catch (Exception dex) { Plugin.Log.LogWarning($"[CARDPICK-DIAG] log error: {dex.Message}"); }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] CardChoiceVisuals.Show postfix error: {ex.Message}"); }
+            finally
+            {
+                if (!remoteShown)
+                {
+                    try { PopupCarriers.Ended(); }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] carrier ledger end failed: {ex.Message}"); }
+                }
+            }
+        }
+    }
+
+    /// <summary>Item 19 fix pass 3 (H3): a hidden popup shows no picker, so the
+    /// carrier ledger's popup session ends here (what it held for that picker
+    /// belongs to the pick that just ended, see PopupCarrierLedger). A postfix,
+    /// so it runs also when InactiveVisualsHidePatch skips vanilla's Hide on an
+    /// inactive visualizer, which shows no picker either.</summary>
+    [HarmonyPatch(typeof(CardChoiceVisuals), "Hide")]
+    class CardChoiceVisuals_Hide_PopupCarrier_Patch
+    {
+        static void Postfix()
+        {
+            try { PopupCarriers.Ended(); }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POPUP] Hide postfix error: {ex.Message}"); }
+        }
+    }
+
+    /// <summary>Item 19 fix pass 4 (H3): the game half of the pick identity.
+    /// GM_ArmsRace.DoStartGame runs on every fighter seat once per game (the
+    /// first game through StartGame, every same-room rematch through
+    /// IDoRematch, #138; never from RoundTransition), so the games each seat
+    /// counts in a room agree across the seats that saw them start. A void
+    /// prefix: it runs whatever a sibling prefix returns (#352) and changes
+    /// nothing the game reads. A spectator is not counted (its popups get no
+    /// identity, so no carrier is applied there and vanilla's face stands).</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "DoStartGame")]
+    internal static class GMArmsRace_DoStartGame_PopupCarrier_Patch
+    {
+        private static void Prefix()
+        {
+            try
+            {
+                if (PhotonNetwork.OfflineMode || RoomActors.LocalIsSpectator) return;
+                PopupCarriers.GameStarted();
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[POPUP] carrier ledger game start failed: " + ex.Message); }
         }
     }
 

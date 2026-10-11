@@ -934,7 +934,7 @@ namespace CompetitiveRounds
                     // them can be filled in the character creator. The array bound stays as
                     // well so a discovery that over-reports can never index out of range.
                     if (preset >= 0 && preset < PresetSlotCount() && cch.playerFaces != null && preset < cch.playerFaces.Length) f = cch.playerFaces[preset];
-                    else if (cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0) f = cch.selectedPlayerFaces[0];
+                    else f = AvatarDefaults.FaceForFollow();   // item 19: the face a forced room switch displaced, else the live selection
                 }
                 if (f != null)
                     face = f.eyeID + ":" + f.mouthID + ":" + f.detailID + ":" + f.detail2ID + ";"
@@ -1038,7 +1038,7 @@ namespace CompetitiveRounds
                     // them can be filled in the character creator. The array bound stays as
                     // well so a discovery that over-reports can never index out of range.
                     if (preset >= 0 && preset < PresetSlotCount() && cch.playerFaces != null && preset < cch.playerFaces.Length) f = cch.playerFaces[preset];
-                    else if (cch.selectedPlayerFaces != null && cch.selectedPlayerFaces.Length > 0) f = cch.selectedPlayerFaces[0];
+                    else f = AvatarDefaults.FaceForFollow();   // item 19: the face a forced room switch displaced, else the live selection
                 }
             }
             catch { f = null; }
