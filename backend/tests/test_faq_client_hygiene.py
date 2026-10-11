@@ -23,9 +23,11 @@ history and runs everywhere.
 
 THE DETECTOR is the FAQ server lane's (backend/tests/test_faq_surfaces.py,
 its section 3), ported with its salt, its handle digests and its attribution
-shapes unchanged, so this lane refuses everything that one does. Five
-differences, each stated where it lives below: words are Unicode words; one
-handle is added; a catalogue row whose English key is a shipped product
+shapes, so this lane refuses everything that one does. Five differences,
+each stated where it lives below: words are Unicode words, and a handle or
+an account label is matched in the folded text (NFKC-normalised and
+casefolded), so every letter case and compatibility form of it is one form;
+two handles are added; a catalogue row whose English key is a shipped product
 string that names a community member on purpose may carry that key's own
 handle words, in the key and in its translation, and no other handle (the
 translated value is scanned like any line, and every class reads a
@@ -51,6 +53,7 @@ import hashlib
 import os
 import re
 import subprocess
+import unicodedata
 
 import pytest
 
@@ -80,18 +83,35 @@ _SANDBOX_TOKENS = ("scr" + "-wt-", "scr" + "-codex")
 # for "almost" broke into a one-letter head and a four-letter tail whose digest
 # is a listed handle, eight times. A word starts with a letter of any script.
 _WORD = re.compile(r"[^\W\d_]\w*")
+# A word's letter runs: a handle joined to a digit or an underscore ("x_2",
+# "x2") is a word of its own to _WORD, and its letter run is the handle.
+_LETTERS = re.compile(r"[^\W\d_]+")
+
+
+def _fold(text):
+    """Text as the identifier classes compare it: NFKC-normalised (a
+    full-width or otherwise compatibility-encoded letter or digit is the
+    letter or digit it renders as) and casefolded (capitalised, lower-case,
+    upper-case and mixed-case forms are one form)."""
+    return unicodedata.normalize("NFKC", text).casefold()
+
 
 _HANDLE_SALT = "scr-faq-item11-handle-blocklist-v1"
-# The server lane's four digests, unchanged, plus one (difference 2): a
+# The server lane's four digests, unchanged, plus two (difference 2): a
 # community member whose handle stood in four comments of these files, in the
 # shapes "(handle, date; ...)" and "batch (handle's charts)" that no
-# attribution shape below recognises.
+# attribution shape below recognises; and the second-seat identifier, which
+# stood in three comments of NativeUI.cs in lower case, as the subject of a
+# verb, as a possessive and inside a parenthesis. A digest is compared with
+# the folded word (_fold), so every letter case and compatibility form of a
+# listed handle is that handle.
 _HANDLE_DIGESTS = frozenset([
     "422aec928bf8edfddc358c6f59ede0b2b7306bebcd6cf798e900044d0309e9f8",
     "4412d9ea108a8a78983534ec345969267c9e40b53c88b7a6079177a23c85a673",
     "73f5adebce4448ae85fc7f6c505207716e70f88e3b0bff43072afb7508850c04",
     "fe7ed63ab5330c6fe2cd7fa73aa921339026008bbd51adca63fda318c424eaee",
     "1836e76c09dd1c1847d37f79b79dafff0666da2c2b6d23bfa2462eebac56330e",
+    "5f84341006e3c6c924b8595196c7a7ca32cb1d288e864b447eb0fbb2fbc2550e",
 ])
 
 # The server lane's product phrase (an achievement named after a community
@@ -134,18 +154,30 @@ _MAINTAINER = "Sid"
 # the maintainer's name joined to the seat's number. Such a label names a
 # seat, and these files describe a seat by its role, so the label is refused
 # wherever it stands, not only where an attribution shape meets it (no shape
-# sees a label inside a parenthesis). The shape: the name capitalised or in
-# capitals, then a digit, joined directly or by an underscore or a hyphen, or
-# after one space when the digit does not begin a number, a time or a range.
-# The lower-case form is not a name: in these files it is the code's own
-# steam-id variables. An account number is any 17-digit run, the class every
-# evidence log of this lane masks.
+# sees a label inside a parenthesis). The shape is applied to the folded
+# text (_fold), so it holds in every letter case and compatibility form: the
+# name not preceded by a letter, then a digit, joined directly or by an
+# underscore or a hyphen, or after one space. After a space-joined digit the
+# label ends at anything but a number's continuation: a further digit, or a
+# colon, slash, hyphen, period or comma followed by a digit (a time, a range,
+# a decimal) is a number; any other delimiter (a colon, comma, period,
+# bracket, quote, slash, hyphen or underscore before a non-digit) and the end
+# of the line end a label. No code identifier of these files has the shape
+# in any case (the one local variable that had it was renamed). An account
+# number is any 17-digit run, the class every evidence log of this lane masks.
 _ACCOUNT_LABEL = re.compile(
-    r"(?<![A-Za-z0-9_])(?:" + _MAINTAINER + "|" + _MAINTAINER.upper() + r")"
-    r"(?:[_-]?[0-9]|\s[0-9](?![0-9:/-]))")
+    r"(?<![^\W\d_])" + re.escape(_fold(_MAINTAINER))
+    + r"(?:[_-]?\d|\s\d(?!\d)(?![:/\-.,]\d))")
 _ACCOUNT_NUMBER = re.compile(r"(?<![0-9])[0-9]{17}(?![0-9])")
 
-_NAME = r"([A-Z][A-Za-z0-9_]*)"
+# A name an attribution shape captures: a word that starts with a letter
+# other than an ASCII lower-case one (so a capitalised name in any script is
+# seen), kept only when its first letter is upper-case or title-case
+# (_attribution_captures); the shapes read the NFKC-normalised line. A
+# lower-case name is no shape's subject (it is indistinguishable from an
+# ordinary word): the listed handles and the label class are matched in
+# every case instead.
+_NAME = r"([^\W\d_a-z]\w*)"
 _ATTRIBUTION_SHAPES = (
     re.compile(_NAME + r"(?:/[A-Za-z0-9_]+)*\s+(?:reported|noticed|asked|"
                r"suggested|proposed|requested|spotted|flagged|found|wanted|"
@@ -184,7 +216,22 @@ def _read(rel):
 
 
 def _salted(text):
-    return hashlib.sha256((_HANDLE_SALT + text.lower()).encode("utf-8")).hexdigest()
+    return hashlib.sha256((_HANDLE_SALT + _fold(text)).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _handle_words(reading):
+    """Every word of a reading the handle digests are compared with: the
+    folded reading's words and their letter runs."""
+    folded = _fold(reading)
+    return _WORD.findall(folded) + [r for w in _WORD.findall(folded) for r in _LETTERS.findall(w) if r != w]
+
+
+def _attribution_captures(reading):
+    """The names the attribution shapes capture in a reading (NFKC-normalised),
+    those whose first letter is upper-case or title-case."""
+    normal = unicodedata.normalize("NFKC", reading)
+    return [m.group(1) for shape in _ATTRIBUTION_SHAPES for m in shape.finditer(normal)
+            if m.group(1)[:1].isupper() or m.group(1)[:1].istitle()]
 
 
 def _cs_literal(body):
@@ -226,11 +273,17 @@ def _key_handles(text):
     digest = hashlib.sha256((_HANDLE_SALT + "string:" + key).encode("utf-8")).hexdigest()
     if digest not in _PRODUCT_STRING_DIGESTS:
         return frozenset()
-    return frozenset(w.lower() for w in _WORD.findall(key) if _salted(w) in _HANDLE_DIGESTS)
+    return frozenset(_fold(w) for w in _handle_words(key) if _salted(w) in _HANDLE_DIGESTS)
 
 
-def _phrase_handles(words):
-    return {a.lower() for a, b in zip(words, words[1:]) if _salted(a + " " + b) in _HANDLE_PHRASE_DIGESTS}
+def _phrase_handles(reading):
+    """The handle word of the product phrase on a reading that carries it, as
+    words or as letter runs (the achievement's id joins the phrase's two
+    words with an underscore)."""
+    out = set()
+    for words in (_WORD.findall(_fold(reading)), _LETTERS.findall(_fold(reading))):
+        out |= {a for a, b in zip(words, words[1:]) if _salted(a + " " + b) in _HANDLE_PHRASE_DIGESTS}
+    return out
 
 
 def _escaped(word):
@@ -251,20 +304,19 @@ def hygiene_hits(rel, lineno, text):
     if any(token in text for token in _SANDBOX_TOKENS):
         hits.append(where + " names a local sandbox checkout")
     decoded = _catalogue_text(text)
-    if _ACCOUNT_LABEL.search(text) or _ACCOUNT_LABEL.search(decoded):
+    if _ACCOUNT_LABEL.search(_fold(text)) or _ACCOUNT_LABEL.search(_fold(decoded)):
         hits.append(where + " an account label (the maintainer's name joined to a seat number): "
                     "a seat is described by its role, never by its label")
     if _ACCOUNT_NUMBER.search(text) or _ACCOUNT_NUMBER.search(decoded):
         hits.append(where + " a 17-digit run, the form of an account number")
-    raw_words = _WORD.findall(text)
-    decoded_words = _WORD.findall(decoded)
     # The handle words this line may carry: the server lane's product phrase
     # (its word, on the line that carries the phrase) and, on an exempt
     # catalogue row, its own key's handle words. Every other listed handle is
-    # refused, in the key and in the translated value alike.
-    allowed = _phrase_handles(raw_words) | _phrase_handles(decoded_words) | _key_handles(text)
-    for w in raw_words + decoded_words:
-        if _salted(w) in _HANDLE_DIGESTS and w.lower() not in allowed:
+    # refused, in the key and in the translated value alike, in every letter
+    # case and compatibility form (_handle_words folds the reading).
+    allowed = _phrase_handles(text) | _phrase_handles(decoded) | _key_handles(text)
+    for w in _handle_words(text) + _handle_words(decoded):
+        if _salted(w) in _HANDLE_DIGESTS and w not in allowed:
             hits.append("%s a personal handle (%d characters): the maintainer is 'Sid' "
                         "in every artifact that leaves this machine, and testers are not "
                         "named at all" % (where, len(w)))
@@ -273,8 +325,8 @@ def hygiene_hits(rel, lineno, text):
     # its key and translated value as the game reads them (an attribution
     # spelled with escapes is one too); a word the written reading already
     # captured is not reported a second time.
-    raw_who = [m.group(1) for shape in _ATTRIBUTION_SHAPES for m in shape.finditer(text)]
-    decoded_who = [m.group(1) for shape in _ATTRIBUTION_SHAPES for m in shape.finditer(decoded)]
+    raw_who = _attribution_captures(text)
+    decoded_who = _attribution_captures(decoded)
     for who in raw_who + [w for w in decoded_who if w not in raw_who]:
         if who == _MAINTAINER or who in _NOT_PEOPLE:
             continue
@@ -373,15 +425,14 @@ def test_the_gate_lets_no_identifier_through():
     list cannot carry a name no line needs. Counts only on failure."""
     maintainer_listed = _MAINTAINER in _NOT_PEOPLE
     assert not maintainer_listed, "the maintainer is on the list of words that are not people"
-    labels = sum(1 for w in _NOT_PEOPLE if _ACCOUNT_LABEL.search(w))
+    labels = sum(1 for w in _NOT_PEOPLE if _ACCOUNT_LABEL.search(_fold(w)))
     assert labels == 0, "%d entries of the list of words that are not people are account labels" % labels
     handles = sum(1 for w in _NOT_PEOPLE if _salted(w) in _HANDLE_DIGESTS)
     assert handles == 0, "%d entries of the list of words that are not people are listed handles" % handles
     met = set()
     for _rel, _lineno, text in _swept_lines():
         for reading in (text, _catalogue_text(text)):
-            for shape in _ATTRIBUTION_SHAPES:
-                met.update(m.group(1) for m in shape.finditer(reading))
+            met.update(_attribution_captures(reading))
     unmet = len(_NOT_PEOPLE - met)
     assert unmet == 0, (
         "%d entries of the list of words that are not people are met by no attribution "
@@ -430,6 +481,92 @@ def test_a_second_seat_label_planted_in_a_scratch_copy_is_refused(tmp_path):
     clean_hits, _n = _file_hits(str(clean), rel)
     n_clean = len(clean_hits)
     assert n_clean == 0, "the maintainer's name alone was refused (%d hits on the copy)" % n_clean
+
+
+def _fullwidth(text):
+    """ASCII text in its full-width compatibility form (NFKC maps it back)."""
+    return "".join(chr(ord(c) + 0xFEE0) if "!" <= c <= "~" else c for c in text)
+
+
+def test_a_planted_label_is_refused_in_every_case_and_at_every_delimiter():
+    """The label class in every letter case and at every delimiter. A planted
+    second-seat label, built from its parts at run time, is refused as an
+    account label in the bare, possessive and lower-case-subject forms; in
+    capitals, mixed case and full width; joined directly, by an underscore, a
+    hyphen and one space; and space-joined before every delimiter that ends
+    it (colon, semicolon, comma, period, the closing brackets, both quotes,
+    slash, hyphen, underscore, question and exclamation marks) and at the end
+    of a line. A time, a range, a decimal and a two-digit number after the
+    maintainer's name are not labels, and neither is his name alone. A
+    failure reports form indices and counts only."""
+    second = str(1 + 1)
+    joined = _MAINTAINER + second
+    spaced = _MAINTAINER + " " + second
+    mixed = joined[0].lower() + joined[1:].upper()
+
+    def label_hit(text):
+        return any(" an account label " in h for h in hygiene_hits("probe", 1, text))
+
+    forms = [
+        "// seen on %s only" % joined,
+        "/// <summary>%s's screenshot shows the page title" % joined,
+        "// %s reported it twice" % joined.lower(),
+        "// %s reported it twice" % spaced.lower(),
+        "// %s's report" % joined.lower(),
+        "// seen on %s only" % joined.upper(),
+        "// seen on %s only" % mixed,
+        "// seen on %s only" % _fullwidth(joined),
+        "// seen on %s only" % (_MAINTAINER.lower() + "_" + second),
+        "// seen on %s only" % (_MAINTAINER.upper() + "-" + second),
+        "// seen on " + spaced,
+        "// seen on " + spaced.lower(),
+        "// seen on " + joined.lower(),
+    ]
+    for delimiter in (":", ";", ",", ".", ")", "]", "}", ">", '"', "'", "/", "-", "_", "?", "!"):
+        forms.append("// seen on %s%s then on the first" % (spaced, delimiter))
+        forms.append("// seen on %s%s" % (spaced.lower(), delimiter))
+    missed = [i for i, form in enumerate(forms) if not label_hit(form)]
+    assert not missed, "%d of %d planted label forms were not refused as a label (forms %s)" % (
+        len(missed), len(forms), missed)
+    numbers = [_MAINTAINER + " " + second + tail for tail in (":30", "-3", "/3", ".5", ",5", "0")]
+    numbers += ["// " + _MAINTAINER + " asked twice", "// per " + _MAINTAINER + ", " + second + " runs"]
+    read = [i for i, form in enumerate(numbers) if label_hit(form)]
+    assert not read, "%d of %d number or name forms were read as a label (forms %s)" % (
+        len(read), len(numbers), read)
+
+
+def test_a_listed_handle_is_refused_in_every_case_and_form(monkeypatch):
+    """The handle digests in every letter case and form. A synthetic word,
+    listed for this test only, is refused as a personal handle capitalised,
+    in lower case, in capitals, in mixed case and full width; as the subject
+    of a verb, a possessive, inside a parenthesis before a number, after a
+    dash, joined to a digit or an underscore, and in a catalogue value
+    spelled with escapes. Unlisted, the same lines carry no personal handle,
+    so the refusals are the digest's. A failure reports form indices only."""
+    word = "Quil" + "lonax"
+    forms = [
+        "// %s reported it twice" % word,
+        "// %s reported it twice" % word.lower(),
+        "// %s reported it twice" % word.upper(),
+        "// %s reported it twice" % (word[:3].lower() + word[3:].upper()),
+        "// %s reported it twice" % _fullwidth(word),
+        "// so the colour reverted (%s's report)" % word.lower(),
+        "// clicks hit the buttons behind it (%s #14)" % word.lower(),
+        "// narrower than before — %s wanted it shorter" % word.lower(),
+        "// seen on %s_%d only" % (word.lower(), 1 + 1),
+        "// seen on %s%d only" % (word.lower(), 1 + 1),
+        '["Probe"] = "seen by %s",' % _escaped(word.lower()),
+    ]
+
+    def handle_hit(text):
+        return any(" a personal handle " in h for h in hygiene_hits("probe", 1, text))
+
+    unlisted = [i for i, form in enumerate(forms) if handle_hit(form)]
+    assert not unlisted, "the unlisted word was refused as a handle (forms %s)" % unlisted
+    monkeypatch.setitem(globals(), "_HANDLE_DIGESTS", _HANDLE_DIGESTS | {_salted(word)})
+    missed = [i for i, form in enumerate(forms) if not handle_hit(form)]
+    assert not missed, "%d of %d forms of a listed handle were not refused (forms %s)" % (
+        len(missed), len(forms), missed)
 
 
 def test_an_exempt_row_lets_only_its_own_key_s_handle_words_through():

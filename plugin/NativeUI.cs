@@ -1905,7 +1905,7 @@ namespace CompetitiveRounds
 
         // Full-screen uGUI raycast blocker for IMGUI modals (bug report form, log/admin
         // viewers). The IMGUI backdrop those draw blocks NOTHING in uGUI — they're separate
-        // input paths — so clicks on the form also hit the F5 buttons behind it (lopi #14).
+        // input paths — so clicks on the form also hit the F5 buttons behind it (a tester's report #14).
         // A transparent raycastTarget Image as the TOP child of the overlay canvas intercepts
         // every uGUI raycast while a modal is up; the IMGUI form still works (separate path).
         private static GameObject clickBlocker;
@@ -11661,7 +11661,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                             // After the optimistic toggle, cached holds post-click state: sku still
                             // set → equipped (send itemId); cleared → unequipped (send 0). Without
                             // this check unequip sent the item_id back and the server re-equipped it,
-                            // so the body color reverted after a second / on refresh (lopi's report).
+                            // so the body color reverted after a second / on refresh (a tester's report).
                             ApiClient.SetActivePlayerColor(id, (cached != null && cached.active_player_color_sku == itemSku) ? r.itemId : 0L, cb);
                         else if (kind == "cursor_color")
                             // After the optimistic toggle, cached holds post-click state: sku still
@@ -17792,7 +17792,7 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
             UIFactory.AddHLG(panel, spacing: 8);
             UIFactory.AddLE(panel, flexH: 1);
 
-            // LEFT: player picker. Narrower than before (was 300/260) — lopi wanted
+            // LEFT: player picker. Narrower than before (was 300/260) — the tester wanted
             // it shorter width-wise; the freed horizontal space on the right belongs
             // to the chart panel. Scroll works anywhere over the viewport now
             // (CreateScrollView sets viewport raycastTarget).
@@ -19964,9 +19964,9 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                             // Both participants take the highlight (round-2
                             // f12: only p1 carried a steam id, so a selected
                             // player sitting in the p2 seat stayed gray).
-                            string sid2 = d.steamIds2.Count > r ? d.steamIds2[r] : "";
-                            bool isSel2 = !string.IsNullOrEmpty(sid2) && hi.ContainsKey(sid2);
-                            string nameHex2 = isSel2 ? ColorToHex(hi[sid2]) : "CCCCCC";
+                            string steamIdP2 = d.steamIds2.Count > r ? d.steamIds2[r] : "";
+                            bool isSel2 = !string.IsNullOrEmpty(steamIdP2) && hi.ContainsKey(steamIdP2);
+                            string nameHex2 = isSel2 ? ColorToHex(hi[steamIdP2]) : "CCCCCC";
                             string bold2 = isSel2 ? "<b>" : "", bold2End = isSel2 ? "</b>" : "";
                             nameCell = $"{bold}<color=#{nameHex}>{FfaSafeRich(Trunc(d.names[r], 12))}</color>{boldEnd}"
                                      + $" <color=#888>vs</color> {bold2}<color=#{nameHex2}>{FfaSafeRich(Trunc(d.names2[r], 12))}</color>{bold2End}";
