@@ -234,28 +234,58 @@ def _attribution_captures(reading):
             if m.group(1)[:1].isupper() or m.group(1)[:1].istitle()]
 
 
+# Every character escape of a C# regular string literal: the simple escapes,
+# \u with four hex digits, \U with eight (at most U+10FFFF), and \x with one
+# to four (greedy, as the compiler reads it).
+_SIMPLE_ESCAPES = {"'": "'", '"': '"', "\\": "\\", "0": "\0", "a": "\a", "b": "\b", "e": "\x1b",
+                   "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
+_HEX = frozenset("0123456789abcdefABCDEF")
+
+
+class Undecodable(ValueError):
+    """A literal holds an escape this decoder does not decode."""
+
+
 def _cs_literal(body):
-    out, i = [], 0
-    simple = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'", "0": "\0"}
-    while i < len(body):
+    """The characters a C# regular string literal's body compiles to. Raises
+    Undecodable on any escape it does not decode, so a gate that scans the
+    decoded text never scans other characters than the game shows."""
+    out, i, n = [], 0, len(body)
+    while i < n:
         c = body[i]
-        if c == "\\" and i + 1 < len(body):
-            n = body[i + 1]
-            if n == "u":
-                out.append(chr(int(body[i + 2:i + 6], 16)))
-                i += 6
-                continue
-            out.append(simple.get(n, n))
-            i += 2
+        if c != "\\":
+            out.append(c)
+            i += 1
             continue
-        out.append(c)
-        i += 1
-    return "".join(out)
+        e = body[i + 1] if i + 1 < n else ""
+        if e in _SIMPLE_ESCAPES and e:
+            out.append(_SIMPLE_ESCAPES[e])
+            i += 2
+        elif e in ("u", "U"):
+            width = 4 if e == "u" else 8
+            digits = body[i + 2:i + 2 + width]
+            if len(digits) != width or not set(digits) <= _HEX or int(digits, 16) > 0x10FFFF:
+                raise Undecodable("a \\%s escape without %d hex digits of a code point" % (e, width))
+            out.append(chr(int(digits, 16)))
+            i += 2 + width
+        elif e == "x":
+            j = i + 2
+            while j < n and j < i + 6 and body[j] in _HEX:
+                j += 1
+            if j == i + 2:
+                raise Undecodable("a \\x escape without a hex digit")
+            out.append(chr(int(body[i + 2:j], 16)))
+            i = j
+        else:
+            raise Undecodable("an escape C# does not define")
+    # A surrogate pair written as two escapes is one character.
+    return "".join(out).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
 
 
 def _catalogue_text(text):
     """A catalogue row's key and translated value as the game reads them
-    (escapes decoded), one per line; empty for any other line."""
+    (escapes decoded), one per line; empty for any other line. Raises
+    Undecodable when either holds an escape the decoder does not decode."""
     m = _CATALOGUE_ENTRY.match(text)
     if not m:
         return ""
@@ -269,7 +299,10 @@ def _key_handles(text):
     m = _CATALOGUE_ENTRY.match(text)
     if not m:
         return frozenset()
-    key = _cs_literal(m.group(1))
+    try:
+        key = _cs_literal(m.group(1))
+    except Undecodable:
+        return frozenset()
     digest = hashlib.sha256((_HANDLE_SALT + "string:" + key).encode("utf-8")).hexdigest()
     if digest not in _PRODUCT_STRING_DIGESTS:
         return frozenset()
@@ -287,8 +320,19 @@ def _phrase_handles(reading):
 
 
 def _escaped(word):
-    """A word as a C# literal spells it with escapes only (the probes' form)."""
+    """A word as a C# literal spells it with \\u escapes only (the probes' form)."""
     return "".join("\\u%04x" % ord(c) for c in word)
+
+
+def _escaped_x(word):
+    """The same with \\x escapes of four hex digits (so no following letter
+    can extend one)."""
+    return "".join("\\x%04x" % ord(c) for c in word)
+
+
+def _escaped_big_u(word):
+    """The same with \\U escapes of eight hex digits."""
+    return "".join("\\U%08X" % ord(c) for c in word)
 
 
 def hygiene_hits(rel, lineno, text):
@@ -303,7 +347,14 @@ def hygiene_hits(rel, lineno, text):
         hits.append(where + " names the gitignored scratch tree, which exists on no other checkout")
     if any(token in text for token in _SANDBOX_TOKENS):
         hits.append(where + " names a local sandbox checkout")
-    decoded = _catalogue_text(text)
+    try:
+        decoded = _catalogue_text(text)
+    except Undecodable as why:
+        # Fails closed: a row whose escapes this gate cannot decode could
+        # compile to text it never scanned, so the row is refused.
+        hits.append("%s a catalogue row with an undecodable escape (%s): refused, since the "
+                    "gate cannot read what it compiles to" % (where, why))
+        decoded = ""
     if _ACCOUNT_LABEL.search(_fold(text)) or _ACCOUNT_LABEL.search(_fold(decoded)):
         hits.append(where + " an account label (the maintainer's name joined to a seat number): "
                     "a seat is described by its role, never by its label")
@@ -567,6 +618,44 @@ def test_a_listed_handle_is_refused_in_every_case_and_form(monkeypatch):
     missed = [i for i, form in enumerate(forms) if not handle_hit(form)]
     assert not missed, "%d of %d forms of a listed handle were not refused (forms %s)" % (
         len(missed), len(forms), missed)
+
+
+def test_every_csharp_escape_is_decoded_or_the_row_is_refused():
+    """The catalogue decoder against every C# character escape. A planted
+    second-seat label (built from its parts) appended to a real catalogue
+    row's translated value is refused as an account label when spelled with
+    \\u, \\x (four digits, and the shortest form) and \\U escapes; each
+    simple escape decodes to its character; an escape the decoder cannot
+    decode refuses the row by name (fails closed); and every row of the real
+    catalogue decodes, so the production catalogue reads as it did. Counts
+    and indices only on failure."""
+    label = _MAINTAINER + str(1 + 1)
+    rel = "plugin/I18nCatalogues.cs"
+    rows = [(i, t) for i, t in enumerate(_read(rel).split("\n"), 1) if _CATALOGUE_ENTRY.match(t)]
+    assert len(rows) > 1000, "only %d catalogue rows were read" % len(rows)
+    undecodable = [i for i, t in rows if any(" an undecodable escape " in h for h in hygiene_hits(rel, i, t))]
+    assert not undecodable, "%d real catalogue rows do not decode (lines %s)" % (len(undecodable), undecodable[:10])
+    lineno, text = rows[len(rows) // 2]
+    at = _CATALOGUE_ENTRY.match(text).end(2)
+    shortest_x = "".join("\\x%x" % ord(c) for c in label[:-1]) + "\\x%04x" % ord(label[-1])
+    spellings = [_escaped(label), _escaped_x(label), shortest_x, _escaped_big_u(label),
+                 label[:1] + _escaped_x(label[1:2]) + label[2:]]
+    missed = [k for k, spelled in enumerate(spellings)
+              if not any(" an account label " in h for h in hygiene_hits(rel, lineno, text[:at] + " " + spelled + text[at:]))]
+    assert not missed, "%d of %d escaped spellings of a planted label were not refused (spellings %s)" % (
+        len(missed), len(spellings), missed)
+    simple = {"\\'": "'", '\\"': '"', "\\\\": "\\", "\\0": "\0", "\\a": "\a", "\\b": "\b",
+              "\\f": "\f", "\\n": "\n", "\\r": "\r", "\\t": "\t", "\\v": "\v", "\\e": "\x1b"}
+    wrong = [k for k, v in simple.items() if _cs_literal("a" + k + "b") != "a" + v + "b"]
+    assert not wrong, "%d simple escapes decode wrongly" % len(wrong)
+    pair = _cs_literal("\\ud83d\\ude00") == _cs_literal("\\U0001F600") == chr(0x1F600)
+    assert pair, "a surrogate pair and its \\U form do not decode to the same character"
+    bad = ["\\q", "\\u12G4", "\\u12", "\\x", "\\xg", "\\U0011FFFF", "\\U0001F60", "\\"]
+    passed = [k for k, b in enumerate(bad)
+              if not any(" an undecodable escape " in h for h in hygiene_hits(
+                  rel, lineno, '["Probe"] = "x' + b + 'y",'))]
+    assert not passed, "%d of %d undecodable escapes were not refused (escapes %s)" % (
+        len(passed), len(bad), passed)
 
 
 def test_an_exempt_row_lets_only_its_own_key_s_handle_words_through():
