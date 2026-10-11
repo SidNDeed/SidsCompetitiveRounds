@@ -1561,7 +1561,7 @@
   "Link your Discord account first (Home tab) to use RLFP pings.",
   "Link your Discord first (Home tab)",
   "Link your Discord first: Home tab -> Get Link Code, then !link YOUR_CODE in Discord.",
-  "Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactive).",
+  "Lists players who have not run the mod recently on every leaderboard, greyed and tagged (inactive).",
   "Little Pink Buddy",
   "Live competitive games in every mode can be watched from inside the mod - ranked 1v1, 2v2, 1v2 and FFA (ordinary casual 1v1 rooms aren't listed). You see the real game, live, from a seat that is built so it cannot touch the match.\n\n<color=#FFD94D><b>HOW TO WATCH</b></color>\n\n- <color=#7FD4FF>WATCH</color> buttons appear on live-game rows across the F5 menu: the Leaderboard's live series strip, the FFA tab's live lobbies, the 1v2 tab's live panel and the Home tab's live rows. You never see WATCH on your own game.\n- Clicking one puts you into the real Photon room as a non-playing seat. You can't start spectating while you're in an online room or mid-queue.\n- A game is joinable while its fighters are in live combat, a spectator seat is free, and every fighter allows spectators.\n\n<color=#FFD94D><b>WHAT YOU SEE</b></color>\n\n- The true live game - real movement and real projectiles, not a replay or a delayed feed.\n- The screen stays black until the first clean round boundary, then the game appears in sync. If your client ever has to catch up mid-round, you see the live scene with a Syncing note instead of black.\n- Card picks are visible, and every round boundary carries everyone's full decks. In FFA you see pick results and decks, not each picker's private hand of candidates.\n- A minimal top bar shows the score and the fighters' names, titles and ratings. Hold Tab for the stats board. Chat works (and can be muted). Esc opens the leave menu.\n\n<color=#FFD94D><b>WHY A SPECTATOR CAN'T TOUCH THE GAME</b></color>\n\nThe spectator seat is an observer by construction, not by politeness:\n\n- <color=#7FE87F>It cannot deal damage or cause a death.</color> A seat-wide clamp makes the death branch unreachable from every damage path on that seat - the deaths you see happen on the fighters' clients and only render on yours.\n- It cannot spawn a player, ready up, or take a slot - even the press-jump-to-join prompt is suppressed.\n- It never answers or sends the sync-up requests fighters use to stay in lockstep, and never reports map loads, so it can't slow or desync the match.\n- It cannot pick cards and runs none of the game lifecycle - it only applies the scores the master broadcasts.\n- It is invisible to every fighter count: quorum checks, reporter election and match-start counts all exclude spectators.\n- <color=#7FE87F>A spectator leaving never ends the fighters' match.</color>\n\n<color=#FFD94D><b>PRIVACY, COUNTS AND LIMITS</b></color>\n\n- Fighters always know: every seat in the room - fighters and spectators alike - sees a bottom-right Spectators line with names while anyone is watching, and the games list shows spectator counts publicly.\n- <color=#7FD4FF>Allow Spectators</color> is a per-player toggle in F5 Settings, on by default. If any one fighter in a game has it off, that game can't be watched - and the reason shown is generic, never who opted out. Flipping it off mid-match removes seated spectators within moments.\n- The one exception: sync tournament matches are always spectatable.\n- Public spectator seats cap at 4 per game, and one extra seat is reserved for the official broadcast account that runs the community stream, so public spectators can never crowd it out. A full game answers 'spectator full'.\n\n<color=#FFD94D><b>LEAVING, AND BEING RETURNED</b></color>\n\n- Esc, then leave. Leaving never disturbs the match - your name just drops off the Spectators line.\n- Your seat is a lease your client refreshes every few seconds. When the game ends or a fighter opts out, the lease ends and you're returned to the menu automatically. <color=#7FE87F>A network hiccup never kicks you</color> - only a definitive answer from the server does.\n\n<color=#FFD94D><b>SPECTATING AND BETTING</b></color>\n\n- Spectators can bet. The early bet-close windows are the information gate: 1v1 and 2v2 bets lock once 2 points are scored in game 1, and FFA bets lock once 2 half points are scored in the game being bet on (earlier in short lobbies) - so a lingering seat learns nothing useful before the window shuts.\n- The only barred group is a lobby's own members: you can never bet on your own lobby.",
   "Lives",
@@ -2374,8 +2374,10 @@
   "Show Discord on leaderboard: <color=#88FF88>ON</color>",
   "Show Discord on leaderboard: <color=#FF9966>OFF</color>",
   "Show Gold",
-  "Show inactive players (90d+): <color=#88FF88>ON</color>",
-  "Show inactive players (90d+): <color=#FF9966>OFF</color>",
+  "Show inactive players ({0}d+): <color=#88FF88>ON</color>",
+  "Show inactive players ({0}d+): <color=#FF9966>OFF</color>",
+  "Show inactive players: <color=#88FF88>ON</color>",
+  "Show inactive players: <color=#FF9966>OFF</color>",
   "Showing {0} of {1}",
   "Showing: Elo",
   "Showing: {0}",
@@ -3345,7 +3347,8 @@
   "{0} GOT A POINT",
   "{0} GOT HALF A POINT",
   "{0} Hit Rate",
-  "{0} active players (90d)",
+  "{0} active players",
+  "{0} active players ({1}d)",
   "{0} and {1} more",
   "{0} can now translate {1}.",
   "{0} cards",
@@ -11209,7 +11212,7 @@
    "location": "SetMailRelay",
    "kind": "Tr"
   },
-  "Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactive).": {
+  "Lists players who have not run the mod recently on every leaderboard, greyed and tagged (inactive).": {
    "surface": "NativeUI",
    "location": "BuildSettingsTab",
    "kind": "Tr"
@@ -15274,15 +15277,25 @@
    "location": "ApplyShopRow",
    "kind": "SetText"
   },
-  "Show inactive players (90d+): <color=#88FF88>ON</color>": {
+  "Show inactive players ({0}d+): <color=#88FF88>ON</color>": {
    "surface": "NativeUI",
    "location": "PaintInactiveBoards",
-   "kind": "SetText"
+   "kind": "TrF"
   },
-  "Show inactive players (90d+): <color=#FF9966>OFF</color>": {
+  "Show inactive players ({0}d+): <color=#FF9966>OFF</color>": {
    "surface": "NativeUI",
    "location": "PaintInactiveBoards",
-   "kind": "SetText"
+   "kind": "TrF"
+  },
+  "Show inactive players: <color=#88FF88>ON</color>": {
+   "surface": "NativeUI",
+   "location": "PaintInactiveBoards",
+   "kind": "Tr"
+  },
+  "Show inactive players: <color=#FF9966>OFF</color>": {
+   "surface": "NativeUI",
+   "location": "PaintInactiveBoards",
+   "kind": "Tr"
   },
   "Showing {0} of {1}": {
    "surface": "NativeUI",
@@ -20129,7 +20142,12 @@
    "location": "PaintPairGraph",
    "kind": "TrF"
   },
-  "{0} active players (90d)": {
+  "{0} active players": {
+   "surface": "NativeUI",
+   "location": "RefreshLeaderboard",
+   "kind": "TrF"
+  },
+  "{0} active players ({1}d)": {
    "surface": "NativeUI",
    "location": "RefreshLeaderboard",
    "kind": "TrF"

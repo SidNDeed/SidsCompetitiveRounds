@@ -7411,7 +7411,7 @@ LATEST_MOD_VERSION = "1.40.3"
 async def get_mod_version():
     """Returns the latest recommended mod version, the gating floor, and the
     capability flags a client must see BEFORE it changes what it puts on the
-    wire.
+    wire, plus the inactivity window every board filters on.
 
     The involuntary-cause capability (bug #392) is the ordering gate between
     the two lanes of that fix. True means this box's leave handlers recognise the
@@ -7444,6 +7444,16 @@ async def get_mod_version():
     GET /api/v1/team/series/{id}/status, which is a route rather than an
     argument, and reads "readonly": true out of that response -- proof about
     the box that produced it, and about nothing else.
+
+    `leaderboard_active_days` is advertised HERE, once, because it is a
+    server setting the CLIENT PRINTS: the F5 board labels its population and
+    its inactive toggle with a day count, and a literal in the client said
+    "90d" on a deployment configured for another number. This route is the
+    one unauthenticated call every seat already makes at startup and it is
+    exempt from the version gate, so even a client below the floor learns
+    it. A client that receives no value prints no day count rather than
+    falling back to a number of its own -- there is no second copy of this
+    setting anywhere.
     """
     _involuntary = bool(_INVOLUNTARY_EXIT_CAUSES) and (
         _INVOLUNTARY_EXIT_CAUSES <= _IN_ROOM_EXIT_CAUSES)
@@ -7453,6 +7463,7 @@ async def get_mod_version():
         # One boolean under ONE name. The transitional alias that carried the
         # first spelling went when the client lane landed on this tree.
         _INVOLUNTARY_CAUSE_CAPABILITY_FIELD: _involuntary,
+        "leaderboard_active_days": LEADERBOARD_ACTIVE_DAYS,
     }
     # The joiner's region guard (connect-failure D3): advertised only while
     # this server enforces it. JOIN_REGION_GUARD ships False, so the answer
@@ -9904,7 +9915,12 @@ async def get_leaderboard(
     # Item d: the board hides players not seen for LEADERBOARD_ACTIVE_DAYS days
     # (players.last_seen, refreshed by the presence ping). True lists everyone
     # and flags each row `inactive`; the rank and total follow the same filter.
-    include_inactive: bool = Query(False, description="Also list players not seen for 90 days (flagged inactive)"),
+    include_inactive: bool = Query(
+        False,
+        # The window is LEADERBOARD_ACTIVE_DAYS, not a constant. This text is
+        # what the schema advertises to every reader of the API, and a literal
+        # here said 90 on a deployment filtering at 30.
+        description=f"Also list players not seen for {LEADERBOARD_ACTIVE_DAYS} days (flagged inactive)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Get the ranked leaderboard sorted by Glicko-2 rating."""
@@ -67011,7 +67027,12 @@ async def team_leaderboard(
     min_series: int = Query(1, ge=0),
     sort_by: str = Query("rating"),
     # Item d -- see get_leaderboard.
-    include_inactive: bool = Query(False, description="Also list players not seen for 90 days (flagged inactive)"),
+    include_inactive: bool = Query(
+        False,
+        # The window is LEADERBOARD_ACTIVE_DAYS, not a constant. This text is
+        # what the schema advertises to every reader of the API, and a literal
+        # here said 90 on a deployment filtering at 30.
+        description=f"Also list players not seen for {LEADERBOARD_ACTIVE_DAYS} days (flagged inactive)"),
     db: AsyncSession = Depends(get_db),
 ):
     """Top players by 2v2 Glicko rating. Includes title, avg teammate elo,

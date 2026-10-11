@@ -1,5 +1,5 @@
-"""Re-derive migration 337's hex from the SHIPPED Unity assets, and re-derive
-the shop distances that migration quotes (#579).
+"""Re-derive migration 337's hex from the SHIPPED Unity assets (#579), and
+re-derive the shop distances that migration quotes.
 
 Not a pytest: the first half needs the installed game, which no test
 environment is entitled to assume. It exists so the provenance comment in
@@ -22,9 +22,10 @@ the serialized data.
      components are all in [0,1] -- never by a hardcoded offset.
 
   2. A card's own theme is the int 12 bytes before the end of its CardInfo
-     serialized data. That offset is not asserted from the layout; it is the
-     only offset within 64 bytes of the end whose value VARIES across the
-     named cards and lands where each card's look says it should.
+     serialized data. That offset is not asserted from the layout. Over every
+     component the named cards share and the six offsets -4, -8, ... -24, it
+     is the only pair whose int is a valid themeType on every card and VARIES
+     across them, and it lands where each card's look says it should.
 
 Nothing is trusted unless the controls come back right, and EVERY control
 here can fail the run:

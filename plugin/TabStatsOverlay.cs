@@ -43,6 +43,11 @@ namespace CompetitiveRounds
         private static float nextSnapshotAt;
         private static bool cardLayoutDirty = true;
         private static float cachedCardLayoutWidth = -1f;
+        // How many wrapped card lines the cached layout was built for. Part of
+        // the cache key, not decoration: the line budget shrinks on a short
+        // screen, and a layout cached at four lines would keep its height
+        // while the board was laid out for three.
+        private static int cachedCardLayoutLines = -1;
         private static float cachedCardsHeight = 24f;
         private static float cardSeparatorWidth;
 
@@ -82,8 +87,10 @@ namespace CompetitiveRounds
         // board, the spectator seat and the broadcaster HUD all render the
         // SAME cached cell string (BroadcastStatValue hands out cachedValues,
         // it does not re-format). Nothing reads a formatted cell
-        // back — the match-history wire is produced by WireNum, which ignores
-        // StatRow.fmt entirely and writes "0.###" invariant (#47).
+        // back — the match-history wire is produced by WireNum (:539), which
+        // never reads StatRow.fmt at all and writes "0.###" under
+        // CultureInfo.InvariantCulture. The fmt-independence is WireNum's own
+        // code, not a lesson; the invariant culture is #47's rule.
         internal static class HealthPrecisionSetting
         {
             internal const string ROUNDED = "Rounded";
@@ -93,10 +100,11 @@ namespace CompetitiveRounds
             private static BepInEx.Configuration.ConfigEntry<string> _entry;
 
             /// <summary>Bound here rather than in Plugin.cs because this file
-            /// owns the format site — the same local-bind pattern LagNotices
-            /// .cs:571 uses for its own lever. Lazy, and a null ConfigFile
-            /// (very early in startup) is retried on the next read instead of
-            /// being latched as "no setting".</summary>
+            /// owns the format site, through Plugin.ConfigFileForLevers — the
+            /// same local bind LagNotices.EnsureStartup makes for its self-test
+            /// lever (LagNotices.cs:583). Lazy, and unlike that one a null
+            /// ConfigFile (very early in startup) is retried on the next read
+            /// instead of being latched as "no setting".</summary>
             private static BepInEx.Configuration.ConfigEntry<string> Entry()
             {
                 if (_entry != null) return _entry;
@@ -893,31 +901,78 @@ namespace CompetitiveRounds
                 float labelW = 118f;
                 float colW = Mathf.Clamp((Screen.width * 0.62f - labelW) / cachedPlayerCount, 130f, 210f);
                 float w = labelW + colW * cachedPlayerCount + 24f;
-                float rowH = 21f;
                 float cardWidth = colW - 8f;
-                if (cardLayoutDirty || Mathf.Abs(cachedCardLayoutWidth - cardWidth) > 0.5f)
-                {
-                    // +3px per line and extra tail slack: the skin's real glyph
-                    // height exceeds lineHeight (#143) — see stCards.clipping.
-                    float lineH = Mathf.Max(15f, stCards.lineHeight + 3f);
-                    int maxLines = 1;
-                    for (int i = 0; i < cachedPlayerCount; i++)
-                        maxLines = Mathf.Max(maxLines, PrepareCardRowLayout(cachedCards[i], cardWidth, 4));
-                    cachedCardsHeight = maxLines * lineH + 8f;
-                    cachedCardLayoutWidth = cardWidth;
-                    cardLayoutDirty = false;
-                }
-                float cardsH = cachedCardsHeight;
                 // Release B §1: the head-to-head header line ("vs NAME · last
                 // played · H2H · ranked series") sits under the title for the
                 // whole sitting once H2HSummary is Ready; "" (no row) before
                 // that and in any room that is not a plain 1v1. Cached text,
-                // richText OFF (the name is server-returned free text).
+                // richText OFF (the name is server-returned free text). Read
+                // here rather than further down because the height budget
+                // below has to know whether this row is present.
                 string h2hLine = H2HSummary.TabLine;
                 float h2hH = string.IsNullOrEmpty(h2hLine) ? 0f : 20f;
-                float h = 34f + h2hH + 26f + ROWS.Length * rowH + cardsH + 16f;
+
+                // ── height budget ─────────────────────────────────────────
+                // Every part of this panel used to be a fixed size, and the
+                // panel was simply centred: 21px per stat row, up to four
+                // wrapped lines of cards, and whatever came out was drawn. At
+                // 1024x576 with the H2H line present, adding the 22nd stat row
+                // put the card row at y=570 with six pixels of screen left
+                // under it -- and the card row is the one thing on this board
+                // that cannot scroll, so those cards were simply not there.
+                //
+                // The pitch and the card block are therefore derived from the
+                // height that is actually available. Both only ever SHRINK:
+                // wherever 21px and four card lines already fitted, the clamp
+                // returns ROW_H_MAX and the loop leaves CARD_LINES_MAX, and the
+                // layout is exactly what it was before.
+                //
+                // What this does NOT promise: a screen short enough that even
+                // ROW_H_MIN and one line of cards overflow still overflows.
+                // At that floor the panel is furniture + 22 rows at ROW_H_MIN
+                // + one card line -- 493px with the H2H row present -- and it
+                // still keeps MARGIN_Y above it, so the screen height where
+                // this starts running off the bottom is 517, not 493. Below
+                // that the fix is a scroll view, not a smaller number.
+                // backend/tests/test_tab_board_layout.py derives that floor
+                // from these same constants and asserts it to the pixel, so
+                // changing one of them moves the test, not just this line.
+                const float ROW_H_MAX = 21f;    // the pitch this board has always drawn
+                const float ROW_H_MIN = 17f;    // 13px cells plus #143's glyph slack
+                const float MARGIN_Y = 24f;     // the minimum the centring already kept
+                const int CARD_LINES_MAX = 4;
+                float furniture = 34f + h2hH + 26f + 16f;   // title, H2H, name row, bottom pad
+                float budget = Mathf.Max(0f, Screen.height - MARGIN_Y * 2f - furniture);
+                // +3px per line and extra tail slack: the skin's real glyph
+                // height exceeds lineHeight (#143) — see stCards.clipping.
+                float lineH = Mathf.Max(15f, stCards.lineHeight + 3f);
+                // The cards give ground first. The stat grid is what the board
+                // is FOR, and one fewer card line is the same reduction
+                // PrepareCardRowLayout already performs for a narrow column:
+                // the cards that no longer fit become its "+N" tail, which is
+                // legible, rather than being drawn past the bottom edge, which
+                // is not.
+                int cardLines = CARD_LINES_MAX;
+                while (cardLines > 1 &&
+                       ROWS.Length * ROW_H_MIN + (cardLines * lineH + 8f) > budget)
+                    cardLines--;
+                if (cardLayoutDirty || cachedCardLayoutLines != cardLines
+                    || Mathf.Abs(cachedCardLayoutWidth - cardWidth) > 0.5f)
+                {
+                    int maxLines = 1;
+                    for (int i = 0; i < cachedPlayerCount; i++)
+                        maxLines = Mathf.Max(maxLines, PrepareCardRowLayout(cachedCards[i], cardWidth, cardLines));
+                    cachedCardsHeight = maxLines * lineH + 8f;
+                    cachedCardLayoutWidth = cardWidth;
+                    cachedCardLayoutLines = cardLines;
+                    cardLayoutDirty = false;
+                }
+                float cardsH = cachedCardsHeight;
+                float rowH = Mathf.Clamp((budget - cardsH) / Mathf.Max(1, ROWS.Length),
+                                         ROW_H_MIN, ROW_H_MAX);
+                float h = furniture + ROWS.Length * rowH + cardsH;
                 float x = (Screen.width - w) / 2f;
-                float y = Mathf.Max(24f, (Screen.height - h) * 0.5f);
+                float y = Mathf.Max(MARGIN_Y, (Screen.height - h) * 0.5f);
 
                 GUI.DrawTexture(new Rect(x, y, w, h), Texture2D.whiteTexture,
                     ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.88f), 0, 0);
@@ -981,13 +1036,17 @@ namespace CompetitiveRounds
             stH2H.normal.textColor = new Color(0.82f, 0.82f, 0.82f);
             stName = new GUIStyle(GUI.skin.label) { fontSize = 14, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
             // wordWrap/clipping explicit, for the same reason bug 239 made them
-            // explicit on BroadcastHud's stName/stStat (:760, :767): GUI.skin.label
+            // explicit on BroadcastHud's stName/stStat (BroadcastHud.cs:769,
+            // BroadcastHud.cs:776): GUI.skin.label
             // defaults wordWrap ON, and both of this batch's changes make these
             // strings longer - the HP row can now render "87.50/100.00" instead of
-            // "88/100", and the label column gained the "Scale" row whose localised
-            // forms are longer than the English one in every bundled locale. The
-            // cells draw into a FIXED-height Rect (see the GUI.Label below), so a
-            // wrapped second line is not shown smaller - it is clipped away.
+            // "88/100", and the label column gained a "Scale" row. Three of the
+            // four bundled translations of it are longer than the English
+            // ("Escala", "Масштаб" twice); Swedish "Skala" is the same five
+            // characters, and character counts are not widths in any case - the
+            // reason for these two properties is the FIXED-height Rect below, not
+            // a measured overflow. A wrapped second line there is not shown
+            // smaller: it is clipped away.
             // stCards below is deliberately the opposite: card lists are MEANT to wrap.
             stLabel = new GUIStyle(GUI.skin.label) { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft, wordWrap = false, clipping = TextClipping.Clip };
             stLabel.normal.textColor = new Color(0.75f, 0.78f, 0.85f);

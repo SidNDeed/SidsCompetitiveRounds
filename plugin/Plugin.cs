@@ -60,7 +60,7 @@ namespace CompetitiveRounds
         internal static ConfigEntry<bool> BroadcastWindowed1080;
         internal static ConfigEntry<bool> ShowRegionPing;
         internal static ConfigEntry<bool> ShowRoomRulesIndicator;   // [UI] item 22: the standing room-rules strip, default on
-        internal static ConfigEntry<bool> ShowInactiveOnBoards;   // [UI] item d: default off -- boards hide players inactive 90+ days
+        internal static ConfigEntry<bool> ShowInactiveOnBoards;   // [UI] item d: default off -- boards hide players the server counts as inactive (its leaderboard_active_days)
         internal static ConfigEntry<bool> LagNoticesEnabled;   // [Network] LagNotices — Release B §4, default off
         // [Data] AutoLogUpload — v1.41.0 item (a). Opt-IN, default off. Named
         // ...Enabled rather than AutoLogUpload so the entry and the
@@ -768,11 +768,14 @@ namespace CompetitiveRounds
             // Sept 6 item d: a NEW key with a false default -- Config.Bind writes a
             // default once and never revisits it (#190), so this ships off for
             // every install. ApiClient appends include_inactive=true to the four
-            // board fetches while it is on.
+            // board fetches while it is on. The description states no day
+            // count: it is written into the .cfg at startup, before the server
+            // can have said what its window is, and the window is a server
+            // setting (leaderboard_active_days on /api/v1/mod-version).
             ShowInactiveOnBoards = Config.Bind(
                 "UI", "ShowInactiveOnBoards",
                 false,
-                "Show players inactive for 90+ days on the leaderboards"
+                "Show inactive players on the leaderboards (the server sets how many days without playing count as inactive)"
             );
 
             // Release B §4 (bug 332): opt-in lag notices. A NEW key with a

@@ -3329,14 +3329,33 @@ namespace CompetitiveRounds
             // Horizontally the frame is centred on the BODY, not on that union. The union
             // carries the gun (reserved to about +1.9 above, hand at +1.2), the free arm and
             // any one-sided cosmetic, so centring on it put the body left of centre in every
-            // run recorded at r=2 (BepInEx/pc_portrait_report_*.txt: fit centre x +0.25 and
-            // +0.37 on sides of 4.28 and 4.59, the rig 6.0% and 8.2% of the width left of it).
-            // The body is built AT the rig transform -- PlayerSkinHandler.Init instantiates the
-            // skin at base.transform.position under base.transform (decompile:
-            // logs-snapshot/decompiled/full/PlayerSkinHandler.cs) -- and eroding the r2 matte
-            // until the thin arm/gun link breaks leaves a body core centred on rig x -0.006
-            // (bbox mid -0.004), the same at every erosion depth from 20 to 56 px.
-            // So the rig x is a measured body centre here, not a stand-in for one.
+            // run recorded at r=2: fit centre x +0.25 and +0.37 on sides of 4.28 and 4.59,
+            // the rig 6.0% and 8.2% of the width left of it. Those figures are read out of
+            // the per-run portrait reports this file writes next to the game, which are run
+            // output and not carried by the repo -- re-read them from a run rather than
+            // taking them from a comment.
+            //
+            // rigX stands in for the body centre because the skin is built at the rig
+            // transform. That holds for a rig this code assembled, and nothing here proves
+            // it for every rig it may be handed, which is why the fallback just below asks
+            // the GEOMETRY one question: does the rig transform lie INSIDE the span being
+            // framed? If it does not, nothing being framed straddles it, so it cannot be
+            // the body's centre, and the union centre is used instead.
+            //
+            // That is the whole of what the fallback detects, and it is narrower than the
+            // shapes it is reached by. It catches a rig transform OUTSIDE the span -- what a
+            // re-root far enough to leave it produces, and what a clone whose skin never
+            // spawned produces only when nothing else framed (limbs, gun, cosmetics)
+            // straddles the rig. A transform left INSIDE the span is NOT caught: the frame
+            // centres on rigX, whatever that is on such a rig. The only thing that shows
+            // it is the report line below -- a bodyCx away from unionCx with no "using the
+            // union centre" line before it. Nothing here tests it and nothing claims to.
+            //
+            // An earlier version of this comment also offered a matte-erosion measurement
+            // (a body core on rig x -0.006, bbox mid -0.004, "the same at every erosion
+            // depth from 20 to 56 px"). Eroding the checked-in mattes does not reproduce
+            // it -- the centre moves across those depths -- so whatever that run measured,
+            // it is not something this tree shows, and it is no longer claimed.
             float bodyCx = rigX;
             if (bodyCx < use.min.x || bodyCx > use.max.x)
             {

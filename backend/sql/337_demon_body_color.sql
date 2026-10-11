@@ -23,9 +23,9 @@
 -- not a pytest because it needs the game's assets, which no test environment
 -- is entitled to assume; run it before taking another body colour from a card
 -- theme, and again if this hex is ever doubted. An earlier version of this
--- comment also cited a re-derivation of 221's poison values and a sweep of
--- every CardInfo in the file; neither is something this tree can repeat, so
--- neither is claimed here any more.
+-- comment also cited a re-derivation of the two hex values 221 recorded
+-- (#4AD652, #9E79FF) and a sweep of every CardInfo in the file; neither is
+-- something this tree can repeat, so neither is claimed here any more.
 --
 -- Controls, run on the same parse before either read is trusted:
 --   * The 9-row theme table self-checks — each themeType's targetColor is the
@@ -36,16 +36,18 @@
 --   * colorTheme lands where the card's own look says it should on four cards
 --     named for their element: Poison bullets = PoisonGreen, Cold bullets =
 --     ColdBlue, Tank = DefensiveBlue, Explosive bullet = DestructiveRed.
---   * The negative control for that offset: NOTHING in the script names the
---     component or the offset. It searches every component the five cards
---     share against every offset near the end of the record and requires
---     EXACTLY ONE pair whose int is a valid themeType on all five cards and
---     is not the same on all five — a reading that cannot vary is not a
---     reading. A second qualifying pair, which is what a neighbouring offset
---     that had started to vary would be, STOPS the run. The neighbours are
---     then reported and re-asserted constant in those terms. The five
---     path_ids above are what the run REPORTS, not what it is told: each
---     card is located by the name its GameObject carries in the asset.
+--   * The negative control for that offset. The search is not given the
+--     component or the offset: it tries every component the five cards
+--     share at each of the six offsets -4, -8, ... -24 and requires EXACTLY
+--     ONE pair whose int is a valid themeType on all five cards and is not
+--     the same on all five — a reading that cannot vary is not a reading.
+--     None, or a second, STOPS the run. The ints at -4, -8 and -16, the
+--     neighbours of -12, are then required CONSTANT across the five, and a
+--     neighbour that varies STOPS the run as well. The script does record
+--     -12 and Demonic pact's path_id 10145, but only to compare against: a
+--     derived offset or path_id that differs is printed beside the recorded
+--     one. Each card is located by the name its GameObject carries in the
+--     asset; CardChoice is the one object the run finds by path_id (3810).
 --
 -- Distance to what is already in the shop, CIELAB dE76 — the same metric 221
 -- used. `reproduce_337_theme_color.py --distances` computes it, needs no game
