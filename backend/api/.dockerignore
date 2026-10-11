@@ -1,0 +1,6 @@
+# No bytecode cache enters the api image. The review loader binds a rules
+# revision to the source bytes of its code; a cache in the image could run in
+# place of that source (build_no_bytecode.py fails the build if one exists).
+**/__pycache__
+**/*.pyc
+**/*.pyo

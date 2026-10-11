@@ -146,6 +146,15 @@ services:
       # source is resolved when the container is CREATED: switching revisions
       # means re-pointing `current` and recreating the api container.
       - ${PC_CARD_ART_DIR:-/opt/competitive-rounds/private/pc-cards/current}:/app/assets/pc/cards:ro
+      # The review rules (review_rules.py): staged per box under
+      # /opt/competitive-rounds/private/review/ (ignored by the clone), one
+      # immutable rules-<id> directory per revision and a `current` pointer.
+      # The PARENT is mounted, so re-pointing `current` reaches a running
+      # container with no recreate; the api re-reads the pointer and
+      # validates a new target before using it. READ-ONLY. With nothing
+      # staged /health reads review_rules=absent, records are stored, and
+      # nothing is evaluated or opened.
+      - ${SCR_REVIEW_DIR:-/opt/competitive-rounds/private/review}:/app/private/review:ro
     ports:
       - "${API_PORT:-8443}:8000"
     security_opt:

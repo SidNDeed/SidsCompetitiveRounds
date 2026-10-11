@@ -37,6 +37,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database import RELEASE_POOL_OVERFLOW, RELEASE_POOL_SIZE, get_db, get_release_db
 from database import get_asm_db
 from flag_evidence import fetch_flag_context_rows, flag_payload
+import review_boot, seat_evidence as _sev   # review_boot FIRST: the review closure executes from source only
+import review_rules as _review_rules
 from glicko2 import calculate_new_rating
 import steamid64 as _sid64   # the SteamID64 rule, standard library only: the name cleanup, the bug-log scrubber and the Steam sweep read it
 import log_redaction as _logred   # the credential rule, standard library only: every receive path and read-back door of client log text applies it
@@ -3679,6 +3681,11 @@ async def lifespan(app: FastAPI):
         # need the durable floor at boot, or the box enforces the COMPILED
         # default instead of the stored one.
         await _min_version_autoraise_restore()
+        # The review rules loader: both roles, read-only (it reads the
+        # mounted revision directory and no table), so /health's
+        # review_rules reads the same id on both boxes.
+        tasks.append(asyncio.create_task(
+            _supervised("review_rules_refresh", review_rules_refresh_loop)))
         if IS_REPLICA:
             # Every loop below this line WRITES -- queue/lobby DELETEs, series
             # cancels, gold movement, tournament progression, runtime_settings
@@ -3693,6 +3700,11 @@ async def lifespan(app: FastAPI):
             print("[REPLICA] BOOTING AS READ REPLICA: write schedulers disabled "
                   "(queue_cleanup, team_queue_cleanup, tournament_tick, "
                   "min_version_autoraise, janitor self-test)")
+            # The review worker writes, so it is primary-only. This line is
+            # the standby's POSITIVE signal that it took this branch and
+            # started no worker (an absent pass line alone cannot tell a
+            # disabled worker from a log that was not collected).
+            print("[REVIEW] worker=standby-disabled", flush=True)
             # The floor still has to track the primary — see the docstring.
             tasks.append(asyncio.create_task(
                 _supervised("min_version_follow", min_version_follow_loop)))
@@ -3740,6 +3752,12 @@ async def lifespan(app: FastAPI):
             # fallback report defers, and the standby's postgres is read-only.
             tasks.append(asyncio.create_task(
                 _supervised("team_dc_fallback_sweep", team_dc_fallback_sweep_loop)))
+            # Seat evidence and the review rules worker: attaching records,
+            # evaluating under the loaded rules revision, posting advisory
+            # review items, the purge. PRIMARY ONLY with the other writers.
+            print("[REVIEW] worker=primary", flush=True)
+            tasks.append(asyncio.create_task(
+                _supervised("review_worker", review_worker_loop)))
             # Detached one-shot, deliberately NOT under _supervised (its while-True
             # would rerun a returning task forever) and not awaited on the boot path.
             tasks.append(asyncio.create_task(_run_janitor_query_selftest()))
@@ -4399,6 +4417,70 @@ async def team_dc_fallback_sweep_loop():
             print(f"[TEAM-DC-SWEEP] error: {e}")
 
 
+REVIEW_PASS_S = 600
+REVIEW_FIRST_PASS_S = 90
+REVIEW_PURGE_EVERY_S = 20 * 3600
+REVIEW_REFRESH_S = 60
+
+
+async def review_rules_refresh_loop():
+    """Re-read the review rules pointer on both roles. A changed pointer or
+    target is validated completely off the event loop and published in one
+    assignment (review_rules.refresh), so a running container follows a
+    re-pointed `current` with no recreate."""
+    while True:
+        try:
+            await asyncio.to_thread(_review_rules.refresh_rules)
+        except Exception as e:
+            print(f"[REVIEW] refresh error: {type(e).__name__}", flush=True)
+        await asyncio.sleep(REVIEW_REFRESH_S)
+
+
+def _review_pass_line(word, games, sittings) -> str:
+    def n(d, k):
+        return int(d.get(k, 0)) if isinstance(d, dict) else 0
+    errors = (n(games, "rule_errors") + n(sittings, "rule_errors")
+              + sum(v for k, v in (games or {}).items() if k.startswith("error:")))
+    return (f"[REVIEW] pass rev={word} evaluated={n(games, 'evaluated') + n(sittings, 'evaluated')} "
+            f"fired={n(games, 'fired') + n(sittings, 'fired')} errors={errors}")
+
+
+async def review_worker_pass(session_factory, purge: bool):
+    """One pass of the review worker: read the loader's published state once
+    and use it for the whole pass, attach and evaluate games, run the sitting
+    rules, purge when asked, and print the pass lines. With no valid revision
+    it attaches records to matches and purges, evaluates nothing and opens
+    nothing; the pass line then names the word (absent or refused)."""
+    state = await asyncio.to_thread(_review_rules.refresh_rules)
+    games = await _sev.games_pass(session_factory, state)
+    sittings = await _sev.sitting_pass(session_factory, state)
+    purged = await _sev.purge_pass(session_factory) if purge else None
+    print(_review_pass_line(state.word, games, sittings), flush=True)
+    print(f"[SEAT-EVIDENCE] games={games} sittings={sittings} purge={purged}", flush=True)
+    return state.word, games, sittings, purged
+
+
+async def review_worker_loop():
+    """The seat-evidence and review worker. PRIMARY ONLY: started in
+    lifespan's primary branch, and every pass it runs writes.
+
+    Every evaluation runs here and nowhere else: the match report path
+    neither awaits nor transacts with any of this SQL. Each game and each
+    sitting rule runs in its own transaction and guard."""
+    from database import async_session
+    last_purge = None
+    await asyncio.sleep(REVIEW_FIRST_PASS_S)
+    while True:
+        try:
+            purge = last_purge is None or time.monotonic() - last_purge > REVIEW_PURGE_EVERY_S
+            await review_worker_pass(async_session, purge)
+            if purge:
+                last_purge = time.monotonic()
+        except Exception as e:
+            print(f"[REVIEW] pass error: {type(e).__name__}", flush=True)
+        await asyncio.sleep(REVIEW_PASS_S)
+
+
 # ── 1v2 abandoned-series horizon (bug 391) ───────────────────────────────
 # Sid ruled on 2026-09-20 that a ranked series idle for 14 days is closed
 # rather than left live. A 1v2 sitting is UNRANKED (`is_ranked` defaults FALSE
@@ -4468,7 +4550,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:47822 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:48033 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4534,7 +4616,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:47634 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:47845 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4604,7 +4686,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:47537 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:47748 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -7091,6 +7173,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
+                              seat_evidence=_seat_evidence_health_word(),
+                              review_eval=_review_rules.review_eval(),
+                              review_rules=_review_rules.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=await _pc_trading_word(db),
@@ -7121,6 +7206,9 @@ async def health_check(db: AsyncSession = Depends(get_db)):
                               ffa_game_number=_FFA_GAME_NUMBER, ovt_solo_split=_OVT_SOLO_SPLIT,
                               ladder_hook=_LADDER_HOOK,
                               connect_failure=_CONNECT_FAILURE,
+                              seat_evidence=_seat_evidence_health_word(),
+                              review_eval=_review_rules.review_eval(),
+                              review_rules=_review_rules.health_word(),
                               lead_forfeit_pergame=_LEAD_FORFEIT_PERGAME,
                               pc_card_themes=_pc_card_themes_word(),
                               pc_trading=_pc_trading_word_cached(),
@@ -7990,6 +8078,129 @@ async def submit_macro_evidence(
         "match_id": str(match.id),
         "flag_id": str(flag.id),
     }
+
+
+def _sev_header_version(request) -> str | None:
+    v = (request.headers.get("X-Mod-Version") or "") if request is not None else ""
+    return v if 0 < len(v) <= 16 else None
+
+
+def _sev_refusal(r):
+    """The contract's answer for a refusal (section 5)."""
+    if r.status == 409:
+        return JSONResponse(status_code=409, content={"status": r.field})
+    if r.status == 429:
+        return JSONResponse(status_code=429, content={"error": "rate_limited", "field": r.field},
+                            headers={"Retry-After": "600"})
+    return JSONResponse(status_code=r.status, content={"detail": r.field})
+
+
+async def _sev_claimed_seat(request) -> tuple[str, object]:
+    """The body, read once, and the seat it names (empty when it names none):
+    the session check needs the claimed seat before anything else happens."""
+    try:
+        body = _json.loads(await request.body())
+    except Exception:
+        return "", None
+    seat = body.get("seat_steam_id") if isinstance(body, dict) else None
+    return (seat if isinstance(seat, str) else ""), body
+
+
+@app.post("/api/v1/matches/seat-evidence", tags=["Matches"])
+async def submit_seat_evidence(request: Request, db: AsyncSession = Depends(get_db)):
+    """One seat's evidence record for one ranked game (contract V2).
+
+    The FIRST decision is the session: 401 unless the request carries a
+    verified session for the seat the body names (_strict_steam_session_ok),
+    before any other route work; that check only reads. After it, this route
+    writes the seat_evidence table and nothing else: it never creates a player
+    row, never touches a match, a series, a rating, gold or flagged_matches.
+    Evaluation runs later, in review_worker_loop."""
+    seat, body = await _sev_claimed_seat(request)
+    if not seat or not await _strict_steam_session_ok(request, seat, db):
+        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+    try:
+        if await _sev.setting(db, "seat_evidence_accept", "0") != "1":
+            return JSONResponse(status_code=503, content={"error": "seat_evidence_off"})
+        env = _sev.parse_envelope(body)
+        if not _sev.verify_sig(MATCH_HMAC_SECRET, env):
+            return JSONResponse(status_code=403, content={"detail": "signature"})
+        rec = _sev.parse_record(env)
+        rows = (await db.execute(
+            select(Player.id, Player.steam_id).where(Player.steam_id.in_([env["seat"], env["other"]]))
+        )).all()
+        by_steam = {r.steam_id: r.id for r in rows}
+        if env["seat"] not in by_steam or env["other"] not in by_steam:
+            return JSONResponse(status_code=409, content={"status": "not_ready"})
+        return await _sev.store_record(db, env, rec, by_steam[env["seat"]], by_steam[env["other"]],
+                                       _sev_header_version(request))
+    except _sev.EvidenceRefused as r:
+        return _sev_refusal(r)
+
+
+@app.post("/api/v1/client/compat-outcome", tags=["Matches"])
+async def submit_compat_outcome(request: Request, db: AsyncSession = Depends(get_db)):
+    """A seat's other-plug-in check outcome (contract V2 section 5.1): sent once
+    by a seat whose check found another plug-in (`finding`) or could not run
+    (`not_run`). Session first, as the seat-evidence route; writes only
+    client_compat_events, one row per account per UTC hour. With the accept
+    switch off it answers 503 seat_evidence_off right after the session check,
+    before any validation, signature work or storage."""
+    seat, body = await _sev_claimed_seat(request)
+    if not seat or not await _strict_steam_session_ok(request, seat, db):
+        return JSONResponse(status_code=401, content={"detail": "seat_session"})
+    try:
+        if await _sev.setting(db, "seat_evidence_accept", "0") != "1":
+            return JSONResponse(status_code=503, content={"error": "seat_evidence_off"})
+        c = _sev.check_compat(body)
+        if not _sev.verify_compat_sig(MATCH_HMAC_SECRET, c):
+            return JSONResponse(status_code=403, content={"detail": "signature"})
+        pid = (await db.execute(select(Player.id).where(Player.steam_id == c["seat"]))).scalar_one_or_none()
+        if pid is None:
+            return JSONResponse(status_code=409, content={"status": "not_ready"})
+        return await _sev.store_compat(db, c, pid, _sev_header_version(request))
+    except _sev.EvidenceRefused as r:
+        return _sev_refusal(r)
+
+
+@app.get("/api/v1/admin/seat-evidence", tags=["Admin"])
+async def admin_seat_evidence(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    match_id: UUID | None = Query(None),
+    stable_game_key: str | None = Query(None, max_length=60),
+    db: AsyncSession = Depends(get_db),
+):
+    """The reviewer's view of one game's seat evidence: both records, the
+    comparison computed now, the stored findings (rule id and revision) and
+    the unavailable matrix when one seat sent nothing. Admin only."""
+    if (match_id is None) == (stable_game_key is None):
+        raise HTTPException(400, "Give exactly one of match_id or stable_game_key")
+    target = str(match_id) if match_id is not None else stable_game_key
+    await _require_admin(db, admin_steam_id, "seat_evidence", target, hmac_signature)
+    return await _sev.admin_view(db, match_id=str(match_id) if match_id else None,
+                                 stable_game_key=stable_game_key,
+                                 rs=_review_rules.current_rules().ruleset)
+
+
+@app.post("/api/v1/admin/release-digests", tags=["Admin"])
+async def admin_register_release_digest(
+    admin_steam_id: str = Query(...),
+    hmac_signature: str = Query(None),
+    version: str = Query(..., max_length=16),
+    variant: str = Query(..., max_length=16),
+    commit: str = Query("", max_length=12),
+    dll_sha256: str = Query(..., max_length=64),
+    db: AsyncSession = Depends(get_db),
+):
+    """Register one released build's tuple for the build comparison. The
+    digest must be of the uploaded release asset."""
+    target = f"{version}|{variant}|{commit}|{dll_sha256}"
+    await _require_admin(db, admin_steam_id, "release_digest", target, hmac_signature)
+    try:
+        return await _sev.register_digest(db, version, variant, commit, dll_sha256)
+    except _sev.EvidenceRefused as r:
+        return _sev_refusal(r)
 
 
 @app.post("/api/v1/matches", response_model=MatchResponse, tags=["Matches"])
@@ -47929,7 +48140,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
     # above is `FOR NO KEY UPDATE` with NO `SKIP LOCKED`: it WAITS. The 1v2
     # horizon janitor takes the same mode on the same row WITH `SKIP LOCKED`
     # — its locking read is
-    # PIN main.py:4573 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
+    # PIN main.py:4655 "SELECT status FROM ovt_series WHERE id = CAST(:sid AS uuid)"
     # and the clause is the line under it. So the two can
     # never both decide this row: either the janitor meets this report's lock
     # and DECLINES the row for that tick, or it commits its void first and
@@ -61324,6 +61535,21 @@ _CONNECT_FAILURE = sum(1 for _cf_fn, _cf_name in _CONNECT_FAILURE_SITES
 # handlers themselves, so it is bound here, after the last of them.
 _PC_MOTION_ROUTES = (pc_motion_upload, pc_face_motion_read, pc_face_motion_atlas, pc_dance_select,
                      internal_pc_motion_preview)
+
+
+# Seat evidence (contract V2): `seat_evidence` on /health is 1 when this app
+# registers all four seat-evidence routes, else 0. Release-train plumbing whose
+# only purpose is to be probed, DERIVED on every call: a comment or a
+# docstring cannot move it. Equal on both roles by construction: it reads the
+# routing table, not which branch of lifespan this box took. The worker's
+# primary-only start is shown by its own log markers, not by this word.
+_SEAT_EVIDENCE_ROUTES = (submit_seat_evidence, submit_compat_outcome, admin_seat_evidence,
+                         admin_register_release_digest)
+
+
+def _seat_evidence_health_word() -> int:
+    registered = {id(getattr(route, "endpoint", None)) for route in app.routes}
+    return 1 if all(id(fn) in registered for fn in _SEAT_EVIDENCE_ROUTES) else 0
 
 
 def _pc_motion_health_word() -> int:

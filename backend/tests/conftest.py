@@ -20,6 +20,14 @@ for path in (str(API_ROOT), str(BACKEND_ROOT), str(TESTS_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+# ── The review closure executes from source only ─────────────────────────
+#
+# review_boot must be installed before any review closure module
+# (review_measures, review_rules) is imported, or the rules loader refuses
+# every revision in the process (review_boot.py). Importing it here, before
+# any test module is collected, installs it for the whole run.
+import review_boot  # noqa: E402,F401
+
 
 # ── The tree this run is reading ─────────────────────────────────────────
 #

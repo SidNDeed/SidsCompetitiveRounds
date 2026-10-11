@@ -124,9 +124,17 @@ def test_one_pass_stays_affordable():
     roots shows up as a failing test rather than as two slow passes per run
     that nobody attributes.
     """
+    # Ceiling from the measured budget (fix pass 4, logs d4-fix4-walk-measure.log
+    # and d4-fix4-walk-commit.log): the fix-pass-4 working tree on 9b8e3cb0 reads
+    # 40.37 MiB over 735 files in one pass on a CRLF checkout (9b8e3cb0 is 39.93
+    # MiB as committed blobs, trunk e9a3f1e1 39.29 MiB); this lane adds 0.82 MiB
+    # over its merge base, every byte of it read by its tests (the largest: the
+    # client's state-space fixture, 0.21 MiB). The ceiling is the measured total
+    # plus about one lane of the same size per dependent lane still to land
+    # (three), rounded up: 44 MiB.
     stamps = ct._source_stamps()
     total = sum(size for size, _digest in stamps.values())
-    assert total < 40 * 1024 * 1024, (
+    assert total < 44 * 1024 * 1024, (
         "one tree-movement pass now reads %.1f MiB across %d files, and it runs "
         "twice per session" % (total / 1048576.0, len(stamps)))
 
