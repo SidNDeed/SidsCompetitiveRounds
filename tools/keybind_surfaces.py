@@ -129,10 +129,10 @@ disposition by default and no file is exempt.
    in RENDER_ROOTS (file, member, what it renders); each must resolve to
    exactly one member, and each root's entries (the members that reference
    it, one level) are a root row of tools/keybind_surfaces_attach.tsv,
-   counted and content-addressed. A chain is a path of at most ATTACH_BOUND
-   HOPS from the sink up, each hop one member referencing the member below
-   it (section 4's reference rule), classified by where the reference
-   stands:
+   counted and content-addressed. A chain is a path from the sink up, of any
+   length (fix pass 5: the traversal is COMPLETE and has no hop bound), each
+   hop one member referencing the member below it (section 4's reference
+   rule), classified by where the reference stands:
      ref       a call or a read;
      delegate  inside a lambda, or the member named as a value (a method
                group): a delegate registration, its context the call or
@@ -151,20 +151,41 @@ disposition by default and no file is exempt.
                UNRESOLVED hop.
    A hop is the hash of its kind, its context, its two members and the text
    of the statement or entry that holds it (comments stripped, literals
-   kept, whitespace collapsed; never its line); a chain id hashes its hops,
-   its end and its registration leg, and the summary prints a digest of
-   every chain. A chain ends at a root or at an UNRESOLVED hop: a member
+   kept, whitespace collapsed; never its line). The traversal (traverse)
+   starts at every sink and expands every member it reaches, once, until
+   every path has ended; one visited set over the whole traversal makes it
+   cycle-safe. A path ends at a root, at an UNRESOLVED end - a member
    nothing in the source references that is entered from outside it (a
    Harmony patch method, harmony:File.cs:Class.Member(Target.method); a
    Unity message, unity:...; a member whose name is a string literal,
-   reflection:...) or a reference at file scope (field:...). Every chain is a
-   chain row (sink, chain id, the chain as text); every UNRESOLVED hop is an
+   reflection:...) or a reference at file scope (field:...) - at a member
+   nothing references and nothing enters (unreferenced), at a registration
+   member with no registration (unregistered), or at a CYCLE END: a hop
+   whose two members lie in one strongly connected component, by which a
+   path returns to a member it already holds. The paths of a sink are every
+   walk up its recorded hops; there are far too many to list one by one
+   (the reference rule over-approximates receivers, so the InfoLibrary
+   sinks reach ~1,700 members), so they are manifested LOSSLESSLY as the
+   rows they are made of: every hop a hop row (lower, hop digest, upper,
+   token), every end an end row, every cycle end a cycle row, and every
+   sink a sink row (its members, hops, the digest of its whole subgraph,
+   attached or ORPHAN, the roots it reaches). A change to any completed path
+   changes a row and the digest of every sink it starts from; the summary
+   prints a digest of every row, and the path mode names any one path row
+   by row. A sink is ATTACHED when the least fixed point reaches it from a
+   root or an UNRESOLVED end (a dispatch hop at a declared dispatcher only
+   with its registration member attached). Every UNRESOLVED end is an
    unresolved row with its CONTROL - a pytest node that exists and names it
-   - and a note. FATAL: a declared root that is not one member; a root whose
-   entries changed; a sink with NO chain (ORPHAN: an orphan is never a silent
-   terminal); a derived chain with no row (reverse discovery: a sink attached
-   anew, or re-attached under another entry, segment, key or caller); a row
-   whose chain is no longer derived (a detachment or a move); an UNRESOLVED
+   - and a note. A traversal that would expand more than ATTACH_BUDGET
+   members stops and is TRUNCATED: FATAL, naming the path to each member
+   never expanded (a truncated traversal is incomplete, never a dead end).
+   FATAL also: a declared root that is not one member; a root whose entries
+   changed; a sink not attached (ORPHAN: an orphan is never a silent
+   terminal); a derived hop, end or cycle with no row (reverse discovery: a
+   sink attached anew, or re-attached under another entry, segment, key or
+   caller), named with the path it lies on; a row the source no longer
+   derives (a detachment or a move), named with its recorded path; a sink
+   row that differs; an UNRESOLVED
    hop with no row, a stale row, or a control that is missing or does not
    name the hop; a dispatcher's binding-key table (KeybindRules.InfoVisual
    .BindingKeys, the keys whose failed build is a repaint failure) that
@@ -191,11 +212,14 @@ manifest "feeds" declaration, which is reviewed, not proven. Section 5's
 limits: a root is declared, and only its entries one level up are recorded;
 a hop is a reference, not a proven invocation (a delegate registration
 proves where the delegate is registered, not that it is invoked; a
-condition around a hop is hashed as text, never evaluated); a path longer
-than ATTACH_BOUND hops is not followed (a sink with no chain within the bound
-is then an ORPHAN: red, never green; a sink with one is checked along its
-chains within the bound only, and the attach mode prints its longer paths
-as #DEAD lines, unhashed); a Seg.V registration whose key is not a literal
+condition around a hop is hashed as text, never evaluated); the reference
+rule does not resolve the receiver of an instance member, so the traversal
+follows more paths than the program can take, never fewer (it is complete
+over the reference rule, and every extra path is made of rows whose change
+is red, so the manifest moves with an edit to any of the ~1,700 members
+those paths cross); a member reached on several paths is expanded once and
+its hops recorded once, shared by every path through it; a Seg.V
+registration whose key is not a literal
 is never paired (it is an UNRESOLVED hop, dispatch-key:..., red until
 dispositioned); Harmony's application of a patch at load, a Unity message's
 delivery and a reflection call are UNRESOLVED hops whose controls pin their
@@ -205,7 +229,8 @@ USAGE
     python tools/keybind_surfaces.py check [--tree T]
     python tools/keybind_surfaces.py readers [--tree T]   # census, manifest shape
     python tools/keybind_surfaces.py callers [--tree T]   # derived caller graph, manifest shape
-    python tools/keybind_surfaces.py attach [--tree T]    # attachment chains, manifest shape
+    python tools/keybind_surfaces.py attach [--tree T]    # attachment rows, manifest shape
+    python tools/keybind_surfaces.py path SINK M1 ... ROOT [--tree T]   # one path, row by row
     python tools/keybind_surfaces.py review [--tree T]    # the rows a review must cover
     python tools/keybind_surfaces.py candidates | sites [--tree T]
 Exit 0 green, 1 red, 2 usage.
@@ -702,6 +727,31 @@ def caller_sources(st):
     return out
 
 
+WORD = re.compile(r"(?<![\w@])\w+")
+
+
+def _word_index(t, fn):
+    """{word: [positions]} of every maximal identifier run in fn's masked
+    text that no word character or @ precedes: exactly the positions where
+    (?<![\\w@])word\\b matches, found in one pass per file instead of one
+    pass per file and name (fix pass 5: the complete attachment traversal
+    asks for the references of every member it reaches)."""
+    cache = t.__dict__.setdefault("_word_index", {})
+    if fn not in cache:
+        idx = collections.defaultdict(list)
+        for w in WORD.finditer(t.mask(t.src[fn])):
+            idx[w.group(0)].append(w.start())
+        cache[fn] = dict(idx)
+    return cache[fn]
+
+
+def _member_ids_of(t, fn):
+    cache = t.__dict__.setdefault("_member_ids", {})
+    if fn not in cache:
+        cache[fn] = member_ids(t.members(fn))
+    return cache[fn]
+
+
 def caller_refs(t, fn, mid, m):
     """{(file, consumer id): [positions]}: every reference to member m (id mid
     of fn) by its name across plugin/. Unqualified, a reference counts inside
@@ -720,21 +770,20 @@ def caller_refs(t, fn, mid, m):
     own = chain[-1]
     after = t.ext._mask_cs(t.src[fn])[m.name_at + len(name):m.name_at + len(name) + 200]
     receiver_free = bool(re.search(r"\bstatic\b", m.header)) and not EXTENSION.match(after)
-    pat = re.compile(r"(?<![\w@])%s\b" % re.escape(name))
     decls = t.__dict__.setdefault("_decl_at", {})
     out = {}
     for fn2 in sorted(t.src):
-        masked = t.mask(t.src[fn2])
-        if name not in masked:
+        found = _word_index(t, fn2).get(name)
+        if not found:
             continue
+        masked = t.mask(t.src[fn2])
         mem2 = t.members(fn2)
-        ids2 = member_ids(mem2)
+        ids2 = _member_ids_of(t, fn2)
         if fn2 not in decls:
             decls[fn2] = {x.name_at for x in mem2}
         enums = _enums(t, fn2)
         types2 = _types(t, fn2)
-        for h in pat.finditer(masked):
-            p = h.start()
+        for p in found:
             if p in decls[fn2] or any(a <= p < b for a, b in enums) or _is_declaration(masked, p, len(name)):
                 continue
             if m.kind != "property" and re.match(r"\s*(?:=(?![=>])|[-+*/%&|^]=|\?\?=)", masked[p + len(name):p + len(name) + 8]):
@@ -859,11 +908,18 @@ def read_callers(path):
 # sink detached from its render root (its call removed, its table entry or
 # segment removed, its dispatch key no longer registered) kept every caller
 # row and digest. This pass walks UP from every terminal display sink to a
-# declared render root and records each attachment chain (section 5 of the
-# docstring).
+# declared render root and records every attachment path (section 5 of the
+# docstring). Fix pass 5: the walk is a COMPLETE traversal - no hop bound -
+# and every path it completes is manifested and hashed through its hops, its
+# ends and its cycle hops; a traversal cut short is fatal, never a dead end.
 
 ATTACH_TSV = os.path.join(HERE, "keybind_surfaces_attach.tsv")
-ATTACH_BOUND = 4   # hops from a sink (or a registration) to the end of its chain
+# The members one traversal may expand. It is a guard against a runaway
+# derivation, not a bound on what is checked: a traversal that reaches it
+# stops, records every member it did not expand, and the oracle is RED
+# (TRUNCATED, the path to each such member named). The fix-5 tip expands
+# about 1,700 members.
+ATTACH_BUDGET = 20000
 # The render roots, declared once: (file, member, what it puts in front of
 # the player). The oracle resolves each to exactly one member and prints its
 # line; a root's own entries (the members that reference it) are recorded,
@@ -1242,34 +1298,138 @@ def entry_point(t, key):
     return None
 
 
-def _walk(t, start, roots, chains, dead, bound=ATTACH_BOUND):
-    """Every simple path of hops up from start, at most `bound` hops, that
-    ends at a declared root ("root:K") or at an UNRESOLVED entry
-    ("unresolved:NAME"): appended to chains as (hops, end). A path that ends
-    nowhere is appended to dead as (why, member)."""
-    def dfs(node, path, seen):
+def _upper(h):
+    """The member a hop leads up to: its consumer, or, for a reference at file
+    scope (a field initializer), the virtual member field:File.cs:ctx, which
+    is an UNRESOLVED end."""
+    if h.kind == "field":
+        return "field:%s:%s" % (h.consumer.split(":", 1)[0], h.ctx)
+    return h.consumer
+
+
+def traverse(t, starts, roots, budget=None, leg=None, virtual=None):
+    """The COMPLETE, cycle-safe traversal UP from every start (fix pass 5 H1).
+    No hop bound: every member reached is expanded, and every hop of every
+    member expanded is recorded. Cycle safety is one visited set over the
+    whole traversal: a member is expanded once, so a path that comes back to
+    a member it already holds ends there (the hop that closes it is a cycle
+    hop, found from the graph by _cycle_hops and recorded as such), and the
+    traversal never loops. Returns a dict:
+      up         {member: [Hop]}: the hops one level up from each member expanded
+      ends       {member: end} for each member that ends a path: root:K for a
+                 declared root (a root ends a path; its own entries are its
+                 root row); for a member with no hop, unresolved:NAME when the
+                 member is entered from outside the source (entry_point), else
+                 unreferenced; for a field hop's virtual member,
+                 unresolved:field:File.cs:ctx; for a registration member with
+                 no registration, unregistered
+      parent     {member: (lower, Hop)}: the hop by which each member was first
+                 reached (breadth first), to name the path to it
+      truncated  [member]: reached and never expanded because `budget` members
+                 had been expanded: the traversal is INCOMPLETE, and the oracle
+                 is red (TRUNCATED), never a silent dead end
+    leg(h): for a dispatch hop at a declared dispatcher, the virtual
+    registration member register:Dispatcher{key} the hop needs (or None);
+    virtual: {that member: [register Hop]}, filled by leg."""
+    budget = ATTACH_BUDGET if budget is None else budget
+    virtual = {} if virtual is None else virtual
+    up, ends, parent, truncated = {}, {}, {}, []
+    queue = collections.deque(sorted(set(starts)))
+    seen = set(queue)
+    expanded = 0
+
+    def reach(node, lower, h):
+        if node not in seen:
+            seen.add(node)
+            parent[node] = (lower, h)
+            queue.append(node)
+
+    while queue:
+        node = queue.popleft()
         if node in roots:
-            chains.append((path, "root:" + node))
-            return
-        if len(path) >= bound:
-            dead.append(("beyond the bound", node))
-            return
-        hops = up_hops(t, node)
+            up[node] = []
+            ends[node] = "root:" + node
+            continue
+        if node.startswith("field:"):
+            up[node] = []
+            ends[node] = "unresolved:" + node
+            continue
+        if expanded >= budget:
+            truncated.append(node)
+            continue
+        expanded += 1
+        hops = virtual.get(node, []) if node.startswith("register:") else up_hops(t, node)
+        up[node] = hops
         if not hops:
-            en = entry_point(t, node)
-            if en:
-                chains.append((path, "unresolved:" + en))
+            if node.startswith("register:"):
+                ends[node] = "unregistered"
             else:
-                dead.append(("unreferenced", node))
-            return
+                en = entry_point(t, node)
+                ends[node] = ("unresolved:" + en) if en else "unreferenced"
+            continue
         for h in hops:
-            if h.consumer in seen:
+            reach(_upper(h), node, h)
+            v = leg(h) if leg is not None else None
+            if v is not None:
+                reach(v, node, h)
+    return {"up": up, "ends": ends, "parent": parent, "truncated": truncated}
+
+
+def _succ(tr, legs, node):
+    """The members one level up from node in a traversal: each hop's upper
+    member and, for a dispatch hop with a registration leg, the leg's
+    registration member."""
+    out = []
+    for h in tr["up"].get(node, ()):
+        out.append(_upper(h))
+        v = legs.get((node, h.digest))
+        if v is not None:
+            out.append(v)
+    return out
+
+
+def _cycle_hops(tr):
+    """{(lower, hop digest)} of every hop whose two members lie in one
+    strongly connected component of the traversed graph: the hop by which a
+    path returns to a member it already holds. The traversal expanded that
+    member once; the hop is a cycle end, recorded, never dropped."""
+    up = tr["up"]
+    succ = {n: [_upper(h) for h in hs if _upper(h) in up] for n, hs in up.items()}
+    index, low, on, stack, comp = {}, {}, set(), [], {}
+    counter = [0]
+    for s0 in sorted(succ):
+        if s0 in index:
+            continue
+        index[s0] = low[s0] = counter[0]
+        counter[0] += 1
+        stack.append(s0)
+        on.add(s0)
+        work = [(s0, iter(succ[s0]))]
+        while work:
+            v, it = work[-1]
+            w = next(it, None)
+            if w is not None:
+                if w not in index:
+                    index[w] = low[w] = counter[0]
+                    counter[0] += 1
+                    stack.append(w)
+                    on.add(w)
+                    work.append((w, iter(succ[w])))
+                elif w in on:
+                    low[v] = min(low[v], index[w])
                 continue
-            if h.kind == "field":
-                chains.append((path + [h], "unresolved:field:%s:%s" % (h.consumer.split(":", 1)[0], h.ctx)))
-                continue
-            dfs(h.consumer, path + [h], seen | {h.consumer})
-    dfs(start, [], {start})
+            work.pop()
+            if work:
+                low[work[-1][0]] = min(low[work[-1][0]], low[v])
+            if low[v] == index[v]:
+                while True:
+                    x = stack.pop()
+                    on.discard(x)
+                    comp[x] = v
+                    if x == v:
+                        break
+    return {(n, h.digest) for n, hs in up.items() for h in hs
+            if _upper(h) in comp and comp[_upper(h)] == comp[n]}
 
 
 def _hop_token(t, h, lines):
@@ -1279,22 +1439,6 @@ def _hop_token(t, h, lines):
         fn = h.consumer.split(":", 1)[0]
         tok += " L" + ",".join(str(t.src[fn].count("\n", 0, p) + 1) for p in sorted(h.pos))
     return tok
-
-
-def chain_text(t, path, end, leg, lines=False):
-    """A chain as one line: its hops from the sink up, its end, and for a
-    dispatch, the registration leg after `## reg`."""
-    s = " | ".join(_hop_token(t, h, lines) for h in path) + " || " + end
-    if leg:
-        s += " ## reg " + " | ".join(_hop_token(t, h, lines) for h in leg[0]) + " || " + leg[1]
-    return s
-
-
-def chain_id(path, end, leg):
-    parts = [h.digest for h in path] + [end]
-    if leg:
-        parts += ["reg"] + [h.digest for h in leg[0]] + [leg[1]]
-    return kid("\n".join(parts))
 
 
 def _literal_table(t, fn, name):
@@ -1307,17 +1451,31 @@ def _literal_table(t, fn, name):
     return set(re.findall(r'"([^"\\]*)"', mm.group(1)))
 
 
-def derive_attach(st, sinks):
-    """The attachment derivation (section 5). sinks: the terminal display
-    sinks ("File.cs:Member"). Returns a dict:
+def derive_attach(st, sinks, budget=None):
+    """The attachment derivation (section 5), a complete traversal (fix pass
+    5). sinks: the terminal display sinks ("File.cs:Member"). Returns a dict:
       roots       {key: (line, what)} of the declared roots found
       missing     the declared roots not found exactly once
       entries     {root key: [hops]}: each root's references, one level
-      sinks       {sink: {"chains": {id: (text, text with lines)},
-                          "dead": [(why, member)], "unregistered": {key}}}
-      unresolved  {name: set of sinks whose chains end or pass there}
+      hops        {(lower, hop digest): (lower, Hop)}: every hop the traversal
+                  recorded, the manifest's hop rows
+      ends        {member: end}: every member that ends a path, its end rows
+      cycles      {(lower, hop digest)}: the hops that close a cycle, its cycle rows
+      truncated   [(member, the path to it)]: members never expanded (RED)
+      sinks       {sink: {"attached": bool, "hops": {(lower, digest)},
+                          "nodes": {member}, "ends": {member},
+                          "roots": sorted root keys reached,
+                          "unregistered": {key}, "digest": its subgraph's digest}}
+      unresolved  {name: set of sinks whose paths end or pass there}
       bkeys       the dispatch keys whose visual is a display sink
-      tables      {dispatcher: set of keys its binding table declares, or None}"""
+      tables      {dispatcher: set of keys its binding table declares, or None}
+      legs        {(lower, hop digest): registration member} of each dispatch
+                  hop at a declared dispatcher
+      tr          the traversal itself (up, ends, parent, truncated)
+    A path is every walk up the recorded hops from a sink that ends at an end
+    member or at a cycle hop; every completed path is therefore manifested and
+    hashed through the rows it is made of, and a change to any path changes a
+    hop, end or cycle row and the digest of every sink it starts from."""
     t = st.t
     roots, missing = {}, []
     for fn, mid, what in RENDER_ROOTS:
@@ -1328,14 +1486,15 @@ def derive_attach(st, sinks):
         roots["%s:%s" % (fn, mid)] = (t.src[fn].count("\n", 0, m.name_at) + 1, what)
     rset = set(roots)
     entries = {k: up_hops(t, k) for k in sorted(roots)}
-    unresolved = collections.defaultdict(set)
     disp = {d: (reg, tab) for d, reg, tab in DISPATCHERS}
-    legs = {}   # (dispatcher, key) -> [(hops, end)]
+    virtual = {}                                # register:D{key} -> [register Hop]
+    nonlit = collections.defaultdict(set)      # dispatch-key:... -> {register:D{key}}
+    legs = {}                                   # (lower, digest) -> register:D{key}
+    sinks = set(sinks)
 
-    def reg_legs(dk, key):
-        if (dk, key) in legs:
-            return legs[(dk, key)]
+    def register_hops(dk, key):
         (rfn, rtype, rname), _ = disp[dk]
+        v = "register:%s{%s}" % (dk, key)
         out = []
         cand = [m for m in t.members(rfn) if m.name == rname
                 and any(n == rtype and a <= m.start < b for n, a, b in _types(t, rfn))] if rfn in t.src else []
@@ -1346,49 +1505,110 @@ def derive_attach(st, sinks):
                 for p in sorted(h.pos):
                     mm = re.match(r'\s*\(\s*"([^"\\]*)"\s*\)', t.strip(t.src[fn2])[p + len(rname):p + len(rname) + 200])
                     if mm is None:
-                        unresolved["dispatch-key:%s(%s)" % (h.consumer, h.ctx)].add(dk)
+                        nonlit["dispatch-key:%s(%s)" % (h.consumer, h.ctx)].add(v)
                         continue
                     if mm.group(1) != key:
                         continue
-                    rh = Hop(h.callee, h.consumer, "register", h.ctx, key, [p],
-                             kid("register\x1f%s\x1f%s" % (h.digest, key)))
-                    found = []
-                    _walk(t, h.consumer, rset, found, [])
-                    out.extend(([rh] + pth, end) for pth, end in found)
-        legs[(dk, key)] = out
+                    out.append(Hop(h.callee, h.consumer, "register", h.ctx, key, [p],
+                                   kid("register\x1f%s\x1f%s" % (h.digest, key))))
         return out
 
+    def leg(h):
+        if h.kind != "dispatch" or h.consumer not in disp:
+            return None
+        v = "register:%s{%s}" % (h.consumer, h.key)
+        if v not in virtual:
+            virtual[v] = register_hops(h.consumer, h.key)
+        return v
+
+    tr = traverse(t, sinks, rset, budget, leg, virtual)
+    up, ends = tr["up"], tr["ends"]
+    for n, hs in up.items():
+        for h in hs:
+            v = leg(h)
+            if v is not None:
+                legs[(n, h.digest)] = v
+    hops = {(n, h.digest): (n, h) for n, hs in up.items() for h in hs}
+    cycles = _cycle_hops(tr)
+
+    # attached: the least fixed point over the graph. A member is attached
+    # when it is a declared root or an UNRESOLVED end, or one of its hops leads
+    # to an attached member - a dispatch hop at a declared dispatcher only when
+    # its registration member is attached as well.
+    att = {n for n, e in ends.items() if e.startswith(("root:", "unresolved:"))}
+    changed = True
+    while changed:
+        changed = False
+        for n, hs in up.items():
+            if n in att:
+                continue
+            for h in hs:
+                if _upper(h) not in att:
+                    continue
+                v = legs.get((n, h.digest))
+                if v is not None and v not in att:
+                    continue
+                att.add(n)
+                changed = True
+                break
+
+    unresolved = collections.defaultdict(set)
     out_sinks, bkeys = {}, set()
     for s in sorted(sinks):
-        chains, dead = [], []
-        if s in rset:
-            chains.append(([], "root:" + s))
-        else:
-            _walk(t, s, rset, chains, dead)
-        rec = {"chains": {}, "dead": dead, "unregistered": set()}
-        for path, end in chains:
-            dh = [h for h in path if h.kind == "dispatch"]
-            bad = [h for h in dh if h.consumer not in disp]
-            for h in bad:
+        nodes, sh, todo = {s}, set(), [s]
+        while todo:
+            n = todo.pop()
+            for h in up.get(n, ()):
+                sh.add((n, h.digest))
+                for m in [_upper(h)] + ([legs[(n, h.digest)]] if (n, h.digest) in legs else []):
+                    if m not in nodes:
+                        nodes.add(m)
+                        todo.append(m)
+        send = {n for n in nodes if n in ends}
+        unreg = set()
+        for n in nodes:
+            e = ends.get(n, "")
+            if e.startswith("unresolved:"):
+                unresolved[e[len("unresolved:"):]].add(s)
+            if n.startswith("register:"):
+                if e == "unregistered":
+                    unreg.add(n[n.index("{") + 1:-1])
+                for name, vs in nonlit.items():
+                    if n in vs:
+                        unresolved[name].add(s)
+        for (n, d) in sh:
+            h = hops[(n, d)][1]
+            if h.kind == "dispatch" and h.consumer not in disp:
                 unresolved["dispatch:%s[%s]" % (h.consumer, h.key)].add(s)
-            pairs = [(path, end, None)]
-            for h in dh:
-                if h.consumer in disp:
-                    bkeys.add(h.key)
-                    lg = reg_legs(h.consumer, h.key)
-                    if not lg:
-                        rec["unregistered"].add(h.key)
-                    pairs = [(pth, e, leg) for pth, e, _ in pairs for leg in lg]
-            for pth, e, leg in pairs:
-                if e.startswith("unresolved:"):
-                    unresolved[e[len("unresolved:"):]].add(s)
-                if leg and leg[1].startswith("unresolved:"):
-                    unresolved[leg[1][len("unresolved:"):]].add(s)
-                rec["chains"][chain_id(pth, e, leg)] = (chain_text(t, pth, e, leg), chain_text(t, pth, e, leg, True))
-        out_sinks[s] = rec
+        for h in up.get(s, ()):
+            if h.kind == "dispatch" and h.consumer in disp:
+                bkeys.add(h.key)
+        lines = ["hop\t%s\t%s" % k for k in sorted(sh)] + ["end\t%s\t%s" % (n, ends[n]) for n in sorted(send)]
+        lines += ["cycle\t%s\t%s" % k for k in sorted(sh & cycles)]
+        out_sinks[s] = {"attached": s in att, "hops": sh, "nodes": nodes, "ends": send,
+                        "roots": sorted(ends[n][len("root:"):] for n in send if ends[n].startswith("root:")),
+                        "unregistered": unreg, "digest": kid("\n".join(lines))}
+    truncated = []
+    for n in tr["truncated"]:
+        truncated.append((n, _trail(tr, n)))
     tables = {d: _literal_table(t, tab[0], tab[1]) for d, (reg, tab) in disp.items()}
-    return {"roots": roots, "missing": missing, "entries": entries, "sinks": out_sinks,
-            "unresolved": dict(unresolved), "bkeys": bkeys, "tables": tables}
+    return {"roots": roots, "missing": missing, "entries": entries, "hops": hops, "ends": dict(ends),
+            "cycles": cycles, "truncated": truncated, "sinks": out_sinks, "unresolved": dict(unresolved),
+            "bkeys": bkeys, "tables": tables, "legs": legs, "tr": tr}
+
+
+def _trail(tr, node):
+    """The path by which the traversal first reached node, from the start
+    member up: "Start <- A <- B <- node"."""
+    out = [node]
+    seen = {node}
+    while node in tr["parent"]:
+        node = tr["parent"][node][0]
+        if node in seen:
+            break
+        seen.add(node)
+        out.append(node)
+    return " <- ".join(reversed(out))
 
 
 def attach_sinks(st, graph, cman, rman):
@@ -1400,26 +1620,45 @@ def attach_sinks(st, graph, cman, rman):
 
 
 def read_attach(path):
-    """{"root": {key: (n, digest, note)}, "chain": {(sink, id): text},
-    "unresolved": {name: (control, note)}}, problems."""
-    rows = {"root": {}, "chain": {}, "unresolved": {}}
+    """The attachment manifest (fix pass 5 shape), problems:
+      root        {key: (n, digest, note)}
+      hop         {(lower, digest): (upper, token)}   hop<TAB>lower<TAB>digest<TAB>upper<TAB>token
+      end         {member: end}                       end<TAB>member<TAB>end
+      cycle       {(lower, digest): upper}            cycle<TAB>lower<TAB>digest<TAB>upper
+      sink        {sink: (nodes, hops, digest, status, roots)}
+                                                      sink<TAB>sink<TAB>nodes<TAB>hops<TAB>digest<TAB>attached|ORPHAN<TAB>roots
+      unresolved  {name: (control, note)}
+      line        {(kind, key): line number}
+    A row of any other kind (the fix-4 `chain` row included) is malformed."""
+    rows = {"root": {}, "hop": {}, "end": {}, "cycle": {}, "sink": {}, "unresolved": {}, "line": {}}
     probs = []
     if not os.path.exists(path):
         return rows, ["attachment manifest %s missing" % path]
+    hx = re.compile(r"[0-9a-f]{16}")
     for n, line in enumerate(io.open(path, encoding="utf-8").read().split("\n"), 1):
         if not line or line.startswith("#"):
             continue
         f = line.split("\t")
-        if f[0] == "root" and len(f) >= 5 and f[2].isdigit() and re.fullmatch(r"[0-9a-f]{16}", f[3]):
-            rows["root"][f[1]] = (int(f[2]), f[3], f[4])
-        elif f[0] == "chain" and len(f) >= 4 and re.fullmatch(r"[0-9a-f]{16}", f[2]):
-            if (f[1], f[2]) in rows["chain"]:
-                probs.append("attachment line %d: chain %s of %s twice" % (n, f[2], f[1]))
-            rows["chain"][(f[1], f[2])] = f[3]
+        key = None
+        if f[0] == "root" and len(f) >= 5 and f[2].isdigit() and hx.fullmatch(f[3]):
+            key, val = f[1], (int(f[2]), f[3], f[4])
+        elif f[0] == "hop" and len(f) == 5 and hx.fullmatch(f[2]):
+            key, val = (f[1], f[2]), (f[3], f[4])
+        elif f[0] == "end" and len(f) == 3:
+            key, val = f[1], f[2]
+        elif f[0] == "cycle" and len(f) == 4 and hx.fullmatch(f[2]):
+            key, val = (f[1], f[2]), f[3]
+        elif f[0] == "sink" and len(f) == 7 and f[2].isdigit() and f[3].isdigit() and hx.fullmatch(f[4]):
+            key, val = f[1], (int(f[2]), int(f[3]), f[4], f[5], f[6])
         elif f[0] == "unresolved" and len(f) >= 4:
-            rows["unresolved"][f[1]] = (f[2], f[3])
-        else:
+            key, val = f[1], (f[2], f[3])
+        if key is None:
             probs.append("attachment line %d malformed: %r" % (n, line[:80]))
+            continue
+        if key in rows[f[0]]:
+            probs.append("attachment line %d: %s row %s twice" % (n, f[0], key))
+        rows[f[0]][key] = val
+        rows["line"][(f[0], key)] = n
     return rows, probs
 
 
@@ -1478,22 +1717,55 @@ def attach_problems(root, st, att, aman, cman):
             probs.append("root %s is referenced nowhere and is no entry point" % k)
     for k in sorted(set(aman["root"]) - set(att["entries"])):
         probs.append("STALE root row %s: no declared root of that name" % k)
+    for n, trail in att["truncated"]:
+        probs.append("TRUNCATED attachment traversal at %s: reached by the path %s and never expanded (the traversal "
+                     "expands at most %d members): a truncated traversal is incomplete, never a dead end" % (
+                         n, trail, ATTACH_BUDGET))
     for s, rec in sorted(att["sinks"].items()):
-        if not rec["chains"]:
+        if not rec["attached"]:
             why = []
             if rec["unregistered"]:
                 why.append("dispatch key %s registered nowhere attached" % ",".join(sorted(rec["unregistered"])))
-            if rec["dead"]:
-                why.append("paths end at %s" % ", ".join("%s (%s)" % (m, w) for w, m in sorted(set(rec["dead"]))[:6]))
-            probs.append("ORPHAN display sink %s: no attachment chain to a declared render root within %d hops%s" % (
-                s, ATTACH_BOUND, (": " + "; ".join(why)) if why else ""))
-        for cid, (text, lined) in sorted(rec["chains"].items()):
-            if (s, cid) not in aman["chain"]:
-                probs.append("NEW attachment chain %s of display sink %s: %s" % (cid, s, lined))
-    for (s, cid), text in sorted(aman["chain"].items()):
-        if cid not in att["sinks"].get(s, {"chains": {}})["chains"]:
-            probs.append("STALE attachment chain %s of display sink %s: the source derives no such chain (%s)" % (
-                cid, s, text))
+            dead = sorted("%s (%s)" % (m, att["ends"][m]) for m in rec["ends"])
+            if dead:
+                why.append("paths end at %s" % ", ".join(dead[:6]))
+            probs.append("ORPHAN display sink %s: no attachment chain to a declared render root or a controlled "
+                         "UNRESOLVED end, over the complete traversal%s" % (s, (": " + "; ".join(why)) if why else ""))
+    dg = _AttachGraph.derived(att)
+    mg = _AttachGraph.recorded(aman)
+    rows = attach_rows(t, att)
+    for k in sorted(set(rows["hop"]) - set(aman["hop"])):
+        n, h = att["hops"][k]
+        for s in dg.sinks_through(n):
+            probs.append("NEW attachment chain hop %s of display sink %s: %s > %s, on the path %s" % (
+                k[1], s, n, _hop_token(t, h, True), dg.path(s, n, k)))
+    for k in sorted(set(aman["hop"]) - set(rows["hop"])):
+        upper, tok = aman["hop"][k]
+        for s in mg.sinks_through(k[0]) or ["-"]:
+            probs.append("STALE attachment chain hop %s of display sink %s: the source derives no such hop (%s > %s, "
+                         "manifest line %d); the recorded path %s" % (
+                             k[1], s, k[0], tok, aman["line"][("hop", k)], mg.path(s, k[0], k) if s != "-" else "-"))
+    for kind, label in (("end", "end"), ("cycle", "cycle hop")):
+        for k in sorted(set(rows[kind]) | set(aman[kind])):
+            a, b = rows[kind].get(k), aman[kind].get(k)
+            if a == b:
+                continue
+            node = k[0] if kind == "cycle" else k
+            if b is None:
+                sk = dg.sinks_through(node)
+                probs.append("NEW attachment %s %s: %s (on the paths of %s)" % (label, "/".join(k) if kind == "cycle" else k,
+                                                                                  a, ",".join(sk) or "-"))
+            elif a is None:
+                probs.append("STALE attachment %s %s: the source derives no such %s (manifest %s, line %d)" % (
+                    label, "/".join(k) if kind == "cycle" else k, label, b, aman["line"][(kind, k)]))
+            else:
+                probs.append("attachment %s CHANGED %s: derived %s, manifest %s" % (label, k, a, b))
+    for s in sorted(set(rows["sink"]) | set(aman["sink"])):
+        a, b = rows["sink"].get(s), aman["sink"].get(s)
+        if a == b:
+            continue
+        fmt = lambda r: "-" if r is None else "%d member(s), %d hop(s), digest %s, %s, roots %s" % r
+        probs.append("SINK CHANGED display sink %s: derived %s; manifest %s" % (s, fmt(a), fmt(b)))
     for name, sk in sorted(att["unresolved"].items()):
         row = aman["unresolved"].get(name)
         if row is None:
@@ -1526,9 +1798,142 @@ def attach_problems(root, st, att, aman, cman):
     return probs
 
 
-def attach_digest(att):
-    return kid("\n".join("%s>%s" % (s, cid) for s, rec in sorted(att["sinks"].items())
-                         for cid in sorted(rec["chains"])))
+def attach_rows(t, att):
+    """The derivation in the manifest's row shape (the keys and values
+    read_attach returns): hop, end, cycle and sink rows."""
+    rows = {"hop": {}, "end": {}, "cycle": {}, "sink": {}}
+    for k, (n, h) in att["hops"].items():
+        rows["hop"][k] = (_upper(h), _hop_token(t, h, False))
+    for n, e in att["ends"].items():
+        rows["end"][n] = e
+    for k in att["cycles"]:
+        rows["cycle"][k] = _upper(att["hops"][k][1])
+    for s, rec in att["sinks"].items():
+        rows["sink"][s] = (len(rec["nodes"]), len(rec["hops"]), rec["digest"],
+                           "attached" if rec["attached"] else "ORPHAN", ",".join(rec["roots"]) or "-")
+    return rows
+
+
+def attach_lines(t, att, aman):
+    """The manifest's lines in order: root, hop, end, cycle, sink, unresolved
+    (root notes and unresolved dispositions carried from aman)."""
+    rows = attach_rows(t, att)
+    out = []
+    for k, hops in sorted(att["entries"].items()):
+        old = aman["root"].get(k)
+        out.append("\t".join(["root", k, str(len(hops)), kid("\n".join(sorted(h.digest for h in hops))),
+                              old[2] if old else ""]))
+    for k, (upper, tok) in sorted(rows["hop"].items()):
+        out.append("\t".join(["hop", k[0], k[1], upper, tok]))
+    for n, e in sorted(rows["end"].items()):
+        out.append("\t".join(["end", n, e]))
+    for k, upper in sorted(rows["cycle"].items()):
+        out.append("\t".join(["cycle", k[0], k[1], upper]))
+    for s, r in sorted(rows["sink"].items()):
+        out.append("\t".join(["sink", s, str(r[0]), str(r[1]), r[2], r[3], r[4]]))
+    for name in sorted(att["unresolved"]):
+        old = aman["unresolved"].get(name)
+        out.append("\t".join(["unresolved", name, old[0] if old else "?", old[1] if old else ""]))
+    return out
+
+
+class _AttachGraph:
+    """An attachment graph to name paths in: the derived one (the traversal)
+    or the recorded one (the manifest's hop, end and sink rows)."""
+
+    def __init__(self, succ, ends, sinks):
+        self.succ, self.ends, self.sinks = succ, ends, sorted(sinks)
+        self._reach = {}
+
+    @classmethod
+    def derived(cls, att):
+        succ = collections.defaultdict(list)
+        for (n, d), (_, h) in att["hops"].items():
+            succ[n].append(((n, d), _upper(h)))
+            v = att["legs"].get((n, d))
+            if v is not None:
+                succ[n].append((None, v))
+        return cls(succ, att["ends"], att["sinks"])
+
+    @classmethod
+    def recorded(cls, aman):
+        disp = {d for d, reg, tab in DISPATCHERS}
+        succ = collections.defaultdict(list)
+        for (n, d), (upper, tok) in aman["hop"].items():
+            succ[n].append(((n, d), upper))
+            mm = re.match(r"dispatch\[.*\{([^{}]*)\}>([^>]*)$", tok)
+            if mm and mm.group(2) in disp:
+                succ[n].append((None, "register:%s{%s}" % (mm.group(2), mm.group(1))))
+        return cls(succ, aman["end"], aman["sink"])
+
+    def reach(self, s):
+        """{member: (previous member, hop key)} breadth first from s."""
+        if s not in self._reach:
+            par, q = {s: None}, collections.deque([s])
+            while q:
+                n = q.popleft()
+                for k, m in sorted(self.succ.get(n, ()), key=lambda x: (x[1], x[0] or ("", ""))):
+                    if m not in par:
+                        par[m] = (n, k)
+                        q.append(m)
+            self._reach[s] = par
+        return self._reach[s]
+
+    def sinks_through(self, n):
+        return [s for s in self.sinks if n in self.reach(s)]
+
+    def path(self, s, n, hop):
+        """s <- ... <- n, the hop, then up to the nearest end: the path a hop
+        lies on, named member by member with its end."""
+        par = self.reach(s)
+        if n not in par:
+            return "(%s does not reach %s)" % (s, n)
+        down = [n]
+        while par[down[-1]] is not None:
+            down.append(par[down[-1]][0])
+        down.reverse()
+        upper = next((m for k, m in self.succ.get(n, ()) if k == hop), None)
+        if upper is None:
+            return " <- ".join(down) + " <- (hop gone)"
+        nxt = self.toward_end()
+        upto, m, seen = [upper], upper, {upper}
+        while m not in self.ends and m in nxt and nxt[m] not in seen:
+            m = nxt[m]
+            seen.add(m)
+            upto.append(m)
+        tail = upto[-1]
+        return " <- ".join(down + upto) + (" (%s)" % self.ends[tail] if tail in self.ends else " (no end)")
+
+    def toward_end(self):
+        """{member: the next member on a shortest way up to an end}, one
+        breadth-first pass back from every end."""
+        if not hasattr(self, "_next"):
+            back = collections.defaultdict(list)
+            for n, outs in self.succ.items():
+                for k, m in outs:
+                    back[m].append(n)
+            nxt, q = {}, collections.deque(sorted(self.ends))
+            done = set(q)
+            while q:
+                m = q.popleft()
+                for n in sorted(back.get(m, ())):
+                    if n not in done:
+                        done.add(n)
+                        nxt[n] = m
+                        q.append(n)
+            self._next = nxt
+        return self._next
+
+
+def attach_digest(att, t):
+    """The digest of every hop, end, cycle and sink row: every completed path
+    from every sink is in it."""
+    rows = attach_rows(t, att)
+    lines = ["hop\t%s\t%s\t%s\t%s" % (k[0], k[1], v[0], v[1]) for k, v in sorted(rows["hop"].items())]
+    lines += ["end\t%s\t%s" % kv for kv in sorted(rows["end"].items())]
+    lines += ["cycle\t%s\t%s\t%s" % (k[0], k[1], v) for k, v in sorted(rows["cycle"].items())]
+    lines += ["sink\t%s\t%d\t%d\t%s\t%s\t%s" % ((s,) + r) for s, r in sorted(rows["sink"].items())]
+    return kid("\n".join(lines))
 
 
 # -- strings ----------------------------------------------------------------
@@ -2024,9 +2429,11 @@ def check(root=REPO, disp_path=None, sites_path=None, verbose=True, readers_path
         " ".join("%s=%d" % kv for kv in sorted(roles.items())), len(st.acc), len(bdm))
     summary += " callers=%d [%s] followed=%d graph=%s" % (
         len(graph), " ".join("%s=%d" % kv for kv in sorted(classes.items())), len(srcs), graph_digest)
-    summary += " attach: roots=%d sinks=%d chains=%d unresolved=%d bkeys=%s digest=%s" % (
-        len(att["roots"]), len(att["sinks"]), sum(len(r["chains"]) for r in att["sinks"].values()),
-        len(att["unresolved"]), ",".join(sorted(att["bkeys"])) or "-", attach_digest(att))
+    summary += (" attach: roots=%d sinks=%d members=%d hops=%d ends=%d cycles=%d unresolved=%d truncated=%d "
+                "bkeys=%s digest=%s") % (
+        len(att["roots"]), len(att["sinks"]), len(att["tr"]["up"]), len(att["hops"]), len(att["ends"]),
+        len(att["cycles"]), len(att["unresolved"]), len(att["truncated"]), ",".join(sorted(att["bkeys"])) or "-",
+        attach_digest(att, st.t))
     return problems, summary, (t, u, found, disp)
 
 
@@ -2060,8 +2467,9 @@ def main(argv=None):
     except Exception:
         pass
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("check", "candidates", "sites", "readers", "callers", "attach", "review"))
+    ap.add_argument("mode", choices=("check", "candidates", "sites", "readers", "callers", "attach", "path", "review"))
     ap.add_argument("--tree", default=REPO)
+    ap.add_argument("members", nargs="*", help="path mode: a sink, then each member up to its end")
     a = ap.parse_args(argv)
     if a.mode == "check":
         problems, summary, _ = check(a.tree)
@@ -2109,25 +2517,55 @@ def main(argv=None):
                 b0 = src.find("\n", p)
                 print("#REF %s > %s L%d %s" % (s, c, src.count("\n", 0, p) + 1, ws(src[a0:b0])[:200]))
         return 0
+    if a.mode in ("attach", "path"):
+        cman, _ = read_callers(os.path.join(a.tree, "tools", "keybind_surfaces_callers.tsv"))
+        apath = os.path.join(a.tree, "tools", "keybind_surfaces_attach.tsv")
+        aman, _ = read_attach(apath)
+        graph = derive_callers(st, cman)
+        att = derive_attach(st, attach_sinks(st, graph, cman, rman))
+    if a.mode == "path":
+        # fix pass 5 H1 control (a): a path given member by member, from a
+        # sink up to its end; each hop must be derived, a hop row of the
+        # manifest and in the sink's subgraph (so in its digest and the
+        # oracle's); the last member must be an end row.
+        ms = a.members
+        if len(ms) < 2:
+            print("path: give a sink and the members up to its end")
+            return 2
+        rows, ok = attach_rows(st.t, att), True
+        sink = ms[0]
+        rec = att["sinks"].get(sink)
+        print("path %s: sink row line %s, %s" % (" <- ".join(ms), aman["line"].get(("sink", sink), "NONE"),
+                                                 "a display sink" if rec else "NOT a display sink"))
+        ok &= rec is not None and ("sink", sink) in aman["line"] and rows["sink"].get(sink) == aman["sink"].get(sink)
+        for lo, hi in zip(ms, ms[1:]):
+            ks = sorted(k for k, (n, h) in att["hops"].items() if n == lo and _upper(h) == hi)
+            if not ks:
+                print("  %s <- %s: NO derived hop" % (lo, hi))
+                ok = False
+                continue
+            for k in ks:
+                ln = aman["line"].get(("hop", k))
+                inm = aman["hop"].get(k) == rows["hop"][k]
+                ins = rec is not None and k in rec["hops"]
+                print("  %s <- %s: hop %s %s, manifest line %s (%s), in the sink's subgraph: %s" % (
+                    lo, hi, k[1], _hop_token(st.t, att["hops"][k][1], True), ln, "equal" if inm else "DIFFERS",
+                    "yes" if ins else "NO"))
+                ok &= ln is not None and inm and ins
+        end = att["ends"].get(ms[-1])
+        ln = aman["line"].get(("end", ms[-1]))
+        print("  end %s: %s, manifest line %s" % (ms[-1], end or "NOT an end", ln))
+        ok &= end is not None and ln is not None and aman["end"].get(ms[-1]) == end
+        print("path: %s; attach digest %s" % ("PRESENT (derived, manifested, in the sink's digest)" if ok else "ABSENT",
+                                               attach_digest(att, st.t)))
+        return 0 if ok else 1
     if a.mode == "attach":
         # the attachment derivation in the attachment manifest's shape (root
         # notes and unresolved dispositions carried from the manifest when the
-        # row exists), then every root, chain and dead path with its lines
-        # (fix pass 4 H1)
-        cman, _ = read_callers(os.path.join(a.tree, "tools", "keybind_surfaces_callers.tsv"))
-        aman, _ = read_attach(os.path.join(a.tree, "tools", "keybind_surfaces_attach.tsv"))
-        graph = derive_callers(st, cman)
-        att = derive_attach(st, attach_sinks(st, graph, cman, rman))
-        for k, hops in sorted(att["entries"].items()):
-            old = aman["root"].get(k)
-            print("\t".join(["root", k, str(len(hops)), kid("\n".join(sorted(h.digest for h in hops))),
-                             old[2] if old else ""]))
-        for s, rec in sorted(att["sinks"].items()):
-            for cid, (text, lined) in sorted(rec["chains"].items()):
-                print("\t".join(["chain", s, cid, text]))
-        for name in sorted(att["unresolved"]):
-            old = aman["unresolved"].get(name)
-            print("\t".join(["unresolved", name, old[0] if old else "?", old[1] if old else ""]))
+        # row exists), then every root, sink, hop and truncation with its
+        # lines (fix pass 4 H1, fix pass 5 H1: the complete traversal)
+        for line in attach_lines(st.t, att, aman):
+            print(line)
         for fn, mid, what in RENDER_ROOTS:
             k = "%s:%s" % (fn, mid)
             if k in att["roots"]:
@@ -2136,12 +2574,17 @@ def main(argv=None):
             else:
                 print("#ROOT %s MISSING" % k)
         for s, rec in sorted(att["sinks"].items()):
-            print("#SINK %s chains=%d%s" % (s, len(rec["chains"]), (" unregistered=" + ",".join(
-                sorted(rec["unregistered"]))) if rec["unregistered"] else ""))
-            for cid, (text, lined) in sorted(rec["chains"].items()):
-                print("#CHAIN %s %s" % (cid, lined))
-            for why, m in sorted(set(rec["dead"])):
-                print("#DEAD %s (%s)" % (m, why))
+            print("#SINK %s %s members=%d hops=%d ends=%d roots=%s%s" % (
+                s, "attached" if rec["attached"] else "ORPHAN", len(rec["nodes"]), len(rec["hops"]),
+                len(rec["ends"]), ",".join(rec["roots"]) or "-", (" unregistered=" + ",".join(
+                    sorted(rec["unregistered"]))) if rec["unregistered"] else ""))
+        for k, (n, h) in sorted(att["hops"].items()):
+            print("#HOP %s %s > %s%s" % (k[1], n, _hop_token(st.t, h, True), " CYCLE" if k in att["cycles"] else ""))
+        for n, trail in att["truncated"]:
+            print("#TRUNCATED %s via %s" % (n, trail))
+        print("#TOTALS members=%d hops=%d ends=%d cycles=%d unresolved=%d truncated=%d" % (
+            len(att["tr"]["up"]), len(att["hops"]), len(att["ends"]), len(att["cycles"]), len(att["unresolved"]),
+            len(att["truncated"])))
         print("#BINDING-KEYS derived %s; tables %s" % (",".join(sorted(att["bkeys"])) or "-", "; ".join(
             "%s=%s" % (d, ",".join(sorted(k)) if k is not None else "NOT FOUND") for d, k in sorted(att["tables"].items()))))
         return 0
