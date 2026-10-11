@@ -374,7 +374,8 @@ def test_every_deferred_trades_and_binder_re_read_is_bound_to_its_identity_gener
     it with its decisive line. The sweep's other half: an answer from before an
     edge releases no latch and consumes no remembered demand (both edges
     release them), so it cannot free a read or swallow a demand that belongs
-    to the new generation."""
+    to the new generation. Item 18 fix pass 4 (finding 7) adds the balance
+    demand's re-read, bound the same way."""
     api = API.read_text(encoding="utf-8")
     end = "\n        }\n"
     check = "if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))"
@@ -392,8 +393,25 @@ def test_every_deferred_trades_and_binder_re_read_is_bound_to_its_identity_gener
             assert co.count(piece) == 1, (sig, piece)
         assert (co.index("yield return null;") < co.index(check) < co.index(line)
                 < co.index("yield break;") < co.index(send)), sig
-    # two definitions and two scheduling lines, nothing else
-    assert api.count("NextFrame(") == 4
+    # Item 18 fix pass 4, finding 7: the balance demand's re-read
+    # (RefetchPcMeNextFrame) is bound the same way: its one yield, then the
+    # generation check and its own drop line, before its one send. It also
+    # sends nothing while a /pc/me read is on the wire: that latch is
+    # released by a landing, stale or not, never by an edge, so a read on the
+    # wire by then was sent after the landing that scheduled this one, and it
+    # answers the demand. The scheduling line binds the generation current at
+    # that landing, the one PcReadDemand.Landed has just matched the demand
+    # to; gate q5 (test_pc_quick_shard.py) pins its two callers.
+    me_drop = '"[PC] me deferred re-read dropped: identity changed gen_at_schedule="'
+    co = _span(api, "private static IEnumerator RefetchPcMeNextFrame(string steamId, int genAtSchedule)", end)
+    for piece in ("yield return null;", check, me_drop, "if (pcMeInFlight)", "FetchPcMe(steamId, true);"):
+        assert co.count(piece) == 1, piece
+    assert co.count("yield break;") == 2
+    assert (co.index("yield return null;") < co.index(check) < co.index(me_drop) < co.index("yield break;")
+            < co.index("if (pcMeInFlight)") < co.index("FetchPcMe(steamId, true);"))
+    assert api.count("StartCoroutine(RefetchPcMeNextFrame(steamId, _pcCacheEpoch));") == 1
+    # three definitions and three scheduling lines, nothing else
+    assert api.count("NextFrame(") == 6
     # (c): each scheduling line passes the callback's own dispatch epoch, below
     # the epoch check that proved it current; the latch and the remembered
     # demand are released only below that check too
