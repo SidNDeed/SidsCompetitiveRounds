@@ -1704,12 +1704,11 @@ namespace CompetitiveRounds
     /// reconciles the set when it lands (ApiClient.FetchPcCollection), lifting
     /// each tombstone whose print the read positively holds, so a print traded
     /// away and back returns to both walks. Only a read DISPATCHED after the
-    /// refusal that wrote a tombstone can lift it: a read already on the wire
-    /// when the refusal landed describes the collection from before that
-    /// answer, so it cannot say the print came back. Each read carries its
-    /// dispatch number (Dispatched) to its landing. An identity change clears
-    /// the set (PlayerCardsUI). Free of Unity so the client rules harness
-    /// executes it (#391).
+    /// refusal that wrote a tombstone can lift it: a read dispatched before
+    /// the refusal landed is not proven newer than that refusal, so it never
+    /// lifts one. Each read carries its dispatch number (Dispatched) to its
+    /// landing. An identity change clears the set (PlayerCardsUI). Free of
+    /// Unity so the client rules harness executes it (#391).
     /// </summary>
     internal sealed class PcShardTombstones
     {
