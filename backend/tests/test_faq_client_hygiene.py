@@ -11,10 +11,15 @@ other checkout has. A file ships whole, so the bar is every line of every
 file this lane changes, not the lines it adds.
 
 THE SCOPE IS RECORDED (_SCOPE) and checked against history in both directions
-by test_the_scope_is_every_file_this_lane_touches: this lane's commits are the
-ones after the branch point that touch one of this lane's three test modules,
-every file such a commit touched must be in the scope, and every file in the
-scope must have been touched by one. The sweep itself needs no history.
+by test_the_scope_is_every_file_this_lane_touches. The lane's commits are
+measured by git and never recognised by a path they touch: every commit from
+the merge-base of HEAD with the certified client base to HEAD, one that
+touches no scope file included. Every path such a commit touches must be in
+the scope, and every file in the scope must have been touched by one. A range
+that holds a merge commit is no longer one lane's line (a fold into the
+client lane merges other lanes' work, which git cannot tell from this
+lane's), so the check skips there and says so. The sweep itself needs no
+history and runs everywhere.
 
 THE DETECTOR is the FAQ server lane's (backend/tests/test_faq_surfaces.py,
 its section 3), ported with its salt, its handle digests and its attribution
@@ -59,15 +64,10 @@ _SCOPE = (
     "plugin/NativeUI.cs",
 )
 
-# The commit this lane's first commit sits on, and the files every commit of
-# the lane touches one of (so the lane's commits stay identifiable after it
-# merges, when everything after the branch point also holds other lanes' work).
-_BRANCH_POINT = "6c46b71e"
-_LANE_ANCHORS = (
-    "backend/tests/test_faq_client_hygiene.py",
-    "backend/tests/test_faq_client_ladder.py",
-    "backend/tests/test_faq_client_upload_caps.py",
-)
+# The certified client base this lane was cut from (its brief). The lane's
+# range is every commit from git's merge-base of HEAD with it to HEAD; no
+# listed path decides which commits are the lane's.
+_CLIENT_BASE = "6c46b71e"
 
 _DRIVE_PATH = re.compile(r"(?<!\w)[A-Za-z]:[\\/](?![\\/])")
 _HOME_PATH = re.compile(
@@ -483,29 +483,113 @@ def test_an_exempt_row_lets_only_its_own_key_s_handle_words_through():
         % (n_own, refused_own[:10]))
 
 
-def test_the_scope_is_every_file_this_lane_touches():
-    """Both directions against the history the record summarises. A clone
-    without the branch point, or a copy that is not a repository at all,
-    skips this half and says why; the sweep itself needs no history."""
+def lane_range(repo, base):
+    """The lane's range as git measures it in `repo`: every commit from the
+    merge-base of HEAD with `base` to HEAD, whatever it touches, and every
+    path each of them touches (a rename counted as a deletion and an
+    addition). Returns (state, detail, commits, touched): "absent" when
+    `base` is not a commit there (detail says why); "merged" when the range
+    holds a merge commit (detail lists them); else "linear" (detail is the
+    merge-base)."""
     def git(*args):
-        return subprocess.run(["git", "-C", REPO] + list(args), capture_output=True,
-                              text=True, encoding="utf-8", errors="replace")
-    probe = git("rev-parse", "--verify", _BRANCH_POINT + "^{commit}")
+        return subprocess.run(["git", "-C", repo, "-c", "core.quotePath=false"] + list(args),
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+    probe = git("rev-parse", "--verify", "--quiet", base + "^{commit}")
     if probe.returncode != 0:
-        pytest.skip("the branch point %s is not reachable here (%s), so this lane's "
-                    "commits cannot be listed" % (_BRANCH_POINT, (probe.stderr or "").strip()[:80]))
-    log = git("log", "--no-merges", "--format=%H", _BRANCH_POINT + "..HEAD", "--", *_LANE_ANCHORS)
-    assert log.returncode == 0, log.stderr or log.stdout
-    commits = log.stdout.split()
-    assert len(commits) >= 3, (
-        "git log found %d commits of this lane after %s; it has at least three "
-        "(one per item)" % (len(commits), _BRANCH_POINT))
+        return "absent", ((probe.stderr or "").strip() or "not a commit here")[:80], [], set()
+    mb = git("merge-base", "HEAD", base)
+    assert mb.returncode == 0, mb.stderr or mb.stdout
+    start = mb.stdout.strip()
+    merges = git("rev-list", "--merges", start + "..HEAD")
+    assert merges.returncode == 0, merges.stderr or merges.stdout
+    if merges.stdout.split():
+        return "merged", merges.stdout.split(), [], set()
+    listed = git("rev-list", "--reverse", start + "..HEAD")
+    assert listed.returncode == 0, listed.stderr or listed.stdout
+    commits = listed.stdout.split()
     touched = set()
     for sha in commits:
-        shown = git("show", "--format=", "--name-only", sha)
+        shown = git("diff-tree", "--no-commit-id", "--name-only", "-r", "--no-renames", sha)
         assert shown.returncode == 0, shown.stderr or shown.stdout
         touched.update(n.strip() for n in shown.stdout.split("\n") if n.strip())
+    return "linear", start, commits, touched
+
+
+def test_the_scope_is_every_file_this_lane_touches():
+    """Both directions against the lane's range as git measures it
+    (lane_range): every path a commit of the range touches must be recorded
+    in the scope, and every recorded file must be touched by one. A clone
+    without the certified client base, or a copy that is not a repository,
+    skips and says why; so does a range that holds a merge commit, where HEAD
+    has merged another line whose commits git cannot tell from this lane's
+    (the fold into the client lane does that). The sweep needs no history
+    and runs in every case."""
+    state, detail, commits, touched = lane_range(REPO, _CLIENT_BASE)
+    if state == "absent":
+        pytest.skip("the certified client base %s is not reachable here (%s), so this "
+                    "lane's range cannot be measured" % (_CLIENT_BASE, detail))
+    if state == "merged":
+        pytest.skip("the range from the merge-base of HEAD with %s holds %d merge commit(s) "
+                    "(%s): HEAD has merged another line, so the range is no longer this "
+                    "lane's alone" % (_CLIENT_BASE, len(detail),
+                                      ", ".join(c[:8] for c in detail[:4])))
+    n_commits = len(commits)
+    assert n_commits >= 3, (
+        "git measured %d commits from the merge-base %s to HEAD; this lane has at "
+        "least three (one per item)" % (n_commits, detail[:8]))
     unrecorded = sorted(touched - set(_SCOPE))
-    assert not unrecorded, "a commit of this lane touched %s, which the scope does not record" % unrecorded
+    assert not unrecorded, (
+        "a commit of the lane range touched %s, which the scope does not record" % unrecorded)
     untouched = sorted(set(_SCOPE) - touched)
-    assert not untouched, "the scope records %s, which no commit of this lane touched" % untouched
+    assert not untouched, (
+        "the scope records %s, which no commit of the lane range touched" % untouched)
+
+
+def test_the_range_check_sees_a_commit_that_touches_no_scope_file(tmp_path):
+    """lane_range on a repository built here, so the property is shown on a
+    history whose every commit is known. Three lane commits touching the five
+    scope files make a linear range that is exactly the scope; one more
+    commit touching only a new path (no scope file, no anchor of any kind)
+    is in the range with its path, so the scope check refuses it; and a
+    merge in the range reports the range as merged, never as the lane's."""
+    repo = tmp_path / "lane"
+    repo.mkdir()
+
+    def git(*args):
+        r = subprocess.run(["git", "-C", str(repo), "-c", "user.name=lane-probe",
+                            "-c", "user.email=lane-probe@example.invalid",
+                            "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"] + list(args),
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        assert r.returncode == 0, "git %s failed: %s" % (args[0], (r.stderr or r.stdout).strip()[:200])
+        return r.stdout.strip()
+
+    def commit(paths, message):
+        for rel in paths:
+            path = repo / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(message + "\n", encoding="utf-8")
+        git("add", "--", *paths)
+        git("commit", "-q", "-m", message)
+        return git("rev-parse", "HEAD")
+
+    git("init", "-q")
+    base = commit(["README.txt"], "the base")
+    commit(list(_SCOPE[:2]), "lane item one")
+    commit(list(_SCOPE[2:4]), "lane item two")
+    commit(list(_SCOPE[4:]), "lane item three")
+    state, start, commits, touched = lane_range(str(repo), base)
+    exact = state == "linear" and start == base and len(commits) == 3 and touched == set(_SCOPE)
+    assert exact, "the three-commit range read %s, %d commits, %d paths" % (state, len(commits), len(touched))
+    commit(["docs/elsewhere.txt"], "a commit that touches no scope file")
+    state, start, commits, touched = lane_range(str(repo), base)
+    unrecorded = sorted(touched - set(_SCOPE))
+    seen = state == "linear" and len(commits) == 4 and unrecorded == ["docs/elsewhere.txt"]
+    assert seen, "the commit that touches no scope file was not seen: %s, %d commits, %d unrecorded" % (
+        state, len(commits), len(unrecorded))
+    git("checkout", "-q", "-b", "another-line", base)
+    commit(["another.txt"], "another line")
+    git("checkout", "-q", "-")
+    git("merge", "-q", "--no-ff", "-m", "merge another line", "another-line")
+    state, detail, _commits, _touched = lane_range(str(repo), base)
+    merged = state == "merged" and len(detail) == 1
+    assert merged, "a range holding a merge commit read as %s" % state
