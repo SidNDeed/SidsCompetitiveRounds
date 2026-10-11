@@ -58,69 +58,82 @@ namespace CompetitiveRounds
         // builder that wants a shape above text must not use Lbl for it.
         private static readonly List<GameObject> _labels = new List<GameObject>();
 
+        /// <summary>One visual of the Info reading pane. Item 17 fix pass 4
+        /// (M2): the failure rule is KeybindRules.InfoVisual.Build - a visual
+        /// that reads the bindings (the Controls article's keyboard guide)
+        /// and throws or builds nothing propagates to the article's repaint
+        /// gate, which blanks the article and keeps its revision due; any
+        /// other visual's failure is a warning and a null, drawn as its text
+        /// form (r1 MEDIUM 5).</summary>
         internal static GameObject Build(string key, Transform parent)
         {
             _inFlight = null;
             _labels.Clear();
-            try
+            return KeybindRules.InfoVisual.Build(key, () => Dispatch(key, parent), ReleaseFailed,
+                w => Plugin.Log.LogWarning(w));
+        }
+
+        /// <summary>What a builder that threw leaves behind - its recorded
+        /// labels and its half-built panel - released.</summary>
+        private static void ReleaseFailed()
+        {
+            _labels.Clear();
+            if (_inFlight != null)
+            { try { UnityEngine.Object.Destroy(_inFlight); } catch { } _inFlight = null; }
+        }
+
+        /// <summary>The builder of one visual key; its exceptions are
+        /// InfoVisual.Build's to judge.</summary>
+        private static GameObject Dispatch(string key, Transform parent)
+        {
+            GameObject made = null;
+            switch (key)
             {
-                GameObject made = null;
-                switch (key)
-                {
-                    case "keyboard": made = BuildKeyboard(parent); break;
-                    case "dot-timeline": made = BuildDotTimeline(parent); break;
-                    case "block-window": made = BuildBlockWindow(parent); break;
-                    case "rank-ladder": made = BuildRankLadder(parent); break;
-                    case "glicko-rd": made = BuildGlickoRd(parent); break;
-                    case "xp-curve": made = BuildXpCurve(parent); break;
-                    case "gold-sources": made = BuildGoldSources(parent); break;
-                    case "series-format": made = BuildSeriesFormat(parent); break;
-                    case "ffa-scoring": made = BuildFfaScoring(parent); break;
-                    case "grow-curve": made = BuildGrowCurve(parent); break;
-                    case "netcode-map": made = BuildNetcodeMap(parent); break;
-                    case "bet-window": made = BuildBetWindow(parent); break;
-                    case "bracket-flow": made = BuildBracketFlow(parent); break;
-                    case "forfeit-clock": made = BuildForfeitClock(parent); break;
-                    case "when-counts": made = BuildWhenCounts(parent); break;
-                    case "refresh-flow": made = BuildRefreshFlow(parent); break;
-                    case "damage-matrix": made = BuildDamageMatrix(parent); break;
-                    case "refresh-gate": made = BuildRefreshGate(parent); break;
-                    case "refresh-sequences": made = BuildRefreshSequences(parent); break;
-                    case "refresh-window-sequences": made = BuildRefreshWindowSequences(parent); break;
-                    case "movement-window": made = BuildMovementWindow(parent); break;
-                    case "team-format": made = BuildTeamFormat(parent); break;
-                    case "report-pipeline": made = BuildReportPipeline(parent); break;
-                    case "visibility-seats": made = BuildVisibilitySeats(parent); break;
-                    case "anticheat-pipeline": made = BuildAnticheatPipeline(parent); break;
-                    case "achievement-tiers": made = BuildAchievementTiers(parent); break;
-                    case "cosmetics-flow": made = BuildCosmeticsFlow(parent); break;
-                    case "ovt-format": made = BuildOvtFormat(parent); break;
-                    default:
-                        Plugin.Log.LogWarning("[INFO-VIZ] unknown viz key '" + key + "'");
-                        break;
-                }
-                // Labels-last pass: send every recorded label to the end of
-                // its sibling list, in creation order, so lines/arrowheads
-                // drawn after a label can never paint over its glyphs.
-                if (made != null)
-                    for (int i = 0; i < _labels.Count; i++)
-                        if (_labels[i] != null) _labels[i].transform.SetAsLastSibling();
-                _labels.Clear();
-                // A builder that deliberately returned null (e.g. xp-curve's
-                // zero-total bail) still owns a created panel — destroy it.
-                if (made == null && _inFlight != null)
-                { try { UnityEngine.Object.Destroy(_inFlight); } catch { } }
-                _inFlight = null;
-                return made;
+                case "keyboard": made = BuildKeyboard(parent); break;
+                case "dot-timeline": made = BuildDotTimeline(parent); break;
+                case "block-window": made = BuildBlockWindow(parent); break;
+                case "rank-ladder": made = BuildRankLadder(parent); break;
+                case "glicko-rd": made = BuildGlickoRd(parent); break;
+                case "xp-curve": made = BuildXpCurve(parent); break;
+                case "gold-sources": made = BuildGoldSources(parent); break;
+                case "series-format": made = BuildSeriesFormat(parent); break;
+                case "ffa-scoring": made = BuildFfaScoring(parent); break;
+                case "grow-curve": made = BuildGrowCurve(parent); break;
+                case "netcode-map": made = BuildNetcodeMap(parent); break;
+                case "bet-window": made = BuildBetWindow(parent); break;
+                case "bracket-flow": made = BuildBracketFlow(parent); break;
+                case "forfeit-clock": made = BuildForfeitClock(parent); break;
+                case "when-counts": made = BuildWhenCounts(parent); break;
+                case "refresh-flow": made = BuildRefreshFlow(parent); break;
+                case "damage-matrix": made = BuildDamageMatrix(parent); break;
+                case "refresh-gate": made = BuildRefreshGate(parent); break;
+                case "refresh-sequences": made = BuildRefreshSequences(parent); break;
+                case "refresh-window-sequences": made = BuildRefreshWindowSequences(parent); break;
+                case "movement-window": made = BuildMovementWindow(parent); break;
+                case "team-format": made = BuildTeamFormat(parent); break;
+                case "report-pipeline": made = BuildReportPipeline(parent); break;
+                case "visibility-seats": made = BuildVisibilitySeats(parent); break;
+                case "anticheat-pipeline": made = BuildAnticheatPipeline(parent); break;
+                case "achievement-tiers": made = BuildAchievementTiers(parent); break;
+                case "cosmetics-flow": made = BuildCosmeticsFlow(parent); break;
+                case "ovt-format": made = BuildOvtFormat(parent); break;
+                default:
+                    Plugin.Log.LogWarning("[INFO-VIZ] unknown viz key '" + key + "'");
+                    break;
             }
-            catch (Exception ex)
-            {
-                Plugin.Log.LogWarning("[INFO-VIZ] build '" + key + "' failed: " + ex.Message);
-                _labels.Clear();
-                if (_inFlight != null)
-                { try { UnityEngine.Object.Destroy(_inFlight); } catch { } _inFlight = null; }
-                return null;
-            }
+            // Labels-last pass: send every recorded label to the end of
+            // its sibling list, in creation order, so lines/arrowheads
+            // drawn after a label can never paint over its glyphs.
+            if (made != null)
+                for (int i = 0; i < _labels.Count; i++)
+                    if (_labels[i] != null) _labels[i].transform.SetAsLastSibling();
+            _labels.Clear();
+            // A builder that deliberately returned null (e.g. xp-curve's
+            // zero-total bail) still owns a created panel — destroy it.
+            if (made == null && _inFlight != null)
+            { try { UnityEngine.Object.Destroy(_inFlight); } catch { } }
+            _inFlight = null;
+            return made;
         }
 
         // ── positioning primitives (bottom-left origin inside the panel) ──
@@ -354,11 +367,14 @@ namespace CompetitiveRounds
 
         /// <summary>Fix pass 1 F4: a board cap's fill from the CURRENT
         /// bindings - gold for a mod control, blue for a game control, purple
-        /// for both, plain for none.</summary>
+        /// for both, plain for none. Item 17 fix pass 4 (M2): nothing is
+        /// swallowed here - a cap role that cannot be read fails the guide's
+        /// build, and the article repaints rather than show a cap in a colour
+        /// the bindings did not decide. An id the board does not carry is -1,
+        /// plain.</summary>
         private static Color Fill(string id)
         {
-            int role = 0;
-            try { role = Keybinds.BoardCapRole(id); } catch { role = 0; }
+            int role = Keybinds.BoardCapRole(id);
             if (role < 0) role = 0;
             bool mod = (role & KeybindRules.BoardMod) != 0, game = (role & KeybindRules.BoardGame) != 0;
             return mod && game ? KEY_BOTH : mod ? KEY_MOD : game ? KEY_GAME : KEY_NONE;

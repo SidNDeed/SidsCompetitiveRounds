@@ -13796,8 +13796,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             foreach (var g in infoBodyExtraGOs)
                 if (g != null) { g.SetActive(false); UnityEngine.Object.Destroy(g); }
             infoBodyExtraGOs.Clear(); infoBodyExtraTexts.Clear();
-            InfoLibrary.Seg[] segs = null;
-            try { segs = art.Segments != null ? art.Segments() : null; } catch { }
+            // Item 17 fix pass 4 (M2): nothing on this path is caught. The
+            // segments read, the segment loop (KeybindRules.InfoVisual.Lay)
+            // and a visual's build (InfoViz.Build through InfoVisual.Build)
+            // let a binding visual's failure - the Controls article's
+            // keyboard guide throwing or building nothing - and a failure to
+            // read the article's segments leave RenderInfoBody for the
+            // repaint gate in SelectInfoArticle, which blanks the article
+            // and keeps its binding revision due.
+            InfoLibrary.Seg[] segs = art.Segments != null ? art.Segments() : null;
             var bodyGO = (infoBodyTxt as Component)?.gameObject;
             Transform content = infoBodyContentRT != null ? infoBodyContentRT.transform : bodyGO?.transform.parent;
             if (segs == null || segs.Length == 0 || content == null)
@@ -13808,38 +13815,33 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
             bool primaryUsed = false;
             var ordered = new List<Transform>();
-            foreach (var seg in segs)
-            {
-                string segText = seg.Text;
-                if (!string.IsNullOrEmpty(seg.Viz))
+            // r1 MEDIUM 5: a visual that is not a binding visual and fails to
+            // build must not take its facts with it - its text form
+            // (InfoViz.TextFallback) is rendered in its place.
+            KeybindRules.InfoVisual.Lay(segs.Length, i => segs[i].Text, i => segs[i].Viz,
+                v => InfoViz.Build(v, content), InfoViz.TextFallback,
+                panel => { infoBodyExtraGOs.Add(panel); ordered.Add(panel.transform); },
+                segText =>
                 {
-                    var panel = InfoViz.Build(seg.Viz, content);
-                    if (panel != null) { infoBodyExtraGOs.Add(panel); ordered.Add(panel.transform); continue; }
-                    // r1 MEDIUM 5: a visual that fails to build must not take its
-                    // facts with it — its text form is rendered in its place.
-                    segText = InfoViz.TextFallback(seg.Viz);
-                    if (string.IsNullOrEmpty(segText)) continue;
-                }
-                if (string.IsNullOrEmpty(segText)) continue;
-                if (!primaryUsed)
-                {
-                    primaryUsed = true;
-                    UIFactory.SetTextRaw(infoBodyTxt, LinkifyInfoBody(segText));
-                    if (bodyGO != null) ordered.Add(bodyGO.transform);
-                    continue;
-                }
-                var extra = UIFactory.CreateText("InfoBodyX", content, "", 23f,
-                    new Color(0.84f, 0.85f, 0.90f), UIFactory.AlignTopLeft, sizeDelta: new Vector2(1180, 400));
-                UIFactory.SetWordWrap(extra, true);
-                UIFactory.SetTextAutoHeight(extra);
-                UIFactory.SetTextRaw(extra, LinkifyInfoBody(segText));
-                var ego = (extra as Component)?.gameObject;
-                if (ego != null)
-                {
-                    UIFactory.SetMinH(ego, 0f);   // same baked-minH reserve as the primary (see BuildInfoTab)
-                    infoBodyExtraGOs.Add(ego); infoBodyExtraTexts.Add(extra); ordered.Add(ego.transform);
-                }
-            }
+                    if (!primaryUsed)
+                    {
+                        primaryUsed = true;
+                        UIFactory.SetTextRaw(infoBodyTxt, LinkifyInfoBody(segText));
+                        if (bodyGO != null) ordered.Add(bodyGO.transform);
+                        return;
+                    }
+                    var extra = UIFactory.CreateText("InfoBodyX", content, "", 23f,
+                        new Color(0.84f, 0.85f, 0.90f), UIFactory.AlignTopLeft, sizeDelta: new Vector2(1180, 400));
+                    UIFactory.SetWordWrap(extra, true);
+                    UIFactory.SetTextAutoHeight(extra);
+                    UIFactory.SetTextRaw(extra, LinkifyInfoBody(segText));
+                    var ego = (extra as Component)?.gameObject;
+                    if (ego != null)
+                    {
+                        UIFactory.SetMinH(ego, 0f);   // same baked-minH reserve as the primary (see BuildInfoTab)
+                        infoBodyExtraGOs.Add(ego); infoBodyExtraTexts.Add(extra); ordered.Add(ego.transform);
+                    }
+                });
             if (!primaryUsed)
             {
                 UIFactory.SetTextRaw(infoBodyTxt, "");

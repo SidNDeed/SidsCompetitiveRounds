@@ -172,6 +172,7 @@
     <Compile Include="../../plugin/FfaNumberingRules.cs" />
     <Compile Include="KeybindFix2Controls.cs" />
     <Compile Include="KeybindFix3Controls.cs" />
+    <Compile Include="KeybindFix4Controls.cs" />
   </ItemGroup>
 
 </Project>

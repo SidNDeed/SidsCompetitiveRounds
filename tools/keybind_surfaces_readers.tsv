@@ -6,7 +6,7 @@ CompetitiveUI.cs	DrawQuickChat	3	6ea6e40bf85a9330	input	-	the QuickChat key even
 CompetitiveUI.cs	Tick	1	ad1b283fd6ec5433	input	-	a ChatChannel tap cycles the chat send channel
 GameStateWatcher.cs	TickInputSampling	7	bdfd66699fcf5abb	input	-	achievement input sampling: counts bound-row edges, renders nothing
 GameStateWatcher.cs	UnionActed	1	5a329bea5d0ea936	input	-	achievement input: whether a union of bound rows acted, renders nothing
-InfoViz.cs	Fill	1	6057685b4137b0c2	producer	-	the keyboard guide's cap colour: the board role of the bindings now
+InfoViz.cs	Fill	1	69fb7fdb2ba78913	producer	-	the keyboard guide's cap colour: the board role of the bindings now (fix pass 4 M2: no swallow, a failure fails the guide's build)
 KeybindRules.cs	BoardMatchesTheDefaultBoard	2	3d57f73611b873dd	selftest	-	T1 helper: the default board equals the a22f80ed board
 KeybindRules.cs	BuildKeyIndex	2	4af0c88821737bc9	rules	-	the token parser's key index; never displayed
 KeybindRules.cs	ControlsSurfaceAfter	2	d94b9afbdb5f6bbd	selftest	-	T1 case 26 helper: the built Controls surface after a rebind

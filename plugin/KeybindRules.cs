@@ -858,6 +858,88 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>Item 17 fix pass 4 (M2): the Info reading pane's visuals as
+        /// the repaint gate sees them. A visual named in BindingKeys reads the
+        /// bindings (the Controls article's keyboard guide): a build of one
+        /// that throws, or that builds nothing, is a repaint failure of its
+        /// article. Its exception leaves InfoViz.Build and RenderInfoBody
+        /// uncaught and reaches RepaintGate.Repaint, which blanks the article,
+        /// keeps the revision due, logs the failure once per exception class
+        /// and message, and lets the next tick repaint. Any other visual keeps
+        /// r1 MEDIUM 5: its failure is a warning and a null, and its text form
+        /// is drawn in its place. Propagation rather than a failure value: the
+        /// gate already carries every part of the required behaviour for an
+        /// exception, and a caller that forgot to test a returned failure would
+        /// stamp the revision (the round-4 M2 path), where an exception nobody
+        /// catches still ends at the gate. Unity-free, so the rules harness
+        /// runs this production failure path; the binding-surface oracle
+        /// (tools/keybind_surfaces.py) checks BindingKeys against the guide's
+        /// dispatch key on every run.</summary>
+        internal static class InfoVisual
+        {
+            /// <summary>The visual keys whose builder reads the bindings.</summary>
+            internal static readonly string[] BindingKeys = { "keyboard" };
+
+            internal static bool ReadsBindings(string key) { return key != null && Array.IndexOf(BindingKeys, key) >= 0; }
+
+            /// <summary>One visual's build (InfoViz.Build). <paramref name="build"/>
+            /// dispatches the key; when it throws, <paramref name="cleanup"/>
+            /// releases what it created. A binding visual's exception is
+            /// rethrown, and its null result is a failure too. Any other
+            /// visual's exception is handed to <paramref name="warn"/> and its
+            /// result is null: the caller draws its text form.</summary>
+            internal static T Build<T>(string key, Func<T> build, Action cleanup, Action<string> warn) where T : class
+            {
+                T made;
+                try
+                {
+                    made = build();
+                }
+                catch (Exception ex)
+                {
+                    if (cleanup != null)
+                    {
+                        try { cleanup(); } catch { }
+                    }
+                    if (ReadsBindings(key)) throw;
+                    if (warn != null)
+                    {
+                        try { warn("[INFO-VIZ] build '" + key + "' failed: " + ex.Message); } catch { }
+                    }
+                    return null;
+                }
+                if (made == null && ReadsBindings(key))
+                    throw new InvalidOperationException("the '" + key + "' visual built nothing");
+                return made;
+            }
+
+            /// <summary>The segment loop of NativeUI.RenderInfoBody. Segment i
+            /// is a visual when <paramref name="vizAt"/> names one, else a text
+            /// block. A visual's panel goes to <paramref name="panel"/>; a visual
+            /// that built nothing is replaced by its text form when it has one;
+            /// every non-empty text goes to <paramref name="text"/>, in order.
+            /// Nothing is caught here: a binding visual's failure leaves the
+            /// loop for the repaint gate.</summary>
+            internal static void Lay<TPanel>(int count, Func<int, string> textAt, Func<int, string> vizAt,
+                Func<string, TPanel> build, Func<string, string> fallback, Action<TPanel> panel, Action<string> text)
+                where TPanel : class
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    string segText = textAt(i);
+                    string viz = vizAt(i);
+                    if (!string.IsNullOrEmpty(viz))
+                    {
+                        TPanel made = build(viz);
+                        if (made != null) { panel(made); continue; }
+                        segText = fallback(viz);
+                    }
+                    if (string.IsNullOrEmpty(segText)) continue;
+                    text(segText);
+                }
+            }
+        }
+
         // -- the ChatChannel tap detector (design section 2.5, fix pass 1 F2) --
 
         /// <summary>Unity's KeyCode.Mouse0 and KeyCode.Mouse6: the seven mouse

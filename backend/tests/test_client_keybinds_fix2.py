@@ -235,6 +235,73 @@ def test_m2_a_repaint_that_threw_stays_due_shows_nothing_and_logs_once():
         assert step in blank, step
 
 
+# -- M2 (round-4 M2, fix pass 4): the keyboard guide's failure reaches the gate.
+# Round 4 found the swallowed path: InfoViz.Build caught the guide's exception
+# and returned null, RenderInfoBody drew nothing in its place and returned,
+# and the gate stamped the failed revision painted. Fix pass 4 propagates a
+# binding visual's failure (KeybindRules.InfoVisual); the keybindfix4 harness
+# suite executes that path on the gate. These gates pin its production shape
+# beyond the order of the gate's own statements: nothing between the guide's
+# binding read and the gate's render catches, and a binding visual's failure
+# or empty build leaves InfoViz.Build as an exception.
+
+VIZ = PLUGIN / "InfoViz.cs"
+INFOVISUAL = "internal static class InfoVisual"
+VBUILD = "internal static T Build<T>(string key, Func<T> build, Action cleanup, Action<string> warn) where T : class"
+VLAY = "internal static void Lay<TPanel>(int count,"
+
+
+def _catches(code: str) -> int:
+    return len(re.findall(r"\bcatch\b", code))
+
+
+def test_m2_fix4_a_binding_visual_failure_propagates_out_of_infoviz_build():
+    build = _ws(_code(_src(VIZ), "internal static GameObject Build(string key, Transform parent)"))
+    assert "return KeybindRules.InfoVisual.Build(key, () => Dispatch(key, parent), ReleaseFailed," in build
+    assert _catches(build) == 0
+    sig = "private static GameObject Dispatch(string key, Transform parent)"
+    dispatch = _ws(_code(_src(VIZ), sig))
+    # its one catch guards only the Destroy of a panel a builder that
+    # returned null left behind; a builder's exception passes through
+    assert _catches(dispatch) == 1
+    assert "{ try { UnityEngine.Object.Destroy(_inFlight); } catch { } }" in dispatch
+    assert 'case "keyboard": made = BuildKeyboard(parent); break;' in _ws(_text(_src(VIZ), sig))
+    rule = _ws(_code(_src(RULES), VBUILD))
+    assert _catches(rule) == 3   # the build's own, and the guarded cleanup's and warning's
+    caught = rule[rule.index("catch (Exception ex)"):]
+    assert caught.index("if (ReadsBindings(key)) throw;") < caught.index("return null;")
+    tail = rule[rule.index("if (made == null && ReadsBindings(key))"):]
+    assert tail.index("throw new InvalidOperationException(") < tail.index("return made;")
+    keys = _ws(_text(_src(RULES), INFOVISUAL))
+    assert 'internal static readonly string[] BindingKeys = { "keyboard" };' in keys
+
+
+def test_m2_fix4_nothing_on_the_guide_path_catches_before_the_gate():
+    # RenderInfoBody catches nothing: the segments read and the segment loop
+    # let a binding visual's failure reach the gate in SelectInfoArticle
+    body = _code(_src(NUI), "private static void RenderInfoBody(InfoLibrary.Article art)")
+    assert _catches(body) == 0
+    w = _ws(body)
+    assert "InfoLibrary.Seg[] segs = art.Segments != null ? art.Segments() : null;" in w
+    assert "KeybindRules.InfoVisual.Lay(segs.Length, i => segs[i].Text, i => segs[i].Viz," in w
+    assert "v => InfoViz.Build(v, content), InfoViz.TextFallback," in w
+    lay = _code(_src(RULES), VLAY)
+    assert _catches(lay) == 0 and "TPanel made = build(viz);" in _ws(lay)
+    # the guide's own builders swallow nothing - the board, the cap faces,
+    # the move caps and the cap colours (round 4's class, swept, #432)
+    for sig in ("private static GameObject BuildKeyboard(Transform parent)", "private static string Cap(int row)",
+                "private static Color Fill(string id)", "private static string MoveCaps()"):
+        assert _catches(_code(_src(VIZ), sig)) == 0, sig
+    assert "int role = Keybinds.BoardCapRole(id);" in _ws(_code(_src(VIZ), "private static Color Fill(string id)"))
+    # the gate's render is the title, the body text and the guide, and it
+    # catches nothing of its own
+    sel = _ws(_code(_src(NUI), "private static void SelectInfoArticle(string key)"))
+    args = _call_args(sel, "infoKbGate.Repaint(")
+    render = args[args.index("() =>"):args.index("}, KbBlankInfoArticle")]
+    assert "RenderInfoBody(art);" in render
+    assert _catches(render) == 0 and re.search(r"\btry\b", render) is None
+
+
 def test_m2_returning_to_the_info_tab_repaints_before_it_is_shown():
     body = re.sub(r"\s+", "", _code(_src(NUI), "private static void SwitchTab(int idx)"))
     shown = body.index("tabPanels[i].SetActive(i==idx);")

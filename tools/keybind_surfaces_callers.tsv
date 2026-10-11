@@ -64,7 +64,7 @@ KeybindRules.cs:ParseToken	KeybindRules.cs:Run	6	1e5d1f0181f9ee8f	nondisplay	sel
 KeybindRules.cs:ResolveLoaded	KeybindRules.cs:ResolveNotes	1	d06f0329cf293ac8	nondisplay	self-test helper
 KeybindRules.cs:ResolveLoaded	KeybindRules.cs:Run	4	1e5d1f0181f9ee8f	nondisplay	self-test T1
 KeybindRules.cs:ResolveLoaded	Keybinds.cs:LoadFromConfig	1	d6c9585ff0663b8f	nondisplay	the registry load: the resolved set becomes the registry, whose readers are the readers manifest
-Keybinds.cs:BoardCapRole	InfoViz.cs:Fill	1	6057685b4137b0c2	producer	the keyboard guide's cap colour
+Keybinds.cs:BoardCapRole	InfoViz.cs:Fill	1	69fb7fdb2ba78913	producer	the keyboard guide's cap colour (fix pass 4 M2: no swallow, a failure fails the guide's build)
 Keybinds.cs:Override	Keybinds.cs:ApplyJoin	1	299f79c617f04fad	display	writes the join prompt's label, or restores the vanilla one
 Keybinds.cs:Override	Keybinds.cs:ApplyReady	1	af1649f08e31c9bb	display	writes the ready-up prompt's label, or restores the vanilla one
 Keybinds.cs:Override	Keybinds.cs:RefreshAll	1	77055b81e0837fd7	display	after every commit: restores every overridden prompt, or re-applies each visible one
