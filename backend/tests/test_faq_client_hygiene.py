@@ -15,11 +15,12 @@ by test_the_scope_is_every_file_this_lane_touches. The lane's commits are
 measured by git and never recognised by a path they touch: every commit from
 the merge-base of HEAD with the certified client base to HEAD, one that
 touches no scope file included. Every path such a commit touches must be in
-the scope, and every file in the scope must have been touched by one. A range
-that holds a merge commit is no longer one lane's line (a fold into the
-client lane merges other lanes' work, which git cannot tell from this
-lane's), so the check skips there and says so. The sweep itself needs no
-history and runs everywhere.
+the scope, and every file in the scope must have been touched by one. The
+check is unconditional: a range that holds a merge commit is no longer one
+lane's line (a fold into the client lane merges other lanes' work, which git
+cannot tell from this lane's), and a checkout without the certified base
+cannot measure the range at all, so each FAILS by name, never skips. The
+sweep itself needs no history and runs everywhere.
 
 THE DETECTOR is the FAQ server lane's (backend/tests/test_faq_surfaces.py,
 its section 3), ported with its salt, its handle digests and its attribution
@@ -741,34 +742,46 @@ def lane_range(repo, base):
     return "linear", start, commits, touched
 
 
+def lane_scope_problems(repo, base, scope, min_commits=3):
+    """Every reason the lane range of `repo` (lane_range) fails the scope
+    check; empty only when the range was measured and holds exactly the
+    scope. Unconditional: a base that is not a commit there and a range that
+    holds a merge commit are each a named failure, never a skip, because in
+    either case git cannot say which commits are this lane's, and a check
+    that does not run cannot refuse the commit it exists for."""
+    state, detail, commits, touched = lane_range(repo, base)
+    if state == "absent":
+        return ["NOT MEASURED, base absent: the certified client base %s is not a commit here (%s), "
+                "so this lane's range cannot be measured" % (base, detail)]
+    if state == "merged":
+        return ["NOT MEASURED, range merged: the range from the merge-base of HEAD with %s holds %d "
+                "merge commit(s) (%s); git cannot tell another line's commits from this lane's"
+                % (base, len(detail), ", ".join(c[:8] for c in detail[:4]))]
+    problems = []
+    if len(commits) < min_commits:
+        problems.append("git measured %d commits from the merge-base %s to HEAD; this lane has at "
+                        "least %d" % (len(commits), detail[:8], min_commits))
+    unrecorded = sorted(touched - set(scope))
+    if unrecorded:
+        problems.append("a commit of the lane range touched %s, which the scope does not record" % unrecorded)
+    untouched = sorted(set(scope) - touched)
+    if untouched:
+        problems.append("the scope records %s, which no commit of the lane range touched" % untouched)
+    return problems
+
+
 def test_the_scope_is_every_file_this_lane_touches():
     """Both directions against the lane's range as git measures it
     (lane_range): every path a commit of the range touches must be recorded
-    in the scope, and every recorded file must be touched by one. A clone
-    without the certified client base, or a copy that is not a repository,
-    skips and says why; so does a range that holds a merge commit, where HEAD
-    has merged another line whose commits git cannot tell from this lane's
-    (the fold into the client lane does that). The sweep needs no history
-    and runs in every case."""
-    state, detail, commits, touched = lane_range(REPO, _CLIENT_BASE)
-    if state == "absent":
-        pytest.skip("the certified client base %s is not reachable here (%s), so this "
-                    "lane's range cannot be measured" % (_CLIENT_BASE, detail))
-    if state == "merged":
-        pytest.skip("the range from the merge-base of HEAD with %s holds %d merge commit(s) "
-                    "(%s): HEAD has merged another line, so the range is no longer this "
-                    "lane's alone" % (_CLIENT_BASE, len(detail),
-                                      ", ".join(c[:8] for c in detail[:4])))
-    n_commits = len(commits)
-    assert n_commits >= 3, (
-        "git measured %d commits from the merge-base %s to HEAD; this lane has at "
-        "least three (one per item)" % (n_commits, detail[:8]))
-    unrecorded = sorted(touched - set(_SCOPE))
-    assert not unrecorded, (
-        "a commit of the lane range touched %s, which the scope does not record" % unrecorded)
-    untouched = sorted(set(_SCOPE) - touched)
-    assert not untouched, (
-        "the scope records %s, which no commit of the lane range touched" % untouched)
+    in the scope, and every recorded file must be touched by one. The check
+    is unconditional (lane_scope_problems): a clone without the certified
+    client base, a copy that is not a repository, and a range that holds a
+    merge commit (HEAD has merged another line, whose commits git cannot tell
+    from this lane's) each FAIL by name. A fold of this lane by merge
+    therefore re-derives the base this module names, in the fold. The sweep
+    needs no history."""
+    problems = lane_scope_problems(REPO, _CLIENT_BASE, _SCOPE)
+    assert not problems, "the lane's history and scope check failed:\n" + "\n".join(problems)
 
 
 def test_the_range_check_sees_a_commit_that_touches_no_scope_file(tmp_path):
@@ -776,8 +789,11 @@ def test_the_range_check_sees_a_commit_that_touches_no_scope_file(tmp_path):
     history whose every commit is known. Three lane commits touching the five
     scope files make a linear range that is exactly the scope; one more
     commit touching only a new path (no scope file, no anchor of any kind)
-    is in the range with its path, so the scope check refuses it; and a
-    merge in the range reports the range as merged, never as the lane's."""
+    is in the range with its path, so the scope check refuses it; a merge in
+    the range reports the range as merged, never as the lane's, and the
+    check then FAILS by name, and a merge followed by an anchorless new-path
+    commit is refused; and a base that is not a commit there FAILS by name.
+    A skip anywhere in the check is a failure of this test."""
     repo = tmp_path / "lane"
     repo.mkdir()
 
@@ -812,6 +828,20 @@ def test_the_range_check_sees_a_commit_that_touches_no_scope_file(tmp_path):
     seen = state == "linear" and len(commits) == 4 and unrecorded == ["docs/elsewhere.txt"]
     assert seen, "the commit that touches no scope file was not seen: %s, %d commits, %d unrecorded" % (
         state, len(commits), len(unrecorded))
+    def problems(at_base):
+        try:
+            return lane_scope_problems(str(repo), at_base, _SCOPE)
+        except pytest.skip.Exception:
+            return None
+
+    linear = problems(base)
+    assert linear is not None and len(linear) == 1 and "docs/elsewhere.txt" in linear[0], (
+        "the scope check on the linear range with a new path read %s" % (
+            "a skip" if linear is None else "%d problems" % len(linear)))
+    missing = problems("0" * 40)
+    absent = missing is not None and len(missing) == 1 and missing[0].startswith("NOT MEASURED, base absent")
+    assert absent, "a base that is not a commit here read %s" % (
+        "a skip" if missing is None else "%d problems" % len(missing))
     git("checkout", "-q", "-b", "another-line", base)
     commit(["another.txt"], "another line")
     git("checkout", "-q", "-")
@@ -819,3 +849,8 @@ def test_the_range_check_sees_a_commit_that_touches_no_scope_file(tmp_path):
     state, detail, _commits, _touched = lane_range(str(repo), base)
     merged = state == "merged" and len(detail) == 1
     assert merged, "a range holding a merge commit read as %s" % state
+    commit(["docs/after-the-merge.txt"], "an anchorless new-path commit after the merge")
+    after = problems(base)
+    refused = after is not None and len(after) == 1 and after[0].startswith("NOT MEASURED, range merged")
+    assert refused, "a merge followed by an anchorless new-path commit read %s" % (
+        "a skip" if after is None else "%d problems" % len(after))
