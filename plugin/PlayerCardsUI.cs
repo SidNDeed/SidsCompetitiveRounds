@@ -5269,7 +5269,16 @@ namespace CompetitiveRounds
                 ApiClient.FetchPcMe(id, true, (ok2, r2) =>
                 {
                     if (ep != uiEpoch) return;
-                    try { PortraitRender.OnTabVisit(); } catch { }   // the picture check (S5.8): a dance picture, or the still without one
+                    // Item 18 fix pass 5, finding 10: this callback is heard
+                    // at most once, and with ok2 only once the answer of a
+                    // /pc/me read sent for or after this ask is cached, never
+                    // that of a read already on the wire when it was asked
+                    // (FetchPcMe keeps it waiting while an older read flies,
+                    // PcReadDemand). So the picture check is armed only here,
+                    // against the post-selection answer. A failed or refused
+                    // answer cached nothing, so it arms no check against the
+                    // answer from before the selection; the next visit checks.
+                    if (ok2) { try { PortraitRender.OnTabVisit(); } catch { } }   // the picture check (S5.8): a dance picture, or the still without one
                     NativeUI.MarkDirty();
                 });
                 NativeUI.MarkDirty();

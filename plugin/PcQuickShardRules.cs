@@ -315,6 +315,7 @@ namespace CompetitiveRounds
             DiscardLateCases(r);
             SettingsLateCases(r);
             MeDemandCases(r);
+            DanceSelectCases(r);
             return r;
         }
 
@@ -333,40 +334,67 @@ namespace CompetitiveRounds
         /// the read on the wire lands, as FetchPcMe's landing clears it).
         /// latch false is the NEGATIVE CONTROL: FetchPcMe as 59fcf3f6 wrote
         /// it, which answered a forced ask made while a read flew "in-flight"
-        /// and remembered nothing. Never called by anything that
-        /// sends.</summary>
+        /// and remembered nothing. Fix pass 5 (finding 10) adds each ask's
+        /// callback (heard as FetchPcMe hears it: the read's own on its
+        /// landing, a forced ask's made while a read flew from the first read
+        /// dispatched after it, PcReadDemand.Answered) and the dance the
+        /// server holds beside the balance (SelectDance; the snapshot carries
+        /// both). latch true with retain false is that pass's NEGATIVE
+        /// CONTROL: FetchPcMe as cdac2efd wrote it, which recorded the demand
+        /// and answered a forced ask's callback "in-flight" at once. Never
+        /// called by anything that sends.</summary>
         private sealed class MeReadPath
         {
-            private readonly bool latch;
+            private readonly bool latch, retain;
             private readonly PcReadDemand demand = new PcReadDemand();
             private readonly PcCacheFence fence = new PcCacheFence();
             internal int Server = 100, Cache = 100, CacheAt, Clock, Sent, Drops, Gen = 1;
-            internal bool InFlight, Owed;
+            internal bool InFlight, Owed, HasCache = true;
+            internal string ServerSku = "", CacheSku = "";   // the dance the server holds, and the cached one
             internal string Deferred;          // the identity a deferred re-read is for
             private int deferredGen, flyRead, flyStamp, flyGen, snap, snapAt;
+            private string snapSku = "";
             private bool served;
+            private Action<bool, string> flyCb, owedCb;   // the read on the wire's own callback, and the owed read's
 
-            internal MeReadPath(bool latch) { this.latch = latch; }
+            internal MeReadPath(bool latch) : this(latch, latch) { }
+
+            internal MeReadPath(bool latch, bool retain) { this.latch = latch; this.retain = retain; }
 
             internal bool DemandOpen { get { return demand.Open; } }
 
-            internal void Ask(string who)
+            internal int Waiting { get { return demand.Waiting; } }
+
+            internal void Ask(string who) { Ask(who, null); }
+
+            internal void Ask(string who, Action<bool, string> cb)
             {
                 Clock++;
-                if (InFlight) { if (latch) demand.Demand(who, Gen); return; }
+                if (InFlight)
+                {
+                    if (latch && retain) { demand.Demand(who, Gen, cb); return; }
+                    if (latch) demand.Demand(who, Gen);
+                    if (cb != null) cb(false, "in-flight");
+                    return;
+                }
                 InFlight = true; served = false; Sent++;
-                flyGen = Gen; flyStamp = fence.Stamp(); flyRead = demand.Dispatched();
+                flyGen = Gen; flyStamp = fence.Stamp(); flyRead = demand.Dispatched(); flyCb = cb;
             }
 
             internal void Serve()
             {
                 Clock++;
-                if (InFlight && !served) { served = true; snap = Server; snapAt = Clock; }
+                if (InFlight && !served) { served = true; snap = Server; snapSku = ServerSku; snapAt = Clock; }
             }
 
             /// <summary>A shard commits on the server; no answer of it is
             /// admitted here, so nothing moves the fence.</summary>
             internal void CommitUnanswered(int d) { Clock++; Server += d; }
+
+            /// <summary>A dance selection commits on the server. Its answer
+            /// writes only the cached item id (ApiClient.PcDanceSelect), never
+            /// the dance, and moves no fence.</summary>
+            internal void SelectDance(string sku) { Clock++; ServerSku = sku ?? ""; }
 
             /// <summary>A shard's or a discard's answer is admitted: its
             /// balance installed, the fence moved.</summary>
@@ -378,11 +406,17 @@ namespace CompetitiveRounds
                 if (!served) Serve();
                 Clock++;
                 InFlight = false;
+                var cb = flyCb; flyCb = null;
                 string again = demand.Landed(flyRead, Gen);
-                if (flyGen != Gen) { Defer(again); return; }
-                if (ok && !fence.Admits(flyStamp)) { Owed = true; Drops++; return; }
+                if (flyGen != Gen) { Defer(again); if (cb != null) cb(false, "stale-identity"); return; }
+                if (ok && !fence.Admits(flyStamp)) { Owed = true; Drops++; if (cb != null) owedCb += cb; return; }
                 Defer(again);
-                if (ok) { Cache = snap; CacheAt = snapAt; }
+                if (ok) { Cache = snap; CacheAt = snapAt; CacheSku = snapSku; HasCache = true; }
+                string resp = ok ? "me" : "failed";
+                if (cb != null) cb(ok, resp);
+                if (!retain) return;
+                var due = demand.Answered(flyRead, Gen);
+                if (due != null) foreach (var w in due) w(ok, resp);
             }
 
             private void Defer(string who)
@@ -398,10 +432,14 @@ namespace CompetitiveRounds
                     string who = Deferred; Deferred = null;
                     if (deferredGen == Gen && !InFlight) Ask(who);
                 }
-                if (Owed && !InFlight) { Owed = false; Ask("me"); }
+                if (Owed && !InFlight) { Owed = false; var cb = owedCb; owedCb = null; Ask("me", cb); }
             }
 
-            internal void Edge() { Clock++; Gen++; demand.Clear(); Owed = false; Cache = 0; CacheAt = Clock; }
+            internal void Edge()
+            {
+                Clock++; Gen++; demand.Clear(); Owed = false; owedCb = null;
+                Cache = 0; CacheAt = Clock; HasCache = false; CacheSku = "";
+            }
         }
 
         /// <summary>The overlap round 4 named (finding 7). The tab's 30 s
@@ -590,6 +628,323 @@ namespace CompetitiveRounds
             Check(r, "me demand: on every order of up to six asks, serves, unanswered commits, landings and frames, the cache ends on a "
                   + "snapshot served after the latest ask, the demand closed, and never more reads than asks", MeDemandOnEveryOrder(true), "");
             Check(r, "control: without the latch some order ends on a snapshot served before the latest ask", !MeDemandOnEveryOrder(false), "");
+        }
+
+        // -- fix pass 5, finding 10: a dance selection's picture check -------
+
+        /// <summary>PortraitRender's one-shot picture check, reduced to what
+        /// finding 10 names: OnTabVisit arms it (Arm); Tick runs it once,
+        /// once /pc/me is cached; a dance in the cached /pc/me decides the
+        /// route (DanceVisit), and with none the base-portrait path starts
+        /// (Start("visit", true): the stored picture is taken as not current,
+        /// the case that uploads a base still). Never called by anything that
+        /// renders.</summary>
+        private sealed class PictureCheck
+        {
+            internal bool Pending;
+            internal int Runs, BaseStarts;
+            internal string RanOn;
+
+            internal void Arm() { Pending = true; }
+
+            internal void Tick(MeReadPath m)
+            {
+                if (!Pending || !m.HasCache) return;
+                Pending = false; Runs++; RanOn = m.CacheSku ?? "";
+                if (RanOn.Length == 0) BaseStarts++;
+            }
+        }
+
+        /// <summary>PlayerCardsUI.MaybeSendDance's /pc/me callback after a
+        /// selection succeeded: the caller's uiEpoch check, then the picture
+        /// check. armOnlyOnOk true is the fix (armed only by an answer that
+        /// was cached); false is cdac2efd's (armed by any answer, "in-flight"
+        /// included). Delivered counts every call; Heard the calls that pass
+        /// the epoch check, with the cached dance and the cached answer's
+        /// serve time at that moment.</summary>
+        private sealed class SelectionProbe
+        {
+            private readonly MeReadPath m;
+            private readonly PictureCheck check;
+            private readonly bool armOnlyOnOk;
+            private readonly int gen;
+            internal int Delivered, Heard, HeardCacheAt = -1, AskAt;
+            internal bool HeardOk;
+            internal string HeardSku;
+
+            internal SelectionProbe(MeReadPath m, PictureCheck check, bool armOnlyOnOk)
+            {
+                this.m = m; this.check = check; this.armOnlyOnOk = armOnlyOnOk; gen = m.Gen;
+            }
+
+            internal void On(bool ok, string resp)
+            {
+                Delivered++;
+                if (gen != m.Gen) return;                 // ep != uiEpoch: the identity changed meanwhile
+                Heard++; HeardOk = ok; HeardSku = m.CacheSku; HeardCacheAt = m.CacheAt;
+                if (check != null && (ok || !armOnlyOnOk)) check.Arm();
+            }
+
+            /// <summary>FetchPcMe(id, true, callback).</summary>
+            internal void Ask() { m.Ask("me", On); AskAt = m.Clock; }
+        }
+
+        private sealed class DanceRun
+        {
+            internal MeReadPath Path;
+            internal PictureCheck Check;
+            internal SelectionProbe Probe;
+            internal int RunsAtOlder, HeardAtOlder, SentAtPost, WaitingAtAsk, WaitingAfterEdge;
+            internal string SkuAtOlder;
+        }
+
+        /// <summary>The overlap round 5 named (finding 10). The tab's 30 s
+        /// read is dispatched and served before the selection (no dance). A
+        /// dance selection then commits on the server ("dance_a"), and
+        /// MaybeSendDance asks FetchPcMe(id, true, callback) while the 30 s
+        /// read still flies. The older read lands the pre-selection answer;
+        /// the next frame sends the demand's own read, which lands (postOk
+        /// false: it fails); then the next 30 s read is sent and lands. The
+        /// picture check ticks after every step, as the UI does. retain false
+        /// with armOnlyOnOk false is cdac2efd.</summary>
+        private static DanceRun DanceOverlap(bool retain, bool armOnlyOnOk, bool postOk)
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, retain), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            o.Probe = new SelectionProbe(m, c, armOnlyOnOk);
+            m.Ask("me"); c.Tick(m);                  // the tab's 30 s read
+            m.Serve(); c.Tick(m);                    // served before the selection: no dance
+            m.SelectDance("dance_a"); c.Tick(m);     // the selection commits; its answer writes only the item id
+            o.Probe.Ask(); c.Tick(m);                // MaybeSendDance's read, the 30 s read still on the wire
+            o.WaitingAtAsk = m.Waiting;
+            m.Land(true); c.Tick(m);                 // the older read lands the pre-selection answer
+            o.RunsAtOlder = c.Runs; o.SkuAtOlder = m.CacheSku; o.HeardAtOlder = o.Probe.Heard;
+            m.Frame(); c.Tick(m);                    // the demand's own read (RefetchPcMeNextFrame)
+            m.Land(postOk); c.Tick(m);               // the post-selection read lands
+            o.SentAtPost = m.Sent;
+            m.Frame(); c.Tick(m);
+            m.Ask("me"); c.Tick(m);                  // the next 30 s read
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>The selection with no /pc/me read on the wire: its read
+        /// is sent at once and carries the callback itself.</summary>
+        private static DanceRun DanceNoFlight(bool retain, bool armOnlyOnOk, bool ok)
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, retain), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            o.Probe = new SelectionProbe(m, c, armOnlyOnOk);
+            m.SelectDance("dance_a"); c.Tick(m);
+            o.Probe.Ask(); c.Tick(m);
+            o.WaitingAtAsk = m.Waiting;
+            m.Land(ok); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>An identity or consent edge while the previous identity's
+        /// 30 s read flies: the selection asked before the edge
+        /// (askedAfterEdge false), or the new identity's own selection asked
+        /// after it, that read still on the wire.</summary>
+        private static DanceRun DanceEdge(bool askedAfterEdge)
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, true), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            m.Ask("me"); c.Tick(m);
+            m.Serve(); c.Tick(m);
+            m.SelectDance("dance_a"); c.Tick(m);
+            if (!askedAfterEdge) { o.Probe = new SelectionProbe(m, c, true); o.Probe.Ask(); c.Tick(m); }
+            o.WaitingAtAsk = m.Waiting;
+            m.Edge(); c.Tick(m);                     // ReleasePcReadLatches
+            o.WaitingAfterEdge = m.Waiting;
+            if (askedAfterEdge)
+            {
+                m.SelectDance("dance_b"); c.Tick(m);
+                o.Probe = new SelectionProbe(m, c, true); o.Probe.Ask(); c.Tick(m);
+            }
+            m.Land(true); c.Tick(m);                 // the previous identity's read lands: stale
+            m.Frame(); c.Tick(m);
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            m.Ask("me"); c.Tick(m);                  // the next 30 s read
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>The overlap, with a shard's answer admitted (the fence
+        /// moved) while the demand's own read flies: that read is dropped and
+        /// owed, and the owed read is the first to land with its answer
+        /// taken.</summary>
+        private static DanceRun DanceFenced()
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, true), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            o.Probe = new SelectionProbe(m, c, true);
+            m.Ask("me"); m.Serve(); m.SelectDance("dance_a"); c.Tick(m);
+            o.Probe.Ask(); c.Tick(m);
+            m.Land(true); c.Tick(m);                 // the older read lands
+            m.Frame(); c.Tick(m);                    // the demand's own read is sent
+            m.ConfirmedWrite(20); c.Tick(m);         // a shard's answer is admitted while it flies
+            m.Land(true); c.Tick(m);                 // dropped by the fence: owed
+            o.HeardAtOlder = o.Probe.Heard;
+            m.Frame(); c.Tick(m);                    // the owed read is sent
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>The overlap, with the tab sending a read of its own after
+        /// the older read landed and before the deferred re-read's
+        /// frame.</summary>
+        private static DanceRun DanceDeferredMeetsRead()
+        {
+            var o = new DanceRun { Path = new MeReadPath(true, true), Check = new PictureCheck() };
+            var m = o.Path; var c = o.Check;
+            o.Probe = new SelectionProbe(m, c, true);
+            m.Ask("me"); m.Serve(); m.SelectDance("dance_a"); c.Tick(m);
+            o.Probe.Ask(); c.Tick(m);
+            m.Land(true); c.Tick(m);                 // the older read lands
+            m.Ask("me"); c.Tick(m);                  // the tab's own read, after that landing
+            m.Frame(); c.Tick(m);                    // the deferred re-read: a read is on the wire, nothing sent
+            m.Land(true); c.Tick(m);
+            m.Frame(); c.Tick(m);
+            return o;
+        }
+
+        /// <summary>Every order of up to six events drawn from "a forced ask
+        /// with a callback", "the server serves the read on the wire", "a
+        /// dance selection commits", "the read on the wire lands", "the next
+        /// frame" and "a shard's answer is admitted (the fence moves)", then
+        /// the path run until nothing is on the wire, owed or scheduled: every
+        /// callback is heard exactly once, with an answer that was cached, and
+        /// the answer cached when it is heard was served after its ask; no
+        /// callback is left waiting. False on the first order that breaks any
+        /// of it.</summary>
+        private static bool DanceCallbacksOnEveryOrder(bool retain)
+        {
+            for (int len = 1; len <= 6; len++)
+            {
+                int total = 1; for (int i = 0; i < len; i++) total *= 6;
+                for (int code = 0; code < total; code++)
+                {
+                    var m = new MeReadPath(true, retain);
+                    var probes = new List<SelectionProbe>();
+                    int c = code, n = 0;
+                    for (int i = 0; i < len; i++, c /= 6)
+                    {
+                        switch (c % 6)
+                        {
+                            case 0: { var q = new SelectionProbe(m, null, true); probes.Add(q); q.Ask(); break; }
+                            case 1: m.Serve(); break;
+                            case 2: m.SelectDance("dance_" + (++n)); break;
+                            case 3: m.Land(true); break;
+                            case 4: m.Frame(); break;
+                            default: m.ConfirmedWrite(1); break;
+                        }
+                    }
+                    for (int k = 0; k < 8 && (m.InFlight || m.Deferred != null || m.Owed); k++) { m.Land(true); m.Frame(); }
+                    if (m.InFlight || m.Deferred != null || m.Owed || m.DemandOpen || m.Waiting != 0) return false;
+                    foreach (var p in probes)
+                        if (p.Delivered != 1 || p.Heard != 1 || !p.HeardOk || p.HeardCacheAt <= p.AskAt) return false;
+                }
+            }
+            return true;
+        }
+
+        private static string Said(DanceRun o)
+        {
+            return "heard=" + o.Probe.Heard + " delivered=" + o.Probe.Delivered + " ok=" + o.Probe.HeardOk
+                 + " sku=[" + (o.Probe.HeardSku ?? "(null)") + "] runs=" + o.Check.Runs + " ran_on=[" + (o.Check.RanOn ?? "(none)")
+                 + "] base=" + o.Check.BaseStarts + " sent=" + o.Path.Sent + " waiting=" + o.Path.Waiting;
+        }
+
+        private static void DanceSelectCases(SelfTestResult r)
+        {
+            var fix = DanceOverlap(true, true, true);
+            Check(r, "dance overlap: the selection's read, asked while the 30 s read flies, waits: the older read lands the pre-selection answer, unheard, and the picture check has not run",
+                  fix.WaitingAtAsk == 1 && fix.HeardAtOlder == 0 && fix.RunsAtOlder == 0 && fix.SkuAtOlder == "",
+                  fix.WaitingAtAsk + " " + fix.HeardAtOlder + " " + fix.RunsAtOlder + " [" + fix.SkuAtOlder + "]");
+            Check(r, "dance overlap: the callback is heard once, from the read sent after the selection, after its answer is cached",
+                  fix.Probe.Heard == 1 && fix.Probe.Delivered == 1 && fix.Probe.HeardOk && fix.Probe.HeardSku == "dance_a", Said(fix));
+            Check(r, "dance overlap: the picture check runs once, against the post-selection dance, and the base path never starts",
+                  fix.Check.Runs == 1 && fix.Check.RanOn == "dance_a" && fix.Check.BaseStarts == 0, Said(fix));
+            Check(r, "dance overlap: two reads, the 30 s one and the demand's own, then the next 30 s read never hears the callback again",
+                  fix.SentAtPost == 2 && fix.Path.Sent == 3 && fix.Probe.Delivered == 1 && fix.Path.Waiting == 0, fix.SentAtPost + " " + Said(fix));
+            var was = DanceOverlap(false, false, true);
+            Check(r, "control: cdac2efd's FetchPcMe answers the selection's read in-flight at once, so the check runs on the cache from before the selection and the base path starts",
+                  was.Probe.Heard == 1 && !was.Probe.HeardOk && was.RunsAtOlder == 1 && was.Check.RanOn == "" && was.Check.BaseStarts == 1, Said(was));
+
+            var failed = DanceOverlap(true, true, false);
+            Check(r, "dance overlap: when the post-selection read fails, the callback is heard once, failed, and arms no check: the base path never starts",
+                  failed.Probe.Heard == 1 && failed.Probe.Delivered == 1 && !failed.Probe.HeardOk && failed.Check.Runs == 0 && failed.Check.BaseStarts == 0,
+                  Said(failed));
+            var armsOnFail = DanceOverlap(true, false, false);
+            Check(r, "control: a callback that arms the check on a failed answer (cdac2efd's MaybeSendDance) runs it on the cache from before the selection",
+                  armsOnFail.Check.Runs == 1 && armsOnFail.Check.RanOn == "" && armsOnFail.Check.BaseStarts == 1, Said(armsOnFail));
+
+            var nf = DanceNoFlight(true, true, true);
+            var nf0 = DanceNoFlight(false, false, true);
+            Check(r, "dance no overlap: the selection's read is sent at once and heard once, and the check runs against the post-selection dance",
+                  nf.WaitingAtAsk == 0 && nf.Path.Sent == 1 && nf.Probe.Heard == 1 && nf.Probe.HeardOk && nf.Check.Runs == 1
+                  && nf.Check.RanOn == "dance_a" && nf.Check.BaseStarts == 0, Said(nf));
+            Check(r, "dance no overlap: exactly as cdac2efd: the same reads, the same callback and the same check",
+                  nf.Path.Sent == nf0.Path.Sent && nf.Probe.Heard == nf0.Probe.Heard && nf.Probe.HeardOk == nf0.Probe.HeardOk
+                  && nf.Check.Runs == nf0.Check.Runs && nf.Check.RanOn == nf0.Check.RanOn && nf.Check.BaseStarts == nf0.Check.BaseStarts, Said(nf0));
+            var nff = DanceNoFlight(true, true, false);
+            var nff0 = DanceNoFlight(false, false, false);
+            Check(r, "dance no overlap: a selection whose read fails arms no check, where cdac2efd ran it on the cache from before the selection",
+                  nff.Probe.Heard == 1 && nff.Check.Runs == 0 && nff0.Check.Runs == 1 && nff0.Check.BaseStarts == 1, Said(nff) + " | " + Said(nff0));
+
+            var edge = DanceEdge(false);
+            Check(r, "dance edge: an identity or consent edge drops the waiting callback: never heard, no check, nothing left waiting",
+                  edge.WaitingAtAsk == 1 && edge.WaitingAfterEdge == 0 && edge.Probe.Delivered == 0 && edge.Check.Runs == 0 && edge.Path.Waiting == 0,
+                  edge.WaitingAtAsk + " " + edge.WaitingAfterEdge + " " + Said(edge));
+            var edgeNew = DanceEdge(true);
+            Check(r, "dance edge: the new identity's selection, asked while the previous identity's read flies, is heard once from the read sent for it",
+                  edgeNew.Probe.Heard == 1 && edgeNew.Probe.Delivered == 1 && edgeNew.Probe.HeardSku == "dance_b" && edgeNew.Check.Runs == 1
+                  && edgeNew.Check.RanOn == "dance_b" && edgeNew.Check.BaseStarts == 0, Said(edgeNew));
+
+            var fenced = DanceFenced();
+            Check(r, "dance fenced: when the fence drops the post-selection read, the callback waits for the owed read and is heard once, after its answer",
+                  fenced.HeardAtOlder == 0 && fenced.Probe.Heard == 1 && fenced.Probe.HeardSku == "dance_a" && fenced.Check.Runs == 1
+                  && fenced.Check.RanOn == "dance_a" && fenced.Check.BaseStarts == 0 && fenced.Path.Sent == 3, fenced.HeardAtOlder + " " + Said(fenced));
+            var meets = DanceDeferredMeetsRead();
+            Check(r, "dance demand: a read sent after the older read landed, on the wire at the deferred frame, answers the callback: heard once, no third read",
+                  meets.Probe.Heard == 1 && meets.Probe.HeardSku == "dance_a" && meets.Path.Sent == 2 && meets.Check.RanOn == "dance_a"
+                  && meets.Check.BaseStarts == 0, Said(meets));
+
+            var d = new PcReadDemand();
+            int calls = 0;
+            Action<bool, string> cb = (ok, s) => calls++;
+            int r1 = d.Dispatched();
+            d.Demand("me", 1, cb);
+            Check(r, "waiting callback: a forced ask's callback is retained with its demand", d.Open && d.Waiting == 1, d.Waiting.ToString());
+            string again = d.Landed(r1, 1);
+            var none = d.Answered(r1, 1);
+            Check(r, "waiting callback: the read on the wire at the ask never answers it, and closing the demand keeps it",
+                  again == "me" && !d.Open && none == null && d.Waiting == 1, (again ?? "(null)") + " " + d.Waiting);
+            int r2 = d.Dispatched();
+            var due = d.Answered(r2, 1);
+            if (due != null) foreach (var f in due) f(true, "me");
+            var dueAgain = d.Answered(d.Dispatched(), 1);
+            Check(r, "waiting callback: the first read dispatched after the ask answers it, exactly once",
+                  due != null && due.Count == 1 && calls == 1 && d.Waiting == 0 && dueAgain == null, calls + " " + d.Waiting);
+            d.Demand("me", 1, cb);
+            var other = d.Answered(d.Dispatched(), 2);
+            Check(r, "waiting callback: a callback of another generation is dropped unheard", other == null && d.Waiting == 0, d.Waiting.ToString());
+            d.Demand("me", 2, cb); d.Demand("me", 2, cb);
+            d.Clear();
+            Check(r, "waiting callback: an identity or consent edge drops every waiting callback unheard",
+                  !d.Open && d.Waiting == 0 && d.Answered(d.Dispatched(), 2) == null, d.Waiting.ToString());
+            d.Demand("me", 2);
+            Check(r, "waiting callback: an ask without a callback waits for nothing", d.Open && d.Waiting == 0, d.Waiting.ToString());
+
+            Check(r, "dance demand: on every order of up to six asks with callbacks, serves, selections, landings, frames and fence moves, each callback "
+                  + "is heard exactly once, with a cached answer served after its ask, and none is left waiting", DanceCallbacksOnEveryOrder(true), "");
+            Check(r, "control: cdac2efd's FetchPcMe hears some callback at once, before any answer newer than its ask", !DanceCallbacksOnEveryOrder(false), "");
         }
 
         // -- fix pass 3, finding 5: a settings answer never writes the balance --
@@ -1423,6 +1778,17 @@ namespace CompetitiveRounds
     /// another generation is dropped, and an identity or consent edge
     /// releases it (Clear, ApiClient.ReleasePcReadLatches). Free of Unity so
     /// the client rules harness executes it (#391).
+    ///
+    /// Fix pass 5, finding 10: a forced ask's completion callback is a caller
+    /// waiting for a read newer than its ask (the dance selection's picture
+    /// check, PlayerCardsUI.MaybeSendDance). It is retained here with the
+    /// demand (Demand) and is heard exactly once, from the first read
+    /// dispatched AFTER the ask that lands with its answer taken (Answered:
+    /// cached, or failed), never from the read that was on the wire when it
+    /// was asked, which is not proven newer than the ask. Closing the demand
+    /// at that older read's landing keeps it (Landed). A callback of another
+    /// generation is dropped unheard, and an identity or consent edge drops
+    /// every waiting callback unheard (Clear).
     /// </summary>
     internal sealed class PcReadDemand
     {
@@ -1431,9 +1797,30 @@ namespace CompetitiveRounds
         private int openAt;        // the reads dispatched when the open demand was made
         private int openGen;       // the identity generation it was made in
         private string openFor;    // the identity it was made for
+        // fix pass 5, finding 10: the forced asks' callbacks not heard yet
+        private readonly List<Waiter> waiting = new List<Waiter>();
+
+        /// <summary>A waiting callback: the reads dispatched when it was
+        /// asked (only a read numbered higher answers it) and the identity
+        /// generation it was asked in.</summary>
+        private sealed class Waiter
+        {
+            internal readonly Action<bool, string> Callback;
+            internal readonly int After;
+            internal readonly int Gen;
+
+            internal Waiter(Action<bool, string> callback, int after, int gen)
+            {
+                Callback = callback; After = after; Gen = gen;
+            }
+        }
 
         /// <summary>Whether a demand is open.</summary>
         internal bool Open { get { return open; } }
+
+        /// <summary>Fix pass 5, finding 10: the callbacks waiting for a read
+        /// newer than their ask.</summary>
+        internal int Waiting { get { return waiting.Count; } }
 
         /// <summary>A /pc/me read is dispatched: its number, carried to its
         /// landing (Landed).</summary>
@@ -1444,11 +1831,14 @@ namespace CompetitiveRounds
 
         /// <summary>A forced read for `who` was asked for while a read was on
         /// the wire, in identity generation `gen`. Asks made while the same
-        /// read flies are one demand.</summary>
-        internal void Demand(string who, int gen)
+        /// read flies are one demand. `callback`, when given, waits here
+        /// until a read dispatched after this ask answers it
+        /// (Answered).</summary>
+        internal void Demand(string who, int gen, Action<bool, string> callback = null)
         {
             if (string.IsNullOrEmpty(who)) return;
             open = true; openAt = dispatched; openGen = gen; openFor = who;
+            if (callback != null) waiting.Add(new Waiter(callback, dispatched, gen));
         }
 
         /// <summary>The read numbered `read` landed, whatever its answer, with
@@ -1457,19 +1847,52 @@ namespace CompetitiveRounds
         /// no demand is open, when the demand belongs to another generation,
         /// and when this read was dispatched after the demand (it answers
         /// it). A read dispatched at or before the demand never answers
-        /// it.</summary>
+        /// it. The waiting callbacks stay (fix pass 5, finding 10): this
+        /// read answers none it was on the wire for.</summary>
         internal string Landed(int read, int gen)
         {
             if (!open) return null;
             string who = openFor;
             bool again = openGen == gen && read <= openAt;
-            Clear();
+            Close();
             return again ? who : null;
         }
 
+        /// <summary>Fix pass 5, finding 10: the read numbered `read` landed
+        /// with its answer taken (cached, or failed), with the identity
+        /// generation now `gen`: the waiting callbacks it answers, in ask
+        /// order, or null. A callback is answered only by a read dispatched
+        /// after its ask (read above After); the read that was on the wire
+        /// when it was asked never answers it. Each answered callback leaves
+        /// the list here, so it is heard exactly once. A callback of another
+        /// generation is dropped unheard.</summary>
+        internal List<Action<bool, string>> Answered(int read, int gen)
+        {
+            if (waiting.Count == 0) return null;
+            List<Action<bool, string>> due = null;
+            var keep = new List<Waiter>();
+            foreach (var w in waiting)
+            {
+                if (w.Gen != gen) continue;                        // another generation's ask: dropped unheard
+                if (read <= w.After) { keep.Add(w); continue; }    // the read on the wire at the ask never answers it
+                if (due == null) due = new List<Action<bool, string>>();
+                due.Add(w.Callback);                               // answered: heard once, so not kept
+            }
+            waiting.Clear(); waiting.AddRange(keep);
+            return due;
+        }
+
         /// <summary>An identity or consent edge: the previous generation's
-        /// demand goes.</summary>
+        /// demand goes, and every waiting callback with it, unheard.</summary>
         internal void Clear()
+        {
+            Close();
+            waiting.Clear();   // fix pass 5, finding 10: the waiting callbacks, never heard
+        }
+
+        /// <summary>Closes the open demand; the waiting callbacks
+        /// stay.</summary>
+        private void Close()
         {
             open = false; openAt = 0; openGen = 0; openFor = null;
         }

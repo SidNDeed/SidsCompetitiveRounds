@@ -83,6 +83,20 @@ Required behaviour, each a named test:
       red on the settings path itself whatever gate q11's currency
       assertions find, then lists every response path that may write the
       balance, the settings answer included and excluded.
+  Q16 (fix pass 5, finding 10) a dance selection's picture check runs
+      against the post-selection /pc/me answer even when another /pc/me read
+      is already in flight: a forced ask's callback made while a read flies
+      is no longer answered "in-flight" at once; it waits with the demand
+      (PcReadDemand) and is heard at most once: from the first read
+      dispatched after the ask that lands with its answer taken, never from
+      the read already on the wire, and never after an identity or consent
+      edge, which drops it unheard; MaybeSendDance arms the check only from
+      that callback and only on an answer that was cached. The overlap is EXERCISED here, not only
+      the calls: test_q16_the_dance_selection_overlap_ran_and_each_case_passed
+      runs the client rules harness and requires each DanceSelectCases case
+      to pass by name (the overlap, the failed read, no overlap, the edges,
+      the fence drop, the class's unit cases, every order of six events, and
+      the cdac2efd controls); gate q16 pins that the client runs that path.
 
 Each client gate runs on the real sources and, with its mutation and control,
 on edited copies (#391). The database tests use test_pc_shard_batch's harness
@@ -105,6 +119,9 @@ from test_pc_shard_batch import (  # noqa: E402,F401  (pg_build and env are fixt
     _sign, _single, _val, env, main, pg_build,
 )
 from test_pc_shard_batch import _code as _py_code, _fn_src  # noqa: E402
+# fix pass 5, finding 10: the dance selection's overlap is EXECUTED here, by
+# the client rules harness (harness_run is that module's fixture)
+from test_client_rules_harness import _named_case, harness_run  # noqa: E402,F401
 
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugin"
@@ -248,12 +265,14 @@ def gate_q5_a_failure_reads_back_by_the_rule(s):
     what = "a forced balance read asked while one is in flight is dropped"
     me = _code(_member(api, "public static void FetchPcMe("))
     busy = _at(me, "if (pcMeInFlight)", what)
-    ask = _at(me, "if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);", what)
+    # fix pass 5 (finding 10): the demand's line also keeps a forced ask's
+    # callback waiting (gate q16 pins that part); the demand is as before
+    ask = _at(me, "if (force) { PcMeDemand.Demand(steamId, _pcCacheEpoch, callback); return; }", what)
     refused = _at(me, 'callback?.Invoke(false, "in-flight");', what)
     num = _at(me, "int read = PcMeDemand.Dispatched();", what)
     start = _at(me, "Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>", what)
     assert busy < ask < refused < num < start, what
-    demand = _member(_code(s["rules"]), "internal void Demand(string who, int gen)")
+    demand = _member(_code(s["rules"]), "internal void Demand(string who, int gen, Action<bool, string> callback = null)")
     assert "open = true; openAt = dispatched; openGen = gen; openFor = who;" in demand, what
     what = "the older read answers the balance demand"
     cb = me[start:]
@@ -267,7 +286,8 @@ def gate_q5_a_failure_reads_back_by_the_rule(s):
     again2 = ret2 + _at(cb[ret2:], "PcMeReadAgain(again);", what)
     land = _at(cb, "CachedPcMe = me;", what)
     assert free < landed < stale < again1 < ret1 < fenced < ret2 < again2 < land, what
-    assert cb.count("PcMeReadAgain(again);") == 2 and me.count("PcMeDemand.") == 3, what
+    # four since fix pass 5 (finding 10): Demand, Dispatched, Landed and Answered
+    assert cb.count("PcMeReadAgain(again);") == 2 and me.count("PcMeDemand.") == 4, what
     assert "Plugin.Instance.StartCoroutine(RefetchPcMeNextFrame(steamId, _pcCacheEpoch));" in _code(
         _member(api, "private static void PcMeReadAgain(")), what
     rule = _member(_code(s["rules"]), "internal string Landed(int read, int gen)")
@@ -281,7 +301,7 @@ def gate_q5_a_failure_reads_back_by_the_rule(s):
     assert wait < gen < busy < fetch and nxt.count("yield break;") == 2, what
     assert "PcMeDemand.Clear();" in _code(_member(api, "private static void ReleasePcReadLatches(")), (
         "a balance demand outlives its identity")
-    assert _code(api).count("PcMeDemand.") == 4, "a balance demand has a writer outside FetchPcMe and the identity edge"
+    assert _code(api).count("PcMeDemand.") == 5, "a balance demand has a writer outside FetchPcMe and the identity edge"
     assert "MeDemandCases(r);" in _member(_code(s["rules"]), "internal static SelfTestResult SelfTest("), (
         "the balance demand's overlap is not executed")
 
@@ -596,6 +616,68 @@ def gate_q15_a_settings_answer_never_writes_the_balance(s):
     assert writes == 3, "a response path outside the list writes the balance (%d writes)" % writes
 
 
+def gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer(s):
+    """Fix pass 5, finding 10: a dance selection's picture check runs against
+    the post-selection /pc/me answer even when another /pc/me read is already
+    in flight. FetchPcMe no longer answers a forced ask's callback
+    "in-flight" while a read flies: the callback waits with the demand
+    (PcReadDemand.Demand) and is heard from the landing of the first read
+    dispatched after the ask that takes its answer, after the answer is
+    cached, once (PcReadDemand.Answered: the read on the wire at the ask
+    never answers it, an answered callback is not kept, another
+    generation's is dropped). Closing the demand keeps the callbacks
+    (Landed closes, it does not clear); an identity or consent edge drops
+    them unheard (Clear, from ReleasePcReadLatches). MaybeSendDance arms the
+    picture check (PortraitRender.OnTabVisit) only from that callback, and
+    only on an answer that was cached. The overlap is EXECUTED by the
+    harness (PcQuickShardRules.DanceSelectCases), and
+    test_q16_the_dance_selection_overlap_ran_and_each_case_passed requires
+    each of its cases to pass by name; this pins that the client runs that
+    path."""
+    api, rules = s["api"], _code(s["rules"])
+    what = "a forced read's callback is answered in-flight"
+    me = _code(_member(api, "public static void FetchPcMe("))
+    busy = _at(me, "if (pcMeInFlight)", what)
+    keep = _at(me, "if (force) { PcMeDemand.Demand(steamId, _pcCacheEpoch, callback); return; }", what)
+    refused = _at(me, 'callback?.Invoke(false, "in-flight");', what)
+    assert busy < keep < refused and me.count('callback?.Invoke(false, "in-flight");') == 1, what
+    demand = _member(rules, "internal void Demand(string who, int gen, Action<bool, string> callback = null)")
+    assert "if (callback != null) waiting.Add(new Waiter(callback, dispatched, gen));" in demand, what
+    cls = rules[_at(rules, "internal sealed class PcReadDemand", "the balance demand's class is gone"):]
+    answered = _member(cls, "internal List<Action<bool, string>> Answered(int read, int gen)")
+    assert "if (read <= w.After) { keep.Add(w); continue; }" in answered, (
+        "a waiting callback is heard from the read that was on the wire at its ask")
+    assert ("due.Add(w.Callback);" in answered and answered.count("keep.Add(") == 1
+            and "waiting.Clear(); waiting.AddRange(keep);" in answered), "a waiting callback is heard more than once"
+    assert "if (w.Gen != gen) continue;" in answered, "a waiting callback of another generation is heard"
+    landed = _member(cls, "internal string Landed(int read, int gen)")
+    assert "Close();" in landed and "Clear();" not in landed, "closing the demand drops the waiting callbacks"
+    clear = _member(cls, "internal void Clear()")
+    assert "Close();" in clear and "waiting.Clear();" in clear and "PcMeDemand.Clear();" in _code(
+        _member(api, "private static void ReleasePcReadLatches(")), (
+        "an identity or consent edge leaves a waiting callback to be heard")
+    what = "a waiting callback is heard outside the landing that takes an answer"
+    cb = me[_at(me, "Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>", what):]
+    stale = _at(cb, "if (epoch != _pcCacheEpoch)", what)
+    fenced = _at(cb, "if (ok && !PcAnswerFence.Admits(fence))", what)
+    ret2 = fenced + _at(cb[fenced:], "return;", what)
+    land = _at(cb, "CachedPcMe = me;", what)
+    own = _at(cb, "try { callback?.Invoke(ok, resp); }", what)
+    heard = _at(cb, "var waited = PcMeDemand.Answered(read, _pcCacheEpoch);", what)
+    each = _at(cb, "foreach (var w in waited)", what)
+    call = _at(cb, "try { w(ok, resp); }", what)
+    assert stale < fenced < ret2 < land < own < heard < each < call, what
+    assert _code(api).count("PcMeDemand.Answered(") == 1, what
+    what = "the picture check is armed by an answer the selection's read did not cache"
+    dance = _code(_member(s["ui"], "private static void MaybeSendDance("))
+    read = _at(dance, "ApiClient.FetchPcMe(id, true, (ok2, r2) =>", what)
+    epoch = read + _at(dance[read:], "if (ep != uiEpoch) return;", what)
+    arm = _at(dance, "if (ok2) { try { PortraitRender.OnTabVisit(); } catch { } }", what)
+    assert read < epoch < arm and dance.count("PortraitRender.OnTabVisit()") == 1, what
+    assert "DanceSelectCases(r);" in _member(rules, "internal static SelfTestResult SelfTest("), (
+        "the dance selection's overlap is not executed")
+
+
 GATES = [gate_q1_the_strip_card_shards_in_place_on_a_confirmed_click,
          gate_q2_the_key_is_kept_for_the_card_until_an_answer,
          gate_q4_the_balance_and_the_stamp_come_only_from_an_answer,
@@ -606,7 +688,8 @@ GATES = [gate_q1_the_strip_card_shards_in_place_on_a_confirmed_click,
          gate_q11_a_retired_shard_s_read_back_never_undoes_a_newer_shard,
          gate_q12_shard_dupes_counts_only_the_prints_owned_now,
          gate_q13_a_not_owned_tombstone_lifts_once_a_later_read_holds_the_print,
-         gate_q15_a_settings_answer_never_writes_the_balance]
+         gate_q15_a_settings_answer_never_writes_the_balance,
+         gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer]
 
 
 @pytest.mark.parametrize("gate", GATES, ids=[g.__name__ for g in GATES])
@@ -657,11 +740,12 @@ MUTATIONS = [
      "{ }",
      'if (PcQuickShardRules.ReadBackAfter("given_up")) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }  ',
      "a strip shard given up does not read back"),
-    # Fix pass 4, finding 7: the balance demand made while a /pc/me read flies.
+    # Fix pass 4, finding 7: the balance demand made while a /pc/me read flies
+    # (the line also keeps the ask's callback waiting since fix pass 5).
     ("Q5c", gate_q5_a_failure_reads_back_by_the_rule, "api",
-     "                if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);\n",
+     "                if (force) { PcMeDemand.Demand(steamId, _pcCacheEpoch, callback); return; }\n",
      "",
-     "                if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);   // remembered\n",
+     "                if (force) { PcMeDemand.Demand(steamId, _pcCacheEpoch, callback); return; }   // remembered\n",
      "a forced balance read asked while one is in flight is dropped"),
     ("Q5d", gate_q5_a_failure_reads_back_by_the_rule, "rules",
      "            open = true; openAt = dispatched; openGen = gen; openFor = who;",
@@ -885,6 +969,57 @@ MUTATIONS = [
      "",
      "            TombstoneCases(r);   // executed\n",
      "the tombstone path is not executed"),
+    # Fix pass 5, finding 10: the forced ask's callback, kept with the demand.
+    ("Q16a", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "api",
+     "                if (force) { PcMeDemand.Demand(steamId, _pcCacheEpoch, callback); return; }\n",
+     "                if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);\n",
+     "                if (force) { PcMeDemand.Demand(steamId, _pcCacheEpoch, callback); return; }   // kept\n",
+     "a forced read's callback is answered in-flight"),
+    ("Q16b", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "rules",
+     "            if (callback != null) waiting.Add(new Waiter(callback, dispatched, gen));\n",
+     "",
+     "            if (callback != null) waiting.Add(new Waiter(callback, dispatched, gen));   // waits\n",
+     "a forced read's callback is answered in-flight"),
+    ("Q16c", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "rules",
+     "                if (read <= w.After) { keep.Add(w); continue; }    // the read on the wire at the ask never answers it\n",
+     "                if (read < w.After) { keep.Add(w); continue; }    // the read on the wire at the ask never answers it\n",
+     "                if (read <= w.After) { keep.Add(w); continue; }    // older reads never answer it\n",
+     "a waiting callback is heard from the read that was on the wire at its ask"),
+    ("Q16d", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "rules",
+     "                due.Add(w.Callback);                               // answered: heard once, so not kept\n",
+     "                due.Add(w.Callback); keep.Add(w);\n",
+     "                due.Add(w.Callback);   // heard once\n",
+     "a waiting callback is heard more than once"),
+    ("Q16e", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "rules",
+     "                if (w.Gen != gen) continue;                        // another generation's ask: dropped unheard\n",
+     "",
+     "                if (w.Gen != gen) continue;   // dropped unheard\n",
+     "a waiting callback of another generation is heard"),
+    ("Q16f", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "rules",
+     "            Close();\n            return again ? who : null;",
+     "            Clear();\n            return again ? who : null;",
+     "            Close();   // the callbacks stay\n            return again ? who : null;",
+     "closing the demand drops the waiting callbacks"),
+    ("Q16g", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "rules",
+     "            waiting.Clear();   // fix pass 5, finding 10: the waiting callbacks, never heard\n",
+     "",
+     "            waiting.Clear();   // never heard\n",
+     "an identity or consent edge leaves a waiting callback to be heard"),
+    ("Q16h", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "api",
+     "                var waited = PcMeDemand.Answered(read, _pcCacheEpoch);\n",
+     "                List<Action<bool, string>> waited = null;\n",
+     "                var waited = PcMeDemand.Answered(read, _pcCacheEpoch);   // heard here\n",
+     "a waiting callback is heard outside the landing that takes an answer"),
+    ("Q16i", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "ui",
+     "                    if (ok2) { try { PortraitRender.OnTabVisit(); } catch { } }",
+     "                    { try { PortraitRender.OnTabVisit(); } catch { } }",
+     "                    if (ok2) { try { PortraitRender.OnTabVisit(); } catch { } } ",
+     "the picture check is armed by an answer the selection's read did not cache"),
+    ("Q16j", gate_q16_a_dance_selection_s_picture_check_runs_on_the_post_selection_answer, "rules",
+     "            DanceSelectCases(r);\n",
+     "",
+     "            DanceSelectCases(r);   // executed\n",
+     "the dance selection's overlap is not executed"),
 ]
 
 
@@ -904,6 +1039,49 @@ def test_each_gate_is_red_under_its_mutation_and_green_under_its_control(mid, ga
     green = dict(s, **{key: _edited(s[key], old, control)})
     assert green[key] != s[key], mid + ": the control did not apply"
     gate(green)
+
+
+# Fix pass 5, finding 10 (Q16): the overlap itself, EXECUTED. The client rules
+# harness runs PcQuickShardRules.DanceSelectCases over PcReadDemand, the class
+# FetchPcMe runs, and a model of FetchPcMe's read path and PortraitRender's
+# one-shot check: the 30 s read in flight, the selection committed, its read
+# asked and kept waiting, the older read landing the pre-selection answer
+# unheard, the post-selection read landing, the callback heard once and the
+# check run against the post-selection dance, the base path never started;
+# with the no-overlap, failed-read, edge and fence cases, the class's own
+# cases, every order of six events, and the cdac2efd controls. Each case must
+# have run and passed, by name.
+DANCE_CASES = [
+    "dance overlap: the selection's read, asked while the 30 s read flies, waits: the older read lands the pre-selection answer, unheard, and the picture check has not run",
+    "dance overlap: the callback is heard once, from the read sent after the selection, after its answer is cached",
+    "dance overlap: the picture check runs once, against the post-selection dance, and the base path never starts",
+    "dance overlap: two reads, the 30 s one and the demand's own, then the next 30 s read never hears the callback again",
+    "control: cdac2efd's FetchPcMe answers the selection's read in-flight at once, so the check runs on the cache from before the selection and the base path starts",
+    "dance overlap: when the post-selection read fails, the callback is heard once, failed, and arms no check: the base path never starts",
+    "control: a callback that arms the check on a failed answer (cdac2efd's MaybeSendDance) runs it on the cache from before the selection",
+    "dance no overlap: the selection's read is sent at once and heard once, and the check runs against the post-selection dance",
+    "dance no overlap: exactly as cdac2efd: the same reads, the same callback and the same check",
+    "dance no overlap: a selection whose read fails arms no check, where cdac2efd ran it on the cache from before the selection",
+    "dance edge: an identity or consent edge drops the waiting callback: never heard, no check, nothing left waiting",
+    "dance edge: the new identity's selection, asked while the previous identity's read flies, is heard once from the read sent for it",
+    "dance fenced: when the fence drops the post-selection read, the callback waits for the owed read and is heard once, after its answer",
+    "dance demand: a read sent after the older read landed, on the wire at the deferred frame, answers the callback: heard once, no third read",
+    "waiting callback: a forced ask's callback is retained with its demand",
+    "waiting callback: the read on the wire at the ask never answers it, and closing the demand keeps it",
+    "waiting callback: the first read dispatched after the ask answers it, exactly once",
+    "waiting callback: a callback of another generation is dropped unheard",
+    "waiting callback: an identity or consent edge drops every waiting callback unheard",
+    "waiting callback: an ask without a callback waits for nothing",
+    "dance demand: on every order of up to six asks with callbacks, serves, selections, landings, frames and fence moves, each callback "
+    "is heard exactly once, with a cached answer served after its ask, and none is left waiting",
+    "control: cdac2efd's FetchPcMe hears some callback at once, before any answer newer than its ask",
+]
+
+
+@pytest.mark.parametrize("name", DANCE_CASES, ids=["dance%02d" % i for i in range(1, len(DANCE_CASES) + 1)])
+def test_q16_the_dance_selection_overlap_ran_and_each_case_passed(harness_run, name):
+    line = _named_case(harness_run, name, "quickshard")
+    assert line.startswith("[quickshard] PASS"), line
 
 
 # ============================================== the server half (live database)

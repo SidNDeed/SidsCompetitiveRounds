@@ -4712,7 +4712,10 @@ namespace CompetitiveRounds
         /// remembers it, bound to the identity generation it was asked in,
         /// and once the read on the wire lands a fresh read is sent: that
         /// older answer never answers it. ReleasePcReadLatches releases it at
-        /// an identity or consent edge.</summary>
+        /// an identity or consent edge. Fix pass 5, finding 10: a forced
+        /// ask's callback waits here too, and is heard once, from the first
+        /// read dispatched after the ask that lands with its answer taken
+        /// (PcReadDemand.Answered); the edge drops it unheard.</summary>
         internal static readonly PcReadDemand PcMeDemand = new PcReadDemand();
         // A read the fence dropped is owed (with the callers that waited on
         // it) until PcSendOwedReads sends it again; an identity edge clears it.
@@ -4784,7 +4787,17 @@ namespace CompetitiveRounds
                 // from before the commit. The demand is remembered
                 // (PcMeDemand, bound to this generation), and a fresh read
                 // is sent once the older one lands.
-                if (force) PcMeDemand.Demand(steamId, _pcCacheEpoch);
+                //
+                // Fix pass 5, finding 10: a forced ask's callback is a caller
+                // waiting for a read newer than its ask (the dance
+                // selection's picture check, PlayerCardsUI.MaybeSendDance),
+                // so it is no longer answered "in-flight" here. It waits
+                // with the demand (PcMeDemand) and is heard once, from the
+                // first read dispatched after this ask that lands with its
+                // answer taken, never from the older read, which is not
+                // proven newer than the ask; an identity or consent edge
+                // drops it unheard.
+                if (force) { PcMeDemand.Demand(steamId, _pcCacheEpoch, callback); return; }
                 callback?.Invoke(false, "in-flight");
                 return;
             }
@@ -4823,7 +4836,9 @@ namespace CompetitiveRounds
                     // answer is the request shape C2 removed). The caller
                     // hears that read. That read, dispatched later, also
                     // answers a demand made while this one flew (fix pass 4,
-                    // finding 7), so no second read is sent for it.
+                    // finding 7), so no second read is sent for it, and the
+                    // callbacks left waiting are heard from it, not from this
+                    // answer, which is not taken (fix pass 5, finding 10).
                     Plugin.Log.LogInfo("[PC] me answer dropped: a confirmed write landed while it was in flight; read owed");
                     pcMeReadOwed = true; if (callback != null) pcMeOwedCallback += callback;
                     return;
@@ -4838,6 +4853,17 @@ namespace CompetitiveRounds
                 else { PcMeError = resp; Plugin.Log.LogInfo($"[PC] me fetch failed: {PcShort(resp)}"); }
                 try { NativeUI.MarkDirty(); } catch { }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] me callback threw: {cex.Message}"); }
+                // Fix pass 5, finding 10: then each callback a forced ask left
+                // waiting while an older read flew, this read being the first
+                // dispatched after that ask to land with its answer taken:
+                // heard once, with this answer, after it is cached (or has
+                // failed). Never on the stale-identity or fence-drop paths
+                // above, which take no answer: there the read sent next
+                // answers it.
+                var waited = PcMeDemand.Answered(read, _pcCacheEpoch);
+                if (waited != null)
+                    foreach (var w in waited)
+                        try { w(ok, resp); } catch (Exception wex) { Plugin.Log.LogWarning($"[PC] me waiting callback threw: {wex.Message}"); }
             }, detailedErrors: true, sessionAware: true));
         }
 
@@ -5287,7 +5313,9 @@ namespace CompetitiveRounds
             pcCollOfInFlight = false;
             // fix pass 2, finding 1: a read owed to the previous identity is not sent
             pcMeReadOwed = false; pcCollReadOwed = false; pcMeOwedCallback = null; pcCollOwedCallback = null;
-            // fix pass 4, finding 7: nor a balance read the previous identity demanded
+            // fix pass 4, finding 7: nor a balance read the previous identity
+            // demanded; fix pass 5, finding 10: and the callbacks its forced
+            // asks left waiting are dropped unheard
             PcMeDemand.Clear();
         }
 

@@ -149,9 +149,10 @@ def test_the_quick_shard_suite_ran_every_case_and_none_failed(harness_run):
     # finding 2), 107 once it added the single-discard late-answer cases
     # (finding 4), 112 once it added the settings late-answer cases (finding
     # 5), 133 once fix pass 4 added the balance demand's cases (PcReadDemand,
-    # finding 7) (#342: a floor near the real count). Raise it when cases are
-    # added.
-    assert run >= 133, "the PcQuickShardRules suite shrank to %d cases" % run
+    # finding 7), 155 once fix pass 5 added the dance selection's cases
+    # (PcReadDemand's waiting callbacks, finding 10) (#342: a floor near the
+    # real count). Raise it when cases are added.
+    assert run >= 155, "the PcQuickShardRules suite shrank to %d cases" % run
 
 
 # Item 18 fix pass 4, finding 7 (Q5): the balance read-back a failed, refused
