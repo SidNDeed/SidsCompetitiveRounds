@@ -89,7 +89,7 @@ NativeUI.Keybinds.cs:KeybindOverlayCap	NativeUI.Keybinds.cs:KeybindSemanticCap	1
 NativeUI.Keybinds.cs:KeybindReadyPrompt	Keybinds.cs:ApplyReady	1	af1649f08e31c9bb	display	writes the ready-up prompt's label
 NativeUI.Keybinds.cs:KeybindRowFace	CompetitiveUI.cs:DrawChatInput	1	4be333f13d21acf3	display	the chat input's channel hint
 NativeUI.Keybinds.cs:KeybindRowFace	CompetitiveUI.cs:DrawDanceWheel	2	a3b6dcb6d2012b67	display	the dance wheel's hint and its loading notice
-NativeUI.Keybinds.cs:KeybindRowFace	CompetitiveUI.cs:DrawMatchFoundStuckOverlay	1	5aed2f90e72a9624	display	the stuck-room overlay's text
+NativeUI.Keybinds.cs:KeybindRowFace	CompetitiveUI.cs:DrawMatchFoundStuckOverlay	1	5aed2f90e72a9624	retired	the stuck-room overlay's text; the overlay is detached in source (its only call, CompetitiveUI.DrawUI, is commented out as intentionally not called), so it is a retired display consumer: the oracle is red the moment it is referenced again (fix pass 4 H1)
 NativeUI.Keybinds.cs:KeybindRowFace	CompetitiveUI.cs:DrawQuickChat	1	6ea6e40bf85a9330	display	the quick-chat wheel's hint
 NativeUI.Keybinds.cs:KeybindRowFace	InfoLibrary.cs:ControlsOutro	9	a54cf12152ac3e29	display	an Info article's text: the article table's Body / Segments delegates read it and the Info tab renders it through SelectInfoArticle's repaint gate; the derivation stops at the delegate (a disclosed limit)
 NativeUI.Keybinds.cs:KeybindRowFace	InfoLibrary.cs:Cosmetics	1	24b3d09ed8e4e910	display	an Info article's text: the article table's Body / Segments delegates read it and the Info tab renders it through SelectInfoArticle's repaint gate; the derivation stops at the delegate (a disclosed limit)

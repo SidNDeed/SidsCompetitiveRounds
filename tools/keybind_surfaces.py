@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Item 17 fix pass 1 F1, fix pass 2 H1, fix pass 3 H1: the binding-surface oracle.
+"""Item 17 fix pass 1 F1, fix passes 2, 3 and 4 H1: the binding-surface oracle.
 
 Every player-visible string that depends on a binding, and every member that
 reads a binding, is ENUMERATED FROM ITS SOURCES, not matched against a
@@ -121,6 +121,57 @@ disposition by default and no file is exempt.
    of any other role but producer whose value reaches a display consumer is
    FATAL. The summary prints a digest of the whole graph.
 
+5. ATTACHMENT (fix pass 4 H1). Section 4 ends at a display consumer; it does
+   not prove that consumer is still attached to anything the player sees.
+   Every TERMINAL DISPLAY SINK - the consumer of every derived edge classed
+   display, and every display reader that renders itself - must reach a
+   declared RENDER ROOT by an attachment chain. The roots are declared once,
+   in RENDER_ROOTS (file, member, what it renders); each must resolve to
+   exactly one member, and each root's entries (the members that reference
+   it, one level) are a root row of tools/keybind_surfaces_attach.tsv,
+   counted and content-addressed. A chain is a path of at most ATTACH_BOUND
+   HOPS from the sink up, each hop one member referencing the member below
+   it (section 4's reference rule), classified by where the reference
+   stands:
+     ref       a call or a read;
+     delegate  inside a lambda, or the member named as a value (a method
+               group): a delegate registration, its context the call or
+               field that receives the delegate;
+     entry     inside an object, collection or array initializer: a table or
+               segment entry, its context the entry path (an object named by
+               its Key literal, an array element by its index, the field it
+               is assigned to);
+     dispatch  inside a switch section with a string label: a string-dispatch
+               key. At a declared DISPATCHER (DISPATCHERS: InfoViz's visual
+               dispatch, whose keys Seg.V("key") calls register) a dispatch
+               hop counts only paired with a REGISTRATION leg: a Seg.V call
+               with that literal key (hop kind register, its context the
+               segment entry) that is itself attached to a root. A string
+               dispatch hop of a chain at any other switch is an
+               UNRESOLVED hop.
+   A hop is the hash of its kind, its context, its two members and the text
+   of the statement or entry that holds it (comments stripped, literals
+   kept, whitespace collapsed; never its line); a chain id hashes its hops,
+   its end and its registration leg, and the summary prints a digest of
+   every chain. A chain ends at a root or at an UNRESOLVED hop: a member
+   nothing in the source references that is entered from outside it (a
+   Harmony patch method, harmony:File.cs:Class.Member(Target.method); a
+   Unity message, unity:...; a member whose name is a string literal,
+   reflection:...) or a reference at file scope (field:...). Every chain is a
+   chain row (sink, chain id, the chain as text); every UNRESOLVED hop is an
+   unresolved row with its CONTROL - a pytest node that exists and names it
+   - and a note. FATAL: a declared root that is not one member; a root whose
+   entries changed; a sink with NO chain (ORPHAN: an orphan is never a silent
+   terminal); a derived chain with no row (reverse discovery: a sink attached
+   anew, or re-attached under another entry, segment, key or caller); a row
+   whose chain is no longer derived (a detachment or a move); an UNRESOLVED
+   hop with no row, a stale row, or a control that is missing or does not
+   name the hop; a dispatcher's binding-key table (KeybindRules.InfoVisual
+   .BindingKeys, the keys whose failed build is a repaint failure) that
+   differs from the keys whose visual is a display sink; and a consumer
+   classed retired (a display consumer detached on purpose, in the callers
+   manifest) that anything references again.
+
 Every P key must be in all four catalogue blocks with the same placeholders,
 and every F payload's keys must be in FIXED_KEYS and occur in the string.
 
@@ -136,12 +187,25 @@ elsewhere, or passes as an argument is followed no further, and the class
 of the edge where it leaves is reviewed, not proven); a caller reached by
 reflection, by Harmony's own invocation of a patch, through an interface or
 a virtual override, or by an unqualified call from a derived type; and a
-manifest "feeds" declaration, which is reviewed, not proven.
+manifest "feeds" declaration, which is reviewed, not proven. Section 5's
+limits: a root is declared, and only its entries one level up are recorded;
+a hop is a reference, not a proven invocation (a delegate registration
+proves where the delegate is registered, not that it is invoked; a
+condition around a hop is hashed as text, never evaluated); a path longer
+than ATTACH_BOUND hops is not followed (a sink with no chain within the bound
+is then an ORPHAN: red, never green; a sink with one is checked along its
+chains within the bound only, and the attach mode prints its longer paths
+as #DEAD lines, unhashed); a Seg.V registration whose key is not a literal
+is never paired (it is an UNRESOLVED hop, dispatch-key:..., red until
+dispositioned); Harmony's application of a patch at load, a Unity message's
+delivery and a reflection call are UNRESOLVED hops whose controls pin their
+source, not their run time; and a surface that reads no binding is no sink.
 
 USAGE
     python tools/keybind_surfaces.py check [--tree T]
     python tools/keybind_surfaces.py readers [--tree T]   # census, manifest shape
     python tools/keybind_surfaces.py callers [--tree T]   # derived caller graph, manifest shape
+    python tools/keybind_surfaces.py attach [--tree T]    # attachment chains, manifest shape
     python tools/keybind_surfaces.py review [--tree T]    # the rows a review must cover
     python tools/keybind_surfaces.py candidates | sites [--tree T]
 Exit 0 green, 1 red, 2 usage.
@@ -165,7 +229,7 @@ DISP = os.path.join(HERE, "keybind_surfaces.tsv")
 SITES_TSV = os.path.join(HERE, "keybind_surfaces_sites.tsv")
 READERS_TSV = os.path.join(HERE, "keybind_surfaces_readers.tsv")
 CALLERS_TSV = os.path.join(HERE, "keybind_surfaces_callers.tsv")
-CALLER_CLASSES = ("display", "nondisplay", "pass", "producer")
+CALLER_CLASSES = ("display", "nondisplay", "pass", "producer", "retired")
 CODES = ("P", "K", "F", "G", "D", "O", "N")
 RULES = {"P": "P", "K": "K", "O": "O", "N1": "N"}      # rule -> the code it derives
 REVIEWABLE = ("F", "G", "D", "K", "N")   # K only when another site shares the msgid (section 4)
@@ -788,6 +852,685 @@ def read_callers(path):
     return rows, probs
 
 
+# -- attachment (fix pass 4 H1) ---------------------------------------------
+#
+# Section 4 proves a binding value reaches a member that shows it. It does not
+# prove that member is still attached to anything the player sees: a display
+# sink detached from its render root (its call removed, its table entry or
+# segment removed, its dispatch key no longer registered) kept every caller
+# row and digest. This pass walks UP from every terminal display sink to a
+# declared render root and records each attachment chain (section 5 of the
+# docstring).
+
+ATTACH_TSV = os.path.join(HERE, "keybind_surfaces_attach.tsv")
+ATTACH_BOUND = 4   # hops from a sink (or a registration) to the end of its chain
+# The render roots, declared once: (file, member, what it puts in front of
+# the player). The oracle resolves each to exactly one member and prints its
+# line; a root's own entries (the members that reference it) are recorded,
+# one level, as the manifest's root rows.
+RENDER_ROOTS = (
+    ("NativeUI.cs", "SelectInfoArticle",
+     "the Info tab's reading pane: an article's text and its visuals (the Controls article and its keyboard guide)"),
+    ("NativeUI.cs", "BuildPage", "the menu's page build: every tab's first paint and the Info tab's navigation"),
+    ("NativeUI.cs", "RefreshCurrentTab", "the open tab's refresh: the Home chat log, the Shop rows"),
+    ("NativeUI.Settings.cs", "SettingsRenderPane",
+     "the settings pane: the Controls pane and a setting's read-more article"),
+    ("NativeUI.Settings.cs", "SettingsShowExtras", "the settings pane's extras: the chat language note"),
+    ("NativeUI.Keybinds.cs", "KeybindPaintAll", "the Controls rows' repaint after a binding revision"),
+    ("CompetitiveUI.cs", "DrawUI",
+     "the IMGUI frame: chat input, quick chat, dance wheel, input overlay, the tab stats overlay"),
+    ("BroadcastHud.cs", "Draw", "the broadcast HUD frame: the action rows, the tab stats strings"),
+    ("GameStateWatcher.cs", "PollMatchState", "the match-state poll: the round-start keybind toast"),
+    ("Keybinds.cs", "CommitRows", "a binding commit: the join and ready prompts painted again"),
+)
+# The string dispatchers whose keys the source registers: (dispatcher, the
+# member whose literal argument registers a key (file, type, member), the
+# table naming the keys whose visual reads a binding (file, field)). A
+# dispatch hop at a declared dispatcher counts only when its key is
+# registered by a site that is itself attached to a root; a string-keyed
+# dispatch anywhere else is an UNRESOLVED hop.
+DISPATCHERS = (
+    ("InfoViz.cs:Dispatch", ("InfoLibrary.cs", "Seg", "V"), ("KeybindRules.cs", "BindingKeys")),
+)
+KW_PAREN = frozenset(("if", "for", "foreach", "while", "switch", "using", "lock", "catch", "fixed", "return",
+                      "typeof", "nameof", "sizeof", "default", "when", "in", "is", "await", "throw", "checked",
+                      "unchecked", "out", "ref", "else"))
+BLOCK_WORDS = frozenset(("else", "try", "finally", "do", "get", "set", "init", "add", "remove", "unsafe",
+                         "checked", "unchecked"))
+UNITY_MESSAGES = frozenset(("Awake", "Start", "Update", "LateUpdate", "FixedUpdate", "OnGUI", "OnEnable",
+                            "OnDisable", "OnDestroy", "OnApplicationFocus", "OnApplicationQuit"))
+Hop = collections.namedtuple("Hop", "callee consumer kind ctx key pos digest")
+
+
+def _name_before(masked, j):
+    """(name, start): the dotted name ending at or before j (generic
+    arguments skipped)."""
+    while j >= 0 and masked[j] in " \t\r\n":
+        j -= 1
+    if j >= 1 and masked[j] == ">" and masked[j - 1] != "=":
+        depth = 0
+        while j >= 0:
+            if masked[j] == ">":
+                depth += 1
+            elif masked[j] == "<":
+                depth -= 1
+                if depth == 0:
+                    j -= 1
+                    break
+            j -= 1
+        while j >= 0 and masked[j] in " \t\r\n":
+            j -= 1
+    e = j
+    while j >= 0 and (masked[j].isalnum() or masked[j] in "_."):
+        j -= 1
+    return masked[j + 1:e + 1], j + 1
+
+
+def _match_back(masked, j, opener, closer):
+    depth = 0
+    while j >= 0:
+        if masked[j] == closer:
+            depth += 1
+        elif masked[j] == opener:
+            depth -= 1
+            if depth == 0:
+                return j
+        j -= 1
+    return -1
+
+
+def _bracket_kind(masked, o):
+    """(kind, name) of the bracket opened at o: call, ctor, kw, paren, index,
+    init (an object or collection initializer of type name), array, switch
+    (a switch statement's block), switchx (a switch expression), lambda (a
+    lambda's block) or block."""
+    c = masked[o]
+    j = o - 1
+    while j >= 0 and masked[j] in " \t\r\n":
+        j -= 1
+    prev = masked[j] if j >= 0 else ""
+    if c == "(":
+        if prev.isalnum() or prev == "_" or (prev == ">" and masked[j - 1] != "="):
+            nm, s = _name_before(masked, j)
+            if nm in KW_PAREN:
+                return "kw", nm
+            before, _ = _name_before(masked, s - 1)
+            return ("ctor" if before == "new" else "call"), nm
+        return "paren", ""
+    if c == "[":
+        return "index", ""
+    if prev == ")":
+        k = _match_back(masked, j, "(", ")")
+        nm, s = _name_before(masked, k - 1)
+        if nm == "switch":
+            return "switch", ""
+        if nm in KW_PAREN:
+            return "block", nm
+        before, _ = _name_before(masked, s - 1)
+        return ("init" if before == "new" else "block"), nm
+    if prev == ">" and j >= 1 and masked[j - 1] == "=":
+        return "lambda", ""
+    if prev == "]":
+        k = _match_back(masked, j, "[", "]")
+        nm, s = _name_before(masked, k - 1)
+        if nm == "new":
+            return "array", ""
+        before, _ = _name_before(masked, s - 1)
+        return ("array" if before == "new" else "block"), nm
+    if prev.isalnum() or prev == "_" or prev == ">":
+        nm, s = _name_before(masked, j)
+        if nm == "switch":
+            return "switchx", ""
+        if nm in BLOCK_WORDS:
+            return "block", nm
+        before, _ = _name_before(masked, s - 1)
+        return ("init" if before == "new" else "block"), nm
+    if prev == "=" or prev in ",{(":
+        return "array", ""
+    return "block", ""
+
+
+def _open_brackets(masked, a, p):
+    """The brackets open at p, scanning from a: [char, open position,
+    element index (the separators before p at the bracket's own depth),
+    element start], outermost first."""
+    stack = []
+    i = a
+    while i < p:
+        c = masked[i]
+        if c in "([{":
+            stack.append([c, i, 0, i + 1])
+        elif c in ")]}":
+            if stack:
+                stack.pop()
+            if c == "}" and stack and stack[-1][0] == "{":
+                stack[-1][3] = i + 1
+        elif c == "," and stack:
+            stack[-1][2] += 1
+            stack[-1][3] = i + 1
+        elif c == ";" and stack and stack[-1][0] == "{":
+            stack[-1][3] = i + 1
+        i += 1
+    return stack
+
+
+def _arrow(masked, a, b):
+    """Whether a lambda arrow stands in masked[a:b] at that range's own depth."""
+    depth = 0
+    for i in range(a, b - 1):
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "=" and masked[i + 1] == ">" and depth == 0:
+            return True
+    return False
+
+
+def _elem_end(masked, p, stops):
+    depth = 0
+    i, n = p, len(masked)
+    while i < n:
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return i
+            depth -= 1
+        elif depth == 0 and c in stops:
+            return i
+        i += 1
+    return n
+
+
+def _init_key(t, fn, o):
+    """The `Key = "..."` literal of the initializer opened at o, if any."""
+    masked = t.mask(t.src[fn])
+    strip = t.strip(t.src[fn])
+    e = t.ext._block_end(masked, o)
+    depth = 0
+    for i in range(o + 1, e):
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif depth == 0 and c == "K" and not (masked[i - 1].isalnum() or masked[i - 1] == "_"):
+            mm = re.match(r'Key\s*=\s*"([^"]*)"', strip[i:i + 200])
+            if mm:
+                return mm.group(1)
+    return None
+
+
+def _case_labels(t, fn, o, upto):
+    """The labels of the switch section that holds upto, in the switch block
+    opened at o."""
+    masked = t.mask(t.src[fn])
+    strip = t.strip(t.src[fn])
+    depth = 0
+    cur, ended = [], False
+    i = o + 1
+    while i < upto:
+        c = masked[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth == 0 and c == "}":
+                ended = True
+        elif depth == 0 and c == ";":
+            ended = True
+        elif depth == 0 and c in "cd" and not (masked[i - 1].isalnum() or masked[i - 1] == "_"):
+            mm = re.match(r"(case|default)(?![\w])", masked[i:i + 8])
+            if mm:
+                w = mm.group(1)
+                k = _elem_end(masked, i + len(w), ":")
+                lab = ws(strip[i + len(w):k]) if w == "case" else "default"
+                if ended:
+                    cur, ended = [], False
+                cur.append(lab)
+                i = k
+        i += 1
+    return cur
+
+
+def hop_at(t, fn, cm, p, callee):
+    """(kind, ctx, text, key) of the reference at p (inside consumer member cm
+    of fn, None at file scope) to the member `callee`:
+      dispatch  inside a switch section with a string label (key: the label)
+      entry     inside an object, collection or array initializer (a table
+                entry; ctx: the path of entries, an object named by its Key)
+      delegate  inside a lambda, or the member named as a value (a method
+                group): a delegate registration (ctx: where it is registered)
+      ref       any other reference
+      field     at file scope (a field initializer)
+    ctx is the path of enclosing calls, entries and switch sections; text is
+    the enclosing statement or entry (comments stripped, literals kept,
+    whitespace collapsed)."""
+    masked = t.mask(t.src[fn])
+    strip = t.strip(t.src[fn])
+    if cm is None:
+        a = max(masked.rfind(";", 0, p), masked.rfind("}", 0, p), masked.rfind("{", 0, p)) + 1
+        e = _elem_end(masked, p, ";")
+        mm = re.search(r"(\w+)\s*=(?![=>])", masked[a:p])
+        return "field", mm.group(1) if mm else "?", ws(strip[a:e]), None
+    fr = _open_brackets(masked, cm.start, p)
+    parts, kinds = [], set()
+    key, textf, lam = None, None, False
+    for n, f in enumerate(fr):
+        inner = fr[n + 1][1] if n + 1 < len(fr) else p
+        fk, nm = _bracket_kind(masked, f[1])
+        arr = _arrow(masked, f[3], inner)
+        mark = "=>" if arr else ""
+        lam = lam or arr
+        if fk == "init":
+            k0 = _init_key(t, fn, f[1])
+            mm = re.match(r"\s*(\w+)\s*=(?![=>])", masked[f[3]:inner])
+            parts.append("%s%s.%s%s" % (nm, "{%s}" % k0 if k0 else "", mm.group(1) if mm else "#%d" % f[2], mark))
+            kinds.add("entry")
+            textf = (f, ",")
+        elif fk == "array":
+            nxt = fr[n + 1] if n + 1 < len(fr) else None
+            keyed = nxt is not None and _bracket_kind(masked, nxt[1])[0] == "init" and _init_key(t, fn, nxt[1])
+            parts.append(("" if keyed else "[%d]" % f[2]) + mark)
+            kinds.add("entry")
+            textf = (f, ",")
+        elif fk in ("call", "ctor"):
+            parts.append("%s%s(#%d%s)" % ("new " if fk == "ctor" else "", nm, f[2], mark))
+        elif fk == "switch":
+            labs = _case_labels(t, fn, f[1], inner)
+            parts.append("case " + "|".join(labs))
+            lits = [x[1:-1] for x in labs if re.fullmatch(r'"[^"\\]*"', x)]
+            if lits:
+                kinds.add("dispatch")
+                key = lits[0]
+            textf = (f, ";")
+        elif fk == "switchx":
+            mm = re.match(r"\s*(.*?)\s*=>", strip[f[3]:inner], re.S)
+            lab = ws(mm.group(1)) if mm else "?"
+            parts.append("arm " + lab)
+            if re.fullmatch(r'"[^"\\]*"', lab):
+                kinds.add("dispatch")
+                key = lab[1:-1]
+            textf = (f, ",")
+        elif fk == "lambda":
+            parts.append("=>{}")
+            textf = (f, ";")
+        elif fk == "block":
+            textf = (f, ";")
+    after = masked[p + len(callee.name):p + len(callee.name) + 40]
+    group = callee.kind == "method" and not re.match(r"\s*(?:<[^<>()]*>)?\s*\(", after)
+    if group:
+        parts.append("&")
+    kind = ("dispatch" if "dispatch" in kinds else "entry" if "entry" in kinds
+            else "delegate" if (lam or group) else "ref")
+    if textf is None:
+        text = ws(strip[cm.start:cm.end])
+    else:
+        f, stops = textf
+        text = ws(strip[f[3]:_elem_end(masked, p, stops)])
+    return kind, "/".join(x for x in parts if x), text, key
+
+
+def _refs(t, key):
+    """(member, caller_refs) of a "File.cs:Member" key, cached on the tree."""
+    memo = t.__dict__.setdefault("_attach_refs", {})
+    if key not in memo:
+        fn, mid = key.split(":", 1)
+        m = None if mid == "(file scope)" else _member_by_id(t, fn, mid)
+        memo[key] = (m, {} if m is None else caller_refs(t, fn, mid, m))
+    return memo[key]
+
+
+def up_hops(t, key):
+    """Every hop one level up from key: its references grouped per consumer,
+    kind and context, each group content-addressed."""
+    memo = t.__dict__.setdefault("_attach_up", {})
+    if key in memo:
+        return memo[key]
+    m, refs = _refs(t, key)
+    groups = {}
+    for (fn2, cmid), pos in sorted(refs.items()):
+        ck = "%s:%s" % (fn2, cmid)
+        cm = None if cmid == "(file scope)" else _member_by_id(t, fn2, cmid)
+        for p in pos:
+            kind, ctx, text, dk = hop_at(t, fn2, cm, p, m)
+            g = groups.setdefault((ck, kind, ctx), [dk, [], []])
+            g[1].append(p)
+            g[2].append(text)
+    hops = []
+    for (ck, kind, ctx), (dk, pos, texts) in sorted(groups.items()):
+        hops.append(Hop(key, ck, kind, ctx, dk, pos, kid("\x1f".join([kind, ctx, key, ck] + sorted(texts)))))
+    memo[key] = hops
+    return hops
+
+
+def entry_point(t, key):
+    """The name of the UNRESOLVED hop that enters an unreferenced member from
+    outside the source, or None: harmony:File.cs:Class.Member(Target.method)
+    for a Harmony patch method, unity:File.cs:Class.Member for a Unity
+    message, reflection:File.cs:Member for a member whose name is a string
+    literal somewhere in plugin/."""
+    fn, mid = key.split(":", 1)
+    m = _member_by_id(t, fn, mid)
+    if m is None:
+        return None
+    types = [(n, a) for n, a, b in _types(t, fn) if a <= m.start < b]
+    cls = types[-1][0] if types else "?"
+    strip = t.strip(t.src[fn])
+    if types:
+        a = types[-1][1]
+        pre = strip[max(0, a - 400):a]
+        pre = pre[max(pre.rfind(";"), pre.rfind("}"), pre.rfind("{")) + 1:]
+        hp = re.search(r"\[\s*HarmonyPatch\s*\((.*)\)\s*\]", pre, re.S)
+        mpre = strip[max(0, m.start - 200):m.start]
+        if hp or re.search(r"\[\s*Harmony(?:Postfix|Prefix|Finalizer|Transpiler)\b", mpre):
+            tgt = "?"
+            if hp:
+                ty = re.search(r"typeof\s*\(\s*([\w.]+)\s*\)", hp.group(1))
+                rest = hp.group(1)[ty.end():] if ty else hp.group(1)
+                me = re.search(r'nameof\s*\(\s*(?:\w+\.)*(\w+)\s*\)|"(\w+)"', rest)
+                tgt = "%s.%s" % (ty.group(1) if ty else "?", (me.group(1) or me.group(2)) if me else "?")
+            return "harmony:%s:%s.%s(%s)" % (fn, cls, mid, tgt)
+    if base(mid) in UNITY_MESSAGES:
+        return "unity:%s:%s.%s" % (fn, cls, mid)
+    lit = '"%s"' % base(mid)
+    if any(lit in t.strip(s) for s in t.src.values()):
+        return "reflection:%s:%s" % (fn, mid)
+    return None
+
+
+def _walk(t, start, roots, chains, dead, bound=ATTACH_BOUND):
+    """Every simple path of hops up from start, at most `bound` hops, that
+    ends at a declared root ("root:K") or at an UNRESOLVED entry
+    ("unresolved:NAME"): appended to chains as (hops, end). A path that ends
+    nowhere is appended to dead as (why, member)."""
+    def dfs(node, path, seen):
+        if node in roots:
+            chains.append((path, "root:" + node))
+            return
+        if len(path) >= bound:
+            dead.append(("beyond the bound", node))
+            return
+        hops = up_hops(t, node)
+        if not hops:
+            en = entry_point(t, node)
+            if en:
+                chains.append((path, "unresolved:" + en))
+            else:
+                dead.append(("unreferenced", node))
+            return
+        for h in hops:
+            if h.consumer in seen:
+                continue
+            if h.kind == "field":
+                chains.append((path + [h], "unresolved:field:%s:%s" % (h.consumer.split(":", 1)[0], h.ctx)))
+                continue
+            dfs(h.consumer, path + [h], seen | {h.consumer})
+    dfs(start, [], {start})
+
+
+def _hop_token(t, h, lines):
+    tok = "%s%s%s>%s" % (h.kind, "[%s]" % h.ctx if h.ctx else "", "{%s}" % h.key if h.key is not None else "",
+                         h.consumer)
+    if lines:
+        fn = h.consumer.split(":", 1)[0]
+        tok += " L" + ",".join(str(t.src[fn].count("\n", 0, p) + 1) for p in sorted(h.pos))
+    return tok
+
+
+def chain_text(t, path, end, leg, lines=False):
+    """A chain as one line: its hops from the sink up, its end, and for a
+    dispatch, the registration leg after `## reg`."""
+    s = " | ".join(_hop_token(t, h, lines) for h in path) + " || " + end
+    if leg:
+        s += " ## reg " + " | ".join(_hop_token(t, h, lines) for h in leg[0]) + " || " + leg[1]
+    return s
+
+
+def chain_id(path, end, leg):
+    parts = [h.digest for h in path] + [end]
+    if leg:
+        parts += ["reg"] + [h.digest for h in leg[0]] + [leg[1]]
+    return kid("\n".join(parts))
+
+
+def _literal_table(t, fn, name):
+    """The string literals of a `name = { ... }` array field, or None."""
+    if fn not in t.src:
+        return None
+    mm = re.search(r"\b%s\s*=\s*(?:new\s*(?:string)?\s*\[\s*\]\s*)?\{([^}]*)\}" % re.escape(name), t.strip(t.src[fn]))
+    if not mm:
+        return None
+    return set(re.findall(r'"([^"\\]*)"', mm.group(1)))
+
+
+def derive_attach(st, sinks):
+    """The attachment derivation (section 5). sinks: the terminal display
+    sinks ("File.cs:Member"). Returns a dict:
+      roots       {key: (line, what)} of the declared roots found
+      missing     the declared roots not found exactly once
+      entries     {root key: [hops]}: each root's references, one level
+      sinks       {sink: {"chains": {id: (text, text with lines)},
+                          "dead": [(why, member)], "unregistered": {key}}}
+      unresolved  {name: set of sinks whose chains end or pass there}
+      bkeys       the dispatch keys whose visual is a display sink
+      tables      {dispatcher: set of keys its binding table declares, or None}"""
+    t = st.t
+    roots, missing = {}, []
+    for fn, mid, what in RENDER_ROOTS:
+        m = _member_by_id(t, fn, mid)
+        if m is None:
+            missing.append("%s:%s" % (fn, mid))
+            continue
+        roots["%s:%s" % (fn, mid)] = (t.src[fn].count("\n", 0, m.name_at) + 1, what)
+    rset = set(roots)
+    entries = {k: up_hops(t, k) for k in sorted(roots)}
+    unresolved = collections.defaultdict(set)
+    disp = {d: (reg, tab) for d, reg, tab in DISPATCHERS}
+    legs = {}   # (dispatcher, key) -> [(hops, end)]
+
+    def reg_legs(dk, key):
+        if (dk, key) in legs:
+            return legs[(dk, key)]
+        (rfn, rtype, rname), _ = disp[dk]
+        out = []
+        cand = [m for m in t.members(rfn) if m.name == rname
+                and any(n == rtype and a <= m.start < b for n, a, b in _types(t, rfn))] if rfn in t.src else []
+        if len(cand) == 1:
+            rk = "%s:%s" % (rfn, member_ids(t.members(rfn))[cand[0].start])
+            for h in up_hops(t, rk):
+                fn2 = h.consumer.split(":", 1)[0]
+                for p in sorted(h.pos):
+                    mm = re.match(r'\s*\(\s*"([^"\\]*)"\s*\)', t.strip(t.src[fn2])[p + len(rname):p + len(rname) + 200])
+                    if mm is None:
+                        unresolved["dispatch-key:%s(%s)" % (h.consumer, h.ctx)].add(dk)
+                        continue
+                    if mm.group(1) != key:
+                        continue
+                    rh = Hop(h.callee, h.consumer, "register", h.ctx, key, [p],
+                             kid("register\x1f%s\x1f%s" % (h.digest, key)))
+                    found = []
+                    _walk(t, h.consumer, rset, found, [])
+                    out.extend(([rh] + pth, end) for pth, end in found)
+        legs[(dk, key)] = out
+        return out
+
+    out_sinks, bkeys = {}, set()
+    for s in sorted(sinks):
+        chains, dead = [], []
+        if s in rset:
+            chains.append(([], "root:" + s))
+        else:
+            _walk(t, s, rset, chains, dead)
+        rec = {"chains": {}, "dead": dead, "unregistered": set()}
+        for path, end in chains:
+            dh = [h for h in path if h.kind == "dispatch"]
+            bad = [h for h in dh if h.consumer not in disp]
+            for h in bad:
+                unresolved["dispatch:%s[%s]" % (h.consumer, h.key)].add(s)
+            pairs = [(path, end, None)]
+            for h in dh:
+                if h.consumer in disp:
+                    bkeys.add(h.key)
+                    lg = reg_legs(h.consumer, h.key)
+                    if not lg:
+                        rec["unregistered"].add(h.key)
+                    pairs = [(pth, e, leg) for pth, e, _ in pairs for leg in lg]
+            for pth, e, leg in pairs:
+                if e.startswith("unresolved:"):
+                    unresolved[e[len("unresolved:"):]].add(s)
+                if leg and leg[1].startswith("unresolved:"):
+                    unresolved[leg[1][len("unresolved:"):]].add(s)
+                rec["chains"][chain_id(pth, e, leg)] = (chain_text(t, pth, e, leg), chain_text(t, pth, e, leg, True))
+        out_sinks[s] = rec
+    tables = {d: _literal_table(t, tab[0], tab[1]) for d, (reg, tab) in disp.items()}
+    return {"roots": roots, "missing": missing, "entries": entries, "sinks": out_sinks,
+            "unresolved": dict(unresolved), "bkeys": bkeys, "tables": tables}
+
+
+def attach_sinks(st, graph, cman, rman):
+    """The terminal display sinks: every derived caller edge classed display
+    (its consumer) and every display reader that renders itself."""
+    out = {c for (s, c) in graph if cman.get((s, c), (0, "", ""))[2] == "display"}
+    out |= {"%s:%s" % k for k, row in rman.items() if k in st.reads and row[2] == "display" and "self" in row[3]}
+    return out
+
+
+def read_attach(path):
+    """{"root": {key: (n, digest, note)}, "chain": {(sink, id): text},
+    "unresolved": {name: (control, note)}}, problems."""
+    rows = {"root": {}, "chain": {}, "unresolved": {}}
+    probs = []
+    if not os.path.exists(path):
+        return rows, ["attachment manifest %s missing" % path]
+    for n, line in enumerate(io.open(path, encoding="utf-8").read().split("\n"), 1):
+        if not line or line.startswith("#"):
+            continue
+        f = line.split("\t")
+        if f[0] == "root" and len(f) >= 5 and f[2].isdigit() and re.fullmatch(r"[0-9a-f]{16}", f[3]):
+            rows["root"][f[1]] = (int(f[2]), f[3], f[4])
+        elif f[0] == "chain" and len(f) >= 4 and re.fullmatch(r"[0-9a-f]{16}", f[2]):
+            if (f[1], f[2]) in rows["chain"]:
+                probs.append("attachment line %d: chain %s of %s twice" % (n, f[2], f[1]))
+            rows["chain"][(f[1], f[2])] = f[3]
+        elif f[0] == "unresolved" and len(f) >= 4:
+            rows["unresolved"][f[1]] = (f[2], f[3])
+        else:
+            probs.append("attachment line %d malformed: %r" % (n, line[:80]))
+    return rows, probs
+
+
+def _unresolved_names(name):
+    """The names a control must carry to name an UNRESOLVED hop."""
+    mm = re.match(r"harmony:[^:]+:(\w+)\.[\w#]+\(([\w.]+)\)$", name)
+    if mm:
+        return [mm.group(1), mm.group(2).split(".")[-1]]
+    mm = re.match(r"(?:unity|reflection):[^:]+:(?:(\w+)\.)?([\w#]+)$", name)
+    if mm:
+        return [x for x in (mm.group(1), base(mm.group(2))) if x]
+    mm = re.match(r"dispatch:[^:]+:([\w#]+)\[(.*)\]$", name)
+    if mm:
+        return [base(mm.group(1)), mm.group(2)]
+    mm = re.match(r"field:[^:]+:(\w+)$", name)
+    if mm:
+        return [mm.group(1)]
+    return [name]
+
+
+def control_names(root, control, names):
+    """None when the control exists and names every one of names, else why
+    not. A control is a pytest node, path::function or path::function[param],
+    the path relative to the tree."""
+    mm = re.fullmatch(r"([\w./-]+\.py)::(\w+)(?:\[([\w.-]+)\])?", control)
+    if not mm:
+        return "control %r is not a pytest node (path::function[param])" % control
+    p = os.path.join(root, *mm.group(1).split("/"))
+    if not os.path.exists(p):
+        return "control file %s missing" % mm.group(1)
+    src = io.open(p, encoding="utf-8").read()
+    if not re.search(r"^def %s\(" % re.escape(mm.group(2)), src, re.M):
+        return "control %s defines no %s" % (mm.group(1), mm.group(2))
+    for x in ([mm.group(3)] if mm.group(3) else []) + list(names):
+        if not re.search(r"(?<![\w])%s(?![\w])" % re.escape(x), src):
+            return "control %s does not name %s" % (control, x)
+    return None
+
+
+def attach_problems(root, st, att, aman, cman):
+    """Section 5's verdicts."""
+    t = st.t
+    probs = []
+    for k in att["missing"]:
+        probs.append("ROOT MISSING %s: a declared render root is not one member of the tree" % k)
+    for k, hops in sorted(att["entries"].items()):
+        dg = kid("\n".join(sorted(h.digest for h in hops)))
+        row = aman["root"].get(k)
+        ents = ", ".join(_hop_token(t, h, True) for h in hops) or "none"
+        if row is None:
+            probs.append("NEW root %s (entered from %s) is not in the attachment manifest" % (k, ents))
+        elif row[0] != len(hops) or row[1] != dg:
+            probs.append("ROOT ENTRY CHANGED %s: entered from %s (%d, %s), manifest %d, %s" % (
+                k, ents, len(hops), dg, row[0], row[1]))
+        if not hops and entry_point(t, k) is None:
+            probs.append("root %s is referenced nowhere and is no entry point" % k)
+    for k in sorted(set(aman["root"]) - set(att["entries"])):
+        probs.append("STALE root row %s: no declared root of that name" % k)
+    for s, rec in sorted(att["sinks"].items()):
+        if not rec["chains"]:
+            why = []
+            if rec["unregistered"]:
+                why.append("dispatch key %s registered nowhere attached" % ",".join(sorted(rec["unregistered"])))
+            if rec["dead"]:
+                why.append("paths end at %s" % ", ".join("%s (%s)" % (m, w) for w, m in sorted(set(rec["dead"]))[:6]))
+            probs.append("ORPHAN display sink %s: no attachment chain to a declared render root within %d hops%s" % (
+                s, ATTACH_BOUND, (": " + "; ".join(why)) if why else ""))
+        for cid, (text, lined) in sorted(rec["chains"].items()):
+            if (s, cid) not in aman["chain"]:
+                probs.append("NEW attachment chain %s of display sink %s: %s" % (cid, s, lined))
+    for (s, cid), text in sorted(aman["chain"].items()):
+        if cid not in att["sinks"].get(s, {"chains": {}})["chains"]:
+            probs.append("STALE attachment chain %s of display sink %s: the source derives no such chain (%s)" % (
+                cid, s, text))
+    for name, sk in sorted(att["unresolved"].items()):
+        row = aman["unresolved"].get(name)
+        if row is None:
+            probs.append("UNRESOLVED hop %s (on the chains of %s) has no disposition" % (name, ",".join(sorted(sk))))
+            continue
+        ctl, note = row
+        why = control_names(root, ctl, _unresolved_names(name))
+        if why:
+            probs.append("UNRESOLVED hop %s: %s" % (name, why))
+        if not note.strip():
+            probs.append("UNRESOLVED hop %s has no note" % name)
+    for name in sorted(set(aman["unresolved"]) - set(att["unresolved"])):
+        probs.append("STALE UNRESOLVED disposition %s: no chain ends or passes there" % name)
+    for d, keys in sorted(att["tables"].items()):
+        if keys is None:
+            probs.append("the binding visual table of dispatcher %s is not found" % d)
+        elif keys != att["bkeys"]:
+            probs.append("BINDING VISUALS DIFFER at %s: the table declares %s, the visuals that are display sinks "
+                         "are %s" % (d, ",".join(sorted(keys)) or "-", ",".join(sorted(att["bkeys"])) or "-"))
+    for (s, c), row in sorted(cman.items()):
+        if row[2] != "retired":
+            continue
+        m, refs = _refs(t, c)
+        n = sum(len(v) for v in refs.values())
+        if m is None:
+            probs.append("retired consumer %s of %s is not one member of the tree" % (c, s))
+        elif n or entry_point(t, c):
+            probs.append("RETIRED consumer %s of %s is referenced again (%d place(s)%s): class it display and "
+                         "record its attachment" % (c, s, n, ", " + entry_point(t, c) if entry_point(t, c) else ""))
+    return probs
+
+
+def attach_digest(att):
+    return kid("\n".join("%s>%s" % (s, cid) for s, rec in sorted(att["sinks"].items())
+                         for cid in sorted(rec["chains"])))
+
+
 # -- strings ----------------------------------------------------------------
 
 def harvested(t):
@@ -1045,9 +1788,9 @@ class State:
 
 
 def check(root=REPO, disp_path=None, sites_path=None, verbose=True, readers_path=None, callers_path=None,
-          state=None):
+          state=None, attach_path=None):
     """state: a State of this same tree to reuse (a test that varies only the
-    readers or callers manifest); built afresh when None."""
+    readers, callers or attachment manifest); built afresh when None."""
     st = state if state is not None else State(root)
     t, u, blocks = st.t, st.u, st.blocks
     disp, problems = read_disp(disp_path or os.path.join(root, "tools", "keybind_surfaces.tsv"))
@@ -1057,6 +1800,8 @@ def check(root=REPO, disp_path=None, sites_path=None, verbose=True, readers_path
     problems += p3
     cman, p4 = read_callers(callers_path or os.path.join(root, "tools", "keybind_surfaces_callers.tsv"))
     problems += p4
+    aman, p5 = read_attach(attach_path or os.path.join(root, "tools", "keybind_surfaces_attach.tsv"))
+    problems += p5
     # the caller graph, derived from source (section 4 of the docstring)
     graph = derive_callers(st, cman)
     srcs = st.caller_srcs
@@ -1177,6 +1922,11 @@ def check(root=REPO, disp_path=None, sites_path=None, verbose=True, readers_path
         problems.append("STALE caller %s of %s: the derived graph has no such edge" % (k[1], k[0]))
     graph_digest = kid("\n".join(edge_digests))
 
+    # 3c. attachment (fix pass 4 H1): every terminal display sink reaches a
+    # declared render root by a recorded chain (section 5 of the docstring)
+    att = derive_attach(st, attach_sinks(st, graph, cman, rman))
+    problems += attach_problems(root, st, att, aman, cman)
+
     # 4. every row's note: a rule the derivation agrees with, or a live review
     bdm = st.binding_dependent(rman)
     display_sites = set()   # a G row's overriding site must be one of these
@@ -1274,6 +2024,9 @@ def check(root=REPO, disp_path=None, sites_path=None, verbose=True, readers_path
         " ".join("%s=%d" % kv for kv in sorted(roles.items())), len(st.acc), len(bdm))
     summary += " callers=%d [%s] followed=%d graph=%s" % (
         len(graph), " ".join("%s=%d" % kv for kv in sorted(classes.items())), len(srcs), graph_digest)
+    summary += " attach: roots=%d sinks=%d chains=%d unresolved=%d bkeys=%s digest=%s" % (
+        len(att["roots"]), len(att["sinks"]), sum(len(r["chains"]) for r in att["sinks"].values()),
+        len(att["unresolved"]), ",".join(sorted(att["bkeys"])) or "-", attach_digest(att))
     return problems, summary, (t, u, found, disp)
 
 
@@ -1307,7 +2060,7 @@ def main(argv=None):
     except Exception:
         pass
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("check", "candidates", "sites", "readers", "callers", "review"))
+    ap.add_argument("mode", choices=("check", "candidates", "sites", "readers", "callers", "attach", "review"))
     ap.add_argument("--tree", default=REPO)
     a = ap.parse_args(argv)
     if a.mode == "check":
@@ -1355,6 +2108,42 @@ def main(argv=None):
                 a0 = src.rfind("\n", 0, p) + 1
                 b0 = src.find("\n", p)
                 print("#REF %s > %s L%d %s" % (s, c, src.count("\n", 0, p) + 1, ws(src[a0:b0])[:200]))
+        return 0
+    if a.mode == "attach":
+        # the attachment derivation in the attachment manifest's shape (root
+        # notes and unresolved dispositions carried from the manifest when the
+        # row exists), then every root, chain and dead path with its lines
+        # (fix pass 4 H1)
+        cman, _ = read_callers(os.path.join(a.tree, "tools", "keybind_surfaces_callers.tsv"))
+        aman, _ = read_attach(os.path.join(a.tree, "tools", "keybind_surfaces_attach.tsv"))
+        graph = derive_callers(st, cman)
+        att = derive_attach(st, attach_sinks(st, graph, cman, rman))
+        for k, hops in sorted(att["entries"].items()):
+            old = aman["root"].get(k)
+            print("\t".join(["root", k, str(len(hops)), kid("\n".join(sorted(h.digest for h in hops))),
+                             old[2] if old else ""]))
+        for s, rec in sorted(att["sinks"].items()):
+            for cid, (text, lined) in sorted(rec["chains"].items()):
+                print("\t".join(["chain", s, cid, text]))
+        for name in sorted(att["unresolved"]):
+            old = aman["unresolved"].get(name)
+            print("\t".join(["unresolved", name, old[0] if old else "?", old[1] if old else ""]))
+        for fn, mid, what in RENDER_ROOTS:
+            k = "%s:%s" % (fn, mid)
+            if k in att["roots"]:
+                print("#ROOT %s:%d %s - %s; entered from %s" % (fn, att["roots"][k][0], mid, what, ", ".join(
+                    _hop_token(st.t, h, True) for h in att["entries"][k]) or "nowhere"))
+            else:
+                print("#ROOT %s MISSING" % k)
+        for s, rec in sorted(att["sinks"].items()):
+            print("#SINK %s chains=%d%s" % (s, len(rec["chains"]), (" unregistered=" + ",".join(
+                sorted(rec["unregistered"]))) if rec["unregistered"] else ""))
+            for cid, (text, lined) in sorted(rec["chains"].items()):
+                print("#CHAIN %s %s" % (cid, lined))
+            for why, m in sorted(set(rec["dead"])):
+                print("#DEAD %s (%s)" % (m, why))
+        print("#BINDING-KEYS derived %s; tables %s" % (",".join(sorted(att["bkeys"])) or "-", "; ".join(
+            "%s=%s" % (d, ",".join(sorted(k)) if k is not None else "NOT FOUND") for d, k in sorted(att["tables"].items()))))
         return 0
     # review: every row a rule cannot derive, with the digest a review records
     man, _ = read_sites(os.path.join(a.tree, "tools", "keybind_surfaces_sites.tsv"))

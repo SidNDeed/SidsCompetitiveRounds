@@ -28,6 +28,20 @@ reader's via must equal the display-reachable set the source derives, and a
 caller the manifest lacks, a recorded caller the source no longer derives, a
 caller whose text changed and a class change are each red. The fix-3 tests
 below run the oracle on this tree's own state with one manifest varied.
+
+Fix pass 4 H1: a display consumer is no longer a silent terminal. Every
+terminal display sink must reach a declared render root by an attachment
+chain (each hop a call, a delegate registration, a table or segment entry
+or a string-dispatch key paired with its registration), every chain is a
+row of tools/keybind_surfaces_attach.tsv, and a sink with no chain, a chain
+the manifest lacks or no longer derives, a root that is missing or entered
+differently, an UNRESOLVED hop without a control that names it, a binding
+visual table that differs from the derived set and a retired consumer that
+is referenced again are each red. The fix-4 tests below run the derivation
+on this tree's state with one manifest or the declared roots varied, and
+classify each hop kind on a synthetic tree; the detachments themselves (the
+keyboard guide's segment removed, the Controls outro's entries removed, a
+sink moved or attached anew) are the lane's mutants, each on a copied tree.
 """
 from __future__ import annotations
 
@@ -189,7 +203,7 @@ def _rows(path):
     return path.read_text(encoding="utf-8").split("\n")
 
 
-def _check(st, tmp_path, callers=None, readers=None):
+def _check(st, tmp_path, callers=None, readers=None, attach=None):
     kw = {}
     if callers is not None:
         p = tmp_path / "callers.tsv"
@@ -199,6 +213,10 @@ def _check(st, tmp_path, callers=None, readers=None):
         p = tmp_path / "readers.tsv"
         p.write_text("\n".join(readers), encoding="utf-8")
         kw["readers_path"] = str(p)
+    if attach is not None:
+        p = tmp_path / "attach.tsv"
+        p.write_text("\n".join(attach), encoding="utf-8")
+        kw["attach_path"] = str(p)
     problems, summary, _ = KS.check(str(REPO), verbose=False, state=st, **kw)
     return problems
 
@@ -283,3 +301,194 @@ def test_h1_fix3_a_display_role_change_is_red(graph3, tmp_path):
     problems = _check(st, tmp_path, callers=rows)
     assert any(p.startswith("reader KeybindRules.cs:FormatToken role rules, but its value reaches the player")
                for p in problems), problems[:5]
+
+
+# -- fix pass 4 H1: every display sink is attached to a declared render root --
+
+ATTACH = REPO / "tools" / "keybind_surfaces_attach.tsv"
+KBD = "InfoViz.cs:BuildKeyboard"
+OUTRO = "InfoLibrary.cs:ControlsOutro"
+RESET_MENU = "harmony:Keybinds.cs:ResetMenuPatch.Postfix#2(CharacterSelectionInstance.ResetMenu)"
+HOP = re.compile(r" \| | \|\| ")
+
+
+@pytest.fixture(scope="module")
+def attach4(graph3):
+    """This tree's attachment derivation and its attachment manifest (the
+    round-4 oracle has neither: every fix-4 test fails there)."""
+    for name in ("derive_attach", "read_attach", "attach_sinks", "attach_problems", "RENDER_ROOTS", "hop_at"):
+        assert hasattr(KS, name), "the oracle derives no attachment (%s)" % name
+    st, cman, graph = graph3
+    rman, _ = KS.read_readers(str(READERS))
+    att = KS.derive_attach(st, KS.attach_sinks(st, graph, cman, rman))
+    aman, probs = KS.read_attach(str(ATTACH))
+    assert probs == [], probs
+    return st, cman, att, aman
+
+
+def test_h1_fix4_every_display_sink_has_a_recorded_chain_to_a_declared_root(attach4):
+    st, cman, att, aman = attach4
+    assert att["missing"] == [] and len(att["roots"]) == len(KS.RENDER_ROOTS), att["missing"]
+    sinks = {c for (s, c), row in cman.items() if row[2] == "display"}
+    assert sinks <= set(att["sinks"]), sorted(sinks - set(att["sinks"]))
+    for s, rec in att["sinks"].items():
+        assert rec["chains"], "orphan display sink %s" % s
+        for text, lined in rec["chains"].values():
+            assert text.split(" ## reg ")[0].rsplit(" || ", 1)[1].startswith(("root:", "unresolved:")), text
+    derived = {(s, cid) for s, rec in att["sinks"].items() for cid in rec["chains"]}
+    assert derived == set(aman["chain"]), (sorted(derived - set(aman["chain"]))[:3],
+                                           sorted(set(aman["chain"]) - derived)[:3])
+
+
+def test_h1_fix4_the_keyboard_guide_is_attached_through_the_controls_segment(attach4):
+    st, cman, att, aman = attach4
+    chains = [text for text, _ in att["sinks"][KBD]["chains"].values()]
+    assert chains
+    for text in chains:
+        leg, reg = text.split(" ## reg ")
+        assert leg.startswith('dispatch[case "keyboard"]{keyboard}>InfoViz.cs:Dispatch | '), leg
+        assert reg.startswith("register[[0]/Category.Articles/Article{controls}.Segments=>/[1]]{keyboard}"
+                              ">InfoLibrary.cs:Categories"), reg
+    assert att["bkeys"] == {"keyboard"} and att["tables"] == {"InfoViz.cs:Dispatch": {"keyboard"}}
+
+
+def test_h1_fix4_the_controls_outro_is_attached_by_both_controls_entries(attach4):
+    st, cman, att, aman = attach4
+    firsts = {HOP.split(text)[0] for text, _ in att["sinks"][OUTRO]["chains"].values()}
+    assert firsts == {
+        "entry[[0]/Category.Articles/Article{controls}.Body=>]>InfoLibrary.cs:Categories",
+        "entry[[0]/Category.Articles/Article{controls}.Segments=>/[2]/Seg.T(#0)]>InfoLibrary.cs:Categories"}, firsts
+
+
+def test_h1_fix4_a_chain_the_manifest_lacks_is_red(attach4, tmp_path):
+    st, cman, att, aman = attach4
+    rows = _rows(ATTACH)
+    gone = [r for r in rows if r.startswith("chain\t%s\t" % KBD)]
+    assert gone
+    problems = _check(st, tmp_path, attach=[r for r in rows if r != gone[0]])
+    cid = gone[0].split("\t")[2]
+    assert any(p.startswith("NEW attachment chain %s of display sink %s: " % (cid, KBD)) for p in problems), problems[:5]
+
+
+def test_h1_fix4_a_recorded_chain_the_source_does_not_derive_is_red(attach4, tmp_path):
+    st, cman, att, aman = attach4
+    rows = _rows(ATTACH) + ["\t".join(["chain", KBD, "0" * 16,
+                                       'dispatch[case "keyboard"]{keyboard}>InfoViz.cs:Dispatch || root:NativeUI.cs:BuildPage'])]
+    problems = _check(st, tmp_path, attach=rows)
+    assert any(p.startswith("STALE attachment chain %s of display sink %s" % ("0" * 16, KBD)) for p in problems), \
+        problems[:5]
+
+
+def test_h1_fix4_a_sink_with_no_chain_to_a_declared_root_is_an_orphan(attach4, monkeypatch):
+    st, cman, att, aman = attach4
+    monkeypatch.setattr(KS, "RENDER_ROOTS", tuple(r for r in KS.RENDER_ROOTS if r[1] != "SelectInfoArticle"))
+    cut = KS.derive_attach(st, {KBD})
+    assert cut["sinks"][KBD]["chains"] == {}, cut["sinks"][KBD]
+    problems = KS.attach_problems(str(REPO), st, cut, aman, cman)
+    assert any(p.startswith("ORPHAN display sink %s: no attachment chain to a declared render root" % KBD)
+               for p in problems), problems[:5]
+
+
+def test_h1_fix4_a_declared_root_that_is_not_one_member_is_red(attach4, monkeypatch, tmp_path):
+    st, cman, att, aman = attach4
+    monkeypatch.setattr(KS, "RENDER_ROOTS", KS.RENDER_ROOTS + (("NativeUI.cs", "NoSuchRoot", "a root that is gone"),))
+    gone = KS.derive_attach(st, set())
+    problems = KS.attach_problems(str(REPO), st, gone, aman, cman)
+    assert "ROOT MISSING NativeUI.cs:NoSuchRoot: a declared render root is not one member of the tree" in problems
+    rows = []
+    for r in _rows(ATTACH):
+        f = r.split("\t")
+        if r.startswith("root\tCompetitiveUI.cs:DrawUI\t"):
+            f[3] = "0" * 16
+        rows.append("\t".join(f))
+    monkeypatch.undo()
+    problems = _check(st, tmp_path, attach=rows)
+    assert any(p.startswith("ROOT ENTRY CHANGED CompetitiveUI.cs:DrawUI: entered from ref>Plugin.cs:OnGUI")
+               for p in problems), problems[:5]
+
+
+def test_h1_fix4_every_unresolved_hop_is_dispositioned_with_a_control_that_names_it(attach4):
+    st, cman, att, aman = attach4
+    assert set(att["unresolved"]) == set(aman["unresolved"]) == {
+        RESET_MENU,
+        "harmony:Keybinds.cs:OnEnablePatch.Postfix#3(CharacterSelectionInstance.OnEnable)",
+        "harmony:Keybinds.cs:StartPickingPatch.Postfix#4(CharacterSelectionInstance.StartPicking)",
+        "harmony:Keybinds.cs:ReadyUpPatch.Postfix#5(CharacterSelectionInstance.ReadyUp)"}
+    for name, (ctl, note) in aman["unresolved"].items():
+        assert KS.control_names(str(REPO), ctl, KS._unresolved_names(name)) is None, (name, ctl)
+        assert note.strip(), name
+
+
+def test_h1_fix4_an_unresolved_hop_without_a_naming_control_is_red(attach4, tmp_path):
+    st, cman, att, aman = attach4
+    rows = [r for r in _rows(ATTACH) if not r.startswith("unresolved\t%s\t" % RESET_MENU)]
+    problems = _check(st, tmp_path, attach=rows)
+    assert any(p.startswith("UNRESOLVED hop %s (on the chains of Keybinds.cs:ApplyJoin) has no disposition" % RESET_MENU)
+               for p in problems), problems[:5]
+    for ctl, why in (("backend/tests/test_client_keybinds_fix2.py::test_m3_the_live_store_has_no_silent_write",
+                      "does not name ResetMenuPatch"),
+                     ("backend/tests/test_no_such_control.py::test_x", "control file backend/tests/test_no_such_control.py missing")):
+        rows = []
+        for r in _rows(ATTACH):
+            f = r.split("\t")
+            if r.startswith("unresolved\t%s\t" % RESET_MENU):
+                f[2] = ctl
+            rows.append("\t".join(f))
+        problems = _check(st, tmp_path, attach=rows)
+        assert any(p.startswith("UNRESOLVED hop %s: " % RESET_MENU) and why in p for p in problems), (ctl, problems[:5])
+
+
+def test_h1_fix4_a_retired_consumer_referenced_again_is_red(attach4, tmp_path):
+    st, cman, att, aman = attach4
+    assert cman[("NativeUI.Keybinds.cs:KeybindRowFace", "CompetitiveUI.cs:DrawMatchFoundStuckOverlay")][2] == "retired"
+    rows = []
+    for r in _rows(CALLERS):
+        f = r.split("\t")
+        if r.startswith("NativeUI.Keybinds.cs:KeybindRowFace\tCompetitiveUI.cs:DrawChatInput\t"):
+            f[4] = "retired"
+        rows.append("\t".join(f))
+    problems = _check(st, tmp_path, callers=rows)
+    assert any(p.startswith("RETIRED consumer CompetitiveUI.cs:DrawChatInput of NativeUI.Keybinds.cs:KeybindRowFace "
+                            "is referenced again") for p in problems), problems[:5]
+
+
+def test_h1_fix4_the_binding_visual_table_must_equal_the_derived_set(attach4):
+    st, cman, att, aman = attach4
+    wrong = dict(att, tables={"InfoViz.cs:Dispatch": {"keyboard", "grow-curve"}})
+    problems = KS.attach_problems(str(REPO), st, wrong, aman, cman)
+    assert any(p.startswith("BINDING VISUALS DIFFER at InfoViz.cs:Dispatch: the table declares grow-curve,keyboard")
+               for p in problems), problems[:5]
+
+
+SYNTH = """internal static class Lib
+{
+    internal struct Seg { public string Viz; public static Seg V(string k) => new Seg { Viz = k }; }
+    internal sealed class Art { public string Key; public System.Func<string> Body; }
+    internal static Art[] Arts => new[] { new Art { Key = "first" }, new Art { Key = "a", Body = () => Sink() } };
+    internal static string Sink() { return "x"; }
+    internal static object Pick(string key)
+    {
+        switch (key)
+        {
+            case "kb": return Sink();
+            default: return null;
+        }
+    }
+    internal static void Reg(System.Action<System.Func<string>> on) { on(Sink); }
+    internal static void Plain() { var s = Sink(); }
+}
+"""
+
+
+def test_h1_fix4_each_hop_kind_is_classified_with_its_context(tmp_path):
+    (tmp_path / "plugin").mkdir()
+    (tmp_path / "tools").mkdir()
+    (tmp_path / "plugin" / "Lib.cs").write_text(SYNTH, encoding="utf-8")
+    (tmp_path / "tools" / "i18n_extract.py").write_bytes((REPO / "tools" / "i18n_extract.py").read_bytes())
+    t = KS.Tree(str(tmp_path))
+    got = {(h.consumer, h.kind, h.ctx, h.key) for h in KS.up_hops(t, "Lib.cs:Sink")}
+    assert got == {
+        ("Lib.cs:Arts", "entry", "Art{a}.Body=>", None),
+        ("Lib.cs:Pick", "dispatch", 'case "kb"', "kb"),
+        ("Lib.cs:Reg", "delegate", "on(#0)/&", None),
+        ("Lib.cs:Plain", "ref", "", None)}, got
