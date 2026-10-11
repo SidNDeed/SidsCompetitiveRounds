@@ -845,6 +845,7 @@
   "Click Discard again to discard that card for shards",
   "Click Dupes again to discard every other copy of that card",
   "Click MAIN MENU again to leave the match.",
+  "Click Shard dupes again to shard {0} duplicates for {1} shards",
   "Click Shard pack again to shard {0} cards for {1} shards",
   "Click Shard selected again to shard {0} cards for {1} shards",
   "Click a card to view it",
@@ -2355,6 +2356,7 @@
   "Severity:",
   "Shade",
   "Shades for those who want to show that they are the true genius of the battlefield",
+  "Shard dupes (+{0})",
   "Shard pack (+{0})",
   "Shard pack is not available on this server yet - discard one card at a time for now",
   "Shard selected ({0})",
@@ -7644,7 +7646,7 @@
   },
   "Click Discard again to discard that card for shards": {
    "surface": "PlayerCardsUI",
-   "location": "OnDiscardClick",
+   "location": "OnDiscardClick, OnQuickShardClick",
    "kind": "Tr"
   },
   "Click Dupes again to discard every other copy of that card": {
@@ -7656,6 +7658,11 @@
    "surface": "EscMenuLeaveGuard",
    "location": "OnGatedClick",
    "kind": "Tr"
+  },
+  "Click Shard dupes again to shard {0} duplicates for {1} shards": {
+   "surface": "PlayerCardsUI",
+   "location": "OnShardDupesClick",
+   "kind": "TrF"
   },
   "Click Shard pack again to shard {0} cards for {1} shards": {
    "surface": "PlayerCardsUI",
@@ -11324,7 +11331,7 @@
   },
   "Loading your binder - try again in a moment": {
    "surface": "PlayerCardsUI",
-   "location": "OnShardPackClick, OnShardSelectedClick",
+   "location": "OnQuickShardClick, OnShardDupesClick, OnShardPackClick +1",
    "kind": "Tr"
   },
   "Loading your binder...": {
@@ -15207,6 +15214,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Shard dupes (+{0})": {
+   "surface": "PlayerCardsUI",
+   "location": "RefreshShardDupesButton",
+   "kind": "TrF"
+  },
   "Shard pack (+{0})": {
    "surface": "PlayerCardsUI",
    "location": "RefreshShardPackButton",
@@ -16074,7 +16086,7 @@
   },
   "Sure? +{0} shards": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshSelectRow, RefreshShardPackButton",
+   "location": "RefreshSelectRow, RefreshShardDupesButton, RefreshShardPackButton",
    "kind": "TrF"
   },
   "Sure? Discard": {
@@ -18519,7 +18531,7 @@
   },
   "You can shard up to {0} cards at once": {
    "surface": "PlayerCardsUI",
-   "location": "FailShard, OnShardPackClick, OnShardSelectedClick +1",
+   "location": "FailShard, OnShardDupesClick, OnShardPackClick +2",
    "kind": "TrF"
   },
   "You can't kick yourself.": {
@@ -19864,7 +19876,7 @@
   },
   "sharding...": {
    "surface": "PlayerCardsUI",
-   "location": "RefreshBinder, RefreshSelectRow, RefreshShardPackButton",
+   "location": "FillTile, RefreshBinder, RefreshSelectRow +2",
    "kind": "Tr"
   },
   "short-match farming pattern": {

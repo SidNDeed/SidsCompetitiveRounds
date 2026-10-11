@@ -1491,6 +1491,7 @@ namespace CompetitiveRounds
             // the batch shard). Placed after "Discard" instead of at the end, so a
             // lane appending at the end merges without a conflict. Sorted among
             // themselves; the entries around them are untouched.
+            ["Click Shard dupes again to shard {0} duplicates for {1} shards"] = "Vuelve a hacer clic en Fragmentar duplicados para fragmentar {0} duplicados por {1} fragmentos",
             ["Click Shard pack again to shard {0} cards for {1} shards"] = "Vuelve a hacer clic en Fragmentar sobre para fragmentar {0} cartas por {1} fragmentos",
             ["Click Shard selected again to shard {0} cards for {1} shards"] = "Vuelve a hacer clic en Fragmentar selecci\u00f3n para fragmentar {0} cartas por {1} fragmentos",
             ["Click cards to select them for shards"] = "Haz clic en las cartas para seleccionarlas y convertirlas en fragmentos",
@@ -1503,6 +1504,7 @@ namespace CompetitiveRounds
             ["Select"] = "Seleccionar",
             ["Select cards first - click the cards you want to shard"] = "Primero selecciona cartas - haz clic en las cartas que quieras fragmentar",
             ["Selected"] = "Seleccionada",
+            ["Shard dupes (+{0})"] = "Fragmentar duplicados (+{0})",
             ["Shard pack (+{0})"] = "Fragmentar sobre (+{0})",
             ["Shard pack is not available on this server yet - discard one card at a time for now"] = "Fragmentar sobre todav\u00eda no est\u00e1 disponible en este servidor - por ahora descarta las cartas de una en una",
             ["Shard selected ({0})"] = "Fragmentar selecci\u00f3n ({0})",
@@ -4910,6 +4912,7 @@ namespace CompetitiveRounds
             // the batch shard). Placed after "Discard" instead of at the end, so a
             // lane appending at the end merges without a conflict. Sorted among
             // themselves; the entries around them are untouched.
+            ["Click Shard dupes again to shard {0} duplicates for {1} shards"] = "\u041d\u0430\u0436\u043c\u0438 \u00ab\u0420\u0430\u0437\u0431\u0438\u0442\u044c \u0434\u0443\u0431\u043b\u0438\u00bb \u0435\u0449\u0451 \u0440\u0430\u0437, \u0447\u0442\u043e\u0431\u044b \u0440\u0430\u0437\u0431\u0438\u0442\u044c \u0434\u0443\u0431\u043b\u0438 ({0} \u0448\u0442.) \u0438 \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c {1} \u043e\u0441\u043a\u043e\u043b\u043a\u043e\u0432",
             ["Click Shard pack again to shard {0} cards for {1} shards"] = "\u041d\u0430\u0436\u043c\u0438 \u00ab\u0420\u0430\u0437\u0431\u0438\u0442\u044c \u043f\u0430\u043a\u00bb \u0435\u0449\u0451 \u0440\u0430\u0437, \u0447\u0442\u043e\u0431\u044b \u0440\u0430\u0437\u0431\u0438\u0442\u044c \u043a\u0430\u0440\u0442\u044b ({0} \u0448\u0442.) \u0438 \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c {1} \u043e\u0441\u043a\u043e\u043b\u043a\u043e\u0432",
             ["Click Shard selected again to shard {0} cards for {1} shards"] = "\u041d\u0430\u0436\u043c\u0438 \u00ab\u0420\u0430\u0437\u0431\u0438\u0442\u044c \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0435\u00bb \u0435\u0449\u0451 \u0440\u0430\u0437, \u0447\u0442\u043e\u0431\u044b \u0440\u0430\u0437\u0431\u0438\u0442\u044c \u043a\u0430\u0440\u0442\u044b ({0} \u0448\u0442.) \u0438 \u043f\u043e\u043b\u0443\u0447\u0438\u0442\u044c {1} \u043e\u0441\u043a\u043e\u043b\u043a\u043e\u0432",
             ["Click cards to select them for shards"] = "\u041d\u0430\u0436\u0438\u043c\u0430\u0439 \u043d\u0430 \u043a\u0430\u0440\u0442\u044b, \u0447\u0442\u043e\u0431\u044b \u0432\u044b\u0431\u0440\u0430\u0442\u044c \u0438\u0445 \u0434\u043b\u044f \u0440\u0430\u0437\u0431\u0438\u0432\u043a\u0438 \u043d\u0430 \u043e\u0441\u043a\u043e\u043b\u043a\u0438",
@@ -4922,6 +4925,7 @@ namespace CompetitiveRounds
             ["Select"] = "\u0412\u044b\u0431\u0440\u0430\u0442\u044c",
             ["Select cards first - click the cards you want to shard"] = "\u0421\u043d\u0430\u0447\u0430\u043b\u0430 \u0432\u044b\u0431\u0435\u0440\u0438 \u043a\u0430\u0440\u0442\u044b - \u043d\u0430\u0436\u043c\u0438 \u043d\u0430 \u0442\u0435, \u043a\u043e\u0442\u043e\u0440\u044b\u0435 \u0445\u043e\u0447\u0435\u0448\u044c \u0440\u0430\u0437\u0431\u0438\u0442\u044c",
             ["Selected"] = "\u0412\u044b\u0431\u0440\u0430\u043d\u0430",
+            ["Shard dupes (+{0})"] = "\u0420\u0430\u0437\u0431\u0438\u0442\u044c \u0434\u0443\u0431\u043b\u0438 (+{0})",
             ["Shard pack (+{0})"] = "\u0420\u0430\u0437\u0431\u0438\u0442\u044c \u043f\u0430\u043a (+{0})",
             ["Shard pack is not available on this server yet - discard one card at a time for now"] = "\u0420\u0430\u0437\u0431\u0438\u0432\u043a\u0430 \u043f\u0430\u043a\u043e\u0432 \u043d\u0430 \u044d\u0442\u043e\u043c \u0441\u0435\u0440\u0432\u0435\u0440\u0435 \u043f\u043e\u043a\u0430 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0430 - \u043f\u043e\u043a\u0430 \u0441\u0431\u0440\u0430\u0441\u044b\u0432\u0430\u0439 \u043a\u0430\u0440\u0442\u044b \u043f\u043e \u043e\u0434\u043d\u043e\u0439",
             ["Shard selected ({0})"] = "\u0420\u0430\u0437\u0431\u0438\u0442\u044c \u0432\u044b\u0431\u0440\u0430\u043d\u043d\u044b\u0435 ({0})",
@@ -8275,6 +8279,7 @@ namespace CompetitiveRounds
             // the batch shard). Placed after "Discard" instead of at the end, so a
             // lane appending at the end merges without a conflict. Sorted among
             // themselves; the entries around them are untouched.
+            ["Click Shard dupes again to shard {0} duplicates for {1} shards"] = "\u041d\u0430\u0442\u0438\u0441\u043d\u0456\u0442\u044c \u00ab\u0420\u043e\u0437\u0431\u0438\u0442\u0438 \u0434\u0443\u0431\u043b\u0456\u00bb \u0449\u0435 \u0440\u0430\u0437, \u0449\u043e\u0431 \u0440\u043e\u0437\u0431\u0438\u0442\u0438 \u0434\u0443\u0431\u043b\u0456 ({0} \u0448\u0442.) \u0456 \u043e\u0442\u0440\u0438\u043c\u0430\u0442\u0438 {1} \u0443\u043b\u0430\u043c\u043a\u0456\u0432",
             ["Click Shard pack again to shard {0} cards for {1} shards"] = "\u041d\u0430\u0442\u0438\u0441\u043d\u0456\u0442\u044c \u00ab\u0420\u043e\u0437\u0431\u0438\u0442\u0438 \u043f\u0430\u043a\u00bb \u0449\u0435 \u0440\u0430\u0437, \u0449\u043e\u0431 \u0440\u043e\u0437\u0431\u0438\u0442\u0438 \u043a\u0430\u0440\u0442\u043a\u0438 ({0} \u0448\u0442.) \u0456 \u043e\u0442\u0440\u0438\u043c\u0430\u0442\u0438 {1} \u0443\u043b\u0430\u043c\u043a\u0456\u0432",
             ["Click Shard selected again to shard {0} cards for {1} shards"] = "\u041d\u0430\u0442\u0438\u0441\u043d\u0456\u0442\u044c \u00ab\u0420\u043e\u0437\u0431\u0438\u0442\u0438 \u0432\u0438\u0431\u0440\u0430\u043d\u0456\u00bb \u0449\u0435 \u0440\u0430\u0437, \u0449\u043e\u0431 \u0440\u043e\u0437\u0431\u0438\u0442\u0438 \u043a\u0430\u0440\u0442\u043a\u0438 ({0} \u0448\u0442.) \u0456 \u043e\u0442\u0440\u0438\u043c\u0430\u0442\u0438 {1} \u0443\u043b\u0430\u043c\u043a\u0456\u0432",
             ["Click cards to select them for shards"] = "\u041d\u0430\u0442\u0438\u0441\u043a\u0430\u0439\u0442\u0435 \u043d\u0430 \u043a\u0430\u0440\u0442\u043a\u0438, \u0449\u043e\u0431 \u0432\u0438\u0431\u0440\u0430\u0442\u0438 \u0457\u0445 \u0434\u043b\u044f \u0440\u043e\u0437\u0431\u0438\u0442\u0442\u044f \u043d\u0430 \u0443\u043b\u0430\u043c\u043a\u0438",
@@ -8287,6 +8292,7 @@ namespace CompetitiveRounds
             ["Select"] = "\u0412\u0438\u0431\u0440\u0430\u0442\u0438",
             ["Select cards first - click the cards you want to shard"] = "\u0421\u043f\u0435\u0440\u0448\u0443 \u0432\u0438\u0431\u0435\u0440\u0456\u0442\u044c \u043a\u0430\u0440\u0442\u043a\u0438 - \u043d\u0430\u0442\u0438\u0441\u043d\u0456\u0442\u044c \u043d\u0430 \u0442\u0456, \u044f\u043a\u0456 \u0445\u043e\u0447\u0435\u0442\u0435 \u0440\u043e\u0437\u0431\u0438\u0442\u0438",
             ["Selected"] = "\u0412\u0438\u0431\u0440\u0430\u043d\u043e",
+            ["Shard dupes (+{0})"] = "\u0420\u043e\u0437\u0431\u0438\u0442\u0438 \u0434\u0443\u0431\u043b\u0456 (+{0})",
             ["Shard pack (+{0})"] = "\u0420\u043e\u0437\u0431\u0438\u0442\u0438 \u043f\u0430\u043a (+{0})",
             ["Shard pack is not available on this server yet - discard one card at a time for now"] = "\u0420\u043e\u0437\u0431\u0438\u0442\u0442\u044f \u043f\u0430\u043a\u0456\u0432 \u043d\u0430 \u0446\u044c\u043e\u043c\u0443 \u0441\u0435\u0440\u0432\u0435\u0440\u0456 \u043f\u043e\u043a\u0438 \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0435 - \u043f\u043e\u043a\u0438 \u0449\u043e \u0441\u043a\u0438\u0434\u0430\u0439\u0442\u0435 \u043a\u0430\u0440\u0442\u043a\u0438 \u043f\u043e \u043e\u0434\u043d\u0456\u0439",
             ["Shard selected ({0})"] = "\u0420\u043e\u0437\u0431\u0438\u0442\u0438 \u0432\u0438\u0431\u0440\u0430\u043d\u0456 ({0})",
@@ -11620,6 +11626,7 @@ namespace CompetitiveRounds
             // the batch shard). Placed after "Discard" instead of at the end, so a
             // lane appending at the end merges without a conflict. Sorted among
             // themselves; the entries around them are untouched.
+            ["Click Shard dupes again to shard {0} duplicates for {1} shards"] = "Klicka p\u00e5 Dubbletter till sk\u00e4rvor igen f\u00f6r att g\u00f6ra {0} dubbletter till {1} sk\u00e4rvor",
             ["Click Shard pack again to shard {0} cards for {1} shards"] = "Klicka p\u00e5 Paket till sk\u00e4rvor igen f\u00f6r att g\u00f6ra {0} kort till {1} sk\u00e4rvor",
             ["Click Shard selected again to shard {0} cards for {1} shards"] = "Klicka p\u00e5 Valda till sk\u00e4rvor igen f\u00f6r att g\u00f6ra {0} kort till {1} sk\u00e4rvor",
             ["Click cards to select them for shards"] = "Klicka p\u00e5 kort f\u00f6r att v\u00e4lja dem till sk\u00e4rvor",
@@ -11632,6 +11639,7 @@ namespace CompetitiveRounds
             ["Select"] = "V\u00e4lj",
             ["Select cards first - click the cards you want to shard"] = "V\u00e4lj kort f\u00f6rst - klicka p\u00e5 korten du vill g\u00f6ra till sk\u00e4rvor",
             ["Selected"] = "Valt",
+            ["Shard dupes (+{0})"] = "Dubbletter till sk\u00e4rvor (+{0})",
             ["Shard pack (+{0})"] = "Paket till sk\u00e4rvor (+{0})",
             ["Shard pack is not available on this server yet - discard one card at a time for now"] = "Paket till sk\u00e4rvor finns inte p\u00e5 den h\u00e4r servern \u00e4n - kasta ett kort i taget s\u00e5 l\u00e4nge",
             ["Shard selected ({0})"] = "Valda till sk\u00e4rvor ({0})",

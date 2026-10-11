@@ -754,7 +754,7 @@
           ],
           "main",
           "pc_discard_print",
-          "19ba623c3b0174f2db85ca10bcc4f95747badde6"
+          "885e907b7d0cdd1a10249418780cab427d2e6591"
         ],
         [
           "/api/v1/pc/settings",
@@ -3590,7 +3590,7 @@
           ],
           "main",
           "pc_discard_batch",
-          "ca4fbbb994070158d8f39d9add3d2e9a915a07f7"
+          "be48595f79c58b9cc49dcab5f8671db90870be0a"
         ],
         [
           "/api/v1/pc/face/preview",

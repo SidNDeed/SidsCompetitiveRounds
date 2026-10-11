@@ -73,6 +73,10 @@ namespace CompetitiveRounds
             public object txtName, txtTitle, txtL1, txtL2, txtL3, txtL4, txtMark, txtSign, btnDiscardTxt, btnDupesTxt, faceMark;
             public ApiClient.PcPrint print;   // the row's CURRENT binding — callbacks read this, never a captured print (#265)
             public int dupes;
+            // item 18: true for the pull strip's five tiles, whose Discard
+            // button shards that one card (PcQuickShardRules); false for the
+            // binder's, which keep their own Discard. Set once in CreateTile.
+            public bool quickSurface;
             // card trading (v1.41.0): the In a trade / Traded badge over the
             // tile, a click that replaces the card view (the compose pickers),
             // and the mini form the trade lists draw
@@ -202,17 +206,33 @@ namespace CompetitiveRounds
         // binder selection), one server transaction per click.
         private static GameObject btnShardPack, btnSelect, btnShardSel;
         private static object btnShardPackTxt, btnSelectTxt, btnShardSelTxt, txtBinderHint, txtBinderSelHint;
+        // Item 18 fix pass 1 (F3): the pull tab's Shard dupes -- the shown
+        // pack's duplicates only (PcQuickShardRules.DuplicateShardIds).
+        private static GameObject btnShardDupes;
+        private static object btnShardDupesTxt;
         private static bool selecting;                                        // the binder's Select mode
         private static readonly List<string> selectedIds = new List<string>();  // in the order they were clicked
         private static string armedShard; private static float armedShardAt;   // the exact request the first click armed
-        private static bool shardInFlight; private static float shardAt;
-        private static string shardPackId;             // the pack a Shard pack in flight came from (null: a selection)
+        // Item 18 fix pass 1 (F2): the one batch shard in flight -- its latch,
+        // its generation, the pack or strip card it is for -- and a strip
+        // card's nonce (kept until an answer, PcQuickShardRules.KeepKeyAfter,
+        // so the same card asked again after a lost answer is a replay) have
+        // ONE writer, PcShardFlight: a retired generation's late answer
+        // changes nothing (SendShard).
+        private static readonly PcShardFlight shardFlight = new PcShardFlight();
+        private static bool shardInFlight => shardFlight.InFlight;
+        private static string shardPackId => shardFlight.PackId;    // the pack a Shard pack in flight came from (null: a selection)
+        private static string shardQuickId => shardFlight.QuickId;  // the strip card a one-card shard is for
         private static string shardKey, shardKeyFor;   // a selection's nonce and the exact request it was made for (#172)
         // Prints the server named as no longer this account's (a refused
-        // batch), kept out of the next Shard pack; and packs whose key an
-        // earlier batch already used with other cards, whose button stays
-        // down (single discards and the binder selection still reach them).
-        private static readonly HashSet<string> shardGone = new HashSet<string>(StringComparer.Ordinal);
+        // shard's not_owned), kept out of the strip's Discard, the next Shard
+        // pack and both Shard dupes walks until an own-collection read
+        // dispatched after that refusal holds them again (item 18 fix pass 3,
+        // finding 2: ApiClient.FetchPcCollection reconciles the set, which
+        // ApiClient owns for that reason); and packs whose key an earlier
+        // batch already used with other cards, whose button stays down
+        // (single discards and the binder selection still reach them).
+        private static PcShardTombstones shardGone => ApiClient.PcShardGone;
         private static readonly HashSet<string> packShardBurned = new HashSet<string>(StringComparer.Ordinal);
         private static bool setInFlight; private static float setAt;
         // the dance row (dance cards S5.8): the choice lives on the server; a
@@ -507,7 +527,7 @@ namespace CompetitiveRounds
             // and an answer still in flight is dropped by its epoch check.
             selecting = false; selectedIds.Clear();
             armedShard = null; armedShardAt = 0f;
-            shardInFlight = false; shardPackId = null; shardKey = null; shardKeyFor = null;
+            shardFlight.Reset(); shardKey = null; shardKeyFor = null;
             shardGone.Clear(); packShardBurned.Clear();
             // FinishDiscard is not on this path, so the run state it clears
             // is cleared here too. A per-copy retry latch left populated
@@ -594,6 +614,10 @@ namespace CompetitiveRounds
             // (or on Settings) is retired all the same.
             RetireStuckLatches(id);
             if (id == null) return;
+            // Fix pass 2, finding 1: a read the answer fence dropped is sent
+            // again only while no shard and no discard is out, so one more
+            // answer of the same run cannot drop it again.
+            if (ApiClient.PcReadsOwed && !shardInFlight && !discardInFlight) ApiClient.PcSendOwedReads(id);
             if (HasIntent()) MaybeRecover(false);
             // Card trading (V8 6.4): ABOVE the early return below, so the
             // 120 s summary runs whichever tab is current while the overlay
@@ -626,7 +650,21 @@ namespace CompetitiveRounds
             if (armedShard != null && Now - armedShardAt > 6f) { armedShard = null; NativeUI.MarkDirty(); }
             // Past the 20 s transport timeout, the other latches' rule: an answer
             // that never came back does not leave both shard buttons dead.
-            if (shardInFlight && Now - shardAt > 25f) { shardInFlight = false; shardPackId = null; NativeUI.MarkDirty(); }
+            // The give-up retires the request's generation (F2): an answer that
+            // does arrive later settles nothing and writes no balance.
+            bool quick;
+            if (shardFlight.GiveUp(Now, 25f, out quick))
+            {
+                // Item 18: a strip shard given up has an unknown outcome, so
+                // the collection and the balance are read back (its key is
+                // kept: the same card asked again is a replay).
+                if (quick)
+                {
+                    Plugin.Log.LogWarning("[PC] quick shard: no answer 25 s after the request; given up, read back");
+                    if (PcQuickShardRules.ReadBackAfter("given_up")) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
+                }
+                NativeUI.MarkDirty();
+            }
             if (lastMsg != null && Now - lastMsgAt > 15f) { lastMsg = null; NativeUI.MarkDirty(); }
             if (openInFlight && Now - openAt > 25f) { openInFlight = false; NativeUI.MarkDirty(); }
             if (claimInFlight && Now - claimAt > 25f) { claimInFlight = false; NativeUI.MarkDirty(); }
@@ -771,6 +809,14 @@ namespace CompetitiveRounds
             btnShardPackTxt = UIFactory.GetButtonText(btnShardPack);
             if (btnShardPackTxt != null) { UIFactory.SetOverflowMode(btnShardPackTxt, 2); UIFactory.SetWordWrap(btnShardPackTxt, false); }
             btnShardPack.SetActive(false);
+            // Item 18 fix pass 1 (F3): shard only the pack on show's
+            // duplicates, one live copy of every exact face kept, through the
+            // same batch route (two clicks; CreateButton routes the click
+            // through ClickGuard). Up only when the pack holds a duplicate.
+            btnShardDupes = UIFactory.CreateButton("PcShardDupes", hdrRow.transform, "", 12f, C_WHITE, C_DANGER, OnShardDupesClick, sizeDelta: new Vector2(150, 22));
+            btnShardDupesTxt = UIFactory.GetButtonText(btnShardDupes);
+            if (btnShardDupesTxt != null) { UIFactory.SetOverflowMode(btnShardDupesTxt, 2); UIFactory.SetWordWrap(btnShardDupesTxt, false); }
+            btnShardDupes.SetActive(false);
             btnHistOlder = UIFactory.CreateButton("PcHistOlder", hdrRow.transform, "< Older", 12f, C_WHITE, C_BTN, () => PageHistory(+1), sizeDelta: new Vector2(76, 22));
             txtHistPos = UIFactory.CreateText("PcHistPos", hdrRow.transform, "", 13f, C_LABEL, UIFactory.AlignMidCenter, sizeDelta: new Vector2(120, 22));
             btnHistNewer = UIFactory.CreateButton("PcHistNewer", hdrRow.transform, "Newer >", 12f, C_WHITE, C_BTN, () => PageHistory(-1), sizeDelta: new Vector2(76, 22));
@@ -782,7 +828,9 @@ namespace CompetitiveRounds
             UIFactory.AddHLG(lastStrip, spacing: 8, forceExpandH: false);
             UIFactory.AddLE(lastStrip, prefH: TILE_H, minH: TILE_H, flexH: 0);
             revealTiles = new Tile[REVEAL_TILES];
-            for (int i = 0; i < REVEAL_TILES; i++) revealTiles[i] = CreateTile(lastStrip.transform, "PcRv" + i, false);
+            // Item 18: the strip's tiles carry the binder's action row, and its
+            // Discard shards that one card (OnQuickShardClick).
+            for (int i = 0; i < REVEAL_TILES; i++) revealTiles[i] = CreateTile(lastStrip.transform, "PcRv" + i, true, true);
         }
 
         private static void BuildBinderView(Transform parent)
@@ -857,9 +905,10 @@ namespace CompetitiveRounds
             UIFactory.SetTextAutoHeight(txtInfo, 40f);   // scroll content: auto height, no baked floor (#449)
         }
 
-        private static Tile CreateTile(Transform parent, string name, bool withActions)
+        private static Tile CreateTile(Transform parent, string name, bool withActions, bool quickSurface = false)
         {
             var t = new Tile();
+            t.quickSurface = quickSurface;
             t.root = UIFactory.CreatePanel(name, parent, FrameColor("common", false));
             UIFactory.AddVLG(t.root, spacing: 0, padL: 3, padR: 3, padT: 3, padB: 3);
             UIFactory.AddLE(t.root, prefW: TILE_W, minW: TILE_W, prefH: TILE_H, minH: TILE_H, flexW: 0, flexH: 0);
@@ -935,7 +984,10 @@ namespace CompetitiveRounds
                 // minH as well as prefH: a row with no minimum is the first
                 // thing a layout over budget shrinks to nothing (#449's rule).
                 UIFactory.AddLE(t.actions, prefH: 22, minH: 22, flexH: 0);
-                t.btnDiscard = UIFactory.CreateButton(name + "_d", t.actions.transform, "Discard", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, false), sizeDelta: new Vector2(76, 20));
+                // The strip's Discard shards the one card through the batch
+                // shard's route (item 18); the binder's keeps its own path.
+                t.btnDiscard = UIFactory.CreateButton(name + "_d", t.actions.transform, "Discard", 11f, C_WHITE, C_DANGER,
+                    quickSurface ? (UnityEngine.Events.UnityAction)(() => OnQuickShardClick(tile)) : () => OnDiscardClick(tile, false), sizeDelta: new Vector2(76, 20));
                 t.btnDiscardTxt = UIFactory.GetButtonText(t.btnDiscard);
                 t.btnDupes = UIFactory.CreateButton(name + "_dd", t.actions.transform, "", 11f, C_WHITE, C_DANGER, () => OnDiscardClick(tile, true), sizeDelta: new Vector2(84, 20));
                 t.btnDupesTxt = UIFactory.GetButtonText(t.btnDupes);
@@ -1180,7 +1232,7 @@ namespace CompetitiveRounds
             // frame and a "Selected" stamp (the DISCARDED stamp's slot: the
             // binder holds no discarded print), and its mark line says so too
             // for a tile showing its text block.
-            bool picked = selecting && t.actions != null && !p.discarded && selectedIds.Contains(p.print_id);
+            bool picked = selecting && t.actions != null && !t.quickSurface && !p.discarded && selectedIds.Contains(p.print_id);
             if (picked) { UIFactory.SetImageColor(t.root, C_SELECT); mark = I18n.Tr("Selected") + " | " + mark; }
             UIFactory.SetTextRaw(t.txtMark, mark);
             if (t.faceMark != null) UIFactory.SetTextRaw(t.faceMark, p.discarded ? "<b>" + DiscardedLine(p) + "</b>" : (picked ? "<b>" + I18n.Tr("Selected") + "</b>" : ""));
@@ -1189,10 +1241,27 @@ namespace CompetitiveRounds
             UIFactory.SetTextRaw(t.txtSign, p.signed ? "<i>~ " + name + " ~</i>" : "");
             if (t.actions != null)
             {
+                bool gone = p.print_id != null && shardGone.Contains(p.print_id);
+                // Select mode picks binder cards; the binder's per-card buttons
+                // wait until it ends. The strip's rule is its own (item 18).
+                t.btnDiscard.SetActive(PcQuickShardRules.DiscardOffered(t.quickSurface, p.discarded, gone, selecting));
+                if (t.quickSurface)
+                {
+                    // Item 18: armed by the batch shard's arming (one card's
+                    // set), "sharding..." while this card's request is out,
+                    // and dimmed while any shard or discard is out (a click
+                    // then is refused at the entry).
+                    bool busyThis = shardInFlight && shardQuickId == p.print_id;
+                    bool armedQ = armedShard != null && armedShard == PcQuickShardRules.ArmSet(p.print_id) && Now - armedShardAt <= 6f;
+                    if (busyThis) UIFactory.SetTextRaw(t.btnDiscardTxt, I18n.Tr("sharding..."));
+                    else UIFactory.SetText(t.btnDiscardTxt, armedQ ? "Sure? Discard" : "Discard");
+                    UIFactory.SetImageColor(t.btnDiscard, SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
+                    t.btnDupes.SetActive(false);
+                    PaintTileBadge(t, p);
+                    return;
+                }
                 bool armedThis = armedPrintId == p.print_id && !armedDupes;
                 UIFactory.SetText(t.btnDiscardTxt, armedThis ? "Sure? Discard" : "Discard");
-                // Select mode picks cards; the per-card buttons wait until it ends.
-                t.btnDiscard.SetActive(!selecting);
                 bool showDupes = dupes > 1 && !selecting;
                 t.btnDupes.SetActive(showDupes);
                 if (showDupes)
@@ -1721,6 +1790,7 @@ namespace CompetitiveRounds
         /// click's label once armed), "sharding..." while a batch is out.</summary>
         private static void RefreshShardPackButton(ApiClient.PcPackAnswer shown)
         {
+            RefreshShardDupesButton(shown);
             if (btnShardPack == null) return;
             var ids = PackShardIds(shown);
             bool up = ids.Count > 0 && ids.Count <= ApiClient.PC_DISCARD_BATCH_CAP
@@ -1733,6 +1803,27 @@ namespace CompetitiveRounds
             UIFactory.SetTextRaw(btnShardPackTxt, busy ? I18n.Tr("sharding...")
                 : armed ? I18n.TrF("Sure? +{0} shards", total) : I18n.TrF("Shard pack (+{0})", total));
             UIFactory.SetImageColor(btnShardPack, SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
+        }
+
+        /// <summary>Item 18 fix pass 1 (F3): the Shard dupes button on the pack
+        /// on show -- up while the pack holds a duplicate the player owns now
+        /// (PackDupeIds; PcQuickShardRules.DupesOffered, fix pass 2), labelled with
+        /// the total those copies pay (the second click's label once armed),
+        /// "sharding..." while its batch is out.</summary>
+        private static void RefreshShardDupesButton(ApiClient.PcPackAnswer shown)
+        {
+            if (btnShardDupes == null) return;
+            bool ready;
+            var ids = PackDupeIds(shown, ApiClient.CachedPcCollection, out ready);
+            bool up = PcQuickShardRules.DupesOffered(ready, ids.Count, ApiClient.PC_DISCARD_BATCH_CAP);
+            bool busy = shardInFlight && shown != null && shardFlight.DupesOf == shown.pack_id;
+            btnShardDupes.SetActive(up || busy);
+            if (!up && !busy) return;
+            int total = ShardTotal(shown.prints, ids);
+            bool armed = armedShard != null && armedShard == DupesShardSet(shown.pack_id, ids) && Now - armedShardAt <= 6f;
+            UIFactory.SetTextRaw(btnShardDupesTxt, busy ? I18n.Tr("sharding...")
+                : armed ? I18n.TrF("Sure? +{0} shards", total) : I18n.TrF("Shard dupes (+{0})", total));
+            UIFactory.SetImageColor(btnShardDupes, SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
         }
 
         // ── pack history (the strip's pager) ──────────────────────────────
@@ -2668,7 +2759,11 @@ namespace CompetitiveRounds
             string pid = discardQueue[0]; discardQueue.RemoveAt(0);
             int ep = uiEpoch;
             discardSentAt = Now;
-            ApiClient.PcDiscard(id, pid, (ok, resp) =>
+            // Item 18 fix pass 3, finding 4: ApiClient writes the answer's
+            // balance, and moves the answer fence, only while this step is
+            // still the current run's -- the test this callback makes below,
+            // made before that write as well.
+            ApiClient.PcDiscard(id, pid, () => PcQuickShardRules.DiscardStepCurrent(ep == uiEpoch, discardInFlight, serial, discardSerial), (ok, resp) =>
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
                 if (serial != discardSerial)
@@ -2683,6 +2778,7 @@ namespace CompetitiveRounds
                     discardShards += gained;
                     var col = ApiClient.CachedPcCollection;
                     if (col != null) col.prints.RemoveAll(x => x.print_id == pid);
+                    ApiClient.PcAnswerFence.Wrote();   // fix pass 2, finding 1: a confirmed removal
                     HistoryMarkDiscarded(pid, gained);
                     DiscardNext(id, serial);
                     return;
@@ -2967,6 +3063,79 @@ namespace CompetitiveRounds
             SendShard(id, shown.pack_id, ids, shown.pack_id);
         }
 
+        /// <summary>Item 18 fix pass 1 (F3): what a Shard dupes sends -- the
+        /// pack on show's DUPLICATES only, sorted: PcQuickShardRules.
+        /// DuplicateShardIds over the pack's live prints (in display order,
+        /// by exact face) and the collection's live copies, so one live copy
+        /// of every exact face is kept and a unique or last copy is never in
+        /// the set. A print discarded or named gone by the server is not
+        /// live. The collection read is the current ownership (fix pass 2,
+        /// finding 2): a pack print it does not hold (traded away since the
+        /// pull) is neither taken nor counted, and one traded back counts
+        /// again. A print the server named not_owned (shardGone) is out of
+        /// both walks until a collection read dispatched after that refusal
+        /// holds it again (fix pass 3, finding 2): the walks themselves run in
+        /// PcQuickShardRules.PackDupes, which the client rules harness
+        /// executes with the tombstones. `ready` is false (and the set empty)
+        /// only while no collection read is loaded.</summary>
+        private static List<string> PackDupeIds(ApiClient.PcPackAnswer pack, ApiClient.PcCollection col, out bool ready)
+        {
+            ready = false;
+            var none = new List<string>();
+            if (pack == null || pack.prints == null || !ShardToken(pack.pack_id) || col == null || col.prints == null) return none;
+            var faces = new List<string>(); var pids = new List<string>();
+            foreach (var p in pack.prints)
+            {
+                bool live = p != null && !p.discarded && ShardToken(p.print_id);
+                faces.Add(live ? FaceKey(p) : null); pids.Add(p?.print_id);
+            }
+            var colFaces = new List<string>(); var colIds = new List<string>();
+            foreach (var c in col.prints)
+            {
+                bool own = c != null && c.print_id != null && !c.discarded;
+                colFaces.Add(own ? FaceKey(c) : null); colIds.Add(own ? c.print_id : null);
+            }
+            return PcQuickShardRules.PackDupes(faces, pids, colFaces, colIds, shardGone, out ready);
+        }
+
+        private static string DupesShardSet(string packId, List<string> ids) { return "dupes|" + packId + "|" + string.Join(",", ids.ToArray()); }
+
+        /// <summary>Item 18 fix pass 1 (F3): the pull tab's Shard dupes. Two
+        /// clicks inside six seconds, as every shard control: the first names
+        /// how many duplicates and what they pay; the second sends ONE batch
+        /// request with exactly that set, keyed by a nonce kept for that set
+        /// until an answer (PcShardFlight.KeyFor), so asking again after a
+        /// lost answer is a replay. The Shard pack beside it is unchanged
+        /// (board row 25: every live print of the pack, with the last-copy
+        /// note).</summary>
+        private static void OnShardDupesClick()
+        {
+            var id = LocalId();
+            if (id == null || shardInFlight || discardInFlight) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            var shown = ShownPack();
+            if (shown == null || !ShardToken(shown.pack_id)) return;
+            var col = ApiClient.CachedPcCollection;
+            bool ready;
+            var ids = PackDupeIds(shown, col, out ready);
+            if (!ready) { ApiClient.FetchPcCollection(id, true); Say(I18n.Tr("Loading your binder - try again in a moment"), C_WARN); return; }
+            if (ids.Count == 0) return;
+            if (ids.Count > ApiClient.PC_DISCARD_BATCH_CAP) { Say(I18n.TrF("You can shard up to {0} cards at once", ApiClient.PC_DISCARD_BATCH_CAP), C_WARN); return; }
+            var batch = new List<ApiClient.PcPrint>();
+            var want = new HashSet<string>(ids, StringComparer.Ordinal);
+            foreach (var p in shown.prints) if (p != null && p.print_id != null && want.Remove(p.print_id)) batch.Add(p);
+            int traded;
+            int total = ShardTotal(batch, ids, out traded);
+            string set = DupesShardSet(shown.pack_id, ids);
+            if (!ShardConfirmed(set))
+            {
+                Say(I18n.TrF("Click Shard dupes again to shard {0} duplicates for {1} shards", ids.Count, total) + TradedNote(traded), C_WARN);
+                return;
+            }
+            string key = shardFlight.KeyFor(set, () => NewNonce());
+            SendShard(id, key, ids, null, null, shown.pack_id);
+        }
+
         private static void OnSelectClick()
         {
             if (shardInFlight) return;
@@ -3024,6 +3193,39 @@ namespace CompetitiveRounds
             SendShard(id, shardKey, ids, null);
         }
 
+        /// <summary>Item 18: the pull strip's Discard. Two clicks inside six
+        /// seconds, as every shard control: the first names what the card
+        /// pays and, when it is the player's last copy of that card, says so
+        /// (the player's call, never a block); the second sends ONE request,
+        /// the batch shard's route with this one print, keyed by a nonce kept
+        /// for this card until an answer arrives. Nothing on screen changes
+        /// until the server answers: the stamp and the balance come from the
+        /// answer (FinishShard and ApiClient.PcDiscardBatch).</summary>
+        private static void OnQuickShardClick(Tile t)
+        {
+            var p = t?.print; var id = LocalId();
+            if (p == null || id == null || p.discarded || shardInFlight || discardInFlight) return;
+            if (!SessionReady) { Say(ReasonText("session_required"), C_WARN); return; }
+            if (!ShardToken(p.print_id) || shardGone.Contains(p.print_id)) return;
+            // The last-copy count reads the collection: a positive signal, not
+            // a guess from the pack alone (the Shard pack's own rule).
+            var col = ApiClient.CachedPcCollection;
+            if (col == null) { ApiClient.FetchPcCollection(id, true); Say(I18n.Tr("Loading your binder - try again in a moment"), C_WARN); return; }
+            var one = new List<ApiClient.PcPrint> { p };
+            var ids = new List<string> { p.print_id };
+            string set = PcQuickShardRules.ArmSet(p.print_id);
+            if (!ShardConfirmed(set))
+            {
+                int traded;
+                int value = ShardTotal(one, ids, out traded);
+                Say(I18n.Tr("Click Discard again to discard that card for shards") + " (+" + value + ")"
+                    + OnlyCopyNote(one, col) + TradedNote(traded), C_WARN);
+                return;
+            }
+            string key = shardFlight.KeyFor(set, () => NewNonce());
+            SendShard(id, key, ids, null, p.print_id);
+        }
+
         private static void RefreshSelectRow(ApiClient.PcCollection col)
         {
             if (btnSelect == null) return;
@@ -3046,18 +3248,34 @@ namespace CompetitiveRounds
             UIFactory.SetImageColor(btnShardSel, ids.Count > 0 && SessionReady && !shardInFlight && !discardInFlight ? C_DANGER : C_BTN);
         }
 
-        private static void SendShard(string id, string key, List<string> ids, string packId)
+        /// <summary>quickPrintId: the pull-strip card a one-card shard is for
+        /// (item 18), null for a pack or a selection; dupesOf: the pack a
+        /// Shard dupes is for (fix pass 1, F3). Both are keyed by the flight's
+        /// own nonce and answered by FinishShard / FailShard's strip rules
+        /// (their `quick` flag).</summary>
+        private static void SendShard(string id, string key, List<string> ids, string packId, string quickPrintId = null, string dupesOf = null)
         {
-            shardInFlight = true; shardAt = Now; shardPackId = packId;
+            // F2: the request's generation. Its answer is checked against it
+            // twice: by ApiClient before the balance is written into the
+            // cache, and here before anything else is touched.
+            int serial = shardFlight.Begin(Now, packId, quickPrintId, dupesOf);
+            // A strip card and a Shard dupes are keyed by the flight's nonce,
+            // so their answers follow the strip's rules (F3).
+            bool keyed = quickPrintId != null || dupesOf != null;
             NativeUI.MarkDirty();
             int ep = uiEpoch;
-            Plugin.Log.LogInfo($"[PC] shard {(packId != null ? "pack" : "selection")}: {ids.Count} card(s)");
-            ApiClient.PcDiscardBatch(id, key, ids, (ok, resp) =>
+            Plugin.Log.LogInfo($"[PC] shard {(quickPrintId != null ? "quick" : dupesOf != null ? "dupes" : packId != null ? "pack" : "selection")}: {ids.Count} card(s)");
+            ApiClient.PcDiscardBatch(id, key, ids, () => ep == uiEpoch && shardFlight.IsCurrent(serial), (ok, resp) =>
             {
                 if (ep != uiEpoch) return;   // identity changed meanwhile (c4)
-                shardInFlight = false; shardPackId = null;
-                if (ok) FinishShard(id, resp, ids, packId);
-                else FailShard(id, resp, packId);
+                string code = ok ? null : resp == "not ready" ? "not_ready" : ApiClient.PcErrorCode(resp);
+                if (!shardFlight.Settle(serial, code))
+                {
+                    Plugin.Log.LogInfo($"[PC] shard: answer for request {serial} dropped (given up)");
+                    return;
+                }
+                if (ok) FinishShard(id, resp, ids, packId, keyed);
+                else FailShard(id, resp, packId, keyed);
                 NativeUI.MarkDirty();
             });
         }
@@ -3067,7 +3285,7 @@ namespace CompetitiveRounds
         /// the toast names the total the server credited (the balance in the
         /// answer was written into the cache by ApiClient). An answer that does
         /// not list exactly what was sent reads both back.</summary>
-        private static void FinishShard(string id, string resp, List<string> sent, string packId)
+        private static void FinishShard(string id, string resp, List<string> sent, string packId, bool quick = false)
         {
             var results = ApiClient.PcBatchResults(resp);
             int total = ApiClient.PcInt(ApiClient.PcTopLevel(resp, "shards_gained"));
@@ -3080,8 +3298,13 @@ namespace CompetitiveRounds
                 if (col != null) col.prints.RemoveAll(x => x.print_id == r.Key);
                 HistoryMarkDiscarded(r.Key, r.Value);
             }
+            // Fix pass 2, finding 1: the prints this answer removed are a
+            // confirmed write, so a collection read already on the wire (a
+            // retired shard's read-back included) cannot put them back.
+            if (results.Count > 0) ApiClient.PcAnswerFence.Wrote();
             selectedIds.RemoveAll(x => done.Contains(x));
-            if (packId == null) { shardKey = null; shardKeyFor = null; }
+            // a strip card's nonce was ended by PcShardFlight.Settle (a success)
+            if (!quick) { if (packId == null) { shardKey = null; shardKeyFor = null; } }
             if (results.Count != sent.Count) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
             if (n <= 0) n = results.Count;
             string msg = I18n.TrF("Sharded {0} cards for {1} shards", n, total);
@@ -3107,10 +3330,35 @@ namespace CompetitiveRounds
         /// nothing credited (all or none). A lost answer or a rate limit keeps
         /// the key, so asking again is a replay; a refusal that says the local
         /// copy is wrong reads the collection and the balance again.</summary>
-        private static void FailShard(string id, string resp, string packId)
+        private static void FailShard(string id, string resp, string packId, bool quick = false)
         {
             string code = ApiClient.PcErrorCode(resp);
             bool reread = false;
+            if (quick)
+            {
+                // Item 18: a strip card's refusal. Nothing on screen changed
+                // before the answer, so the card and the balance are still as
+                // they were; PcQuickShardRules says whether they are read
+                // back (every code but the rate limit and an unsent request:
+                // a lost answer included, whose outcome is unknown) and
+                // whether the card's key is kept for a replay.
+                // ApiClient refused to build the request (its "not ready"),
+                // which PcErrorCode would read as transport: nothing was sent.
+                // The card's nonce was kept or dropped by PcShardFlight.Settle
+                // (PcQuickShardRules.KeepKeyAfter) before this ran.
+                if (resp == "not ready") code = "not_ready";
+                if (code == "not_owned") foreach (var g in NamedPrintIds(resp)) { shardGone.Add(g); selectedIds.Remove(g); }
+                string say;
+                if (code == "not_owned") say = I18n.Tr("One of those cards is no longer in your collection - nothing was sharded; your binder has been refreshed");
+                else if (code == "key_reused") say = I18n.Tr("That shard was already done with other cards - your binder has been refreshed");
+                else if (code == "shard_batch_unavailable" || (code == "http" && ApiClient.PcHttpCode(resp) == 404))
+                    say = I18n.Tr("Shard pack is not available on this server yet - discard one card at a time for now");
+                else say = ReasonText(code);
+                Say(say, C_WARN);
+                Plugin.Log.LogInfo($"[PC] quick shard refused: {code}");
+                if (PcQuickShardRules.ReadBackAfter(code) && id != null) { ApiClient.FetchPcCollection(id, true); ApiClient.FetchPcMe(id, true); }
+                return;
+            }
             switch (code)
             {
                 case "not_owned":
@@ -4201,6 +4449,10 @@ namespace CompetitiveRounds
             int drawn = 0;
             foreach (var p in ans.get)
                 if (p != null && !p.gone && !string.IsNullOrEmpty(p.print_id) && !col.prints.Exists(x => x.print_id == p.print_id)) { col.prints.Add(p); drawn++; }
+            // Fix pass 2, finding 1 (the sibling writer): the accept's prints
+            // are a confirmed write, so a collection read already on the wire
+            // cannot undo them before AfterTradeAction's forced read lands.
+            ApiClient.PcAnswerFence.Wrote();
             Plugin.Log.LogInfo("[PC-TRADE-SENTINEL] accept drew received=" + drawn + " gave=" + gave.Count);
         }
 
@@ -5017,7 +5269,16 @@ namespace CompetitiveRounds
                 ApiClient.FetchPcMe(id, true, (ok2, r2) =>
                 {
                     if (ep != uiEpoch) return;
-                    try { PortraitRender.OnTabVisit(); } catch { }   // the picture check (S5.8): a dance picture, or the still without one
+                    // Item 18 fix pass 5, finding 10: this callback is heard
+                    // at most once, and with ok2 only once the answer of a
+                    // /pc/me read sent for or after this ask is cached, never
+                    // that of a read already on the wire when it was asked
+                    // (FetchPcMe keeps it waiting while an older read flies,
+                    // PcReadDemand). So the picture check is armed only here,
+                    // against the post-selection answer. A failed or refused
+                    // answer cached nothing, so it arms no check against the
+                    // answer from before the selection; the next visit checks.
+                    if (ok2) { try { PortraitRender.OnTabVisit(); } catch { } }   // the picture check (S5.8): a dance picture, or the still without one
                     NativeUI.MarkDirty();
                 });
                 NativeUI.MarkDirty();

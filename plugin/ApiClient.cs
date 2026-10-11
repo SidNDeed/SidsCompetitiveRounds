@@ -4742,6 +4742,59 @@ namespace CompetitiveRounds
         private static bool pcMeInFlight, pcCollInFlight;
         private static float pcMeAttemptAt = -100f, pcCollAttemptAt = -100f;   // the throttle keys on the last ATTEMPT, so a failing fetch is not re-fired by every repaint
         private static int _pcCacheEpoch;   // advanced on every identity edge (c4): a landing from an older epoch never touches the cache
+        /// <summary>Item 18 fix pass 2, finding 1: the generation of the two
+        /// caches' confirmed writes (PcCacheFence). FetchPcMe and
+        /// FetchPcCollection stamp it at dispatch and land only if it has not
+        /// moved; the writers that apply a server confirmation (a shard's or a
+        /// discard's balance and removed prints, a trade accept's drawn
+        /// prints) move it.</summary>
+        internal static readonly PcCacheFence PcAnswerFence = new PcCacheFence();
+        /// <summary>Item 18 fix pass 3, finding 2: the prints a refused
+        /// shard's not_owned named (PcShardTombstones; PlayerCardsUI reads
+        /// and writes it as shardGone). It lives here because the reads that
+        /// lift a tombstone land here: FetchPcCollection numbers each read at
+        /// dispatch and, when a read lands, lifts every tombstone written
+        /// before that dispatch whose print the read holds, so a print traded
+        /// away and back returns to the pull tab's walks.</summary>
+        internal static readonly PcShardTombstones PcShardGone = new PcShardTombstones();
+        /// <summary>Item 18 fix pass 4, finding 7: a forced /pc/me read asked
+        /// for while one is already on the wire (PcReadDemand). FetchPcMe
+        /// remembers it, bound to the identity generation it was asked in,
+        /// and once the read on the wire lands a fresh read is sent: that
+        /// older answer never answers it. ReleasePcReadLatches releases it at
+        /// an identity or consent edge. Fix pass 5, finding 10: a forced
+        /// ask's callback waits here too, and is heard once, from the first
+        /// read dispatched after the ask that lands with its answer taken
+        /// (PcReadDemand.Answered); the edge drops it unheard.</summary>
+        internal static readonly PcReadDemand PcMeDemand = new PcReadDemand();
+        // A read the fence dropped is owed (with the callers that waited on
+        // it) until PcSendOwedReads sends it again; an identity edge clears it.
+        private static bool pcMeReadOwed, pcCollReadOwed;
+        private static Action<bool, string> pcMeOwedCallback, pcCollOwedCallback;
+        internal static bool PcReadsOwed { get { return pcMeReadOwed || pcCollReadOwed; } }
+
+        /// <summary>Fix pass 2, finding 1: sends each read the fence dropped,
+        /// once, stamped now. PlayerCardsUI's tick calls it only while no
+        /// shard and no discard is out, so the read it sends is not itself
+        /// dropped by an answer of the same run, and one dropped read costs
+        /// at most one more request.</summary>
+        internal static void PcSendOwedReads(string steamId)
+        {
+            if (string.IsNullOrEmpty(steamId) || steamId == "unknown") return;
+            if (pcMeReadOwed && !pcMeInFlight)
+            {
+                pcMeReadOwed = false;
+                var cb = pcMeOwedCallback; pcMeOwedCallback = null;
+                FetchPcMe(steamId, true, cb);
+            }
+            if (pcCollReadOwed && !pcCollInFlight)
+            {
+                pcCollReadOwed = false;
+                var cb = pcCollOwedCallback; pcCollOwedCallback = null;
+                pcCollAttemptAt = -100f;
+                FetchPcCollection(steamId, true, cb);
+            }
+        }
 
         /// <summary>The identity/consent generation. It is bumped by
         /// OnLocalIdentityChanged and by the consent revoke, before either clears
@@ -4771,21 +4824,76 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(steamId) || steamId == "unknown") { callback?.Invoke(false, "no-id"); return; }
             if (!force && Time.realtimeSinceStartup - pcMeAttemptAt < 10f) { callback?.Invoke(CachedPcMe != null, null); return; }
-            if (pcMeInFlight) { callback?.Invoke(false, "in-flight"); return; }
+            if (pcMeInFlight)
+            {
+                // Fix pass 4, finding 7: a forced read is DEMAND (a failed,
+                // refused or unanswered shard's balance read-back among
+                // them), and the read already on the wire (the tab's 30 s
+                // read, for one) was dispatched before whatever made the
+                // caller ask, so its answer is not proven newer than that.
+                // When a shard committed with no answer this client
+                // admitted, nothing moved the answer fence, so that older
+                // read lands, and the balance it installs may be the one
+                // from before the commit. The demand is remembered
+                // (PcMeDemand, bound to this generation), and a fresh read
+                // is sent once the older one lands.
+                //
+                // Fix pass 5, finding 10: a forced ask's callback is a caller
+                // waiting for a read newer than its ask (the dance
+                // selection's picture check, PlayerCardsUI.MaybeSendDance),
+                // so it is no longer answered "in-flight" here. It waits
+                // with the demand (PcMeDemand) and is heard once, from the
+                // first read dispatched after this ask that lands with its
+                // answer taken, never from the older read, which is not
+                // proven newer than the ask; an identity or consent edge
+                // drops it unheard.
+                if (force) { PcMeDemand.Demand(steamId, _pcCacheEpoch, callback); return; }
+                callback?.Invoke(false, "in-flight");
+                return;
+            }
             pcMeInFlight = true; pcMeAttemptAt = Time.realtimeSinceStartup;
             float dispatched = pcMeAttemptAt;
             string url = PcUrl("me", steamId, $"pcread:{steamId}:me:-", null);
             int epoch = _pcCacheEpoch;
+            int fence = PcAnswerFence.Stamp();
+            int read = PcMeDemand.Dispatched();   // fix pass 4, finding 7: which demand this read can answer
             Plugin.Instance.StartCoroutine(GetRequest(url, (ok, resp) =>
             {
                 pcMeInFlight = false;
+                // Fix pass 4, finding 7: whatever this answer is, a demand
+                // made while it was on the wire is closed here. This read was
+                // dispatched before that demand, so it never answers it; a
+                // fresh read is sent the next frame (PcMeReadAgain) unless
+                // the fence drops this answer, whose owed read is dispatched
+                // later and answers it. A demand of another generation is
+                // dropped.
+                string again = PcMeDemand.Landed(read, _pcCacheEpoch);
                 if (epoch != _pcCacheEpoch)
                 {
                     // dispatched for a previous identity: never repaint the cache (c4)
                     Plugin.Log.LogInfo("[PC] me answer dropped: identity changed");
+                    PcMeReadAgain(again);   // a demand the current identity made while this one flew
                     try { callback?.Invoke(false, "stale-identity"); } catch { }
                     return;
                 }
+                if (ok && !PcAnswerFence.Admits(fence))
+                {
+                    // Fix pass 2, finding 1: a confirmed write (a shard's or a
+                    // discard's balance) landed while this read was on the
+                    // wire, so its balance may predate it. Dropped; the read
+                    // is OWED and sent again by PcSendOwedReads once no shard
+                    // or discard is out (never mid-run: a re-read per discard
+                    // answer is the request shape C2 removed). The caller
+                    // hears that read. That read, dispatched later, also
+                    // answers a demand made while this one flew (fix pass 4,
+                    // finding 7), so no second read is sent for it, and the
+                    // callbacks left waiting are heard from it, not from this
+                    // answer, which is not taken (fix pass 5, finding 10).
+                    Plugin.Log.LogInfo("[PC] me answer dropped: a confirmed write landed while it was in flight; read owed");
+                    pcMeReadOwed = true; if (callback != null) pcMeOwedCallback += callback;
+                    return;
+                }
+                PcMeReadAgain(again);   // fix pass 4, finding 7: this answer lands, then the demand's own read goes
                 if (ok)
                 {
                     var me = ParsePcMe(resp);
@@ -4795,6 +4903,17 @@ namespace CompetitiveRounds
                 else { PcMeError = resp; Plugin.Log.LogInfo($"[PC] me fetch failed: {PcShort(resp)}"); }
                 try { NativeUI.MarkDirty(); } catch { }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] me callback threw: {cex.Message}"); }
+                // Fix pass 5, finding 10: then each callback a forced ask left
+                // waiting while an older read flew, this read being the first
+                // dispatched after that ask to land with its answer taken:
+                // heard once, with this answer, after it is cached (or has
+                // failed). Never on the stale-identity or fence-drop paths
+                // above, which take no answer: there the read sent next
+                // answers it.
+                var waited = PcMeDemand.Answered(read, _pcCacheEpoch);
+                if (waited != null)
+                    foreach (var w in waited)
+                        try { w(ok, resp); } catch (Exception wex) { Plugin.Log.LogWarning($"[PC] me waiting callback threw: {wex.Message}"); }
             }, detailedErrors: true, sessionAware: true));
         }
 
@@ -4819,6 +4938,8 @@ namespace CompetitiveRounds
             pcCollInFlight = true; pcCollAttemptAt = Time.realtimeSinceStartup;
             string url = PcUrl("collection", steamId, $"pcread:{steamId}:collection:-", null);
             int epoch = _pcCacheEpoch;
+            int fence = PcAnswerFence.Stamp();
+            int read = PcShardGone.Dispatched();   // fix pass 3, finding 2: which tombstones this read may lift
             // The prints carry a face_locale and the faces are cached by it, so
             // the answer describes the language it was ASKED in. Committing one
             // asked in the previous language leaves every face keyed to a locale
@@ -4848,6 +4969,18 @@ namespace CompetitiveRounds
                     FetchPcCollection(who, true, callback);
                     return;
                 }
+                if (ok && !PcAnswerFence.Admits(fence))
+                {
+                    // Fix pass 2, finding 1: a confirmed write (prints a shard,
+                    // a discard or a trade accept removed or drew) landed while
+                    // this read was on the wire, so its prints may predate it.
+                    // Dropped; the read is OWED (PcSendOwedReads, as /pc/me's),
+                    // and that read also answers any demand remembered
+                    // meanwhile. The caller hears that read.
+                    Plugin.Log.LogInfo("[PC] collection answer dropped: a confirmed write landed while it was in flight; read owed");
+                    pcCollReadOwed = true; if (callback != null) pcCollOwedCallback += callback;
+                    return;
+                }
                 if (again)
                 {
                     // something demanded a fresh read while this one was on the
@@ -4860,7 +4993,18 @@ namespace CompetitiveRounds
                 if (ok)
                 {
                     var col = ParsePcCollection(resp);
-                    if (col != null) { CachedPcCollection = col; PcCollectionFetchedAt = Time.realtimeSinceStartup; PcCollectionError = null; }
+                    if (col != null)
+                    {
+                        CachedPcCollection = col; PcCollectionFetchedAt = Time.realtimeSinceStartup; PcCollectionError = null;
+                        // Fix pass 3, finding 2: this landed read is the current
+                        // ownership, so every not_owned tombstone written before
+                        // it was dispatched whose print it holds live is lifted:
+                        // a print traded away and back is the player's again.
+                        var held = new List<string>();
+                        if (col.prints != null)
+                            foreach (var p in col.prints) if (p != null && p.print_id != null && !p.discarded && !p.gone) held.Add(p.print_id);
+                        PcShardGone.Reconcile(held, read);
+                    }
                     else { PcCollectionError = "parse"; ok = false; }
                 }
                 else { PcCollectionError = resp; Plugin.Log.LogInfo($"[PC] collection fetch failed: {PcShort(resp)}"); }
@@ -4883,6 +5027,38 @@ namespace CompetitiveRounds
                 yield break;
             }
             FetchPcCollection(steamId, true);
+        }
+
+        /// <summary>Fix pass 4, finding 7: the fresh /pc/me read that a
+        /// demand made while a read was on the wire asks for, once that read
+        /// has landed (PcMeDemand.Landed named the identity), sent the next
+        /// frame. Null: nothing was demanded.</summary>
+        private static void PcMeReadAgain(string steamId)
+        {
+            if (steamId == null) return;
+            try { Plugin.Instance.StartCoroutine(RefetchPcMeNextFrame(steamId, _pcCacheEpoch)); } catch { }
+        }
+
+        /// <summary>Fix pass 4, finding 7: the next-frame /pc/me re-read,
+        /// bound to the Player Cards generation that scheduled it (TC-M2, as
+        /// RefetchCollectionNextFrame): an identity or consent edge before
+        /// the frame comes round drops it. A read on the wire by then was
+        /// sent after the older answer landed, so after the demand: it
+        /// answers the demand, and no second read is sent.</summary>
+        private static IEnumerator RefetchPcMeNextFrame(string steamId, int genAtSchedule)
+        {
+            yield return null;                       // let the older answer commit first
+            if (!PcTradeRules.GenerationCurrent(genAtSchedule, _pcCacheEpoch))
+            {
+                Plugin.Log.LogInfo("[PC] me deferred re-read dropped: identity changed gen_at_schedule=" + genAtSchedule + " gen_now=" + _pcCacheEpoch);
+                yield break;
+            }
+            if (pcMeInFlight)
+            {
+                Plugin.Log.LogInfo("[PC] me deferred re-read not sent: a read sent after the demand is on the wire");
+                yield break;
+            }
+            FetchPcMe(steamId, true);
         }
 
         /// <summary>Buy and open a pack. The caller persists its intent (nonce,
@@ -4937,17 +5113,26 @@ namespace CompetitiveRounds
             }));
         }
 
-        public static void PcDiscard(string steamId, string printId, Action<bool, string> callback)
+        /// <summary>One print discarded: a step of the binder's per-copy run
+        /// (PlayerCardsUI.DiscardNext), one request per copy. The balance in
+        /// the answer is written into the cache before the callback runs, and
+        /// moves PcAnswerFence, only while `current` says the step is still
+        /// the caller's current run (item 18 fix pass 3, finding 4:
+        /// PcQuickShardRules.DiscardStepCurrent, PcDiscardBatch's
+        /// PcShardFlight.Admits(current) rule). A run given up whose answer
+        /// arrives late therefore changes neither the cached balance nor the
+        /// fence. A null `current` writes none (Admits fails closed).</summary>
+        public static void PcDiscard(string steamId, string printId, Func<bool> current, Action<bool, string> callback)
         {
             string url = PcUrl("prints/discard", steamId, $"pcdiscard:{steamId}:{printId}", $"print_id={printId}");
             int epoch = _pcCacheEpoch;
             Plugin.Instance.StartCoroutine(PostRequest(url, "", (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[PC] discard {printId} ok={ok} resp={PcShort(resp)}");
-                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))
                 {
                     string sh = PcTopLevel(resp, "shards");
-                    if (sh != null) CachedPcMe.shards = PcInt(sh);
+                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }
                 }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] discard callback threw: {cex.Message}"); }
             }));
@@ -4969,8 +5154,14 @@ namespace CompetitiveRounds
         /// written into the JSON body as they are, so both must be plain tokens
         /// ([A-Za-z0-9-], at most 64): anything else is refused here, unsent.
         /// The balance in the answer is written into the cache before the
-        /// callback runs, as the single discard does.</summary>
-        public static void PcDiscardBatch(string steamId, string key, IList<string> printIds, Action<bool, string> callback)
+        /// callback runs, as the single discard does -- and only while
+        /// `current` says the request is still the caller's current one
+        /// (item 18 fix pass 1, F2: PcShardFlight's generation), so a request
+        /// given up whose answer arrives late writes no balance. A null
+        /// `current` writes none (PcShardFlight.Admits fails closed). A
+        /// balance it does write moves PcAnswerFence (fix pass 2, finding 1),
+        /// so a read already on the wire cannot put the older balance back.</summary>
+        public static void PcDiscardBatch(string steamId, string key, IList<string> printIds, Func<bool> current, Action<bool, string> callback)
         {
             if (Plugin.Instance == null || !PcPlainToken(key) || printIds == null || printIds.Count == 0
                 || printIds.Count > PC_DISCARD_BATCH_CAP)
@@ -4991,10 +5182,10 @@ namespace CompetitiveRounds
             Plugin.Instance.StartCoroutine(PostRequest(url, body.ToString(), (ok, resp) =>
             {
                 Plugin.Log.LogInfo($"[PC] discard-batch key={key} prints={count} ok={ok} resp={PcShort(resp)}");
-                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null)
+                if (ok && epoch == _pcCacheEpoch && CachedPcMe != null && PcShardFlight.Admits(current))
                 {
                     string sh = PcTopLevel(resp, "shards");
-                    if (sh != null) CachedPcMe.shards = PcInt(sh);
+                    if (sh != null) { CachedPcMe.shards = PcInt(sh); PcAnswerFence.Wrote(); }
                 }
                 try { callback?.Invoke(ok, resp); } catch (Exception cex) { Plugin.Log.LogWarning($"[PC] discard-batch callback threw: {cex.Message}"); }
             }));
@@ -5039,8 +5230,13 @@ namespace CompetitiveRounds
 
         /// <summary>Compare-and-set one setting: the revision the caller read
         /// must still be current (409 stale_revision otherwise). The answer is
-        /// the full settings row and is written into the cache before the
-        /// callback runs.</summary>
+        /// the full settings row; its settings and its revision are written
+        /// into the cache before the callback runs, its shard balance is not
+        /// (fix pass 3, finding 5). That balance is the one the server read
+        /// when this write committed: a shard confirmed while the answer was
+        /// on the wire installs a newer balance, which this answer landing
+        /// later would put back. The cached balance comes from the /pc/me
+        /// answer and the discard answers only (PcApplySettings).</summary>
         public static void PcSetSetting(string steamId, string nonce, int revision, string key, int value, Action<bool, string> callback)
         {
             string url = PcUrl("settings", steamId, $"pcset:{steamId}:{nonce}:{revision}:{key}:{value}",
@@ -5165,6 +5361,12 @@ namespace CompetitiveRounds
             pcTradeSummaryInFlight = false; pcTradesInFlight = false;
             pcCollInFlight = false; pcCollForceAgain = false;
             pcCollOfInFlight = false;
+            // fix pass 2, finding 1: a read owed to the previous identity is not sent
+            pcMeReadOwed = false; pcCollReadOwed = false; pcMeOwedCallback = null; pcCollOwedCallback = null;
+            // fix pass 4, finding 7: nor a balance read the previous identity
+            // demanded; fix pass 5, finding 10: and the callbacks its forced
+            // asks left waiting are dropped unheard
+            PcMeDemand.Clear();
         }
 
         /// <summary>GET /pc/trades?view=summary, HMAC over
@@ -6003,13 +6205,22 @@ namespace CompetitiveRounds
             return list;
         }
 
+        /// <summary>The settings and the revision of a settings object, never
+        /// the shard balance (fix pass 3, finding 5). Two callers: ParsePcMe,
+        /// whose settings object carries no balance and which reads the
+        /// answer's top-level shards itself, and PcSetSetting, whose answer
+        /// row carries the balance as of its own commit, older than any shard
+        /// confirmed while that answer was on the wire. The cached balance is
+        /// written by three answers only: /pc/me (ParsePcMe, installed by
+        /// FetchPcMe through the answer fence) and the two discard answers
+        /// (PcDiscard, PcDiscardBatch, each current and each moving the
+        /// fence).</summary>
         private static void PcApplySettings(PcMe me, string settingsObj)
         {
             if (me == null || string.IsNullOrEmpty(settingsObj)) return;
             if (PcHas(settingsObj, "collection_public")) me.collection_public = PcBool(PcTopLevel(settingsObj, "collection_public"));
             if (PcHas(settingsObj, "announce")) me.announce = PcBool(PcTopLevel(settingsObj, "announce"));
             if (PcHas(settingsObj, "revision")) me.revision = PcInt(PcTopLevel(settingsObj, "revision"));
-            if (PcHas(settingsObj, "shards")) me.shards = PcInt(PcTopLevel(settingsObj, "shards"));
             if (PcHas(settingsObj, "trades_open")) { me.trades_open = PcBool(PcTopLevel(settingsObj, "trades_open")); me.has_trades_open = true; }
         }
 

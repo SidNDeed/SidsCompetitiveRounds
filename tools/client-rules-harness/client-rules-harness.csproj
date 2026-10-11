@@ -151,6 +151,7 @@
     <Compile Include="../../plugin/FfaReportRules.cs" />
     <Compile Include="../../plugin/RosterCensusRules.cs" />
     <Compile Include="../../plugin/BinderSortRules.cs" />
+    <Compile Include="../../plugin/PcQuickShardRules.cs" />
     <Compile Include="../../plugin/TitleLadderRules.cs" />
     <Compile Include="TitleLadderRulesSelfTest.cs" />
     <Compile Include="../../plugin/SettingsModel.cs" />

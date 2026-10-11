@@ -29440,29 +29440,9 @@ async def pc_discard_print(
     await db.execute(text("SELECT id FROM players WHERE id = CAST(:pid AS uuid) FOR NO KEY UPDATE"), {"pid": pid})
     # Card trading (migration 353, V8 3.9): a print ever received by trade
     # discards for PC_TRADE['traded_discard_shards'] whatever its rarity
-    # (F1). The flag is a column of the print, so no retention step can
-    # change what a print pays. The probe runs here, after the owner lock:
-    # an accept that flagged this owner's print held the same players row,
-    # so it has committed. Found (ready / off): the flag governs.
-    # partial / unknown / broken: 503 and nothing paid of either kind -- no
-    # value is provably right (F29, F36). A positively confirmed
-    # schema_missing: the legacy branch, which reads the column's own
-    # existence in a savepoint (present: the flag governs; absent: today's
-    # value, right because the column is never dropped, so no print ever
-    # carried the flag; the read raising: 503).
-    word = await _pc_trading_word(db)
-    if word in ("ready", "off"):
-        flag_governs = True
-    elif word == "schema_missing":
-        try:
-            async with db.begin_nested():
-                flag_governs = bool((await db.execute(text(_PC_TRADE_FLAG_COLUMN_SQL))).scalar_one())
-        except Exception:
-            await db.rollback()
-            raise HTTPException(status_code=503, detail={"error": "trading_unavailable"})
-    else:
-        await db.rollback()
-        raise HTTPException(status_code=503, detail={"error": "trading_unavailable"})
+    # (F1). The probe runs here, after the owner lock; the rule is
+    # _pc_traded_rule_governs, which the batch route runs too.
+    flag_governs = await _pc_traded_rule_governs(db)
     rarity = (await _pc_discard_gate(db, pid, [norm])).get(norm)
     if rarity is None:
         await db.rollback()
@@ -29527,6 +29507,45 @@ async def _pc_discard_gate(db: AsyncSession, pid: str, print_ids: list) -> dict:
     asks for, not a refusal here -- a product decision that may change."""
     rows = (await db.execute(text(_PC_DISCARD_GATE_SQL), {"ids": list(print_ids), "pid": pid})).mappings().all()
     return {r["id"]: r["rarity"] for r in rows}
+
+
+async def _pc_traded_rule_governs(db: AsyncSession) -> bool:
+    """Whether the traded-discard rule (migration 353, V8 3.9) is read from
+    the print's acquired_by_trade flag in this discard. BOTH discard routes
+    call it under the caller's players-row lock, before the gate and before
+    any write, so a print received by trade pays
+    PC_TRADE['traded_discard_shards'] whichever route discards it. The flag
+    is a column of the print, so no retention step can change what a print
+    pays; an accept that flagged this owner's print held the same players
+    row, so it has committed. Found (ready / off): True. partial / unknown /
+    broken: the transaction is rolled back and the request answers 503
+    trading_unavailable, nothing paid of either kind -- no value is provably
+    right (F29, F36). A positively confirmed schema_missing: the legacy
+    branch, which reads the column's own existence in a savepoint (present:
+    True; absent: False, the rarity value, right because the column is
+    never dropped, so no print ever carried the flag; the read raising:
+    503)."""
+    word = await _pc_trading_word(db)
+    if word in ("ready", "off"):
+        return True
+    if word == "schema_missing":
+        try:
+            async with db.begin_nested():
+                return bool((await db.execute(text(_PC_TRADE_FLAG_COLUMN_SQL))).scalar_one())
+        except Exception:
+            await db.rollback()
+            raise HTTPException(status_code=503, detail={"error": "trading_unavailable"})
+    await db.rollback()
+    raise HTTPException(status_code=503, detail={"error": "trading_unavailable"})
+
+
+# The prints among a batch's (already gated, so the caller's and live) that
+# were ever received by trade. Run only where _pc_traded_rule_governs said
+# the flag governs, so the column exists.
+_PC_TRADED_AMONG_SQL = """
+    SELECT id::text AS id FROM pc_prints
+     WHERE id = ANY(CAST(:ids AS uuid[])) AND owner_player_id = CAST(:pid AS uuid) AND acquired_by_trade
+"""
 
 
 _PC_BATCH_KEY_RE = _re.compile(r"[A-Za-z0-9-]{8,64}")
@@ -29598,11 +29617,16 @@ async def pc_discard_batch(
         stored total again and credits nothing (replayed: true); with a
         different set it is refused, nothing done (409 key_reused) --
         however old the key is, because its row is never pruned;
+      * the traded-discard rule the single route reads
+        (_pc_traded_rule_governs) is established first; when it cannot
+        be, 503 trading_unavailable and nothing discarded or credited;
       * the gate the single route shares (_pc_discard_gate) locks every
         print in print-id order; one print not the caller's or already
         discarded refuses the whole batch, nothing discarded (404
         not_owned, naming them);
-      * each print's conditional discard at its rarity's value, their
+      * each print's conditional discard at the single route's value (a
+        print ever received by trade: PC_TRADE['traded_discard_shards'];
+        any other: its rarity's value), their
         delivery leases dropped, ONE delta credit of the total (never an
         absolute write, #326) and the key's row, committed together; a
         row for the key that is there anyway (the primary key on (player,
@@ -29676,15 +29700,29 @@ async def pc_discard_batch(
                 "shards_gained": int(prior["shards_gained"]), "shards": int(balance),
                 "results": [{"print_id": r["id"], "rarity": r["rarity"],
                              "shards_gained": int(r["discard_shards"] or 0)} for r in rows]}
+    # The traded-discard rule, the single route's own (_pc_traded_rule_governs):
+    # established before the gate and before any write, or 503
+    # trading_unavailable with the transaction rolled back and nothing
+    # discarded or credited. A replay above pays nothing, so it needs no rule.
+    flag_governs = await _pc_traded_rule_governs(db)
     found = await _pc_discard_gate(db, pid, order)
     missing = [p for p in order if p not in found]
     if missing:
         await db.rollback()
         raise HTTPException(status_code=404, detail={"error": "not_owned", "print_ids": missing})
+    # The gate locked every row; the flag is read from them only where the
+    # column governs, never as a second ownership check.
+    traded = set()
+    if flag_governs:
+        traded = {r for r in (await db.execute(text(_PC_TRADED_AMONG_SQL),
+                                               {"ids": order, "pid": pid})).scalars().all()}
     results, total = [], 0
     for p in order:
         rarity = found[p]
-        value = _pc.shards_for(rarity)
+        if p in traded:
+            value = int(_pc.PC_TRADE["traded_discard_shards"])
+        else:
+            value = _pc.shards_for(rarity)
         done = (await db.execute(text("""
             UPDATE pc_prints SET discarded_at = now(), discard_shards = CAST(:value AS integer)
              WHERE id = CAST(:print AS uuid) AND owner_player_id = CAST(:pid AS uuid) AND discarded_at IS NULL

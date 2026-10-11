@@ -131,6 +131,49 @@ def test_the_binder_sort_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= 38, "the BinderSortRules suite shrank to %d cases" % run
 
 
+def test_the_quick_shard_suite_ran_every_case_and_none_failed(harness_run):
+    """Item 18: the pull strip's per-card shard rules (PcQuickShardRules)."""
+    suites = _suites(harness_run)
+    assert "quickshard" in suites, "the PcQuickShardRules suite did not report"
+    run, fail, verdict = suites["quickshard"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[quickshard\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The suite ran 27 cases on the commit that added it, 45 once fix pass 1
+    # added the batch shard's generation cases (PcShardFlight, finding 2),
+    # 60 once it added Shard dupes' duplicate cases (finding 3), 70 once fix
+    # pass 2 added the read-back fence's recovery cases (PcCacheFence,
+    # finding 1), 80 once it added the ownership cases (finding 2), 98 once
+    # fix pass 3 added the tombstone path's cases (PcShardTombstones,
+    # finding 2), 107 once it added the single-discard late-answer cases
+    # (finding 4), 112 once it added the settings late-answer cases (finding
+    # 5), 133 once fix pass 4 added the balance demand's cases (PcReadDemand,
+    # finding 7), 155 once fix pass 5 added the dance selection's cases
+    # (PcReadDemand's waiting callbacks, finding 10) (#342: a floor near the
+    # real count). Raise it when cases are added.
+    assert run >= 155, "the PcQuickShardRules suite shrank to %d cases" % run
+
+
+# Item 18 fix pass 4, finding 7 (Q5): the balance read-back a failed, refused
+# or unanswered shard asks for while a /pc/me read is already on the wire.
+# The overlap is EXECUTED over PcReadDemand, the class FetchPcMe runs; each
+# case must have run and passed, by name.
+@pytest.mark.parametrize("name", [
+    "me overlap: a balance read-back asked while the 30 s read flies is sent once that read lands, and the committed balance is cached",
+    "me overlap: the older read never answers it: it lands its balance from before the commit, and a fresh read is scheduled",
+    "me overlap: two reads in all, the 30 s one and the demand's own",
+    "me overlap: the same when the older read fails",
+    "control: without the latch (59fcf3f6's FetchPcMe) the read-back asked while the 30 s read flies is lost",
+    "control: and the balance from before the commit stays cached",
+    "me demand: a read-back asked with no read on the wire is sent at once: one read, the committed balance, no demand",
+    "me demand: exactly as 59fcf3f6 sent it",
+])
+def test_q5_the_balance_demand_overlap_ran_and_each_case_passed(harness_run, name):
+    line = _named_case(harness_run, name, "quickshard")
+    assert line.startswith("[quickshard] PASS"), line
+
+
 @pytest.mark.parametrize("name", [
     # the ordering rule itself
     "a ranked subject precedes an off-board subject",
