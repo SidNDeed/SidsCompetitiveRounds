@@ -1,7 +1,8 @@
 """Bar B7 over every file the FAQ refresh's client lane touches: no
 drive-letter or home-directory path, no reference into the gitignored scratch
-tree or a local sandbox checkout, no tester's handle, and no attribution to
-anybody but the maintainer, on any line of any of those files.
+tree or a local sandbox checkout, no tester's handle, no account label or
+account number, and no attribution to anybody but the maintainer, on any line
+of any of those files.
 
 WHY WHOLE FILES. The FAQ server lane handed plugin/I18nCatalogues.cs and
 plugin/NativeUI.cs back to the client lane carrying thirteen references into
@@ -17,17 +18,26 @@ scope must have been touched by one. The sweep itself needs no history.
 
 THE DETECTOR is the FAQ server lane's (backend/tests/test_faq_surfaces.py,
 its section 3), ported with its salt, its handle digests and its attribution
-shapes unchanged, so the two lanes refuse the same things. Three differences,
-each stated where it lives below: words are Unicode words; one handle is
-added; and shipped product strings that name a community member on purpose
-are exempt by their exact English text, on catalogue lines only.
+shapes unchanged, so this lane refuses everything that one does. Five
+differences, each stated where it lives below: words are Unicode words; one
+handle is added; shipped product strings that name a community member on
+purpose are exempt by their exact English text, on catalogue lines only; an
+attribution may carry the maintainer's name and no other name (the server
+lane's escapes for any one-letter word and any word in capitals are gone, and
+the words that are not people are listed one by one); and account labels and
+account numbers are refused by their shape wherever they stand.
 
-THE DETECTOR DOES NOT SPELL ITS OWN TARGET. This module is in the scope, so a
-pattern written as a literal would match its own source, and the only way to
-keep it green would be to exclude it, which is how a check stops being able
-to fail. Tokens are assembled from pieces, paths are written as patterns and
-never as examples, and handles and product strings appear only as digests.
-A hit is reported by file, line and class, never by quoting it.
+THE DETECTOR DOES NOT SPELL ITS OWN TARGET, AND EXEMPTS NO IDENTIFIER. This
+module is in the scope, so a pattern written as a literal would match its own
+source, and the only way to keep it green would be to exclude it, which is how
+a check stops being able to fail. Tokens are assembled from pieces, paths are
+written as patterns and never as examples, handles and product strings appear
+only as digests, and an account label only as a shape built from the
+maintainer's name. These files describe a seat by its role (the second seat),
+never by its label, so the gate holds no label to let through, and
+test_the_gate_lets_no_identifier_through keeps it so. A hit is reported by
+file, line and class, never by quoting it, and the tests below assert on
+counts and flags computed beforehand, so a failure quotes nothing either.
 """
 import hashlib
 import os
@@ -109,6 +119,24 @@ _PRODUCT_STRING_DIGESTS = frozenset([
     "1ef54f70e82d18a69517bc7faceb52f338049d85153b94dd417b4faf3f0a1fa8",
 ])
 
+# THE MAINTAINER (difference 4): the one name an attribution may carry, alone.
+_MAINTAINER = "Sid"
+
+# ACCOUNT LABELS AND NUMBERS (difference 5). A seat's account is labelled with
+# the maintainer's name joined to the seat's number. Such a label names a
+# seat, and these files describe a seat by its role, so the label is refused
+# wherever it stands, not only where an attribution shape meets it (no shape
+# sees a label inside a parenthesis). The shape: the name capitalised or in
+# capitals, then a digit, joined directly or by an underscore or a hyphen, or
+# after one space when the digit does not begin a number, a time or a range.
+# The lower-case form is not a name: in these files it is the code's own
+# steam-id variables. An account number is any 17-digit run, the class every
+# evidence log of this lane masks.
+_ACCOUNT_LABEL = re.compile(
+    r"(?<![A-Za-z0-9_])(?:" + _MAINTAINER + "|" + _MAINTAINER.upper() + r")"
+    r"(?:[_-]?[0-9]|\s[0-9](?![0-9:/-]))")
+_ACCOUNT_NUMBER = re.compile(r"(?<![0-9])[0-9]{17}(?![0-9])")
+
 _NAME = r"([A-Z][A-Za-z0-9_]*)"
 _ATTRIBUTION_SHAPES = (
     re.compile(_NAME + r"(?:/[A-Za-z0-9_]+)*\s+(?:reported|noticed|asked|"
@@ -122,16 +150,21 @@ _ATTRIBUTION_SHAPES = (
     re.compile(r"\b[Bb]ug\s*#?\d+\s*[(,:\-—]\s*" + _NAME),
     re.compile(r"\((?:per|via|from|thanks|h/t|cc)\s+" + _NAME + r"\s*[),]"),
 )
-# Words the shapes meet in these files that are not people: the server lane's
-# list, plus the maintainer's second test seat, the C# types that precede
-# "found" in declarations ("ClickHandler found = null;"), the update method a
-# comment says it is called from ("(from Tick, ..."), the generic noun in
-# "User reported", and the tab a bug title names ("Bug #130: My Stats").
+# Words the shapes meet in these files that are not people (difference 4).
+# The server lane lets through any one-letter word and any word in capitals,
+# and so would let through a name written that way; here every capture is
+# refused unless it is the maintainer or one of these, and each of these is a
+# word the shapes actually meet in these files (the test that keeps the gate
+# free of identifiers fails on one they do not): the C# types that precede
+# "found" in declarations ("ClickHandler found = null;"), the noun in "Match
+# found", the "Not" of "Not found", the generic noun in "User reported", the
+# update method a comment says it is called from ("(from Tick, ..."), the tab
+# a bug title names ("Bug #130: My Stats"), the article in an article's "A
+# saw's spinning loop" (the tool), and three words in capitals for emphasis:
+# "ARE wanted", and "NO" and "ONE" opening a bug title.
 _NOT_PEOPLE = frozenset([
-    "Sid",
-    "Aug", "GameStateWatcher", "Games", "Match", "None", "Not", "Nothing",
-    "Question", "Queue", "That", "The",
-    "Sid2", "ClickHandler", "Component", "CardInfo", "Tick", "User", "My",
+    "CardInfo", "ClickHandler", "Component", "Match", "Not", "User",
+    "Tick", "My", "A", "ARE", "NO", "ONE",
 ])
 
 _CATALOGUE_ENTRY = re.compile(r'^\s*\["((?:[^"\\]|\\.)*)"\]\s*=\s*"((?:[^"\\]|\\.)*)",?\s*$')
@@ -186,6 +219,11 @@ def hygiene_hits(rel, lineno, text):
         hits.append(where + " names the gitignored scratch tree, which exists on no other checkout")
     if any(token in text for token in _SANDBOX_TOKENS):
         hits.append(where + " names a local sandbox checkout")
+    if _ACCOUNT_LABEL.search(text):
+        hits.append(where + " an account label (the maintainer's name joined to a seat number): "
+                    "a seat is described by its role, never by its label")
+    if _ACCOUNT_NUMBER.search(text):
+        hits.append(where + " a 17-digit run, the form of an account number")
     words = _WORD.findall(text)
     product = {a.lower() for a, b in zip(words, words[1:]) if _salted(a + " " + b) in _HANDLE_PHRASE_DIGESTS}
     if not _product_line(text):
@@ -198,11 +236,19 @@ def hygiene_hits(rel, lineno, text):
     for shape in _ATTRIBUTION_SHAPES:
         for m in shape.finditer(text):
             who = m.group(1)
-            if who in _NOT_PEOPLE or len(who) == 1 or who.isupper():
+            if who == _MAINTAINER or who in _NOT_PEOPLE:
                 continue
-            hits.append("%s an attribution to a word (%d characters) that is not on the "
-                        "list of words that are not people" % (where, len(who)))
+            hits.append("%s an attribution to a word (%d characters) that is neither the "
+                        "maintainer's name nor on the list of words that are not people"
+                        % (where, len(who)))
     return hits
+
+
+def _file_hits(path, rel):
+    """Every hit of one file on disk, with its line count."""
+    with open(path, encoding="utf-8") as fh:
+        lines = fh.read().split("\n")
+    return [h for i, t in enumerate(lines, 1) for h in hygiene_hits(rel, i, t)], len(lines)
 
 
 def _swept_lines():
@@ -247,12 +293,94 @@ def test_the_detector_refuses_each_class_it_exists_for():
     assert refused("// " + who + " reported it twice"), "a reported-by shape was accepted"
     assert refused("// reported by " + who), "a by-shape was accepted"
     assert refused("/* (per " + who + ") */"), "a per-shape was accepted"
+    # Difference 4: a name in capitals and a one-letter name are names too.
+    capitals = refused("// " + who.upper() + " reported it twice")
+    assert capitals, "an attribution to a name in capitals was accepted"
+    one_letter = refused("// " + "Q" + " reported it twice")
+    assert one_letter, "an attribution to a one-letter name was accepted"
+    # Difference 5, each built from its parts: a label for a seat other than
+    # the second (the planted-copy test covers the second), and an account
+    # number.
+    label = refused("// seen on " + _MAINTAINER + str(3) + " only")
+    assert label, "an account label was accepted"
+    number = refused("// account " + "7" * 17)
+    assert number, "a 17-digit account number was accepted"
     assert not refused("// Sid reported it twice"), "the maintainer was refused"
+    possessive = refused("/// " + _MAINTAINER + "'s screenshot shows it")
+    assert not possessive, "the maintainer's screenshot was refused"
     assert not refused("ClickHandler found = null;"), "a declaration was read as a person"
     assert not refused("Nästan svarta block på svart bakgrund"), (
         "a non-ASCII word was split into a handle")
     assert not refused("// " + "Us" + "ers send via hotkey T"), "a bare word was read as a path"
     assert not refused("see docs/faq-refresh-client-contract.md"), "a tracked path was refused"
+    sixteen = refused("// a 16-digit run " + "7" * 16 + " and a date 2026-10-11 12:00")
+    assert not sixteen, "a 16-digit run or a date was read as an account"
+
+
+def test_the_gate_lets_no_identifier_through():
+    """The gate stores no identifier to exempt. An attribution may carry the
+    maintainer's name and nothing else: the list of words that are not people
+    holds neither him nor an account label nor a listed handle, and each of its
+    words is one the attribution shapes actually meet in these files, so the
+    list cannot carry a name no line needs. Counts only on failure."""
+    maintainer_listed = _MAINTAINER in _NOT_PEOPLE
+    assert not maintainer_listed, "the maintainer is on the list of words that are not people"
+    labels = sum(1 for w in _NOT_PEOPLE if _ACCOUNT_LABEL.search(w))
+    assert labels == 0, "%d entries of the list of words that are not people are account labels" % labels
+    handles = sum(1 for w in _NOT_PEOPLE if _salted(w) in _HANDLE_DIGESTS)
+    assert handles == 0, "%d entries of the list of words that are not people are listed handles" % handles
+    met = set()
+    for _rel, _lineno, text in _swept_lines():
+        for shape in _ATTRIBUTION_SHAPES:
+            met.update(m.group(1) for m in shape.finditer(text))
+    unmet = len(_NOT_PEOPLE - met)
+    assert unmet == 0, (
+        "%d entries of the list of words that are not people are met by no attribution "
+        "shape in these files: the list may hold only words a line needs" % unmet)
+
+
+def test_a_second_seat_label_planted_in_a_scratch_copy_is_refused(tmp_path):
+    """Bar B7's seat clause on the sweep itself. A scratch copy of
+    plugin/NativeUI.cs gains planted lines carrying the second seat's account
+    label in the two shapes it stood in before this pass (inside a
+    parenthesis, and as the owner of a screenshot) and in the attribution and
+    bare forms; also in capitals, joined by an underscore, a hyphen and a
+    space, and for every other seat number. The sweep refuses exactly the
+    planted lines, each as an account label. The same lines carrying the
+    maintainer's name alone pass. Every label is built from its parts at run
+    time, so this file spells none, and a failure reports counts only."""
+    rel = "plugin/NativeUI.cs"
+    source = _read(rel)
+    n_source = len(source.split("\n"))
+    second = str(1 + 1)
+    labels = [_MAINTAINER + second, _MAINTAINER.upper() + second, _MAINTAINER + "_" + second,
+              _MAINTAINER + "-" + second, _MAINTAINER + " " + second]
+    labels += [_MAINTAINER + str(n) for n in range(1, 10) if str(n) != second]
+    forms = (
+        "/* the fade must never survive a close (%s in-game check) */",
+        "/// <summary>%s's screenshot shows the page title over live gameplay",
+        "// %s reported it twice",
+        "// seen on %s only",
+    )
+    planted = [form % label for label in labels for form in forms]
+    copy = tmp_path / "NativeUI.planted.cs"
+    copy.write_text(source + "\n" + "\n".join(planted) + "\n", encoding="utf-8")
+    hits, _n = _file_hits(str(copy), rel)
+    where = re.compile(re.escape(rel) + r":([0-9]+) ")
+    hit_lines = sorted({int(where.match(h).group(1)) for h in hits})
+    label_lines = sorted({int(where.match(h).group(1)) for h in hits if " an account label " in h})
+    expected = list(range(n_source + 1, n_source + 1 + len(planted)))
+    exact = hit_lines == expected and label_lines == expected
+    assert exact, (
+        "the sweep of the planted copy: %d planted lines, %d lines refused, %d of them as an "
+        "account label, %d refused lines outside the planted ones"
+        % (len(planted), len(hit_lines), len(label_lines), len(set(hit_lines) - set(expected))))
+    clean = tmp_path / "NativeUI.maintainer.cs"
+    clean.write_text(source + "\n" + "\n".join(form % _MAINTAINER for form in forms) + "\n",
+                     encoding="utf-8")
+    clean_hits, _n = _file_hits(str(clean), rel)
+    n_clean = len(clean_hits)
+    assert n_clean == 0, "the maintainer's name alone was refused (%d hits on the copy)" % n_clean
 
 
 def test_the_scope_is_every_file_this_lane_touches():
