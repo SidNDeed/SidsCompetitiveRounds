@@ -310,19 +310,22 @@ def test_the_card_line_count_is_part_of_the_layout_cache_key():
 
 # ── the precision lever's entry point ────────────────────────────────────────
 
-CYCLE = "TabStatsOverlay.HealthPrecisionSetting.Cycle();"
+# The row's entry point into the setting. Wave A's row called Cycle(); item 13
+# (d1b61f0e) made the settings page rows segmented, so at the merged v1.41.0
+# client tree the SHpPrec row chooses a level through the named writer.
+WRITER = "TabStatsOverlay.HealthPrecisionSetting.Set(id);"
 
 
 def test_the_precision_setting_is_reachable_from_the_settings_tab():
     """Without a caller the whole setting is inert, and nothing in the logs
     says so."""
     tab = _flat(code_of(NATIVE_CS, SETTINGS_TAB))
-    assert CYCLE in tab, "no settings row cycles the HP precision"
-    assert '"SHpPrec"' in tab, "the row that cycles it is not built here"
+    assert WRITER in tab, "no settings row sets the HP precision"
+    assert '"SHpPrec"' in tab, "the row that sets it is not built here"
 
 
 def test_the_reachability_reader_is_scoped_to_one_method():
     """The control for the pin above: the same reader over a sibling method
     must not find the call. A check that reads the whole file would pass on a
     dead call site, or on this very docstring."""
-    assert CYCLE not in _flat(code_of(NATIVE_CS, OTHER_METHOD))
+    assert WRITER not in _flat(code_of(NATIVE_CS, OTHER_METHOD))
