@@ -265,6 +265,17 @@ namespace CompetitiveRounds
                 chatMutePublishTickAt = Time.unscaledTime;
                 PublishChatMuteState();
             }
+            // Item 17: the ChatChannel tap is read from the PHYSICAL key stream
+            // once a frame (KeybindRules.TapDetector over every KeyCode member,
+            // the typed text and, fix pass 3 M1, the key-down messages the game
+            // thread took from its queue since the previous frame, drained from
+            // an event accumulator), not from IMGUI events: a key pressed with
+            // it - also in the same frame as a click - or a modifier use
+            // disarms the tap, and so does a keyboard press no KeyCode names,
+            // also one that went down and up between two frames, whenever that
+            // event source is live.
+            try { if (Keybinds.ChatChannelTapped(chatInputOpen)) CycleChatSendChannel(); }
+            catch (Exception e) { VanillaFixSupport.DiagLimited("KeybindChatTap", "[KEYBIND] chat tap: " + e.Message, 3); }
             NativeUI.Tick();
         }
 
@@ -503,13 +514,15 @@ namespace CompetitiveRounds
             // underneath, on EITHER input path.
             if (!PageImguiHidden) DrawRankedHintCallout();   // Sept 8 item 1: the callout is IMGUI too
             bool anyModal = BackdroplessModalOpen || quickChatOpen || danceWheelOpen;
-            NativeUI.SetClickBlocker(anyModal);
+            NativeUI.SetClickBlocker(anyModal || Keybinds.CaptureOwnsInput);   // item 17 property 7
             // The raw-poll half additionally covers the modals that DO raise
             // their own uGUI backdrop (info popup, picker, language prompt,
             // consent) — a backdrop stops EventSystem clicks but not a
             // ClickHandler polling Input.GetMouseButtonDown itself (#141/#200).
             // Adding them to anyModal instead would double-blocker them.
-            ClickHandler.ModalBlockInput = KeyboardInputOwnedByModal;
+            // Item 17: a keybind capture owns clicks on BOTH paths, but never joins
+            // KeyboardInputOwnedByModal - the capture poll reads that gate first.
+            ClickHandler.ModalBlockInput = KeyboardInputOwnedByModal || Keybinds.CaptureOwnsInput;
             // Sept 7 item 1 (contract 7 / 1-1a): a backdropless modal is topmost
             // by definition, so while one is up every popup's bypass handlers
             // are inert as well. Single writer, beside ModalBlockInput's.
@@ -3710,7 +3723,7 @@ namespace CompetitiveRounds
                       I18n.Tr("<color=#FFD080>Match-found screen might be stuck</color>"),
                       stuckTitleStyle);
             GUI.Label(new Rect(x + 14, y + 32, w - 28, 50),
-                      I18n.TrF("<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try space again, or use the escape hatch below.</color>", secs),
+                      I18n.TrF("<color=#CCCCCC>In this Photon room for <b>{0}s</b> with no match started. Vanilla matchmaking sometimes hangs here when one player has ROUNDS unfocused. Click into the ROUNDS window first and try {1} again, or use the escape hatch below.</color>", secs, NativeUI.KeybindRowFace(KeybindRules.Jump)),
                       stuckTextStyle);
 
             if (GUI.Button(new Rect(x + 14, y + h - 38, 220, 28), I18n.Tr("Force exit room"), stuckButtonStyle))
@@ -4141,13 +4154,18 @@ namespace CompetitiveRounds
                 };
             }
 
-            bool w = Input.GetKey(KeyCode.W);
-            bool a = Input.GetKey(KeyCode.A);
-            bool s = Input.GetKey(KeyCode.S);
-            bool d = Input.GetKey(KeyCode.D);
-            bool space = Input.GetKey(KeyCode.Space);
-            bool lmb = Input.GetMouseButton(0);
-            bool rmb = Input.GetMouseButton(1);
+            // Item 17: the BOUND sources, read through the one total accessor
+            // (an unreadable source reads as not pressed, never as a throw).
+            bool w = Keybinds.ReadBoundSource(KeybindRules.MoveUp, Keybinds.Mode.Held) == Read.Down;
+            bool a = Keybinds.ReadBoundSource(KeybindRules.MoveLeft, Keybinds.Mode.Held) == Read.Down;
+            bool s = Keybinds.ReadBoundSource(KeybindRules.MoveDown, Keybinds.Mode.Held) == Read.Down;
+            bool d = Keybinds.ReadBoundSource(KeybindRules.MoveRight, Keybinds.Mode.Held) == Read.Down;
+            bool space = Keybinds.ReadBoundSource(KeybindRules.Jump, Keybinds.Mode.Held) == Read.Down;
+            bool lmb = Keybinds.ReadBoundSource(KeybindRules.Fire, Keybinds.Mode.Held) == Read.Down;
+            bool rmb = Keybinds.ReadBoundSource(KeybindRules.Block, Keybinds.Mode.Held) == Read.Down;
+            // A spectating seat's keyboard is not the watched player's: semantic caps.
+            bool specSeat = false;
+            try { specSeat = RoomActors.LocalIsSpectator; } catch { }
 
             // Geometry: bottom-left, two stacked rows for keyboard, mouse row below.
             float keyW = 38, keyH = 38, gap = 4;
@@ -4157,25 +4175,32 @@ namespace CompetitiveRounds
             // Mouse row (LMB + RMB, wider keys labeled).
             float mouseRowY = bottomY - keyH;
             float mKeyW = keyW * 1.6f;
-            DrawKeyBox(new Rect(originX, mouseRowY, mKeyW, keyH), "LMB", lmb, true);
-            DrawKeyBox(new Rect(originX + mKeyW + gap, mouseRowY, mKeyW, keyH), "RMB", rmb, true);
+            DrawKeyBox(new Rect(originX, mouseRowY, mKeyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.Fire, specSeat), lmb, true);
+            DrawKeyBox(new Rect(originX + mKeyW + gap, mouseRowY, mKeyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.Block, specSeat), rmb, true);
             float mouseRowW = (mKeyW * 2) + gap;
             // Spacer
             float wasdBottomY = mouseRowY - 10 - keyH;
             // Bottom WASD row: A S D
             float asdX = originX + keyW + gap;  // align under W
-            DrawKeyBox(new Rect(originX,                 wasdBottomY, keyW, keyH), "A", a, false);
-            DrawKeyBox(new Rect(originX + keyW + gap,    wasdBottomY, keyW, keyH), "S", s, false);
-            DrawKeyBox(new Rect(originX + (keyW+gap)*2,  wasdBottomY, keyW, keyH), "D", d, false);
+            DrawKeyBox(new Rect(originX,                 wasdBottomY, keyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.MoveLeft, specSeat), a, OverlaySmall(KeybindRules.MoveLeft, specSeat));
+            DrawKeyBox(new Rect(originX + keyW + gap,    wasdBottomY, keyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.MoveDown, specSeat), s, OverlaySmall(KeybindRules.MoveDown, specSeat));
+            DrawKeyBox(new Rect(originX + (keyW+gap)*2,  wasdBottomY, keyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.MoveRight, specSeat), d, OverlaySmall(KeybindRules.MoveRight, specSeat));
             // W row on top
             float wRowY = wasdBottomY - keyH - gap;
-            DrawKeyBox(new Rect(originX + keyW + gap,    wRowY, keyW, keyH), "W", w, false);
+            DrawKeyBox(new Rect(originX + keyW + gap,    wRowY, keyW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.MoveUp, specSeat), w, OverlaySmall(KeybindRules.MoveUp, specSeat));
             // Space bar (wide) under the WASD cluster, between WASD and mouse.
             float spaceY = mouseRowY - 6 - keyH;
             float spaceW = (keyW + gap) * 3 - gap;
             // But this collides with WASD layout — instead place SPACE to the
             // right of WASD on the same row as the bottom WASD line.
-            DrawKeyBox(new Rect(originX + (keyW+gap)*3 + 8, wasdBottomY, spaceW, keyH), "SPACE", space, true);
+            DrawKeyBox(new Rect(originX + (keyW+gap)*3 + 8, wasdBottomY, spaceW, keyH), NativeUI.KeybindOverlayCap(KeybindRules.Jump, specSeat), space, true);
+        }
+
+        /// <summary>Item 17: a cap longer than one character takes the small
+        /// face in a 38 px movement key.</summary>
+        private static bool OverlaySmall(int row, bool spectator)
+        {
+            return NativeUI.KeybindOverlayCap(row, spectator).Length > 1;
         }
 
         private static void DrawKeyBox(Rect r, string label, bool pressed, bool small)
@@ -4694,6 +4719,7 @@ namespace CompetitiveRounds
         {
             // Item 13: the artist picker (the settings page's dropdowns) is a
             // prompt of this set too, and its callback is nulled with its flag.
+            Keybinds.CancelCapture("prompts cancelled");   // item 17: first, like ConsumePromptEscape
             artistPickerOpen = false; artistPickerOnPick = null;
             confirmOpen = false; confirmOnYes = null;
             playerSearchOpen = false; playerSearchOnPick = null;
@@ -4707,6 +4733,9 @@ namespace CompetitiveRounds
             // topmost by definition. Tick runs before OnGUI, so the picker's
             // own Escape branch never sees a press consumed here; without this
             // clause the page closed under an open dropdown.
+            // Item 17: an armed keybind capture is topmost of all - Escape cancels it
+            // and the page stays (without this the page closed under the capture).
+            if (Keybinds.KeybindCaptureActive) { Keybinds.CancelCapture("escape"); return true; }
             if (artistPickerOpen) { artistPickerOpen = false; artistPickerOnPick = null; return true; }
             if (confirmOpen) { confirmOpen = false; confirmOnYes = null; return true; }
             if (playerSearchOpen) { playerSearchOpen = false; playerSearchOnPick = null; return true; }
@@ -7280,11 +7309,9 @@ namespace CompetitiveRounds
             chatInputOpen = false;
             chatJustOpened = false;
             chatInputText = "";
-            // Item 13: never carry a half-observed shift hold into the next
-            // time the box opens — a KeyUp we never saw would otherwise leave
-            // the tap armed and switch channels on the next release.
-            chatAltHeld = false;
-            chatAltTapClean = false;
+            // Item 13: never carry a half-observed hold into the next time the
+            // box opens (item 17: the physical detector's state).
+            Keybinds.ResetChatTap();
             // Disarm the resume-caret window with the box — it is re-armed by
             // the next open that actually resumes something. Same for the
             // "draft restored" notice: its deadline outlives the box by up to
@@ -7374,10 +7401,6 @@ namespace CompetitiveRounds
             }
         }
 
-        // Shift-tap state for the channel cycle (see the KeyUp handler in
-        // DrawChatInput for why a tap, not a press, is the trigger).
-        private static bool chatAltHeld, chatAltTapClean;
-        private static float chatAltDownAt;
         // F4 companion, armed only when a stashed draft is resumed. Runtime
         // IMGUI's TextEditor.DetectFocusChange calls OnFocus() -> SelectAll()
         // on a single-line field the frame after keyboard focus lands, which is
@@ -7402,6 +7425,7 @@ namespace CompetitiveRounds
         // the memo correct by construction rather than by enumeration.
         private static string chatHeaderCache, chatHeaderChan, chatHeaderLocale;
         private static int chatHeaderGen = -1;
+        private static int chatHeaderKb = -1;
         private static GUIStyle chatHeaderStyle;
 
         private static void DrawChatInput()
@@ -7500,7 +7524,7 @@ namespace CompetitiveRounds
                 // owns focus; we additionally inspect it for any InputField-typed component so
                 // we don't false-positive on plain buttons.
                 if (IsAnotherTextInputActive()) return;
-                if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.T)
+                if (Keybinds.Matches(KeybindRules.ChatOpen, ev))   // item 17: the bound key
                 {
                     // Lockdown (design v3 S7): don't open a box whose submit
                     // would be refused — the system line IS the feedback, and
@@ -7526,8 +7550,7 @@ namespace CompetitiveRounds
                         // has to stay up long enough to be read (bug #382).
                         chatResumeNoticeUntil = Time.unscaledTime + 4f;
                     }
-                    chatAltHeld = false;
-                    chatAltTapClean = false;
+                    Keybinds.ResetChatTap();
                     // Belt-and-suspenders re-derive. Since F10 the memo's key
                     // covers every input that can change the line (channel,
                     // locale, catalogue generation), so this is no longer the
@@ -7551,7 +7574,7 @@ namespace CompetitiveRounds
                 // was a hand-copied SUBSET, so M did fire behind a confirm
                 // dialog (Aug 12 UI review). No gameplay-input lock is taken:
                 // this is a one-shot toggle, not a typing surface.
-                else if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.M)
+                else if (Keybinds.Matches(KeybindRules.ChatOverlayMode, ev))   // item 17
                 {
                     CycleChatOverlayMode();
                     ev.Use();
@@ -7589,35 +7612,10 @@ namespace CompetitiveRounds
             bool submit = false, cancel = false;
             if (ev != null && ev.type == EventType.KeyDown)
             {
-                if (ev.keyCode == KeyCode.LeftAlt || ev.keyCode == KeyCode.RightAlt)
-                {
-                    // Aug 6 item 11: the channel cycle moved from Shift to Alt
-                    // (Shift kept firing while players typed capitals). Arm a
-                    // tap on the FIRST alt-down of a hold (key repeat must not
-                    // re-arm a hold that already typed something).
-                    // Deliberately not ev.Use()'d: a bare alt KeyDown carries
-                    // no character, and TextField reads the modifier off the
-                    // keys that follow, not off this event.
-                    if (!chatAltHeld)
-                    {
-                        chatAltHeld = true;
-                        chatAltTapClean = true;
-                        chatAltDownAt = Time.unscaledTime;
-                    }
-                }
-                else if (ev.keyCode != KeyCode.None || ev.character != '\0')
-                {
-                    // ANY other real KeyDown during the hold means alt was a
-                    // MODIFIER (Alt+Tab, AltGr-typed characters on intl
-                    // layouts), not a tap. Unity fires TWO KeyDown events per
-                    // physical key (one with keyCode, one with ev.character —
-                    // see the chatJustOpened note above) and either one
-                    // disarms. Padding events with neither are skipped, or the
-                    // alt's own key-down pair could disarm the tap it just
-                    // armed.
-                    chatAltTapClean = false;
-                }
-
+                // Item 17: the channel tap is no longer read here. IMGUI's
+                // events are per OnGUI pass and lose key identity on the
+                // character half of each pair; CompetitiveUI.Tick reads the
+                // bound ChatChannel key physically, once a frame.
                 if (ev.keyCode == KeyCode.Return || ev.keyCode == KeyCode.KeypadEnter)
                 {
                     submit = true; ev.Use();
@@ -7633,36 +7631,6 @@ namespace CompetitiveRounds
                     // yank the caret out of the box mid-message.
                     ev.Use();
                 }
-            }
-            else if (ev != null && ev.type == EventType.KeyUp
-                     && (ev.keyCode == KeyCode.LeftAlt || ev.keyCode == KeyCode.RightAlt))
-            {
-                // Item 13 (Shift->Alt per Aug 6 item 11): a TAP of alt rotates
-                // the SEND channel through the whole allowed set
-                // (global -> es -> ru -> global), ungated by locale — the old
-                // Tab cycle only existed when the player HAD a locale channel,
-                // so English clients had no cycle at all.
-                //
-                // The discriminator is the whole trick: acting on the RELEASE,
-                // and only when nothing was typed between the press and the
-                // release (chatAltTapClean, cleared above by any other
-                // KeyDown) and the hold was shorter than 0.6s, means an alt
-                // used as a modifier (Alt+Tab, AltGr) can never trigger it —
-                // the other key's own KeyDown always lands inside the hold.
-                bool tap = chatAltHeld && chatAltTapClean
-                           && Time.unscaledTime - chatAltDownAt < 0.6f;
-                chatAltHeld = false;
-                chatAltTapClean = false;
-                if (tap) { CycleChatSendChannel(); ev.Use(); }
-            }
-
-            // Alt+Tab safety: if focus left while alt was held, the KeyUp
-            // never arrives — clear the armed state so the first alt tap
-            // after returning doesn't act on a stale hold.
-            if (!Application.isFocused && (chatAltHeld || chatAltTapClean))
-            {
-                chatAltHeld = false;
-                chatAltTapClean = false;
             }
 
             // ── Position (item 13) ────────────────────────────────────────
@@ -7714,16 +7682,17 @@ namespace CompetitiveRounds
             string hdrChan = ChatClient.SendChannel;
             string hdrLoc = I18n.Locale;
             int hdrGen = I18n.CatalogueGeneration;   // F10 — see the memo's note
+            int hdrKb = Keybinds.Revision;   // item 17: the line names the bound channel key
             if (chatHeaderCache == null || hdrChan != chatHeaderChan
-                || hdrLoc != chatHeaderLocale || hdrGen != chatHeaderGen)
+                || hdrLoc != chatHeaderLocale || hdrGen != chatHeaderGen || hdrKb != chatHeaderKb)
             {
-                chatHeaderChan = hdrChan; chatHeaderLocale = hdrLoc; chatHeaderGen = hdrGen;
+                chatHeaderChan = hdrChan; chatHeaderLocale = hdrLoc; chatHeaderGen = hdrGen; chatHeaderKb = hdrKb;
                 // "Esc to cancel" became a false statement when Esc started
                 // keeping the draft (bug #382) — the line has to say what the
                 // key now does, so this key changes with the behaviour.
                 chatHeaderCache = I18n.TrF(
-                    "Chat [{0}]  —  Enter to send, Esc keeps your draft, Alt switches channel",
-                    ChannelDisplayLabel(hdrChan));
+                    "Chat [{0}]  —  Enter to send, Esc keeps your draft, {1} switches channel",
+                    ChannelDisplayLabel(hdrChan), NativeUI.KeybindRowFace(KeybindRules.ChatChannel));
             }
             // Overflow clipping + no wrap on the header: it is a TRANSLATED
             // line in an 18px box (2px tighter than before), and OS-fallback
@@ -8037,7 +8006,7 @@ namespace CompetitiveRounds
             var ev = Event.current;
             if (!danceWheelOpen)
             {
-                if (ev == null || ev.type != EventType.KeyDown || ev.keyCode != KeyCode.E) return;
+                if (!Keybinds.Matches(KeybindRules.DanceWheel, ev)) return;   // item 17: the bound key
                 if (IsAnotherTextInputActive()) return;
                 bool spec = false;
                 try { spec = RoomActors.LocalIsSpectator; } catch { }
@@ -8073,7 +8042,7 @@ namespace CompetitiveRounds
                         if (!string.IsNullOrEmpty(sid) && sid != "unknown") ApiClient.FetchShopItems(sid);
                     }
                     catch { }
-                    ShowNotification(I18n.Tr("Loading your dances - try E again in a second."),
+                    ShowNotification(I18n.TrF("Loading your dances - try {0} again in a second.", NativeUI.KeybindRowFace(KeybindRules.DanceWheel)),
                                      new Color(0.75f, 0.85f, 1f), 2.5f);
                     ev.Use();
                     return;
@@ -8104,7 +8073,7 @@ namespace CompetitiveRounds
             if (dwIds == null || dwIds.Length == 0 || !DanceEmotes.WindowOpen()) { DwClose(); return; }
             if (ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Escape)
             { DwClose(); ev.Use(); return; }
-            if (dwClickMode && ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.E)
+            if (dwClickMode && Keybinds.Matches(KeybindRules.DanceWheel, ev))
             { DwClose(); ev.Use(); return; }
 
             QcEnsureStyles();
@@ -8126,7 +8095,7 @@ namespace CompetitiveRounds
                 if (dwHighlight >= n) dwHighlight = 0;
             }
 
-            bool held = Input.GetKey(KeyCode.E);
+            bool held = Keybinds.Held(KeybindRules.DanceWheel);
             bool clicked = ev != null && ev.type == EventType.MouseDown && ev.button == 0;
             if (clicked) ev.Use();
             if (clicked)
@@ -8147,7 +8116,7 @@ namespace CompetitiveRounds
             GUI.Label(new Rect(cx - 120f, cy - 22f, 240f, 20f),
                 $"<color=#FFC8F0><b>{I18n.Tr("Dances")}</b></color>", qcHintStyle);
             GUI.Label(new Rect(cx - 120f, cy + 2f, 240f, 20f),
-                $"<color=#8899AA>{I18n.Tr("point + release E to dance")}</color>", qcHintStyle);
+                $"<color=#8899AA>{I18n.TrF("point + release {0} to dance", NativeUI.KeybindRowFace(KeybindRules.DanceWheel))}</color>", qcHintStyle);
             if (dwHighlight >= 0)
             {
                 Vector2 dirN = d.normalized;
@@ -8331,8 +8300,8 @@ namespace CompetitiveRounds
                 // tease them with a wheel either.
                 bool spec = false;
                 try { spec = RoomActors.LocalIsSpectator; } catch { }
-                if (inRoom && !spec && ev != null && ev.type == EventType.KeyDown
-                    && ev.keyCode == KeyCode.Q && !IsAnotherTextInputActive())
+                if (inRoom && !spec && Keybinds.Matches(KeybindRules.QuickChat, ev)   // item 17: the bound key
+                    && !IsAnotherTextInputActive())
                 {
                     quickChatOpen = true;
                     qcStage = 0; qcHighlight = -1; qcClickMode = false;
@@ -8348,7 +8317,7 @@ namespace CompetitiveRounds
             // Q pressed again while in a click-mode wheel = dismiss (the main
             // hold gesture closes on RELEASE below; a fresh KeyDown can only
             // mean the More wheel or a tap-opened wheel).
-            if ((qcStage == 1 || qcClickMode) && ev != null && ev.type == EventType.KeyDown && ev.keyCode == KeyCode.Q)
+            if ((qcStage == 1 || qcClickMode) && Keybinds.Matches(KeybindRules.QuickChat, ev))
             { QcClose(); ev.Use(); return; }
 
             QcEnsureStyles();
@@ -8386,7 +8355,7 @@ namespace CompetitiveRounds
             // confirm (tap Q again / Esc dismisses). The 0.25s grace ignores
             // the release that belongs to the opening tap itself. More wheel:
             // click only (the hold ended when it opened).
-            bool held = Input.GetKey(KeyCode.Q);
+            bool held = Keybinds.Held(KeybindRules.QuickChat);
             bool clicked = ev != null && ev.type == EventType.MouseDown && ev.button == 0;
             if (clicked) ev.Use();
             if (clicked)
@@ -8416,7 +8385,7 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(cx - Rx * 1.45f, cy - Ry * 1.45f, Rx * 2.9f, Ry * 2.9f),
                 qcDiscTex, ScaleMode.StretchToFill, true, 0, new Color(0f, 0f, 0f, 0.55f), 0, 0);
             string hint = qcStage == 0
-                ? I18n.Tr("point + release Q to send")
+                ? I18n.TrF("point + release {0} to send", NativeUI.KeybindRowFace(KeybindRules.QuickChat))
                 : I18n.Tr("click a phrase - Esc closes");
             GUI.Label(new Rect(cx - 120f, cy - 22f, 240f, 20f),
                 $"<color=#AECBFF><b>{I18n.Tr("Quick chat")}</b></color>", qcHintStyle);

@@ -153,7 +153,7 @@
     {
       "class": "reason",
       "key": "SIgChat",
-      "text": "M cycles the same state in game; Muted also tells the room you cannot read chat"
+      "text": "the Chat overlay mode control cycles the same state in game; Muted also tells the room you cannot read chat"
     },
     {
       "class": "reason",

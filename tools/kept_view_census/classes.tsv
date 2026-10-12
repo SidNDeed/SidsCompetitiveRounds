@@ -212,6 +212,7 @@ GameStateWatcher.cs	RosterCensusEmitter	ReadSeats	PlayerList	R	census feed reads
 GameStateWatcher.cs	RosterCensusEmitter	ResolveBodiesByActor	players	R	census feed resolves every body by actor (K48)	
 H2HSummary.cs	H2HSummary	IsPlainTwoFighterRoom	ActiveFighterCount	N	1v1 summary UI	
 H2HSummary.cs	H2HSummary	ResolveOpponent	OtherActiveFighters	N	1v1 summary UI	
+Keybinds.cs	Keybinds	LocalCharacter	players	N	finds the local body (IsMine) only; the item 17 achievement combat gate and the action terms of the local input predicates	
 NametagFontRenderer.cs	NametagFontRenderer	ScanAndApply	ActiveFighters	N	cosmetic; reads ActiveFighters(), so a quarantined body gets no nametag	
 NametagGlowRenderer.cs	NametagGlowRenderer	ScanAndApply	ActiveFighters	N	cosmetic; reads ActiveFighters(), so a quarantined body gets no glow	
 NativeUI.cs	NativeUI	BuildComparePlayerNemesisPanel	players	N	JSON record field	

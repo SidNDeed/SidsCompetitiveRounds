@@ -2038,6 +2038,9 @@ namespace CompetitiveRounds
                 string q=histSearch?.Trim()??"";
                 if(q.Length>0){try{ApiClient.FetchMatchHistorySearch(MatchTracker.LocalSteamId,q,append:false);}catch{}}
             }
+            // Item 17 fix pass 2 (M2): a binding revision while the Info tab is
+            // up repaints its article too (SwitchTab covers the return to it).
+            if (currentTab == TAB_INFO) { try { KbRepaintInfoIfDue(); } catch (Exception kbe) { Plugin.Log.LogWarning("[KEYBIND] Info repaint: " + kbe.Message); } }
             // Info tab: cross-ref link clicks are a raw Input poll (edge
             // trigger, so it must live on this per-frame path — #120).
             if (currentTab == TAB_INFO) TickInfoLinkClicks();
@@ -6656,7 +6659,7 @@ namespace CompetitiveRounds
             catch (Exception ex) { Plugin.Log.LogWarning("[NATIVE] dev open tab threw: " + ex.Message); }
         }
 
-        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}try{TitleLaddersUI.CollapseDropdown();}catch{}/* five-tier ladders: the ladder dropdown belongs to the Shop page it was opened on */}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */TitleLaddersUI.OnShopEntered();/* item 12 follow-up: the ladder entries live in the Shop's Titles section */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
+        private static void SwitchTab(int idx){if(idx!=currentTab){/* Music design F13: leaving a tab terminates any live shop music preview. Generation-fenced and safe always, so a stale/no-preview call is a no-op. */try{MusicEngine.StopPreviewAndRestore();}catch{}try{TitleLaddersUI.CollapseDropdown();}catch{}/* five-tier ladders: the ladder dropdown belongs to the Shop page it was opened on */}currentTab=idx;PageGeneration++;CompetitiveUI.ClearCardHoverRegions();ProfileCard.ClearHoverTargets();/* Sept 6 item a (review a-M2): name targets die with the tab, not with every list refresh */for(int i=0;i<NUM_TABS;i++){if(tabPanels[i]!=null)tabPanels[i].SetActive(i==idx);}UpdateTabBarVisual();/* Item 17 fix pass 2 (M2): the Info article repaints here, before the frame that shows it, when the bindings moved since it was painted */if(idx==TAB_INFO){try{KbRepaintInfoIfDue();}catch(Exception kbe){Plugin.Log.LogWarning("[KEYBIND] Info repaint: "+kbe.Message);}}if(idx==1){lbTabRefreshAt=Time.unscaledTime+30f;ApiClient.FetchLeaderboard();ApiClient.FetchRecentSeries();ApiClient.FetchRecentMultimodeSeries();ApiClient.FetchActiveSeries();ApiClient.FetchRankTiers();var sid=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(sid)&&sid!="unknown")ApiClient.FetchMyBets(sid);}if(idx==2&&ApiClient.CachedCardStats==null)ApiClient.FetchCardStats(200,MatchTracker.LocalSteamId);if(idx==3&&ApiClient.CachedAchievements==null){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown")ApiClient.FetchAchievements(id);}if(idx==4){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&id!="unknown"){ApiClient.FetchShopItems(id);ApiClient.FetchInventory(id);}else ApiClient.FetchShopItems();ApiClient.FetchNewestCosmetics();/* Aug 7 item 10: the New chip needs the newest cache; Home used to be its only fetch site */TitleLaddersUI.OnShopEntered();/* item 12 follow-up: the ladder entries live in the Shop's Titles section */}if(idx==6){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin){ApiClient.FetchFlaggedMatches(id);ApiClient.FetchAdminRecentSeries(id);ApiClient.FetchAdminQuarantine(id);ApiClient.FetchAdminActions(id,25,0,"","",null);}}if(idx==TAB_BANNED){var id=MatchTracker.LocalSteamId;if(!string.IsNullOrEmpty(id)&&ApiClient.IsAdmin)ApiClient.FetchBannedUsers(id);}if(idx==7){/* Participant-first sub-tab (Aug 30, owner: "still no Forfeit button in
 tournaments"): the My Match panel — Ready Up / Play Now / FORFEIT — is gated by the
 sub-tab kind fence, so a participant whose live match sits under the OTHER kind's
 sub-tab opened the tab and saw nothing concedable. On tab entry only (manual sub-tab
@@ -6837,7 +6840,7 @@ poll makes fresh data the norm, so staleness fails NEUTRAL). */try{var mine=ApiC
              * holding the label + the channel selector button. The label is
              * refreshed in RefreshChatLog so the active channel is VISIBLE. */
             var chHdrRow=new GameObject("CHRow");chHdrRow.transform.SetParent(chatBox.transform,false);chHdrRow.AddComponent<RectTransform>();UIFactory.AddHLG(chHdrRow,spacing:6);UIFactory.AddLE(chHdrRow,prefH:26,minH:26,flexH:0);
-            txtChatHeader=UIFactory.CreateText("CH",chHdrRow.transform,"Chat  <color=#888>(press T to chat)</color>",17f,new Color(0.7f,0.85f,1f),UIFactory.AlignMidLeft,sizeDelta:new Vector2(460,26));
+            txtChatHeader=UIFactory.CreateText("CH",chHdrRow.transform,I18n.TrF("Chat  <color=#888>(press {0} to chat)</color>",KeybindRowFace(KeybindRules.ChatOpen)),17f,new Color(0.7f,0.85f,1f),UIFactory.AlignMidLeft,sizeDelta:new Vector2(460,26));
             var chHdrSp=new GameObject("S");chHdrSp.transform.SetParent(chHdrRow.transform,false);chHdrSp.AddComponent<RectTransform>();UIFactory.AddLE(chHdrSp,flexW:1);
             /* item 13: two separate controls. Width budget for this row is the chat
              * box's inner width (~966 at the 1920 width-matched canvas): 460 header
@@ -10975,14 +10978,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             "All cosmetics - everything available, grouped by category.",
             "Character cosmetics - faces, eyes, and accessories, many made by community artists. Buy here, then equip them in ROUNDS' own character editor (F8 or main menu). Visible to all modded players.",
             "Bold, italic, underline, strikethrough, and color/size modifiers applied to your player nametag in lobbies and matches. Visible to every player, modded or not.",
-            "Map color schemes. Equip as many as you like and cycle between your owned colors with Left Shift in-game.",
+            "Map color schemes. Equip as many as you like and cycle between your owned colors with {0} in-game.",
             "Flair text shown next to your name on the leaderboard, match history, and in chat.",
             "A glowing trail that follows your character body during combat. Only visible to modded players; the shop preview shows it following your cursor.",
             "Override the default orange/blue team color with a tint of your choice. Only visible to modded players. Premium tiers (Prismatic, Chrome) animate during combat.",
             "Mouse-cursor color tint (local-only). Pick the cursor SHAPE — arrow, dot, crosshair, circle — in Settings; the tint colors whichever shape you choose.",
             "In-combat particle aura around your character. Only visible to modded players.",
             "Utility unlocks (e.g. hide your gold total on the leaderboard).",
-            "Emote dances for the hold-E wheel. Your character busts the move for everyone running the mod - but your own controls lock until the dance ends, so dance wisely.",
+            "Emote dances for the hold-{0} wheel. Your character busts the move for everyone running the mod - but your own controls lock until the dance ends, so dance wisely.",
             "Full music albums that replace ROUNDS' combat soundtrack for you. Click an album row for 30-second track previews; after buying, pick tracks and control playback in the Music tab.",
         };
         private static List<GameObject> shopRowPool = new List<GameObject>();
@@ -11118,7 +11121,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 
             // Description of the active tab - updated on each RefreshShop.
             txtShopCategoryDesc = UIFactory.CreateText("SHDesc", panel.transform,
-                I18n.Tr(SHOP_TAB_DESCS[0]), 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
+                KbShopTabDesc(0), 13f, C_LABEL, UIFactory.AlignMidLeft, sizeDelta: new Vector2(900, 22));
 
             var sv = UIFactory.CreateScrollView("SHSV", panel.transform, spacing: 4);
             UIFactory.AddLE(sv.scrollGO, flexH: 1);
@@ -11702,7 +11705,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             if (txtShopCategoryDesc != null)
             {
                 int di = Math.Max(0, Math.Min(shopCategoryFilter, SHOP_TAB_DESCS.Length - 1));
-                UIFactory.SetText(txtShopCategoryDesc, I18n.Tr(SHOP_TAB_DESCS[di]));
+                UIFactory.SetText(txtShopCategoryDesc, KbShopTabDesc(di));
             }
 
             var rawItems = ApiClient.CachedShopItems;
@@ -12417,7 +12420,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // artist-authored included (design-Q4 reversal; see the name
                 // line above for why). Mod-authored suffixes are Tr'd/TrF'd
                 // BEFORE concatenation (compose-after-Tr, #298c).
-                string desc = I18n.Tr(it.description ?? "");
+                string desc = KbShopItemDesc(it.description);   // item 17: the dance rows name the bound wheel key
                 // Limited-stock counter (v1.30). The artist byline lives on the
                 // NAME line only now (round 3 item 1 — twice per row was noise).
                 if (it.stock_limit < 0)
@@ -13467,14 +13470,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
 <color=#FFD94D><b>BLOCK SUCCESS</b></color>
 
 - One OFF-COOLDOWN block activation = one attempt
-  (right-clicks during cooldown don't count), and at
+  (blocks during cooldown don't count), and at
   most ONE success no matter how many bullets that
   block absorbs.
 - Echo repeats and Shield Charge dashes belong to the
-  right-click that started them - they never add
+  block that started them - they never add
   attempts.
 - Abyssal / Shields Up auto-blocks are not attempts,
-  though an auto-block absorbing within the right-click's
+  though an auto-block absorbing within the block's
   short credit window can claim its success.
 - Blocking your OWN reflected bullet DOES count as a
   success.
@@ -13699,9 +13702,20 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                 // LinkifyInfoBody wraps each cross-ref span in a TMP <link>
                 // tag AT RENDER TIME — never in the source bodies, which
                 // would re-key every translation (#289).
-                UIFactory.SetTextRaw(infoTitleTxt, art.Title());
-                UIFactory.SetColor(infoTitleTxt, InfoLibrary.ColorOf(key));
-                RenderInfoBody(art);
+                // Item 17 fix pass 3 (M2): the binding revision this render
+                // reads is stamped only AFTER the title, the body text and
+                // the keyboard guide finished rendering (RepaintGate.Repaint).
+                // A render that throws leaves the revision due - the Info tick
+                // repaints again (KbRepaintInfoIfDue) - and shows an empty
+                // article until a repaint completes, never stale or partial
+                // help; its exception is logged once by class and message.
+                int revision = Keybinds.Revision;
+                infoKbGate.Repaint(revision, () =>
+                {
+                    UIFactory.SetTextRaw(infoTitleTxt, art.Title());
+                    UIFactory.SetColor(infoTitleTxt, InfoLibrary.ColorOf(key));
+                    RenderInfoBody(art);
+                }, KbBlankInfoArticle, KbRepaintFailed("Info article '" + key + "'"));
                 // Snap back to the top for the new article (both the content
                 // offset and the normalized position — the layout rebuild
                 // lands next frame and clamps whichever survives).
@@ -13721,6 +13735,14 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
             catch (Exception ex) { Plugin.Log.LogWarning("[INFO-TAB] select '" + key + "': " + ex.Message); }
         }
+
+        // Item 17 fix pass 2 (M2): the binding revision the Info article on
+        // screen was painted at. The Controls article's text and its keyboard
+        // guide read the bindings only when the article renders, so a later
+        // revision repaints it (KbRepaintInfoIfDue) before it is shown again.
+        // Fix pass 3 (M2): stamped only after a render completed; a render
+        // that threw keeps it due.
+        private static readonly KeybindRules.RepaintGate infoKbGate = new KeybindRules.RepaintGate();
 
         // Sept 1: true while the rewards article is up with its gold chart
         // still waiting on the local player's /gold-sources fetch.
@@ -13776,8 +13798,15 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             foreach (var g in infoBodyExtraGOs)
                 if (g != null) { g.SetActive(false); UnityEngine.Object.Destroy(g); }
             infoBodyExtraGOs.Clear(); infoBodyExtraTexts.Clear();
-            InfoLibrary.Seg[] segs = null;
-            try { segs = art.Segments != null ? art.Segments() : null; } catch { }
+            // Item 17 fix pass 4 (M2): nothing on this path is caught. The
+            // segments read, the segment loop (KeybindRules.InfoVisual.Lay)
+            // and a visual's build (InfoViz.Build through InfoVisual.Build)
+            // let a binding visual's failure - the Controls article's
+            // keyboard guide throwing or building nothing - and a failure to
+            // read the article's segments leave RenderInfoBody for the
+            // repaint gate in SelectInfoArticle, which blanks the article
+            // and keeps its binding revision due.
+            InfoLibrary.Seg[] segs = art.Segments != null ? art.Segments() : null;
             var bodyGO = (infoBodyTxt as Component)?.gameObject;
             Transform content = infoBodyContentRT != null ? infoBodyContentRT.transform : bodyGO?.transform.parent;
             if (segs == null || segs.Length == 0 || content == null)
@@ -13788,38 +13817,33 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             }
             bool primaryUsed = false;
             var ordered = new List<Transform>();
-            foreach (var seg in segs)
-            {
-                string segText = seg.Text;
-                if (!string.IsNullOrEmpty(seg.Viz))
+            // r1 MEDIUM 5: a visual that is not a binding visual and fails to
+            // build must not take its facts with it - its text form
+            // (InfoViz.TextFallback) is rendered in its place.
+            KeybindRules.InfoVisual.Lay(segs.Length, i => segs[i].Text, i => segs[i].Viz,
+                v => InfoViz.Build(v, content), InfoViz.TextFallback,
+                panel => { infoBodyExtraGOs.Add(panel); ordered.Add(panel.transform); },
+                segText =>
                 {
-                    var panel = InfoViz.Build(seg.Viz, content);
-                    if (panel != null) { infoBodyExtraGOs.Add(panel); ordered.Add(panel.transform); continue; }
-                    // r1 MEDIUM 5: a visual that fails to build must not take its
-                    // facts with it — its text form is rendered in its place.
-                    segText = InfoViz.TextFallback(seg.Viz);
-                    if (string.IsNullOrEmpty(segText)) continue;
-                }
-                if (string.IsNullOrEmpty(segText)) continue;
-                if (!primaryUsed)
-                {
-                    primaryUsed = true;
-                    UIFactory.SetTextRaw(infoBodyTxt, LinkifyInfoBody(segText));
-                    if (bodyGO != null) ordered.Add(bodyGO.transform);
-                    continue;
-                }
-                var extra = UIFactory.CreateText("InfoBodyX", content, "", 23f,
-                    new Color(0.84f, 0.85f, 0.90f), UIFactory.AlignTopLeft, sizeDelta: new Vector2(1180, 400));
-                UIFactory.SetWordWrap(extra, true);
-                UIFactory.SetTextAutoHeight(extra);
-                UIFactory.SetTextRaw(extra, LinkifyInfoBody(segText));
-                var ego = (extra as Component)?.gameObject;
-                if (ego != null)
-                {
-                    UIFactory.SetMinH(ego, 0f);   // same baked-minH reserve as the primary (see BuildInfoTab)
-                    infoBodyExtraGOs.Add(ego); infoBodyExtraTexts.Add(extra); ordered.Add(ego.transform);
-                }
-            }
+                    if (!primaryUsed)
+                    {
+                        primaryUsed = true;
+                        UIFactory.SetTextRaw(infoBodyTxt, LinkifyInfoBody(segText));
+                        if (bodyGO != null) ordered.Add(bodyGO.transform);
+                        return;
+                    }
+                    var extra = UIFactory.CreateText("InfoBodyX", content, "", 23f,
+                        new Color(0.84f, 0.85f, 0.90f), UIFactory.AlignTopLeft, sizeDelta: new Vector2(1180, 400));
+                    UIFactory.SetWordWrap(extra, true);
+                    UIFactory.SetTextAutoHeight(extra);
+                    UIFactory.SetTextRaw(extra, LinkifyInfoBody(segText));
+                    var ego = (extra as Component)?.gameObject;
+                    if (ego != null)
+                    {
+                        UIFactory.SetMinH(ego, 0f);   // same baked-minH reserve as the primary (see BuildInfoTab)
+                        infoBodyExtraGOs.Add(ego); infoBodyExtraTexts.Add(extra); ordered.Add(ego.transform);
+                    }
+                });
             if (!primaryUsed)
             {
                 UIFactory.SetTextRaw(infoBodyTxt, "");
@@ -14132,6 +14156,11 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             var subPrivacy = new GameObject("SubPrivacy");
             subPrivacy.transform.SetParent(panel.transform, false);
             SettingsBodyInit(subPrivacy, 6);
+            // Item 17: the Controls sub-tab (NativeUI.Keybinds.cs builds its rows).
+            var subControls = new GameObject("SubControls");
+            subControls.transform.SetParent(panel.transform, false);
+            SettingsBodyInit(subControls, 7);
+            BuildControlsRows(subControls.transform);
 
             // -- In game --
             pingToggleBtn = SettingsSwitch(subIngame.transform, "SPing", I18n.Tr("Shows your current server region and your ping to it."),
@@ -14154,7 +14183,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
                     dirty = true;
                 });
             lagNoticesToggleTxt = UIFactory.GetButtonText(lagNoticesToggleBtn);
-            inputOverlayToggleBtn = SettingsSwitch(subIngame.transform, "SInpOv", I18n.Tr("Input overlay (bottom-left): shows W, A, S, D, Space and both mouse buttons. Lights up red when pressed. Useful for streams or spotting missed inputs."),
+            inputOverlayToggleBtn = SettingsSwitch(subIngame.transform, "SInpOv", KbDescInputOverlay(),
                 () => Plugin.ShowInputOverlay != null && Plugin.ShowInputOverlay.Value,
                 () =>
                 {
@@ -14180,9 +14209,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             // formats invariantly per #47 -- so no value of this setting can
             // move a byte of a stored build. Item 13: the three levels are
             // chosen directly through the named writer.
-            healthPrecToggleBtn = SettingsSegmented(subIngame.transform, "SHpPrec", I18n.Tr("Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. "
-                + "Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops "
-                + "reading as a whole number too. Local display only - nothing stored or sent changes."),
+            healthPrecToggleBtn = SettingsSegmented(subIngame.transform, "SHpPrec", KbDescHpPrecision(),
                 new[] { TabStatsOverlay.HealthPrecisionSetting.ROUNDED, TabStatsOverlay.HealthPrecisionSetting.ONE_DP, TabStatsOverlay.HealthPrecisionSetting.TWO_DP },
                 () => TabStatsOverlay.HealthPrecisionSetting.Level,
                 id =>
@@ -14278,7 +14305,7 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
             escBtnTxt = UIFactory.GetButtonText(escRow);
 
             // -- Chat & mail --
-            ingameChatToggleBtn = SettingsSegmented(subChatMail.transform, "SIgChat", I18n.Tr("Shows community chat in the corner while you play. Press T to type a reply, or M in game to cycle normal / pinned / muted."),
+            ingameChatToggleBtn = SettingsSegmented(subChatMail.transform, "SIgChat", KbDescInGameChat(),
                 new[] { "Normal", "Pinned", "Muted" },
                 () => CompetitiveUI.CurrentChatOverlayMode().ToString(),
                 id =>
@@ -14852,16 +14879,33 @@ lbBlockRow=new GameObject("BlockRow");lbBlockRow.transform.SetParent(right.trans
         /// delete result - built into the help pane's extras slot, where each
         /// shows beside the row it explains (NativeUI.Settings.cs,
         /// SettingsShowExtras). Same keys as when they sat in the list.</summary>
+        /// <summary>The Settings language-channel note, naming the CURRENT
+        /// ChatChannel key (built with the pane, repainted by fix pass 2 M2).</summary>
+        private static string LangChatNoteText()
+        {
+            return I18n.TrF("Chat has language channels - use the dropdown on the Home tab, or tap {0} while typing, to switch.",
+                KeybindRowFace(KeybindRules.ChatChannel));
+        }
+
         private static void BuildSettingsPaneTexts(Transform extras)
         {
             txtConsentStatus = UIFactory.CreateText("SCS", extras, "",
                 15f, C_LABEL, sizeDelta: new Vector2(748, 22));
             UIFactory.SetWordWrap(txtConsentStatus, true); UIFactory.SetTextAutoHeight(txtConsentStatus, 22f);
             // Item 5 companion: point players at the chat language channels.
-            var note = UIFactory.CreateText("SLangChatNote", extras,
-                "Chat has language channels - use the dropdown on the Home tab, or tap Alt while typing, to switch.",
+            // Item 17 fix pass 2 (M2): the note names the bound ChatChannel
+            // key, so it keeps its text object and the binding revision it was
+            // painted at; SettingsShowExtras repaints it before it is shown
+            // again when the bindings moved since (KbRepaintLangNoteIfDue).
+            // Fix pass 3 (M2): created empty and painted through the gate, so
+            // the revision is stamped only after the text is set; a paint
+            // that throws leaves the note empty and due.
+            var note = UIFactory.CreateText("SLangChatNote", extras, "",
                 13f, C_DIM, sizeDelta: new Vector2(748, 18));
+            setLangNoteTxt = note;
             UIFactory.SetWordWrap(note, true); UIFactory.SetTextAutoHeight(note, 18f);
+            setLangNoteGate.Repaint(Keybinds.Revision, () => UIFactory.SetTextRaw(note, LangChatNoteText()),
+                () => UIFactory.SetTextRaw(note, ""), KbRepaintFailed("Settings language note"));
             var sdd = UIFactory.CreateText("SDD", extras,
                 "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' " +
                 "Elo and histories aren't affected. You will no longer appear on leaderboards.\n" +
@@ -22305,15 +22349,15 @@ int cW=s.casual_wins,cL=s.casual_losses,sweepG=s.sweeps_given,sweepT=s.sweeps_ta
                 try { mutedLine = CompetitiveUI.MutedPlayersLine(); } catch { }
                 UIFactory.SetTextRaw(txtChatHeader,
                     mutedLine.Length > 0
-                        ? I18n.TrF("Viewing: {0}  <color=#888>(press T to chat)</color>", ChatChannelDisplayName(filter))
+                        ? I18n.TrF("Viewing: {0}  <color=#888>(press {1} to chat)</color>", ChatChannelDisplayName(filter), KeybindRowFace(KeybindRules.ChatOpen))
                           + "  <color=#997766>" + mutedLine + "</color>"
-                        : I18n.TrF("Viewing: {0}  <color=#888>(press T to chat)</color>", ChatChannelDisplayName(filter)));
+                        : I18n.TrF("Viewing: {0}  <color=#888>(press {1} to chat)</color>", ChatChannelDisplayName(filter), KeybindRowFace(KeybindRules.ChatOpen)));
             }
             if (chatViewBtn != null)
                 UIFactory.SetTextRaw(UIFactory.GetButtonText(chatViewBtn), I18n.Tr("Change view"));
             if (chatSendBtn != null)
                 UIFactory.SetTextRaw(UIFactory.GetButtonText(chatSendBtn),
-                    I18n.TrF("Typing: {0}  (Alt to change)", ChatChannelDisplayName(send)));
+                    I18n.TrF("Typing: {0}  ({1} to change)", ChatChannelDisplayName(send), KeybindRowFace(KeybindRules.ChatChannel)));
             if (txtChatLog == null) return;
             // "all" (and the "auto" default) keeps the merged view; only an explicit
             // concrete channel filters. System lines (null channel) always show.

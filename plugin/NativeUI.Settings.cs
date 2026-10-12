@@ -42,7 +42,7 @@ namespace CompetitiveRounds
     /// </summary>
     public static partial class NativeUI
     {
-        internal enum SettingsKind { Switch, Segmented, Dropdown, Slider, Action, Disclosure, Destructive }
+        internal enum SettingsKind { Switch, Segmented, Dropdown, Slider, Action, Disclosure, Destructive, Keybind }
 
         /// <summary>One settings row (or, for the delete row, one of its
         /// three buttons; the row itself is the group record "SDR").</summary>
@@ -91,6 +91,9 @@ namespace CompetitiveRounds
             internal object ButtonTxt;
             internal Vector2 ButtonSize;
             internal List<SettingsRowRec> Members;
+            // keybind (item 17): the row it edits, its unbind and reset buttons
+            internal int KbRow = -1;
+            internal GameObject KbUnbind, KbReset;
         }
 
         /// <summary>Reference identity for the text-object registry: a TMP
@@ -101,7 +104,7 @@ namespace CompetitiveRounds
             int IEqualityComparer<object>.GetHashCode(object o) { return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(o); }
         }
 
-        private const int SETTINGS_TABS = 7;
+        private const int SETTINGS_TABS = 8;
         // The help pane's scroll content spacing: built with it, and A2b's
         // content leg sums the children with it.
         private const float SetDetBodySpacing = 8f;
@@ -143,6 +146,10 @@ namespace CompetitiveRounds
         private static GameObject setDetMoreBtn, setResetBtn, setResetConfirmBtn, setResetCancelBtn, setDetSkipGO;
         private static object setDetTitleTxt, setDetCurTxt, setDetRecTxt, setDetReasonTxt, setDetDetectedTxt, setDetBodyTxt;
         private static GameObject setExtraSCS, setExtraSDD, setExtraSDD2, setExtraSDS, setExtraLangNote, setExtraPcInfo;
+        // Item 17 fix pass 2 (M2): the language-channel note's text object and
+        // the binding revision it was painted at (it names the ChatChannel key).
+        private static object setLangNoteTxt;
+        private static readonly KeybindRules.RepaintGate setLangNoteGate = new KeybindRules.RepaintGate();
         private static string settingsMoreKey;
 
         // reset
@@ -200,6 +207,9 @@ namespace CompetitiveRounds
             setDetailGO = setDetCurGO = setDetRecGO = setDetDetectedGO = setDetExtrasGO = setDetPrevGO = null;
             setDetMoreBtn = setResetBtn = setResetConfirmBtn = setResetCancelBtn = setDetSkipGO = null;
             setExtraSCS = setExtraSDD = setExtraSDD2 = setExtraSDS = setExtraLangNote = setExtraPcInfo = null;
+            setLangNoteTxt = null;
+            kbRows.Clear();
+            kbResetAllBtn = kbResetAllConfirmBtn = kbResetAllCancelBtn = null;
         }
 
         /// <summary>The page frame: the sub-tab bar, then the two columns. The
@@ -221,7 +231,8 @@ namespace CompetitiveRounds
                 var b = UIFactory.CreateButton("SSub_" + home, bar.transform, "", 13f, C_WHITE, C_TAB,
                     () => SettingsSwitchSubTab(idx), new Vector2(168, 24));
                 UIFactory.SetMinW(b, 168);
-                UIFactory.SetTextNoHook(UIFactory.GetButtonText(b), SettingsDescriptors.SubTabLabelTr(home));
+                // Item 17: the Controls tab has no descriptor rows, so its label is its own literal.
+                UIFactory.SetTextNoHook(UIFactory.GetButtonText(b), home == "controls" ? I18n.Tr("Controls") : SettingsDescriptors.SubTabLabelTr(home));
                 settingsSubBtns[i] = b;
             }
             var barSp = new GameObject("SSubSp");
@@ -357,6 +368,8 @@ namespace CompetitiveRounds
             setResetConfirmBtn.SetActive(false);
             setResetCancelBtn.SetActive(false);
             setDetSkipGO.SetActive(false);
+            // Item 17: reset all controls (SKbResetAll -> SKbResetAllC / SKbResetAllX).
+            KeybindBuildFooter(foot.transform);
 
             return sv.content.transform;
         }
@@ -1187,6 +1200,9 @@ namespace CompetitiveRounds
                 UIFactory.SetColor(UIFactory.GetButtonText(setResetBtn), onPrivacy ? C_DIM : C_WHITE);
             }
 
+            // Item 17: on the Controls tab the footer is reset-all, and its armed prompt owns the pane.
+            if (KeybindRenderFooter()) return;
+
             string key = settingsPinnedKey ?? settingsHoverKey;
             if (key == null) { var f = SettingsFocusedRec(); key = f != null ? f.Key : null; }
             SettingsRowRec rec = null;
@@ -1205,6 +1221,7 @@ namespace CompetitiveRounds
                 return;
             }
             if (rec.Key == "SDR") { SettingsRenderDestructivePane(rec); return; }
+            if (KeybindRenderPane(rec)) return;
 
             string title = SettingsSplits(rec.Kind) ? rec.LastLabel : rec.LastLabel;
             if (string.IsNullOrEmpty(title)) title = SettingsModel.StripTags(SettingsSplits(rec.Kind) ? rec.LastValue : rec.LastPainted);
@@ -1268,6 +1285,7 @@ namespace CompetitiveRounds
             SettingsSetActive(setExtraSDD, key == "SDR");
             SettingsSetActive(setExtraSDD2, key == "SDR");
             SettingsSetActive(setExtraSDS, key == "SDR");
+            if (key == "SLang") KbRepaintLangNoteIfDue();
             SettingsSetActive(setExtraLangNote, key == "SLang");
             SettingsSetActive(setExtraPcInfo, pc);
             SettingsSetActive(setDetPrevGO, key == "SPcPre");
@@ -1410,9 +1428,13 @@ namespace CompetitiveRounds
         /// a row (design 6.3, T5-a).</summary>
         internal static void TickSettingsInput()
         {
+            KeybindPaintTick();
             if (CompetitiveUI.KeyboardInputOwnedByModal) return;
             if (CompetitiveUI.ChatTypingOwnsKeyboard) return;
             if (!isOpen || !pageBuilt || currentTab != TAB_SETTINGS) return;
+            // Item 17: the keybind capture, behind the same gate ladder (design 2.5
+            // property 2); while it owns input the page's own key dispatch stands down.
+            if (KeybindTakeInput()) { if (settingsPaneDirty) SettingsRenderPane(); return; }
             SettingsPollHover();
             if (Time.unscaledTime >= settingsHintPollAt)
             {
@@ -1597,6 +1619,9 @@ namespace CompetitiveRounds
                 case SettingsKind.Destructive:
                     SettingsActivateDelete(rec);
                     break;
+                case SettingsKind.Keybind:
+                    KeybindArm(rec);
+                    break;
                 // DISCLOSURE: Left and Right only (SettingsStep), never Enter or Space.
             }
             settingsPaneDirty = true;
@@ -1644,6 +1669,7 @@ namespace CompetitiveRounds
             {
                 d = (d ?? "").Trim();
                 if (d.Length == 0) return;
+                if (KeybindDirective(d)) return;   // item 17: "kb:<verb>[:<arg>]"
                 if (string.Equals(d, "selftest", StringComparison.OrdinalIgnoreCase)) { SettingsSelfTestStart("lever"); return; }
                 if (d.StartsWith("selftest:", StringComparison.OrdinalIgnoreCase)) { SettingsSelfTestStart("lever", d.Substring(9)); return; }
                 if (string.Equals(d, "drive", StringComparison.OrdinalIgnoreCase)) { SettingsDriveStart(""); return; }

@@ -1803,7 +1803,8 @@ def test_l9_every_changed_key_reaches_all_four_embedded_locales():
     cat = _src("I18nCatalogues.cs")
     keys = [
         "Account changed — message not sent.",
-        "Chat [{0}]  —  Enter to send, Esc keeps your draft, Alt switches channel",
+        # item 17: the channel key is the bound ChatChannel control, a {1} hole
+        "Chat [{0}]  —  Enter to send, Esc keeps your draft, {1} switches channel",
         "Game ended", "Mode closed", "Not ready yet", "Player opted out",
         "Seats full", "Session expired",
         "Steam session expired — try again in a moment.",

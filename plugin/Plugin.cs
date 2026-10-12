@@ -846,7 +846,7 @@ namespace CompetitiveRounds
             ShowInputOverlay = Config.Bind(
                 "UI", "ShowInputOverlay",
                 false,
-                "Show a bottom-left WASD + Space + L/R-click input visualizer during matches. Keys glow red when pressed."
+                "Show a bottom-left visualizer of your movement, jump, shoot and block controls during matches. Keys glow red when pressed."
             );
 
             // Item 19: two default avatars chosen by the kind of room. New keys
@@ -1372,6 +1372,11 @@ namespace CompetitiveRounds
                 return;
             }
             Log.LogInfo($"[COMPAT] Game version OK: {gameVer}");
+
+            // Item 17: the keybind registry - the mapping accessor is resolved and
+            // the sixteen Controls entries loaded BEFORE any patch can read them.
+            try { Keybinds.Init(Config); }
+            catch (Exception ex) { Log.LogError("[KEYBIND] init failed: " + ex.Message); }
 
             // Patch each [HarmonyPatch] class individually so one bad patch
             // (e.g. parameter-name mismatch with vanilla, missing target method)
@@ -3556,8 +3561,18 @@ namespace CompetitiveRounds
             // unless the boot check fell back to the backup.
             try { ApiClient.SecureRouteTick(); } catch { }
 
-            // F5 input (no log spam — just toggle)
-            if (Input.GetKeyDown(KeyCode.F5))
+            // Item 17: the keybind capture's expiry and page check, and the
+            // in-game self-test's frame step, once a frame.
+            try { Keybinds.FrameTick(); } catch { }
+
+            // F5 input (no log spam — just toggle). Item 17 (question 1): the
+            // menu row is rebindable and F5 stays a permanent rescue read, so no
+            // binding can lock a player out of this menu. One toggle per frame
+            // whichever fired; a keybind capture owns the keyboard while armed.
+            bool menuF5 = false, menuRow = false;
+            try { menuF5 = Input.GetKeyDown(KeyCode.F5) && !Keybinds.CaptureOwnsInput; } catch { }
+            try { menuRow = Keybinds.Down(KeybindRules.MenuToggle); } catch { }
+            if (menuF5 || menuRow)
             {
                 CompetitiveUI.ToggleOverlay();
             }
@@ -12599,7 +12614,9 @@ namespace CompetitiveRounds
                     // FLICKER as several skus applied in a burst. Gating on Shift keeps the
                     // chosen skin STABLE per round; the player deliberately cycles with Shift.
                     bool manualShift = false;
-                    try { manualShift = Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift); } catch { }
+                    // Item 17: the bound MapSkinCycle control (question 8: its default
+                    // is Left Shift alone - the transpiled ArtHandler read is the same row).
+                    try { manualShift = Keybinds.Held(KeybindRules.MapSkinCycle); } catch { }
                     manualShiftNow = manualShift;   // consumed by the defer decision below
                     if (manualShift)
                         _cycleIndex = (_cycleIndex + 1) % equipped.Count;

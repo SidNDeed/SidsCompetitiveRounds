@@ -151,6 +151,11 @@ FILES = [
     # labels, all at I18n.Tr/TrF sites. Its sibling AvatarDefaultRules.cs is
     # deliberately absent: pure decision code with no display text.
     "AvatarDefaults.cs",
+    # Keybinds (item 17): the Controls page, the key names, the refusal
+    # lines and the round-start toast, all I18n.Tr/TrF sites in a NativeUI
+    # partial. Keybinds.cs and KeybindRules.cs are absent on purpose: they
+    # hold no display text (#357, #464).
+    "NativeUI.Keybinds.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2
@@ -214,6 +219,11 @@ SHORT_WHOLE_LINES = frozenset({
     # of a painted literal that clears the floor itself), so this entry adds
     # no key on this commit.
     "ME",
+    # Item 17: the input overlay's semantic cap for the up control, drawn
+    # beside DOWN, LEFT and RIGHT on a spectating seat and on the broadcast
+    # HUD. It is the whole string on its key, never glue; two letters is
+    # below the floor, so the line is asserted here.
+    "UP",
 })
 
 
@@ -750,7 +760,11 @@ def harvest_source(fn: str, src: str, found: dict, sites: dict) -> None:
         if block:
             for x in STR_LIT.finditer(block.group(1)):
                 s = lf(unescape(x.group(1)))
-                if looks_translatable(s):
+                # allow_braces: item 17 made two of these descs TEMPLATES
+                # (the bound map-skin key, the bound dance-wheel key) that
+                # render through I18n.TrF; an initializer literal is never a
+                # $-string body, so the hole is the catalogue key's own.
+                if looks_translatable(s, allow_braces=True):
                     note_table(s, "SHOP_TAB_DESCS")
 
 
@@ -780,7 +794,10 @@ def extract():
             raise ValueError("'strings' must be a non-empty list of non-blank strings")
         for s in _lst:
             s = lf(s)
-            if looks_translatable(s):
+            # allow_braces: item 17's two dance descriptions are TrF
+            # templates (the bound wheel key); a json string is never a
+            # $-string body.
+            if looks_translatable(s, allow_braces=True):
                 found.setdefault(s, []).append("shop_strings.json")
                 sites.setdefault(s, set()).add(("shop catalog", "cosmetic name/description", "shop"))
     except SystemExit:

@@ -60,6 +60,9 @@ namespace CompetitiveRounds
                     "SPerf_OOB", "SPerf_PoolInit", "SPerf_Stun", "SFPS", "SFPSCap", "SDeepIdle" },
             new[] { "langmenus", "SHeavyFont", "SInactiveLb" },
             new[] { "privacy" },
+            // item 17: the Controls tab carries no descriptor rows; its reset-all
+            // writes the keybind config through Keybinds.ResetAll, never ResetSet
+            new[] { "controls" },
         };
 
         internal static SelfTestResult SelfTest()
@@ -100,7 +103,7 @@ namespace CompetitiveRounds
             // -- the table the reset reads ----------------------------------
             var homeless = SettingsDescriptors.All.Where(d => SettingsModel.SubTabIndex(d.Home) < 0)
                                                   .Select(d => d.Key).ToList();
-            Check(r, "every descriptor's home is one of the seven sub-tabs",
+            Check(r, "every descriptor's home is one of the eight sub-tabs",
                   homeless.Count == 0 && SettingsDescriptors.All.Length > 0,
                   "rows=" + SettingsDescriptors.All.Length + " homeless={" + string.Join(",", homeless) + "}");
             var storeless = SettingsDescriptors.All.Where(d => d.BulkReset && !d.StoresValue)
@@ -142,7 +145,7 @@ namespace CompetitiveRounds
             }
             Check(r, "T5-g a home outside the bar writes nothing",
                   SettingsModel.ResetSet("nope").Count == 0, SettingsModel.ResetSet("nope").Count.ToString());
-            r.Report.Append("INFO | T5-g the seven sets sum to ").Append(sum)
+            r.Report.Append("INFO | T5-g the eight sets sum to ").Append(sum)
              .Append(" (printed for information, never asserted)").Append('\n');
 
             // -- M1 (design 6.3): which source activates which kind ------------
@@ -173,8 +176,8 @@ namespace CompetitiveRounds
                        + Dispatch(SettingsModel.PadKey(false, false, false), 3);
             Check(r, "L2 the shoulders move the sub-tab and the activate button activates the focused row",
                   pad == "switch:4|switch:2|activate:Pad|", pad);
-            string wrap = Dispatch(SettingsModel.PadKey(false, true, false), 6) + "|" + Dispatch(SettingsModel.PadKey(true, false, false), 0);
-            Check(r, "L2 the shoulders wrap at both ends of the bar", wrap == "switch:0|switch:6", wrap);
+            string wrap = Dispatch(SettingsModel.PadKey(false, true, false), 7) + "|" + Dispatch(SettingsModel.PadKey(true, false, false), 0);
+            Check(r, "L2 the shoulders wrap at both ends of the bar", wrap == "switch:0|switch:7", wrap);
             var pads = SettingsModel.SettingsActivation.Pad;
             Accepts(r, "L2 the activate button never arms or confirms a destructive row", "DESTRUCTIVE", pads, false);
             Accepts(r, "L2 the activate button activates an action row", "ACTION", pads, true);
@@ -187,8 +190,16 @@ namespace CompetitiveRounds
             Keys(r, "M1 the Space key reaches the row as Space, never as Enter",
                  SettingsModel.SettingsKey.Space, 0, "activate:Space");
             Keys(r, "M1 the Enter key reaches the row as Enter", SettingsModel.SettingsKey.Enter, 0, "activate:Enter");
-            Keys(r, "Tab moves to the next sub-tab and wraps", SettingsModel.SettingsKey.Tab, 6, "switch:0");
-            Keys(r, "Shift+Tab moves to the previous sub-tab and wraps", SettingsModel.SettingsKey.ShiftTab, 0, "switch:6");
+            Keys(r, "Tab moves to the next sub-tab and wraps", SettingsModel.SettingsKey.Tab, 7, "switch:0");
+            Keys(r, "Shift+Tab moves to the previous sub-tab and wraps", SettingsModel.SettingsKey.ShiftTab, 0, "switch:7");
+            // item 17: a keybind row arms its capture from Enter, Space or the pad
+            Accepts(r, "item 17 Enter arms a keybind row's capture", "KEYBIND", enter, true);
+            Accepts(r, "item 17 Space arms a keybind row's capture", "KEYBIND", space, true);
+            Accepts(r, "item 17 the activate button arms a keybind row's capture", "KEYBIND", pads, true);
+            Check(r, "item 17 Controls is the eighth sub-tab",
+                  SettingsModel.SubTabIndex("controls") == 7 && SettingsModel.SubTabIndex("SubControls") == 7
+                  && SettingsModel.SubTabHomes.Length == 8 && SettingsModel.SubTabBodies.Length == 8,
+                  SettingsModel.SubTabIndex("controls") + "," + SettingsModel.SubTabHomes.Length);
             string moves = Dispatch(SettingsModel.SettingsKey.Up, 3) + "|" + Dispatch(SettingsModel.SettingsKey.Down, 3) + "|"
                          + Dispatch(SettingsModel.SettingsKey.Left, 3) + "|" + Dispatch(SettingsModel.SettingsKey.Right, 3) + "|"
                          + Dispatch(SettingsModel.SettingsKey.Pin, 3) + "|" + Dispatch(SettingsModel.SettingsKey.None, 3);

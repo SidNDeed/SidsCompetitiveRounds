@@ -302,6 +302,104 @@ def test_the_settings_model_suite_ran_every_case_and_none_failed(harness_run):
     assert run >= 44, "the SettingsModel suite shrank to %d cases" % run
 
 
+# 1-17 the build's; fix pass 1: 18 and 23 F2 (the tap detector), 19 F3
+# (prompt surface gate), 20 F5 (the loaded set), 21 F6 (the commit), 22 F7
+# (capture reads the mouse for every row), 24 F4 (the board follows the
+# bindings). Fix pass 2: 25 M1 (the independent keyboard-edge source), 26 M2
+# (built help surfaces repaint after a binding revision), 27-29 M3 (the
+# commit: a restore is read back, a missing entry refuses, an unsaved entry or
+# a live set that did not take the change is never a success).
+KEYBIND_MUTATIONS = tuple(range(1, 18)) + (18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29)
+
+
+def test_the_keybinds_suite_ran_every_case_and_none_failed(harness_run):
+    """Item 17, T1: plugin/KeybindRules.cs's SelfTest, executed - the sixteen
+    defaults, the refusal rules, the token parse, the capture gesture, the
+    key table and seventeen mutation cases, each with its control."""
+    suites = _suites(harness_run)
+    assert "keybinds" in suites, "the keybinds suite did not report"
+    run, fail, verdict = suites["keybinds"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[keybinds\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # The count on the commit that added the suite (#342).
+    assert run >= KEYBIND_CASES, "the keybinds suite shrank to %d cases" % run
+
+
+KEYBIND_CASES = 107
+
+
+# Item 17 fix pass 2: the round-2 findings' controls, one instrument that
+# compiles on the reviewed pin and on the fix tip (red there, green here).
+KEYBIND_FIX2_CASES = 14
+
+
+def test_the_keybind_fix2_controls_ran_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "keybindfix2" in suites, "the keybindfix2 suite did not report"
+    run, fail, verdict = suites["keybindfix2"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[keybindfix2\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run == KEYBIND_FIX2_CASES, (run, printed)
+
+
+# Item 17 fix pass 3: the round-3 findings' controls, one instrument that
+# compiles on the reviewed pin (6e74c910) and on the fix tip (red there,
+# green here): M1 the event-level keyboard accumulator (7), M2 a revision
+# painted only after its repaint completed (3).
+KEYBIND_FIX3_CASES = 10
+
+
+def test_the_keybind_fix3_controls_ran_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "keybindfix3" in suites, "the keybindfix3 suite did not report"
+    run, fail, verdict = suites["keybindfix3"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[keybindfix3\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run == KEYBIND_FIX3_CASES, (run, printed)
+
+
+# Item 17 fix pass 4: the round-4 M2 controls, one instrument that compiles
+# on the reviewed pin (9cff43c9) and on the fix tip (red there, green here):
+# the keyboard guide's failure reaches the repaint gate unstamped (3) and two
+# controls that hold at both (2).
+KEYBIND_FIX4_CASES = 5
+
+
+def test_the_keybind_fix4_controls_ran_and_none_failed(harness_run):
+    suites = _suites(harness_run)
+    assert "keybindfix4" in suites, "the keybindfix4 suite did not report"
+    run, fail, verdict = suites["keybindfix4"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[keybindfix4\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run == KEYBIND_FIX4_CASES, (run, printed)
+
+
+@pytest.mark.parametrize("n", KEYBIND_MUTATIONS)
+def test_each_keybind_mutation_reds_its_assertion_and_keeps_its_control(harness_run, n):
+    """Every T1 mutation: unmutated green, the mutation reds the guarded
+    assertion, the control stays green under it (#391)."""
+    lines = [l for l in harness_run.stdout.splitlines()
+             if l.startswith("[keybinds] ") and (" | case=T1 case %d " % n) in l]
+    assert len(lines) == 3, (n, lines)
+    assert all(l.startswith("[keybinds] PASS") for l in lines), lines
+    assert any("(unmutated)" in l for l in lines)
+    assert any("mutation %d reds the guarded assertion" % n in l for l in lines)
+    assert any("the control stays green under mutation %d" % n in l for l in lines)
+
+
+@pytest.mark.parametrize("name", [
+    "the sixteen defaults equal today's keys exactly",
+    "no two defaults conflict",
+    "the defaults pass every rule on their own rows",
+    "the key table has 132 rows in each column",
+])
+def test_the_keybind_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "keybinds")
+    assert line.startswith("[keybinds] PASS"), line
+
+
 @pytest.mark.parametrize("name", [
     # T2a, the design's four cases
     "T2a the ordinary case",
@@ -998,7 +1096,8 @@ def test_the_harness_compiles_only_the_rule_files():
                       "plugin/SecureRouteRules.cs", "plugin/SecureRouteText.cs",
                       "plugin/NameGlyphs.cs",
                       "plugin/SessionReportRules.cs", "plugin/ShowcaseRules.cs",
-                      "plugin/DamageNumberRules.cs"):
+                      "plugin/DamageNumberRules.cs",
+                      "plugin/KeybindRules.cs"):
         assert any(p.endswith(rule_file) for p in included), (
             "%s is not compiled into the harness" % rule_file)
     # The ladder rules' cases are the harness's own half of the partial

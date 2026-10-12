@@ -38,7 +38,7 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class BroadcastHud
     {
-        private static GUIStyle stName, stStat, stStatLabel, stKey, stTag;
+        private static GUIStyle stName, stStat, stStatLabel, stKey, stKeyTiny, stTag;
 
         private const float FLASH_SECONDS = 0.15f;
 
@@ -701,13 +701,16 @@ namespace CompetitiveRounds
             float row2 = area.y + KEY + GAP;
             float row3 = area.y + 2f * (KEY + GAP);
             float cx = area.x;                        // movement cluster left edge
-            // W sits centered over S (the middle key of the ASD row).
-            DrawKey(new Rect(cx + KEY + GAP, row1, KEY, KEY), "W", up);
-            DrawKey(new Rect(cx, row2, KEY, KEY), "A", left);
-            DrawKey(new Rect(cx + KEY + GAP, row2, KEY, KEY), "S", down);
-            DrawKey(new Rect(cx + 2f * (KEY + GAP), row2, KEY, KEY), "D", right);
-            // SPACE: wide 76 px key centered under the 78 px ASD row.
-            DrawKey(new Rect(cx + (3f * KEY + 2f * GAP - SPACE_W) / 2f, row3, SPACE_W, KEY), "SPACE", jump);
+            // Item 17: the state drawn here is the watched owner's REPLICATED
+            // movement, whose binding this seat cannot know - so the caps are the
+            // semantic actions, like SHOT and BLOCK beside them, never W/A/S/D.
+            // UP sits centered over DOWN (the middle key of the lower row).
+            DrawKey(new Rect(cx + KEY + GAP, row1, KEY, KEY), NativeUI.KeybindSemanticCap(KeybindRules.MoveUp), up);
+            DrawKey(new Rect(cx, row2, KEY, KEY), NativeUI.KeybindSemanticCap(KeybindRules.MoveLeft), left);
+            DrawKey(new Rect(cx + KEY + GAP, row2, KEY, KEY), NativeUI.KeybindSemanticCap(KeybindRules.MoveDown), down);
+            DrawKey(new Rect(cx + 2f * (KEY + GAP), row2, KEY, KEY), NativeUI.KeybindSemanticCap(KeybindRules.MoveRight), right);
+            // JUMP: wide 76 px key centered under the 78 px lower row.
+            DrawKey(new Rect(cx + (3f * KEY + 2f * GAP - SPACE_W) / 2f, row3, SPACE_W, KEY), NativeUI.KeybindSemanticCap(KeybindRules.Jump), jump);
 
             float aimL = area.x + area.width - KEY;   // aim box top-right (kept — Sid likes it)
             float colX = aimL - GAP - ACT_W;          // action column left edge
@@ -736,7 +739,8 @@ namespace CompetitiveRounds
             GUI.DrawTexture(new Rect(r.x + r.width - 1, r.y, 1, r.height), Texture2D.whiteTexture, ScaleMode.StretchToFill, true, 0, edge, 0, 0);
             var prev = GUI.contentColor;
             GUI.contentColor = Color.white;
-            GUI.Label(r, label, stKey);
+            // A word in a 24 px key (item 17's semantic caps) takes the small face.
+            GUI.Label(r, label, label != null && label.Length > 2 && r.width < 40f ? stKeyTiny : stKey);
             GUI.contentColor = prev;
         }
 
@@ -777,6 +781,7 @@ namespace CompetitiveRounds
             stStatLabel = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleLeft };
             stStatLabel.normal.textColor = new Color(0.72f, 0.76f, 0.84f);
             stKey = new GUIStyle(GUI.skin.label) { fontSize = 11, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+            stKeyTiny = new GUIStyle(GUI.skin.label) { fontSize = 7, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter, clipping = TextClipping.Overflow };
             stTag = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
         }
     }

@@ -158,7 +158,7 @@
     {
       "class": "reason",
       "key": "SIgChat",
-      "text": "M cycles the same state in game; Muted also tells the room you cannot read chat"
+      "text": "the Chat overlay mode control cycles the same state in game; Muted also tells the room you cannot read chat"
     },
     {
       "class": "reason",
@@ -2691,7 +2691,7 @@
       "home_label": "Chat & mail",
       "i18n_literals": {
         "option_words": [],
-        "reason": "M cycles the same state in game; Muted also tells the room you cannot read chat",
+        "reason": "the Chat overlay mode control cycles the same state in game; Muted also tells the room you cannot read chat",
         "state_words": []
       },
       "key": "SIgChat",
@@ -2700,7 +2700,7 @@
         "pin",
         "lane"
       ],
-      "reason": "M cycles the same state in game; Muted also tells the room you cannot read chat",
+      "reason": "the Chat overlay mode control cycles the same state in game; Muted also tells the room you cannot read chat",
       "recommendation": {
         "kind": "painted_literal",
         "new_i18n_key": false,

@@ -149,6 +149,7 @@
     <Compile Include="../../plugin/LogScrub.cs" />
     <Compile Include="../../plugin/TopStripBand.cs" />
     <Compile Include="../../plugin/FfaReportRules.cs" />
+    <Compile Include="../../plugin/KeybindRules.cs" />
     <Compile Include="../../plugin/RosterCensusRules.cs" />
     <Compile Include="../../plugin/BinderSortRules.cs" />
     <Compile Include="../../plugin/PcQuickShardRules.cs" />
@@ -173,6 +174,9 @@
     <Compile Include="../../plugin/DamageNumberRules.cs" />
     <Compile Include="../../plugin/AvatarDefaultRules.cs" />
     <Compile Include="AvatarDefaultRulesSelfTest.cs" />
+    <Compile Include="KeybindFix2Controls.cs" />
+    <Compile Include="KeybindFix3Controls.cs" />
+    <Compile Include="KeybindFix4Controls.cs" />
   </ItemGroup>
 
 </Project>

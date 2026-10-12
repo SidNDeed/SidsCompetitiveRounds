@@ -1,0 +1,56 @@
+# tools/keybind_surfaces.py readers (fix pass 2 H1): file	member	root reads	digest	role	via (consumers, self, - for none)	note
+CompetitiveUI.cs	DrawChatInput	2	4be333f13d21acf3	input	-	matches the ChatOpen and ChatOverlayMode key events; decides behaviour, names nothing
+CompetitiveUI.cs	DrawDanceWheel	3	a3b6dcb6d2012b67	input	-	the DanceWheel key event and held state open and keep the wheel; the hint it shows is the KeybindRowFace site of this member
+CompetitiveUI.cs	DrawInputOverlay	7	86fd3e02f1ba9af3	display	self	lights each overlay cap while its bound source is held; the cap labels are this member's KeybindOverlayCap site
+CompetitiveUI.cs	DrawQuickChat	3	6ea6e40bf85a9330	input	-	the QuickChat key event and held state open and keep the wheel; the hint it shows is the KeybindRowFace site of this member
+CompetitiveUI.cs	Tick	1	ad1b283fd6ec5433	input	-	a ChatChannel tap cycles the chat send channel
+GameStateWatcher.cs	TickInputSampling	7	bdfd66699fcf5abb	input	-	achievement input sampling: counts bound-row edges, renders nothing
+GameStateWatcher.cs	UnionActed	1	5a329bea5d0ea936	input	-	achievement input: whether a union of bound rows acted, renders nothing
+InfoViz.cs	Fill	1	69fb7fdb2ba78913	producer	-	the keyboard guide's cap colour: the board role of the bindings now (fix pass 4 M2: no swallow, a failure fails the guide's build)
+KeybindRules.cs	BoardMatchesTheDefaultBoard	2	3d57f73611b873dd	selftest	-	T1 helper: the default board equals the a22f80ed board
+KeybindRules.cs	BuildKeyIndex	2	4af0c88821737bc9	rules	-	the token parser's key index; never displayed
+KeybindRules.cs	ControlsSurfaceAfter	2	d94b9afbdb5f6bbd	selftest	-	T1 case 26 helper: the built Controls surface after a rebind
+KeybindRules.cs	FormatToken	3	cabf40486cafb47c	rules	-	the config token key:<Id> / mouse:<Id>, persisted and logged, never shown to a player
+KeybindRules.cs	FunctionNumber	1	9c54192d8e8e43f7	rules	-	an F-key's number for the rules and for the KeybindKeyName producer
+KeybindRules.cs	GlyphFor	1	fb6f59b44f594888	rules	-	the glyph table lookup the KeybindKeyName producer and IsGlyphKey use
+KeybindRules.cs	IsGlyphKey	1	e93704e2ea2444a9	rules	-	a refusal rule input (a glyph key cannot be bound)
+KeybindRules.cs	IsTextChanging	1	56126f6eca9a652c	rules	-	a refusal rule input (keys that edit the chat text)
+KeybindRules.cs	M	2	76db51b67eb32a76	selftest	-	T1 helper: a mouse source by id
+KeybindRules.cs	ParseToken	1	f7e9cdda3db68e54	rules	-	the config token parser; never displayed
+KeybindRules.cs	Run	10	1e5d1f0181f9ee8f	selftest	-	the T1 self-test body
+Keybinds.cs	(file scope)	2	46caf892f87cc860	input	-	the transpiler hooks HookHeld / HookDown name VanillaHeld and VanillaDown, the vanilla input reads
+Keybinds.cs	Accept	1	b966f420e1bbe306	registry	-	capture accept: the one writer, then the refusal the pane renders through KeybindRefusalText
+Keybinds.cs	ApplyGameBindings#1	1	9c51bb0f756c60d7	registry	-	applies the registry to one live action set
+Keybinds.cs	BoardCapRole	2	939fc47c00dafb60	producer	-	the board role of the registry for one cap
+Keybinds.cs	Bound	1	bdada45bcb646a03	registry	-	the registry accessor
+Keybinds.cs	BoundSnapshot	1	61639c71b1da9668	registry	-	the registry copy a commit compares against
+Keybinds.cs	BoundSourceUnreadable	1	4a655aea11311aa0	registry	-	whether a row's bound mouse button is above the readable cap; its display consumer is KeybindPaintRow, a reader row of its own
+Keybinds.cs	CaseJ	3	2acaa2fe31325e3b	selftest	-	T2 case j (in-game self-test)
+Keybinds.cs	ChatChannelTapped	1	bd3b7ae384f2cc01	input	-	the ChatChannel tap detector over the bound keys
+Keybinds.cs	CommitRows	3	9430a06cef1c1738	registry	-	the one commit; its outcome text is rendered by the toast and KeybindRefusalText
+Keybinds.cs	Down	1	61ae1762a1d418b9	input	-	a bound row's edge
+Keybinds.cs	Held	1	b23c70bad9686600	input	-	a bound row's held state
+Keybinds.cs	Init	1	e7e29d0dfbf8d457	log	-	logs the loaded set as config tokens
+Keybinds.cs	KeyCodesFor#1	1	d38f0ff7712f5eb6	input	-	a row's KeyCodes for input matching
+Keybinds.cs	KeyCodesFor#2	1	a4cc8dd5dc30f931	input	-	a row's KeyCodes for input matching
+Keybinds.cs	LoadFromConfig	5	d6c9585ff0663b8f	registry	-	loads, revalidates and installs the registry
+Keybinds.cs	Matches	1	d6dfadd927536164	input	-	whether an IMGUI key event is a bound row's key
+Keybinds.cs	MatchesUp	1	58ce800912bef01d	input	-	whether an IMGUI key-up event is a bound row's key
+Keybinds.cs	Override	1	69018163e7a18ad0	display	ApplyJoin,ApplyReady,RefreshAll	whether the vanilla join and ready-up prompts take the mod's KeybindJoinPrompt / KeybindReadyPrompt face (Jump moved off Space); RefreshAll re-decides every prompt after a commit
+Keybinds.cs	ReadBoundSource#1	1	f174e813ba89c24a	input	-	a bound source's input state
+Keybinds.cs	ReadBoundSource#2	1	f59a7c9ec6cbb851	input	-	a bound row's input state
+Keybinds.cs	ReadRow	2	06a82eed25985501	input	-	a bound row's input state
+Keybinds.cs	ResetAll	1	99d7b2a5d470671c	registry	-	the reset-all writer
+Keybinds.cs	ResetRow	2	d976ad13014a4086	registry	-	the per-row reset writer
+Keybinds.cs	StCases	6	91f22ba3b669049f	selftest	-	the T2 in-game self-test cases
+Keybinds.cs	Unbind	1	06de593f66fc7a88	registry	-	the unbind writer
+Keybinds.cs	VanillaDown	1	fc5fb132e2f70929	input	-	the vanilla input hook's edge read
+Keybinds.cs	VanillaHeld	1	e7f3f9a61c1c784b	input	-	the vanilla input hook's held read
+Keybinds.cs	Write	3	fba55cff50524b42	registry	-	the one writer
+NativeUI.Keybinds.cs	KeybindKeyName	4	2f5fd09b0543b031	producer	-	a key's face
+NativeUI.Keybinds.cs	KeybindPaintRow	1	befb2074ef840355	display	self	colours a Controls row's face red while its bound mouse button is unreadable; the face text is this member's KeybindRowFace site
+NativeUI.Keybinds.cs	KeybindResetRow	1	341c4e67f56f8f47	registry	-	the Controls row's reset button handler: the per-row reset writer; the row repaints from the revision
+NativeUI.Keybinds.cs	KeybindRowFace	1	8ad08b4f28d18909	producer	-	a row's face
+Plugin.cs	Prefix#25	1	18f21d2b9e197860	input	-	MapSkinCycle held: the manual map-art cycle
+Plugin.cs	Update#2	1	bf47f9eb9f1195d2	input	-	MenuToggle edge: opens the menu
+TabStatsOverlay.cs	Draw	1	b84004bba356da1a	input	-	Scoreboard held: the overlay shows while the key is held; its hint is the EnsureLocaleStrings site
