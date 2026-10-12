@@ -40,7 +40,26 @@ names each such operation by file, line and kind (r3.Reported.rebinds):
     its line and kind;
   * the path-query alias map keeps every binding's value, so a name bound to
     two values (control d's shape) is judged under each (at 47669b66 the
-    enumeration raised NoFixedPoint on it before judging the walk)."""
+    enumeration raised NoFixedPoint on it before judging the walk).
+
+Fix pass 10 (build round 9, M5): a list of rebinding forms was refuted by a
+form outside it (a write through a function's __globals__ mapping), so the
+proof is BOUNDED by namespace reach (r3._namespace_reach): it is refused, and
+the walk reported naming the line, whenever the module holds a write through
+a namespace-reaching expression or name or through a base it cannot resolve,
+a call of a namespace-reaching callable, an import of a namespace-reaching
+module, or a namespace-reaching value leaving its sight. The bound covers the
+stated lists, not every conceivable rebinding:
+  * REBOUND10, controls a to i (the round 9 report's scenario verbatim, the
+    aliased mapping with a container-element variant, vars of the module in
+    sys.modules, a string-built getattr name, exec, unittest.mock.patch and
+    monkeypatch.setattr, the module dict through sys.modules, importlib,
+    types.FunctionType replacing the walk's function): each reports os.walk
+    naming its rebinding line and kind;
+  * j, a benign module (its own local dict written by subscript, a literal
+    plain getattr, the manager used unchanged): still trusted, walk proven;
+  * k, the real review modules: each keeps its round 9 verdict by the same
+    test, and the real-module rule's measured unresolved-base counts hold."""
 
 import os
 import sys
@@ -250,3 +269,118 @@ def test_m5_fix9_a_name_bound_to_two_values_is_judged_under_each():
         src = "import os\nimport sys\nq = %s\nq = %s\nx = q.isdir(p)\n" % (first, second)
         assert [k for _l, k in r3.unwrapped_queries(src)] == ["os.path.isdir"], src
     assert r3.unwrapped_queries("import os\nimport sys\nq = sys\nq = os.path\nx = q.join(p)\n") == []
+
+
+# -- fix pass 10: the proof bounded by namespace reach (r3._namespace_reach) -------------
+MAIN = "def main(argv):"
+GLOBALS_TD = dict(header="import contextlib\nfrom tempfile import TemporaryDirectory\n",
+                  scan=SUPPRESS % "TemporaryDirectory")
+
+
+def _after_scan(shape, text):
+    """shape with `text` as module-level lines between scan and main."""
+    return dict(shape, edits=[(MAIN, text + "\n\n\n" + MAIN)])
+
+
+REBOUND10 = [
+    ("a_report_scenario_verbatim", [
+        (_after_scan(GLOBALS_TD, 'scan.__globals__["TemporaryDirectory"] = contextlib.suppress'),
+         [('scan.__globals__["TemporaryDirectory"] = contextlib.suppress',
+           "subscript store through namespace-reaching scan.__globals__")])]),
+    ("b_the_aliased_mapping", [
+        (_after_scan(GLOBALS_TD, 'g = scan.__globals__\ng["TemporaryDirectory"] = contextlib.suppress'),
+         [('g["TemporaryDirectory"] = contextlib.suppress', "subscript store through namespace-reaching g")]),
+        (_after_scan(GLOBALS_TD, '[scan.__globals__][0]["TemporaryDirectory"] = contextlib.suppress'),
+         [('[scan.__globals__][0]["TemporaryDirectory"] = contextlib.suppress',
+           "subscript store through namespace-reaching scan.__globals__")])]),
+    ("c_vars_of_the_module_in_sys_modules", [
+        (dict(header='import contextlib\nimport sys\nfrom tempfile import TemporaryDirectory\n'
+                     'vars(sys.modules[__name__])["TemporaryDirectory"] = contextlib.suppress\n',
+              scan=SUPPRESS % "TemporaryDirectory"),
+         [('vars(sys.modules[__name__])["TemporaryDirectory"] = contextlib.suppress',
+           "subscript store through namespace-reaching vars(sys.modules[__name__])")])]),
+    ("d_the_string_built_name", [
+        (_after_scan(GLOBALS_TD, 'getattr(scan, "__glo" + "bals__")["TemporaryDirectory"] = contextlib.suppress'),
+         [('getattr(scan, "__glo" + "bals__")["TemporaryDirectory"] = contextlib.suppress',
+           "subscript store through namespace-reaching getattr(scan, '__glo' + 'bals__')")])]),
+    ("e_exec", [
+        (dict(header='import contextlib\nimport tempfile\nexec("tempfile.TemporaryDirectory = contextlib.suppress")\n',
+              scan=TD_WALK),
+         [('exec("tempfile.TemporaryDirectory = contextlib.suppress")', "call of namespace-reaching exec")])]),
+    ("f_mock_patch_and_monkeypatch", [
+        (dict(header="import contextlib\nimport tempfile\nimport unittest.mock\n",
+              scan='    with unittest.mock.patch("tempfile.TemporaryDirectory", contextlib.suppress):\n'
+                   "        with tempfile.TemporaryDirectory(Exception):\n"
+                   "            return list(os.walk(p, onerror=_walk_error))\n"),
+         [('    with unittest.mock.patch("tempfile.TemporaryDirectory", contextlib.suppress):',
+           "call of namespace-reaching unittest.mock.patch"),
+          ("import unittest.mock", "import of namespace-reaching module unittest.mock")]),
+        (dict(header='import contextlib\nimport tempfile\n\n\ndef _patch(monkeypatch):\n'
+                     '    monkeypatch.setattr("tempfile.TemporaryDirectory", contextlib.suppress)\n', scan=TD_WALK),
+         [('    monkeypatch.setattr("tempfile.TemporaryDirectory", contextlib.suppress)',
+           "call of namespace-reaching monkeypatch.setattr")])]),
+    ("g_the_module_dict_through_sys_modules", [
+        (dict(header='import contextlib\nimport sys\nimport tempfile\n'
+                     'sys.modules["tempfile"].__dict__["TemporaryDirectory"] = contextlib.suppress\n', scan=TD_WALK),
+         [('sys.modules["tempfile"].__dict__["TemporaryDirectory"] = contextlib.suppress',
+           "subscript store through namespace-reaching sys.modules['tempfile'].__dict__")])]),
+    ("h_importlib_import_module", [
+        (dict(header='import contextlib\nimport importlib\nimport tempfile\n'
+                     'importlib.import_module("tempfile").TemporaryDirectory = contextlib.suppress\n', scan=TD_WALK),
+         [('importlib.import_module("tempfile").TemporaryDirectory = contextlib.suppress',
+           "attribute store through namespace-reaching importlib.import_module('tempfile')")])]),
+    ("i_types_function_type_replacing_scan", [
+        (_after_scan(dict(GLOBALS_TD, header="import contextlib\nimport types\nfrom tempfile import TemporaryDirectory\n"),
+                     'scan = types.FunctionType(scan.__code__, {"TemporaryDirectory": contextlib.suppress, "os": os})'),
+         [('scan = types.FunctionType(scan.__code__, {"TemporaryDirectory": contextlib.suppress, "os": os})',
+           "call of namespace-reaching types.FunctionType"),
+          ("import types", "import of namespace-reaching module types")])]),
+]
+
+
+@pytest.mark.parametrize("name,variants", REBOUND10, ids=[r[0] for r in REBOUND10])
+def test_m5_fix10_a_namespace_reaching_rebind_reports_the_walk_naming_the_line(name, variants):
+    for shape, expect in variants:
+        _named(name, shape, expect)
+
+
+def test_m5_fix10_j_a_benign_module_is_still_trusted():
+    """Its own local dict written by subscript, getattr on a local object
+    with a literal plain name, tempfile.TemporaryDirectory used unchanged:
+    nothing reaches a namespace, the walk is still proven."""
+    src = _plant(header="import tempfile\n\n\nclass _Box:\n    name = 'box'\n",
+                 scan='    seen = {}\n    seen["root"] = p\n    box = _Box()\n    label = getattr(box, "name")\n'
+                      "    with tempfile.TemporaryDirectory():\n        return list(os.walk(p, onerror=_walk_error))\n")
+    assert r3.unwrapped_queries(src, "planted") == []
+    assert _named_rows(src) == []
+
+
+def _named_rows(src, file="planted"):
+    tree = r3.ast.parse(src)
+    parents = {}
+    for n in r3.ast.walk(tree):
+        for c in r3.ast.iter_child_nodes(n):
+            parents[id(c)] = n
+    return r3._namespace_reach(tree, r3._Names(tree, parents), file)
+
+
+REAL = {"backend/tools/review_needles.py": 9, "backend/api/review_rules.py": 23, "backend/api/review_boot.py": 0}
+
+
+def test_m5_fix10_k_the_real_review_modules_keep_their_verdicts():
+    """Every surface keeps its round 9 verdict by the same test; the
+    real-module rule's measured counts of unresolved-base sites hold; the
+    named module is exempt at exactly its measured count, and one more such
+    site lapses the exemption."""
+    r3.test_m5_no_path_query_turns_a_failure_into_absence()
+    root = os.path.join(HERE, "..", "..")
+    for rel, count in REAL.items():
+        with open(os.path.join(root, rel), encoding="utf-8") as f:
+            src = f.read()
+        unresolved = [x for x in _named_rows(src, "<source>") if r3._unresolved(x[1])]
+        assert len(unresolved) == count, (rel, unresolved)
+    with open(os.path.join(root, "backend/tools/review_needles.py"), encoding="utf-8") as f:
+        src = f.read()
+    assert _named_rows(src, "review_needles.py") == []
+    extra = src + "\n\ndef _planted_extra(d):\n    d['k'] = 1\n"
+    assert len(_named_rows(extra, "review_needles.py")) == 10

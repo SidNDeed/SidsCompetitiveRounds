@@ -828,8 +828,9 @@ _REFLECTIVE_STRINGS = frozenset(s for s in _NAMESPACE | _PROTOCOL
 class Reported(tuple):
     """One row of the enumeration's report: (line, kind), as every caller
     unpacks it. An os.walk row also carries every operation of the module
-    that can rebind a never-suppress manager (`rebinds`, each (file, line,
-    kind)), and its repr names them."""
+    that can rebind a never-suppress manager (fix pass 9) or reach a
+    namespace (fix pass 10) (`rebinds`, each (file, line, kind)), and its
+    repr names them."""
 
     def __new__(cls, line, kind, file="<source>", rebinds=()):
         row = tuple.__new__(cls, (line, kind))
@@ -1008,7 +1009,366 @@ def _manager_rebinds(tree, names) -> list:
     return sorted(set(out))
 
 
-def walk_handler_proven(tree, handler) -> bool:
+# Fix pass 10 (round 9 M5): _manager_rebinds is a list of rebinding FORMS, and
+# a form outside it (a write through a function's __globals__ mapping) rebound
+# a manager unseen. The proof is now BOUNDED by namespace reach instead: it is
+# refused whenever the module holds any expression in the stated lists that
+# can reach a namespace (a module dict, a function's globals, a frame, the
+# import system, a mock), any name bound to one, or any write through a base
+# the proof cannot resolve to an object the module makes. This is a bound
+# over the stated lists and the unresolved-base rule, not a claim that every
+# conceivable rebinding is detected: code that runs from elsewhere stays
+# outside a per-module static proof, as fix pass 9 states.
+_REACH_CALLABLES = frozenset(
+    {"builtins." + n for n in ("globals", "vars", "locals", "dir", "getattr", "setattr", "delattr", "hasattr",
+                               "exec", "eval", "compile", "__import__", "breakpoint")}
+    | {"sys._getframe", "sys.settrace", "sys.setprofile", "sys.modules", "inspect.currentframe", "inspect.stack",
+       "inspect.getmodule", "inspect.getmembers", "types.FunctionType", "types.MethodType", "types.ModuleType",
+       "types.new_class", "operator.setitem", "operator.delitem", "operator.attrgetter", "operator.itemgetter",
+       "functools.reduce", "codecs.decode"})
+_REACH_MODULES = ("importlib", "runpy", "ctypes", "gc", "unittest.mock", "mock", "base64",
+                  "pickle", "_pickle", "marshal", "copyreg", "shelve")    # the module and every attribute of it
+_REACH_IMPORTS = ("importlib", "ctypes", "gc", "runpy", "unittest.mock", "mock", "types", "inspect", "builtins")
+_FRAME_ATTRS = frozenset({"f_globals", "f_locals", "f_back", "f_builtins", "gi_frame", "cr_frame", "ag_frame",
+                          "tb_frame"})
+_NAME_ARG = frozenset({"builtins.getattr", "builtins.hasattr"})    # benign only with a literal plain name
+_STRING_NAMES = frozenset({"__name__", "__file__", "__doc__", "__debug__", "__package__", "__qualname__",
+                           "__module__"})                           # module-level dunder NAMES that hold strings
+
+
+def _dunder(s) -> bool:
+    return isinstance(s, str) and len(s) > 4 and s.startswith("__") and s.endswith("__")
+
+
+def _in_module(c, mods) -> bool:
+    return any(c == m or c.startswith(m + ".") for m in mods)
+
+
+def _type_name(node) -> bool:
+    """`type(<name>).__name__`: the class name of an object, a string (the
+    form _raise_is_total admits in a refusal's arguments)."""
+    return (isinstance(node, ast.Attribute) and node.attr == "__name__" and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name) and node.value.func.id == "type"
+            and len(node.value.args) == 1 and not node.value.keywords and isinstance(node.value.args[0], ast.Name))
+
+
+def _target_names(t) -> set:
+    """The plain names a binding target binds (through tuples, lists and
+    starred parts; a subscript or attribute target binds no name)."""
+    if isinstance(t, ast.Name):
+        return {t.id}
+    if isinstance(t, ast.Starred):
+        return _target_names(t.value)
+    if isinstance(t, (ast.Tuple, ast.List)):
+        return set().union(*[_target_names(e) for e in t.elts]) if t.elts else set()
+    return set()
+
+
+class _Reach:
+    """Namespace reach of one module (fix pass 10), judged per node:
+      a namespace-reaching EXPRESSION is any dunder attribute, a frame or
+      generator frame attribute (_FRAME_ATTRS), sys.modules and any subscript
+      or attribute of it, a reference that can stand for a namespace-reaching
+      callable or module (_REACH_CALLABLES, _REACH_MODULES, the builtins
+      module) other than the function of a getattr or hasattr call whose
+      name is a literal plain name, a call of any of these, anything named
+      monkeypatch, and a dunder name other than the string-valued ones;
+      a namespace-reaching NAME is any name bound, through every binding
+      form in any scope (assignment, augmented and annotated assignment,
+      unpacking, walrus, with-as, loop and comprehension targets, except-as,
+      function and lambda defaults, a def through what it returns or yields,
+      a class through its body), to anything that contains a
+      namespace-reaching expression or name, to a fixed point."""
+
+    def __init__(self, tree, names):
+        self.tree, self.parents, self.names = tree, names.parents, names
+        self.binds, self.cache = {}, {}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.arg):
+                self.binds.setdefault(n.arg, []).append(n)
+            elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                self.binds.setdefault(n.id, []).append(n)
+            elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                for a in n.names:
+                    self.binds.setdefault(a.asname or a.name.split(".")[0], []).append(n)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                                ast.MatchAs, ast.MatchStar)) and n.name:
+                self.binds.setdefault(n.name, []).append(n)
+            elif isinstance(n, (ast.Global, ast.Nonlocal)):
+                for g in n.names:
+                    self.binds.setdefault(g, []).append(n)
+            elif isinstance(n, ast.MatchMapping) and n.rest:
+                self.binds.setdefault(n.rest, []).append(n)
+        self.marked = set()
+        self._mark()
+
+    def cands(self, node, seen=frozenset()) -> set:
+        """Every dotted name a reference can stand for through every binding
+        of its names (the _candidates rule), None for anything unresolvable."""
+        if isinstance(node, ast.Attribute):
+            return {None if b is None else b + "." + node.attr for b in self.cands(node.value, seen)}
+        if not isinstance(node, ast.Name) or node.id in seen:
+            return {None}
+        if not seen and node.id in self.cache:
+            return self.cache[node.id]
+        binds = self.binds.get(node.id, [])
+        if not binds:
+            out = {"builtins." + node.id} if hasattr(builtins, node.id) else {None}
+        else:
+            out = set()
+            for b in binds:
+                if isinstance(b, ast.Import):
+                    out |= {a.name if a.asname else a.name.split(".")[0] for a in b.names
+                            if (a.asname or a.name.split(".")[0]) == node.id}
+                elif isinstance(b, ast.ImportFrom) and b.module and not b.level:
+                    out |= {b.module + "." + a.name for a in b.names if (a.asname or a.name) == node.id}
+                elif isinstance(b, ast.Name) and isinstance(b.ctx, ast.Store) and self.names._assigned(b):
+                    out |= self.cands(self.parents[id(b)].value, seen | {node.id})
+                else:
+                    out.add(None)
+        if not seen:
+            self.cache[node.id] = out
+        return out
+
+    def reach_callable(self, node):
+        """The first dotted name a reference can stand for that is a
+        namespace-reaching callable or module, else None."""
+        for c in sorted(x for x in self.cands(node) if x):
+            if c in _REACH_CALLABLES or _in_module(c, _REACH_MODULES) or c == "builtins":
+                return c
+        return None
+
+    def benign_name_call(self, call) -> bool:
+        """getattr or hasattr called with a literal plain (non-dunder) name."""
+        c = self.reach_callable(call.func)
+        a = call.args[1] if len(call.args) >= 2 else None
+        name = a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None
+        computed = name is None                       # a name built at run time
+        return c in _NAME_ARG and not computed and not _dunder(name)
+
+    def reaching(self, node) -> bool:
+        """Whether this one node is a namespace-reaching expression or name."""
+        if isinstance(node, ast.Attribute):
+            if _dunder(node.attr):                                   # every dunder attribute
+                return True
+            if node.attr in _FRAME_ATTRS or node.attr == "monkeypatch":
+                return True
+        if isinstance(node, ast.Name):
+            if node.id in self.marked:                               # a name bound to a reaching expression
+                return True
+            if node.id == "monkeypatch" or _dunder(node.id) and node.id not in _STRING_NAMES:
+                return True
+        if isinstance(node, (ast.Name, ast.Attribute)) and self.reach_callable(node):
+            p = self.parents.get(id(node))
+            return not (isinstance(p, ast.Call) and p.func is node and self.benign_name_call(p))
+        if isinstance(node, ast.Subscript):
+            return "sys.modules" in self.cands(node.value)
+        if isinstance(node, ast.Call):
+            return self.reaching(node.func) or self.contains(node.func)
+        return False
+
+    def contains(self, node) -> bool:
+        return any(self.reaching(x) for x in ast.walk(node))
+
+    def _sources(self) -> list:
+        """(names bound, the expressions they are bound from) for every
+        binding form of the module."""
+        out = []
+        for n in ast.walk(self.tree):
+            if isinstance(n, ast.Assign):
+                out.append((set().union(*[_target_names(t) for t in n.targets]), [n.value]))
+            elif isinstance(n, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and n.value is not None:
+                out.append((_target_names(n.target), [n.value]))
+            elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
+                out.append((_target_names(n.target), [n.iter]))
+            elif isinstance(n, ast.withitem) and n.optional_vars is not None:
+                out.append((_target_names(n.optional_vars), [n.context_expr]))
+            elif isinstance(n, ast.ExceptHandler) and n.name and n.type is not None:
+                out.append(({n.name}, [n.type]))
+            elif isinstance(n, ast.arguments):
+                pos = n.posonlyargs + n.args
+                out += [({a.arg}, [d]) for a, d in zip(pos[len(pos) - len(n.defaults):], n.defaults)]
+                out += [({a.arg}, [d]) for a, d in zip(n.kwonlyargs, n.kw_defaults) if d is not None]
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                out.append(({n.name}, [x.value for x in ast.walk(n) if isinstance(x, (ast.Return, ast.Yield,
+                                                                                     ast.YieldFrom)) and x.value]))
+            elif isinstance(n, ast.ClassDef):
+                out.append(({n.name}, list(n.body)))
+            elif isinstance(n, ast.Match):
+                caps = {x.name for x in ast.walk(n) if isinstance(x, (ast.MatchAs, ast.MatchStar)) and x.name}
+                out.append((caps, [n.subject]))
+        return out
+
+    def _mark(self):
+        sources = self._sources()
+        while True:
+            new = set()
+            for bound, exprs in sources:
+                if bound - self.marked and any(self.contains(e) for e in exprs):
+                    new |= bound - self.marked
+            if not new:
+                return
+            self.marked |= new
+
+    def made_here(self, node, seen=frozenset()) -> bool:
+        """Whether the base chain of an expression starts from an object the
+        module itself makes: a literal or display, the fresh result of a
+        call of a builtin or of a def or class of the module, or a name
+        whose every binding is an import, a def, a class, or an assignment,
+        loop or with target whose source is itself made here. A parameter,
+        a name the module never binds, an except or match capture and the
+        result of any other call are not."""
+        while isinstance(node, (ast.Attribute, ast.Subscript, ast.Starred)):
+            node = node.value
+        if isinstance(node, ast.Call):
+            f = node.func
+            if not isinstance(f, ast.Name):
+                return False                                         # a method's or an imported callable's result
+            binds = self.binds.get(f.id, [])
+            if not binds:
+                return hasattr(builtins, f.id)
+            return all(isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) for b in binds)
+        if not isinstance(node, ast.Name):
+            return True                                              # a literal, a display, a lambda
+        if node.id in seen:
+            return False
+        binds = self.binds.get(node.id, [])
+        if not binds:
+            return False                                             # an unresolved global
+        for b in binds:
+            if isinstance(b, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                              ast.Global, ast.Nonlocal)):
+                continue
+            if isinstance(b, ast.Name) and isinstance(b.ctx, ast.Del):
+                continue
+            if isinstance(b, ast.Name):
+                stmt = self.parents.get(id(b))
+                while isinstance(stmt, (ast.Tuple, ast.List, ast.Starred)):
+                    stmt = self.parents.get(id(stmt))
+                if isinstance(stmt, (ast.AugAssign, ast.AnnAssign)) and (stmt.value is None
+                                                                          or isinstance(stmt, ast.AugAssign)):
+                    continue                                         # the object is bound by another binding
+                if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) \
+                        and self.made_here(stmt.value, seen | {node.id}):
+                    continue
+                if isinstance(stmt, (ast.For, ast.AsyncFor, ast.comprehension)) \
+                        and self.made_here(stmt.iter, seen | {node.id}):
+                    continue
+                if isinstance(stmt, ast.withitem) and self.made_here(stmt.context_expr, seen | {node.id}):
+                    continue
+            return False                 # a parameter, a capture, a target of a source not made here
+        return True
+
+
+# The real-module rule (fix pass 10). Measured over the three review modules,
+# the unresolved-base case found 32 write sites: 9 in review_needles.py
+# (dict accumulators that are parameters: out twice, a; local dicts whose
+# names are also parameters elsewhere in the module, which the scope-merged
+# resolution cannot tell apart: tables, found three times, out; one tuple
+# store on self), 23 in review_rules.py (stores on self, two of them
+# subscripts of self attributes, and the parameter memo dict), 0 in
+# review_boot.py; every site is named with its line in the notes. The
+# narrowest rule that still refuses every control: the unresolved-base case
+# refuses in every module EXCEPT a module named here, and only while it holds
+# exactly the measured number of such sites and no other namespace-reaching
+# operation at all; one more or one fewer site, or any other row, and the
+# exemption lapses (the refusal returns). review_rules.py and review_boot.py
+# are not named: other rules refuse them regardless.
+_MEASURED_CLEAN = {"review_needles.py": 9}
+
+
+def _unresolved(kind) -> bool:
+    return " through unresolved base " in kind
+
+
+_ESCAPES = {ast.Call: "a call argument", ast.keyword: "a call argument", ast.Return: "a return value",
+            ast.Yield: "a yielded value", ast.YieldFrom: "a yielded value", ast.Await: "an awaited value",
+            ast.Lambda: "a lambda body", ast.Raise: "a raised value", ast.Assign: "a stored value",
+            ast.AnnAssign: "a stored value", ast.AugAssign: "a stored value"}
+
+
+def _namespace_reach(tree, names, file="<source>") -> list:
+    """Every namespace-reaching operation of the module (fix pass 10), as
+    sorted (line, kind) pairs; any one refuses the handler proof (the
+    unresolved-base rows of a module the real-module rule names are dropped
+    while it holds exactly its measured count of them and nothing else):
+      (1) a store, deletion or augmented store whose target is a subscript
+          or an attribute, when the target or anything in its base is a
+          namespace-reaching expression or name (_Reach), or when its base
+          does not start from an object the module makes (_Reach.made_here);
+      (2) a call of a namespace-reaching callable, or of anything whose
+          function contains a namespace-reaching expression or name (a method
+          of a namespace, a dunder method, a marked alias), in any scope;
+      (3) an import of importlib, ctypes, gc, runpy, unittest.mock, mock,
+          types, inspect or builtins, in any scope;
+      (4) a namespace-reaching expression or name that leaves the module's
+          sight: passed as a call argument, returned, yielded, raised, stored
+          into an attribute or subscript, or used anywhere but read through,
+          bound to plain names (which marks them), compared, tested or
+          formatted; `type(<name>).__name__` is a string and exempt.
+    Fix pass 9's _manager_rebinds still runs beside it, unchanged."""
+    r = _Reach(tree, names)
+    parents = r.parents
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):     # (1)
+            what = "attribute" if isinstance(n, ast.Attribute) else "subscript"
+            op = "%s deletion" % what if isinstance(n.ctx, ast.Del) else \
+                "augmented %s store" % what if isinstance(parents.get(id(n)), ast.AugAssign) else "%s store" % what
+            hit = next((x for x in [n] + list(ast.walk(n.value)) if r.reaching(x)), None)
+            if hit is not None:
+                out.append((n.lineno, "%s through namespace-reaching %s" % (op, ast.unparse(hit))))
+            elif not r.made_here(n.value):
+                out.append((n.lineno, "%s through unresolved base %s" % (op, ast.unparse(n.value))))
+        if isinstance(n, ast.Call) and r.reaching(n):                                                     # (2)
+            out.append((n.lineno, "call of namespace-reaching %s" % ast.unparse(n.func)))
+        if isinstance(n, (ast.Import, ast.ImportFrom)):                                                  # (3)
+            mods = [a.name for a in n.names] if isinstance(n, ast.Import) else \
+                [n.module or ""] + ["%s.%s" % (n.module, a.name) for a in n.names if n.module]
+            for m in sorted({m for m in mods if _in_module(m, _REACH_IMPORTS)}):
+                out.append((n.lineno, "import of namespace-reaching module %s" % m))
+        if r.reaching(n) and not _type_name(n) and not isinstance(n, ast.Call) \
+                and not isinstance(getattr(n, "ctx", None), (ast.Store, ast.Del)):                      # (4)
+            ctx, p = n, parents.get(id(n))
+            while True:
+                if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is ctx and isinstance(p.ctx, ast.Load) \
+                        or isinstance(p, (ast.Tuple, ast.List, ast.Set, ast.Dict, ast.Starred, ast.BoolOp)) \
+                        or isinstance(p, ast.IfExp) and p.test is not ctx:
+                    ctx, p = p, parents.get(id(p))                   # read through: the result still reaches
+                    continue
+                break
+            if isinstance(p, ast.Call) and p.func is ctx:
+                continue                                             # a call: (2)
+            if isinstance(p, (ast.Attribute, ast.Subscript)) and p.value is ctx:
+                continue                                             # the base of a store: (1)
+            if isinstance(p, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and p.value is ctx and all(
+                    _target_names(t) and not any(isinstance(x, (ast.Attribute, ast.Subscript)) for x in ast.walk(t))
+                    for t in (p.targets if isinstance(p, ast.Assign) else [p.target])):
+                continue                                             # bound to plain names: marked
+            if isinstance(p, (ast.For, ast.AsyncFor, ast.comprehension)) and p.iter is ctx \
+                    or isinstance(p, ast.withitem) and p.context_expr is ctx:
+                tgt = p.target if not isinstance(p, ast.withitem) else p.optional_vars
+                if tgt is None or not any(isinstance(x, (ast.Attribute, ast.Subscript)) for x in ast.walk(tgt)):
+                    continue                                         # bound to plain names: marked
+            if isinstance(p, (ast.Compare, ast.Expr, ast.FormattedValue, ast.UnaryOp, ast.If, ast.While,
+                              ast.Assert, ast.IfExp)) or isinstance(p, ast.comprehension) and ctx in p.ifs:
+                continue                                             # compared, tested, formatted or discarded
+            if isinstance(p, ast.arguments) or isinstance(p, ast.ExceptHandler) and p.type is ctx:
+                continue                                             # a default or a caught type: marked
+            if isinstance(p, ast.ClassDef) and ctx in p.bases + p.decorator_list \
+                    or isinstance(p, (ast.FunctionDef, ast.AsyncFunctionDef)) and ctx in p.decorator_list:
+                out.append((n.lineno, "namespace-reaching %s escapes into a decorator or base" % ast.unparse(n)))
+                continue
+            where = next((v for k, v in _ESCAPES.items() if isinstance(p, k)), "a %s" % type(p).__name__)
+            out.append((n.lineno, "namespace-reaching %s escapes as %s" % (ast.unparse(n), where)))
+    out = sorted(set(out))
+    measured = _MEASURED_CLEAN.get(os.path.basename(file.replace("\\", "/")))
+    if measured is not None and all(_unresolved(k) for _l, k in out) and len(out) == measured:
+        return []                       # the real-module rule: exactly the measured, named sites
+    return out
+
+
+def walk_handler_proven(tree, handler, file="<source>") -> bool:
     """An os.walk error handler is accepted only when the name AT THE CALL
     SITE can stand for nothing but one module-level raising function, and
     every exception path from it reaches the single exit-3 refusal:
@@ -1039,7 +1399,11 @@ def walk_handler_proven(tree, handler) -> bool:
           suppress, a prefix of its dotted path, an alias of either, or the
           manager itself (_manager_rebinds, fix pass 9): (5) trusts such a
           manager by its name, and _Names still resolves a name whose
-          meaning such an operation changes at run time."""
+          meaning such an operation changes at run time;
+      (7) the module holds no namespace-reaching operation (_namespace_reach,
+          fix pass 10): a bound over the stated namespace-reaching lists and
+          every write through a base the proof cannot resolve, in place of
+          relying on (6)'s list of rebinding forms alone."""
     if not isinstance(handler, ast.Name):
         return False
     binds = _bindings(tree, handler.id)
@@ -1066,6 +1430,8 @@ def walk_handler_proven(tree, handler) -> bool:
     names = _Names(tree, parents)
     if _manager_rebinds(tree, names):
         return False                      # an operation can rebind a never-suppress manager
+    if _namespace_reach(tree, names, file):
+        return False                      # an operation can reach a namespace (fix pass 10)
     if names.ref(cls[0].bases[0]) != "builtins.Exception":
         return False                      # NoVerdict's base is not the builtin Exception
     for n in ast.walk(tree):
@@ -1097,7 +1463,8 @@ def unwrapped_queries(source: str, file: str = "<source>") -> list:
     on a path module, and an os.walk whose handler is not proven -- through
     any import or assignment alias, called or not. An os.walk row is a
     Reported naming, by `file`, line and kind, every operation of the module
-    that can rebind a never-suppress manager (fix pass 9)."""
+    that can rebind a never-suppress manager (fix pass 9) or reach a
+    namespace (fix pass 10)."""
     tree = ast.parse(source)
     aliases = _aliases(tree)
     parents = {}
@@ -1114,8 +1481,11 @@ def unwrapped_queries(source: str, file: str = "<source>") -> list:
                 if isinstance(call, ast.Call) and call.func is n:
                     kw = [k.value for k in call.keywords if k.arg == "onerror"]
                     handler = kw[0] if kw else (call.args[2] if len(call.args) > 2 else None)
-                if not walk_handler_proven(tree, handler):
-                    out.append(Reported(n.lineno, "os.walk", file, _manager_rebinds(tree, _Names(tree, parents))))
+                if not walk_handler_proven(tree, handler, file):
+                    names = _Names(tree, parents)
+                    out.append(Reported(n.lineno, "os.walk", file,
+                                        sorted(set(_manager_rebinds(tree, names)
+                                                   + _namespace_reach(tree, names, file)))))
             for q in sorted(r & QUERY_NAMES - {"os.walk"}):
                 out.append((n.lineno, q))
             if not r & QUERY_NAMES and isinstance(n, ast.Attribute) and n.attr in PATHLIB_QUERIES \
