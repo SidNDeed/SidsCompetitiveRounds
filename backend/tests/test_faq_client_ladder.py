@@ -30,11 +30,13 @@ MAIN = ROOT / "backend" / "api" / "main.py"
 LOCALES = ("ES", "RU", "UK", "SV")
 
 # The Info-library properties the contract corrects, by the property each
-# article is held in.
+# article is held in and the I18n call that holds it. Item 17 (ce4cdc4c) made
+# the cosmetics article I18n.TrF: its English names a bound key through {0}.
+# Each declaration is matched in exactly that form.
 ARTICLES = {
-    "ranked 1v1 article": "Ranked1v1",
-    "economy article": "Rewards",
-    "cosmetics article": "Cosmetics",
+    "ranked 1v1 article": ("Ranked1v1", "Tr"),
+    "economy article": ("Rewards", "Tr"),
+    "cosmetics article": ("Cosmetics", "TrF"),
 }
 
 # The contract's section 1, verbatim: (article, before, after). An "after" is
@@ -116,8 +118,8 @@ def article_sources():
     """{article: English source} read out of InfoLibrary.cs's own literals."""
     src = _read(INFO)
     out = {}
-    for name, prop in ARTICLES.items():
-        decl = "private static string %s => I18n.Tr(@\"" % prop
+    for name, (prop, call) in ARTICLES.items():
+        decl = "private static string %s => I18n.%s(@\"" % (prop, call)
         assert src.count(decl) == 1, "%s: %r occurs %d times in InfoLibrary.cs" % (
             name, decl, src.count(decl))
         out[name] = _verbatim_after(src, src.index(decl) + len(decl))
