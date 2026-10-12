@@ -212,6 +212,10 @@ GameStateWatcher.cs	RosterCensusEmitter	ReadSeats	PlayerList	R	census feed reads
 GameStateWatcher.cs	RosterCensusEmitter	ResolveBodiesByActor	players	R	census feed resolves every body by actor (K48)	
 H2HSummary.cs	H2HSummary	IsPlainTwoFighterRoom	ActiveFighterCount	N	1v1 summary UI	
 H2HSummary.cs	H2HSummary	ResolveOpponent	OtherActiveFighters	N	1v1 summary UI	
+IdentityClockEvidence.cs	IdentityClockEvidence	EnterRpc	Sender	R	the identity clock record: a raw fact written into the record the server judges; it decides no count, send gate, damage, pick or result (the RPC frame's sender actor, kept for the frame; the first non-local sender is the actor the record follows, and only that actor's RPC names and stamps are noted)	
+IdentityClockEvidence.cs	IdentityClockEvidence	MovePlayers	players	R	the identity clock record: a raw fact written into the record the server judges; it decides no count, send gate, damage, pick or result (the first non-local body's spawn target of the point, recorded as seen)	
+IdentityClockEvidence.cs	IdentityClockEvidence	ReadPubFps	GetPlayer	R	the identity clock record: a raw fact written into the record the server judges; it decides no count, send gate, damage, pick or result (the followed actor's Photon player, read for its published frame rate, cr_gstats field 7)	
+IdentityClockEvidence.cs	IdentityClockEvidence	Slice	players	R	the identity clock record: a raw fact written into the record the server judges; it decides no count, send gate, damage, pick or result (every body each tick: the own body for its isPlaying edges and input, and whether any body is dead, for the point's timing)	
 Keybinds.cs	Keybinds	LocalCharacter	players	N	finds the local body (IsMine) only; the item 17 achievement combat gate and the action terms of the local input predicates	
 NametagFontRenderer.cs	NametagFontRenderer	ScanAndApply	ActiveFighters	N	cosmetic; reads ActiveFighters(), so a quarantined body gets no nametag	
 NametagGlowRenderer.cs	NametagGlowRenderer	ScanAndApply	ActiveFighters	N	cosmetic; reads ActiveFighters(), so a quarantined body gets no glow	
