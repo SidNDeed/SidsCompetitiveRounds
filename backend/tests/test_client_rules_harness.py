@@ -1519,3 +1519,39 @@ def test_each_avatar_claim_has_its_mutation_and_its_control(harness_run, cid):
         assert l.startswith("[avatardefaults] PASS"), l
         assert " | got=" in l and not l.rstrip().endswith("| got="), (
             "the case printed no measurement: " + l)
+
+
+# -- verified reads: the client half (requirements 30-35) --------------------
+
+def test_the_read_gate_suite_ran_every_case_and_none_failed(harness_run):
+    """Verified reads: ReadGateRules, executed - the hold, the one OPEN/gated
+    signal, the refusal retries and the mode advert."""
+    suites = _suites(harness_run)
+    assert "readgate" in suites, "the ReadGateRules suite did not report"
+    run, fail, verdict = suites["readgate"]
+    assert fail == 0 and verdict == "PASS", harness_run.stdout[-4000:]
+    printed = len(re.findall(r"^\[readgate\] (PASS|FAIL) ", harness_run.stdout, re.M))
+    assert printed == run, (
+        "the suite declared run=%d but printed %d case lines" % (run, printed))
+    # 38 cases on the commit that added the suite; the floor is that count
+    # (#342). Raise it when cases are added.
+    assert run >= 38, "the ReadGateRules suite shrank to %d cases" % run
+
+
+@pytest.mark.parametrize("name", [
+    "prolonged_mint_failure_zero_gated_sends: 120 s without a session, zero gated sends, every OPEN GET sent",
+    "prolonged_mint_failure_zero_gated_sends: the same on the fallback",
+    "control: a session minted at 60 s sends the gated GETs still waiting and every later one",
+    "enforce_to_log_unchanged_process: latched, then 'log' resumes gated sends in the same instance, on the fallback too",
+    "enforce_to_log_unchanged_process: latched, then 'off' resumes gated sends in the same instance, on the fallback too",
+    "enforce_to_log_unchanged_process: 'unknown' leaves the latch as it was (before 'log')",
+    "log: a handler's own 401 session_required (no gate mark) is delivered and latches nothing",
+    "503 session_replication_pending: retried after 1, 2, 4 and 8 s, then delivered",
+    "503 read_gate_unavailable: retried once after 5 s, then delivered",
+    "401 read_credential_required: latches enforce, passes to the session reject, retries once, then delivers",
+])
+def test_the_read_gate_guarantees_each_have_a_case(harness_run, name):
+    line = _named_case(harness_run, name, "readgate")
+    assert line.startswith("[readgate] PASS"), line
+    assert " | got=" in line and not line.rstrip().endswith("| got="), (
+        "the case printed no measurement: " + line)

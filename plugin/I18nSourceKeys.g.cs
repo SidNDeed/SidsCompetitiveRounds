@@ -2578,6 +2578,7 @@ namespace CompetitiveRounds
             "Start Here",
             "Start unlocks in {0}s (settings changed)",
             "Starts: <color=#FFDE88>{0}</color>",
+            "Stats and profiles need the secure connection. Retrying every 5 minutes.",
             "Stats still loading - try again in a moment.",
             "Status: <color=#88FF88>Allowed</color> - match data and linking are active.",
             "Status: <color=#DDDD66>Unset</color> - the consent prompt will appear on next launch.",

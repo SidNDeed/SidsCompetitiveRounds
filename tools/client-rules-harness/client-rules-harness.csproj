@@ -177,6 +177,8 @@
     <Compile Include="KeybindFix2Controls.cs" />
     <Compile Include="KeybindFix3Controls.cs" />
     <Compile Include="KeybindFix4Controls.cs" />
+    <Compile Include="../../plugin/ReadGateRules.cs" />
+    <Compile Include="ReadGateRulesSelfTest.cs" />
   </ItemGroup>
 
 </Project>
