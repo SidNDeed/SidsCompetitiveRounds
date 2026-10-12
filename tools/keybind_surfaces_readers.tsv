@@ -51,6 +51,6 @@ NativeUI.Keybinds.cs	KeybindKeyName	4	2f5fd09b0543b031	producer	-	a key's face
 NativeUI.Keybinds.cs	KeybindPaintRow	1	befb2074ef840355	display	self	colours a Controls row's face red while its bound mouse button is unreadable; the face text is this member's KeybindRowFace site
 NativeUI.Keybinds.cs	KeybindResetRow	1	341c4e67f56f8f47	registry	-	the Controls row's reset button handler: the per-row reset writer; the row repaints from the revision
 NativeUI.Keybinds.cs	KeybindRowFace	1	8ad08b4f28d18909	producer	-	a row's face
-Plugin.cs	Prefix#25	1	18f21d2b9e197860	input	-	MapSkinCycle held: the manual map-art cycle
-Plugin.cs	Update#2	1	bf47f9eb9f1195d2	input	-	MenuToggle edge: opens the menu
-TabStatsOverlay.cs	Draw	1	b84004bba356da1a	input	-	Scoreboard held: the overlay shows while the key is held; its hint is the EnsureLocaleStrings site
+Plugin.cs	Prefix#26	1	18f21d2b9e197860	input	-	MapSkinCycle held: the manual map-art cycle
+Plugin.cs	Update#2	1	d618ee7322dbe96c	input	-	MenuToggle edge: opens the menu
+TabStatsOverlay.cs	Draw	1	b2a9c72a08978a83	input	-	Scoreboard held: the overlay shows while the key is held; its hint is the EnsureLocaleStrings site

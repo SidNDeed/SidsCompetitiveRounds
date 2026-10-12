@@ -642,6 +642,9 @@ c40497b1048c1314	N	rule:N1	Async Champion
 0b5c4206710a5a0d	N	rule:N1	Auras
 eeee9b76ec5d1cfa	N	rule:N1	Aurora
 96fe497e8d08bf63	N	rule:N1	Aurora Gradient
+4b223773afab914d	N	rule:N1	Avatar auto-switch: <color=#88CCFF>OFF</color>
+bea9ed715393b1ce	N	rule:N1	Avatar auto-switch: <color=#88CCFF>ON</color>
+d6c1ae4f4abe4b83	N	rule:N1	Avatar defaults
 5055532922ff4f34	N	rule:N1	Avatar swap
 54f2de771fcc83e1	N	rule:N1	Average FPS
 275e87e442eacff8	N	rule:N1	Average game
@@ -738,6 +741,7 @@ d785c0d4b3b9c248	N	rev:b2c4eb90b7d51341 a page or section title of the info libr
 a5c48a631fa6ac8b	N	rule:N1	Blood Moon
 60cd1e9614619c2e	N	rule:N1	Bloodbath
 1aecb54aae1e2b5e	N	rule:N1	Blue Cursor
+f5df6418e93109fc	N	rule:N1	Blue ring: your vanilla default
 31412d98b3bdcdd0	N	rule:N1	Body colors
 2b8293c4e72cd26a	N	rev:29102c587e4bfc71 info-library prose (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); the text names no key	Body colors in ROUNDS are team colors: the game holds four body skins and picks one by team number. 
 8b6936a29f32dc8b	N	rule:N1	Body/Team Color
@@ -747,6 +751,7 @@ b97598910533b3e4	N	rule:N1	Bold, italic, underline, strikethrough, and color/siz
 1be0a8f67aa11f43	N	rule:N1	Boosters
 3d3d4c5ad7b1daa8	N	rule:N1	Both clients watch everything; only the elected reporter sends. Duplicates are absorbed, and the ser
 b094a487f88ec8ed	N	rule:N1	Both ready! Joining match...
+f5bb5791cacc35b6	N	rule:N1	Both rings: this preset is both of your defaults
 1eeb92f0bbb43ad2	N	rule:N1	Bottomless
 af7ed27586b5893f	N	rule:N1	Bounce
 4e36289d0951a7bd	N	rule:N1	Bouncer
@@ -910,9 +915,10 @@ b9a010b399b7896b	N	rule:N1	Clean white body color.
 719ea396ad92e01b	K	rev:6c048c3d9557194e shared: the Clear buttons of the search boxes and the Compare tab; KeybindKeyName also returns it for the Clear key	Clear
 87e328dc94be6ee1	N	rule:N1	Clear Search
 99767352d7331ce5	N	rev:cc2c97575b030f24 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click <b>Search Random</b> to start finding a 2v2.
-956d1978dd0405a6	N	rev:b728cddfe328ff33 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click Discard again to discard that card for shards
+956d1978dd0405a6	N	rev:26368c6b559a7a8e a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click Discard again to discard that card for shards
 3a9607641bf374f5	N	rev:255eb9e4227a64c5 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click Dupes again to discard every other copy of that card
 1fdaf16da209dcbd	N	rev:2e6162505b14fd0c a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click MAIN MENU again to leave the match.
+e8ec5e2774fc7925	N	rev:241472198973ea33 the card pull tab's confirm line (item 18): a second click on the mod's own Shard dupes button shards the pack's duplicates; a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click Shard dupes again to shard {0} duplicates for {1} shards
 69594a6831d0b845	N	rev:f3ec3acc7dd6e0b0 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click Shard pack again to shard {0} cards for {1} shards
 3bae6a873aacd2f4	N	rev:3bd549a50f601217 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click Shard selected again to shard {0} cards for {1} shards
 cdd0bc23bbc50f96	N	rev:bbca28b99f8a38b9 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Click a card to view it
@@ -1060,6 +1066,9 @@ c5df7463f6f1ed01	N	rule:N1	DUPLICATE +{0}pack open
 35343d5d72d6a493	N	rule:N1	Daily limit reached - paid packs reset at midnight UTC
 7bf6d1d3a58a22ee	N	rev:60c8c1f9b60db1c0 a live-scoreboard stat label (TabStatsOverlay.EnsureLocaleStrings is binding-dependent: it names the scoreboard key through KeybindRowFace); names no key	Damage
 fb0aee06de4f9faa	N	rule:N1	Damage dealt (cumulative per game)
+1194f0b3ca797351	N	rule:N1	Damage numbers: <color=#88FF88>EVERYONE</color>
+b8c1898c1d13a5a5	N	rule:N1	Damage numbers: <color=#DDDD66>ME</color>
+c688bb9ebf2a1747	N	rule:N1	Damage numbers: <color=#FF9966>OFF</color>
 e7a0bc3a8cde1a01	N	rule:N1	Damage per game
 10d9adc648f4c2f0	N	rev:33d23218e709ebdb a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	Damage types & buffs
 8b7c4dd82c77a28d	N	rule:N1	Dance is on cooldown - try again in a moment.
@@ -1246,6 +1255,7 @@ d7a501f83242fd94	N	rule:N1	Expert
 51704cc87553884c	N	rule:N1	Expires in {0}
 0f2ac9fc2d0300ba	N	rule:N1	Export Tier List
 5f2a2412b0200b7a	N	rule:N1	Export already in progress...
+52f713c1669e7f7f	N	rule:N1	Extra motion over the fight. Turn it on when you want to read exactly what a trade cost.
 16b52078a6f08d64	N	rule:N1	Eye-watering hot-pink body color.
 2bc4f5879207567e	N	rule:N1	Eyes for those who are burning for a true battle
 5c143e75d051c385	N	rule:N1	Eyes for those who feel fiendish
@@ -1324,6 +1334,7 @@ a2e6462d89b355f9	N	rule:N1	Flagged Matches
 cdc31cb72e817957	N	rule:N1	Flame Crest
 22b9ee43aaa645b2	N	rule:N1	Flawless
 455a8cfec6c15aa9	N	rule:N1	Floating Name
+b67fef8cb2f99487	N	rule:N1	Floating numbers above a player showing damage taken and health received, using the same decimals as
 6c741cc15dd127d0	N	rule:N1	Floating pink hearts rise from your body.
 08fcdd22fef005ba	N	rule:N1	Follow my character
 8c2e0e1d55b89016	N	rule:N1	For sale
@@ -1414,6 +1425,7 @@ c57604db5869f605	N	rule:N1	Gold
 e8a08aa75e862bc7	N	rule:N1	Gold Sources
 a5a0320e13168f43	F	rev:860add3332aedb4b fixed:F5 F5 always opens the mod menu; no Controls row moves it	Gold betting runs on live 1v1, 2v2 and FFA games. This page covers who can bet, how the odds are pri
 fb482885e3df2220	N	rule:N1	Gold per game
+5d781d48be47bf4f	N	rule:N1	Gold ring: your modded default
 d78f50fe39240af5	N	rule:N1	Gold this set
 87631f9c1ac0e38e	N	rule:N1	Golden Eagle
 5ab5f51856f65ede	N	rule:N1	Goober
@@ -1683,7 +1695,8 @@ d5cc324443a8277d	N	rule:N1	Link code: {0}
 9a079643ddf31581	N	rev:eb2b27235249e4b7 'tab' is a tab of the mod's menu; names no key	Link your Discord account first (Home tab) to use RLFP pings.
 f3168e1294a51faf	N	rev:e778eb014161858f 'tab' is a tab of the mod's menu; names no key	Link your Discord first (Home tab)
 5f4e4bf17d1089e0	N	rev:909db080af76fac2 'tab' is a tab of the mod's menu; names no key	Link your Discord first: Home tab -> Get Link Code, then !link YOUR_CODE in Discord.
-8f080546a2a2bd13	N	rule:N1	Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactiv
+8f080546a2a2bd13	O	rule:O	Lists players who have not run the mod for 90+ days on every leaderboard, greyed and tagged (inactiv
+d9f50ba23a933f8c	N	rule:N1	Lists players who have not run the mod recently on every leaderboard, greyed and tagged (inactive).
 0582db7c610c1514	N	rule:N1	Little Pink Buddy
 32548b3ebc8e9936	P	rule:P	Live competitive games in every mode can be watched from inside the mod - ranked 1v1, 2v2, 1v2 and F
 ce6afbd4b60bf8df	N	rev:12c29e6acc376b0d a live-scoreboard stat label (TabStatsOverlay.EnsureLocaleStrings is binding-dependent: it names the scoreboard key through KeybindRowFace); names no key	Lives
@@ -1783,6 +1796,9 @@ aaa70f58c89e3972	N	rule:N1	Mint
 b6af76411b6d6bc9	N	rule:N1	Mirrored chrome with a soft shifting tint.
 ed2905c870344322	N	rev:181359aaab7cedae Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	Mod controls
 2f86234d58aeb5c4	N	rule:N1	Mod display language. Machine-translated drafts until community moderators review them — card text i
+7d964946d68e74c4	N	rule:N1	Modded avatar
+5ebe5e74f19b27b2	N	rule:N1	Modded avatar: <color=#88CCFF>{0}</color>
+641fb99253912601	N	rule:N1	Modded eyes, mouths and details are drawn by the mod. A player without the mod sees an empty slot wh
 164d2918ea54906b	N	rule:N1	Mode closed
 3fa1667ada7e0544	N	rule:N1	Mode: <color=#88CCFF>vanilla music</color>
 cfe537a5f3289e55	N	rule:N1	Mode: <color=#88FF88>custom music</color>
@@ -1912,6 +1928,7 @@ d5204921aec730c6	N	rule:N1	No mail yet.
 0be6a25758e1f32b	N	rule:N1	No matches.
 21c960d176f4b50c	N	rev:4ae2243ab4c0ea86 the chat box's own status text (DrawChatInput and RefreshChatLog are binding-dependent: they name the chat keys through KeybindRowFace); names no key	No messages in this channel yet.
 d1a321b6ff6c3937	N	rule:N1	No opponent has enough ranked series against this group yet.
+6043e614319ca2a3	N	rule:N1	No preset is free of modded items yet.
 7b6404043fbac559	N	rule:N1	No ranked 1v1 series recorded for the selected players yet.
 29ac10d1f29b9a81	N	rule:N1	No recent series
 31c3631d596f2157	N	rev:a99af20110a01b73 'keys on the server's row id' is database keying; names no key	No server-issued chat lines are in this session's log.\n\nOnly messages this client received from th
@@ -1934,6 +1951,7 @@ b8a8dabdec32830a	N	rule:N1	Not great. Not terrible.
 bcdd436f6f0ca66e	N	rule:N1	Not in queue.
 55657e24a43eff6a	N	rule:N1	Not on sale yet
 f9f151938094b0bc	N	rule:N1	Not ready yet
+93039e609d94a24f	N	rule:N1	Not set
 db2c45d557936743	N	rule:N1	Not started
 669625e5b829ae56	N	rule:N1	Not started - buy {0} in the Shop to begin this ladder.
 36f5d5d080194460	O	rule:O	Not started - buy {0} in the Shop to begin this line.
@@ -2155,6 +2173,7 @@ c5b3b9f5cd30f77e	N	rule:N1	Predator
 381ae69d6dec239a	N	rule:N1	Premium: northern-lights walls shimmering between polar teal and violet in a polar night
 7ebcf28d6de38706	N	rule:N1	Preparing your card picture...
 4464d597199bdfb3	N	rule:N1	Preset {0}
+0704fc43b49bac17	N	rule:N1	Preset {0} — has items an unmodded player cannot see
 97a6e94ae4eed9bb	N	rule:N1	President Meow
 f759566b7428a79b	N	rev:7580b72803876541 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.
 425872a6007bf097	F	rev:faf33a04a3aee3c3 fixed:Esc Escape cancels and closes; not rebindable	Press Esc to leave
@@ -2332,6 +2351,7 @@ ef916cd7f6aaa4e1	N	rule:N1	Record removed.
 e51c55255be9007d	N	rule:N1	Records
 8944bac56fb71a84	N	rule:N1	Red Cursor
 126a8e3bc4cc743f	N	rule:N1	Red Name
+272e33806900fb11	N	rule:N1	Red ring: this preset has items an unmodded player cannot see, so it cannot be your vanilla default
 17cf3ff04e9a66a2	N	rule:N1	Redrawn from Spirit's diagram: Conditional damage never Refreshes twice in a row.
 653b3acdfbacbb68	N	rule:N1	Reduced keeps the hit feedback without the camera motion
 c3302e6912c3f125	N	rule:N1	Reef Shark
@@ -2542,6 +2562,7 @@ c7f73bb54d928922	N	rule:N1	Settings
 5d92c2e8b2137b35	N	rule:N1	Severity:
 97389d1a0ff724b0	N	rule:N1	Shade
 0458a184cf383c78	N	rule:N1	Shades for those who want to show that they are the true genius of the battlefield
+bee1882ed045dfdf	N	rule:N1	Shard dupes (+{0})
 ac98582a99c43cb7	N	rule:N1	Shard pack (+{0})
 6d5df74abaf89344	N	rule:N1	Shard pack is not available on this server yet - discard one card at a time for now
 8129bc1251f45e6b	N	rule:N1	Shard selected ({0})
@@ -2576,8 +2597,10 @@ da679c68be32dbac	N	rule:N1	Show Discord on leaderboard: <color=#888>link Discord
 0b42ec74cc3cc659	N	rule:N1	Show Discord on leaderboard: <color=#88FF88>ON</color>
 4d9856099b56f185	N	rule:N1	Show Discord on leaderboard: <color=#FF9966>OFF</color>
 b76e070645519586	N	rule:N1	Show Gold
-5431669ad787be0e	N	rule:N1	Show inactive players (90d+): <color=#88FF88>ON</color>
-e794f8666bdefdf4	N	rule:N1	Show inactive players (90d+): <color=#FF9966>OFF</color>
+41743cdddfa06dda	N	rule:N1	Show inactive players ({0}d+): <color=#88FF88>ON</color>
+3957743fc4987882	N	rule:N1	Show inactive players ({0}d+): <color=#FF9966>OFF</color>
+0f368c6f7044d2e8	N	rule:N1	Show inactive players: <color=#88FF88>ON</color>
+f5e9b43b1d2e552d	N	rule:N1	Show inactive players: <color=#FF9966>OFF</color>
 4fc8a40beb83bfd8	N	rule:N1	Showing {0} of {1}
 575fb28d1b6dfec7	N	rule:N1	Showing: Elo
 223b8527cddb50f5	O	rule:O	Showing: Elo over games
@@ -2679,6 +2702,7 @@ af0151e8d21f97eb	N	rule:N1	Start (need {0}+)
 e225fc35916c0208	N	rule:N1	Start unlocks in {0}s (settings changed)
 e3c95802a4529c0f	N	rule:N1	Starts: <color=#FFDE88>{0}</color>
 be763e9aba2af6b8	O	rule:O	Stats
+0e3a877944567241	N	rule:N1	Stats and profiles need the secure connection. Retrying every 5 minutes.
 638ae8141a106560	N	rule:N1	Stats still loading - try again in a moment.
 084282a69463a804	N	rule:N1	Status: <color=#88FF88>Allowed</color> - match data and linking are active.
 1701a52158cb5b8e	N	rule:N1	Status: <color=#DDDD66>Unset</color> - the consent prompt will appear on next launch.
@@ -2737,6 +2761,8 @@ f53f0af5f87f3ba6	N	rule:N1	Sweat is just XP in liquid form.
 0c95f4a83a19eb2e	N	rule:N1	Sweaty
 72ddd2b619af6d6a	N	rule:N1	Sweden
 c992e487ff19ddc4	N	rule:N1	Sweeps: <color=#00FF00>5-0 x{0}</color>  <color=#FF6666>0-5 x{1}</color>
+7aefc82c5f16a5cf	N	rule:N1	Switched back to your modded avatar.
+8cfe0b9aaea854c6	N	rule:N1	Switched to your vanilla avatar for this room.
 cf00d420c15dfbf2	N	rule:N1	Sync (weekly)
 7356f9d83ad3ebef	N	rule:N1	Sync Champion
 38ecddf69e8409bc	N	rule:N1	Sync Finalist
@@ -2806,6 +2832,7 @@ dc7165ddbbc4df8b	N	rule:N1	That player declined your last proposal - wait before
 4e0dde2bc3badc04	N	rule:N1	That player has card trading turned off
 42a8864092d52b31	N	rule:N1	That player has too many proposals waiting - try again later
 570b6a22ef8b60e4	N	rule:N1	That player's binder is private - they can still propose a trade to you
+229053b95f5d9a16	N	rule:N1	That preset has never been customised, so your avatar was not switched.
 d143a158719cef2e	N	rule:N1	That shard was already done with other cards - your binder has been refreshed
 9caa66931c9f06f0	N	rule:N1	That trade has changed - check it again before answering
 feb0073d2b8d34a5	N	rule:N1	That trade has expired
@@ -2860,6 +2887,8 @@ ef78e5cd61ce1f0a	N	rule:N1	The pack is still yours to open
 a9e422da77adf45b	N	rule:N1	The pack price changed - check the new price and try again
 208a87b9e1761918	N	rule:N1	The picture was not ready in time - try again
 03722ca2a0686786	N	rule:N1	The pool changed while your pack was opening - nothing was charged, try again
+94c0409540edfa67	N	rule:N1	The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where eve
+6457b33d171ff055	N	rule:N1	The preset you wear in Quick Match and in any game where somebody does not have the mod. Only preset
 5a7fbd2ce825994a	N	rule:N1	The report could not be read
 6f43b8da2c4d3c96	N	rule:N1	The report details are too long.
 5a09ef793c04d82a	N	rule:N1	The report details contain characters that are not allowed.
@@ -2938,6 +2967,7 @@ e2993d8a67ea3605	N	rule:N1	Times picked (all players)
 a116f7255e19431f	N	rev:421590b16f48f162 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	Titles
 2d45294cfb5df315	N	rev:b3b05b6c66a3b78f 'T-chat' is the name of the mod's chat feature, not an instruction naming its key; tab, enter and hold are menu, board and podium words	Titles are the short labels that render beside your name across the mod - leaderboard rows, Recent S
 98eb77f46816e71d	O	rule:O	Titles are the short labels that render beside your name across the mod - leaderboard rows, Recent S
+05e759d3a5611e8a	N	rule:N1	To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and 
 56506086c6aef291	N	rule:N1	To pick the best server region for a match, the mod measures your ping to each Photon region and sen
 a201e92f6e7c9226	N	rule:N1	To {0}
 a88aedfc4f2bb81f	N	rule:N1	To: {0}
@@ -3556,6 +3586,8 @@ c955f9a5060f3c7c	N	rule:N1	V:UK_GAME:StringTableDefault/PROMPT_WAITING#0 = Waiti
 9465d6babb41a0a1	G	rev:9465d6babb41a0a1 ReadyPromptPatches.ApplyReady writes NativeUI.KeybindReadyPrompt over this ready prompt while Jump is off Space (Override)	V:UK_GAME:StringTableDefault/PROMT_SPACE_WHEN_READY#0 = Press [SPACE] when ready | Натисніть [SPACE]
 e3b2c4d88bb44675	N	rule:N1	VANILLA GROW: FRAME RATE CHANGES DAMAGE
 67e7a92881ae1200	N	rule:N1	VOTING / SIGNUPS OPEN
+5cf3af41da08fc16	N	rule:N1	Vanilla avatar
+e3274ead58dddc83	N	rule:N1	Vanilla avatar: <color=#88CCFF>{0}</color>
 722b8253ed5d9130	N	rev:11590853417f3465 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	Vanilla stays vanilla
 50c8e9195e5ecd57	N	rule:N1	Velvet
 ed706f2149025b47	N	rev:38d0cb92400f973c rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Verified movement tech: the shield edge bounce, wall jumps, and the flying bounce. Every rule on thi
@@ -3761,6 +3793,7 @@ f8acd4ea8b53c8e6	N	rule:N1	Your picks
 07165fcd109bbf91	N	rule:N1	Your placements:  <color=#FFE580>1stx{0}</color>  <color=#C8C8C8>2ndx{1}</color>  <color=#D4894A>3rd
 a1a912243dc59524	N	rule:N1	Your placements: <color=#888>no completed tournaments yet</color>
 f1a69beeabd980c7	N	rev:56455244dc4f092a rules prose: its input words are actions (press block, hold jump), the mod's own buttons and tabs, possession (hold a rung) or articles, numerals and variables; it names no rebindable key	Your shield absorbs for exactly 0.3 seconds per press, the absorb decision is made on the SHOOTER's 
+307824db5a062f3c	N	rule:N1	Your vanilla avatar preset has items an unmodded player cannot see, so your avatar was not switched.
 7762d72ce7bf49fc	N	rule:N1	Your view starts at the next round - that is the first moment the score, cards and health can be sho
 a579e85fe77434ba	N	rule:N1	Your {0} lobby closed.
 bcece8c6a3f5cadc	N	rule:N1	Your {0} lobby seat expired — join or create a new one.
@@ -3776,6 +3809,7 @@ d8010d74929ce9a0	N	rule:N1	also locks when any game is decided
 ca0de51d37da5248	N	rule:N1	always earns x1.5 pay
 9c22dec522b1a743	N	rule:N1	an empty slot - no crash, no fallback
 c148b7d5a3359c89	N	rule:N1	any moment now
+db480f6051fd1c85	N	rule:N1	any preset; this is the one you wear everywhere else
 7b1d45a11485f18f	N	rule:N1	applies only when everyone in the room agrees
 34e037d5352a3cd0	N	rev:07bbe007625bab5d a click or press on one of the mod's own buttons, rows, tiles or links; names no key	applying a language rebuilds the page, so it cannot be part of one atomic bulk write; press this row
 51965c0404a0449c	N	rule:N1	art submitted in-game
@@ -3867,6 +3901,7 @@ ab28e89d2a9fc74e	N	rule:N1	it only hides you from Home lists; it does not hide m
 8db28acc19b6e7d3	N	rule:N1	it opens a browser; nothing in game changes
 e076f29122f30e52	N	rule:N1	jump within 0.1s: up and away
 a7f8e7cc0d43d21e	N	rule:N1	just now
+0dd3a6f354eb8bd6	N	rule:N1	keeps a modded avatar out of games where it renders with holes
 8736ade781bb7e93	N	rule:N1	keeps boards to players you can actually meet
 4cbe09f6351f1f35	N	rule:N1	kill boundary
 4b11e02d76ac718f	N	rule:N1	kills
@@ -3937,6 +3972,7 @@ ff83a9a220be04b9	N	rule:N1	one font at a time
 99bc7c117c72c212	N	rule:N1	online, data on, fighter
 65775754146f98c3	N	rule:N1	only after reading the armed warning
 effa17fb09544b59	N	rule:N1	only if it is 1-1
+2e642b708572d9d1	N	rule:N1	only presets an unmodded opponent's own loader can resolve are visible to them
 25d1391b89ec6443	N	rule:N1	only rare pulls, and only in one channel
 841cc10c82ddae23	N	rule:N1	only to leave for good
 a964374df27d3749	N	rule:N1	opp n/a
@@ -4084,7 +4120,8 @@ bf913700cbab4121	N	rule:N1	{0} Blocks
 eb511260e4db8992	N	rule:N1	{0} GOT A POINT
 0628f47a69f66037	N	rule:N1	{0} GOT HALF A POINT
 fbea931837908137	N	rule:N1	{0} Hit Rate
-7127b856ebda7425	N	rule:N1	{0} active players (90d)
+7b291b43e0c48457	N	rule:N1	{0} active players
+1ab2f62477596e5a	N	rule:N1	{0} active players ({1}d)
 616f33b46c1533c1	N	rule:N1	{0} and {1} more
 352e94ec0f736105	N	rule:N1	{0} can now translate {1}.
 4b2e608f2980000e	N	rule:N1	{0} cards

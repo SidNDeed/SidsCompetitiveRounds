@@ -69,11 +69,11 @@ Keybinds.cs:Override	Keybinds.cs:ApplyJoin	1	299f79c617f04fad	display	writes the
 Keybinds.cs:Override	Keybinds.cs:ApplyReady	1	af1649f08e31c9bb	display	writes the ready-up prompt's label, or restores the vanilla one
 Keybinds.cs:Override	Keybinds.cs:RefreshAll	1	77055b81e0837fd7	display	after every commit: restores every overridden prompt, or re-applies each visible one
 NativeUI.Keybinds.cs:KbDescHpPrecision	NativeUI.Keybinds.cs:KbRefreshNamedDescs	1	c5f21af97f724f1e	display	re-sets the setting's description, the record field the Settings tab shows
-NativeUI.Keybinds.cs:KbDescHpPrecision	NativeUI.cs:BuildSettingsTab	1	f635113cc2fb5f3f	display	builds the setting with its description
+NativeUI.Keybinds.cs:KbDescHpPrecision	NativeUI.cs:BuildSettingsTab	1	b9ee5280ea8f1741	display	builds the setting with its description
 NativeUI.Keybinds.cs:KbDescInGameChat	NativeUI.Keybinds.cs:KbRefreshNamedDescs	1	c5f21af97f724f1e	display	re-sets the setting's description, the record field the Settings tab shows
-NativeUI.Keybinds.cs:KbDescInGameChat	NativeUI.cs:BuildSettingsTab	1	f635113cc2fb5f3f	display	builds the setting with its description
+NativeUI.Keybinds.cs:KbDescInGameChat	NativeUI.cs:BuildSettingsTab	1	b9ee5280ea8f1741	display	builds the setting with its description
 NativeUI.Keybinds.cs:KbDescInputOverlay	NativeUI.Keybinds.cs:KbRefreshNamedDescs	1	c5f21af97f724f1e	display	re-sets the setting's description, the record field the Settings tab shows
-NativeUI.Keybinds.cs:KbDescInputOverlay	NativeUI.cs:BuildSettingsTab	1	f635113cc2fb5f3f	display	builds the setting with its description
+NativeUI.Keybinds.cs:KbDescInputOverlay	NativeUI.cs:BuildSettingsTab	1	b9ee5280ea8f1741	display	builds the setting with its description
 NativeUI.Keybinds.cs:KbMoveAndJumpFaces	NativeUI.Keybinds.cs:KbDescInputOverlay	1	8594568d04fc1e1e	pass	the input overlay setting's description
 NativeUI.Keybinds.cs:KbShopItemDesc	NativeUI.cs:ApplyShopRow	1	34c81894b9442b91	display	a shop row's description
 NativeUI.Keybinds.cs:KbShopTabDesc	NativeUI.cs:BuildShopTab	1	9ad00e7d5574301b	display	the shop tab's first description
