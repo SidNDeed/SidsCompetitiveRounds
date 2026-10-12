@@ -29,7 +29,16 @@ module is the one module-level raising function.
 
 Fix pass 7 (tests in test_review_handler_r7.py): the handler proof resolves
 every exception and suppression name through its aliases at the use site,
-and treats every catcher or suppressor it cannot resolve as catching."""
+and treats every catcher or suppressor it cannot resolve as catching.
+
+Fix pass 9 (tests in test_review_handler_r7.py): a manager known never to
+suppress is trusted by its name, so the handler proof is refused for the
+whole module whenever any operation in it could rebind such a manager, a
+prefix of its dotted path, an alias of either, or the manager itself
+(_manager_rebinds); the report names each such operation by file, line and
+kind (Reported.rebinds). The path-query alias map keeps every binding's
+value, so a name bound to two values is judged under each instead of never
+settling (_aliases)."""
 
 import ast
 import builtins
@@ -600,23 +609,26 @@ class NoFixedPoint(Exception):
 
 
 def _aliases(tree) -> dict:
-    """name -> the dotted name it stands for, from every import and every
-    assignment of a resolvable expression, iterated to a TRUE fixed point:
-    rounds repeat until one changes nothing. A chain of k assignments in any
+    """name -> the SET of dotted names it can stand for, from every import
+    and every assignment of a resolvable expression (fix pass 9: every
+    binding's value is kept, so a name bound to two different values stands
+    for both and is judged under each, where a single value flipped between
+    them every round and never settled), iterated to a TRUE fixed point:
+    rounds repeat until one adds nothing. A chain of k assignments in any
     source order settles within k + 1 rounds, so the bound (one round per
     assignment of the module, plus two) is reached only by bindings that
-    never settle (`x = y.a; y = x`); reaching it raises NoFixedPoint."""
+    grow without end (`x = y.a; y = x`); reaching it raises NoFixedPoint."""
     out = {}
     for n in ast.walk(tree):
         if isinstance(n, ast.Import):
             for a in n.names:
                 if a.asname:
-                    out[a.asname] = a.name
+                    out.setdefault(a.asname, set()).add(a.name)
                 else:
-                    out[a.name.split(".")[0]] = a.name.split(".")[0]
+                    out.setdefault(a.name.split(".")[0], set()).add(a.name.split(".")[0])
         elif isinstance(n, ast.ImportFrom) and n.module and not n.level:
             for a in n.names:
-                out[a.asname or a.name] = n.module + "." + a.name
+                out.setdefault(a.asname or a.name, set()).add(n.module + "." + a.name)
     assigns = [n for n in ast.walk(tree)
                if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and n.value is not None]
     for _round in range(len(assigns) + 2):
@@ -625,26 +637,31 @@ def _aliases(tree) -> dict:
             targets = n.targets if isinstance(n, ast.Assign) else [n.target]
             r = _resolve(n.value, out)
             for t in targets:
-                if r and isinstance(t, ast.Name) and out.get(t.id) != r:
-                    out[t.id], grew = r, True
+                if r and isinstance(t, ast.Name) and not r <= out.get(t.id, set()):
+                    out.setdefault(t.id, set()).update(r)
+                    grew = True
         if not grew:
             break
     else:
         raise NoFixedPoint("alias resolution did not settle in %d rounds" % (len(assigns) + 2))
-    for name, full in list(out.items()):
-        for m in ("posixpath", "ntpath"):
-            if full == m or full.startswith(m + "."):
-                out[name] = "os.path" + full[len(m):]
-    return out
+    return {name: {_os_path(f) for f in fulls} for name, fulls in out.items()}
 
 
-def _resolve(node, aliases):
+def _os_path(full):
+    for m in ("posixpath", "ntpath"):
+        if full == m or full.startswith(m + "."):
+            return "os.path" + full[len(m):]
+    return full
+
+
+def _resolve(node, aliases) -> set:
+    """Every dotted name a name or attribute reference can stand for (empty
+    when it resolves to nothing)."""
     if isinstance(node, ast.Name):
-        return aliases.get(node.id)
+        return set(aliases.get(node.id, ()))
     if isinstance(node, ast.Attribute):
-        base = _resolve(node.value, aliases)
-        return base + "." + node.attr if base else None
-    return None
+        return {b + "." + node.attr for b in _resolve(node.value, aliases)}
+    return set()
 
 
 def _bindings(tree, name) -> list:
@@ -786,9 +803,209 @@ def _may_suppress(names, item) -> bool:
     """Whether a with item's context manager can swallow the refusal: False
     only when the item calls what resolves (_Names) to a manager known never
     to suppress (_NEVER_SUPPRESS); contextlib.suppress under any alias, and
-    every manager the proof cannot resolve, can."""
+    every manager the proof cannot resolve, can. The name is trusted only in
+    a module with no operation that can rebind it (_manager_rebinds)."""
     e = item.context_expr
     return not (isinstance(e, ast.Call) and names.ref(e.func) in _NEVER_SUPPRESS)
+
+
+# Fix pass 9 (round 8 M5): _Names resolves a name while an operation changes
+# what it denotes at run time (an attribute store on the module, a namespace
+# write, code the module hands the module to), so a never-suppress manager
+# trusted by its name could be a suppressing one. The proof is refused for the
+# whole module whenever any operation could rebind a manager, a prefix of its
+# dotted path, an alias of either, or the manager itself.
+_WATCHED = frozenset(m[:i] for m in _NEVER_SUPPRESS for i in range(len(m) + 1)
+                     if i == len(m) or m[i] == ".")      # each manager and every prefix of its dotted path
+_WATCHED_NAMES = frozenset(p.rsplit(".", 1)[-1] for p in _WATCHED)   # the bare names they are reached by
+_PROTOCOL = frozenset({"__enter__", "__exit__", "__aenter__", "__aexit__", "__class__", "__bases__",
+                       "__dict__", "__setattr__", "__delattr__", "__getattr__", "__getattribute__"})
+_NAMESPACE = _DYNAMIC | {"__setattr__", "__delattr__", "modules"}   # `modules`: sys.modules
+_REFLECTIVE_STRINGS = frozenset(s for s in _NAMESPACE | _PROTOCOL
+                                if s.startswith("__") or s in ("setattr", "delattr", "modules"))
+
+
+class Reported(tuple):
+    """One row of the enumeration's report: (line, kind), as every caller
+    unpacks it. An os.walk row also carries every operation of the module
+    that can rebind a never-suppress manager (`rebinds`, each (file, line,
+    kind)), and its repr names them."""
+
+    def __new__(cls, line, kind, file="<source>", rebinds=()):
+        row = tuple.__new__(cls, (line, kind))
+        row.rebinds = tuple((file, ln, k) for ln, k in rebinds)
+        return row
+
+    def __repr__(self):
+        why = "; ".join("%s:%d %s" % r for r in self.rebinds)
+        return tuple.__repr__(self) + (" unproven: " + why if why else "")
+
+
+def _candidates(tree, names, node, seen=frozenset()) -> set:
+    """Every dotted name an expression can stand for through EVERY binding of
+    its names, None standing for anything unresolvable. Unlike _Names,
+    bindings that disagree are all kept, so a rebinding shows beside the
+    binding it replaces."""
+    if isinstance(node, ast.Attribute):
+        return {None if b is None else b + "." + node.attr
+                for b in _candidates(tree, names, node.value, seen)}
+    if not isinstance(node, ast.Name) or node.id in seen:
+        return {None}
+    binds = _bindings(tree, node.id)
+    if not binds:
+        return {"builtins." + node.id} if hasattr(builtins, node.id) else {None}
+    out = set()
+    for b in binds:
+        got = _bound(tree, names, b, node.id, seen | {node.id})
+        out |= {None} if got is None else got
+    return out
+
+
+def _bound(tree, names, b, name, seen=frozenset()):
+    """The dotted names the binding b can make `name` stand for: an absolute
+    import's target, or the candidates of the value of an assignment whose
+    whole target is `name`; None for a binding of any other kind."""
+    if isinstance(b, ast.Import):
+        return {a.name if a.asname else a.name.split(".")[0] for a in b.names
+                if (a.asname or a.name.split(".")[0]) == name}
+    if isinstance(b, ast.ImportFrom):
+        if not b.module or b.level:
+            return None
+        return {b.module + "." + a.name for a in b.names if (a.asname or a.name) == name}
+    if isinstance(b, ast.Name) and isinstance(b.ctx, ast.Store) and names._assigned(b):
+        return _candidates(tree, names, names.parents[id(b)].value, seen | {name})
+    return None
+
+
+def _binding_kind(b, parents) -> str:
+    if isinstance(b, ast.arg):
+        return "parameter"
+    if isinstance(b, (ast.Import, ast.ImportFrom)):
+        return "import"
+    if isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return "def"
+    if isinstance(b, ast.ClassDef):
+        return "class"
+    if isinstance(b, ast.ExceptHandler):
+        return "except target"
+    if isinstance(b, ast.Global):
+        return "global declaration"
+    if isinstance(b, ast.Nonlocal):
+        return "nonlocal declaration"
+    if not isinstance(b, ast.Name):
+        return "match capture"
+    if isinstance(b.ctx, ast.Del):
+        return "deletion"
+    p = parents.get(id(b))
+    if isinstance(p, ast.AugAssign):
+        return "augmented assignment"
+    if isinstance(p, ast.AnnAssign) and p.value is None:
+        return "annotation"
+    if isinstance(p, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+        return "assignment"
+    return "store"                        # a loop, with, comprehension or unpacking target
+
+
+def _plain_getattr(call) -> bool:
+    """getattr(x, "<name>") with a constant plain attribute that is not a
+    watched component, a namespace operation or a protocol member."""
+    a = call.args[1] if len(call.args) >= 2 else None
+    return (isinstance(a, ast.Constant) and isinstance(a.value, str) and a.value.isidentifier()
+            and not a.value.startswith("__") and a.value not in _WATCHED_NAMES | _NAMESPACE | _PROTOCOL)
+
+
+def _manager_rebinds(tree, names) -> list:
+    """Every operation of the module that could rebind a never-suppress
+    manager, a prefix of its dotted path (_WATCHED), an alias of either, or
+    the manager itself, as sorted (line, kind) pairs. Judged statically and
+    conservatively, in every scope; an operation the proof cannot rule out
+    counts:
+      (1) a binding of a watched name -- a component of a watched path
+          (_WATCHED_NAMES), or an alias any of whose bindings reaches a
+          watched path through any chain (_candidates) -- other than the
+          imports and whole assignments that make it stand for ONE watched
+          path: an import of anything else, an assignment of anything else,
+          an augmented store, a deletion, a parameter, a def or class, a
+          loop, with, comprehension, unpacking or except target, a match
+          capture, a global or nonlocal declaration;
+      (2) an attribute store or deletion (plain, augmented, del, or as any
+          target) whose attribute is a watched component or a member of the
+          manager or attribute protocol (_PROTOCOL), on ANY base: a base the
+          proof cannot resolve may be the module or the manager;
+      (3) a namespace or reflective operation: a reference to a _DYNAMIC
+          name or attribute, to __setattr__, __delattr__ or a `modules`
+          attribute (sys.modules), a string constant naming one of them or a
+          protocol member, a getattr that is not a call with a constant plain
+          attribute (_plain_getattr), an import of importlib or imp, a star
+          import;
+      (4) a watched object escaping: a reference to a watched name, or to an
+          attribute named by a watched component, anywhere but as the
+          function of a call, the base of an attribute, or the whole value of
+          an assignment to names (an alias, judged by (1)) -- code the proof
+          cannot see may rebind what it is handed.
+    The proof judges the operations written in this module: code that runs
+    from elsewhere (another module's import-time code, a method of an object
+    a caller supplies) is outside a per-module static proof."""
+    parents = names.parents
+    bound = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.arg):
+            bound.add(n.arg)
+        elif isinstance(n, ast.Name):
+            bound.add(n.id)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            bound |= {a.asname or a.name.split(".")[0] for a in n.names if a.name != "*"}
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                            ast.MatchAs, ast.MatchStar)) and n.name:
+            bound.add(n.name)
+        elif isinstance(n, (ast.Global, ast.Nonlocal)):
+            bound |= set(n.names)
+        elif isinstance(n, ast.MatchMapping) and n.rest:
+            bound.add(n.rest)
+    watched = set()
+    for name in bound:
+        if name in _WATCHED_NAMES or _WATCHED & _candidates(tree, names, ast.Name(name, ast.Load())):
+            watched.add(name)
+    out = []
+    for name in sorted(watched):                                           # (1)
+        canon = None
+        for b in sorted(_bindings(tree, name), key=lambda x: (x.lineno, x.col_offset)):
+            got = _bound(tree, names, b, name)
+            if got is not None and len(got) == 1 and got <= _WATCHED and canon in (None, got):
+                canon = got                     # an import or whole assignment of one watched path
+                continue
+            out.append((b.lineno, "%s rebinds %s" % (_binding_kind(b, parents), name)))
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute) and isinstance(n.ctx, (ast.Store, ast.Del)) \
+                and (n.attr in _WATCHED_NAMES or n.attr in _PROTOCOL):     # (2)
+            kind = "attribute deletion" if isinstance(n.ctx, ast.Del) else \
+                "augmented attribute store" if isinstance(parents.get(id(n)), ast.AugAssign) else "attribute store"
+            out.append((n.lineno, "%s rebinds %s" % (kind, ast.unparse(n))))
+        ref = n.id if isinstance(n, ast.Name) else n.attr if isinstance(n, ast.Attribute) else None
+        if ref in _NAMESPACE:                                              # (3)
+            out.append((n.lineno, "namespace operation " + ref))
+        elif ref == "getattr":
+            p = parents.get(id(n))
+            if not (isinstance(p, ast.Call) and p.func is n and _plain_getattr(p)):
+                out.append((n.lineno, "getattr with a computed or reflective attribute"))
+        elif isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in _REFLECTIVE_STRINGS:
+            out.append((n.lineno, "string naming " + n.value))
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            mods = [a.name for a in n.names] if isinstance(n, ast.Import) else [n.module or ""]
+            if any(m.split(".")[0] in ("importlib", "imp") for m in mods):
+                out.append((n.lineno, "dynamic import"))
+            if isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names):
+                out.append((n.lineno, "star import"))
+        if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load) and (
+                n.id in watched | _WATCHED_NAMES if isinstance(n, ast.Name) else n.attr in _WATCHED_NAMES):
+            p = parents.get(id(n))                                         # (4)
+            if isinstance(p, ast.Call) and p.func is n or isinstance(p, ast.Attribute) and p.value is n:
+                continue
+            if isinstance(p, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and p.value is n and all(
+                    isinstance(t, ast.Name) for t in (p.targets if isinstance(p, ast.Assign) else [p.target])):
+                continue
+            out.append((n.lineno, "%s escapes as a value" % ast.unparse(n)))
+    return sorted(set(out))
 
 
 def walk_handler_proven(tree, handler) -> bool:
@@ -817,7 +1034,12 @@ def walk_handler_proven(tree, handler) -> bool:
           the refusal in flight), and every manager of every with statement
           resolves to one known never to suppress (_may_suppress:
           contextlib.suppress under any alias, and every manager the proof
-          cannot resolve, can swallow the refusal)."""
+          cannot resolve, can swallow the refusal);
+      (6) no operation of the module can rebind a manager known never to
+          suppress, a prefix of its dotted path, an alias of either, or the
+          manager itself (_manager_rebinds, fix pass 9): (5) trusts such a
+          manager by its name, and _Names still resolves a name whose
+          meaning such an operation changes at run time."""
     if not isinstance(handler, ast.Name):
         return False
     binds = _bindings(tree, handler.id)
@@ -842,6 +1064,8 @@ def walk_handler_proven(tree, handler) -> bool:
         for c in ast.iter_child_nodes(n):
             parents[id(c)] = n
     names = _Names(tree, parents)
+    if _manager_rebinds(tree, names):
+        return False                      # an operation can rebind a never-suppress manager
     if names.ref(cls[0].bases[0]) != "builtins.Exception":
         return False                      # NoVerdict's base is not the builtin Exception
     for n in ast.walk(tree):
@@ -867,11 +1091,13 @@ def walk_handler_proven(tree, handler) -> bool:
     return True
 
 
-def unwrapped_queries(source: str) -> list:
+def unwrapped_queries(source: str, file: str = "<source>") -> list:
     """Every reference that can turn a failure into a False/absent answer:
     an os.path status predicate, os.access, a pathlib predicate, a getattr
     on a path module, and an os.walk whose handler is not proven -- through
-    any import or assignment alias, called or not."""
+    any import or assignment alias, called or not. An os.walk row is a
+    Reported naming, by `file`, line and kind, every operation of the module
+    that can rebind a never-suppress manager (fix pass 9)."""
     tree = ast.parse(source)
     aliases = _aliases(tree)
     parents = {}
@@ -881,22 +1107,22 @@ def unwrapped_queries(source: str) -> list:
     out = []
     for n in ast.walk(tree):
         if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load):
-            r = _resolve(n, aliases)
-            if r == "os.walk":
+            r = _resolve(n, aliases)                        # every name the reference can stand for
+            if "os.walk" in r:
                 call = parents.get(id(n))
                 handler = None
                 if isinstance(call, ast.Call) and call.func is n:
                     kw = [k.value for k in call.keywords if k.arg == "onerror"]
                     handler = kw[0] if kw else (call.args[2] if len(call.args) > 2 else None)
                 if not walk_handler_proven(tree, handler):
-                    out.append((n.lineno, "os.walk"))
-            elif r in QUERY_NAMES:
-                out.append((n.lineno, r))
-            elif isinstance(n, ast.Attribute) and n.attr in PATHLIB_QUERIES \
-                    and _resolve(n.value, aliases) != "os.path":
+                    out.append(Reported(n.lineno, "os.walk", file, _manager_rebinds(tree, _Names(tree, parents))))
+            for q in sorted(r & QUERY_NAMES - {"os.walk"}):
+                out.append((n.lineno, q))
+            if not r & QUERY_NAMES and isinstance(n, ast.Attribute) and n.attr in PATHLIB_QUERIES \
+                    and _resolve(n.value, aliases) != {"os.path"}:
                 out.append((n.lineno, "." + n.attr))
-        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" \
-                and n.args and (_resolve(n.args[0], aliases) or "").split(".")[0] in {"os", "pathlib"}:
+        elif isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "getattr" and n.args \
+                and any(c.split(".")[0] in {"os", "pathlib"} for c in _resolve(n.args[0], aliases)):
             out.append((n.lineno, "getattr"))
     return out
 
@@ -905,7 +1131,7 @@ def test_m5_no_path_query_turns_a_failure_into_absence():
     for path in (os.path.join(TOOLS, "review_needles.py"), os.path.join(API, "review_rules.py"),
                  os.path.join(API, "review_boot.py")):
         with open(path, encoding="utf-8") as f:
-            assert unwrapped_queries(f.read()) == [], path
+            assert unwrapped_queries(f.read(), path) == [], path
 
 
 PLANTED_QUERIES = ["os.path.isdir(p)", "os.path.lexists(p)", "os.path.exists(p)",
