@@ -12,15 +12,25 @@ file this lane changes, not the lines it adds.
 
 THE SCOPE IS RECORDED (_SCOPE) and checked against history in both directions
 by test_the_scope_is_every_file_this_lane_touches. The lane's commits are
-measured by git and never recognised by a path they touch: every commit from
-the merge-base of HEAD with the certified client base to HEAD, one that
-touches no scope file included. Every path such a commit touches must be in
-the scope, and every file in the scope must have been touched by one. The
-check is unconditional: a range that holds a merge commit is no longer one
-lane's line (a fold into the client lane merges other lanes' work, which git
-cannot tell from this lane's), and a checkout without the certified base
-cannot measure the range at all, so each FAILS by name, never skips. The
-sweep itself needs no history and runs everywhere.
+measured by git and never recognised by a path they touch. On the lane's own
+line the range is every commit from the merge-base of HEAD with the certified
+client base to HEAD, one that touches no scope file included: every path such
+a commit touches must be in the scope, every file in the scope must have been
+touched by one, and the lane has at least three commits. A fold of this lane
+into the client lane is one merge commit, so on a folded tree that range also
+holds other lanes' work, and the lane is recovered from the fold itself: the
+lane side of a merge is every commit reachable from its second parent and not
+from its first, and a merge is this lane's fold only when its lane side holds
+no merge commit, at least three commits, and exactly the scope in both
+directions. Exactly one merge of the range must qualify. It pins the lane tip
+(its second parent) and the client tip the lane was folded onto (its first);
+the scope assertion is made over its lane side as on the lane's own line; the
+lane tip must be an ancestor of HEAD and every scope file must exist at HEAD
+(the lane was folded, not dropped). Nothing is asserted about which of the
+lane's lines survive later commits. No qualifying merge, more than one, a
+checkout without the certified base, a copy that is not a repository and a
+git answer the check cannot read each FAIL by name, never skip. The sweep
+itself needs no history and runs everywhere.
 
 THE DETECTOR is the FAQ server lane's (backend/tests/test_faq_surfaces.py,
 its section 3), ported with its salt, its handle digests and its attribution
@@ -70,7 +80,8 @@ _SCOPE = (
 
 # The certified client base this lane was cut from (its brief). The lane's
 # range is every commit from git's merge-base of HEAD with it to HEAD; no
-# listed path decides which commits are the lane's.
+# listed path decides which commits are the lane's. On a tree that has folded
+# this lane, the fold merge of that range pins the lane (lane_fold).
 _CLIENT_BASE = "6c46b71e"
 
 _DRIVE_PATH = re.compile(r"(?<!\w)[A-Za-z]:[\\/](?![\\/])")
@@ -742,25 +753,15 @@ def lane_range(repo, base):
     return "linear", start, commits, touched
 
 
-def lane_scope_problems(repo, base, scope, min_commits=3):
-    """Every reason the lane range of `repo` (lane_range) fails the scope
-    check; empty only when the range was measured and holds exactly the
-    scope. Unconditional: a base that is not a commit there and a range that
-    holds a merge commit are each a named failure, never a skip, because in
-    either case git cannot say which commits are this lane's, and a check
-    that does not run cannot refuse the commit it exists for."""
-    state, detail, commits, touched = lane_range(repo, base)
-    if state == "absent":
-        return ["NOT MEASURED, base absent: the certified client base %s is not a commit here (%s), "
-                "so this lane's range cannot be measured" % (base, detail)]
-    if state == "merged":
-        return ["NOT MEASURED, range merged: the range from the merge-base of HEAD with %s holds %d "
-                "merge commit(s) (%s); git cannot tell another line's commits from this lane's"
-                % (base, len(detail), ", ".join(c[:8] for c in detail[:4]))]
+def _range_problems(commits, touched, scope, min_commits, measured):
+    """The scope assertion over a measured run of the lane's commits, the
+    same on the lane's own line and on the lane side of its fold: at least
+    min_commits commits, every path they touch recorded in the scope, and
+    every recorded file touched by one."""
     problems = []
     if len(commits) < min_commits:
-        problems.append("git measured %d commits from the merge-base %s to HEAD; this lane has at "
-                        "least %d" % (len(commits), detail[:8], min_commits))
+        problems.append("git measured %d commits %s; this lane has at least %d"
+                        % (len(commits), measured, min_commits))
     unrecorded = sorted(touched - set(scope))
     if unrecorded:
         problems.append("a commit of the lane range touched %s, which the scope does not record" % unrecorded)
@@ -770,17 +771,189 @@ def lane_scope_problems(repo, base, scope, min_commits=3):
     return problems
 
 
+class Unparsable(ValueError):
+    """A git answer the fold recovery cannot read as it expects; the check
+    then FAILS by name and never guesses."""
+
+
+_SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+def _git_in(repo):
+    def git(*args):
+        return subprocess.run(["git", "-C", repo, "-c", "core.quotePath=false"] + list(args),
+                              capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return git
+
+
+def _commit_names(answer, what):
+    """The commit names of a git answer that lists one per line, or
+    Unparsable naming the command; never a partial reading."""
+    if answer.returncode != 0:
+        raise Unparsable("%s exited %d (%s)" % (what, answer.returncode,
+                                                (answer.stderr or answer.stdout).strip()[:120]))
+    names = answer.stdout.split()
+    if any(not _SHA.fullmatch(n) for n in names):
+        raise Unparsable("%s answered a word that is not a commit name" % what)
+    return names
+
+
+def _side_paths(git, side, scope):
+    """Every path the commits of a merge's lane side touch (diff-tree per
+    commit, a rename counted as a deletion and an addition, a root commit's
+    files counted as added), and the reason the set is not exactly the
+    scope, or None. Stops at the first commit that touches a path outside
+    the scope: such a side cannot be this lane's."""
+    touched = set()
+    for sha in side:
+        shown = git("diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "--no-renames", sha, "--")
+        if shown.returncode != 0:
+            raise Unparsable("diff-tree of a lane-side commit exited %d" % shown.returncode)
+        paths = set(n.strip() for n in shown.stdout.split("\n") if n.strip())
+        touched |= paths
+        outside = sorted(paths - set(scope))
+        if outside:
+            return touched, "its lane side touched %s, which the scope does not record" % outside[:3]
+    untouched = sorted(set(scope) - touched)
+    if untouched:
+        return touched, "its lane side never touched %s" % untouched
+    return touched, None
+
+
+def _side_reason(git, first, second, scope, min_commits):
+    """Why the lane side of a merge (every commit reachable from `second`,
+    its second parent, and not from `first`, its first) is not this lane's
+    line, or None when it is: no merge commit on it, at least min_commits
+    commits, and exactly the scope in both directions. Returns (reason,
+    commits, touched)."""
+    rng = first + ".." + second
+    if _commit_names(git("rev-list", "--merges", rng, "--"), "rev-list of the lane side's merges"):
+        return "its lane side is merged (it holds a merge commit)", [], set()
+    side = _commit_names(git("rev-list", "--reverse", rng, "--"), "rev-list of the lane side")
+    if len(side) < min_commits:
+        return "its lane side holds %d commit(s), fewer than %d" % (len(side), min_commits), side, set()
+    touched, exact = _side_paths(git, side, scope)
+    if exact is not None:
+        return exact, side, touched
+    return None, side, touched
+
+
+def lane_fold(repo, merges, scope, min_commits=3):
+    """The fold merges of this lane among `merges` (the merge commits of a
+    merged range, lane_range). For each, its parents as git lists them and
+    its lane side (_side_reason). Returns (qualifying, rows): qualifying
+    lists (merge, client tip, lane tip, commits, touched) for every merge
+    whose lane side is this lane's line; rows lists every merge with the
+    reason it does not qualify (None when it does). Raises Unparsable on a
+    git answer it cannot read."""
+    git = _git_in(repo)
+    qualifying, rows = [], []
+    for merge in merges:
+        if not _SHA.fullmatch(merge):
+            raise Unparsable("lane_range listed a merge that is not a commit name")
+        parents = _commit_names(git("rev-list", "--parents", "-n", "1", merge, "--"),
+                                "rev-list of a merge's parents")
+        if not parents or parents[0] != merge:
+            raise Unparsable("rev-list of a merge's parents did not name the merge first")
+        if len(parents) != 3:
+            rows.append((merge, "it has %d parents, not two" % (len(parents) - 1)))
+            continue
+        _merge, first, second = parents
+        reason, commits, touched = _side_reason(git, first, second, scope, min_commits)
+        rows.append((merge, reason))
+        if reason is None:
+            qualifying.append((merge, first, second, commits, touched))
+    return qualifying, rows
+
+
+def integration_problems(repo, lane_tip, scope):
+    """The integration half of the check on a folded tree: the lane tip must
+    be an ancestor of HEAD (git merge-base --is-ancestor) and every scope
+    file must exist at HEAD, so the lane was folded and not dropped. It
+    asserts nothing about which of the lane's lines survive later commits."""
+    git = _git_in(repo)
+    problems = []
+    ancestor = git("merge-base", "--is-ancestor", lane_tip, "HEAD").returncode
+    if ancestor not in (0, 1):
+        problems.append("NOT MEASURED, unparsable git answer: merge-base --is-ancestor exited %d" % ancestor)
+    elif ancestor == 1:
+        problems.append("the lane tip %s is not an ancestor of HEAD" % lane_tip[:8])
+    listed = git("ls-tree", "-r", "--full-tree", "--name-only", "HEAD", "--", *scope)
+    if listed.returncode != 0:
+        problems.append("NOT MEASURED, unparsable git answer: ls-tree of HEAD exited %d" % listed.returncode)
+    else:
+        present = set(n.strip() for n in listed.stdout.split("\n") if n.strip())
+        missing = sorted(set(scope) - present)
+        if missing:
+            problems.append("the scope records %s, which does not exist at HEAD" % missing)
+    return problems
+
+
+def lane_scope_check(repo, base, scope, min_commits=3):
+    """(problems, detail) for the lane range of `repo` (lane_range):
+    problems is empty only when the lane was measured and holds exactly the
+    scope; detail names what was measured. Unconditional: a base that is not
+    a commit there is a named failure, never a skip. On the lane's own line
+    (no merge in the range) the scope assertion is made over the range. When
+    the range holds merge commits, the lane is recovered from its fold
+    (lane_fold): exactly one merge must qualify, and none or more than one
+    is a named failure listing the merges; the qualifying merge pins the lane
+    tip and the client tip, the same scope assertion is made over its lane
+    side, and integration_problems must hold."""
+    state, detail, commits, touched = lane_range(repo, base)
+    if state == "absent":
+        return ["NOT MEASURED, base absent: the certified client base %s is not a commit here (%s), "
+                "so this lane's range cannot be measured" % (base, detail)], ""
+    if state == "linear":
+        problems = _range_problems(commits, touched, scope, min_commits,
+                                   "from the merge-base %s to HEAD" % detail[:8])
+        return problems, ("the lane's own line: %d commits from the merge-base %s to HEAD, %d paths"
+                          % (len(commits), detail[:8], len(touched)))
+    try:
+        qualifying, rows = lane_fold(repo, detail, scope, min_commits)
+    except Unparsable as e:
+        return ["NOT MEASURED, unparsable git answer: %s" % e], ""
+    if not qualifying:
+        listed = "; ".join("%s %s" % (m[:8], reason) for m, reason in rows[:8])
+        more = "; and %d more" % (len(rows) - 8) if len(rows) > 8 else ""
+        return ["NOT MEASURED, range merged, no fold merge of this lane found: the range from the merge-base "
+                "of HEAD with %s holds %d merge commit(s) and none has this lane's line as its lane side (%s%s)"
+                % (base, len(rows), listed, more)], ""
+    if len(qualifying) > 1:
+        return ["NOT MEASURED, range merged, ambiguous: %d merge commits each have this lane's line as their "
+                "lane side (%s)" % (len(qualifying), ", ".join(q[0][:8] for q in qualifying[:8]))], ""
+    merge, client_tip, lane_tip, commits, touched = qualifying[0]
+    pinned = "the fold %s pins the lane tip %s and the client tip %s" % (merge[:8], lane_tip[:8], client_tip[:8])
+    problems = _range_problems(commits, touched, scope, min_commits, "on the lane side of the fold %s" % merge[:8])
+    problems += integration_problems(repo, lane_tip, scope)
+    return (["%s: %s" % (pinned, p) for p in problems],
+            "range merged (%d merge commits); %s; %d lane commits, %d paths"
+            % (len(rows), pinned, len(commits), len(touched)))
+
+
+def lane_scope_problems(repo, base, scope, min_commits=3):
+    """Every reason the lane of `repo` fails the scope check
+    (lane_scope_check); empty only when it was measured and holds exactly
+    the scope."""
+    return lane_scope_check(repo, base, scope, min_commits)[0]
+
+
 def test_the_scope_is_every_file_this_lane_touches():
-    """Both directions against the lane's range as git measures it
-    (lane_range): every path a commit of the range touches must be recorded
-    in the scope, and every recorded file must be touched by one. The check
-    is unconditional (lane_scope_problems): a clone without the certified
-    client base, a copy that is not a repository, and a range that holds a
-    merge commit (HEAD has merged another line, whose commits git cannot tell
-    from this lane's) each FAIL by name. A fold of this lane by merge
-    therefore re-derives the base this module names, in the fold. The sweep
-    needs no history."""
-    problems = lane_scope_problems(REPO, _CLIENT_BASE, _SCOPE)
+    """Both directions against the lane as git measures it: every path a
+    commit of the lane touches must be recorded in the scope, and every
+    recorded file must be touched by one. The check is unconditional
+    (lane_scope_check): a clone without the certified client base and a copy
+    that is not a repository each FAIL by name. On the lane's own line the
+    lane is the range from the merge-base of HEAD with the base (lane_range).
+    On a tree that has folded this lane by merge, the lane is recovered from
+    the fold (lane_fold): the one merge whose lane side, everything reachable
+    from its second parent and not from its first, is exactly this lane's
+    line pins the lane tip and the client tip; the scope assertion is made
+    over that side, the lane tip must be an ancestor of HEAD and every scope
+    file must exist at HEAD; no such merge, or more than one, FAILS by name.
+    The detail printed names what was measured. The sweep needs no history."""
+    problems, detail = lane_scope_check(REPO, _CLIENT_BASE, _SCOPE)
+    print("the lane's history and scope check measured %s" % (detail or "nothing"))
     assert not problems, "the lane's history and scope check failed:\n" + "\n".join(problems)
 
 
@@ -854,3 +1027,223 @@ def test_the_range_check_sees_a_commit_that_touches_no_scope_file(tmp_path):
     refused = after is not None and len(after) == 1 and after[0].startswith("NOT MEASURED, range merged")
     assert refused, "a merge followed by an anchorless new-path commit read %s" % (
         "a skip" if after is None else "%d problems" % len(after))
+
+
+def _fold_scratch(root):
+    """A repository built under `root` for the fold tests, every commit of it
+    known: the base; a client line (one commit, then another lane of three
+    commits folded into it by a no-fast-forward merge); this lane cut from
+    the base (three commits over the five scope files); and one branch per
+    case, each a no-fast-forward fold onto the client line. Returns a dict
+    holding the git helper, the repository and the names of the commits."""
+    repo = os.path.join(str(root), "fold")
+    os.makedirs(repo)
+
+    def git(*args):
+        r = subprocess.run(["git", "-C", repo, "-c", "user.name=lane-probe",
+                            "-c", "user.email=lane-probe@example.invalid",
+                            "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false"] + list(args),
+                           capture_output=True, text=True, encoding="utf-8", errors="replace")
+        assert r.returncode == 0, "git %s failed: %s" % (args[0], (r.stderr or r.stdout).strip()[:200])
+        return r.stdout.strip()
+
+    def commit(paths, message):
+        for rel in paths:
+            path = os.path.join(repo, rel)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(message + "\n")
+        git("add", "--", *paths)
+        git("commit", "-q", "-m", message)
+        return git("rev-parse", "HEAD")
+
+    def fold(branch, onto, lane, message):
+        git("checkout", "-q", "-b", branch, onto)
+        git("merge", "-q", "--no-ff", "--no-edit", "-m", message, lane)
+        return git("rev-parse", "HEAD")
+
+    s = {"git": git, "repo": repo}
+    git("init", "-q")
+    s["base"] = commit(["README.txt"], "the base")
+    git("checkout", "-q", "-b", "client")
+    commit(["client.txt"], "client work")
+    git("checkout", "-q", "-b", "other")
+    for word in ("one", "two", "three"):
+        commit(["other/%s.txt" % word], "another lane, item " + word)
+    git("checkout", "-q", "client")
+    git("merge", "-q", "--no-ff", "--no-edit", "-m", "fold another lane", "other")
+    s["client"] = git("rev-parse", "HEAD")
+    git("checkout", "-q", "-b", "lane", s["base"])
+    commit(list(_SCOPE[:2]), "lane item one")
+    commit(list(_SCOPE[2:4]), "lane item two")
+    s["lane"] = commit(list(_SCOPE[4:]), "lane item three")
+    s["folded"] = fold("folded", "client", "lane", "fold this lane")
+    git("checkout", "-q", "-b", "lane-sixth", "lane")
+    s["sixth"] = commit(["docs/sixth.txt"], "a sixth path on the lane side")
+    s["folded-sixth"] = fold("folded-sixth", "client", "lane-sixth", "fold this lane with a sixth path")
+    git("checkout", "-q", "-b", "lane-again", "lane")
+    commit(list(_SCOPE[:2]), "lane again one")
+    commit(list(_SCOPE[2:4]), "lane again two")
+    commit(list(_SCOPE[4:]), "lane again three")
+    s["folded-twice"] = fold("folded-twice", "folded", "lane-again", "fold this lane a second time")
+    git("checkout", "-q", "-b", "lane-merged", s["base"])
+    commit(list(_SCOPE[:2]), "merged lane one")
+    git("checkout", "-q", "-b", "lane-sub", s["base"])
+    commit(list(_SCOPE[2:4]), "merged lane two")
+    commit(list(_SCOPE[4:]), "merged lane three")
+    git("checkout", "-q", "lane-merged")
+    git("merge", "-q", "--no-ff", "--no-edit", "-m", "merge into the lane line", "lane-sub")
+    s["folded-merged"] = fold("folded-merged", "client", "lane-merged", "fold a lane whose line is merged")
+    git("checkout", "-q", "-b", "lane-short", s["base"])
+    commit(list(_SCOPE), "the whole scope in one commit")
+    s["folded-short"] = fold("folded-short", "client", "lane-short", "fold a one-commit lane")
+    git("checkout", "-q", "-b", "lane-later", "lane")
+    commit(list(_SCOPE), "a later pass over the whole scope in one commit")
+    s["folded-later"] = fold("folded-later", "folded", "lane-later", "fold a later one-commit pass")
+    git("checkout", "-q", "-b", "dropped", "folded")
+    git("rm", "-q", "--", _SCOPE[1])
+    git("commit", "-q", "-m", "a scope file deleted after the fold")
+    s["dropped"] = git("rev-parse", "HEAD")
+    git("checkout", "-q", "folded")
+    return s
+
+
+_FOLD_REPOSITORY = {}
+
+
+def _fold_scratch_once(root):
+    """_fold_scratch built once per loaded module (the build starts about a
+    hundred git processes): the first fold test builds it under its own
+    directory, and every fold test checks out the branch it measures; no test
+    writes to it."""
+    if "built" not in _FOLD_REPOSITORY:
+        _FOLD_REPOSITORY["built"] = _fold_scratch(root)
+    return _FOLD_REPOSITORY["built"]
+
+
+_NO_FOLD = "NOT MEASURED, range merged, no fold merge of this lane found"
+
+
+def _check_at(s, branch):
+    s["git"]("checkout", "-q", branch)
+    return lane_scope_check(s["repo"], s["base"], _SCOPE)
+
+
+def test_a_fold_merge_of_this_lane_is_recovered_from_its_second_parent(tmp_path):
+    """The folded tree of _fold_scratch: the range from the base holds two
+    merges, the client line's fold of another lane and this lane's fold. The
+    lane is recovered from the one merge whose lane side is exactly the
+    scope, and the check PASSES with the fold, the lane tip and the client
+    tip named in its detail. A HEAD on the lane's own line keeps the linear
+    verdict."""
+    s = _fold_scratch_once(tmp_path)
+    s["git"]("checkout", "-q", "folded")
+    state, merges, _commits, _touched = lane_range(s["repo"], s["base"])
+    assert state == "merged" and sorted(merges) == sorted([s["client"], s["folded"]]), (
+        "the folded range read %s with %d merges" % (state, len(merges)))
+    problems, measured = _check_at(s, "folded")
+    assert not problems, "the folded HEAD failed:\n" + "\n".join(problems)
+    pinned = "the fold %s pins the lane tip %s and the client tip %s" % (
+        s["folded"][:8], s["lane"][:8], s["client"][:8])
+    assert pinned in measured, "the passing detail does not name the pins: " + measured
+    problems, measured = _check_at(s, "lane")
+    state, _start, commits, touched = lane_range(s["repo"], s["base"])
+    linear = (not problems and state == "linear" and len(commits) == 3 and touched == set(_SCOPE)
+              and measured.startswith("the lane's own line"))
+    assert linear, "the lane's own line read %s, %d problems (%s)" % (state, len(problems), measured)
+
+
+def test_a_merge_whose_lane_side_is_not_exactly_this_lane_is_no_fold_of_it(tmp_path):
+    """A fold whose lane side also touches a sixth path FAILS naming the
+    path: no merge of that range has this lane's line as its lane side. A
+    later one-commit pass of the lane folded after the real fold is no fold
+    of the lane (its side is below the minimum), so the real fold is the one
+    that qualifies and the check PASSES pinning the real lane tip. A fold of
+    a one-commit lane over the whole scope alone FAILS naming the minimum."""
+    s = _fold_scratch_once(tmp_path)
+    problems, _measured = _check_at(s, "folded-sixth")
+    sixth = (len(problems) == 1 and problems[0].startswith(_NO_FOLD) and "docs/sixth.txt" in problems[0]
+             and (s["folded-sixth"][:8] + " its lane side touched") in problems[0])
+    assert sixth, "a fold whose lane side touches a sixth path read %d problems: %s" % (
+        len(problems), [p[:120] for p in problems[:2]])
+    problems, measured = _check_at(s, "folded-later")
+    later = not problems and ("pins the lane tip %s and" % s["lane"][:8]) in measured
+    assert later, "a later one-commit pass folded after the fold read %d problems: %s" % (
+        len(problems), [p[:120] for p in problems[:2]] or measured)
+    problems, _measured = _check_at(s, "folded-short")
+    short = (len(problems) == 1 and problems[0].startswith(_NO_FOLD)
+             and (s["folded-short"][:8] + " its lane side holds") in problems[0])
+    assert short, "a fold of a one-commit lane read %d problems: %s" % (
+        len(problems), [p[:120] for p in problems[:2]])
+
+
+def test_two_merges_that_each_qualify_fail_as_ambiguous(tmp_path):
+    """This lane folded, then a second pass of three commits over the whole
+    scope folded after it: two merges each have a lane side that is exactly
+    the scope, so the check FAILS as ambiguous and names both."""
+    s = _fold_scratch_once(tmp_path)
+    problems, _measured = _check_at(s, "folded-twice")
+    ambiguous = (len(problems) == 1 and problems[0].startswith("NOT MEASURED, range merged, ambiguous")
+                 and s["folded"][:8] in problems[0] and s["folded-twice"][:8] in problems[0])
+    assert ambiguous, "two qualifying merges read %d problems: %s" % (
+        len(problems), [p[:120] for p in problems[:2]])
+
+
+def test_a_fold_whose_lane_side_is_merged_fails_as_merged(tmp_path):
+    """A lane line that merged another line into itself and was then
+    folded: the fold's lane side holds a merge commit, so it is no fold of
+    this lane however its paths read (here they are exactly the scope), and
+    the check FAILS naming the fold's lane side as merged."""
+    s = _fold_scratch_once(tmp_path)
+    problems, _measured = _check_at(s, "folded-merged")
+    merged = (len(problems) == 1 and problems[0].startswith(_NO_FOLD)
+              and (s["folded-merged"][:8] + " its lane side is merged") in problems[0])
+    assert merged, "a fold whose lane side is merged read %d problems: %s" % (
+        len(problems), [p[:120] for p in problems[:2]])
+
+
+def test_the_folded_lane_tip_is_an_ancestor_of_head_and_every_scope_file_exists_there(tmp_path):
+    """integration_problems on the folded tree: the lane tip passes, and a
+    tip that HEAD never merged (the sixth-path line's) is refused as no
+    ancestor of HEAD. A scope file deleted after the fold FAILS the whole
+    check by name, with the fold's pins in the failure text."""
+    s = _fold_scratch_once(tmp_path)
+    s["git"]("checkout", "-q", "folded")
+    assert integration_problems(s["repo"], s["lane"], _SCOPE) == [], "the folded lane tip was refused"
+    off = integration_problems(s["repo"], s["sixth"], _SCOPE)
+    assert off == ["the lane tip %s is not an ancestor of HEAD" % s["sixth"][:8]], (
+        "a tip HEAD never merged read %d problems" % len(off))
+    problems, _measured = _check_at(s, "dropped")
+    pinned = "the fold %s pins the lane tip %s and the client tip %s" % (
+        s["folded"][:8], s["lane"][:8], s["client"][:8])
+    dropped = (len(problems) == 1 and problems[0].startswith(pinned) and _SCOPE[1] in problems[0]
+               and "does not exist at HEAD" in problems[0])
+    assert dropped, "a scope file deleted after the fold read %d problems: %s" % (
+        len(problems), [p[:120] for p in problems[:2]])
+
+
+def test_the_fold_recovery_fails_closed_on_what_it_cannot_read(tmp_path, monkeypatch):
+    """A copy that is not a repository FAILS as base absent; a git answer
+    that is not a list of commit names raises Unparsable, never a partial
+    reading; and an Unparsable inside the fold recovery FAILS the check by
+    name, never as a skip."""
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    absent = lane_scope_problems(str(plain), "f" * 40, _SCOPE)
+    assert len(absent) == 1 and absent[0].startswith("NOT MEASURED, base absent"), (
+        "a copy that is not a repository read %d problems" % len(absent))
+    odd = subprocess.CompletedProcess(["git"], 0, stdout="not-a-commit-name\n", stderr="")
+    with pytest.raises(Unparsable):
+        _commit_names(odd, "a probe")
+    s = _fold_scratch_once(tmp_path)
+
+    def unreadable(*_args, **_kwargs):
+        raise Unparsable("a probe")
+    monkeypatch.setitem(globals(), "lane_fold", unreadable)
+    try:
+        problems, _measured = _check_at(s, "folded")
+    except pytest.skip.Exception:
+        problems = None
+    named = problems is not None and len(problems) == 1 and problems[0].startswith(
+        "NOT MEASURED, unparsable git answer")
+    assert named, "an unreadable git answer read %s" % ("a skip" if problems is None else problems[:1])
