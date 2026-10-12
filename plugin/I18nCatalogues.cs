@@ -3387,9 +3387,9 @@ namespace CompetitiveRounds
             ["Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room."] = "Números flotantes sobre un jugador que muestran el daño recibido y la vida recuperada, con los mismos decimales que el indicador de HP. Solo local — nada de lo que ves aquí se envía, y nada cambia para nadie más en la sala.",
             ["Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."] = "Más movimiento sobre la pelea. Actívalo cuando quieras leer exactamente lo que costó un intercambio.",
             // Added 2026-10-10: the client strings v1.41.0 wave A added (the HP
-            // precision setting's help and its three labels). Sorted among
-            // themselves; existing entries above are untouched.
-            ["Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes."] = "Decimales de la lectura de HP en la tabla que aparece al mantener Tab, el asiento de espectador y el HUD de transmisión. Las dos mitades de \"actual/máx.\" siguen este ajuste, así que una carta que deja la vida máxima en una fracción tampoco se muestra ya como un número entero. Solo afecta a la pantalla local - no cambia nada de lo que se guarda o se envía.",
+            // precision setting's three labels; the setting's help names its
+            // key from the binding and is the hold-{0} row further down).
+            // Sorted among themselves; existing entries above are untouched.
             ["HP decimals: <color=#88FF88>2 DECIMALS</color>"] = "Decimales de HP: <color=#88FF88>2 DECIMALES</color>",
             ["HP decimals: <color=#DDDD66>1 DECIMAL</color>"] = "Decimales de HP: <color=#DDDD66>1 DECIMAL</color>",
             ["HP decimals: <color=#FF9966>ROUNDED</color>"] = "Decimales de HP: <color=#FF9966>REDONDEADO</color>",
@@ -6921,9 +6921,9 @@ namespace CompetitiveRounds
             ["Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room."] = "Всплывающие числа над игроком: полученный урон и восстановленное здоровье, с теми же знаками после запятой, что и у показателя HP. Только локально — ничего из того, что вы здесь видите, не отправляется, и ни для кого в комнате ничего не меняется.",
             ["Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."] = "Лишнее движение поверх боя. Включайте, когда хотите точно видеть, во что обошёлся размен.",
             // Added 2026-10-10: the client strings v1.41.0 wave A added (the HP
-            // precision setting's help and its three labels). Sorted among
-            // themselves; existing entries above are untouched.
-            ["Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes."] = "Число знаков после запятой у HP в таблице, открываемой удержанием Tab, на месте зрителя и в HUD трансляции. Обе половины «текущее/макс.» следуют этой настройке, так что карта, оставляющая максимальное здоровье дробным, тоже перестаёт показываться целым числом. Только локальное отображение - ничего сохраняемого или отправляемого не меняется.",
+            // precision setting's three labels; the setting's help names its
+            // key from the binding and is the hold-{0} row further down).
+            // Sorted among themselves; existing entries above are untouched.
             ["HP decimals: <color=#88FF88>2 DECIMALS</color>"] = "Точность HP: <color=#88FF88>2 ЗНАКА</color>",
             ["HP decimals: <color=#DDDD66>1 DECIMAL</color>"] = "Точность HP: <color=#DDDD66>1 ЗНАК</color>",
             ["HP decimals: <color=#FF9966>ROUNDED</color>"] = "Точность HP: <color=#FF9966>ОКРУГЛЕНО</color>",
@@ -10381,9 +10381,9 @@ namespace CompetitiveRounds
             ["Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room."] = "Спливні числа над гравцем: отримана шкода та відновлене здоров'я, з тими ж знаками після коми, що й у показнику HP. Лише локально — нічого з того, що ви тут бачите, не надсилається, і ні для кого в кімнаті нічого не змінюється.",
             ["Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."] = "Зайвий рух поверх бою. Вмикайте, коли хочете точно бачити, чого коштував обмін.",
             // Added 2026-10-10: the client strings v1.41.0 wave A added (the HP
-            // precision setting's help and its three labels). Sorted among
-            // themselves; existing entries above are untouched.
-            ["Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes."] = "Кількість знаків після коми в показнику HP у таблиці, що відкривається утриманням Tab, на місці глядача та в HUD трансляції. Обидві половини «поточне/макс.» слідують цьому налаштуванню, тож карта, яка залишає максимальне здоров’я дробовим, теж перестає показуватися цілим числом. Лише локальне відображення - нічого, що зберігається чи надсилається, не змінюється.",
+            // precision setting's three labels; the setting's help names its
+            // key from the binding and is the hold-{0} row further down).
+            // Sorted among themselves; existing entries above are untouched.
             ["HP decimals: <color=#88FF88>2 DECIMALS</color>"] = "Точність HP: <color=#88FF88>2 ЗНАКИ</color>",
             ["HP decimals: <color=#DDDD66>1 DECIMAL</color>"] = "Точність HP: <color=#DDDD66>1 ЗНАК</color>",
             ["HP decimals: <color=#FF9966>ROUNDED</color>"] = "Точність HP: <color=#FF9966>ОКРУГЛЕНО</color>",
@@ -13841,9 +13841,9 @@ namespace CompetitiveRounds
             ["Floating numbers above a player showing damage taken and health received, using the same decimals as the HP readout. Local display only — nothing you see here is sent, and nothing changes for anyone else in the room."] = "Flytande siffror ovanför en spelare som visar skada som tas och hälsa som fås, med samma decimaler som HP-visningen. Endast lokalt — inget du ser här skickas, och inget ändras för någon annan i rummet.",
             ["Extra motion over the fight. Turn it on when you want to read exactly what a trade cost."] = "Extra rörelse över striden. Slå på det när du vill läsa exakt vad ett utbyte kostade.",
             // Added 2026-10-10: the client strings v1.41.0 wave A added (the HP
-            // precision setting's help and its three labels). Sorted among
-            // themselves; existing entries above are untouched.
-            ["Decimals on the HP readout in the hold-Tab board, the spectator seat and the broadcaster HUD. Both halves of \"current/max\" follow it, so a card that leaves max health on a fraction stops reading as a whole number too. Local display only - nothing stored or sent changes."] = "Decimaler på HP-visningen i tavlan som visas när du håller ned Tab, på åskådarplatsen och i sändningens HUD. Båda halvorna av \"nuvarande/max\" följer inställningen, så ett kort som lämnar maxhälsan på ett bråktal visas inte heller längre som ett heltal. Endast lokal visning - inget som sparas eller skickas ändras.",
+            // precision setting's three labels; the setting's help names its
+            // key from the binding and is the hold-{0} row further down).
+            // Sorted among themselves; existing entries above are untouched.
             ["HP decimals: <color=#88FF88>2 DECIMALS</color>"] = "HP-decimaler: <color=#88FF88>2 DECIMALER</color>",
             ["HP decimals: <color=#DDDD66>1 DECIMAL</color>"] = "HP-decimaler: <color=#DDDD66>1 DECIMAL</color>",
             ["HP decimals: <color=#FF9966>ROUNDED</color>"] = "HP-decimaler: <color=#FF9966>AVRUNDAT</color>",
