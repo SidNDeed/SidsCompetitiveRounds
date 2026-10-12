@@ -447,11 +447,20 @@ def test_h1_fix4_every_unresolved_hop_is_dispositioned_with_a_control_that_names
         assert note.strip(), name
 
 
+# The sinks whose chains carry the ResetMenuPatch hop, as the check prints them
+# (sorted, comma-joined). Fix 5's graph had ApplyJoin's chain only; at the
+# merged v1.41.0 client tree the folded lanes' references join the InfoLibrary
+# and keyboard sinks' subgraph to it, so the hop is on seven chains.
+RESET_MENU_CHAINS = ",".join(("InfoLibrary.cs:ControlsOutro", "InfoLibrary.cs:Cosmetics", "InfoLibrary.cs:Spectating",
+                              "InfoLibrary.cs:StartHere", "InfoLibrary.cs:VanillaBugs", "InfoViz.cs:BuildKeyboard",
+                              "Keybinds.cs:ApplyJoin"))
+
+
 def test_h1_fix4_an_unresolved_hop_without_a_naming_control_is_red(attach4, tmp_path):
     st, cman, att, aman = attach4
     rows = [r for r in _rows(ATTACH) if not r.startswith("unresolved\t%s\t" % RESET_MENU)]
     problems = _check(st, tmp_path, attach=rows)
-    assert any(p.startswith("UNRESOLVED hop %s (on the chains of Keybinds.cs:ApplyJoin) has no disposition" % RESET_MENU)
+    assert any(p.startswith("UNRESOLVED hop %s (on the chains of %s) has no disposition" % (RESET_MENU, RESET_MENU_CHAINS))
                for p in problems), problems[:5]
     for ctl, why in (("backend/tests/test_client_keybinds_fix2.py::test_m3_the_live_store_has_no_silent_write",
                       "does not name ResetMenuPatch"),
