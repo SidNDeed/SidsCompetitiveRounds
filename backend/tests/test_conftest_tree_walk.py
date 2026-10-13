@@ -128,10 +128,19 @@ def test_one_pass_stays_affordable():
     files, every one tracked (main.py 3.7, I18nCatalogues.cs 3.3, the Player
     Cards art under backend/api/assets 8.8); the ceiling moved from 40 to 48
     MiB with it, and a directory of binaries still crosses it.
+
+    Measured again at the merged hold 2 tip d3629b36 (the three client lanes
+    folded; main 4395feda, 41.1 MiB across 729 files under its own 46 MiB
+    ceiling, not yet folded): 49.6 MiB across 887 files, every one tracked
+    (plugin 17.8 across 166 files, backend/tests 9.9 across 221, the Player
+    Cards art 8.8 unchanged, backend/api 4.9, backend/sql 4.1, tools 1.3),
+    no new binary directory; the ceiling moves from 48 to 56 MiB, about 6 MiB
+    of headroom again, and the fold of this branch into main takes the
+    larger value.
     """
     stamps = ct._source_stamps()
     total = sum(size for size, _digest in stamps.values())
-    assert total < 48 * 1024 * 1024, (
+    assert total < 56 * 1024 * 1024, (
         "one tree-movement pass now reads %.1f MiB across %d files, and it runs "
         "twice per session" % (total / 1048576.0, len(stamps)))
 
