@@ -1035,6 +1035,27 @@ _NAME_ARG = frozenset({"builtins.getattr", "builtins.hasattr"})    # benign only
 _STRING_NAMES = frozenset({"__name__", "__file__", "__doc__", "__debug__", "__package__", "__qualname__",
                            "__module__"})                           # module-level dunder NAMES that hold strings
 
+# Fix pass 11 (round 10 M5): the bound gains the in-process string and code
+# executors (each module and every attribute of it), types.CodeType, the
+# method caller, and the executors' modules in the import rule.
+_EXECUTORS = ("timeit", "code", "codeop", "pdb", "bdb", "cProfile", "profile", "trace", "doctest")
+_EXECUTOR_IMPORTS = _EXECUTORS + ("marshal", "pickle", "shelve")
+_REACH_MODULES = _REACH_MODULES + _EXECUTORS                       # fix 11: the executor additions
+_REACH_CALLABLES = _REACH_CALLABLES | {"types.CodeType"}           # fix 11: a code object made into a function
+_REACH_CALLABLES = _REACH_CALLABLES | {"operator.methodcaller"}    # fix 11: a mutator called by its name
+_REACH_IMPORTS = _REACH_IMPORTS + _EXECUTOR_IMPORTS                 # fix 11: the executor import rule
+_BENIGN_EXEC = frozenset({"timeit.timeit", "timeit.repeat", "timeit.Timer"})
+_BENIGN_EXEC_MODULES = ("timeit",)
+_MUTATORS = frozenset({"setitem", "setdefault", "update", "pop", "popitem", "clear", "delitem", "setattr",
+                       "delattr", "__setitem__", "__delitem__", "__setattr__", "__delattr__"})
+_FRESH, _HOLDS, _UNRES = 0, 1, 2          # the data-flow levels of _Flow, ordered
+_FRESH_BUILTINS = frozenset({"len", "str", "repr", "int", "float", "complex", "bool", "hash", "id", "abs", "round",
+                             "format", "ascii", "bin", "hex", "oct", "ord", "chr", "isinstance", "issubclass",
+                             "callable", "sum", "any", "all", "bytes", "range", "open", "print", "divmod", "pow",
+                             "object"})   # a new object that refers to none of its arguments
+_COPY_BUILTINS = frozenset({"dict", "list", "tuple", "set", "frozenset", "sorted", "bytearray", "iter", "reversed",
+                            "enumerate", "zip", "map", "filter"})   # a new object holding its arguments' elements
+
 
 def _dunder(s) -> bool:
     return isinstance(s, str) and len(s) > 4 and s.startswith("__") and s.endswith("__")
@@ -1062,6 +1083,376 @@ def _target_names(t) -> set:
     if isinstance(t, (ast.Tuple, ast.List)):
         return set().union(*[_target_names(e) for e in t.elts]) if t.elts else set()
     return set()
+
+
+def _root(node):
+    """The name a chain of attributes and subscripts starts from, else None."""
+    while isinstance(node, (ast.Attribute, ast.Subscript, ast.Starred)):
+        node = node.value
+    return node.id if isinstance(node, ast.Name) else None
+
+
+class _Flow:
+    """Data flow of one module for the unresolved-base rule (fix pass 11,
+    round 10 M5: a module-local identity function carried a caller-supplied
+    mapping through unseen, because every result of a local call was taken
+    as fresh). Every expression has a LEVEL:
+      _FRESH  an object the module makes that holds nothing it cannot resolve;
+      _HOLDS  a fresh object that may HOLD one it cannot resolve (a display, a
+              copy, an instance, a generator, a closure over one): a write to
+              it reaches no namespace, a write to anything read out of it may;
+      _UNRES  possibly an object the proof cannot resolve, or an element of
+              one: a write through it is refused.
+    Levels are solved to a least fixed point (values only rise, over a finite
+    set of keys) over four kinds of key: a name of the module (every binding
+    and every mutation in any scope, merged, as everywhere in this proof); a
+    name local to a callee, under a parameter level; a callee's SUMMARY under
+    a parameter level (the join of every return path, a yield counting as
+    held, _UNRES for a decorated def or a body the analysis cannot follow:
+    exec, eval, a yield from, a call of an unresolved callable, a try whose
+    handler swallows and rebinds); and a class's INSTANCE under an argument
+    level (_UNRES for a decorator, a metaclass, a __new__ or a base the proof
+    cannot follow; held when an argument, a class-body store or a method's
+    store or mutation can hold an unresolved object). A call of a module def,
+    lambda binding or class takes that summary or instance, with the callee's
+    parameters at _UNRES whenever any argument is at least _HOLDS (*args and
+    **kwargs forwarding included), else at _FRESH; a parameter with a
+    default also takes the default's level. A call of a method or an
+    imported callable is _UNRES (copy and deepcopy excepted); a builtin is
+    fresh (_FRESH_BUILTINS), a copy holding its arguments' elements
+    (_COPY_BUILTINS), or else _UNRES when an argument is held. A name a
+    mutation writes into (a subscript or attribute store, or a method call,
+    whose chain starts at it) is at least _HOLDS when the written value or an
+    argument is."""
+
+    def __init__(self, reach):
+        self.r, self.parents, self.binds = reach, reach.parents, reach.binds
+        self.tab, self.keys, self.nodes, self.dirty = {}, [], {}, False
+        self.encl, self.locals, self.declared, self.muts = {}, {}, {}, {}
+        stack = [(reach.tree, None)]
+        while stack:
+            node, fn = stack.pop()
+            for c in ast.iter_child_nodes(node):
+                self.encl[id(c)] = fn
+                stack.append((c, c if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) else fn))
+        for n in ast.walk(reach.tree):
+            root, vals = None, []
+            if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                stmt = self.parents.get(id(n))
+                while isinstance(stmt, (ast.Tuple, ast.List, ast.Starred)):
+                    stmt = self.parents.get(id(stmt))
+                val = stmt.value if isinstance(stmt, (ast.Assign, ast.AugAssign, ast.AnnAssign)) \
+                    else stmt.iter if isinstance(stmt, (ast.For, ast.AsyncFor, ast.comprehension)) \
+                    else stmt.context_expr if isinstance(stmt, ast.withitem) else None
+                root, vals = _root(n.value), [] if val is None else [val]
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
+                root = _root(n.func.value)
+                vals = [a.value if isinstance(a, ast.Starred) else a for a in n.args] + [k.value for k in n.keywords]
+            if root is not None and vals:
+                self.muts.setdefault(root, []).append((n, vals))
+
+    # -- the solver ------------------------------------------------------------------
+    def get(self, key):
+        v = self.tab.get(key)
+        if v is None:
+            self.tab[key] = v = _FRESH
+            self.keys.append(key)
+            self.dirty = True
+        return v
+
+    def solve(self):
+        while True:
+            self.dirty, changed = False, False
+            for key in list(self.keys):
+                v = self.compute(key)
+                if v > self.tab[key]:
+                    self.tab[key], changed = v, True
+            if not changed and not self.dirty:
+                return
+
+    def level(self, node, ctx=None):
+        """The level of an expression read at module scope (ctx None) or in a
+        callee under a parameter level (ctx (callee, level))."""
+        while True:
+            v = self.lv(node, ctx)
+            if not self.dirty:
+                return v
+            self.solve()
+
+    # -- scopes ----------------------------------------------------------------------
+    def local(self, fn):
+        """The bindings made in a callee's own subtree, by name, and the names
+        it declares global or nonlocal."""
+        got = self.locals.get(id(fn))
+        if got is None:
+            got, decl = {}, set()
+            for c in ast.iter_child_nodes(fn):
+                for n in ast.walk(c):
+                    names = ()
+                    if isinstance(n, ast.arg):
+                        names = (n.arg,)
+                    elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+                        names = (n.id,)
+                    elif isinstance(n, (ast.Import, ast.ImportFrom)):
+                        names = tuple(a.asname or a.name.split(".")[0] for a in n.names)
+                    elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                                        ast.MatchAs, ast.MatchStar)) and n.name:
+                        names = (n.name,)
+                    elif isinstance(n, ast.MatchMapping) and n.rest:
+                        names = (n.rest,)
+                    elif isinstance(n, (ast.Global, ast.Nonlocal)):
+                        decl |= set(n.names)
+                    for x in names:
+                        got.setdefault(x, []).append(n)
+            self.locals[id(fn)], self.declared[id(fn)] = got, decl
+        return got
+
+    def is_local(self, name, ctx) -> bool:
+        return ctx is not None and name in self.local(ctx[0]) and name not in self.declared[id(ctx[0])]
+
+    def scope_binds(self, name, ctx):
+        return self.local(ctx[0])[name] if self.is_local(name, ctx) else self.binds.get(name, [])
+
+    def inside(self, node, fn) -> bool:
+        e = self.encl.get(id(node))
+        while e is not None:
+            if e is fn:
+                return True
+            e = self.encl.get(id(e))
+        return False
+
+    # -- keys ------------------------------------------------------------------------
+    def name_lv(self, name, ctx):
+        if self.is_local(name, ctx):
+            self.nodes[id(ctx[0])] = ctx[0]
+            return self.get(("l", id(ctx[0]), ctx[1], name))
+        return self.get(("n", name))
+
+    def compute(self, key):
+        if key[0] == "n":
+            binds = self.binds.get(key[1], [])
+            if not binds:
+                return _FRESH if hasattr(builtins, key[1]) else _UNRES      # a builtin, or an unbound global
+            v = max(self.bind_lv(b, None) for b in binds)
+            if v < _HOLDS and any(self.lv(x, None) >= _HOLDS for _s, vals in self.muts.get(key[1], ())
+                                  for x in vals):
+                v = _HOLDS                                           # a mutation wrote a held value into it
+            return v
+        if key[0] == "l":
+            fn = self.nodes[key[1]]
+            ctx = (fn, key[2])
+            v = max(self.bind_lv(b, ctx) for b in self.local(fn)[key[3]])
+            if v < _HOLDS and any(self.lv(x, ctx) >= _HOLDS for s, vals in self.muts.get(key[3], ())
+                                  if self.inside(s, fn) for x in vals):
+                v = _HOLDS
+            return v
+        if key[0] == "s":
+            return self.summary(self.nodes[key[1]], key[2])
+        return self.instance(self.nodes[key[1]], key[2])
+
+    def bind_lv(self, b, ctx):
+        """The level one binding gives its name, read in ctx."""
+        if isinstance(b, ast.arg):
+            owner = self.encl.get(id(b))
+            if ctx is None or owner is not ctx[0]:
+                return _UNRES                                        # a value a caller supplies
+            d = self.default_of(owner, b)
+            return max(ctx[1], _FRESH if d is None else self.lv(d, None))
+        if isinstance(b, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                          ast.Global, ast.Nonlocal)):
+            return _FRESH
+        if not isinstance(b, ast.Name):
+            return _UNRES                                            # an except target, a match capture
+        if isinstance(b.ctx, ast.Del):
+            return _FRESH
+        stmt, unpacked = self.parents.get(id(b)), False
+        while isinstance(stmt, (ast.Tuple, ast.List, ast.Starred)):
+            stmt, unpacked = self.parents.get(id(stmt)), True
+        if isinstance(stmt, ast.AugAssign):
+            return _HOLDS if self.lv(stmt.value, ctx) >= _HOLDS else _FRESH   # the object keeps; it may gain
+        if isinstance(stmt, ast.AnnAssign) and stmt.value is None:
+            return _FRESH
+        if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            tgt, val = self.parents.get(id(b)), stmt.value
+            if unpacked and isinstance(stmt, ast.Assign) and any(t is tgt for t in stmt.targets) \
+                    and isinstance(tgt, (ast.Tuple, ast.List)) and isinstance(val, (ast.Tuple, ast.List)) \
+                    and len(tgt.elts) == len(val.elts) \
+                    and not any(isinstance(e, ast.Starred) for e in tgt.elts + val.elts):
+                return self.lv(val.elts[[i for i, e in enumerate(tgt.elts) if e is b][0]], ctx)   # a, b = x, y
+            v = self.lv(val, ctx)
+            return (_UNRES if v >= _HOLDS else _FRESH) if unpacked else v
+        if isinstance(stmt, (ast.For, ast.AsyncFor, ast.comprehension)):
+            return _UNRES if self.lv(stmt.iter, ctx) >= _HOLDS else _FRESH     # an element
+        if isinstance(stmt, ast.withitem):
+            return _UNRES if self.lv(stmt.context_expr, ctx) >= _HOLDS else _FRESH
+        return _UNRES
+
+    @staticmethod
+    def default_of(fn, a):
+        A = fn.args
+        pos = A.posonlyargs + A.args
+        for x, d in zip(pos[len(pos) - len(A.defaults):], A.defaults):
+            if x is a:
+                return d
+        for x, d in zip(A.kwonlyargs, A.kw_defaults):
+            if x is a:
+                return d
+        return None
+
+    # -- expressions -----------------------------------------------------------------
+    def lv(self, node, ctx):
+        if node is None or isinstance(node, (ast.Constant, ast.JoinedStr, ast.FormattedValue, ast.Compare)):
+            return _FRESH
+        if isinstance(node, ast.Name):
+            return self.name_lv(node.id, ctx)
+        if isinstance(node, ast.Attribute):
+            return _UNRES if self.lv(node.value, ctx) >= _HOLDS else _FRESH
+        if isinstance(node, ast.Subscript):
+            base = self.lv(node.value, ctx)
+            if isinstance(node.slice, ast.Slice):
+                return _HOLDS if base >= _HOLDS else _FRESH          # a new sequence of the same elements
+            return _UNRES if base >= _HOLDS else _FRESH
+        if isinstance(node, (ast.Starred, ast.NamedExpr, ast.Await)):
+            return self.lv(node.value, ctx)
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return _HOLDS if any(self.lv(e, ctx) >= _HOLDS for e in node.elts) else _FRESH
+        if isinstance(node, ast.Dict):
+            return _HOLDS if any(self.lv(e, ctx) >= _HOLDS for e in node.keys + node.values if e is not None) \
+                else _FRESH
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return _HOLDS if self.lv(node.elt, ctx) >= _HOLDS else _FRESH
+        if isinstance(node, ast.DictComp):
+            return _HOLDS if max(self.lv(node.key, ctx), self.lv(node.value, ctx)) >= _HOLDS else _FRESH
+        if isinstance(node, ast.IfExp):
+            return max(self.lv(node.body, ctx), self.lv(node.orelse, ctx))     # either branch
+        if isinstance(node, ast.BoolOp):
+            return max(self.lv(v, ctx) for v in node.values)                   # any operand
+        if isinstance(node, ast.BinOp):
+            return _HOLDS if max(self.lv(node.left, ctx), self.lv(node.right, ctx)) >= _HOLDS else _FRESH
+        if isinstance(node, ast.UnaryOp):
+            return _FRESH if isinstance(node.op, ast.Not) or self.lv(node.operand, ctx) < _HOLDS else _HOLDS
+        if isinstance(node, ast.Lambda):
+            return _HOLDS if self.lv(node.body, ctx) >= _HOLDS else _FRESH     # a closure over what it returns
+        if isinstance(node, ast.Call):
+            return self.call_lv(node, ctx)
+        return _UNRES                                                # anything else: not followed
+
+    def call_lv(self, node, ctx):
+        args = [a.value if isinstance(a, ast.Starred) else a for a in node.args] + [k.value for k in node.keywords]
+        al = max([self.lv(a, ctx) for a in args], default=_FRESH)
+        pl = _UNRES if al >= _HOLDS else _FRESH
+        f = node.func
+        if isinstance(f, ast.Attribute):
+            if f.attr == "copy" and not args:
+                return _HOLDS if self.lv(f.value, ctx) >= _HOLDS else _FRESH   # a copy: fresh, same elements
+            c = self.r.cands(f)
+            if c == {"copy.copy"}:
+                return _HOLDS if al >= _HOLDS else _FRESH
+            if c == {"copy.deepcopy"}:
+                return _FRESH
+            return _UNRES                                            # a method's or an imported callable's result
+        if not isinstance(f, ast.Name):
+            return _UNRES
+        binds = self.scope_binds(f.id, ctx)
+        if not binds:
+            if not hasattr(builtins, f.id):
+                return _UNRES
+            if f.id in _FRESH_BUILTINS:
+                return _FRESH
+            if f.id in _COPY_BUILTINS:
+                return _HOLDS if al >= _HOLDS else _FRESH            # a copy: writes to it reach no namespace
+            return _UNRES if al >= _HOLDS else _FRESH
+        out = _FRESH
+        for b in binds:
+            if isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                self.nodes[id(b)] = b
+                out = max(out, self.get(("s", id(b), pl)))          # the callee's return paths
+            elif isinstance(b, ast.ClassDef):
+                self.nodes[id(b)] = b
+                out = max(out, self.get(("c", id(b), pl)))
+            else:
+                lam = self.lambda_of(b)
+                if lam is None:
+                    return _UNRES                                    # a name bound to a callable not followed
+                self.nodes[id(lam)] = lam
+                out = max(out, self.get(("s", id(lam), pl)))
+        return out
+
+    def lambda_of(self, b):
+        if not isinstance(b, ast.Name) or not isinstance(b.ctx, ast.Store):
+            return None
+        p = self.parents.get(id(b))
+        whole = isinstance(p, ast.Assign) and any(t is b for t in p.targets) \
+            or isinstance(p, (ast.AnnAssign, ast.NamedExpr)) and p.target is b
+        return p.value if whole and isinstance(p.value, ast.Lambda) else None
+
+    # -- callees ---------------------------------------------------------------------
+    def unresolved_callable(self, func, ctx) -> bool:
+        while isinstance(func, (ast.Attribute, ast.Subscript)):
+            func = func.value
+        return self.lv(func, ctx) >= _UNRES
+
+    def summary(self, fn, pl):
+        """The join of a callee's return paths with its parameters at pl."""
+        ctx = (fn, pl)
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+                not (isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod") and not self.binds.get(d.id))
+                for d in fn.decorator_list):
+            return _UNRES                                            # a decorator the analysis does not follow
+        for x in ast.walk(fn):
+            if isinstance(x, ast.YieldFrom):
+                return _UNRES
+            if isinstance(x, ast.Call) and (self.r.cands(x.func) & {"builtins.exec", "builtins.eval"}
+                                            or self.unresolved_callable(x.func, ctx)):
+                return _UNRES                                        # exec, eval, a call of an unresolved callable
+            if isinstance(x, (ast.Try, getattr(ast, "TryStar", ast.Try))) and any(
+                    not (h.body and isinstance(h.body[-1], ast.Raise)) and any(
+                        isinstance(y, ast.Return) or isinstance(y, ast.Name) and isinstance(y.ctx, ast.Store)
+                        for s in h.body for y in ast.walk(s)) for h in x.handlers):
+                return _UNRES                                        # a try that swallows and rebinds
+        if isinstance(fn, ast.Lambda):
+            return self.lv(fn.body, ctx)
+        v = _FRESH
+        stack = list(fn.body)
+        while stack:
+            x = stack.pop()
+            if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                continue                                             # a nested scope's returns are its own
+            if isinstance(x, ast.Return) and x.value is not None:
+                v = max(v, self.lv(x.value, ctx))                    # every return path
+            elif isinstance(x, ast.Yield) and x.value is not None and self.lv(x.value, ctx) >= _HOLDS:
+                v = max(v, _HOLDS)                                   # a generator holds what it yields
+            stack.extend(ast.iter_child_nodes(x))
+        return v
+
+    def instance(self, cls, pl):
+        """The level of an instance of a module class built from arguments at pl."""
+        if cls.decorator_list or cls.keywords:
+            return _UNRES
+        v = _HOLDS if pl >= _UNRES else _FRESH                       # an instance may keep its arguments
+        for b in cls.bases:
+            if isinstance(b, ast.Name) and not self.binds.get(b.id) and hasattr(builtins, b.id):
+                continue
+            bb = self.binds.get(b.id, []) if isinstance(b, ast.Name) else []
+            if not bb or not all(isinstance(x, ast.ClassDef) for x in bb):
+                return _UNRES                                        # a base the analysis does not follow
+            for x in bb:
+                self.nodes[id(x)] = x
+                v = max(v, self.get(("c", id(x), pl)))
+        if any(isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)) and x.name == "__new__" for x in cls.body):
+            return _UNRES
+        for x in ast.walk(cls):
+            vals = []
+            if isinstance(x, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and x.value is not None:
+                vals = [x.value]
+            elif isinstance(x, ast.Call) and isinstance(x.func, ast.Attribute):
+                vals = [a.value if isinstance(a, ast.Starred) else a for a in x.args] + [k.value for k in x.keywords]
+            if vals:
+                e = self.encl.get(id(x))
+                ctx = (e, _FRESH) if e is not None and e in cls.body else None   # a method, else module scope
+                if any(self.lv(val, ctx) >= _HOLDS for val in vals):
+                    v = max(v, _HOLDS)                               # a store or mutation that can hold one
+        return v
 
 
 class _Reach:
@@ -1100,6 +1491,7 @@ class _Reach:
             elif isinstance(n, ast.MatchMapping) and n.rest:
                 self.binds.setdefault(n.rest, []).append(n)
         self.marked = set()
+        self.flow = _Flow(self)
         self._mark()
 
     def cands(self, node, seen=frozenset()) -> set:
@@ -1139,15 +1531,79 @@ class _Reach:
         return None
 
     def benign_name_call(self, call) -> bool:
-        """getattr or hasattr called with a literal plain (non-dunder) name."""
+        """getattr or hasattr called with a literal plain (non-dunder) name;
+        a mutator method's name (_MUTATORS) only on an object the module
+        makes (fix pass 11)."""
         c = self.reach_callable(call.func)
         a = call.args[1] if len(call.args) >= 2 else None
         name = a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None
         computed = name is None                       # a name built at run time
+        if name in _MUTATORS and not (call.args and self.made_here(call.args[0])):
+            return False                              # a bound mutator of an unresolved object
         return c in _NAME_ARG and not computed and not _dunder(name)
+
+    def benign_exec_call(self, call) -> bool:
+        """Fix pass 11: timeit.timeit, timeit.repeat or timeit.Timer whose code
+        (stmt, setup) is literal text that only evaluates expressions: no
+        store, deletion, import, declaration, attribute, lambda or walrus, no
+        call but of a builtin in _FRESH_BUILTINS or _COPY_BUILTINS the module
+        does not rebind; no timer or globals argument; number and repeat
+        literal integers. Every other executor call is namespace-reaching."""
+        if not isinstance(call, ast.Call) or not self.cands(call.func) <= _BENIGN_EXEC:
+            return False                              # every name the function can stand for is listed
+        if len(call.args) > 2 or any(isinstance(a, ast.Starred) for a in call.args):
+            return False                              # a third positional is the timer
+        codes = list(call.args)
+        for k in call.keywords:
+            if k.arg in ("stmt", "setup"):
+                codes.append(k.value)
+            elif not (k.arg in ("number", "repeat") and isinstance(k.value, ast.Constant)
+                      and type(k.value.value) is int):
+                return False
+        for c in codes:
+            if not (isinstance(c, ast.Constant) and isinstance(c.value, str)):
+                return False
+            try:
+                snippet = ast.parse(c.value)
+            except SyntaxError:
+                return False
+            if not all(isinstance(s, ast.Expr) for s in snippet.body):
+                return False
+            for x in ast.walk(snippet):
+                if isinstance(x, (ast.Attribute, ast.Lambda, ast.NamedExpr, ast.Await, ast.Yield, ast.YieldFrom,
+                                  ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                    return False
+                if isinstance(x, ast.Name) and (not isinstance(x.ctx, ast.Load) or _dunder(x.id)):
+                    return False
+                if isinstance(x, ast.Call) and not (isinstance(x.func, ast.Name)
+                                                    and x.func.id in _FRESH_BUILTINS | _COPY_BUILTINS
+                                                    and not self.binds.get(x.func.id)):
+                    return False
+        return True
+
+    def benign_import(self, imp, module) -> bool:
+        """Fix pass 11: an import of an executor module whose every bound name
+        is bound only here and used only to reach the function of a benign
+        executor call (benign_exec_call)."""
+        if not _in_module(module, _BENIGN_EXEC_MODULES):
+            return False
+        for a in imp.names:
+            bound = a.asname or a.name.split(".")[0]
+            if self.binds.get(bound) != [imp]:
+                return False
+            for x in ast.walk(self.tree):
+                if isinstance(x, ast.Name) and x.id == bound:
+                    p = self.parents.get(id(x))
+                    if isinstance(p, ast.Attribute) and p.value is x:
+                        x, p = p, self.parents.get(id(p))
+                    if not (isinstance(p, ast.Call) and p.func is x and self.benign_exec_call(p)):
+                        return False
+        return True
 
     def reaching(self, node) -> bool:
         """Whether this one node is a namespace-reaching expression or name."""
+        if isinstance(node, ast.Call) and self.benign_exec_call(node):
+            return False                                             # fix pass 11: literal timing code
         if isinstance(node, ast.Attribute):
             if _dunder(node.attr):                                   # every dunder attribute
                 return True
@@ -1168,7 +1624,15 @@ class _Reach:
         return False
 
     def contains(self, node) -> bool:
-        return any(self.reaching(x) for x in ast.walk(node))
+        stack = [node]
+        while stack:
+            x = stack.pop()
+            if isinstance(x, ast.Call) and self.benign_exec_call(x):
+                continue                                             # fix pass 11: literal timing code
+            if self.reaching(x):
+                return True
+            stack.extend(ast.iter_child_nodes(x))
+        return False
 
     def _sources(self) -> list:
         """(names bound, the expressions they are bound from) for every
@@ -1211,53 +1675,13 @@ class _Reach:
             self.marked |= new
 
     def made_here(self, node, seen=frozenset()) -> bool:
-        """Whether the base chain of an expression starts from an object the
-        module itself makes: a literal or display, the fresh result of a
-        call of a builtin or of a def or class of the module, or a name
-        whose every binding is an import, a def, a class, or an assignment,
-        loop or with target whose source is itself made here. A parameter,
-        a name the module never binds, an except or match capture and the
-        result of any other call are not."""
-        while isinstance(node, (ast.Attribute, ast.Subscript, ast.Starred)):
-            node = node.value
-        if isinstance(node, ast.Call):
-            f = node.func
-            if not isinstance(f, ast.Name):
-                return False                                         # a method's or an imported callable's result
-            binds = self.binds.get(f.id, [])
-            if not binds:
-                return hasattr(builtins, f.id)
-            return all(isinstance(b, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) for b in binds)
-        if not isinstance(node, ast.Name):
-            return True                                              # a literal, a display, a lambda
-        if node.id in seen:
-            return False
-        binds = self.binds.get(node.id, [])
-        if not binds:
-            return False                                             # an unresolved global
-        for b in binds:
-            if isinstance(b, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
-                              ast.Global, ast.Nonlocal)):
-                continue
-            if isinstance(b, ast.Name) and isinstance(b.ctx, ast.Del):
-                continue
-            if isinstance(b, ast.Name):
-                stmt = self.parents.get(id(b))
-                while isinstance(stmt, (ast.Tuple, ast.List, ast.Starred)):
-                    stmt = self.parents.get(id(stmt))
-                if isinstance(stmt, (ast.AugAssign, ast.AnnAssign)) and (stmt.value is None
-                                                                          or isinstance(stmt, ast.AugAssign)):
-                    continue                                         # the object is bound by another binding
-                if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) \
-                        and self.made_here(stmt.value, seen | {node.id}):
-                    continue
-                if isinstance(stmt, (ast.For, ast.AsyncFor, ast.comprehension)) \
-                        and self.made_here(stmt.iter, seen | {node.id}):
-                    continue
-                if isinstance(stmt, ast.withitem) and self.made_here(stmt.context_expr, seen | {node.id}):
-                    continue
-            return False                 # a parameter, a capture, a target of a source not made here
-        return True
+        """Whether a write through this base reaches only an object the module
+        makes (fix pass 11: _Flow's level is not _UNRES). A parameter, a name
+        the module never binds, an except or match capture, the result of a
+        method or an imported callable, an element of anything that may hold
+        one of those, and the result of a module-local call whose return
+        paths can yield one, are not."""
+        return self.flow.level(node) < _UNRES
 
 
 # The real-module rule (fix pass 10). Measured over the three review modules,
@@ -1274,7 +1698,15 @@ class _Reach:
 # operation at all; one more or one fewer site, or any other row, and the
 # exemption lapses (the refusal returns). review_rules.py and review_boot.py
 # are not named: other rules refuse them regardless.
-_MEASURED_CLEAN = {"review_needles.py": 9}
+# Fix pass 11 re-measured with data flow through local calls and the method
+# rule: the 32 sites stand and 11 more are unresolved, every one a mutator
+# method on an unresolved receiver and none from a local call: 3 in
+# review_needles.py (933 h.update on a hashlib object, an imported callable's
+# result; 1036 and 1037 found.pop on a parameter) and 8 in review_rules.py
+# (132, 133 and 137 to 140 h.update on a hashlib object; 946 and 1198
+# files.update, files being a parameter elsewhere in the scope-merged
+# module); 0 in review_boot.py. The rule keeps its form, at the new count.
+_MEASURED_CLEAN = {"review_needles.py": 12}
 
 
 def _unresolved(kind) -> bool:
@@ -1305,7 +1737,16 @@ def _namespace_reach(tree, names, file="<source>") -> list:
           sight: passed as a call argument, returned, yielded, raised, stored
           into an attribute or subscript, or used anywhere but read through,
           bound to plain names (which marks them), compared, tested or
-          formatted; `type(<name>).__name__` is a string and exempt.
+          formatted; `type(<name>).__name__` is a string and exempt;
+      (5) (fix pass 11) a mutator method (_MUTATORS) called on, or taken as a
+          bound method from, a receiver whose write would be refused by (1)'s
+          unresolved-base half; a bound method handed to functools.partial or
+          any other code is therefore refused, and operator.methodcaller is a
+          listed callable. Since fix pass 11 the unresolved-base half follows
+          data through module-local calls (_Flow), and (2) and (3) cover the
+          in-process string and code executors (_EXECUTORS, types.CodeType;
+          _EXECUTOR_IMPORTS), a timeit call on literal code that only
+          evaluates expressions, and its import, excepted (benign_exec_call).
     Fix pass 9's _manager_rebinds still runs beside it, unchanged."""
     r = _Reach(tree, names)
     parents = r.parents
@@ -1320,12 +1761,22 @@ def _namespace_reach(tree, names, file="<source>") -> list:
                 out.append((n.lineno, "%s through namespace-reaching %s" % (op, ast.unparse(hit))))
             elif not r.made_here(n.value):
                 out.append((n.lineno, "%s through unresolved base %s" % (op, ast.unparse(n.value))))
+        if isinstance(n, ast.Attribute) and n.attr in _MUTATORS and isinstance(n.ctx, ast.Load) \
+                and not r.made_here(n.value):                                                            # (5)
+            p = parents.get(id(n))
+            if isinstance(p, ast.Call) and p.func is n:
+                out.append((n.lineno, "method call %s through unresolved base %s" % (n.attr, ast.unparse(n.value))))
+            else:
+                out.append((n.lineno, "bound method %s taken through unresolved base %s"
+                            % (n.attr, ast.unparse(n.value))))
         if isinstance(n, ast.Call) and r.reaching(n):                                                     # (2)
             out.append((n.lineno, "call of namespace-reaching %s" % ast.unparse(n.func)))
         if isinstance(n, (ast.Import, ast.ImportFrom)):                                                  # (3)
             mods = [a.name for a in n.names] if isinstance(n, ast.Import) else \
                 [n.module or ""] + ["%s.%s" % (n.module, a.name) for a in n.names if n.module]
             for m in sorted({m for m in mods if _in_module(m, _REACH_IMPORTS)}):
+                if _in_module(m, _EXECUTOR_IMPORTS) and r.benign_import(n, m):
+                    continue                                         # fix pass 11: only literal timing code
                 out.append((n.lineno, "import of namespace-reaching module %s" % m))
         if r.reaching(n) and not _type_name(n) and not isinstance(n, ast.Call) \
                 and not isinstance(getattr(n, "ctx", None), (ast.Store, ast.Del)):                      # (4)
@@ -1403,7 +1854,11 @@ def walk_handler_proven(tree, handler, file="<source>") -> bool:
       (7) the module holds no namespace-reaching operation (_namespace_reach,
           fix pass 10): a bound over the stated namespace-reaching lists and
           every write through a base the proof cannot resolve, in place of
-          relying on (6)'s list of rebinding forms alone."""
+          relying on (6)'s list of rebinding forms alone; since fix pass 11 a
+          base is followed through module-local calls, and mutator methods on
+          an unresolved receiver and the listed executors are in the bound.
+          It is a bound over those lists and that data flow, not a claim
+          that every conceivable rebinding is detected."""
     if not isinstance(handler, ast.Name):
         return False
     binds = _bindings(tree, handler.id)
