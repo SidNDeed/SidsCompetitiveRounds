@@ -877,8 +877,9 @@ def test_every_achievement_is_on_the_tier_line_that_pays_it():
 
     # Every step of the ladder correction, classified against the article as
     # it stands — before anything is applied to it in memory.
-    ladder = REKEY_EDITS["economy article"]
-    assert ladder, "the contract's economy-article correction table is empty"
+    ladder = ECONOMY_LADDER
+    assert ladder and all(pair in REKEY_EDITS["economy article"] for pair in ladder), (
+        "the contract's economy-article ladder table is empty or not in the correction table")
     owed = [(b, a) for b, a in ladder if b in article_src and a not in article_src]
     applied = [(b, a) for b, a in ladder if a in article_src and b not in article_src]
     assert len(owed) + len(applied) == len(ladder), (
@@ -3313,14 +3314,25 @@ REKEYED = {
 # edits are what the client lane owes plugin/InfoLibrary.cs
 # (docs/faq-refresh-client-contract.md); this file cannot see that lane, so
 # it holds the migration to them instead.
+# The economy article's gold-ladder steps (the tier lines), the table the
+# ladder test classifies as applied or owed.
+ECONOMY_LADDER = [
+    ("Hostile Takeover, Bodycount.",
+     "Hostile Takeover, Bodycount, Sync Champion, Async Champion."),
+    ("Heartbreak, Dragoman.",
+     "Heartbreak, Dragoman, Sync Finalist, Async Finalist.")]
+# Merged hold 3 (Codex client merged round 1 LOW 4): the client lane replaced
+# the shutout sentence after 340 was derived, so the economy successor is
+# re-derived from the CURRENT client English (340 and 341 are applied nowhere:
+# the read-only query in the hold-3 notes found none of the three keys on the
+# primary, so both are edited in place). That replacement is the third edit.
+ECONOMY_SENTENCE = [
+    ("one 5-0 win in a 5-player lobby pays",
+     "one 5-0 win with 5 players finishing pays")]
 REKEY_EDITS = {
     "ranked 1v1 article": [
         ("a warning at 25 seconds", "a warning at 15 seconds")],
-    "economy article": [
-        ("Hostile Takeover, Bodycount.",
-         "Hostile Takeover, Bodycount, Sync Champion, Async Champion."),
-        ("Heartbreak, Dragoman.",
-         "Heartbreak, Dragoman, Sync Finalist, Async Finalist.")],
+    "economy article": ECONOMY_LADDER + ECONOMY_SENTENCE,
     "cosmetics article": [
         ("a PNG or animated frames",
          "one 512x512 PNG, a GIF, or up to 16 numbered PNG frames")],
@@ -3609,6 +3621,116 @@ def test_340_retires_the_keys_its_successors_replace():
     assert "IS DISTINCT FROM EXCLUDED" in arm, (
         "340's conflict arm advances updated_at unconditionally, so every "
         "re-run reports work it did not do")
+
+
+# ── 6b. Merged hold 3: the economy successor IS the client's current English ──
+#
+# On the merged v1.41.0 client branch both halves are present, so the server's
+# economy successor (340) and its four seeds (341) are held to what a player
+# renders: the Rewards article of plugin/InfoLibrary.cs and its four bundled
+# values in plugin/I18nCatalogues.cs, byte for byte (Codex client merged round
+# 1 LOW 4: translator work must attach to a key a current client renders).
+
+_CS_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\", "'": "'", "0": "\0"}
+
+
+def _cs_verbatim_after(src, marker):
+    i = src.index(marker) + len(marker)
+    out = []
+    while True:
+        c = src[i]
+        if c == '"':
+            if src[i + 1] == '"':
+                out.append('"')
+                i += 2
+                continue
+            return "".join(out)
+        out.append(c)
+        i += 1
+
+
+def _unescape(body, quote_doubling):
+    """A C# regular string body (quote_doubling False) or a PostgreSQL E''
+    body (True: '' is one quote), backslash escapes decoded."""
+    out, i = [], 0
+    while i < len(body):
+        c = body[i]
+        if quote_doubling and c == "'" and body[i + 1:i + 2] == "'":
+            out.append("'")
+            i += 2
+        elif c == "\\":
+            n = body[i + 1]
+            if n == "u":
+                out.append(chr(int(body[i + 2:i + 6], 16)))
+                i += 6
+            else:
+                assert n in _CS_ESCAPES, "unknown escape \\%s" % n
+                out.append(_CS_ESCAPES[n])
+                i += 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def _economy_halves(info_src, cat_src, sql340, sql341):
+    """(client English, {locale: catalogue value}, (340 id, hash, body),
+    {locale: (341 id, hash, target)}) for the economy article."""
+    english = _cs_verbatim_after(info_src, 'private static string Rewards => I18n.Tr(@"')
+    starts = sorted((cat_src.index("Dictionary<string, string> %s = new" % L), L) for L in ("ES", "RU", "UK", "SV"))
+    entry = re.compile(r'^\s*\["((?:[^"\\]|\\.)*)"\]\s*=\s*"((?:[^"\\]|\\.)*)",?\s*$', re.M)
+    cat = {}
+    for n, (a, L) in enumerate(starts):
+        b = starts[n + 1][0] if n + 1 < len(starts) else len(cat_src)
+        vals = [_unescape(m.group(2), False) for m in entry.finditer(cat_src, a, b)
+                if _unescape(m.group(1), False) == english]
+        assert len(vals) <= 1, "two %s catalogue entries for the economy English" % L
+        if vals:
+            cat[L.lower()] = vals[0]
+    rows = [r for r in re.findall(r"\('([0-9a-f]{16})', 'client', \$k340\$(.*?)\$k340\$, '([0-9a-f]{40})'",
+                                  sql340, re.S) if REKEYED["economy article"] in r[1]]
+    assert len(rows) == 1, "340 carries %d economy bodies" % len(rows)
+    seeds = {}
+    for kid, lang, sh, tgt in re.findall(
+            r"\('([0-9a-f]{16})', '(es|ru|uk|sv)', '([0-9a-f]{40})', E'((?:[^'\\]|\\.|'')*)'\)", sql341):
+        if kid == rows[0][0]:
+            seeds[lang] = (kid, sh, _unescape(tgt, True))
+    return english, cat, (rows[0][0], rows[0][2], rows[0][1]), seeds
+
+
+def _economy_equal(halves):
+    english, cat, (kid, sh, body), seeds = halves
+    return (body == english and kid == _client_key_id(english)
+            and sh == hashlib.sha1(english.encode("utf-8")).hexdigest()
+            and sorted(cat) == sorted(seeds) == ["es", "ru", "sv", "uk"]
+            and all(seeds[L] == (kid, sh, cat[L]) for L in cat))
+
+
+def test_hold3_the_economy_successor_is_the_client_english_and_its_seeds_the_catalogues():
+    info, cat = _read(_INFO_LIBRARY), _read(os.path.join(REPO, "plugin", "I18nCatalogues.cs"))
+    sql340, sql341 = _read(MIG_340), _read(MIG_341)
+    halves = _economy_halves(info, cat, sql340, sql341)
+    english, catv, (kid, sh, body), seeds = halves
+    assert ECONOMY_SENTENCE[0][1] in english and ECONOMY_SENTENCE[0][0] not in english, (
+        "the client's economy article no longer carries the replacement shutout sentence")
+    assert body == english, "340's economy successor is not the client's current English"
+    assert kid == _client_key_id(english), "340's economy key is not the client English's key"
+    assert sorted(catv) == ["es", "ru", "sv", "uk"], "the bundled catalogues lack a locale: %s" % sorted(catv)
+    for L in ("es", "ru", "uk", "sv"):
+        assert L in seeds, "341 seeds no %s row for the economy key %s" % (L, kid)
+        assert seeds[L][:2] == (kid, sh), "341's %s row names another key or hash" % L
+        assert seeds[L][2] == catv[L], "341's %s seed is not the bundled %s value byte for byte" % (L, L)
+    assert _economy_equal(halves)
+    # NEGATIVE CONTROLS: the round-1 state (340 and 341 derived from the
+    # predecessor sentence) fails, and so does one locale's seed alone reverted.
+    before, after = ECONOMY_SENTENCE[0]
+    old340 = sql340.replace(after, before)
+    old340 = old340.replace(kid, _client_key_id(english.replace(after, before)))
+    assert not _economy_equal(_economy_halves(info, cat, old340, sql341)), "the predecessor sentence passes"
+    sv_new = "en 5-0-vinst med 5 spelare som spelar klart betalar"
+    assert sql341.count(sv_new) == 1
+    reverted = sql341.replace(sv_new, "en 5-0-vinst i en 5-spelarlobby betalar")
+    assert not _economy_equal(_economy_halves(info, cat, sql340, reverted)), "a reverted Swedish seed passes"
 
 
 _I18N_SCHEMA = [

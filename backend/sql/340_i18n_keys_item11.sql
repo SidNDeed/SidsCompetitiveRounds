@@ -117,7 +117,7 @@ The anti-abuse rules:
 - A DC at match point becomes a DC win for the other player instead, not a leave mark.
 
 For the full is-this-recorded decision tree, see <color=#7FD4FF>When a game counts</color>.$k340$, '0aa41f4136b6fb6ac705d0f82fccc62a6fd86ca6', TRUE, E'InfoLibrary · (file scope)'),
-  ('ab40c2146a3ed0fb', 'client', $k340$Every finished game pays XP, XP converts to Gold at 100 XP = 1 Gold, and ranked play multiplies the base rewards below by your opponent's rank tier. This is the pay table - exact numbers, mode by mode. (Tournament podium prizes are separate; see <color=#7FD4FF>Deadlines & forfeits</color>.)
+  ('d89523ad6cb44ac1', 'client', $k340$Every finished game pays XP, XP converts to Gold at 100 XP = 1 Gold, and ranked play multiplies the base rewards below by your opponent's rank tier. This is the pay table - exact numbers, mode by mode. (Tournament podium prizes are separate; see <color=#7FD4FF>Deadlines & forfeits</color>.)
 
 <color=#FFD94D><b>THE TIER MULTIPLIER</b></color>
 
@@ -196,9 +196,9 @@ Every achievement pays <color=#7FE87F>100g</color> unless listed here:
 - <color=#7FD4FF>500g</color> - Master (reach 1980), Tag Team Sweep, Rise from the Ashes, Casual Conqueror, Twins!, Immortal, Hostile Takeover, Bodycount, Sync Champion, Async Champion.
 - <color=#7FD4FF>300g</color> - Stacked Deck, Flawless, Silly Drill, Into the Deep End, Century Club, Unstoppable, Party Crasher, Heartbreak, Dragoman, Sync Finalist, Async Finalist.
 
-The FFA shutouts nest: one 5-0 win in a 5-player lobby pays Clean House (100g) + Party Crasher (300g) + Hostile Takeover (500g) in a single game. The translator achievements (Rosetta, Dragoman, Babel) trigger at 10, 100 and 1000 approved live strings.
+The FFA shutouts nest: one 5-0 win with 5 players finishing pays Clean House (100g) + Party Crasher (300g) + Hostile Takeover (500g) in a single game. The translator achievements (Rosetta, Dragoman, Babel) trigger at 10, 100 and 1000 approved live strings.
 
-<color=#8A8A93>Outside matches: Discord server boosters are paid 2000g monthly, and community artists earn a 30% royalty (rounded down to whole Gold) when another player buys their item - gifts pay none.</color>$k340$, 'a486c9106056d299d8eccbfdcd4b495e775e2af9', TRUE, E'InfoLibrary · (file scope)'),
+<color=#8A8A93>Outside matches: Discord server boosters are paid 2000g monthly, and community artists earn a 30% royalty (rounded down to whole Gold) when another player buys their item - gifts pay none.</color>$k340$, '69eb03ebb191b5b285ab8ffca88ed678a84bad0d', TRUE, E'InfoLibrary · (file scope)'),
   ('7d2c24d463786026', 'client', $k340$Cosmetics live in the F5 Shop tab and are bought with the gold you earn by playing. This page covers every kind, how each equips, how drops and stock work, and where the art comes from.
 
 <color=#FFD94D><b>WHAT EACH KIND DOES</b></color>
@@ -349,7 +349,7 @@ BEGIN
       FROM i18n_keys k
       JOIN (VALUES
         ('fc07ba40fe031c27', '0aa41f4136b6fb6ac705d0f82fccc62a6fd86ca6', E'InfoLibrary · (file scope)'),
-        ('ab40c2146a3ed0fb', 'a486c9106056d299d8eccbfdcd4b495e775e2af9', E'InfoLibrary · (file scope)'),
+        ('d89523ad6cb44ac1', '69eb03ebb191b5b285ab8ffca88ed678a84bad0d', E'InfoLibrary · (file scope)'),
         ('7d2c24d463786026', '19329ffd6e3b0670e93678c0dfd1bde7861598fa', E'InfoLibrary · (file scope)')
       ) AS e(key_id, source_hash, context) ON e.key_id = k.key_id
      WHERE k.namespace = 'client' AND k.retired_at IS NULL
