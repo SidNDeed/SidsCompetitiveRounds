@@ -1056,6 +1056,24 @@ _FRESH_BUILTINS = frozenset({"len", "str", "repr", "int", "float", "complex", "b
 _COPY_BUILTINS = frozenset({"dict", "list", "tuple", "set", "frozenset", "sorted", "bytearray", "iter", "reversed",
                             "enumerate", "zip", "map", "filter"})   # a new object holding its arguments' elements
 
+# Fix pass 12 (round 11 M5): element provenance through slices, copies and
+# iteration; higher-order local callbacks; in-place mutation of unresolved
+# receivers. Builtins that may return an argument itself or an element of
+# one (an object's __abs__, __round__, __pow__, __divmod__, or the elements
+# sum adds onto a list start) are no longer fresh over a held argument; the
+# builtins that CALL a callable argument are listed with where it sits.
+_ARG_RETURNING = frozenset({"abs", "round", "sum", "divmod", "pow"})
+_HIGHER_ORDER = {"map": (0, None), "filter": (0, None), "iter": (0, None),    # (positional index, keyword)
+                 "sorted": (None, "key"), "min": (None, "key"), "max": (None, "key")}
+_AUG_OPS = {ast.Add: "+=", ast.Sub: "-=", ast.Mult: "*=", ast.MatMult: "@=", ast.Div: "/=", ast.FloorDiv: "//=",
+            ast.Mod: "%=", ast.Pow: "**=", ast.LShift: "<<=", ast.RShift: ">>=", ast.BitAnd: "&=", ast.BitXor: "^=",
+            ast.BitOr: "|="}
+_INPLACE_NAMES = ("add", "sub", "mul", "matmul", "truediv", "floordiv", "mod", "pow", "lshift", "rshift", "and",
+                  "xor", "or")
+_INPLACE_DUNDERS = frozenset("__i%s__" % o for o in _INPLACE_NAMES)        # ns.__ior__(...), the method forms
+_INPLACE_OPERATORS = frozenset({"operator.i" + o for o in _INPLACE_NAMES + ("concat",)}
+                               | {"operator.__i%s__" % o for o in _INPLACE_NAMES + ("concat",)})
+
 
 def _dunder(s) -> bool:
     return isinstance(s, str) and len(s) > 4 and s.startswith("__") and s.endswith("__")
@@ -1123,7 +1141,17 @@ class _Flow:
     (_COPY_BUILTINS), or else _UNRES when an argument is held. A name a
     mutation writes into (a subscript or attribute store, or a method call,
     whose chain starts at it) is at least _HOLDS when the written value or an
-    argument is."""
+    argument is.
+    Fix pass 12 (round 11 M5): a slice (a Slice, or a tuple holding one) keeps
+    its base's level, so a slice of an unresolved object is unresolved and a
+    slice of a holder holds the same elements; every element reached by
+    iteration, unpacking, a with target or a copy builtin is _UNRES when its
+    container holds anything (carried); a builtin that may return an
+    argument or an element of one (_ARG_RETURNING) is no longer fresh over a
+    held argument; and a builtin that calls a callable argument
+    (_HIGHER_ORDER) marks that callback as if it were called directly
+    (higher_order_lv, callback_lv), an unresolvable callback making the
+    result _UNRES."""
 
     def __init__(self, reach):
         self.r, self.parents, self.binds = reach, reach.parents, reach.binds
@@ -1280,12 +1308,19 @@ class _Flow:
                     and not any(isinstance(e, ast.Starred) for e in tgt.elts + val.elts):
                 return self.lv(val.elts[[i for i, e in enumerate(tgt.elts) if e is b][0]], ctx)   # a, b = x, y
             v = self.lv(val, ctx)
-            return (_UNRES if v >= _HOLDS else _FRESH) if unpacked else v
+            return self.carried(v) if unpacked else v                # first, *rest = seq; a, b = seq
         if isinstance(stmt, (ast.For, ast.AsyncFor, ast.comprehension)):
-            return _UNRES if self.lv(stmt.iter, ctx) >= _HOLDS else _FRESH     # an element
+            return self.carried(self.lv(stmt.iter, ctx))             # an element
         if isinstance(stmt, ast.withitem):
-            return _UNRES if self.lv(stmt.context_expr, ctx) >= _HOLDS else _FRESH
+            return self.carried(self.lv(stmt.context_expr, ctx))     # what __enter__ returns (nullcontext(ns))
         return _UNRES
+
+    @staticmethod
+    def carried(v):
+        """Fix pass 12: the level of an element reached through a container at
+        level v by iteration, unpacking, a with target or a copy builtin: the
+        unresolved mark of an element survives every way of reaching it."""
+        return _UNRES if v >= _HOLDS else _FRESH                     # fix 12: element provenance
 
     @staticmethod
     def default_of(fn, a):
@@ -1309,8 +1344,9 @@ class _Flow:
             return _UNRES if self.lv(node.value, ctx) >= _HOLDS else _FRESH
         if isinstance(node, ast.Subscript):
             base = self.lv(node.value, ctx)
-            if isinstance(node.slice, ast.Slice):
-                return _HOLDS if base >= _HOLDS else _FRESH          # a new sequence of the same elements
+            if isinstance(node.slice, ast.Slice) or isinstance(node.slice, ast.Tuple) and any(
+                    isinstance(e, ast.Slice) for e in node.slice.elts):
+                return base                                          # fix 12: a slice keeps its base's level
             return _UNRES if base >= _HOLDS else _FRESH
         if isinstance(node, (ast.Starred, ast.NamedExpr, ast.Await)):
             return self.lv(node.value, ctx)
@@ -1353,14 +1389,67 @@ class _Flow:
             return _UNRES                                            # a method's or an imported callable's result
         if not isinstance(f, ast.Name):
             return _UNRES
-        binds = self.scope_binds(f.id, ctx)
+        if f.id in _HIGHER_ORDER and not self.scope_binds(f.id, ctx) and hasattr(builtins, f.id):
+            return self.higher_order_lv(node, ctx)
+        v = self.name_call_lv(f.id, pl, al, ctx)
+        return _UNRES if v is None else v
+
+    def higher_order_lv(self, node, ctx):
+        """Fix pass 12: a builtin that calls a callable argument (map, filter,
+        iter's callable form, sorted, min and max with key). Each callback is
+        marked as if called directly (callback_lv) with its arguments at
+        _UNRES when the other arguments hold anything; a callback the analysis
+        cannot resolve makes the result _UNRES; else the result holds the marks
+        of the other arguments' elements and of every callback's results (a
+        container: map, filter, iter, sorted; an element: min, max)."""
+        pos, kw = _HIGHER_ORDER[node.func.id]
+        calls, rest = [], []
+        for i, a in enumerate(node.args):
+            a = a.value if isinstance(a, ast.Starred) else a
+            (calls if i == pos and (node.func.id != "iter" or len(node.args) == 2) else rest).append(a)
+        for k in node.keywords:
+            (calls if k.arg is not None and k.arg == kw else rest).append(k.value)
+        rl = max([self.lv(a, ctx) for a in rest], default=_FRESH)
+        pl = _UNRES if rl >= _HOLDS else _FRESH
+        cbs = [self.callback_lv(c, pl, ctx) for c in calls]           # fix 12: each callback as if called directly
+        if any(v is None for v in cbs):
+            return _UNRES                                            # a callback the analysis cannot resolve
+        v = max([rl] + cbs)
+        if node.func.id in ("min", "max"):
+            return self.carried(v)                                   # an element
+        return _HOLDS if self.carried(v) >= _HOLDS else _FRESH       # a container holding its elements
+
+    def callback_lv(self, c, pl, ctx):
+        """Fix pass 12: the level of what calling the VALUE c returns, with its
+        arguments at pl, exactly as a direct call is marked; None when the
+        analysis cannot resolve the callable (a name the module never binds
+        that is no builtin, a name bound to anything but a def, a class or a
+        lambda, an attribute of an unresolved value, any other expression)."""
+        if isinstance(c, ast.Constant) and c.value is None:
+            return _FRESH                                            # filter(None, ...): the elements themselves
+        if isinstance(c, ast.Lambda):
+            self.nodes[id(c)] = c
+            return self.get(("s", id(c), pl))
+        if isinstance(c, ast.Attribute):
+            return None if self.lv(c.value, ctx) >= _UNRES else _UNRES     # a method or imported callable's result
+        if not isinstance(c, ast.Name):
+            return None
+        return self.name_call_lv(c.id, pl, pl, ctx)
+
+    def name_call_lv(self, name, pl, al, ctx):
+        """The level of a call of the name with its arguments at al (and so a
+        callee's parameters at pl); None when the name stands for nothing the
+        analysis follows."""
+        binds = self.scope_binds(name, ctx)
         if not binds:
-            if not hasattr(builtins, f.id):
-                return _UNRES
-            if f.id in _FRESH_BUILTINS:
+            if not hasattr(builtins, name):
+                return None
+            if name in _ARG_RETURNING:
+                return _UNRES if al >= _HOLDS else _FRESH            # fix 12: may return an argument or its element
+            if name in _FRESH_BUILTINS:
                 return _FRESH
-            if f.id in _COPY_BUILTINS:
-                return _HOLDS if al >= _HOLDS else _FRESH            # a copy: writes to it reach no namespace
+            if name in _COPY_BUILTINS:
+                return _HOLDS if self.carried(al) >= _HOLDS else _FRESH   # a copy: writes to it reach no namespace
             return _UNRES if al >= _HOLDS else _FRESH
         out = _FRESH
         for b in binds:
@@ -1373,7 +1462,7 @@ class _Flow:
             else:
                 lam = self.lambda_of(b)
                 if lam is None:
-                    return _UNRES                                    # a name bound to a callable not followed
+                    return None                                      # a name bound to a callable not followed
                 self.nodes[id(lam)] = lam
                 out = max(out, self.get(("s", id(lam), pl)))
         return out
@@ -1689,6 +1778,42 @@ class _Reach:
             return False                                             # an unbound name, as fix pass 10 judged it
         return self.flow.level(node) < _UNRES
 
+    def aug_name_refused(self, t) -> bool:
+        """Fix pass 12: an augmented assignment to a plain name applies its
+        operator IN PLACE to the object the name holds (`ns |= {...}` calls
+        ns.__ior__), whatever the operator: the type of an unresolved object
+        is unknown, so none is exempt. Refused when that object may be one
+        the proof cannot resolve; the name is read in its own scope (the
+        enclosing function, its parameters caller-supplied; module scope
+        merged as everywhere), so a local counter or list is judged by its
+        own bindings, and a copy (dict(ns), {**ns}) is fresh."""
+        fn = self.flow.encl.get(id(t))
+        return not self.flow.level(t, None if fn is None else (fn, _UNRES)) < _UNRES
+
+    def inplace_form(self, n):
+        """Fix pass 12: the dunder and operator in-place forms. A method in
+        _INPLACE_DUNDERS called on, or taken as a bound method from, a
+        receiver made_here rejects; a reference that can stand for an
+        operator in-place function (operator.ior and the rest, under any
+        alias) called with a first argument made_here rejects, or used any
+        other way (handed to functools.partial, map or any other code, where
+        its receiver is out of sight). The kind names the operation, else
+        None."""
+        p = self.parents.get(id(n))
+        called = isinstance(p, ast.Call) and p.func is n
+        if isinstance(n, ast.Attribute) and n.attr in _INPLACE_DUNDERS and not self.made_here(n.value):
+            return ("method call %s through unresolved base %s" if called else
+                    "bound method %s taken through unresolved base %s") % (n.attr, ast.unparse(n.value))
+        if isinstance(p, ast.Attribute) and p.value is n or not self.cands(n) & _INPLACE_OPERATORS:
+            return None                                              # a prefix, or no in-place operator
+        if not called:
+            return "in-place operator %s taken as a value" % ast.unparse(n)
+        recv = p.args[0] if p.args else None
+        if recv is not None and not isinstance(recv, ast.Starred) and self.made_here(recv):
+            return None                                              # on an object the module makes
+        return "in-place call %s through unresolved base %s" % (
+            ast.unparse(n), "(no receiver)" if recv is None else ast.unparse(recv))
+
 
 # The real-module rule (fix pass 10). Measured over the three review modules,
 # the unresolved-base case found 32 write sites: 9 in review_needles.py
@@ -1712,7 +1837,15 @@ class _Reach:
 # (132, 133 and 137 to 140 h.update on a hashlib object; 946 and 1198
 # files.update, files being a parameter elsewhere in the scope-merged
 # module); 0 in review_boot.py. The rule keeps its form, at the new count.
-_MEASURED_CLEAN = {"review_needles.py": 12}
+# Fix pass 12 re-measured with element provenance through slices, copies and
+# iteration, higher-order callbacks and the in-place forms: every earlier
+# site stands and ONE more is unresolved, review_needles.py 999
+# `body += [...]` (an augmented assignment to a name that also holds the
+# result of a module-local call whose return paths the proof cannot rate
+# fresh; the flow is not ordered, so the later fresh list does not clear
+# it); 0 new in review_rules.py and review_boot.py (review_rules.py 668's
+# row now names its operator, -=). The rule keeps its form, at 13.
+_MEASURED_CLEAN = {"review_needles.py": 13}
 
 
 def _unresolved(kind) -> bool:
@@ -1752,7 +1885,21 @@ def _namespace_reach(tree, names, file="<source>") -> list:
           data through module-local calls (_Flow), and (2) and (3) cover the
           in-process string and code executors (_EXECUTORS, types.CodeType;
           _EXECUTOR_IMPORTS), a timeit call on literal code that only
-          evaluates expressions, and its import, excepted (benign_exec_call).
+          evaluates expressions, and its import, excepted (benign_exec_call);
+      (6) (fix pass 12) an augmented assignment, with any operator, whose
+          target is a plain name holding an object the proof cannot resolve
+          (aug_name_refused), or whose target is a subscript or attribute
+          over a base made here but whose element is not (the in-place
+          operator runs on the element before the store); the store rows of
+          (1) name the operator;
+      (7) (fix pass 12) an in-place dunder method (_INPLACE_DUNDERS) called on,
+          or taken as a bound method from, a receiver made_here rejects, and
+          an operator in-place function (_INPLACE_OPERATORS) under any alias
+          called on such a receiver or used as a value (inplace_form).
+          Since fix pass 12 the unresolved-base half also carries element
+          provenance through slices, copies and iteration, and marks a
+          callback consumed by map, filter, iter, sorted, min or max as if it
+          were called directly (_Flow.higher_order_lv).
     Fix pass 9's _manager_rebinds still runs beside it, unchanged."""
     r = _Reach(tree, names)
     parents = r.parents
@@ -1760,13 +1907,23 @@ def _namespace_reach(tree, names, file="<source>") -> list:
     for n in ast.walk(tree):
         if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):     # (1)
             what = "attribute" if isinstance(n, ast.Attribute) else "subscript"
+            aug = parents.get(id(n)) if isinstance(parents.get(id(n)), ast.AugAssign) else None
             op = "%s deletion" % what if isinstance(n.ctx, ast.Del) else \
-                "augmented %s store" % what if isinstance(parents.get(id(n)), ast.AugAssign) else "%s store" % what
+                "augmented %s store %s" % (what, _AUG_OPS[type(aug.op)]) if aug is not None else "%s store" % what
             hit = next((x for x in [n] + list(ast.walk(n.value)) if r.reaching(x)), None)
             if hit is not None:
                 out.append((n.lineno, "%s through namespace-reaching %s" % (op, ast.unparse(hit))))
             elif not r.made_here(n.value):
                 out.append((n.lineno, "%s through unresolved base %s" % (op, ast.unparse(n.value))))
+            elif aug is not None and not r.made_here(n):          # fix 12: the element's in-place operator
+                out.append((n.lineno, "augmented assignment %s through unresolved base %s"
+                            % (_AUG_OPS[type(aug.op)], ast.unparse(n))))
+        if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Name):                              # (6)
+            if r.aug_name_refused(n.target):
+                out.append((n.lineno, "augmented assignment %s through unresolved base %s"
+                            % (_AUG_OPS[type(n.op)], n.target.id)))
+        if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load) and r.inplace_form(n):  # (7)
+            out.append((n.lineno, r.inplace_form(n)))
         if isinstance(n, ast.Attribute) and n.attr in _MUTATORS and isinstance(n.ctx, ast.Load) \
                 and not r.made_here(n.value):                                                            # (5)
             p = parents.get(id(n))
@@ -1862,7 +2019,10 @@ def walk_handler_proven(tree, handler, file="<source>") -> bool:
           every write through a base the proof cannot resolve, in place of
           relying on (6)'s list of rebinding forms alone; since fix pass 11 a
           base is followed through module-local calls, and mutator methods on
-          an unresolved receiver and the listed executors are in the bound.
+          an unresolved receiver and the listed executors are in the bound;
+          since fix pass 12 element provenance survives slices, copies and
+          iteration, higher-order local callbacks are followed, and every
+          in-place operator on an unresolved receiver is refused.
           It is a bound over those lists and that data flow, not a claim
           that every conceivable rebinding is detected."""
     if not isinstance(handler, ast.Name):

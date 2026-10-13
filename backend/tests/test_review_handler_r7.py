@@ -82,6 +82,23 @@ a store through it, and the executors join the call list and the import rule:
     from the values, timeit on literal code that binds nothing): still
     trusted, the walk still proven;
   * l, the real review modules: each keeps its round 10 verdict by the same
+    test, and the newly unresolved sites are exactly the measured ones.
+
+Fix pass 12 (build round 11, M5): a slice of an unresolved value was taken as
+a fresh holder, a module-local callable consumed by map was not followed, and
+an augmented assignment to a plain name was only a binding. Element
+provenance now survives slices, copies and iteration, callbacks are marked as
+if called directly, and every in-place operator on an unresolved receiver is
+refused like a store through it:
+  * REBOUND12, controls a to e (the round 11 report's scenario verbatim, the
+    slice aliases, unpacking and iteration, the higher-order forms, the
+    in-place forms): each reports os.walk naming the refused line and
+    operation; INPLACE12 runs every augmented operator, its dunder method and
+    its operator function;
+  * f, a benign module (augmented assignments on copies and fresh values, a
+    rebinding, map over a builtin, slices and sorts of fresh lists): still
+    trusted, the walk still proven;
+  * g, the real review modules: each keeps its round 11 verdict by the same
     test, and the newly unresolved sites are exactly the measured ones."""
 
 import os
@@ -387,7 +404,8 @@ def _named_rows(src, file="planted"):
     return r3._namespace_reach(tree, r3._Names(tree, parents), file)
 
 
-REAL = {"backend/tools/review_needles.py": 12, "backend/api/review_rules.py": 31, "backend/api/review_boot.py": 0}
+REAL = {"backend/tools/review_needles.py": 13, "backend/api/review_rules.py": 31, "backend/api/review_boot.py": 0}
+# (fix pass 12: review_needles.py 12 -> 13, the in-place site pinned by NEW12 below)
 
 
 def test_m5_fix10_k_the_real_review_modules_keep_their_verdicts():
@@ -406,7 +424,7 @@ def test_m5_fix10_k_the_real_review_modules_keep_their_verdicts():
         src = f.read()
     assert _named_rows(src, "review_needles.py") == []
     extra = src + "\n\ndef _planted_extra(d):\n    d['k'] = 1\n"
-    assert len(_named_rows(extra, "review_needles.py")) == 13
+    assert len(_named_rows(extra, "review_needles.py")) == REAL["backend/tools/review_needles.py"] + 1
 
 
 # -- fix pass 11: data flow through local calls, mutators, executors (r3._Flow) -------------
@@ -613,4 +631,169 @@ def test_m5_fix11_l_the_real_review_modules_keep_their_verdicts():
         src = f.read()
     assert _named_rows(src, "review_needles.py") == []
     extra = src + "\n\ndef _planted_extra(d):\n    d.update(k=1)\n"
+    assert len(_named_rows(extra, "review_needles.py")) == REAL["backend/tools/review_needles.py"] + 1
+
+
+# -- fix pass 12: slices, copies, iteration, callbacks, in-place operators (r3._Flow) -----
+TDV = '{"TemporaryDirectory": contextlib.suppress}'
+U = " through unresolved base "
+
+
+def _in(lines_text, kind):
+    """An expected row for a line one block deeper than _at's."""
+    return ("        " + lines_text, kind)
+
+
+def _v(defs, lines, expect, imports="", params="p, ns"):
+    """One variant: _ns with scan taking `params`, and its expected rows."""
+    shape = _ns(defs, lines, imports)
+    return (dict(shape, edits=[("def scan(p):", "def scan(%s):" % params)]), expect)
+
+
+SLICES = ("def head(seq):\n    return seq[0:]\n\n\ndef back(seq):\n    return seq[::-1]\n\n\n"
+          "def last(seq):\n    return seq[-1:]\n\n\ndef tail(x):\n    return x[:]\n")
+HIGHER = (ID + "\n\ndef apply(f, v):\n    return f(v)\n\n\ndef make(x):\n    def get():\n        return x\n"
+          "    return get\n\n\nclass Keeper:\n    def __init__(self, v):\n        self.v = v\n\n"
+          "    def get(self, _=None):\n        return self.v\n")
+FETCH = "def fetch(_=None):\n    return ns\n"
+
+
+def _store(base, defs="", imports=""):
+    shown = r3.ast.unparse(r3.ast.parse(base).body[0].value)     # the report's own rendering of the base
+    return _v(defs, base + TD_LINE, [_at(base + TD_LINE, "subscript store" + U + shown)], imports)
+
+
+def _fetched(base):
+    """A local callback closing over ns, consumed by `base` (round 11 L)."""
+    return _v("", FETCH + base + TD_LINE, [_at(base + TD_LINE, "subscript store" + U + base)])
+
+
+REBOUND12 = [
+    ("a_report_scenario_verbatim", [
+        _v("", "ns |= " + TDV, [_at("ns |= " + TDV, "augmented assignment |=" + U + "ns")])]),
+    ("b_the_slice_aliases", [
+        _store("head([ns])[0]", SLICES), _store("back([ns])[0]", SLICES), _store("last([ns])[0]", SLICES),
+        _store("tail(ns)", SLICES), _store("[ns][0:][0]"), _store("[ns][::-1][0]"),
+        _v(SLICES, "head([ns])[0] |= " + TDV,
+           [_at("head([ns])[0] |= " + TDV, "augmented subscript store |=" + U + "head([ns])")]),
+        _v(SLICES, "m = last([ns])[0]\nm |= " + TDV, [_at("m |= " + TDV, "augmented assignment |=" + U + "m")]),
+        _v("", "[ns][:][0] |= " + TDV, [_at("[ns][:][0] |= " + TDV, "augmented assignment |=" + U + "[ns][:][0]")])]),
+    ("c_unpacking_and_iteration", [
+        _v("", "first, *rest = [None, ns]\nrest[0]" + TD_LINE, [_at("rest[0]" + TD_LINE, "subscript store" + U + "rest[0]")]),
+        _v("", "a, b = [ns, None]\na" + TD_LINE, [_at("a" + TD_LINE, "subscript store" + U + "a")]),
+        _v("", "for m in (ns,):\n    m" + TD_LINE, [_in("m" + TD_LINE, "subscript store" + U + "m")]),
+        _store("tuple([ns])[0]"), _store("list(reversed([ns]))[0]"), _store("sorted([ns], key=id)[0]"),
+        _store("next(iter([ns]))"), _store("next(itertools.islice([ns], 1))", imports="import itertools\n"),
+        _store("next(itertools.chain([ns]))", imports="import itertools\n"), _store("next(zip([ns]))[0]"),
+        _store("list(enumerate([ns]))[0][1]"), _store("[m for m in [ns]][0]"), _store("next(m for m in [ns])"),
+        _store("operator.getitem([ns], 0)", imports="import operator\n"), _store("sum([[ns]], [])[0]"),
+        _v("", "with contextlib.nullcontext(ns) as m:\n    m" + TD_LINE,
+           [_in("m" + TD_LINE, "subscript store" + U + "m")])]),
+    ("d_the_higher_order_forms", [
+        _store("list(map(identity, [ns]))[0]", HIGHER), _store("next(filter(None, [ns]))"),
+        _v("", "functools.reduce(lambda a, b: b, [ns])" + TD_LINE,
+           [_at("functools.reduce(lambda a, b: b, [ns])" + TD_LINE,
+                "subscript store through namespace-reaching functools.reduce(lambda a, b: b, [ns])"),
+            _at("functools.reduce(lambda a, b: b, [ns])" + TD_LINE, "call of namespace-reaching functools.reduce")],
+           "import functools\n"),
+        _store("[identity(x) for x in [ns]][0]", HIGHER), _store("apply(identity, ns)", HIGHER),
+        _store("apply(lambda m: m, ns)", HIGHER), _store("functools.partial(identity)(ns)", HIGHER, "import functools\n"),
+        _v("", "operator.itemgetter(0)([ns])" + TD_LINE,
+           [_at("operator.itemgetter(0)([ns])" + TD_LINE,
+                "subscript store through namespace-reaching operator.itemgetter(0)([ns])"),
+            _at("operator.itemgetter(0)([ns])" + TD_LINE, "call of namespace-reaching operator.itemgetter")],
+           "import operator\n"),
+        _store("make(ns)()", HIGHER), _store("next(map(Keeper(ns).get, [1]))", HIGHER),
+        _store("next(map(lambda _: ns, [1]))"), _store("next(map(make(ns), [1]))", HIGHER),
+        _store("next(map(unbound_callable, [1]))"),
+        _fetched("next(map(fetch, [1]))"), _fetched("next(iter(fetch, None))"), _fetched("next(filter(fetch, [1]))"),
+        _fetched("sorted([1], key=fetch)[0]"), _fetched("max([1], key=fetch)"), _fetched("min([1], key=fetch)")]),
+    ("e_the_in_place_forms", [
+        _v("", "ns |= " + TDV, [_at("ns |= " + TDV, "augmented assignment |=" + U + "ns")]),
+        _v("", "alias = ns\nalias |= " + TDV, [_at("alias |= " + TDV, "augmented assignment |=" + U + "alias")]),
+        _v("", "ns.__ior__(%s)" % TDV, [_at("ns.__ior__(%s)" % TDV, "method call __ior__" + U + "ns")]),
+        _v("", "merge = ns.__ior__\nmerge(%s)" % TDV, [_at("merge = ns.__ior__", "bound method __ior__ taken" + U + "ns")]),
+        _v("", "operator.ior(ns, %s)" % TDV, [_at("operator.ior(ns, %s)" % TDV, "in-place call operator.ior" + U + "ns")],
+           "import operator\n"),
+        _v("", "merge_in(ns, %s)" % TDV, [_at("merge_in(ns, %s)" % TDV, "in-place call merge_in" + U + "ns")],
+           "from operator import ior as merge_in\n"),
+        _v("", "functools.partial(operator.ior, ns)(%s)" % TDV,
+           [_at("functools.partial(operator.ior, ns)(%s)" % TDV, "in-place operator operator.ior taken as a value")],
+           "import functools\nimport operator\n"),
+        _v("", "(ns,)[0] |= " + TDV, [_at("(ns,)[0] |= " + TDV, "augmented assignment |=" + U + "(ns,)[0]")]),
+        _v("", "for m in [ns]:\n    m |= " + TDV, [_in("m |= " + TDV, "augmented assignment |=" + U + "m")]),
+        _v("", "with contextlib.nullcontext(ns) as m:\n    m |= " + TDV,
+           [_in("m |= " + TDV, "augmented assignment |=" + U + "m")]),
+        _v("", "collections.ChainMap(ns).maps[0] |= " + TDV,
+           [_at("collections.ChainMap(ns).maps[0] |= " + TDV,
+                "augmented subscript store |=" + U + "collections.ChainMap(ns).maps")], "import collections\n"),
+        _v(HIGHER, "list(map(identity, [ns]))[0] |= " + TDV,
+           [_at("list(map(identity, [ns]))[0] |= " + TDV, "augmented assignment |=" + U + "list(map(identity, [ns]))[0]")]),
+        _v("", FETCH + "m = next(map(fetch, [1]))\nm |= " + TDV, [_at("m |= " + TDV, "augmented assignment |=" + U + "m")]),
+        _v("", "handlers += [contextlib.suppress]",
+           [_at("handlers += [contextlib.suppress]", "augmented assignment +=" + U + "handlers")],
+           params="p, ns, handlers")]),
+]
+
+
+@pytest.mark.parametrize("name,variants", REBOUND12, ids=[r[0] for r in REBOUND12])
+def test_m5_fix12_a_slice_callback_or_in_place_form_reports_the_walk_naming_the_line(name, variants):
+    for shape, expect in variants:
+        _named(name, shape, expect)
+
+
+INPLACE12 = [(sym, op) for op, sym in [(o, r3._AUG_OPS[t]) for o, t in zip(
+    ("add", "sub", "mul", "matmul", "truediv", "floordiv", "mod", "pow", "lshift", "rshift", "and", "xor", "or"),
+    (r3.ast.Add, r3.ast.Sub, r3.ast.Mult, r3.ast.MatMult, r3.ast.Div, r3.ast.FloorDiv, r3.ast.Mod, r3.ast.Pow,
+     r3.ast.LShift, r3.ast.RShift, r3.ast.BitAnd, r3.ast.BitXor, r3.ast.BitOr))]]
+
+
+@pytest.mark.parametrize("sym,op", INPLACE12, ids=[o for _s, o in INPLACE12])
+def test_m5_fix12_every_in_place_operator_on_an_unresolved_receiver_is_refused(sym, op):
+    """No operator is exempt: the augmented assignment, its dunder method and
+    its operator function, each on the caller-supplied mapping."""
+    for line, kind, imports in (("ns %s %s" % (sym, TDV), "augmented assignment %s%sns" % (sym, U), ""),
+                                ("ns.__i%s__(%s)" % (op, TDV), "method call __i%s__%sns" % (op, U), ""),
+                                ("operator.i%s(ns, %s)" % (op, TDV), "in-place call operator.i%s%sns" % (op, U),
+                                 "import operator\n")):
+        shape, expect = _v("", line, [_at(line, kind)], imports)
+        _named(op, shape, expect)
+
+
+def test_m5_fix12_f_a_benign_module_is_still_trusted():
+    """Augmented assignments on a dict copy, a dict display over ns, a local
+    counter and a local list; a rebinding ns = ns | {...}; map over a builtin;
+    a slice of a literal list and a sort of fresh mappings written through:
+    nothing reaches a namespace, the walk is still proven."""
+    lines = ("fresh = dict(ns)\nfresh |= %s\nmerged = {**ns}\nmerged |= %s\nns = ns | %s\ncount = 0\ncount += 1\n"
+             'names = []\nnames += ["x"]\nlabels = list(map(str, [1, 2]))\nlabels[0] = "x"\nv = "fresh"\n'
+             'rows = [{}, {}][0:1]\nrows[0]["k"] = v\nsorted([{}, {}])[0]["k"] = v') % (TDV, TDV, TDV)
+    shape, _e = _v("", lines, [])
+    src = _plant(**shape)
+    assert r3.unwrapped_queries(src, "planted") == []
+    assert _named_rows(src) == []
+
+
+NEW12 = {"backend/tools/review_needles.py": [(999, "augmented assignment += through unresolved base body")],
+         "backend/api/review_rules.py": [], "backend/api/review_boot.py": []}
+
+
+def test_m5_fix12_g_the_real_review_modules_keep_their_verdicts():
+    """Every surface keeps its round 11 verdict by the same test; the sites the
+    in-place rule newly finds are exactly the measured, named ones (the fix
+    11 method sites stand, test l); the named module is exempt at exactly
+    its measured count and one more in-place site lapses the exemption."""
+    r3.test_m5_no_path_query_turns_a_failure_into_absence()
+    root = os.path.join(HERE, "..", "..")
+    for rel, new in NEW12.items():
+        with open(os.path.join(root, rel), encoding="utf-8") as f:
+            src = f.read()
+        unresolved = [x for x in _named_rows(src, "<source>") if r3._unresolved(x[1])]
+        assert [x for x in unresolved if x[1].startswith(("augmented assignment ", "in-place "))] == new, rel
+        assert len(unresolved) == REAL[rel], (rel, unresolved)
+    assert r3._MEASURED_CLEAN == {"review_needles.py": REAL["backend/tools/review_needles.py"]}
+    with open(os.path.join(root, "backend/tools/review_needles.py"), encoding="utf-8") as f:
+        src = f.read()
+    assert _named_rows(src, "review_needles.py") == []
+    extra = src + "\n\ndef _planted_extra(d):\n    d |= {}\n"
     assert len(_named_rows(extra, "review_needles.py")) == REAL["backend/tools/review_needles.py"] + 1
