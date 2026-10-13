@@ -1680,7 +1680,13 @@ class _Reach:
         the module never binds, an except or match capture, the result of a
         method or an imported callable, an element of anything that may hold
         one of those, and the result of a module-local call whose return
-        paths can yield one, are not."""
+        paths can yield one, are not; nor, as in fix pass 10, a chain that
+        starts at a name the module never binds (a builtin name included)."""
+        r = node
+        while isinstance(r, (ast.Attribute, ast.Subscript, ast.Starred)):
+            r = r.value
+        if isinstance(r, ast.Name) and not self.binds.get(r.id):
+            return False                                             # an unbound name, as fix pass 10 judged it
         return self.flow.level(node) < _UNRES
 
 

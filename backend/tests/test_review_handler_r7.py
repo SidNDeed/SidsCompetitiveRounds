@@ -559,6 +559,15 @@ def test_m5_fix11_every_listed_local_call_form_reports_the_walk_naming_the_line(
     _named(name, _ns(defs, base + TD_LINE), [_at(base + TD_LINE, "subscript store through unresolved base " + shown)])
 
 
+def test_m5_fix11_a_write_through_an_unbound_name_stays_refused():
+    """As at fix pass 10: a chain that starts at a name the module never binds,
+    a builtin name included, is an unresolved base (the flow rates a builtin
+    fresh as a callee, never as a base written through)."""
+    for line, kind in (("print.marker = contextlib.suppress", "attribute store through unresolved base print"),
+                       ("registry" + TD_LINE, "subscript store through unresolved base registry")):
+        _named(line, _ns("", line), [_at(line, kind)])
+
+
 def test_m5_fix11_k_a_benign_module_is_still_trusted():
     """A local function returning a copy (dict(x)) whose result is written, one
     returning a constant, one returning a fresh object built from the values
