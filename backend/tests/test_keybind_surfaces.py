@@ -349,7 +349,7 @@ def test_h1_fix4_every_display_sink_has_a_recorded_chain_to_a_declared_root(atta
         assert rec["attached"], "orphan display sink %s" % s
         assert any(att["ends"][n].startswith(("root:", "unresolved:")) for n in rec["ends"]), s
     rows = KS.attach_rows(st.t, att)
-    for kind in ("hop", "end", "cycle", "sink"):
+    for kind in ("hop", "end", "cycle", "member", "sink"):
         assert rows[kind] == aman[kind], (kind, sorted(set(rows[kind]) ^ set(aman[kind]))[:3])
 
 
@@ -663,6 +663,102 @@ def test_h1_fix5_no_hop_bound_a_two_hundred_hop_chain_is_recorded_whole(tmp_path
     assert att["sinks"]["Lib.cs:Sink"]["attached"]
     assert len(att["hops"]) == DEEP + 1, len(att["hops"])
     assert att["ends"] == {"Lib.cs:Root": "root:Lib.cs:Root"}, att["ends"]
+
+
+# ---- merged hold 3 (Codex client merged round 1 H1): the normalized
+# full-member digest. A hop pins the one statement that holds its reference;
+# at plugin/NativeUI.cs ApplyInfoNavFilter, `bool all = q.Length == 0;` made
+# unconditionally true short-circuits `bool vis = all || InfoArticleMatches(...)`
+# and suppresses the binding-dependent search path while that statement, its
+# hop row and (at T) the sink digest stay the same. The fixture below has the
+# same shape: Sink <- Matches <- Filter (the guard and the short-circuit) <- Update.
+
+ADJACENT = """internal static class Lib
+{
+    internal static string Q = "";
+    internal static string Sink() { return "x"; }
+    internal static bool Matches(string q) { return Sink().Contains(q); }
+    internal static void Filter()
+    {
+        string q = Q.Trim();
+        bool all = q.Length == 0;
+        int total = 0;
+        for (int i = 0; i < 3; i++)
+        {
+            bool vis = all || Matches(q);
+            Show(i, vis);
+            if (!vis) continue;
+            total++;
+        }
+    }
+    internal static void Show(int i, bool v) { }
+    internal static void Update() { Filter(); }
+}
+"""
+
+# (label, old, new, red?): the two adjacent-guard edits of the hold-3 red
+# control (the report's edit, then a reordered early exit), and the negative
+# controls (a comment and whitespace edit the normalization removes; an edit in
+# Show, a member Filter calls that no path crosses: outside every traversed
+# member, the stated bound)
+ADJACENT_EDITS = [
+    ("guard made unconditionally true", "bool all = q.Length == 0;", "bool all = true;", True),
+    ("early exit reordered", "            Show(i, vis);\n            if (!vis) continue;\n",
+     "            if (!vis) continue;\n            Show(i, vis);\n", True),
+    ("comment and whitespace only", "        int total = 0;\n", "        int   total = 0;  // a count\n", False),
+    ("edit outside every traversed member", "internal static void Show(int i, bool v) { }",
+     "internal static void Show(int i, bool v) { if (v) return; }", False),
+]
+
+
+def _adjacent_state(tmp_path, monkeypatch, src):
+    d = tmp_path / ("t%d" % len(list(tmp_path.iterdir())))
+    d.mkdir()
+    return _synthetic(d, monkeypatch, src, "Update")
+
+
+@pytest.mark.parametrize("label,old,new,red", ADJACENT_EDITS, ids=[e[0].replace(" ", "-") for e in ADJACENT_EDITS])
+def test_hold3_an_adjacent_control_flow_edit_in_a_traversed_member_is_red(tmp_path, monkeypatch, label, old, new, red):
+    st = _adjacent_state(tmp_path, monkeypatch, ADJACENT)
+    base = KS.derive_attach(st, ["Lib.cs:Sink"])
+    assert base["sinks"]["Lib.cs:Sink"]["attached"] and base["truncated"] == []
+    assert {"Lib.cs:Sink", "Lib.cs:Matches", "Lib.cs:Filter", "Lib.cs:Update"} <= set(base["sinks"]["Lib.cs:Sink"]["members"])
+    assert "Lib.cs:Show" not in base["sinks"]["Lib.cs:Sink"]["nodes"]
+    p = tmp_path / "attach.tsv"
+    p.write_text("\n".join(KS.attach_lines(st.t, base, {"root": {"Lib.cs:Update": (0, "", "the synthetic root")},
+                                                         "unresolved": {}})), encoding="utf-8")
+    aman, probs = KS.read_attach(str(p))
+    assert probs == [] and set(aman["member"]) == set(base["sinks"]["Lib.cs:Sink"]["members"]), probs
+    # the unedited fixture is GREEN against its own manifest
+    assert KS.attach_problems(str(tmp_path), st, base, aman, {}) == []
+    assert ADJACENT.count(old) == 1, label
+    st2 = _adjacent_state(tmp_path, monkeypatch, ADJACENT.replace(old, new))
+    cut = KS.derive_attach(st2, ["Lib.cs:Sink"])
+    rows = KS.attach_rows(st2.t, cut)
+    problems = KS.attach_problems(str(tmp_path), st2, cut, aman, {})
+    if not red:
+        assert problems == [], (label, problems)
+        return
+    # the statement-level pins alone do not see the edit: every hop, end and
+    # cycle row is unchanged (the round-1 false green) ...
+    for kind in ("hop", "end", "cycle"):
+        assert rows[kind] == aman[kind], (label, kind)
+    # ... and the member digest turns it RED, naming the member and the sink
+    assert any(x.startswith("MEMBER BODY CHANGED Lib.cs:Filter: ") and "display sink(s) Lib.cs:Sink:" in x
+               for x in problems), (label, problems)
+    assert any(x.startswith("SINK CHANGED display sink Lib.cs:Sink: ") for x in problems), (label, problems)
+    assert not any("Lib.cs:Matches" in x or "Lib.cs:Update" in x for x in problems if x.startswith("MEMBER")), problems
+
+
+def test_hold3_every_traversed_member_of_the_six_hop_path_is_hashed_into_its_sink(attach4):
+    st, cman, att, aman = attach4
+    sink = att["sinks"][PATH5[0]]
+    for n in PATH5:
+        assert n in sink["members"], n
+        assert aman["member"][n] == sink["members"][n] == KS.member_body_digest(st.t, n), n
+    rows = KS.attach_rows(st.t, att)
+    assert set(rows["member"]) == {n for rec in att["sinks"].values() for n in rec["members"]}
+    assert all(not (n.startswith(("field:", "register:"))) for n in rows["member"])
 
 
 # Every UNRESOLVED end the complete traversal reaches beyond fix pass 4's

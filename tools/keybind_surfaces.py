@@ -167,10 +167,22 @@ disposition by default and no file is exempt.
    (the reference rule over-approximates receivers, so the InfoLibrary
    sinks reach ~1,700 members), so they are manifested LOSSLESSLY as the
    rows they are made of: every hop a hop row (lower, hop digest, upper,
-   token), every end an end row, every cycle end a cycle row, and every
-   sink a sink row (its members, hops, the digest of its whole subgraph,
-   attached or ORPHAN, the roots it reaches). A change to any completed path
-   changes a row and the digest of every sink it starts from; the summary
+   token), every end an end row, every cycle end a cycle row, every
+   traversed member a member row, and every sink a sink row (its members,
+   hops, the digest of its whole subgraph, attached or ORPHAN, the roots it
+   reaches). A hop hashes the one statement that holds its reference; a
+   condition, an early return or a reordered statement elsewhere in the same
+   member can suppress or reroute that reference without changing it (merged
+   hold 3, the round-1 adjacent-guard finding). So every traversed member
+   that is a member of the source (not a field: or register: virtual) also
+   carries its NORMALIZED FULL-MEMBER DIGEST - its whole text from the
+   declaration to the closing brace (or the semicolon of an expression
+   body), normalized as a hop's statement is (comments stripped, literals
+   and identifiers kept, whitespace collapsed) - as a member row, and that
+   digest is folded into the digest of every sink whose subgraph holds the
+   member. A change to any completed path, or to the body of any member a
+   path crosses, changes a row and the digest of every sink it starts from;
+   an edit outside every traversed member moves nothing here. The summary
    prints a digest of every row, and the path mode names any one path row
    by row. A sink is ATTACHED when the least fixed point reaches it from a
    root or an UNRESOLVED end (a dispatch hop at a declared dispatcher only
@@ -184,8 +196,10 @@ disposition by default and no file is exempt.
    terminal); a derived hop, end or cycle with no row (reverse discovery: a
    sink attached anew, or re-attached under another entry, segment, key or
    caller), named with the path it lies on; a row the source no longer
-   derives (a detachment or a move), named with its recorded path; a sink
-   row that differs; an UNRESOLVED
+   derives (a detachment or a move), named with its recorded path; a member
+   row whose body digest differs (MEMBER BODY CHANGED, naming the member and
+   the sinks whose paths cross it), a traversed member with no row, or a row
+   no traversal holds; a sink row that differs; an UNRESOLVED
    hop with no row, a stale row, or a control that is missing or does not
    name the hop; a dispatcher's binding-key table (KeybindRules.InfoVisual
    .BindingKeys, the keys whose failed build is a repaint failure) that
@@ -212,7 +226,11 @@ manifest "feeds" declaration, which is reviewed, not proven. Section 5's
 limits: a root is declared, and only its entries one level up are recorded;
 a hop is a reference, not a proven invocation (a delegate registration
 proves where the delegate is registered, not that it is invoked; a
-condition around a hop is hashed as text, never evaluated); the reference
+condition around a hop, and the rest of the member that holds it, is hashed
+as text, never evaluated: a member's body digest turns any edit of its
+normalized text red, whether or not the edit changes behaviour, and an edit
+outside every traversed member - a field, a type, or a member a traversed
+member calls that no path crosses - moves no member row); the reference
 rule does not resolve the receiver of an instance member, so the traversal
 follows more paths than the program can take, never fewer (it is complete
 over the reference rule, and every extra path is made of rows whose change
@@ -1298,6 +1316,32 @@ def entry_point(t, key):
     return None
 
 
+def member_body_digest(t, key):
+    """The NORMALIZED FULL-MEMBER DIGEST of a traversed member (merged hold 3,
+    the round-1 adjacent-guard finding): the member's whole text from its
+    declaration to its closing brace (or the semicolon of an expression
+    body), comments stripped, literals and identifiers kept, whitespace
+    collapsed (member_text, the normalization a hop's statement gets in
+    hop_at), hashed with its key. None for a node that is no member of the
+    source: a field: or register: virtual, or a file scope."""
+    memo = t.__dict__.setdefault("_attach_body", {})
+    if key not in memo:
+        d = None
+        if not key.startswith(("field:", "register:")) and ":" in key:
+            fn, mid = key.split(":", 1)
+            if mid != "(file scope)" and fn in t.src:
+                ids = t.__dict__.setdefault("_attach_ids", {})
+                if fn not in ids:
+                    mem = t.members(fn)
+                    mi = member_ids(mem)
+                    ids[fn] = {mi[m.start]: m for m in mem}
+                m = ids[fn].get(mid)
+                if m is not None:
+                    d = kid("body\x1f%s\x1f%s" % (key, ws(t.strip(t.src[fn])[m.start:m.end])))
+        memo[key] = d
+    return memo[key]
+
+
 def _upper(h):
     """The member a hop leads up to: its consumer, or, for a reference at file
     scope (a field initializer), the virtual member field:File.cs:ctx, which
@@ -1465,7 +1509,9 @@ def derive_attach(st, sinks, budget=None):
       sinks       {sink: {"attached": bool, "hops": {(lower, digest)},
                           "nodes": {member}, "ends": {member},
                           "roots": sorted root keys reached,
-                          "unregistered": {key}, "digest": its subgraph's digest}}
+                          "unregistered": {key},
+                          "members": {member: its normalized full-member digest},
+                          "digest": its subgraph's digest, the member digests folded in}}
       unresolved  {name: set of sinks whose paths end or pass there}
       bkeys       the dispatch keys whose visual is a display sink
       tables      {dispatcher: set of keys its binding table declares, or None}
@@ -1475,7 +1521,9 @@ def derive_attach(st, sinks, budget=None):
     A path is every walk up the recorded hops from a sink that ends at an end
     member or at a cycle hop; every completed path is therefore manifested and
     hashed through the rows it is made of, and a change to any path changes a
-    hop, end or cycle row and the digest of every sink it starts from."""
+    hop, end or cycle row and the digest of every sink it starts from; a
+    change anywhere in the body of a member a path crosses changes that
+    member's row and the digest of every such sink (merged hold 3)."""
     t = st.t
     roots, missing = {}, []
     for fn, mid, what in RENDER_ROOTS:
@@ -1585,9 +1633,15 @@ def derive_attach(st, sinks, budget=None):
                 bkeys.add(h.key)
         lines = ["hop\t%s\t%s" % k for k in sorted(sh)] + ["end\t%s\t%s" % (n, ends[n]) for n in sorted(send)]
         lines += ["cycle\t%s\t%s" % k for k in sorted(sh & cycles)]
+        # merged hold 3: the normalized full-member digest of every member of
+        # this sink's subgraph, folded into its digest (and so into its member
+        # rows): an edit anywhere in a traversed member, not only in the
+        # statement a hop pins, changes the sink
+        folded = {n: d for n, d in ((n, member_body_digest(t, n)) for n in sorted(nodes)) if d is not None}
+        lines += ["member\t%s\t%s" % kv for kv in sorted(folded.items())]
         out_sinks[s] = {"attached": s in att, "hops": sh, "nodes": nodes, "ends": send,
                         "roots": sorted(ends[n][len("root:"):] for n in send if ends[n].startswith("root:")),
-                        "unregistered": unreg, "digest": kid("\n".join(lines))}
+                        "unregistered": unreg, "members": folded, "digest": kid("\n".join(lines))}
     truncated = []
     for n in tr["truncated"]:
         truncated.append((n, _trail(tr, n)))
@@ -1625,12 +1679,13 @@ def read_attach(path):
       hop         {(lower, digest): (upper, token)}   hop<TAB>lower<TAB>digest<TAB>upper<TAB>token
       end         {member: end}                       end<TAB>member<TAB>end
       cycle       {(lower, digest): upper}            cycle<TAB>lower<TAB>digest<TAB>upper
+      member      {member: body digest}                member<TAB>member<TAB>normalized full-member digest
       sink        {sink: (nodes, hops, digest, status, roots)}
                                                       sink<TAB>sink<TAB>nodes<TAB>hops<TAB>digest<TAB>attached|ORPHAN<TAB>roots
       unresolved  {name: (control, note)}
       line        {(kind, key): line number}
     A row of any other kind (the fix-4 `chain` row included) is malformed."""
-    rows = {"root": {}, "hop": {}, "end": {}, "cycle": {}, "sink": {}, "unresolved": {}, "line": {}}
+    rows = {"root": {}, "hop": {}, "end": {}, "cycle": {}, "member": {}, "sink": {}, "unresolved": {}, "line": {}}
     probs = []
     if not os.path.exists(path):
         return rows, ["attachment manifest %s missing" % path]
@@ -1648,6 +1703,8 @@ def read_attach(path):
             key, val = f[1], f[2]
         elif f[0] == "cycle" and len(f) == 4 and hx.fullmatch(f[2]):
             key, val = (f[1], f[2]), f[3]
+        elif f[0] == "member" and len(f) == 3 and hx.fullmatch(f[2]):
+            key, val = f[1], f[2]
         elif f[0] == "sink" and len(f) == 7 and f[2].isdigit() and f[3].isdigit() and hx.fullmatch(f[4]):
             key, val = f[1], (int(f[2]), int(f[3]), f[4], f[5], f[6])
         elif f[0] == "unresolved" and len(f) >= 4:
@@ -1760,6 +1817,23 @@ def attach_problems(root, st, att, aman, cman):
                     label, "/".join(k) if kind == "cycle" else k, label, b, aman["line"][(kind, k)]))
             else:
                 probs.append("attachment %s CHANGED %s: derived %s, manifest %s" % (label, k, a, b))
+    # merged hold 3: every traversed member's normalized full-member digest
+    amem = aman.get("member", {})
+    for k in sorted(set(rows["member"]) | set(amem)):
+        a, b = rows["member"].get(k), amem.get(k)
+        if a == b:
+            continue
+        sk = ",".join(s for s, rec in sorted(att["sinks"].items()) if k in rec["members"]) or "-"
+        if b is None:
+            probs.append("NEW traversed member %s: body digest %s has no member row (on the paths of %s)" % (k, a, sk))
+        elif a is None:
+            probs.append("STALE member row %s: no sink's traversal holds that member (manifest %s, line %d)" % (
+                k, b, aman["line"][("member", k)]))
+        else:
+            probs.append("MEMBER BODY CHANGED %s: normalized body digest %s, manifest %s (line %d), on the paths of "
+                         "display sink(s) %s: an edit in a traversed member, inside or outside the statements its "
+                         "hops pin, can suppress or reroute a binding-dependent display path: review the member "
+                         "and record its new digest" % (k, a, b, aman["line"][("member", k)], sk))
     for s in sorted(set(rows["sink"]) | set(aman["sink"])):
         a, b = rows["sink"].get(s), aman["sink"].get(s)
         if a == b:
@@ -1800,8 +1874,9 @@ def attach_problems(root, st, att, aman, cman):
 
 def attach_rows(t, att):
     """The derivation in the manifest's row shape (the keys and values
-    read_attach returns): hop, end, cycle and sink rows."""
-    rows = {"hop": {}, "end": {}, "cycle": {}, "sink": {}}
+    read_attach returns): hop, end, cycle, member and sink rows (a member
+    row for every member some sink's digest folds)."""
+    rows = {"hop": {}, "end": {}, "cycle": {}, "member": {}, "sink": {}}
     for k, (n, h) in att["hops"].items():
         rows["hop"][k] = (_upper(h), _hop_token(t, h, False))
     for n, e in att["ends"].items():
@@ -1809,14 +1884,15 @@ def attach_rows(t, att):
     for k in att["cycles"]:
         rows["cycle"][k] = _upper(att["hops"][k][1])
     for s, rec in att["sinks"].items():
+        rows["member"].update(rec["members"])
         rows["sink"][s] = (len(rec["nodes"]), len(rec["hops"]), rec["digest"],
                            "attached" if rec["attached"] else "ORPHAN", ",".join(rec["roots"]) or "-")
     return rows
 
 
 def attach_lines(t, att, aman):
-    """The manifest's lines in order: root, hop, end, cycle, sink, unresolved
-    (root notes and unresolved dispositions carried from aman)."""
+    """The manifest's lines in order: root, hop, end, cycle, member, sink,
+    unresolved (root notes and unresolved dispositions carried from aman)."""
     rows = attach_rows(t, att)
     out = []
     for k, hops in sorted(att["entries"].items()):
@@ -1829,6 +1905,8 @@ def attach_lines(t, att, aman):
         out.append("\t".join(["end", n, e]))
     for k, upper in sorted(rows["cycle"].items()):
         out.append("\t".join(["cycle", k[0], k[1], upper]))
+    for n, d in sorted(rows["member"].items()):
+        out.append("\t".join(["member", n, d]))
     for s, r in sorted(rows["sink"].items()):
         out.append("\t".join(["sink", s, str(r[0]), str(r[1]), r[2], r[3], r[4]]))
     for name in sorted(att["unresolved"]):
@@ -1926,12 +2004,14 @@ class _AttachGraph:
 
 
 def attach_digest(att, t):
-    """The digest of every hop, end, cycle and sink row: every completed path
-    from every sink is in it."""
+    """The digest of every hop, end, cycle, member and sink row: every
+    completed path from every sink, and the body of every member one
+    crosses, is in it."""
     rows = attach_rows(t, att)
     lines = ["hop\t%s\t%s\t%s\t%s" % (k[0], k[1], v[0], v[1]) for k, v in sorted(rows["hop"].items())]
     lines += ["end\t%s\t%s" % kv for kv in sorted(rows["end"].items())]
     lines += ["cycle\t%s\t%s\t%s" % (k[0], k[1], v) for k, v in sorted(rows["cycle"].items())]
+    lines += ["member\t%s\t%s" % kv for kv in sorted(rows["member"].items())]
     lines += ["sink\t%s\t%d\t%d\t%s\t%s\t%s" % ((s,) + r) for s, r in sorted(rows["sink"].items())]
     return kid("\n".join(lines))
 
