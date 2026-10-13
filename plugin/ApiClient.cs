@@ -2574,6 +2574,10 @@ namespace CompetitiveRounds
         private static IEnumerator DoCheckModVersion()
         {
             var req = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version");
+            // Verified reads (merged hold 3): the server carries read_gate and
+            // read_gate_open only for a request whose X-Mod-Version is 1.41.0 or
+            // later, so the boot read is stamped like every other API call.
+            StampVersionHeader(req);
             yield return req.SendWebRequest();
             if (req.result == UnityWebRequest.Result.Success)
             {
@@ -25288,6 +25292,10 @@ namespace CompetitiveRounds
                 using (var req = UnityWebRequest.Get($"{baseUrl}/api/v1/mod-version"))
                 {
                     req.timeout = 20;
+                    // The same stamp as the boot read: without X-Mod-Version
+                    // the answer carries no mode and no OPEN list, so a latch
+                    // could never be released by a log or off advert.
+                    StampVersionHeader(req);
                     yield return req.SendWebRequest();
                     if (req.result == UnityWebRequest.Result.Success)
                         ReadGateAdvert(req.downloadHandler.text, asked ? "after-refusal" : "poll");

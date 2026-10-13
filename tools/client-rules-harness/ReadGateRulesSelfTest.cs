@@ -201,6 +201,39 @@ namespace CompetitiveRounds
                       stillHeld == Hold.Wait, stillHeld.ToString());
             }
 
+            // -- latched before any advert (merged hold 3, Codex client merged
+            // round 1 HIGH 2) ---------------------------------------------------
+            // A process whose first word from the gate was a refusal latched
+            // enforce with no OPEN list. Its next periodic /mod-version read is
+            // stamped with X-Mod-Version, so the answer carries the mode and the
+            // list: a log or off advert clears the latch and the list arrives,
+            // in the same process. The control is the answer an unstamped read
+            // gets (the server omits both fields; ExtractJsonString reads ""):
+            // nothing changes.
+            foreach (string back in new[] { ModeLog, ModeOff })
+            {
+                var r = new ReadGateRules();
+                r.OnRefusal(401, "{\"detail\":\"read_credential_required\"}", "no-store, private", new Attempts());
+                bool latchedBare = r.Enforcing && !r.HasOpenList && r.IsGated(OpenUrl);
+                var held = r.ShouldHold(GatedUrl, true, false, 0);
+                string word = r.OnModeAdvert(back, Advert(back, OpenSet));
+                var after = r.ShouldHold(GatedUrl, true, false, 0);
+                Check(res, "latched_before_any_advert: the next periodic read's '" + back + "' advert clears the latch and brings the OPEN list",
+                      latchedBare && held == Hold.Wait && word == back && !r.Enforcing && r.HasOpenList
+                      && !r.IsGated(OpenUrl) && r.IsGated(GatedUrl) && after == Hold.Send && r.AdvertisedMode == back,
+                      "before latched=" + latchedBare + " " + held + "; after word=" + word + " latched=" + r.Enforcing
+                      + " list=" + r.HasOpenList + " " + after);
+            }
+            {
+                var r = new ReadGateRules();
+                r.OnRefusal(401, "{\"detail\":\"read_credential_required\"}", "no-store, private", new Attempts());
+                string word = r.OnModeAdvert("", "{\"version\":\"1.41.0\",\"min_version\":\"1.40.0\"}");
+                var after = r.ShouldHold(GatedUrl, true, false, 0);
+                Check(res, "control: latched_before_any_advert, a periodic answer without the advert fields keeps the latch and no list",
+                      word == "(absent)" && r.Enforcing && !r.HasOpenList && r.IsGated(OpenUrl) && after == Hold.Wait,
+                      "word=" + word + " latched=" + r.Enforcing + " list=" + r.HasOpenList + " " + after);
+            }
+
             return res;
         }
 

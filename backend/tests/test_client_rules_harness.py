@@ -1533,9 +1533,10 @@ def test_the_read_gate_suite_ran_every_case_and_none_failed(harness_run):
     printed = len(re.findall(r"^\[readgate\] (PASS|FAIL) ", harness_run.stdout, re.M))
     assert printed == run, (
         "the suite declared run=%d but printed %d case lines" % (run, printed))
-    # 38 cases on the commit that added the suite; the floor is that count
-    # (#342). Raise it when cases are added.
-    assert run >= 38, "the ReadGateRules suite shrank to %d cases" % run
+    # 38 cases on the commit that added the suite; 41 after merged hold 3
+    # (latched_before_any_advert: log, off and its control). The floor is
+    # that count (#342). Raise it when cases are added.
+    assert run >= 41, "the ReadGateRules suite shrank to %d cases" % run
 
 
 @pytest.mark.parametrize("name", [
@@ -1549,6 +1550,12 @@ def test_the_read_gate_suite_ran_every_case_and_none_failed(harness_run):
     "503 session_replication_pending: retried after 1, 2, 4 and 8 s, then delivered",
     "503 read_gate_unavailable: retried once after 5 s, then delivered",
     "401 read_credential_required: latches enforce, passes to the session reject, retries once, then delivers",
+    # merged hold 3 (Codex client merged round 1 HIGH 2): an unchanged process
+    # latched by a refusal before any advert is released by the next periodic
+    # read's log or off advert, and the OPEN list arrives; the control keeps it
+    "latched_before_any_advert: the next periodic read's 'log' advert clears the latch and brings the OPEN list",
+    "latched_before_any_advert: the next periodic read's 'off' advert clears the latch and brings the OPEN list",
+    "control: latched_before_any_advert, a periodic answer without the advert fields keeps the latch and no list",
 ])
 def test_the_read_gate_guarantees_each_have_a_case(harness_run, name):
     line = _named_case(harness_run, name, "readgate")

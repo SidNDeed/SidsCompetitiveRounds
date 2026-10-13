@@ -12317,3 +12317,55 @@ def test_r9_cl2_no_delivered_claim_restores_the_removed_resolution():
                "and re-points the harness by hand."):
         assert not _r9_merged_tree_claims(ok), ok
 
+
+# ══════════════════════════════════════════════════════════════════════════
+# Merged hold 3 (Codex client merged round 1 HIGH 2): verified reads, the wire
+# ══════════════════════════════════════════════════════════════════════════
+#
+# The server carries read_gate and read_gate_open on /api/v1/mod-version only
+# for a request whose X-Mod-Version is 1.41.0 or later (backend/api/main.py's
+# mod_version, read_gate.advert_requested). Both reads of that route - the boot
+# version check and the read-gate mode poll - must therefore be stamped, with
+# the one helper every other API call uses (StampVersionHeader), before the
+# request is sent. The rules' half (a latched process released by the next
+# log or off advert, with the OPEN list) is the harness's readgate suite.
+
+_HOLD3_BOOT_SIG = "private static IEnumerator DoCheckModVersion()"
+_HOLD3_POLL_SIG = "private static IEnumerator ReadGateModePoll()"
+
+
+def _hold3_stamped_before_send(body):
+    """The read's request is stamped by StampVersionHeader exactly once, before
+    its send, and the method spells no header of its own."""
+    i = body.find("StampVersionHeader(req);")
+    j = body.find("yield return req.SendWebRequest();")
+    return (0 <= i < j and body.count("StampVersionHeader(") == 1
+            and "/api/v1/mod-version" in body and "SetRequestHeader(" not in body)
+
+
+def test_hold3_the_boot_mod_version_read_sends_the_version_header():
+    api = _src("ApiClient.cs")
+    body = _method_body(api, _HOLD3_BOOT_SIG)
+    assert body, "DoCheckModVersion is not one method's text"
+    stamp = "            StampVersionHeader(req);\n            yield return req.SendWebRequest();"
+    assert api.replace("\r\n", "\n").count(stamp) == 1
+    mutated = _method_body(_mutate(api.replace("\r\n", "\n"), stamp,
+                                   "            yield return req.SendWebRequest();", "boot read unstamped"),
+                           _HOLD3_BOOT_SIG)
+    _assert_discriminating(_hold3_stamped_before_send, body, mutated, "boot /mod-version read")
+
+
+def test_hold3_the_periodic_mod_version_read_sends_the_version_header():
+    api = _src("ApiClient.cs")
+    body = _method_body(api, _HOLD3_POLL_SIG)
+    assert body, "ReadGateModePoll is not one method's text"
+    stamp = "                    StampVersionHeader(req);\n                    yield return req.SendWebRequest();"
+    assert api.replace("\r\n", "\n").count(stamp) == 1
+    mutated = _method_body(_mutate(api.replace("\r\n", "\n"), stamp,
+                                   "                    yield return req.SendWebRequest();", "periodic read unstamped"),
+                           _HOLD3_POLL_SIG)
+    _assert_discriminating(_hold3_stamped_before_send, body, mutated, "periodic /mod-version read")
+    # the poll still feeds every answer to the rules (the advert that clears a
+    # latch reaches OnModeAdvert in the same process)
+    assert "ReadGateAdvert(req.downloadHandler.text" in body
+
