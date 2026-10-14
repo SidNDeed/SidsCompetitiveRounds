@@ -587,10 +587,60 @@ namespace CompetitiveRounds
             if (new AvatarRules().RestorationOwed(home, !inRoom)) Evaluate("E13-deferred");
         }
 
+        // Bug 434: the ring painter's grid lookup. MenuPortraits() is a
+        // Resources.FindObjectsOfTypeAll sweep over every loaded object; run
+        // from Tick every 15th frame in every state it was a recurring scan
+        // of every loaded object through every game, where the grid is not shown.
+        // The painter now scans while the cached grid is on screen (the menu
+        // behaviour is unchanged there: the grid is re-read every 15th frame
+        // so portraits added by LoadFaces are still painted) and, while no
+        // live grid is cached, at most once per TickGridRescanSeconds. A
+        // cached grid that is loaded but not on screen costs one liveness read
+        // and no scan. No game-state gate: vanilla never writes
+        // GameManager.isPlaying back to false, so a gate on it could leave the
+        // menu unpainted. The residual is the no-grid case, bounded by the
+        // rescan interval; the [PERF] per-match AvatarRingScan count and the
+        // three [AVATAR] ring grid scan lines measure it.
+        // The rescan time is a Stopwatch timestamp (monotonic, unaffected by
+        // timeScale and by the frame clock). The PERF count is hit only while
+        // in a room: PerfGate.DumpAndReset prints and clears it at room leave,
+        // so the line carries the scans of the room that just ended and never
+        // menu scans made before the room was joined. The scan-cost lines are
+        // the first three scans of the process, one line per scan.
+        private static List<CharacterCreatorPortrait> tickGrid;
+        private static long tickGridRescanAt;
+        private const double TickGridRescanSeconds = 2.0;
+        private static int scanCostLines;
+
+        private static List<CharacterCreatorPortrait> TickPortraits()
+        {
+            var g = tickGrid;
+            bool alive = g != null && g.Count > 0 && g[0] != null;          // Unity null: the cached grid was destroyed
+            if (alive && !g[0].gameObject.activeInHierarchy) return null;    // loaded, not on screen: nothing to paint
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (!alive && now < tickGridRescanAt) return null;
+            g = MenuPortraits();
+            long ticks = System.Diagnostics.Stopwatch.GetTimestamp() - now;
+            bool inRoom = PhotonNetwork.InRoom;
+            if (inRoom) PerfGate.Hit("AvatarRingScan");
+            if (scanCostLines < 3)
+            {
+                scanCostLines++;
+                double ms = ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                Plugin.Log.LogInfo("[AVATAR] ring grid scan " + scanCostLines + "/3: "
+                    + ms.ToString("F2", System.Globalization.CultureInfo.InvariantCulture) + " ms, "
+                    + g.Count + " portrait(s), inRoom=" + inRoom);
+            }
+            tickGrid = g;
+            if (g.Count == 0)
+                tickGridRescanAt = now + (long)(TickGridRescanSeconds * System.Diagnostics.Stopwatch.Frequency);
+            return g;
+        }
+
         private static void PaintRings()
         {
-            var grid = MenuPortraits();
-            if (grid.Count == 0 || !grid[0].gameObject.activeInHierarchy) return;
+            var grid = TickPortraits();
+            if (grid == null || grid.Count == 0 || !grid[0].gameObject.activeInHierarchy) return;
             EnsureRings();
             var s = ReadSetting();
             var cch = CharacterCreatorHandler.instance;
