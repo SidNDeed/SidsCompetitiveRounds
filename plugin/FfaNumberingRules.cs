@@ -492,6 +492,86 @@ namespace CompetitiveRounds
             return "";
         }
 
+        /// <summary>Bugs 435/436: the card of an OLDER build's pick, read from
+        /// cr_ffa_pk ("{nonce}:{game}:{cycle}:{Card}", the only form a build
+        /// before the epoch protocol publishes), when it names this room and
+        /// exactly this game and cycle; else null. The match is the older
+        /// master's own (prefix plus a non-empty card), so a mixed room keeps
+        /// what an all-older room had. This build never writes a non-empty
+        /// cr_ffa_pk (LegacyPickValue), so the value can only be an older
+        /// build's; an epoch-form value does not match, since its game slot
+        /// holds the epoch (NewEpoch's 32 hex digits), not the game.</summary>
+        internal static string LegacyPickCard(string value, string nonce, int game, int cycle)
+        {
+            if (string.IsNullOrEmpty(value) || string.IsNullOrEmpty(nonce)) return null;
+            string prefix = nonce + ":" + game.ToString(CultureInfo.InvariantCulture) + ":"
+                            + cycle.ToString(CultureInfo.InvariantCulture) + ":";
+            if (!value.StartsWith(prefix, StringComparison.Ordinal) || value.Length <= prefix.Length) return null;
+            return value.Substring(prefix.Length);
+        }
+
+        /// <summary>The two player-property pick keys (FfaMode.PropPick and
+        /// FfaMode.PropPickEpoch carry the same literals).</summary>
+        internal const string LegacyPickKey = "cr_ffa_pk";
+        internal const string PickEpochKey = "cr_ffa_pe";
+
+        /// <summary>Bugs 435/436: the card the closing master collects from one
+        /// manifest seat, or null. epochPick is the seat's cr_ffa_pe, null when
+        /// the seat carries no such key; legacyPick its cr_ffa_pk. A seat that
+        /// carries cr_ffa_pe is collected from that key alone, under the epoch
+        /// held for use (N19(e)), and its cr_ffa_pk is never read: no pick is
+        /// counted from both keys, and an epoch-carrying seat whose pick does
+        /// not match is never collected through the legacy key. A seat without
+        /// cr_ffa_pe is collected from cr_ffa_pk as an older master collects it
+        /// (LegacyPickCard), and legacy reports that; this build writes
+        /// cr_ffa_pk only as "" (LegacyPickValue), so only an older build's
+        /// value can be counted there. With no epoch held for use nothing is
+        /// collected, legacy picks included.</summary>
+        internal static string CollectedPickCard(string epochPick, string legacyPick, string nonce, string epoch,
+                                                 int game, int cycle, out bool legacy)
+        {
+            legacy = false;
+            if (string.IsNullOrEmpty(nonce) || epoch == null) return null;
+            if (epochPick != null)
+            {
+                string prefix = nonce + ":" + epoch + ":" + game.ToString(CultureInfo.InvariantCulture) + ":"
+                                + cycle.ToString(CultureInfo.InvariantCulture) + ":";
+                return epochPick.StartsWith(prefix, StringComparison.Ordinal) && epochPick.Length > prefix.Length
+                    ? epochPick.Substring(prefix.Length)
+                    : null;
+            }
+            string card = LegacyPickCard(legacyPick, nonce, game, cycle);
+            legacy = card != null;
+            return card;
+        }
+
+        /// <summary>Bugs 435/436: one collection pass of the closing master over
+        /// its manifest. FfaMode.CollectPicks hands in the Photon player
+        /// properties through propsOf (null for a pid it skips); the harness
+        /// hands in plain tables. onLegacy hears every pick counted through
+        /// cr_ffa_pk.</summary>
+        internal static Dictionary<int, string> CollectPicksFrom(IList<int> manifest,
+                                                                 Func<int, System.Collections.IDictionary> propsOf,
+                                                                 string nonce, string epoch, int game, int cycle,
+                                                                 Action<int, string> onLegacy)
+        {
+            var got = new Dictionary<int, string>();
+            if (manifest == null || epoch == null) return got;
+            foreach (var pid in manifest)
+            {
+                var props = propsOf(pid);
+                if (props == null) continue;
+                string pe = props.Contains(PickEpochKey) ? (props[PickEpochKey] as string ?? "") : null;
+                string pk = props.Contains(LegacyPickKey) ? props[LegacyPickKey] as string : null;
+                bool legacy;
+                string card = CollectedPickCard(pe, pk, nonce, epoch, game, cycle, out legacy);
+                if (card == null) continue;
+                got[pid] = card;
+                if (legacy && onLegacy != null) onLegacy(pid, card);
+            }
+            return got;
+        }
+
         /// <summary>N19(c): the epoch-carrying pick, cr_ffa_pe.</summary>
         internal static string PickValue(string nonce, string epoch, int game, int cycle, string card)
         {
@@ -856,6 +936,83 @@ namespace CompetitiveRounds
             Unit(r, "U-EP-2", !SameEpoch("e1", "e2"), B(SameEpoch("e1", "e2")));
             Unit(r, "U-EP-3", !SameEpoch(null, null), B(SameEpoch(null, null)));
             Unit(r, "U-EP-4", !SameEpoch("e1", null), B(SameEpoch("e1", null)));
+
+            // LegacyPickCard (bugs 435/436): an older build's cr_ffa_pk pick.
+            string lp1 = LegacyPickCard("ffa_r:1:1:Poison bullets", "ffa_r", 1, 1);
+            Unit(r, "U-LEG-1", lp1 == "Poison bullets", lp1 ?? "null");
+            string lp2 = LegacyPickCard("ffa_r:1:1:Decay", "ffa_r", 1, 2);
+            Unit(r, "U-LEG-2", lp2 == null, lp2 ?? "null");
+            string lp3 = LegacyPickCard("ffa_old:1:1:Decay", "ffa_r", 1, 1);
+            Unit(r, "U-LEG-3", lp3 == null, lp3 ?? "null");
+            string lp4 = LegacyPickCard("ffa_r:1:1:", "ffa_r", 1, 1);
+            Unit(r, "U-LEG-4", lp4 == null, lp4 ?? "null");
+            string lp5 = LegacyPickCard(LegacyPickValue("ffa_r", 1, 1, "Decay"), "ffa_r", 1, 1);
+            Unit(r, "U-LEG-5", lp5 == null, lp5 ?? "null");
+            string lp6 = LegacyPickCard(PickValue("ffa_r", "e1", 1, 1, "Decay"), "ffa_r", 1, 1);
+            Unit(r, "U-LEG-6", lp6 == null, lp6 ?? "null");
+            string lp7 = LegacyPickCard("ffa_r:1:12:Decay", "ffa_r", 1, 1);
+            Unit(r, "U-LEG-7", lp7 == null, lp7 ?? "null");
+
+            // CollectedPickCard (bugs 435/436): which key the closing master
+            // reads per seat. A seat carrying cr_ffa_pe is read from it alone.
+            bool lg;
+            string cp1 = CollectedPickCard("ffa_r:e1:1:1:Decay", "", "ffa_r", "e1", 1, 1, out lg);
+            Unit(r, "U-COL-1", cp1 == "Decay" && !lg, S(cp1) + " legacy=" + B(lg));
+            string cp2 = CollectedPickCard(null, "ffa_r:1:1:Poison bullets", "ffa_r", "e1", 1, 1, out lg);
+            Unit(r, "U-COL-2", cp2 == "Poison bullets" && lg, S(cp2) + " legacy=" + B(lg));
+            string cp3 = CollectedPickCard("", "ffa_r:1:1:Decay", "ffa_r", "e1", 1, 1, out lg);
+            Unit(r, "U-COL-3", cp3 == null && !lg, S(cp3) + " legacy=" + B(lg));
+            string cp4 = CollectedPickCard("ffa_r:e1:1:1:Decay", "ffa_r:1:1:Leach", "ffa_r", "e1", 1, 1, out lg);
+            Unit(r, "U-COL-4", cp4 == "Decay" && !lg, S(cp4) + " legacy=" + B(lg));
+            string cp5 = CollectedPickCard("ffa_r:e0:1:1:Decay", "ffa_r:1:1:Decay", "ffa_r", "e1", 1, 1, out lg);
+            Unit(r, "U-COL-5", cp5 == null && !lg, S(cp5) + " legacy=" + B(lg));
+            string cp6 = CollectedPickCard(null, "ffa_r:1:1:Decay", "ffa_r", null, 1, 1, out lg);
+            Unit(r, "U-COL-6", cp6 == null && !lg, S(cp6) + " legacy=" + B(lg));
+            string cp7 = CollectedPickCard(null, LegacyPickValue("ffa_r", 1, 1, "Decay"), "ffa_r", "e1", 1, 1, out lg);
+            Unit(r, "U-COL-7", cp7 == null && !lg, S(cp7) + " legacy=" + B(lg));
+
+            // The receive path (bugs 435/436): production's own collection pass
+            // (CollectPicksFrom, which FfaMode.CollectPicks calls with the Photon
+            // player properties) over a manifest of four seats under the held
+            // epoch e1 at 1:1: pid 2 a new-form pick, pid 3 an old-form pick
+            // (no cr_ffa_pe key), pid 4 an older build that has not picked yet,
+            // pid 5 quarantined (no table).
+            var rcvSeats = new Dictionary<int, System.Collections.Hashtable>
+            {
+                { 2, new System.Collections.Hashtable { { PickEpochKey, "ffa_r:e1:1:1:Decay" }, { LegacyPickKey, "" } } },
+                { 3, new System.Collections.Hashtable { { LegacyPickKey, "ffa_r:1:1:Poison bullets" } } },
+                { 4, new System.Collections.Hashtable { { LegacyPickKey, "" } } },
+            };
+            var rcvManifest = new List<int> { 2, 3, 4, 5 };
+            var rcvHeard = new List<int>();
+            Func<int, System.Collections.IDictionary> rcvProps = pid =>
+            {
+                System.Collections.Hashtable t;
+                return rcvSeats.TryGetValue(pid, out t) ? t : null;
+            };
+            var pass1 = CollectPicksFrom(rcvManifest, rcvProps, "ffa_r", "e1", 1, 1, (pid, card) => rcvHeard.Add(pid));
+            var pass1Keys = new List<int>(pass1.Keys);
+            pass1Keys.Sort();
+            var pass1Parts = new List<string>();
+            foreach (var k in pass1Keys) pass1Parts.Add(I(k) + "=" + pass1[k]);
+            string pass1s = string.Join(",", pass1Parts.ToArray());
+            Unit(r, "U-RCV-1", pass1s == "2=Decay,3=Poison bullets" && rcvHeard.Count == 1 && rcvHeard[0] == 3,
+                 pass1s + " legacy heard=" + (rcvHeard.Count > 0 ? I(rcvHeard[0]) : "none") + " of " + I(rcvHeard.Count));
+            // The window closes on that pass (deadline): the result is the pass,
+            // as the master loop's close does (result = got; break). Pid 4 then
+            // publishes late, after the close: the closed result never gains it.
+            var closed = new Dictionary<int, string>(pass1);
+            rcvSeats[4][LegacyPickKey] = "ffa_r:1:1:Leach";
+            Unit(r, "U-RCV-2", !closed.ContainsKey(4) && closed.Count == 2, "closed " + I(closed.Count) + " has4=" + B(closed.ContainsKey(4)));
+            // Had pid 4 published before the close, the next pass counts it
+            // through the legacy key, and the present pickers (2, 3, 4) are all
+            // in, so allIn closes the window on it.
+            var pass2 = CollectPicksFrom(rcvManifest, rcvProps, "ffa_r", "e1", 1, 1, null);
+            Unit(r, "U-RCV-3", pass2.Count == 3 && pass2.ContainsKey(4) && pass2[4] == "Leach",
+                 I(pass2.Count) + " 4=" + (pass2.ContainsKey(4) ? pass2[4] : "absent"));
+            // Under no held epoch the same tables give nothing (N19(e)).
+            var pass3 = CollectPicksFrom(rcvManifest, rcvProps, "ffa_r", null, 1, 1, null);
+            Unit(r, "U-RCV-4", pass3.Count == 0, I(pass3.Count));
 
             // EpochEvidence(gate, sameEpoch, pickGame, pickCycle, phaseGame, phaseCycle, ahead) (N19(d), (i))
             bool ev1 = EpochEvidence(true, true, 4, 1, 4, 1, true);
@@ -1254,6 +1411,7 @@ namespace CompetitiveRounds
                 private string _label = "g0.0";
                 private readonly Dictionary<string, EpochRec> _epochs = new Dictionary<string, EpochRec>();
                 private int _sourceChecks, _useChecks;
+                private readonly HashSet<string> _legacyPicks = new HashSet<string>();
                 private readonly List<string> _cards = new List<string>();
                 private bool _playing, _injectNext, _afterResultPending, _afterResultFired;
                 private Opts _opts;
@@ -1270,9 +1428,12 @@ namespace CompetitiveRounds
                     // The positive arms' counts: LIVE-F per game, CARDS per game
                     // (applied of expected), and the applied results SOURCE and the
                     // epoch uses USE checked in the walk.
+                    // LEGACY (bugs 435/436): the older-build picks a new-build
+                    // master's collection counted, one per phase and pid.
                     string pass = "LIVE-F " + string.Join(" ", _counts.ToArray())
                                   + " | CARDS " + (_cards.Count > 0 ? string.Join(" ", _cards.ToArray()) : "none")
-                                  + " | SOURCE " + I(_sourceChecks) + " | USE " + I(_useChecks);
+                                  + " | SOURCE " + I(_sourceChecks) + " | USE " + I(_useChecks)
+                                  + " | LEGACY " + I(_legacyPicks.Count);
                     _r.Report.Append(ok ? "PASS " : "FAIL ").Append(_id).Append(" | ")
                         .Append(ok ? pass : string.Join("; ", _fails.ToArray()))
                         .Append('\n');
@@ -2870,8 +3031,10 @@ namespace CompetitiveRounds
                 }
 
                 /// <summary>CollectPicks. The pin collects cr_ffa_pk at its key; the
-                /// new build collects cr_ffa_pe only under the epoch held for use
-                /// (N19(e)), and nothing with none.</summary>
+                /// new build collects under the epoch held for use (N19(e)), and
+                /// nothing with none, through production's own pass
+                /// (CollectPicksFrom, bugs 435/436): cr_ffa_pe from a seat that
+                /// carries it, cr_ffa_pk at its key from a seat that does not.</summary>
                 private Dictionary<int, string> CollectPicks(Seat s, Phase ph)
                 {
                     var got = new Dictionary<int, string>();
@@ -2881,8 +3044,12 @@ namespace CompetitiveRounds
                     {
                         string ep = EpochForUse(s, false);
                         if (ep == null) return got;
-                        key = KPe;
-                        prefix = ph.Nonce + ":" + ep + ":" + I(ph.Game) + ":" + I(ph.Cycle) + ":";
+                        return CollectPicksFrom(ph.Manifest, pid =>
+                        {
+                            var q = ByActor(s.R, pid);
+                            return q != null ? PropsOf(s, q) : null;
+                        }, ph.Nonce, ep, ph.Game, ph.Cycle,
+                           (pid, card) => _legacyPicks.Add(I(ph.Serial) + ":" + I(pid)));
                     }
                     foreach (var pid in ph.Manifest)
                     {

@@ -1,5 +1,6 @@
 """RJ-DRIFT numbering controls (design V10 section 5, "Driver" and "Controls":
-V4's 23 rows, then the 14 of V5-V9).
+V4's 23 rows, then the 14 of V5-V9, then C-LEGREAD and C-LEGPICK for bugs
+435/436, which are not design rows).
 
 For each control row: copy the rule files, the harness project and Main.cs to
 a work directory (the tree itself is never edited, checked out or restored),
@@ -299,7 +300,9 @@ ROWS = [
      ("walk-D6 W6.14", "EPOCH g4.3 C holds the epoch of its terminated g4.2")),
     ("C-LEGACY", NR, "static string LegacyPickValue(", "return \"\";",
      "return nonce + \":\" + game + \":\" + cycle + \":\" + card;", "return \"\" + \"\";",
-     units("LEGACY-1", "LEGACY-2") + walk("W7.4", None) + walk("W7.9", None),
+     # LEG-5 and COL-7 (bugs 435/436): this build's own legacy value is never
+     # read as a pick, so a non-empty LegacyPickValue turns both red.
+     units("LEGACY-1", "LEGACY-2", "LEG-5", "COL-7") + walk("W7.4", None) + walk("W7.9", None),
      ("walk-D12 W7.9", "REPLAY Z applied 3:4 at g4.1, written at g3.4")),
     ("C-HOLD", NR, "static string HeldEpoch(", "return live;",
      "return live ?? pe;", "return pe == live ? pe : live;",
@@ -319,8 +322,22 @@ ROWS = [
      "return pe;", "return masterActor == issuer ? pe : null;",
      units("USE-2", "USE-3") + walk("W7.11", None),
      ("walk-D12 W7.11", "USE g4.1 P published under the epoch of departed A")),
+    # Bugs 435/436. C-LEGREAD restores the cc46ea06 drop: a seat without
+    # cr_ffa_pe is skipped, so an older build's cr_ffa_pk pick is never counted.
+    ("C-LEGREAD", NR, "static string CollectedPickCard(",
+     "string card = LegacyPickCard(legacyPick, nonce, game, cycle);",
+     "string card = null;", "string card = LegacyPickCard(legacyPick, nonce, game, cycle) ?? null;",
+     units("COL-2", "RCV-1", "RCV-2", "RCV-3"),
+     ("U-RCV-1", "U-RCV-1 | got=2=Decay legacy heard=none of 0")),
+    # C-LEGPICK drops the epoch key's precedence: an epoch-carrying seat whose
+    # pick does not match falls through to its cr_ffa_pk.
+    ("C-LEGPICK", NR, "static string CollectedPickCard(", "if (epochPick != null)",
+     "if (epochPick != null && epochPick.StartsWith(nonce + \":\" + epoch + \":\", StringComparison.Ordinal))",
+     "if (epochPick != null && true)",
+     units("COL-3", "COL-5"),
+     ("U-COL-3", "U-COL-3 | got=Decay legacy=true")),
 ]
-assert len(ROWS) == 37, len(ROWS)
+assert len(ROWS) == 39, len(ROWS)
 
 # ── mechanics ───────────────────────────────────────────────────────────
 

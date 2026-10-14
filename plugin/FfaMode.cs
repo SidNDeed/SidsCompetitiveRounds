@@ -227,10 +227,14 @@ namespace CompetitiveRounds
         // the wrong card applied. The nonce is the room name (server-issued,
         // unique per lobby).
         private const string PropPick = "cr_ffa_pk";
-        // RJ-DRIFT N19(c): this build writes cr_ffa_pk only as "" and never
-        // reads it. Its picks travel in cr_ffa_pe, a NEW key old clients
-        // ignore: "{roomNonce}:{epoch}:{game}:{cycle}:{CardName}", written
-        // only while the seat holds its phase's epoch.
+        // RJ-DRIFT N19(c): this build writes cr_ffa_pk only as "". Its picks
+        // travel in cr_ffa_pe, a NEW key old clients ignore:
+        // "{roomNonce}:{epoch}:{game}:{cycle}:{CardName}", written only while
+        // the seat holds its phase's epoch. Bugs 435/436: as master, this build
+        // reads cr_ffa_pk in CollectPicks only for a seat that carries no
+        // cr_ffa_pe (a build from before the epoch protocol; this build writes
+        // cr_ffa_pk only as "", so only an older build's value counts there);
+        // identity detection never reads it.
         private const string PropPickEpoch = "cr_ffa_pe";
 
         // ── Per-game state (reset in OnGameStart) ──
@@ -604,6 +608,9 @@ namespace CompetitiveRounds
         /// <summary>N19(d): the peers already logged as "pick ignored" in the
         /// current phase (once per phase and peer).</summary>
         private static readonly HashSet<int> pickIgnoredLogged = new HashSet<int>();
+        /// <summary>Bugs 435/436: the pids whose older-build pick was already
+        /// logged as counted in the current phase (once per phase and pid).</summary>
+        private static readonly HashSet<int> legacyPickLogged = new HashSet<int>();
         /// <summary>RJ-DRIFT change 23: this seat's own phase identity in the
         /// current game, recorded (with a game of 1 or more) wherever
         /// phaseGame and phaseCycle are set, bound to its Room object and N10
@@ -2728,6 +2735,7 @@ namespace CompetitiveRounds
             phaseEpoch = null;
             phaseEpochIssuer = -1;
             pickIgnoredLogged.Clear();
+            legacyPickLogged.Clear();
             // Vanilla logs "PICK PHASE" from RoundTransition; GameStateWatcher's
             // log intercept keys inPickPhase (input/achievement gating) on that
             // exact marker. Emit it for parity or pick-phase keystrokes count
@@ -3983,18 +3991,29 @@ namespace CompetitiveRounds
             if (ep == null) return got;
             try
             {
-                string prefix = $"{RoomNonce()}:{ep}:{game}:{cycle}:";
-                foreach (var pid in manifest)
+                // Bugs 435/436: a seat on a build from before the epoch
+                // protocol publishes its pick ONLY in cr_ffa_pk, as
+                // "{nonce}:{game}:{cycle}:{Card}", and carries no cr_ffa_pe.
+                // FfaNumberingRules.CollectedPickCard reads a seat that carries
+                // cr_ffa_pe from that key alone (N19(e), unchanged) and a seat
+                // without it from cr_ffa_pk, under the identity this master is
+                // closing, as an older master would. Without this, every
+                // older-build picker in a room this build masters lost its card.
+                got = FfaNumberingRules.CollectPicksFrom(manifest, pid =>
                 {
-                    // V11 item 13 (row 50): a quarantined pid's entry is skipped.
-                    var pl = (ResolveFighter(pid) is Player q && !FfaLateEntry.IsQuarantined(q)) ? q : null;
-                    var owner = pl?.data?.view?.Owner;
-                    var props = owner?.CustomProperties;
-                    if (props == null || !props.ContainsKey(PropPickEpoch)) continue;
-                    string v = props[PropPickEpoch] as string ?? "";
-                    if (v.StartsWith(prefix) && v.Length > prefix.Length)
-                        got[pid] = v.Substring(prefix.Length);
-                }
+                    try
+                    {
+                        // V11 item 13 (row 50): a quarantined pid's entry is skipped.
+                        var pl = (ResolveFighter(pid) is Player q && !FfaLateEntry.IsQuarantined(q)) ? q : null;
+                        var owner = pl?.data?.view?.Owner;
+                        return owner?.CustomProperties;
+                    }
+                    catch { return null; }
+                }, RoomNonce(), ep, game, cycle, (pid, card) =>
+                {
+                    if (legacyPickLogged.Add(pid))
+                        Plugin.Log.LogInfo($"[FFA] legacy pick counted pid={pid} card={card} (identity {game}:{cycle})");
+                });
             }
             catch { }
             return got;
