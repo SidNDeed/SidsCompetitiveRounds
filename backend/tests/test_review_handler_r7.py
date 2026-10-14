@@ -99,7 +99,32 @@ refused like a store through it:
     rebinding, map over a builtin, slices and sorts of fresh lists): still
     trusted, the walk still proven;
   * g, the real review modules: each keeps its round 11 verdict by the same
-    test, and the newly unresolved sites are exactly the measured ones."""
+    test, and the newly unresolved sites are exactly the measured ones.
+
+Fix pass 13 (build round 12, M5): an operator delivered by a loop, a with
+target or another binding form was not followed, iter and reversed over an
+unresolved value were taken as holders, and a collection mutator off the
+fix 11 list on an unresolved receiver was trusted. Every binding form is now
+dispatched through one table (r3._BINDING_TABLE, a node outside it refused
+by name), calls fail closed (r3._PROVEN_FRESH, r3._ARG_SAFE, an unresolved
+callable refused over a marked argument or when itself unresolved), methods
+on an unresolved receiver fail closed (r3._PURE_METHODS), and a constant
+index into a display selects its own element:
+  * REBOUND13, controls a to f (the round 12 report's loop-delivered operator
+    verbatim and every other delivering binding form, the identity-preserving
+    calls, the collection mutators, the extracted bound methods, the
+    fail-closed method gate, the refused constant and non-constant indexes):
+    each reports os.walk naming the refused line and operation;
+  * the binding table holds every ast class with a binding field, and a node
+    outside it (a synthetic class, or the table narrowed) refuses the walk
+    naming its line (e);
+  * f, the trusted constant-index selections; g, a benign module (every fix
+    12 item, iteration, local lists, a dict copy, the pure methods): still
+    trusted, the walk still proven;
+  * h, the real review modules: each keeps its round 12 verdict by the same
+    test, every unresolved site is named per module (REAL: the row the proof
+    prints and its enclosing function or class, never a line or a total) and
+    review_needles.py's new sites are exactly the measured ones."""
 
 import os
 import sys
@@ -404,27 +429,199 @@ def _named_rows(src, file="planted"):
     return r3._namespace_reach(tree, r3._Names(tree, parents), file)
 
 
-REAL = {"backend/tools/review_needles.py": 13, "backend/api/review_rules.py": 31, "backend/api/review_boot.py": 0}
-# (fix pass 12: review_needles.py 12 -> 13, the in-place site pinned by NEW12 below)
+def _sites(src, file="<source>", unresolved_only=True):
+    """The rows of the proof over src, each named as a site by r3._site_names:
+    the row the proof prints (the rule, the operator or method, the base) and
+    its enclosing function or class; sorted, never keyed by line."""
+    rows = [(line, kind) for line, kind in _named_rows(src, file) if not unresolved_only or r3._unresolved(kind)]
+    return r3._site_names(r3.ast.parse(src), rows)
+
+
+def _planted(kind):
+    return [("_planted_extra", kind + " through unresolved base d")]
+
+
+NEEDLES = "backend/tools/review_needles.py"
+# The unresolved-base sites of each real review module, measured at the tip of
+# the lane and named, never counted: each entry is the row the proof prints and
+# the function or class that encloses it (<module> outside any), a repeated
+# entry once per site. The measured count of a module is the length of its
+# list, so a site swapped for another at an equal count fails the pin as one
+# more or one fewer does. review_needles.py's list is the exemption the proof
+# itself carries (r3._MEASURED_CLEAN), written there independently.
+REAL = {
+    NEEDLES: [
+        ('_Values.__init__', 'attribute store through unresolved base self'),
+        ('_Values.add', 'method call add through unresolved base self'),
+        ('_Values.add', 'method call append through unresolved base self.items'),
+        ('_Values.add', 'method call append through unresolved base self.lists'),
+        ('_derive', "method call add through unresolved base out['basename']"),
+        ('_derive', 'subscript store through unresolved base out'),
+        ('_entries', 'subscript store through unresolved base out'),
+        ('_expr', 'method call add through unresolved base vals'),
+        ('_merge', 'subscript store through unresolved base a'),
+        ('_pred', 'method call add through unresolved base vals'),
+        ('_report_line', 'method call pop through unresolved base found'),
+        ('_report_line', 'method call pop through unresolved base found'),
+        ('_revision', 'augmented subscript store |= through unresolved base out'),
+        ('_revision', "method call add through unresolved base out['data']"),
+        ('_revision', "method call add through unresolved base out['data']"),
+        ('_revision', "method call add through unresolved base out['nonce']"),
+        ('_revision', "method call add through unresolved base out['rule_id']"),
+        ('_revision', "method call add through unresolved base out['wording']"),
+        ('_revision', 'method call read through unresolved base f'),
+        ('_revision', 'subscript store through unresolved base tables'),
+        ('_sitting', 'method call add through unresolved base vals'),
+        ('_table', 'method call add through unresolved base vals'),
+        ('_table', 'method call add through unresolved base vals'),
+        ('_table', 'method call add through unresolved base vals'),
+        ('_value_needles', 'method call add through unresolved base by_group.setdefault(group, set())'),
+        ('corpus_digest', 'method call update through unresolved base h'),
+        ('count', 'subscript store through unresolved base found'),
+        ('packet', 'subscript store through unresolved base found'),
+        ('seal', 'augmented assignment += through unresolved base body'),
+        ('seal', 'subscript store through unresolved base found'),
+    ],
+    "backend/api/review_rules.py": [
+        ('Refused.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.__init__', 'attribute store through unresolved base self'),
+        ('Ruleset.evaluate_game',
+         "call of unresolved callable self.core['core.game'].impl[0] through unresolved base self"),
+        ('Ruleset.render_line',
+         "call of unresolved callable self.core['core.render'].impl[0] through unresolved base rule"),
+        ('Ruleset.run_selftest',
+         "call of unresolved callable self.core['core.game'].impl[-1] through unresolved base self"),
+        ('Ruleset.run_sitting_selftest',
+         "call of unresolved callable self.core['core.sitting'].impl[-1] through unresolved base self"),
+        ('Ruleset.sitting_items',
+         "call of unresolved callable self.core['core.sitting'].impl[0] through unresolved base rule"),
+        ('Ruleset.sitting_statement',
+         "call of unresolved callable self.core['core.sitting'].impl[1] through unresolved base rule"),
+        ('State.__init__', 'attribute store through unresolved base self'),
+        ('State.__init__', 'attribute store through unresolved base self'),
+        ('State.__init__', 'attribute store through unresolved base self'),
+        ('_Binder.__call__', 'call of unlisted callable rm.REGISTRY.get through unresolved base name'),
+        ('_Binder.__call__', 'subscript store through unresolved base self.kinds'),
+        ('_Binder.__call__', 'subscript store through unresolved base self.used'),
+        ('_Binder.__init__', 'attribute store through unresolved base self'),
+        ('_Binder.__init__', 'attribute store through unresolved base self'),
+        ('_Binder.__init__', 'attribute store through unresolved base self'),
+        ('_Binder.__init__', 'attribute store through unresolved base self'),
+        ('_Budget.__init__', 'attribute store through unresolved base self'),
+        ('_Budget.tick', 'augmented attribute store -= through unresolved base self'),
+        ('_code_files', 'call of unlisted callable rb.LOADED.get through unresolved base stem'),
+        ('_code_files', 'call of unlisted callable sys.modules.get through unresolved base stem'),
+        ('_compile_expr', 'call of unresolved callable bind through unresolved base e.family'),
+        ('_compile_expr', 'call of unresolved callable bind through unresolved base v'),
+        ('_compile_pred', "call of unresolved callable bind through unresolved base node['op']"),
+        ('_compile_sitting', 'call of unresolved callable bind through unresolved base f'),
+        ('_compile_sitting', "call of unresolved callable bind through unresolved base node['op']"),
+        ('_compile_sitting', 'call of unresolved callable bind through unresolved base v'),
+        ('_compile_sitting', 'call of unresolved callable entry.impl[0] through unresolved base out'),
+        ('_compile_sitting.bind', 'call of unresolved callable bind0 through unresolved base name'),
+        ('_compile_template', 'method call end through unresolved base m'),
+        ('_compile_template', 'method call groups through unresolved base m'),
+        ('_compile_template', 'method call start through unresolved base m'),
+        ('_framed', 'method call update through unresolved base h'),
+        ('_framed', 'method call update through unresolved base h'),
+        ('_framed', 'method call update through unresolved base h'),
+        ('_framed', 'method call update through unresolved base h'),
+        ('_framed', 'method call update through unresolved base h'),
+        ('_framed', 'method call update through unresolved base h'),
+        ('_measure_value', 'call of unresolved callable m.impl[0] through unresolved base ctx'),
+        ('_measure_value', 'subscript store through unresolved base memo'),
+        ('_open_nofollow', 'call of unlisted callable msvcrt.open_osfhandle through unresolved base h'),
+        ('_open_nofollow', 'method call CloseHandle through unresolved base _K32'),
+        ('_open_nofollow', 'method call CreateFileW through unresolved base _K32'),
+        ('_open_nofollow', 'method call GetFinalPathNameByHandleW through unresolved base _K32'),
+        ('_parse_time', "call of unlisted callable datetime.fromisoformat through unresolved base "
+                        "v[:-1] if v.endswith('Z') else v"),
+        ('_py', 'method call to_integral_value through unresolved base v'),
+        ('_register_core', "call of unlisted callable rm._register through unresolved base rm.Entry('core', "
+                           "'core.game', (evaluate_game, eval_pred, eval_expr, _measure_value, run_selftest))"),
+        ('_register_core', "call of unlisted callable rm._register through unresolved base rm.Entry('core', "
+                           "'core.render', (render_line, render_item, _render_value))"),
+        ('_register_core', "call of unlisted callable rm._register through unresolved base rm.Entry('core', "
+                           "'core.sitting', (sitting_items, sitting_statement, norm_pair, _py, _bound_lookup, "
+                           "sitting_selftest))"),
+        ('build_revision', 'call of unlisted callable shutil.rmtree through unresolved base incoming'),
+        ('build_revision', 'call of unlisted callable shutil.rmtree through unresolved base staged'),
+        ('build_revision', 'method call strftime through unresolved base datetime.now(timezone.utc)'),
+        ('build_revision', 'method call update through unresolved base files'),
+        ('build_revision', 'subscript store through unresolved base data'),
+        ('closure_fingerprint', 'method call update through unresolved base files'),
+        ('compile_rules', 'call of unresolved callable bind through unresolved base bind'),
+        ('compile_rules', 'call of unresolved callable bind through unresolved base family'),
+        ('compile_rules', 'method call append through unresolved base rs.rules'),
+        ('eval_expr', 'call of unlisted callable rm._num through unresolved base a'),
+        ('eval_expr', 'call of unlisted callable rm._num through unresolved base b'),
+        ('eval_expr', 'call of unlisted callable rm._num through unresolved base v'),
+        ('eval_pred', 'call of unresolved callable entry.impl[0] through unresolved base vals'),
+        ('eval_pred', 'method call tick through unresolved base budget'),
+        ('evaluate_game', 'call of unlisted callable rm.Ctx through unresolved base records'),
+        ('evaluate_game', 'call of unlisted callable rm.Ctx through unresolved base records'),
+        ('evaluate_game', 'method call render_line through unresolved base rs'),
+        ('literal', "call of unlisted callable re.sub through unresolved base ':%s\\\\b' % re.escape(k)"),
+        ('literal', 'method call rule through unresolved base rs'),
+        ('literal', 'method call sitting_statement through unresolved base rs'),
+        ('load_dir', 'method call run_selftest through unresolved base rs'),
+        ('load_dir', 'method call run_sitting_selftest through unresolved base rs'),
+        ('load_dir', 'subscript store through unresolved base data'),
+        ('refresh_rules', 'method call acquire through unresolved base _LOCK'),
+        ('refresh_rules', 'method call release through unresolved base _LOCK'),
+        ('run_selftest', 'method call evaluate_game through unresolved base rs'),
+        ('sitting_items', "method call append through unresolved base slot['items']"),
+        ('sitting_selftest', 'method call sitting_statement through unresolved base rs'),
+        ('sitting_statement', 'call of unlisted callable rm.sitting_binds through unresolved base entry'),
+        ('sitting_statement', 'call of unresolved callable entry.impl[0] through unresolved base args'),
+    ],
+    "backend/api/review_boot.py": [
+        ('<module>', 'call of unlisted callable review_rules.cli through unresolved base sys.argv[1:]'),
+        ('SourceOnly.exec_module', 'call of unlisted callable compile through unresolved base raw'),
+        ('SourceOnly.exec_module',
+         "call of unlisted callable exec through unresolved base compile(raw, path, 'exec', dont_inherit=True)"),
+        ('SourceOnly.exec_module', 'call of unlisted callable vars through unresolved base module'),
+        ('SourceOnly.find_spec',
+         'call of unlisted callable importlib.machinery.ModuleSpec through unresolved base fullname'),
+        ('install', 'call of unlisted callable sys.meta_path.insert through unresolved base FINDER'),
+    ],
+}
+
+
+def _lapsed(extra, kind):
+    """With one planted site more, review_needles.py's exemption lapses: every
+    row is reported, and the rows are exactly the REAL sites and the planted
+    one, by name. Also: the exemption the proof carries names exactly the REAL
+    sites of the module."""
+    assert {k: sorted(v) for k, v in r3._MEASURED_CLEAN.items()} == {"review_needles.py": sorted(REAL[NEEDLES])}
+    return _sites(extra, "review_needles.py", unresolved_only=False) == sorted(REAL[NEEDLES] + _planted(kind))
 
 
 def test_m5_fix10_k_the_real_review_modules_keep_their_verdicts():
     """Every surface keeps its round 9 verdict by the same test; the
-    real-module rule's measured counts of unresolved-base sites hold; the
-    named module is exempt at exactly its measured count, and one more such
+    real-module rule's measured unresolved-base sites hold, each named; the
+    named module is exempt at exactly its measured sites, and one more such
     site lapses the exemption."""
     r3.test_m5_no_path_query_turns_a_failure_into_absence()
     root = os.path.join(HERE, "..", "..")
-    for rel, count in REAL.items():
+    for rel, sites in REAL.items():
         with open(os.path.join(root, rel), encoding="utf-8") as f:
             src = f.read()
-        unresolved = [x for x in _named_rows(src, "<source>") if r3._unresolved(x[1])]
-        assert len(unresolved) == count, (rel, unresolved)
+        assert _sites(src) == sorted(sites), (rel, _sites(src))
     with open(os.path.join(root, "backend/tools/review_needles.py"), encoding="utf-8") as f:
         src = f.read()
     assert _named_rows(src, "review_needles.py") == []
     extra = src + "\n\ndef _planted_extra(d):\n    d['k'] = 1\n"
-    assert len(_named_rows(extra, "review_needles.py")) == REAL["backend/tools/review_needles.py"] + 1
+    assert _lapsed(extra, "subscript store")
 
 
 # -- fix pass 11: data flow through local calls, mutators, executors (r3._Flow) -------------
@@ -616,7 +813,7 @@ def test_m5_fix11_l_the_real_review_modules_keep_their_verdicts():
     """Every surface keeps its round 10 verdict by the same test; the sites
     the completed proof newly finds unresolved are exactly the measured,
     named ones (every one a mutator method, none from a local call); the
-    named module is exempt at exactly its measured count and one more such
+    named module is exempt at exactly its measured sites and one more such
     site lapses the exemption."""
     r3.test_m5_no_path_query_turns_a_failure_into_absence()
     root = os.path.join(HERE, "..", "..")
@@ -624,14 +821,14 @@ def test_m5_fix11_l_the_real_review_modules_keep_their_verdicts():
         with open(os.path.join(root, rel), encoding="utf-8") as f:
             src = f.read()
         unresolved = [x for x in _named_rows(src, "<source>") if r3._unresolved(x[1])]
-        assert [x for x in unresolved if x[1].startswith(("method call ", "bound method "))] == new, rel
-        assert len(unresolved) == REAL[rel], (rel, unresolved)
-    assert r3._MEASURED_CLEAN == {"review_needles.py": REAL["backend/tools/review_needles.py"]}
+        assert [x for x in unresolved if x[1].startswith(("method call ", "bound method "))
+                and x[1].split()[2] in r3._MUTATORS] == new, rel     # fix 13: the fix 11 names (h pins the rest)
+        assert _sites(src) == sorted(REAL[rel]), (rel, unresolved)
     with open(os.path.join(root, "backend/tools/review_needles.py"), encoding="utf-8") as f:
         src = f.read()
     assert _named_rows(src, "review_needles.py") == []
     extra = src + "\n\ndef _planted_extra(d):\n    d.update(k=1)\n"
-    assert len(_named_rows(extra, "review_needles.py")) == REAL["backend/tools/review_needles.py"] + 1
+    assert _lapsed(extra, "method call update")
 
 
 # -- fix pass 12: slices, copies, iteration, callbacks, in-place operators (r3._Flow) -----
@@ -782,7 +979,7 @@ def test_m5_fix12_g_the_real_review_modules_keep_their_verdicts():
     """Every surface keeps its round 11 verdict by the same test; the sites the
     in-place rule newly finds are exactly the measured, named ones (the fix
     11 method sites stand, test l); the named module is exempt at exactly
-    its measured count and one more in-place site lapses the exemption."""
+    its measured sites and one more in-place site lapses the exemption."""
     r3.test_m5_no_path_query_turns_a_failure_into_absence()
     root = os.path.join(HERE, "..", "..")
     for rel, new in NEW12.items():
@@ -790,10 +987,233 @@ def test_m5_fix12_g_the_real_review_modules_keep_their_verdicts():
             src = f.read()
         unresolved = [x for x in _named_rows(src, "<source>") if r3._unresolved(x[1])]
         assert [x for x in unresolved if x[1].startswith(("augmented assignment ", "in-place "))] == new, rel
-        assert len(unresolved) == REAL[rel], (rel, unresolved)
-    assert r3._MEASURED_CLEAN == {"review_needles.py": REAL["backend/tools/review_needles.py"]}
+        assert _sites(src) == sorted(REAL[rel]), (rel, unresolved)
     with open(os.path.join(root, "backend/tools/review_needles.py"), encoding="utf-8") as f:
         src = f.read()
     assert _named_rows(src, "review_needles.py") == []
     extra = src + "\n\ndef _planted_extra(d):\n    d |= {}\n"
-    assert len(_named_rows(extra, "review_needles.py")) == REAL["backend/tools/review_needles.py"] + 1
+    assert _lapsed(extra, "augmented assignment |=")
+
+
+# -- fix pass 13: the binding table, fail-closed calls and methods, the constant index ---------
+OPS = "ops = [operator.ior]\n"
+OPCALL = "op(ns, %s)" % TDV
+SUP = "contextlib.suppress"
+IOR = "import operator\n"
+
+
+def _rows13(line, kinds, defs="", lines=None, imports="", params="p, ns", deep=False):
+    """A variant whose refused line is `line` (one block deeper when deep),
+    carrying every kind in `kinds` (each a callee or method kind + U + base)."""
+    at = _in if deep else _at
+    return _v(defs, line if lines is None else lines, [at(line, k) for k in kinds], imports, params)
+
+
+def _op13(callee, line=None, defs="", lines=None, params="p, ns", deep=False, unresolved=False):
+    """An in-place operator delivered to its call site: the call names the
+    delivered callee as unlisted and as an in-place call (and as unresolved
+    when a caller may supply it)."""
+    kinds = ["call of unlisted callable %s%sns" % (callee, U), "in-place call %s%sns" % (callee, U)]
+    if unresolved:
+        kinds.append("call of unresolved callable %s%sns" % (callee, U))
+    return _rows13(line or OPCALL, kinds, defs, lines, IOR, params, deep)
+
+
+def _mut13(line, method, base, params="p, ns, handlers"):
+    return _rows13(line, ["method call %s%s%s" % (method, U, base)], params=params)
+
+
+H = "p, ns, handlers"
+REBOUND13 = [
+    ("a_loop_delivered_operators", [
+        _op13("op", defs=OPS, lines="for op in ops:\n    " + OPCALL, deep=True),
+        _rows13(OPCALL, ["call of unresolved callable op%sns" % U], lines="for op in ops:\n    " + OPCALL,
+                params="p, ns, ops", deep=True),
+        _op13("op", lines="with contextlib.nullcontext(operator.ior) as op:\n    " + OPCALL, deep=True),
+        _op13("(op := operator.ior)", "(op := operator.ior)(ns, %s)" % TDV),
+        _op13("op", "[%s for op in ops]" % OPCALL, defs=OPS),
+        _op13("last", "last(ns, %s)" % TDV, lines="*first, last = [operator.ior]\nlast(ns, %s)" % TDV),
+        _op13("op", lines="def f(op=operator.ior):\n    %s\nf()" % OPCALL, deep=True, unresolved=True),
+        _op13("op", lines="if (op := operator.ior):\n    " + OPCALL, deep=True)]),
+    ("b_identity_preserving_calls", [
+        _rows13("m" + TD_LINE, ["subscript store" + U + "m"], lines="m = iter(ns)\nm" + TD_LINE),
+        _rows13("m |= " + TDV, ["augmented assignment |=" + U + "m"], lines="m = reversed(ns)\nm |= " + TDV),
+        _rows13("operator.ior(iter(ns), %s)" % TDV, ["in-place call operator.ior" + U + "iter(ns)"], imports=IOR),
+        _store("next(iter([ns]))"),
+        _rows13("functools.reduce(lambda a, b: b, [ns])" + TD_LINE,
+                ["subscript store through namespace-reaching functools.reduce(lambda a, b: b, [ns])"],
+                imports="import functools\n"),
+        _rows13("m" + TD_LINE, ["subscript store" + U + "m"], lines="m = min([ns], key=id)\nm" + TD_LINE),
+        _rows13("m" + TD_LINE, ["subscript store" + U + "m"], lines="m = max(ns, key=len)\nm" + TD_LINE),
+        _rows13("m" + TD_LINE, ["subscript store" + U + "m"], lines="m = next(ns)\nm" + TD_LINE),
+        _rows13("next(m)" + TD_LINE, ["subscript store" + U + "next(m)"],
+                lines="m = iter(lambda: ns, None)\nnext(m)" + TD_LINE),
+        _rows13("m" + TD_LINE, ["subscript store" + U + "m"], lines="m = ns.copy()\nm" + TD_LINE),
+        _rows13("m" + TD_LINE, ["subscript store" + U + "m"], lines="m = copy.copy(ns)\nm" + TD_LINE,
+                imports="import copy\n")]),
+    ("c_collection_mutators", [
+        _mut13("handlers.append(%s)" % SUP, "append", "handlers"),
+        _mut13('ns["handlers"].append(%s)' % SUP, "append", "ns['handlers']"),
+        _mut13("ns.group.add(%s)" % SUP, "add", "ns.group"),
+        _mut13('ns["handlers"].extend([%s])' % SUP, "extend", "ns['handlers']"),
+        _mut13('ns["handlers"].insert(0, %s)' % SUP, "insert", "ns['handlers']"),
+        _mut13("ns.group.update({%s})" % SUP, "update", "ns.group"),
+        _mut13("handlers.sort(key=id)", "sort", "handlers"),
+        _mut13("handlers.reverse()", "reverse", "handlers"),
+        _rows13("handlers += [%s]" % SUP, ["augmented assignment +=" + U + "handlers"], params=H),
+        _rows13("ns.group |= {%s}" % SUP, ["augmented attribute store |=" + U + "ns"])]),
+    ("d_extracted_bound_methods", [
+        _v("", "add = handlers.append\nadd(%s)" % SUP,
+           [_at("add = handlers.append", "bound method append taken" + U + "handlers"),
+            _at("add(%s)" % SUP, "call of unresolved callable add" + U + "add")], params=H),
+        _rows13('getattr(handlers, "append")(%s)' % SUP,
+                ["call of unresolved callable getattr(handlers, 'append')" + U + "getattr(handlers, 'append')"],
+                params=H),
+        _rows13('operator.methodcaller("append", %s)(handlers)' % SUP,
+                ["call of unresolved callable operator.methodcaller('append', contextlib.suppress)" + U + "handlers"],
+                imports=IOR, params=H),
+        _rows13("functools.partial(handlers.append, %s)()" % SUP,
+                ["bound method append taken" + U + "handlers",
+                 "call of unresolved callable functools.partial(handlers.append, contextlib.suppress)" + U
+                 + "functools.partial(handlers.append, contextlib.suppress)"], imports="import functools\n", params=H),
+        _rows13("list(map(handlers.append, [%s]))" % SUP,
+                ["bound method append taken" + U + "handlers", "callback method append of map" + U + "handlers"],
+                params=H),
+        _v("", "for a in [handlers.append]:\n    a(%s)" % SUP,
+           [_at("for a in [handlers.append]:", "bound method append taken" + U + "handlers"),
+            _in("a(%s)" % SUP, "call of unresolved callable a" + U + "a")], params=H),
+        _v(HIGHER, "apply(handlers.append, %s)" % SUP,
+           [_at("apply(handlers.append, %s)" % SUP, "bound method append taken" + U + "handlers"),
+            ("    return f(v)", "call of unresolved callable f" + U + "v")], params=H),
+        _rows13("[handlers.append][0](%s)" % SUP,
+                ["bound method append taken" + U + "handlers",
+                 "call of unresolved callable [handlers.append][0]" + U + "[handlers.append][0]"], params=H)]),
+    ("e_the_fail_closed_method_gate", [
+        _rows13("ns.frobnicate(%s)" % SUP, ["method call frobnicate" + U + "ns"]),
+        _rows13("f(%s)" % SUP, ["call of unresolved callable f" + U + "f"], lines="f = ns.frobnicate\nf(%s)" % SUP)]),
+    ("f_the_constant_index_refused", [
+        _rows13('[ns, {}][0]["k"] = 1', ["subscript store" + U + "[ns, {}][0]"]),
+        _rows13('({}, ns)[-1]["k"] = 1', ["subscript store" + U + "({}, ns)[-1]"]),
+        _rows13('[ns, {}][i]["k"] = 1', ["subscript store" + U + "[ns, {}][i]"], params="p, ns, i"),
+        _rows13('[ns, {}][5]["k"] = 1', ["subscript store" + U + "[ns, {}][5]"])]),
+]
+
+
+@pytest.mark.parametrize("name,variants", REBOUND13, ids=[r[0] for r in REBOUND13])
+def test_m5_fix13_a_to_f_each_route_reports_the_walk_naming_the_refused_line(name, variants):
+    for shape, expect in variants:
+        _named(name, shape, expect)
+
+
+def test_m5_fix13_every_binding_class_of_the_grammar_is_in_the_table():
+    """Every ast node class that carries a binding field is dispatched by the
+    binding table (r3._BINDING_TABLE); the enumeration is of the running
+    interpreter's ast module, so a new grammar form fails here first."""
+    carrying = sorted((c for c in vars(r3.ast).values() if isinstance(c, type) and issubclass(c, r3.ast.AST)
+                       and r3._BIND_FIELDS & set(c._fields)), key=lambda c: c.__name__)
+    assert len(carrying) >= 25
+    assert [c.__name__ for c in carrying if c not in r3._BINDING_TABLE] == []
+    for c in (r3.ast.For, r3.ast.AsyncFor, r3.ast.With, r3.ast.AsyncWith, r3.ast.NamedExpr, r3.ast.comprehension,
+              r3.ast.ExceptHandler, r3.ast.MatchAs, r3.ast.MatchStar, r3.ast.MatchMapping, r3.ast.Global,
+              r3.ast.Nonlocal, r3.ast.Import, r3.ast.ImportFrom, r3.ast.arguments, r3.ast.Assign, r3.ast.AnnAssign,
+              r3.ast.AugAssign, r3.ast.Delete, r3.ast.FunctionDef, r3.ast.AsyncFunctionDef, r3.ast.ClassDef):
+        assert c in carrying or c in (r3.ast.With, r3.ast.AsyncWith), c.__name__    # a With binds by withitem
+    assert r3.ast.withitem in r3._BINDING_TABLE
+
+
+LOOP13 = "for k in ns:\n    print(k)"
+
+
+class _Loop(r3.ast.For):
+    """A binding node of a class the table does not hold (the gate control)."""
+
+
+def test_m5_fix13_e_a_node_outside_the_table_refuses_the_walk_naming_its_line(monkeypatch):
+    """The gate is live: the benign loop is trusted as parsed; the same loop
+    as a node of a class outside the table, and the plain loop with the
+    table narrowed through the seam the proof exposes, each refuse the walk
+    naming the loop's line."""
+    shape, _e = _v("", LOOP13, [])
+    src = _plant(**shape)
+    assert r3.unwrapped_queries(src, "planted") == []
+    line = _line(src, "    for k in ns:")
+    tree = r3.ast.parse(src)
+    loops = [n for n in r3.ast.walk(tree) if isinstance(n, r3.ast.For) and n.lineno == line]
+    assert len(loops) == 1
+    loops[0].__class__ = _Loop
+    rows = r3.unwrapped_queries(src, "planted", tree=tree)
+    assert [k for _l, k in rows] == ["os.walk"], rows
+    assert ("planted", line, "binding form _Loop outside the binding table") in rows[0].rebinds, rows
+    monkeypatch.delitem(r3._BINDING_TABLE, r3.ast.For)
+    rows = r3.unwrapped_queries(src, "planted")
+    assert [k for _l, k in rows] == ["os.walk"], rows
+    assert ("planted", line, "binding form For outside the binding table") in rows[0].rebinds, rows
+
+
+def test_m5_fix13_f_a_constant_index_selects_its_own_element():
+    """Round 12 LOW 1: a constant index into a display selects that element's
+    own mark, a negative one resolved statically: both fresh selections are
+    trusted, the walk still proven (the refused selections are control f)."""
+    shape, _e = _v("", 'fresh = [ns, {}][1]\nfresh["k"] = 1\n[{}, ns][-2]["k"] = 1', [])
+    src = _plant(**shape)
+    assert r3.unwrapped_queries(src, "planted") == []
+    assert _named_rows(src) == []
+
+
+def test_m5_fix13_g_a_benign_module_is_still_trusted():
+    """Every fix 12 (f) item, and: iteration printing the keys, a local list
+    appended to, a dict copy updated, a local operator called on constants,
+    a builtin delivered by a loop over ns, the pure methods and len of ns,
+    a membership test and a sort of its keys: still trusted, walk proven."""
+    test_m5_fix12_f_a_benign_module_is_still_trusted()
+    lines = (LOOP13 + '\nhandlers = []\nhandlers.append(1)\nfresh = dict(ns)\nfresh.update(%s)\nlocal = [1]\n'
+             'local.append(2)\nop = operator.add\nop(1, 2)\nfor f in [len]:\n    f(ns)\nns.get("k")\nns.keys()\n'
+             'len(ns)\n"k" in ns\nx = sorted(ns.keys())') % TDV
+    shape, _e = _v("", lines, [], IOR)
+    src = _plant(**shape)
+    assert r3.unwrapped_queries(src, "planted") == []
+    assert _named_rows(src) == []
+
+
+RULE_NAMES13 = ("subscript store", "attribute store", "subscript deletion", "attribute deletion",
+                "augmented subscript store", "augmented attribute store", "augmented assignment", "method call",
+                "bound method", "callback method", "callback of", "call of unlisted callable",
+                "call of unresolved callable", "in-place call")
+
+
+def _rule13(kind):
+    return max((r for r in RULE_NAMES13 if kind.startswith(r + " ")), key=len)
+
+
+NEW13 = sorted([(n, "method call add" + U + b) for n, b in (
+    (237, "out['basename']"), (263, "out['nonce']"), (266, "out['rule_id']"), (270, "out['wording']"),
+    (272, "out['data']"), (275, "out['data']"))] + [(255, "method call read" + U + "f")] + [
+    (381, "method call add" + U + "self"), (384, "method call append" + U + "self.lists"),
+    (389, "method call append" + U + "self.items")] + [
+    (n, "method call add" + U + "vals") for n in (402, 436, 453, 478, 482, 487)] + [
+    (631, "method call add" + U + "by_group.setdefault(group, set())")])
+
+
+def test_m5_fix13_h_the_real_review_modules_keep_their_verdicts():
+    """Every surface keeps its round 12 verdict by the same test; each rule's
+    unresolved sites are named per module (the rule, the operator or method,
+    the base and the enclosing function or class: REAL), each named row one
+    of the rules, and review_needles.py's new sites are exactly the measured,
+    named ones (every one a method the fail-closed gate no longer takes as
+    pure); the named module is exempt at exactly its measured sites and one
+    more unlisted method lapses it."""
+    r3.test_m5_no_path_query_turns_a_failure_into_absence()
+    root = os.path.join(HERE, "..", "..")
+    for rel, sites in REAL.items():
+        with open(os.path.join(root, rel), encoding="utf-8") as f:
+            src = f.read()
+        unresolved = [x for x in _named_rows(src, "<source>") if r3._unresolved(x[1])]
+        assert _sites(src) == sorted(sites), (rel, unresolved)
+        assert {_rule13(k) for _s, k in sites} <= set(RULE_NAMES13), rel
+    with open(os.path.join(root, "backend/tools/review_needles.py"), encoding="utf-8") as f:
+        src = f.read()
+    rows = [x for x in _named_rows(src, "<source>") if r3._unresolved(x[1])]
+    assert [x for x in rows if x[1].startswith("method call ") and x[1].split()[2] not in r3._MUTATORS] == NEW13
+    assert _named_rows(src, "review_needles.py") == []
+    extra = src + "\n\ndef _planted_extra(d):\n    d.frobnicate(1)\n"
+    assert _lapsed(extra, "method call frobnicate")

@@ -1074,6 +1074,214 @@ _INPLACE_DUNDERS = frozenset("__i%s__" % o for o in _INPLACE_NAMES)        # ns.
 _INPLACE_OPERATORS = frozenset({"operator.i" + o for o in _INPLACE_NAMES + ("concat",)}
                                | {"operator.__i%s__" % o for o in _INPLACE_NAMES + ("concat",)})
 
+# Fix pass 13 (round 12 M5): the unresolved-receiver namespace-reach bound,
+# completed by class.
+#   (1) BINDING FORMS COMPLETE BY CONSTRUCTION. Every construct of the grammar
+#       that binds a name is dispatched through ONE table keyed by ast node
+#       class (_BINDING_TABLE); the candidate resolution (_Reach.resolve), the
+#       data flow (_Flow.bind_lv, _Flow.local) and the namespace marks
+#       (_Reach._sources) read only the bindings it delivers (_Bind). A node of
+#       a class that carries a binding field (_BIND_FIELDS) and is not in the
+#       table, or a stored name no entry delivers, refuses the proof with a
+#       named row, never silently fresh. A call of a callable the resolution
+#       cannot follow is refused when an argument is marked or the callable
+#       itself may be unresolved (_Reach.call_rows).
+#   (2) IDENTITY-PRESERVING CALLS FAIL CLOSED: iter(x) and reversed(x) may
+#       return x itself (_IDENTITY_BUILTINS); x.copy(), copy.copy(x) and
+#       copy.deepcopy(x) carry an unresolved x's full mark; only the
+#       _PROVEN_FRESH builtins return values that alias nothing.
+#   (3) A METHOD CALLED ON AN UNRESOLVED RECEIVER IS A MUTATION unless its name
+#       is on _PURE_METHODS (_MUTATOR_NAMES only names rows); a marked value
+#       handed to a library callable that is not on _ARG_SAFE is refused too.
+#   (4) A constant index into a list or tuple display selects that element's
+#       own mark (_Reach.indexed).
+_BIND_FIELDS = frozenset({"target", "targets", "optional_vars", "name", "elt", "args", "names", "rest", "asname",
+                          "arg", "vararg", "kwarg", "kwonlyargs", "posonlyargs", "generators"})
+_IDENTITY_BUILTINS = frozenset({"iter", "reversed"})     # one argument: may return that argument itself
+_PROVEN_FRESH = frozenset({"len", "str", "repr", "int", "float", "complex", "bool", "hash", "id", "format", "ascii",
+                           "bin", "hex", "oct", "ord", "chr", "isinstance", "issubclass", "callable", "any", "all",
+                           "bytes", "range", "open", "print", "object"})   # results that alias no argument
+_PURE_METHODS = frozenset({
+    "get", "keys", "values", "items", "copy", "index", "count", "__contains__", "__len__", "__iter__",
+    "union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint",
+    "startswith", "endswith", "split", "rsplit", "splitlines", "strip", "lstrip", "rstrip", "lower", "upper",
+    "casefold", "title", "capitalize", "swapcase", "replace", "join", "find", "rfind", "rindex", "format",
+    "format_map", "encode", "decode", "partition", "rpartition", "isdigit", "isalpha", "isalnum", "isspace",
+    "isidentifier", "isupper", "islower", "isascii", "isdecimal", "isnumeric", "istitle", "isprintable", "ljust",
+    "rjust", "center", "zfill", "expandtabs", "translate", "removeprefix", "removesuffix", "hex",
+    "match", "fullmatch", "search", "findall", "finditer", "is_integer", "hexdigest", "digest"})
+_MUTATOR_NAMES = _MUTATORS | frozenset({
+    "append", "extend", "insert", "remove", "add", "discard", "sort", "reverse", "appendleft", "extendleft",
+    "popleft", "rotate", "difference_update", "intersection_update", "symmetric_difference_update", "move_to_end",
+    "subtract"})                                       # names rows only; the gate is _PURE_METHODS
+_ARG_SAFE = frozenset({"builtins." + n for n in (
+    "abs", "all", "any", "ascii", "bin", "bool", "bytearray", "bytes", "callable", "chr", "complex", "dict", "divmod",
+    "enumerate", "filter", "float", "format", "frozenset", "getattr", "hasattr", "hash", "hex", "id", "int",
+    "isinstance", "issubclass", "iter", "len", "list", "map", "max", "memoryview", "min", "next", "object", "oct",
+    "open", "ord", "pow", "print", "range", "repr", "reversed", "round", "set", "slice", "sorted", "str", "sum",
+    "super", "tuple", "type", "zip")} | {
+    "os.walk", "os.stat", "os.lstat", "os.fstat", "os.listdir", "os.scandir", "os.makedirs", "os.fspath",
+    "json.load", "json.loads", "json.dumps", "re.compile", "re.escape", "re.split", "re.fullmatch", "re.match",
+    "re.search", "re.findall", "re.finditer", "subprocess.run", "hashlib.sha256", "hashlib.sha1", "hashlib.md5",
+    "time.strftime", "time.gmtime", "sys.exit", "os.open", "os.read", "os.write", "os.close", "os.readlink",
+    "os.rename", "os.replace", "os.rmdir", "os.remove", "os.unlink", "os.fsync"})
+#   re.sub/re.subn and shutil.rmtree stay off: they call a callable they are handed
+_ARG_SAFE_MODULES = ("os.path", "stat", "math")
+_ARG_SAFE_EXCEPTIONS = frozenset({"builtins." + n for n, v in vars(builtins).items()
+                                  if isinstance(v, type) and issubclass(v, BaseException)})   # a raise's argument
+_BUILTIN_TYPES = frozenset({"dict", "list", "tuple", "set", "frozenset", "sorted", "bytearray", "bytes", "str"})
+_ELEMENT_KEEPING = frozenset({"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"})
+
+
+def _arg_safe(dotted) -> bool:
+    """A library callable proven not to mutate its arguments (_ARG_SAFE, a
+    module of _ARG_SAFE_MODULES, a builtin exception class)."""
+    return dotted in _ARG_SAFE or dotted in _ARG_SAFE_EXCEPTIONS or _in_module(dotted, _ARG_SAFE_MODULES)
+
+
+def _const_index(s):
+    """A constant integer index (a negative one included), else None."""
+    if isinstance(s, ast.UnaryOp) and isinstance(s.op, ast.USub):
+        i = _const_index(s.operand)
+        return None if i is None else -i
+    return s.value if isinstance(s, ast.Constant) and type(s.value) is int else None
+
+
+class _Bind:
+    """One name a binding construct binds (fix pass 13): the BINDER node (the
+    key the flow and the resolution use: a stored Name, an arg, a def or
+    class, an import, an except handler, a match pattern, a declaration),
+    the name, the MODE of the value it receives (value, aug, param, import,
+    local, capture, unres, fresh, declare), the expression that delivers it
+    (the dotted name for an import), the PATH from that expression to the
+    value (steps: "elem" an element of it, "enter" what its __enter__
+    returns, "star" a new list of its elements) and the construct's class."""
+    __slots__ = ("binder", "name", "mode", "expr", "path", "src")
+
+    def __init__(self, binder, name, mode, expr=None, path=(), src=""):
+        self.binder, self.name, self.mode, self.expr, self.path, self.src = binder, name, mode, expr, path, src
+
+
+def _unpack(t, val, path, src):
+    """The bindings a target makes from a value through a path."""
+    if isinstance(t, ast.Name):
+        return [_Bind(t, t.id, "value", val, path, src)]
+    if isinstance(t, (ast.Tuple, ast.List)):
+        if not path and isinstance(val, (ast.Tuple, ast.List)) and len(t.elts) == len(val.elts) \
+                and not any(isinstance(e, ast.Starred) for e in t.elts + val.elts):
+            return [b for e, v in zip(t.elts, val.elts) for b in _unpack(e, v, (), src)]   # a, b = x, y
+        return [b for e in t.elts for b in (_unpack(e.value, val, path + ("star",), src) if isinstance(e, ast.Starred)
+                                            else _unpack(e, val, path + ("elem",), src))]
+    if isinstance(t, ast.Starred):
+        return _unpack(t.value, val, path + ("star",), src)
+    return []                                  # a subscript or attribute target: a store, judged by rule (1)
+
+
+def _b_nothing(n, r):
+    return []
+
+
+def _b_assign(n, r):
+    return [b for t in n.targets for b in _unpack(t, n.value, (), "Assign")]
+
+
+def _b_annassign(n, r):
+    if not isinstance(n.target, ast.Name):
+        return []
+    if n.value is None:
+        return [_Bind(n.target, n.target.id, "fresh", None, (), "AnnAssign")]       # an annotation only
+    return [_Bind(n.target, n.target.id, "value", n.value, (), "AnnAssign")]
+
+
+def _b_augassign(n, r):
+    if not isinstance(n.target, ast.Name):
+        return []
+    return [_Bind(n.target, n.target.id, "aug", n.value, (), "AugAssign")]
+
+
+def _b_namedexpr(n, r):
+    return [_Bind(n.target, n.target.id, "value", n.value, (), "NamedExpr")]
+
+
+def _b_loop(n, r):
+    return _unpack(n.target, n.iter, ("elem",), type(n).__name__)                    # For, AsyncFor, comprehension
+
+
+def _b_withitem(n, r):
+    return [] if n.optional_vars is None else _unpack(n.optional_vars, n.context_expr, ("enter",), "withitem")
+
+
+def _b_delete(n, r):
+    return [_Bind(x, x.id, "fresh", None, (), "Delete") for t in n.targets for x in ast.walk(t)
+            if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Del)]
+
+
+def _b_def(n, r):
+    return [_Bind(n, n.name, "local", n, (), type(n).__name__)]
+
+
+def _b_arguments(n, r):
+    pos = n.posonlyargs + n.args
+    dflt = dict(zip(map(id, pos[len(pos) - len(n.defaults):]), n.defaults))
+    dflt.update(zip(map(id, n.kwonlyargs), n.kw_defaults))
+    return [_Bind(a, a.arg, "param", dflt.get(id(a)), (), "arguments")
+            for a in pos + [n.vararg] + n.kwonlyargs + [n.kwarg] if a is not None]
+
+
+def _b_import(n, r):
+    return [_Bind(n, a.asname or a.name.split(".")[0], "import", a.name if a.asname else a.name.split(".")[0], (),
+                  "Import") for a in n.names]
+
+
+def _b_importfrom(n, r):
+    return [_Bind(n, a.asname or a.name, "import", n.module + "." + a.name if n.module and not n.level else None, (),
+                  "ImportFrom") for a in n.names]
+
+
+def _b_except(n, r):
+    return [_Bind(n, n.name, "unres", n.type, (), "ExceptHandler")] if n.name else []
+
+
+def _b_capture(n, r):
+    name = n.rest if isinstance(n, ast.MatchMapping) else n.name
+    return [_Bind(n, name, "capture", r.match_subject(n), (), type(n).__name__)] if name else []
+
+
+def _b_declare(n, r):
+    return [_Bind(n, g, "declare", None, (), type(n).__name__) for g in n.names]
+
+
+def _b_typealias(n, r):
+    return [_Bind(n.name, n.name.id, "fresh", None, (), "TypeAlias")] if isinstance(n.name, ast.Name) else []
+
+
+def _b_typeparam(n, r):
+    return [_Bind(n, n.name, "fresh", None, (), type(n).__name__)]
+
+
+# The binding table (fix pass 13): every ast node class that carries a
+# binding field, with what it binds. The classes that carry such a field
+# but bind nothing themselves are listed too, each with its reason: a Call's
+# args are arguments, a keyword's arg names a callee's parameter, a lambda's
+# parameters are bound by its arguments node (as a def's are), an arg is
+# delivered by its arguments node, a comprehension expression binds through
+# its comprehension nodes, and an alias through its import.
+_BINDING_TABLE = {
+    ast.Assign: _b_assign, ast.AnnAssign: _b_annassign, ast.AugAssign: _b_augassign, ast.NamedExpr: _b_namedexpr,
+    ast.For: _b_loop, ast.AsyncFor: _b_loop, ast.comprehension: _b_loop, ast.withitem: _b_withitem,
+    ast.Delete: _b_delete, ast.FunctionDef: _b_def, ast.AsyncFunctionDef: _b_def, ast.ClassDef: _b_def,
+    ast.arguments: _b_arguments, ast.Import: _b_import, ast.ImportFrom: _b_importfrom,
+    ast.ExceptHandler: _b_except, ast.MatchAs: _b_capture, ast.MatchStar: _b_capture,
+    ast.MatchMapping: _b_capture, ast.Global: _b_declare, ast.Nonlocal: _b_declare,
+    ast.Call: _b_nothing, ast.keyword: _b_nothing, ast.Lambda: _b_nothing, ast.arg: _b_nothing,
+    ast.ListComp: _b_nothing, ast.SetComp: _b_nothing, ast.GeneratorExp: _b_nothing, ast.DictComp: _b_nothing,
+    ast.alias: _b_nothing,
+}
+for _cls, _h in (("TypeAlias", _b_typealias), ("TypeVar", _b_typeparam), ("ParamSpec", _b_typeparam),
+                 ("TypeVarTuple", _b_typeparam)):
+    if hasattr(ast, _cls):
+        _BINDING_TABLE[getattr(ast, _cls)] = _h
+
 
 def _dunder(s) -> bool:
     return isinstance(s, str) and len(s) > 4 and s.startswith("__") and s.endswith("__")
@@ -1151,7 +1359,14 @@ class _Flow:
     held argument; and a builtin that calls a callable argument
     (_HIGHER_ORDER) marks that callback as if it were called directly
     (higher_order_lv, callback_lv), an unresolvable callback making the
-    result _UNRES."""
+    result _UNRES.
+    Fix pass 13 (round 12 M5): every binding is read from the binding table
+    (bind_lv by the mode _Bind carries; a binder the table did not deliver is
+    _UNRES and refused by the gate); a builtin is fresh only on _PROVEN_FRESH;
+    iter(x) and reversed(x) over an unresolved x are _UNRES (they may return
+    x), and x.copy(), copy.copy(x) and copy.deepcopy(x) carry x's mark
+    (joined); a constant index into a list or tuple display reads that
+    element's own level (_Reach.indexed)."""
 
     def __init__(self, reach):
         self.r, self.parents, self.binds = reach, reach.parents, reach.binds
@@ -1210,28 +1425,18 @@ class _Flow:
     # -- scopes ----------------------------------------------------------------------
     def local(self, fn):
         """The bindings made in a callee's own subtree, by name, and the names
-        it declares global or nonlocal."""
+        it declares global or nonlocal (fix pass 13: read from the binding
+        table's deliveries, _Reach.records)."""
         got = self.locals.get(id(fn))
         if got is None:
             got, decl = {}, set()
-            for c in ast.iter_child_nodes(fn):
-                for n in ast.walk(c):
-                    names = ()
-                    if isinstance(n, ast.arg):
-                        names = (n.arg,)
-                    elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
-                        names = (n.id,)
-                    elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                        names = tuple(a.asname or a.name.split(".")[0] for a in n.names)
-                    elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
-                                        ast.MatchAs, ast.MatchStar)) and n.name:
-                        names = (n.name,)
-                    elif isinstance(n, ast.MatchMapping) and n.rest:
-                        names = (n.rest,)
-                    elif isinstance(n, (ast.Global, ast.Nonlocal)):
-                        decl |= set(n.names)
-                    for x in names:
-                        got.setdefault(x, []).append(n)
+            for b in self.r.records:
+                if b.binder is fn or not self.inside(b.binder, fn):
+                    continue
+                if b.mode == "declare":
+                    decl.add(b.name)
+                else:
+                    got.setdefault(b.name, []).append(b.binder)
             self.locals[id(fn)], self.declared[id(fn)] = got, decl
         return got
 
@@ -1239,7 +1444,7 @@ class _Flow:
         return ctx is not None and name in self.local(ctx[0]) and name not in self.declared[id(ctx[0])]
 
     def scope_binds(self, name, ctx):
-        return self.local(ctx[0])[name] if self.is_local(name, ctx) else self.binds.get(name, [])
+        return self.local(ctx[0])[name] if self.is_local(name, ctx) else self.r.effective(name)
 
     def inside(self, node, fn) -> bool:
         e = self.encl.get(id(node))
@@ -1258,10 +1463,10 @@ class _Flow:
 
     def compute(self, key):
         if key[0] == "n":
-            binds = self.binds.get(key[1], [])
+            binds = self.r.effective(key[1])                         # fix 13: a declaration binds nothing
             if not binds:
                 return _FRESH if hasattr(builtins, key[1]) else _UNRES      # a builtin, or an unbound global
-            v = max(self.bind_lv(b, None) for b in binds)
+            v = max(self.bind_lv(b, None, key[1]) for b in binds)
             if v < _HOLDS and any(self.lv(x, None) >= _HOLDS for _s, vals in self.muts.get(key[1], ())
                                   for x in vals):
                 v = _HOLDS                                           # a mutation wrote a held value into it
@@ -1269,7 +1474,7 @@ class _Flow:
         if key[0] == "l":
             fn = self.nodes[key[1]]
             ctx = (fn, key[2])
-            v = max(self.bind_lv(b, ctx) for b in self.local(fn)[key[3]])
+            v = max(self.bind_lv(b, ctx, key[3]) for b in self.local(fn)[key[3]])
             if v < _HOLDS and any(self.lv(x, ctx) >= _HOLDS for s, vals in self.muts.get(key[3], ())
                                   if self.inside(s, fn) for x in vals):
                 v = _HOLDS
@@ -1278,42 +1483,34 @@ class _Flow:
             return self.summary(self.nodes[key[1]], key[2])
         return self.instance(self.nodes[key[1]], key[2])
 
-    def bind_lv(self, b, ctx):
-        """The level one binding gives its name, read in ctx."""
-        if isinstance(b, ast.arg):
+    def bind_lv(self, b, ctx, name):
+        """The level one binding gives its name, read in ctx (fix pass 13: by
+        the mode the binding table delivered; a binder it did not deliver is
+        _UNRES, and the proof is refused by the table gate)."""
+        d = self.r.recs.get((id(b), name))
+        if d is None:
+            return _UNRES                                            # outside the binding table
+        if d.mode == "param":
             owner = self.encl.get(id(b))
             if ctx is None or owner is not ctx[0]:
                 return _UNRES                                        # a value a caller supplies
-            d = self.default_of(owner, b)
-            return max(ctx[1], _FRESH if d is None else self.lv(d, None))
-        if isinstance(b, (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
-                          ast.Global, ast.Nonlocal)):
+            return max(ctx[1], _FRESH if d.expr is None else self.lv(d.expr, None))
+        if d.mode in ("import", "local", "fresh", "declare"):
             return _FRESH
-        if not isinstance(b, ast.Name):
-            return _UNRES                                            # an except target, a match capture
-        if isinstance(b.ctx, ast.Del):
-            return _FRESH
-        stmt, unpacked = self.parents.get(id(b)), False
-        while isinstance(stmt, (ast.Tuple, ast.List, ast.Starred)):
-            stmt, unpacked = self.parents.get(id(stmt)), True
-        if isinstance(stmt, ast.AugAssign):
-            return _HOLDS if self.lv(stmt.value, ctx) >= _HOLDS else _FRESH   # the object keeps; it may gain
-        if isinstance(stmt, ast.AnnAssign) and stmt.value is None:
-            return _FRESH
-        if isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
-            tgt, val = self.parents.get(id(b)), stmt.value
-            if unpacked and isinstance(stmt, ast.Assign) and any(t is tgt for t in stmt.targets) \
-                    and isinstance(tgt, (ast.Tuple, ast.List)) and isinstance(val, (ast.Tuple, ast.List)) \
-                    and len(tgt.elts) == len(val.elts) \
-                    and not any(isinstance(e, ast.Starred) for e in tgt.elts + val.elts):
-                return self.lv(val.elts[[i for i, e in enumerate(tgt.elts) if e is b][0]], ctx)   # a, b = x, y
-            v = self.lv(val, ctx)
-            return self.carried(v) if unpacked else v                # first, *rest = seq; a, b = seq
-        if isinstance(stmt, (ast.For, ast.AsyncFor, ast.comprehension)):
-            return self.carried(self.lv(stmt.iter, ctx))             # an element
-        if isinstance(stmt, ast.withitem):
-            return self.carried(self.lv(stmt.context_expr, ctx))     # what __enter__ returns (nullcontext(ns))
-        return _UNRES
+        if d.mode == "unres":
+            return _UNRES                                            # an except target
+        if d.mode == "capture":
+            return self.carried(self.lv(d.expr, ctx))                # a match capture: the subject or a part of it
+        if d.mode == "aug":
+            return _HOLDS if self.lv(d.expr, ctx) >= _HOLDS else _FRESH      # the object keeps; it may gain
+        v = self.lv(d.expr, ctx)
+        return self.carried(v) if d.path else v                      # an element, an __enter__ result, a star list
+
+    @staticmethod
+    def joined(v):
+        """Fix pass 13: the level of a call result that may be its argument
+        itself: the full unresolved mark stays _UNRES, a held one _HOLDS."""
+        return _UNRES if v >= _UNRES else _HOLDS if v >= _HOLDS else _FRESH
 
     @staticmethod
     def carried(v):
@@ -1321,18 +1518,6 @@ class _Flow:
         level v by iteration, unpacking, a with target or a copy builtin: the
         unresolved mark of an element survives every way of reaching it."""
         return _UNRES if v >= _HOLDS else _FRESH                     # fix 12: element provenance
-
-    @staticmethod
-    def default_of(fn, a):
-        A = fn.args
-        pos = A.posonlyargs + A.args
-        for x, d in zip(pos[len(pos) - len(A.defaults):], A.defaults):
-            if x is a:
-                return d
-        for x, d in zip(A.kwonlyargs, A.kw_defaults):
-            if x is a:
-                return d
-        return None
 
     # -- expressions -----------------------------------------------------------------
     def lv(self, node, ctx):
@@ -1343,6 +1528,9 @@ class _Flow:
         if isinstance(node, ast.Attribute):
             return _UNRES if self.lv(node.value, ctx) >= _HOLDS else _FRESH
         if isinstance(node, ast.Subscript):
+            e = self.r.indexed(node)
+            if e is not None:
+                return self.lv(e, ctx)                               # fix 13: the selected element's own mark
             base = self.lv(node.value, ctx)
             if isinstance(node.slice, ast.Slice) or isinstance(node.slice, ast.Tuple) and any(
                     isinstance(e, ast.Slice) for e in node.slice.elts):
@@ -1380,15 +1568,16 @@ class _Flow:
         f = node.func
         if isinstance(f, ast.Attribute):
             if f.attr == "copy" and not args:
-                return _HOLDS if self.lv(f.value, ctx) >= _HOLDS else _FRESH   # a copy: fresh, same elements
+                return self.joined(self.lv(f.value, ctx))           # fix 13: may be the receiver itself
             c = self.r.cands(f)
-            if c == {"copy.copy"}:
-                return _HOLDS if al >= _HOLDS else _FRESH
-            if c == {"copy.deepcopy"}:
-                return _FRESH
+            if c and c <= {"copy.copy", "copy.deepcopy"}:
+                return self.joined(al)                               # fix 13: __copy__ may return its argument
             return _UNRES                                            # a method's or an imported callable's result
         if not isinstance(f, ast.Name):
             return _UNRES
+        if f.id in _IDENTITY_BUILTINS and not self.scope_binds(f.id, ctx) and len(node.args) == 1 \
+                and not node.keywords and al >= _UNRES:
+            return _UNRES                                            # fix 13: iter(x), reversed(x) may be x
         if f.id in _HIGHER_ORDER and not self.scope_binds(f.id, ctx) and hasattr(builtins, f.id):
             return self.higher_order_lv(node, ctx)
         v = self.name_call_lv(f.id, pl, al, ctx)
@@ -1446,7 +1635,7 @@ class _Flow:
                 return None
             if name in _ARG_RETURNING:
                 return _UNRES if al >= _HOLDS else _FRESH            # fix 12: may return an argument or its element
-            if name in _FRESH_BUILTINS:
+            if name in _PROVEN_FRESH:                                # fix 13: the allowlist is the gate
                 return _FRESH
             if name in _COPY_BUILTINS:
                 return _HOLDS if self.carried(al) >= _HOLDS else _FRESH   # a copy: writes to it reach no namespace
@@ -1558,58 +1747,381 @@ class _Reach:
       unpacking, walrus, with-as, loop and comprehension targets, except-as,
       function and lambda defaults, a def through what it returns or yields,
       a class through its body), to anything that contains a
-      namespace-reaching expression or name, to a fixed point."""
+      namespace-reaching expression or name, to a fixed point.
+    Since fix pass 13 the bindings come from ONE table keyed by ast node
+    class (_BINDING_TABLE, records/recs); the candidate resolution (resolve)
+    follows every binding it delivers, a loop, comprehension or with target
+    through the elements or __enter__ result it can see, a parameter as
+    anything a caller passes; a node the table does not hold is a named
+    refusal (unknown)."""
 
     def __init__(self, tree, names):
         self.tree, self.parents, self.names = tree, names.parents, names
-        self.binds, self.cache = {}, {}
-        for n in ast.walk(tree):
-            if isinstance(n, ast.arg):
-                self.binds.setdefault(n.arg, []).append(n)
-            elif isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
-                self.binds.setdefault(n.id, []).append(n)
-            elif isinstance(n, (ast.Import, ast.ImportFrom)):
-                for a in n.names:
-                    self.binds.setdefault(a.asname or a.name.split(".")[0], []).append(n)
-            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
-                                ast.MatchAs, ast.MatchStar)) and n.name:
-                self.binds.setdefault(n.name, []).append(n)
-            elif isinstance(n, (ast.Global, ast.Nonlocal)):
-                for g in n.names:
-                    self.binds.setdefault(g, []).append(n)
-            elif isinstance(n, ast.MatchMapping) and n.rest:
-                self.binds.setdefault(n.rest, []).append(n)
+        self.binds, self.cache, self.recs, self.records = {}, {}, {}, []
+        gate = []
+        for n in ast.walk(tree):                                     # fix 13: the binding table, by construction
+            h = _BINDING_TABLE.get(type(n))
+            if h is None:
+                if _BIND_FIELDS & set(type(n)._fields):
+                    gate.append((n, "binding form %s outside the binding table" % type(n).__name__))
+                continue
+            for b in h(n, self):
+                self.records.append(b)
+                self.recs[(id(b.binder), b.name)] = b
+                self.binds.setdefault(b.name, []).append(b.binder)
+        gate += [(n, "binding of %s outside the binding table" % n.id) for n in ast.walk(tree)
+                 if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)) and (id(n), n.id) not in self.recs]
+        self.unknown = gate                                          # the gate: each refuses the proof, named
+        defs, other, stored = set(), set(), set()
+        for c in ast.walk(tree):
+            if isinstance(c, ast.ClassDef):
+                for x in c.body:
+                    if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        defs.add(x.name)
+                    else:
+                        other |= {y.id for y in ast.walk(x) if isinstance(y, ast.Name)
+                                  and isinstance(y.ctx, (ast.Store, ast.Del))}
+                        other |= {y.name for y in ast.walk(x) if isinstance(y, (ast.ClassDef, ast.FunctionDef,
+                                                                                ast.AsyncFunctionDef))}
+            elif isinstance(c, ast.Attribute) and isinstance(c.ctx, (ast.Store, ast.Del)):
+                stored.add(c.attr)
+        # the attribute names whose call on an object the module makes runs builtin or module code: a
+        # pure method name, or a method a module class defines, unless anything stores an attribute of it
+        self.methods = ((defs - other) | _PURE_METHODS) - stored
         self.marked = set()
         self.flow = _Flow(self)
         self._mark()
 
+    def level_at(self, node):
+        """Fix pass 13: the level of an expression read in its own function
+        scope (its parameters caller-supplied; free and global names at module
+        scope, merged), as fix 12 reads an augmented name (aug_name_refused)."""
+        fn = self.flow.encl.get(id(node))
+        return self.flow.level(node, None if fn is None else (fn, _UNRES))
+
+    def made_here_at(self, node) -> bool:
+        """made_here, the base read in its own function scope (level_at)."""
+        r = node
+        while isinstance(r, (ast.Attribute, ast.Subscript, ast.Starred)):
+            r = r.value
+        if isinstance(r, ast.Name) and not self.effective(r.id):
+            return False
+        return self.level_at(node) < _UNRES
+
+    def library(self, node) -> bool:
+        """Fix pass 13: a reference that resolves only to dotted names (a
+        module, an imported or builtin object): a call through it is a
+        library call, judged by _ARG_SAFE (rule (8)), not a method of a value."""
+        rs = self.resolve(node)
+        return bool(rs) and all(isinstance(x, str) for x in rs)
+
+    def unresolved_receiver(self, n) -> bool:
+        """Fix pass 13, rule (3): the receiver of the method n is a value the
+        proof cannot resolve: read in its own function scope (level_at), or,
+        for a fix 11 mutator name, in the merged scope as fix 11 read it; a
+        library reference is no receiver."""
+        if self.library(n.value):
+            return False
+        if n.attr in _MUTATORS and not self.made_here(n.value):
+            return True
+        return not self.made_here_at(n.value)
+
+    def effective(self, name):
+        """Fix pass 13: the binders of a name that deliver a value (a global or
+        nonlocal declaration binds nothing: the name resolves to the module
+        binding, and a name only declared is unbound)."""
+        return [b for b in self.binds.get(name, []) if self.recs[(id(b), name)].mode != "declare"]
+
+    def match_subject(self, n):
+        p = self.parents.get(id(n))
+        while p is not None and not isinstance(p, ast.Match):
+            p = self.parents.get(id(p))
+        return None if p is None else p.subject
+
     def cands(self, node, seen=frozenset()) -> set:
         """Every dotted name a reference can stand for through every binding
-        of its names (the _candidates rule), None for anything unresolvable."""
+        of its names (the _candidates rule), None for anything unresolvable.
+        Fix pass 13: the dotted part of resolve, so it follows every binding
+        form the table delivers."""
+        return {x if isinstance(x, str) else None for x in self.resolve(node, seen)}
+
+    def resolve(self, node, seen=frozenset()) -> set:
+        """Fix pass 13: every value a reference can stand for, through every
+        binding the table delivers: a dotted name (an import, a builtin), a
+        ("local", node) for a module def, class or lambda (a class's instance
+        too), or None for anything the resolution cannot follow (a parameter,
+        an except target, a capture, an element of a container it cannot see
+        into, the result of a call other than a local callee's return paths,
+        or next, min or max over elements it can see)."""
         if isinstance(node, ast.Attribute):
-            return {None if b is None else b + "." + node.attr for b in self.cands(node.value, seen)}
+            return {b + "." + node.attr if isinstance(b, str) else None for b in self.resolve(node.value, seen)}
+        if isinstance(node, ast.NamedExpr):
+            return self.resolve(node.value, seen)
+        if isinstance(node, ast.IfExp):
+            return self.resolve(node.body, seen) | self.resolve(node.orelse, seen)
+        if isinstance(node, ast.BoolOp):
+            return set().union(*[self.resolve(v, seen) for v in node.values])
+        if isinstance(node, ast.Lambda):
+            return {("local", node)}
+        if isinstance(node, ast.Subscript):
+            e = self.indexed(node)
+            if e is not None:
+                return self.resolve(e, seen)
+            sl = node.slice
+            if isinstance(sl, ast.Slice) or isinstance(sl, ast.Tuple) and any(isinstance(x, ast.Slice) for x in sl.elts):
+                return {None}                                        # a sequence, not one of its elements
+            return self.resolve_all(self.elements(node.value, seen), seen)
+        if isinstance(node, ast.Call):
+            return self.call_result(node, seen)
         if not isinstance(node, ast.Name) or node.id in seen:
             return {None}
         if not seen and node.id in self.cache:
             return self.cache[node.id]
-        binds = self.binds.get(node.id, [])
+        binds = self.effective(node.id)
         if not binds:
             out = {"builtins." + node.id} if hasattr(builtins, node.id) else {None}
         else:
             out = set()
             for b in binds:
-                if isinstance(b, ast.Import):
-                    out |= {a.name if a.asname else a.name.split(".")[0] for a in b.names
-                            if (a.asname or a.name.split(".")[0]) == node.id}
-                elif isinstance(b, ast.ImportFrom) and b.module and not b.level:
-                    out |= {b.module + "." + a.name for a in b.names if (a.asname or a.name) == node.id}
-                elif isinstance(b, ast.Name) and isinstance(b.ctx, ast.Store) and self.names._assigned(b):
-                    out |= self.cands(self.parents[id(b)].value, seen | {node.id})
-                else:
-                    out.add(None)
+                out |= self.resolve_bind(self.recs[(id(b), node.id)], seen | {node.id})
+            out = out or {None}
         if not seen:
             self.cache[node.id] = out
         return out
+
+    def resolve_all(self, exprs, seen) -> set:
+        if exprs is None:
+            return {None}
+        return set().union(*[self.resolve(e, seen) for e in exprs]) if exprs else {None}
+
+    def resolve_bind(self, b, seen) -> set:
+        """What one delivered binding can stand for."""
+        if b.mode == "import":
+            return {b.expr}                                          # the dotted name; None for a relative import
+        if b.mode == "local":
+            return {("local", b.expr)}
+        if b.mode == "param":
+            return {None} | (self.resolve(b.expr, seen) if b.expr is not None else set())   # a caller may pass any
+        if b.mode == "value":
+            return self.resolve_all(self.values(b.expr, b.path, seen), seen)
+        return {None}                         # an except target, a capture, an annotation, a deletion, an aug
+
+    def values(self, expr, path, seen):
+        """The expressions a binding's value can be, along its path, or None
+        when one step cannot be seen through."""
+        vs = [expr]
+        for step in path:
+            if step == "star":
+                return None                                          # a new list, not an element
+            nxt = []
+            for v in vs:
+                got = self.elements(v, seen) if step == "elem" else self.entered(v)
+                if got is None:
+                    return None
+                nxt += got
+            vs = nxt
+        return vs
+
+    def entered(self, v):
+        """What a with statement's manager returns from __enter__, where the
+        resolution can see it (contextlib.nullcontext(x) returns x)."""
+        if isinstance(v, ast.Call) and v.args and not isinstance(v.args[0], ast.Starred) \
+                and self.cands(v.func) == {"contextlib.nullcontext"}:
+            return [v.args[0]]
+        return None
+
+    def indexed(self, node):
+        """Fix pass 13 (round 12 LOW 1): the element a constant integer index
+        selects from a list or tuple display (negative constants resolved
+        statically), else None (an out-of-range constant, a non-constant
+        index, a slice, a starred element or a container that is no display
+        keeps the joined mark of fix 12)."""
+        v = node.value
+        if not isinstance(v, (ast.List, ast.Tuple)) or any(isinstance(e, ast.Starred) for e in v.elts):
+            return None
+        i = _const_index(node.slice)
+        if i is None or not -len(v.elts) <= i < len(v.elts):
+            return None
+        return v.elts[i]
+
+    def elements(self, node, seen):
+        """The expressions an element of node can be, or None when the
+        resolution cannot see into it."""
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            out = []
+            for e in node.elts:
+                if isinstance(e, ast.Starred):
+                    got = self.elements(e.value, seen)
+                    if got is None:
+                        return None
+                    out += got
+                else:
+                    out.append(e)
+            return out
+        if isinstance(node, ast.Dict):
+            return None if any(k is None for k in node.keys) else list(node.keys)
+        if isinstance(node, ast.Subscript):
+            e = self.indexed(node)
+            if e is not None:
+                return self.elements(e, seen)
+            sl = node.slice
+            if isinstance(sl, ast.Slice) or isinstance(sl, ast.Tuple) and any(isinstance(x, ast.Slice) for x in sl.elts):
+                return self.elements(node.value, seen)
+            return None
+        if isinstance(node, ast.IfExp):
+            a, b = self.elements(node.body, seen), self.elements(node.orelse, seen)
+            return None if a is None or b is None else a + b
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _ELEMENT_KEEPING \
+                and not self.effective(node.func.id) and len(node.args) == 1 and not isinstance(node.args[0], ast.Starred) \
+                and all(k.arg in ("key", "reverse") for k in node.keywords):
+            return self.elements(node.args[0], seen)
+        if isinstance(node, ast.Name) and node.id not in seen and node.id not in self.flow.muts:
+            binds = self.effective(node.id)
+            if not binds:
+                return None
+            out = []
+            for b in binds:
+                d = self.recs[(id(b), node.id)]
+                if d.mode != "value":
+                    return None
+                star = bool(d.path) and d.path[-1] == "star"
+                vs = self.values(d.expr, d.path[:-1] if star else d.path, seen | {node.id})
+                if vs is None:
+                    return None
+                for v in vs:
+                    got = self.elements(v, seen | {node.id})
+                    if got is None:
+                        return None
+                    out += got
+            return out
+        return None
+
+    def call_result(self, node, seen) -> set:
+        """What the result of a call can stand for: next, min or max of
+        elements the resolution sees; the return paths of a module def or
+        lambda; an instance of a module class; else None."""
+        f = node.func
+        if isinstance(f, ast.Name) and f.id in ("next", "min", "max") and not self.effective(f.id) \
+                and len(node.args) == 1 and not isinstance(node.args[0], ast.Starred):
+            return self.resolve_all(self.elements(node.args[0], seen), seen)
+        out = set()
+        for x in self.resolve(f, seen):
+            if isinstance(x, tuple) and isinstance(x[1], ast.ClassDef):
+                out.add(x)                                           # an instance of a module class
+            elif isinstance(x, tuple) and ("ret", id(x[1])) not in seen:
+                out |= self.returns(x[1], seen | {("ret", id(x[1]))})
+            else:
+                out.add(None)
+        return out or {None}
+
+    def returns(self, fn, seen) -> set:
+        if isinstance(fn, ast.Lambda):
+            return self.resolve(fn.body, seen)
+        if any(not (isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod") and not self.effective(d.id))
+               for d in fn.decorator_list):
+            return {None}                                            # a decorator the resolution does not follow
+        out, stack = set(), list(fn.body)
+        while stack:
+            x = stack.pop()
+            if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                continue
+            if isinstance(x, (ast.Yield, ast.YieldFrom, ast.Await)):
+                return {None}
+            if isinstance(x, ast.Return):
+                out |= self.resolve(x.value, seen) if x.value is not None else {None}
+            stack.extend(ast.iter_child_nodes(x))
+        return out or {None}
+
+    def builtin_typed(self, node, seen=frozenset()) -> bool:
+        """Fix pass 13: a list, tuple, set, dict, generator, string or bytes
+        the module builds (a display, a comprehension, a literal, a call of an
+        unbound builtin constructor, a slice of one, a name only ever bound to
+        one), whose attributes are only that type's builtin methods."""
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict, ast.ListComp, ast.SetComp, ast.DictComp,
+                             ast.GeneratorExp, ast.Constant, ast.JoinedStr)):
+            return True
+        if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
+            return self.builtin_typed(node.value, seen)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _BUILTIN_TYPES \
+                and not self.effective(node.func.id):
+            return True
+        if isinstance(node, ast.Name) and node.id not in seen:
+            fn = self.flow.encl.get(id(node))
+            binds = self.flow.local(fn)[node.id] if fn is not None and self.flow.is_local(node.id, (fn, _UNRES)) \
+                else self.effective(node.id)                         # the name in its own scope
+            return bool(binds) and all(
+                d.mode == "aug" or d.mode == "value" and not d.path and self.builtin_typed(d.expr, seen | {node.id})
+                or d.mode == "value" and d.path == ("enter",) and isinstance(d.expr, ast.Call)
+                and isinstance(d.expr.func, ast.Name) and d.expr.func.id == "open" and not self.effective("open")
+                for d in (self.recs[(id(b), node.id)] for b in binds))   # with open(...) as f: the file itself
+        return False
+
+    def unresolved_callee(self, f, rs) -> bool:
+        """Fix pass 13: a callee the resolution cannot follow. A method of an
+        object the module makes is followed when that object is a builtin
+        container or string (its methods are builtin) or the name is a method
+        a module class defines and nothing rebinds; a held object's other
+        attributes may be anything it holds."""
+        if isinstance(f, ast.Attribute):
+            if all(isinstance(x, str) for x in rs):
+                return False                                         # a library callable: _ARG_SAFE judges it
+            return self.level_at(f) >= _UNRES and not self.builtin_typed(f.value) and f.attr not in self.methods
+        return None in rs
+
+    def callee_rows(self, f, marked, what) -> list:
+        """Fix pass 13: the rows of calling the value f with arguments of
+        which `marked` is the first marked one (None when all are fresh):
+        an unlisted library callable over a marked argument, and a callable
+        the resolution cannot follow over a marked argument or that may
+        itself be unresolved (a bound method of an unresolved receiver,
+        extracted or delivered, or a value a caller supplies)."""
+        rs = self.resolve(f)
+        rows = []
+        if marked is not None and any(not _arg_safe(d) for d in rs if isinstance(d, str)):
+            rows.append("%s %s through unresolved base %s" % (what % "unlisted", ast.unparse(f), ast.unparse(marked)))
+        if self.unresolved_callee(f, rs):
+            if marked is not None or self.level_at(f) >= _UNRES:
+                rows.append("%s %s through unresolved base %s" % (what % "unresolved", ast.unparse(f),
+                                                                  ast.unparse(marked if marked is not None else f)))
+        return rows
+
+    def call_rows(self, call) -> list:
+        """Fix pass 13: the rows of one call. A method of an unresolved
+        receiver is rule (3)'s; a callback of map, filter, iter, sorted, min
+        or max is judged as a call at this site with the other arguments'
+        elements; an in-place operator delivered through a call, a subscript
+        or a walrus is rule (7)'s, here; every other callee by callee_rows."""
+        f, rows = call.func, []
+        args = [a.value if isinstance(a, ast.Starred) else a for a in call.args] + [k.value for k in call.keywords]
+        if isinstance(f, ast.Attribute) and self.unresolved_receiver(f):
+            return rows                                              # rule (3)
+        if isinstance(f, ast.Name) and f.id in _HIGHER_ORDER and not self.effective(f.id) and hasattr(builtins, f.id):
+            pos, kw = _HIGHER_ORDER[f.id]
+            calls, rest = [], []
+            for i, a in enumerate(call.args):
+                a = a.value if isinstance(a, ast.Starred) else a
+                (calls if i == pos and (f.id != "iter" or len(call.args) == 2) else rest).append(a)
+            for k in call.keywords:
+                (calls if k.arg is not None and k.arg == kw else rest).append(k.value)
+            cm = next((a for a in rest if self.level_at(a) >= _HOLDS), None)
+            for c in calls:
+                if isinstance(c, ast.Constant) and c.value is None:
+                    continue                                         # filter(None, ...)
+                if isinstance(c, ast.Attribute) and self.unresolved_receiver(c):
+                    if c.attr not in _PURE_METHODS:
+                        rows.append("callback method %s of %s through unresolved base %s"
+                                    % (c.attr, f.id, ast.unparse(c.value)))
+                    continue
+                rows += self.callee_rows(c, cm, "callback of " + f.id + " (%s)")
+            args = rest
+        marked = next((a for a in args if self.level_at(a) >= _HOLDS), None)
+        if not isinstance(f, (ast.Name, ast.Attribute)) and self.cands(f) & _INPLACE_OPERATORS:
+            recv = call.args[0] if call.args else None
+            if recv is None or isinstance(recv, ast.Starred) or not self.made_here(recv):
+                rows.append("in-place call %s through unresolved base %s"
+                            % (ast.unparse(f), "(no receiver)" if recv is None else ast.unparse(recv)))
+        rows += self.callee_rows(f, marked, "call of %s callable")
+        return rows
 
     def reach_callable(self, node):
         """The first dotted name a reference can stand for that is a
@@ -1627,7 +2139,7 @@ class _Reach:
         a = call.args[1] if len(call.args) >= 2 else None
         name = a.value if isinstance(a, ast.Constant) and isinstance(a.value, str) else None
         computed = name is None                       # a name built at run time
-        if name in _MUTATORS and not (call.args and self.made_here(call.args[0])):
+        if name in _MUTATOR_NAMES and not (call.args and self.made_here(call.args[0])):
             return False                              # a bound mutator of an unresolved object
         return c in _NAME_ARG and not computed and not _dunder(name)
 
@@ -1725,31 +2237,19 @@ class _Reach:
 
     def _sources(self) -> list:
         """(names bound, the expressions they are bound from) for every
-        binding form of the module."""
+        binding the table delivers (fix pass 13; the same forms fix 10 listed
+        by hand: a value, an augmented value, a default, an except type, a
+        match subject, a def through what it returns or yields, a class
+        through its body)."""
         out = []
-        for n in ast.walk(self.tree):
-            if isinstance(n, ast.Assign):
-                out.append((set().union(*[_target_names(t) for t in n.targets]), [n.value]))
-            elif isinstance(n, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and n.value is not None:
-                out.append((_target_names(n.target), [n.value]))
-            elif isinstance(n, (ast.For, ast.AsyncFor, ast.comprehension)):
-                out.append((_target_names(n.target), [n.iter]))
-            elif isinstance(n, ast.withitem) and n.optional_vars is not None:
-                out.append((_target_names(n.optional_vars), [n.context_expr]))
-            elif isinstance(n, ast.ExceptHandler) and n.name and n.type is not None:
-                out.append(({n.name}, [n.type]))
-            elif isinstance(n, ast.arguments):
-                pos = n.posonlyargs + n.args
-                out += [({a.arg}, [d]) for a, d in zip(pos[len(pos) - len(n.defaults):], n.defaults)]
-                out += [({a.arg}, [d]) for a, d in zip(n.kwonlyargs, n.kw_defaults) if d is not None]
-            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                out.append(({n.name}, [x.value for x in ast.walk(n) if isinstance(x, (ast.Return, ast.Yield,
-                                                                                     ast.YieldFrom)) and x.value]))
-            elif isinstance(n, ast.ClassDef):
-                out.append(({n.name}, list(n.body)))
-            elif isinstance(n, ast.Match):
-                caps = {x.name for x in ast.walk(n) if isinstance(x, (ast.MatchAs, ast.MatchStar)) and x.name}
-                out.append((caps, [n.subject]))
+        for b in self.records:
+            if b.mode in ("value", "aug", "unres", "capture", "param") and isinstance(b.expr, ast.AST):
+                out.append(({b.name}, [b.expr]))
+            elif b.mode == "local" and isinstance(b.expr, ast.ClassDef):
+                out.append(({b.name}, list(b.expr.body)))
+            elif b.mode == "local":
+                out.append(({b.name}, [x.value for x in ast.walk(b.expr) if isinstance(x, (ast.Return, ast.Yield,
+                                                                                          ast.YieldFrom)) and x.value]))
         return out
 
     def _mark(self):
@@ -1774,7 +2274,7 @@ class _Reach:
         r = node
         while isinstance(r, (ast.Attribute, ast.Subscript, ast.Starred)):
             r = r.value
-        if isinstance(r, ast.Name) and not self.binds.get(r.id):
+        if isinstance(r, ast.Name) and not self.effective(r.id):
             return False                                             # an unbound name, as fix pass 10 judged it
         return self.flow.level(node) < _UNRES
 
@@ -1845,11 +2345,81 @@ class _Reach:
 # fresh; the flow is not ordered, so the later fresh list does not clear
 # it); 0 new in review_rules.py and review_boot.py (review_rules.py 668's
 # row now names its operator, -=). The rule keeps its form, at 13.
-_MEASURED_CLEAN = {"review_needles.py": 13}
+# Fix pass 13 re-measured with the fail-closed method gate (a method on an
+# unresolved receiver is a mutation unless _PURE_METHODS lists it), the
+# fail-closed library-argument rule and the binding table: every earlier site
+# stands and more are unresolved in review_needles.py, every one a method
+# call off the pure list on a receiver the flow already rated unresolved
+# (add on out[...], vals, self and a setdefault result; append on self.lists
+# and self.items; read on f, which the same scope also binds by two for
+# loops); review_rules.py and review_boot.py gain sites too (the method gate
+# and the library-argument rule; neither module carries the exemption).
+# The exemption names its sites: each is the row the proof prints (the rule,
+# the operator or method, the base) and the function or class that encloses
+# it, never its line and never a total. The module is exempt at exactly this
+# multiset, so one more site, one fewer, or a site swapped for another at an
+# equal count lapses it; the measured count is the length of the list.
+_MEASURED_CLEAN = {"review_needles.py": [
+    ('_Values.__init__', 'attribute store through unresolved base self'),
+    ('_Values.add', 'method call add through unresolved base self'),
+    ('_Values.add', 'method call append through unresolved base self.items'),
+    ('_Values.add', 'method call append through unresolved base self.lists'),
+    ('_derive', "method call add through unresolved base out['basename']"),
+    ('_derive', 'subscript store through unresolved base out'),
+    ('_entries', 'subscript store through unresolved base out'),
+    ('_expr', 'method call add through unresolved base vals'),
+    ('_merge', 'subscript store through unresolved base a'),
+    ('_pred', 'method call add through unresolved base vals'),
+    ('_report_line', 'method call pop through unresolved base found'),
+    ('_report_line', 'method call pop through unresolved base found'),
+    ('_revision', 'augmented subscript store |= through unresolved base out'),
+    ('_revision', "method call add through unresolved base out['data']"),
+    ('_revision', "method call add through unresolved base out['data']"),
+    ('_revision', "method call add through unresolved base out['nonce']"),
+    ('_revision', "method call add through unresolved base out['rule_id']"),
+    ('_revision', "method call add through unresolved base out['wording']"),
+    ('_revision', 'method call read through unresolved base f'),
+    ('_revision', 'subscript store through unresolved base tables'),
+    ('_sitting', 'method call add through unresolved base vals'),
+    ('_table', 'method call add through unresolved base vals'),
+    ('_table', 'method call add through unresolved base vals'),
+    ('_table', 'method call add through unresolved base vals'),
+    ('_value_needles', 'method call add through unresolved base by_group.setdefault(group, set())'),
+    ('corpus_digest', 'method call update through unresolved base h'),
+    ('count', 'subscript store through unresolved base found'),
+    ('packet', 'subscript store through unresolved base found'),
+    ('seal', 'augmented assignment += through unresolved base body'),
+    ('seal', 'subscript store through unresolved base found'),
+]}
 
 
 def _unresolved(kind) -> bool:
     return " through unresolved base " in kind
+
+
+def _site_names(tree, rows) -> list:
+    """Each (line, kind) row named as a site: (the dotted name of the innermost
+    function or class whose span holds the line, or <module>; the kind),
+    sorted. The line only locates the row; it is not part of the name."""
+    spans = []
+
+    def walk(node, stack):
+        for c in ast.iter_child_nodes(node):
+            if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                q = stack + (c.name,)
+                spans.append((c.lineno, c.end_lineno, ".".join(q)))
+                walk(c, q)
+            else:
+                walk(c, stack)
+    walk(tree, ())
+
+    def scope(line):
+        inner = [(start, -end, name) for start, end, name in spans if start <= line <= end]
+        if not inner:
+            return "<module>"
+        _start, _end, name = max(inner)         # the latest start, then the shortest span: innermost
+        return name
+    return sorted((scope(line), kind) for line, kind in rows)
 
 
 _ESCAPES = {ast.Call: "a call argument", ast.keyword: "a call argument", ast.Return: "a return value",
@@ -1900,10 +2470,30 @@ def _namespace_reach(tree, names, file="<source>") -> list:
           provenance through slices, copies and iteration, and marks a
           callback consumed by map, filter, iter, sorted, min or max as if it
           were called directly (_Flow.higher_order_lv).
+      (0) (fix pass 13) a node of a class that carries a binding field and
+          is not in _BINDING_TABLE, or a stored name no table entry delivers
+          (_Reach.unknown), named at its line;
+      (5) since fix pass 13 the method half is fail-closed: a method called
+          on a receiver (1)'s unresolved-base half rejects is a mutation
+          unless _PURE_METHODS lists its name (_MUTATOR_NAMES only names the
+          rows of bound methods taken);
+      (8) (fix pass 13) a call (_Reach.call_rows): of a library callable off
+          _ARG_SAFE with a marked argument; of a callable the resolution
+          cannot follow (a parameter, a bound method of an unresolved
+          receiver, extracted or delivered by any binding form, an element
+          of a held container) with a marked argument or itself unresolved;
+          of a callback of map, filter, iter, sorted, min or max judged as
+          that call; of an in-place operator delivered by a call, a
+          subscript or a walrus.
     Fix pass 9's _manager_rebinds still runs beside it, unchanged."""
     r = _Reach(tree, names)
     parents = r.parents
     out = []
+    for n, why in r.unknown:                                                                             # (0)
+        line = n
+        while line is not None and not hasattr(line, "lineno"):
+            line = parents.get(id(line))
+        out.append((0 if line is None else line.lineno, why))
     for n in ast.walk(tree):
         if isinstance(n, (ast.Attribute, ast.Subscript)) and isinstance(n.ctx, (ast.Store, ast.Del)):     # (1)
             what = "attribute" if isinstance(n, ast.Attribute) else "subscript"
@@ -1924,14 +2514,17 @@ def _namespace_reach(tree, names, file="<source>") -> list:
                             % (_AUG_OPS[type(n.op)], n.target.id)))
         if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load) and r.inplace_form(n):  # (7)
             out.append((n.lineno, r.inplace_form(n)))
-        if isinstance(n, ast.Attribute) and n.attr in _MUTATORS and isinstance(n.ctx, ast.Load) \
-                and not r.made_here(n.value):                                                            # (5)
+        if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and r.unresolved_receiver(n):     # (5)
             p = parents.get(id(n))
             if isinstance(p, ast.Call) and p.func is n:
-                out.append((n.lineno, "method call %s through unresolved base %s" % (n.attr, ast.unparse(n.value))))
-            else:
+                if n.attr not in _PURE_METHODS:                      # fix 13: unlisted methods are mutations
+                    out.append((n.lineno, "method call %s through unresolved base %s"
+                                % (n.attr, ast.unparse(n.value))))
+            elif n.attr in _MUTATOR_NAMES:
                 out.append((n.lineno, "bound method %s taken through unresolved base %s"
                             % (n.attr, ast.unparse(n.value))))
+        if isinstance(n, ast.Call):                                                                      # (8)
+            out += [(n.lineno, k) for k in r.call_rows(n)]
         if isinstance(n, ast.Call) and r.reaching(n):                                                     # (2)
             out.append((n.lineno, "call of namespace-reaching %s" % ast.unparse(n.func)))
         if isinstance(n, (ast.Import, ast.ImportFrom)):                                                  # (3)
@@ -1977,7 +2570,8 @@ def _namespace_reach(tree, names, file="<source>") -> list:
             out.append((n.lineno, "namespace-reaching %s escapes as %s" % (ast.unparse(n), where)))
     out = sorted(set(out))
     measured = _MEASURED_CLEAN.get(os.path.basename(file.replace("\\", "/")))
-    if measured is not None and all(_unresolved(k) for _l, k in out) and len(out) == measured:
+    if measured is not None and all(_unresolved(k) for _l, k in out) \
+            and _site_names(tree, out) == sorted(measured):
         return []                       # the real-module rule: exactly the measured, named sites
     return out
 
@@ -2022,7 +2616,12 @@ def walk_handler_proven(tree, handler, file="<source>") -> bool:
           an unresolved receiver and the listed executors are in the bound;
           since fix pass 12 element provenance survives slices, copies and
           iteration, higher-order local callbacks are followed, and every
-          in-place operator on an unresolved receiver is refused.
+          in-place operator on an unresolved receiver is refused; since fix
+          pass 13 every binding form the binding table holds is followed (a
+          binding node outside it is refused), a method on an unresolved
+          receiver off _PURE_METHODS and a call of an unresolved callable or
+          of a library callable off _ARG_SAFE with a marked argument are
+          refused, and iter and reversed may return their argument.
           It is a bound over those lists and that data flow, not a claim
           that every conceivable rebinding is detected."""
     if not isinstance(handler, ast.Name):
@@ -2078,15 +2677,17 @@ def walk_handler_proven(tree, handler, file="<source>") -> bool:
     return True
 
 
-def unwrapped_queries(source: str, file: str = "<source>") -> list:
+def unwrapped_queries(source: str, file: str = "<source>", tree=None) -> list:
     """Every reference that can turn a failure into a False/absent answer:
     an os.path status predicate, os.access, a pathlib predicate, a getattr
     on a path module, and an os.walk whose handler is not proven -- through
     any import or assignment alias, called or not. An os.walk row is a
     Reported naming, by `file`, line and kind, every operation of the module
     that can rebind a never-suppress manager (fix pass 9) or reach a
-    namespace (fix pass 10)."""
-    tree = ast.parse(source)
+    namespace (fix pass 10). `tree` (fix pass 13) is the seam a control uses
+    to hand the proof a parsed module holding a node of a class outside the
+    binding table; by default the source is parsed."""
+    tree = ast.parse(source) if tree is None else tree
     aliases = _aliases(tree)
     parents = {}
     for n in ast.walk(tree):
