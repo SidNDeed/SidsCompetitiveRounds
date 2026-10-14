@@ -739,7 +739,8 @@ class _Names:
     cycle, a relative import -- and EVERY name of a module whose names can
     change at run time: a star import, a reference to a namespace operation
     (_DYNAMIC), or a store or deletion of an attribute of the builtins
-    module."""
+    module. Fix pass 14: the namespace operation named by an import alias
+    (from os import __dict__ as ns) counts as its reference does."""
 
     def __init__(self, tree, parents):
         self.tree, self.parents, self.dynamic = tree, parents, False
@@ -748,6 +749,7 @@ class _Names:
             any(isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names) for n in nodes)
             or any(isinstance(n, ast.Name) and n.id in _DYNAMIC for n in nodes)
             or any(isinstance(n, ast.Attribute) and n.attr in _DYNAMIC for n in nodes)
+            or any(isinstance(n, ast.alias) and set(n.name.split(".")) & _DYNAMIC for n in nodes)   # fix 14: an import alias
             or any(isinstance(n, ast.Attribute) and isinstance(n.ctx, (ast.Store, ast.Del))
                    and self.ref(n.value) == "builtins" for n in nodes))
 
@@ -995,6 +997,9 @@ def _manager_rebinds(tree, names) -> list:
             mods = [a.name for a in n.names] if isinstance(n, ast.Import) else [n.module or ""]
             if any(m.split(".")[0] in ("importlib", "imp") for m in mods):
                 out.append((n.lineno, "dynamic import"))
+            for a in n.names:                                              # fix 14: a member import
+                if any(p in _NAMESPACE or _dunder(p) and p not in _STRING_NAMES for p in a.name.split(".")):
+                    out.append((n.lineno, "namespace operation imported as " + (a.asname or a.name)))
             if isinstance(n, ast.ImportFrom) and any(a.name == "*" for a in n.names):
                 out.append((n.lineno, "star import"))
         if isinstance(n, (ast.Name, ast.Attribute)) and isinstance(n.ctx, ast.Load) and (
@@ -1048,11 +1053,13 @@ _BENIGN_EXEC = frozenset({"timeit.timeit", "timeit.repeat", "timeit.Timer"})
 _BENIGN_EXEC_MODULES = ("timeit",)
 _MUTATORS = frozenset({"setitem", "setdefault", "update", "pop", "popitem", "clear", "delitem", "setattr",
                        "delattr", "__setitem__", "__delitem__", "__setattr__", "__delattr__"})
-_FRESH, _HOLDS, _UNRES = 0, 1, 2          # the data-flow levels of _Flow, ordered
+_LEVELS = ("fresh", "immutable identity alias", "holds", "unresolved")    # fix 14: the second level
+_FRESH, _IMMUT, _HOLDS, _UNRES = range(len(_LEVELS))   # the data-flow levels of _Flow, ordered
 _FRESH_BUILTINS = frozenset({"len", "str", "repr", "int", "float", "complex", "bool", "hash", "id", "abs", "round",
                              "format", "ascii", "bin", "hex", "oct", "ord", "chr", "isinstance", "issubclass",
                              "callable", "sum", "any", "all", "bytes", "range", "open", "print", "divmod", "pow",
-                             "object"})   # a new object that refers to none of its arguments
+                             "object"})   # builtins a literal timing snippet may call (benign_exec_call); fix 14:
+#   not a freshness claim: str, int, bytes and their kin may return their argument itself (_IDENTITY_IMMUTABLE)
 _COPY_BUILTINS = frozenset({"dict", "list", "tuple", "set", "frozenset", "sorted", "bytearray", "iter", "reversed",
                             "enumerate", "zip", "map", "filter"})   # a new object holding its arguments' elements
 
@@ -1098,9 +1105,10 @@ _INPLACE_OPERATORS = frozenset({"operator.i" + o for o in _INPLACE_NAMES + ("con
 _BIND_FIELDS = frozenset({"target", "targets", "optional_vars", "name", "elt", "args", "names", "rest", "asname",
                           "arg", "vararg", "kwarg", "kwonlyargs", "posonlyargs", "generators"})
 _IDENTITY_BUILTINS = frozenset({"iter", "reversed"})     # one argument: may return that argument itself
-_PROVEN_FRESH = frozenset({"len", "str", "repr", "int", "float", "complex", "bool", "hash", "id", "format", "ascii",
+_PROVEN_FRESH = frozenset({"len", "repr", "hash", "id", "ascii",
                            "bin", "hex", "oct", "ord", "chr", "isinstance", "issubclass", "callable", "any", "all",
-                           "bytes", "range", "open", "print", "object"})   # results that alias no argument
+                           "range", "open", "print", "object"})   # results that alias no argument (fix 14: str, int,
+#   float, complex, bool, format and bytes moved to _IDENTITY_IMMUTABLE: each may return its argument itself)
 _PURE_METHODS = frozenset({
     "get", "keys", "values", "items", "copy", "index", "count", "__contains__", "__len__", "__iter__",
     "union", "intersection", "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint",
@@ -1131,6 +1139,65 @@ _ARG_SAFE_EXCEPTIONS = frozenset({"builtins." + n for n, v in vars(builtins).ite
                                   if isinstance(v, type) and issubclass(v, BaseException)})   # a raise's argument
 _BUILTIN_TYPES = frozenset({"dict", "list", "tuple", "set", "frozenset", "sorted", "bytearray", "bytes", "str"})
 _ELEMENT_KEEPING = frozenset({"list", "tuple", "set", "frozenset", "sorted", "reversed", "iter"})
+
+# Fix pass 14 (round 13 M5, LOW 1, LOW 2).
+#   M5  (1) A dotted name with a namespace member past its first part (a dunder
+#           member such as __dict__ or __builtins__, the string-valued dunders
+#           aside; a frame attribute; a modules member) is namespace-reaching
+#           however it is reached, an import alias included (_namespace_member):
+#           from os import __dict__ as ns makes ns reaching. A store, deletion
+#           or augmented store whose base resolves to an imported object (a
+#           module, or a member of one) writes another module's namespace and is
+#           refused (_Reach.imported).
+#       (2) A method called on an unresolved receiver is a mutation WHATEVER its
+#           name: _PURE_METHODS admits a name only on a receiver proven an exact
+#           builtin (_Reach.builtin_typed), where no row arises; on an unproven
+#           receiver a listed name is refused as an unproven pure method call.
+#       (3) A call of an allowlisted callable (_ARG_SAFE, the builtins of
+#           _PROVEN_FRESH and _IDENTITY_IMMUTABLE) runs a protocol of its
+#           argument (__len__, __str__, __fspath__, __iter__, __getattr__ and
+#           the rest); it is admitted over a held or unresolved argument only
+#           when the callee runs no code of its argument (_NO_PROTOCOL), or the
+#           argument is proven an exact builtin scalar (a literal, or a
+#           parameter its function checks with type(p) is not str or bytes,
+#           raising, in an earlier statement of its body: _Reach.guarded), or
+#           a proven builtin container handed to a callee that touches no
+#           element (_ELEMENT_BLIND); else it is refused as a protocol-running
+#           call. A method of a proven builtin receiver is judged the same way
+#           over its arguments (list.append only stores its argument); an
+#           imported object handed to an unlisted or unresolved callable, and
+#           a method off _PURE_METHODS and _ARG_SAFE called through an
+#           imported object that is not a module an import statement names,
+#           are writes through an imported namespace (rule (9)).
+#       An operator's result (+, ==, unary -) over an unresolved operand is
+#           _UNRES (the operand's own method returns it), never _HOLDS.
+#   LOW 1   Names are read by Python's scope rules (_Flow.lookup): a function,
+#           lambda, comprehension or class body is a scope, a comprehension
+#           target never leaves its comprehension, a class body is invisible
+#           to the scopes nested in it, global and nonlocal redirect a binding;
+#           the flow, the resolution and the builtin-type proof read only the
+#           bindings a use can see, never every binding of the name.
+#   LOW 2   A builtin that may return its argument itself (an exact str, int,
+#           float, complex, bool, bytes, tuple or frozenset is returned as it
+#           is) yields _IMMUT, an identity alias that can carry no write, never
+#           _FRESH; a tuple or frozenset holding an unresolved element stays
+#           _HOLDS. Only _PROVEN_FRESH results alias no argument.
+_IDENTITY_IMMUTABLE = frozenset({"str", "int", "float", "complex", "bool", "bytes", "format", "tuple", "frozenset"})
+_NO_PROTOCOL = frozenset({"builtins.id", "builtins.type", "builtins.callable"})   # run no code of their argument
+_ELEMENT_BLIND = frozenset({"builtins." + n for n in (
+    "len", "bool", "id", "type", "callable", "isinstance", "list", "tuple", "iter", "reversed", "enumerate", "zip",
+    "next", "map", "filter")})                         # on a builtin container: no element's code runs
+_GUARD_TYPES = frozenset({"builtins.str", "builtins.bytes"})       # an exact scalar a type guard can prove
+_RESULT_TYPED = frozenset({"os.walk"})                 # a library call whose result is a builtin generator
+
+
+def _namespace_member(dotted) -> bool:
+    """Fix pass 14: a dotted name one of whose parts past the first is a
+    namespace member (a dunder other than the string-valued ones, a frame
+    attribute, or modules: sys.modules reached through another module)."""
+    _first, dot, rest = dotted.partition(".")
+    return bool(dot) and any(_dunder(p) and p not in _STRING_NAMES or p in _FRAME_ATTRS or p == "modules"
+                             for p in rest.split("."))
 
 
 def _arg_safe(dotted) -> bool:
@@ -1318,6 +1385,59 @@ def _root(node):
     return node.id if isinstance(node, ast.Name) else None
 
 
+def _root_node(node):
+    """Fix pass 14: the Name node a chain of attributes and subscripts starts from, else None."""
+    while isinstance(node, (ast.Attribute, ast.Subscript, ast.Starred)):
+        node = node.value
+    return node if isinstance(node, ast.Name) else None
+
+
+def _only(seq):
+    """Fix pass 14: the one element of seq, else None (none, or more than one)."""
+    it = iter(seq)
+    first = next(it, None)
+    return first if next(it, None) is None else None
+
+
+_FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_SCOPE_NODES = _FUNCS + _COMPS + (ast.ClassDef,)
+
+
+def _scopes(tree) -> dict:
+    """Fix pass 14 (round 13 LOW 1): id(node) -> the innermost scope node
+    (function, lambda, comprehension or class body) whose names the node is
+    evaluated in, None for the module. Python evaluates a def's or lambda's
+    defaults, a def's decorators, annotations and return annotation, a
+    class's bases, keywords and decorators, and a comprehension's first
+    iterable in the scope AROUND the node, so those parts map there."""
+    out = {}
+    stack = [(tree, None)]
+    while stack:
+        node, sc = stack.pop()
+        for c in ast.iter_child_nodes(node):
+            out[id(c)] = sc
+            stack.append((c, c if isinstance(c, _SCOPE_NODES) else sc))
+    for n in ast.walk(tree):                     # breadth first: an outer node is moved before an inner one
+        around = []
+        if isinstance(n, _FUNCS):
+            a = n.args
+            around = list(a.defaults) + [d for d in a.kw_defaults if d is not None]
+            if not isinstance(n, ast.Lambda):
+                around += list(n.decorator_list) + ([n.returns] if n.returns is not None else []) + [
+                    x.annotation for x in a.posonlyargs + a.args + a.kwonlyargs + [a.vararg, a.kwarg]
+                    if x is not None and x.annotation is not None]
+        elif isinstance(n, ast.ClassDef):
+            around = list(n.bases) + [k.value for k in n.keywords] + list(n.decorator_list)
+        elif isinstance(n, _COMPS):
+            around = [next(iter(n.generators)).iter]
+        for e in around:
+            for x in ast.walk(e):
+                if out.get(id(x)) is n:
+                    out[id(x)] = out.get(id(n))
+    return out
+
+
 class _Flow:
     """Data flow of one module for the unresolved-base rule (fix pass 11,
     round 10 M5: a module-local identity function carried a caller-supplied
@@ -1366,12 +1486,36 @@ class _Flow:
     iter(x) and reversed(x) over an unresolved x are _UNRES (they may return
     x), and x.copy(), copy.copy(x) and copy.deepcopy(x) carry x's mark
     (joined); a constant index into a list or tuple display reads that
-    element's own level (_Reach.indexed)."""
+    element's own level (_Reach.indexed).
+    Fix pass 14 (round 13 LOW 1 and LOW 2): a name is read by Python's scope
+    rules (lookup), so a name key is the module's own binding of the name
+    ("n": its module-scope bindings and those a global declaration
+    redirects; none is an unbound global, _UNRES unless a builtin) or one
+    scope's ("l": the bindings of that function, lambda, comprehension or
+    class body, nonlocal redirects included, read under the level of its
+    activation: the callee's own level when it is the context's, else
+    _UNRES, a closure's activation being unknown); a builtin that may return
+    its argument itself is _IMMUT, never _FRESH."""
 
     def __init__(self, reach):
         self.r, self.parents, self.binds = reach, reach.parents, reach.binds
         self.tab, self.keys, self.nodes, self.dirty = {}, [], {}, False
-        self.encl, self.locals, self.declared, self.muts = {}, {}, {}, {}
+        self.encl, self.muts = {}, {}
+        self.scope = _scopes(reach.tree)                             # fix 14: Python's scopes
+        self.snodes = {id(n): n for n in ast.walk(reach.tree) if isinstance(n, _SCOPE_NODES)}
+        self.glob, self.nonl, raw = {}, {}, {}
+        for b in reach.records:
+            if b.mode == "declare":
+                s = self.scope.get(id(b.binder))
+                (self.glob if isinstance(b.binder, ast.Global) else self.nonl).setdefault(
+                    None if s is None else id(s), set()).add(b.name)
+        for b in reach.records:
+            if b.mode != "declare":
+                raw.setdefault((self.immediate(b), b.name), True)
+        self.own = {}
+        for b in reach.records:
+            if b.mode != "declare":
+                self.own.setdefault((self.home(b, raw), b.name), []).append(b.binder)
         stack = [(reach.tree, None)]
         while stack:
             node, fn = stack.pop()
@@ -1392,7 +1536,8 @@ class _Flow:
                 root = _root(n.func.value)
                 vals = [a.value if isinstance(a, ast.Starred) else a for a in n.args] + [k.value for k in n.keywords]
             if root is not None and vals:
-                self.muts.setdefault(root, []).append((n, vals))
+                rn_ = _root_node(n.func.value if isinstance(n, ast.Call) else n.value)
+                self.muts.setdefault(root, []).append((n, vals, rn_))
 
     # -- the solver ------------------------------------------------------------------
     def get(self, key):
@@ -1422,61 +1567,94 @@ class _Flow:
                 return v
             self.solve()
 
-    # -- scopes ----------------------------------------------------------------------
-    def local(self, fn):
-        """The bindings made in a callee's own subtree, by name, and the names
-        it declares global or nonlocal (fix pass 13: read from the binding
-        table's deliveries, _Reach.records)."""
-        got = self.locals.get(id(fn))
-        if got is None:
-            got, decl = {}, set()
-            for b in self.r.records:
-                if b.binder is fn or not self.inside(b.binder, fn):
-                    continue
-                if b.mode == "declare":
-                    decl.add(b.name)
-                else:
-                    got.setdefault(b.name, []).append(b.binder)
-            self.locals[id(fn)], self.declared[id(fn)] = got, decl
-        return got
+    # -- scopes (fix pass 14: Python's scope rules, never every binding of a name) ---------
+    def immediate(self, b):
+        """The id of the scope a binding is made in (None: the module): a def's
+        or class's name in the scope around it, a walrus outside every
+        comprehension it sits in."""
+        s = self.scope.get(id(b.binder))                             # the binding's own scope
+        if b.src == "NamedExpr":
+            while isinstance(s, _COMPS):
+                s = self.scope.get(id(s))
+        return None if s is None else id(s)
 
-    def is_local(self, name, ctx) -> bool:
-        return ctx is not None and name in self.local(ctx[0]) and name not in self.declared[id(ctx[0])]
+    def home(self, b, raw):
+        """The id of the scope whose name the binding binds: its own scope,
+        unless that scope declares the name global (the module) or nonlocal
+        (the nearest enclosing function scope that binds it)."""
+        sid = self.immediate(b)
+        while sid is not None:
+            if b.name in self.glob.get(sid, ()):
+                return None
+            if b.name not in self.nonl.get(sid, ()):
+                return sid
+            s = self.scope.get(id(self.snode(sid)))
+            while s is not None and not (isinstance(s, _FUNCS) and (id(s), b.name) in raw
+                                         and b.name not in self.nonl.get(id(s), ())):
+                s = self.scope.get(id(s))
+            sid = None if s is None else id(s)
+        return None
 
-    def scope_binds(self, name, ctx):
-        return self.local(ctx[0])[name] if self.is_local(name, ctx) else self.r.effective(name)
+    def snode(self, sid):
+        return self.snodes[sid]
 
-    def inside(self, node, fn) -> bool:
-        e = self.encl.get(id(node))
-        while e is not None:
-            if e is fn:
-                return True
-            e = self.encl.get(id(e))
-        return False
+    def lookup(self, name, node):
+        """Fix pass 14 (round 13 LOW 1): the id of the scope whose binding of
+        name a read at node sees (None: the module): the innermost scope that
+        binds the name and does not declare it global or nonlocal, a class
+        body seen only by code written directly in it."""
+        s, first = (self.scope.get(id(node)) if node is not None else None), True
+        while s is not None:
+            if isinstance(s, ast.ClassDef) and not first:
+                s = self.scope.get(id(s))                            # invisible to the scopes nested in it
+                continue
+            if name in self.glob.get(id(s), ()):
+                return None
+            if name not in self.nonl.get(id(s), ()) and (id(s), name) in self.own:
+                return id(s)
+            s, first = self.scope.get(id(s)), False
+        return None
+
+    def binds_at(self, name, node):
+        """The binders a read of name at node can see (fix pass 14)."""
+        return self.own.get((self.lookup(name, node), name), [])
+
+    def act(self, s):
+        """The function or lambda whose activation runs scope s (through
+        comprehension and class bodies), None for the module."""
+        while s is not None and not isinstance(s, _FUNCS):
+            s = self.scope.get(id(s))
+        return s
 
     # -- keys ------------------------------------------------------------------------
-    def name_lv(self, name, ctx):
-        if self.is_local(name, ctx):
-            self.nodes[id(ctx[0])] = ctx[0]
-            return self.get(("l", id(ctx[0]), ctx[1], name))
-        return self.get(("n", name))
+    def name_lv(self, name, ctx, node=None):
+        sid = self.lookup(name, node)
+        if sid is None:
+            return self.get(("n", name))
+        s = self.snode(sid)
+        cfn, clvl = ctx if ctx is not None else (None, _UNRES)
+        lvl = clvl if ctx is not None and self.act(s) is self.act(cfn) else _UNRES
+        return self.get(("l", sid, lvl, name))
 
     def compute(self, key):
-        if key[0] == "n":
-            binds = self.r.effective(key[1])                         # fix 13: a declaration binds nothing
+        kind, *rest = key
+        if kind == "n":
+            (name,) = rest
+            binds = self.own.get((None, name), [])                   # fix 14: the module's own bindings
             if not binds:
-                return _FRESH if hasattr(builtins, key[1]) else _UNRES      # a builtin, or an unbound global
-            v = max(self.bind_lv(b, None, key[1]) for b in binds)
-            if v < _HOLDS and any(self.lv(x, None) >= _HOLDS for _s, vals in self.muts.get(key[1], ())
-                                  for x in vals):
+                return _FRESH if hasattr(builtins, name) else _UNRES        # a builtin, or an unbound global
+            v = max(self.bind_lv(b, None, name) for b in binds)
+            if v < _HOLDS and any(self.lv(x, None) >= _HOLDS for _s, vals, rt in self.muts.get(name, ())
+                                  if self.lookup(name, rt) is None for x in vals):
                 v = _HOLDS                                           # a mutation wrote a held value into it
             return v
-        if key[0] == "l":
-            fn = self.nodes[key[1]]
-            ctx = (fn, key[2])
-            v = max(self.bind_lv(b, ctx, key[3]) for b in self.local(fn)[key[3]])
-            if v < _HOLDS and any(self.lv(x, ctx) >= _HOLDS for s, vals in self.muts.get(key[3], ())
-                                  if self.inside(s, fn) for x in vals):
+        if kind == "l":
+            sid, lvl, name = rest
+            fn = self.snode(sid)
+            ctx = (fn, lvl)
+            v = max(self.bind_lv(b, ctx, name) for b in self.own[(sid, name)])
+            if v < _HOLDS and any(self.lv(x, ctx) >= _HOLDS for _s, vals, rt in self.muts.get(name, ())
+                                  if self.lookup(name, rt) == sid for x in vals):
                 v = _HOLDS
             return v
         if key[0] == "s":
@@ -1509,8 +1687,9 @@ class _Flow:
     @staticmethod
     def joined(v):
         """Fix pass 13: the level of a call result that may be its argument
-        itself: the full unresolved mark stays _UNRES, a held one _HOLDS."""
-        return _UNRES if v >= _UNRES else _HOLDS if v >= _HOLDS else _FRESH
+        itself: the full unresolved mark stays _UNRES, a held one _HOLDS (fix
+        14: an immutable identity alias stays _IMMUT, never _FRESH)."""
+        return _UNRES if v >= _UNRES else _HOLDS if v >= _HOLDS else _IMMUT if v >= _IMMUT else _FRESH
 
     @staticmethod
     def carried(v):
@@ -1520,11 +1699,26 @@ class _Flow:
         return _UNRES if v >= _HOLDS else _FRESH                     # fix 12: element provenance
 
     # -- expressions -----------------------------------------------------------------
+    def operated(self, operands, ctx):
+        """Fix pass 14 (round 13 LOW 2): the level of an operator's result. The
+        operator runs a method of its operands (__add__, __eq__, __neg__ and
+        the rest, reflected ones included), which may return an operand itself
+        or anything else: over an operand the proof cannot resolve, or one
+        holding such a value that is not a proven builtin, the result is
+        _UNRES; else it keeps the join of its operands (s + '' may be s)."""
+        v = max([self.lv(x, ctx) for x in operands], default=_FRESH)
+        if v >= _UNRES or any(self.lv(x, ctx) >= _HOLDS and not self.r.builtin_typed(x) for x in operands):
+            return _UNRES
+        return self.joined(v)
+
     def lv(self, node, ctx):
+        if isinstance(node, ast.Compare) and not all(isinstance(o, (ast.Is, ast.IsNot, ast.In, ast.NotIn))
+                                                     for o in node.ops):
+            return self.operated([node.left] + node.comparators, ctx)   # fix 14: __eq__ may return anything
         if node is None or isinstance(node, (ast.Constant, ast.JoinedStr, ast.FormattedValue, ast.Compare)):
             return _FRESH
         if isinstance(node, ast.Name):
-            return self.name_lv(node.id, ctx)
+            return self.name_lv(node.id, ctx, node)                  # fix 14: read in the node's own scope
         if isinstance(node, ast.Attribute):
             return _UNRES if self.lv(node.value, ctx) >= _HOLDS else _FRESH
         if isinstance(node, ast.Subscript):
@@ -1552,9 +1746,9 @@ class _Flow:
         if isinstance(node, ast.BoolOp):
             return max(self.lv(v, ctx) for v in node.values)                   # any operand
         if isinstance(node, ast.BinOp):
-            return _HOLDS if max(self.lv(node.left, ctx), self.lv(node.right, ctx)) >= _HOLDS else _FRESH
+            return self.operated([node.left, node.right], ctx)     # fix 14: was _HOLDS over an unresolved operand
         if isinstance(node, ast.UnaryOp):
-            return _FRESH if isinstance(node.op, ast.Not) or self.lv(node.operand, ctx) < _HOLDS else _HOLDS
+            return _FRESH if isinstance(node.op, ast.Not) else self.operated([node.operand], ctx)
         if isinstance(node, ast.Lambda):
             return _HOLDS if self.lv(node.body, ctx) >= _HOLDS else _FRESH     # a closure over what it returns
         if isinstance(node, ast.Call):
@@ -1572,15 +1766,17 @@ class _Flow:
             c = self.r.cands(f)
             if c and c <= {"copy.copy", "copy.deepcopy"}:
                 return self.joined(al)                               # fix 13: __copy__ may return its argument
+            if f.attr in _PURE_METHODS and self.r.builtin_typed(f.value):
+                return max(self.carried(self.lv(f.value, ctx)), self.joined(al))   # fix 14: a builtin's pure method
             return _UNRES                                            # a method's or an imported callable's result
         if not isinstance(f, ast.Name):
             return _UNRES
-        if f.id in _IDENTITY_BUILTINS and not self.scope_binds(f.id, ctx) and len(node.args) == 1 \
+        if f.id in _IDENTITY_BUILTINS and not self.binds_at(f.id, f) and _only(node.args) is not None \
                 and not node.keywords and al >= _UNRES:
             return _UNRES                                            # fix 13: iter(x), reversed(x) may be x
-        if f.id in _HIGHER_ORDER and not self.scope_binds(f.id, ctx) and hasattr(builtins, f.id):
+        if f.id in _HIGHER_ORDER and not self.binds_at(f.id, f) and hasattr(builtins, f.id):
             return self.higher_order_lv(node, ctx)
-        v = self.name_call_lv(f.id, pl, al, ctx)
+        v = self.name_call_lv(f.id, pl, al, ctx, f)
         return _UNRES if v is None else v
 
     def higher_order_lv(self, node, ctx):
@@ -1623,18 +1819,25 @@ class _Flow:
             return None if self.lv(c.value, ctx) >= _UNRES else _UNRES     # a method or imported callable's result
         if not isinstance(c, ast.Name):
             return None
-        return self.name_call_lv(c.id, pl, pl, ctx)
+        return self.name_call_lv(c.id, pl, pl, ctx, c)
 
-    def name_call_lv(self, name, pl, al, ctx):
+    def name_call_lv(self, name, pl, al, ctx, node):
         """The level of a call of the name with its arguments at al (and so a
         callee's parameters at pl); None when the name stands for nothing the
-        analysis follows."""
-        binds = self.scope_binds(name, ctx)
+        analysis follows. Fix pass 14: the name is looked up in the scope of
+        the node that reads it, and a builtin that can return its argument
+        itself (str, bytes, int, tuple and the rest of _IDENTITY_IMMUTABLE)
+        yields an immutable identity alias, never a fresh value."""
+        binds = self.binds_at(name, node)
         if not binds:
             if not hasattr(builtins, name):
                 return None
             if name in _ARG_RETURNING:
-                return _UNRES if al >= _HOLDS else _FRESH            # fix 12: may return an argument or its element
+                return _UNRES if al >= _HOLDS else _IMMUT            # fix 12: may return an argument or its element
+            if name in _IDENTITY_IMMUTABLE and al >= _UNRES:
+                return _UNRES                                        # fix 14: its __str__ or __index__ returns anything
+            if name in _IDENTITY_IMMUTABLE:                          # fix 14: may return its argument itself
+                return _HOLDS if name in _COPY_BUILTINS and self.carried(al) >= _HOLDS else _IMMUT
             if name in _PROVEN_FRESH:                                # fix 13: the allowlist is the gate
                 return _FRESH
             if name in _COPY_BUILTINS:
@@ -1674,7 +1877,7 @@ class _Flow:
         """The join of a callee's return paths with its parameters at pl."""
         ctx = (fn, pl)
         if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-                not (isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod") and not self.binds.get(d.id))
+                not (isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod") and not self.binds_at(d.id, d))
                 for d in fn.decorator_list):
             return _UNRES                                            # a decorator the analysis does not follow
         for x in ast.walk(fn):
@@ -1709,9 +1912,9 @@ class _Flow:
             return _UNRES
         v = _HOLDS if pl >= _UNRES else _FRESH                       # an instance may keep its arguments
         for b in cls.bases:
-            if isinstance(b, ast.Name) and not self.binds.get(b.id) and hasattr(builtins, b.id):
+            if isinstance(b, ast.Name) and not self.binds_at(b.id, b) and hasattr(builtins, b.id):
                 continue
-            bb = self.binds.get(b.id, []) if isinstance(b, ast.Name) else []
+            bb = self.binds_at(b.id, b) if isinstance(b, ast.Name) else []     # fix 14: by scope
             if not bb or not all(isinstance(x, ast.ClassDef) for x in bb):
                 return _UNRES                                        # a base the analysis does not follow
             for x in bb:
@@ -1785,9 +1988,11 @@ class _Reach:
                                                                                 ast.AsyncFunctionDef))}
             elif isinstance(c, ast.Attribute) and isinstance(c.ctx, (ast.Store, ast.Del)):
                 stored.add(c.attr)
-        # the attribute names whose call on an object the module makes runs builtin or module code: a
-        # pure method name, or a method a module class defines, unless anything stores an attribute of it
-        self.methods = ((defs - other) | _PURE_METHODS) - stored
+        # the attribute names whose call on an object the module makes runs module code: a method a
+        # module class defines, unless anything stores an attribute of it (fix 14: a pure method name
+        # no longer counts here; it is admitted only on a proven builtin receiver, builtin_typed)
+        self.methods = (defs - other) - stored
+        self.modules = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         self.marked = set()
         self.flow = _Flow(self)
         self._mark()
@@ -1804,8 +2009,8 @@ class _Reach:
         r = node
         while isinstance(r, (ast.Attribute, ast.Subscript, ast.Starred)):
             r = r.value
-        if isinstance(r, ast.Name) and not self.effective(r.id):
-            return False
+        if isinstance(r, ast.Name) and not self.flow.binds_at(r.id, r):
+            return False                                             # fix 14: no binding this use can see
         return self.level_at(node) < _UNRES
 
     def library(self, node) -> bool:
@@ -1825,12 +2030,6 @@ class _Reach:
         if n.attr in _MUTATORS and not self.made_here(n.value):
             return True
         return not self.made_here_at(n.value)
-
-    def effective(self, name):
-        """Fix pass 13: the binders of a name that deliver a value (a global or
-        nonlocal declaration binds nothing: the name resolves to the module
-        binding, and a name only declared is unbound)."""
-        return [b for b in self.binds.get(name, []) if self.recs[(id(b), name)].mode != "declare"]
 
     def match_subject(self, n):
         p = self.parents.get(id(n))
@@ -1875,9 +2074,10 @@ class _Reach:
             return self.call_result(node, seen)
         if not isinstance(node, ast.Name) or node.id in seen:
             return {None}
-        if not seen and node.id in self.cache:
-            return self.cache[node.id]
-        binds = self.effective(node.id)
+        key = (self.flow.lookup(node.id, node), node.id)             # fix 14: the scope whose binding this read sees
+        if not seen and key in self.cache:
+            return self.cache[key]
+        binds = self.flow.own.get(key, [])
         if not binds:
             out = {"builtins." + node.id} if hasattr(builtins, node.id) else {None}
         else:
@@ -1886,7 +2086,7 @@ class _Reach:
                 out |= self.resolve_bind(self.recs[(id(b), node.id)], seen | {node.id})
             out = out or {None}
         if not seen:
-            self.cache[node.id] = out
+            self.cache[key] = out
         return out
 
     def resolve_all(self, exprs, seen) -> set:
@@ -1972,11 +2172,11 @@ class _Reach:
             a, b = self.elements(node.body, seen), self.elements(node.orelse, seen)
             return None if a is None or b is None else a + b
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _ELEMENT_KEEPING \
-                and not self.effective(node.func.id) and len(node.args) == 1 and not isinstance(node.args[0], ast.Starred) \
-                and all(k.arg in ("key", "reverse") for k in node.keywords):
+                and not self.flow.binds_at(node.func.id, node.func) and _only(node.args) is not None \
+                and not isinstance(_only(node.args), ast.Starred) and all(k.arg in ("key", "reverse") for k in node.keywords):
             return self.elements(node.args[0], seen)
         if isinstance(node, ast.Name) and node.id not in seen and node.id not in self.flow.muts:
-            binds = self.effective(node.id)
+            binds = self.flow.binds_at(node.id, node)                # fix 14: the bindings this use can see
             if not binds:
                 return None
             out = []
@@ -2001,7 +2201,7 @@ class _Reach:
         elements the resolution sees; the return paths of a module def or
         lambda; an instance of a module class; else None."""
         f = node.func
-        if isinstance(f, ast.Name) and f.id in ("next", "min", "max") and not self.effective(f.id) \
+        if isinstance(f, ast.Name) and f.id in ("next", "min", "max") and not self.flow.binds_at(f.id, f) \
                 and len(node.args) == 1 and not isinstance(node.args[0], ast.Starred):
             return self.resolve_all(self.elements(node.args[0], seen), seen)
         out = set()
@@ -2017,8 +2217,8 @@ class _Reach:
     def returns(self, fn, seen) -> set:
         if isinstance(fn, ast.Lambda):
             return self.resolve(fn.body, seen)
-        if any(not (isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod") and not self.effective(d.id))
-               for d in fn.decorator_list):
+        if any(not (isinstance(d, ast.Name) and d.id in ("staticmethod", "classmethod")
+                    and not self.flow.binds_at(d.id, d)) for d in fn.decorator_list):
             return {None}                                            # a decorator the resolution does not follow
         out, stack = set(), list(fn.body)
         while stack:
@@ -2036,25 +2236,128 @@ class _Reach:
         """Fix pass 13: a list, tuple, set, dict, generator, string or bytes
         the module builds (a display, a comprehension, a literal, a call of an
         unbound builtin constructor, a slice of one, a name only ever bound to
-        one), whose attributes are only that type's builtin methods."""
+        one), whose attributes are only that type's builtin methods. Fix pass
+        14: the bindings a name's use can see (_Flow.binds_at), never every
+        binding of the name; str(x) and bytes(x) of one argument only over a
+        builtin scalar (an object's __str__ or __bytes__ may return a
+        subclass); an augmented binding only with a builtin or module-made
+        operand (str += x runs x's reflected operator); a parameter proven
+        an exact str or bytes by its function's type guard (guarded); the
+        result of a library call listed in _RESULT_TYPED."""
         if isinstance(node, (ast.List, ast.Tuple, ast.Set, ast.Dict, ast.ListComp, ast.SetComp, ast.DictComp,
                              ast.GeneratorExp, ast.Constant, ast.JoinedStr)):
             return True
         if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Slice):
             return self.builtin_typed(node.value, seen)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _BUILTIN_TYPES \
-                and not self.effective(node.func.id):
-            return True
+                and not self.flow.binds_at(node.func.id, node.func):
+            one = _only(list(node.args) + [k.value for k in node.keywords])   # the one-argument form, else None
+            return node.func.id not in ("str", "bytes") or not any(isinstance(a, ast.Starred) for a in node.args) \
+                and not any(k.arg is None for k in node.keywords) and (one is None or self.builtin_scalar(one))
+        if isinstance(node, ast.Call) and self.cands(node.func) and self.cands(node.func) <= _RESULT_TYPED:
+            return True                                              # fix 14: a builtin generator
         if isinstance(node, ast.Name) and node.id not in seen:
-            fn = self.flow.encl.get(id(node))
-            binds = self.flow.local(fn)[node.id] if fn is not None and self.flow.is_local(node.id, (fn, _UNRES)) \
-                else self.effective(node.id)                         # the name in its own scope
+            if self.guarded(node):
+                return True                                          # fix 14: an exact str or bytes parameter
+            binds = self.flow.binds_at(node.id, node)                # fix 14: the bindings this use can see
             return bool(binds) and all(
-                d.mode == "aug" or d.mode == "value" and not d.path and self.builtin_typed(d.expr, seen | {node.id})
+                d.mode == "aug" and (self.builtin_typed(d.expr, seen | {node.id}) or self.level_at(d.expr) < _HOLDS)
+                or d.mode == "value" and not d.path and self.builtin_typed(d.expr, seen | {node.id})
                 or d.mode == "value" and d.path == ("enter",) and isinstance(d.expr, ast.Call)
-                and isinstance(d.expr.func, ast.Name) and d.expr.func.id == "open" and not self.effective("open")
+                and isinstance(d.expr.func, ast.Name) and d.expr.func.id == "open"
+                and not self.flow.binds_at("open", d.expr.func)
                 for d in (self.recs[(id(b), node.id)] for b in binds))   # with open(...) as f: the file itself
         return False
+
+    def builtin_scalar(self, node) -> bool:
+        """Fix pass 14: an exact builtin scalar whose protocols run no code of
+        the module's callers: a literal, an f-string, or a parameter its
+        function's type guard proves an exact str or bytes (guarded)."""
+        return isinstance(node, (ast.Constant, ast.JoinedStr)) or isinstance(node, ast.Name) and self.guarded(node)
+
+    def guarded(self, node) -> bool:
+        """Fix pass 14: a read of a parameter p that its function binds only as
+        the parameter, inside a statement of the function's body that comes
+        after a statement `if type(p) is not str: raise ...` (or bytes) of the
+        same body (type_guard): the statements of a body run in order, so
+        past the guard p is exactly that type and no method of a caller's
+        class runs on it."""
+        sid = self.flow.lookup(node.id, node)
+        fn = None if sid is None else self.flow.snode(sid)
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return False
+        b = _only(self.flow.own.get((sid, node.id), []))
+        if b is None or self.recs[(id(b), node.id)].mode != "param":
+            return False                                             # rebound, or not a parameter
+        top = node
+        while top is not None and self.parents.get(id(top)) is not fn:
+            top = self.parents.get(id(top))
+        for g in fn.body:                                            # the statements that run before the use's own
+            if g is top or top is None:
+                return False
+            if self.type_guard(g, node.id):
+                return True
+        return False
+
+    def type_guard(self, g, name) -> bool:
+        """Fix pass 14: `if type(name) is not str: raise ...` (or bytes), with
+        nothing else in it, type and the type named resolving to the builtins."""
+        if not (isinstance(g, ast.If) and not g.orelse and isinstance(_only(g.body), ast.Raise)):
+            return False
+        t = g.test
+        if not (isinstance(t, ast.Compare) and isinstance(_only(t.ops), ast.IsNot) and isinstance(t.left, ast.Call)):
+            return False
+        arg, typ = _only(t.left.args), _only(t.comparators)
+        names = self.cands(typ)
+        return not t.left.keywords and isinstance(arg, ast.Name) and arg.id == name \
+            and self.cands(t.left.func) == {"builtins.type"} and _only(names) is not None and names <= _GUARD_TYPES
+
+    def imported(self, node) -> bool:
+        """Fix pass 14 (round 13 M5 (1)): a reference that can stand for an
+        imported object (a module, or a member of one, by any import form, a
+        relative one included); the builtins are judged as before."""
+        if any(isinstance(x, str) and not x.startswith("builtins.") for x in self.resolve(node)):
+            return True
+        r = _root_node(node)
+        return r is not None and any(self.recs[(id(b), r.id)].mode == "import" for b in self.flow.binds_at(r.id, r))
+
+    def module_ref(self, node) -> bool:
+        """Fix pass 14: a reference that stands only for a module an import
+        statement names (import x.y binds x and names x.y), so an attribute of
+        it is a module function, judged by _ARG_SAFE, not a method of an object."""
+        rs = self.resolve(node)
+        return bool(rs) and all(isinstance(x, str) and x in self.modules for x in rs)
+
+    def protocol_rows(self, f, args, what="call of protocol-running callable %s through unresolved base %s",
+                      elements=False) -> list:
+        """Fix pass 14 (round 13 M5 (3)): a call of builtin or library code
+        (a callable that resolves only to dotted names, or a method of a
+        proven builtin receiver) runs protocols of its arguments (__len__,
+        __str__, __fspath__, __iter__, __hash__, __eq__, __getattr__ and the
+        rest). An argument the proof cannot resolve, or one holding such a
+        value, is admitted only when it is a proven builtin scalar
+        (builtin_scalar), or a proven builtin container handed to a callee
+        that touches no element (_ELEMENT_BLIND), or the callee runs no code
+        of its arguments (_NO_PROTOCOL, a builtin exception class, list.append
+        storing it); else the call is refused, named. With `elements` the
+        callee is a callback handed each element of args, so no container
+        proof admits it."""
+        if isinstance(f, ast.Attribute) and not self.library(f) and self.builtin_typed(f.value):
+            if f.attr == "append":
+                return []                                            # stores its argument, runs none of its code
+            blind = False
+        else:
+            rs = self.resolve(f)
+            if not rs or not all(isinstance(x, str) for x in rs):
+                return []                                            # module code: judged where it is written
+            if all(x in _NO_PROTOCOL or x in _ARG_SAFE_EXCEPTIONS for x in rs):
+                return []
+            blind = not elements and all(x in _ELEMENT_BLIND for x in rs)
+        for a in args:
+            if self.level_at(a) < _HOLDS or self.builtin_scalar(a) or blind and self.builtin_typed(a):
+                continue
+            return [what % (ast.unparse(f), ast.unparse(a))]
+        return []
 
     def unresolved_callee(self, f, rs) -> bool:
         """Fix pass 13: a callee the resolution cannot follow. A method of an
@@ -2068,21 +2371,30 @@ class _Reach:
             return self.level_at(f) >= _UNRES and not self.builtin_typed(f.value) and f.attr not in self.methods
         return None in rs
 
-    def callee_rows(self, f, marked, what) -> list:
+    def callee_rows(self, f, marked, what, imp=None) -> list:
         """Fix pass 13: the rows of calling the value f with arguments of
         which `marked` is the first marked one (None when all are fresh):
         an unlisted library callable over a marked argument, and a callable
         the resolution cannot follow over a marked argument or that may
         itself be unresolved (a bound method of an unresolved receiver,
-        extracted or delivered, or a value a caller supplies)."""
+        extracted or delivered, or a value a caller supplies). Fix pass 14:
+        an argument that stands for an imported object (`imp`, a module or a
+        member of one) handed to either is refused too, as a write through an
+        imported namespace (functools.update_wrapper(os, f) updates os's
+        namespace from f's)."""
         rs = self.resolve(f)
         rows = []
         if marked is not None and any(not _arg_safe(d) for d in rs if isinstance(d, str)):
             rows.append("%s %s through unresolved base %s" % (what % "unlisted", ast.unparse(f), ast.unparse(marked)))
+        if imp is not None and any(not _arg_safe(d) for d in rs if isinstance(d, str)):
+            rows.append("%s %s through imported namespace %s" % (what % "unlisted", ast.unparse(f), ast.unparse(imp)))
         if self.unresolved_callee(f, rs):
             if marked is not None or self.level_at(f) >= _UNRES:
                 rows.append("%s %s through unresolved base %s" % (what % "unresolved", ast.unparse(f),
                                                                   ast.unparse(marked if marked is not None else f)))
+            if imp is not None:
+                rows.append("%s %s through imported namespace %s" % (what % "unresolved", ast.unparse(f),
+                                                                     ast.unparse(imp)))
         return rows
 
     def call_rows(self, call) -> list:
@@ -2095,7 +2407,8 @@ class _Reach:
         args = [a.value if isinstance(a, ast.Starred) else a for a in call.args] + [k.value for k in call.keywords]
         if isinstance(f, ast.Attribute) and self.unresolved_receiver(f):
             return rows                                              # rule (3)
-        if isinstance(f, ast.Name) and f.id in _HIGHER_ORDER and not self.effective(f.id) and hasattr(builtins, f.id):
+        if isinstance(f, ast.Name) and f.id in _HIGHER_ORDER and not self.flow.binds_at(f.id, f) \
+                and hasattr(builtins, f.id):
             pos, kw = _HIGHER_ORDER[f.id]
             calls, rest = [], []
             for i, a in enumerate(call.args):
@@ -2104,30 +2417,40 @@ class _Reach:
             for k in call.keywords:
                 (calls if k.arg is not None and k.arg == kw else rest).append(k.value)
             cm = next((a for a in rest if self.level_at(a) >= _HOLDS), None)
+            ce = next((a for a in rest if self.level_at(a) >= _HOLDS and not self.builtin_scalar(a)), None)
             for c in calls:
                 if isinstance(c, ast.Constant) and c.value is None:
+                    if ce is not None:                               # fix 14: filter(None, ...) tests each element
+                        rows.append("callback of %s (protocol-running truth test) through unresolved base %s"
+                                    % (f.id, ast.unparse(ce)))
                     continue                                         # filter(None, ...)
                 if isinstance(c, ast.Attribute) and self.unresolved_receiver(c):
-                    if c.attr not in _PURE_METHODS:
+                    if c.attr not in _PURE_METHODS or not self.builtin_typed(c.value):   # fix 14: proven builtin only
                         rows.append("callback method %s of %s through unresolved base %s"
                                     % (c.attr, f.id, ast.unparse(c.value)))
                     continue
                 rows += self.callee_rows(c, cm, "callback of " + f.id + " (%s)")
+                rows += self.protocol_rows(c, [] if ce is None else [ce], "callback of " + f.id
+                                           + " (protocol-running callable %s) through unresolved base %s", True)
             args = rest
         marked = next((a for a in args if self.level_at(a) >= _HOLDS), None)
+        imp = next((a for a in args if self.imported(a)), None)      # fix 14: an imported object handed over
         if not isinstance(f, (ast.Name, ast.Attribute)) and self.cands(f) & _INPLACE_OPERATORS:
             recv = call.args[0] if call.args else None
             if recv is None or isinstance(recv, ast.Starred) or not self.made_here(recv):
                 rows.append("in-place call %s through unresolved base %s"
                             % (ast.unparse(f), "(no receiver)" if recv is None else ast.unparse(recv)))
-        rows += self.callee_rows(f, marked, "call of %s callable")
+        rows += self.callee_rows(f, marked, "call of %s callable", imp)
+        rows += self.protocol_rows(f, args)                          # fix 14: protocols of the arguments
         return rows
 
     def reach_callable(self, node):
         """The first dotted name a reference can stand for that is a
-        namespace-reaching callable or module, else None."""
+        namespace-reaching callable or module, else None. Fix pass 14: or a
+        namespace member reached through any import form (_namespace_member:
+        from os import __dict__ as ns, os.sys.modules)."""
         for c in sorted(x for x in self.cands(node) if x):
-            if c in _REACH_CALLABLES or _in_module(c, _REACH_MODULES) or c == "builtins":
+            if c in _REACH_CALLABLES or _in_module(c, _REACH_MODULES) or c == "builtins" or _namespace_member(c):
                 return c
         return None
 
@@ -2274,7 +2597,7 @@ class _Reach:
         r = node
         while isinstance(r, (ast.Attribute, ast.Subscript, ast.Starred)):
             r = r.value
-        if isinstance(r, ast.Name) and not self.effective(r.id):
+        if isinstance(r, ast.Name) and not self.flow.binds_at(r.id, r):
             return False                                             # an unbound name, as fix pass 10 judged it
         return self.flow.level(node) < _UNRES
 
@@ -2354,42 +2677,458 @@ class _Reach:
 # and self.items; read on f, which the same scope also binds by two for
 # loops); review_rules.py and review_boot.py gain sites too (the method gate
 # and the library-argument rule; neither module carries the exemption).
+# Fix pass 14 re-measured with Python's scopes, the unproven-receiver rule for
+# pure method names, the protocol-running call rule and operator results:
+# sites whose base a same-name binding in ANOTHER scope made unresolved are
+# proven and drop out of review_needles.py (the f.read() of _revision; the
+# found of count, packet and seal; the out of _entries; the tables of
+# _revision) and of review_rules.py; every module gains the calls that run a
+# protocol of an argument the proof cannot type (isinstance, len, set,
+# os.path.join and the rest over a parameter or a library result) and the
+# pure methods called on a receiver not proven a builtin. Each site is named
+# below and in the notes; the list's form is unchanged.
 # The exemption names its sites: each is the row the proof prints (the rule,
 # the operator or method, the base) and the function or class that encloses
 # it, never its line and never a total. The module is exempt at exactly this
 # multiset, so one more site, one fewer, or a site swapped for another at an
 # equal count lapses it; the measured count is the length of the list.
 _MEASURED_CLEAN = {"review_needles.py": [
-    ('_Values.__init__', 'attribute store through unresolved base self'),
-    ('_Values.add', 'method call add through unresolved base self'),
-    ('_Values.add', 'method call append through unresolved base self.items'),
-    ('_Values.add', 'method call append through unresolved base self.lists'),
-    ('_derive', "method call add through unresolved base out['basename']"),
-    ('_derive', 'subscript store through unresolved base out'),
-    ('_entries', 'subscript store through unresolved base out'),
-    ('_expr', 'method call add through unresolved base vals'),
-    ('_merge', 'subscript store through unresolved base a'),
-    ('_pred', 'method call add through unresolved base vals'),
-    ('_report_line', 'method call pop through unresolved base found'),
-    ('_report_line', 'method call pop through unresolved base found'),
-    ('_revision', 'augmented subscript store |= through unresolved base out'),
-    ('_revision', "method call add through unresolved base out['data']"),
-    ('_revision', "method call add through unresolved base out['data']"),
-    ('_revision', "method call add through unresolved base out['nonce']"),
-    ('_revision', "method call add through unresolved base out['rule_id']"),
-    ('_revision', "method call add through unresolved base out['wording']"),
-    ('_revision', 'method call read through unresolved base f'),
-    ('_revision', 'subscript store through unresolved base tables'),
-    ('_sitting', 'method call add through unresolved base vals'),
-    ('_table', 'method call add through unresolved base vals'),
-    ('_table', 'method call add through unresolved base vals'),
-    ('_table', 'method call add through unresolved base vals'),
-    ('_value_needles', 'method call add through unresolved base by_group.setdefault(group, set())'),
-    ('corpus_digest', 'method call update through unresolved base h'),
-    ('count', 'subscript store through unresolved base found'),
-    ('packet', 'subscript store through unresolved base found'),
-    ('seal', 'augmented assignment += through unresolved base body'),
-    ('seal', 'subscript store through unresolved base found'),
+        ('<module>', 'call of protocol-running callable sys.exit through unresolved base main(sys.argv[1:])'),
+        ('_Values.__init__', 'attribute store through unresolved base self'),
+        ('_Values.add',
+         'call of protocol-running callable any through unresolved base (_key_pattern(k) for k in keys)'),
+        ('_Values.add', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_Values.add', 'method call add through unresolved base self'),
+        ('_Values.add', 'method call append through unresolved base self.items'),
+        ('_Values.add', 'method call append through unresolved base self.lists'),
+        ('_blob_text', 'unproven pure method call decode through unresolved base raw'),
+        ('_data_refs', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_data_refs', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_data_refs', "call of protocol-running callable isinstance through unresolved base node['data']"),
+        ('_data_refs', 'call of protocol-running callable set through unresolved base node'),
+        ('_data_refs', 'unproven pure method call values through unresolved base node'),
+        ('_derive',
+         "call of protocol-running callable _PUBLIC.extend through unresolved base sorted({ln.rstrip('\\n') for ln in f if ln.strip() and (not ln.startswith('#'))}, key=len, reverse=True)"),
+        ('_derive', 'call of protocol-running callable len through unresolved base name'),
+        ('_derive', 'call of protocol-running callable open through unresolved base listed'),
+        ('_derive', 'call of protocol-running callable open through unresolved base public'),
+        ('_derive', 'call of protocol-running callable os.listdir through unresolved base base'),
+        ('_derive', 'call of protocol-running callable os.listdir through unresolved base store'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base base'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base store'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base store'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base tests'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base tests'),
+        ('_derive', 'call of protocol-running callable sorted through unresolved base os.listdir(store)'),
+        ('_derive',
+         "call of protocol-running callable sorted through unresolved base {ln.rstrip('\\n') for ln in f if ln.strip() and (not ln.startswith('#'))}"),
+        ('_derive',
+         "callback of sorted (protocol-running callable len) through unresolved base {ln.rstrip('\\n') for ln in f if ln.strip() and (not ln.startswith('#'))}"),
+        ('_derive', "method call add through unresolved base out['basename']"),
+        ('_derive', 'subscript store through unresolved base out'),
+        ('_derive', 'unproven pure method call fullmatch through unresolved base _REV_DIR'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable open through unresolved base rest[0]'),
+        ('_dispatch',
+         "call of protocol-running callable print through unresolved base __doc__.split('Modes:')[1].split('Exit 0')[0].rstrip()"),
+        ('_dispatch',
+         "unproven pure method call rstrip through unresolved base __doc__.split('Modes:')[1].split('Exit 0')[0]"),
+        ('_dispatch', "unproven pure method call split through unresolved base __doc__.split('Modes:')[1]"),
+        ('_entries', 'call of protocol-running callable getattr through unresolved base st'),
+        ('_entries', 'call of protocol-running callable getattr through unresolved base st'),
+        ('_entries', 'call of protocol-running callable os.path.join through unresolved base top'),
+        ('_entries', 'call of protocol-running callable os.path.join through unresolved base top'),
+        ('_entries', 'call of protocol-running callable os.scandir through unresolved base top'),
+        ('_entries', 'call of protocol-running callable sorted through unresolved base (e.name for e in it)'),
+        ('_entries', 'call of protocol-running callable stat.S_ISDIR through unresolved base st.st_mode'),
+        ('_entries', 'call of protocol-running callable stat.S_ISDIR through unresolved base st.st_mode'),
+        ('_entries', 'call of protocol-running callable stat.S_ISLNK through unresolved base st.st_mode'),
+        ('_entries', 'call of protocol-running callable stat.S_ISREG through unresolved base st.st_mode'),
+        ('_entries', 'call of protocol-running callable str through unresolved base root'),
+        ('_expr', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_expr', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_expr', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_expr', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_expr', 'call of protocol-running callable len through unresolved base node'),
+        ('_expr', 'method call add through unresolved base vals'),
+        ('_expr', 'unproven pure method call items through unresolved base node'),
+        ('_finite', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_finite', 'call of protocol-running callable math.isfinite through unresolved base v'),
+        ('_git',
+         "call of protocol-running callable subprocess.run through unresolved base ['git', '-C', repo, *args]"),
+        ('_git', 'unproven pure method call decode through unresolved base out'),
+        ('_ident', 'call of protocol-running callable stat.S_IFMT through unresolved base st.st_mode'),
+        ('_inside', 'call of protocol-running callable os.path.commonpath through unresolved base [a, b]'),
+        ('_inside', 'call of protocol-running callable os.path.realpath through unresolved base path'),
+        ('_inside', 'call of protocol-running callable os.path.realpath through unresolved base root'),
+        ('_is_dir', 'call of protocol-running callable stat.S_ISDIR through unresolved base st.st_mode'),
+        ('_is_file', 'call of protocol-running callable stat.S_ISREG through unresolved base st.st_mode'),
+        ('_key_pattern',
+         "call of protocol-running callable '[ _-]?'.join through unresolved base (re.escape(w) for w in words)"),
+        ('_key_pattern', 'call of protocol-running callable re.escape through unresolved base w'),
+        ('_key_pattern', 'call of protocol-running callable re.escape through unresolved base words.pop()'),
+        ('_key_pattern', 'call of protocol-running callable re.split through unresolved base key'),
+        ('_keys', 'call of protocol-running callable isinstance through unresolved base n'),
+        ('_keys', 'call of protocol-running callable len through unresolved base n'),
+        ('_manifest_body', "call of protocol-running callable '\\n'.join through unresolved base lines"),
+        ('_manifest_body', 'call of protocol-running callable hashlib.md5 through unresolved base data'),
+        ('_manifest_body', 'call of protocol-running callable len through unresolved base data'),
+        ('_manifest_body', 'call of protocol-running callable open through unresolved base note_file'),
+        ('_manifest_body',
+         'call of protocol-running callable sorted through unresolved base ((rel, hashlib.md5(data).hexdigest(), len(data)) for rel, data in snap)'),
+        ('_manifest_body', 'call of protocol-running callable sum through unresolved base (n for _r, _m, n in rows)'),
+        ('_manifest_body', 'call of protocol-running callable time.strftime through unresolved base time.gmtime()'),
+        ('_manifest_body', "unproven pure method call encode through unresolved base '\\n'.join(lines) + '\\n'"),
+        ('_manifest_body', 'unproven pure method call hexdigest through unresolved base hashlib.md5(data)'),
+        ('_manifest_body', "unproven pure method call strip through unresolved base _git(pin, 'rev-parse', 'HEAD')"),
+        ('_manifest_body', 'unproven pure method call strip through unresolved base f.read()'),
+        ('_manifest_lines_of', 'call of protocol-running callable hashlib.sha256 through unresolved base raw'),
+        ('_manifest_lines_of', 'call of protocol-running callable sorted through unresolved base snap'),
+        ('_manifest_lines_of', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(raw)'),
+        ('_measure_keys', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_measure_keys', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_measure_keys', "call of protocol-running callable isinstance through unresolved base node['m']"),
+        ('_measure_keys', 'call of protocol-running callable set through unresolved base node'),
+        ('_measure_keys',
+         "call of unresolved callable out.append through unresolved base node['m'].rsplit('.', 1)[-1]"),
+        ('_measure_keys', "unproven pure method call rsplit through unresolved base node['m']"),
+        ('_measure_keys', 'unproven pure method call values through unresolved base node'),
+        ('_merge', 'subscript store through unresolved base a'),
+        ('_merge', 'unproven pure method call get through unresolved base a'),
+        ('_merge', 'unproven pure method call items through unresolved base b'),
+        ('_meta', "call of protocol-running callable isinstance through unresolved base r['post']"),
+        ('_meta', "call of protocol-running callable isinstance through unresolved base r['post_since']"),
+        ('_meta', 'call of protocol-running callable isinstance through unresolved base r[k]'),
+        ('_meta', 'call of protocol-running callable isinstance through unresolved base s'),
+        ('_meta', 'call of protocol-running callable isinstance through unresolved base show'),
+        ('_meta', 'call of protocol-running callable isinstance through unresolved base x'),
+        ('_meta', 'call of protocol-running callable set through unresolved base r'),
+        ('_meta', 'unproven pure method call get through unresolved base r'),
+        ('_num_tokens', 'call of protocol-running callable int through unresolved base v'),
+        ('_num_tokens', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_num_tokens', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_num_tokens', 'call of protocol-running callable repr through unresolved base v'),
+        ('_num_tokens', 'call of protocol-running callable sorted through unresolved base toks'),
+        ('_num_tokens', 'call of protocol-running callable str through unresolved base v'),
+        ('_num_tokens', 'unproven pure method call is_integer through unresolved base v'),
+        ('_num_tokens', 'unproven pure method call startswith through unresolved base t'),
+        ('_num_tokens', 'unproven pure method call startswith through unresolved base t'),
+        ('_pred', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_pred', "call of protocol-running callable isinstance through unresolved base node['args']"),
+        ('_pred', "call of protocol-running callable isinstance through unresolved base node['op']"),
+        ('_pred', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_pred', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_pred', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_pred', "call of protocol-running callable isinstance through unresolved base v['data']"),
+        ('_pred', 'call of protocol-running callable set through unresolved base node'),
+        ('_pred', 'call of protocol-running callable set through unresolved base node'),
+        ('_pred', 'call of protocol-running callable set through unresolved base node'),
+        ('_pred', 'call of protocol-running callable set through unresolved base v'),
+        ('_pred', 'method call add through unresolved base vals'),
+        ('_pred', 'unproven pure method call items through unresolved base node'),
+        ('_pred', "unproven pure method call items through unresolved base node['args']"),
+        ('_pred', "unproven pure method call rsplit through unresolved base node['op']"),
+        ('_read_regular', 'call of protocol-running callable len through unresolved base raw'),
+        ('_read_regular', 'call of protocol-running callable open through unresolved base path'),
+        ('_read_regular', 'call of protocol-running callable os.fstat through unresolved base f.fileno()'),
+        ('_report_line',
+         "call of protocol-running callable ', '.join through unresolved base ('%s=%d' % (k, found[k]) for k in sorted(found))"),
+        ('_report_line', 'call of protocol-running callable sorted through unresolved base found'),
+        ('_report_line', 'call of protocol-running callable sum through unresolved base found.values()'),
+        ('_report_line', 'method call pop through unresolved base found'),
+        ('_report_line', 'method call pop through unresolved base found'),
+        ('_report_line', 'unproven pure method call values through unresolved base found'),
+        ('_revision', 'augmented subscript store |= through unresolved base out'),
+        ('_revision', 'call of protocol-running callable isinstance through unresolved base doc'),
+        ('_revision', "call of protocol-running callable isinstance through unresolved base doc.get('nonce')"),
+        ('_revision', "call of protocol-running callable isinstance through unresolved base r.get('id')"),
+        ('_revision', 'call of protocol-running callable json.loads through unresolved base text'),
+        ('_revision', 'call of protocol-running callable len through unresolved base f'),
+        ('_revision', 'call of protocol-running callable len through unresolved base f.strip()'),
+        ('_revision', 'call of protocol-running callable len through unresolved base stem'),
+        ('_revision', 'call of protocol-running callable open through unresolved base os.path.join(ddir, dn)'),
+        ('_revision',
+         "call of protocol-running callable open through unresolved base os.path.join(path, 'rules.json')"),
+        ('_revision', 'call of protocol-running callable os.listdir through unresolved base ddir'),
+        ('_revision', 'call of protocol-running callable os.path.join through unresolved base ddir'),
+        ('_revision', 'call of protocol-running callable os.path.join through unresolved base path'),
+        ('_revision', 'call of protocol-running callable os.path.join through unresolved base path'),
+        ('_revision', 'call of protocol-running callable sorted through unresolved base _data_refs(doc)'),
+        ('_revision', 'call of protocol-running callable sorted through unresolved base os.listdir(ddir)'),
+        ('_revision', "method call add through unresolved base out['data']"),
+        ('_revision', "method call add through unresolved base out['data']"),
+        ('_revision', "method call add through unresolved base out['nonce']"),
+        ('_revision', "method call add through unresolved base out['rule_id']"),
+        ('_revision', "method call add through unresolved base out['wording']"),
+        ('_revision', 'unproven pure method call decode through unresolved base f.read()'),
+        ('_revision', 'unproven pure method call endswith through unresolved base dn'),
+        ('_revision', 'unproven pure method call get through unresolved base doc'),
+        ('_revision', 'unproven pure method call get through unresolved base doc'),
+        ('_revision', 'unproven pure method call get through unresolved base r'),
+        ('_revision', 'unproven pure method call get through unresolved base r'),
+        ('_revision', 'unproven pure method call rsplit through unresolved base dn'),
+        ('_revision', 'unproven pure method call split through unresolved base _PLACE'),
+        ('_revision', 'unproven pure method call strip through unresolved base f'),
+        ('_revision', 'unproven pure method call strip through unresolved base f'),
+        ('_rx', 'call of protocol-running callable re.compile through unresolved base p'),
+        ('_sequence',
+         'call of protocol-running callable re.compile through unresolved base gap.join((re.escape(f) for f in frags))'),
+        ('_sequence', 'call of protocol-running callable re.escape through unresolved base f'),
+        ('_sequence', 'call of unresolved callable gap.join through unresolved base (re.escape(f) for f in frags)'),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_sitting', "call of protocol-running callable isinstance through unresolved base node['args']"),
+        ('_sitting', "call of protocol-running callable isinstance through unresolved base node['op']"),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base x'),
+        ('_sitting', 'call of protocol-running callable set through unresolved base node'),
+        ('_sitting', 'method call add through unresolved base vals'),
+        ('_sitting', "unproven pure method call items through unresolved base node['args']"),
+        ('_sitting', "unproven pure method call rsplit through unresolved base node['op']"),
+        ('_status', 'call of protocol-running callable os.lstat through unresolved base path'),
+        ('_status', 'call of protocol-running callable os.stat through unresolved base path'),
+        ('_table', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_table', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_table', 'call of protocol-running callable isinstance through unresolved base x'),
+        ('_table', 'call of protocol-running callable isinstance through unresolved base x'),
+        ('_table', 'method call add through unresolved base vals'),
+        ('_table', 'method call add through unresolved base vals'),
+        ('_table', 'method call add through unresolved base vals'),
+        ('_table', 'unproven pure method call items through unresolved base node'),
+        ('_text_lines', 'unproven pure method call splitlines through unresolved base text'),
+        ('_text_lines', 'unproven pure method call strip through unresolved base ln'),
+        ('_text_value', 'call of protocol-running callable float through unresolved base tok'),
+        ('_text_value', 'call of protocol-running callable int through unresolved base tok'),
+        ('_text_value', 'unproven pure method call fullmatch through unresolved base _TEXT_NUM'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base doc'),
+        ('_value_items',
+         "call of protocol-running callable isinstance through unresolved base doc.get('closure', {})"),
+        ('_value_items', "call of protocol-running callable isinstance through unresolved base doc.get('format')"),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base n'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base n'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base params'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base ps'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base r'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base rules'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base table'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base vocab'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base vocab'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base vocab'),
+        ('_value_items', 'call of protocol-running callable set through unresolved base doc'),
+        ('_value_items', 'call of protocol-running callable set through unresolved base vocab'),
+        ('_value_items', 'call of protocol-running callable sorted through unresolved base (tables or {}).items()'),
+        ('_value_items', 'call of protocol-running callable sorted through unresolved base vocab.items()'),
+        ('_value_items', 'call of protocol-running callable str through unresolved base fam'),
+        ('_value_items', "call of protocol-running callable str through unresolved base r.get('id')"),
+        ('_value_items', 'unproven pure method call get through unresolved base doc'),
+        ('_value_items', 'unproven pure method call get through unresolved base doc'),
+        ('_value_items', 'unproven pure method call get through unresolved base doc'),
+        ('_value_items', 'unproven pure method call get through unresolved base doc'),
+        ('_value_items', 'unproven pure method call get through unresolved base r'),
+        ('_value_items', 'unproven pure method call items through unresolved base params'),
+        ('_value_items', 'unproven pure method call items through unresolved base ps'),
+        ('_value_items', 'unproven pure method call items through unresolved base tables or {}'),
+        ('_value_items', 'unproven pure method call items through unresolved base vocab'),
+        ('_value_items', 'unproven pure method call rsplit through unresolved base name'),
+        ('_value_items', 'unproven pure method call rsplit through unresolved base name'),
+        ('_value_items', 'unproven pure method call rsplit through unresolved base str(fam)'),
+        ('_value_items', 'unproven pure method call split through unresolved base _TEXT_SPLIT'),
+        ('_value_items', 'unproven pure method call strip through unresolved base ln'),
+        ('_value_items', 'unproven pure method call strip through unresolved base ln'),
+        ('_value_needles',
+         "call of protocol-running callable '|'.join through unresolved base (re.escape(t) for t in _num_tokens(x))"),
+        ('_value_needles',
+         "call of protocol-running callable '|'.join through unresolved base (re.escape(x) for x in _num_tokens(v))"),
+        ('_value_needles', "call of protocol-running callable '|'.join through unresolved base sorted(alts)"),
+        ('_value_needles',
+         "call of protocol-running callable any through unresolved base (k.endswith('days') for k in keys)"),
+        ('_value_needles',
+         "call of protocol-running callable any through unresolved base (k.endswith('ms') for k in keys)"),
+        ('_value_needles', 'call of protocol-running callable by_group.setdefault through unresolved base group'),
+        ('_value_needles', 'call of protocol-running callable len through unresolved base alts'),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '%s[ \\\\t]?ms\\\\b' % val"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '%s[ \\\\t]{0,3}%s' % (val, _SIGN)"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?<![\\\\w.])(?:%s)(?:[ \\\\t]*[,;/][ \\\\t]*|[ \\\\t]+)(?:%s)(?![\\\\w]|\\\\.\\\\d)' % (x, y)"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?<![\\\\w.])(?:%s)[ \\\\t]?/[ \\\\t]?(?:%s)(?![\\\\w]|\\\\.\\\\d)' % (one, one)"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?i)%s[ \\\\t-]?days?\\\\b' % val"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?i)%s[ \\\\t]{0,3}%s' % (_CMP, val)"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?i)%s[^\\\\n]{0,%d}?\\\\b%s\\\\b' % (val, VALUE_NEAR, kp)"),
+        ('_value_needles', "call of protocol-running callable out.add through unresolved base '(?i)' + val"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?i)\\\\b%s\\\\b[^\\\\n]{0,%d}?%s' % (kp, VALUE_NEAR, val)"),
+        ('_value_needles', 'call of protocol-running callable re.escape through unresolved base t'),
+        ('_value_needles', 'call of protocol-running callable re.escape through unresolved base x'),
+        ('_value_needles', 'call of protocol-running callable sorted through unresolved base alts'),
+        ('_value_needles', 'call of protocol-running callable zip through unresolved base alts'),
+        ('_value_needles', 'method call add through unresolved base by_group.setdefault(group, set())'),
+        ('_value_needles', 'unproven pure method call endswith through unresolved base k'),
+        ('_value_needles', 'unproven pure method call endswith through unresolved base k'),
+        ('_value_rx',
+         "call of protocol-running callable '|'.join through unresolved base (re.escape(x) for x in _num_tokens(v))"),
+        ('_value_rx', 'call of protocol-running callable re.escape through unresolved base v'),
+        ('_value_rx', 'call of protocol-running callable re.escape through unresolved base x'),
+        ('_write_manifest', 'call of protocol-running callable f.write through unresolved base body'),
+        ('_write_manifest', 'call of protocol-running callable open through unresolved base dst'),
+        ('_write_manifest', 'call of protocol-running callable os.path.basename through unresolved base out'),
+        ('_write_manifest', 'call of protocol-running callable os.path.join through unresolved base pin'),
+        ('_write_manifest', 'call of protocol-running callable os.path.join through unresolved base ri'),
+        ('corpus_digest',
+         "call of unresolved callable ('%s\\t%d\\t%s\\n' % (name, size, digest)).encode through unresolved base ('%s\\t%d\\t%s\\n' % (name, size, digest)).encode"),
+        ('corpus_digest', 'method call update through unresolved base h'),
+        ('corpus_digest', 'unproven pure method call hexdigest through unresolved base h'),
+        ('count', 'call of protocol-running callable found.get through unresolved base cls'),
+        ('count', 'call of protocol-running callable isinstance through unresolved base s'),
+        ('count', 'unproven pure method call items through unresolved base needles'),
+        ('count', 'unproven pure method call replace through unresolved base public_cut'),
+        ('count', 'unproven pure method call search through unresolved base _rx(s[1])'),
+        ('count', 'unproven pure method call search through unresolved base _sequence(s)'),
+        ('leaf_type', 'call of protocol-running callable abs through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable len through unresolved base v'),
+        ('leaf_type', 'unproven pure method call is_integer through unresolved base v'),
+        ('main', 'call of protocol-running callable isinstance through unresolved base e'),
+        ('main', 'call of protocol-running callable isinstance through unresolved base e'),
+        ('main', 'call of protocol-running callable len through unresolved base argv'),
+        ('main',
+         "call of protocol-running callable print through unresolved base 'review_needles: no verdict (%s): refused' % (e if isinstance(e, NoVerdict) else type(e).__name__)"),
+        ('main',
+         "call of protocol-running callable print through unresolved base 'review_needles: no verdict (a read failed: %s): refused, no result' % (e if isinstance(e, NoVerdict) else type(e).__name__)"),
+        ('main',
+         "call of protocol-running callable print through unresolved base 'review_needles: no verdict (store unreadable: %s): refused, nothing was scanned' % e"),
+        ('main',
+         "call of protocol-running callable print through unresolved base __doc__.split('Modes:')[1].split('Exit 0')[0].rstrip()"),
+        ('main',
+         "unproven pure method call rstrip through unresolved base __doc__.split('Modes:')[1].split('Exit 0')[0]"),
+        ('main', "unproven pure method call split through unresolved base __doc__.split('Modes:')[1]"),
+        ('packet', "call of protocol-running callable '\\n'.join through unresolved base _manifest_lines_of(snap)"),
+        ('packet', 'call of protocol-running callable f.write through unresolved base body'),
+        ('packet', 'call of protocol-running callable f.write through unresolved base raw'),
+        ('packet', 'call of protocol-running callable f.write through unresolved base raw'),
+        ('packet',
+         "call of protocol-running callable hashlib.sha1 through unresolved base b'blob %d\\x00' % len(got) + got"),
+        ('packet', 'call of protocol-running callable hashlib.sha256 through unresolved base body'),
+        ('packet', 'call of protocol-running callable hashlib.sha256 through unresolved base got'),
+        ('packet', 'call of protocol-running callable hashlib.sha256 through unresolved base raw'),
+        ('packet', 'call of protocol-running callable len through unresolved base got'),
+        ('packet', 'call of protocol-running callable len through unresolved base parts'),
+        ('packet', 'call of protocol-running callable len through unresolved base snap'),
+        ('packet', 'call of protocol-running callable open through unresolved base allowlist'),
+        ('packet', 'call of protocol-running callable open through unresolved base d'),
+        ('packet', 'call of protocol-running callable open through unresolved base dst'),
+        ('packet', 'call of protocol-running callable open through unresolved base dst'),
+        ('packet', 'call of protocol-running callable open through unresolved base os.path.join(out_dir, MANIFEST)'),
+        ('packet', 'call of protocol-running callable os.listdir through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable os.makedirs through unresolved base os.path.dirname(dst)'),
+        ('packet', 'call of protocol-running callable os.makedirs through unresolved base os.path.dirname(dst)'),
+        ('packet', 'call of protocol-running callable os.makedirs through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable os.path.basename through unresolved base d'),
+        ('packet', 'call of protocol-running callable os.path.basename through unresolved base d'),
+        ('packet', 'call of protocol-running callable os.path.basename through unresolved base d'),
+        ('packet', 'call of protocol-running callable os.path.dirname through unresolved base dst'),
+        ('packet', 'call of protocol-running callable os.path.dirname through unresolved base dst'),
+        ('packet', 'call of protocol-running callable os.path.isabs through unresolved base parts[1]'),
+        ('packet', 'call of protocol-running callable os.path.join through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable os.path.join through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable os.path.join through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable re.fullmatch through unresolved base parts[2]'),
+        ('packet',
+         "call of protocol-running callable set through unresolved base _git(repo, 'ls-tree', '-r', '--name-only', '-z', commit).split('\\x00')"),
+        ('packet', 'call of protocol-running callable sorted through unresolved base pins'),
+        ('packet',
+         "unproven pure method call encode through unresolved base '\\n'.join(_manifest_lines_of(snap)) + '\\n'"),
+        ('packet',
+         "unproven pure method call hexdigest through unresolved base hashlib.sha1(b'blob %d\\x00' % len(got) + got)"),
+        ('packet', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(body)'),
+        ('packet', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(got)'),
+        ('packet', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(raw)'),
+        ('packet',
+         "unproven pure method call split through unresolved base _git(repo, 'ls-tree', '-r', '--name-only', '-z', commit)"),
+        ('packet', 'unproven pure method call split through unresolved base ln'),
+        ('packet', 'unproven pure method call split through unresolved base p'),
+        ('packet', 'unproven pure method call split through unresolved base p'),
+        ('packet', 'unproven pure method call startswith through unresolved base ln'),
+        ('packet', 'unproven pure method call startswith through unresolved base p'),
+        ('packet',
+         "unproven pure method call strip through unresolved base _git(repo, 'rev-parse', '%s:%s' % (commit, p))"),
+        ('packet', 'unproven pure method call strip through unresolved base ln'),
+        ('packet_verify', 'call of protocol-running callable dict through unresolved base snap'),
+        ('packet_verify', 'call of protocol-running callable hashlib.sha256 through unresolved base raw'),
+        ('packet_verify', 'unproven pure method call decode through unresolved base raw'),
+        ('packet_verify', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(raw)'),
+        ('packet_verify',
+         "unproven pure method call splitlines through unresolved base raw.decode('utf-8', 'replace')"),
+        ('report', 'call of protocol-running callable print through unresolved base line'),
+        ('scan_range', 'call of protocol-running callable len through unresolved base commits'),
+        ('scan_range', 'call of protocol-running callable len through unresolved base tree'),
+        ('scan_range', 'call of protocol-running callable set through unresolved base blob'),
+        ('scan_range',
+         "unproven pure method call split through unresolved base _git(repo, 'diff-tree', '-r', '--no-commit-id', '-z', '--root', c)"),
+        ('scan_range',
+         "unproven pure method call split through unresolved base _git(repo, 'rev-list', '%s..%s' % (base, tip))"),
+        ('scan_range', 'unproven pure method call split through unresolved base meta'),
+        ('scan_range', 'unproven pure method call startswith through unresolved base status'),
+        ('scan_staged',
+         "unproven pure method call split through unresolved base _git(repo, 'diff', '--cached', '--name-only', '-z')"),
+        ('scan_staged',
+         "unproven pure method call split through unresolved base _git(repo, 'diff', '--cached', '--name-only', '-z', '--diff-filter=d')"),
+        ('seal', 'augmented assignment += through unresolved base body'),
+        ('seal', "call of protocol-running callable '\\n'.join through unresolved base body"),
+        ('seal', 'call of protocol-running callable dict through unresolved base found'),
+        ('seal', "call of protocol-running callable f.write through unresolved base '\\n'.join(body) + '\\n'"),
+        ('seal', 'call of protocol-running callable len through unresolved base rows'),
+        ('seal', 'call of protocol-running callable open through unresolved base seal_file'),
+        ('seal', 'call of protocol-running callable os.path.basename through unresolved base out'),
+        ('seal', 'call of protocol-running callable os.path.join through unresolved base pin'),
+        ('seal', 'call of protocol-running callable sorted through unresolved base snap + [(name, body)]'),
+        ('seal_verify',
+         'call of protocol-running callable any through unresolved base (cur[k] != was[k] for k in was)'),
+        ('seal_verify', 'call of protocol-running callable int through unresolved base lines[2].split()[1]'),
+        ('seal_verify', 'call of protocol-running callable int through unresolved base n'),
+        ('seal_verify', 'call of protocol-running callable len through unresolved base lines'),
+        ('seal_verify', 'call of protocol-running callable open through unresolved base seal_file'),
+        ('seal_verify', 'call of protocol-running callable set through unresolved base cur'),
+        ('seal_verify', 'call of protocol-running callable set through unresolved base cur'),
+        ('seal_verify', 'call of protocol-running callable set through unresolved base was'),
+        ('seal_verify', 'call of protocol-running callable set through unresolved base was'),
+        ('seal_verify', 'unproven pure method call split through unresolved base lines[0]'),
+        ('seal_verify', 'unproven pure method call split through unresolved base lines[2]'),
+        ('seal_verify', 'unproven pure method call split through unresolved base ln'),
+        ('seal_verify', 'unproven pure method call splitlines through unresolved base f.read()'),
+        ('seal_verify', 'unproven pure method call startswith through unresolved base lines[0]'),
+        ('seal_verify', 'unproven pure method call startswith through unresolved base lines[2]'),
+        ('snapshot', 'call of protocol-running callable os.path.join through unresolved base root'),
+        ('snapshot', 'call of protocol-running callable set through unresolved base again'),
+        ('snapshot', 'call of protocol-running callable set through unresolved base listed'),
+        ('snapshot',
+         'call of protocol-running callable sorted through unresolved base (k for k in listed if again[k] != listed[k])'),
+        ('snapshot', 'call of protocol-running callable sorted through unresolved base listed'),
+        ('snapshot', 'call of protocol-running callable sorted through unresolved base set(again) ^ set(listed)'),
+        ('snapshot', 'unproven pure method call split through unresolved base rel'),
+        ('snapshot_rows', 'call of protocol-running callable hashlib.sha256 through unresolved base raw'),
+        ('snapshot_rows', 'call of protocol-running callable len through unresolved base raw'),
+        ('snapshot_rows',
+         'call of protocol-running callable sorted through unresolved base ((rel, len(raw), hashlib.sha256(raw).hexdigest()) for rel, raw in snap)'),
+        ('snapshot_rows', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(raw)'),
+        ('write_manifest', 'call of protocol-running callable os.path.basename through unresolved base out'),
+        ('write_manifest', 'call of protocol-running callable os.path.join through unresolved base pin'),
 ]}
 
 
@@ -2485,7 +3224,30 @@ def _namespace_reach(tree, names, file="<source>") -> list:
           of a callback of map, filter, iter, sorted, min or max judged as
           that call; of an in-place operator delivered by a call, a
           subscript or a walrus.
-    Fix pass 9's _manager_rebinds still runs beside it, unchanged."""
+    Fix pass 14 (round 13 M5, LOW 1, LOW 2):
+      (1) a store, deletion or augmented store whose base can stand for an
+          imported object (a module, or a member of one, by any import form)
+          is refused as a write through an imported namespace, and a dotted
+          name with a namespace member past its first part (from os import
+          __dict__ as ns) is namespace-reaching (_namespace_member);
+      (5) a method listed on _PURE_METHODS called on a receiver the
+          unresolved-base half rejects is refused too, unless the receiver
+          is proven an exact builtin (_Reach.builtin_typed);
+      (8) a call of builtin or library code (or a method of a proven
+          builtin receiver) over an argument the proof cannot type is
+          refused as protocol-running (_Reach.protocol_rows), and an
+          imported object handed to an unlisted or unresolved callable is a
+          write through an imported namespace;
+      (9) a method off _PURE_METHODS and _ARG_SAFE called, or a mutator
+          method taken, through an imported object that is not a module an
+          import statement names is a write through an imported namespace;
+      every name is read by Python's scope rules (_Flow.lookup), never by
+      every binding of the name, and an identity alias is never fresh.
+    The implicit protocols (iteration, subscript and attribute reads, in,
+    formatting, an operator's own method) are not calls and are not refused
+    by (8); an operator's RESULT over an unresolved operand is unresolved.
+    Fix pass 9's _manager_rebinds still runs beside it; fix pass 14 adds a
+    namespace operation named by an import (from os import __dict__)."""
     r = _Reach(tree, names)
     parents = r.parents
     out = []
@@ -2503,6 +3265,8 @@ def _namespace_reach(tree, names, file="<source>") -> list:
             hit = next((x for x in [n] + list(ast.walk(n.value)) if r.reaching(x)), None)
             if hit is not None:
                 out.append((n.lineno, "%s through namespace-reaching %s" % (op, ast.unparse(hit))))
+            elif r.imported(n.value):                                # fix 14: another module's namespace
+                out.append((n.lineno, "%s through imported namespace %s" % (op, ast.unparse(n.value))))
             elif not r.made_here(n.value):
                 out.append((n.lineno, "%s through unresolved base %s" % (op, ast.unparse(n.value))))
             elif aug is not None and not r.made_here(n):          # fix 12: the element's in-place operator
@@ -2520,8 +3284,20 @@ def _namespace_reach(tree, names, file="<source>") -> list:
                 if n.attr not in _PURE_METHODS:                      # fix 13: unlisted methods are mutations
                     out.append((n.lineno, "method call %s through unresolved base %s"
                                 % (n.attr, ast.unparse(n.value))))
+                elif not r.builtin_typed(n.value):                   # fix 14: a listed name, an unproven receiver
+                    out.append((n.lineno, "unproven pure method call %s through unresolved base %s"
+                                % (n.attr, ast.unparse(n.value))))
             elif n.attr in _MUTATOR_NAMES:
                 out.append((n.lineno, "bound method %s taken through unresolved base %s"
+                            % (n.attr, ast.unparse(n.value))))
+        if isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Load) and r.imported(n.value) \
+                and not r.module_ref(n.value) and not r.reaching(n):                                     # (9)
+            p = parents.get(id(n))
+            listed = all(_arg_safe(d) for d in r.cands(n) if d)
+            if isinstance(p, ast.Call) and p.func is n and n.attr not in _PURE_METHODS and not listed:
+                out.append((n.lineno, "method call %s through imported namespace %s" % (n.attr, ast.unparse(n.value))))
+            elif not (isinstance(p, ast.Call) and p.func is n) and n.attr in _MUTATOR_NAMES:
+                out.append((n.lineno, "bound method %s taken through imported namespace %s"
                             % (n.attr, ast.unparse(n.value))))
         if isinstance(n, ast.Call):                                                                      # (8)
             out += [(n.lineno, k) for k in r.call_rows(n)]
@@ -2766,7 +3542,8 @@ def test_m5_fix4_alias_controls_are_clean():
 # M5(c): an os.walk handler must be proven to reach the exit-3 refusal
 WALK_OK = ("import os\n\n\nclass NoVerdict(Exception):\n    pass\n\n\n"
            "def _walk_error(e):\n    raise NoVerdict(type(e).__name__)\n\n\n"
-           "def scan(p):\n    return list(os.walk(p, onerror=_walk_error))\n\n\n"
+           "def scan(p):\n    if type(p) is not str:\n        raise NoVerdict('root')\n"
+           "    return list(os.walk(p, onerror=_walk_error))\n\n\n"
            "def main(argv):\n    try:\n        scan(argv[0])\n    except NoVerdict:\n"
            "        print('refused')\n        return 3\n    return 0\n")
 WALK_BAD = [

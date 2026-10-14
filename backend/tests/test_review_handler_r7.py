@@ -124,7 +124,34 @@ index into a display selects its own element:
   * h, the real review modules: each keeps its round 12 verdict by the same
     test, every unresolved site is named per module (REAL: the row the proof
     prints and its enclosing function or class, never a line or a total) and
-    review_needles.py's new sites are exactly the measured ones."""
+    review_needles.py's new sites are exactly the measured ones.
+
+Fix pass 14 (build round 13, M5, LOW 1, LOW 2): a write through an imported
+namespace object (the report's from os import __dict__ as ns), a name-only get
+on an unresolved receiver and a protocol-running allowlisted call over an
+untyped value were trusted; a same-name binding in another scope was merged
+into the receiver proof; and bytes(b) over an exact bytes b was called fresh.
+Stores and mutators through imported objects and imported objects handed to
+unlisted code are refused, a pure method name is admitted only on a proven
+builtin receiver, a builtin or library call over an argument the proof cannot
+type is refused (a type guard of the parameter, a literal or a proven builtin
+container admits it), names are read by Python's scopes, and an identity
+alias is _IMMUT, never fresh:
+  * REBOUND14, a to h (the report's input verbatim, a dynamic member through
+    an import alias, stores through imported objects, an imported object
+    handed to unlisted code, a mutator through an imported object, the
+    name-only get, protocol-running calls and callbacks, a type guard of a
+    module class): each reports os.walk naming its line (each admitted at
+    a2b5151c);
+  * b, the control: a guarded parameter, a local dict's pure methods and an
+    argument stored by append: still trusted, the walk still proven;
+  * c, the _revision shape trusted with no exemption, the same-scope binding
+    and the free name still refused; d, the identity aliases, the operator
+    and the mutable alias, and the fix 13 fresh results;
+  * the benign controls k (fix 11), f (fix 12), g and the loop of e (fix 13)
+    keep their shapes over values the proof can type (each deviation is
+    named where it is made), the selftest fixture r3.WALK_OK guards its
+    parameter's type, and REAL is re-measured by site identity."""
 
 import os
 import sys
@@ -451,38 +478,451 @@ NEEDLES = "backend/tools/review_needles.py"
 # itself carries (r3._MEASURED_CLEAN), written there independently.
 REAL = {
     NEEDLES: [
+        ('<module>', 'call of protocol-running callable sys.exit through unresolved base main(sys.argv[1:])'),
         ('_Values.__init__', 'attribute store through unresolved base self'),
+        ('_Values.add',
+         'call of protocol-running callable any through unresolved base (_key_pattern(k) for k in keys)'),
+        ('_Values.add', 'call of protocol-running callable isinstance through unresolved base v'),
         ('_Values.add', 'method call add through unresolved base self'),
         ('_Values.add', 'method call append through unresolved base self.items'),
         ('_Values.add', 'method call append through unresolved base self.lists'),
+        ('_blob_text', 'unproven pure method call decode through unresolved base raw'),
+        ('_data_refs', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_data_refs', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_data_refs', "call of protocol-running callable isinstance through unresolved base node['data']"),
+        ('_data_refs', 'call of protocol-running callable set through unresolved base node'),
+        ('_data_refs', 'unproven pure method call values through unresolved base node'),
+        ('_derive',
+         "call of protocol-running callable _PUBLIC.extend through unresolved base sorted({ln.rstrip('\\n') for ln in f if ln.strip() and (not ln.startswith('#'))}, key=len, reverse=True)"),
+        ('_derive', 'call of protocol-running callable len through unresolved base name'),
+        ('_derive', 'call of protocol-running callable open through unresolved base listed'),
+        ('_derive', 'call of protocol-running callable open through unresolved base public'),
+        ('_derive', 'call of protocol-running callable os.listdir through unresolved base base'),
+        ('_derive', 'call of protocol-running callable os.listdir through unresolved base store'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base base'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base store'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base store'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base tests'),
+        ('_derive', 'call of protocol-running callable os.path.join through unresolved base tests'),
+        ('_derive', 'call of protocol-running callable sorted through unresolved base os.listdir(store)'),
+        ('_derive',
+         "call of protocol-running callable sorted through unresolved base {ln.rstrip('\\n') for ln in f if ln.strip() and (not ln.startswith('#'))}"),
+        ('_derive',
+         "callback of sorted (protocol-running callable len) through unresolved base {ln.rstrip('\\n') for ln in f if ln.strip() and (not ln.startswith('#'))}"),
         ('_derive', "method call add through unresolved base out['basename']"),
         ('_derive', 'subscript store through unresolved base out'),
-        ('_entries', 'subscript store through unresolved base out'),
+        ('_derive', 'unproven pure method call fullmatch through unresolved base _REV_DIR'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable len through unresolved base rest'),
+        ('_dispatch', 'call of protocol-running callable open through unresolved base rest[0]'),
+        ('_dispatch',
+         "call of protocol-running callable print through unresolved base __doc__.split('Modes:')[1].split('Exit 0')[0].rstrip()"),
+        ('_dispatch',
+         "unproven pure method call rstrip through unresolved base __doc__.split('Modes:')[1].split('Exit 0')[0]"),
+        ('_dispatch', "unproven pure method call split through unresolved base __doc__.split('Modes:')[1]"),
+        ('_entries', 'call of protocol-running callable getattr through unresolved base st'),
+        ('_entries', 'call of protocol-running callable getattr through unresolved base st'),
+        ('_entries', 'call of protocol-running callable os.path.join through unresolved base top'),
+        ('_entries', 'call of protocol-running callable os.path.join through unresolved base top'),
+        ('_entries', 'call of protocol-running callable os.scandir through unresolved base top'),
+        ('_entries', 'call of protocol-running callable sorted through unresolved base (e.name for e in it)'),
+        ('_entries', 'call of protocol-running callable stat.S_ISDIR through unresolved base st.st_mode'),
+        ('_entries', 'call of protocol-running callable stat.S_ISDIR through unresolved base st.st_mode'),
+        ('_entries', 'call of protocol-running callable stat.S_ISLNK through unresolved base st.st_mode'),
+        ('_entries', 'call of protocol-running callable stat.S_ISREG through unresolved base st.st_mode'),
+        ('_entries', 'call of protocol-running callable str through unresolved base root'),
+        ('_expr', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_expr', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_expr', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_expr', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_expr', 'call of protocol-running callable len through unresolved base node'),
         ('_expr', 'method call add through unresolved base vals'),
+        ('_expr', 'unproven pure method call items through unresolved base node'),
+        ('_finite', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_finite', 'call of protocol-running callable math.isfinite through unresolved base v'),
+        ('_git',
+         "call of protocol-running callable subprocess.run through unresolved base ['git', '-C', repo, *args]"),
+        ('_git', 'unproven pure method call decode through unresolved base out'),
+        ('_ident', 'call of protocol-running callable stat.S_IFMT through unresolved base st.st_mode'),
+        ('_inside', 'call of protocol-running callable os.path.commonpath through unresolved base [a, b]'),
+        ('_inside', 'call of protocol-running callable os.path.realpath through unresolved base path'),
+        ('_inside', 'call of protocol-running callable os.path.realpath through unresolved base root'),
+        ('_is_dir', 'call of protocol-running callable stat.S_ISDIR through unresolved base st.st_mode'),
+        ('_is_file', 'call of protocol-running callable stat.S_ISREG through unresolved base st.st_mode'),
+        ('_key_pattern',
+         "call of protocol-running callable '[ _-]?'.join through unresolved base (re.escape(w) for w in words)"),
+        ('_key_pattern', 'call of protocol-running callable re.escape through unresolved base w'),
+        ('_key_pattern', 'call of protocol-running callable re.escape through unresolved base words.pop()'),
+        ('_key_pattern', 'call of protocol-running callable re.split through unresolved base key'),
+        ('_keys', 'call of protocol-running callable isinstance through unresolved base n'),
+        ('_keys', 'call of protocol-running callable len through unresolved base n'),
+        ('_manifest_body', "call of protocol-running callable '\\n'.join through unresolved base lines"),
+        ('_manifest_body', 'call of protocol-running callable hashlib.md5 through unresolved base data'),
+        ('_manifest_body', 'call of protocol-running callable len through unresolved base data'),
+        ('_manifest_body', 'call of protocol-running callable open through unresolved base note_file'),
+        ('_manifest_body',
+         'call of protocol-running callable sorted through unresolved base ((rel, hashlib.md5(data).hexdigest(), len(data)) for rel, data in snap)'),
+        ('_manifest_body', 'call of protocol-running callable sum through unresolved base (n for _r, _m, n in rows)'),
+        ('_manifest_body', 'call of protocol-running callable time.strftime through unresolved base time.gmtime()'),
+        ('_manifest_body', "unproven pure method call encode through unresolved base '\\n'.join(lines) + '\\n'"),
+        ('_manifest_body', 'unproven pure method call hexdigest through unresolved base hashlib.md5(data)'),
+        ('_manifest_body', "unproven pure method call strip through unresolved base _git(pin, 'rev-parse', 'HEAD')"),
+        ('_manifest_body', 'unproven pure method call strip through unresolved base f.read()'),
+        ('_manifest_lines_of', 'call of protocol-running callable hashlib.sha256 through unresolved base raw'),
+        ('_manifest_lines_of', 'call of protocol-running callable sorted through unresolved base snap'),
+        ('_manifest_lines_of', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(raw)'),
+        ('_measure_keys', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_measure_keys', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_measure_keys', "call of protocol-running callable isinstance through unresolved base node['m']"),
+        ('_measure_keys', 'call of protocol-running callable set through unresolved base node'),
+        ('_measure_keys',
+         "call of unresolved callable out.append through unresolved base node['m'].rsplit('.', 1)[-1]"),
+        ('_measure_keys', "unproven pure method call rsplit through unresolved base node['m']"),
+        ('_measure_keys', 'unproven pure method call values through unresolved base node'),
         ('_merge', 'subscript store through unresolved base a'),
+        ('_merge', 'unproven pure method call get through unresolved base a'),
+        ('_merge', 'unproven pure method call items through unresolved base b'),
+        ('_meta', "call of protocol-running callable isinstance through unresolved base r['post']"),
+        ('_meta', "call of protocol-running callable isinstance through unresolved base r['post_since']"),
+        ('_meta', 'call of protocol-running callable isinstance through unresolved base r[k]'),
+        ('_meta', 'call of protocol-running callable isinstance through unresolved base s'),
+        ('_meta', 'call of protocol-running callable isinstance through unresolved base show'),
+        ('_meta', 'call of protocol-running callable isinstance through unresolved base x'),
+        ('_meta', 'call of protocol-running callable set through unresolved base r'),
+        ('_meta', 'unproven pure method call get through unresolved base r'),
+        ('_num_tokens', 'call of protocol-running callable int through unresolved base v'),
+        ('_num_tokens', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_num_tokens', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_num_tokens', 'call of protocol-running callable repr through unresolved base v'),
+        ('_num_tokens', 'call of protocol-running callable sorted through unresolved base toks'),
+        ('_num_tokens', 'call of protocol-running callable str through unresolved base v'),
+        ('_num_tokens', 'unproven pure method call is_integer through unresolved base v'),
+        ('_num_tokens', 'unproven pure method call startswith through unresolved base t'),
+        ('_num_tokens', 'unproven pure method call startswith through unresolved base t'),
+        ('_pred', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_pred', "call of protocol-running callable isinstance through unresolved base node['args']"),
+        ('_pred', "call of protocol-running callable isinstance through unresolved base node['op']"),
+        ('_pred', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_pred', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_pred', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_pred', "call of protocol-running callable isinstance through unresolved base v['data']"),
+        ('_pred', 'call of protocol-running callable set through unresolved base node'),
+        ('_pred', 'call of protocol-running callable set through unresolved base node'),
+        ('_pred', 'call of protocol-running callable set through unresolved base node'),
+        ('_pred', 'call of protocol-running callable set through unresolved base v'),
         ('_pred', 'method call add through unresolved base vals'),
+        ('_pred', 'unproven pure method call items through unresolved base node'),
+        ('_pred', "unproven pure method call items through unresolved base node['args']"),
+        ('_pred', "unproven pure method call rsplit through unresolved base node['op']"),
+        ('_read_regular', 'call of protocol-running callable len through unresolved base raw'),
+        ('_read_regular', 'call of protocol-running callable open through unresolved base path'),
+        ('_read_regular', 'call of protocol-running callable os.fstat through unresolved base f.fileno()'),
+        ('_report_line',
+         "call of protocol-running callable ', '.join through unresolved base ('%s=%d' % (k, found[k]) for k in sorted(found))"),
+        ('_report_line', 'call of protocol-running callable sorted through unresolved base found'),
+        ('_report_line', 'call of protocol-running callable sum through unresolved base found.values()'),
         ('_report_line', 'method call pop through unresolved base found'),
         ('_report_line', 'method call pop through unresolved base found'),
+        ('_report_line', 'unproven pure method call values through unresolved base found'),
         ('_revision', 'augmented subscript store |= through unresolved base out'),
+        ('_revision', 'call of protocol-running callable isinstance through unresolved base doc'),
+        ('_revision', "call of protocol-running callable isinstance through unresolved base doc.get('nonce')"),
+        ('_revision', "call of protocol-running callable isinstance through unresolved base r.get('id')"),
+        ('_revision', 'call of protocol-running callable json.loads through unresolved base text'),
+        ('_revision', 'call of protocol-running callable len through unresolved base f'),
+        ('_revision', 'call of protocol-running callable len through unresolved base f.strip()'),
+        ('_revision', 'call of protocol-running callable len through unresolved base stem'),
+        ('_revision', 'call of protocol-running callable open through unresolved base os.path.join(ddir, dn)'),
+        ('_revision',
+         "call of protocol-running callable open through unresolved base os.path.join(path, 'rules.json')"),
+        ('_revision', 'call of protocol-running callable os.listdir through unresolved base ddir'),
+        ('_revision', 'call of protocol-running callable os.path.join through unresolved base ddir'),
+        ('_revision', 'call of protocol-running callable os.path.join through unresolved base path'),
+        ('_revision', 'call of protocol-running callable os.path.join through unresolved base path'),
+        ('_revision', 'call of protocol-running callable sorted through unresolved base _data_refs(doc)'),
+        ('_revision', 'call of protocol-running callable sorted through unresolved base os.listdir(ddir)'),
         ('_revision', "method call add through unresolved base out['data']"),
         ('_revision', "method call add through unresolved base out['data']"),
         ('_revision', "method call add through unresolved base out['nonce']"),
         ('_revision', "method call add through unresolved base out['rule_id']"),
         ('_revision', "method call add through unresolved base out['wording']"),
-        ('_revision', 'method call read through unresolved base f'),
-        ('_revision', 'subscript store through unresolved base tables'),
+        ('_revision', 'unproven pure method call decode through unresolved base f.read()'),
+        ('_revision', 'unproven pure method call endswith through unresolved base dn'),
+        ('_revision', 'unproven pure method call get through unresolved base doc'),
+        ('_revision', 'unproven pure method call get through unresolved base doc'),
+        ('_revision', 'unproven pure method call get through unresolved base r'),
+        ('_revision', 'unproven pure method call get through unresolved base r'),
+        ('_revision', 'unproven pure method call rsplit through unresolved base dn'),
+        ('_revision', 'unproven pure method call split through unresolved base _PLACE'),
+        ('_revision', 'unproven pure method call strip through unresolved base f'),
+        ('_revision', 'unproven pure method call strip through unresolved base f'),
+        ('_rx', 'call of protocol-running callable re.compile through unresolved base p'),
+        ('_sequence',
+         'call of protocol-running callable re.compile through unresolved base gap.join((re.escape(f) for f in frags))'),
+        ('_sequence', 'call of protocol-running callable re.escape through unresolved base f'),
+        ('_sequence', 'call of unresolved callable gap.join through unresolved base (re.escape(f) for f in frags)'),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_sitting', "call of protocol-running callable isinstance through unresolved base node['args']"),
+        ('_sitting', "call of protocol-running callable isinstance through unresolved base node['op']"),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_sitting', 'call of protocol-running callable isinstance through unresolved base x'),
+        ('_sitting', 'call of protocol-running callable set through unresolved base node'),
         ('_sitting', 'method call add through unresolved base vals'),
+        ('_sitting', "unproven pure method call items through unresolved base node['args']"),
+        ('_sitting', "unproven pure method call rsplit through unresolved base node['op']"),
+        ('_status', 'call of protocol-running callable os.lstat through unresolved base path'),
+        ('_status', 'call of protocol-running callable os.stat through unresolved base path'),
+        ('_table', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_table', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_table', 'call of protocol-running callable isinstance through unresolved base x'),
+        ('_table', 'call of protocol-running callable isinstance through unresolved base x'),
         ('_table', 'method call add through unresolved base vals'),
         ('_table', 'method call add through unresolved base vals'),
         ('_table', 'method call add through unresolved base vals'),
+        ('_table', 'unproven pure method call items through unresolved base node'),
+        ('_text_lines', 'unproven pure method call splitlines through unresolved base text'),
+        ('_text_lines', 'unproven pure method call strip through unresolved base ln'),
+        ('_text_value', 'call of protocol-running callable float through unresolved base tok'),
+        ('_text_value', 'call of protocol-running callable int through unresolved base tok'),
+        ('_text_value', 'unproven pure method call fullmatch through unresolved base _TEXT_NUM'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base doc'),
+        ('_value_items',
+         "call of protocol-running callable isinstance through unresolved base doc.get('closure', {})"),
+        ('_value_items', "call of protocol-running callable isinstance through unresolved base doc.get('format')"),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base n'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base n'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base params'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base ps'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base r'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base rules'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base table'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base vocab'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base vocab'),
+        ('_value_items', 'call of protocol-running callable isinstance through unresolved base vocab'),
+        ('_value_items', 'call of protocol-running callable set through unresolved base doc'),
+        ('_value_items', 'call of protocol-running callable set through unresolved base vocab'),
+        ('_value_items', 'call of protocol-running callable sorted through unresolved base (tables or {}).items()'),
+        ('_value_items', 'call of protocol-running callable sorted through unresolved base vocab.items()'),
+        ('_value_items', 'call of protocol-running callable str through unresolved base fam'),
+        ('_value_items', "call of protocol-running callable str through unresolved base r.get('id')"),
+        ('_value_items', 'unproven pure method call get through unresolved base doc'),
+        ('_value_items', 'unproven pure method call get through unresolved base doc'),
+        ('_value_items', 'unproven pure method call get through unresolved base doc'),
+        ('_value_items', 'unproven pure method call get through unresolved base doc'),
+        ('_value_items', 'unproven pure method call get through unresolved base r'),
+        ('_value_items', 'unproven pure method call items through unresolved base params'),
+        ('_value_items', 'unproven pure method call items through unresolved base ps'),
+        ('_value_items', 'unproven pure method call items through unresolved base tables or {}'),
+        ('_value_items', 'unproven pure method call items through unresolved base vocab'),
+        ('_value_items', 'unproven pure method call rsplit through unresolved base name'),
+        ('_value_items', 'unproven pure method call rsplit through unresolved base name'),
+        ('_value_items', 'unproven pure method call rsplit through unresolved base str(fam)'),
+        ('_value_items', 'unproven pure method call split through unresolved base _TEXT_SPLIT'),
+        ('_value_items', 'unproven pure method call strip through unresolved base ln'),
+        ('_value_items', 'unproven pure method call strip through unresolved base ln'),
+        ('_value_needles',
+         "call of protocol-running callable '|'.join through unresolved base (re.escape(t) for t in _num_tokens(x))"),
+        ('_value_needles',
+         "call of protocol-running callable '|'.join through unresolved base (re.escape(x) for x in _num_tokens(v))"),
+        ('_value_needles', "call of protocol-running callable '|'.join through unresolved base sorted(alts)"),
+        ('_value_needles',
+         "call of protocol-running callable any through unresolved base (k.endswith('days') for k in keys)"),
+        ('_value_needles',
+         "call of protocol-running callable any through unresolved base (k.endswith('ms') for k in keys)"),
+        ('_value_needles', 'call of protocol-running callable by_group.setdefault through unresolved base group'),
+        ('_value_needles', 'call of protocol-running callable len through unresolved base alts'),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '%s[ \\\\t]?ms\\\\b' % val"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '%s[ \\\\t]{0,3}%s' % (val, _SIGN)"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?<![\\\\w.])(?:%s)(?:[ \\\\t]*[,;/][ \\\\t]*|[ \\\\t]+)(?:%s)(?![\\\\w]|\\\\.\\\\d)' % (x, y)"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?<![\\\\w.])(?:%s)[ \\\\t]?/[ \\\\t]?(?:%s)(?![\\\\w]|\\\\.\\\\d)' % (one, one)"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?i)%s[ \\\\t-]?days?\\\\b' % val"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?i)%s[ \\\\t]{0,3}%s' % (_CMP, val)"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?i)%s[^\\\\n]{0,%d}?\\\\b%s\\\\b' % (val, VALUE_NEAR, kp)"),
+        ('_value_needles', "call of protocol-running callable out.add through unresolved base '(?i)' + val"),
+        ('_value_needles',
+         "call of protocol-running callable out.add through unresolved base '(?i)\\\\b%s\\\\b[^\\\\n]{0,%d}?%s' % (kp, VALUE_NEAR, val)"),
+        ('_value_needles', 'call of protocol-running callable re.escape through unresolved base t'),
+        ('_value_needles', 'call of protocol-running callable re.escape through unresolved base x'),
+        ('_value_needles', 'call of protocol-running callable sorted through unresolved base alts'),
+        ('_value_needles', 'call of protocol-running callable zip through unresolved base alts'),
         ('_value_needles', 'method call add through unresolved base by_group.setdefault(group, set())'),
+        ('_value_needles', 'unproven pure method call endswith through unresolved base k'),
+        ('_value_needles', 'unproven pure method call endswith through unresolved base k'),
+        ('_value_rx',
+         "call of protocol-running callable '|'.join through unresolved base (re.escape(x) for x in _num_tokens(v))"),
+        ('_value_rx', 'call of protocol-running callable re.escape through unresolved base v'),
+        ('_value_rx', 'call of protocol-running callable re.escape through unresolved base x'),
+        ('_write_manifest', 'call of protocol-running callable f.write through unresolved base body'),
+        ('_write_manifest', 'call of protocol-running callable open through unresolved base dst'),
+        ('_write_manifest', 'call of protocol-running callable os.path.basename through unresolved base out'),
+        ('_write_manifest', 'call of protocol-running callable os.path.join through unresolved base pin'),
+        ('_write_manifest', 'call of protocol-running callable os.path.join through unresolved base ri'),
+        ('corpus_digest',
+         "call of unresolved callable ('%s\\t%d\\t%s\\n' % (name, size, digest)).encode through unresolved base ('%s\\t%d\\t%s\\n' % (name, size, digest)).encode"),
         ('corpus_digest', 'method call update through unresolved base h'),
-        ('count', 'subscript store through unresolved base found'),
-        ('packet', 'subscript store through unresolved base found'),
+        ('corpus_digest', 'unproven pure method call hexdigest through unresolved base h'),
+        ('count', 'call of protocol-running callable found.get through unresolved base cls'),
+        ('count', 'call of protocol-running callable isinstance through unresolved base s'),
+        ('count', 'unproven pure method call items through unresolved base needles'),
+        ('count', 'unproven pure method call replace through unresolved base public_cut'),
+        ('count', 'unproven pure method call search through unresolved base _rx(s[1])'),
+        ('count', 'unproven pure method call search through unresolved base _sequence(s)'),
+        ('leaf_type', 'call of protocol-running callable abs through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('leaf_type', 'call of protocol-running callable len through unresolved base v'),
+        ('leaf_type', 'unproven pure method call is_integer through unresolved base v'),
+        ('main', 'call of protocol-running callable isinstance through unresolved base e'),
+        ('main', 'call of protocol-running callable isinstance through unresolved base e'),
+        ('main', 'call of protocol-running callable len through unresolved base argv'),
+        ('main',
+         "call of protocol-running callable print through unresolved base 'review_needles: no verdict (%s): refused' % (e if isinstance(e, NoVerdict) else type(e).__name__)"),
+        ('main',
+         "call of protocol-running callable print through unresolved base 'review_needles: no verdict (a read failed: %s): refused, no result' % (e if isinstance(e, NoVerdict) else type(e).__name__)"),
+        ('main',
+         "call of protocol-running callable print through unresolved base 'review_needles: no verdict (store unreadable: %s): refused, nothing was scanned' % e"),
+        ('main',
+         "call of protocol-running callable print through unresolved base __doc__.split('Modes:')[1].split('Exit 0')[0].rstrip()"),
+        ('main',
+         "unproven pure method call rstrip through unresolved base __doc__.split('Modes:')[1].split('Exit 0')[0]"),
+        ('main', "unproven pure method call split through unresolved base __doc__.split('Modes:')[1]"),
+        ('packet', "call of protocol-running callable '\\n'.join through unresolved base _manifest_lines_of(snap)"),
+        ('packet', 'call of protocol-running callable f.write through unresolved base body'),
+        ('packet', 'call of protocol-running callable f.write through unresolved base raw'),
+        ('packet', 'call of protocol-running callable f.write through unresolved base raw'),
+        ('packet',
+         "call of protocol-running callable hashlib.sha1 through unresolved base b'blob %d\\x00' % len(got) + got"),
+        ('packet', 'call of protocol-running callable hashlib.sha256 through unresolved base body'),
+        ('packet', 'call of protocol-running callable hashlib.sha256 through unresolved base got'),
+        ('packet', 'call of protocol-running callable hashlib.sha256 through unresolved base raw'),
+        ('packet', 'call of protocol-running callable len through unresolved base got'),
+        ('packet', 'call of protocol-running callable len through unresolved base parts'),
+        ('packet', 'call of protocol-running callable len through unresolved base snap'),
+        ('packet', 'call of protocol-running callable open through unresolved base allowlist'),
+        ('packet', 'call of protocol-running callable open through unresolved base d'),
+        ('packet', 'call of protocol-running callable open through unresolved base dst'),
+        ('packet', 'call of protocol-running callable open through unresolved base dst'),
+        ('packet', 'call of protocol-running callable open through unresolved base os.path.join(out_dir, MANIFEST)'),
+        ('packet', 'call of protocol-running callable os.listdir through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable os.makedirs through unresolved base os.path.dirname(dst)'),
+        ('packet', 'call of protocol-running callable os.makedirs through unresolved base os.path.dirname(dst)'),
+        ('packet', 'call of protocol-running callable os.makedirs through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable os.path.basename through unresolved base d'),
+        ('packet', 'call of protocol-running callable os.path.basename through unresolved base d'),
+        ('packet', 'call of protocol-running callable os.path.basename through unresolved base d'),
+        ('packet', 'call of protocol-running callable os.path.dirname through unresolved base dst'),
+        ('packet', 'call of protocol-running callable os.path.dirname through unresolved base dst'),
+        ('packet', 'call of protocol-running callable os.path.isabs through unresolved base parts[1]'),
+        ('packet', 'call of protocol-running callable os.path.join through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable os.path.join through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable os.path.join through unresolved base out_dir'),
+        ('packet', 'call of protocol-running callable re.fullmatch through unresolved base parts[2]'),
+        ('packet',
+         "call of protocol-running callable set through unresolved base _git(repo, 'ls-tree', '-r', '--name-only', '-z', commit).split('\\x00')"),
+        ('packet', 'call of protocol-running callable sorted through unresolved base pins'),
+        ('packet',
+         "unproven pure method call encode through unresolved base '\\n'.join(_manifest_lines_of(snap)) + '\\n'"),
+        ('packet',
+         "unproven pure method call hexdigest through unresolved base hashlib.sha1(b'blob %d\\x00' % len(got) + got)"),
+        ('packet', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(body)'),
+        ('packet', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(got)'),
+        ('packet', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(raw)'),
+        ('packet',
+         "unproven pure method call split through unresolved base _git(repo, 'ls-tree', '-r', '--name-only', '-z', commit)"),
+        ('packet', 'unproven pure method call split through unresolved base ln'),
+        ('packet', 'unproven pure method call split through unresolved base p'),
+        ('packet', 'unproven pure method call split through unresolved base p'),
+        ('packet', 'unproven pure method call startswith through unresolved base ln'),
+        ('packet', 'unproven pure method call startswith through unresolved base p'),
+        ('packet',
+         "unproven pure method call strip through unresolved base _git(repo, 'rev-parse', '%s:%s' % (commit, p))"),
+        ('packet', 'unproven pure method call strip through unresolved base ln'),
+        ('packet_verify', 'call of protocol-running callable dict through unresolved base snap'),
+        ('packet_verify', 'call of protocol-running callable hashlib.sha256 through unresolved base raw'),
+        ('packet_verify', 'unproven pure method call decode through unresolved base raw'),
+        ('packet_verify', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(raw)'),
+        ('packet_verify',
+         "unproven pure method call splitlines through unresolved base raw.decode('utf-8', 'replace')"),
+        ('report', 'call of protocol-running callable print through unresolved base line'),
+        ('scan_range', 'call of protocol-running callable len through unresolved base commits'),
+        ('scan_range', 'call of protocol-running callable len through unresolved base tree'),
+        ('scan_range', 'call of protocol-running callable set through unresolved base blob'),
+        ('scan_range',
+         "unproven pure method call split through unresolved base _git(repo, 'diff-tree', '-r', '--no-commit-id', '-z', '--root', c)"),
+        ('scan_range',
+         "unproven pure method call split through unresolved base _git(repo, 'rev-list', '%s..%s' % (base, tip))"),
+        ('scan_range', 'unproven pure method call split through unresolved base meta'),
+        ('scan_range', 'unproven pure method call startswith through unresolved base status'),
+        ('scan_staged',
+         "unproven pure method call split through unresolved base _git(repo, 'diff', '--cached', '--name-only', '-z')"),
+        ('scan_staged',
+         "unproven pure method call split through unresolved base _git(repo, 'diff', '--cached', '--name-only', '-z', '--diff-filter=d')"),
         ('seal', 'augmented assignment += through unresolved base body'),
-        ('seal', 'subscript store through unresolved base found'),
+        ('seal', "call of protocol-running callable '\\n'.join through unresolved base body"),
+        ('seal', 'call of protocol-running callable dict through unresolved base found'),
+        ('seal', "call of protocol-running callable f.write through unresolved base '\\n'.join(body) + '\\n'"),
+        ('seal', 'call of protocol-running callable len through unresolved base rows'),
+        ('seal', 'call of protocol-running callable open through unresolved base seal_file'),
+        ('seal', 'call of protocol-running callable os.path.basename through unresolved base out'),
+        ('seal', 'call of protocol-running callable os.path.join through unresolved base pin'),
+        ('seal', 'call of protocol-running callable sorted through unresolved base snap + [(name, body)]'),
+        ('seal_verify',
+         'call of protocol-running callable any through unresolved base (cur[k] != was[k] for k in was)'),
+        ('seal_verify', 'call of protocol-running callable int through unresolved base lines[2].split()[1]'),
+        ('seal_verify', 'call of protocol-running callable int through unresolved base n'),
+        ('seal_verify', 'call of protocol-running callable len through unresolved base lines'),
+        ('seal_verify', 'call of protocol-running callable open through unresolved base seal_file'),
+        ('seal_verify', 'call of protocol-running callable set through unresolved base cur'),
+        ('seal_verify', 'call of protocol-running callable set through unresolved base cur'),
+        ('seal_verify', 'call of protocol-running callable set through unresolved base was'),
+        ('seal_verify', 'call of protocol-running callable set through unresolved base was'),
+        ('seal_verify', 'unproven pure method call split through unresolved base lines[0]'),
+        ('seal_verify', 'unproven pure method call split through unresolved base lines[2]'),
+        ('seal_verify', 'unproven pure method call split through unresolved base ln'),
+        ('seal_verify', 'unproven pure method call splitlines through unresolved base f.read()'),
+        ('seal_verify', 'unproven pure method call startswith through unresolved base lines[0]'),
+        ('seal_verify', 'unproven pure method call startswith through unresolved base lines[2]'),
+        ('snapshot', 'call of protocol-running callable os.path.join through unresolved base root'),
+        ('snapshot', 'call of protocol-running callable set through unresolved base again'),
+        ('snapshot', 'call of protocol-running callable set through unresolved base listed'),
+        ('snapshot',
+         'call of protocol-running callable sorted through unresolved base (k for k in listed if again[k] != listed[k])'),
+        ('snapshot', 'call of protocol-running callable sorted through unresolved base listed'),
+        ('snapshot', 'call of protocol-running callable sorted through unresolved base set(again) ^ set(listed)'),
+        ('snapshot', 'unproven pure method call split through unresolved base rel'),
+        ('snapshot_rows', 'call of protocol-running callable hashlib.sha256 through unresolved base raw'),
+        ('snapshot_rows', 'call of protocol-running callable len through unresolved base raw'),
+        ('snapshot_rows',
+         'call of protocol-running callable sorted through unresolved base ((rel, len(raw), hashlib.sha256(raw).hexdigest()) for rel, raw in snap)'),
+        ('snapshot_rows', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(raw)'),
+        ('write_manifest', 'call of protocol-running callable os.path.basename through unresolved base out'),
+        ('write_manifest', 'call of protocol-running callable os.path.join through unresolved base pin'),
     ],
     "backend/api/review_rules.py": [
+        ('<module>',
+         "call of protocol-running callable print through unresolved base __doc__.split('Command line')[1].strip()"),
+        ('<module>',
+         "call of protocol-running callable re.compile through unresolved base '[a-z_]\\\\w{0,%d}' % (rm.CONTRACT_BOUNDS['label_max'] * PAIR)"),
+        ('<module>',
+         "call of protocol-running callable re.compile through unresolved base '[a-z_]{1,%d}' % rm.CONTRACT_BOUNDS['label_max']"),
+        ('<module>', "unproven pure method call strip through unresolved base __doc__.split('Command line')[1]"),
         ('Refused.__init__', 'attribute store through unresolved base self'),
         ('Ruleset.__init__', 'attribute store through unresolved base self'),
         ('Ruleset.__init__', 'attribute store through unresolved base self'),
@@ -496,6 +936,7 @@ REAL = {
         ('Ruleset.__init__', 'attribute store through unresolved base self'),
         ('Ruleset.evaluate_game',
          "call of unresolved callable self.core['core.game'].impl[0] through unresolved base self"),
+        ('Ruleset.horizon_days', 'call of protocol-running callable max through unresolved base days'),
         ('Ruleset.render_line',
          "call of unresolved callable self.core['core.render'].impl[0] through unresolved base rule"),
         ('Ruleset.run_selftest',
@@ -509,6 +950,9 @@ REAL = {
         ('State.__init__', 'attribute store through unresolved base self'),
         ('State.__init__', 'attribute store through unresolved base self'),
         ('State.__init__', 'attribute store through unresolved base self'),
+        ('_Binder.__call__', 'call of protocol-running callable isinstance through unresolved base kind'),
+        ('_Binder.__call__', 'call of protocol-running callable isinstance through unresolved base name'),
+        ('_Binder.__call__', 'call of protocol-running callable rm.REGISTRY.get through unresolved base name'),
         ('_Binder.__call__', 'call of unlisted callable rm.REGISTRY.get through unresolved base name'),
         ('_Binder.__call__', 'subscript store through unresolved base self.kinds'),
         ('_Binder.__call__', 'subscript store through unresolved base self.used'),
@@ -518,34 +962,180 @@ REAL = {
         ('_Binder.__init__', 'attribute store through unresolved base self'),
         ('_Budget.__init__', 'attribute store through unresolved base self'),
         ('_Budget.tick', 'augmented attribute store -= through unresolved base self'),
+        ('_canon', 'call of protocol-running callable json.dumps through unresolved base obj'),
+        ('_canon',
+         "unproven pure method call encode through unresolved base json.dumps(obj, sort_keys=True, separators=(',', ':'), ensure_ascii=True)"),
+        ('_closure_names',
+         "call of protocol-running callable all through unresolved base (isinstance(n, str) and _CODE_NAME.fullmatch(n) for n in closure['code'])"),
+        ('_closure_names', 'call of protocol-running callable isinstance through unresolved base closure'),
+        ('_closure_names', "call of protocol-running callable isinstance through unresolved base closure['code']"),
+        ('_closure_names', "call of protocol-running callable isinstance through unresolved base closure['fp']"),
+        ('_closure_names', 'call of protocol-running callable isinstance through unresolved base n'),
+        ('_closure_names', "call of protocol-running callable len through unresolved base closure['code']"),
+        ('_closure_names', "call of protocol-running callable len through unresolved base closure['fp']"),
+        ('_closure_names', 'call of protocol-running callable set through unresolved base closure'),
+        ('_closure_names', "call of protocol-running callable set through unresolved base closure['code']"),
+        ('_closure_names', "call of protocol-running callable set through unresolved base closure['code']"),
+        ('_closure_names', "call of protocol-running callable sorted through unresolved base set(closure['code'])"),
+        ('_closure_names', 'unproven pure method call fullmatch through unresolved base _CODE_NAME'),
+        ('_closure_names', 'unproven pure method call fullmatch through unresolved base _HEX'),
+        ('_code_files', 'call of protocol-running callable len through unresolved base raw'),
+        ('_code_files', 'call of protocol-running callable open through unresolved base path'),
+        ('_code_files', 'call of protocol-running callable os.path.abspath through unresolved base rb.__file__'),
+        ('_code_files', 'call of protocol-running callable os.path.basename through unresolved base rb.__file__'),
+        ('_code_files', 'call of protocol-running callable os.path.join through unresolved base api_dir'),
+        ('_code_files', 'call of protocol-running callable os.path.splitext through unresolved base name'),
+        ('_code_files', 'call of protocol-running callable rb.LOADED.get through unresolved base stem'),
+        ('_code_files', 'call of protocol-running callable sys.modules.get through unresolved base stem'),
         ('_code_files', 'call of unlisted callable rb.LOADED.get through unresolved base stem'),
         ('_code_files', 'call of unlisted callable sys.modules.get through unresolved base stem'),
+        ('_code_files', 'unproven pure method call replace through unresolved base raw'),
+        ('_compile_expr',
+         'call of protocol-running callable all through unresolved base (_finite(x) or isinstance(x, str) for x in v)'),
+        ('_compile_expr', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_compile_expr', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_expr', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_expr', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_expr', 'call of protocol-running callable isinstance through unresolved base x'),
+        ('_compile_expr', 'call of protocol-running callable len through unresolved base node'),
+        ('_compile_expr', 'call of protocol-running callable len through unresolved base v'),
         ('_compile_expr', 'call of unresolved callable bind through unresolved base e.family'),
         ('_compile_expr', 'call of unresolved callable bind through unresolved base v'),
+        ('_compile_expr', 'unproven pure method call items through unresolved base node'),
+        ('_compile_pred',
+         'call of protocol-running callable all through unresolved base (_finite(x) or isinstance(x, str) for x in v)'),
+        ('_compile_pred', 'call of protocol-running callable isinstance through unresolved base args'),
+        ('_compile_pred', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_compile_pred', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_pred', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_pred', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_pred', 'call of protocol-running callable isinstance through unresolved base x'),
+        ('_compile_pred', 'call of protocol-running callable set through unresolved base args'),
+        ('_compile_pred', 'call of protocol-running callable set through unresolved base node'),
+        ('_compile_pred', 'call of protocol-running callable set through unresolved base node'),
+        ('_compile_pred', 'call of protocol-running callable set through unresolved base node'),
+        ('_compile_pred', 'call of protocol-running callable set through unresolved base v'),
         ('_compile_pred', "call of unresolved callable bind through unresolved base node['op']"),
-        ('_compile_sitting', 'call of unresolved callable bind through unresolved base f'),
-        ('_compile_sitting', "call of unresolved callable bind through unresolved base node['op']"),
-        ('_compile_sitting', 'call of unresolved callable bind through unresolved base v'),
+        ('_compile_pred', 'unproven pure method call items through unresolved base node'),
+        ('_compile_sitting', 'call of protocol-running callable all through unresolved base (_finite(x) for x in v)'),
+        ('_compile_sitting', 'call of protocol-running callable isinstance through unresolved base args'),
+        ('_compile_sitting', 'call of protocol-running callable isinstance through unresolved base node'),
+        ('_compile_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_sitting', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_compile_sitting', 'call of protocol-running callable len through unresolved base v'),
+        ('_compile_sitting', 'call of protocol-running callable len through unresolved base v'),
+        ('_compile_sitting', 'call of protocol-running callable set through unresolved base args'),
+        ('_compile_sitting', 'call of protocol-running callable set through unresolved base node'),
+        ('_compile_sitting', 'call of protocol-running callable set through unresolved base v'),
+        ('_compile_sitting', 'call of protocol-running callable sorted through unresolved base v'),
         ('_compile_sitting', 'call of unresolved callable entry.impl[0] through unresolved base out'),
+        ('_compile_sitting', 'unproven pure method call fullmatch through unresolved base _STRATA'),
         ('_compile_sitting.bind', 'call of unresolved callable bind0 through unresolved base name'),
+        ('_compile_template', 'call of protocol-running callable bool through unresolved base none'),
+        ('_compile_template', 'call of protocol-running callable int through unresolved base places'),
+        ('_compile_template', 'call of protocol-running callable isinstance through unresolved base line'),
+        ('_compile_template', 'call of protocol-running callable len through unresolved base line'),
         ('_compile_template', 'method call end through unresolved base m'),
         ('_compile_template', 'method call groups through unresolved base m'),
         ('_compile_template', 'method call start through unresolved base m'),
+        ('_compile_template', 'unproven pure method call finditer through unresolved base _PLACE'),
+        ('_entries', 'call of protocol-running callable len through unresolved base plan'),
+        ('_entries', 'call of protocol-running callable os.path.join through unresolved base path'),
+        ('_entries', 'call of protocol-running callable os.scandir through unresolved base path'),
+        ('_exists', 'call of protocol-running callable os.lstat through unresolved base path'),
+        ('_finite', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_finite', 'call of protocol-running callable math.isfinite through unresolved base v'),
+        ('_framed', 'call of protocol-running callable len through unresolved base c'),
+        ('_framed', 'call of protocol-running callable len through unresolved base files'),
+        ('_framed', 'call of protocol-running callable len through unresolved base p'),
+        ('_framed', 'call of protocol-running callable sorted through unresolved base files'),
         ('_framed', 'method call update through unresolved base h'),
         ('_framed', 'method call update through unresolved base h'),
         ('_framed', 'method call update through unresolved base h'),
         ('_framed', 'method call update through unresolved base h'),
         ('_framed', 'method call update through unresolved base h'),
         ('_framed', 'method call update through unresolved base h'),
+        ('_framed', 'unproven pure method call encode through unresolved base path'),
+        ('_framed', 'unproven pure method call hexdigest through unresolved base h'),
+        ('_inventory', 'call of protocol-running callable os.lstat through unresolved base dp'),
+        ('_inventory', 'call of protocol-running callable os.lstat through unresolved base path'),
+        ('_inventory', 'call of protocol-running callable os.lstat through unresolved base rdir'),
+        ('_inventory', 'call of protocol-running callable stat.S_ISDIR through unresolved base s.st_mode'),
+        ('_inventory', 'call of protocol-running callable stat.S_ISDIR through unresolved base st.st_mode'),
+        ('_inventory', 'call of protocol-running callable stat.S_ISLNK through unresolved base ds.st_mode'),
+        ('_inventory', 'call of protocol-running callable stat.S_ISLNK through unresolved base s.st_mode'),
+        ('_inventory', 'call of protocol-running callable stat.S_ISLNK through unresolved base st.st_mode'),
+        ('_inventory', 'call of protocol-running callable stat.S_ISREG through unresolved base ds.st_mode'),
+        ('_inventory', 'call of protocol-running callable stat.S_ISREG through unresolved base s.st_mode'),
+        ('_inventory', 'call of protocol-running callable sum through unresolved base (p[2] for p in plan)'),
+        ('_inventory',
+         "call of protocol-running callable {'rules.json': _BOUNDS['rules_bytes_max'], 'selftest.json': _BOUNDS['selftest_bytes_max']}.get through unresolved base name"),
+        ('_inventory', 'unproven pure method call fullmatch through unresolved base _DATA_NAME'),
+        ('_is_dir', 'call of protocol-running callable os.stat through unresolved base path'),
+        ('_is_dir', 'call of protocol-running callable stat.S_ISDIR through unresolved base st.st_mode'),
+        ('_log', "call of protocol-running callable print through unresolved base '[REVIEW] rules: %s' % state.word"),
+        ('_log',
+         "call of protocol-running callable print through unresolved base '[REVIEW] rules: refused (%s)' % state.reason"),
         ('_measure_value', 'call of unresolved callable m.impl[0] through unresolved base ctx'),
         ('_measure_value', 'subscript store through unresolved base memo'),
+        ('_measure_value', 'unproven pure method call get through unresolved base rs.params'),
+        ('_nt_final', 'call of protocol-running callable os.path.abspath through unresolved base path'),
+        ('_nt_final', 'call of protocol-running callable os.path.normcase through unresolved base final'),
+        ('_nt_final',
+         'call of protocol-running callable os.path.normcase through unresolved base os.path.abspath(path)'),
+        ('_nt_final', 'unproven pure method call startswith through unresolved base final'),
+        ('_open_nofollow', 'call of protocol-running callable msvcrt.open_osfhandle through unresolved base h'),
+        ('_open_nofollow', 'call of protocol-running callable os.open through unresolved base path'),
         ('_open_nofollow', 'call of unlisted callable msvcrt.open_osfhandle through unresolved base h'),
         ('_open_nofollow', 'method call CloseHandle through unresolved base _K32'),
         ('_open_nofollow', 'method call CreateFileW through unresolved base _K32'),
         ('_open_nofollow', 'method call GetFinalPathNameByHandleW through unresolved base _K32'),
+        ('_parse_time',
+         "call of protocol-running callable datetime.fromisoformat through unresolved base v[:-1] if v.endswith('Z') else v"),
+        ('_parse_time', 'call of protocol-running callable isinstance through unresolved base v'),
         ('_parse_time', "call of unlisted callable datetime.fromisoformat through unresolved base "
                         "v[:-1] if v.endswith('Z') else v"),
+        ('_parse_time', 'unproven pure method call endswith through unresolved base v'),
+        ('_parse_time', 'unproven pure method call endswith through unresolved base v'),
+        ('_parse_time', 'unproven pure method call replace through unresolved base t'),
+        ('_pointer_key',
+         'call of protocol-running callable os.lstat through unresolved base os.path.join(base, target)'),
+        ('_pointer_key', 'call of protocol-running callable os.path.join through unresolved base base'),
+        ('_pointer_target', 'call of protocol-running callable os.lstat through unresolved base p'),
+        ('_pointer_target', 'call of protocol-running callable os.path.join through unresolved base base'),
+        ('_pointer_target', 'call of protocol-running callable os.readlink through unresolved base p'),
+        ('_pointer_target', 'call of protocol-running callable stat.S_ISLNK through unresolved base st.st_mode'),
+        ('_pointer_target', 'call of protocol-running callable stat.S_ISREG through unresolved base st.st_mode'),
+        ('_pointer_target', 'call of unresolved callable raw.decode through unresolved base raw.decode'),
+        ('_pointer_target', 'unproven pure method call fullmatch through unresolved base _REV_DIR'),
+        ('_pointer_target', "unproven pure method call strip through unresolved base raw.decode('ascii', 'replace')"),
+        ('_provenance', "call of protocol-running callable ','.join through unresolved base elsewhere"),
+        ('_provenance',
+         'call of protocol-running callable sorted through unresolved base rb.PRIOR | rb.executed_elsewhere()'),
+        ('_py', 'call of protocol-running callable float through unresolved base v'),
+        ('_py', 'call of protocol-running callable int through unresolved base v'),
+        ('_py', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_py', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_py', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_py', 'call of protocol-running callable round through unresolved base v'),
+        ('_py', 'call of protocol-running callable str through unresolved base v'),
         ('_py', 'method call to_integral_value through unresolved base v'),
+        ('_read_verified', 'augmented assignment -= through unresolved base left'),
+        ('_read_verified', "call of protocol-running callable b''.join through unresolved base chunks"),
+        ('_read_verified', 'call of protocol-running callable len through unresolved base b'),
+        ('_read_verified', 'call of protocol-running callable len through unresolved base data'),
+        ('_read_verified', 'call of protocol-running callable os.close through unresolved base fd'),
+        ('_read_verified', 'call of protocol-running callable os.fstat through unresolved base fd'),
+        ('_read_verified', 'call of protocol-running callable os.read through unresolved base fd'),
+        ('_read_verified', 'call of protocol-running callable stat.S_ISREG through unresolved base fs.st_mode'),
+        ('_register_core',
+         "call of protocol-running callable rm._register through unresolved base rm.Entry('core', 'core.game', (evaluate_game, eval_pred, eval_expr, _measure_value, run_selftest))"),
+        ('_register_core',
+         "call of protocol-running callable rm._register through unresolved base rm.Entry('core', 'core.render', (render_line, render_item, _render_value))"),
+        ('_register_core',
+         "call of protocol-running callable rm._register through unresolved base rm.Entry('core', 'core.sitting', (sitting_items, sitting_statement, norm_pair, _py, _bound_lookup, sitting_selftest))"),
         ('_register_core', "call of unlisted callable rm._register through unresolved base rm.Entry('core', "
                            "'core.game', (evaluate_game, eval_pred, eval_expr, _measure_value, run_selftest))"),
         ('_register_core', "call of unlisted callable rm._register through unresolved base rm.Entry('core', "
@@ -553,46 +1143,284 @@ REAL = {
         ('_register_core', "call of unlisted callable rm._register through unresolved base rm.Entry('core', "
                            "'core.sitting', (sitting_items, sitting_statement, norm_pair, _py, _bound_lookup, "
                            "sitting_selftest))"),
+        ('_render_value',
+         "call of protocol-running callable '/'.join through unresolved base (_render_value(x, places) for x in v)"),
+        ('_render_value', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_render_value', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_render_value', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_render_value', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_render_value', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('_render_value', 'call of protocol-running callable str through unresolved base v'),
+        ('_render_value', 'call of protocol-running callable str through unresolved base v'),
+        ('_reparse',
+         'call of protocol-running callable bool through unresolved base st.st_file_attributes & _REPARSE'),
+        ('build_revision', 'call of protocol-running callable dict through unresolved base doc'),
+        ('build_revision',
+         "call of protocol-running callable f.write through unresolved base '%s\\t%s\\t%s\\t%s\\t\\n' % (rev, datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'), parent, reason.replace('\\t', ' ').replace('\\n', ' '))"),
+        ('build_revision',
+         "call of protocol-running callable f.write through unresolved base (digest + '\\n').encode()"),
+        ('build_revision', 'call of protocol-running callable f.write through unresolved base raw'),
+        ('build_revision', 'call of protocol-running callable files.update through unresolved base data_files'),
+        ('build_revision',
+         "call of protocol-running callable json.loads through unresolved base f.read().decode('utf-8')"),
+        ('build_revision',
+         "call of protocol-running callable json.loads through unresolved base f.read().decode('utf-8')"),
+        ('build_revision', 'call of protocol-running callable json.loads through unresolved base text'),
+        ('build_revision', 'call of protocol-running callable open through unresolved base log'),
+        ('build_revision', 'call of protocol-running callable open through unresolved base log'),
+        ('build_revision', 'call of protocol-running callable open through unresolved base os.path.join(ddir, dn)'),
+        ('build_revision',
+         "call of protocol-running callable open through unresolved base os.path.join(draft, 'rules.json')"),
+        ('build_revision',
+         "call of protocol-running callable open through unresolved base os.path.join(draft, 'selftest.json')"),
+        ('build_revision',
+         "call of protocol-running callable open through unresolved base os.path.join(incoming, 'REVISION')"),
+        ('build_revision',
+         "call of protocol-running callable open through unresolved base os.path.join(incoming, *rel.split('/'))"),
+        ('build_revision', 'call of protocol-running callable os.listdir through unresolved base ddir'),
+        ('build_revision',
+         'call of protocol-running callable os.makedirs through unresolved base os.path.dirname(staged)'),
+        ('build_revision',
+         "call of protocol-running callable os.makedirs through unresolved base os.path.join(incoming, 'data') if data_files else incoming"),
+        ('build_revision', 'call of protocol-running callable os.path.dirname through unresolved base staged'),
+        ('build_revision', 'call of protocol-running callable os.path.dirname through unresolved base staged'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base ddir'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base draft'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base draft'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base draft'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base incoming'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base incoming'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base incoming'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base store'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base store'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base store'),
+        ('build_revision', 'call of protocol-running callable os.path.join through unresolved base store'),
+        ('build_revision', 'call of protocol-running callable os.rename through unresolved base incoming'),
+        ('build_revision', 'call of protocol-running callable os.rename through unresolved base staged'),
+        ('build_revision',
+         'call of protocol-running callable os.rmdir through unresolved base os.path.dirname(staged)'),
+        ('build_revision', 'call of protocol-running callable shutil.rmtree through unresolved base incoming'),
+        ('build_revision', 'call of protocol-running callable shutil.rmtree through unresolved base staged'),
+        ('build_revision', 'call of protocol-running callable sorted through unresolved base binder.used'),
+        ('build_revision', 'call of protocol-running callable sorted through unresolved base os.listdir(ddir)'),
         ('build_revision', 'call of unlisted callable shutil.rmtree through unresolved base incoming'),
         ('build_revision', 'call of unlisted callable shutil.rmtree through unresolved base staged'),
         ('build_revision', 'method call strftime through unresolved base datetime.now(timezone.utc)'),
-        ('build_revision', 'method call update through unresolved base files'),
-        ('build_revision', 'subscript store through unresolved base data'),
-        ('closure_fingerprint', 'method call update through unresolved base files'),
+        ('build_revision', 'unproven pure method call decode through unresolved base f.read()'),
+        ('build_revision', 'unproven pure method call decode through unresolved base f.read()'),
+        ('build_revision', 'unproven pure method call decode through unresolved base raw'),
+        ('build_revision', "unproven pure method call encode through unresolved base digest + '\\n'"),
+        ('build_revision', 'unproven pure method call replace through unresolved base reason'),
+        ('build_revision', "unproven pure method call replace through unresolved base reason.replace('\\t', ' ')"),
+        ('build_revision', "unproven pure method call rsplit through unresolved base rel.split('/', 1)[1]"),
+        ('build_revision', 'unproven pure method call split through unresolved base lines[-1]'),
+        ('build_revision', 'unproven pure method call split through unresolved base rel'),
+        ('build_revision', 'unproven pure method call split through unresolved base rel'),
+        ('build_revision', 'unproven pure method call splitlines through unresolved base f.read()'),
+        ('build_revision', 'unproven pure method call splitlines through unresolved base text'),
+        ('build_revision', 'unproven pure method call strip through unresolved base ln'),
+        ('build_revision', 'unproven pure method call strip through unresolved base ln'),
+        ('cli', 'call of protocol-running callable int through unresolved base days'),
+        ('cli', 'call of protocol-running callable len through unresolved base rest'),
+        ('cli', 'call of protocol-running callable list through unresolved base argv[1:]'),
+        ('cli', "call of protocol-running callable print through unresolved base 'eval: ' + review_eval()"),
+        ('cli', "call of protocol-running callable print through unresolved base 'refused (%s)' % e.cls"),
+        ('cli', "call of protocol-running callable print through unresolved base 'rev: ' + rs.rev"),
+        ('cli', "call of protocol-running callable print through unresolved base 'verdict: refused (%s)' % e.cls"),
+        ('cli',
+         "call of protocol-running callable print through unresolved base __doc__.split('Command line')[1].strip()"),
+        ('cli',
+         'call of protocol-running callable print through unresolved base build_revision(draft, store, reason)'),
+        ('cli', 'call of protocol-running callable print through unresolved base literal(rdir, rule_id, int(days))'),
+        ('cli', "unproven pure method call strip through unresolved base __doc__.split('Command line')[1]"),
+        ('closure_fingerprint', 'call of protocol-running callable dict through unresolved base code_files'),
+        ('closure_fingerprint',
+         "call of protocol-running callable files.update through unresolved base {'revision/' + k: v for k, v in revision_files.items() if k != 'REVISION'}"),
+        ('closure_fingerprint', 'unproven pure method call items through unresolved base revision_files'),
+        ('compile_rules',
+         'call of protocol-running callable all through unresolved base (_finite(x) for x in values.values())'),
+        ('compile_rules',
+         'call of protocol-running callable all through unresolved base (isinstance(s, list) and len(s) == PAIR and isinstance(s[0], str) and _RULE_LABEL.fullmatch(s[0]) for s in show)'),
+        ('compile_rules', 'call of protocol-running callable dict through unresolved base values'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base doc'),
+        ('compile_rules', "call of protocol-running callable isinstance through unresolved base doc['vocabulary']"),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base nonce'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base params'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base r.id'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base r.post'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base raw'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base rules'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base s'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base s[0]'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base show'),
+        ('compile_rules', 'call of protocol-running callable isinstance through unresolved base values'),
+        ('compile_rules', 'call of protocol-running callable len through unresolved base nonce'),
+        ('compile_rules', 'call of protocol-running callable len through unresolved base rules'),
+        ('compile_rules', 'call of protocol-running callable len through unresolved base s'),
+        ('compile_rules', 'call of protocol-running callable len through unresolved base show'),
+        ('compile_rules', 'call of protocol-running callable len through unresolved base show'),
+        ('compile_rules', 'call of protocol-running callable seen.add through unresolved base r.id'),
+        ('compile_rules', 'call of protocol-running callable set through unresolved base doc'),
+        ('compile_rules', 'call of protocol-running callable set through unresolved base entry.data'),
+        ('compile_rules', 'call of protocol-running callable set through unresolved base raw'),
+        ('compile_rules', 'call of protocol-running callable set through unresolved base raw'),
+        ('compile_rules', 'call of protocol-running callable set through unresolved base rs.params'),
+        ('compile_rules', 'call of protocol-running callable set through unresolved base values'),
         ('compile_rules', 'call of unresolved callable bind through unresolved base bind'),
         ('compile_rules', 'call of unresolved callable bind through unresolved base family'),
         ('compile_rules', 'method call append through unresolved base rs.rules'),
+        ('compile_rules', 'unproven pure method call fullmatch through unresolved base _HEX'),
+        ('compile_rules', 'unproven pure method call fullmatch through unresolved base _RULE_ID'),
+        ('compile_rules', 'unproven pure method call fullmatch through unresolved base _RULE_LABEL'),
+        ('compile_rules', 'unproven pure method call get through unresolved base raw'),
+        ('compile_rules', 'unproven pure method call get through unresolved base raw'),
+        ('compile_rules', 'unproven pure method call get through unresolved base raw'),
+        ('compile_rules', 'unproven pure method call get through unresolved base raw'),
+        ('compile_rules', 'unproven pure method call get through unresolved base raw'),
+        ('compile_rules', 'unproven pure method call get through unresolved base raw'),
+        ('compile_rules', 'unproven pure method call items through unresolved base bind.kinds'),
+        ('compile_rules', 'unproven pure method call items through unresolved base params'),
+        ('compile_rules', 'unproven pure method call values through unresolved base values'),
+        ('eval_expr', 'call of protocol-running callable abs through unresolved base rm._num(v)'),
+        ('eval_expr', 'call of protocol-running callable rm._num through unresolved base a'),
+        ('eval_expr', 'call of protocol-running callable rm._num through unresolved base b'),
+        ('eval_expr', 'call of protocol-running callable rm._num through unresolved base v'),
         ('eval_expr', 'call of unlisted callable rm._num through unresolved base a'),
         ('eval_expr', 'call of unlisted callable rm._num through unresolved base b'),
         ('eval_expr', 'call of unlisted callable rm._num through unresolved base v'),
+        ('eval_pred', 'call of protocol-running callable isinstance through unresolved base out'),
         ('eval_pred', 'call of unresolved callable entry.impl[0] through unresolved base vals'),
         ('eval_pred', 'method call tick through unresolved base budget'),
+        ('evaluate_game', 'call of protocol-running callable len through unresolved base records'),
+        ('evaluate_game', 'call of protocol-running callable rm.Ctx through unresolved base records'),
+        ('evaluate_game', 'call of protocol-running callable rm.Ctx through unresolved base records'),
         ('evaluate_game', 'call of unlisted callable rm.Ctx through unresolved base records'),
         ('evaluate_game', 'call of unlisted callable rm.Ctx through unresolved base records'),
         ('evaluate_game', 'method call render_line through unresolved base rs'),
+        ('literal', "call of protocol-running callable ' '.join through unresolved base sql.split()"),
+        ('literal', 'call of protocol-running callable int through unresolved base days_back'),
+        ('literal', 'call of protocol-running callable isinstance through unresolved base v'),
+        ('literal', 'call of protocol-running callable re.escape through unresolved base k'),
+        ('literal', "call of protocol-running callable re.sub through unresolved base ':%s\\\\b' % re.escape(k)"),
+        ('literal', 'call of protocol-running callable repr through unresolved base v'),
+        ('literal', 'call of protocol-running callable sorted through unresolved base binds'),
         ('literal', "call of unlisted callable re.sub through unresolved base ':%s\\\\b' % re.escape(k)"),
+        ('literal', 'callback of sorted (protocol-running callable len) through unresolved base binds'),
         ('literal', 'method call rule through unresolved base rs'),
         ('literal', 'method call sitting_statement through unresolved base rs'),
+        ('literal', 'unproven pure method call split through unresolved base sql'),
+        ('load_dir', 'call of protocol-running callable isinstance through unresolved base binder.vocab'),
+        ('load_dir', 'call of protocol-running callable isinstance through unresolved base doc'),
+        ('load_dir', 'call of protocol-running callable isinstance through unresolved base n'),
+        ('load_dir', 'call of protocol-running callable isinstance through unresolved base selftest'),
+        ('load_dir', "call of protocol-running callable isinstance through unresolved base selftest['cases']"),
+        ('load_dir',
+         "call of protocol-running callable json.loads through unresolved base files['rules.json'].decode('utf-8')"),
+        ('load_dir',
+         "call of protocol-running callable json.loads through unresolved base files['selftest.json'].decode('utf-8')"),
+        ('load_dir', 'call of protocol-running callable json.loads through unresolved base text'),
+        ('load_dir', 'call of protocol-running callable len through unresolved base code'),
+        ('load_dir', 'call of protocol-running callable len through unresolved base files'),
+        ('load_dir', "call of protocol-running callable len through unresolved base selftest['cases']"),
+        ('load_dir', 'call of protocol-running callable list through unresolved base binder.vocab'),
+        ('load_dir',
+         'call of protocol-running callable os.path.basename through unresolved base os.path.normpath(rdir)'),
+        ('load_dir', 'call of protocol-running callable os.path.normpath through unresolved base rdir'),
+        ('load_dir', 'call of protocol-running callable set through unresolved base binder.used'),
+        ('load_dir', 'call of protocol-running callable set through unresolved base binder.vocab'),
+        ('load_dir', 'call of protocol-running callable set through unresolved base binder.vocab'),
+        ('load_dir', 'call of protocol-running callable set through unresolved base selftest'),
+        ('load_dir', 'call of protocol-running callable sorted through unresolved base set(binder.vocab)'),
         ('load_dir', 'method call run_selftest through unresolved base rs'),
         ('load_dir', 'method call run_sitting_selftest through unresolved base rs'),
-        ('load_dir', 'subscript store through unresolved base data'),
+        ('load_dir', "unproven pure method call decode through unresolved base files['REVISION']"),
+        ('load_dir', "unproven pure method call decode through unresolved base files['rules.json']"),
+        ('load_dir', "unproven pure method call decode through unresolved base files['selftest.json']"),
+        ('load_dir', 'unproven pure method call decode through unresolved base raw'),
+        ('load_dir', 'unproven pure method call fullmatch through unresolved base _REV_DIR'),
+        ('load_dir', 'unproven pure method call get through unresolved base doc'),
+        ('load_dir', 'unproven pure method call get through unresolved base doc'),
+        ('load_dir', 'unproven pure method call items through unresolved base files'),
+        ('load_dir', 'unproven pure method call items through unresolved base files'),
+        ('load_dir', "unproven pure method call rsplit through unresolved base rel.split('/', 1)[1]"),
+        ('load_dir', 'unproven pure method call split through unresolved base rel'),
+        ('load_dir', 'unproven pure method call splitlines through unresolved base text'),
+        ('load_dir', 'unproven pure method call startswith through unresolved base rel'),
+        ('load_dir',
+         "unproven pure method call strip through unresolved base files['REVISION'].decode('ascii', 'replace')"),
+        ('load_dir', 'unproven pure method call strip through unresolved base ln'),
+        ('norm_pair', 'call of protocol-running callable str through unresolved base a'),
+        ('norm_pair', 'call of protocol-running callable str through unresolved base b'),
+        ('refresh_rules', 'call of protocol-running callable os.path.join through unresolved base base'),
         ('refresh_rules', 'method call acquire through unresolved base _LOCK'),
         ('refresh_rules', 'method call release through unresolved base _LOCK'),
+        ('render_item', "call of protocol-running callable ''.join through unresolved base out"),
+        ('render_item', 'call of protocol-running callable isinstance through unresolved base p'),
+        ('render_item', 'unproven pure method call get through unresolved base item'),
+        ('render_line',
+         "call of protocol-running callable '\\n'.join through unresolved base (render_item(rule.line, it) for it in list(items)[:_BOUNDS['render_items_max']] if isinstance(it, dict))"),
+        ('render_line', 'call of protocol-running callable isinstance through unresolved base it'),
+        ('render_line', 'call of protocol-running callable list through unresolved base items'),
+        ('run_selftest', 'call of protocol-running callable isinstance through unresolved base case'),
+        ('run_selftest', 'call of protocol-running callable set through unresolved base case'),
+        ('run_selftest', "call of protocol-running callable sorted through unresolved base case['fire']"),
+        ('run_selftest', 'call of protocol-running callable sorted through unresolved base fired'),
+        ('run_selftest', 'call of protocol-running callable tuple through unresolved base t'),
         ('run_selftest', 'method call evaluate_game through unresolved base rs'),
+        ('sitting_items', 'call of protocol-running callable grouped.setdefault through unresolved base dedup'),
+        ('sitting_items', 'call of protocol-running callable sorted through unresolved base grouped'),
+        ('sitting_items', "call of protocol-running callable sorted through unresolved base grouped[k]['items']"),
+        ('sitting_items', 'call of protocol-running callable str through unresolved base lo'),
+        ('sitting_items', "call of protocol-running callable str through unresolved base r['subject']"),
         ('sitting_items', "method call append through unresolved base slot['items']"),
+        ('sitting_selftest', 'call of protocol-running callable set through unresolved base _BIND.findall(sql)'),
+        ('sitting_selftest', 'call of protocol-running callable set through unresolved base binds'),
         ('sitting_selftest', 'method call sitting_statement through unresolved base rs'),
+        ('sitting_selftest', 'unproven pure method call findall through unresolved base _BIND'),
+        ('sitting_statement', 'call of protocol-running callable rm.sitting_binds through unresolved base entry'),
         ('sitting_statement', 'call of unlisted callable rm.sitting_binds through unresolved base entry'),
         ('sitting_statement', 'call of unresolved callable entry.impl[0] through unresolved base args'),
     ],
     "backend/api/review_boot.py": [
+        ('<module>', 'call of protocol-running callable os.path.abspath through unresolved base __file__'),
+        ('<module>',
+         'call of protocol-running callable os.path.dirname through unresolved base os.path.abspath(__file__)'),
+        ('<module>', 'call of protocol-running callable review_rules.cli through unresolved base sys.argv[1:]'),
+        ('<module>',
+         'call of protocol-running callable sys.exit through unresolved base review_rules.cli(sys.argv[1:])'),
         ('<module>', 'call of unlisted callable review_rules.cli through unresolved base sys.argv[1:]'),
+        ('SourceOnly.exec_module', 'call of protocol-running callable LOADED.pop through unresolved base stem'),
+        ('SourceOnly.exec_module', 'call of protocol-running callable compile through unresolved base raw'),
+        ('SourceOnly.exec_module',
+         "call of protocol-running callable exec through unresolved base compile(raw, path, 'exec', dont_inherit=True)"),
+        ('SourceOnly.exec_module', 'call of protocol-running callable open through unresolved base path'),
+        ('SourceOnly.exec_module', 'call of protocol-running callable vars through unresolved base module'),
         ('SourceOnly.exec_module', 'call of unlisted callable compile through unresolved base raw'),
         ('SourceOnly.exec_module',
          "call of unlisted callable exec through unresolved base compile(raw, path, 'exec', dont_inherit=True)"),
         ('SourceOnly.exec_module', 'call of unlisted callable vars through unresolved base module'),
+        ('SourceOnly.exec_module', 'unproven pure method call replace through unresolved base f.read()'),
+        ('SourceOnly.find_spec',
+         'call of protocol-running callable importlib.machinery.ModuleSpec through unresolved base fullname'),
         ('SourceOnly.find_spec',
          'call of unlisted callable importlib.machinery.ModuleSpec through unresolved base fullname'),
+        ('SourceOnly.find_spec', 'unproven pure method call rpartition through unresolved base fullname'),
+        ('_same_file', 'call of protocol-running callable isinstance through unresolved base path'),
+        ('_same_file', 'call of protocol-running callable os.path.basename through unresolved base path'),
+        ('_same_file',
+         'call of protocol-running callable os.path.normcase through unresolved base os.path.realpath(path)'),
+        ('_same_file',
+         'call of protocol-running callable os.path.normcase through unresolved base os.path.realpath(source_path(stem))'),
+        ('_same_file', 'call of protocol-running callable os.path.realpath through unresolved base path'),
+        ('_same_file',
+         'call of protocol-running callable os.path.realpath through unresolved base source_path(stem)'),
+        ('_same_file', 'unproven pure method call lower through unresolved base os.path.basename(path)'),
+        ('executed_elsewhere', 'call of protocol-running callable getattr through unresolved base mod'),
+        ('executed_elsewhere', 'call of protocol-running callable list through unresolved base sys.modules.items()'),
+        ('install', 'call of protocol-running callable isinstance through unresolved base f'),
+        ('install', 'call of protocol-running callable sys.meta_path.insert through unresolved base FINDER'),
         ('install', 'call of unlisted callable sys.meta_path.insert through unresolved base FINDER'),
+        ('source_path', 'call of protocol-running callable os.path.join through unresolved base HERE'),
     ],
 }
 
@@ -784,13 +1612,16 @@ def test_m5_fix11_a_write_through_an_unbound_name_stays_refused():
 
 
 def test_m5_fix11_k_a_benign_module_is_still_trusted():
-    """A local function returning a copy (dict(x)) whose result is written, one
-    returning a constant, one returning a fresh object built from the values
-    of x, and timeit on a literal expression that rebinds nothing: nothing
-    reaches a namespace, the walk is still proven."""
-    src = _plant(header="import tempfile\nimport timeit\n\n\ndef copied(x):\n    return dict(x)\n\n\n"
+    """A local function returning a fresh dict holding x whose result is
+    written, one returning a constant, one returning a fresh object built
+    from x, and timeit on a literal expression that rebinds nothing: nothing
+    reaches a namespace, the walk is still proven. Fix pass 14: dict(x),
+    len(x) and sorted(x) over a parameter run its protocols and are refused
+    (r3 rule (8)'s protocol half), so the copy is a display holding x and the
+    size is id(x), which runs no code of x."""
+    src = _plant(header="import tempfile\nimport timeit\n\n\ndef copied(x):\n    return {\"v\": x}\n\n\n"
                         "def blank(x):\n    return {}\n\n\n"
-                        'def sized(x):\n    return {"size": len(x), "names": sorted(x)}\n',
+                        'def sized(x):\n    return {"size": id(x), "names": [x]}\n',
                  scan='    copied(cfg)["root"] = p\n    blank(cfg)["root"] = p\n    sized(cfg)["size"] = 0\n'
                       '    timeit.timeit("sum(range(10))", number=1)\n'
                       "    with tempfile.TemporaryDirectory():\n        return list(os.walk(p, onerror=_walk_error))\n",
@@ -807,6 +1638,11 @@ NEW11 = {"backend/tools/review_needles.py": [(933, "method call update through u
          + [(946, "method call update through unresolved base files"),
             (1198, "method call update through unresolved base files")],
          "backend/api/review_boot.py": []}
+# Fix pass 14 (round 13 LOW 1): files is read by Python's scope rules, so in build_revision and
+# closure_fingerprint it is the local set those functions build, no longer merged with the parameter
+# of the same name elsewhere in review_rules.py: both of its fix 11 sites are proven and drop out.
+NEW11["backend/api/review_rules.py"] = [(ln, k) for ln, k in NEW11["backend/api/review_rules.py"]
+                                        if k != "method call update through unresolved base files"]
 
 
 def test_m5_fix11_l_the_real_review_modules_keep_their_verdicts():
@@ -958,11 +1794,14 @@ def test_m5_fix12_every_in_place_operator_on_an_unresolved_receiver_is_refused(s
 
 
 def test_m5_fix12_f_a_benign_module_is_still_trusted():
-    """Augmented assignments on a dict copy, a dict display over ns, a local
-    counter and a local list; a rebinding ns = ns | {...}; map over a builtin;
-    a slice of a literal list and a sort of fresh mappings written through:
-    nothing reaches a namespace, the walk is still proven."""
-    lines = ("fresh = dict(ns)\nfresh |= %s\nmerged = {**ns}\nmerged |= %s\nns = ns | %s\ncount = 0\ncount += 1\n"
+    """Augmented assignments on a dict copy, a dict display over a local
+    mapping, a local counter and a local list; a rebinding ns = ns | {...};
+    map over a builtin; a slice of a literal list and a sort of fresh
+    mappings written through: nothing reaches a namespace, the walk is still
+    proven. Fix pass 14: the copy and the display are of a local mapping,
+    not of ns, since dict(ns) runs ns's protocols (r3 rule (8))."""
+    lines = ("seed = {}\nfresh = dict(seed)\nfresh |= %s\nmerged = {**seed}\nmerged |= %s\nns = ns | %s\ncount = 0\n"
+             "count += 1\n"
              'names = []\nnames += ["x"]\nlabels = list(map(str, [1, 2]))\nlabels[0] = "x"\nv = "fresh"\n'
              'rows = [{}, {}][0:1]\nrows[0]["k"] = v\nsorted([{}, {}])[0]["k"] = v') % (TDV, TDV, TDV)
     shape, _e = _v("", lines, [])
@@ -973,6 +1812,10 @@ def test_m5_fix12_f_a_benign_module_is_still_trusted():
 
 NEW12 = {"backend/tools/review_needles.py": [(999, "augmented assignment += through unresolved base body")],
          "backend/api/review_rules.py": [], "backend/api/review_boot.py": []}
+# Fix pass 14 (round 13 LOW 2): an operator over an unresolved operand is unresolved, never a holder,
+# so _read_verified's left (cap + 1, cap a parameter) joins the in-place sites by its -=; named here by
+# site identity (and in REAL), and test g compares the other in-place rows to NEW12 as before.
+NEW12_14 = {"backend/api/review_rules.py": [("_read_verified", "augmented assignment -= through unresolved base left")]}
 
 
 def test_m5_fix12_g_the_real_review_modules_keep_their_verdicts():
@@ -986,7 +1829,10 @@ def test_m5_fix12_g_the_real_review_modules_keep_their_verdicts():
         with open(os.path.join(root, rel), encoding="utf-8") as f:
             src = f.read()
         unresolved = [x for x in _named_rows(src, "<source>") if r3._unresolved(x[1])]
-        assert [x for x in unresolved if x[1].startswith(("augmented assignment ", "in-place "))] == new, rel
+        inplace = [(ln, k) for ln, k in unresolved if k.startswith(("augmented assignment ", "in-place "))]
+        tree, later = r3.ast.parse(src), NEW12_14.get(rel, [])     # fix 14: the operator-result sites
+        assert [x for x in inplace if r3._only(r3._site_names(tree, [x])) not in later] == new, rel
+        assert sorted(s for s in r3._site_names(tree, inplace) if s in later) == sorted(later), rel
         assert _sites(src) == sorted(REAL[rel]), (rel, unresolved)
     with open(os.path.join(root, "backend/tools/review_needles.py"), encoding="utf-8") as f:
         src = f.read()
@@ -1121,7 +1967,7 @@ def test_m5_fix13_every_binding_class_of_the_grammar_is_in_the_table():
     assert r3.ast.withitem in r3._BINDING_TABLE
 
 
-LOOP13 = "for k in ns:\n    print(k)"
+LOOP13 = "for k in ns:\n    id(k)"         # fix 14: print(k) runs k's __str__ (r3 rule (8)); id runs no code of k
 
 
 class _Loop(r3.ast.For):
@@ -1161,14 +2007,18 @@ def test_m5_fix13_f_a_constant_index_selects_its_own_element():
 
 
 def test_m5_fix13_g_a_benign_module_is_still_trusted():
-    """Every fix 12 (f) item, and: iteration printing the keys, a local list
-    appended to, a dict copy updated, a local operator called on constants,
-    a builtin delivered by a loop over ns, the pure methods and len of ns,
-    a membership test and a sort of its keys: still trusted, walk proven."""
+    """Every fix 12 (f) item, and: iteration over ns, a local list appended
+    to, a dict copy updated, a local operator called on constants, a builtin
+    delivered by a loop over a local, the pure methods, len, a membership
+    test and a sort of its keys on a local dict, and an element taken by get
+    from a local dict and appended to: still trusted, walk proven. Fix pass
+    14: the pure methods, len and sorted over ns itself, and a builtin called
+    on ns, are refused (an unproven receiver, a protocol-running call), so
+    they run on a local dict here."""
     test_m5_fix12_f_a_benign_module_is_still_trusted()
-    lines = (LOOP13 + '\nhandlers = []\nhandlers.append(1)\nfresh = dict(ns)\nfresh.update(%s)\nlocal = [1]\n'
-             'local.append(2)\nop = operator.add\nop(1, 2)\nfor f in [len]:\n    f(ns)\nns.get("k")\nns.keys()\n'
-             'len(ns)\n"k" in ns\nx = sorted(ns.keys())') % TDV
+    lines = (LOOP13 + '\nhandlers = []\nhandlers.append(1)\nseed = {"k": []}\nfresh = dict(seed)\nfresh.update(%s)\n'
+             'local = [1]\nlocal.append(2)\nop = operator.add\nop(1, 2)\nfor f in [len]:\n    f(seed)\nseed.get("k")\n'
+             'seed.keys()\nlen(seed)\n"k" in seed\nx = sorted(seed.keys())\ngot = seed.get("k")\ngot.append(1)') % TDV
     shape, _e = _v("", lines, [], IOR)
     src = _plant(**shape)
     assert r3.unwrapped_queries(src, "planted") == []
@@ -1178,7 +2028,8 @@ def test_m5_fix13_g_a_benign_module_is_still_trusted():
 RULE_NAMES13 = ("subscript store", "attribute store", "subscript deletion", "attribute deletion",
                 "augmented subscript store", "augmented attribute store", "augmented assignment", "method call",
                 "bound method", "callback method", "callback of", "call of unlisted callable",
-                "call of unresolved callable", "in-place call")
+                "call of unresolved callable", "in-place call",
+                "unproven pure method call", "call of protocol-running callable")      # the last two: fix 14
 
 
 def _rule13(kind):
@@ -1192,6 +2043,9 @@ NEW13 = sorted([(n, "method call add" + U + b) for n, b in (
     (389, "method call append" + U + "self.items")] + [
     (n, "method call add" + U + "vals") for n in (402, 436, 453, 478, 482, 487)] + [
     (631, "method call add" + U + "by_group.setdefault(group, set())")])
+# Fix pass 14 (round 13 LOW 1): _revision's f.read() reads the f its own with statement binds, no
+# longer merged with the comprehension variable of the same name: the site is proven and drops out.
+NEW13 = [(ln, k) for ln, k in NEW13 if k != "method call read" + U + "f"]
 
 
 def test_m5_fix13_h_the_real_review_modules_keep_their_verdicts():
@@ -1217,3 +2071,134 @@ def test_m5_fix13_h_the_real_review_modules_keep_their_verdicts():
     assert _named_rows(src, "review_needles.py") == []
     extra = src + "\n\ndef _planted_extra(d):\n    d.frobnicate(1)\n"
     assert _lapsed(extra, "method call frobnicate")
+
+
+# -- fix pass 14: imported namespaces, unproven receivers and protocols, scopes, identity --------
+WALKX = "lambda *args, **kwargs: ()"
+NSR = " through namespace-reaching "
+IMP = " through imported namespace "
+GUARD14 = "    if type(p) is not str:\n"
+
+
+def _header14(text, line, kind):
+    """A variant planted at module level (no parameter), its refused line `line`."""
+    return (dict(header=text), [(line, kind)])
+
+
+REBOUND14 = [
+    ("a_report_input_verbatim", [
+        _header14('from os import __dict__ as ns\nns["walk"] = %s\n' % WALKX, 'ns["walk"] = ' + WALKX,
+                  "subscript store" + NSR + "ns")]),
+    ("b_dynamic_member_through_an_import_alias", [
+        _header14('from os import __builtins__ as _bi\n_bi["list"] = %s\n' % WALKX, '_bi["list"] = ' + WALKX,
+                  "subscript store" + NSR + "_bi")]),
+    ("c_store_through_an_imported_object", [
+        _header14("import os as _o\n_o.walk = %s\n" % WALKX, "_o.walk = " + WALKX, "attribute store" + IMP + "_o"),
+        _header14("from posixpath import os as _o2\n_o2.walk = %s\n" % WALKX, "_o2.walk = " + WALKX,
+                  "attribute store" + IMP + "_o2")]),
+    ("d_imported_object_handed_to_unlisted_code", [
+        _header14("import functools\nimport os.path as _osp\n\n\ndef _fake():\n    pass\n\n\n_fake.islink = %s\n"
+                  "functools.update_wrapper(_osp, _fake)\n" % WALKX, "functools.update_wrapper(_osp, _fake)",
+                  "call of unlisted callable functools.update_wrapper" + IMP + "_osp")]),
+    ("e_mutator_through_an_imported_object", [
+        _header14('from os import environ as _env\n_env.update(HOME="x")\n', '_env.update(HOME="x")',
+                  "method call update" + IMP + "_env")]),
+    ("f_name_only_get", [_v("", 'ns.get("walk")', [_at('ns.get("walk")', "unproven pure method call get" + U + "ns")])]),
+    ("g_protocol_running_allowlisted_call", [
+        _v("", "os.fspath(ns)", [_at("os.fspath(ns)", "call of protocol-running callable os.fspath" + U + "ns")]),
+        _v("", "len(ns)", [_at("len(ns)", "call of protocol-running callable len" + U + "ns")]),
+        _v("", "names = list(map(str, [ns]))", [_at("names = list(map(str, [ns]))",
+                                                    "callback of map (protocol-running callable str)" + U + "[ns]")])]),
+    ("h_a_type_guard_of_a_module_class_proves_nothing", [
+        (dict(header="\n\nclass _Path(str):\n    pass\n",
+              edits=[(GUARD14, GUARD14.replace("str", "_Path"))]),
+         [("    return list(os.walk(p, onerror=_walk_error))", "call of protocol-running callable os.walk" + U + "p")]),
+        # an imported class resolves to one dotted name that is no builtin scalar: the guard proves nothing
+        (dict(header="from pathlib import PurePath\n",
+              edits=[(GUARD14, GUARD14.replace("str", "PurePath"))]),
+         [("    return list(os.walk(p, onerror=_walk_error))", "call of protocol-running callable os.walk" + U + "p")])]),
+]
+
+
+@pytest.mark.parametrize("name,variants", REBOUND14, ids=[name for name, _variants in REBOUND14])
+def test_m5_fix14_a_each_route_reports_the_walk_naming_the_refused_line(name, variants):
+    """Round 13 M5, by class: a write through an imported namespace object (the
+    report's import alias of os __dict__, a dynamic member carried by an
+    import alias, a store through any imported object, an imported object
+    handed to unlisted code, a mutator through an imported object), a
+    name-only get on an unresolved receiver, and a protocol-running
+    allowlisted call over a value the proof cannot type (a direct call, a
+    callback, a parameter whose type guard names a module class): each
+    reports os.walk naming its line and kind (each admitted at a2b5151c)."""
+    for shape, expect in variants:
+        _named(name, shape, expect)
+
+
+def test_m5_fix14_b_a_proven_builtin_receiver_and_argument_are_still_trusted():
+    """The control: a parameter its type guard proves an exact str handed to
+    os.fspath, open and str, the pure methods, len and sorted of a local dict,
+    an element taken by get and appended to, an argument stored by append:
+    still trusted, the walk still proven (the guard is the selftest
+    fixture's own)."""
+    assert GUARD14 in r3.WALK_OK
+    lines = ('seed = {"k": []}\ngot = seed.get("k")\ngot.append("x")\nseen = []\nseen.append(ns)\nsize = len(seed)\n'
+             "names = sorted(seed.keys())\n"
+             'here = os.fspath(p)\nlabel = str(p).upper()\nwith open(p, "rb") as f:\n    head = f.read()')
+    shape, _e = _v("", lines, [])
+    src = _plant(**shape)
+    assert r3.unwrapped_queries(src, "planted") == []
+    assert _named_rows(src) == []
+
+
+L1_REVISION = 'with open("notes.txt", "rb") as f:\n    t = f.read()\n'
+
+
+def test_m5_fix14_c_the_receiver_proof_reads_python_scopes():
+    """Round 13 LOW 1: the _revision shape (a file opened as f and read, a
+    later comprehension variable also named f) is trusted without any
+    exemption (refused at a2b5151c); a same-name binding in the SAME scope
+    that reaches the use still refuses it; and a free name is no longer
+    vouched for by a same-name local of another function (admitted at
+    a2b5151c)."""
+    shape, _e = _v("", L1_REVISION + "x = [f for f in ns]", [])
+    src = _plant(**shape)
+    assert r3.unwrapped_queries(src, "planted") == []
+    assert _named_rows(src) == []
+    _named("same_scope", *_v("", L1_REVISION + "for f in ns:\n    pass",
+                             [_in("t = f.read()", "method call read" + U + "f")]))
+    _named("free_name", dict(header="\n\ndef _other():\n    handlers = []\n    return handlers\n",
+                             edits=[("    return list(os.walk(", "    handlers.append(p)\n    return list(os.walk(")]),
+           [("    handlers.append(p)", "method call append" + U + "handlers")])
+
+
+def _levels14(lines, defs=""):
+    """The flow level of every call at the head of scan, keyed by its text,
+    each read in its own scope."""
+    shape, _e = _v(defs, lines, [])
+    tree = r3.ast.parse(_plant(**shape))
+    parents = {id(c): n for n in r3.ast.walk(tree) for c in r3.ast.iter_child_nodes(n)}
+    reach = r3._Reach(tree, r3._Names(tree, parents))
+    return {r3.ast.unparse(n): reach.level_at(n) for n in r3.ast.walk(tree) if isinstance(n, r3.ast.Call)}
+
+
+def test_m5_fix14_d_an_identity_alias_is_never_fresh():
+    """Round 13 LOW 2: bytes, str, int and tuple over an exact argument may
+    return it itself, so each result is an immutable identity alias (_IMMUT:
+    it can carry no write), never fresh (the model at a2b5151c said fresh);
+    over an unresolved argument the result is unresolved (its own __str__
+    returns anything); an operator over an unresolved operand is unresolved
+    (it was a holder at a2b5151c, so a write through it was trusted); a
+    mutable alias stays refused (a local function returning its argument)
+    while a copy of a fresh list stays fresh, as do the fix 13 fresh results."""
+    assert r3._FRESH < r3._IMMUT < r3._HOLDS < r3._UNRES
+    lv = _levels14('b = b"x"\nm = bytes(b)\ns = "x"\nt = str(s)\ni = len("ab")\nj = int(i)\nu = ("a",)\nv = tuple(u)\n'
+                   "w = str(ns)\nl = []\nc = list(l)\nr = repr(ns)\nn = len(ns)", ID)
+    for call in ("bytes(b)", "str(s)", "int(i)", "tuple(u)"):
+        assert (lv[call], lv[call] == r3._FRESH) == (r3._IMMUT, False), call
+    assert lv["str(ns)"] == r3._UNRES
+    assert {c: lv[c] for c in ("list(l)", "repr(ns)", "len(ns)")} == dict.fromkeys(("list(l)", "repr(ns)", "len(ns)"),
+                                                                                  r3._FRESH)
+    _named("operator", *_v("", 'alias = ns + []\nalias["walk"] = None', [_at('alias["walk"] = None',
+                                                                           "subscript store" + U + "alias")]))
+    _named("mutable_alias", *_v(ID, 'm = identity(ns)\nm["walk"] = None', [_at('m["walk"] = None',
+                                                                             "subscript store" + U + "m")]))
