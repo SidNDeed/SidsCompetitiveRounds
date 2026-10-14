@@ -5194,7 +5194,13 @@ namespace CompetitiveRounds
             if (!FfaMode.EngineActive()) return true;
             try
             {
-                __result = FfaTargeting.NearestOpponent(__instance, asker.transform.position, asker.TeamID);
+                // Bugs 437-439: the asker is KNOWN here, so it is excluded by
+                // identity and an opponent standing on the asker's exact spot
+                // (the pick-phase parking position, an overlapping spawn) stays
+                // eligible. The positional rule is only for the call sites below
+                // that pass a bare position.
+                __result = FfaTargeting.NearestOpponent(__instance, asker.transform.position, asker.TeamID,
+                                                        false, asker);
                 return false;
             }
             catch { return true; }
@@ -5236,31 +5242,41 @@ namespace CompetitiveRounds
         /// queries from the ASKER'S OWN transform — a detached attack (a
         /// Radiance wave parked where it was emitted) must pass excludePlayer
         /// so its owner is excluded by IDENTITY, or the owner becomes the
-        /// wave's nearest target the moment they move.</summary>
+        /// wave's nearest target the moment they move.
+        ///
+        /// Bugs 437-439: every eligibility and ranking rule now lives in
+        /// FfaTargetingSeam (pure, no Unity types), so the harness in
+        /// tools/tests/ffa-targeting-seam executes the rules that ship. This
+        /// member only reads the roster and measures; it decides nothing.
+        /// When excludePlayer is given, the positional self-exclusion is OFF:
+        /// identity already excludes the asker, and the positional rule would
+        /// also drop a real opponent standing on the same spot.</summary>
         public static Player NearestOpponent(PlayerManager pm, Vector3 position,
                                              int excludeTeam, bool needVision = false,
                                              Player excludePlayer = null)
         {
             Player best = null;
-            float bestDist = float.PositiveInfinity;
             if (pm == null) return null;
+            FfaPick pick = FfaTargetingSeam.Begin();
+            int index = 0;
             // V11 item 13 surface 7: automatic targeting over the kept view
             // (pm is PlayerManager.instance, the list the view filters).
             foreach (var p in RoomActors.KeptPlayers())
             {
+                int i = index++;
                 if (p == null || p.gameObject == null || p.data == null) continue;
-                if (p.data.dead) continue;
-                if (excludeTeam >= 0 && p.TeamID == excludeTeam) continue;
-                if (excludePlayer != null && p == excludePlayer) continue;   // identity exclusion (bug #165)
                 float d = Vector2.Distance(position, p.transform.position);
-                if (d < 0.01f) continue;                 // that's the asker
-                if (d >= bestDist) continue;
+                if (!FfaTargetingSeam.Improves(ref pick, p.TeamID, p.data.dead, d, excludeTeam,
+                                               excludePlayer != null && p == excludePlayer,
+                                               excludePlayer != null))
+                    continue;
                 if (needVision)
                 {
                     try { if (!pm.CanSeePlayer(position, p).canSee) continue; }
                     catch { }
                 }
-                bestDist = d; best = p;
+                FfaTargetingSeam.Take(ref pick, i, d);
+                best = p;
             }
             return best;
         }

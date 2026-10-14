@@ -645,6 +645,32 @@ namespace CompetitiveRounds
                 ProximityVictim.SignalText(site, outcome, why),
                 ProximityVictim.MaxOutcomeSignals);
         }
+
+        /// <summary>Bugs 437-439 - the positive signal, called ONLY on the
+        /// accepting branch, before the write, so `previous` is what the
+        /// effect's own field held (vanilla's cached victim, or the previous
+        /// activation's answer). Reads two ids and decides nothing; a throw is
+        /// swallowed so a log line can never change the activation.
+        ///
+        /// This runs on EVERY accepted activation (a Lifestealer ring can fire
+        /// its effect most frames), so the slot is reserved first and the line
+        /// is built only when the slot was free: a spent budget costs the key
+        /// and one dictionary probe, never the text.</summary>
+        internal static void NoteActive(string site, Player previous, Player fresh)
+        {
+            try
+            {
+                int prevId = previous == null ? -1 : previous.PlayerID;
+                int freshId = fresh == null ? -1 : fresh.PlayerID;
+                bool redirected = ProximityVictim.IsRedirect(prevId, freshId);
+                if (VanillaFixSupport.TryReserveDiag(
+                        ProximityVictim.ActiveSignalKey(site, redirected),
+                        ProximityVictim.MaxOutcomeSignals))
+                    VanillaFixSupport.WriteReservedDiag(
+                        ProximityVictim.ActiveSignalText(site, redirected, prevId, freshId));
+            }
+            catch { }
+        }
     }
 
     /// <summary>The reported defect. DealDamageToPlayer.cs:24,33-40.</summary>
@@ -665,6 +691,8 @@ namespace CompetitiveRounds
             // few microseconds earlier. The write stays on the accepting branch, and
             // the return comes from the seam, so both prefixes on a shared method
             // answer Harmony through one tested function (#432).
+            if (action == ProximityPrefixAction.WriteVictimAndRun)
+                ProximityVictimResolver.NoteActive("DealDamageToPlayer", __instance.target, fresh);
             if (action == ProximityPrefixAction.WriteVictimAndRun) __instance.target = fresh;
             return ProximityVictim.PrefixReturn(action);
         }
@@ -727,6 +755,8 @@ namespace CompetitiveRounds
                 "StunPlayer", __instance,
                 __instance != null && __instance.targetPlayer == StunPlayer.TargetPlayer.OtherPlayer,
                 out fresh);
+            if (action == ProximityPrefixAction.WriteVictimAndRun)
+                ProximityVictimResolver.NoteActive("StunPlayer", __instance.target, fresh);
             if (action == ProximityPrefixAction.WriteVictimAndRun) __instance.target = fresh;
             return ProximityVictim.PrefixReturn(action);
         }
@@ -774,6 +804,8 @@ namespace CompetitiveRounds
             Player fresh;
             ProximityPrefixAction action = ProximityVictimResolver.DecidePrefix(
                 "TeleportToOpponent", __instance, true, out fresh);
+            if (action == ProximityPrefixAction.WriteVictimAndRun)
+                ProximityVictimResolver.NoteActive("TeleportToOpponent", __instance.target, fresh);
             if (action == ProximityPrefixAction.WriteVictimAndRun) __instance.target = fresh;
             return ProximityVictim.PrefixReturn(action);
         }

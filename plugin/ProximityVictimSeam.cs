@@ -230,6 +230,42 @@ namespace CompetitiveRounds
             return "[PROX-TARGET] " + outcome + " site=" + site + " why=" + reason;
         }
 
+        /// <summary>Bugs 437-439 - THE POSITIVE SIGNAL. Until now the repair spoke
+        /// only when it was inactive or deferring; an activation it actually
+        /// repaired left no trace, so a room where it worked and a room where it
+        /// never ran could not be told apart from a log (#438/#443).
+        ///
+        /// Two kinds, both bounded by MaxOutcomeSignals PER SITE per session:
+        /// "kept" when the fresh answer equals what the effect's field already
+        /// held (or the field was still empty), and "redirected" when the field
+        /// held a different player - the activation on which
+        /// vanilla would have hit the wrong player. Unlike SignalKey this key
+        /// DOES carry the site: the fact being reported is about one effect, not
+        /// about the room, so each site that engages says so once. At most
+        /// six lines a session, never one per frame.</summary>
+        internal static string ActiveSignalKey(string site, bool redirected)
+        {
+            return DiagKeyRoot + "/active/" + site + "/" + (redirected ? "redirected" : "kept");
+        }
+
+        internal static string ActiveSignalText(string site, bool redirected, int previousPlayerId, int freshPlayerId)
+        {
+            return "[PROX-TARGET] active site=" + site
+                + (redirected ? " redirected" : " kept")
+                + " victim pid=" + freshPlayerId
+                + " field held pid=" + previousPlayerId
+                + " SCR_PROX_ACTIVE=1";
+        }
+
+        /// <summary>The field held a DIFFERENT player: the activation on which a
+        /// resolve-once effect would have hit someone the ring did not pick. A
+        /// field that held nobody (-1, the first activation) is not a redirect -
+        /// vanilla's own first resolution gives the same answer.</summary>
+        internal static bool IsRedirect(int previousPlayerId, int freshPlayerId)
+        {
+            return previousPlayerId >= 0 && previousPlayerId != freshPlayerId;
+        }
+
         /// <summary>The capability gate, as a pure predicate so the inert case is
         /// testable.
         ///
