@@ -611,6 +611,15 @@ namespace CompetitiveRounds
         /// <summary>Bugs 435/436: the pids whose older-build pick was already
         /// logged as counted in the current phase (once per phase and pid).</summary>
         private static readonly HashSet<int> legacyPickLogged = new HashSet<int>();
+        /// <summary>Bugs 435/436 (RJ-DRIFT V10 amendment A1), the legacy bridge.
+        /// phaseGate is the phase's G (true until the phase sets it, so no
+        /// legacy form is taken before); phaseLegacyForm the form this seat's
+        /// last pick write took; phaseSawOlderMaster whether an older master
+        /// (another seat carrying no cr_ffa_pe key) was master at any point of
+        /// this phase under G false. All three reset at every phase entry.</summary>
+        private static bool phaseGate = true;
+        private static bool phaseLegacyForm;
+        private static bool phaseSawOlderMaster;
         /// <summary>RJ-DRIFT change 23: this seat's own phase identity in the
         /// current game, recorded (with a game of 1 or more) wherever
         /// phaseGame and phaseCycle are set, bound to its Room object and N10
@@ -2736,6 +2745,10 @@ namespace CompetitiveRounds
             phaseEpochIssuer = -1;
             pickIgnoredLogged.Clear();
             legacyPickLogged.Clear();
+            // A1: the bridge's per-phase state; phaseGate is set below with G.
+            phaseGate = true;
+            phaseLegacyForm = false;
+            phaseSawOlderMaster = false;
             // Vanilla logs "PICK PHASE" from RoundTransition; GameStateWatcher's
             // log intercept keys inPickPhase (input/achievement gating) on that
             // exact marker. Emit it for parity or pick-phase keystrokes count
@@ -2803,6 +2816,10 @@ namespace CompetitiveRounds
             // No seat keys its counter under G, and a seat with no identity
             // makes no keyed read (N12(d)).
             bool gate = GateNow();
+            // A1: the bridge reads the phase's G; an older master at entry is
+            // recorded now (every master change records again).
+            phaseGate = gate;
+            NoteOlderMaster();
             int rgNow = RoomGame;
             bool followLogged = false, noIdentityLogged = false;
             bool follow = EvaluateFollow(gate, rgNow, ref followLogged);
@@ -3159,12 +3176,24 @@ namespace CompetitiveRounds
                 // 25(a): under G false the pin's reads, a counter of 0 included).
                 if (FfaNumberingRules.KeyedReadsAllowed(gate, game))
                 {
-                    // N19(i): the result comes only from the envelope, under
-                    // the held epoch and the present master; cr_ffa_res is
-                    // never read here.
-                    result = FfaNumberingRules.ResultFromEnvelope(ReadRawRoomProp(PropResultEpoch), EpochForUse(),
-                                                                  MasterActorNow(), game, cycle);
-                    if (result != null) { resultApplies = true; break; }
+                    // N19(i) with A1's precedence, one read: the envelope under
+                    // the held epoch and the present master first; only then,
+                    // under G false, cr_ffa_res with the 1.40.3 follower rules
+                    // where LegacyResult admits it (an older master; or, holding
+                    // no epoch, a departed or closed current master's own
+                    // payload, or the close of an older master seen this phase).
+                    bool viaLegacy;
+                    result = FfaNumberingRules.PhaseResult(gate, ReadRawRoomProp(PropResultEpoch),
+                                                           ReadRawRoomProp(PropResult), EpochForUse(),
+                                                           MasterActorNow(), OlderMasterNow(), phaseSawOlderMaster,
+                                                           finalizedEpochs, game, cycle, out viaLegacy);
+                    if (result != null)
+                    {
+                        resultApplies = true;
+                        if (viaLegacy)
+                            Plugin.Log.LogInfo($"[FFA-NUM] legacy result applied {game}:{cycle} ({result.Count} cards, older-build form)");
+                        break;
+                    }
                 }
                 float now = Time.realtimeSinceStartup;
                 if (now - lastCollect > 0.25f)   // prop-table reads throttled
@@ -3273,6 +3302,18 @@ namespace CompetitiveRounds
                             }
                             else
                             {
+                                // A1: under G false the promoted seat applies
+                                // the result every older seat applies, where
+                                // LegacyResult admits it (it holds no epoch:
+                                // it became master); else R22's cardless bail.
+                                var promoted = LegacyResultNow(gate, false, game, cycle);
+                                if (promoted != null)
+                                {
+                                    result = promoted;
+                                    resultApplies = true;
+                                    Plugin.Log.LogInfo($"[FFA-NUM] legacy result applied {game}:{cycle} ({result.Count} cards, older-build form, on promotion)");
+                                    break;
+                                }
                                 Plugin.Log.LogInfo("[FFA-NUM] no phase epoch: cardless this cycle (closed)");
                                 result = new Dictionary<int, string>();
                                 break;
@@ -3757,6 +3798,55 @@ namespace CompetitiveRounds
             if (masterNow == lastMasterActor) return;
             lastMasterActor = masterNow;
             EvaluatePhaseEpoch(nonce);
+            // A1: the bridge is re-evaluated at every master change, in either
+            // direction: an older master is recorded for the read half, and a
+            // pending pick whose form no longer matches the present master is
+            // re-stamped (a re-stamp the evaluation above made already took the
+            // present form, so this one is then a no-op).
+            NoteOlderMaster();
+            if (LegacyPickFormNow() != phaseLegacyForm) RepublishLocalPickFor(nonce, phaseGame, phaseCycle);
+        }
+
+        /// <summary>A1: the present master carries a cr_ffa_pe key (every
+        /// current-build seat stages one at its join, N19(c)). True when it
+        /// cannot be read, so an unreadable master never takes the bridge.</summary>
+        private static bool MasterCarriesPickEpoch()
+        {
+            try
+            {
+                var props = PhotonNetwork.MasterClient?.CustomProperties;
+                return props == null || props.ContainsKey(PropPickEpoch);
+            }
+            catch { return true; }
+        }
+
+        /// <summary>A1: an older master is master now (LegacyPickForm's test,
+        /// under the phase's G).</summary>
+        private static bool OlderMasterNow()
+        {
+            return FfaNumberingRules.LegacyPickForm(phaseGate, MasterActorNow(), LocalActorNow(), MasterCarriesPickEpoch());
+        }
+
+        /// <summary>A1: this seat's pick takes the 1.40.3 legacy form now.</summary>
+        private static bool LegacyPickFormNow()
+        {
+            return OlderMasterNow();
+        }
+
+        /// <summary>A1: records an older master for the phase's read half
+        /// (sawOlderMaster, never cleared inside the phase).</summary>
+        private static void NoteOlderMaster()
+        {
+            if (!phaseSawOlderMaster && OlderMasterNow()) phaseSawOlderMaster = true;
+        }
+
+        /// <summary>A1, the read half: FfaNumberingRules.LegacyResult over the
+        /// room's cr_ffa_rep and cr_ffa_res, or null.</summary>
+        private static Dictionary<int, string> LegacyResultNow(bool gate, bool holdsEpoch, int game, int cycle)
+        {
+            return FfaNumberingRules.LegacyResult(gate, holdsEpoch, OlderMasterNow(), phaseSawOlderMaster,
+                                                  ReadRawRoomProp(PropResultEpoch), ReadRawRoomProp(PropResult),
+                                                  finalizedEpochs, game, cycle);
         }
 
         /// <summary>N19(b): a non-master evaluates on a change of cr_ffa_cyc
@@ -3969,17 +4059,33 @@ namespace CompetitiveRounds
             }
             try
             {
-                // RJ-DRIFT N19(c): the legacy key is always written empty; the
-                // pick travels in cr_ffa_pe, only under the epoch held for use.
-                var h = new ExitGames.Client.Photon.Hashtable();
+                // RJ-DRIFT N19(c) as amended (A1): the pick travels in
+                // cr_ffa_pe under the epoch held for use, and in cr_ffa_pk in
+                // the 1.40.3 legacy form only while an older master is master
+                // (empty otherwise), with cr_ffa_pe beside it in one Hashtable.
                 string ep = EpochForUse();
-                h[PropPick] = FfaNumberingRules.LegacyPickValue(nonce, game, cycle, pendingPickCard);
-                if (ep != null) h[PropPickEpoch] = FfaNumberingRules.PickValue(nonce, ep, game, cycle, pendingPickCard);
+                bool legacyForm;
+                var h = PickWrite(nonce, ep, game, cycle, pendingPickCard, out legacyForm);
                 PhotonNetwork.LocalPlayer.SetCustomProperties(h);
                 Plugin.Log.LogInfo($"[FFA-DRIFT] re-stamped local pick '{pendingPickCard}' onto {game}:{cycle}"
-                                   + (ep != null ? "" : " (no phase epoch)"));
+                                   + (ep != null ? "" : legacyForm ? " (older master, legacy form)" : " (no phase epoch)"));
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] pick re-stamp: {ex.Message}"); }
+        }
+
+        /// <summary>A1: one publish or re-stamp's pick keys in one Hashtable:
+        /// cr_ffa_pk through LegacyPickValue under the present form, cr_ffa_pe
+        /// through PickEpochValue (left out on null). Records the form taken.</summary>
+        private static ExitGames.Client.Photon.Hashtable PickWrite(string nonce, string ep, int game, int cycle,
+                                                                   string card, out bool legacyForm)
+        {
+            legacyForm = LegacyPickFormNow();
+            var h = new ExitGames.Client.Photon.Hashtable();
+            h[PropPick] = FfaNumberingRules.LegacyPickValue(nonce, game, cycle, card, legacyForm);
+            string pe = FfaNumberingRules.PickEpochValue(nonce, ep, game, cycle, card, legacyForm);
+            if (pe != null) h[PropPickEpoch] = pe;
+            phaseLegacyForm = legacyForm;
+            return h;
         }
 
         private static Dictionary<int, string> CollectPicks(List<int> manifest, int game, int cycle)
@@ -4275,15 +4381,18 @@ namespace CompetitiveRounds
                 // #182).
                 if (nonce == RoomNonce())
                 {
-                    // RJ-DRIFT N19(c): the legacy key is always written empty;
-                    // the pick travels in cr_ffa_pe, only under the epoch held
-                    // for use. The pending record is kept either way, so a
-                    // later epoch re-stamps it.
-                    var h = new ExitGames.Client.Photon.Hashtable();
+                    // RJ-DRIFT N19(c) as amended (A1): the pick travels in
+                    // cr_ffa_pe under the epoch held for use, and in cr_ffa_pk
+                    // in the 1.40.3 legacy form while an older master is
+                    // master. The pending record is kept either way, so a later
+                    // epoch or master change re-stamps it.
                     string ep = EpochForUse();
-                    h[PropPick] = FfaNumberingRules.LegacyPickValue(nonce, pubGame, pubCycle, cardName);
-                    if (ep != null) h[PropPickEpoch] = FfaNumberingRules.PickValue(nonce, ep, pubGame, pubCycle, cardName);
-                    else Plugin.Log.LogInfo($"[FFA-NUM] no phase epoch: cardless this cycle ({NoEpochReason()})");
+                    bool legacyForm;
+                    var h = PickWrite(nonce, ep, pubGame, pubCycle, cardName, out legacyForm);
+                    if (legacyForm)
+                        Plugin.Log.LogInfo($"[FFA-NUM] legacy pick published {pubGame}:{pubCycle} (older master, 1.40.3 form)");
+                    else if (ep == null)
+                        Plugin.Log.LogInfo($"[FFA-NUM] no phase epoch: cardless this cycle ({NoEpochReason()})");
                     PhotonNetwork.LocalPlayer.SetCustomProperties(h);
                     NotePendingLocalPick(nonce, cardName);
                 }

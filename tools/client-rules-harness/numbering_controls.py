@@ -1,6 +1,7 @@
 """RJ-DRIFT numbering controls (design V10 section 5, "Driver" and "Controls":
 V4's 23 rows, then the 14 of V5-V9, then C-LEGREAD and C-LEGPICK for bugs
-435/436, which are not design rows).
+435/436, which are not design rows, then the five C-BRIDGE rows of the V10
+amendment A1 for the same bugs).
 
 For each control row: copy the rule files, the harness project and Main.cs to
 a work directory (the tree itself is never edited, checked out or restored),
@@ -89,6 +90,28 @@ ALL_WALKS = (
 )
 assert len(ALL_WALKS) == 77, len(ALL_WALKS)
 assert len(set(ALL_WALKS)) == 77
+
+# V10 amendment A1 (bugs 435/436): the all-older twins of W7.4, W7.9 and
+# W7.10, the D12 walks in OLD-MASTER mode, and the W8 compositions. Kept apart
+# from ALL_WALKS so each row names the A1 walks it turns red explicitly.
+A1_WALKS = (
+    walk("W7.4t", None) + walk("W7.9t", None) + walk("W7.10ot", None)
+    + [w for n in range(1, 12) for w in walk("W7.%do" % n, None)]
+    + [w for n in range(1, 7) for w in walk("W8.%d" % n, None)]
+)
+assert len(A1_WALKS) == 20, len(A1_WALKS)
+assert not set(A1_WALKS) & set(ALL_WALKS)
+
+
+def a1(*names):
+    """a1("W7.4o", "W8.1") -> those A1 walk ids (each must exist)."""
+    out = []
+    for n in names:
+        ids = walk(n, None)
+        assert ids[0] in A1_WALKS, n
+        out += ids
+    return out
+
 
 # FfaReportRules.cs lines at the design's pin (V10: 901ed11; V4 cited 426,
 # 447, 460 and 472 at 46f54d4) -> the check's name (names are stable across
@@ -301,8 +324,13 @@ ROWS = [
     ("C-LEGACY", NR, "static string LegacyPickValue(", "return \"\";",
      "return nonce + \":\" + game + \":\" + cycle + \":\" + card;", "return \"\" + \"\";",
      # LEG-5 and COL-7 (bugs 435/436): this build's own legacy value is never
-     # read as a pick, so a non-empty LegacyPickValue turns both red.
-     units("LEGACY-1", "LEGACY-2", "LEG-5", "COL-7") + walk("W7.4", None) + walk("W7.9", None),
+     # read as a pick, so a non-empty LegacyPickValue turns both red. A1: the
+     # mutation writes the legacy form under a current master too (and with an
+     # empty card): LEGACY-4 and BRIDGE-5 turn red; W7.4 leaves the set, since
+     # under its older master the legacy form is now intended (its replay is
+     # INHERITED); W7.9's named line (a value written under the current master
+     # X, counted by the later older master Z) is the row's observable.
+     units("LEGACY-1", "LEGACY-2", "LEGACY-4", "LEG-5", "COL-7", "BRIDGE-5") + walk("W7.9", None),
      ("walk-D12 W7.9", "REPLAY Z applied 3:4 at g4.1, written at g3.4")),
     ("C-HOLD", NR, "static string HeldEpoch(", "return live;",
      "return live ?? pe;", "return pe == live ? pe : live;",
@@ -336,8 +364,39 @@ ROWS = [
      "if (epochPick != null && true)",
      units("COL-3", "COL-5"),
      ("U-COL-3", "U-COL-3 | got=Decay legacy=true")),
+    # V10 amendment A1 (bugs 435/436), the bridge. C-BRIDGE-PICK: the legacy
+    # form never writes the pick, so an older master's collect lacks a
+    # new-build follower's pick (LOST).
+    ("C-BRIDGE-PICK", NR, "static string LegacyPickValue(", "if (legacyForm && ",
+     "if (false && legacyForm && ", "if (true && legacyForm && ",
+     units("LEGACY-3", "BRIDGE-1", "BRIDGE-2") + a1("W8.1"),
+     ("walk-D8 W8.1", "LOST A picked 1:1 at g1.1, absent from older master Z's collect")),
+    # C-BRIDGE-FORM: no seat ever sees an older master, so neither half runs.
+    ("C-BRIDGE-FORM", NR, "static bool LegacyPickForm(", "!masterCarriesPickEpoch;",
+     "!masterCarriesPickEpoch && false;", "!masterCarriesPickEpoch && true;",
+     units("FORM-1", "BRIDGE-1") + a1("W8.1"),
+     ("walk-D8 W8.1", "LOST A picked 1:1 at g1.1, absent from older master Z's collect")),
+    # C-BRIDGE-READ: under an older master the legacy result is refused.
+    ("C-BRIDGE-READ", NR, "static Dictionary<int, string> LegacyResult(", "if (olderMasterNow) return res;",
+     "if (olderMasterNow) return null;", "if (olderMasterNow && true) return res;",
+     units("LRES-1", "BRIDGE-3") + a1("W8.1"),
+     ("walk-D8 W8.1", "DECK g1.1 at 1:1")),
+    # C-BRIDGE-SAW: a seat promoted over an older master's close, which it saw
+    # this phase, no longer applies that close.
+    ("C-BRIDGE-SAW", NR, "static Dictionary<int, string> LegacyResult(", "return sawOlderMaster ? res : null;",
+     "return null;", "return sawOlderMaster ? res : (null);",
+     units("LRES-5") + a1("W8.4"),
+     ("walk-D8 W8.4", "DECK g4.1 at 4:1")),
+    # C-BRIDGE-CARRIER: a seat holding no epoch no longer applies a departed
+    # current master's own payload (R22 under G false).
+    ("C-BRIDGE-CARRIER", NR, "static Dictionary<int, string> LegacyResult(",
+     "if (carrier != null) return finalized != null && finalized.Contains(carrier) ? null : res;",
+     "if (carrier != null) return null;",
+     "if (null != carrier) return finalized != null && finalized.Contains(carrier) ? null : res;",
+     units("LRES-6") + a1("W8.5"),
+     ("walk-D8 W8.5", "DECK g4.1 at 4:1")),
 ]
-assert len(ROWS) == 39, len(ROWS)
+assert len(ROWS) == 44, len(ROWS)
 
 # ── mechanics ───────────────────────────────────────────────────────────
 

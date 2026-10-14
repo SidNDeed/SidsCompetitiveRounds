@@ -484,12 +484,138 @@ namespace CompetitiveRounds
             return pe != null;
         }
 
-        /// <summary>N19(c): the value this build writes to the legacy pick key.
-        /// It is always empty, so a current-build master never counts or
-        /// collects a pick of this build.</summary>
-        internal static string LegacyPickValue(string nonce, int game, int cycle, string card)
+        /// <summary>N19(c) as amended (bugs 435/436, RJ-DRIFT V10 amendment A1):
+        /// the value this build writes to the legacy pick key. In the legacy
+        /// form (LegacyPickForm: an older master) it is exactly what a 1.40.3
+        /// follower writes there, "{nonce}:{game}:{cycle}:{Card}"; otherwise it
+        /// is empty, so a current-build master never counts or collects a pick
+        /// of this build through cr_ffa_pk, and a later older master finds no
+        /// stale value of this build to vote with.</summary>
+        internal static string LegacyPickValue(string nonce, int game, int cycle, string card, bool legacyForm)
         {
+            if (legacyForm && !string.IsNullOrEmpty(nonce) && !string.IsNullOrEmpty(card))
+                return nonce + ":" + game.ToString(CultureInfo.InvariantCulture) + ":"
+                       + cycle.ToString(CultureInfo.InvariantCulture) + ":" + card;
             return "";
+        }
+
+        /// <summary>Bugs 435/436 (A1): whether this seat's pick takes the
+        /// 1.40.3 legacy form in cr_ffa_pk. Only under G false, and only while
+        /// the present master is another seat that carries no cr_ffa_pe key
+        /// (every current-build seat stages that key at its join, N19(c)), so an
+        /// older master, which collects and counts cr_ffa_pk alone, collects
+        /// and counts this seat's pick exactly as a 1.40.3 follower's. With no
+        /// master (-1) the form is not taken. Re-evaluated at every publish,
+        /// re-stamp and master change.</summary>
+        internal static bool LegacyPickForm(bool gate, int masterActor, int localActor, bool masterCarriesPickEpoch)
+        {
+            return !gate && masterActor >= 0 && masterActor != localActor && !masterCarriesPickEpoch;
+        }
+
+        /// <summary>Bugs 435/436 (A1): the cr_ffa_pe value written in the same
+        /// Hashtable as cr_ffa_pk, or null to leave the key unwritten: the
+        /// epoch pick under the epoch held for use; with none, "" when the
+        /// legacy key carries the pick (so a seat whose cr_ffa_pk carries a
+        /// pick always carries cr_ffa_pe, and a current-build master, which
+        /// reads cr_ffa_pk only for a seat with no cr_ffa_pe key, never
+        /// collects it there, a seat whose join stage was refused included);
+        /// else nothing, as before.</summary>
+        internal static string PickEpochValue(string nonce, string epoch, int game, int cycle, string card, bool legacyForm)
+        {
+            if (epoch != null) return PickValue(nonce, epoch, game, cycle, card);
+            return legacyForm ? "" : null;
+        }
+
+        /// <summary>Bugs 435/436 (A1): the 1.40.3 follower's result read
+        /// (FfaMode.ReadCycleResult at 1.40.3): cr_ffa_res = "{g}:{c}:{entries}"
+        /// for exactly game:cycle, else null; an empty entry list is an empty
+        /// result; an entry without '=' at a positive index or with a
+        /// non-integer pid is skipped.</summary>
+        internal static Dictionary<int, string> ResultFromLegacy(string rawRes, int game, int cycle)
+        {
+            if (rawRes == null) return null;
+            var parts = rawRes.Split(new[] { ':' }, 3);
+            if (parts.Length != 3) return null;
+            int g, c;
+            if (!TryInt(parts[0], out g) || !TryInt(parts[1], out c)) return null;
+            if (g != game || c != cycle) return null;
+            var result = new Dictionary<int, string>();
+            if (parts[2].Length > 0)
+            {
+                foreach (var pair in parts[2].Split('|'))
+                {
+                    int eq = pair.IndexOf('=');
+                    if (eq <= 0) continue;
+                    int pid;
+                    if (TryInt(pair.Substring(0, eq), out pid)) result[pid] = pair.Substring(eq + 1);
+                }
+            }
+            return result;
+        }
+
+        /// <summary>Bugs 435/436 (A1): the epoch of the envelope that carries
+        /// exactly this cr_ffa_res value ("{E}:{A}:{rawRes}", one Hashtable
+        /// write by a current-build master, WriteResultProp), or null when the
+        /// envelope carries another payload or none.</summary>
+        internal static string EnvelopeEpochCarrying(string rawRep, string rawRes)
+        {
+            if (rawRep == null || rawRes == null) return null;
+            var parts = rawRep.Split(new[] { ':' }, 3);
+            if (parts.Length != 3) return null;
+            if (string.IsNullOrEmpty(parts[0]) || IsIntegerText(parts[0])) return null;
+            int issuer;
+            if (!TryInt(parts[1], out issuer)) return null;
+            return parts[2] == rawRes ? parts[0] : null;
+        }
+
+        /// <summary>Bugs 435/436 (A1), the read half: the result a seat whose
+        /// envelope read found nothing applies from cr_ffa_res with the 1.40.3
+        /// follower rules (ResultFromLegacy), or null. Only under G false.
+        /// Admitted when
+        ///  (1) the present master is another seat without a cr_ffa_pe key: an
+        ///      older master writes cr_ffa_res alone, and the seat reads it
+        ///      exactly as every 1.40.3 seat in the room does; else, for a seat
+        ///      that holds no epoch for use only,
+        ///  (2) a current-build master's envelope carries exactly this payload
+        ///      under an epoch this seat has not finalized (N19(g)): its issuer
+        ///      departed, or the seat entered after the close, and it is the
+        ///      result every older seat applies; or
+        ///  (3) no envelope carries this payload and an older master was master
+        ///      during this phase (sawOlderMaster: it closed, then left).
+        /// A seat that holds an epoch for use waits for its master's envelope.
+        /// PhaseResult runs the envelope read first.</summary>
+        internal static Dictionary<int, string> LegacyResult(bool gate, bool holdsEpoch, bool olderMasterNow,
+                                                             bool sawOlderMaster, string rawRep, string rawRes,
+                                                             ICollection<string> finalized, int game, int cycle)
+        {
+            if (gate) return null;
+            var res = ResultFromLegacy(rawRes, game, cycle);
+            if (res == null) return null;
+            if (olderMasterNow) return res;
+            if (holdsEpoch) return null;
+            string carrier = EnvelopeEpochCarrying(rawRep, rawRes);
+            if (carrier != null) return finalized != null && finalized.Contains(carrier) ? null : res;
+            return sawOlderMaster ? res : null;
+        }
+
+        /// <summary>Bugs 435/436 (A1), the precedence: one read of a phase's
+        /// result. The envelope under the epoch held for use and the present
+        /// master first (N19(i), ResultFromEnvelope); only when it gives none,
+        /// cr_ffa_res through LegacyResult. legacy reports which form answered.
+        /// The caller applies the first non-null answer and leaves its result
+        /// loop, so a phase applies one result whichever forms the room
+        /// carries: at most one application per phase across both forms.</summary>
+        internal static Dictionary<int, string> PhaseResult(bool gate, string rawRep, string rawRes, string pe,
+                                                            int masterActor, bool olderMasterNow, bool sawOlderMaster,
+                                                            ICollection<string> finalized, int game, int cycle,
+                                                            out bool legacy)
+        {
+            legacy = false;
+            var env = ResultFromEnvelope(rawRep, pe, masterActor, game, cycle);
+            if (env != null) return env;
+            var res = LegacyResult(gate, pe != null, olderMasterNow, sawOlderMaster, rawRep, rawRes, finalized, game, cycle);
+            legacy = res != null;
+            return res;
         }
 
         /// <summary>Bugs 435/436: the card of an OLDER build's pick, read from
@@ -497,10 +623,12 @@ namespace CompetitiveRounds
         /// before the epoch protocol publishes), when it names this room and
         /// exactly this game and cycle; else null. The match is the older
         /// master's own (prefix plus a non-empty card), so a mixed room keeps
-        /// what an all-older room had. This build never writes a non-empty
-        /// cr_ffa_pk (LegacyPickValue), so the value can only be an older
-        /// build's; an epoch-form value does not match, since its game slot
-        /// holds the epoch (NewEpoch's 32 hex digits), not the game.</summary>
+        /// what an all-older room had. This build writes a non-empty
+        /// cr_ffa_pk only in the legacy form under an older master, and then
+        /// always beside a cr_ffa_pe key (PickEpochValue), which
+        /// CollectedPickCard reads instead; an epoch-form value does not match,
+        /// since its game slot holds the epoch (NewEpoch's 32 hex digits), not
+        /// the game.</summary>
         internal static string LegacyPickCard(string value, string nonce, int game, int cycle)
         {
             if (string.IsNullOrEmpty(value) || string.IsNullOrEmpty(nonce)) return null;
@@ -523,10 +651,11 @@ namespace CompetitiveRounds
         /// counted from both keys, and an epoch-carrying seat whose pick does
         /// not match is never collected through the legacy key. A seat without
         /// cr_ffa_pe is collected from cr_ffa_pk as an older master collects it
-        /// (LegacyPickCard), and legacy reports that; this build writes
-        /// cr_ffa_pk only as "" (LegacyPickValue), so only an older build's
-        /// value can be counted there. With no epoch held for use nothing is
-        /// collected, legacy picks included.</summary>
+        /// (LegacyPickCard), and legacy reports that; this build writes a
+        /// non-empty cr_ffa_pk only beside a cr_ffa_pe key (PickEpochValue, in
+        /// one Hashtable), so only an older build's value can be counted there.
+        /// With no epoch held for use nothing is collected, legacy picks
+        /// included.</summary>
         internal static string CollectedPickCard(string epochPick, string legacyPick, string nonce, string epoch,
                                                  int game, int cycle, out bool legacy)
         {
@@ -927,6 +1056,186 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>Bugs 435/436 (A1): one publish or re-stamp's pick keys, as
+        /// FfaMode writes them in one Hashtable (cr_ffa_pe left out on null).</summary>
+        private static System.Collections.Hashtable BridgePublish(string nonce, string epoch, int game, int cycle,
+                                                                  string card, bool legacyForm)
+        {
+            var h = new System.Collections.Hashtable();
+            h[LegacyPickKey] = LegacyPickValue(nonce, game, cycle, card, legacyForm);
+            string pe = PickEpochValue(nonce, epoch, game, cycle, card, legacyForm);
+            if (pe != null) h[PickEpochKey] = pe;
+            return h;
+        }
+
+        /// <summary>The 1.40.3 master's collection (FfaMode.CollectPicks at
+        /// 1.40.3): every manifest seat's cr_ffa_pk at "{nonce}:{g}:{c}:", the
+        /// cr_ffa_pe key unread. LegacyPickCard is that match.</summary>
+        private static Dictionary<int, string> OlderCollect(Dictionary<int, System.Collections.Hashtable> seats,
+                                                            string nonce, int game, int cycle)
+        {
+            var got = new Dictionary<int, string>();
+            foreach (var kv in seats)
+            {
+                string card = LegacyPickCard(kv.Value[LegacyPickKey] as string, nonce, game, cycle);
+                if (card != null) got[kv.Key] = card;
+            }
+            return got;
+        }
+
+        /// <summary>Bugs 435/436 (A1), the bridge's unit cases: the form
+        /// decision, the cr_ffa_pe companion, the 1.40.3 result read and the
+        /// admission rule; then U-BRIDGE: a current follower (pid 2) beside a
+        /// 1.40.3 follower (pid 3) at identity 4:3 of room ffa_r, under an
+        /// older master (pid 1, no cr_ffa_pe key) and a current one (pid 4),
+        /// with each promotion inside the cycle.</summary>
+        private static void RunLegacyBridgeUnits(SelfTestResult r)
+        {
+            // LegacyPickForm(gate, masterActor, localActor, masterCarriesPickEpoch)
+            Unit(r, "U-FORM-1", LegacyPickForm(false, 1, 2, false), B(LegacyPickForm(false, 1, 2, false)));
+            Unit(r, "U-FORM-2", !LegacyPickForm(false, 4, 2, true), B(LegacyPickForm(false, 4, 2, true)));
+            Unit(r, "U-FORM-3", !LegacyPickForm(true, 1, 2, false), B(LegacyPickForm(true, 1, 2, false)));
+            Unit(r, "U-FORM-4", !LegacyPickForm(false, 2, 2, false), B(LegacyPickForm(false, 2, 2, false)));
+            Unit(r, "U-FORM-5", !LegacyPickForm(false, -1, 2, false), B(LegacyPickForm(false, -1, 2, false)));
+
+            // PickEpochValue(nonce, epoch, game, cycle, card, legacyForm)
+            string pev1 = PickEpochValue("ffa_r", "e1", 4, 3, "Decay", true);
+            Unit(r, "U-PEV-1", pev1 == "ffa_r:e1:4:3:Decay", S(pev1));
+            string pev2 = PickEpochValue("ffa_r", null, 4, 3, "Decay", true);
+            Unit(r, "U-PEV-2", pev2 == "", S(pev2));
+            string pev3 = PickEpochValue("ffa_r", null, 4, 3, "Decay", false);
+            Unit(r, "U-PEV-3", pev3 == null, S(pev3));
+
+            // ResultFromLegacy(rawRes, game, cycle): the 1.40.3 follower's read
+            var rf1 = ResultFromLegacy("4:3:2=Decay|3=Leach", 4, 3);
+            Unit(r, "U-RFL-1", D(rf1) == "{2:Decay,3:Leach}", D(rf1));
+            var rf2 = ResultFromLegacy("4:3:", 4, 3);
+            Unit(r, "U-RFL-2", rf2 != null && rf2.Count == 0, D(rf2));
+            var rf3 = ResultFromLegacy("4:2:2=Decay", 4, 3);
+            Unit(r, "U-RFL-3", rf3 == null, D(rf3));
+            var rf4 = ResultFromLegacy("e1:1:4:3:2=Decay", 4, 3);
+            Unit(r, "U-RFL-4", rf4 == null, D(rf4));
+            var rf5 = ResultFromLegacy(null, 4, 3);
+            Unit(r, "U-RFL-5", rf5 == null, D(rf5));
+
+            // LegacyResult(gate, holdsEpoch, olderMasterNow, sawOlderMaster,
+            //              rawRep, rawRes, finalized, game, cycle)
+            const string res = "4:3:2=Decay|3=Leach";
+            const string rep = "e1:4:" + res;
+            var none = new HashSet<string>();
+            var fin = new HashSet<string> { "e1" };
+            var lr1 = LegacyResult(false, false, true, true, null, res, none, 4, 3);
+            Unit(r, "U-LRES-1", D(lr1) == "{2:Decay,3:Leach}", D(lr1));
+            var lr2 = LegacyResult(true, false, true, true, null, res, none, 4, 3);
+            Unit(r, "U-LRES-2", lr2 == null, D(lr2));
+            var lr3 = LegacyResult(false, true, false, false, rep, res, none, 4, 3);
+            Unit(r, "U-LRES-3", lr3 == null, D(lr3));
+            var lr4 = LegacyResult(false, false, false, false, rep, res, none, 4, 3);
+            Unit(r, "U-LRES-4", D(lr4) == "{2:Decay,3:Leach}", D(lr4));
+            var lr5 = LegacyResult(false, false, false, false, rep, res, fin, 4, 3);
+            Unit(r, "U-LRES-5", lr5 == null, D(lr5));
+            var lr6 = LegacyResult(false, false, false, true, null, res, none, 4, 3);
+            Unit(r, "U-LRES-6", D(lr6) == "{2:Decay,3:Leach}", D(lr6));
+            var lr7 = LegacyResult(false, false, false, false, null, res, none, 4, 3);
+            Unit(r, "U-LRES-7", lr7 == null, D(lr7));
+            // under an older master the 1.40.3 read decides, as for every older seat
+            var lr8 = LegacyResult(false, false, true, true, rep, res, fin, 4, 3);
+            Unit(r, "U-LRES-8", D(lr8) == "{2:Decay,3:Leach}", D(lr8));
+            // a seat holding an epoch under a current master waits for its envelope
+            var lr9 = LegacyResult(false, true, false, true, null, res, none, 4, 3);
+            Unit(r, "U-LRES-9", lr9 == null, D(lr9));
+            var lr10 = LegacyResult(false, false, false, true, "e1:4:4:3:2=Decay", res, fin, 4, 3);
+            Unit(r, "U-LRES-10", D(lr10) == "{2:Decay,3:Leach}", D(lr10));
+            var lr11 = LegacyResult(false, false, false, false, "e1:4:4:3:2=Decay", res, none, 4, 3);
+            Unit(r, "U-LRES-11", lr11 == null, D(lr11));
+
+            // U-BRIDGE-1: under the older master the current follower publishes
+            // exactly what the 1.40.3 publish writes (FfaLocalPickUI at 1.40.3:
+            // $"{nonce}:{pubGame}:{pubCycle}:{cardName}"), with cr_ffa_pe "" beside it.
+            bool form = LegacyPickForm(false, 1, 2, false);
+            var cur = BridgePublish("ffa_r", null, 4, 3, "Decay", form);
+            string want = string.Format(CultureInfo.InvariantCulture, "{0}:{1}:{2}:{3}", "ffa_r", 4, 3, "Decay");
+            Unit(r, "U-BRIDGE-1", form && (cur[LegacyPickKey] as string) == want && (cur[PickEpochKey] as string) == "",
+                 "form=" + B(form) + " pk=" + S(cur[LegacyPickKey] as string) + " pe=" + S(cur[PickEpochKey] as string));
+            // U-BRIDGE-2: the older master's own collection counts it beside the
+            // 1.40.3 follower's pick, as it counts a 1.40.3 follower's.
+            var seats = new Dictionary<int, System.Collections.Hashtable>
+            {
+                { 2, cur },
+                { 3, new System.Collections.Hashtable { { LegacyPickKey, "ffa_r:4:3:Leach" } } },
+            };
+            var olderGot = OlderCollect(seats, "ffa_r", 4, 3);
+            Unit(r, "U-BRIDGE-2", D(olderGot) == "{2:Decay,3:Leach}", D(olderGot));
+            // U-BRIDGE-3: its close, "4:3:2=Decay|3=Leach" in cr_ffa_res alone:
+            // the current follower's one read (PhaseResult, no envelope) applies
+            // exactly what the 1.40.3 follower applies.
+            bool viaLegacy;
+            var curApplied = PhaseResult(false, null, res, null, 1, true, true, none, 4, 3, out viaLegacy);
+            var oldApplied = ResultFromLegacy(res, 4, 3);
+            Unit(r, "U-BRIDGE-3", viaLegacy && curApplied != null && D(curApplied) == D(oldApplied)
+                                  && D(oldApplied) == "{2:Decay,3:Leach}",
+                 D(curApplied) + " vs " + D(oldApplied) + " legacy=" + B(viaLegacy));
+            // U-BRIDGE-4, the precedence: a cycle carrying both forms (the
+            // current master pid 4's envelope under e1, and a cr_ffa_res an
+            // older writer left with another payload) answers from the envelope
+            // while the seat holds e1 under pid 4; after the promotion of the
+            // older pid 1 the seat holds none and the same room answers from
+            // cr_ffa_res. Each read gives one answer, and the loop applies the
+            // first, so the phase applies once.
+            bool l4a, l4b;
+            var both = PhaseResult(false, "e1:4:4:3:2=Decay", res, "e1", 4, false, true, none, 4, 3, out l4a);
+            var after = PhaseResult(false, "e1:4:4:3:2=Decay", res, EpochAtUse("e1", 4, 1), 1, true, true, none, 4, 3, out l4b);
+            Unit(r, "U-BRIDGE-4", !l4a && D(both) == "{2:Decay}" && l4b && D(after) == "{2:Decay,3:Leach}",
+                 D(both) + " legacy=" + B(l4a) + "; " + D(after) + " legacy=" + B(l4b));
+            // U-BRIDGE-5: under a current master the legacy key is published
+            // empty, and a legacy value still standing beside a cr_ffa_pe key is
+            // never collected through cr_ffa_pk: pid 2's table from U-BRIDGE-1
+            // before its re-stamp is ignored by the current master (pid 4, e1).
+            bool formNew = LegacyPickForm(false, 4, 2, true);
+            var underNew = BridgePublish("ffa_r", "e1", 4, 3, "Decay", formNew);
+            var stale = new Dictionary<int, System.Collections.Hashtable> { { 2, cur } };
+            var heard5 = new List<int>();
+            var got5 = CollectPicksFrom(new List<int> { 2 }, pid => stale[pid], "ffa_r", "e1", 4, 3, (p, c) => heard5.Add(p));
+            Unit(r, "U-BRIDGE-5", !formNew && (underNew[LegacyPickKey] as string) == "" && got5.Count == 0 && heard5.Count == 0,
+                 "form=" + B(formNew) + " pk=" + S(underNew[LegacyPickKey] as string) + " got=" + D(got5) + " heard=" + I(heard5.Count));
+            // U-BRIDGE-6, older to current inside the cycle: the master changes
+            // from pid 1 to pid 4, pid 2 takes e1 and re-stamps (form re-
+            // evaluated); pid 4 collects pid 2 from cr_ffa_pe and pid 3 from
+            // cr_ffa_pk, and only pid 3 is heard as legacy.
+            seats[2] = underNew;
+            var heard6 = new List<int>();
+            var got6 = CollectPicksFrom(new List<int> { 2, 3 }, pid => seats[pid], "ffa_r", "e1", 4, 3, (p, c) => heard6.Add(p));
+            Unit(r, "U-BRIDGE-6", D(got6) == "{2:Decay,3:Leach}" && heard6.Count == 1 && heard6[0] == 3,
+                 D(got6) + " heard=" + L(heard6));
+            // U-BRIDGE-7, current to older inside the cycle: the master changes
+            // from pid 4 to pid 1, pid 2's e1 is refused at its next use (issuer
+            // departed), the form flips and the re-stamp is the legacy form with
+            // cr_ffa_pe "", which pid 1's 1.40.3 collection counts.
+            string epAfter = EpochAtUse("e1", 4, 1);
+            seats[2] = BridgePublish("ffa_r", epAfter, 4, 3, "Decay", LegacyPickForm(false, 1, 2, false));
+            var got7 = OlderCollect(seats, "ffa_r", 4, 3);
+            Unit(r, "U-BRIDGE-7", epAfter == null && D(got7) == "{2:Decay,3:Leach}" && (seats[2][PickEpochKey] as string) == "",
+                 "ep=" + S(epAfter) + " got=" + D(got7));
+            // U-BRIDGE-8, a late pick under the older master: pid 1 closed
+            // "4:3:3=Leach" before pid 2 published; pid 2's later publish never
+            // enters the closed result, and pid 2 applies that result exactly as
+            // pid 3 does: no card for pid 2 on any screen.
+            var late = LegacyResult(false, false, true, true, null, "4:3:3=Leach", none, 4, 3);
+            Unit(r, "U-BRIDGE-8", late != null && D(late) == D(ResultFromLegacy("4:3:3=Leach", 4, 3)) && !late.ContainsKey(2),
+                 D(late));
+            // U-BRIDGE-9, a current master's close then promotion of the older
+            // pid 1: res and rep under e1 written together; pid 2 holds none
+            // after the change; it applies the payload pid 3 applies.
+            var p9 = LegacyResult(false, false, true, false, rep, res, none, 4, 3);
+            Unit(r, "U-BRIDGE-9", p9 != null && D(p9) == D(ResultFromLegacy(res, 4, 3)), D(p9));
+            // U-BRIDGE-10, the older pid 1's close then promotion of the current
+            // pid 4: no envelope carries the payload; pid 2 and pid 4 (both
+            // holding no epoch, both saw the older master in this phase) apply
+            // what pid 3 applies.
+            var p10 = LegacyResult(false, false, false, true, "e0:4:4:2:2=Gamble", res, none, 4, 3);
+            Unit(r, "U-BRIDGE-10", p10 != null && D(p10) == D(ResultFromLegacy(res, 4, 3)), D(p10));
+        }
+
         /// <summary>V10 section 5's unit cases for changes 24-26 and 25 (the
         /// round-2 delta; U-OPEN-4 sits with U-OPEN-1..3).</summary>
         private static void RunRoundTwoUnits(SelfTestResult r)
@@ -946,7 +1255,7 @@ namespace CompetitiveRounds
             Unit(r, "U-LEG-3", lp3 == null, lp3 ?? "null");
             string lp4 = LegacyPickCard("ffa_r:1:1:", "ffa_r", 1, 1);
             Unit(r, "U-LEG-4", lp4 == null, lp4 ?? "null");
-            string lp5 = LegacyPickCard(LegacyPickValue("ffa_r", 1, 1, "Decay"), "ffa_r", 1, 1);
+            string lp5 = LegacyPickCard(LegacyPickValue("ffa_r", 1, 1, "Decay", false), "ffa_r", 1, 1);
             Unit(r, "U-LEG-5", lp5 == null, lp5 ?? "null");
             string lp6 = LegacyPickCard(PickValue("ffa_r", "e1", 1, 1, "Decay"), "ffa_r", 1, 1);
             Unit(r, "U-LEG-6", lp6 == null, lp6 ?? "null");
@@ -968,7 +1277,7 @@ namespace CompetitiveRounds
             Unit(r, "U-COL-5", cp5 == null && !lg, S(cp5) + " legacy=" + B(lg));
             string cp6 = CollectedPickCard(null, "ffa_r:1:1:Decay", "ffa_r", null, 1, 1, out lg);
             Unit(r, "U-COL-6", cp6 == null && !lg, S(cp6) + " legacy=" + B(lg));
-            string cp7 = CollectedPickCard(null, LegacyPickValue("ffa_r", 1, 1, "Decay"), "ffa_r", "e1", 1, 1, out lg);
+            string cp7 = CollectedPickCard(null, LegacyPickValue("ffa_r", 1, 1, "Decay", false), "ffa_r", "e1", 1, 1, out lg);
             Unit(r, "U-COL-7", cp7 == null && !lg, S(cp7) + " legacy=" + B(lg));
 
             // The receive path (bugs 435/436): production's own collection pass
@@ -1108,11 +1417,17 @@ namespace CompetitiveRounds
             Unit(r, "U-FIN-2", FinalizesAtTermination("e1", 0), B(FinalizesAtTermination("e1", 0)));
             Unit(r, "U-FIN-3", !FinalizesAtTermination(null, 0), B(FinalizesAtTermination(null, 0)));
 
-            // LegacyPickValue(nonce, game, cycle, card) (N19(c))
-            string lg1 = LegacyPickValue("ffa_2", 4, 3, "Leach");
+            // LegacyPickValue(nonce, game, cycle, card, legacyForm) (N19(c), A1)
+            string lg1 = LegacyPickValue("ffa_2", 4, 3, "Leach", false);
             Unit(r, "U-LEGACY-1", lg1 == "", "\"" + S(lg1) + "\"");
-            string lg2 = LegacyPickValue("ffa_2", -1, 0, "");
+            string lg2 = LegacyPickValue("ffa_2", -1, 0, "", false);
             Unit(r, "U-LEGACY-2", lg2 == "", "\"" + S(lg2) + "\"");
+            string lg3 = LegacyPickValue("ffa_2", 4, 3, "Leach", true);
+            Unit(r, "U-LEGACY-3", lg3 == "ffa_2:4:3:Leach", "\"" + S(lg3) + "\"");
+            string lg4 = LegacyPickValue("ffa_2", 4, 3, "", true);
+            Unit(r, "U-LEGACY-4", lg4 == "", "\"" + S(lg4) + "\"");
+
+            RunLegacyBridgeUnits(r);
 
             // PickValue and ParsePick (N19(c))
             string pv1 = PickValue("ffa_2", "e1", 4, 3, "Leach");
@@ -1277,6 +1592,8 @@ namespace CompetitiveRounds
                 // steps' last master and last-seen values
                 internal int Serial, Winner, LastMaster;
                 internal string RawCycSeen, RawEpSeen;
+                // A1 (bugs 435/436): FfaMode's phaseLegacyForm and phaseSawOlderMaster
+                internal bool LegacyForm, SawOlder;
             }
 
             private sealed class Msg
@@ -1331,6 +1648,8 @@ namespace CompetitiveRounds
                 internal HashSet<string> Finalized = new HashSet<string>();
                 internal bool HoldPick;
                 internal string HeldPick;
+                // A1: the OLD-MASTER mode's one decision per seat
+                internal bool OmDecided;
                 // the ledger: the record of every value this seat holds, kept as
                 // its property dictionaries keep the values; and the room phases
                 // this seat terminated (never reset)
@@ -1390,6 +1709,11 @@ namespace CompetitiveRounds
                 internal readonly Dictionary<int, List<int>> Manifest = new Dictionary<int, List<int>>();
                 internal readonly Dictionary<int, Dictionary<Seat, Dictionary<int, string>>> Applied =
                     new Dictionary<int, Dictionary<Seat, Dictionary<int, string>>>();
+                // DECK (A1): an older-build fighter entered a phase of this game,
+                // and the identity each seat ended each phase under
+                internal bool Mixed;
+                internal readonly Dictionary<int, Dictionary<Seat, string>> Ident =
+                    new Dictionary<int, Dictionary<Seat, string>>();
             }
 
             private sealed partial class Model
@@ -1412,17 +1736,44 @@ namespace CompetitiveRounds
                 private readonly Dictionary<string, EpochRec> _epochs = new Dictionary<string, EpochRec>();
                 private int _sourceChecks, _useChecks;
                 private readonly HashSet<string> _legacyPicks = new HashSet<string>();
+                // A1: legacy-form pick writes, legacy result reads, DECK phases
+                // compared; OLD-MASTER mode (the first fighter to join each
+                // checked room runs the pin, every later fighter the new build;
+                // the numbering expectations stay with the D12 walks)
+                private int _legacyPublishes, _legacyReads, _deckChecks, _lostHeld;
+                internal bool OldMasterMode;
+                // DeckOnly: the deck and ledger checks only (OLD-MASTER mode and
+                // the W8 walks); RequireBridge: the walk must read a legacy
+                // result and compare a deck, or it fails (no vacuous pass)
+                internal bool DeckOnly, RequireBridge;
                 private readonly List<string> _cards = new List<string>();
                 private bool _playing, _injectNext, _afterResultPending, _afterResultFired;
                 private Opts _opts;
 
                 internal Model(SelfTestResult r, string id) { _r = r; _id = id; }
 
+                /// <summary>A1: failure lines a walk declares inherited from the
+                /// 1.40.3 rules, each proven by the walk's all-older twin, which
+                /// declares the same lines for the older seats. Each must occur: an
+                /// absent one fails the walk ("INHERITED absent"); a present one is
+                /// counted on PASS as INHERITED instead of failing it.</summary>
+                private readonly List<string> _inherited = new List<string>();
+                private int _inheritedSeen;
+
+                internal void Inherited(params string[] lines) { _inherited.AddRange(lines); }
+
                 internal void Run(Action<Model> script)
                 {
                     try { script(this); }
                     catch (Exception ex) { Fail("THREW " + ex.GetType().Name + ": " + ex.Message); }
                     foreach (var t in _trace) _r.Report.Append("TRACE ").Append(_id).Append(' ').Append(t).Append('\n');
+                    foreach (var line in _inherited)
+                    {
+                        if (_fails.Remove(line)) _inheritedSeen++;
+                        else Fail("INHERITED absent: " + line);
+                    }
+                    if (RequireBridge && _legacyReads == 0) Fail("BRIDGE no legacy result read");
+                    if (RequireBridge && _deckChecks == 0) Fail("BRIDGE no deck compared");
                     bool ok = _fails.Count == 0;
                     if (ok) _r.Passed++; else _r.Failed++;
                     // The positive arms' counts: LIVE-F per game, CARDS per game
@@ -1433,7 +1784,10 @@ namespace CompetitiveRounds
                     string pass = "LIVE-F " + string.Join(" ", _counts.ToArray())
                                   + " | CARDS " + (_cards.Count > 0 ? string.Join(" ", _cards.ToArray()) : "none")
                                   + " | SOURCE " + I(_sourceChecks) + " | USE " + I(_useChecks)
-                                  + " | LEGACY " + I(_legacyPicks.Count);
+                                  + " | LEGACY " + I(_legacyPicks.Count)
+                                  + " | LEGACY-PUB " + I(_legacyPublishes) + " | LEGACY-READ " + I(_legacyReads)
+                                  + " | DECK " + I(_deckChecks) + " | HELD " + I(_lostHeld)
+                                  + " | INHERITED " + I(_inheritedSeen);
                     _r.Report.Append(ok ? "PASS " : "FAIL ").Append(_id).Append(" | ")
                         .Append(ok ? pass : string.Join("; ", _fails.ToArray()))
                         .Append('\n');
@@ -1700,6 +2054,17 @@ namespace CompetitiveRounds
                 internal void Join(Seat s, Room room, string path, bool refuseStage)
                 {
                     if (s.R != null) throw new InvalidOperationException(s.Name + " joins while in a room");
+                    if (OldMasterMode && room.Checked && !s.OmDecided && !s.NoMod && !s.Spectator)
+                    {
+                        // OLD-MASTER mode (A1): decided once per seat, at its
+                        // first join of the checked room: the first fighter runs
+                        // the pin (the 1.40.3 pick rules), every later one the
+                        // new build.
+                        bool firstFighter = true;
+                        foreach (var p in room.Present) if (!p.Spectator && !p.NoMod) firstFighter = false;
+                        s.Current = firstFighter;
+                        s.OmDecided = true;
+                    }
                     if (!s.Current && !s.NoMod)
                     {
                         if (path == "ready") { RecordAdvertTarget(s, room.Name); s.TruthTarget = room.Name; }
@@ -2360,6 +2725,50 @@ namespace CompetitiveRounds
                     if (now == ph.LastMaster) return;
                     ph.LastMaster = now;
                     EvaluateEpoch(s, ph);
+                    // A1: the bridge re-evaluated at the master change, as FfaMode.
+                    NoteOlder(s, ph);
+                    if (OlderMasterNow(s, ph) != ph.LegacyForm) Restamp(s, ph);
+                }
+
+                /// <summary>FfaMode.MasterCarriesPickEpoch: the present master's
+                /// player properties, as this seat sees them, carry cr_ffa_pe
+                /// (true with no master or no view of one).</summary>
+                private static bool MasterCarriesPe(Seat s)
+                {
+                    var m = s.R != null ? s.R.Master : null;
+                    if (m == null) return true;
+                    var props = PropsOf(s, m);
+                    return props == null || props.ContainsKey(KPe);
+                }
+
+                /// <summary>FfaMode.OlderMasterNow, under the phase's G.</summary>
+                private static bool OlderMasterNow(Seat s, Phase ph)
+                {
+                    return LegacyPickForm(ph.Gate, MasterActorOf(s), s.Actor, MasterCarriesPe(s));
+                }
+
+                /// <summary>FfaMode.NoteOlderMaster.</summary>
+                private static void NoteOlder(Seat s, Phase ph)
+                {
+                    if (!ph.SawOlder && OlderMasterNow(s, ph)) ph.SawOlder = true;
+                }
+
+                /// <summary>FfaMode.LegacyResultNow.</summary>
+                private static Dictionary<int, string> LegacyResultOf(Seat s, Phase ph, bool holdsEpoch)
+                {
+                    return LegacyResult(ph.Gate, holdsEpoch, OlderMasterNow(s, ph), ph.SawOlder,
+                                        Raw(s, KRep), Raw(s, KRes), s.Finalized, ph.Game, ph.Cycle);
+                }
+
+                /// <summary>FfaMode.PickWrite: one publish or re-stamp's keys.</summary>
+                private void PickWrite(Seat s, Phase ph, string ep, string card)
+                {
+                    bool form = OlderMasterNow(s, ph);
+                    WriteOwn(s, KPick, LegacyPickValue(ph.Nonce, ph.Game, ph.Cycle, card, form));
+                    string pe = PickEpochValue(ph.Nonce, ep, ph.Game, ph.Cycle, card, form);
+                    if (pe != null) WriteOwn(s, KPe, pe);
+                    ph.LegacyForm = form;
+                    if (form) _legacyPublishes++;
                 }
 
                 /// <summary>FfaMode.EpochChangeCheck (a non-master): evaluate on a
@@ -2381,18 +2790,13 @@ namespace CompetitiveRounds
 
                 /// <summary>FfaLocalPickUI's publish. The pin writes its keyed
                 /// cr_ffa_pk; the new build writes cr_ffa_pk through LegacyPickValue
-                /// and, under the epoch held for use, cr_ffa_pe (N19(c), (h)). The
-                /// pick is recorded as pending either way.</summary>
+                /// under the present form and, through PickEpochValue, cr_ffa_pe
+                /// (N19(c), (h), A1). The pick is recorded as pending either way.</summary>
                 private void PublishPick(Seat s, Phase ph, string card)
                 {
                     if (s.Current)
                         WriteOwn(s, KPick, ph.Nonce + ":" + I(ph.Game) + ":" + I(ph.Cycle) + ":" + card);
-                    else
-                    {
-                        string ep = EpochForUse(s, true);
-                        WriteOwn(s, KPick, LegacyPickValue(ph.Nonce, ph.Game, ph.Cycle, card));
-                        if (ep != null) WriteOwn(s, KPe, PickValue(ph.Nonce, ep, ph.Game, ph.Cycle, card));
-                    }
+                    else PickWrite(s, ph, EpochForUse(s, true), card);
                     s.PendingPick = card;
                 }
 
@@ -2406,9 +2810,7 @@ namespace CompetitiveRounds
                         WriteOwn(s, KPick, ph.Nonce + ":" + I(ph.Game) + ":" + I(ph.Cycle) + ":" + s.PendingPick);
                         return;
                     }
-                    string ep = EpochForUse(s, true);
-                    WriteOwn(s, KPick, LegacyPickValue(ph.Nonce, ph.Game, ph.Cycle, s.PendingPick));
-                    if (ep != null) WriteOwn(s, KPe, PickValue(ph.Nonce, ep, ph.Game, ph.Cycle, s.PendingPick));
+                    PickWrite(s, ph, EpochForUse(s, true), s.PendingPick);
                 }
 
                 /// <summary>V9's HoldPick: the seat's next pick is chosen but neither
@@ -2450,6 +2852,9 @@ namespace CompetitiveRounds
                     foreach (var p in room.Present) if (!p.Spectator && p.Actor != winnerActor) ph.Pickers.Add(p.Actor);
                     ph.Pickers.Sort();
                     ph.RawAtEntry = Raw(s, KCyc);
+                    // DECK (A1): a game in which an older-build fighter enters a
+                    // pick phase is a mixed room's.
+                    if (s.Current && IsFighter(s) && room.Checked && _game != null) _game.Mixed = true;
                     if (s.Current)
                     {
                         ph.Gate = false;
@@ -2467,6 +2872,7 @@ namespace CompetitiveRounds
                         ph.LastMaster = MasterActorOf(s);
                         if (!IsMaster(s)) EvaluateEpoch(s, ph);
                         ph.Gate = GateNow(s);
+                        NoteOlder(s, ph);   // A1: FfaMode's NoteOlderMaster beside phaseGate
                         ph.RgNow = RoomGameOf(s);
                         bool follow = EvaluateFollow(s, ph.Gate, ph.RgNow);
                         int acq = AcquiredHere(s);
@@ -2708,11 +3114,18 @@ namespace CompetitiveRounds
                         EpochMasterCheck(s, ph);
                         if (KeyedReadsAllowed(ph.Gate, ph.Game))
                         {
+                            // A1: one read through PhaseResult, as FfaMode: the
+                            // envelope first, then cr_ffa_res where LegacyResult
+                            // admits it.
                             string ep = EpochForUse(s, false);
-                            var res = ResultFromEnvelope(Raw(s, KRep), ep, MasterActorOf(s), ph.Game, ph.Cycle);
+                            bool viaLegacy;
+                            var res = PhaseResult(ph.Gate, Raw(s, KRep), Raw(s, KRes), ep, MasterActorOf(s),
+                                                  OlderMasterNow(s, ph), ph.SawOlder, s.Finalized, ph.Game, ph.Cycle,
+                                                  out viaLegacy);
                             if (res != null)
                             {
-                                Applied(s, ph, res, RoomProvOf(s, KRep), ep);
+                                if (viaLegacy) AppliedLegacy(s, ph, res);
+                                else Applied(s, ph, res, RoomProvOf(s, KRep), ep);
                                 return;
                             }
                         }
@@ -2765,7 +3178,11 @@ namespace CompetitiveRounds
                                 Adopt(s, ph, ph.Game, ph.Cycle, null, true, null, " as master (promotion reissue)");
                             else
                             {
-                                Terminate(s, ph, new Dictionary<int, string>());
+                                // A1: the promoted seat holds no epoch; the result
+                                // LegacyResult admits, else R22's cardless bail.
+                                var promoted = LegacyResultOf(s, ph, false);
+                                if (promoted != null) AppliedLegacy(s, ph, promoted);
+                                else Terminate(s, ph, new Dictionary<int, string>());
                                 return;
                             }
                         }
@@ -2804,6 +3221,7 @@ namespace CompetitiveRounds
                         if (allIn || (now > ph.Deadline && !settling))
                         {
                             string value = ResValue(ph.Game, ph.Cycle, got);
+                            if (s.Current) LostChecks(s, ph, got);
                             if (s.Current) WriteRoom(s, KRes, value);
                             else WriteResult(s, value, closeEp);
                             OnResultWritten(s, ph);
@@ -2824,6 +3242,23 @@ namespace CompetitiveRounds
                             Fail("REPLAY " + s.Name + " applied " + I(ph.Game) + ":" + I(ph.Cycle) + " at " + _label
                                  + ", written at " + prov.Label);
                         if (!s.Current) SourceCheck(s, ph, prov != null ? prov.Writer : null, ep);
+                    }
+                    Terminate(s, ph, res);
+                }
+
+                /// <summary>A1: a result applied from cr_ffa_res through
+                /// LegacyResult (the 1.40.3 follower read). NO-REPLAY on the value
+                /// read, as for the pin; SOURCE does not apply (no epoch); counted
+                /// on the PASS line as LEGACY-READ.</summary>
+                private void AppliedLegacy(Seat s, Phase ph, Dictionary<int, string> res)
+                {
+                    var prov = RoomProvOf(s, KRes);
+                    if (s.R != null && s.R.Checked)
+                    {
+                        if (prov != null && prov.Serial != _serial)
+                            Fail("REPLAY " + s.Name + " applied " + I(ph.Game) + ":" + I(ph.Cycle) + " at " + _label
+                                 + ", written at " + prov.Label);
+                        _legacyReads++;
                     }
                     Terminate(s, ph, res);
                 }
@@ -2875,6 +3310,14 @@ namespace CompetitiveRounds
                             _game.Applied[ph.Serial] = bySeat;
                         }
                         bySeat[s] = applied;
+                        // DECK (A1): the identity the seat ended the phase under.
+                        Dictionary<Seat, string> idOf;
+                        if (!_game.Ident.TryGetValue(ph.Serial, out idOf))
+                        {
+                            idOf = new Dictionary<Seat, string>();
+                            _game.Ident[ph.Serial] = idOf;
+                        }
+                        idOf[s] = ph.Game >= 1 ? I(ph.Game) + ":" + I(ph.Cycle) : null;
                     }
                 }
 
@@ -3060,6 +3503,31 @@ namespace CompetitiveRounds
                             got[pid] = v.Substring(prefix.Length);
                     }
                     return got;
+                }
+
+                /// <summary>A1 (bugs 435/436), the pick half in the walks (LOST,
+                /// DeckOnly walks): when an older master closes, every new-build
+                /// fighter in the manifest that published its pick at the same phase
+                /// identity, with no write of it to the master still in flight or
+                /// stalled, must be in the collect it writes, as a 1.40.3
+                /// follower's is.</summary>
+                private void LostChecks(Seat s, Phase ph, Dictionary<int, string> got)
+                {
+                    if (!DeckOnly || s.R == null || !s.R.Checked || s.R.Master != s) return;
+                    foreach (var pid in ph.Manifest)
+                    {
+                        var p = ByActor(s.R, pid);
+                        if (p == null || p == s || p.Current || p.NoMod || p.Spectator) continue;
+                        if (got.ContainsKey(pid)) { _lostHeld++; continue; }
+                        var pp = p.Ph;
+                        if (pp == null || p.PendingPick == null || pp.Nonce != ph.Nonce || pp.Game != ph.Game
+                            || pp.Cycle != ph.Cycle) continue;
+                        if (_stalled.Contains(p.Name + ">" + s.Name)
+                            || _queue.Exists(q => q.From == p && q.To == s && !q.RoomProp)) continue;
+                        Fail("LOST " + p.Name + " picked " + I(ph.Game) + ":" + I(ph.Cycle) + " at " + _label
+                             + ", absent from older master " + s.Name + "'s collect (pk=" + S(StrProp(s, p, KPick)) + " pe="
+                             + S(StrProp(s, p, KPe)) + " form=" + B(pp.LegacyForm) + ")");
+                    }
                 }
 
                 /// <summary>FfaMode.CountStillPresent, production-faithful (change
@@ -3488,13 +3956,49 @@ namespace CompetitiveRounds
                         if (rg >= 1) vals.Add(rg);
                         gates.Add(gate);
                     }
+                    g.G1 = starters > 0 && allG1;
+                    // OLD-MASTER mode and the W8 walks (A1) keep the deck and
+                    // ledger checks only.
+                    if (DeckOnly) return;
                     Expected("RG", misses);
                     if (vals.Count > 1) Fail("two numbers g" + I(g.N) + " RG{" + string.Join(",", rgs.ToArray()) + "}");
                     // AGREE-G, unless the walk scripts a join between start edges
                     // (R6), which its spec states with "XG 1".
                     if (gates.Count > 1 && !g.Global.ContainsKey("XG"))
                         Fail("AGREE-G g" + I(g.N) + " G{" + string.Join(",", gs.ToArray()) + "}");
-                    g.G1 = starters > 0 && allG1;
+                }
+
+                /// <summary>DECK (A1, bugs 435/436): in a game where an older-build
+                /// fighter entered a pick phase, every two seats that ended one room
+                /// phase under the same identity applied the same result (pid to
+                /// card; a cardless bail is the empty one), so no screen disagrees
+                /// with another on any deck. Seats under different identities are a
+                /// drift, which the numbering checks own. The phases compared print
+                /// on PASS.</summary>
+                private void DeckChecks()
+                {
+                    var g = _game;
+                    if (g == null || !g.Mixed) return;
+                    foreach (int serial in g.Phases)
+                    {
+                        Dictionary<Seat, Dictionary<int, string>> bySeat;
+                        Dictionary<Seat, string> idOf;
+                        if (!g.Applied.TryGetValue(serial, out bySeat) || !g.Ident.TryGetValue(serial, out idOf)) continue;
+                        var firstOf = new Dictionary<string, Seat>();
+                        bool compared = false;
+                        foreach (var s in ByName(new List<Seat>(bySeat.Keys)))
+                        {
+                            string id;
+                            if (!idOf.TryGetValue(s, out id) || id == null) continue;
+                            Seat f;
+                            if (!firstOf.TryGetValue(id, out f)) { firstOf[id] = s; continue; }
+                            compared = true;
+                            if (D(bySeat[f]) != D(bySeat[s]))
+                                Fail("DECK " + g.PhaseLabel[serial] + " at " + id + " " + f.Name + D(bySeat[f]) + " "
+                                     + s.Name + D(bySeat[s]));
+                        }
+                        if (compared) _deckChecks++;
+                    }
                 }
 
                 /// <summary>At each game-over edge: EXPECTED (F, cand, CS, G, advert),
@@ -3504,6 +4008,8 @@ namespace CompetitiveRounds
                 {
                     var g = _game;
                     if (g == null) return;
+                    DeckChecks();
+                    if (DeckOnly) return;   // A1: the deck and ledger checks only
                     string n = I(g.N), key = I(g.Key);
                     var present = ByName(room.Present);
                     var ranSet = new HashSet<Seat>(ran);
@@ -3815,13 +4321,50 @@ namespace CompetitiveRounds
                     Case(r, "walk-D12 W7.2", W72);
                     Case(r, "walk-D12 W7.3", W73);
                     Case(r, "walk-D12 W7.4", W74);
+                    Case(r, "walk-D12 W7.4t", W74t);
                     Case(r, "walk-D12 W7.5", W75);
                     Case(r, "walk-D12 W7.6", W76);
                     Case(r, "walk-D12 W7.7", W77);
                     Case(r, "walk-D12 W7.8", W78);
                     Case(r, "walk-D12 W7.9", W79);
+                    Case(r, "walk-D12 W7.9t", W79t);
                     Case(r, "walk-D12 W7.10", W710);
                     Case(r, "walk-D12 W7.11", W711);
+
+                    // A1 (bugs 435/436): the D12 walks in OLD-MASTER mode (the
+                    // first fighter to join runs the 1.40.3 pick rules, every
+                    // later one the new build), and the compositions of W8.
+                    Case(r, "walk-D12 W7.1o", Om(W71));
+                    Case(r, "walk-D12 W7.2o", Om(W72));
+                    Case(r, "walk-D12 W7.3o", Om(W73));
+                    Case(r, "walk-D12 W7.4o", Om(W74));
+                    Case(r, "walk-D12 W7.5o", Om(W75));
+                    Case(r, "walk-D12 W7.6o", Om(W76));
+                    Case(r, "walk-D12 W7.7o", Om(W77));
+                    Case(r, "walk-D12 W7.8o", Om(W78));
+                    Case(r, "walk-D12 W7.9o", Om(W79));
+                    Case(r, "walk-D12 W7.10o", m => { W710Replay(m); Om(W710)(m); });
+                    Case(r, "walk-D12 W7.10ot", W710t);
+                    Case(r, "walk-D12 W7.11o", Om(W711));
+                    Case(r, "walk-D8 W8.1", W81);
+                    Case(r, "walk-D8 W8.2", W82);
+                    Case(r, "walk-D8 W8.3", W83);
+                    Case(r, "walk-D8 W8.4", W84);
+                    Case(r, "walk-D8 W8.5", W85);
+                    Case(r, "walk-D8 W8.6", W86);
+                }
+
+                /// <summary>OLD-MASTER mode (A1): the walk's script, its seats'
+                /// builds decided at their first join (Model.Join), with the deck
+                /// and ledger checks only.</summary>
+                private static Action<Model> Om(Action<Model> walk)
+                {
+                    return m =>
+                    {
+                        m.OldMasterMode = true;
+                        m.DeckOnly = true;
+                        walk(m);
+                    };
                 }
 
                 // ── D3 ────────────────────────────────────────────────────
@@ -4539,14 +5082,31 @@ namespace CompetitiveRounds
                 /// Z's counter is set to 1 after game 3 (two behind the lobby at game
                 /// 4), and P's and Q's counter and sequence to 1, so that fresh picks
                 /// from the new seats do not out-vote Z; X keeps counter and sequence
-                /// 3, which gives V4's stamp inputs (sequence 7, counter 5) when P
-                /// leaves game 7. The expectations are V4's. Under N19 no new-build
-                /// seat publishes a non-empty cr_ffa_pk (LegacyPickValue), so Z's
-                /// detector, which reads only cr_ffa_pk, finds at most its own
-                /// retained 3:4, one vote below its quorum of 2. At 901ed11 X's, P's
-                /// and Q's retained 3:4 met that quorum at Z's first pre-pass and Z
-                /// adopted it; C-LEGACY restores that.</summary>
+                /// 3. A1 (bugs 435/436): Z is an older master in games 1-3, so the
+                /// new seats publish their picks in cr_ffa_pk in the 1.40.3 form
+                /// there, as the brief orders, and keep them until they pick again,
+                /// as a 1.40.3 follower keeps its own. Z's detector therefore counts
+                /// X's, P's and Q's retained 3:4 at its first game-4 pre-pass and
+                /// adopts it, and every seat that follows to 3:4 applies Z's stale
+                /// 3:4 result: what Z does with three 1.40.3 followers (W7.4t, this
+                /// walk's all-older twin, prints the same lines), so those lines are
+                /// INHERITED here. The numbers follow the adoption (game 4 keys 3).
+                /// Every screen at 3:4 applies one deck (DECK); X, still at 4:1, is
+                /// the drift the twin shows too.</summary>
                 private static void W74(Model m)
+                {
+                    W74Room(m, false);
+                }
+
+                /// <summary>W7.4t (A1): W7.4's twin with X, P and Q on the 1.40.3
+                /// pick rules (the pin): the older master's own behaviour, which
+                /// W7.4 must reproduce line for line.</summary>
+                private static void W74t(Model m)
+                {
+                    W74Room(m, true);
+                }
+
+                private static void W74Room(Model m, bool allOlder)
                 {
                     var room = m.NewRoom("ffa_2");
                     var Z = m.NewSeat("Z", "1000");
@@ -4554,20 +5114,29 @@ namespace CompetitiveRounds
                     var P = m.NewSeat("P");
                     var Q = m.NewSeat("Q");
                     Z.Current = true;
+                    X.Current = allOlder;
+                    P.Current = allOlder;
+                    Q.Current = allOlder;
+                    m.Inherited("REPLAY Z adopted 3:4 at g4.1 from picks written at g3.4",
+                                "REPLAY Z applied 3:4 at g4.1, written at g3.4",
+                                "REPLAY P applied 3:4 at g4.1, written at g3.4",
+                                "REPLAY Q applied 3:4 at g4.1, written at g3.4");
                     m.S0(room, "G 0", Z, X, P, Q);
                     Z.GameNumber = 1;
                     P.GameNumber = 1;
                     P.LocalGameSeq = 1;
                     Q.GameNumber = 1;
                     Q.LocalGameSeq = 1;
-                    m.Play(room, "G 0; RG 4; F 2; CAND 2; CS Z2 X4 P2 Q2", null);
-                    m.Play(room, "G 0; RG 3; F 3; CAND 3; CS Z3 X5 P3 Q3", null);
-                    m.Play(room, "G 0; RG 4; F 4; CAND 4; CS Z4 X6 P4 Q4", null);
+                    m.Play(room, "G 0; RG 4; F 3; CAND 3; CS Z2 X4 P2 Q2", null);
+                    m.Play(room, "G 0; RG 4; F 4; CAND 4; CS Z4 X5 P4 Q4", null);
+                    m.Play(room, "G 0; RG 5; F 5; CAND 5; CS Z5 X6 P5 Q5", null);
                     m.Leave(Z);
                     var o7 = new Opts();
                     o7.AfterCycle = c => { if (c == 2) m.Leave(P); };
-                    m.Play(room, "N 5", o7);
-                    m.Play(room, "N 6", null);
+                    // After Z leaves, the twin's X and Q key by the pin's counter
+                    // (G 0, X one ahead), the new seats by N12: numbering, not decks.
+                    m.Play(room, allOlder ? "G 0; N 7; CS Q6" : "N 6", o7);
+                    m.Play(room, allOlder ? "G 0; N 8; CS Q7" : "N 7", null);
                 }
 
                 private static void W75(Model m)
@@ -4658,8 +5227,33 @@ namespace CompetitiveRounds
                 /// game-3 cycle-4 publishes until after Z's first game-4 pre-pass,
                 /// which runs in cycle 1's first tick (released after the cycle-1
                 /// entries). Inject sets Z's counter and sequence to 1 and X leaves,
-                /// so Z is master in game 4.</summary>
+                /// so Z is master in game 4. A1: under X (games 1-3) the new seats
+                /// write cr_ffa_pk empty, so Z's first pre-pass finds no retained
+                /// 3:4 to count (C-LEGACY, the legacy form under any master, brings
+                /// the replay back: its named line). Under Z the new seats publish
+                /// the 1.40.3 form, so once the hold lifts Z's detector counts P's
+                /// and Q's 4:1 and adopts it, as it adopts two 1.40.3 followers'
+                /// (W7.9t, the twin): game 4 keys 4 on every seat.</summary>
                 private static void W79(Model m)
+                {
+                    W79Room(m, false);
+                }
+
+                /// <summary>W7.9t (A1): W7.9's twin with P and Q on the 1.40.3 pick
+                /// rules. Z ends game 4 with W7.9's numbers, but on the way its first
+                /// pre-pass counts P's and Q's retained 3:4 (a 1.40.3 follower keeps
+                /// its pick under any master) and replays 3:4 before adopting 4:1:
+                /// the replay W7.9's new seats avoid by writing cr_ffa_pk empty under
+                /// the current master X. Those lines are the twin's INHERITED ones.</summary>
+                private static void W79t(Model m)
+                {
+                    m.Inherited("REPLAY Z adopted 3:4 at g4.1 from picks written at g3.4",
+                                "REPLAY Z applied 3:4 at g4.1, written at g3.4",
+                                "REPLAY Z adopted 4:1 at g4.2 from picks written at g4.1");
+                    W79Room(m, true);
+                }
+
+                private static void W79Room(Model m, bool allOlder)
                 {
                     var room = m.NewRoom("ffa_2");
                     var X = m.NewSeat("X");
@@ -4667,6 +5261,8 @@ namespace CompetitiveRounds
                     var P = m.NewSeat("P");
                     var Q = m.NewSeat("Q");
                     Z.Current = true;
+                    P.Current = allOlder;
+                    Q.Current = allOlder;
                     m.JoinAll(room, X, Z, P, Q);
                     m.Play(room, "G 0", null);
                     m.Play(room, "G 0", null);
@@ -4687,8 +5283,8 @@ namespace CompetitiveRounds
                         m.Unstall(P, Z);
                         m.Unstall(Q, Z);
                     };
-                    m.Play(room, "G 0; N 2; RG P4 Q4; F 2; CS Z2 P4 Q4", o4);
-                    m.StartOnly(room, "G 0; N 3");
+                    m.Play(room, "G 0; N 4; RG P4 Q4; F 4; CS Z2 P4 Q4", o4);
+                    m.StartOnly(room, "G 0; N 5");
                 }
 
                 /// <summary>W7.10 (V7): a new-to-current handoff with a result-only
@@ -4704,6 +5300,39 @@ namespace CompetitiveRounds
                     var Z = m.NewSeat("Z");
                     var P = m.NewSeat("P");
                     Z.Current = true;
+                    m.S0(room, "G 0", A, Z, P);
+                    m.Inject(A, 2, 2);
+                    var o4 = new Opts();
+                    o4.AfterResult = c => { if (c == 1) m.Leave(A); };
+                    m.Play(room, "G 0; F Z4 P4", o4);
+                    m.StartOnly(room, "G 0");
+                }
+
+                /// <summary>W7.10o (A1): A, the first to join, is the older master;
+                /// injected two behind, its first game-4 pre-pass counts Z's and P's
+                /// retained 3:4 (the 1.40.3 form keeps a pick until the next one) and
+                /// adopts it, then heals to 4:1: the replay A runs with two 1.40.3
+                /// followers (W7.10ot prints the same lines), so INHERITED.</summary>
+                private static void W710Replay(Model m)
+                {
+                    m.Inherited("REPLAY A adopted 3:4 at g4.1 from picks written at g3.4",
+                                "REPLAY A applied 3:4 at g4.1, written at g3.4",
+                                "REPLAY A adopted 4:1 at g4.2 from picks written at g4.1");
+                }
+
+                /// <summary>W7.10ot (A1): W7.10's script with A, Z and P all on the
+                /// 1.40.3 pick rules, deck and ledger checks only.</summary>
+                private static void W710t(Model m)
+                {
+                    m.DeckOnly = true;
+                    W710Replay(m);
+                    var room = m.NewRoom("ffa_2");
+                    var A = m.NewSeat("A");
+                    var Z = m.NewSeat("Z");
+                    var P = m.NewSeat("P");
+                    A.Current = true;
+                    Z.Current = true;
+                    P.Current = true;
                     m.S0(room, "G 0", A, Z, P);
                     m.Inject(A, 2, 2);
                     var o4 = new Opts();
@@ -4736,6 +5365,145 @@ namespace CompetitiveRounds
                     m.HoldPick(P);
                     m.Play(room, "G 0; F Z4 P4", o4);
                     m.StartOnly(room, "G 0");
+                }
+                // ── A1 (bugs 435/436): the mixed-room compositions ────────────
+                // Each runs the deck and ledger checks (DeckOnly) and must read a
+                // legacy result and compare a deck (RequireBridge). Z and O run
+                // the 1.40.3 pick rules (the pin); A, B and P the new build. The
+                // first seat to join is master; on a leave the next ActorNumber.
+
+                private static Model Bridge(Model m)
+                {
+                    m.DeckOnly = true;
+                    m.RequireBridge = true;
+                    return m;
+                }
+
+                /// <summary>W8.1: an older master with both kinds of follower, three
+                /// games: A and P publish the 1.40.3 form, Z collects them as it
+                /// collects O's, and every seat applies Z's results.</summary>
+                private static void W81(Model m)
+                {
+                    Bridge(m);
+                    var room = m.NewRoom("ffa_2");
+                    var Z = m.NewSeat("Z");
+                    var A = m.NewSeat("A");
+                    var P = m.NewSeat("P");
+                    var O = m.NewSeat("O");
+                    Z.Current = true;
+                    O.Current = true;
+                    m.S0(room, "G 0", Z, A, P, O);
+                }
+
+                /// <summary>W8.2: new to older after the close, both kinds of
+                /// follower. A (new) is master; in game 4 it leaves one tick after
+                /// its cycle-1 result write and Z (older) is promoted; P (new) holds
+                /// A's departed epoch, clears it and reads cr_ffa_res under Z.</summary>
+                private static void W82(Model m)
+                {
+                    Bridge(m);
+                    var room = m.NewRoom("ffa_2");
+                    var A = m.NewSeat("A");
+                    var Z = m.NewSeat("Z");
+                    var P = m.NewSeat("P");
+                    var O = m.NewSeat("O");
+                    Z.Current = true;
+                    O.Current = true;
+                    m.S0(room, "G 0", A, Z, P, O);
+                    var o4 = new Opts();
+                    o4.AfterResult = c => { if (c == 1) m.Leave(A); };
+                    m.Play(room, "G 0", o4);
+                    m.Play(room, "G 0", null);
+                }
+
+                /// <summary>W8.3: older to new before the close, both kinds of
+                /// follower. Z (older) is master; in game 4 it leaves after the
+                /// cycle-1 entries; A (new) is promoted inside its result loop,
+                /// reissues the identity under a fresh epoch, collects P from
+                /// cr_ffa_pe (P re-stamps at the master change) and O from cr_ffa_pk.</summary>
+                private static void W83(Model m)
+                {
+                    Bridge(m);
+                    var room = m.NewRoom("ffa_2");
+                    var Z = m.NewSeat("Z");
+                    var A = m.NewSeat("A");
+                    var P = m.NewSeat("P");
+                    var O = m.NewSeat("O");
+                    Z.Current = true;
+                    O.Current = true;
+                    m.S0(room, "G 0", Z, A, P, O);
+                    var o4 = new Opts();
+                    o4.AfterEntries = c => { if (c == 1) m.Leave(Z); };
+                    m.Play(room, "G 0", o4);
+                    m.Play(room, "G 0", null);
+                }
+
+                /// <summary>W8.4: older to new after the close. Z (older) is master;
+                /// in game 4 it leaves one tick after its cycle-1 result write; A
+                /// (new) is promoted with Z's cr_ffa_res for the cycle present and no
+                /// envelope carrying it, and applies it (it saw the older master in
+                /// this phase), as P and O do.</summary>
+                private static void W84(Model m)
+                {
+                    Bridge(m);
+                    var room = m.NewRoom("ffa_2");
+                    var Z = m.NewSeat("Z");
+                    var A = m.NewSeat("A");
+                    var P = m.NewSeat("P");
+                    var O = m.NewSeat("O");
+                    Z.Current = true;
+                    O.Current = true;
+                    m.S0(room, "G 0", Z, A, P, O);
+                    var o4 = new Opts();
+                    o4.AfterResult = c => { if (c == 1) m.Leave(Z); };
+                    m.Play(room, "G 0", o4);
+                    m.Play(room, "G 0", null);
+                }
+
+                /// <summary>W8.5: new to new after the close with an older follower
+                /// (R22 under G false). A (new) is master; in game 4 it leaves one
+                /// tick after its cycle-1 result write and B (new) is promoted with
+                /// A's envelope and cr_ffa_res present; B and P hold no epoch (A's
+                /// departed) and apply A's payload from cr_ffa_res, as O does.</summary>
+                private static void W85(Model m)
+                {
+                    Bridge(m);
+                    var room = m.NewRoom("ffa_2");
+                    var A = m.NewSeat("A");
+                    var B = m.NewSeat("B");
+                    var O = m.NewSeat("O");
+                    var P = m.NewSeat("P");
+                    O.Current = true;
+                    m.S0(room, "G 0", A, B, O, P);
+                    var o4 = new Opts();
+                    o4.AfterResult = c => { if (c == 1) m.Leave(A); };
+                    m.Play(room, "G 0", o4);
+                    m.Play(room, "G 0", null);
+                }
+
+                /// <summary>W8.6: new to older before the close. A (new) is master;
+                /// in game 4 it leaves after the cycle-1 entries, with B's and P's
+                /// picks published under A's epoch (cr_ffa_pe, cr_ffa_pk empty); Z
+                /// (older) is promoted and collects cr_ffa_pk alone, so B and P must
+                /// re-stamp in the 1.40.3 form at the master change (EpochMasterCheck)
+                /// for Z's collect to hold them (LOST), and read Z's close from
+                /// cr_ffa_res (DECK).</summary>
+                private static void W86(Model m)
+                {
+                    Bridge(m);
+                    var room = m.NewRoom("ffa_2");
+                    var A = m.NewSeat("A");
+                    var Z = m.NewSeat("Z");
+                    var B = m.NewSeat("B");
+                    var P = m.NewSeat("P");
+                    var O = m.NewSeat("O");
+                    Z.Current = true;
+                    O.Current = true;
+                    m.S0(room, "G 0", A, Z, B, P, O);
+                    var o4 = new Opts();
+                    o4.AfterEntries = c => { if (c == 1) m.Leave(A); };
+                    m.Play(room, "G 0", o4);
+                    m.Play(room, "G 0", null);
                 }
             }
         }
