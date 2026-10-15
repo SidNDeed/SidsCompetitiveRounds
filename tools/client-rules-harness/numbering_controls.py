@@ -355,14 +355,14 @@ ROWS = [
     ("C-LEGREAD", NR, "static string CollectedPickCard(",
      "string card = LegacyPickCard(legacyPick, nonce, game, cycle);",
      "string card = null;", "string card = LegacyPickCard(legacyPick, nonce, game, cycle) ?? null;",
-     units("COL-2", "RCV-1", "RCV-2", "RCV-3"),
+     units("COL-2", "RCV-1", "RCV-2", "RCV-3", "BRIDGE-6"),
      ("U-RCV-1", "U-RCV-1 | got=2=Decay legacy heard=none of 0")),
     # C-LEGPICK drops the epoch key's precedence: an epoch-carrying seat whose
     # pick does not match falls through to its cr_ffa_pk.
     ("C-LEGPICK", NR, "static string CollectedPickCard(", "if (epochPick != null)",
      "if (epochPick != null && epochPick.StartsWith(nonce + \":\" + epoch + \":\", StringComparison.Ordinal))",
      "if (epochPick != null && true)",
-     units("COL-3", "COL-5"),
+     units("COL-3", "COL-5", "BRIDGE-5"),
      ("U-COL-3", "U-COL-3 | got=Decay legacy=true")),
     # V10 amendment A1 (bugs 435/436), the bridge. C-BRIDGE-PICK: the legacy
     # form never writes the pick, so an older master's collect lacks a
