@@ -119,6 +119,27 @@ def _functions_that_read_bug_report_kind():
     return dict(_READERS_CACHE)
 
 
+def _header_of(filename):
+    """A migration's header: its text before the first `BEGIN;`."""
+    text = (SQL_DIR / filename).read_text(encoding="utf-8")
+    return text[:text.upper().find("BEGIN;")]
+
+
+#: The migration that ships with the automatic upload. 336 is applied on
+#: production, so its file is not edited after the fact; the `kind` readers
+#: that arrive with the upload module are inventoried in THIS header instead,
+#: which is applied before their code and itself requires 336.
+_AUTO_NUMBER_SQL = "373_bug_reports_auto_number.sql"
+
+
+def _kind_inventory():
+    """336's header, plus 373's where the tree carries it."""
+    header = _header_of("336_bug_reports_kind.sql")
+    if (SQL_DIR / _AUTO_NUMBER_SQL).exists():
+        header += "\n" + _header_of(_AUTO_NUMBER_SQL)
+    return header
+
+
 def test_the_336_header_names_every_reader_and_writer_of_kind():
     """The inventory in 336's header is the deploy-order argument.
 
@@ -138,9 +159,14 @@ def test_the_336_header_names_every_reader_and_writer_of_kind():
     the upload module sat beside it, and eight is still what the two together
     produce, so the floor holds on both trees and a detector that went vacuous
     still reds on either.
+
+    WHERE THE INVENTORY LIVES (2026-10-06). 336 is applied on production and
+    its file is byte-identical to the one production ran; the two readers the
+    automatic upload adds (`_auto_bucket`, and `prune_orphan_blobs` named as a
+    non-reader) are listed in 373's header, the migration that ships with
+    them. So the inventory read here is 336's header plus 373's.
     """
-    header = (SQL_DIR / "336_bug_reports_kind.sql").read_text(encoding="utf-8")
-    header = header[:header.upper().find("BEGIN;")]
+    header = _kind_inventory()
     readers = _functions_that_read_bug_report_kind()
     assert len(readers) >= 6, (
         "the detector found only %d function(s) touching bug_reports.kind "
@@ -151,7 +177,8 @@ def test_the_336_header_names_every_reader_and_writer_of_kind():
 
     missing = sorted(fn for fn in readers if fn not in header)
     assert not missing, (
-        "336's header inventory does not name %r, and that inventory is the "
+        "the kind inventory (336's header, plus 373's) does not name %r, and "
+        "that inventory is the "
         "whole argument for applying it before the api. A reader it does not "
         "list is a path nobody checked before deciding the order." % missing)
 
@@ -162,10 +189,10 @@ def test_the_336_inventory_test_can_actually_fail():
     Its assertion is `every derived name appears in the header text`, and a
     header is long: a name could match by accident, or the detector could go
     silently empty. So a name that is NOT a reader is confirmed absent, and a
-    deliberately corrupted header is confirmed to fail the same comparison.
+    deliberately corrupted header is confirmed to fail the same comparison --
+    in 336's header and, where the tree carries it, in 373's.
     """
-    header = (SQL_DIR / "336_bug_reports_kind.sql").read_text(encoding="utf-8")
-    header = header[:header.upper().find("BEGIN;")]
+    header = _kind_inventory()
     assert "submit_team_match" not in header, (
         "the header happens to contain an unrelated function name, so 'the "
         "name appears in the header' is weaker than it looks")
@@ -175,6 +202,11 @@ def test_the_336_inventory_test_can_actually_fail():
     assert [fn for fn in readers if fn not in corrupted], (
         "removing a reader from the header text did not make the comparison "
         "fail, so the comparison proves nothing")
+    if "_auto_bucket" in readers:
+        corrupted = header.replace("_auto_bucket", "xxx")
+        assert [fn for fn in readers if fn not in corrupted], (
+            "removing the upload's own reader from 373's header did not make "
+            "the comparison fail, so 373's half of the inventory is not read")
 
 
 # ── a default on a response model, read as a deploy-order permission ───────

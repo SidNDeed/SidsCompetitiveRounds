@@ -60,8 +60,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
 from models import Player, PlayerItem, ShopItem
+from read_gate import ReadGateRoute
 
-router = APIRouter(tags=["Titles"])
+# Verified reads: the GET route here carries the read gate (read_gate.py).
+router = APIRouter(tags=["Titles"], route_class=ReadGateRoute)
 
 # The read route's own 404 carries this in its detail so the client can tell
 # "this account has no ladder yet" from "this server has no such route". Both

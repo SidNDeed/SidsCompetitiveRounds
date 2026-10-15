@@ -71,6 +71,7 @@
 -- not cover them. Stop and read them rather than continuing.
 
 BEGIN;
+SET LOCAL lock_timeout = '5s';
 
 -- 1. The consent flag. Sid's decision (QUESTIONS.md #3): relay defaults ON
 --    for players with a linked Discord, with off-switches in the mod's Mail

@@ -1,0 +1,704 @@
+ROUND-8 TRAIN PLAN -- automatic log upload, server half
+branch claude/autolog-hotfix   code commit c5cd8ff1371ea178d77bcbe68f750cbfe79268b0
+reviewed precursor 824662a0a99709d9d0f7cc4a0e9afe189546bc42 (THIS round's
+                   sql-only commit -- 350 changed, so the precursor moved)
+the batch entry's pair, read from the train copy: precursor 824662a0a997, code c5cd8ff1371e
+
+WHICH PAIR THIS LOG CERTIFIES. This log is COMMITTED on the branch (R7-L3),
+so it cannot certify the commit that carries it: the train's gate A needs
+the reviewed code SHA to BE the branch tip. Every part below ran with the
+branch at the CODE commit (the run record's HEAD, checked by this writer),
+and it certifies the pair it names -- the sql commit and the code commit.
+Three commits follow on the branch: the .gitignore negations, the three
+round-8 logs and the route manifest's re-pin, none of them a file the train
+reads or one the api imports. The pair then moves to the final tip, and
+the same plan, check and controls are re-run there to
+autolog-hotfix-r8-trainplan-final.log beside the notes, untracked for the
+reason above (notes 19, D-19.6).
+
+The plan is READ-ONLY. `--go` is never passed, here or anywhere in this
+round's evidence. The plan wrote no release state: section 3's CONTROL E
+asserts that as a control rather than in prose, against a listing of the
+state directory and the state file's sha256 on each side of the run.
+
+THE ROUTE DISCRIMINATOR. The route is POST-only and every probe in phase 7
+is a GET, so the reading that tells the two builds apart is
+
+    GET /api/v1/logs/auto   ->  404 on the build WITHOUT the route
+                            ->  405 on the build WITH it
+                            ->  never 200, on either build
+
+The dry plan below stops at the 404 because the route is not deployed. The
+405 half is READ IN PROCESS in section 5: this tree's own application
+object, its middleware included, through the train's own `code_state` --
+405 with the route, 404 with it removed in memory. On a box it is proven
+only by a deploy, and that reading is recorded as one (notes 19).
+
+THE DERIVED SCHEMA (M2), THE CURRENT POSITION (M1 / B9) AND 350'S POLICY
+(R7-M1, R7-M2, R7-M3). Every object probe asks about the schema
+`assert_roles_resolve_one_schema` derives for the migration role and every
+api role. The sequence probe reads where the sequence IS, through the
+accounted-value query and against the floor it reads OUT OF 350 at the
+reviewed precursor -- one policy, one copy -- after checking that the
+catalogue carries exactly the columns 350 declares; and it asks for cache 1
+and a logged relation as 350 does. The dry plan reaches the derivation once
+-- phase 3, on the primary, before its `--go` return -- and reaches no
+object probe that reads the position: that runs in phase 3's postcondition
+and phase 7's closing re-read, which a dry plan does not reach. So section 4
+executes the train copy's own functions against local servers, each refusal
+beside a mutant that removes its check, section 6 runs the read-only
+`check`, which derives the schema and runs every object probe on BOTH
+production boxes, and section 7 reads the pool-retention controls (R7-M4).
+
+Local paths are post-processed to stable tokens -- this worktree reads WT,
+the main checkout REPO, this lane's scratch TMP -- so every command stays
+runnable while carrying no workstation layout (B11). The controller's
+machine name and the two per-box inventory selectors are replaced by
+<CONTROLLER>, <PRIMARY-SELECTOR> and <STANDBY-SELECTOR>; the tally closes
+this log, and the writer refuses if any spelling of them survives.
+
+Contents:
+  1. the plan itself, phases 0-7
+  2. [R3-H1] the batch-declaration control, EXECUTED
+  3. [CONTROL A]..[CONTROL E] the reviewed-SHA gates on the pair
+  4. [M2 + B9 + R7-M1/M2/M3] the derived schema, the position, the policy,
+     the catalogue, the cache and the persistence, hostless
+  5. [R4-L8] the route discriminator's 405 half, read in process
+  6. [M2 WITNESS] the read-only check on both production boxes
+  7. [R7-M4 / B15] the pool-retention controls
+
+==========================================================================
+1. THE PLAN, ON THE ROUND-8 CODE COMMIT
+==========================================================================
+INVOCATION (cwd WT):
+  PYTHON scripts/deploy/release_train.py plan --batch autolog-hotfix
+  exit=1  (the EXPECTED phase-7 stop; see below)
+
+batch: autolog-hotfix  branch: claude/autolog-hotfix  migrations: 336_bug_reports_kind.sql, 350_bug_reports_auto_number.sql  discriminator: /api/v1/logs/auto
+
+*** DRY RUN -- no mutating step will execute. Add --go to run. ***
+
+==========================================================================
+PHASE 0 -- Proxmox snapshot of the primary (rollback point)
+==========================================================================
+  [plan only] would run, on <CONTROLLER>:
+    $ ansible-playbook playbooks/snapshot-scr.yml -e snap_label=pre-autolog-hotfix
+
+==========================================================================
+PHASE 1 -- migrations-only precursor commit on main (#477)
+==========================================================================
+  main is checked out at REPO (this train file runs from WT); the main-branch commands run there
+  OK precursor phase: claude/autolog-hotfix == reviewed code sha c5cd8ff1371e
+  OK 336_bug_reports_kind.sql: identical at 2 commit(s) (486b2833193e)
+  OK 350_bug_reports_auto_number.sql: identical at 2 commit(s) (6735d9539b2a)
+  2 sql files, taken from 824662a0a99709d9d0f7cc4a0e9afe189546bc42
+  [plan only] would run, in REPO:
+    $ git checkout main
+    $ git pull --ff-only
+    $ git checkout 824662a0a99709d9d0f7cc4a0e9afe189546bc42 -- backend/sql/336_bug_reports_kind.sql backend/sql/350_bug_reports_auto_number.sql
+    $ git commit -m Migrations 336 and 350 precursor for the automatic log upload (files only, #477 two-SHA order)
+    $ git push origin main
+
+==========================================================================
+PHASE 2 -- deploy the precursor SHA to both boxes (files land, code unchanged)
+==========================================================================
+  [plan only] would deploy <PRECURSOR_SHA from phase 1> to <PRIMARY-SELECTOR> then <STANDBY-SELECTOR>
+  [plan only] then assert: both boxes healthy AND still running the OLD build (new routes still 404)
+
+==========================================================================
+PHASE 3 -- schema migrations on the PRIMARY (standby follows by replication)
+==========================================================================
+  OK 336_bug_reports_kind.sql: identical at 2 commit(s) (486b2833193e)
+  OK 350_bug_reports_auto_number.sql: identical at 2 commit(s) (6735d9539b2a)
+    $ ssh -o BatchMode=yes 192.168.72.199 sql-readonly:WITH api AS (SELECT DISTINCT usename::text AS r FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND application_name = '' AND pid <> pg_backend_pid() AND usename IS NOT NULL), roles AS (SELECT r FROM api UNION SELECT current_user::text) SELECT jsonb_build_object('role', current_user::text, 'database', current_database()::text, 'path', current_setting('search_path'), 'source', (SELECT source FROM pg_settings WHERE name = 'search_path'), 'current_schema', current_schema()::text, 'resolves', (SELECT coalesce(jsonb_object_agg(x, (SELECT n.nspname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(x))), '{}'::jsonb) FROM unnest(ARRAY['bug_reports', 'bug_reports_auto_number_seq']::text[]) AS x), 'api_roles', (SELECT coalesce(jsonb_agg(r ORDER BY r), '[]'::jsonb) FROM api), 'hidden', (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_type IS NULL), 'settings', (SELECT coalesce(jsonb_agg(jsonb_build_object('this_db', s.setdatabase <> 0, 'role', ro.rolname::text, 'path', substr(s.cfg, 13))), '[]'::jsonb) FROM (SELECT setdatabase, setrole, unnest(setconfig) AS cfg FROM pg_db_role_setting WHERE setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))) s LEFT JOIN pg_roles ro ON ro.oid = s.setrole WHERE left(s.cfg, 12) = 'search_path='), 'usage', (SELECT coalesce(jsonb_agg(jsonb_build_object('role', roles.r, 'schema', n.nspname::text)), '[]'::jsonb) FROM roles CROSS JOIN pg_namespace n WHERE has_schema_privilege(roles.r::name, n.oid, 'USAGE')), 'relations', (SELECT coalesce(jsonb_agg(jsonb_build_object('schema', n.nspname::text, 'name', c.relname::text)), '[]'::jsonb) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = ANY(ARRAY['bug_reports', 'bug_reports_auto_number_seq']::text[]))) AS schema_facts;
+  schema: migration role comp_rounds: search_path '"$user", public' (server level) -> public
+  schema: api role comp_rounds: search_path '"$user", public' (server level) -> public
+  OK 192.168.72.199: the migration role and every api role resolve 'public'; the object probes ask about 'public' only
+    $ ssh -o BatchMode=yes 192.168.72.199 sql-readonly:SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema = 'public' AND (table_name, column_name) IN (('bug_reports','kind')) ORDER BY 1;
+  before: 0/0 tables, 1/1 columns
+    $ ssh 192.168.72.199 'migrate:336_bug_reports_kind.sql'
+    $ ssh 192.168.72.199 'migrate:350_bug_reports_auto_number.sql'
+
+==========================================================================
+PHASE 4 -- merge the branch, deploy the code SHA (the bot comes last, phase 6)
+==========================================================================
+  OK code phase: claude/autolog-hotfix == reviewed code sha c5cd8ff1371e
+  main is checked out at REPO (this train file runs from WT); the main-branch commands run there
+  [plan only] would run, in REPO:
+    $ git checkout main
+    $ git merge --no-ff --no-commit c5cd8ff1371ea178d77bcbe68f750cbfe79268b0
+    $ git commit -m Merge claude/autolog-hotfix: automatic post-match log upload, server half
+
+Reviewed code SHA: c5cd8ff1371ea178d77bcbe68f750cbfe79268b0
+Reviewed precursor SHA: 824662a0a99709d9d0f7cc4a0e9afe189546bc42
+    $ git push origin main
+  (--no-ff --no-commit then commit, so the pre-commit privacy guard runs)
+  [plan only] then assert: HEAD^2 == c5cd8ff1371ea178d77bcbe68f750cbfe79268b0, i.e. the ref deployed is the merge of exactly the reviewed code SHA
+
+==========================================================================
+PHASE 5 -- post-code cleanup, i18n keys and seeds, then the backfill (PRIMARY)
+==========================================================================
+
+==========================================================================
+PHASE 6 -- the discord bot, behind the i18n seeds it reads (PRIMARY; the bot is a singleton)
+==========================================================================
+  SKIPPED: this batch changes nothing the bot runs; both bug-report feeds are filtered server-side and discord_bot.py is byte-identical to production
+
+==========================================================================
+PHASE 7 -- post-deploy verification (read-only)
+==========================================================================
+  OK 192.168.72.199: control 200
+  OK 192.168.72.90: control 200
+
+!!! GATE FAILED in phase 'verify':
+192.168.72.199 does not read as the new build: 404 /api/v1/logs/auto
+
+Stopped. Nothing after this phase ran. Fix, then resume with:
+    python scripts/deploy/release_train.py run --go --from verify
+
+--------------------------------------------------------------------------
+WHAT THE PLAN PROVED (each line emitted only because the plan carries it)
+--------------------------------------------------------------------------
+  * phase 1 printed that the branch tip EQUALS the reviewed code sha c5cd8ff1371e.
+  * phase 4 printed the same equality, so the pair in the batch entry is the tip
+    the branch actually points at -- the gate cannot be satisfied by a name.
+  * phase 1 lifts both sql files from 824662a0a997, this round's sql-only commit.
+  * 350 is byte-identical at the precursor and at the code sha.
+  * phase 3 derived, READ-ONLY and before its `--go` return, the schema the
+    migration role and every api role resolve on the primary: 'public' (M2).
+  * phase 6 printed SKIPPED with the batch's own declared reason, and phase 7
+    did not then demand a bot witness (section 2 executes the function the
+    --go path calls, which the dry path bypasses).
+  * phase 7 stopped on the 404 at /api/v1/logs/auto on the primary: the
+    undeployed-route reading and the expected stop.
+  * both boxes answered the control route before the stop (192.168.72.199: control 200; 192.168.72.90: control 200), so
+    "this box answers 404 to everything" is excluded in the same pass.
+  * exit=1 is the stop, not a failure of the run.
+
+==========================================================================
+2. [R3-H1] THE BATCH-DECLARATION CONTROL, EXECUTED
+==========================================================================
+INVOCATION (cwd TMP):
+  PYTHON r8_bot_control.py
+  exit=0
+
+ROUND-8 -- [R3-H1] THE BATCH-DECLARATION CONTROL, EXECUTED
+==========================================================================
+`bot_phase_expectation` is read by phase 7 only on the `--go` path,
+so every dry plan bypasses it. This calls it directly. It reaches no
+host and writes no release state; `--go` is never passed anywhere.
+
+release-state directory BEFORE: '(absent)'
+
+the batch entry as the train reads it today, after select_batch:
+    DEPLOY_BOT       = False
+    BOT_SKIP_REASON  = 'this batch changes nothing the bot runs; both bug-report feeds are filtered server-side and discord_bot.py is byte-identical to production'
+
+### RED-1  skip declared, a bot DEPLOY recorded
+    DEPLOY_BOT=False   state={'bot_deployed': True}
+    RESULT: REFUSED -- this batch declares the bot skipped (this batch changes nothing the bot runs; both bug-report feeds are filtered server-side and discord_bot.py is byt
+    OK: the refusal names 'the state and the batch entry'
+
+### RED-2  skip declared, phase 6 recorded NO skip
+    DEPLOY_BOT=False   state={}
+    RESULT: REFUSED -- this batch declares the bot skipped (this batch changes nothing the bot runs; both bug-report feeds are filtered server-side and discord_bot.py is byt
+    OK: the refusal names 'recorded no skip'
+
+### RED-3  the bot IS deployed by this batch, nothing recorded
+    DEPLOY_BOT=True   state={}
+    RESULT: REFUSED -- bot phase has not run; the rollout is not complete (r5 L15)
+    OK: the refusal names 'bot phase has not run'
+
+### GREEN  the real declaration: skip declared, skip recorded
+    DEPLOY_BOT=False   state={'bot_skipped': True}
+    RESULT: ACCEPTED, answered False
+    OK: the accepted answer is False
+
+release-state directory AFTER : '(absent)'
+    [EQUAL -- this control wrote no release state]
+
+THREE REFUSALS FIRED AND THE REAL DECLARATION WAS ACCEPTED
+EXIT 0
+
+==========================================================================
+3. [CONTROL A]..[CONTROL E] THE REVIEWED-SHA GATES, ON THE PAIR
+==========================================================================
+INVOCATION (cwd TMP):
+  PYTHON r8_train_controls.py
+  exit=0
+
+ROUND-8 -- THE REVIEWED-SHA GATE CONTROLS, ON THE NEW PAIR
+==========================================================================
+read-only; --go is never passed
+release_train.py sha256 before: 6e36df5c2a4c6ded16561b48900935dec89e66c16251d5ec13e098c776a0e5bd
+the pair under test: precursor 824662a0a997 / code c5cd8ff1371e
+(read from the range e4090d2..HEAD: the first round-8 commit and the tip)
+
+### CONTROL A -- the branch has moved since the review (reviewed_code_sha names round 7's tip, not the tip the branch now points at)
+    expects a REFUSAL naming: 'has moved since the review'
+    exit=1  refusal found: YES
+    | The branch has moved since the review. Nothing is deployed from a
+    restore sha256 6e36df5c2a4c6ded  [EQUAL]
+
+### CONTROL B -- the sql is not one file across the two reviewed commits (reviewed_precursor_sha names fab66bb, round 7's 350, which predates this round's accounted floor, cache and persistence)
+    expects a REFUSAL naming: 'is not the same file at every commit'
+    exit=1  refusal found: YES
+    | 350_bug_reports_auto_number.sql is not the same file at every commit this train touches:
+    restore sha256 6e36df5c2a4c6ded  [EQUAL]
+
+### CONTROL C -- an abbreviated sha, which can become ambiguous as the repository grows
+    expects a REFUSAL naming: 'It must be a FULL 40-character sha'
+    exit=1  refusal found: YES
+    | batch 'autolog-hotfix': reviewed_code_sha is 'c5cd8ff'. It must be a FULL 40-character sha -- an abbreviation 
+    restore sha256 6e36df5c2a4c6ded  [EQUAL]
+
+### CONTROL D -- the SHAs removed altogether, with no exemption
+    expects a REFUSAL naming: 'names no reviewed_code_sha'
+    exit=1  refusal found: YES
+    | batch 'autolog-hotfix' names no reviewed_code_sha/reviewed_precursor_sha and no reviewed_sha_exempt. Without t
+    restore sha256 6e36df5c2a4c6ded  [EQUAL]
+
+release_train.py sha256 after : 6e36df5c2a4c6ded16561b48900935dec89e66c16251d5ec13e098c776a0e5bd
+restore verified: YES
+
+### CONTROL E (R3-L1) -- a dry plan writes NO release state
+    the state file for this batch is ai-collab/autolog/release-train-state.json under the train's own REPO root
+    state directory BEFORE: (absent)
+    INVOCATION (cwd WT):
+      PYTHON scripts/deploy/release_train.py plan --batch autolog-hotfix
+    exit=1  (the plan's stop -- section 1 names where and why)
+    state directory AFTER : (absent)
+    [EQUAL -- the plan wrote no release state]
+    CONTROL -- a state file planted into the reading, in memory: [DIFFERENT]
+
+REVIEWED-SHA GATE CONTROLS: ALL REFUSED AS REQUIRED
+EXIT 0
+
+==========================================================================
+4. [M2 + B9 + R7-M1/M2/M3] THE SCHEMA, THE POSITION AND 350'S POLICY, HOSTLESS
+==========================================================================
+The train copy's own `read_schema_facts`, `judge_schema`, `floor_policy`,
+`assert_pg_sequence_columns` and `sequence_state` run against lane-unique
+local databases; each refusal is paired with a MUTANT that removes its
+check and lets the wrong state pass, and an inert TWIN at the same site.
+[P] reads positions on both sides of the floor through 350's own accounted
+query, including the one round 7's policy admitted; [C1] the catalogue's
+columns; [F] the policy's single source, refused when 350 states it twice.
+The correct pair is GREEN in `public`, in a non-`public` schema and under a
+database-level path. The isolation reading brackets the run.
+
+INVOCATION (cwd TMP):
+  PYTHON r8_train_m2.py
+  exit=0
+
+ROUND-8 -- [M2] THE DERIVED TARGET SCHEMA, [B9] THE POSITION THROUGH 350'S POLICY, [R7-M2/M3] CACHE, CATALOGUE COLUMNS, PERSISTENCE
+==============================================================================
+database scr_autolog8_train on 127.0.0.1:55432; roles scr_autolog8_mig (migration: every probe runs as it) and scr_autolog8_api (api: an asyncpg session)
+census before: 2 database row(s); on scr_autolog8*: none
+release state file before: (absent)
+train copy: batch 'autolog-hotfix'; probe names ['bug_reports', 'bug_reports_auto_number_seq']; EXPECT_COLUMNS [('bug_reports', 'kind')]; EXPECT_INDEXES ['idx_bug_reports_kind_created', 'idx_bug_reports_steam_kind_created']; EXPECT_CONSTRAINTS ['bug_reports_auto_number_negative']; EXPECT_SEQUENCES ['bug_reports_auto_number_seq']
+the substitutions: `sql` = psql -U scr_autolog8_mig -d scr_autolog8_train; `http_code` = '200'
+
+compiled 13 judge variants
+compiled 26 probe variants
+
+admin: CREATE ROLE scr_autolog8_mig, scr_autolog8_api (LOGIN); GRANT pg_read_all_stats TO scr_autolog8_mig (revoked for R7)
+
+[G1] THE CORRECT PAIR IN public: both roles on the server default path
+      facts: role 'scr_autolog8_mig' path '"$user", public' source 'default' current_schema 'public' api_roles ['scr_autolog8_api']
+      probes in 'public': {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1} (full is {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1})
+      api session ACTUALLY resolves current schema 'public' and {'bug_reports': 'public', 'bug_reports_auto_number_seq': 'public'}; the train's model says 'public' and {'bug_reports': 'public', 'bug_reports_auto_number_seq': 'public'} [EQUAL]
+    OK   G1 derives public and the probes count everything -- target 'public', {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1}
+    OK   G1 T-target stays GREEN -- GREEN (public)
+    OK   G1 T-stray stays GREEN -- GREEN (public)
+    OK   G1 T-noapi stays GREEN -- GREEN (public)
+    OK   G1 T-hidden stays GREEN -- GREEN (public)
+    OK   G1 T-source stays GREEN -- GREEN (public)
+    OK   G1 T-selfcheck stays GREEN -- GREEN (public)
+
+[P] THE CURRENT POSITION (B9), on G1's database
+      the train reads the position through 350's c_accounted_sql, against 350's c_floor (floor_policy, at the reviewed precursor)
+    P0 fresh: never drawn, next -1 (the start): sequence gate 1/1 
+    OK   P0 -> 1/1 -- got 1
+    P1 restarted at MINVALUE + 1 by setval(..., false): accounted -9223372036854775806: sequence gate 0/1 {'bug_reports_auto_number_seq': 'its accounted next value -9223372036854775806 is below the adoption floor -4611686018427387904 (both read from backend/sql/350_bug_reports_auto_number.sql at 824662a0a997)'}
+    OK   P1 -> 0/1 -- got 0
+    OK   P1 M-floor REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P1 T-floor stays live -- twin 0/1
+    OK   P1 M-pgseq REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P1 T-pgseq stays live -- twin 0/1
+    P1r the same position by ALTER SEQUENCE ... RESTART WITH: sequence gate 0/1 {'bug_reports_auto_number_seq': 'its accounted next value -9223372036854775806 is below the adoption floor -4611686018427387904 (both read from backend/sql/350_bug_reports_auto_number.sql at 824662a0a997)'}
+    OK   P1r -> 0/1 -- got 0
+    OK   P1r M-floor REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P1r T-floor stays live -- twin 0/1
+    OK   P1r M-pgseq REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P1r T-pgseq stays live -- twin 0/1
+    P2a accounted exactly the floor -4611686018427387904 (not called): sequence gate 1/1 
+    OK   P2a -> 1/1 -- got 1
+    P2b called at the floor, so the accounted next is one below it: sequence gate 0/1 {'bug_reports_auto_number_seq': 'its accounted next value -4611686018427387905 is below the adoption floor -4611686018427387904 (both read from backend/sql/350_bug_reports_auto_number.sql at 824662a0a997)'}
+    OK   P2b -> 0/1 -- got 0
+    OK   P2b M-floor REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P2b T-floor stays live -- twin 0/1
+    P3 next -1 with bug number -3 already held: sequence gate 0/1 {'bug_reports_auto_number_seq': 'its next value -1 is at or below 1 bug number(s) bug_reports.bug_number already holds'}
+    OK   P3 -> 0/1 -- got 0
+    OK   P3 M-held REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P3 T-held stays live -- twin 0/1
+    P3t the twin: restarted below the held number, next -4: sequence gate 1/1 
+    OK   P3t -> 1/1 -- got 1
+    OK   P3t M-pgseq REDs (answers otherwise) -- mutant 0/1 against live 1/1
+    OK   P3t T-pgseq stays live -- twin 1/1
+    P4 called at -5, so next is -6 (is_called read): sequence gate 1/1 
+    OK   P4 -> 1/1 -- got 1
+    P5 called at -3, so next is -4: -3 is spent, not ahead: sequence gate 1/1 
+    OK   P5 -> 1/1 -- got 1
+    P6 R7-M1: set at -2^62 + 20 and DRAWN ONCE: last_value -2^62 + 20, log_cnt 32, so the logged position's next is -2^62 - 13: sequence gate 0/1 {'bug_reports_auto_number_seq': 'its accounted next value -4611686018427387917 is below the adoption floor -4611686018427387904 (both read from backend/sql/350_bug_reports_auto_number.sql at 824662a0a997)'}
+    OK   P6 -> 0/1 -- got 0
+    OK   P6 M-unaccounted REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P6 T-unaccounted stays live -- twin 0/1
+    OK   P6 M-floor REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P6 T-floor stays live -- twin 0/1
+    P6t the twin: set at -2^62 + 40 and drawn once: the logged next -2^62 + 7 is above the floor: sequence gate 1/1 
+    OK   P6t -> 1/1 -- got 1
+    P7 R7-M2: the exact sequence but for CACHE 20: sequence gate 0/1 {'bug_reports_auto_number_seq': "absent from 'public', not 350's shape (cache 1 and logged included), or not readable"}
+    OK   P7 -> 0/1 -- got 0
+    OK   P7 M-cache REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P7 T-cache stays live -- twin 0/1
+    P7t the twin: CACHE 1 again: sequence gate 1/1 
+    OK   P7t -> 1/1 -- got 1
+    P8 R7-M3: the exact sequence made UNLOGGED: sequence gate 0/1 {'bug_reports_auto_number_seq': "absent from 'public', not 350's shape (cache 1 and logged included), or not readable"}
+    OK   P8 -> 0/1 -- got 0
+    OK   P8 M-persist REDs (answers otherwise) -- mutant 1/1 against live 0/1
+    OK   P8 T-persist stays live -- twin 0/1
+    P8t the twin: LOGGED again: sequence gate 1/1 
+    OK   P8t -> 1/1 -- got 1
+
+[C1] THE CATALOGUE'S COLUMNS (R7-M2): the train's declared list against pg_catalog.pg_sequence
+      declared ('seqrelid', 'seqtypid', 'seqstart', 'seqincrement', 'seqmax', 'seqmin', 'seqcache', 'seqcycle'); with it the gate reads 1/1
+    OK   C0 the full declaration: the catalogue matches and the gate counts -- live 1
+    C1 the declaration WITHOUT seqcache (a catalogue column nobody judges): live Fail: local: pg_catalog.pg_sequence has columns seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle, and 350 and this train judge exactly the 7 they declare, seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcycle; unjudged: ['seqcache'], absent: []
+    OK   C1 -> refused by name -- live Fail: local: pg_catalog.pg_sequence has columns seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle, and 350 and this train judge exactly the 7 they declare, seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcycle; unjudged: ['seqcache'], absent: []
+    OK   C1 M-columns REDs (answers otherwise) -- mutant 1
+    OK   C1 T-columns stays live -- twin Fail: local: pg_catalog.pg_sequence has columns seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle, and 350 and this train judge exactly the 7 they declare, seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcycle; unjudged: ['seqcache'], absent: []
+    C2 the declaration naming a column the catalogue lacks: live Fail: local: pg_catalog.pg_sequence has columns seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle, and 350 and this train judge exactly the 9 they declare, seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle,seqextra; unjudged: [], absent: ['seqextra']
+    OK   C2 -> refused by name -- live Fail: local: pg_catalog.pg_sequence has columns seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle, and 350 and this train judge exactly the 9 they declare, seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle,seqextra; unjudged: [], absent: ['seqextra']
+    OK   C2 M-columns REDs (answers otherwise) -- mutant 1
+    OK   C2 T-columns stays live -- twin Fail: local: pg_catalog.pg_sequence has columns seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle, and 350 and this train judge exactly the 9 they declare, seqrelid,seqtypid,seqstart,seqincrement,seqmax,seqmin,seqcache,seqcycle,seqextra; unjudged: [], absent: ['seqextra']
+    OK   C3 the declaration restored: the gate counts again -- live 1
+
+[F] THE POLICY ITSELF (R7-M1): floor_policy, the train's only source of the floor and the accounted-value query
+      floor -4611686018427387904; query 'SELECT (CASE WHEN is_called THEN last_value + (log_cnt + 1) * -1 ELSE last_value END)::text AS accounted_next FROM %s'; read from backend/sql/350_bug_reports_auto_number.sql at 824662a0a997
+    OK   F0 read from 350 at the reviewed precursor: -2^62 and one placeholder -- backend/sql/350_bug_reports_auto_number.sql at 824662a0a997
+      350's floor line(s) at the precursor: ['    c_floor CONSTANT bigint := -4611686018427387904;']
+    F1 a SECOND floor line (a second policy): Fail: backend/sql/350_bug_reports_auto_number.sql at 824662a0a997 states the adoption-floor policy in 2 floor line(s) and 1 query line(s); this train applies exactly 
+    OK   F1 -> refused by name -- Fail: backend/sql/350_bug_reports_auto_number.sql at 824662a0a997 states the adoption-floor policy in 2 floor line(s) and 1 query line(s); this train applies exactly 
+    OK   F1 M-policy REDs (picks one of two floors) -- OK -4611686018427387904
+    OK   F1 T-policy stays live -- Fail: backend/sql/350_bug_reports_auto_number.sql at 824662a0a997 states the adoption-floor policy in 2 floor line(s) and 1 query line(s); this train applies exactly 
+    F2 NO floor line: Fail: backend/sql/350_bug_reports_auto_number.sql at 824662a0a997 states the adoption-floor policy in 0 floor line(s) and 1 query line(s); this train applies exactly 
+    OK   F2 -> refused by name -- Fail: backend/sql/350_bug_reports_auto_number.sql at 824662a0a997 states the adoption-floor policy in 0 floor line(s) and 1 query line(s); this train applies exactly 
+    F3 the second floor line COMMENTED OUT (the twin: accepted, floor unchanged): OK -4611686018427387904
+    OK   F3 -> accepted, floor -2^62 -- OK -4611686018427387904
+
+[G2] THE CORRECT PAIR IN A NON-public SCHEMA: both roles set to scr_app IN DATABASE; public holds nothing
+      facts: path 'scr_app' source 'database user' current_schema 'scr_app' api_roles ['scr_autolog8_api']
+      probes in 'scr_app': {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1}
+      api session ACTUALLY resolves current schema 'scr_app' and {'bug_reports': 'scr_app', 'bug_reports_auto_number_seq': 'scr_app'}; the train's model says 'scr_app' and {'bug_reports': 'scr_app', 'bug_reports_auto_number_seq': 'scr_app'} [EQUAL]
+    OK   G2 derives scr_app and the probes count everything -- target 'scr_app', {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1}
+    OK   G2 M-public (round 6's `public`) REFUSES the correct deployment -- M-public counts {'cols': 0, 'idx': 0, 'con': 0, 'seq': 0}
+    OK   G2 T-public stays live -- T-public counts {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1}
+
+[G3] A DATABASE-LEVEL path (ALTER DATABASE ... SET search_path = scr_app): the catalog branch of the model, no role setting
+      facts: path 'scr_app' source 'database' current_schema 'scr_app'
+      api session ACTUALLY resolves current schema 'scr_app' and {'bug_reports': 'scr_app', 'bug_reports_auto_number_seq': 'scr_app'}; the train's model says 'scr_app' and {'bug_reports': 'scr_app', 'bug_reports_auto_number_seq': 'scr_app'} [EQUAL]
+    OK   G3 derives scr_app from the database level and counts everything -- target 'scr_app', {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1}, source 'database'
+
+[R1] THE API ROLE'S PATH DIFFERS: api IN DATABASE search_path = scr_other, public (scr_other exists, usable, EMPTY); everything correct in public
+      REFUSED: local: the api role scr_autolog8_api resolves 'scr_other' as its current schema (search_path 'scr_other, public', database user level), but the migration role scr_autolog8_mig creates its objects in 'public'; the probes and the api would be reading different objects
+      api session ACTUALLY resolves current schema 'scr_other' and {'bug_reports': 'public', 'bug_reports_auto_number_seq': 'public'}; the train's model says 'scr_other' and {'bug_reports': 'public', 'bug_reports_auto_number_seq': 'public'} [EQUAL]
+    OK   R1 REFUSED by name: the api role resolves scr_other -- local: the api role scr_autolog8_api resolves 'scr_other' as its current schema (search_path 'scr_other, public', databa
+    OK   R1 M-target passes it (the RED control) -- GREEN (public)
+    OK   R1 M-target+stray passes it (the RED control) -- GREEN (public)
+    OK   R1 T-target still refuses -- RED
+      round 6's probes (M-public) would have counted {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1} -- a pass
+
+[R2] AN OBJECT IN ANOTHER SCHEMA ON THE API'S RESOLVED PATH -- the "$user" trap: schema scr_autolog8_api (the api role's own name) holds an ASCENDING bug_reports_auto_number_seq; both roles on the default path
+      REFUSED: local: the api role scr_autolog8_api resolves 'scr_autolog8_api' as its current schema (search_path '"$user", public', server level), but the migration role scr_autolog8_mig creates its objects in 'public'; the probes and the api would be reading different objects
+      api session ACTUALLY resolves current schema 'scr_autolog8_api' and {'bug_reports': 'public', 'bug_reports_auto_number_seq': 'scr_autolog8_api'}; the train's model says 'scr_autolog8_api' and {'bug_reports': 'public', 'bug_reports_auto_number_seq': 'scr_autolog8_api'} [EQUAL]
+    OK   R2 REFUSED by name: the api role resolves its own schema -- local: the api role scr_autolog8_api resolves 'scr_autolog8_api' as its current schema (search_path '"$user", public', s
+    OK   R2 M-target -> RED (the other check still names it) -- RED
+    OK   R2 M-stray -> RED (the other check still names it) -- RED
+    OK   R2 M-target+stray -> GREEN (both checks removed) -- GREEN (public)
+    OK   R2 round 6's probes (M-public) would have PASSED it (the false green M2 names) -- M-public counts {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1}
+
+[R3] AN OBJECT RESOLVES OUTSIDE THE TARGET: both roles IN DATABASE search_path = public, scr_extra; public lacks the sequence, scr_extra holds a correct one
+      REFUSED: local: for the migration role scr_autolog8_mig, bug_reports_auto_number_seq -> scr_extra.bug_reports_auto_number_seq resolves outside the target schema 'public' (search_path 'public, scr_extra', database user level)
+      api session ACTUALLY resolves current schema 'public' and {'bug_reports': 'public', 'bug_reports_auto_number_seq': 'scr_extra'}; the train's model says 'public' and {'bug_reports': 'public', 'bug_reports_auto_number_seq': 'scr_extra'} [EQUAL]
+    OK   R3 REFUSED by name: the sequence resolves to scr_extra -- local: for the migration role scr_autolog8_mig, bug_reports_auto_number_seq -> scr_extra.bug_reports_auto_number_seq res
+    OK   R3 M-stray -> GREEN (the RED control) -- GREEN (public)
+    OK   R3 T-stray -> RED (live) -- RED
+
+[R4] NO API SESSION IS OPEN: G1's shape, the api session closed
+      REFUSED: local: no api session is open on scr_autolog8_train -- no client backend without an application_name -- so the api role, and the schema it resolves, cannot be read
+    OK   R4 REFUSED by name: no api session -- local: no api session is open on scr_autolog8_train -- no client backend without an application_name -- so the api role,
+    OK   R4 M-noapi -> GREEN (the RED control) -- GREEN (public)
+    OK   R4 T-noapi -> RED (live) -- RED
+
+[R5] THE MIGRATION SESSION'S PATH SET AT CONNECT TIME (PGOPTIONS search_path=scr_app); objects only in scr_app; the api on the default path
+      facts: path 'scr_app' source 'client' current_schema 'scr_app'
+      REFUSED: local: the probe session's search_path 'scr_app' was set by 'client' -- at connect time or inside the session, which no catalog shows -- so the migration role's path cannot be tied to the catalog and the api role's cannot be modelled from it
+    OK   R5 REFUSED by name: a connect-time path -- local: the probe session's search_path 'scr_app' was set by 'client' -- at connect time or inside the session, which no 
+    OK   R5 M-source passes it (the RED control) although the api session ACTUALLY resolves 'public' -- GREEN (scr_app)
+    OK   R5 T-source still refuses -- RED
+
+[R6] THE SELF-CHECK: G1's real facts, with the probe session's recorded resolution of bug_reports altered (a model that disagrees with the one session whose answer is known)
+      REFUSED: local: modelled from the catalog, the probe session would resolve current schema 'public' and {'bug_reports': 'public', 'bug_reports_auto_number_seq':
+    OK   R6 live refuses the disagreement -- RED
+    OK   R6 M-selfcheck -> GREEN (the RED control) -- GREEN (public)
+    OK   R6 T-selfcheck -> RED (live) -- RED
+
+[R7] THE API SESSION IS HIDDEN FROM THE PROBE ROLE: G1's shape and an open api session, pg_read_all_stats revoked from the migration role
+      facts: api_roles [] hidden 1
+      REFUSED: local: 1 session(s) on scr_autolog8_train are hidden from the probe role scr_autolog8_mig, which holds neither pg_read_all_stats nor their role, so which of them is the api cannot be read
+    OK   R7 REFUSED by name: hidden, never read as no api session -- local: 1 session(s) on scr_autolog8_train are hidden from the probe role scr_autolog8_mig, which holds neither pg_read_a
+    OK   R7 M-hidden answers with the no-api-session refusal instead (the misattributing control) -- RED: local: no api session is open on scr_autolog8_train -- no client backend without an application_name -- so the api 
+    OK   R7 T-hidden still names the hidden session -- RED: local: 1 session(s) on scr_autolog8_train are hidden from the probe role scr_autolog8_mig, which holds neither pg_r
+
+[S] ROUND 6'S SECOND-SCHEMA SCENARIOS, carried, under the derived target
+    S1 only `staged` carries the objects (not on either role's path): live {'cols': 0, 'idx': 0, 'con': 0, 'seq': 0}
+    OK   S1 -> {'cols': 0, 'idx': 0, 'con': 0, 'seq': 0} -- target 'public'
+    OK   S1 M-seq-ns REDs -- mutant 'Fail: psql as scr_autolog8_mig failed (1): ERROR: relation "public.bug_reports_auto_number_seq" does not exist LINE '
+    OK   S1 T-seq-ns stays live -- twin {'cols': 0, 'idx': 0, 'con': 0, 'seq': 0}
+    OK   S1 M-con-ns REDs -- mutant {'cols': 0, 'idx': 0, 'con': 1, 'seq': 0}
+    OK   S1 T-con-ns stays live -- twin {'cols': 0, 'idx': 0, 'con': 0, 'seq': 0}
+    OK   S1 M-idx-ns REDs -- mutant {'cols': 0, 'idx': 2, 'con': 0, 'seq': 0}
+    OK   S1 T-idx-ns stays live -- twin {'cols': 0, 'idx': 0, 'con': 0, 'seq': 0}
+    OK   S1 M-col-ns REDs -- mutant {'cols': 1, 'idx': 0, 'con': 0, 'seq': 0}
+    OK   S1 T-col-ns stays live -- twin {'cols': 0, 'idx': 0, 'con': 0, 'seq': 0}
+    S2 the target public carries them too: live {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1}
+    OK   S2 -> {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1} -- target 'public'
+    S3 public's sequence re-created exact but for START -2 (in range, above the floor, not -1): live {'cols': 1, 'idx': 2, 'con': 1, 'seq': 0}
+    OK   S3 -> {'cols': 1, 'idx': 2, 'con': 1, 'seq': 0} -- target 'public'
+    OK   S3 M-start REDs -- mutant {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1}
+    OK   S3 T-start stays live -- twin {'cols': 1, 'idx': 2, 'con': 1, 'seq': 0}
+    OK   S3 M-seq-ns REDs -- mutant {'cols': 1, 'idx': 2, 'con': 1, 'seq': 1}
+    OK   S3 T-seq-ns stays live -- twin {'cols': 1, 'idx': 2, 'con': 1, 'seq': 0}
+
+admin: DROP DATABASE scr_autolog8_train; DROP ROLE scr_autolog8_mig, scr_autolog8_api
+census after: 2 database row(s); on scr_autolog8*: none
+release state file after : (absent) [EQUAL -- nothing written]
+312 queries sent through the `sql` substitute (39 distinct texts): none carries a substring the read-only wrapper refuses ('drop '/'truncate'/'delete '/'update '/'insert '/'alter '/'grant '/'revoke '/'create '/'copy ', lower-cased, as its sql-readonly branch tests them), a double quote or a newline
+
+101 verdict(s): 101 OK, 0 FAIL
+M2 + B9 + R7-M1/M2/M3 HOSTLESS CONTROLS: ALL AS REQUIRED
+EXIT 0
+
+==========================================================================
+5. [R4-L8] THE ROUTE DISCRIMINATOR'S 405 HALF, READ IN PROCESS
+==========================================================================
+INVOCATION (cwd TMP):
+  PYTHON r8_discrim.py
+  exit=0
+
+ROUND-8 -- [R4-L8] THE ROUTE DISCRIMINATOR'S 405 HALF, READ IN PROCESS
+==========================================================================
+train copy, batch autolog-hotfix: NEW_ROUTES = ['/api/v1/logs/auto'], CONTROL_ROUTE = '/api/v1/leaderboard',
+  X-Mod-Version '1.40.3' -- the header `http_code` sends
+
+[WITH THE ROUTE] this tree's application, as a deploy would serve it
+  reading:
+    code_state -> present=True absent=False readings=['405 /api/v1/logs/auto']
+    control route /api/v1/leaderboard: not read in process -- its handler needs the
+      database, which phase 7 reads on the box
+    sibling GET /api/v1/logs/auto-not-a-route -> 404
+    OK   GET /api/v1/logs/auto answers 405: the path exists, the method does not
+    OK   the train's own code_state reads it as the NEW build
+    OK   and never 200
+    OK   the sibling path answers 404 on the same app
+
+[CONTROL: WITHOUT THE ROUTE] the same application, the route removed in memory
+    removed 1 route object(s) whose path is /api/v1/logs/auto
+  reading:
+    code_state -> present=False absent=True readings=['404 /api/v1/logs/auto']
+    control route /api/v1/leaderboard: not read in process -- its handler needs the
+      database, which phase 7 reads on the box
+    sibling GET /api/v1/logs/auto-not-a-route -> 404
+    OK   the control removed the route it names
+    OK   GET /api/v1/logs/auto answers 404 without the route
+    OK   the train's own code_state reads it as the OLD build
+    OK   the sibling path still answers 404
+    OK   restored: the route answers 405 again (405)
+
+IN PROCESS: 405 WITH THE ROUTE, 404 WITHOUT IT, NEVER 200 -- READ BY THE TRAIN'S OWN code_state
+EXIT 0
+
+==========================================================================
+6. [M2 WITNESS] THE READ-ONLY CHECK, ON BOTH PRODUCTION BOXES
+==========================================================================
+`check` changes nothing: it reads each box's version and routes, derives
+the schema for the migration role and every api role, and runs every
+object probe in the schema it derived.
+
+INVOCATION (cwd WT):
+  PYTHON scripts/deploy/release_train.py check --batch autolog-hotfix
+  exit=0
+
+batch: autolog-hotfix  branch: claude/autolog-hotfix  migrations: 336_bug_reports_kind.sql, 350_bug_reports_auto_number.sql  discriminator: /api/v1/logs/auto
+
+==========================================================================
+CHECK -- current production state (read-only)
+==========================================================================
+
+-- primary (192.168.72.199)
+   mod-version : {"version":"1.40.3","min_version":"1.40.3","ffa_involuntary_cause":true}
+   control /api/v1/leaderboard    : 200 OK
+   new route                                  : 404 /api/v1/logs/auto
+   build                                      : OLD
+    $ ssh -o BatchMode=yes 192.168.72.199 sql-readonly:WITH api AS (SELECT DISTINCT usename::text AS r FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND application_name = '' AND pid <> pg_backend_pid() AND usename IS NOT NULL), roles AS (SELECT r FROM api UNION SELECT current_user::text) SELECT jsonb_build_object('role', current_user::text, 'database', current_database()::text, 'path', current_setting('search_path'), 'source', (SELECT source FROM pg_settings WHERE name = 'search_path'), 'current_schema', current_schema()::text, 'resolves', (SELECT coalesce(jsonb_object_agg(x, (SELECT n.nspname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(x))), '{}'::jsonb) FROM unnest(ARRAY['bug_reports', 'bug_reports_auto_number_seq']::text[]) AS x), 'api_roles', (SELECT coalesce(jsonb_agg(r ORDER BY r), '[]'::jsonb) FROM api), 'hidden', (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_type IS NULL), 'settings', (SELECT coalesce(jsonb_agg(jsonb_build_object('this_db', s.setdatabase <> 0, 'role', ro.rolname::text, 'path', substr(s.cfg, 13))), '[]'::jsonb) FROM (SELECT setdatabase, setrole, unnest(setconfig) AS cfg FROM pg_db_role_setting WHERE setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))) s LEFT JOIN pg_roles ro ON ro.oid = s.setrole WHERE left(s.cfg, 12) = 'search_path='), 'usage', (SELECT coalesce(jsonb_agg(jsonb_build_object('role', roles.r, 'schema', n.nspname::text)), '[]'::jsonb) FROM roles CROSS JOIN pg_namespace n WHERE has_schema_privilege(roles.r::name, n.oid, 'USAGE')), 'relations', (SELECT coalesce(jsonb_agg(jsonb_build_object('schema', n.nspname::text, 'name', c.relname::text)), '[]'::jsonb) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = ANY(ARRAY['bug_reports', 'bug_reports_auto_number_seq']::text[]))) AS schema_facts;
+   schema: migration role comp_rounds: search_path '"$user", public' (server level) -> public
+   schema: api role comp_rounds: search_path '"$user", public' (server level) -> public
+   OK 192.168.72.199: the migration role and every api role resolve 'public'; the object probes ask about 'public' only
+    $ ssh -o BatchMode=yes 192.168.72.199 sql-readonly:SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema = 'public' AND (table_name, column_name) IN (('bug_reports','kind')) ORDER BY 1;
+   tables  0/0 : none
+   columns 1/1 : bug_reports.kind
+    $ ssh -o BatchMode=yes 192.168.72.199 sql-readonly:SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname IN ('idx_bug_reports_kind_created', 'idx_bug_reports_steam_kind_created') ORDER BY 1;
+   indexes 2/2 : idx_bug_reports_kind_created, idx_bug_reports_steam_kind_created
+    $ ssh -o BatchMode=yes 192.168.72.199 sql-readonly:SELECT t.conname FROM pg_constraint t JOIN pg_namespace n ON n.oid = t.connamespace WHERE n.nspname = 'public' AND t.conname IN ('bug_reports_auto_number_negative') ORDER BY 1;
+   constrts 0/1 : none
+    $ ssh -o BatchMode=yes 192.168.72.199 sql-readonly:SELECT string_agg(attname::text, ',' ORDER BY attnum) AS pg_sequence_columns FROM pg_attribute WHERE attrelid = 'pg_catalog.pg_sequence'::regclass AND attnum > 0 AND NOT attisdropped;
+    $ ssh -o BatchMode=yes 192.168.72.199 sql-readonly:SELECT sequencename FROM pg_sequences WHERE schemaname = 'public' AND sequencename IN ('bug_reports_auto_number_seq') AND data_type = 'bigint'::regtype AND increment_by = -1 AND max_value = -1 AND min_value = -9223372036854775807 AND NOT cycle AND start_value = -1 AND cache_size = 1 AND (SELECT c.relpersistence FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = schemaname AND c.relname = sequencename) = 'p' AND has_sequence_privilege(quote_ident(schemaname) || '.' || quote_ident(sequencename), 'SELECT') ORDER BY 1;
+   sequences 0/1: none  (350's whole shape, start, cache 1 and logged; its accounted next value at or above 350's own floor and no number taken, in the target schema); bug_reports_auto_number_seq: absent from 'public', not 350's shape (cache 1 and logged included), or not readable
+
+-- standby (192.168.72.90)
+   mod-version : {"version":"1.40.3","min_version":"1.40.3","ffa_involuntary_cause":true}
+   control /api/v1/leaderboard    : 200 OK
+   new route                                  : 404 /api/v1/logs/auto
+   build                                      : OLD
+    $ ssh -o BatchMode=yes 192.168.72.90 sql-readonly:WITH api AS (SELECT DISTINCT usename::text AS r FROM pg_stat_activity WHERE datname = current_database() AND backend_type = 'client backend' AND application_name = '' AND pid <> pg_backend_pid() AND usename IS NOT NULL), roles AS (SELECT r FROM api UNION SELECT current_user::text) SELECT jsonb_build_object('role', current_user::text, 'database', current_database()::text, 'path', current_setting('search_path'), 'source', (SELECT source FROM pg_settings WHERE name = 'search_path'), 'current_schema', current_schema()::text, 'resolves', (SELECT coalesce(jsonb_object_agg(x, (SELECT n.nspname::text FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.oid = to_regclass(x))), '{}'::jsonb) FROM unnest(ARRAY['bug_reports', 'bug_reports_auto_number_seq']::text[]) AS x), 'api_roles', (SELECT coalesce(jsonb_agg(r ORDER BY r), '[]'::jsonb) FROM api), 'hidden', (SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND backend_type IS NULL), 'settings', (SELECT coalesce(jsonb_agg(jsonb_build_object('this_db', s.setdatabase <> 0, 'role', ro.rolname::text, 'path', substr(s.cfg, 13))), '[]'::jsonb) FROM (SELECT setdatabase, setrole, unnest(setconfig) AS cfg FROM pg_db_role_setting WHERE setdatabase IN (0, (SELECT oid FROM pg_database WHERE datname = current_database()))) s LEFT JOIN pg_roles ro ON ro.oid = s.setrole WHERE left(s.cfg, 12) = 'search_path='), 'usage', (SELECT coalesce(jsonb_agg(jsonb_build_object('role', roles.r, 'schema', n.nspname::text)), '[]'::jsonb) FROM roles CROSS JOIN pg_namespace n WHERE has_schema_privilege(roles.r::name, n.oid, 'USAGE')), 'relations', (SELECT coalesce(jsonb_agg(jsonb_build_object('schema', n.nspname::text, 'name', c.relname::text)), '[]'::jsonb) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = ANY(ARRAY['bug_reports', 'bug_reports_auto_number_seq']::text[]))) AS schema_facts;
+   schema: migration role comp_rounds: search_path '"$user", public' (server level) -> public
+   schema: api role comp_rounds: search_path '"$user", public' (server level) -> public
+   OK 192.168.72.90: the migration role and every api role resolve 'public'; the object probes ask about 'public' only
+    $ ssh -o BatchMode=yes 192.168.72.90 sql-readonly:SELECT table_name || '.' || column_name FROM information_schema.columns WHERE table_schema = 'public' AND (table_name, column_name) IN (('bug_reports','kind')) ORDER BY 1;
+   tables  0/0 : none
+   columns 1/1 : bug_reports.kind
+    $ ssh -o BatchMode=yes 192.168.72.90 sql-readonly:SELECT indexname FROM pg_indexes WHERE schemaname = 'public' AND indexname IN ('idx_bug_reports_kind_created', 'idx_bug_reports_steam_kind_created') ORDER BY 1;
+   indexes 2/2 : idx_bug_reports_kind_created, idx_bug_reports_steam_kind_created
+    $ ssh -o BatchMode=yes 192.168.72.90 sql-readonly:SELECT t.conname FROM pg_constraint t JOIN pg_namespace n ON n.oid = t.connamespace WHERE n.nspname = 'public' AND t.conname IN ('bug_reports_auto_number_negative') ORDER BY 1;
+   constrts 0/1 : none
+    $ ssh -o BatchMode=yes 192.168.72.90 sql-readonly:SELECT string_agg(attname::text, ',' ORDER BY attnum) AS pg_sequence_columns FROM pg_attribute WHERE attrelid = 'pg_catalog.pg_sequence'::regclass AND attnum > 0 AND NOT attisdropped;
+    $ ssh -o BatchMode=yes 192.168.72.90 sql-readonly:SELECT sequencename FROM pg_sequences WHERE schemaname = 'public' AND sequencename IN ('bug_reports_auto_number_seq') AND data_type = 'bigint'::regtype AND increment_by = -1 AND max_value = -1 AND min_value = -9223372036854775807 AND NOT cycle AND start_value = -1 AND cache_size = 1 AND (SELECT c.relpersistence FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = schemaname AND c.relname = sequencename) = 'p' AND has_sequence_privilege(quote_ident(schemaname) || '.' || quote_ident(sequencename), 'SELECT') ORDER BY 1;
+   sequences 0/1: none  (350's whole shape, start, cache 1 and logged; its accounted next value at or above 350's own floor and no number taken, in the target schema); bug_reports_auto_number_seq: absent from 'public', not 350's shape (cache 1 and logged included), or not readable
+
+-- local git
+   main tree  : REPO
+   this file  : WT
+   branch tip : c5cd8ff
+   main tip   : 73c8dfc
+   ahead      : 24 commits
+
+-- recorded state: (none yet)
+
+-- rollback rule: a bare code rollback is safe for BOTH schema files, and 350 is the one worth stating because a CHECK constraint normally is not. It reads `kind <> 'auto' OR bug_number < 0`, so it constrains ONLY the rows the rolled-back code cannot write -- that code has no automatic upload path at all -- and it can never refuse anything the bug form writes. The descending sequence beside it is simply unused while the code is rolled back. 336 only adds bug_reports.kind as NOT NULL DEFAULT 'report' plus a CHECK and two indexes, and pre-336 code never names the column -- the rows it writes take the default, which is true of them. The residue is the other direction: any kind='auto' row already uploaded stays in bug_reports, and rolled-back code does not filter on kind, so those rows reappear in the admin list, in the #bug-reports feed and in submit_bug_report's 10-per-24h count. Nothing is corrupted and no match, rating or gold is touched; re-deploying this batch's code restores the separation. The blobs those rows name are untouched either way, and nothing collects them while the code is rolled back.
+
+--------------------------------------------------------------------------
+WHAT THE CHECK READ (each line emitted only because the check carries it)
+--------------------------------------------------------------------------
+  * the primary: the migration role and every api role resolve 'public'.
+  * the standby: the migration role and every api role resolve 'public' --
+    the standby's own derivation, which the dry plan never reaches.
+  * the api role was RECOGNISED on each box from its open sessions, not
+    declared: 2 reading(s), each naming the role and its modelled path
+    (lines above, `schema: api role ...`).
+  * the sequence is ABSENT on both boxes, read under round 8's predicate
+    (`sequences 0/1: none` -- the whole shape, cache 1 and logged, the
+    accounted next value at or above 350's own floor): 350 has not run,
+    so the position probe has nothing to read on production yet. Its
+    production reading is a DEPLOY reading, recorded as one (notes 19);
+    its mechanism is proved hostless in section 4.
+  * BEFORE that line, on each box, `sequence_state` read the floor and the
+    accounted-value query out of 350 at the reviewed precursor (R7-M1) and
+    checked that pg_catalog.pg_sequence carries exactly the eight columns
+    350 declares (R7-M2) -- release_train.py:1773 and :1774, ahead of the
+    sequence query at :1776; each raises on a mismatch, so a box that printed
+    its sequences line passed both.
+  * both boxes answer 404 at /api/v1/logs/auto: the route is not deployed.
+  * the release state is empty: neither the check nor the plan wrote one.
+
+==========================================================================
+7. [R7-M4 / B15] THE POOL-RETENTION CONTROLS
+==========================================================================
+(i) THIRTY CONCURRENT UPLOADS CANNOT RETAIN THE POOL. Fifteen automatic
+uploads and fifteen player reports, each for a different account, arrive
+together while the volume does not answer. With all thirty waiting at the
+volume, the suite's model of the pool -- the production size, 20 + 10 --
+must read NO connection checked out and every session's transaction ENDED,
+and an unrelated checkout must be served at once; then all thirty land. Its
+CONTROL puts back the round-7 shape (the two ends of T1 removed) and must
+see all thirty connections held and the unrelated checkout time out; its
+inert TWIN spells the same two lines otherwise and changes nothing.
+
+INVOCATION (cwd WT/backend):
+  PYTHON -m pytest tests/test_auto_logs.py -k thirty_concurrent_uploads_cannot_retain_the_pool -v -p no:cacheprovider
+  exit=0
+
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0 -- PYTHON
+rootdir: WT\backend
+plugins: anyio-4.15.0
+collecting ... collected 193 items / 192 deselected / 1 selected
+
+tests/test_auto_logs.py::test_thirty_concurrent_uploads_cannot_retain_the_pool PASSED [100%]
+
+===================== 1 passed, 192 deselected in 11.40s ======================
+
+(ii) THE MECHANISM THE MODEL ASSUMES, ON A REAL POOL. `_end_transaction` on
+a real SQLAlchemy session over asyncpg, against the local PostgreSQL, with
+database.py's pool sizes: thirty open transactions hold thirty connections
+and starve a thirty-first request; ended, they hold none and it is served;
+the control (no end) still holds thirty; and the upload's advisory-lock
+class is released with the transaction. The run record's isolation reading
+on each side of it:
+
+  pool start 03:33:40Z -- 1 pytest process(es) on the machine
+  census before pool (SELECT datname, count(*) FROM pg_stat_activity GROUP BY 1), exit=0:
+      (no database) 5
+      postgres 1
+  census before pool: no session on any scr_autolog8* database
+  pool exit=0 03:33:51Z (9s) -- 1 pytest process(es) on the machine at its end
+  census after pool (SELECT datname, count(*) FROM pg_stat_activity GROUP BY 1), exit=0:
+      (no database) 5
+      postgres 1
+  census after pool: no session on any scr_autolog8* database
+
+INVOCATION (cwd TMP):
+  PYTHON r8_pool_witness.py
+  exit=0
+
+census before (SELECT datname, count(*) FROM pg_stat_activity GROUP BY 1), exit=0:
+  (no database) 5
+  postgres 1
+census before: no session on any scr_autolog8* database
+CREATE DATABASE scr_autolog8_pool: exit=0 
+database.py's engine: pool_size=20 max_overflow=10 pool_timeout=30
+witness engine:        pool_size=20 max_overflow=10 pool_timeout=2
+LIVE -- thirty transactions open, then `_end_transaction` on each
+  thirty open: checked out                                   OK  (checkedout()=30)
+  thirty open: idle in transaction on the server             OK  ({'idle in transaction': 30})
+  thirty open: a thirty-first request                        OK  (not served (TimeoutError))
+  after _end_transaction: checked out                        OK  (checkedout()=0)
+  after _end_transaction: idle in transaction on the server  OK  ({'idle': 20})
+  after _end_transaction: a thirty-first request             OK  (served)
+CONTROL -- the same thirty, the wait taken WITHOUT `_end_transaction`
+  no end: checked out                                        OK  (checkedout()=30)
+  no end: a thirty-first request                             OK  (not served (TimeoutError))
+  closed: checked out                                        OK  (checkedout()=0)
+LOCK -- the upload's advisory-lock class, released by `_end_transaction`
+  held by an open transaction: a second try                  OK  (granted=False)
+  after _end_transaction: a second try                       OK  (granted=True)
+DROP DATABASE scr_autolog8_pool: exit=0 
+census after (SELECT datname, count(*) FROM pg_stat_activity GROUP BY 1), exit=0:
+  (no database) 5
+  postgres 1
+census after: no session on any scr_autolog8* database
+POOL WITNESS: PASS -- every reading as stated
+
+--------------------------------------------------------------------------
+MASKED: <CONTROLLER> x1, <PRIMARY-SELECTOR> x1, <STANDBY-SELECTOR> x1 -- replaced in the text above, by class; no spelling of any
+survives (the writer's survivor pattern reads zero)

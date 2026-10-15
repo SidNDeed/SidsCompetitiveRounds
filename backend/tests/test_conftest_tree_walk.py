@@ -124,6 +124,11 @@ def test_one_pass_stays_affordable():
     roots shows up as a failing test rather than as two slow passes per run
     that nobody attributes.
 
+    On main, the ceiling was 40 MiB until the verified-reads lane met main
+    e9a3f1e1: the merged walk measured 40.09 MiB across 720 files as working
+    files on a core.autocrlf=true checkout (39.58 MiB as committed blobs),
+    every file tracked, no new binary directory; main moved to 46 MiB.
+
     Measured at the v1.41.0 beta's merge of main cd8d846: 42.3 MiB across 725
     files, every one tracked (main.py 3.7, I18nCatalogues.cs 3.3, the Player
     Cards art under backend/api/assets 8.8); the ceiling moved from 40 to 48
@@ -137,6 +142,11 @@ def test_one_pass_stays_affordable():
     no new binary directory; the ceiling moves from 48 to 56 MiB, about 6 MiB
     of headroom again, and the fold of this branch into main takes the
     larger value.
+
+    Measured at the trunk fold (main 9267b1fe into the merged client lane at
+    92f46014): 50.9 MiB across 918 files as working files on a
+    core.autocrlf=true checkout, no new binary directory; the larger value is
+    kept, and 56 MiB still leaves about 5 MiB of headroom.
     """
     stamps = ct._source_stamps()
     total = sum(size for size, _digest in stamps.values())
