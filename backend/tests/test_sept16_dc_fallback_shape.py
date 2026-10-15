@@ -3006,9 +3006,11 @@ def test_mod_version_advertises_no_series_status_capability():
     kind: the involuntary-cause field, derived from the leave-cause vocabulary
     and pinned by that fix's own tests. It gates what a client may SEND, and
     this pin does not judge it. What this pin holds is the rest of the answer:
-    the returned mapping is exactly the two version numbers plus that one
-    field, so any other key -- the series-status flag above all -- turns it
-    red.
+    the returned mapping is exactly the two version numbers, that
+    involuntary-cause field, the leaderboard window field
+    ("leaderboard_active_days", which wave A advertises and its own tests pin)
+    and the conditional join_region_guard key read below, so any other key --
+    the series-status flag above all -- turns it red.
     """
     node = node_named("get_mod_version")
     joined = "\n".join(code_lines_of(node))
@@ -3050,7 +3052,8 @@ def test_mod_version_advertises_no_series_status_capability():
     assert isinstance(answer, ast.Dict), ast.unparse(returns[0])
     keys = sorted(ast.unparse(k) for k in answer.keys)
     assert keys == sorted(["'version'", "'min_version'",
-                           "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD"]), keys
+                           "_INVOLUNTARY_CAUSE_CAPABILITY_FIELD",
+                           "'leaderboard_active_days'"]), keys
     values = {ast.unparse(k): ast.unparse(v) for k, v in zip(answer.keys, answer.values)}
     # The two version numbers are the two constants, not a literal.
     assert values["'version'"] == "LATEST_MOD_VERSION", values
