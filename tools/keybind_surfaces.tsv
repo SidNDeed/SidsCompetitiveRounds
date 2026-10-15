@@ -1121,6 +1121,7 @@ e29fa79082af77a5	N	rule:N1	Delete Chat Message...
 e0a26141796cf26a	N	rule:N1	Delete this message?
 3d44114e197112dc	N	rule:N1	Demolitionist
 a957d1b7bc867ae0	N	rule:N1	Demon Wings
+607586a5c7a6fab4	N	rule:N1	Demonic
 f37ae864ff0537bb	O	rule:O	Deny failed: 
 a1b943b041c4467f	N	rule:N1	Despawn off-screen bullets — host clears bullets that exit the camera viewport.
 55a2bf4d07dee237	N	rule:N1	Detail: a shooting star circling overhead (animated). Equip in the Character editor.
@@ -2889,6 +2890,7 @@ a9e422da77adf45b	N	rule:N1	The pack price changed - check the new price and try 
 03722ca2a0686786	N	rule:N1	The pool changed while your pack was opening - nothing was charged, try again
 94c0409540edfa67	N	rule:N1	The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where eve
 6457b33d171ff055	N	rule:N1	The preset you wear in Quick Match and in any game where somebody does not have the mod. Only preset
+50a9d67312296bed	N	rule:N1	The purple the Demonic Pact card is drawn in.
 5a7fbd2ce825994a	N	rule:N1	The report could not be read
 6f43b8da2c4d3c96	N	rule:N1	The report details are too long.
 5a09ef793c04d82a	N	rule:N1	The report details contain characters that are not allowed.

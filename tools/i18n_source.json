@@ -1049,6 +1049,7 @@
   "Delete this message?",
   "Demolitionist",
   "Demon Wings",
+  "Demonic",
   "Despawn off-screen bullets — host clears bullets that exit the camera viewport.",
   "Detail: a shooting star circling overhead (animated). Equip in the Character editor.",
   "Detail: certified angel. Equip in the Character editor.",
@@ -2757,6 +2758,7 @@
   "The pool changed while your pack was opening - nothing was charged, try again",
   "The preset you wear everywhere the mod is running: ranked, 2v2, 1v2, FFA and private games where everyone has the mod.",
   "The preset you wear in Quick Match and in any game where somebody does not have the mod. Only presets a base-game player's own game can load are offered here, because those are the only ones an unmodded opponent can actually see. To make a preset an unmodded opponent can see: open the character menu, choose an empty preset, and build the face from base-game eyes, mouths and details only.",
+  "The purple the Demonic Pact card is drawn in.",
   "The report could not be read",
   "The report details are too long.",
   "The report details contain characters that are not allowed.",
@@ -8788,6 +8790,11 @@
    "kind": "table"
   },
   "Demon Wings": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
+  },
+  "Demonic": {
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
@@ -17331,6 +17338,11 @@
    "surface": "NativeUI, SettingsDescriptors.g",
    "location": "BuildSettingsTab, HelpBodyTr",
    "kind": "Tr"
+  },
+  "The purple the Demonic Pact card is drawn in.": {
+   "surface": "shop catalog",
+   "location": "cosmetic name/description",
+   "kind": "shop"
   },
   "The report could not be read": {
    "surface": "SessionReportView",
