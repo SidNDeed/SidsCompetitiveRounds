@@ -120,6 +120,7 @@ FfaMode.cs	FfaMode	HandlePlayerDied	MasterMaySend	F	master point latch and RPCA_
 FfaMode.cs	FfaMode	HeldNow	ActiveFighters	V	RJ-DRIFT N1 HELD: the fighters' room games over ActiveFighters(), the kept view	
 FfaMode.cs	FfaMode	LocalPlayer	players	N	finds the local body (IsMine) only	
 FfaMode.cs	FfaMode	MasterActorNow	MasterClient	R	RJ-DRIFT N19: the present master's actor number, compared with an epoch's issuer; a read, no send	
+FfaMode.cs	FfaMode	MasterCarriesPickEpoch	MasterClient	R	RJ-DRIFT V10 A1: whether the present master's player properties carry cr_ffa_pe, the legacy bridge's input to LegacyPickForm; an unreadable master answers true and never takes the bridge; a read, no send	
 FfaMode.cs	FfaMode	MasterGameNow	IsMasterClient	R	RJ-DRIFT N2/N15: on the master its own room game (it cannot see its own witness before the echo, #428), else the master's witness; a read, no send	
 FfaMode.cs	FfaMode	MasterGameNow	MasterClient	R	RJ-DRIFT N2/N15: the master's witness, read for the carry and the follow test; a read, no send	
 FfaMode.cs	FfaMode	MasterPublishConfig	MasterMaySend	F	NEW V7 site: master config publish (FfaMode.cs:89-93); MasterMaySend()	

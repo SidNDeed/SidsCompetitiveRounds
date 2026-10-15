@@ -10,10 +10,12 @@
 --
 -- Both keys reach the client through the tools/shop_strings.json refresh
 -- -> tools/i18n_extract.py -> plugin/I18nSourceKeys.g.cs route, the same
--- route the Poison swatch's description took. UNLIKE 223, these
--- translations are NOT bundled in I18nCatalogues.cs: the client renders
--- English until a native reviewer approves a proposal in the portal, and
--- the approved text then reaches the client through the pack overlay.
+-- route the Poison swatch's description took. As with 223, the four seed
+-- texts below are ALSO bundled in I18nCatalogues.cs (es/ru/uk/sv), so the
+-- client renders the machine draft (D4) rather than English; the name
+-- "Demonic" is bundled as itself in every locale, as Poison is. A native
+-- reviewer's approved text then reaches the client through the pack
+-- overlay.
 --
 -- Same contract as 184/189/213/223: PENDING proposals only, sentinel
 -- proposer 'claude-mt', license_assent TRUE at the machine-translation
