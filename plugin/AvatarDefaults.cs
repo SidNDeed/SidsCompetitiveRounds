@@ -593,14 +593,19 @@ namespace CompetitiveRounds
         // of every loaded object through every game, where the grid is not shown.
         // The painter now scans while the cached grid is on screen (the menu
         // behaviour is unchanged there: the grid is re-read every 15th frame
-        // so portraits added by LoadFaces are still painted) and, while no
-        // live grid is cached, at most once per TickGridRescanSeconds. A
+        // so portraits added by LoadFaces are still painted). While no live
+        // grid is cached it scans on every painter tick outside a room, as
+        // before (a grid that appears in the menu is painted on the tick it
+        // appears), and at most once per TickGridRescanSeconds in a room. A
         // cached grid that is loaded but not on screen costs one liveness read
-        // and no scan. No game-state gate: vanilla never writes
+        // and no scan, in every state. No game-state gate: vanilla never writes
         // GameManager.isPlaying back to false, so a gate on it could leave the
-        // menu unpainted. The residual is the no-grid case, bounded by the
-        // rescan interval; the [PERF] per-match AvatarRingScan count and the
-        // three [AVATAR] ring grid scan lines measure it.
+        // menu unpainted. The residuals are the no-grid case (in a room bounded
+        // by the rescan interval; outside a room, an offline game with no grid
+        // ever cached scans as before the fix) and a grid opened in a room with
+        // none cached, painted up to the interval late. The [PERF] per-match
+        // AvatarRingScan count and the three [AVATAR] ring grid scan lines
+        // measure them.
         // The rescan time is a Stopwatch timestamp (monotonic, unaffected by
         // timeScale and by the frame clock). The PERF count is hit only while
         // in a room: PerfGate.DumpAndReset prints and clears it at room leave,
@@ -618,10 +623,10 @@ namespace CompetitiveRounds
             bool alive = g != null && g.Count > 0 && g[0] != null;          // Unity null: the cached grid was destroyed
             if (alive && !g[0].gameObject.activeInHierarchy) return null;    // loaded, not on screen: nothing to paint
             long now = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (!alive && now < tickGridRescanAt) return null;
+            bool inRoom = PhotonNetwork.InRoom;
+            if (!alive && inRoom && now < tickGridRescanAt) return null;    // the no-grid backoff holds in a room only
             g = MenuPortraits();
             long ticks = System.Diagnostics.Stopwatch.GetTimestamp() - now;
-            bool inRoom = PhotonNetwork.InRoom;
             if (inRoom) PerfGate.Hit("AvatarRingScan");
             if (scanCostLines < 3)
             {

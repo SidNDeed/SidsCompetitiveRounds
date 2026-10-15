@@ -361,6 +361,13 @@ namespace CompetitiveRounds
 {
     internal sealed class ConfigEntry<T> { public T Value { get; set; } }
 
+    // Bug 434: AvatarDefaults.TickPortraits counts its grid scans on the
+    // per-match PERF line (PerfPatches.cs). The probe only needs the name.
+    internal static class PerfGate
+    {
+        public static void Hit(string patch) { }
+    }
+
     internal sealed class ProbeLog
     {
         internal readonly List<string> Lines = new List<string>();

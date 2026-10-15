@@ -666,8 +666,13 @@ ENTRY_FIELDS = ["internal string Pick;", "internal string Value;", "internal boo
 PCARRIERS = "internal static class PopupCarriers"
 # Fix pass 4 (H9, M3): the depth of item 19's own select and the E9 postfixes
 # it deferred, raised and restored around that one select (S36 pins where).
+# Bug 434: the ring painter's grid cache (the portrait list it last read), the
+# time of its next permitted rescan, and the count of scan-cost lines printed.
+# None of the three holds a face, a pick or a decision.
 AD_STATE = ["private static Sprite ringGold, ringBlue, ringBoth, ringRed;", "private static bool ringsBuilt;",
-            "private static int ownedApplyDepth;", "private static int deferredSelectEdges;"]
+            "private static int ownedApplyDepth;", "private static int deferredSelectEdges;",
+            "private static List<CharacterCreatorPortrait> tickGrid;", "private static long tickGridRescanAt;",
+            "private static int scanCostLines;"]
 
 
 def _s20(src):
