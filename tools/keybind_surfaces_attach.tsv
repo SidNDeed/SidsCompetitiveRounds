@@ -54977,7 +54977,7 @@ member	Plugin.cs:Applied	d5a7b7124f09e199
 member	Plugin.cs:Apply#3	17cc5162da7cfdbb
 member	Plugin.cs:ApplyBackdrop	c8894479a5fb8b51
 member	Plugin.cs:ApplyBackdropNow	296b098e809120ba
-member	Plugin.cs:ApplyCameraBackground	c3c185f8530c4a27
+member	Plugin.cs:ApplyCameraBackground	3bdda8fa11ad2972
 member	Plugin.cs:ApplyLighting	07da4f48753a7b6b
 member	Plugin.cs:ApplyLive	b36389fdaadb08f2
 member	Plugin.cs:ApplyNow	c1c6754887038302
@@ -55146,7 +55146,7 @@ member	Plugin.cs:TryResolveTeamColors	3692ccdbeffbd5db
 member	Plugin.cs:TrySendLocalFace	e648cddc98cdf1ce
 member	Plugin.cs:TwinkleLoop	01869595154ad335
 member	Plugin.cs:Update#1	f5ac45199ffd7f7f
-member	Plugin.cs:Update#2	76bb1bc5f1a84e5d
+member	Plugin.cs:Update#2	a40f8d459143efd7
 member	Plugin.cs:VerifyAndRebake	12f93064c50f0a8c
 member	PoisonLedgerCore.cs:AcceptsAt	b967882b6c2de38f
 member	PoisonLedgerCore.cs:AckedPresent	5ebbd223afd12b26
@@ -56286,15 +56286,15 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	1ed14bbca99c44f4	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	83cae25a3936cab8	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	dc8fd8ca1839bec7	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	51b788a4983fd01d	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	4894	45969	ccf79419ec72ba43	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	4894	45969	ccf79419ec72ba43	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	4894	45969	ccf79419ec72ba43	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	4894	45969	ccf79419ec72ba43	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	4894	45969	ccf79419ec72ba43	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	4894	45969	ccf79419ec72ba43	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
-sink	Keybinds.cs:OnRoundStart	9	9	69545ea6455d8236	attached	GameStateWatcher.cs:PollMatchState
+sink	Keybinds.cs:OnRoundStart	9	9	cea46977074c4226	attached	GameStateWatcher.cs:PollMatchState
 sink	Keybinds.cs:RefreshAll	2	1	fb6a0440324c0395	attached	Keybinds.cs:CommitRows
 sink	NativeUI.Keybinds.cs:KbRefreshNamedDescs	2	1	302cbc5aa531339f	attached	NativeUI.Keybinds.cs:KeybindPaintAll
 sink	NativeUI.Keybinds.cs:KbRepaintLangNoteIfDue	2	1	9d99563b94be4109	attached	NativeUI.Settings.cs:SettingsShowExtras
