@@ -494,6 +494,10 @@ namespace CompetitiveRounds
             // labels every frame whether or not anything is drawn. Ungated,
             // local, whole body guarded; it never touches gameplay.
             go.AddComponent<DamageNumberDriver>();
+            // Letterbox ghost fix: the whole-window clearing camera, a child of
+            // this host so it lives exactly as long as the host does. Visual and
+            // local only, never gated (LetterboxClear.cs).
+            LetterboxClear.CreateClearCamera(go);
         }
 
         private void Awake()
@@ -3468,6 +3472,12 @@ namespace CompetitiveRounds
             // a disabled mod can only ever RESTORE.
             TickUnfocusedFpsCap();
             TickBroadcastWindowPin();
+            // Letterbox clear camera: per-frame scene check, depth re-adapted
+            // every 2 s. Above the modDisabled return like the fps tick: the
+            // camera is created with the host whatever the mod's state, and a
+            // stale depth would draw the clear OVER the game, so its upkeep must
+            // run whenever the camera exists.
+            LetterboxClear.Upkeep(gameObject);
 
             // Bug 389: the proximity-victim capability withdrawal runs here for
             // the same reason the fps tick does - ABOVE the modDisabled return.
@@ -11192,6 +11202,10 @@ namespace CompetitiveRounds
                 foreach (var cam in cams)
                 {
                     if (cam == null) continue;
+                    // The letterbox clear camera is an on-screen SolidColor
+                    // camera too, but it must stay opaque black: painting it
+                    // would colour the strips outside ROUNDS' viewport.
+                    if (LetterboxClear.IsOurs(cam)) continue;
                     if (!_loggedCams)
                         Plugin.Log.LogInfo($"[MAPCOLOR-CAMS] '{cam.gameObject.name}' depth={cam.depth} flags={cam.clearFlags} bg={cam.backgroundColor} rt={(cam.targetTexture != null)} mask={cam.cullingMask}");
                     // Only genuinely OFF-SCREEN cameras are off limits — the ones
