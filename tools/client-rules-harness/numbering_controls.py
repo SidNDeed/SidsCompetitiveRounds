@@ -213,11 +213,11 @@ ROWS = [
      ("walk-D6 W6.1(i)", "g4 E{A,B,C,D} on A,B,D: C holds none")),
     ("C-LB", NR, "static int LeaverStampSource(", "return seq;",
      "return counter;", "return seq + 0;",
-     units("LB-1") + walk("W7.4", None),
+     units("LB-1") + walk("W7.4", None) + a1("W7.4o"),
      ("walk-D12 W7.4", "LEAVER g7 body lists P absent (left in g7)")),
     ("C-ARM", RR, "void Clear(object room)", "_armedIn = room;",
      "_armedIn = null;", "_armedIn = room ?? null;",
-     ffa(465, 487, 502) + ALL_WALKS,
+     ffa(465, 487, 502) + ALL_WALKS + a1("W7.9t"),
      (None, "LIVE-F g1 F none on A")),
     ("C-CAND", NR, "static int CarryAfterGameOver(", "return candidate + 1;",
      "return fieldAtCarry + 1;", "return 1 + candidate;",
@@ -245,7 +245,7 @@ ROWS = [
      ("walk-D12 W7.6", "AGREE-G g1 G{A0,B1,C0,D0}")),
     ("C-KEY", NR, "static int StagedAdvertKey(", "return RoomKey(target);",
      "return RoomKey(current);", "return RoomKey((target));",
-     units("KEY-4") + ALL_WALKS,
+     units("KEY-4") + ALL_WALKS + a1("W7.9t"),
      (None, "EXPECTED g1 advert{A,B,C,D} 1:136261 expected 1:987561")),
     ("C-LP", NR, "static int LivePointsGame(", "if (candidate >= 1) return candidate;",
      "return counter;", "if (candidate >= 1) return candidate + 0;",
@@ -297,7 +297,7 @@ ROWS = [
      ("walk-D12 W7.8", "EXPECTED g4 CS none, expected 4 on C")),
     ("C-RESETG", NR, "static int CounterAfterRoomChange(", "return (gate || lastName != name) ? 0 : counter;",
      "return 0;", "return (gate || lastName != name) ? 0 : counter + 0;",
-     units("RESETG-2") + walk("W7.8", None),
+     units("RESETG-2") + walk("W7.8", None) + a1("W7.8o"),
      ("walk-D12 W7.8", "EXPECTED g5 CS{C1} expected 5")),
     ("C-SAMEGAME", NR, "static bool EpochEvidence(",
      "return sameEpoch && ahead && (!gate || (pickGame == phaseGame && pickCycle == phaseCycle));",
@@ -334,11 +334,12 @@ ROWS = [
      ("walk-D12 W7.9", "REPLAY Z applied 3:4 at g4.1, written at g3.4")),
     ("C-HOLD", NR, "static string HeldEpoch(", "return live;",
      "return live ?? pe;", "return pe == live ? pe : live;",
-     units("HE-2") + walk("W6.8d", None) + walk("W6.15", None) + walk("W7.10", None) + walk("W7.11", None),
+     units("HE-2") + walk("W6.8d", None) + walk("W6.15", None) + walk("W7.10", None) + walk("W7.11", None)
+     + a1("W8.2", "W8.5", "W8.6"),
      ("walk-D12 W7.10", "EPOCH g4.1 P holds the epoch of departed A")),
     ("C-ISSUER", NR, "static string LiveEpoch(", "if (!issuer.HasValue || issuer.Value != masterActor) return null;",
      "", "if (!issuer.HasValue || masterActor != issuer.Value) return null;",
-     units("LEP-2", "LEP-6") + walk("W6.8d", None) + walk("W6.15", None) + walk("W7.11", None),
+     units("LEP-2", "LEP-6") + walk("W6.8d", None) + walk("W6.15", None) + walk("W7.11", None) + a1("W8.6"),
      ("walk-D6 W6.15", "EPOCH g4.3 C holds the epoch of departed A")),
     ("C-CYCLE", NR, "static bool EpochEvidence(",
      "return sameEpoch && ahead && (!gate || (pickGame == phaseGame && pickCycle == phaseCycle));",
@@ -348,7 +349,7 @@ ROWS = [
      ("walk-D6 W6.15", "SAME-CYCLE g4 B adopted 1:3 over 1:2")),
     ("C-USE", NR, "static string EpochAtUse(", "return issuer == masterActor ? pe : null;",
      "return pe;", "return masterActor == issuer ? pe : null;",
-     units("USE-2", "USE-3") + walk("W7.11", None),
+     units("USE-2", "USE-3", "BRIDGE-7") + walk("W7.11", None),
      ("walk-D12 W7.11", "USE g4.1 P published under the epoch of departed A")),
     # Bugs 435/436. C-LEGREAD restores the cc46ea06 drop: a seat without
     # cr_ffa_pe is skipped, so an older build's cr_ffa_pk pick is never counted.
@@ -369,31 +370,37 @@ ROWS = [
     # new-build follower's pick (LOST).
     ("C-BRIDGE-PICK", NR, "static string LegacyPickValue(", "if (legacyForm && ",
      "if (false && legacyForm && ", "if (true && legacyForm && ",
-     units("LEGACY-3", "BRIDGE-1", "BRIDGE-2") + a1("W8.1"),
+     units("LEGACY-3", "BRIDGE-1", "BRIDGE-2", "BRIDGE-7") + walk("W7.4", None) + walk("W7.9", None)
+     + [w for n in range(1, 12) for w in walk("W7.%do" % n, None)] + a1("W8.1", "W8.2", "W8.3", "W8.4", "W8.6"),
      ("walk-D8 W8.1", "LOST A picked 1:1 at g1.1, absent from older master Z's collect")),
     # C-BRIDGE-FORM: no seat ever sees an older master, so neither half runs.
     ("C-BRIDGE-FORM", NR, "static bool LegacyPickForm(", "!masterCarriesPickEpoch;",
      "!masterCarriesPickEpoch && false;", "!masterCarriesPickEpoch && true;",
-     units("FORM-1", "BRIDGE-1") + a1("W8.1"),
+     units("FORM-1", "BRIDGE-1", "BRIDGE-2", "BRIDGE-7") + walk("W7.4", None) + walk("W7.9", None) + walk("W7.10", None) + walk("W7.11", None)
+     + [w for n in range(1, 12) for w in walk("W7.%do" % n, None)] + a1("W8.1", "W8.2", "W8.3", "W8.4", "W8.6"),
      ("walk-D8 W8.1", "LOST A picked 1:1 at g1.1, absent from older master Z's collect")),
     # C-BRIDGE-READ: under an older master the legacy result is refused.
     ("C-BRIDGE-READ", NR, "static Dictionary<int, string> LegacyResult(", "if (olderMasterNow) return res;",
      "if (olderMasterNow) return null;", "if (olderMasterNow && true) return res;",
-     units("LRES-1", "BRIDGE-3") + a1("W8.1"),
+     units("LRES-1", "LRES-8", "BRIDGE-3", "BRIDGE-4", "BRIDGE-8", "BRIDGE-9") + walk("W7.4", None) + walk("W7.9", None) + walk("W7.10", None) + walk("W7.11", None)
+     + [w for n in range(1, 12) for w in walk("W7.%do" % n, None)] + a1("W8.1", "W8.2", "W8.3", "W8.4", "W8.6"),
      ("walk-D8 W8.1", "DECK g1.1 at 1:1")),
     # C-BRIDGE-SAW: a seat promoted over an older master's close, which it saw
-    # this phase, no longer applies that close.
+    # this phase, no longer applies that close. The mutated line is reached only
+    # when no envelope carries the payload (lr6, lr10, BRIDGE-10); lr5's carrier
+    # is finalized and returns before it.
     ("C-BRIDGE-SAW", NR, "static Dictionary<int, string> LegacyResult(", "return sawOlderMaster ? res : null;",
      "return null;", "return sawOlderMaster ? res : (null);",
-     units("LRES-5") + a1("W8.4"),
+     units("LRES-6", "LRES-10", "BRIDGE-10") + a1("W8.4"),
      ("walk-D8 W8.4", "DECK g4.1 at 4:1")),
     # C-BRIDGE-CARRIER: a seat holding no epoch no longer applies a departed
-    # current master's own payload (R22 under G false).
+    # current master's own payload (R22 under G false). The mutated line is
+    # reached only with a carrying envelope (lr4); lr6 has none.
     ("C-BRIDGE-CARRIER", NR, "static Dictionary<int, string> LegacyResult(",
      "if (carrier != null) return finalized != null && finalized.Contains(carrier) ? null : res;",
      "if (carrier != null) return null;",
      "if (null != carrier) return finalized != null && finalized.Contains(carrier) ? null : res;",
-     units("LRES-6") + a1("W8.5"),
+     units("LRES-4") + a1("W8.5"),
      ("walk-D8 W8.5", "DECK g4.1 at 4:1")),
 ]
 assert len(ROWS) == 44, len(ROWS)
