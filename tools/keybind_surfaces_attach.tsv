@@ -307,7 +307,6 @@ hop	ApiClient.cs:Join	2c8d186b1d83b7a6	GameStateWatcher.cs:TryGetPeerTelemetry	r
 hop	ApiClient.cs:Join	2d63073c122ec1ab	DanceStep0Probe.cs:PathOf	ref>DanceStep0Probe.cs:PathOf
 hop	ApiClient.cs:Join	2e11b40e4a886392	ApiClient.cs:ClampTimeline	ref>ApiClient.cs:ClampTimeline
 hop	ApiClient.cs:Join	2e9ca90dd2623c5c	NativeUI.cs:OnAdminQuarantineAction	ref>NativeUI.cs:OnAdminQuarantineAction
-hop	ApiClient.cs:Join	2edc332b7f107d09	FfaNumberingRules.cs:Run#1	ref>FfaNumberingRules.cs:Run#1
 hop	ApiClient.cs:Join	3576548356b0e42d	NativeUI.cs:BuildTeamCardsFullLine	ref>NativeUI.cs:BuildTeamCardsFullLine
 hop	ApiClient.cs:Join	35f1e2fe50946c3d	NativeUI.Settings.cs:SelfTestA2a	ref[StNote(#0)]>NativeUI.Settings.cs:SelfTestA2a
 hop	ApiClient.cs:Join	367493b57d04d786	FfaMode.cs:FfaPickPhase	delegate[=>{}/WriteCycleProp(#0)]>FfaMode.cs:FfaPickPhase
@@ -395,6 +394,7 @@ hop	ApiClient.cs:Join	92aef5d543aa4fbb	GameStateWatcher.cs:OnGameOver	ref[ApiCli
 hop	ApiClient.cs:Join	94299bd3a33c45d7	PoisonSync.cs:V3PatchesMissing	ref>PoisonSync.cs:V3PatchesMissing
 hop	ApiClient.cs:Join	94f2a2a2504d0234	NametagGlowRenderer.cs:BuildGlowMaterial	ref>NametagGlowRenderer.cs:BuildGlowMaterial
 hop	ApiClient.cs:Join	952a1ba46c111f36	FfaNumberingRules.cs:ExpectedAdvert	ref[Fail(#0)]>FfaNumberingRules.cs:ExpectedAdvert
+hop	ApiClient.cs:Join	9572052f65330ec2	FfaNumberingRules.cs:Run#1	ref>FfaNumberingRules.cs:Run#1
 hop	ApiClient.cs:Join	9575552fc5bc5857	IdentityClockEvidence.cs:BootLine	ref[Plugin.Log.LogError(#0)]>IdentityClockEvidence.cs:BootLine
 hop	ApiClient.cs:Join	9624d13a343f43ed	CardDrawEvidence.cs:BootLine	ref>CardDrawEvidence.cs:BootLine
 hop	ApiClient.cs:Join	98f138b89da51e8b	NativeUI.cs:TryInstallUnicodeFallback	ref>NativeUI.cs:TryInstallUnicodeFallback
@@ -700,6 +700,7 @@ hop	AvatarDefaultRules.cs:Applied	bb63d0fe4f16913e	PoisonLedgerCore.cs:OnVerdict
 hop	AvatarDefaultRules.cs:Applied	c1e59ba2696704fb	PoisonLedgerCore.cs:Fill	delegate[&]>PoisonLedgerCore.cs:Fill
 hop	AvatarDefaultRules.cs:Applied	d1af57e8c5295add	FfaLateRules.cs:N9Receiver	entry[Outcome.Applied/&]>FfaLateRules.cs:N9Receiver
 hop	AvatarDefaultRules.cs:Applied	e65415659e75a1e8	FfaLateRules.cs:K45viii	delegate[x.Ok(#0)/&]>FfaLateRules.cs:K45viii
+hop	AvatarDefaultRules.cs:Applied	e999af4ae62d0e71	FfaNumberingRules.cs:DeckChecks	delegate[&]>FfaNumberingRules.cs:DeckChecks
 hop	AvatarDefaultRules.cs:Applied	eecd170f51ef43e5	FfaLateRules.cs:Settle	delegate[case PairKind.Apply|PairKind.Carry|PairKind.CarryDown/ChainOf(#2)/&]>FfaLateRules.cs:Settle
 hop	AvatarDefaultRules.cs:Applied	f2daad65409d3ab8	FfaLateRules.cs:Pair	delegate[Settle(#1)/I.PairDecision(#6)/&]>FfaLateRules.cs:Pair
 hop	AvatarDefaultRules.cs:Applied	f7758ddc447727c8	FfaLateRules.cs:OnEpoch	delegate[ChainOf(#2)/&]>FfaLateRules.cs:OnEpoch
@@ -2033,6 +2034,7 @@ hop	CombatEvidenceCore.cs:Add#1	b540170a7c719af2	NativeUI.SettingsDrive.cs:DrvBl
 hop	CombatEvidenceCore.cs:Add#1	b58239bd043b37e2	CompetitiveUI.cs:RegisterCardHoverRegion#3	ref>CompetitiveUI.cs:RegisterCardHoverRegion#3
 hop	CombatEvidenceCore.cs:Add#1	b5830e08ae71871d	DanceMotionCore.cs:OnMotion	ref>DanceMotionCore.cs:OnMotion
 hop	CombatEvidenceCore.cs:Add#1	b5bb4aee55da1b8c	FfaNumberingRules.cs:OnResultWritten	ref>FfaNumberingRules.cs:OnResultWritten
+hop	CombatEvidenceCore.cs:Add#1	b633a43925c4824e	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	CombatEvidenceCore.cs:Add#1	b6a5899170c2c806	IdentityClockEvidence.cs:ReadPatches	ref>IdentityClockEvidence.cs:ReadPatches
 hop	CombatEvidenceCore.cs:Add#1	b6d47d54c42780c1	ProfileCard.cs:RequestData	ref>ProfileCard.cs:RequestData
 hop	CombatEvidenceCore.cs:Add#1	b7087318d359592a	NativeUI.SettingsDrive.cs:DrvPrefRestore	ref>NativeUI.SettingsDrive.cs:DrvPrefRestore
@@ -3220,6 +3222,7 @@ hop	CombatEvidenceCore.cs:Add#2	e8aa6f7f21b8dfce	DamageNumberRules.cs:FlushOne	r
 hop	CombatEvidenceCore.cs:Add#2	e8c92de8f73007d5	PoisonLedgerCore.cs:Break	ref>PoisonLedgerCore.cs:Break
 hop	CombatEvidenceCore.cs:Add#2	e8cdb6a0c9eb8dde	FfaMode.cs:HandleNextRound	ref>FfaMode.cs:HandleNextRound
 hop	CombatEvidenceCore.cs:Add#2	e8da24eeffa18747	NativeUI.cs:BuildSeriesCards	ref>NativeUI.cs:BuildSeriesCards
+hop	CombatEvidenceCore.cs:Add#2	e92a6335407e3dc9	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	CombatEvidenceCore.cs:Add#2	e92d7f0be7fd2a27	FfaMode.cs:ReadCycleManifest	ref>FfaMode.cs:ReadCycleManifest
 hop	CombatEvidenceCore.cs:Add#2	e9345c07df07b54a	GameStateWatcher.cs:PollOpponentFps	ref>GameStateWatcher.cs:PollOpponentFps
 hop	CombatEvidenceCore.cs:Add#2	e9464f8561a8d3ef	PcQuickShardRules.cs:DuplicateShardIds	ref>PcQuickShardRules.cs:DuplicateShardIds
@@ -4617,6 +4620,7 @@ hop	DamageNumberRules.cs:Count	420d33701e7fa456	SessionReportModel.cs:BuildsRang
 hop	DamageNumberRules.cs:Count	426da4f5a716c7fd	UnicodeFallback.cs:RegisterFallbacks	ref[AddAssets(#2)]>UnicodeFallback.cs:RegisterFallbacks
 hop	DamageNumberRules.cs:Count	427f3d620077777c	NativeUI.cs:SwitchTab	ref>NativeUI.cs:SwitchTab
 hop	DamageNumberRules.cs:Count	4308bb8cd74a69c3	Plugin.cs:ResolveTestSkin	ref>Plugin.cs:ResolveTestSkin
+hop	DamageNumberRules.cs:Count	43305869385202b7	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	DamageNumberRules.cs:Count	43535b7613adfef1	ApiClient.cs:PersistOutbox	ref>ApiClient.cs:PersistOutbox
 hop	DamageNumberRules.cs:Count	435d7de28a7a495f	ApiClient.cs:FetchTeamMatchHistory	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchTeamMatchHistory
 hop	DamageNumberRules.cs:Count	437d00a6ce46798e	ApiClient.cs:OutboxAlreadyQueued	ref>ApiClient.cs:OutboxAlreadyQueued
@@ -4837,6 +4841,7 @@ hop	DamageNumberRules.cs:Count	653c8a274617fe14	TitleLaddersUI.cs:DevDirective	r
 hop	DamageNumberRules.cs:Count	6549dfd579055834	FfaSpawnPoints.cs:ScanForMap	ref>FfaSpawnPoints.cs:ScanForMap
 hop	DamageNumberRules.cs:Count	65602b6065c4cb99	NativeUI.cs:RefreshAlertBanner	ref>NativeUI.cs:RefreshAlertBanner
 hop	DamageNumberRules.cs:Count	65919f824eec27ff	ApiClient.cs:CollapseCardDuplicates	ref[new List(#0)]>ApiClient.cs:CollapseCardDuplicates
+hop	DamageNumberRules.cs:Count	65965e79bc503edf	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)/I(#0)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	DamageNumberRules.cs:Count	661805dc9554ca24	ApiClient.cs:FetchCardStats	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchCardStats
 hop	DamageNumberRules.cs:Count	6665b09e95771ec8	NativeUI.Settings.cs:SettingsFocusedRec	ref>NativeUI.Settings.cs:SettingsFocusedRec
 hop	DamageNumberRules.cs:Count	666b44d9f339fb43	MusicStreamProbe.cs:SilentRunIsScripted	ref>MusicStreamProbe.cs:SilentRunIsScripted
@@ -5158,6 +5163,7 @@ hop	DamageNumberRules.cs:Count	977f03a599cc535e	AvatarDefaults.cs:OtherFighterCo
 hop	DamageNumberRules.cs:Count	97a6a26746332e01	PlayerColorCosmetic.cs:WriteFrame	ref>PlayerColorCosmetic.cs:WriteFrame
 hop	DamageNumberRules.cs:Count	97ab9ea6b76c9c31	SeatEvidence.cs:Find	ref>SeatEvidence.cs:Find
 hop	DamageNumberRules.cs:Count	983edb5371361d1b	PlayerCardsUI.cs:ProcessTradeAnswers	ref>PlayerCardsUI.cs:ProcessTradeAnswers
+hop	DamageNumberRules.cs:Count	98937bbf68e389bf	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	DamageNumberRules.cs:Count	98a6f5ff03cecfb7	FfaLateEntry.cs:ConsumeLoadCount	entry[FfaLateRules.ScaleRecord.Count]>FfaLateEntry.cs:ConsumeLoadCount
 hop	DamageNumberRules.cs:Count	98c75d2f77f502bc	CardSnapshot.cs:ResolveCard	ref>CardSnapshot.cs:ResolveCard
 hop	DamageNumberRules.cs:Count	98c9fb3b68ec3eff	ApiClient.cs:JsonIntArrayByKey	ref[new List(#0)]>ApiClient.cs:JsonIntArrayByKey
@@ -5348,7 +5354,6 @@ hop	DamageNumberRules.cs:Count	b660134fb7dd060e	NativeUI.SettingsDrive.cs:DriveW
 hop	DamageNumberRules.cs:Count	b66369a79519ab47	IdleShowcase.cs:TickView	ref>IdleShowcase.cs:TickView
 hop	DamageNumberRules.cs:Count	b7268bf4a6646efd	CardTextLocalizer.cs:ScanIfNeeded	ref[Plugin.Log.LogInfo(#0)]>CardTextLocalizer.cs:ScanIfNeeded
 hop	DamageNumberRules.cs:Count	b7ad034928b21523	PlayerCardsUI.cs:DrawReceived	ref[Plugin.Log.LogInfo(#0)]>PlayerCardsUI.cs:DrawReceived
-hop	DamageNumberRules.cs:Count	b7c61e659d1e5ca5	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	DamageNumberRules.cs:Count	b825951b8cf3521d	NativeUI.cs:RefreshRecentSeries	ref>NativeUI.cs:RefreshRecentSeries
 hop	DamageNumberRules.cs:Count	b85b4f251a8143c3	ApiClient.cs:FetchBlockedPlayers	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchBlockedPlayers
 hop	DamageNumberRules.cs:Count	b889c38edf44efdc	NativeUI.cs:RefreshChatLog	ref>NativeUI.cs:RefreshChatLog
@@ -7594,6 +7599,7 @@ hop	FfaLateRules.cs:Add	fb42f0df59ff1877	MusicEngine.cs:RootFailed	ref>MusicEngi
 hop	FfaLateRules.cs:Add	fbe611d84440f213	NativeUI.SettingsDrive.cs:DrvPrefSummary	ref>NativeUI.SettingsDrive.cs:DrvPrefSummary
 hop	FfaLateRules.cs:Add	fccbe162767ba84c	CompetitiveUI.cs:DrawInGameChat	ref>CompetitiveUI.cs:DrawInGameChat
 hop	FfaLateRules.cs:Add	fcdc35bd3ff3ec59	FfaMode.cs:CollectMatchPointTeams	ref>FfaMode.cs:CollectMatchPointTeams
+hop	FfaLateRules.cs:Add	fd302e492f4e3441	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	FfaLateRules.cs:Add	fd3a974fb1b3e05e	FfaAssembly.cs:UnionGranted	ref>FfaAssembly.cs:UnionGranted
 hop	FfaLateRules.cs:Add	fdf36ba402207a26	SeatEvidence.cs:HitEnter	ref>SeatEvidence.cs:HitEnter
 hop	FfaLateRules.cs:Add	fdf4af8ab6d76c85	ApiClient.cs:FetchActiveSeries	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchActiveSeries
@@ -8131,6 +8137,8 @@ hop	FfaMode.cs:LateSeedScores	3a0519c26249b4cb	FfaLateEntry.cs:CheckPendingSnaps
 hop	FfaMode.cs:LeaveBelowMinimum	75184d68b682aa2b	FfaMode.cs:CheckRoundAfterLeave	ref>FfaMode.cs:CheckRoundAfterLeave
 hop	FfaMode.cs:LivePointsGameNow	f1e6c48053729089	FfaMode.cs:HandleNextRound	ref>FfaMode.cs:HandleNextRound
 hop	FfaMode.cs:MasterPublishConfig	2ec6827fdcf47bf9	FfaMode.cs:OnGameStart	ref>FfaMode.cs:OnGameStart
+hop	FfaMode.cs:NearestOpponent	3d52dcf1c9a47d14	FfaMode.cs:Prefix#8	ref>FfaMode.cs:Prefix#8
+hop	FfaMode.cs:NearestOpponent	77abda9b827fdc12	FfaMode.cs:Prefix#7	ref>FfaMode.cs:Prefix#7
 hop	FfaMode.cs:OnGameStart	cd2a9425f5bd6994	FfaMode.cs:FfaDoStartGame	ref>FfaMode.cs:FfaDoStartGame
 hop	FfaMode.cs:OnRoomLeft	8a7f28e72eda6e46	SpectatorSession.cs:EndSession	ref>SpectatorSession.cs:EndSession
 hop	FfaMode.cs:OnRoomLeft	d58a575c8b56241c	GameStateWatcher.cs:PollRoomState	ref>GameStateWatcher.cs:PollRoomState
@@ -8153,6 +8161,7 @@ hop	FfaMode.cs:RecordAdvertTarget	3026687c98ffcaa1	ApiClient.cs:ArmFfaLock	ref>A
 hop	FfaMode.cs:RecordAdvertTarget	5e685dab8cc4d0b6	SpectatorJoiner.cs:ConnectAndJoin	delegate[nch.StartCoroutine(#0)/nch.DoActionWhenConnected(#0=>)/=>{}]>SpectatorJoiner.cs:ConnectAndJoin
 hop	FfaMode.cs:RecordKillFor	338469b34254e413	FfaMode.cs:Prefix#1	ref>FfaMode.cs:Prefix#1
 hop	FfaMode.cs:RepublishLocalPickFor	10901ca0664a8fc8	FfaMode.cs:EvaluatePhaseEpoch	ref>FfaMode.cs:EvaluatePhaseEpoch
+hop	FfaMode.cs:RepublishLocalPickFor	15ca81f4ebe60fe8	FfaMode.cs:EpochMasterCheck	ref>FfaMode.cs:EpochMasterCheck
 hop	FfaMode.cs:RepublishLocalPickFor	3b93efdf031522f5	FfaMode.cs:FfaPickPhase	ref>FfaMode.cs:FfaPickPhase
 hop	FfaMode.cs:RepublishLocalPickFor	cfacdf8471149739	FfaMode.cs:FfaPickPhase	delegate[=>{}]>FfaMode.cs:FfaPickPhase
 hop	FfaMode.cs:RepublishLocalPickFor	d8884b68d3753293	FfaMode.cs:OpenOnPromotion	ref>FfaMode.cs:OpenOnPromotion
@@ -8255,7 +8264,6 @@ hop	FfaNumberingRules.cs:Advance	c9a6f17ad4c98134	FfaNumberingRules.cs:W75	ref>F
 hop	FfaNumberingRules.cs:Ahead	4ade20334b39b373	FfaNumberingRules.cs:WaitBody	ref>FfaNumberingRules.cs:WaitBody
 hop	FfaNumberingRules.cs:Ahead	a9b0c4c5938e4090	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Applied	077c1a27e8af92a7	FfaLateRules.cs:K45xiN7	delegate[&]>FfaLateRules.cs:K45xiN7
-hop	FfaNumberingRules.cs:Applied	0dd4b556a3250860	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Applied	146476cffe3bfe02	DanceMotionCore.cs:ClassifyMotion	delegate[case 200/&]>DanceMotionCore.cs:ClassifyMotion
 hop	FfaNumberingRules.cs:Applied	14a70e9d901d4460	FfaNumberingRules.cs:Terminate	delegate[&]>FfaNumberingRules.cs:Terminate
 hop	FfaNumberingRules.cs:Applied	1ee42ebe6a719688	FfaLateRules.cs:OnCallIn	entry[Settle(#1)/PairResult.EpochApplied/&]>FfaLateRules.cs:OnCallIn
@@ -8263,6 +8271,7 @@ hop	FfaNumberingRules.cs:Applied	2164590aec58e24b	PoisonSync.cs:ResetForView	del
 hop	FfaNumberingRules.cs:Applied	328c99295609bf66	PoisonSync.cs:ResetForView	delegate[VanillaFixSupport.DiagLimited(#1)/&]>PoisonSync.cs:ResetForView
 hop	FfaNumberingRules.cs:Applied	33b50932f5a39a6b	PoisonLedgerCore.cs:Fill	delegate[&]>PoisonLedgerCore.cs:Fill
 hop	FfaNumberingRules.cs:Applied	4d8f40dfd8d416b9	Plugin.cs:ApplyNow	ref>Plugin.cs:ApplyNow
+hop	FfaNumberingRules.cs:Applied	5131a40f46b8328d	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Applied	537d1154e81c54e0	FfaLateRules.cs:OnEpoch	delegate[Math.Max(#0)/&]>FfaLateRules.cs:OnEpoch
 hop	FfaNumberingRules.cs:Applied	5388becf5ad24451	FfaLateRules.cs:StampOf	delegate[Math.Max(#0)/&]>FfaLateRules.cs:StampOf
 hop	FfaNumberingRules.cs:Applied	541034eac2251013	DanceMotionCore.cs:OnMotion	delegate[&]>DanceMotionCore.cs:OnMotion
@@ -8294,6 +8303,8 @@ hop	FfaNumberingRules.cs:Applied	e7891950d1067cf9	PoisonSync.cs:AuthoritativeDot
 hop	FfaNumberingRules.cs:Applied	e87c6652b9fbf63a	FfaLateRules.cs:OnCallIn	delegate[Settle(#1)/I.PairDecision(#6)/&]>FfaLateRules.cs:OnCallIn
 hop	FfaNumberingRules.cs:Applied	e9c03f6801f40d1a	PoisonSync.cs:DrainRetired	delegate[Plugin.Log.LogInfo(#0)/&]>PoisonSync.cs:DrainRetired
 hop	FfaNumberingRules.cs:Applied	f46f8c4f992d5fd4	PoisonSync.cs:ApplyCommitted	delegate[&]>PoisonSync.cs:ApplyCommitted
+hop	FfaNumberingRules.cs:Applied	ff5ece8943304e5a	FfaNumberingRules.cs:DeckChecks	delegate[&]>FfaNumberingRules.cs:DeckChecks
+hop	FfaNumberingRules.cs:AppliedLegacy	5f6914455b543d73	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:BeginGame	695c2a8139aaba30	GameStateWatcher.cs:OnMatchStarted	ref>GameStateWatcher.cs:OnMatchStarted
 hop	FfaNumberingRules.cs:BeginGame	b58dea2985b0844c	FfaNumberingRules.cs:Play#1	ref>FfaNumberingRules.cs:Play#1
 hop	FfaNumberingRules.cs:BeginGame	cb8831d569f57acd	FfaNumberingRules.cs:StartOnly	ref>FfaNumberingRules.cs:StartOnly
@@ -8301,10 +8312,11 @@ hop	FfaNumberingRules.cs:BeginResult	c0491ed759c7254e	FfaNumberingRules.cs:StepP
 hop	FfaNumberingRules.cs:ByName	27c56e24ce495b89	FfaNumberingRules.cs:StartChecks	ref>FfaNumberingRules.cs:StartChecks
 hop	FfaNumberingRules.cs:ByName	473aee880a4f64e0	FfaNumberingRules.cs:EdgeChecks	ref>FfaNumberingRules.cs:EdgeChecks
 hop	FfaNumberingRules.cs:ByName	5238046b6e0e4663	FfaNumberingRules.cs:OnResultWritten	ref>FfaNumberingRules.cs:OnResultWritten
+hop	FfaNumberingRules.cs:ByName	96908989a3349117	FfaNumberingRules.cs:DeckChecks	ref>FfaNumberingRules.cs:DeckChecks
 hop	FfaNumberingRules.cs:CandidateNow	051105066e1c6da3	FfaNumberingRules.cs:LivePointsGameNow	ref>FfaNumberingRules.cs:LivePointsGameNow
 hop	FfaNumberingRules.cs:CandidateNow	1d47612546e24304	FfaNumberingRules.cs:EdgeNew	ref>FfaNumberingRules.cs:EdgeNew
-hop	FfaNumberingRules.cs:Case	19763b369a415e28	FfaNumberingRules.cs:Run#2	ref>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:Case	9e716253ed6722cd	FfaNumberingRules.cs:Ordered	ref>FfaNumberingRules.cs:Ordered
+hop	FfaNumberingRules.cs:Case	be6f00c0779fe1b4	FfaNumberingRules.cs:Run#2	ref>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:CheckHeldEpoch	f0d158342aee684b	FfaNumberingRules.cs:EvaluateEpoch	ref>FfaNumberingRules.cs:EvaluateEpoch
 hop	FfaNumberingRules.cs:CheckLeavers	1bf5f1f63a2f5df9	FfaNumberingRules.cs:EdgeNew	ref>FfaNumberingRules.cs:EdgeNew
 hop	FfaNumberingRules.cs:CheckLivePoints	c61a5aca27528666	FfaNumberingRules.cs:PointAt	ref>FfaNumberingRules.cs:PointAt
@@ -8322,49 +8334,53 @@ hop	FfaNumberingRules.cs:CycValue	ecdbac924e8843c6	FfaNumberingRules.cs:EnterPha
 hop	FfaNumberingRules.cs:CycValue	ee2f777baa3099fc	FfaNumberingRules.cs:Adopt	ref[WriteRoom(#2)]>FfaNumberingRules.cs:Adopt
 hop	FfaNumberingRules.cs:Cycle	0c493fa4667ff0ab	FfaNumberingRules.cs:ResultBody	delegate[Adopt(#3)/&]>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Cycle	0df91f41183b5041	FfaNumberingRules.cs:ResultBody	delegate[TryReadDeadline(#2)/&]>FfaNumberingRules.cs:ResultBody
-hop	FfaNumberingRules.cs:Cycle	11676d005d9ce1b7	FfaNumberingRules.cs:Restamp	delegate[WriteOwn(#2)/LegacyPickValue(#2)/&]>FfaNumberingRules.cs:Restamp
 hop	FfaNumberingRules.cs:Cycle	13585c987a2683fa	FfaNumberingRules.cs:WaitBody	delegate[WriteRoom(#2)/CycValue(#1)/&]>FfaNumberingRules.cs:WaitBody
 hop	FfaNumberingRules.cs:Cycle	1be690ff66f5a593	FfaNumberingRules.cs:PublishDeadline	delegate[WriteRoom(#2)/I(#0)/&]>FfaNumberingRules.cs:PublishDeadline
 hop	FfaNumberingRules.cs:Cycle	2c0e739a365f4632	FfaNumberingRules.cs:SourceCheck	delegate[Fail(#0)/I(#0)/&]>FfaNumberingRules.cs:SourceCheck
 hop	FfaNumberingRules.cs:Cycle	34feda55e80a6b0e	FfaNumberingRules.cs:ResultBody	delegate[ResValue(#1)/&]>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Cycle	39700c312831476c	FfaNumberingRules.cs:EnterPhase	delegate[RecordOwn(#2)/&]>FfaNumberingRules.cs:EnterPhase
 hop	FfaNumberingRules.cs:Cycle	3f2d96bd98f5110c	FfaNumberingRules.cs:OnResultWritten	delegate[list.Add(#0)/I(#0)/&]>FfaNumberingRules.cs:OnResultWritten
-hop	FfaNumberingRules.cs:Cycle	46e8a6fadd53a399	FfaNumberingRules.cs:PublishPick	delegate[WriteOwn(#2)/PickValue(#3)/&]>FfaNumberingRules.cs:PublishPick
-hop	FfaNumberingRules.cs:Cycle	4a4a22dd2394c52c	FfaNumberingRules.cs:ResultBody	delegate[ResultFromEnvelope(#4)/&]>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Cycle	4c222007b1c83cf4	FfaNumberingRules.cs:EnterPhase	delegate[WriteRoom(#2)/CycValue(#1)/&]>FfaNumberingRules.cs:EnterPhase
 hop	FfaNumberingRules.cs:Cycle	4c27066cdc69bd49	FfaNumberingRules.cs:Ahead	delegate[&]>FfaNumberingRules.cs:Ahead
+hop	FfaNumberingRules.cs:Cycle	4ca85e3355d77280	FfaNumberingRules.cs:LostChecks	delegate[Fail(#0)/I(#0)/&]>FfaNumberingRules.cs:LostChecks
 hop	FfaNumberingRules.cs:Cycle	506b1930c89464c8	FfaNumberingRules.cs:OpenOnPromotion	delegate[_trace.Add(#0)/I(#0)/&]>FfaNumberingRules.cs:OpenOnPromotion
 hop	FfaNumberingRules.cs:Cycle	511518b38a4456d5	FfaNumberingRules.cs:AdoptFromPicks	delegate[&]>FfaNumberingRules.cs:AdoptFromPicks
 hop	FfaNumberingRules.cs:Cycle	5375662f3efaf928	FfaNumberingRules.cs:BeginResult	delegate[I(#0)/&]>FfaNumberingRules.cs:BeginResult
 hop	FfaNumberingRules.cs:Cycle	5506854759f0d0e4	FfaNumberingRules.cs:ResultBody	delegate[ReadCycleResult(#2)/&]>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Cycle	59274307136ed35a	FfaNumberingRules.cs:RunRoundTwoUnits	delegate[Unit(#3)/I(#0)/&]>FfaNumberingRules.cs:RunRoundTwoUnits
+hop	FfaNumberingRules.cs:Cycle	6694f63fca54e9d2	FfaNumberingRules.cs:PickWrite	delegate[WriteOwn(#2)/LegacyPickValue(#2)/&]>FfaNumberingRules.cs:PickWrite
 hop	FfaNumberingRules.cs:Cycle	6a5683564edf428e	FfaNumberingRules.cs:EnterPhase	delegate[&]>FfaNumberingRules.cs:EnterPhase
 hop	FfaNumberingRules.cs:Cycle	728e0e6e284bb0ee	FfaNumberingRules.cs:AdoptFromPicks	delegate[I(#0)/&]>FfaNumberingRules.cs:AdoptFromPicks
 hop	FfaNumberingRules.cs:Cycle	77b7307d361dbd73	FfaNumberingRules.cs:Applied	delegate[Fail(#0)/I(#0)/&]>FfaNumberingRules.cs:Applied
+hop	FfaNumberingRules.cs:Cycle	7d2a5d12fb353296	FfaNumberingRules.cs:PickWrite	delegate[PickEpochValue(#3)/&]>FfaNumberingRules.cs:PickWrite
 hop	FfaNumberingRules.cs:Cycle	83cbdacd98582ac2	FfaNumberingRules.cs:DetectAhead	delegate[&]>FfaNumberingRules.cs:DetectAhead
 hop	FfaNumberingRules.cs:Cycle	8a02cfa194205514	FfaNumberingRules.cs:PublishPick	delegate[WriteOwn(#2)/I(#0)/&]>FfaNumberingRules.cs:PublishPick
 hop	FfaNumberingRules.cs:Cycle	95f3fcb3e78883c7	FfaNumberingRules.cs:DetectAhead	delegate[EpochEvidence(#3)/&]>FfaNumberingRules.cs:DetectAhead
 hop	FfaNumberingRules.cs:Cycle	9b4bae7114a8df99	FfaNumberingRules.cs:CollectPicks	delegate[CollectPicksFrom(#5)/&]>FfaNumberingRules.cs:CollectPicks
-hop	FfaNumberingRules.cs:Cycle	9b7883ef442110a9	FfaNumberingRules.cs:Restamp	delegate[WriteOwn(#2)/PickValue(#3)/&]>FfaNumberingRules.cs:Restamp
 hop	FfaNumberingRules.cs:Cycle	9b81062a92bcb062	FfaNumberingRules.cs:OpenOnPromotion	delegate[RecordOwn(#2)/&]>FfaNumberingRules.cs:OpenOnPromotion
 hop	FfaNumberingRules.cs:Cycle	a1719af823431c71	FfaNumberingRules.cs:OpenOnPromotion	delegate[CycValue(#1)/&]>FfaNumberingRules.cs:OpenOnPromotion
 hop	FfaNumberingRules.cs:Cycle	a2250432fb21dcdb	FfaNumberingRules.cs:WaitBody	delegate[ReadCycleManifest(#2)/&]>FfaNumberingRules.cs:WaitBody
+hop	FfaNumberingRules.cs:Cycle	a2a5f5850fcaac00	FfaNumberingRules.cs:AppliedLegacy	delegate[Fail(#0)/I(#0)/&]>FfaNumberingRules.cs:AppliedLegacy
 hop	FfaNumberingRules.cs:Cycle	a52e5c7c0dea5a69	FfaNumberingRules.cs:WaitBody	delegate[WriteCycle(#1)/CycValue(#1)/&]>FfaNumberingRules.cs:WaitBody
 hop	FfaNumberingRules.cs:Cycle	a7df5fd1d3efce14	FfaMode.cs:DetectAheadPickIdentity	delegate[&]>FfaMode.cs:DetectAheadPickIdentity
 hop	FfaNumberingRules.cs:Cycle	a8a6e78b4fa2b643	FfaNumberingRules.cs:CollectPicks	delegate[I(#0)/&]>FfaNumberingRules.cs:CollectPicks
 hop	FfaNumberingRules.cs:Cycle	adbe8018a2d2e4f3	FfaNumberingRules.cs:ResultBody	delegate[ResultPresentEitherKey(#2)/&]>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Cycle	b35b5f06f9a7d162	FfaMode.cs:DetectAheadPickIdentity	delegate[FfaNumberingRules.EpochEvidence(#3)/&]>FfaMode.cs:DetectAheadPickIdentity
 hop	FfaNumberingRules.cs:Cycle	b63aabaf47844082	FfaNumberingRules.cs:EnterPhase	delegate[WriteCycle(#1)/CycValue(#1)/&]>FfaNumberingRules.cs:EnterPhase
+hop	FfaNumberingRules.cs:Cycle	b93d10742c862247	FfaNumberingRules.cs:LostChecks	delegate[&]>FfaNumberingRules.cs:LostChecks
 hop	FfaNumberingRules.cs:Cycle	c06d3646a34764b9	FfaMode.cs:DetectAheadPickIdentity	delegate[Plugin.Log.LogInfo(#0)/&]>FfaMode.cs:DetectAheadPickIdentity
+hop	FfaNumberingRules.cs:Cycle	c5f29f1105fe4316	FfaNumberingRules.cs:Terminate	delegate[I(#0)/&]>FfaNumberingRules.cs:Terminate
 hop	FfaNumberingRules.cs:Cycle	cb45ada59a184683	FfaNumberingRules.cs:RunRoundTwoUnits	delegate[Unit(#2)/&]>FfaNumberingRules.cs:RunRoundTwoUnits
-hop	FfaNumberingRules.cs:Cycle	d430d3fb5f7a2c9d	FfaNumberingRules.cs:PublishPick	delegate[WriteOwn(#2)/LegacyPickValue(#2)/&]>FfaNumberingRules.cs:PublishPick
+hop	FfaNumberingRules.cs:Cycle	d8dc944602029696	FfaNumberingRules.cs:LegacyResultOf	delegate[LegacyResult(#8)/&]>FfaNumberingRules.cs:LegacyResultOf
 hop	FfaNumberingRules.cs:Cycle	d96bf4fe64aa5e4f	FfaNumberingRules.cs:Play#1	ref>FfaNumberingRules.cs:Play#1
 hop	FfaNumberingRules.cs:Cycle	e42ed7757a393d3b	FfaNumberingRules.cs:DetectAhead	delegate[EpochEvidence(#5)/&]>FfaNumberingRules.cs:DetectAhead
 hop	FfaNumberingRules.cs:Cycle	e906503d29565520	FfaNumberingRules.cs:OnResultWritten	delegate[&]>FfaNumberingRules.cs:OnResultWritten
 hop	FfaNumberingRules.cs:Cycle	e91fb7a933273f70	FfaNumberingRules.cs:Restamp	delegate[WriteOwn(#2)/I(#0)/&]>FfaNumberingRules.cs:Restamp
 hop	FfaNumberingRules.cs:Cycle	fd93eb504b1be786	FfaNumberingRules.cs:DetectAhead	delegate[Vote(#2)/I(#0)/&]>FfaNumberingRules.cs:DetectAhead
+hop	FfaNumberingRules.cs:Cycle	feba63cd25fe125b	FfaNumberingRules.cs:ResultBody	delegate[PhaseResult(#9)/&]>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:D	08993edcda25c74b	FfaNumberingRules.cs:W64	delegate[=>{}/m.Enter(#0)/&]>FfaNumberingRules.cs:W64
 hop	FfaNumberingRules.cs:D	0fc239c99daee22f	FfaNumberingRules.cs:W610	delegate[=>{}/m.Enter(#0)/&]>FfaNumberingRules.cs:W610
+hop	FfaNumberingRules.cs:D	16280a98d12895f5	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	FfaNumberingRules.cs:D	1a383b6ace302e64	FfaNumberingRules.cs:W610	delegate[m.Unstall(#1)/&]>FfaNumberingRules.cs:W610
 hop	FfaNumberingRules.cs:D	1b6a6bef4c2f0695	FfaNumberingRules.cs:W78	delegate[=>{}/m.Enter(#0)/&]>FfaNumberingRules.cs:W78
 hop	FfaNumberingRules.cs:D	1c491879d4078785	FfaNumberingRules.cs:RunRoundTwoUnits	ref[Unit(#3)]>FfaNumberingRules.cs:RunRoundTwoUnits
@@ -8378,11 +8394,13 @@ hop	FfaNumberingRules.cs:D	4752a86509e16dce	FfaNumberingRules.cs:W611	delegate[=
 hop	FfaNumberingRules.cs:D	4b334082c270c39d	FfaNumberingRules.cs:W53	delegate[m.S0(#4)/&]>FfaNumberingRules.cs:W53
 hop	FfaNumberingRules.cs:D	513d00b2ef6d8ff5	FfaNumberingRules.cs:W63	delegate[=>{}/m.Unstall(#0)/&]>FfaNumberingRules.cs:W63
 hop	FfaNumberingRules.cs:D	624fa1fadfed9378	FfaNumberingRules.cs:W611	delegate[m.JoinAll(#5)/&]>FfaNumberingRules.cs:W611
+hop	FfaNumberingRules.cs:D	6330876f5f1d491b	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	FfaNumberingRules.cs:D	63f6c7df9f455749	FfaNumberingRules.cs:W611	delegate[m.Leave(#0)/&]>FfaNumberingRules.cs:W611
 hop	FfaNumberingRules.cs:D	738f4894f55eec7a	FfaNumberingRules.cs:W63	delegate[=>{}/m.Stall(#0)/&]>FfaNumberingRules.cs:W63
 hop	FfaNumberingRules.cs:D	79f081dcc17049b5	FfaNumberingRules.cs:W610	delegate[m.Stall(#1)/&]>FfaNumberingRules.cs:W610
 hop	FfaNumberingRules.cs:D	7f0b0f2a508c7053	FfaNumberingRules.cs:W68	delegate[m.Unstall(#0)/&]>FfaNumberingRules.cs:W68
 hop	FfaNumberingRules.cs:D	836b2343c34d53a0	FfaNumberingRules.cs:W611	delegate[=>{}/m.Join(#0)/&]>FfaNumberingRules.cs:W611
+hop	FfaNumberingRules.cs:D	8a47d8cde330646e	FfaNumberingRules.cs:DeckChecks	ref[Fail(#0)]>FfaNumberingRules.cs:DeckChecks
 hop	FfaNumberingRules.cs:D	8cc6915f483dea6c	FfaNumberingRules.cs:W66	delegate[=>{}/m.Enter(#0)/&]>FfaNumberingRules.cs:W66
 hop	FfaNumberingRules.cs:D	96ce386fe10f5756	FfaNumberingRules.cs:W615	delegate[=>{}/m.Join(#0)/&]>FfaNumberingRules.cs:W615
 hop	FfaNumberingRules.cs:D	9d1c2f967d004d25	FfaNumberingRules.cs:W611	delegate[=>{}/m.Enter(#0)/&]>FfaNumberingRules.cs:W611
@@ -8390,8 +8408,10 @@ hop	FfaNumberingRules.cs:D	a7fc2a1a5df20861	FfaNumberingRules.cs:W66	delegate[&]
 hop	FfaNumberingRules.cs:D	abbe24045c9c43ed	FfaNumberingRules.cs:W615	delegate[=>{}/m.Enter(#0)/&]>FfaNumberingRules.cs:W615
 hop	FfaNumberingRules.cs:D	c93f36e6cb5c6f9c	FfaNumberingRules.cs:W33	delegate[m.S0(#5)/&]>FfaNumberingRules.cs:W33
 hop	FfaNumberingRules.cs:D	e2e999d10aa6073c	FfaNumberingRules.cs:W54	delegate[m.S0(#4)/&]>FfaNumberingRules.cs:W54
+hop	FfaNumberingRules.cs:D	f0540cbf90a733ed	FfaNumberingRules.cs:DeckChecks	ref>FfaNumberingRules.cs:DeckChecks
 hop	FfaNumberingRules.cs:D	f383284e9f5185e4	FfaNumberingRules.cs:W68	delegate[m.Stall(#0)/&]>FfaNumberingRules.cs:W68
 hop	FfaNumberingRules.cs:D	f4035654f9da0cea	FfaNumberingRules.cs:W612	delegate[=>{}/m.Unstall(#0)/&]>FfaNumberingRules.cs:W612
+hop	FfaNumberingRules.cs:DeckChecks	5738f321ccada368	FfaNumberingRules.cs:EdgeChecks	ref>FfaNumberingRules.cs:EdgeChecks
 hop	FfaNumberingRules.cs:Deliver	066a6d8292d70285	ReadGateRules.cs:OnRefusal	entry[Verdict.Next/&]>ReadGateRules.cs:OnRefusal
 hop	FfaNumberingRules.cs:Deliver	17f30abe6fd3d3b7	ApiClient.cs:GetBytes	delegate[&]>ApiClient.cs:GetBytes
 hop	FfaNumberingRules.cs:Deliver	735be781b0836785	FfaNumberingRules.cs:TickOnce	ref>FfaNumberingRules.cs:TickOnce
@@ -8459,10 +8479,10 @@ hop	FfaNumberingRules.cs:EnterPhase	35d0a7a2e4c64da3	FfaNumberingRules.cs:Enter	
 hop	FfaNumberingRules.cs:EpochChangeCheck	1c5ff671985a1a97	FfaNumberingRules.cs:WaitBody	ref>FfaNumberingRules.cs:WaitBody
 hop	FfaNumberingRules.cs:EpochChangeCheck	4827c4c26c83d83c	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:EpochForUse	215fccd18caeef87	FfaNumberingRules.cs:CollectPicks	ref>FfaNumberingRules.cs:CollectPicks
+hop	FfaNumberingRules.cs:EpochForUse	41b29e249adb857d	FfaNumberingRules.cs:PublishPick	ref[PickWrite(#2)]>FfaNumberingRules.cs:PublishPick
 hop	FfaNumberingRules.cs:EpochForUse	5bb2360b40a03e23	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
-hop	FfaNumberingRules.cs:EpochForUse	6441da77ec34cce5	FfaNumberingRules.cs:Restamp	ref>FfaNumberingRules.cs:Restamp
 hop	FfaNumberingRules.cs:EpochForUse	67576290b7e565a2	FfaNumberingRules.cs:DetectAhead	ref>FfaNumberingRules.cs:DetectAhead
-hop	FfaNumberingRules.cs:EpochForUse	ab9811ede17ab45b	FfaNumberingRules.cs:PublishPick	ref>FfaNumberingRules.cs:PublishPick
+hop	FfaNumberingRules.cs:EpochForUse	9d2e3da39a8a6209	FfaNumberingRules.cs:Restamp	ref[PickWrite(#2)]>FfaNumberingRules.cs:Restamp
 hop	FfaNumberingRules.cs:EpochForUse	fd3d1cb4d5e7e5de	FfaNumberingRules.cs:EpochForWrite	ref>FfaNumberingRules.cs:EpochForWrite
 hop	FfaNumberingRules.cs:EpochForWrite	13747affc956bdc9	FfaNumberingRules.cs:WaitBody	ref>FfaNumberingRules.cs:WaitBody
 hop	FfaNumberingRules.cs:EpochForWrite	e9a47540092df0fc	FfaNumberingRules.cs:Adopt	ref>FfaNumberingRules.cs:Adopt
@@ -8488,10 +8508,10 @@ hop	FfaNumberingRules.cs:Expected	b5f9bef1e13e2096	FfaNumberingRules.cs:EdgeChec
 hop	FfaNumberingRules.cs:Expected	c4b51c513d93e8d4	LagNotices.cs:RunSelfTest	delegate[.LogInfo(#0)/&]>LagNotices.cs:RunSelfTest
 hop	FfaNumberingRules.cs:ExpectedAdvert	fba2ba57bb33ab12	FfaNumberingRules.cs:EdgeChecks	ref>FfaNumberingRules.cs:EdgeChecks
 hop	FfaNumberingRules.cs:Fail	0a0327f16439f53e	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
+hop	FfaNumberingRules.cs:Fail	0d84c4074bde0380	FfaNumberingRules.cs:LostChecks	ref>FfaNumberingRules.cs:LostChecks
 hop	FfaNumberingRules.cs:Fail	1dc05ee2b4837561	FfaNumberingRules.cs:EdgeChecks	ref>FfaNumberingRules.cs:EdgeChecks
 hop	FfaNumberingRules.cs:Fail	29a2bb85bb4880a6	FfaNumberingRules.cs:ExpectedAdvert	ref>FfaNumberingRules.cs:ExpectedAdvert
 hop	FfaNumberingRules.cs:Fail	3cc3a2e972e0999b	FfaNumberingRules.cs:StartSeat	ref>FfaNumberingRules.cs:StartSeat
-hop	FfaNumberingRules.cs:Fail	430b99562334a0ee	FfaNumberingRules.cs:Run#1	ref>FfaNumberingRules.cs:Run#1
 hop	FfaNumberingRules.cs:Fail	4e370e88f5fd32b4	FfaNumberingRules.cs:Report	ref>FfaNumberingRules.cs:Report
 hop	FfaNumberingRules.cs:Fail	59cebcedc3e7c0a7	FfaNumberingRules.cs:CheckLeavers	ref>FfaNumberingRules.cs:CheckLeavers
 hop	FfaNumberingRules.cs:Fail	666b5cd8518ca69f	FfaNumberingRules.cs:AdoptFromPicks	ref>FfaNumberingRules.cs:AdoptFromPicks
@@ -8499,11 +8519,14 @@ hop	FfaNumberingRules.cs:Fail	6f06fc075ae54d5f	FfaNumberingRules.cs:EpochForUse	
 hop	FfaNumberingRules.cs:Fail	7a7433d76bf0bad4	FfaNumberingRules.cs:OnResultWritten	ref>FfaNumberingRules.cs:OnResultWritten
 hop	FfaNumberingRules.cs:Fail	8837926edafedbde	FfaNumberingRules.cs:CheckHeldEpoch	ref>FfaNumberingRules.cs:CheckHeldEpoch
 hop	FfaNumberingRules.cs:Fail	9de0131838188f81	FfaNumberingRules.cs:Expected	ref>FfaNumberingRules.cs:Expected
+hop	FfaNumberingRules.cs:Fail	a1a22535f32395cf	FfaNumberingRules.cs:AppliedLegacy	ref>FfaNumberingRules.cs:AppliedLegacy
 hop	FfaNumberingRules.cs:Fail	a2e4ea2354a5f26a	FfaNumberingRules.cs:ReopenCheck	ref>FfaNumberingRules.cs:ReopenCheck
 hop	FfaNumberingRules.cs:Fail	ad6f073d36a33ac4	FfaNumberingRules.cs:SourceCheck	ref>FfaNumberingRules.cs:SourceCheck
+hop	FfaNumberingRules.cs:Fail	af319685abc09358	FfaNumberingRules.cs:DeckChecks	ref>FfaNumberingRules.cs:DeckChecks
 hop	FfaNumberingRules.cs:Fail	b45b294d508921c1	SecureRouteRules.cs:PortalMintAction	delegate[&]>SecureRouteRules.cs:PortalMintAction
 hop	FfaNumberingRules.cs:Fail	d3db1a1343915c63	FfaNumberingRules.cs:StartChecks	ref>FfaNumberingRules.cs:StartChecks
 hop	FfaNumberingRules.cs:Fail	e494d8b667e052da	FfaNumberingRules.cs:CheckLivePoints	ref>FfaNumberingRules.cs:CheckLivePoints
+hop	FfaNumberingRules.cs:Fail	f36025082529902b	FfaNumberingRules.cs:Run#1	ref>FfaNumberingRules.cs:Run#1
 hop	FfaNumberingRules.cs:Fail	f9806bd9c192298e	FfaNumberingRules.cs:Applied	ref>FfaNumberingRules.cs:Applied
 hop	FfaNumberingRules.cs:FastLeave	210484177270de6b	FfaNumberingRules.cs:W67	ref>FfaNumberingRules.cs:W67
 hop	FfaNumberingRules.cs:FastLeave	b1c5ea16a1697c1f	FfaNumberingRules.cs:FoughtElsewhere	ref>FfaNumberingRules.cs:FoughtElsewhere
@@ -8587,7 +8610,6 @@ hop	FfaNumberingRules.cs:Join#1	3068004354881010	PcTradeRules.cs:SelfTest	ref[Ch
 hop	FfaNumberingRules.cs:Join#1	3280c055e5e49556	PortraitRender.cs:RigPath	ref>PortraitRender.cs:RigPath
 hop	FfaNumberingRules.cs:Join#1	36815e68034fc1ad	PlayerCardsUI.cs:SelShardSet	ref>PlayerCardsUI.cs:SelShardSet
 hop	FfaNumberingRules.cs:Join#1	36b5e1ea3a9a6764	NativeUI.SettingsDrive.cs:SettingsDriveStart	ref>NativeUI.SettingsDrive.cs:SettingsDriveStart
-hop	FfaNumberingRules.cs:Join#1	37210ea48753726f	FfaNumberingRules.cs:Run#1	ref>FfaNumberingRules.cs:Run#1
 hop	FfaNumberingRules.cs:Join#1	3992e95c0c9d757b	GameStateWatcher.cs:BuildTeamReportPayload	entry[ApiClient.TeamTelemetry.blockTimeline]>GameStateWatcher.cs:BuildTeamReportPayload
 hop	FfaNumberingRules.cs:Join#1	3cb333895285a279	NativeUI.SettingsDrive.cs:SettingsDriveStart	ref[Plugin.Log.LogWarning(#0)]>NativeUI.SettingsDrive.cs:SettingsDriveStart
 hop	FfaNumberingRules.cs:Join#1	3d32188f46dec831	FfaNumberingRules.cs:Join#2	ref>FfaNumberingRules.cs:Join#2
@@ -8654,6 +8676,7 @@ hop	FfaNumberingRules.cs:Join#1	7f5175eb0033f8e2	GameLocaleInjector.cs:StepLoadi
 hop	FfaNumberingRules.cs:Join#1	85240c8fcb394dcc	PlayerCardsUI.cs:JoinIntents	ref[sb.Append(#0)]>PlayerCardsUI.cs:JoinIntents
 hop	FfaNumberingRules.cs:Join#1	85a169fe4900b2d1	GameStateWatcher.cs:BuildTeamReportPayload	entry[ApiClient.TeamTelemetry.pingTimeline]>GameStateWatcher.cs:BuildTeamReportPayload
 hop	FfaNumberingRules.cs:Join#1	85eb4700b91c6101	PlayerCardsUI.cs:OnlyCopyNote	ref>PlayerCardsUI.cs:OnlyCopyNote
+hop	FfaNumberingRules.cs:Join#1	8aff349b838fd776	FfaNumberingRules.cs:Run#1	ref>FfaNumberingRules.cs:Run#1
 hop	FfaNumberingRules.cs:Join#1	8c11f3c700e6cde5	CustomMapColors.cs:FriendlyName	ref>CustomMapColors.cs:FriendlyName
 hop	FfaNumberingRules.cs:Join#1	8c2096ed032d29b1	GameStateWatcher.cs:TickSpectateAttest	ref[ApiClient.SpectateAttest(#8)]>GameStateWatcher.cs:TickSpectateAttest
 hop	FfaNumberingRules.cs:Join#1	8d40ee1618a76898	FfaNumberingRules.cs:W66	ref>FfaNumberingRules.cs:W66
@@ -8911,12 +8934,12 @@ hop	FfaNumberingRules.cs:Join#2	cf4e8589e8d01e71	LagNotices.cs:Exp	ref>LagNotice
 hop	FfaNumberingRules.cs:Join#2	d008cb5432183aad	NativeUI.cs:BuildSeriesCards	ref>NativeUI.cs:BuildSeriesCards
 hop	FfaNumberingRules.cs:Join#2	d0c11fe5a88516d9	GameStateWatcher.cs:OnGameOver	ref[ApiClient.ReportMatch(#45)]>GameStateWatcher.cs:OnGameOver
 hop	FfaNumberingRules.cs:Join#2	d1232d8d591d9810	FfaNumberingRules.cs:W66	ref>FfaNumberingRules.cs:W66
+hop	FfaNumberingRules.cs:Join#2	d176eec02c71d797	FfaNumberingRules.cs:Run#1	ref>FfaNumberingRules.cs:Run#1
 hop	FfaNumberingRules.cs:Join#2	d1d70529016dfb09	NativeUI.SettingsDrive.cs:DrvPrefSummary	ref>NativeUI.SettingsDrive.cs:DrvPrefSummary
 hop	FfaNumberingRules.cs:Join#2	d3844130b11ad47c	CardDrawEvidence.cs:BootLine	ref>CardDrawEvidence.cs:BootLine
 hop	FfaNumberingRules.cs:Join#2	d417dd93696fc2d3	GameStateWatcher.cs:OnGameOver	ref>GameStateWatcher.cs:OnGameOver
 hop	FfaNumberingRules.cs:Join#2	d447e71e12e423ca	NativeUI.cs:BuildOvtRecentRowText	ref[sb.Append(#0)]>NativeUI.cs:BuildOvtRecentRowText
 hop	FfaNumberingRules.cs:Join#2	d52904dc31646103	FfaNumberingRules.cs:W610	ref>FfaNumberingRules.cs:W610
-hop	FfaNumberingRules.cs:Join#2	d642632c6b4d7371	FfaNumberingRules.cs:Run#1	ref>FfaNumberingRules.cs:Run#1
 hop	FfaNumberingRules.cs:Join#2	d7a3d3018206dc2e	NativeUI.cs:GetWeightMaterial	ref[Plugin.Log.LogInfo(#0)]>NativeUI.cs:GetWeightMaterial
 hop	FfaNumberingRules.cs:Join#2	d7d966447a5f146c	GameLocaleInjector.cs:StepLoadingEn	ref[Abort(#0)]>GameLocaleInjector.cs:StepLoadingEn
 hop	FfaNumberingRules.cs:Join#2	d862f62606aed2e9	NativeUI.cs:RefreshTournaments	ref>NativeUI.cs:RefreshTournaments
@@ -8949,43 +8972,52 @@ hop	FfaNumberingRules.cs:Join#2	fdf9e231e3c7be23	SeatEvidenceCore.cs:CompatCanon
 hop	FfaNumberingRules.cs:Join#2	ff442808e368bd5b	FfaNumberingRules.cs:W61	delegate[=>{}]>FfaNumberingRules.cs:W61
 hop	FfaNumberingRules.cs:JoinAll	0837619f33b53be9	FfaNumberingRules.cs:W69	ref>FfaNumberingRules.cs:W69
 hop	FfaNumberingRules.cs:JoinAll	301ec0e55059f5d5	FfaNumberingRules.cs:W43	ref>FfaNumberingRules.cs:W43
-hop	FfaNumberingRules.cs:JoinAll	5021b203ccbebc99	FfaNumberingRules.cs:W79	ref>FfaNumberingRules.cs:W79
+hop	FfaNumberingRules.cs:JoinAll	3a828ea4d265ef21	FfaNumberingRules.cs:W79Room	ref>FfaNumberingRules.cs:W79Room
 hop	FfaNumberingRules.cs:JoinAll	5122e089e90587cd	FfaNumberingRules.cs:W68	ref>FfaNumberingRules.cs:W68
 hop	FfaNumberingRules.cs:JoinAll	8b90e4fa08d6c3d6	FfaNumberingRules.cs:S0	ref>FfaNumberingRules.cs:S0
 hop	FfaNumberingRules.cs:JoinAll	8f6962204dfea1d7	FfaNumberingRules.cs:WithKeeper	ref>FfaNumberingRules.cs:WithKeeper
 hop	FfaNumberingRules.cs:JoinAll	d921d008579259d6	FfaNumberingRules.cs:W611	ref>FfaNumberingRules.cs:W611
 hop	FfaNumberingRules.cs:L	0cba85486bb04ef9	FfaNumberingRules.cs:RunRoundTwoUnits	ref[Unit(#3)]>FfaNumberingRules.cs:RunRoundTwoUnits
+hop	FfaNumberingRules.cs:L	27ebef9a537b08a3	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	FfaNumberingRules.cs:Leave	10aedab908cf0c53	FfaNumberingRules.cs:W78	delegate[=>{}]>FfaNumberingRules.cs:W78
 hop	FfaNumberingRules.cs:Leave	2450ed8d77a5109f	FfaMode.cs:FfaLocalPickUI	ref>FfaMode.cs:FfaLocalPickUI
 hop	FfaNumberingRules.cs:Leave	247f09b4906fd0d4	FfaNumberingRules.cs:W64	delegate[=>{}]>FfaNumberingRules.cs:W64
 hop	FfaNumberingRules.cs:Leave	264410e8b91473ae	FfaNumberingRules.cs:FoughtElsewhere	ref>FfaNumberingRules.cs:FoughtElsewhere
 hop	FfaNumberingRules.cs:Leave	28d4f9abce3b7996	FfaLateRules.cs:K45ix	ref>FfaLateRules.cs:K45ix
+hop	FfaNumberingRules.cs:Leave	2eb124b9d63713ef	FfaNumberingRules.cs:W83	delegate[=>{}]>FfaNumberingRules.cs:W83
 hop	FfaNumberingRules.cs:Leave	38327ad897e8723b	FfaNumberingRules.cs:W63	delegate[=>{}]>FfaNumberingRules.cs:W63
 hop	FfaNumberingRules.cs:Leave	3fdff12e75c848e9	FfaNumberingRules.cs:W612	delegate[=>{}]>FfaNumberingRules.cs:W612
-hop	FfaNumberingRules.cs:Leave	5376ee0985cb719b	FfaNumberingRules.cs:W74	delegate[=>{}]>FfaNumberingRules.cs:W74
 hop	FfaNumberingRules.cs:Leave	59680211eb8b9e20	FfaNumberingRules.cs:W610	ref>FfaNumberingRules.cs:W610
+hop	FfaNumberingRules.cs:Leave	665a414b27ae0f22	FfaNumberingRules.cs:W84	delegate[=>{}]>FfaNumberingRules.cs:W84
 hop	FfaNumberingRules.cs:Leave	67e4d0b9f8d5c278	FfaNumberingRules.cs:W65	ref>FfaNumberingRules.cs:W65
 hop	FfaNumberingRules.cs:Leave	69c2344eea6a4cec	FfaNumberingRules.cs:W615	ref>FfaNumberingRules.cs:W615
 hop	FfaNumberingRules.cs:Leave	6c7ca62c492ac6de	FfaNumberingRules.cs:W66	ref>FfaNumberingRules.cs:W66
 hop	FfaNumberingRules.cs:Leave	7b558154284da98f	FfaNumberingRules.cs:W610	delegate[=>{}]>FfaNumberingRules.cs:W610
+hop	FfaNumberingRules.cs:Leave	7b69904564cf90fb	FfaNumberingRules.cs:W82	delegate[=>{}]>FfaNumberingRules.cs:W82
 hop	FfaNumberingRules.cs:Leave	7bec867c0a9febe6	TeamGameNumber.cs:Simulate	ref>TeamGameNumber.cs:Simulate
 hop	FfaNumberingRules.cs:Leave	81259d864f4053fc	FfaNumberingRules.cs:W62	delegate[=>{}]>FfaNumberingRules.cs:W62
-hop	FfaNumberingRules.cs:Leave	914aaa7d6a9bff49	FfaNumberingRules.cs:W79	ref>FfaNumberingRules.cs:W79
 hop	FfaNumberingRules.cs:Leave	998e30dd4c1a9270	FfaLateRules.cs:K45xiia	ref>FfaLateRules.cs:K45xiia
+hop	FfaNumberingRules.cs:Leave	9c7f3276d1344eb4	FfaNumberingRules.cs:W85	delegate[=>{}]>FfaNumberingRules.cs:W85
+hop	FfaNumberingRules.cs:Leave	9d25019a2d7beb9f	FfaNumberingRules.cs:W74Room	ref>FfaNumberingRules.cs:W74Room
 hop	FfaNumberingRules.cs:Leave	a31f638c4b070399	FfaNumberingRules.cs:W69	ref>FfaNumberingRules.cs:W69
 hop	FfaNumberingRules.cs:Leave	a74e9714eef4e8af	FfaNumberingRules.cs:W75	ref>FfaNumberingRules.cs:W75
 hop	FfaNumberingRules.cs:Leave	aea6edec6cf82b70	FfaNumberingRules.cs:W41	ref>FfaNumberingRules.cs:W41
+hop	FfaNumberingRules.cs:Leave	b10411b2dff7e59f	FfaNumberingRules.cs:W710t	delegate[=>{}]>FfaNumberingRules.cs:W710t
 hop	FfaNumberingRules.cs:Leave	b52e703091cacda4	FfaNumberingRules.cs:W711	delegate[=>{}]>FfaNumberingRules.cs:W711
+hop	FfaNumberingRules.cs:Leave	ba07347d3971ef5f	FfaNumberingRules.cs:W79Room	ref>FfaNumberingRules.cs:W79Room
 hop	FfaNumberingRules.cs:Leave	c09bc656ee73a2d1	FfaLateRules.cs:K45iii	ref>FfaLateRules.cs:K45iii
 hop	FfaNumberingRules.cs:Leave	c21fd788b880b05b	FfaLateRules.cs:K45iv	ref>FfaLateRules.cs:K45iv
 hop	FfaNumberingRules.cs:Leave	ca2ad91793cff20a	FfaNumberingRules.cs:W68	delegate[=>{}]>FfaNumberingRules.cs:W68
 hop	FfaNumberingRules.cs:Leave	d1fc512c6f9105e0	FfaNumberingRules.cs:W611	ref>FfaNumberingRules.cs:W611
+hop	FfaNumberingRules.cs:Leave	d82a7c66c414d40d	FfaNumberingRules.cs:W74Room	delegate[=>{}]>FfaNumberingRules.cs:W74Room
 hop	FfaNumberingRules.cs:Leave	e5a170c6002b6825	FfaNumberingRules.cs:W710	delegate[=>{}]>FfaNumberingRules.cs:W710
 hop	FfaNumberingRules.cs:Leave	e6d0c39d19af3429	FfaNumberingRules.cs:W615	delegate[=>{}]>FfaNumberingRules.cs:W615
+hop	FfaNumberingRules.cs:Leave	e78b3b9977fa934e	FfaNumberingRules.cs:W86	delegate[=>{}]>FfaNumberingRules.cs:W86
 hop	FfaNumberingRules.cs:Leave	eaf23facccb006f1	FfaNumberingRules.cs:W61	delegate[=>{}]>FfaNumberingRules.cs:W61
-hop	FfaNumberingRules.cs:Leave	ebb8e150e2426489	FfaNumberingRules.cs:W74	ref>FfaNumberingRules.cs:W74
 hop	FfaNumberingRules.cs:Leave	ece6158e4e4a2c9e	FfaNumberingRules.cs:W42	ref>FfaNumberingRules.cs:W42
+hop	FfaNumberingRules.cs:LegacyResultOf	ed9d61b901cda6fa	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:LivePointsGameNow	4a94f5b01c106ee2	FfaNumberingRules.cs:PointAt	ref>FfaNumberingRules.cs:PointAt
+hop	FfaNumberingRules.cs:LostChecks	f3442cef58df6f72	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:MasterPublishSeed	0d75893e03dd7646	FfaMode.cs:FfaPickPhase	ref>FfaMode.cs:FfaPickPhase
 hop	FfaNumberingRules.cs:MasterPublishSeed	408d046060836993	FfaNumberingRules.cs:StartCurrent	ref>FfaNumberingRules.cs:StartCurrent
 hop	FfaNumberingRules.cs:MasterPublishSeed	49abed5d8c0e5444	VanillaCardSequence.cs:OnPickPhase	ref>VanillaCardSequence.cs:OnPickPhase
@@ -8994,38 +9026,51 @@ hop	FfaNumberingRules.cs:MasterPublishSeed	5979e0e5dc4ec671	FfaNumberingRules.cs
 hop	FfaNumberingRules.cs:MasterPublishSeed	bb05fa541a15c4bd	FfaMode.cs:OnGameStart	ref>FfaMode.cs:OnGameStart
 hop	FfaNumberingRules.cs:MasterPublishSeed	d5280c33de17e8e2	FfaNumberingRules.cs:StepPhase	ref>FfaNumberingRules.cs:StepPhase
 hop	FfaNumberingRules.cs:MasterPublishSeed	f838b8ddb534fe88	VanillaCardSequence.cs:OnGameStart	ref>VanillaCardSequence.cs:OnGameStart
+hop	FfaNumberingRules.cs:NewSeat#1	07b80ddf029a380f	FfaNumberingRules.cs:W83	ref>FfaNumberingRules.cs:W83
 hop	FfaNumberingRules.cs:NewSeat#1	0bbae9c0c75df241	FfaNumberingRules.cs:W52m	ref>FfaNumberingRules.cs:W52m
+hop	FfaNumberingRules.cs:NewSeat#1	145a8e898b8a5a68	FfaNumberingRules.cs:W85	ref>FfaNumberingRules.cs:W85
 hop	FfaNumberingRules.cs:NewSeat#1	17dbbb33abb3a85a	FfaNumberingRules.cs:Abcd	entry[[2]]>FfaNumberingRules.cs:Abcd
-hop	FfaNumberingRules.cs:NewSeat#1	23006581721427a1	FfaNumberingRules.cs:W79	ref>FfaNumberingRules.cs:W79
 hop	FfaNumberingRules.cs:NewSeat#1	30ad2a2fa3f3a9e3	FfaNumberingRules.cs:Abcd	entry[[0]]>FfaNumberingRules.cs:Abcd
+hop	FfaNumberingRules.cs:NewSeat#1	3ee65ce35589162c	FfaNumberingRules.cs:W82	ref>FfaNumberingRules.cs:W82
 hop	FfaNumberingRules.cs:NewSeat#1	46321fb7aca2344c	FfaNumberingRules.cs:W52	ref>FfaNumberingRules.cs:W52
+hop	FfaNumberingRules.cs:NewSeat#1	4b0b2f64cd38005a	FfaNumberingRules.cs:W710t	ref>FfaNumberingRules.cs:W710t
 hop	FfaNumberingRules.cs:NewSeat#1	51c61f57cbe0786b	FfaNumberingRules.cs:W75	ref>FfaNumberingRules.cs:W75
+hop	FfaNumberingRules.cs:NewSeat#1	5c969b7774dd489f	FfaNumberingRules.cs:W86	ref>FfaNumberingRules.cs:W86
 hop	FfaNumberingRules.cs:NewSeat#1	5fee03a878453840	FfaNumberingRules.cs:W73	ref>FfaNumberingRules.cs:W73
 hop	FfaNumberingRules.cs:NewSeat#1	621da3f0fb864fee	FfaNumberingRules.cs:W52xf	ref>FfaNumberingRules.cs:W52xf
 hop	FfaNumberingRules.cs:NewSeat#1	6318d07599f4b79e	FfaNumberingRules.cs:W51	ref>FfaNumberingRules.cs:W51
 hop	FfaNumberingRules.cs:NewSeat#1	74ef65bee95c6bfa	FfaNumberingRules.cs:W711	ref>FfaNumberingRules.cs:W711
 hop	FfaNumberingRules.cs:NewSeat#1	793782ea6e803572	FfaNumberingRules.cs:W66	ref>FfaNumberingRules.cs:W66
+hop	FfaNumberingRules.cs:NewSeat#1	8cca8963f81fabc5	FfaNumberingRules.cs:W79Room	ref>FfaNumberingRules.cs:W79Room
 hop	FfaNumberingRules.cs:NewSeat#1	8e11752574d521ce	FfaNumberingRules.cs:W33	ref>FfaNumberingRules.cs:W33
 hop	FfaNumberingRules.cs:NewSeat#1	8f0d4fcbf60c9711	FfaNumberingRules.cs:Abcd	entry[[3]]>FfaNumberingRules.cs:Abcd
 hop	FfaNumberingRules.cs:NewSeat#1	b4abd94a8b129d8a	FfaNumberingRules.cs:W710	ref>FfaNumberingRules.cs:W710
 hop	FfaNumberingRules.cs:NewSeat#1	b4c46fa34c435afb	FfaNumberingRules.cs:W613	ref>FfaNumberingRules.cs:W613
-hop	FfaNumberingRules.cs:NewSeat#1	bfbd611c87d13768	FfaNumberingRules.cs:W74	ref>FfaNumberingRules.cs:W74
+hop	FfaNumberingRules.cs:NewSeat#1	c3afea5ee35e6bbb	FfaNumberingRules.cs:W74Room	ref>FfaNumberingRules.cs:W74Room
 hop	FfaNumberingRules.cs:NewSeat#1	d42989c6a1618d98	FfaNumberingRules.cs:W54	ref>FfaNumberingRules.cs:W54
 hop	FfaNumberingRules.cs:NewSeat#1	df3ad2e9d2184e56	FfaNumberingRules.cs:W611	ref>FfaNumberingRules.cs:W611
 hop	FfaNumberingRules.cs:NewSeat#1	e0062095bfb0d2e7	FfaNumberingRules.cs:W615	ref>FfaNumberingRules.cs:W615
 hop	FfaNumberingRules.cs:NewSeat#1	ebd13842f9350788	FfaNumberingRules.cs:W53	ref>FfaNumberingRules.cs:W53
 hop	FfaNumberingRules.cs:NewSeat#1	ee62113d534838e2	FfaNumberingRules.cs:W69	ref>FfaNumberingRules.cs:W69
+hop	FfaNumberingRules.cs:NewSeat#1	f43ebfd822b72ff1	FfaNumberingRules.cs:W81	ref>FfaNumberingRules.cs:W81
 hop	FfaNumberingRules.cs:NewSeat#1	f7872c0f055d7748	FfaNumberingRules.cs:Abcd	entry[[1]]>FfaNumberingRules.cs:Abcd
+hop	FfaNumberingRules.cs:NewSeat#1	ff73d67c9db1e873	FfaNumberingRules.cs:W84	ref>FfaNumberingRules.cs:W84
+hop	FfaNumberingRules.cs:NewSeat#2	0884dd9b44441024	FfaNumberingRules.cs:W84	ref>FfaNumberingRules.cs:W84
 hop	FfaNumberingRules.cs:NewSeat#2	0f011ef4ee14c984	FfaNumberingRules.cs:W611	ref>FfaNumberingRules.cs:W611
+hop	FfaNumberingRules.cs:NewSeat#2	0f811b5e567d3781	FfaNumberingRules.cs:W79Room	ref>FfaNumberingRules.cs:W79Room
 hop	FfaNumberingRules.cs:NewSeat#2	1bb8c64465db978a	FfaNumberingRules.cs:W613	ref>FfaNumberingRules.cs:W613
+hop	FfaNumberingRules.cs:NewSeat#2	25d5025765fc561a	FfaNumberingRules.cs:W83	ref>FfaNumberingRules.cs:W83
 hop	FfaNumberingRules.cs:NewSeat#2	2dbc7df88d58500b	FfaNumberingRules.cs:W54	ref>FfaNumberingRules.cs:W54
 hop	FfaNumberingRules.cs:NewSeat#2	3d5a8de6c3091466	FfaNumberingRules.cs:W711	ref>FfaNumberingRules.cs:W711
+hop	FfaNumberingRules.cs:NewSeat#2	4d3780eb4802f9dd	FfaNumberingRules.cs:W86	ref>FfaNumberingRules.cs:W86
+hop	FfaNumberingRules.cs:NewSeat#2	56bb0db63eb8b11b	FfaNumberingRules.cs:W710t	ref>FfaNumberingRules.cs:W710t
 hop	FfaNumberingRules.cs:NewSeat#2	6015eb488ef8c1a4	FfaNumberingRules.cs:Abcd	entry[[3]]>FfaNumberingRules.cs:Abcd
 hop	FfaNumberingRules.cs:NewSeat#2	635f78806e0a6530	FfaNumberingRules.cs:W75	ref>FfaNumberingRules.cs:W75
 hop	FfaNumberingRules.cs:NewSeat#2	7c13df8ac0198ac3	FfaNumberingRules.cs:W33	ref>FfaNumberingRules.cs:W33
 hop	FfaNumberingRules.cs:NewSeat#2	8290ea33661a32a6	FfaNumberingRules.cs:W52m	ref>FfaNumberingRules.cs:W52m
 hop	FfaNumberingRules.cs:NewSeat#2	83df3d808987d57a	FfaNumberingRules.cs:W52	ref>FfaNumberingRules.cs:W52
 hop	FfaNumberingRules.cs:NewSeat#2	852fb9ba6c99b11c	FfaNumberingRules.cs:W51	ref>FfaNumberingRules.cs:W51
+hop	FfaNumberingRules.cs:NewSeat#2	8561c4e4aa9d0024	FfaNumberingRules.cs:W82	ref>FfaNumberingRules.cs:W82
 hop	FfaNumberingRules.cs:NewSeat#2	87560bd6e6abe5bd	FfaNumberingRules.cs:Abcd	entry[[1]]>FfaNumberingRules.cs:Abcd
 hop	FfaNumberingRules.cs:NewSeat#2	8d11ea73f7e6fecc	FfaNumberingRules.cs:W710	ref>FfaNumberingRules.cs:W710
 hop	FfaNumberingRules.cs:NewSeat#2	a65ccc984ec32f64	FfaNumberingRules.cs:Abcd	entry[[2]]>FfaNumberingRules.cs:Abcd
@@ -9033,9 +9078,10 @@ hop	FfaNumberingRules.cs:NewSeat#2	a72a545ad52fd82d	FfaNumberingRules.cs:W66	ref
 hop	FfaNumberingRules.cs:NewSeat#2	a7eaacc868fabde6	FfaNumberingRules.cs:W52xf	ref>FfaNumberingRules.cs:W52xf
 hop	FfaNumberingRules.cs:NewSeat#2	a838ce909f8f7b3a	FfaNumberingRules.cs:Abcd	entry[[0]]>FfaNumberingRules.cs:Abcd
 hop	FfaNumberingRules.cs:NewSeat#2	b5a94e7eb4732868	FfaNumberingRules.cs:W53	ref>FfaNumberingRules.cs:W53
+hop	FfaNumberingRules.cs:NewSeat#2	c2fd8b0a101c13dd	FfaNumberingRules.cs:W85	ref>FfaNumberingRules.cs:W85
 hop	FfaNumberingRules.cs:NewSeat#2	c7dfdc6c06a0312d	FfaNumberingRules.cs:W615	ref>FfaNumberingRules.cs:W615
-hop	FfaNumberingRules.cs:NewSeat#2	d5471b1da0ba8070	FfaNumberingRules.cs:W79	ref>FfaNumberingRules.cs:W79
-hop	FfaNumberingRules.cs:NewSeat#2	dcfc2cc4402403b3	FfaNumberingRules.cs:W74	ref>FfaNumberingRules.cs:W74
+hop	FfaNumberingRules.cs:NewSeat#2	d267af4ec1b419cf	FfaNumberingRules.cs:W74Room	ref>FfaNumberingRules.cs:W74Room
+hop	FfaNumberingRules.cs:NewSeat#2	d9b1f2caa17eb160	FfaNumberingRules.cs:W81	ref>FfaNumberingRules.cs:W81
 hop	FfaNumberingRules.cs:NewSeat#2	e15a477bfe5b264c	FfaNumberingRules.cs:W73	ref>FfaNumberingRules.cs:W73
 hop	FfaNumberingRules.cs:NewSeat#2	e5a793c0e54eebd3	FfaNumberingRules.cs:W69	ref>FfaNumberingRules.cs:W69
 hop	FfaNumberingRules.cs:OnResultWritten	5908636af2a984b2	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
@@ -9075,8 +9121,11 @@ hop	FfaNumberingRules.cs:Pick	ac3aec15e78086bd	AvatarDefaultRules.cs:Show	delega
 hop	FfaNumberingRules.cs:Pick	c19860844f59d6fe	AvatarDefaultRules.cs:Applied	delegate[Say(#0)/&]>AvatarDefaultRules.cs:Applied
 hop	FfaNumberingRules.cs:Pick	cd31822aff82c877	AvatarDefaultRules.cs:Tick	delegate[rules.BoundToPopup(#0)/&]>AvatarDefaultRules.cs:Tick
 hop	FfaNumberingRules.cs:Pick	efe6409f003dc29f	FfaNumberingRules.cs:W711	delegate[=>{}]>FfaNumberingRules.cs:W711
+hop	FfaNumberingRules.cs:PickWrite	234afc14c6c58740	FfaNumberingRules.cs:Restamp	ref>FfaNumberingRules.cs:Restamp
+hop	FfaNumberingRules.cs:PickWrite	4e51ebc95c3a5363	FfaNumberingRules.cs:PublishPick	ref>FfaNumberingRules.cs:PublishPick
 hop	FfaNumberingRules.cs:Play#1	088eb0c301a4785d	FfaNumberingRules.cs:W614	ref>FfaNumberingRules.cs:W614
 hop	FfaNumberingRules.cs:Play#1	0d3dc2de8093aff4	FfaNumberingRules.cs:W42	ref>FfaNumberingRules.cs:W42
+hop	FfaNumberingRules.cs:Play#1	0da27b1152db198b	FfaNumberingRules.cs:W710t	ref>FfaNumberingRules.cs:W710t
 hop	FfaNumberingRules.cs:Play#1	163ae6400440a2ac	FfaNumberingRules.cs:W611	ref>FfaNumberingRules.cs:W611
 hop	FfaNumberingRules.cs:Play#1	17e55c9c754d4dea	SessionReportView.cs:DrawPlayersPage	delegate[DrawTable(#2)/&]>SessionReportView.cs:DrawPlayersPage
 hop	FfaNumberingRules.cs:Play#1	19dc995d3e6c7bf7	SessionReportModel.cs:BuildTotalsPages	delegate[FillTable(#1)/&]>SessionReportModel.cs:BuildTotalsPages
@@ -9093,13 +9142,15 @@ hop	FfaNumberingRules.cs:Play#1	2d36ba940dc8c01c	MusicStreamProbe.cs:BindAndPlay
 hop	FfaNumberingRules.cs:Play#1	31aa0b062b2cd1f8	SessionReportModel.cs:BuildTotalsPages	delegate[&]>SessionReportModel.cs:BuildTotalsPages
 hop	FfaNumberingRules.cs:Play#1	3352482ed8c67666	FfaNumberingRules.cs:W32m	ref>FfaNumberingRules.cs:W32m
 hop	FfaNumberingRules.cs:Play#1	3430fc6a686ec96c	FfaNumberingRules.cs:W31	ref>FfaNumberingRules.cs:W31
+hop	FfaNumberingRules.cs:Play#1	43338c682f19e87d	FfaNumberingRules.cs:W79Room	ref>FfaNumberingRules.cs:W79Room
 hop	FfaNumberingRules.cs:Play#1	43975f464b55069f	FfaNumberingRules.cs:FoughtElsewhere	ref>FfaNumberingRules.cs:FoughtElsewhere
-hop	FfaNumberingRules.cs:Play#1	46dfbc5f57a70495	FfaNumberingRules.cs:W79	ref>FfaNumberingRules.cs:W79
 hop	FfaNumberingRules.cs:Play#1	46f542561a2c1806	FfaNumberingRules.cs:W63	ref>FfaNumberingRules.cs:W63
 hop	FfaNumberingRules.cs:Play#1	48e8a7cc0ff14986	MusicEngine.cs:TickPlayback	ref>MusicEngine.cs:TickPlayback
 hop	FfaNumberingRules.cs:Play#1	5441576c7eed91fb	FfaNumberingRules.cs:W68	ref>FfaNumberingRules.cs:W68
+hop	FfaNumberingRules.cs:Play#1	5842e9e8bf1ecbb8	FfaNumberingRules.cs:W85	ref>FfaNumberingRules.cs:W85
 hop	FfaNumberingRules.cs:Play#1	6237ca6dec6f14d4	FfaNumberingRules.cs:Play#2	ref>FfaNumberingRules.cs:Play#2
 hop	FfaNumberingRules.cs:Play#1	67975785adac730c	FfaNumberingRules.cs:W67	ref>FfaNumberingRules.cs:W67
+hop	FfaNumberingRules.cs:Play#1	689aa7468fa2d8f3	FfaNumberingRules.cs:W83	ref>FfaNumberingRules.cs:W83
 hop	FfaNumberingRules.cs:Play#1	721bba62c9fa7e2d	SessionReportView.cs:DrawPlayersPage	delegate[DrawTable(#1)/&]>SessionReportView.cs:DrawPlayersPage
 hop	FfaNumberingRules.cs:Play#1	74d331c6768c5f4e	FfaNumberingRules.cs:W43	ref>FfaNumberingRules.cs:W43
 hop	FfaNumberingRules.cs:Play#1	7659288750dd2548	FfaNumberingRules.cs:W52m	ref>FfaNumberingRules.cs:W52m
@@ -9110,9 +9161,10 @@ hop	FfaNumberingRules.cs:Play#1	7df19e9076915477	FfaNumberingRules.cs:W78	ref>Ff
 hop	FfaNumberingRules.cs:Play#1	81a7c6edffa9bd49	FfaNumberingRules.cs:W41	ref>FfaNumberingRules.cs:W41
 hop	FfaNumberingRules.cs:Play#1	8472b5241020bc22	FfaNumberingRules.cs:W61	ref>FfaNumberingRules.cs:W61
 hop	FfaNumberingRules.cs:Play#1	8a1212858a74d563	FfaNumberingRules.cs:W613	ref>FfaNumberingRules.cs:W613
+hop	FfaNumberingRules.cs:Play#1	8d80112a056828c2	FfaNumberingRules.cs:W84	ref>FfaNumberingRules.cs:W84
 hop	FfaNumberingRules.cs:Play#1	8e3e071c39cf8c62	FfaNumberingRules.cs:W72	ref>FfaNumberingRules.cs:W72
-hop	FfaNumberingRules.cs:Play#1	95143cb29759c709	FfaNumberingRules.cs:W74	ref>FfaNumberingRules.cs:W74
 hop	FfaNumberingRules.cs:Play#1	9d911634cbffa816	FfaNumberingRules.cs:W75	ref>FfaNumberingRules.cs:W75
+hop	FfaNumberingRules.cs:Play#1	9dfb9fa113b983f7	FfaNumberingRules.cs:W82	ref>FfaNumberingRules.cs:W82
 hop	FfaNumberingRules.cs:Play#1	a0b2e8077ba6c121	FfaNumberingRules.cs:W615	ref>FfaNumberingRules.cs:W615
 hop	FfaNumberingRules.cs:Play#1	a25ac82efe1b23c7	Plugin.cs:RetintAfterChildrenSpawn	ref>Plugin.cs:RetintAfterChildrenSpawn
 hop	FfaNumberingRules.cs:Play#1	a99e307ef0e16d0b	FfaNumberingRules.cs:W52	ref>FfaNumberingRules.cs:W52
@@ -9122,7 +9174,9 @@ hop	FfaNumberingRules.cs:Play#1	bb052cc0c7d0bdff	FfaNumberingRules.cs:W52xf	ref>
 hop	FfaNumberingRules.cs:Play#1	be11afc681f64b1f	FfaNumberingRules.cs:W610	ref>FfaNumberingRules.cs:W610
 hop	FfaNumberingRules.cs:Play#1	bff432fdd2531f36	FfaNumberingRules.cs:W65	ref>FfaNumberingRules.cs:W65
 hop	FfaNumberingRules.cs:Play#1	c49fec2c6ebb9cf3	FfaNumberingRules.cs:W710	ref>FfaNumberingRules.cs:W710
+hop	FfaNumberingRules.cs:Play#1	c80631f0d4b8de04	FfaNumberingRules.cs:W74Room	ref>FfaNumberingRules.cs:W74Room
 hop	FfaNumberingRules.cs:Play#1	cdb00cbda8fb7fcf	FfaNumberingRules.cs:W53	ref>FfaNumberingRules.cs:W53
+hop	FfaNumberingRules.cs:Play#1	d384c1df30701be2	FfaNumberingRules.cs:W86	ref>FfaNumberingRules.cs:W86
 hop	FfaNumberingRules.cs:Play#1	d3b3b1196efdc165	FfaNumberingRules.cs:W66	ref>FfaNumberingRules.cs:W66
 hop	FfaNumberingRules.cs:Play#1	dc6e6204f7b36a36	FfaNumberingRules.cs:W612	ref>FfaNumberingRules.cs:W612
 hop	FfaNumberingRules.cs:Play#1	def155a8b7f3205d	MusicStreamProbe.cs:PumpControls	ref[case 5]>MusicStreamProbe.cs:PumpControls
@@ -9139,23 +9193,24 @@ hop	FfaNumberingRules.cs:Play#2	26213cd996630744	FfaNumberingRules.cs:W41	ref>Ff
 hop	FfaNumberingRules.cs:Play#2	29ca1c90f0c1465b	FfaNumberingRules.cs:W61	ref>FfaNumberingRules.cs:W61
 hop	FfaNumberingRules.cs:Play#2	2bf64dee5493f994	MusicEngine.cs:EnterWaiting	ref>MusicEngine.cs:EnterWaiting
 hop	FfaNumberingRules.cs:Play#2	2dfaf42ae202f351	FfaNumberingRules.cs:W72	ref>FfaNumberingRules.cs:W72
+hop	FfaNumberingRules.cs:Play#2	301b32b192944b10	FfaNumberingRules.cs:W83	ref>FfaNumberingRules.cs:W83
 hop	FfaNumberingRules.cs:Play#2	328ae2dc2c397336	FfaNumberingRules.cs:W612	ref>FfaNumberingRules.cs:W612
 hop	FfaNumberingRules.cs:Play#2	332edad43ec5b89d	Plugin.cs:RetintAfterChildrenSpawn	ref>Plugin.cs:RetintAfterChildrenSpawn
 hop	FfaNumberingRules.cs:Play#2	3da7f61406d51f18	FfaNumberingRules.cs:W52m	ref>FfaNumberingRules.cs:W52m
+hop	FfaNumberingRules.cs:Play#2	3ea4fd3d0855caba	FfaNumberingRules.cs:W84	ref>FfaNumberingRules.cs:W84
 hop	FfaNumberingRules.cs:Play#2	449b01b7a4a256e2	FfaNumberingRules.cs:W68	ref>FfaNumberingRules.cs:W68
 hop	FfaNumberingRules.cs:Play#2	46c4135407dda778	MusicStreamProbe.cs:BindAndPlay	ref>MusicStreamProbe.cs:BindAndPlay
 hop	FfaNumberingRules.cs:Play#2	46d627139d12c496	SessionReportModel.cs:BuildTotalsPages	delegate[&]>SessionReportModel.cs:BuildTotalsPages
-hop	FfaNumberingRules.cs:Play#2	4d7c99c2eeb4f64f	FfaNumberingRules.cs:W74	ref>FfaNumberingRules.cs:W74
 hop	FfaNumberingRules.cs:Play#2	4f386611182575d6	FfaNumberingRules.cs:W611	ref>FfaNumberingRules.cs:W611
 hop	FfaNumberingRules.cs:Play#2	5233cf4bf0ac86b4	FfaNumberingRules.cs:W53	ref>FfaNumberingRules.cs:W53
 hop	FfaNumberingRules.cs:Play#2	57a79a789a1d7b70	CompetitiveUI.cs:PlayMatchFoundSound	ref>CompetitiveUI.cs:PlayMatchFoundSound
-hop	FfaNumberingRules.cs:Play#2	5c0c56fd22f52f97	FfaNumberingRules.cs:W79	ref>FfaNumberingRules.cs:W79
 hop	FfaNumberingRules.cs:Play#2	631d1cfaa5d04769	MailUI.cs:PlayMailSound	ref>MailUI.cs:PlayMailSound
 hop	FfaNumberingRules.cs:Play#2	6352323fd47ca522	FfaNumberingRules.cs:W710	ref>FfaNumberingRules.cs:W710
 hop	FfaNumberingRules.cs:Play#2	6d176d52f9ae6bd2	MapSkinEffects.cs:Apply	ref>MapSkinEffects.cs:Apply
 hop	FfaNumberingRules.cs:Play#2	6dbbc72c3beef1cc	FfaMapScale.cs:Prefix#2	ref>FfaMapScale.cs:Prefix#2
 hop	FfaNumberingRules.cs:Play#2	6efd41ade76bd09e	MusicStreamProbe.cs:PumpControls	ref[case 5]>MusicStreamProbe.cs:PumpControls
 hop	FfaNumberingRules.cs:Play#2	700249b07b0dfc65	FfaNumberingRules.cs:W610	ref>FfaNumberingRules.cs:W610
+hop	FfaNumberingRules.cs:Play#2	74b56bfc5332ebd5	FfaNumberingRules.cs:W74Room	ref>FfaNumberingRules.cs:W74Room
 hop	FfaNumberingRules.cs:Play#2	750846a6ecf94513	FfaNumberingRules.cs:W32m	ref>FfaNumberingRules.cs:W32m
 hop	FfaNumberingRules.cs:Play#2	7a6cb93950bc6114	FfaNumberingRules.cs:W63	ref>FfaNumberingRules.cs:W63
 hop	FfaNumberingRules.cs:Play#2	7b1822fb5eb33818	FfaNumberingRules.cs:W614	ref>FfaNumberingRules.cs:W614
@@ -9164,12 +9219,15 @@ hop	FfaNumberingRules.cs:Play#2	8a191f66ff702210	FfaNumberingRules.cs:W34	ref>Ff
 hop	FfaNumberingRules.cs:Play#2	8c588cb81902af79	FfaNumberingRules.cs:W613	ref>FfaNumberingRules.cs:W613
 hop	FfaNumberingRules.cs:Play#2	91b4ee601a9292b4	FfaNumberingRules.cs:W31	ref>FfaNumberingRules.cs:W31
 hop	FfaNumberingRules.cs:Play#2	9493f0ac4eaee2b9	FfaNumberingRules.cs:W65	ref>FfaNumberingRules.cs:W65
+hop	FfaNumberingRules.cs:Play#2	9b59b5f4b5ca8e10	FfaNumberingRules.cs:W82	ref>FfaNumberingRules.cs:W82
 hop	FfaNumberingRules.cs:Play#2	a28253e3dbc9922f	FfaNumberingRules.cs:W52xf	ref>FfaNumberingRules.cs:W52xf
 hop	FfaNumberingRules.cs:Play#2	a5b8947a7157b6bd	SessionReportView.cs:DrawPlayersPage	delegate[DrawTable(#1)/&]>SessionReportView.cs:DrawPlayersPage
 hop	FfaNumberingRules.cs:Play#2	a83b8fe53bdfa8b3	MusicEngine.cs:EnsureMainPlaying	ref>MusicEngine.cs:EnsureMainPlaying
 hop	FfaNumberingRules.cs:Play#2	aba4e6028f330a04	FfaNumberingRules.cs:W54	ref>FfaNumberingRules.cs:W54
+hop	FfaNumberingRules.cs:Play#2	ae196dd323556d34	FfaNumberingRules.cs:W79Room	ref>FfaNumberingRules.cs:W79Room
 hop	FfaNumberingRules.cs:Play#2	b2d91bb552a09611	FfaNumberingRules.cs:W33	ref>FfaNumberingRules.cs:W33
 hop	FfaNumberingRules.cs:Play#2	b4e3967eefdb8555	PlayerEffectCosmetic.cs:ApplyAnimationState	ref>PlayerEffectCosmetic.cs:ApplyAnimationState
+hop	FfaNumberingRules.cs:Play#2	b510fdb87180184d	FfaNumberingRules.cs:W710t	ref>FfaNumberingRules.cs:W710t
 hop	FfaNumberingRules.cs:Play#2	bd3d73cc9a1cc502	FfaNumberingRules.cs:W615	ref>FfaNumberingRules.cs:W615
 hop	FfaNumberingRules.cs:Play#2	bee0e6a92bbec4de	FfaNumberingRules.cs:W711	ref>FfaNumberingRules.cs:W711
 hop	FfaNumberingRules.cs:Play#2	c8fecba8bd47f127	FfaNumberingRules.cs:W43	ref>FfaNumberingRules.cs:W43
@@ -9179,7 +9237,9 @@ hop	FfaNumberingRules.cs:Play#2	d7e3ac4729f9601e	MusicEngine.cs:TickPlayback	ref
 hop	FfaNumberingRules.cs:Play#2	db126fed0a9c20d4	FfaNumberingRules.cs:W69	ref>FfaNumberingRules.cs:W69
 hop	FfaNumberingRules.cs:Play#2	ddbee1d60ea13a53	FfaNumberingRules.cs:W42	ref>FfaNumberingRules.cs:W42
 hop	FfaNumberingRules.cs:Play#2	e83e58aa637a36f7	SessionReportModel.cs:BuildTotalsPages	delegate[FillTable(#1)/&]>SessionReportModel.cs:BuildTotalsPages
+hop	FfaNumberingRules.cs:Play#2	e9d4ec0af9ea4fe2	FfaNumberingRules.cs:W86	ref>FfaNumberingRules.cs:W86
 hop	FfaNumberingRules.cs:Play#2	ebf888b708e19fc9	FfaNumberingRules.cs:W52	ref>FfaNumberingRules.cs:W52
+hop	FfaNumberingRules.cs:Play#2	ec3f7a1e56625cd2	FfaNumberingRules.cs:W85	ref>FfaNumberingRules.cs:W85
 hop	FfaNumberingRules.cs:Play#2	f29ecfdf12d23308	FfaNumberingRules.cs:W62	ref>FfaNumberingRules.cs:W62
 hop	FfaNumberingRules.cs:Play#2	f795724c56ef6021	FfaNumberingRules.cs:W32	ref>FfaNumberingRules.cs:W32
 hop	FfaNumberingRules.cs:Play#2	fc9bd40a264aef47	FfaNumberingRules.cs:WithKeeper	ref>FfaNumberingRules.cs:WithKeeper
@@ -9237,6 +9297,7 @@ hop	FfaNumberingRules.cs:Report	e6eb9d5f05f18a40	FfaNumberingRules.cs:EdgeNew	re
 hop	FfaNumberingRules.cs:ResValue	22c70302a1274f7c	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Restamp	37be892468357a5a	FfaNumberingRules.cs:Adopt	ref>FfaNumberingRules.cs:Adopt
 hop	FfaNumberingRules.cs:Restamp	531ebd056798fc8d	FfaNumberingRules.cs:OpenOnPromotion	ref>FfaNumberingRules.cs:OpenOnPromotion
+hop	FfaNumberingRules.cs:Restamp	5a403886b1cb999d	FfaNumberingRules.cs:EpochMasterCheck	ref>FfaNumberingRules.cs:EpochMasterCheck
 hop	FfaNumberingRules.cs:Restamp	5e03070e35920599	FfaNumberingRules.cs:EvaluateEpoch	ref>FfaNumberingRules.cs:EvaluateEpoch
 hop	FfaNumberingRules.cs:Restamp	8cf2e45d3668413d	FfaNumberingRules.cs:WaitBody	ref>FfaNumberingRules.cs:WaitBody
 hop	FfaNumberingRules.cs:ResultBody	f682d8c7f0754799	FfaNumberingRules.cs:StepPhase	ref>FfaNumberingRules.cs:StepPhase
@@ -9259,10 +9320,10 @@ hop	FfaNumberingRules.cs:Run#1	d39b8ab0a7fe2439	PoisonSync.cs:Finalizer#3	ref>Po
 hop	FfaNumberingRules.cs:Run#1	f4d5f026afdd1db1	PoisonSync.cs:After#5	ref>PoisonSync.cs:After#5
 hop	FfaNumberingRules.cs:Run#2	855064983493fd29	FfaNumberingRules.cs:RunAll	ref>FfaNumberingRules.cs:RunAll
 hop	FfaNumberingRules.cs:RunAll	5646c21fa65de3a3	FfaNumberingRules.cs:SelfTest	ref>FfaNumberingRules.cs:SelfTest
+hop	FfaNumberingRules.cs:RunLegacyBridgeUnits	adab271cabf0350b	FfaNumberingRules.cs:RunRoundTwoUnits	ref>FfaNumberingRules.cs:RunRoundTwoUnits
 hop	FfaNumberingRules.cs:RunPhases	10046ddcd60ca2f3	FfaNumberingRules.cs:Cycle	ref>FfaNumberingRules.cs:Cycle
 hop	FfaNumberingRules.cs:RunRoundTwoUnits	f85c5152acc00428	FfaNumberingRules.cs:RunUnits	ref>FfaNumberingRules.cs:RunUnits
 hop	FfaNumberingRules.cs:RunUnits	eabcf6e492a6b641	FfaNumberingRules.cs:SelfTest	ref>FfaNumberingRules.cs:SelfTest
-hop	FfaNumberingRules.cs:S0	18efb05eceb4085f	FfaNumberingRules.cs:W74	ref>FfaNumberingRules.cs:W74
 hop	FfaNumberingRules.cs:S0	23e3b2c98e3e8d4e	FfaNumberingRules.cs:W67	ref>FfaNumberingRules.cs:W67
 hop	FfaNumberingRules.cs:S0	26d7be8c611c7a76	FfaNumberingRules.cs:W710	ref>FfaNumberingRules.cs:W710
 hop	FfaNumberingRules.cs:S0	33c1d67376eadae7	FfaNumberingRules.cs:W65	ref>FfaNumberingRules.cs:W65
@@ -9270,20 +9331,28 @@ hop	FfaNumberingRules.cs:S0	348dfb05780f0a62	FfaNumberingRules.cs:W71	ref>FfaNum
 hop	FfaNumberingRules.cs:S0	349e87642a401f66	FfaNumberingRules.cs:W33	ref>FfaNumberingRules.cs:W33
 hop	FfaNumberingRules.cs:S0	3d8bc5d0d6158361	FfaNumberingRules.cs:W42	ref>FfaNumberingRules.cs:W42
 hop	FfaNumberingRules.cs:S0	44dea8a4184016d4	FfaNumberingRules.cs:W61	ref>FfaNumberingRules.cs:W61
+hop	FfaNumberingRules.cs:S0	4cbba09925a20430	FfaNumberingRules.cs:W83	ref>FfaNumberingRules.cs:W83
 hop	FfaNumberingRules.cs:S0	50be01deb7d4309e	FfaNumberingRules.cs:W610	ref>FfaNumberingRules.cs:W610
+hop	FfaNumberingRules.cs:S0	528534b66bf2a4c6	FfaNumberingRules.cs:W710t	ref>FfaNumberingRules.cs:W710t
 hop	FfaNumberingRules.cs:S0	5468130b69d31385	FfaNumberingRules.cs:W711	ref>FfaNumberingRules.cs:W711
 hop	FfaNumberingRules.cs:S0	56092e10cf397786	FfaNumberingRules.cs:W72	ref>FfaNumberingRules.cs:W72
 hop	FfaNumberingRules.cs:S0	58d715782a9e3170	FfaNumberingRules.cs:W41	ref>FfaNumberingRules.cs:W41
+hop	FfaNumberingRules.cs:S0	5f6abe11296468da	FfaNumberingRules.cs:W74Room	ref>FfaNumberingRules.cs:W74Room
 hop	FfaNumberingRules.cs:S0	78e08c078c0394c8	FfaNumberingRules.cs:W53	ref>FfaNumberingRules.cs:W53
+hop	FfaNumberingRules.cs:S0	7a43f0266cc376f5	FfaNumberingRules.cs:W85	ref>FfaNumberingRules.cs:W85
 hop	FfaNumberingRules.cs:S0	7ab7a7c3a042a446	FfaNumberingRules.cs:W62	ref>FfaNumberingRules.cs:W62
+hop	FfaNumberingRules.cs:S0	8799e97566ba91b4	FfaNumberingRules.cs:W81	ref>FfaNumberingRules.cs:W81
 hop	FfaNumberingRules.cs:S0	910c2ddf0a7323d5	FfaNumberingRules.cs:W73	ref>FfaNumberingRules.cs:W73
 hop	FfaNumberingRules.cs:S0	9db5feb45fa5bfc7	FfaNumberingRules.cs:W34	ref>FfaNumberingRules.cs:W34
+hop	FfaNumberingRules.cs:S0	adfcad0113c87170	FfaNumberingRules.cs:W82	ref>FfaNumberingRules.cs:W82
 hop	FfaNumberingRules.cs:S0	c6bfa57df88377ca	FfaNumberingRules.cs:W32	ref>FfaNumberingRules.cs:W32
 hop	FfaNumberingRules.cs:S0	c87b037848e6c8ac	FfaNumberingRules.cs:W78	ref>FfaNumberingRules.cs:W78
 hop	FfaNumberingRules.cs:S0	d10f1e81dd2d810b	FfaNumberingRules.cs:W32m	ref>FfaNumberingRules.cs:W32m
 hop	FfaNumberingRules.cs:S0	d498e620d3b78bb7	FfaNumberingRules.cs:W614	ref>FfaNumberingRules.cs:W614
 hop	FfaNumberingRules.cs:S0	e69d8b9be32b6ca7	FfaNumberingRules.cs:W31	ref>FfaNumberingRules.cs:W31
+hop	FfaNumberingRules.cs:S0	ec1af73209a35d40	FfaNumberingRules.cs:W86	ref>FfaNumberingRules.cs:W86
 hop	FfaNumberingRules.cs:S0	f8cdd0ca92823def	FfaNumberingRules.cs:W54	ref>FfaNumberingRules.cs:W54
+hop	FfaNumberingRules.cs:S0	ff9049a84a368e53	FfaNumberingRules.cs:W84	ref>FfaNumberingRules.cs:W84
 hop	FfaNumberingRules.cs:SameList	8a5c0386d0d6a3b1	FfaNumberingRules.cs:RunRoundTwoUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunRoundTwoUnits
 hop	FfaNumberingRules.cs:Send	02723923238dfb23	H2HRules.cs:AdmitRoomRequest	delegate[&]>H2HRules.cs:AdmitRoomRequest
 hop	FfaNumberingRules.cs:Send	179a201239ea77ae	PcTradeRules.cs:SelfTest	delegate[&]>PcTradeRules.cs:SelfTest
@@ -9304,7 +9373,7 @@ hop	FfaNumberingRules.cs:SourceCheck	de258503b553cf2f	FfaNumberingRules.cs:Close
 hop	FfaNumberingRules.cs:Stall	1970cae9046c8a35	FfaNumberingRules.cs:W615	delegate[=>{}]>FfaNumberingRules.cs:W615
 hop	FfaNumberingRules.cs:Stall	299289b0d784df62	FfaNumberingRules.cs:W615	ref>FfaNumberingRules.cs:W615
 hop	FfaNumberingRules.cs:Stall	434550880cb59fea	FfaNumberingRules.cs:W68	ref>FfaNumberingRules.cs:W68
-hop	FfaNumberingRules.cs:Stall	62a52cb18dfc2ef1	FfaNumberingRules.cs:W79	delegate[=>{}]>FfaNumberingRules.cs:W79
+hop	FfaNumberingRules.cs:Stall	5fdc0598a4e57ea0	FfaNumberingRules.cs:W79Room	delegate[=>{}]>FfaNumberingRules.cs:W79Room
 hop	FfaNumberingRules.cs:Stall	8cea327394f43ab5	FfaNumberingRules.cs:W614	delegate[=>{}]>FfaNumberingRules.cs:W614
 hop	FfaNumberingRules.cs:Stall	c4e2dc28a4573fc6	FfaNumberingRules.cs:W610	ref>FfaNumberingRules.cs:W610
 hop	FfaNumberingRules.cs:Stall	c84a2a610f3abae5	FfaNumberingRules.cs:W612	delegate[=>{}]>FfaNumberingRules.cs:W612
@@ -9325,8 +9394,8 @@ hop	FfaNumberingRules.cs:StartNew	ba1e2e86aec0390a	field:SeatEvidence.cs:_sw	fie
 hop	FfaNumberingRules.cs:StartNew	ce3a6beacfea64d9	MusicStreamProbe.cs:PumpRequest	ref>MusicStreamProbe.cs:PumpRequest
 hop	FfaNumberingRules.cs:StartNew	df18b8f1d42203f3	FfaNumberingRules.cs:StartSeat	ref>FfaNumberingRules.cs:StartSeat
 hop	FfaNumberingRules.cs:StartNew	f8d275e7288e7603	field:GameStateWatcher.cs:_tickStopwatch	field[_tickStopwatch]>GameStateWatcher.cs:(file scope)
-hop	FfaNumberingRules.cs:StartOnly	1077f6599c700cba	FfaNumberingRules.cs:W79	ref>FfaNumberingRules.cs:W79
 hop	FfaNumberingRules.cs:StartOnly	1d4a86055fae1e8e	FfaNumberingRules.cs:W32	ref>FfaNumberingRules.cs:W32
+hop	FfaNumberingRules.cs:StartOnly	2fe96bfc3532d07a	FfaNumberingRules.cs:W79Room	ref>FfaNumberingRules.cs:W79Room
 hop	FfaNumberingRules.cs:StartOnly	306fcc1f1da38308	FfaNumberingRules.cs:W710	ref>FfaNumberingRules.cs:W710
 hop	FfaNumberingRules.cs:StartOnly	333e1a2707dee146	FfaNumberingRules.cs:W65	ref>FfaNumberingRules.cs:W65
 hop	FfaNumberingRules.cs:StartOnly	3a4a8342becbbed6	FfaNumberingRules.cs:W612	ref>FfaNumberingRules.cs:W612
@@ -9340,6 +9409,7 @@ hop	FfaNumberingRules.cs:StartOnly	6d25ede9d5f8fd6b	FfaNumberingRules.cs:W33	ref
 hop	FfaNumberingRules.cs:StartOnly	7352be5aad4dd573	FfaNumberingRules.cs:W54	ref>FfaNumberingRules.cs:W54
 hop	FfaNumberingRules.cs:StartOnly	863a1f80610a1a9b	FfaNumberingRules.cs:W68	ref>FfaNumberingRules.cs:W68
 hop	FfaNumberingRules.cs:StartOnly	951b06bebdac9f0a	FfaNumberingRules.cs:W41	ref>FfaNumberingRules.cs:W41
+hop	FfaNumberingRules.cs:StartOnly	9d90c53cdebbad04	FfaNumberingRules.cs:W710t	ref>FfaNumberingRules.cs:W710t
 hop	FfaNumberingRules.cs:StartOnly	a7c7275c2517b526	FfaNumberingRules.cs:W53	ref>FfaNumberingRules.cs:W53
 hop	FfaNumberingRules.cs:StartOnly	a941d96edf2c51d7	FfaNumberingRules.cs:W52	ref>FfaNumberingRules.cs:W52
 hop	FfaNumberingRules.cs:StartOnly	a98c10d2a30b31e8	FfaNumberingRules.cs:W72	ref>FfaNumberingRules.cs:W72
@@ -9362,8 +9432,9 @@ hop	FfaNumberingRules.cs:StartSeat	dbce5553ae44d09e	FfaNumberingRules.cs:W611	de
 hop	FfaNumberingRules.cs:StepPhase	3795e67909c963b8	FfaNumberingRules.cs:TickOnce	ref>FfaNumberingRules.cs:TickOnce
 hop	FfaNumberingRules.cs:StepPhase	881fa176f7ce517f	FfaNumberingRules.cs:EnterPhase	ref>FfaNumberingRules.cs:EnterPhase
 hop	FfaNumberingRules.cs:TakeCarry	414a46d6d7d131a2	FfaNumberingRules.cs:EdgeNew	ref>FfaNumberingRules.cs:EdgeNew
-hop	FfaNumberingRules.cs:Terminate	461693af19029cee	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
+hop	FfaNumberingRules.cs:Terminate	5b73b33d57880cc8	FfaNumberingRules.cs:AppliedLegacy	ref>FfaNumberingRules.cs:AppliedLegacy
 hop	FfaNumberingRules.cs:Terminate	7693883062ef38ce	FfaNumberingRules.cs:Closed	ref>FfaNumberingRules.cs:Closed
+hop	FfaNumberingRules.cs:Terminate	d77087b807a7ce77	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:Terminate	e22d71ec1663549e	FfaNumberingRules.cs:Applied	ref>FfaNumberingRules.cs:Applied
 hop	FfaNumberingRules.cs:Tick	0081c205967800f2	PcTradeRules.cs:SelfTest	entry[RunEdge(#0)/[2]]>PcTradeRules.cs:SelfTest
 hop	FfaNumberingRules.cs:Tick	024950c46364bc6a	TeamGameNumber.cs:SimulateF30	ref>TeamGameNumber.cs:SimulateF30
@@ -9425,15 +9496,16 @@ hop	FfaNumberingRules.cs:TickOnce	d25d8011d58a7fd5	FfaNumberingRules.cs:RunPhase
 hop	FfaNumberingRules.cs:TickOnce	df4f5b71a4a00989	FfaNumberingRules.cs:Advance	ref>FfaNumberingRules.cs:Advance
 hop	FfaNumberingRules.cs:TickOnce	e1f89fab2cdde017	FfaNumberingRules.cs:Cycle	ref>FfaNumberingRules.cs:Cycle
 hop	FfaNumberingRules.cs:TruthCand	517fdf940aff73d1	FfaNumberingRules.cs:CheckLivePoints	ref>FfaNumberingRules.cs:CheckLivePoints
+hop	FfaNumberingRules.cs:Unit	3fc3680b0c571ff5	FfaNumberingRules.cs:RunRoundTwoUnits	ref>FfaNumberingRules.cs:RunRoundTwoUnits
 hop	FfaNumberingRules.cs:Unit	53e1843a2c8c4cfd	FfaNumberingRules.cs:RunUnits	ref>FfaNumberingRules.cs:RunUnits
-hop	FfaNumberingRules.cs:Unit	ee97dc98cd923b56	FfaNumberingRules.cs:RunRoundTwoUnits	ref>FfaNumberingRules.cs:RunRoundTwoUnits
+hop	FfaNumberingRules.cs:Unit	9fc448b8f2a887b6	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	FfaNumberingRules.cs:Unstall	284181beaf4ce5a5	FfaNumberingRules.cs:W63	delegate[=>{}]>FfaNumberingRules.cs:W63
 hop	FfaNumberingRules.cs:Unstall	28ab62f917f918dc	FfaNumberingRules.cs:W614	delegate[=>{}]>FfaNumberingRules.cs:W614
 hop	FfaNumberingRules.cs:Unstall	355ee1c8ccbefda5	FfaNumberingRules.cs:W615	ref>FfaNumberingRules.cs:W615
 hop	FfaNumberingRules.cs:Unstall	574cad5c4235b9aa	FfaNumberingRules.cs:W610	ref>FfaNumberingRules.cs:W610
 hop	FfaNumberingRules.cs:Unstall	6776c1e80dfe91f9	FfaNumberingRules.cs:W615	delegate[=>{}]>FfaNumberingRules.cs:W615
+hop	FfaNumberingRules.cs:Unstall	99b66fd3f3aefa16	FfaNumberingRules.cs:W79Room	delegate[=>{}]>FfaNumberingRules.cs:W79Room
 hop	FfaNumberingRules.cs:Unstall	e7ca957736e5ae5b	FfaNumberingRules.cs:W612	delegate[=>{}]>FfaNumberingRules.cs:W612
-hop	FfaNumberingRules.cs:Unstall	f1926cb3f9df425e	FfaNumberingRules.cs:W79	delegate[=>{}]>FfaNumberingRules.cs:W79
 hop	FfaNumberingRules.cs:Unstall	f6d319124f2044b3	FfaNumberingRules.cs:W68	ref>FfaNumberingRules.cs:W68
 hop	FfaNumberingRules.cs:UnstallInbound	be60f73596b264d8	FfaNumberingRules.cs:W64	ref>FfaNumberingRules.cs:W64
 hop	FfaNumberingRules.cs:UnstallInbound	fe7cea5557b404af	FfaNumberingRules.cs:W66	ref>FfaNumberingRules.cs:W66
@@ -9470,16 +9542,40 @@ hop	FfaNumberingRules.cs:W68	dd82e35b96a61b50	FfaNumberingRules.cs:Run#2	delegat
 hop	FfaNumberingRules.cs:W69	42f5895dbb64a4f0	FfaNumberingRules.cs:Run#2	delegate[Ordered(#2=>)]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W69	53cba179e1527184	FfaNumberingRules.cs:Run#2	delegate[Case(#2=>)]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W71	0c0fae27f8520631	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W71	79f5e61a1b7d797b	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W710	3377550106c6fb27	FfaNumberingRules.cs:Run#2	delegate[Case(#2=>)/=>{}/Om(#0)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W710	3c31aacf4a0a391d	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W710t	517066d83bf5fe2a	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W711	03db6da83fd7f8cf	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W711	7b8e2fe7a1f8bffa	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W72	6c71c38b01424b3b	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W72	70bf36ce077c5759	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W73	0af94f4a76267dc8	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W73	540e11113f0bf9c6	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W74	22efa7ea43acb73f	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W74	465a9bb944b5a9b3	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W74Room	0e84cbe36c4eadd6	FfaNumberingRules.cs:W74t	ref>FfaNumberingRules.cs:W74t
+hop	FfaNumberingRules.cs:W74Room	2acf9f337d186e3d	FfaNumberingRules.cs:W74	ref>FfaNumberingRules.cs:W74
+hop	FfaNumberingRules.cs:W74t	f5f73cd8c3379f0b	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W75	0f26c0d5d0f25d79	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W75	ba8733464c0d8dd9	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W76	69aef72206bd0763	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W76	b05119c9e49b9e63	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W77	a2a8952bf273aaf5	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W77	fc6663627c029fbd	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W78	70c6fffecd5a352a	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W78	7c52a4b05c12b081	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W79	129bba9af50990c5	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/Om(#0)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:W79	656859a4de161e35	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W79Room	8adc26ea7f6bdfa5	FfaNumberingRules.cs:W79t	ref>FfaNumberingRules.cs:W79t
+hop	FfaNumberingRules.cs:W79Room	9d21e27903a686c1	FfaNumberingRules.cs:W79	ref>FfaNumberingRules.cs:W79
+hop	FfaNumberingRules.cs:W79t	1742ab8dcbec3823	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W81	15d5f6c9ea847920	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W82	5c11bd9d72fbe81b	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W83	c41df0f910f92ec4	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W84	c4f82fd9be4de1d3	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W85	ac815c92dbf6d8d3	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
+hop	FfaNumberingRules.cs:W86	d54aff2580239630	FfaNumberingRules.cs:Run#2	delegate[Case(#2)/&]>FfaNumberingRules.cs:Run#2
 hop	FfaNumberingRules.cs:WaitBody	cde6c50fb845a75f	FfaNumberingRules.cs:StepPhase	ref>FfaNumberingRules.cs:StepPhase
 hop	FfaNumberingRules.cs:WinnerOf	b84865e6a8f70d10	FfaNumberingRules.cs:Play#1	ref>FfaNumberingRules.cs:Play#1
 hop	FfaNumberingRules.cs:WithKeeper	256f8ae12e7ef8ba	FfaNumberingRules.cs:W66	ref>FfaNumberingRules.cs:W66
@@ -9493,12 +9589,13 @@ hop	FfaNumberingRules.cs:WriteCycle	2f0735e48744241c	FfaNumberingRules.cs:OpenOn
 hop	FfaNumberingRules.cs:WriteCycle	4baae7a45dcc9d4f	FfaNumberingRules.cs:Adopt	ref>FfaNumberingRules.cs:Adopt
 hop	FfaNumberingRules.cs:WriteCycle	76839b3db7693221	FfaNumberingRules.cs:EnterPhase	ref>FfaNumberingRules.cs:EnterPhase
 hop	FfaNumberingRules.cs:WriteCycle	da0837464dc67d5a	FfaNumberingRules.cs:WaitBody	ref>FfaNumberingRules.cs:WaitBody
-hop	FfaNumberingRules.cs:WriteOwn	0ef3282aa5d73160	FfaNumberingRules.cs:Restamp	ref>FfaNumberingRules.cs:Restamp
 hop	FfaNumberingRules.cs:WriteOwn	212b1864e3f1e813	FfaNumberingRules.cs:Adopt	ref>FfaNumberingRules.cs:Adopt
+hop	FfaNumberingRules.cs:WriteOwn	40f809bf98ec7fc1	FfaNumberingRules.cs:PickWrite	ref>FfaNumberingRules.cs:PickWrite
 hop	FfaNumberingRules.cs:WriteOwn	6360a2299ca10eb4	FfaNumberingRules.cs:StartCurrent	ref>FfaNumberingRules.cs:StartCurrent
 hop	FfaNumberingRules.cs:WriteOwn	72e8d2c3ba53e240	FfaNumberingRules.cs:WaitBody	ref>FfaNumberingRules.cs:WaitBody
 hop	FfaNumberingRules.cs:WriteOwn	87e3c124705776a9	FfaNumberingRules.cs:StartNew	ref>FfaNumberingRules.cs:StartNew
-hop	FfaNumberingRules.cs:WriteOwn	c881ac60ebf762d6	FfaNumberingRules.cs:PublishPick	ref>FfaNumberingRules.cs:PublishPick
+hop	FfaNumberingRules.cs:WriteOwn	91a5b4479b0a42e0	FfaNumberingRules.cs:Restamp	ref>FfaNumberingRules.cs:Restamp
+hop	FfaNumberingRules.cs:WriteOwn	d197b387a4e122bb	FfaNumberingRules.cs:PublishPick	ref>FfaNumberingRules.cs:PublishPick
 hop	FfaNumberingRules.cs:WriteResult	61c45d054292845c	FfaNumberingRules.cs:ResultBody	ref>FfaNumberingRules.cs:ResultBody
 hop	FfaNumberingRules.cs:WriteRoom	2c950f2f2c03ff52	FfaNumberingRules.cs:Adopt	ref>FfaNumberingRules.cs:Adopt
 hop	FfaNumberingRules.cs:WriteRoom	442a71b0573ff42b	FfaNumberingRules.cs:MasterPublishSeed	ref>FfaNumberingRules.cs:MasterPublishSeed
@@ -10369,6 +10466,7 @@ hop	GameStateWatcher.cs:Add	d48eda1f91b7e69a	FfaAssembly.cs:JsonObjects	ref>FfaA
 hop	GameStateWatcher.cs:Add	d4a59fc9643455be	PoisonSync.cs:RetireOpenV3	ref>PoisonSync.cs:RetireOpenV3
 hop	GameStateWatcher.cs:Add	d4db8cf8267f7d8e	IdentityClockCore.cs:Outcome	ref>IdentityClockCore.cs:Outcome
 hop	GameStateWatcher.cs:Add	d4ebe6b412224e90	SeatEvidenceCore.cs:DriftTriple	ref>SeatEvidenceCore.cs:DriftTriple
+hop	GameStateWatcher.cs:Add	d5185ec987523076	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	GameStateWatcher.cs:Add	d54c130e6386c532	HitEvidenceCore.cs:AddDirect	ref>HitEvidenceCore.cs:AddDirect
 hop	GameStateWatcher.cs:Add	d55c6423dfcb0cf3	NativeUI.cs:CreateShopRow	delegate[UIFactory.CreateButton(#6=>)/=>{}]>NativeUI.cs:CreateShopRow
 hop	GameStateWatcher.cs:Add	d5adf7f025b5df13	FfaAssembly.cs:NewSitting	ref>FfaAssembly.cs:NewSitting
@@ -11366,6 +11464,7 @@ hop	GameStateWatcher.cs:Count	5182b2d61d2bcddc	Keybinds.cs:LiveSetCount	ref>Keyb
 hop	GameStateWatcher.cs:Count	518af9cc05bd8b6f	NativeUI.cs:BuildCompareRecordsPanel	ref[MakeGraphLabel(#1)/RecordValueText(#1)]>NativeUI.cs:BuildCompareRecordsPanel
 hop	GameStateWatcher.cs:Count	5194cc10abb6eac8	PlayerCardsUI.cs:RefreshOpen	ref>PlayerCardsUI.cs:RefreshOpen
 hop	GameStateWatcher.cs:Count	5211fe7b727c098e	ApiClient.cs:FetchReleaseNotes	ref>ApiClient.cs:FetchReleaseNotes
+hop	GameStateWatcher.cs:Count	521f5791a6a5d976	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)/I(#0)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	GameStateWatcher.cs:Count	522d1ff0a44765a8	PortraitRenderDance.cs:DanceFitDrawn	ref>PortraitRenderDance.cs:DanceFitDrawn
 hop	GameStateWatcher.cs:Count	52400cb1b1675e75	ApiClient.cs:FetchReleaseNotes	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchReleaseNotes
 hop	GameStateWatcher.cs:Count	524635a1cbc2dbac	ApiClient.cs:FetchAchievements	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:FetchAchievements
@@ -11770,7 +11869,6 @@ hop	GameStateWatcher.cs:Count	942aebfabf233af8	MusicEngine.cs:PollClipLoads	ref>
 hop	GameStateWatcher.cs:Count	948620e94417d75b	NativeUI.cs:CalcStreak	ref>NativeUI.cs:CalcStreak
 hop	GameStateWatcher.cs:Count	9486248b55010043	MailUI.cs:AddresseeNames	ref[Math.Min(#1)]>MailUI.cs:AddresseeNames
 hop	GameStateWatcher.cs:Count	949720458ca637e9	MusicEngine.cs:VanillaTrackLength	ref>MusicEngine.cs:VanillaTrackLength
-hop	GameStateWatcher.cs:Count	949ce9cbc727ec26	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	GameStateWatcher.cs:Count	94c0968d2e238415	NativeUI.cs:TickPodiumSparkle	ref>NativeUI.cs:TickPodiumSparkle
 hop	GameStateWatcher.cs:Count	94e8f05eb616c984	ApiClient.cs:AnnounceUnseenAlerts	ref>ApiClient.cs:AnnounceUnseenAlerts
 hop	GameStateWatcher.cs:Count	94f89e709a95cedd	SessionReportModel.cs:FfaScoreLabel	ref[Math.Min(#1)]>SessionReportModel.cs:FfaScoreLabel
@@ -11885,6 +11983,7 @@ hop	GameStateWatcher.cs:Count	a630646f2ee93868	NativeUI.cs:RefreshCompare	ref[UI
 hop	GameStateWatcher.cs:Count	a67bb1e6bb4a9abd	GameStateWatcher.cs:TryGetPeerTelemetry	ref>GameStateWatcher.cs:TryGetPeerTelemetry
 hop	GameStateWatcher.cs:Count	a67fabe145a35946	FfaNumberingRules.cs:EdgeChecks	ref[Fail(#0)/I(#0)]>FfaNumberingRules.cs:EdgeChecks
 hop	GameStateWatcher.cs:Count	a6b5fa0eeaaa1c58	NativeUI.cs:InfoLinkSelfTest	ref>NativeUI.cs:InfoLinkSelfTest
+hop	GameStateWatcher.cs:Count	a6b71e635f4c67d9	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	GameStateWatcher.cs:Count	a6c5df6f9e91f16e	MusicEngine.cs:BuildAlbumBlockCycle	ref>MusicEngine.cs:BuildAlbumBlockCycle
 hop	GameStateWatcher.cs:Count	a6d657bb2bc4db6e	CardDrawEvidence.cs:Rounds	ref>CardDrawEvidence.cs:Rounds
 hop	GameStateWatcher.cs:Count	a6fecedcccee9da7	Keybinds.cs:ResetRow	ref[Plugin.Log.LogInfo(#0)/string.Join(#1)/rows.Take(#0)]>Keybinds.cs:ResetRow
@@ -12095,6 +12194,7 @@ hop	GameStateWatcher.cs:Count	cc032e7885994e6a	MusicStreamProbe.cs:FinishEndReco
 hop	GameStateWatcher.cs:Count	cc3480200c848830	SeatEvidence.cs:PromoteSpool	ref>SeatEvidence.cs:PromoteSpool
 hop	GameStateWatcher.cs:Count	cc39f5c04b807d0e	CardDrawEvidenceCore.cs:Budget	ref[case 3/lenPh.RemoveAt(#0)]>CardDrawEvidenceCore.cs:Budget
 hop	GameStateWatcher.cs:Count	cc717429809da2bd	CardSnapshot.cs:CaptureOne	ref>CardSnapshot.cs:CaptureOne
+hop	GameStateWatcher.cs:Count	ccc2862bb4f708c2	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	GameStateWatcher.cs:Count	cd20e67ef64143d7	PortraitRenderDance.cs:DanceFitLine	ref>PortraitRenderDance.cs:DanceFitLine
 hop	GameStateWatcher.cs:Count	cd650e61f590990f	OverlayInputGate.cs:Postfix	ref>OverlayInputGate.cs:Postfix
 hop	GameStateWatcher.cs:Count	cdb8f98efa0e3fca	ApiClient.cs:UpdateOvtQueuePoll	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}]>ApiClient.cs:UpdateOvtQueuePoll
@@ -14823,6 +14923,7 @@ hop	IdentityClockCore.cs:Add#1	6ba7168418c73e47	ApiClient.cs:ReformExcluded	ref>
 hop	IdentityClockCore.cs:Add#1	6bb018802b60cf2c	NativeUI.cs:RefreshShop	ref>NativeUI.cs:RefreshShop
 hop	IdentityClockCore.cs:Add#1	6bdf106633c39968	PlayerCardsUI.cs:RefreshCompose	ref>PlayerCardsUI.cs:RefreshCompose
 hop	IdentityClockCore.cs:Add#1	6c04c923f52559d6	FfaCardSequence.cs:GenerateNextSet	ref>FfaCardSequence.cs:GenerateNextSet
+hop	IdentityClockCore.cs:Add#1	6c0e17c333418c5e	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	IdentityClockCore.cs:Add#1	6c99f6ec4bed5098	IdentityClockEvidence.cs:Tick	ref>IdentityClockEvidence.cs:Tick
 hop	IdentityClockCore.cs:Add#1	6d35d75970ef793c	NativeUI.cs:BuildCompareBarChart	ref>NativeUI.cs:BuildCompareBarChart
 hop	IdentityClockCore.cs:Add#1	6d4b61c3d8d61b1f	FfaLateRules.cs:RoomSlots	ref>FfaLateRules.cs:RoomSlots
@@ -15962,6 +16063,7 @@ hop	IdentityClockCore.cs:Add#2	936c2f6ff65153fe	CompetitiveUI.cs:RunChatRevokeSe
 hop	IdentityClockCore.cs:Add#2	937aa7fff30edc12	ApiClient.cs:ParseCardStatsJson	ref>ApiClient.cs:ParseCardStatsJson
 hop	IdentityClockCore.cs:Add#2	93af3958591591b5	FfaLateEntry.cs:Hide	ref>FfaLateEntry.cs:Hide
 hop	IdentityClockCore.cs:Add#2	93e8a687187e3a50	NativeUI.Settings.cs:SettingsDecorateRow	ref>NativeUI.Settings.cs:SettingsDecorateRow
+hop	IdentityClockCore.cs:Add#2	944241fc0cd1570d	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	IdentityClockCore.cs:Add#2	9445fb9195710491	NativeUI.cs:RefreshOvtRecent	ref>NativeUI.cs:RefreshOvtRecent
 hop	IdentityClockCore.cs:Add#2	9489e01384537fb4	NativeUI.cs:BuildSeriesCards	ref>NativeUI.cs:BuildSeriesCards
 hop	IdentityClockCore.cs:Add#2	94a179e807564890	HitEvidenceCore.cs:AddDirect	ref>HitEvidenceCore.cs:AddDirect
@@ -17124,7 +17226,6 @@ hop	IdentityClockCore.cs:Count	778ef9b3558bd938	DanceMotionCore.cs:SelfCheck	del
 hop	IdentityClockCore.cs:Count	77bb2ada5a68b396	TabStatsOverlay.cs:BroadcastFighterName	delegate[&]>TabStatsOverlay.cs:BroadcastFighterName
 hop	IdentityClockCore.cs:Count	77e8a39096959bbf	BroadcastHud.cs:DrawPanel	delegate[&]>BroadcastHud.cs:DrawPanel
 hop	IdentityClockCore.cs:Count	77fab82275747d6b	MusicStreamProbe.cs:RetryReleases	delegate[&]>MusicStreamProbe.cs:RetryReleases
-hop	IdentityClockCore.cs:Count	785f87459a22ab23	FfaMode.cs:FfaPickPhase	delegate[Plugin.Log.LogInfo(#0)/&]>FfaMode.cs:FfaPickPhase
 hop	IdentityClockCore.cs:Count	7900f1066af5ab74	IdentityClockCore.cs:Needles	delegate[&]>IdentityClockCore.cs:Needles
 hop	IdentityClockCore.cs:Count	792fa5f37453ca51	FfaNumberingRules.cs:DriftGate	delegate[&]>FfaNumberingRules.cs:DriftGate
 hop	IdentityClockCore.cs:Count	79304eca8e8fb59a	NativeUI.cs:CopyChatTail	delegate[&]>NativeUI.cs:CopyChatTail
@@ -17218,6 +17319,7 @@ hop	IdentityClockCore.cs:Count	892526dd5b0dd3ad	Keybinds.cs:ResetRow	delegate[Pl
 hop	IdentityClockCore.cs:Count	896148f2810fb0f3	NativeUI.cs:RefreshRecentSeries	delegate[Math.Min(#1)/&]>NativeUI.cs:RefreshRecentSeries
 hop	IdentityClockCore.cs:Count	898ef541bc3716d6	FfaLateRules.cs:IsKindS	delegate[&]>FfaLateRules.cs:IsKindS
 hop	IdentityClockCore.cs:Count	8993102ac9eb2bff	ProfileCard.cs:RegisterNameHover	delegate[&]>ProfileCard.cs:RegisterNameHover
+hop	IdentityClockCore.cs:Count	89ac4b6a33384624	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[Unit(#2)/&]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	IdentityClockCore.cs:Count	89fb8ad536686d95	NativeUI.cs:DrawWideTooltip	delegate[&]>NativeUI.cs:DrawWideTooltip
 hop	IdentityClockCore.cs:Count	8a30db532fbc615e	IdentityClockCore.cs:Budget	delegate[&]>IdentityClockCore.cs:Budget
 hop	IdentityClockCore.cs:Count	8a421ed4c0c5bbe4	GameStateWatcher.cs:TryReportOvtMatch	delegate[Plugin.Log.LogWarning(#0)/&]>GameStateWatcher.cs:TryReportOvtMatch
@@ -17745,6 +17847,7 @@ hop	IdentityClockCore.cs:Count	e1db8de0fcf5262b	FfaLateRules.cs:ScaleLoad	delega
 hop	IdentityClockCore.cs:Count	e22f0bdf0f12b35b	ApiClient.cs:FetchShopSalesBoard	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#5)/&]>ApiClient.cs:FetchShopSalesBoard
 hop	IdentityClockCore.cs:Count	e23a39565a097189	PlayerCardsUI.cs:ShownPack	delegate[&]>PlayerCardsUI.cs:ShownPack
 hop	IdentityClockCore.cs:Count	e25687dc29ba69ab	CardDrawEvidenceCore.cs:Budget	entry[[0]/&]>CardDrawEvidenceCore.cs:Budget
+hop	IdentityClockCore.cs:Count	e27659f85dc4290d	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[Unit(#3)/I(#0)/&]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	IdentityClockCore.cs:Count	e2cf517c0ed5b41b	PcQuickShardRules.cs:TombDupes	delegate[DupesOffered(#1)/&]>PcQuickShardRules.cs:TombDupes
 hop	IdentityClockCore.cs:Count	e2d01b7a468360e0	SeatEvidenceCore.cs:OtherCaps	delegate[&]>SeatEvidenceCore.cs:OtherCaps
 hop	IdentityClockCore.cs:Count	e2e673022fa1ca43	GameStateWatcher.cs:TimelineAppend	delegate[&]>GameStateWatcher.cs:TimelineAppend
@@ -17887,6 +17990,7 @@ hop	IdentityClockCore.cs:Count	f73628d651703f94	NativeUI.cs:FfaSettingsSummaryBi
 hop	IdentityClockCore.cs:Count	f751e5f4ae059c18	NativeUI.cs:SubmitLfpPing	delegate[&]>NativeUI.cs:SubmitLfpPing
 hop	IdentityClockCore.cs:Count	f770c2bc6f46ccc5	DanceEmotes.cs:LocalDanceActive	delegate[&]>DanceEmotes.cs:LocalDanceActive
 hop	IdentityClockCore.cs:Count	f7a42b79df161a15	PeerBuildCore.cs:Line	delegate[.Append(#0)/&]>PeerBuildCore.cs:Line
+hop	IdentityClockCore.cs:Count	f7ceb49c428e12f2	FfaMode.cs:FfaPickPhase	delegate[Plugin.Log.LogInfo(#0)/&]>FfaMode.cs:FfaPickPhase
 hop	IdentityClockCore.cs:Count	f802de368c08543c	PlayerCardsUI.cs:OnShardDupesClick	delegate[Say(#0)/I18n.TrF(#1)/&]>PlayerCardsUI.cs:OnShardDupesClick
 hop	IdentityClockCore.cs:Count	f80c7b64ba87ee29	MusicEngine.cs:ComputeQueueSignature	delegate[&]>MusicEngine.cs:ComputeQueueSignature
 hop	IdentityClockCore.cs:Count	f82d234c2fa81dd1	NativeUI.cs:ShowRecentSeriesRows	delegate[&]>NativeUI.cs:ShowRecentSeriesRows
@@ -18138,6 +18242,7 @@ hop	IdentityClockCore.cs:Name	39955a2b9428ffb7	CustomCosmetics.cs:ArtDownloadWor
 hop	IdentityClockCore.cs:Name	39deb882a8edf078	FfaLateRules.cs:K45iv	delegate[x.P(#0)/&]>FfaLateRules.cs:K45iv
 hop	IdentityClockCore.cs:Name	39e6718bd748adaa	FfaNumberingRules.cs:StallInbound	delegate[_stalled.Add(#0)/&]>FfaNumberingRules.cs:StallInbound
 hop	IdentityClockCore.cs:Name	3b3b08581dda4d49	H2HSummary.cs:OnResponse	delegate[Plugin.Log.LogWarning(#0)/&]>H2HSummary.cs:OnResponse
+hop	IdentityClockCore.cs:Name	3b67d33cf9b5a948	FfaNumberingRules.cs:LostChecks	delegate[Fail(#0)/&]>FfaNumberingRules.cs:LostChecks
 hop	IdentityClockCore.cs:Name	3d077cb473e937e7	ApiClient.cs:PersistOutbox	delegate[Plugin.Log.LogWarning(#0)/&]>ApiClient.cs:PersistOutbox
 hop	IdentityClockCore.cs:Name	3d293649a3926074	FfaNumberingRules.cs:RecordLeaver	entry[Leaver.Name/&]>FfaNumberingRules.cs:RecordLeaver
 hop	IdentityClockCore.cs:Name	3dbe033d455f2058	FfaMapScale.cs:PlaySpawnSound	delegate[&]>FfaMapScale.cs:PlaySpawnSound
@@ -18226,6 +18331,7 @@ hop	IdentityClockCore.cs:Name	6ca894fae6c52f9e	GameStateWatcher.cs:SubmitTeamRep
 hop	IdentityClockCore.cs:Name	6d8505d935755dc0	GameStateWatcher.cs:TickSettle	delegate[Plugin.Log.LogWarning(#0)/&]>GameStateWatcher.cs:TickSettle
 hop	IdentityClockCore.cs:Name	6ff01af621505583	FfaNumberingRules.cs:EdgeChecks	delegate[list.Add(#0)/&]>FfaNumberingRules.cs:EdgeChecks
 hop	IdentityClockCore.cs:Name	702820cadd9383d7	SpectatorSync.cs:BuildSnapshot	delegate[&]>SpectatorSync.cs:BuildSnapshot
+hop	IdentityClockCore.cs:Name	7028934bd0b06673	FfaNumberingRules.cs:LostChecks	delegate[_stalled.Contains(#0)/&]>FfaNumberingRules.cs:LostChecks
 hop	IdentityClockCore.cs:Name	7064b3bf2435f709	Keybinds.cs:Describe	delegate[string.Join(#1)/a.UnfilteredBindings.Select(#0=>)/&]>Keybinds.cs:Describe
 hop	IdentityClockCore.cs:Name	70a7758ba461adf0	FfaMode.cs:ApplyManifestPick	delegate[VanillaFixSupport.DiagLimited(#1)/&]>FfaMode.cs:ApplyManifestPick
 hop	IdentityClockCore.cs:Name	7124654a5d2eea40	EmojiSprites.cs:Build	delegate[Disable(#0)/&]>EmojiSprites.cs:Build
@@ -18273,6 +18379,7 @@ hop	IdentityClockCore.cs:Name	8a38a846a832809e	IdentityClockEvidence.cs:ReadAsse
 hop	IdentityClockCore.cs:Name	8acc0fa0dc23876e	VanillaCardSequence.cs:SelfTest	delegate[&]>VanillaCardSequence.cs:SelfTest
 hop	IdentityClockCore.cs:Name	8b0190bf05afc18f	PortraitRender.cs:PlanParticles	delegate[&]>PortraitRender.cs:PlanParticles
 hop	IdentityClockCore.cs:Name	8b743767934b2714	PortraitRender.cs:IsMask	delegate[&]>PortraitRender.cs:IsMask
+hop	IdentityClockCore.cs:Name	8bb615090164c180	FfaNumberingRules.cs:AppliedLegacy	delegate[Fail(#0)/&]>FfaNumberingRules.cs:AppliedLegacy
 hop	IdentityClockCore.cs:Name	8d54ca01cba6f392	VanillaFixes.cs:ComputeDecision	delegate[&]>VanillaFixes.cs:ComputeDecision
 hop	IdentityClockCore.cs:Name	8e53dedd59a4f8a1	EscLeaveRow.cs:ComputeContext	delegate[&]>EscLeaveRow.cs:ComputeContext
 hop	IdentityClockCore.cs:Name	8ee9c5dc5ce28dbf	MailUI.cs:BuildTab	delegate[Plugin.Log.LogWarning(#0)/&]>MailUI.cs:BuildTab
@@ -18353,6 +18460,7 @@ hop	IdentityClockCore.cs:Name	c1c818dcc694f8b3	VanillaFixes.cs:Finalizer#3	deleg
 hop	IdentityClockCore.cs:Name	c26defe8da089585	FfaNumberingRules.cs:Join#1	delegate[StageJoinNumbering(#1)/&]>FfaNumberingRules.cs:Join#1
 hop	IdentityClockCore.cs:Name	c2e6be660d22b530	ApiClient.cs:ObserveSeriesStateAnswer	delegate[&]>ApiClient.cs:ObserveSeriesStateAnswer
 hop	IdentityClockCore.cs:Name	c306dba6ddf25397	ApiClient.cs:SendSeriesPreflight	delegate[Plugin.Instance.StartCoroutine(#0)/PostRequest(#2=>)/=>{}/&]>ApiClient.cs:SendSeriesPreflight
+hop	IdentityClockCore.cs:Name	c34ed740ea19105c	FfaNumberingRules.cs:DeckChecks	delegate[Fail(#0)/&]>FfaNumberingRules.cs:DeckChecks
 hop	IdentityClockCore.cs:Name	c3809426e929b41d	FfaMode.cs:DriftGateNow	delegate[FfaNumberingRules.DriftGate(#2)/FfaNumberingRules.RoomKey(#0)/&]>FfaMode.cs:DriftGateNow
 hop	IdentityClockCore.cs:Name	c4bae01e06bb0d8e	TeamColorIdentity.cs:FindTmp	delegate[&]>TeamColorIdentity.cs:FindTmp
 hop	IdentityClockCore.cs:Name	c55371901f023d21	CardDrawEvidence.cs:DrainEvents	delegate[Plugin.Log.LogWarning(#0)/&]>CardDrawEvidence.cs:DrainEvents
@@ -23362,12 +23470,12 @@ hop	PcQuickShardRules.cs:Count	495649118f981bc5	NativeUI.cs:RefreshOvtRecent	ref
 hop	PcQuickShardRules.cs:Count	4968d30e76f89597	SpectatorHud.cs:BuildTerminalLine	ref>SpectatorHud.cs:BuildTerminalLine
 hop	PcQuickShardRules.cs:Count	49a3cbdcc027d27e	NativeUI.cs:RenderOvtLiveGames	ref>NativeUI.cs:RenderOvtLiveGames
 hop	PcQuickShardRules.cs:Count	49f7025c2ed9346d	SessionReportModel.cs:FillTable	ref>SessionReportModel.cs:FillTable
+hop	PcQuickShardRules.cs:Count	49fa36790e408885	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)/I(#0)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PcQuickShardRules.cs:Count	4a18d62f19cc3f46	CompetitiveUI.cs:DrawInGameChat	ref>CompetitiveUI.cs:DrawInGameChat
 hop	PcQuickShardRules.cs:Count	4a38f7db3c2e8657	DanceEmotes.cs:Tick	ref>DanceEmotes.cs:Tick
 hop	PcQuickShardRules.cs:Count	4a3efbad9184544a	PlayerCardsUI.cs:MotionTick	ref>PlayerCardsUI.cs:MotionTick
 hop	PcQuickShardRules.cs:Count	4a687a4c7089c7de	NativeUI.cs:RefreshTeamTab	ref[UIFactory.SetText(#1)/I18n.TrF(#1)]>NativeUI.cs:RefreshTeamTab
 hop	PcQuickShardRules.cs:Count	4a709a8db23e15f6	NametagStyler.cs:Wrap	ref>NametagStyler.cs:Wrap
-hop	PcQuickShardRules.cs:Count	4acce7632bb13e51	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PcQuickShardRules.cs:Count	4ae8a120d4fa48fb	CardDrawEvidenceCore.cs:Budget	ref[case default/lenHd.RemoveAt(#0)]>CardDrawEvidenceCore.cs:Budget
 hop	PcQuickShardRules.cs:Count	4b0931baebbf3038	ApiClient.cs:ChooseOutboxCopy	ref>ApiClient.cs:ChooseOutboxCopy
 hop	PcQuickShardRules.cs:Count	4b35fbc5d7affe35	MusicEngine.cs:DesiredKeys	ref>MusicEngine.cs:DesiredKeys
@@ -23998,11 +24106,13 @@ hop	PcQuickShardRules.cs:Count	b690debfc6d6756c	PlayerCardsUI.cs:DrawReceived	re
 hop	PcQuickShardRules.cs:Count	b6921e827db2e261	CompetitiveUI.cs:DrawNotificationSetInner	ref>CompetitiveUI.cs:DrawNotificationSetInner
 hop	PcQuickShardRules.cs:Count	b69fcb16a8b83e07	ApiClient.cs:FetchCardTopPickers	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#3)]>ApiClient.cs:FetchCardTopPickers
 hop	PcQuickShardRules.cs:Count	b6b902753b4016ef	GameStateWatcher.cs:MacroTimelineForPeer	ref>GameStateWatcher.cs:MacroTimelineForPeer
+hop	PcQuickShardRules.cs:Count	b75da6a520a30bb0	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PcQuickShardRules.cs:Count	b7846eff457eef93	PoisonLedgerCore.cs:Flush	ref[Lines.Add(#0)/ClaimLine.Rate(#2)]>PoisonLedgerCore.cs:Flush
 hop	PcQuickShardRules.cs:Count	b7a779444677736e	NativeUI.cs:RenderVisualBracket	ref>NativeUI.cs:RenderVisualBracket
 hop	PcQuickShardRules.cs:Count	b7cad0222668b3b0	PcQuickShardRules.cs:AllLivePrints	ref>PcQuickShardRules.cs:AllLivePrints
 hop	PcQuickShardRules.cs:Count	b7dc99526f479fb1	PortraitRenderDanceDev.cs:DanceDevDecide	ref[Plugin.Log.LogInfo(#0)]>PortraitRenderDanceDev.cs:DanceDevDecide
 hop	PcQuickShardRules.cs:Count	b8150a63d44dbfa2	CompetitiveUI.cs:ParsePairSeries	ref>CompetitiveUI.cs:ParsePairSeries
+hop	PcQuickShardRules.cs:Count	b82992fe14bc9dee	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PcQuickShardRules.cs:Count	b84d4da8ef92901c	Keybinds.cs:OnRoundStart	ref>Keybinds.cs:OnRoundStart
 hop	PcQuickShardRules.cs:Count	b8887e4c27bc1bc3	GameStateWatcher.cs:TickInputSampling	ref>GameStateWatcher.cs:TickInputSampling
 hop	PcQuickShardRules.cs:Count	b89371f82aa0746f	CardDrawEvidenceCore.cs:Budget	ref[case 0/lenAp.RemoveAt(#0)]>CardDrawEvidenceCore.cs:Budget
@@ -25420,6 +25530,7 @@ hop	PlayerCardMotionCore.cs:Count#1	43b1ae0d1dc26561	SeatEvidenceCore.cs:Budget	
 hop	PlayerCardMotionCore.cs:Count#1	43d01ab3892c5e7e	PlayerCardsUI.cs:FillChosen	ref[UIFactory.SetTextRaw(#1)]>PlayerCardsUI.cs:FillChosen
 hop	PlayerCardMotionCore.cs:Count#1	43d9345e57440afc	IdentityClockCore.cs:Census	ref[asm.RemoveRange(#1)]>IdentityClockCore.cs:Census
 hop	PlayerCardMotionCore.cs:Count#1	4426442441098f9c	FfaLateEntry.cs:ConsumeLoadCount	entry[FfaLateRules.ScaleRecord.Count]>FfaLateEntry.cs:ConsumeLoadCount
+hop	PlayerCardMotionCore.cs:Count#1	4440814a6f9f0602	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PlayerCardMotionCore.cs:Count#1	444b7b0bfd6c07b3	FfaLateEntry.cs:OnCallIn	ref>FfaLateEntry.cs:OnCallIn
 hop	PlayerCardMotionCore.cs:Count#1	44936dd92b43586c	NativeUI.cs:FitNameList	ref>NativeUI.cs:FitNameList
 hop	PlayerCardMotionCore.cs:Count#1	4493bf348b9bf8a0	SeatEvidenceCore.cs:ChooseCopy	ref>SeatEvidenceCore.cs:ChooseCopy
@@ -25514,6 +25625,7 @@ hop	PlayerCardMotionCore.cs:Count#1	530132e8ae14ebb8	ApiClient.cs:ReportFfaMatch
 hop	PlayerCardMotionCore.cs:Count#1	53268d82745775a9	FfaLateRules.cs:BarrierSet	ref>FfaLateRules.cs:BarrierSet
 hop	PlayerCardMotionCore.cs:Count#1	536e7a401beb66f3	SpectatorSync.cs:AppendCurrentDeck	ref>SpectatorSync.cs:AppendCurrentDeck
 hop	PlayerCardMotionCore.cs:Count#1	53840e4b981404ae	PortraitRenderDance.cs:Summary#1	ref[.Append(#0)]>PortraitRenderDance.cs:Summary#1
+hop	PlayerCardMotionCore.cs:Count#1	5389741f74effc84	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PlayerCardMotionCore.cs:Count#1	53c8235612c78041	FfaMode.cs:RoomCount	ref>FfaMode.cs:RoomCount
 hop	PlayerCardMotionCore.cs:Count#1	53cccc888a289687	RegionPingSweep.cs:NotePollHeadersAcked	ref>RegionPingSweep.cs:NotePollHeadersAcked
 hop	PlayerCardMotionCore.cs:Count#1	53d487615fba4eec	ApiClient.cs:FetchNemesis	delegate[FetchCompareBoard(#2=>)/=>{}/ArraysAligned(#4)]>ApiClient.cs:FetchNemesis
@@ -25753,7 +25865,6 @@ hop	PlayerCardMotionCore.cs:Count#1	7baead472179c3d4	DanceStep0Probe.cs:BodyProb
 hop	PlayerCardMotionCore.cs:Count#1	7bdb9ddfe3c65a87	NativeUI.cs:FillLobbyMemberRows	ref[rows.Add(#0)/CreateLobbyMemberRow(#1)]>NativeUI.cs:FillLobbyMemberRows
 hop	PlayerCardMotionCore.cs:Count#1	7bf4bf034df2b32a	NativeUI.cs:GetOrCreateArtistBlockRow	ref[new GameObject(#0)]>NativeUI.cs:GetOrCreateArtistBlockRow
 hop	PlayerCardMotionCore.cs:Count#1	7bfdb1a3b7710129	DanceMotionCore.cs:Start	ref>DanceMotionCore.cs:Start
-hop	PlayerCardMotionCore.cs:Count#1	7c74e8b0a4c596fb	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PlayerCardMotionCore.cs:Count#1	7cb1825cea6e6f60	MusicEngine.cs:IsAlbumPlayable	ref>MusicEngine.cs:IsAlbumPlayable
 hop	PlayerCardMotionCore.cs:Count#1	7d00cb88e05567b7	NativeUI.SettingsDrive.cs:DrvCheckA7	ref>NativeUI.SettingsDrive.cs:DrvCheckA7
 hop	PlayerCardMotionCore.cs:Count#1	7d18124d2570c95b	MusicEngine.cs:OnEntitlementsChanged	ref>MusicEngine.cs:OnEntitlementsChanged
@@ -26276,6 +26387,7 @@ hop	PlayerCardMotionCore.cs:Count#1	d5115874f876d565	DanceMotionCore.cs:OnStill	
 hop	PlayerCardMotionCore.cs:Count#1	d521cc510d378865	NativeUI.cs:BuildPlayerModeHistoryText	ref>NativeUI.cs:BuildPlayerModeHistoryText
 hop	PlayerCardMotionCore.cs:Count#1	d5318be914949186	PcQuickShardRules.cs:Reconcile	ref>PcQuickShardRules.cs:Reconcile
 hop	PlayerCardMotionCore.cs:Count#1	d55687d5ef9c0b4f	NativeUI.SettingsDrive.cs:DrvPrimeBinds	ref[DrvNote(#0)]>NativeUI.SettingsDrive.cs:DrvPrimeBinds
+hop	PlayerCardMotionCore.cs:Count#1	d57771b8af1ab2d2	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)/I(#0)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PlayerCardMotionCore.cs:Count#1	d5af8d1e45ae8e8a	CombatEvidenceCore.cs:TopByPerp	ref[new List(#0)/Math.Min(#1)]>CombatEvidenceCore.cs:TopByPerp
 hop	PlayerCardMotionCore.cs:Count#1	d5dddbf135463e8d	BroadcastMode.cs:IsExcluded	ref>BroadcastMode.cs:IsExcluded
 hop	PlayerCardMotionCore.cs:Count#1	d5f2cb62ae4cb51e	NativeUI.cs:BuildTeamCardsColumn	ref>NativeUI.cs:BuildTeamCardsColumn
@@ -27563,6 +27675,7 @@ hop	PlayerCardMotionCore.cs:Count#2	ab03320a595248de	PlayerCardsUI.cs:DevAct	ref
 hop	PlayerCardMotionCore.cs:Count#2	ab16063e57fdd33f	NativeUI.SettingsDrive.cs:DriveW3	ref[Mathf.Max(#0)]>NativeUI.SettingsDrive.cs:DriveW3
 hop	PlayerCardMotionCore.cs:Count#2	aba48ff5eca1825d	NativeUI.cs:JoinTeamCards	ref[sb.Append(#0)/string.Join(#1)/aCards.GetRange(#1)/Math.Min(#0)]>NativeUI.cs:JoinTeamCards
 hop	PlayerCardMotionCore.cs:Count#2	abb86d7f401c81c7	FfaMode.cs:KillTimelineFor	ref>FfaMode.cs:KillTimelineFor
+hop	PlayerCardMotionCore.cs:Count#2	ac0aa38193914ef8	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PlayerCardMotionCore.cs:Count#2	ac349c35f4b1a11e	NativeUI.cs:ParseFfaTimeline	ref>NativeUI.cs:ParseFfaTimeline
 hop	PlayerCardMotionCore.cs:Count#2	ac8e777b9511481e	PlayerCardFaces.cs:DevPut	ref>PlayerCardFaces.cs:DevPut
 hop	PlayerCardMotionCore.cs:Count#2	ac9b8b0e3a6b0927	NativeUI.cs:RefreshFfaTab	ref[UIFactory.SetTextRaw(#1)]>NativeUI.cs:RefreshFfaTab
@@ -27587,6 +27700,7 @@ hop	PlayerCardMotionCore.cs:Count#2	ae33608100dd36f8	NativeUI.cs:RefreshMusicTab
 hop	PlayerCardMotionCore.cs:Count#2	ae4627b5588bd4a6	SessionReportModel.cs:Coloured	ref>SessionReportModel.cs:Coloured
 hop	PlayerCardMotionCore.cs:Count#2	ae4f7631f641bae1	NativeUI.cs:GroupBySeries	ref>NativeUI.cs:GroupBySeries
 hop	PlayerCardMotionCore.cs:Count#2	ae7be2c05396ffa8	CompetitiveUI.cs:FlowTipColumns	ref[Math.Min(#1)/Math.Max(#1)]>CompetitiveUI.cs:FlowTipColumns
+hop	PlayerCardMotionCore.cs:Count#2	aec9c8af79f70999	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)/I(#0)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PlayerCardMotionCore.cs:Count#2	aeced1dc4e44a02f	NativeUI.cs:BuildCompareCardLeaders	ref>NativeUI.cs:BuildCompareCardLeaders
 hop	PlayerCardMotionCore.cs:Count#2	aee71aba1e489924	PortraitRenderDance.cs:DanceDrawnSnap	ref>PortraitRenderDance.cs:DanceDrawnSnap
 hop	PlayerCardMotionCore.cs:Count#2	aee80ac3c5856313	DamageNumberRules.cs:Count	ref>DamageNumberRules.cs:Count
@@ -27922,6 +28036,7 @@ hop	PlayerCardMotionCore.cs:Count#2	e46c8f185f065ce4	CombatEvidence.cs:Dispatch	
 hop	PlayerCardMotionCore.cs:Count#2	e47d4f6b4e551c06	PcQuickShardRules.cs:AllLivePrints	ref>PcQuickShardRules.cs:AllLivePrints
 hop	PlayerCardMotionCore.cs:Count#2	e4829ffdc268db5b	ApiClient.cs:OutboxAlreadyQueued	ref>ApiClient.cs:OutboxAlreadyQueued
 hop	PlayerCardMotionCore.cs:Count#2	e559a043ce699c39	CompetitiveUI.cs:LayoutNotificationSet	ref[Mathf.Max(#1)]>CompetitiveUI.cs:LayoutNotificationSet
+hop	PlayerCardMotionCore.cs:Count#2	e5bc4e0bd083e2d8	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PlayerCardMotionCore.cs:Count#2	e5d0745a189e8151	RosterCensus.cs:SelfTest#4	ref>RosterCensus.cs:SelfTest#4
 hop	PlayerCardMotionCore.cs:Count#2	e6249c66a46e188b	NativeUI.Settings.cs:SelfTestStatic	ref[StOk(#0)]>NativeUI.Settings.cs:SelfTestStatic
 hop	PlayerCardMotionCore.cs:Count#2	e640b7e710073de0	NativeUI.cs:RefreshHomeTab	ref[UIFactory.SetTextRaw(#1)]>NativeUI.cs:RefreshHomeTab
@@ -27932,7 +28047,6 @@ hop	PlayerCardMotionCore.cs:Count#2	e67d92201e20057b	CardSnapshot.cs:CaptureOne	
 hop	PlayerCardMotionCore.cs:Count#2	e68664c7023d7817	IdleShowcase.cs:TickView	ref>IdleShowcase.cs:TickView
 hop	PlayerCardMotionCore.cs:Count#2	e68d192503901eef	PortraitRender.cs:LegsPlanted	ref[.Append(#0)]>PortraitRender.cs:LegsPlanted
 hop	PlayerCardMotionCore.cs:Count#2	e69ff872ffbefa8d	ProfileCard.cs:RegisterNameHover	ref>ProfileCard.cs:RegisterNameHover
-hop	PlayerCardMotionCore.cs:Count#2	e6c812aa2caf1b8f	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PlayerCardMotionCore.cs:Count#2	e6d0602aaca58e05	PortraitRenderDanceDev.cs:DanceDevDecide	ref[Plugin.Log.LogInfo(#0)]>PortraitRenderDanceDev.cs:DanceDevDecide
 hop	PlayerCardMotionCore.cs:Count#2	e6e6edcbc6378a97	NativeUI.cs:BuildTeamCardsTooltipBody	ref>NativeUI.cs:BuildTeamCardsTooltipBody
 hop	PlayerCardMotionCore.cs:Count#2	e6ef85218b0ba8d5	GameStateWatcher.cs:TryRequestContinuationSeries	ref>GameStateWatcher.cs:TryRequestContinuationSeries
@@ -28943,6 +29057,7 @@ hop	PoisonLedgerCore.cs:AdmitRate	f001c5d87f49efae	PoisonLedgerCore.cs:Receive	r
 hop	PoisonLedgerCore.cs:AdmitV3Stream	2d9a421836c12c7a	PoisonSync.cs:AuthoritativeDot	ref>PoisonSync.cs:AuthoritativeDot
 hop	PoisonLedgerCore.cs:AdoptLife	7d0e85202188bbe5	PoisonLedgerCore.cs:Create	ref>PoisonLedgerCore.cs:Create
 hop	PoisonLedgerCore.cs:AfterTick	2f2fdd5e1e019b9a	PoisonSync.cs:AuthoritativeDot	ref>PoisonSync.cs:AuthoritativeDot
+hop	PoisonLedgerCore.cs:Begin	02e00b277494d34a	FfaMode.cs:NearestOpponent	ref>FfaMode.cs:NearestOpponent
 hop	PoisonLedgerCore.cs:Begin	261404813c60ec09	PoisonSync.cs:AuthoritativeDot	ref>PoisonSync.cs:AuthoritativeDot
 hop	PoisonLedgerCore.cs:Begin	2f662fa694ed2736	ApiClient.cs:StartBootProbe	ref>ApiClient.cs:StartBootProbe
 hop	PoisonLedgerCore.cs:Begin	3943dcd9ccd3569d	PortraitRenderDance.cs:DanceTimed	ref>PortraitRenderDance.cs:DanceTimed
@@ -30875,7 +30990,6 @@ hop	PoisonLedgerCore.cs:Count#1	37097ef8840e4b11	NativeUI.cs:BuildAdminTab	deleg
 hop	PoisonLedgerCore.cs:Count#1	3718d52c975a06f9	TabStatsOverlay.cs:RefreshSnapshot	ref>TabStatsOverlay.cs:RefreshSnapshot
 hop	PoisonLedgerCore.cs:Count#1	37221907ab34b389	CardDrawEvidenceCore.cs:Budget	entry[[3]]>CardDrawEvidenceCore.cs:Budget
 hop	PoisonLedgerCore.cs:Count#1	374a9c52fcf86c06	SessionReportRules.cs:StatusTarget	ref>SessionReportRules.cs:StatusTarget
-hop	PoisonLedgerCore.cs:Count#1	37764a1fd1e10437	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PoisonLedgerCore.cs:Count#1	3776bfb47d22be82	DanceEmotes.cs:ObservableCancelSweep	ref>DanceEmotes.cs:ObservableCancelSweep
 hop	PoisonLedgerCore.cs:Count#1	379b9c31c28a1a8a	FfaLateRules.cs:K45viii	ref[x.Ok(#0)]>FfaLateRules.cs:K45viii
 hop	PoisonLedgerCore.cs:Count#1	379b9cab2c06930f	CardDrawEvidenceCore.cs:Budget	ref[case default/hd.RemoveAt(#0)]>CardDrawEvidenceCore.cs:Budget
@@ -31154,6 +31268,7 @@ hop	PoisonLedgerCore.cs:Count#1	6351b40fd59dfe45	PoisonSync.cs:ScanRoster	ref>Po
 hop	PoisonLedgerCore.cs:Count#1	63a78986598a62c0	MusicEngine.cs:ResidencyFields	ref>MusicEngine.cs:ResidencyFields
 hop	PoisonLedgerCore.cs:Count#1	63e365883815696a	CombatEvidenceCore.cs:RemoveLast	ref[g.RemoveAt(#0)]>CombatEvidenceCore.cs:RemoveLast
 hop	PoisonLedgerCore.cs:Count#1	63eea6973d32c8f6	NativeUI.cs:BuildCompareAchievementGrid	ref>NativeUI.cs:BuildCompareAchievementGrid
+hop	PoisonLedgerCore.cs:Count#1	6420dcfa02bd362e	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PoisonLedgerCore.cs:Count#1	6451eee4a8c88be0	PlayerCardFaces.cs:Tick	ref>PlayerCardFaces.cs:Tick
 hop	PoisonLedgerCore.cs:Count#1	648193532b8271b5	PcQuickShardRules.cs:TombstoneCases	ref[Check(#3)]>PcQuickShardRules.cs:TombstoneCases
 hop	PoisonLedgerCore.cs:Count#1	657f3789742ff2c1	ApiClient.cs:FetchBlockedPlayers	delegate[Plugin.Instance.StartCoroutine(#0)/GetRequest(#1=>)/=>{}/Plugin.Log.LogInfo(#0)]>ApiClient.cs:FetchBlockedPlayers
@@ -31171,6 +31286,7 @@ hop	PoisonLedgerCore.cs:Count#1	68b8e8647d478800	FfaNumberingRules.cs:SameList	r
 hop	PoisonLedgerCore.cs:Count#1	68bf807c682dd78d	NativeUI.cs:Claim#2	ref>NativeUI.cs:Claim#2
 hop	PoisonLedgerCore.cs:Count#1	68df4099e1164624	NativeUI.SettingsDrive.cs:DriveT5g	ref[DrvOk(#0)]>NativeUI.SettingsDrive.cs:DriveT5g
 hop	PoisonLedgerCore.cs:Count#1	690f52f29a41920c	GameStateWatcher.cs:TryRequestContinuationSeries	ref>GameStateWatcher.cs:TryRequestContinuationSeries
+hop	PoisonLedgerCore.cs:Count#1	6912d8c359ce977d	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)/I(#0)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PoisonLedgerCore.cs:Count#1	692acec5c6883ddf	NativeUI.cs:GetOrCreateArtistRow	ref>NativeUI.cs:GetOrCreateArtistRow
 hop	PoisonLedgerCore.cs:Count#1	6936c919820e2869	MusicEngine.cs:IsTrackKnown	ref>MusicEngine.cs:IsTrackKnown
 hop	PoisonLedgerCore.cs:Count#1	694ab2f2b9351045	CombatEvidenceCore.cs:Check	ref[case W.K_LIST]>CombatEvidenceCore.cs:Check
@@ -31612,6 +31728,7 @@ hop	PoisonLedgerCore.cs:Count#1	b0c6af7ba6bd4f1f	FfaLateEntry.cs:KeptList	ref>Ff
 hop	PoisonLedgerCore.cs:Count#1	b0f72091bb54ea09	PlayerCardsUI.cs:DevSeedMotionPrints	ref>PlayerCardsUI.cs:DevSeedMotionPrints
 hop	PoisonLedgerCore.cs:Count#1	b10d1429ad94ebc8	CardImageLoader.cs:Initialize	ref[.LogInfo(#0)]>CardImageLoader.cs:Initialize
 hop	PoisonLedgerCore.cs:Count#1	b1273320ad3b5d28	LagNotices.cs:RunCase	ref>LagNotices.cs:RunCase
+hop	PoisonLedgerCore.cs:Count#1	b1b3053ff926d60a	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PoisonLedgerCore.cs:Count#1	b1b976fafc9822ba	TeamColorIdentity.cs:SetTmpOutline	ref>TeamColorIdentity.cs:SetTmpOutline
 hop	PoisonLedgerCore.cs:Count#1	b1d4817803323b89	VanillaFixes.cs:SweepNow#2	ref>VanillaFixes.cs:SweepNow#2
 hop	PoisonLedgerCore.cs:Count#1	b1e3cba3e3d79b39	PoisonLedgerCore.cs:Note#1	ref>PoisonLedgerCore.cs:Note#1
@@ -32124,6 +32241,7 @@ hop	PoisonLedgerCore.cs:Count#2	0867378a72cd4658	PortraitRenderDance.cs:Summary#
 hop	PoisonLedgerCore.cs:Count#2	08769dd9e3be002f	RunInBackgroundLease.cs:Acquire	ref[.LogInfo(#0)]>RunInBackgroundLease.cs:Acquire
 hop	PoisonLedgerCore.cs:Count#2	089a33eab5366a47	PoisonLedgerCore.cs:ViewsWithPending	ref>PoisonLedgerCore.cs:ViewsWithPending
 hop	PoisonLedgerCore.cs:Count#2	08cdd66ca4ed4831	PoisonSync.cs:SawBefore	ref>PoisonSync.cs:SawBefore
+hop	PoisonLedgerCore.cs:Count#2	08d1561cae4b6344	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)/I(#0)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PoisonLedgerCore.cs:Count#2	09058a7fbe9eb627	GameStateWatcher.cs:TickSpectateAttest	ref>GameStateWatcher.cs:TickSpectateAttest
 hop	PoisonLedgerCore.cs:Count#2	091c152989559d38	IdleShowcase.cs:ViewDataReady	ref>IdleShowcase.cs:ViewDataReady
 hop	PoisonLedgerCore.cs:Count#2	0955b118e5a03931	NetworkReplicaDiagnostics.cs:ActorSummary	ref>NetworkReplicaDiagnostics.cs:ActorSummary
@@ -32712,6 +32830,7 @@ hop	PoisonLedgerCore.cs:Count#2	6be2a3053868b3d3	NativeUI.cs:RefreshArtistTab	re
 hop	PoisonLedgerCore.cs:Count#2	6c239591ca58d38e	PoisonLedgerCore.cs:CountFor	ref>PoisonLedgerCore.cs:CountFor
 hop	PoisonLedgerCore.cs:Count#2	6c3f214f5a3db096	NativeUI.cs:SyncShopArtistFilterButtons	delegate[UIFactory.CreateButton(#6=>)/=>{}]>NativeUI.cs:SyncShopArtistFilterButtons
 hop	PoisonLedgerCore.cs:Count#2	6c405466b254adc0	EmojiSprites.cs:Attach	ref>EmojiSprites.cs:Attach
+hop	PoisonLedgerCore.cs:Count#2	6c63f31b0dc5567c	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	PoisonLedgerCore.cs:Count#2	6c64385ee505527e	FfaNumberingRules.cs:BeginGame	ref>FfaNumberingRules.cs:BeginGame
 hop	PoisonLedgerCore.cs:Count#2	6ce0fc6061977f5b	PostSessionReport.cs:FfaSessionMatches	ref>PostSessionReport.cs:FfaSessionMatches
 hop	PoisonLedgerCore.cs:Count#2	6d07af7934bc2baf	PcQuickShardRules.cs:DuplicateShardIds	ref>PcQuickShardRules.cs:DuplicateShardIds
@@ -32797,6 +32916,7 @@ hop	PoisonLedgerCore.cs:Count#2	793f34575a6d6fd1	NativeUI.cs:RefreshTournaments	
 hop	PoisonLedgerCore.cs:Count#2	7966b08315194731	BroadcastHud.cs:DrawFfaStrip	ref[GUI.Label(#1)]>BroadcastHud.cs:DrawFfaStrip
 hop	PoisonLedgerCore.cs:Count#2	7978c8533861181b	FfaNumberingRules.cs:RunRoundTwoUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunRoundTwoUnits
 hop	PoisonLedgerCore.cs:Count#2	7a29826b3c943f22	PlayerCardsUI.cs:DevTrade	dispatch[case "cancel"]{cancel}>PlayerCardsUI.cs:DevTrade
+hop	PoisonLedgerCore.cs:Count#2	7a54454768172d8e	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PoisonLedgerCore.cs:Count#2	7a5ba60529219ed7	SpectatorSync.cs:CurrentDeckNames	ref>SpectatorSync.cs:CurrentDeckNames
 hop	PoisonLedgerCore.cs:Count#2	7aa223dd60afdd6b	NativeUI.cs:ApplyAdminPanelScope	ref>NativeUI.cs:ApplyAdminPanelScope
 hop	PoisonLedgerCore.cs:Count#2	7aacb56dbac7020c	NativeUI.cs:RefreshCompare	ref[UIFactory.SetTextRaw(#1)/I18n.TrF(#1)]>NativeUI.cs:RefreshCompare
@@ -33508,7 +33628,6 @@ hop	PoisonLedgerCore.cs:Count#2	efea34e0ffd14a82	NativeUI.cs:PickSlotAndSubmitAn
 hop	PoisonLedgerCore.cs:Count#2	f0b7adb28ff92305	SessionReportModel.cs:BuildsRange	ref[I18n.TrF(#3)]>SessionReportModel.cs:BuildsRange
 hop	PoisonLedgerCore.cs:Count#2	f0e6d6313b4d571c	SeatEvidenceCore.cs:ParseQueue	ref>SeatEvidenceCore.cs:ParseQueue
 hop	PoisonLedgerCore.cs:Count#2	f10c7b0b458b6fcf	TitleLaddersUI.cs:ProgressText	ref>TitleLaddersUI.cs:ProgressText
-hop	PoisonLedgerCore.cs:Count#2	f1644f10d2247ccd	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	PoisonLedgerCore.cs:Count#2	f1afd565b3781a92	SessionReportModel.cs:Coloured	ref>SessionReportModel.cs:Coloured
 hop	PoisonLedgerCore.cs:Count#2	f20172b214618e8f	GameStateWatcher.cs:OnFfaMatchStarted	ref>GameStateWatcher.cs:OnFfaMatchStarted
 hop	PoisonLedgerCore.cs:Count#2	f21162862ec933f4	UnicodeFallback.cs:RegisterFallbacks	ref[AddAssets(#2)]>UnicodeFallback.cs:RegisterFallbacks
@@ -34166,6 +34285,7 @@ hop	PortraitRenderDance.cs:Begin	b349ac4c6bdd0d0d	ApiClient.cs:StartBootProbe	re
 hop	PortraitRenderDance.cs:Begin	c16196ee5208dfb4	ApiClient.cs:SecureRouteTick	ref>ApiClient.cs:SecureRouteTick
 hop	PortraitRenderDance.cs:Begin	c9078d8de6fa5b90	PcQuickShardRules.cs:LateAnswer	ref>PcQuickShardRules.cs:LateAnswer
 hop	PortraitRenderDance.cs:Begin	d0a48c503ae2ae65	PlayerCardsUI.cs:SendShard	ref>PlayerCardsUI.cs:SendShard
+hop	PortraitRenderDance.cs:Begin	d45107f0603397b5	FfaMode.cs:NearestOpponent	ref>FfaMode.cs:NearestOpponent
 hop	PortraitRenderDance.cs:Begin	d7024f2f0e970a0a	PortraitRenderDance.cs:DanceTimed	ref>PortraitRenderDance.cs:DanceTimed
 hop	PortraitRenderDance.cs:DanceAfterYield	47e3ea1de0f75d9d	PortraitRenderDance.cs:DanceRun	ref>PortraitRenderDance.cs:DanceRun
 hop	PortraitRenderDance.cs:DanceAnswer	448aa728617f7104	PortraitRenderDance.cs:UploadStill	delegate[ApiClient.PcPortraitUpload(#4=>)/=>{}]>PortraitRenderDance.cs:UploadStill
@@ -35816,6 +35936,7 @@ hop	SeatEvidenceCore.cs:Add#1	8b2645da2df1be52	RegionPingSweep.cs:BuildTargets	r
 hop	SeatEvidenceCore.cs:Add#1	8b281d891ba3f3fb	ApiClient.cs:ExtractCardNames	ref>ApiClient.cs:ExtractCardNames
 hop	SeatEvidenceCore.cs:Add#1	8b86feb4dd908b61	field:RosterCensus.cs:?	field[?]>RosterCensus.cs:(file scope)
 hop	SeatEvidenceCore.cs:Add#1	8b973c7f687588cc	PoisonSync.cs:RawNonSpectators	ref>PoisonSync.cs:RawNonSpectators
+hop	SeatEvidenceCore.cs:Add#1	8b9a2c5ee54dbeb6	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	SeatEvidenceCore.cs:Add#1	8bf3bde88424158e	NativeUI.cs:DevSetCompareSelection	ref>NativeUI.cs:DevSetCompareSelection
 hop	SeatEvidenceCore.cs:Add#1	8bf73ed48a4283c0	DanceStep0Probe.cs:BodyProbe	ref>DanceStep0Probe.cs:BodyProbe
 hop	SeatEvidenceCore.cs:Add#1	8c073964a800a317	VanillaFixes.cs:TargetMethods#4	ref>VanillaFixes.cs:TargetMethods#4
@@ -37140,6 +37261,7 @@ hop	SeatEvidenceCore.cs:Add#2	e6c5e2ea6e321ea0	DanceMotionCore.cs:TryParseContai
 hop	SeatEvidenceCore.cs:Add#2	e73b4b647eb5f91e	NativeUI.cs:BuildOvtRecentRowText	ref>NativeUI.cs:BuildOvtRecentRowText
 hop	SeatEvidenceCore.cs:Add#2	e74120ae1d6eab14	NativeUI.cs:BuildInfoTab	ref>NativeUI.cs:BuildInfoTab
 hop	SeatEvidenceCore.cs:Add#2	e754180990cf965d	ApiClient.cs:RunHeartbeatAbortSentinel	ref>ApiClient.cs:RunHeartbeatAbortSentinel
+hop	SeatEvidenceCore.cs:Add#2	e757dabf79aa3cc0	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	SeatEvidenceCore.cs:Add#2	e7daa0840c05b24c	BinderSortRules.cs:SelfTest	ref>BinderSortRules.cs:SelfTest
 hop	SeatEvidenceCore.cs:Add#2	e7fed877a50fdb96	ApiClient.cs:ParseTeamQueueList	ref>ApiClient.cs:ParseTeamQueueList
 hop	SeatEvidenceCore.cs:Add#2	e91637771d330471	ApiClient.cs:ParseTopCards	ref>ApiClient.cs:ParseTopCards
@@ -37883,6 +38005,7 @@ hop	SeatEvidenceCore.cs:Add#3	a17dbb9c2d5b42c9	SeatEvidence.cs:Dispatch	ref>Seat
 hop	SeatEvidenceCore.cs:Add#3	a1f11039b6d556b4	FfaCardSequence.cs:SnapshotPool	ref>FfaCardSequence.cs:SnapshotPool
 hop	SeatEvidenceCore.cs:Add#3	a251982ee3001a04	IdentityClockCore.cs:Copy	ref>IdentityClockCore.cs:Copy
 hop	SeatEvidenceCore.cs:Add#3	a269f48892316057	PostSessionReport.cs:BuildCells2v2Game	ref[case 4]>PostSessionReport.cs:BuildCells2v2Game
+hop	SeatEvidenceCore.cs:Add#3	a2bc93a1a466d707	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	SeatEvidenceCore.cs:Add#3	a31093421aff1408	ApiClient.cs:ParseBugReportList	ref>ApiClient.cs:ParseBugReportList
 hop	SeatEvidenceCore.cs:Add#3	a34264893aa7ab63	MusicEngine.cs:MarkFailed	ref>MusicEngine.cs:MarkFailed
 hop	SeatEvidenceCore.cs:Add#3	a34a5ff52a2159e6	KeybindRules.cs:Repaint	ref>KeybindRules.cs:Repaint
@@ -38915,6 +39038,7 @@ hop	SeatEvidenceCore.cs:Add#4	b4ba2f9bf30eda09	FfaNumberingRules.cs:EdgeChecks	r
 hop	SeatEvidenceCore.cs:Add#4	b4d0ca5b94f52a6d	PcQuickShardRules.cs:TombstoneCases	ref>PcQuickShardRules.cs:TombstoneCases
 hop	SeatEvidenceCore.cs:Add#4	b507c5a4749e9abe	FfaNumberingRules.cs:Adopt	ref>FfaNumberingRules.cs:Adopt
 hop	SeatEvidenceCore.cs:Add#4	b644099cf60a6f97	FfaNumberingRules.cs:HeldNow	ref>FfaNumberingRules.cs:HeldNow
+hop	SeatEvidenceCore.cs:Add#4	b6822085922fcb6e	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	SeatEvidenceCore.cs:Add#4	b69aba00bdcea2c0	NativeUI.cs:DevSetCompareMetricByName	ref>NativeUI.cs:DevSetCompareMetricByName
 hop	SeatEvidenceCore.cs:Add#4	b6b9c181891d6243	GameStateWatcher.cs:SpectateFighterIds	ref>GameStateWatcher.cs:SpectateFighterIds
 hop	SeatEvidenceCore.cs:Add#4	b6e782a1d99b4477	ApiClient.cs:ParseTeamSeriesPagedList	ref>ApiClient.cs:ParseTeamSeriesPagedList
@@ -39767,6 +39891,7 @@ hop	SeatEvidenceCore.cs:Add#5	939358dd5b8508ac	NativeUI.SettingsDrive.cs:DrvSetA
 hop	SeatEvidenceCore.cs:Add#5	939c3d798be247c6	Plugin.cs:TargetMethods	ref>Plugin.cs:TargetMethods
 hop	SeatEvidenceCore.cs:Add#5	93aaa0cb0189b517	PlayerCardsUI.cs:StartCompose	ref>PlayerCardsUI.cs:StartCompose
 hop	SeatEvidenceCore.cs:Add#5	94328fe445ed1bfd	FfaMode.cs:FfaPickPhase	ref>FfaMode.cs:FfaPickPhase
+hop	SeatEvidenceCore.cs:Add#5	9448a7207d90aadf	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	SeatEvidenceCore.cs:Add#5	94c7d317cdfdc5ba	NativeUI.cs:RefreshFfaTab	ref>NativeUI.cs:RefreshFfaTab
 hop	SeatEvidenceCore.cs:Add#5	94cd565848d62f82	NativeUI.cs:TryInstallUnicodeFallback	ref>NativeUI.cs:TryInstallUnicodeFallback
 hop	SeatEvidenceCore.cs:Add#5	94dd0a95cf6a5877	PostSessionReport.cs:BuildCellsFfaGame	ref[case 1]>PostSessionReport.cs:BuildCellsFfaGame
@@ -41089,6 +41214,7 @@ hop	SeatEvidenceCore.cs:Add#6	e50903061d93e8b4	FfaMode.cs:ScoreLine	ref>FfaMode.
 hop	SeatEvidenceCore.cs:Add#6	e52643ab3568364b	NativeUI.cs:RenderVisualBracket	ref>NativeUI.cs:RenderVisualBracket
 hop	SeatEvidenceCore.cs:Add#6	e59ed3a13d087048	IdentityClockEvidence.cs:BootCheck	ref>IdentityClockEvidence.cs:BootCheck
 hop	SeatEvidenceCore.cs:Add#6	e5b5dfde55770754	Keybinds.cs:FullKeyScan	ref>Keybinds.cs:FullKeyScan
+hop	SeatEvidenceCore.cs:Add#6	e6288a1238126c11	FfaNumberingRules.cs:RunLegacyBridgeUnits	delegate[CollectPicksFrom(#6=>)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	SeatEvidenceCore.cs:Add#6	e6877d805e0eaf80	ApiClient.cs:ParseCosmeticSubmissionArray	ref>ApiClient.cs:ParseCosmeticSubmissionArray
 hop	SeatEvidenceCore.cs:Add#6	e70cd0c93908be95	ApiClient.cs:PumpPrefs	ref>ApiClient.cs:PumpPrefs
 hop	SeatEvidenceCore.cs:Add#6	e78d474d1aba92bd	NativeUI.cs:CreateShopRow	delegate[UIFactory.CreateButton(#6=>)/=>{}]>NativeUI.cs:CreateShopRow
@@ -42555,6 +42681,7 @@ hop	SeatEvidenceCore.cs:Count	11853d47cf43e70a	BinderSortRules.cs:SelfTest	ref[C
 hop	SeatEvidenceCore.cs:Count	11a703859a2031ac	ApiClient.cs:DoAutoUpdate	ref>ApiClient.cs:DoAutoUpdate
 hop	SeatEvidenceCore.cs:Count	11cbd1dd542eb316	BroadcastHud.cs:DrawPanel	ref>BroadcastHud.cs:DrawPanel
 hop	SeatEvidenceCore.cs:Count	11d1325285693ba5	NativeUI.cs:BuildCompareMetricTable	ref>NativeUI.cs:BuildCompareMetricTable
+hop	SeatEvidenceCore.cs:Count	11de839f348aa3d7	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#2)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	SeatEvidenceCore.cs:Count	11eff017607e78b7	PortraitRender.cs:LegsPlanted	ref>PortraitRender.cs:LegsPlanted
 hop	SeatEvidenceCore.cs:Count	1204c957680eb7cb	FfaLateRules.cs:K45xiid	ref[x.Ok(#0)]>FfaLateRules.cs:K45xiid
 hop	SeatEvidenceCore.cs:Count	1211bb8aa2d0275a	IdentityClockEvidence.cs:BootLine	ref>IdentityClockEvidence.cs:BootLine
@@ -42663,7 +42790,6 @@ hop	SeatEvidenceCore.cs:Count	2263ee251f823829	MailUI.cs:IndexOfPerson	ref>MailU
 hop	SeatEvidenceCore.cs:Count	22661293d0f94c92	PortraitRender.cs:Read	ref>PortraitRender.cs:Read
 hop	SeatEvidenceCore.cs:Count	228c6b839cc996ac	RatingGraphAxis.cs:Build	ref>RatingGraphAxis.cs:Build
 hop	SeatEvidenceCore.cs:Count	22978babfaec1023	VanillaFixes.cs:Prefix#3	ref[VanillaFixSupport.DiagLimited(#1)]>VanillaFixes.cs:Prefix#3
-hop	SeatEvidenceCore.cs:Count	231558b5c1227158	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	SeatEvidenceCore.cs:Count	239ecb8db29b037a	FfaLateEntry.cs:OnEpochAnswer	ref[JoinTimeline.Step(#1)/I(#0)]>FfaLateEntry.cs:OnEpochAnswer
 hop	SeatEvidenceCore.cs:Count	23d7dc2196e1152d	PlayerCardMotion.cs:MaybeRead	ref>PlayerCardMotion.cs:MaybeRead
 hop	SeatEvidenceCore.cs:Count	241b6063c53a6e76	NativeUI.cs:Tick	ref>NativeUI.cs:Tick
@@ -43037,6 +43163,7 @@ hop	SeatEvidenceCore.cs:Count	61e5e4e7e4958f0f	Keybinds.cs:LiveSetCount	ref>Keyb
 hop	SeatEvidenceCore.cs:Count	62179bbc7d72f9de	SeatEvidence.cs:Foreign	ref>SeatEvidence.cs:Foreign
 hop	SeatEvidenceCore.cs:Count	625bc79a9af713fc	CardDrawEvidenceCore.cs:Budget	ref[case 0/ap.RemoveAt(#0)]>CardDrawEvidenceCore.cs:Budget
 hop	SeatEvidenceCore.cs:Count	627291e531a42cc0	FfaAssembly.cs:HandleAnswer	ref>FfaAssembly.cs:HandleAnswer
+hop	SeatEvidenceCore.cs:Count	62a78a7586b73c89	FfaMode.cs:FfaPickPhase	ref[Plugin.Log.LogInfo(#0)]>FfaMode.cs:FfaPickPhase
 hop	SeatEvidenceCore.cs:Count	62d67b67e3222855	RegionPingSweep.cs:BuildTargets	ref[new List(#0)/Math.Min(#1)]>RegionPingSweep.cs:BuildTargets
 hop	SeatEvidenceCore.cs:Count	6301c8761e58035c	PlayerCardMotion.cs:Pump	ref>PlayerCardMotion.cs:Pump
 hop	SeatEvidenceCore.cs:Count	6310d5374000add4	MusicEngine.cs:TickTestScript	ref>MusicEngine.cs:TickTestScript
@@ -43568,6 +43695,7 @@ hop	SeatEvidenceCore.cs:Count	ba7bb21fddf0a2c6	CardDrawEvidenceCore.cs:Budget	en
 hop	SeatEvidenceCore.cs:Count	ba7bd7d5e93b07f5	FfaLateRules.cs:ChainOf	ref>FfaLateRules.cs:ChainOf
 hop	SeatEvidenceCore.cs:Count	ba9602e643f8cc3f	FfaLateRules.cs:CountCase	ref>FfaLateRules.cs:CountCase
 hop	SeatEvidenceCore.cs:Count	badfac62fe82fe93	MusicEngine.cs:MusicStatusLine	ref>MusicEngine.cs:MusicStatusLine
+hop	SeatEvidenceCore.cs:Count	baec530bbc606d7f	FfaNumberingRules.cs:RunLegacyBridgeUnits	ref[Unit(#3)/I(#0)]>FfaNumberingRules.cs:RunLegacyBridgeUnits
 hop	SeatEvidenceCore.cs:Count	baf0ba8d1654f766	GameStateWatcher.cs:ResolveBodiesByActor	ref>GameStateWatcher.cs:ResolveBodiesByActor
 hop	SeatEvidenceCore.cs:Count	baff09891e520c59	NativeUI.cs:CopyChatTail	ref[Math.Max(#1)]>NativeUI.cs:CopyChatTail
 hop	SeatEvidenceCore.cs:Count	bb2b99051d2f5cfa	HitEvidenceCore.cs:AddForce	ref>HitEvidenceCore.cs:AddForce
@@ -44135,6 +44263,7 @@ hop	SecureRouteRules.cs:Begin	df8cc38b4ad391c6	PortraitRenderDance.cs:DanceTimed
 hop	SecureRouteRules.cs:Begin	e152cffbfb9669ef	PcQuickShardRules.cs:LateAnswer	ref>PcQuickShardRules.cs:LateAnswer
 hop	SecureRouteRules.cs:Begin	e311c6c65a27e08f	ApiClient.cs:StartBootProbe	ref>ApiClient.cs:StartBootProbe
 hop	SecureRouteRules.cs:Begin	f3d80283f0e2ac2b	PoisonSync.cs:AuthoritativeDot	ref>PoisonSync.cs:AuthoritativeDot
+hop	SecureRouteRules.cs:Begin	fe0cfe9e159d3122	FfaMode.cs:NearestOpponent	ref>FfaMode.cs:NearestOpponent
 hop	SecureRouteRules.cs:ClaimLifetimeSeconds	02b693e30553690b	SecureRouteRules.cs:ProbeLive	ref>SecureRouteRules.cs:ProbeLive
 hop	SecureRouteRules.cs:Conclude	1c6b23a14e04984b	SecureRouteRules.cs:Step	delegate[transport.Get(#2=>)/=>{}]>SecureRouteRules.cs:Step
 hop	SecureRouteRules.cs:End	0ae84e4e5a6a2707	CardDrawEvidence.cs:SealGame	entry[_pending.Add(#0)/Pending.End/&]>CardDrawEvidence.cs:SealGame
@@ -45196,31 +45325,37 @@ hop	TeamGameNumber.cs:Issue	bab2bb788ed3ab58	TeamGameNumber.cs:Restart	ref>TeamG
 hop	TeamGameNumber.cs:Issue	bbf8d304f8842edc	TeamGameNumber.cs:SimulateF31Fresh	ref>TeamGameNumber.cs:SimulateF31Fresh
 hop	TeamGameNumber.cs:Issue	c5c19857c9914e01	TeamGameNumber.cs:SimulateF31Entry	ref>TeamGameNumber.cs:SimulateF31Entry
 hop	TeamGameNumber.cs:KeptBoot	143b9e4fc992be24	TeamGameNumber.cs:SimulateF31#2	ref>TeamGameNumber.cs:SimulateF31#2
+hop	TeamGameNumber.cs:Leave#1	03bc68cfff7e090a	FfaNumberingRules.cs:W84	delegate[=>{}]>FfaNumberingRules.cs:W84
+hop	TeamGameNumber.cs:Leave#1	06a2222279f420e5	FfaNumberingRules.cs:W74Room	delegate[=>{}]>FfaNumberingRules.cs:W74Room
 hop	TeamGameNumber.cs:Leave#1	1894e84bc90b0dde	FfaNumberingRules.cs:W610	delegate[=>{}]>FfaNumberingRules.cs:W610
 hop	TeamGameNumber.cs:Leave#1	1c4e5a38fd5f55e9	FfaLateRules.cs:K45ix	ref>FfaLateRules.cs:K45ix
 hop	TeamGameNumber.cs:Leave#1	1ce5c7c63b69c2af	FfaNumberingRules.cs:W64	delegate[=>{}]>FfaNumberingRules.cs:W64
+hop	TeamGameNumber.cs:Leave#1	26889976679b3f48	FfaNumberingRules.cs:W710t	delegate[=>{}]>FfaNumberingRules.cs:W710t
+hop	TeamGameNumber.cs:Leave#1	27b20514585643f2	FfaNumberingRules.cs:W85	delegate[=>{}]>FfaNumberingRules.cs:W85
 hop	TeamGameNumber.cs:Leave#1	28e249f673f9e0e2	FfaNumberingRules.cs:W42	ref>FfaNumberingRules.cs:W42
 hop	TeamGameNumber.cs:Leave#1	2b0e01658cd70e41	FfaNumberingRules.cs:W41	ref>FfaNumberingRules.cs:W41
+hop	TeamGameNumber.cs:Leave#1	312b190ebd6f2b92	FfaNumberingRules.cs:W86	delegate[=>{}]>FfaNumberingRules.cs:W86
 hop	TeamGameNumber.cs:Leave#1	4681124783a86ed4	FfaLateRules.cs:K45xiia	ref>FfaLateRules.cs:K45xiia
 hop	TeamGameNumber.cs:Leave#1	57539221ee542e00	FfaNumberingRules.cs:W66	ref>FfaNumberingRules.cs:W66
 hop	TeamGameNumber.cs:Leave#1	6b0351fd6e2fa14c	FfaNumberingRules.cs:W612	delegate[=>{}]>FfaNumberingRules.cs:W612
+hop	TeamGameNumber.cs:Leave#1	7233f6573f708672	FfaNumberingRules.cs:W82	delegate[=>{}]>FfaNumberingRules.cs:W82
 hop	TeamGameNumber.cs:Leave#1	793fb486e642bf99	FfaNumberingRules.cs:W610	ref>FfaNumberingRules.cs:W610
 hop	TeamGameNumber.cs:Leave#1	7d3f8df922dc3d86	FfaNumberingRules.cs:W615	ref>FfaNumberingRules.cs:W615
 hop	TeamGameNumber.cs:Leave#1	8674a29c16715c46	TeamGameNumber.cs:Simulate	ref>TeamGameNumber.cs:Simulate
-hop	TeamGameNumber.cs:Leave#1	9665310edab126b7	FfaNumberingRules.cs:W74	ref>FfaNumberingRules.cs:W74
 hop	TeamGameNumber.cs:Leave#1	99b1b13e893cd25b	FfaNumberingRules.cs:W61	delegate[=>{}]>FfaNumberingRules.cs:W61
 hop	TeamGameNumber.cs:Leave#1	9aef31c6758c7334	FfaLateRules.cs:K45iv	ref>FfaLateRules.cs:K45iv
+hop	TeamGameNumber.cs:Leave#1	a0fd1553dab8bb23	FfaNumberingRules.cs:W79Room	ref>FfaNumberingRules.cs:W79Room
 hop	TeamGameNumber.cs:Leave#1	a2e933f4a9f8e703	FfaNumberingRules.cs:W611	ref>FfaNumberingRules.cs:W611
 hop	TeamGameNumber.cs:Leave#1	ae010e573bfde76e	FfaNumberingRules.cs:W75	ref>FfaNumberingRules.cs:W75
 hop	TeamGameNumber.cs:Leave#1	aec265f978560637	FfaNumberingRules.cs:W65	ref>FfaNumberingRules.cs:W65
-hop	TeamGameNumber.cs:Leave#1	b712dcebd2697ae2	FfaNumberingRules.cs:W74	delegate[=>{}]>FfaNumberingRules.cs:W74
+hop	TeamGameNumber.cs:Leave#1	b308fa90810d28eb	FfaNumberingRules.cs:W74Room	ref>FfaNumberingRules.cs:W74Room
+hop	TeamGameNumber.cs:Leave#1	c4bbc967019d2a87	FfaNumberingRules.cs:W83	delegate[=>{}]>FfaNumberingRules.cs:W83
 hop	TeamGameNumber.cs:Leave#1	c62b790208c4a19f	FfaNumberingRules.cs:W711	delegate[=>{}]>FfaNumberingRules.cs:W711
 hop	TeamGameNumber.cs:Leave#1	c7ef65c8380f1ecb	FfaNumberingRules.cs:W69	ref>FfaNumberingRules.cs:W69
 hop	TeamGameNumber.cs:Leave#1	c96670c93c3fb725	FfaNumberingRules.cs:W615	delegate[=>{}]>FfaNumberingRules.cs:W615
 hop	TeamGameNumber.cs:Leave#1	d694842cf53e41ce	FfaNumberingRules.cs:W63	delegate[=>{}]>FfaNumberingRules.cs:W63
 hop	TeamGameNumber.cs:Leave#1	d963f65d8c4d8843	FfaMode.cs:FfaLocalPickUI	ref>FfaMode.cs:FfaLocalPickUI
 hop	TeamGameNumber.cs:Leave#1	db78bc95fb74e82b	FfaNumberingRules.cs:W62	delegate[=>{}]>FfaNumberingRules.cs:W62
-hop	TeamGameNumber.cs:Leave#1	dbb88a49f664e0e9	FfaNumberingRules.cs:W79	ref>FfaNumberingRules.cs:W79
 hop	TeamGameNumber.cs:Leave#1	dd15bb56d24e2806	FfaNumberingRules.cs:W710	delegate[=>{}]>FfaNumberingRules.cs:W710
 hop	TeamGameNumber.cs:Leave#1	e1b2f1e68474852b	FfaLateRules.cs:K45iii	ref>FfaLateRules.cs:K45iii
 hop	TeamGameNumber.cs:Leave#1	eda0b4a5469d1a90	FfaNumberingRules.cs:W68	delegate[=>{}]>FfaNumberingRules.cs:W68
@@ -46803,6 +46938,7 @@ cycle	AvatarDefaultRules.cs:Applied	49c4a3917b64e4d3	DanceMotionCore.cs:Classify
 cycle	AvatarDefaultRules.cs:Applied	521774f872a9eaa0	FfaNumberingRules.cs:EdgeChecks
 cycle	AvatarDefaultRules.cs:Applied	55259faa7683d086	FfaNumberingRules.cs:Terminate
 cycle	AvatarDefaultRules.cs:Applied	63b923c25770f0dd	DanceMotionCore.cs:OnMotion
+cycle	AvatarDefaultRules.cs:Applied	e999af4ae62d0e71	FfaNumberingRules.cs:DeckChecks
 cycle	CardDrawEvidenceCore.cs:Apply	f4c0a12a09c56ffa	UnicodeFallback.cs:AddCodepoints
 cycle	CardDrawEvidenceCore.cs:Close	64b282d309986cb2	RegionPingSweep.cs:Close
 cycle	CardDrawEvidenceCore.cs:Close	890672842b57efd0	NativeUI.cs:TeardownOverlaySurfaces
@@ -47195,6 +47331,7 @@ cycle	DamageNumberRules.cs:Count	94ab48d112673fb2	MusicEngine.cs:IsTrackReady
 cycle	DamageNumberRules.cs:Count	952d41cc48097805	PoisonLedgerCore.cs:TryStart
 cycle	DamageNumberRules.cs:Count	99a6dae00c32787a	CardDrawEvidenceCore.cs:CloseHand
 cycle	DamageNumberRules.cs:Count	9b8b8da1bc5c6128	I18n.cs:JsonStructureBalanced
+cycle	DamageNumberRules.cs:Count	9cdb052d3c440f44	FfaNumberingRules.cs:D
 cycle	DamageNumberRules.cs:Count	9eb4a8cc09d05a60	FfaNumberingRules.cs:StartChecks
 cycle	DamageNumberRules.cs:Count	a0eb28c1c4a46509	UnicodeFallback.cs:OnLocaleChanged
 cycle	DamageNumberRules.cs:Count	a4afe0c9d0bef053	TeamGameNumber.cs:ObserveRead
@@ -47436,16 +47573,19 @@ cycle	FfaNumberingRules.cs:Advance	531d6ce220833e73	FfaNumberingRules.cs:Play#1
 cycle	FfaNumberingRules.cs:Advance	bea7c395cfcad58b	FfaNumberingRules.cs:PointAt
 cycle	FfaNumberingRules.cs:Ahead	4ade20334b39b373	FfaNumberingRules.cs:WaitBody
 cycle	FfaNumberingRules.cs:Ahead	a9b0c4c5938e4090	FfaNumberingRules.cs:ResultBody
-cycle	FfaNumberingRules.cs:Applied	0dd4b556a3250860	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:Applied	146476cffe3bfe02	DanceMotionCore.cs:ClassifyMotion
 cycle	FfaNumberingRules.cs:Applied	14a70e9d901d4460	FfaNumberingRules.cs:Terminate
+cycle	FfaNumberingRules.cs:Applied	5131a40f46b8328d	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:Applied	541034eac2251013	DanceMotionCore.cs:OnMotion
 cycle	FfaNumberingRules.cs:Applied	b807e1815430c22c	FfaNumberingRules.cs:EdgeChecks
+cycle	FfaNumberingRules.cs:Applied	ff5ece8943304e5a	FfaNumberingRules.cs:DeckChecks
+cycle	FfaNumberingRules.cs:AppliedLegacy	5f6914455b543d73	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:BeginGame	b58dea2985b0844c	FfaNumberingRules.cs:Play#1
 cycle	FfaNumberingRules.cs:BeginResult	c0491ed759c7254e	FfaNumberingRules.cs:StepPhase
 cycle	FfaNumberingRules.cs:ByName	27c56e24ce495b89	FfaNumberingRules.cs:StartChecks
 cycle	FfaNumberingRules.cs:ByName	473aee880a4f64e0	FfaNumberingRules.cs:EdgeChecks
 cycle	FfaNumberingRules.cs:ByName	5238046b6e0e4663	FfaNumberingRules.cs:OnResultWritten
+cycle	FfaNumberingRules.cs:ByName	96908989a3349117	FfaNumberingRules.cs:DeckChecks
 cycle	FfaNumberingRules.cs:CandidateNow	051105066e1c6da3	FfaNumberingRules.cs:LivePointsGameNow
 cycle	FfaNumberingRules.cs:CandidateNow	1d47612546e24304	FfaNumberingRules.cs:EdgeNew
 cycle	FfaNumberingRules.cs:CheckHeldEpoch	f0d158342aee684b	FfaNumberingRules.cs:EvaluateEpoch
@@ -47463,42 +47603,48 @@ cycle	FfaNumberingRules.cs:CycValue	ecdbac924e8843c6	FfaNumberingRules.cs:EnterP
 cycle	FfaNumberingRules.cs:CycValue	ee2f777baa3099fc	FfaNumberingRules.cs:Adopt
 cycle	FfaNumberingRules.cs:Cycle	0c493fa4667ff0ab	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:Cycle	0df91f41183b5041	FfaNumberingRules.cs:ResultBody
-cycle	FfaNumberingRules.cs:Cycle	11676d005d9ce1b7	FfaNumberingRules.cs:Restamp
 cycle	FfaNumberingRules.cs:Cycle	13585c987a2683fa	FfaNumberingRules.cs:WaitBody
 cycle	FfaNumberingRules.cs:Cycle	1be690ff66f5a593	FfaNumberingRules.cs:PublishDeadline
 cycle	FfaNumberingRules.cs:Cycle	2c0e739a365f4632	FfaNumberingRules.cs:SourceCheck
 cycle	FfaNumberingRules.cs:Cycle	34feda55e80a6b0e	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:Cycle	39700c312831476c	FfaNumberingRules.cs:EnterPhase
 cycle	FfaNumberingRules.cs:Cycle	3f2d96bd98f5110c	FfaNumberingRules.cs:OnResultWritten
-cycle	FfaNumberingRules.cs:Cycle	46e8a6fadd53a399	FfaNumberingRules.cs:PublishPick
-cycle	FfaNumberingRules.cs:Cycle	4a4a22dd2394c52c	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:Cycle	4c222007b1c83cf4	FfaNumberingRules.cs:EnterPhase
 cycle	FfaNumberingRules.cs:Cycle	4c27066cdc69bd49	FfaNumberingRules.cs:Ahead
+cycle	FfaNumberingRules.cs:Cycle	4ca85e3355d77280	FfaNumberingRules.cs:LostChecks
 cycle	FfaNumberingRules.cs:Cycle	506b1930c89464c8	FfaNumberingRules.cs:OpenOnPromotion
 cycle	FfaNumberingRules.cs:Cycle	511518b38a4456d5	FfaNumberingRules.cs:AdoptFromPicks
 cycle	FfaNumberingRules.cs:Cycle	5375662f3efaf928	FfaNumberingRules.cs:BeginResult
 cycle	FfaNumberingRules.cs:Cycle	5506854759f0d0e4	FfaNumberingRules.cs:ResultBody
+cycle	FfaNumberingRules.cs:Cycle	6694f63fca54e9d2	FfaNumberingRules.cs:PickWrite
 cycle	FfaNumberingRules.cs:Cycle	6a5683564edf428e	FfaNumberingRules.cs:EnterPhase
 cycle	FfaNumberingRules.cs:Cycle	728e0e6e284bb0ee	FfaNumberingRules.cs:AdoptFromPicks
 cycle	FfaNumberingRules.cs:Cycle	77b7307d361dbd73	FfaNumberingRules.cs:Applied
+cycle	FfaNumberingRules.cs:Cycle	7d2a5d12fb353296	FfaNumberingRules.cs:PickWrite
 cycle	FfaNumberingRules.cs:Cycle	83cbdacd98582ac2	FfaNumberingRules.cs:DetectAhead
 cycle	FfaNumberingRules.cs:Cycle	8a02cfa194205514	FfaNumberingRules.cs:PublishPick
 cycle	FfaNumberingRules.cs:Cycle	95f3fcb3e78883c7	FfaNumberingRules.cs:DetectAhead
 cycle	FfaNumberingRules.cs:Cycle	9b4bae7114a8df99	FfaNumberingRules.cs:CollectPicks
-cycle	FfaNumberingRules.cs:Cycle	9b7883ef442110a9	FfaNumberingRules.cs:Restamp
 cycle	FfaNumberingRules.cs:Cycle	9b81062a92bcb062	FfaNumberingRules.cs:OpenOnPromotion
 cycle	FfaNumberingRules.cs:Cycle	a1719af823431c71	FfaNumberingRules.cs:OpenOnPromotion
 cycle	FfaNumberingRules.cs:Cycle	a2250432fb21dcdb	FfaNumberingRules.cs:WaitBody
+cycle	FfaNumberingRules.cs:Cycle	a2a5f5850fcaac00	FfaNumberingRules.cs:AppliedLegacy
 cycle	FfaNumberingRules.cs:Cycle	a52e5c7c0dea5a69	FfaNumberingRules.cs:WaitBody
 cycle	FfaNumberingRules.cs:Cycle	a8a6e78b4fa2b643	FfaNumberingRules.cs:CollectPicks
 cycle	FfaNumberingRules.cs:Cycle	adbe8018a2d2e4f3	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:Cycle	b63aabaf47844082	FfaNumberingRules.cs:EnterPhase
-cycle	FfaNumberingRules.cs:Cycle	d430d3fb5f7a2c9d	FfaNumberingRules.cs:PublishPick
+cycle	FfaNumberingRules.cs:Cycle	b93d10742c862247	FfaNumberingRules.cs:LostChecks
+cycle	FfaNumberingRules.cs:Cycle	c5f29f1105fe4316	FfaNumberingRules.cs:Terminate
+cycle	FfaNumberingRules.cs:Cycle	d8dc944602029696	FfaNumberingRules.cs:LegacyResultOf
 cycle	FfaNumberingRules.cs:Cycle	d96bf4fe64aa5e4f	FfaNumberingRules.cs:Play#1
 cycle	FfaNumberingRules.cs:Cycle	e42ed7757a393d3b	FfaNumberingRules.cs:DetectAhead
 cycle	FfaNumberingRules.cs:Cycle	e906503d29565520	FfaNumberingRules.cs:OnResultWritten
 cycle	FfaNumberingRules.cs:Cycle	e91fb7a933273f70	FfaNumberingRules.cs:Restamp
 cycle	FfaNumberingRules.cs:Cycle	fd93eb504b1be786	FfaNumberingRules.cs:DetectAhead
+cycle	FfaNumberingRules.cs:Cycle	feba63cd25fe125b	FfaNumberingRules.cs:ResultBody
+cycle	FfaNumberingRules.cs:D	8a47d8cde330646e	FfaNumberingRules.cs:DeckChecks
+cycle	FfaNumberingRules.cs:D	f0540cbf90a733ed	FfaNumberingRules.cs:DeckChecks
+cycle	FfaNumberingRules.cs:DeckChecks	5738f321ccada368	FfaNumberingRules.cs:EdgeChecks
 cycle	FfaNumberingRules.cs:Deliver	735be781b0836785	FfaNumberingRules.cs:TickOnce
 cycle	FfaNumberingRules.cs:DetectAhead	80a555c3661a8eda	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:DetectAhead	c2f0b117971241f8	FfaNumberingRules.cs:BeginResult
@@ -47513,10 +47659,10 @@ cycle	FfaNumberingRules.cs:EnterPhase	234d94e76123835f	FfaNumberingRules.cs:Cycl
 cycle	FfaNumberingRules.cs:EpochChangeCheck	1c5ff671985a1a97	FfaNumberingRules.cs:WaitBody
 cycle	FfaNumberingRules.cs:EpochChangeCheck	4827c4c26c83d83c	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:EpochForUse	215fccd18caeef87	FfaNumberingRules.cs:CollectPicks
+cycle	FfaNumberingRules.cs:EpochForUse	41b29e249adb857d	FfaNumberingRules.cs:PublishPick
 cycle	FfaNumberingRules.cs:EpochForUse	5bb2360b40a03e23	FfaNumberingRules.cs:ResultBody
-cycle	FfaNumberingRules.cs:EpochForUse	6441da77ec34cce5	FfaNumberingRules.cs:Restamp
 cycle	FfaNumberingRules.cs:EpochForUse	67576290b7e565a2	FfaNumberingRules.cs:DetectAhead
-cycle	FfaNumberingRules.cs:EpochForUse	ab9811ede17ab45b	FfaNumberingRules.cs:PublishPick
+cycle	FfaNumberingRules.cs:EpochForUse	9d2e3da39a8a6209	FfaNumberingRules.cs:Restamp
 cycle	FfaNumberingRules.cs:EpochForUse	fd3d1cb4d5e7e5de	FfaNumberingRules.cs:EpochForWrite
 cycle	FfaNumberingRules.cs:EpochForWrite	13747affc956bdc9	FfaNumberingRules.cs:WaitBody
 cycle	FfaNumberingRules.cs:EpochForWrite	e9a47540092df0fc	FfaNumberingRules.cs:Adopt
@@ -47536,6 +47682,7 @@ cycle	FfaNumberingRules.cs:Expected	26f9a90bb2c39e3e	FfaNumberingRules.cs:StartC
 cycle	FfaNumberingRules.cs:Expected	b5f9bef1e13e2096	FfaNumberingRules.cs:EdgeChecks
 cycle	FfaNumberingRules.cs:ExpectedAdvert	fba2ba57bb33ab12	FfaNumberingRules.cs:EdgeChecks
 cycle	FfaNumberingRules.cs:Fail	0a0327f16439f53e	FfaNumberingRules.cs:ResultBody
+cycle	FfaNumberingRules.cs:Fail	0d84c4074bde0380	FfaNumberingRules.cs:LostChecks
 cycle	FfaNumberingRules.cs:Fail	1dc05ee2b4837561	FfaNumberingRules.cs:EdgeChecks
 cycle	FfaNumberingRules.cs:Fail	29a2bb85bb4880a6	FfaNumberingRules.cs:ExpectedAdvert
 cycle	FfaNumberingRules.cs:Fail	3cc3a2e972e0999b	FfaNumberingRules.cs:StartSeat
@@ -47546,8 +47693,10 @@ cycle	FfaNumberingRules.cs:Fail	6f06fc075ae54d5f	FfaNumberingRules.cs:EpochForUs
 cycle	FfaNumberingRules.cs:Fail	7a7433d76bf0bad4	FfaNumberingRules.cs:OnResultWritten
 cycle	FfaNumberingRules.cs:Fail	8837926edafedbde	FfaNumberingRules.cs:CheckHeldEpoch
 cycle	FfaNumberingRules.cs:Fail	9de0131838188f81	FfaNumberingRules.cs:Expected
+cycle	FfaNumberingRules.cs:Fail	a1a22535f32395cf	FfaNumberingRules.cs:AppliedLegacy
 cycle	FfaNumberingRules.cs:Fail	a2e4ea2354a5f26a	FfaNumberingRules.cs:ReopenCheck
 cycle	FfaNumberingRules.cs:Fail	ad6f073d36a33ac4	FfaNumberingRules.cs:SourceCheck
+cycle	FfaNumberingRules.cs:Fail	af319685abc09358	FfaNumberingRules.cs:DeckChecks
 cycle	FfaNumberingRules.cs:Fail	d3db1a1343915c63	FfaNumberingRules.cs:StartChecks
 cycle	FfaNumberingRules.cs:Fail	e494d8b667e052da	FfaNumberingRules.cs:CheckLivePoints
 cycle	FfaNumberingRules.cs:Fail	f9806bd9c192298e	FfaNumberingRules.cs:Applied
@@ -47588,7 +47737,9 @@ cycle	FfaNumberingRules.cs:Join#2	9ca1d63246790377	FfaNumberingRules.cs:EdgeChec
 cycle	FfaNumberingRules.cs:Join#2	a18723768a631e37	FfaNumberingRules.cs:ExpectedAdvert
 cycle	FfaNumberingRules.cs:Join#2	be5a117d22c8bf9c	FfaNumberingRules.cs:StartChecks
 cycle	FfaNumberingRules.cs:Join#2	d7a3d3018206dc2e	NativeUI.cs:GetWeightMaterial
+cycle	FfaNumberingRules.cs:LegacyResultOf	ed9d61b901cda6fa	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:LivePointsGameNow	4a94f5b01c106ee2	FfaNumberingRules.cs:PointAt
+cycle	FfaNumberingRules.cs:LostChecks	f3442cef58df6f72	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:MasterPublishSeed	408d046060836993	FfaNumberingRules.cs:StartCurrent
 cycle	FfaNumberingRules.cs:MasterPublishSeed	5979e0e5dc4ec671	FfaNumberingRules.cs:StartNew
 cycle	FfaNumberingRules.cs:MasterPublishSeed	d5280c33de17e8e2	FfaNumberingRules.cs:StepPhase
@@ -47606,6 +47757,8 @@ cycle	FfaNumberingRules.cs:ParseCyc	b5960a57d6ee8509	FfaNumberingRules.cs:EnterP
 cycle	FfaNumberingRules.cs:ParseCyc	c71ba511fc7600c7	FfaNumberingRules.cs:DetectAhead
 cycle	FfaNumberingRules.cs:Pick	9284870927f4bcd7	MusicEngine.cs:ReenterVanillaForContext
 cycle	FfaNumberingRules.cs:Pick	c19860844f59d6fe	AvatarDefaultRules.cs:Applied
+cycle	FfaNumberingRules.cs:PickWrite	234afc14c6c58740	FfaNumberingRules.cs:Restamp
+cycle	FfaNumberingRules.cs:PickWrite	4e51ebc95c3a5363	FfaNumberingRules.cs:PublishPick
 cycle	FfaNumberingRules.cs:Play#1	6237ca6dec6f14d4	FfaNumberingRules.cs:Play#2
 cycle	FfaNumberingRules.cs:Play#1	f539b3c3ec22cdd6	MusicEngine.cs:EnsureMainPlaying
 cycle	FfaNumberingRules.cs:Play#2	a83b8fe53bdfa8b3	MusicEngine.cs:EnsureMainPlaying
@@ -47628,6 +47781,7 @@ cycle	FfaNumberingRules.cs:Report	e6eb9d5f05f18a40	FfaNumberingRules.cs:EdgeNew
 cycle	FfaNumberingRules.cs:ResValue	22c70302a1274f7c	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:Restamp	37be892468357a5a	FfaNumberingRules.cs:Adopt
 cycle	FfaNumberingRules.cs:Restamp	531ebd056798fc8d	FfaNumberingRules.cs:OpenOnPromotion
+cycle	FfaNumberingRules.cs:Restamp	5a403886b1cb999d	FfaNumberingRules.cs:EpochMasterCheck
 cycle	FfaNumberingRules.cs:Restamp	5e03070e35920599	FfaNumberingRules.cs:EvaluateEpoch
 cycle	FfaNumberingRules.cs:Restamp	8cf2e45d3668413d	FfaNumberingRules.cs:WaitBody
 cycle	FfaNumberingRules.cs:ResultBody	f682d8c7f0754799	FfaNumberingRules.cs:StepPhase
@@ -47647,8 +47801,9 @@ cycle	FfaNumberingRules.cs:StartSeat	ac2de4e1adc3e631	FfaNumberingRules.cs:Cycle
 cycle	FfaNumberingRules.cs:StepPhase	3795e67909c963b8	FfaNumberingRules.cs:TickOnce
 cycle	FfaNumberingRules.cs:StepPhase	881fa176f7ce517f	FfaNumberingRules.cs:EnterPhase
 cycle	FfaNumberingRules.cs:TakeCarry	414a46d6d7d131a2	FfaNumberingRules.cs:EdgeNew
-cycle	FfaNumberingRules.cs:Terminate	461693af19029cee	FfaNumberingRules.cs:ResultBody
+cycle	FfaNumberingRules.cs:Terminate	5b73b33d57880cc8	FfaNumberingRules.cs:AppliedLegacy
 cycle	FfaNumberingRules.cs:Terminate	7693883062ef38ce	FfaNumberingRules.cs:Closed
+cycle	FfaNumberingRules.cs:Terminate	d77087b807a7ce77	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:Terminate	e22d71ec1663549e	FfaNumberingRules.cs:Applied
 cycle	FfaNumberingRules.cs:TickOnce	d25d8011d58a7fd5	FfaNumberingRules.cs:RunPhases
 cycle	FfaNumberingRules.cs:TickOnce	df4f5b71a4a00989	FfaNumberingRules.cs:Advance
@@ -47661,12 +47816,13 @@ cycle	FfaNumberingRules.cs:WriteCycle	2f0735e48744241c	FfaNumberingRules.cs:Open
 cycle	FfaNumberingRules.cs:WriteCycle	4baae7a45dcc9d4f	FfaNumberingRules.cs:Adopt
 cycle	FfaNumberingRules.cs:WriteCycle	76839b3db7693221	FfaNumberingRules.cs:EnterPhase
 cycle	FfaNumberingRules.cs:WriteCycle	da0837464dc67d5a	FfaNumberingRules.cs:WaitBody
-cycle	FfaNumberingRules.cs:WriteOwn	0ef3282aa5d73160	FfaNumberingRules.cs:Restamp
 cycle	FfaNumberingRules.cs:WriteOwn	212b1864e3f1e813	FfaNumberingRules.cs:Adopt
+cycle	FfaNumberingRules.cs:WriteOwn	40f809bf98ec7fc1	FfaNumberingRules.cs:PickWrite
 cycle	FfaNumberingRules.cs:WriteOwn	6360a2299ca10eb4	FfaNumberingRules.cs:StartCurrent
 cycle	FfaNumberingRules.cs:WriteOwn	72e8d2c3ba53e240	FfaNumberingRules.cs:WaitBody
 cycle	FfaNumberingRules.cs:WriteOwn	87e3c124705776a9	FfaNumberingRules.cs:StartNew
-cycle	FfaNumberingRules.cs:WriteOwn	c881ac60ebf762d6	FfaNumberingRules.cs:PublishPick
+cycle	FfaNumberingRules.cs:WriteOwn	91a5b4479b0a42e0	FfaNumberingRules.cs:Restamp
+cycle	FfaNumberingRules.cs:WriteOwn	d197b387a4e122bb	FfaNumberingRules.cs:PublishPick
 cycle	FfaNumberingRules.cs:WriteResult	61c45d054292845c	FfaNumberingRules.cs:ResultBody
 cycle	FfaNumberingRules.cs:WriteRoom	2c950f2f2c03ff52	FfaNumberingRules.cs:Adopt
 cycle	FfaNumberingRules.cs:WriteRoom	442a71b0573ff42b	FfaNumberingRules.cs:MasterPublishSeed
@@ -47978,6 +48134,7 @@ cycle	GameStateWatcher.cs:Count	f22d2a7f1bc41d5b	RegionPingSweep.cs:TryStart
 cycle	GameStateWatcher.cs:Count	f414c77e2b719207	UnicodeFallback.cs:RegisterFallbacks
 cycle	GameStateWatcher.cs:Count	f4b0b933e4b7f868	IdentityClockCore.cs:Add#2
 cycle	GameStateWatcher.cs:Count	f6869b4e74b0ce61	MusicAssets.cs:TreeEntriesExact
+cycle	GameStateWatcher.cs:Count	f7fbd6085f493f54	FfaNumberingRules.cs:D
 cycle	GameStateWatcher.cs:Count	f90ff9c76a8ea7f5	PortraitRenderDance.cs:Max
 cycle	GameStateWatcher.cs:Count	f935c9bc577d6463	FfaNumberingRules.cs:DetectAhead
 cycle	GameStateWatcher.cs:Count	fbaa438c98cdf153	FfaNumberingRules.cs:TickOnce
@@ -48573,6 +48730,7 @@ cycle	IdentityClockCore.cs:Count	ae18c58cc59243d3	ApiClient.cs:EnrollResult
 cycle	IdentityClockCore.cs:Count	ae5bd7dc0ccba008	RegionPingSweep.cs:BuildTargets
 cycle	IdentityClockCore.cs:Count	afaf176f73ed04cf	I18n.cs:TryApplyRoundsLocale
 cycle	IdentityClockCore.cs:Count	b01b4564fb6fe02a	DamageNumberRules.cs:Count
+cycle	IdentityClockCore.cs:Count	b1f207f6c61e31c9	FfaNumberingRules.cs:D
 cycle	IdentityClockCore.cs:Count	b418ae0d95ee353c	MusicEngine.cs:ResolveReadyClip
 cycle	IdentityClockCore.cs:Count	b44478466c00b62f	I18n.cs:TryApplyRoundsLocale
 cycle	IdentityClockCore.cs:Count	b54e160ca0c22870	PoisonLedgerCore.cs:Count#1
@@ -48655,6 +48813,7 @@ cycle	IdentityClockCore.cs:Name	2b2ad2957f72483a	Plugin.cs:IsCompetitiveRoom
 cycle	IdentityClockCore.cs:Name	2fcd74b7534fc420	PoisonLedgerCore.cs:Handle
 cycle	IdentityClockCore.cs:Name	34c55d153613c09a	RegionPingSweep.cs:TryStart
 cycle	IdentityClockCore.cs:Name	37bbe662a112e6b7	FfaNumberingRules.cs:EdgeChecks
+cycle	IdentityClockCore.cs:Name	3b67d33cf9b5a948	FfaNumberingRules.cs:LostChecks
 cycle	IdentityClockCore.cs:Name	3e0751b714a5a0c7	MusicAssets.cs:ValidateTierTree
 cycle	IdentityClockCore.cs:Name	3f28d437d9586ebd	FfaNumberingRules.cs:StartCurrent
 cycle	IdentityClockCore.cs:Name	41171abd1e7078e8	FfaNumberingRules.cs:Applied
@@ -48675,6 +48834,7 @@ cycle	IdentityClockCore.cs:Name	683618d474ba25ae	RegionPingSweep.cs:Done
 cycle	IdentityClockCore.cs:Name	694387528147bdd0	FfaNumberingRules.cs:StartChecks
 cycle	IdentityClockCore.cs:Name	6a66df3e89a6fdb9	FfaNumberingRules.cs:EdgeNew
 cycle	IdentityClockCore.cs:Name	6ff01af621505583	FfaNumberingRules.cs:EdgeChecks
+cycle	IdentityClockCore.cs:Name	7028934bd0b06673	FfaNumberingRules.cs:LostChecks
 cycle	IdentityClockCore.cs:Name	713e81f59e4a59b3	TeamColorIdentity.cs:FindTmpInParents
 cycle	IdentityClockCore.cs:Name	721122d23dcf7422	FfaNumberingRules.cs:EnterPhase
 cycle	IdentityClockCore.cs:Name	73535e49ac8c456c	FfaNumberingRules.cs:ByName
@@ -48685,6 +48845,7 @@ cycle	IdentityClockCore.cs:Name	8029b9be3c2d1546	FfaNumberingRules.cs:StartSeat
 cycle	IdentityClockCore.cs:Name	861cebcd51bec8c5	FfaNumberingRules.cs:Deliver
 cycle	IdentityClockCore.cs:Name	865e12b1713a0e9a	FfaNumberingRules.cs:StartNew
 cycle	IdentityClockCore.cs:Name	86d4bd7c838020f8	FfaNumberingRules.cs:EdgeChecks
+cycle	IdentityClockCore.cs:Name	8bb615090164c180	FfaNumberingRules.cs:AppliedLegacy
 cycle	IdentityClockCore.cs:Name	8f4c8aa6f68a942d	FfaNumberingRules.cs:Join#1
 cycle	IdentityClockCore.cs:Name	9255313b34f278dd	FfaNumberingRules.cs:EpochForUse
 cycle	IdentityClockCore.cs:Name	94c76bd86479a9cd	FfaNumberingRules.cs:EdgeChecks
@@ -48700,6 +48861,7 @@ cycle	IdentityClockCore.cs:Name	b4072718f691f898	RegionPingSweep.cs:Worker
 cycle	IdentityClockCore.cs:Name	ba5c7e546e1d9b8c	PortraitRender.cs:Read
 cycle	IdentityClockCore.cs:Name	c162a141e6f3072d	IdentityClockCore.cs:Count
 cycle	IdentityClockCore.cs:Name	c26defe8da089585	FfaNumberingRules.cs:Join#1
+cycle	IdentityClockCore.cs:Name	c34ed740ea19105c	FfaNumberingRules.cs:DeckChecks
 cycle	IdentityClockCore.cs:Name	c636be0a69d3bbd3	UnicodeFallback.cs:AddCodepoints
 cycle	IdentityClockCore.cs:Name	cee5a2dcf3ebc32b	MusicAssets.cs:ValidateTierTree
 cycle	IdentityClockCore.cs:Name	d7c4438e10c4775f	IdentityClockCore.cs:Entries
@@ -49280,6 +49442,7 @@ cycle	PcQuickShardRules.cs:Count	c27d19b88f41d48b	SeatEvidenceCore.cs:Add#2
 cycle	PcQuickShardRules.cs:Count	c621c86f85276a9c	FfaNumberingRules.cs:Terminate
 cycle	PcQuickShardRules.cs:Count	c6c876cff66e624c	FfaLateRules.cs:ChainOf
 cycle	PcQuickShardRules.cs:Count	c75d154b6038bdbb	PcQuickShardRules.cs:Reconcile
+cycle	PcQuickShardRules.cs:Count	cabaa540bd093d6c	FfaNumberingRules.cs:D
 cycle	PcQuickShardRules.cs:Count	ceeccaaa0af80b04	TeamGameNumber.cs:Remember
 cycle	PcQuickShardRules.cs:Count	cfacf947839fdff8	PoisonLedgerCore.cs:AdmitRate
 cycle	PcQuickShardRules.cs:Count	d02101f9579b32d9	I18n.cs:TryApplyRoundsLocale
@@ -49470,6 +49633,7 @@ cycle	PlayerCardMotionCore.cs:Count#1	b1da4bb2c30c1588	PoisonLedgerCore.cs:Admit
 cycle	PlayerCardMotionCore.cs:Count#1	b1f6dd8946a66131	SeatEvidenceCore.cs:Add#6
 cycle	PlayerCardMotionCore.cs:Count#1	b201acf6e394820f	MusicEngine.cs:RefreshDerivedState
 cycle	PlayerCardMotionCore.cs:Count#1	b3ce4f4412ba052f	FfaLateRules.cs:ChainOf
+cycle	PlayerCardMotionCore.cs:Count#1	b535087acb1c5bec	FfaNumberingRules.cs:D
 cycle	PlayerCardMotionCore.cs:Count#1	b64539f838075df2	CardDrawEvidenceCore.cs:Apply
 cycle	PlayerCardMotionCore.cs:Count#1	b7148d9c07a1bc31	PortraitRender.cs:Read
 cycle	PlayerCardMotionCore.cs:Count#1	b7c85eac1ef021ac	FfaNumberingRules.cs:TickOnce
@@ -49528,6 +49692,7 @@ cycle	PlayerCardMotionCore.cs:Count#2	1eee6b004b5828cd	DamageNumberRules.cs:Find
 cycle	PlayerCardMotionCore.cs:Count#2	23efb894cbbf4e09	PoisonLedgerCore.cs:Flush
 cycle	PlayerCardMotionCore.cs:Count#2	2407353b569f3788	FfaNumberingRules.cs:BeginGame
 cycle	PlayerCardMotionCore.cs:Count#2	25d3b020830b155d	MusicEngine.cs:RootFailed
+cycle	PlayerCardMotionCore.cs:Count#2	2643c06e74f5d98c	FfaNumberingRules.cs:D
 cycle	PlayerCardMotionCore.cs:Count#2	2c3545a5ca8531a7	RunInBackgroundLease.cs:Acquire
 cycle	PlayerCardMotionCore.cs:Count#2	2e8f04514cc75d75	PoisonLedgerCore.cs:FlushRate
 cycle	PlayerCardMotionCore.cs:Count#2	2f811f9fdf23be6b	MusicEngine.cs:ResolveTrackGain
@@ -50004,6 +50169,7 @@ cycle	PoisonLedgerCore.cs:Count#1	982316ea48e2c614	MusicEngine.cs:ResolveReadyCl
 cycle	PoisonLedgerCore.cs:Count#1	9930f8b99ed9eeb1	ApiClient.cs:EnrollResult
 cycle	PoisonLedgerCore.cs:Count#1	993a25e2e04546b9	DamageNumberRules.cs:Find#2
 cycle	PoisonLedgerCore.cs:Count#1	9afd8c44548dffcf	UnicodeFallback.cs:RegisterFallbacks
+cycle	PoisonLedgerCore.cs:Count#1	9d4642d58b31bf1c	FfaNumberingRules.cs:D
 cycle	PoisonLedgerCore.cs:Count#1	9eb16b9b4386d008	UnicodeFallback.cs:AddAssets
 cycle	PoisonLedgerCore.cs:Count#1	a1e7ddf13ce350d6	PlayerCardMotionCore.cs:Count#1
 cycle	PoisonLedgerCore.cs:Count#1	a249e4774dcf19c0	I18n.cs:StripNamedHoles
@@ -50092,6 +50258,7 @@ cycle	PoisonLedgerCore.cs:Count#2	3a4a68c17fe56aac	PoisonLedgerCore.cs:Refuse
 cycle	PoisonLedgerCore.cs:Count#2	3a94cab50224225f	UnicodeFallback.cs:DestroyBuiltFonts
 cycle	PoisonLedgerCore.cs:Count#2	3b92e6da97453d8f	SeatEvidenceCore.cs:Add#5
 cycle	PoisonLedgerCore.cs:Count#2	3e5fb63d59a1a2e4	MusicAssets.cs:TreeEntriesExact
+cycle	PoisonLedgerCore.cs:Count#2	40be2864b4a73851	FfaNumberingRules.cs:D
 cycle	PoisonLedgerCore.cs:Count#2	44b5e117cd4a4ece	UnicodeFallback.cs:OnLocaleChanged
 cycle	PoisonLedgerCore.cs:Count#2	4503d7da355a37d2	RegionPingSweep.cs:TryStart
 cycle	PoisonLedgerCore.cs:Count#2	457ed49894dce785	MusicEngine.cs:RefreshDerivedState
@@ -51229,6 +51396,7 @@ cycle	SeatEvidenceCore.cs:Count	9e8bdb96b526264e	MusicEngine.cs:RootFailed
 cycle	SeatEvidenceCore.cs:Count	9e8ce9de0c42f8b0	RunInBackgroundLease.cs:Release
 cycle	SeatEvidenceCore.cs:Count	a100218fa44623af	MusicEntitlements.cs:ApplyShopSnapshot
 cycle	SeatEvidenceCore.cs:Count	a5bed8c91ec0e42e	PoisonLedgerCore.cs:Count#2
+cycle	SeatEvidenceCore.cs:Count	a7a70ca8d9bb10a3	FfaNumberingRules.cs:D
 cycle	SeatEvidenceCore.cs:Count	aa255fd39b4cfb82	DamageNumberRules.cs:Find#2
 cycle	SeatEvidenceCore.cs:Count	abf48a72577be82d	MusicEngine.cs:SuccessorRef
 cycle	SeatEvidenceCore.cs:Count	ad15253f58ecfb94	FfaNumberingRules.cs:ResValue
@@ -52750,12 +52918,12 @@ member	FfaMode.cs:DriftGateNow	3bb909de8a1ece88
 member	FfaMode.cs:EndSittingBelowMinimum	b4eec7b7c4aa329e
 member	FfaMode.cs:EngineActive	b66477a4966d9536
 member	FfaMode.cs:EpochChangeCheck	66d240b9543815e8
-member	FfaMode.cs:EpochMasterCheck	8e45ed0a8a5ca464
+member	FfaMode.cs:EpochMasterCheck	ecf3f66952b96714
 member	FfaMode.cs:EvaluateFollow	904c55c3097252d3
 member	FfaMode.cs:EvaluatePhaseEpoch	6a93c4e48f79ecc8
 member	FfaMode.cs:FfaDoStartGame	8449bbd993dcadae
-member	FfaMode.cs:FfaLocalPickUI	fa6bf752f8df97da
-member	FfaMode.cs:FfaPickPhase	0797adf7593fbcaa
+member	FfaMode.cs:FfaLocalPickUI	e67ea9e284eca650
+member	FfaMode.cs:FfaPickPhase	8cee05558a579e30
 member	FfaMode.cs:FfaTransition	3eff6ae4e11f39e9
 member	FfaMode.cs:FreezeReportGameNumber	4c0bdf8c09e3104c
 member	FfaMode.cs:GateNow	fb93958fb4e9c24b
@@ -52768,6 +52936,7 @@ member	FfaMode.cs:LateSeedScores	e1a1eda737413f65
 member	FfaMode.cs:LeaveBelowMinimum	90f82115b6a1c331
 member	FfaMode.cs:LivePointsGameNow	dad72470f806dcdf
 member	FfaMode.cs:MasterPublishConfig	fd63ec8ad61cd99d
+member	FfaMode.cs:NearestOpponent	1c8fe8068dd9efc6
 member	FfaMode.cs:OnGameStart	fb2558dba4730d66
 member	FfaMode.cs:OnRoomLeft	111a9781b473ab96
 member	FfaMode.cs:OpenOnPromotion	f67ed42c5ab47a97
@@ -52784,7 +52953,7 @@ member	FfaMode.cs:Prefix#3	72519e923ddcc150
 member	FfaMode.cs:Prefix#4	473b9ea46736fe79
 member	FfaMode.cs:Prefix#5	27b78becc34f2ca1
 member	FfaMode.cs:Prefix#6	2553ed51234ec716
-member	FfaMode.cs:Prefix#7	40fd484c0f84272c
+member	FfaMode.cs:Prefix#7	70651d13fcdaff3e
 member	FfaMode.cs:Prefix#8	9846aad714eea7a8
 member	FfaMode.cs:Prefix#9	58327e8426919006
 member	FfaMode.cs:PublishedGameNumber	0b4b85dda89445d2
@@ -52792,7 +52961,7 @@ member	FfaMode.cs:ReadCycleManifest	f5def48a0273f0f7
 member	FfaMode.cs:RebuildDeckViews	f08ca0077600c0f9
 member	FfaMode.cs:RecordAdvertTarget	0e706855ea385b68
 member	FfaMode.cs:RecordKillFor	c8ddc74ff34911cb
-member	FfaMode.cs:RepublishLocalPickFor	0209b1c868745717
+member	FfaMode.cs:RepublishLocalPickFor	1e2c2dc316ff485a
 member	FfaMode.cs:ResolveFighter	08ea323c584dfe55
 member	FfaMode.cs:ResolvePointEndOfFrame	9e6ffa5b2af5613f
 member	FfaMode.cs:ResolvePointNow	5254f4a0a70595f8
@@ -52823,6 +52992,7 @@ member	FfaNumberingRules.cs:AdoptFromPicks	9b58080e2c25857c
 member	FfaNumberingRules.cs:Advance	7cc66372ff98b0a2
 member	FfaNumberingRules.cs:Ahead	ce2e9c186363f78c
 member	FfaNumberingRules.cs:Applied	6f64ebaf5ad79558
+member	FfaNumberingRules.cs:AppliedLegacy	a3e81e53fb057a0a
 member	FfaNumberingRules.cs:BeginGame	d6b8fbdccdec22b6
 member	FfaNumberingRules.cs:BeginResult	73bbd8d0079e2f38
 member	FfaNumberingRules.cs:ByName	b6146b29972f616e
@@ -52837,20 +53007,21 @@ member	FfaNumberingRules.cs:CountStillPresent	25c887239952b32c
 member	FfaNumberingRules.cs:CycValue	10d765af192aaf5b
 member	FfaNumberingRules.cs:Cycle	3370c065de739f53
 member	FfaNumberingRules.cs:D	75fb4afa19833dd8
+member	FfaNumberingRules.cs:DeckChecks	20adf9ae5639bdef
 member	FfaNumberingRules.cs:Deliver	703f56f92d1c003f
 member	FfaNumberingRules.cs:DetectAhead	cf3c41ea7803be04
 member	FfaNumberingRules.cs:DriftGate	1b0b6b09240ff22a
 member	FfaNumberingRules.cs:DriftGateNow	848afaebcc76f51b
 member	FfaNumberingRules.cs:Edge	6b61040a491a3f79
-member	FfaNumberingRules.cs:EdgeChecks	5e3269a1bb3f8e52
+member	FfaNumberingRules.cs:EdgeChecks	8c0e63311864e3ad
 member	FfaNumberingRules.cs:EdgeCurrent	4c75325cf99f5bb7
 member	FfaNumberingRules.cs:EdgeNew	20bec9710b3bc4fc
 member	FfaNumberingRules.cs:Enter	ddd3aa22955bdba2
-member	FfaNumberingRules.cs:EnterPhase	fe5e6183934cbfb4
+member	FfaNumberingRules.cs:EnterPhase	7db37910d8b654e6
 member	FfaNumberingRules.cs:EpochChangeCheck	60ba1ec0f97dfa4d
 member	FfaNumberingRules.cs:EpochForUse	27b34810e1c4faa2
 member	FfaNumberingRules.cs:EpochForWrite	da2236815bdbd690
-member	FfaNumberingRules.cs:EpochMasterCheck	430d41cc6f682bc7
+member	FfaNumberingRules.cs:EpochMasterCheck	a2ef14533bd5c525
 member	FfaNumberingRules.cs:EvaluateEpoch	a7e171ed4cb8371c
 member	FfaNumberingRules.cs:EvidenceQuorum	692d4a699f92e34c
 member	FfaNumberingRules.cs:Exp	4548321431093c1d
@@ -52864,12 +53035,14 @@ member	FfaNumberingRules.cs:Games	57de07f8dcc2c4e6
 member	FfaNumberingRules.cs:GateNow	51ef3018ddef536f
 member	FfaNumberingRules.cs:HeldByRoom	989d867b62c6ecf5
 member	FfaNumberingRules.cs:HeldNow	70bc9f42634a0874
-member	FfaNumberingRules.cs:Join#1	67bc4aad2b04c85e
+member	FfaNumberingRules.cs:Join#1	9416bacc5a5431cd
 member	FfaNumberingRules.cs:Join#2	2cf6bf4b83ebad50
 member	FfaNumberingRules.cs:JoinAll	20c5f6e03da0c192
 member	FfaNumberingRules.cs:L	1a84a1cfda960b3e
 member	FfaNumberingRules.cs:Leave	e415c92129f183e5
+member	FfaNumberingRules.cs:LegacyResultOf	8a29dd89fecd417b
 member	FfaNumberingRules.cs:LivePointsGameNow	057a947288895e4e
+member	FfaNumberingRules.cs:LostChecks	8daba206de1d4e6d
 member	FfaNumberingRules.cs:MasterPublishSeed	c2f13750b651d63c
 member	FfaNumberingRules.cs:NewSeat#1	ea156bf458211294
 member	FfaNumberingRules.cs:NewSeat#2	bd9f62754b12e76d
@@ -52880,11 +53053,12 @@ member	FfaNumberingRules.cs:Ordered	6cfb1b344da87923
 member	FfaNumberingRules.cs:OthersOf	db1cc297485914be
 member	FfaNumberingRules.cs:ParseCyc	891d3f4001623de0
 member	FfaNumberingRules.cs:Pick	b913639418e43ab9
+member	FfaNumberingRules.cs:PickWrite	a09807cb10e9ae54
 member	FfaNumberingRules.cs:Play#1	5f2b0a27b6c1445f
 member	FfaNumberingRules.cs:Play#2	8847102345b4314a
 member	FfaNumberingRules.cs:PointAt	9d9ce41f183a1c86
 member	FfaNumberingRules.cs:PublishDeadline	a34efb70e0e3be4a
-member	FfaNumberingRules.cs:PublishPick	6719671045fe3f44
+member	FfaNumberingRules.cs:PublishPick	35b84c8a6f671dc5
 member	FfaNumberingRules.cs:PublishedGameNumber	06bd5afa13cefc94
 member	FfaNumberingRules.cs:ReadCycleManifest	bb97037b68e56dfc
 member	FfaNumberingRules.cs:RecordAdvertTarget	a723656df29fc012
@@ -52895,13 +53069,14 @@ member	FfaNumberingRules.cs:RemoveFromRoom	f2f63a8749f73288
 member	FfaNumberingRules.cs:ReopenCheck	59db6d549b210d99
 member	FfaNumberingRules.cs:Report	f26afc6e0f9b7c86
 member	FfaNumberingRules.cs:ResValue	c97e36ff1f564d32
-member	FfaNumberingRules.cs:Restamp	fc2cf0e26a7592ad
-member	FfaNumberingRules.cs:ResultBody	429b465ddc7fe875
-member	FfaNumberingRules.cs:Run#1	44f2453505b0dfd2
-member	FfaNumberingRules.cs:Run#2	0f0d53c322daf620
+member	FfaNumberingRules.cs:Restamp	90310eebdd69d627
+member	FfaNumberingRules.cs:ResultBody	e0368f04efc58145
+member	FfaNumberingRules.cs:Run#1	f224bc8a6ad4bcea
+member	FfaNumberingRules.cs:Run#2	10692ab9357ffb37
 member	FfaNumberingRules.cs:RunAll	e2f58ecaf212cb1d
+member	FfaNumberingRules.cs:RunLegacyBridgeUnits	42509bd804f52c1e
 member	FfaNumberingRules.cs:RunPhases	3e75f0ec49ffdbe0
-member	FfaNumberingRules.cs:RunRoundTwoUnits	e54e4832b2b9614a
+member	FfaNumberingRules.cs:RunRoundTwoUnits	2a9d89a5c246b4ac
 member	FfaNumberingRules.cs:RunUnits	1837ea1da54358ab
 member	FfaNumberingRules.cs:S0	00d8bf51d395f4df
 member	FfaNumberingRules.cs:SameList	d5963cc7ec65b733
@@ -52910,14 +53085,14 @@ member	FfaNumberingRules.cs:Send	8e14a86ced75fa24
 member	FfaNumberingRules.cs:SourceCheck	1c51f4a5aca59dc0
 member	FfaNumberingRules.cs:Stall	0f7e3b24342dc537
 member	FfaNumberingRules.cs:StallInbound	cfcbfa3df949ac28
-member	FfaNumberingRules.cs:StartChecks	ebff42ca5d56fd6d
+member	FfaNumberingRules.cs:StartChecks	964caa6bb8bbd6fe
 member	FfaNumberingRules.cs:StartCurrent	4ff43ae5923170c0
 member	FfaNumberingRules.cs:StartNew	81af4a8019b22534
 member	FfaNumberingRules.cs:StartOnly	fcf787ddc232f7d0
 member	FfaNumberingRules.cs:StartSeat	fa93f9e22d2dfbc0
 member	FfaNumberingRules.cs:StepPhase	70f9d387273ca9a2
 member	FfaNumberingRules.cs:TakeCarry	00400dcdeb4add75
-member	FfaNumberingRules.cs:Terminate	513653fd89377f28
+member	FfaNumberingRules.cs:Terminate	9dee5421cf429f83
 member	FfaNumberingRules.cs:Tick	045b13527411e300
 member	FfaNumberingRules.cs:TickOnce	7513bf954710d835
 member	FfaNumberingRules.cs:TruthCand	f760d1467c8ad52b
@@ -52956,15 +53131,26 @@ member	FfaNumberingRules.cs:W68	91e7bb72b89c378e
 member	FfaNumberingRules.cs:W69	5338bf5316a3d225
 member	FfaNumberingRules.cs:W71	b2a972f4748c2366
 member	FfaNumberingRules.cs:W710	46830744720a5ee9
+member	FfaNumberingRules.cs:W710t	6e2e1c6b1b586cd4
 member	FfaNumberingRules.cs:W711	4058f4010d70d2d8
 member	FfaNumberingRules.cs:W72	9cb634dedbb9c84e
 member	FfaNumberingRules.cs:W73	782cd40e3eb94464
-member	FfaNumberingRules.cs:W74	8ff2b58f45df4aa0
+member	FfaNumberingRules.cs:W74	aee2f5cc1a97784d
+member	FfaNumberingRules.cs:W74Room	e9becfb5b6262832
+member	FfaNumberingRules.cs:W74t	a0f26d425ee60ba3
 member	FfaNumberingRules.cs:W75	10f70cdf591a4298
 member	FfaNumberingRules.cs:W76	cff4bf8a8e2fcf2d
 member	FfaNumberingRules.cs:W77	6da20c1987af4661
 member	FfaNumberingRules.cs:W78	48cb72a7c488f416
-member	FfaNumberingRules.cs:W79	5174ea4bea6b7413
+member	FfaNumberingRules.cs:W79	913b4ba260dbcfb1
+member	FfaNumberingRules.cs:W79Room	bee1b08863a70588
+member	FfaNumberingRules.cs:W79t	e5c3143f4a87e14f
+member	FfaNumberingRules.cs:W81	e3f4f68980642ed8
+member	FfaNumberingRules.cs:W82	ce0928394c26320e
+member	FfaNumberingRules.cs:W83	e4a61dac72129d5f
+member	FfaNumberingRules.cs:W84	09767a2cb9bb99c3
+member	FfaNumberingRules.cs:W85	fc47db695d3ae6d4
+member	FfaNumberingRules.cs:W86	e686a0c590968225
 member	FfaNumberingRules.cs:WaitBody	190419db321a1319
 member	FfaNumberingRules.cs:WinnerOf	2675e3f2cb0f2082
 member	FfaNumberingRules.cs:WithKeeper	9b097e3da7705d2c
@@ -54977,7 +55163,7 @@ member	Plugin.cs:Applied	d5a7b7124f09e199
 member	Plugin.cs:Apply#3	17cc5162da7cfdbb
 member	Plugin.cs:ApplyBackdrop	c8894479a5fb8b51
 member	Plugin.cs:ApplyBackdropNow	296b098e809120ba
-member	Plugin.cs:ApplyCameraBackground	c3c185f8530c4a27
+member	Plugin.cs:ApplyCameraBackground	3bdda8fa11ad2972
 member	Plugin.cs:ApplyLighting	07da4f48753a7b6b
 member	Plugin.cs:ApplyLive	b36389fdaadb08f2
 member	Plugin.cs:ApplyNow	c1c6754887038302
@@ -55146,7 +55332,7 @@ member	Plugin.cs:TryResolveTeamColors	3692ccdbeffbd5db
 member	Plugin.cs:TrySendLocalFace	e648cddc98cdf1ce
 member	Plugin.cs:TwinkleLoop	01869595154ad335
 member	Plugin.cs:Update#1	f5ac45199ffd7f7f
-member	Plugin.cs:Update#2	76bb1bc5f1a84e5d
+member	Plugin.cs:Update#2	a40f8d459143efd7
 member	Plugin.cs:VerifyAndRebake	12f93064c50f0a8c
 member	PoisonLedgerCore.cs:AcceptsAt	b967882b6c2de38f
 member	PoisonLedgerCore.cs:AckedPresent	5ebbd223afd12b26
@@ -55535,9 +55721,9 @@ member	ProfileCard.cs:ResultName	2afc16a480256edb
 member	ProfileCard.cs:RunParseSelfTest	44f6a98fbbd81e93
 member	ProfileCard.cs:Teardown	0eb50b7d45874481
 member	ProfileCard.cs:Tick	06a38467a70ccd93
-member	ProximityVictimPatches.cs:BeforeGo#1	c09e8f19744032b6
-member	ProximityVictimPatches.cs:BeforeGo#2	3f6bfd308a73e1ee
-member	ProximityVictimPatches.cs:BeforeGo#3	0560c280ce410a35
+member	ProximityVictimPatches.cs:BeforeGo#1	c973c8dffe8a120f
+member	ProximityVictimPatches.cs:BeforeGo#2	3cad82484d1b207b
+member	ProximityVictimPatches.cs:BeforeGo#3	c857853d7198e27f
 member	ProximityVictimPatches.cs:DecidePrefix	a8eb3c569cef3eac
 member	ProximityVictimPatches.cs:GateState	56015ea030a40d46
 member	ProximityVictimPatches.cs:VanillaVictimFor	4c957e0fbdc02ecf
@@ -56286,15 +56472,15 @@ sink	CompetitiveUI.cs:DrawChatInput	2	1	1ed14bbca99c44f4	attached	CompetitiveUI.
 sink	CompetitiveUI.cs:DrawDanceWheel	2	1	83cae25a3936cab8	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawInputOverlay	2	1	dc8fd8ca1839bec7	attached	CompetitiveUI.cs:DrawUI
 sink	CompetitiveUI.cs:DrawQuickChat	2	1	51b788a4983fd01d	attached	CompetitiveUI.cs:DrawUI
-sink	InfoLibrary.cs:ControlsOutro	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Cosmetics	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:Spectating	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:StartHere	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoLibrary.cs:VanillaBugs	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
-sink	InfoViz.cs:BuildKeyboard	4894	45969	f5617f29409c433f	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:ControlsOutro	4912	46104	957ac32910264a26	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Cosmetics	4912	46104	957ac32910264a26	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:Spectating	4912	46104	957ac32910264a26	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:StartHere	4912	46104	957ac32910264a26	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoLibrary.cs:VanillaBugs	4912	46104	957ac32910264a26	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
+sink	InfoViz.cs:BuildKeyboard	4912	46104	957ac32910264a26	attached	BroadcastHud.cs:Draw,CompetitiveUI.cs:DrawUI,GameStateWatcher.cs:PollMatchState,Keybinds.cs:CommitRows,NativeUI.Keybinds.cs:KeybindPaintAll,NativeUI.Settings.cs:SettingsRenderPane,NativeUI.Settings.cs:SettingsShowExtras,NativeUI.cs:BuildPage,NativeUI.cs:RefreshCurrentTab,NativeUI.cs:SelectInfoArticle
 sink	Keybinds.cs:ApplyJoin	5	4	116d269dcc76ee4c	attached	Keybinds.cs:CommitRows
 sink	Keybinds.cs:ApplyReady	5	4	3bb007885d986e1f	attached	Keybinds.cs:CommitRows
-sink	Keybinds.cs:OnRoundStart	9	9	69545ea6455d8236	attached	GameStateWatcher.cs:PollMatchState
+sink	Keybinds.cs:OnRoundStart	9	9	cea46977074c4226	attached	GameStateWatcher.cs:PollMatchState
 sink	Keybinds.cs:RefreshAll	2	1	fb6a0440324c0395	attached	Keybinds.cs:CommitRows
 sink	NativeUI.Keybinds.cs:KbRefreshNamedDescs	2	1	302cbc5aa531339f	attached	NativeUI.Keybinds.cs:KeybindPaintAll
 sink	NativeUI.Keybinds.cs:KbRepaintLangNoteIfDue	2	1	9d99563b94be4109	attached	NativeUI.Settings.cs:SettingsShowExtras
