@@ -1119,6 +1119,10 @@ _PURE_METHODS = frozenset({
     "isidentifier", "isupper", "islower", "isascii", "isdecimal", "isnumeric", "istitle", "isprintable", "ljust",
     "rjust", "center", "zfill", "expandtabs", "translate", "removeprefix", "removesuffix", "hex",
     "match", "fullmatch", "search", "findall", "finditer", "is_integer", "hexdigest", "digest"})
+_PURE_LIBRARY_RECEIVERS = {
+    # os._Environ.get reads its string storage; protocol_rows still judges every argument.
+    "os.environ": frozenset({"get"}),
+}
 _MUTATOR_NAMES = _MUTATORS | frozenset({
     "append", "extend", "insert", "remove", "add", "discard", "sort", "reverse", "appendleft", "extendleft",
     "popleft", "rotate", "difference_update", "intersection_update", "symmetric_difference_update", "move_to_end",
@@ -1153,9 +1157,9 @@ _ELEMENT_KEEPING = frozenset({"list", "tuple", "set", "frozenset", "sorted", "re
 #           module, or a member of one) writes another module's namespace and is
 #           refused (_Reach.imported).
 #       (2) A method called on an unresolved receiver is a mutation WHATEVER its
-#           name: _PURE_METHODS admits a name only on a receiver proven an exact
-#           builtin (_Reach.builtin_typed), where no row arises; on an unproven
-#           receiver a listed name is refused as an unproven pure method call.
+#           name: _PURE_METHODS admits a name only on a receiver proven by
+#           _Reach.pure_receiver, where no row arises; on an unproven receiver
+#           a listed name is refused as an unproven pure method call.
 #       (3) A call of an allowlisted callable (_ARG_SAFE, the builtins of
 #           _PROVEN_FRESH and _IDENTITY_IMMUTABLE) runs a protocol of its
 #           argument (__len__, __str__, __fspath__, __iter__, __getattr__ and
@@ -1975,7 +1979,7 @@ class _Flow:
             c = self.r.cands(f)
             if c and c <= {"copy.copy", "copy.deepcopy"}:
                 return self.joined(al)                               # fix 13: __copy__ may return its argument
-            if f.attr in _PURE_METHODS and self.r.builtin_typed(f.value):
+            if f.attr in _PURE_METHODS and self.r.pure_receiver(f.value, f.attr):
                 return max(self.carried(self.lv(f.value, ctx)), self.joined(al))   # fix 14: a builtin's pure method
             return _UNRES                                            # a method's or an imported callable's result
         if not isinstance(f, ast.Name):
@@ -2208,8 +2212,8 @@ class _Reach:
             elif isinstance(c, ast.Attribute) and isinstance(c.ctx, (ast.Store, ast.Del)):
                 stored.add(c.attr)
         # the attribute names whose call on an object the module makes runs module code: a method a
-        # module class defines, unless anything stores an attribute of it (fix 14: a pure method name
-        # no longer counts here; it is admitted only on a proven builtin receiver, builtin_typed)
+        # module class defines, unless anything stores an attribute of it (a pure method name
+        # no longer counts here; it is admitted only on a receiver proven by pure_receiver)
         self.methods = (defs - other) - stored
         self.modules = {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         self.marked = set()
@@ -2500,6 +2504,17 @@ class _Reach:
                 and self.flow.builtin_certain("open", d.expr.func)
                 for d in (self.recs[(id(b), node.id)] for b in binds))   # with open(...) as f: the file itself
         return False
+
+    def pure_receiver(self, node, method) -> bool:
+        """Whether a listed pure method has a proven exact receiver.
+
+        Exact builtins retain their existing proof. Otherwise every candidate
+        route must be an exact dotted library receiver that lists this method.
+        """
+        if self.builtin_typed(node):
+            return True
+        routes = self.cands(node)
+        return bool(routes) and all(method in _PURE_LIBRARY_RECEIVERS.get(route, ()) for route in routes)
 
     def augmented_container(self, kind, binding, seen) -> bool:
         """Whether a successful augmented binding preserves an exact
@@ -2919,11 +2934,19 @@ class _Reach:
                         rows.append("callback of %s (protocol-running truth test) through unresolved base %s"
                                     % (operation, ast.unparse(ce)))
                     continue                                         # filter(None, ...)
-                if isinstance(c, ast.Attribute) and self.unresolved_receiver(c):
-                    if c.attr not in _PURE_METHODS or not self.builtin_typed(c.value):   # fix 14: proven builtin only
-                        rows.append("callback method %s of %s through unresolved base %s"
-                                    % (c.attr, operation, ast.unparse(c.value)))
-                    continue
+                if isinstance(c, ast.Attribute):
+                    unresolved = self.unresolved_receiver(c)
+                    imported = self.imported(c.value) and not self.module_ref(c.value)
+                    if unresolved or imported:
+                        candidates = self.cands(c)
+                        listed = bool(candidates) and all(
+                            candidate is not None and _arg_safe(candidate) for candidate in candidates)
+                        if (c.attr not in _PURE_METHODS or not self.pure_receiver(c.value, c.attr)) and not listed:
+                            route = "unresolved base" if unresolved else "imported namespace"
+                            rows.append("callback method %s of %s through %s %s"
+                                        % (c.attr, operation, route, ast.unparse(c.value)))
+                        if unresolved:
+                            continue
                 rows += self.callee_rows(c, cm, "callback of " + operation + " (%s)")
                 callback_args = rest if operation == "map" else [] if ce is None else [ce]
                 rows += self.protocol_rows(call, c, callback_args, "callback of " + operation
@@ -3731,7 +3754,7 @@ def _namespace_reach(tree, names, file="<source>") -> list:
           __dict__ as ns) is namespace-reaching (_namespace_member);
       (5) a method listed on _PURE_METHODS called on a receiver the
           unresolved-base half rejects is refused too, unless the receiver
-          is proven an exact builtin (_Reach.builtin_typed);
+          is proven by _Reach.pure_receiver;
       (8) a call of builtin or library code (or a method of a proven
           builtin receiver) over an argument the proof cannot type, or an
           imported argument or imported value held in a local container, is
@@ -3803,7 +3826,7 @@ def _namespace_reach(tree, names, file="<source>") -> list:
                 if n.attr not in _PURE_METHODS:                      # fix 13: unlisted methods are mutations
                     out.append((n.lineno, "method call %s through unresolved base %s"
                                 % (n.attr, ast.unparse(n.value))))
-                elif not r.builtin_typed(n.value):                   # fix 14: a listed name, an unproven receiver
+                elif not r.pure_receiver(n.value, n.attr):           # a listed name, an unproven receiver
                     out.append((n.lineno, "unproven pure method call %s through unresolved base %s"
                                 % (n.attr, ast.unparse(n.value))))
             elif n.attr in _MUTATOR_NAMES:
@@ -3814,7 +3837,7 @@ def _namespace_reach(tree, names, file="<source>") -> list:
             p = parents.get(id(n))
             listed = all(_arg_safe(d) for d in r.cands(n) if d)
             if isinstance(p, ast.Call) and p.func is n \
-                    and not (n.attr in _PURE_METHODS and r.builtin_typed(n.value)) and not listed:
+                    and not (n.attr in _PURE_METHODS and r.pure_receiver(n.value, n.attr)) and not listed:
                 out.append((n.lineno, "method call %s through imported namespace %s" % (n.attr, ast.unparse(n.value))))
             elif not (isinstance(p, ast.Call) and p.func is n) and n.attr in _MUTATOR_NAMES:
                 out.append((n.lineno, "bound method %s taken through imported namespace %s"
@@ -4442,3 +4465,91 @@ def test_m5_fix15_l_held_receiver_results_and_custom_class_mappings_are_refused(
     assert not _fix15_rows(direct_method)
     assert not _fix15_rows(decorator_control)
     assert not _fix15_rows(base_control)
+
+
+# Fix pass sixteen: exact library receiver methods, never method names alone.
+def test_m5_fix16_a_exact_library_receiver_reads_are_trusted():
+    sources = (
+        "import os\nos.environ.get('KEY')\n",
+        "from os import environ as settings\nsettings.get('KEY')\n",
+    )
+    assert _PURE_LIBRARY_RECEIVERS == {"os.environ": frozenset({"get"})}
+    for source in sources:
+        assert not _fix15_rows(source), source
+
+
+def test_m5_fix16_b_receiver_and_method_boundaries_stay_refused():
+    cases = {
+        "impure_method": ("import os\nos.environ.update({'KEY': 'value'})\n",
+                          "method call update through imported namespace os.environ"),
+        "method_off_receiver_table": ("import os\nos.environ.keys()\n",
+                                      "method call keys through imported namespace os.environ"),
+        "unresolved_receiver": ("def f(receiver):\n    receiver.get('KEY')\n",
+                                "unproven pure method call get through unresolved base receiver"),
+        "other_imported_receiver": ("from helper import environ\nenviron.get('KEY')\n",
+                                    "method call get through imported namespace environ"),
+    }
+    for source, expected in cases.values():
+        assert _fix15_has(source, expected), expected
+    assert not _fix15_rows("def f():\n    {}.get('KEY')\n")
+
+
+def test_m5_fix16_c_known_receiver_arguments_keep_the_existing_protocol_rule():
+    source = "import os\ndef f(obj):\n    os.environ.get(obj)\n"
+    assert _fix15_has(source, "call of protocol-running callable os.environ.get through unresolved base obj")
+    assert not _fix15_has(source, "method call get through imported namespace os.environ")
+
+
+def test_m5_fix16_d_callback_receivers_use_the_same_exact_rule():
+    known = "import os\nsorted(('KEY',), key=os.environ.get)\n"
+    listed = "import os\nsorted(('KEY',), key=os.path.basename)\n"
+    unresolved = "def f(receiver):\n    sorted(('KEY',), key=receiver.get)\n"
+    imported = "from helper import environ\nsorted(('KEY',), key=environ.get)\n"
+    mixed = ("import os\ndef f(receiver, condition):\n"
+             "    sorted(('KEY',), key=(os.path if condition else receiver).join)\n")
+    assert not _fix15_rows(known)
+    assert not _fix15_rows(listed)
+    assert _fix15_has(unresolved, "callback method get of sorted through unresolved base receiver")
+    assert _fix15_has(imported, "callback method get of sorted through imported namespace environ")
+    assert _fix15_has(mixed, "callback method join of sorted through unresolved base os.path if condition else receiver")
+
+
+def test_m5_fix16_e_flow_consults_the_same_receiver_rule(monkeypatch):
+    tree = ast.parse("import os\nos.environ.get('KEY')\nos.environ.update({'KEY': 'value'})\n")
+    parents = {id(c): n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    reach = _Reach(tree, _Names(tree, parents))
+    calls = {n.func.attr: n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)}
+    seen = []
+
+    def tracked(_receiver, method):
+        seen.append(method)
+        return False
+
+    monkeypatch.setattr(reach, "pure_receiver", tracked)
+    reach.flow.call_lv(calls["get"], None)
+    assert seen == ["get"]
+    seen.clear()
+    reach.flow.call_lv(calls["update"], None)
+    assert not seen
+
+
+def test_m5_fix16_f_library_storage_results_remain_unresolved():
+    source = "import os\nvalue = os.environ.get('KEY')\nvalue.get('other')\n"
+    assert _fix15_has(source, "unproven pure method call get through unresolved base value")
+    assert not _fix15_has(source, "method call get through imported namespace os.environ")
+
+
+def test_m5_fix16_g_removing_the_rule_lapses_the_real_module_clean_check(monkeypatch):
+    with open(os.path.join(TOOLS, "review_needles.py"), encoding="utf-8") as f:
+        source = f.read()
+    tree = ast.parse(source)
+    parents = {id(c): n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+    names = _Names(tree, parents)
+    assert not _namespace_reach(tree, names, "review_needles.py")
+    monkeypatch.delitem(_PURE_LIBRARY_RECEIVERS, "os.environ")
+    rows = _namespace_reach(tree, names, "review_needles.py")
+    remaining = [(line, kind) for line, kind in rows if not _unresolved(kind)]
+    assert _site_names(tree, remaining) == [
+        ("main", "method call get through imported namespace os.environ"),
+    ]
