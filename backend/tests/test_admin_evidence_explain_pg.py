@@ -4,15 +4,30 @@ Migration 377 adds four indexes on `matches` (design 7.1), each ending in the
 `id` its ordering breaks ties on. Their whole purpose is a property of the
 PLAN, so this module reads plans: every report read is run under
 `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` against seeded fixtures (design 2.9)
-and each gate requires
+and each gate requires (the acceptance as restated by the integrator's pass 2
+ruling 3; the lane notes carry it as a deviation from the certified wording)
 
-  * the named index, and no sequential or bitmap scan anywhere;
-  * no Sort or Incremental Sort between an index scan and its branch Limit;
+  * no sequential or bitmap scan anywhere;
+  * exactly one index scan or index-only scan per branch, each under its own
+    branch Limit, whose Index Cond carries at least one seat equality (the
+    series equality for the series read) and, where the read has one, the
+    `(ended_at, id)` time bound with its trailing `id`; either seat order
+    index or the pair index satisfies it;
+  * no Sort or Incremental Sort between that scan and its branch Limit;
+  * rows read by that scan (actual rows plus rows removed by a filter or
+    recheck) at or under the read's ceiling, so a seat index with a Filter
+    passes only while its rows read stay under the ceiling;
   * a merge above the two branches over at most twice the branch limit;
-  * rows touched (actual rows plus rows removed by a filter or recheck) within
-    the read's ceiling;
   * the same ids, in the same order, as a reference query with no LIMIT under
     the index (so a fast plan returning the wrong rows is red too).
+
+STATISTICS are part of the fixture: after the load every loaded table gets
+`VACUUM (ANALYZE)` (outside any open transaction), so the planner reads the
+statistics and visibility a maintained production table has; the
+`default_statistics_target` in force is printed. No planner setting (no
+enable_* and no cost setting) appears anywhere in this module: a gate that
+forces its plan cannot fail. `plan_cache_mode` only selects WHICH plan is read
+(the generic one a statement cache reuses), never its shape.
 
 Every gate runs on the custom plan (planned with the bound values) and on
 the generic plan (PREPARE, EXECUTE under force_generic_plan), the one a
@@ -282,7 +297,13 @@ async def _seed(conn):
                CASE WHEN i % 2 = 0 THEN gen_random_uuid() ELSE $1::uuid END,
                $2::timestamptz
           FROM generate_series(1, 10000) AS i""", s.E, _ts(TE))
-    await conn.execute("ANALYZE matches; ANALYZE ranked_series;")
+    # Statistics are part of the fixture (integrator pass 2 ruling 1): each
+    # loaded table is vacuumed and analysed, one statement per call so no
+    # VACUUM runs inside an implicit transaction block.
+    s.loaded = ("matches", "ranked_series")
+    for table in s.loaded:
+        await conn.execute("VACUUM (ANALYZE) %s" % table)
+    s.stats_target = await conn.fetchval("SHOW default_statistics_target")
     return s
 
 
@@ -408,39 +429,63 @@ def _gate(plan, **kw):
     try:
         return _gate_checks(plan, **kw)
     except AssertionError as ex:
-        raise AssertionError("%s\nPLAN:\n%s" % (ex, _compact(plan))) from None
+        # A failing case prints its whole EXPLAIN (ANALYZE, BUFFERS) plan into
+        # the step log (integrator pass 2 ruling 4), after the compact form.
+        raise AssertionError("%s\nPLAN:\n%s\nFULL PLAN (EXPLAIN ANALYZE, BUFFERS):\n%s"
+                             % (ex, _compact(plan), json.dumps(plan, indent=1))) from None
 
 
-def _gate_checks(plan, *, indexes, branch_limit, branches):
-    """The design 2.9 gate over one plan; returns lines for the step log."""
+SEAT_EQUALITY = re.compile(r"\((?:player1_id|player2_id) = ")
+SERIES_EQUALITY = re.compile(r"\(series_id = ")
+TIME_BOUND = re.compile(r"ROW\(ended_at, id\) < ROW\(")
+
+
+def _gate_checks(plan, *, branch_limit, branches, equality=SEAT_EQUALITY,
+                 time_bound=False):
+    """The design 2.9 gate over one plan, in the acceptance restated by the
+    integrator's pass 2 ruling 3 (a property, not an index name); returns
+    lines for the step log."""
     nodes = list(_walk(plan))
     kinds = [n["Node Type"] for n, _ in nodes]
     assert "Seq Scan" not in kinds, "sequential scan in the plan: %r" % kinds
     assert not [k for k in kinds if k.startswith("Bitmap")], (
         "bitmap scan in the plan (order lost): %r" % kinds)
     scans = [(n, p) for n, p in nodes if n["Node Type"] in INDEX_SCANS]
-    used = sorted(n["Index Name"] for n, _ in scans)
-    assert used == sorted(indexes), "indexes used %r, required %r" % (used, sorted(indexes))
     assert len(scans) == branches, "%d index scans for %d branches" % (len(scans), branches)
     lines = []
+    branch_limits = set()
     for node, path in scans:
+        name = node["Index Name"]
+        cond = node.get("Index Cond", "")
+        assert equality.search(cond), (
+            "%s: the Index Cond %r carries no %s" % (
+                name, cond, "seat equality" if equality is SEAT_EQUALITY
+                else "series equality"))
+        if time_bound:
+            assert TIME_BOUND.search(cond), (
+                "%s: the Index Cond %r does not carry the (ended_at, id) time bound"
+                % (name, cond))
         between = []
         for anc in reversed(path):
             if anc["Node Type"] == "Limit":
+                branch_limits.add(id(anc))
                 break
             between.append(anc["Node Type"])
         else:
-            raise AssertionError("index scan %s has no Limit above it"
-                                 % node["Index Name"])
+            raise AssertionError("index scan %s has no Limit above it" % name)
         assert not [k for k in between if k in SORTS], (
-            "%s: %r between the index scan and its Limit"
-            % (node["Index Name"], between))
+            "%s: %r between the index scan and its Limit" % (name, between))
         touched = _touched(node)
         assert touched <= branch_limit, (
-            "%s touched %d rows, ceiling %d" % (node["Index Name"], touched, branch_limit))
-        lines.append("%s touched=%d ceiling=%d between=%r shared_hit=%s read=%s"
-                     % (node["Index Name"], touched, branch_limit, between,
+            "%s read %d rows, ceiling %d" % (name, touched, branch_limit))
+        lines.append("%s %s read=%d (filter removed %d) ceiling=%d between=%r "
+                     "shared_hit=%s shared_read=%s"
+                     % (node["Node Type"], name, touched,
+                        node.get("Rows Removed by Filter", 0), branch_limit, between,
                         node.get("Shared Hit Blocks"), node.get("Shared Read Blocks")))
+    assert len(branch_limits) == branches, (
+        "%d index scans share %d branch Limits; one scan per branch is required"
+        % (len(scans), len(branch_limits)))
     if branches == 2:
         appends = [n for n, _ in nodes if n["Node Type"] in ("Append", "Merge Append")]
         assert len(appends) == 1, kinds
@@ -459,6 +504,34 @@ def _say(name, lines):
 
 
 # ── The gates ──────────────────────────────────────────────────────────────
+
+def test_fixture_statistics_are_those_of_a_maintained_table(db):
+    """Ruling 1: every loaded table carries fresh statistics and a set
+    visibility map before any plan is read: reltuples equals the row count
+    (a VACUUM sets it exactly), every heap page is all-visible, and pg_stats
+    holds the seat, time and series columns."""
+    lines = ["default_statistics_target=%s" % db.seed.stats_target]
+    for table in db.seed.loaded:
+        row = db.run(db.conn.fetchrow("""
+            SELECT c.reltuples::bigint AS reltuples, c.relpages, c.relallvisible
+              FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = current_schema() AND c.relname = $1""", table))
+        count = db.run(db.conn.fetchval("SELECT count(*) FROM %s" % table))
+        assert row["reltuples"] == count, (table, row["reltuples"], count)
+        assert row["relpages"] > 0 and row["relallvisible"] == row["relpages"], (
+            table, dict(row))
+        lines.append("%s rows=%d reltuples=%d relpages=%d relallvisible=%d"
+                     % (table, count, row["reltuples"], row["relpages"],
+                        row["relallvisible"]))
+    stats = db.run(db.conn.fetch("""
+        SELECT attname FROM pg_stats
+         WHERE schemaname = current_schema() AND tablename = 'matches'"""))
+    have = {r["attname"] for r in stats}
+    for col in ("player1_id", "player2_id", "ended_at", "series_id", "id"):
+        assert col in have, (col, sorted(have))
+    lines.append("pg_stats matches columns: %s" % ", ".join(sorted(have)))
+    _say("fixture statistics", lines)
+
 
 @pytest.mark.parametrize("mode", MODES)
 def test_r1_short_code_reads_the_shortcode_index(db, mode):
@@ -492,7 +565,7 @@ def test_r2_series_is_a_limit_directly_over_the_series_index(db, which, count, m
     assert child["Node Type"] in INDEX_SCANS, (
         "the series Limit sits over %r, not directly over the index scan\nPLAN:\n%s"
         % (child["Node Type"], _compact(plan)))
-    lines = _gate(plan, indexes=["idx_matches_series"], branch_limit=lim, branches=1)
+    lines = _gate(plan, branch_limit=lim, branches=1, equality=SERIES_EQUALITY)
     got = db.run(_rows(db.conn, R2_SERIES, params))
     want = db.run(_rows(db.conn, REF_SERIES, {"sid": sid}))[:lim]
     assert got == want
@@ -512,8 +585,7 @@ def test_r3_pair_reads_both_orientations_over_the_pair_index(db, pair, games, mo
     a, b = (s.D, s.R) if pair == "DR" else (s.P, s.Q)
     params = {"a": a, "b": b, "games": games}
     plan = db.run(_explain(db.conn, R3_PAIR, params, mode))
-    lines = _gate(plan, indexes=["idx_matches_pair", "idx_matches_pair"],
-                  branch_limit=games, branches=2)
+    lines = _gate(plan, branch_limit=games, branches=2)
     got = db.run(_rows(db.conn, R3_PAIR, params))
     assert got == db.run(_rows(db.conn, REF_PAIR, {"a": a, "b": b}))[:games]
     _say("r3 pair %s games=%d %s" % (pair, games, mode), lines)
@@ -526,8 +598,7 @@ def test_r4_player_reads_both_seats_over_the_seat_order_indexes(db, who, games, 
     subject = getattr(db.seed, who)
     params = {"s": subject, "games": games}
     plan = db.run(_explain(db.conn, R4_PLAYER, params, mode))
-    lines = _gate(plan, indexes=["idx_matches_p1_order", "idx_matches_p2_order"],
-                  branch_limit=games, branches=2)
+    lines = _gate(plan, branch_limit=games, branches=2)
     got = db.run(_rows(db.conn, R4_PLAYER, params))
     assert got == db.run(_rows(db.conn, REF_PLAYER, {"s": subject}))[:games]
     _say("r4 player %s games=%d %s" % (who, games, mode), lines)
@@ -550,8 +621,7 @@ def test_seat_baseline_reads_scan_plus_one_before_the_game(db, who, mode):
     scan = BASELINE_SCAN + 1
     params = {"s": subject, "g_ended": g["ended_at"], "g_id": g["id"], "scan": scan}
     plan = db.run(_explain(db.conn, SEAT_BASELINE, params, mode))
-    lines = _gate(plan, indexes=["idx_matches_p1_order", "idx_matches_p2_order"],
-                  branch_limit=scan, branches=2)
+    lines = _gate(plan, branch_limit=scan, branches=2, time_bound=True)
     got = db.run(_rows(db.conn, SEAT_BASELINE, params))
     ref = db.run(db.conn.fetch("""
         SELECT id FROM matches
@@ -578,8 +648,7 @@ def test_pair_global_baseline_reads_both_orientations_before_the_game(db, pair, 
     scan = BASELINE_SCAN + 1
     params = {"a": a, "b": b, "g_ended": g["ended_at"], "g_id": g["id"], "scan": scan}
     plan = db.run(_explain(db.conn, PAIR_BASELINE, params, mode))
-    lines = _gate(plan, indexes=["idx_matches_pair", "idx_matches_pair"],
-                  branch_limit=scan, branches=2)
+    lines = _gate(plan, branch_limit=scan, branches=2, time_bound=True)
     got = db.run(_rows(db.conn, PAIR_BASELINE, params))
     ref = db.run(db.conn.fetch("""
         SELECT id FROM matches
