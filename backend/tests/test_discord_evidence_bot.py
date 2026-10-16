@@ -236,7 +236,10 @@ def game_body(page=1, pages=1, shape="game"):
                        "invalidated": None, "series_id": None, "rounds": [5, 3],
                        "seats": [{"subject": 0, "reporter": True, "cells": cells},
                                  {"subject": 1, "reporter": False, "cells": cells}],
-                       "pair_cells": [], "flags": []}]}
+                       "pair_cells": [],
+                       "flags": [{"reason": "suspected_macro", "subject": 0, "reviewed": False,
+                                  "current": True,
+                                  "created_at": "2026-10-16T00:00:00+00:00"}]}]}
 
 
 def summary_body(page=1, pages=3, shape="pair"):
@@ -245,7 +248,7 @@ def summary_body(page=1, pages=3, shape="pair"):
     body["catalog"] = [ae._catalog_row(w)]
     body["games"] = []
     body["windows"] = [{"oi": 0, "basis": "pair", "subj": ["seat", 0, 1], "games": 10,
-                        "covered": 10, "flag_obs": None, "newest": "a" * 12,
+                        "covered": 10, "flag_obs": 0, "newest": "a" * 12,
                         "oldest": "b" * 12}]
     body["summary"] = [{"oi": 0, "cells": [[w.ki, 10, 4.5, None, None, None, "none",
                                             None, None, None, None, None, "ok"]]}]
@@ -297,6 +300,9 @@ def test_the_1a_decoder_accepts_a_served_page_and_refuses_every_break(bot):
     assert broken(lambda b: b["summary"][0]["cells"][0].__setitem__(
         0, next(e.ki for e in ae.REPORT_REGISTRY if not e.is_window)), summary_body)
     assert broken(lambda b: b["games"][0].update(pair_cells=[[0]]))
+    assert broken(lambda b: b["games"][0]["flags"][0].update(reason="x\x1b[31m"))   # raw ESC
+    assert broken(lambda b: b["games"][0]["flags"][0].update(reviewed=1))
+    assert broken(lambda b: b["windows"][0].update(flag_obs=True), summary_body)
     with pytest.raises(err):
         dec(game_body(), "1b")
 

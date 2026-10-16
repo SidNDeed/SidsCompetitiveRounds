@@ -630,7 +630,7 @@ def flag_list(flag_rows, steam_to_subject, current):
     current_ids = {c["id"] for c in current.values()}
     out = []
     for r in sorted(flag_rows, key=lambda r: (r["created_at"], str(r["id"]))):
-        out.append({"reason": r["flag_reason"],
+        out.append({"reason": _aer_enc(r["flag_reason"]),     # a display slot (2.12)
                     "subject": steam_to_subject.get(_flag_subject_steam(_details(r))),
                     "reviewed": r["reviewed_at"] is not None,
                     "current": r["id"] in current_ids,

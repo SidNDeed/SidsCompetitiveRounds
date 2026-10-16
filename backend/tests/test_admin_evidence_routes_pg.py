@@ -836,6 +836,11 @@ def test_admin_authorized_consumers_serve_sentinels_only_to_admins(rig, monkeypa
             assert base == p2_cols, (label, base)
         else:
             assert base == sorted(STORAGE_FIELDS), (label, base)
+    # design 3.3: every page the api served meets the bot's 1a schema
+    from test_discord_evidence_bot import bot_ns
+    decode = bot_ns()["_aer_decode_response"]
+    decoded = sum(1 for pages in served.values() for body in pages if decode(body, "1a"))
+    assert decoded == sum(len(pages) for pages in served.values())
     assert len(refusals) == 28
     texts = [str(v) for v in sentinels.values()]
     for shape, label, status, content, headers in refusals:
@@ -847,8 +852,8 @@ def test_admin_authorized_consumers_serve_sentinels_only_to_admins(rig, monkeypa
         assert not [t for t in texts if t in blob], (shape, label)
         assert not [c for c in STORAGE_FIELDS if c in blob], (shape, label)
     print("GATE 4.7 sentinels: (all hits, base value slots) per route %s; every hit "
-          "under its own key; 28 refusals carry no sentinel name, value or text"
-          % sorted(counts.items()))
+          "under its own key; %d served pages decode under the bot's 1a schema; 28 refusals "
+          "carry no sentinel name, value or text" % (sorted(counts.items()), decoded))
 
 
 # ── P9 through the routes (1a-3 route half) ────────────────────────────────

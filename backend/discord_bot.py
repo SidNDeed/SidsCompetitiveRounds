@@ -15070,6 +15070,7 @@ _AER_WINDOW_KEYS = frozenset({"oi", "basis", "subj", "games", "covered", "flag_o
                               "newest", "oldest"})
 _AER_CATALOG_KEYS = frozenset({"ki", "key", "base", "fam", "unit", "kind"})
 _AER_SPREAD_KEYS = frozenset({"p50", "p90", "p99"})
+_AER_FLAG_KEYS = frozenset({"reason", "subject", "reviewed", "current", "created_at"})
 
 # The decoded page (design 3.3): immutable, built only from a response that
 # passed the 1a closed schema. Cells are tuples in their AER_WIRE slot order.
@@ -15187,7 +15188,16 @@ def _aer_decode_response(body, phase="1a"):
             _aer_display(g[k])
         if not isinstance(g["is_ranked"], bool) or not isinstance(g["flags"], list):
             raise AerSchemaError("game fields")
-        games.append(dict(g, seats=tuple(seats)))
+        flags = []
+        for f in g["flags"]:
+            _aer_keys(f, _AER_FLAG_KEYS)
+            if not all(isinstance(f[k], bool) for k in ("reviewed", "current")) or (
+                    f["subject"] is not None and _aer_check_int(f["subject"], 0) >= len(subjects)):
+                raise AerSchemaError("flag")
+            _aer_display(f["reason"])
+            _aer_display(f["created_at"])
+            flags.append(dict(f))
+        games.append(dict(g, seats=tuple(seats), flags=tuple(flags)))
     windows, summary = (), ()
     if summary_page:
         if games or not isinstance(body["windows"], list) or not isinstance(body["summary"], list):
@@ -15200,6 +15210,8 @@ def _aer_decode_response(body, phase="1a"):
                     or w["basis"] not in ("player", "pair")
                     or (subj[0] != "seat" and w["flag_obs"] is not None)):
                 raise AerSchemaError("window")
+            if subj[0] == "seat":
+                _aer_check_int(w["flag_obs"], 0)
             wins.append(dict(w))
         cells = []
         for s in body["summary"]:
