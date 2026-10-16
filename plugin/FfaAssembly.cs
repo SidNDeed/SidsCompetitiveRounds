@@ -127,6 +127,32 @@ namespace CompetitiveRounds
             public bool Reform;
         }
 
+        /// <summary>RJ readmission (V3 P4.6): the readmit flag of the sitting,
+        /// pinned from the lock payload with the lobby and room; null until a
+        /// gated lock pins one.</summary>
+        internal static FfaReadmitRules.ReadmitPin ReadmitPin;
+
+        /// <summary>Whether this room runs the readmission rules (V3 P2 gate,
+        /// P3, P4): the pinned flag for the pinned room, never re-derived from
+        /// present, kept or bodied actors.</summary>
+        internal static bool ReadmitLobby
+        {
+            get
+            {
+                try
+                {
+                    string room = PhotonNetwork.InRoom && PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : null;
+                    return FfaReadmitRules.GateOn(new FfaReadmitRules.GateView
+                    {
+                        Pin = ReadmitPin,
+                        Room = room,
+                        PresentAllAdvertise = () => false,
+                    });
+                }
+                catch { return false; }
+            }
+        }
+
         /// <summary>The latest gated lock (assembly: 1); null after an ungated
         /// lock.</summary>
         internal static LockInfo Lock;

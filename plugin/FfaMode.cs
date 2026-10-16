@@ -2766,6 +2766,18 @@ namespace CompetitiveRounds
                 pickerIds.Add(p.PlayerID);
             }
             pickerIds.Sort();
+            // RJ readmission P2 step 1: in a readmission lobby (the flag pinned
+            // at lock, never re-derived) the pickers are every roster slot but
+            // the round winner's, with or without a kept body.
+            bool readmitGate = FfaAssembly.ReadmitLobby;
+            if (readmitGate)
+            {
+                int rosterCount = ApiClient.FfaLockedRoster != null ? ApiClient.FfaLockedRoster.Count : 0;
+                if (rosterCount > 0)
+                    pickerIds = FfaReadmitRules.PickerSet(true, rosterCount, pickerIds, roundWinnerTeam);
+            }
+            FfaReadmitRules.FfaOfferRecord heldOffer = null;
+            List<int> phaseGranted = null;
 
             // §8c drift recovery — FINAL SHAPE after three review rounds
             // (wave-2 round-3 find N6 closed the book on cache adoption).
@@ -3027,6 +3039,15 @@ namespace CompetitiveRounds
                     yield return null;
                 }
                 try { FfaCardSequence.ConsumeOffers(manifest); } catch { }
+                // RJ readmission P2 step 2: after its own latch and
+                // ConsumeOffers, the master publishes the cycle's offer record,
+                // under the epoch it holds for the cycle, before any grant; its
+                // own screen reads it like every other seat's.
+                if (readmitGate && manifest != null && FfaLateEntry.MasterMaySend() && PhotonNetwork.IsMasterClient)
+                {
+                    string offerEpoch = EpochForUse();
+                    if (offerEpoch != null) heldOffer = MasterOfferRecord(game, cycle, manifest, offerEpoch);
+                }
             }
 
             // Local player picks? (N12(d): never without an identity.)
@@ -3388,6 +3409,19 @@ namespace CompetitiveRounds
                         }
                         if (allIn || (now > deadline && !adoptSettling))
                         {
+                            // RJ readmission P2 step 6: each manifest pid with
+                            // no pick in got receives entry 0 of its list in the
+                            // record this master holds (a promoted master adopts
+                            // the published one; it builds one only when none is
+                            // readable). No record: no grant, today's outcome.
+                            string grantMarker = null;
+                            if (readmitGate)
+                            {
+                                var held = heldOffer ?? MasterOfferRecord(game, cycle, manifest, closeEpoch);
+                                phaseGranted = FfaReadmitRules.GrantMissing(manifest, got, held,
+                                    new FfaReadmitRules.GrantView { HasKeptBody = HasKeptBody });
+                                grantMarker = FfaReadmitRules.GrantMarker(closeEpoch, game, cycle, phaseGranted);
+                            }
                             var sb = new System.Text.StringBuilder();
                             sb.Append(game).Append(':').Append(cycle).Append(':');
                             bool first = true;
@@ -3397,7 +3431,7 @@ namespace CompetitiveRounds
                                 sb.Append(kv.Key).Append('=').Append(kv.Value);
                                 first = false;
                             }
-                            WriteResultProp(sb.ToString(), closeEpoch);
+                            WriteResultProp(sb.ToString(), closeEpoch, grantMarker);
                             if (!allIn)
                                 Plugin.Log.LogWarning($"[FFA] pick cycle {cycle} closed with {got.Count}/{manifest.Count} picks (window ended)");
                             // Adopt what we just published as OUR result and
@@ -3442,7 +3476,31 @@ namespace CompetitiveRounds
             // auto-confirm this should only happen when our publish lost the
             // race to a master whose phase clock ran well ahead of ours —
             // log it loudly so repeat sightings surface the skew.
-            if (iPick && localPlayer != null && !result.ContainsKey(localPlayer.PlayerID))
+            // RJ readmission P2 steps 3, 4, 6 and 9: the audit and the adoption
+            // of the published record, before any deck changes; then which
+            // entries of the result were automatic (the master's own list, or
+            // the marker that rode the result's property event).
+            List<int> grantedNow = null;
+            if (readmitGate)
+            {
+                OfferEndOfCycle(game, cycle);
+                grantedNow = phaseGranted ?? ReadGrantedPids(game, cycle);
+            }
+            if (grantedNow != null && iPick && localPlayer != null && grantedNow.Contains(localPlayer.PlayerID)
+                && result.TryGetValue(localPlayer.PlayerID, out var autoCard))
+            {
+                // V3 P2 step 8: the local seat's automatic pick, in place of
+                // the missed-cutoff toast.
+                Plugin.Log.LogInfo($"[FFA] cycle {cycle}: local seat granted automatically: {autoCard}");
+                try
+                {
+                    string canonA = CardRarityLookup.GetCanonicalName(autoCard) ?? autoCard;
+                    CompetitiveUI.ShowNotification(I18n.TrF("Automatic pick: {0}", CardTextLocalizer.PrettyNameIfCached(canonA, autoCard)),
+                        new Color(1f, 0.85f, 0.5f), 5f);
+                }
+                catch { }
+            }
+            else if (iPick && localPlayer != null && !result.ContainsKey(localPlayer.PlayerID))
             {
                 Plugin.Log.LogWarning($"[FFA] cycle {cycle}: local pick missed the window — no card this cycle (auto-confirm lost the close race?)");
                 try
@@ -3457,7 +3515,19 @@ namespace CompetitiveRounds
             _cycleToasts.Clear();
             foreach (var kv in result.OrderBy(k => k.Key))
             {
-                yield return ApplyManifestPick(kv.Key, kv.Value, cycle);
+                if (!readmitGate)
+                {
+                    yield return ApplyManifestPick(kv.Key, kv.Value, cycle);
+                    continue;
+                }
+                // RJ readmission P2 step 7: a pid with no kept body on this
+                // client is applied bodiless (logical deck and history only);
+                // its body, once kept, receives a replay of the logical deck.
+                bool bodiless = FfaReadmitRules.Bodiless(true, HasKeptBody(kv.Key));
+                if (grantedNow != null && grantedNow.Contains(kv.Key))
+                    Plugin.Log.LogInfo($"[FFA] auto grant pid={kv.Key} card={kv.Value}");
+                yield return ApplyManifestPick(kv.Key, kv.Value, cycle, bodiless);
+                FfaReadmitRules.NoteApplied(FfaCardSequence.Spend, kv.Key, kv.Value);
             }
             // RJ-DRIFT N19(g): every exit of the result loop reaches here (the
             // read, the close and the bail), so the held epoch is recorded as
@@ -3605,7 +3675,7 @@ namespace CompetitiveRounds
         /// "{epoch}:{local ActorNumber}:{that value}" in the same Hashtable, so
         /// epoch, issuer and payload are one property value. SetRoomProp is
         /// untouched.</summary>
-        private static void WriteResultProp(string value, string epoch)
+        private static void WriteResultProp(string value, string epoch, string grantMarker = null)
         {
             try
             {
@@ -3613,9 +3683,147 @@ namespace CompetitiveRounds
                 h[PropResult] = value;
                 h[PropResultEpoch] = epoch + ":" + LocalActorNow().ToString(System.Globalization.CultureInfo.InvariantCulture)
                                      + ":" + value;
+                // RJ readmission P2 step 6: the grant marker rides the same
+                // Hashtable, so the result and which entries were automatic are
+                // one property event (as cr_ffa_res and cr_ffa_rep are).
+                if (grantMarker != null) h[FfaReadmitRules.GrantProp] = grantMarker;
                 PhotonNetwork.CurrentRoom.SetCustomProperties(h);
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"[FFA] SetRoomProp {PropResult}: {ex.Message}"); }
+        }
+
+        // ── RJ readmission P2 (design V3): the offer record and the grant ──
+
+        /// <summary>How long a readmission lobby's pick screen waits for the
+        /// cycle's offer record before it falls back to today's computation.</summary>
+        private const float OfferWaitSeconds = 4f;
+
+        /// <summary>The offer record of (game, cycle) from the room, or null.</summary>
+        private static FfaReadmitRules.FfaOfferRecord ReadOfferRecord(int game, int cycle)
+        {
+            try
+            {
+                var r = FfaReadmitRules.Parse(ReadRawRoomProp(FfaReadmitRules.OfferProp));
+                return r != null && r.Game == game && r.Cycle == cycle ? r : null;
+            }
+            catch { return null; }
+        }
+
+        /// <summary>The granted pids of (game, cycle) from the room's grant
+        /// marker, or an empty list.</summary>
+        private static List<int> ReadGrantedPids(int game, int cycle)
+        {
+            try
+            {
+                int g, c;
+                List<int> pids;
+                if (FfaReadmitRules.ParseGrantMarker(ReadRawRoomProp(FfaReadmitRules.GrantProp), out g, out c, out pids)
+                    && g == game && c == cycle)
+                    return pids;
+            }
+            catch { }
+            return new List<int>();
+        }
+
+        /// <summary>A pid's logical deck, by prefab name, in order.</summary>
+        private static IList<string> LogicalDeckNames(int pid)
+        {
+            var o = new List<string>();
+            if (decks.TryGetValue(pid, out var d))
+                foreach (var c in d)
+                    if (c != null) o.Add(c.gameObject.name.Replace("(Clone)", ""));
+            return o;
+        }
+
+        /// <summary>Whether this client holds a kept body for the pid.</summary>
+        private static bool HasKeptBody(int pid)
+        {
+            try
+            {
+                var p = ResolveFighter(pid);
+                return p != null && p.gameObject != null && p.data != null && !FfaLateEntry.IsQuarantined(p);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>V3 P2 step 2: the record for the manifest, from this
+        /// client's state: rule s when the shared sequence runs this game, else
+        /// rule p (the master's own roll, Q2). Null on any failure: the cycle then
+        /// grants nothing automatically, today's outcome.</summary>
+        private static FfaReadmitRules.FfaOfferRecord BuildOfferRecord(int game, int cycle, List<int> manifest, string epoch)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(epoch) || manifest == null) return null;
+                if (FfaCardSequence.ActiveThisGame)
+                {
+                    var pool = FfaCardSequence.OfferPoolNow();
+                    if (pool == null) return null;
+                    return FfaReadmitRules.BuildRuleS(epoch, game, cycle, manifest, FfaCardSequence.DrawIndexOf,
+                        LogicalDeckNames, pool, FfaCardSequence.SeqStateNow(), FfaCardSequence.Spend);
+                }
+                var choice = CardChoice.instance;
+                if (choice == null || choice.cards == null) return null;
+                var ppool = new FfaReadmitRules.OfferPool();
+                foreach (var c in choice.cards)
+                    if (c != null && ppool.Facts(c.gameObject.name) == null) ppool.Add(FfaCardSequence.FactsOf(c, 0));
+                return FfaReadmitRules.BuildRuleP(epoch, game, cycle, manifest, LogicalDeckNames, ppool,
+                    Mathf.Clamp(CardCandidates, 1, 5), () =>
+                    {
+                        var rc = PickRandomCard(choice);
+                        return rc != null ? rc.gameObject.name : null;
+                    }, FfaCardSequence.Spend);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"[FFA-OFF] record build failed {game}:{cycle}: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>V3 P2 steps 2 and 6, the master's half: the record it holds
+        /// for the cycle. A record already published for (game, cycle) is
+        /// ADOPTED, never rewritten (a promoted master); one is built and
+        /// published only when none is readable. Null with no record.</summary>
+        private static FfaReadmitRules.FfaOfferRecord MasterOfferRecord(int game, int cycle, List<int> manifest, string epoch)
+        {
+            var held = ReadOfferRecord(game, cycle);
+            if (held != null) return held;
+            var built = BuildOfferRecord(game, cycle, manifest, epoch);
+            string enc = built != null ? FfaReadmitRules.Encode(built) : null;
+            if (enc == null) return null;
+            SetRoomProp(FfaReadmitRules.OfferProp, enc);
+            FfaCardSequence.AdoptOfferRecord(built);
+            Plugin.Log.LogInfo($"[FFA-OFF] record published {game}:{cycle} rule={built.Rule} pids={string.Join(",", built.Entries.Keys)}");
+            return built;
+        }
+
+        /// <summary>V3 P2 steps 3, 4 and 9 at the cycle's end, before the
+        /// apply: a non-master recomputes the rule-s record from its own state
+        /// and logs the audit; every client then adopts the PUBLISHED record
+        /// (ledger and draw indices). The audit never changes what is applied.</summary>
+        private static void OfferEndOfCycle(int game, int cycle)
+        {
+            try
+            {
+                var pub = ReadOfferRecord(game, cycle);
+                if (pub == null) return;
+                FfaReadmitRules.FfaOfferRecord mine = null;
+                if (!PhotonNetwork.IsMasterClient && pub.Rule == 's')
+                {
+                    var pool = FfaCardSequence.OfferPoolNow();
+                    if (pool != null)
+                    {
+                        mine = FfaReadmitRules.BuildRuleS(pub.Epoch, game, cycle, new List<int>(pub.Entries.Keys),
+                            FfaCardSequence.DrawIndexOf, LogicalDeckNames, pool, FfaCardSequence.SeqStateNow(),
+                            FfaCardSequence.Spend);
+                        foreach (var a in FfaReadmitRules.Audit(pub, mine))
+                            Plugin.Log.LogInfo($"[FFA-OFF] audit pid={a.Key} match={(a.Value ? 1 : 0)}");
+                    }
+                }
+                FfaCardSequence.AdoptOfferRecord(FfaReadmitRules.AfterAudit(pub, mine));
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[FFA-OFF] end of cycle {game}:{cycle}: {ex.Message}"); }
         }
 
         /// <summary>The present master's ActorNumber, -1 with none.</summary>
@@ -4245,8 +4453,38 @@ namespace CompetitiveRounds
             var candidates = new List<CardInfo>();
             var candidateObjs = new List<GameObject>();
             bool sharedDraw = false;
-            try { sharedDraw = FfaCardSequence.TryGetCandidates(localPlayer, slots.Count, candidates); }
-            catch (Exception sqx) { Plugin.Log.LogWarning($"[FFA-SEQ] shared draw failed: {sqx.Message}"); candidates.Clear(); }
+            // RJ readmission P2 step 5: in a readmission lobby this seat is
+            // shown ITS OWN list from the cycle's offer record (the record the
+            // automatic grant reads), by name. It waits up to OfferWaitSeconds;
+            // with no record in time it falls back to today's computation and
+            // its pick still travels by name.
+            List<string> offerList = null;
+            if (FfaAssembly.ReadmitLobby)
+            {
+                float offerWait = Time.realtimeSinceStartup;
+                FfaReadmitRules.FfaOfferRecord offerRec = null;
+                while ((offerRec = ReadOfferRecord(game, cycle)) == null
+                       && Time.realtimeSinceStartup - offerWait < OfferWaitSeconds)
+                    yield return null;
+                offerList = offerRec != null ? offerRec.ListOf(localPlayer.PlayerID) : null;
+                if (offerList == null)
+                    Plugin.Log.LogInfo($"[FFA-OFF] record late {game}:{cycle} pid={localPlayer.PlayerID} - this screen uses today's computation");
+                else
+                {
+                    foreach (var on in offerList)
+                    {
+                        if (candidates.Count >= slots.Count) break;
+                        var oc = ResolveCard(on);
+                        if (oc != null) candidates.Add(oc);
+                    }
+                    sharedDraw = true;
+                }
+            }
+            if (offerList == null)
+            {
+                try { sharedDraw = FfaCardSequence.TryGetCandidates(localPlayer, slots.Count, candidates); }
+                catch (Exception sqx) { Plugin.Log.LogWarning($"[FFA-SEQ] shared draw failed: {sqx.Message}"); candidates.Clear(); }
+            }
             if (!sharedDraw)
             {
                 int guard = 0;
@@ -4294,6 +4532,7 @@ namespace CompetitiveRounds
             float started = Time.realtimeSinceStartup;
             int chosen = -1;
             bool autoPicked = false;
+            bool moved = false;   // RJ readmission P2 step 5: whether the highlight ever moved
             localPickOpen = true;
             // The 0.35s arm delay keeps a jump pressed during the transition
             // (or any queued press on the very first frame) from
@@ -4333,7 +4572,10 @@ namespace CompetitiveRounds
                     }
                     catch { }
                     if (dir != lastDir && dir != 0)
+                    {
                         selected = Mathf.Clamp(selected + dir, 0, candidateObjs.Count - 1);
+                        moved = true;
+                    }
                     lastDir = dir;
                     try
                     {
@@ -4356,6 +4598,16 @@ namespace CompetitiveRounds
 
             localPickOpen = false;
             string cardName = shown[chosen].gameObject.name.Replace("(Clone)", "");
+            // RJ readmission P2 step 5: idling confirms entry 0 of this seat's
+            // record list BY NAME, even when entry 0's visual failed to spawn,
+            // so a staying seat that idles and an absent seat reach one card.
+            if (offerList != null && autoPicked)
+            {
+                var shownNames = new List<string>();
+                foreach (var s in shown) shownNames.Add(s.gameObject.name.Replace("(Clone)", ""));
+                string byName = FfaReadmitRules.TimeoutPick(offerList, shownNames, chosen, moved);
+                if (!string.IsNullOrEmpty(byName)) cardName = byName;
+            }
             // Publish BEFORE any local application — application happens only
             // from the result manifest, identically on every client.
             // Publish under the phase's LIVE identity, never the value captured
@@ -4411,7 +4663,9 @@ namespace CompetitiveRounds
             {
                 try
                 {
-                    string display = shown[chosen].cardName;
+                    var displayCard = shown[chosen].gameObject.name.Replace("(Clone)", "") == cardName
+                        ? shown[chosen] : ResolveCard(cardName);
+                    string display = displayCard != null ? displayCard.cardName : null;
                     if (string.IsNullOrEmpty(display)) display = cardName;
                     CompetitiveUI.ShowNotification(I18n.TrF("Time's up - {0} picked automatically.", display),
                         new Color(1f, 0.85f, 0.5f), 5f);
@@ -4574,8 +4828,11 @@ namespace CompetitiveRounds
             // suppressed for the rest of the game — clear on every new apply.
             deckViewRebuilds.Remove(pid);
             // V11 item 13 surface 2 (row 50): a quarantined pid gets no card.
+            // RJ readmission P2 step 7: a bodiless apply (a seat with no KEPT
+            // body here, a quarantined returner included) writes the logical
+            // deck; the quarantine refusal guards the physical apply only.
             Player player;
-            if (FfaLateEntry.IsQuarantined(player = ResolveFighter(pid)))
+            if (FfaLateEntry.IsQuarantined(player = ResolveFighter(pid)) && !bodiless)
             {
                 FfaLateEntry.Refused("pick", player);
                 yield break;
@@ -4752,8 +5009,10 @@ namespace CompetitiveRounds
             {
                 string canon = CardRarityLookup.GetCanonicalName(cardName) ?? cardName;
                 string shown = CardTextLocalizer.PrettyNameIfCached(canon, cardName);
+                // V3 P2 step 8: survivors see an absent seat's card as "(away)".
                 _cycleToasts.Add(new CompetitiveUI.NotifSetItem(
-                    I18n.TrF("{0} picked {1}", who, shown), new Color(0.75f, 0.85f, 1f)));
+                    bodiless ? I18n.TrF("{0} (away) got {1}", who, shown) : I18n.TrF("{0} picked {1}", who, shown),
+                    new Color(0.75f, 0.85f, 1f)));
                 if (!bodiless && player.data.view != null && player.data.view.IsMine)
                 {
                     try { GameStateWatcher.RecordFfaLocalPick(cardName, RoundsTotalAll()); } catch { }

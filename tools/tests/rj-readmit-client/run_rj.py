@@ -4,21 +4,23 @@ Suites:
   apply   P1 twin run (T1.1, T1.2): the REAL ApplyManifestPick at the lane base
           and from the tree under test, extracted into one generated file and
           compiled against apply-trace/Stubs.cs; traces equal element by element.
-  rules   the REAL plugin/FfaReadmitRules.cs under a plain compiler (P2 to P5
-          rules: the offer record, the ledger, the grant, the digest, the
-          tail, departure as death, registration, the readmit flows).
+  rules   the REAL plugin rule files (FfaReadmitRules.cs, FfaReportRules.cs,
+          FfaLateRules.cs, FfaNumberingRules.cs) under a plain compiler: one
+          named case per falsifiable sentence (rules/Cases*.cs).
 
 Mutants are planted into COPIES of the plugin files under the work folder (the
 tracked files are never written). Each mutant must turn its target case red
 and leave its control case green (#391). Exit 0 only when every baseline case
-passes, every mutant is caught, every control holds and the tracked plugin
-files are unchanged.
+passes, every mutant is caught, every control holds and the source files are
+unchanged by the run.
 
-    python tools/tests/rj-readmit-client/run_rj.py --work <dir> [--suite apply|rules|all]
-        [--only <mutant id>,...] [--overlay <dir>]
+    python tools/tests/rj-readmit-client/run_rj.py --work <dir>
+        [--tree <dir>] [--wt <dir>] [--suite apply|rules|all] [--only <id>,...]
 
---overlay DIR: a file DIR/plugin/X is read in place of plugin/X (a piece
-snapshot); its sha256 is printed so a log names exactly what ran.
+--tree DIR: the source tree to test (plugin/ and this folder), default the
+repository holding this script. --wt DIR: the git worktree whose commit and
+state head the log, default the tree. Every source file read is printed with
+its sha256, so a log names exactly what ran.
 """
 import argparse
 import hashlib
@@ -27,41 +29,80 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-PLUGIN = os.path.join(REPO, "plugin")
+DEFAULT_TREE = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 BASE = "bf81f4fe"  # the lane base: the pre-split reducer is read from here
-TRACKED = ["FfaMode.cs", "FfaReadmitRules.cs"]
+REL = os.path.join("tools", "tests", "rj-readmit-client")
 
 APPLY_CASES = ["rolling", "local", "remote", "unknown", "quarantined", "nobody",
                "rolling_local", "throw_replay", "throw_apply", "throw_audit", "throw_rebuild",
                "bodiless", "bodiless_plain"]
 
-# (id, suite, file, [(old, new), ...], target case, control case)
+# file -> MSBuild property naming its copy, per suite
+SUITE_FILES = {
+    "apply": {"FfaMode.cs": None, "FfaReadmitRules.cs": "RulesSource"},
+    "rules": {"FfaReadmitRules.cs": "RulesSource", "FfaReportRules.cs": "ReportSource",
+              "FfaLateRules.cs": "LateSource"},
+}
+
+# (id, piece, suite, file, [(old, new), ...], target case, control case)
 # Each old string occurs exactly once in the file it names.
 MUTANTS = [
-    # M1.1 publish cr_cards before the physical apply
-    ("M1.1", "apply", "FfaMode.cs",
+    # ---- C1 (P1)
+    ("M1.1", "C1", "apply", "FfaMode.cs",
      [("            if (!bodiless) ApplyCardTo(player, prefab);\n",
        "            try { GameStateWatcher.RecordFfaLocalPick(cardName, RoundsTotalAll()); } catch { }\n"
        "            if (!bodiless) ApplyCardTo(player, prefab);\n")],
      "throw_apply", "unknown"),
-    # M1.2 rewrite the deck before the replay
-    ("M1.2", "apply", "FfaMode.cs",
+    ("M1.2", "C1", "apply", "FfaMode.cs",
      [("                if (!bodiless)\n                {\n                    deckViewRebuilds.Add(pid);\n",
        "                deck.Clear();\n                deck.AddRange(survivors);\n"
        "                if (!bodiless)\n                {\n                    deckViewRebuilds.Add(pid);\n")],
      "rolling", "remote"),
-    # M1.3 run the logical statements when bodiless is false and there is no body
-    ("M1.3", "apply", "FfaMode.cs",
+    ("M1.3", "C1", "apply", "FfaMode.cs",
      [("                Plugin.Log.LogWarning($\"[FFA] apply skipped — player {pid} gone (card {cardName})\");\n"
        "                yield break;\n",
        "                bodiless = true;\n")],
      "nobody", "rolling"),
-    # M1.4 survivors as the first CardCap - 1 entries
-    ("M1.4", "apply", "FfaReadmitRules.cs",
+    ("M1.4", "C1", "apply", "FfaReadmitRules.cs",
      [("plan.Survivors = deck.Skip(count - (cardCap - 1)).ToList();",
        "plan.Survivors = deck.Take(cardCap - 1).ToList();")],
      "rolling", "remote"),
+    # ---- C2 (P2)
+    ("M2.1", "C2", "rules", "FfaReadmitRules.cs",
+     [("                string first = held.FirstOf(pid);\n",
+       "                var l1 = held.ListOf(pid);\n                string first = l1 != null && l1.Count > 1 ? l1[1] : null;\n")],
+     "C2.T2.1.twin_rule_s_ledger", "C2.T2.3.opening_draw_raw_entry"),
+    ("M2.2", "C2", "rules", "FfaReadmitRules.cs",
+     [("(seq.UsedNoRepeatFold.Contains(cn) || ledger.Contains(cn))",
+       "(seq.UsedNoRepeatFold.Contains(cn) || new HashSet<string>().Contains(cn))")],
+     "C2.T2.2.ledger_substitute_never_reoffered", "C2.T2.3.opening_draw_raw_entry"),
+    ("M2.3", "C2", "rules", "FfaReadmitRules.cs",
+     [("                            if (pool.NoRepeat.Contains(sub.Name)) ledger.Add(sub.Name);\n", ""),
+      ("        internal static void NoteApplied(SpendState spend, int pid, string card)\n        {\n",
+       "        internal static void NoteApplied(SpendState spend, int pid, string card)\n        {\n"
+       "            if (!spend.Ledger.Contains(card)) spend.Ledger.Add(card);\n")],
+     "C2.T2.2.ledger_substitute_never_reoffered", "C2.T2.3.opening_draw_raw_entry"),
+    ("M2.4", "C2", "rules", "FfaReadmitRules.cs",
+     [("bool openingDraw = k <= seq.OpeningDraws;", "bool openingDraw = false;")],
+     "C2.T2.3.opening_draw_raw_entry", "C2.T2.2.ledger_substitute_never_reoffered"),
+    ("M2.5", "C2", "rules", "FfaReadmitRules.cs",
+     [("                if (got.ContainsKey(pid)) continue;\n                string first",
+       "                if (view.HasKeptBody(pid)) continue;\n                string first")],
+     "C2.T2.4.walk_seat_leaves", "C2.T2.1.twin_rule_s_ledger"),
+    ("M2.6", "C2", "rules", "FfaReadmitRules.cs",
+     [("                if (got.ContainsKey(pid)) continue;\n                string first",
+       "                if (got.ContainsKey(pid) || view.HasKeptBody(pid)) continue;\n                string first")],
+     "C2.T2.5.present_missed_gets_entry0", "C2.T2.4.walk_seat_leaves"),
+    ("M2.7", "C2", "rules", "FfaReadmitRules.cs",
+     [("return v != null && v.Pin != null && v.Pin.Flag && !string.IsNullOrEmpty(v.Room) && v.Room == v.Pin.Room;",
+       "return v != null && v.PresentAllAdvertise();")],
+     "C2.T2.6.gate_pinned_at_lock", "C2.T2.1.twin_rule_s_ledger"),
+    ("M2.8", "C2", "rules", "FfaReadmitRules.cs",
+     [("        internal static FfaOfferRecord AfterAudit(FfaOfferRecord published, FfaOfferRecord recomputed)\n"
+       "        {\n            return published;\n",
+       "        internal static FfaOfferRecord AfterAudit(FfaOfferRecord published, FfaOfferRecord recomputed)\n"
+       "        {\n            return recomputed ?? published;\n")],
+     "C2.T2.7.master_mutation_audited", "C2.T2.1.twin_rule_s_ledger"),
 ]
 
 
@@ -71,14 +112,6 @@ def sha(path):
 
 def read_text(path):
     return open(path, "rb").read().decode("utf-8")
-
-
-def source_path(name, overlay):
-    if overlay:
-        p = os.path.join(overlay, "plugin", name)
-        if os.path.exists(p):
-            return p
-    return os.path.join(PLUGIN, name)
 
 
 def extract(text, sig):
@@ -95,8 +128,8 @@ def extract(text, sig):
     raise RuntimeError("no end for %r" % sig)
 
 
-def gen_reducers(new_mode_text, out_dir):
-    base = subprocess.run(["git", "-C", REPO, "show", BASE + ":plugin/FfaMode.cs"],
+def gen_reducers(wt, new_mode_text, out_dir):
+    base = subprocess.run(["git", "-C", wt, "show", BASE + ":plugin/FfaMode.cs"],
                           capture_output=True).stdout.decode("utf-8")
     if not base:
         raise RuntimeError("cannot read the base reducer at " + BASE)
@@ -138,28 +171,31 @@ def run_case(dll, case):
     return r.returncode, r.stdout.strip()
 
 
-SUITES = {
-    "apply": {"proj": os.path.join(HERE, "apply-trace", "ApplyTrace.csproj"), "cases": APPLY_CASES},
-    "rules": {"proj": os.path.join(HERE, "rules", "RjRules.csproj"), "cases": None},
-}
+def project(tree, suite):
+    return os.path.join(tree, REL, {"apply": os.path.join("apply-trace", "ApplyTrace.csproj"),
+                                    "rules": os.path.join("rules", "RjRules.csproj")}[suite])
 
 
-def prepare(suite, work, tag, texts):
-    """Writes this variant's sources and builds it; returns the dll."""
+def prepare(tree, wt, suite, work, tag, texts):
+    """Writes this variant's copies and builds it; returns the dll."""
     out = os.path.join(work, suite + "_" + tag)
     os.makedirs(out, exist_ok=True)
-    rules = os.path.join(out, "FfaReadmitRules.cs")
-    open(rules, "wb").write(texts["FfaReadmitRules.cs"].encode("utf-8"))
-    props = {"RulesSource": rules}
+    props = {}
+    for f, prop in SUITE_FILES[suite].items():
+        if prop is None:
+            continue
+        p = os.path.join(out, f)
+        open(p, "wb").write(texts[f].encode("utf-8"))
+        props[prop] = p
     if suite == "apply":
-        gen_reducers(texts["FfaMode.cs"], os.path.join(out, "gen"))
+        gen_reducers(wt, texts["FfaMode.cs"], os.path.join(out, "gen"))
         props["GenDir"] = os.path.join(out, "gen")
-    return build(SUITES[suite]["proj"], out, props)
+    return build(project(tree, suite), out, props)
 
 
 def suite_cases(suite, dll):
-    if SUITES[suite]["cases"] is not None:
-        return SUITES[suite]["cases"]
+    if suite == "apply":
+        return APPLY_CASES
     r = subprocess.run(["dotnet", dll, "--list"], capture_output=True, text=True)
     return [l.strip() for l in r.stdout.splitlines() if l.strip()]
 
@@ -167,30 +203,37 @@ def suite_cases(suite, dll):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", required=True)
+    ap.add_argument("--tree", default=DEFAULT_TREE)
+    ap.add_argument("--wt", default="")
     ap.add_argument("--suite", default="all")
     ap.add_argument("--only", default="")
-    ap.add_argument("--overlay", default="")
     a = ap.parse_args()
+    tree = os.path.abspath(a.tree)
+    wt = os.path.abspath(a.wt) if a.wt else tree
     work = os.path.abspath(a.work)
     os.makedirs(work, exist_ok=True)
-    head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
-    status = subprocess.run(["git", "-C", REPO, "status", "--porcelain"], capture_output=True, text=True).stdout
+    head = subprocess.run(["git", "-C", wt, "log", "--oneline", "-1"], capture_output=True, text=True).stdout.strip()
+    status = subprocess.run(["git", "-C", wt, "status", "--porcelain"], capture_output=True, text=True).stdout
+    print("worktree", wt)
     print("commit", head)
-    print("tree", "clean" if not status.strip() else "dirty:\n" + status.rstrip())
-    srcs = {f: source_path(f, a.overlay) for f in TRACKED}
-    for f in TRACKED:
-        print("source %s sha256 %s%s" % (f, sha(srcs[f]), " (overlay)" if srcs[f] != os.path.join(PLUGIN, f) else ""))
-    before = {f: sha(os.path.join(PLUGIN, f)) for f in TRACKED}
-    texts = {f: read_text(srcs[f]) for f in TRACKED}
-    suites = list(SUITES) if a.suite == "all" else a.suite.split(",")
+    print("worktree state", "clean" if not status.strip() else "dirty:\n" + status.rstrip())
+    print("tree under test", tree)
+    files = sorted(set(f for s in SUITE_FILES.values() for f in s))
+    srcs = {f: os.path.join(tree, "plugin", f) for f in files}
+    for f in files:
+        print("source plugin/%s sha256 %s" % (f, sha(srcs[f])))
+    for root, _, names in sorted(os.walk(os.path.join(tree, REL))):
+        for n in sorted(names):
+            if n.endswith((".cs", ".csproj", ".py")) and os.sep + "bin" not in root and os.sep + "obj" not in root:
+                p = os.path.join(root, n)
+                print("source %s sha256 %s" % (os.path.relpath(p, tree).replace(os.sep, "/"), sha(p)))
+    before = {f: sha(srcs[f]) for f in files}
+    texts = {f: read_text(srcs[f]) for f in files}
+    suites = ["apply", "rules"] if a.suite == "all" else a.suite.split(",")
     only = set(x for x in a.only.split(",") if x)
     ok = True
     for suite in suites:
-        if not os.path.exists(SUITES[suite]["proj"]):
-            print("SUITE %s: project absent" % suite)
-            ok = False
-            continue
-        dll = prepare(suite, work, "base", texts)
+        dll = prepare(tree, wt, suite, work, "base", texts)
         if dll is None:
             print("BUILD FAILED (%s base)" % suite)
             ok = False
@@ -206,7 +249,7 @@ def main():
         if not cases:
             ok = False
         caught = total = 0
-        for mid, msuite, mfile, edits, target, control in MUTANTS:
+        for mid, piece, msuite, mfile, edits, target, control in MUTANTS:
             if msuite != suite or (only and mid not in only):
                 continue
             total += 1
@@ -227,7 +270,7 @@ def main():
                 continue
             mtexts = dict(texts)
             mtexts[mfile] = text
-            mdll = prepare(suite, work, "mut_" + mid.replace(".", "_"), mtexts)
+            mdll = prepare(tree, wt, suite, work, "mut_" + mid.replace(".", "_"), mtexts)
             if mdll is None:
                 print("BAD mutant %s: does not build" % mid)
                 ok = False
@@ -237,8 +280,8 @@ def main():
             hit = trc != 0 and crc == 0
             caught += hit
             ok = ok and hit
-            print("%s mutant %s: target %s=%s; control %s=%s" % (
-                "CAUGHT" if hit else "MISSED", mid, target, "RED" if trc else "GREEN", control,
+            print("%s mutant %s (%s): target %s=%s; control %s=%s" % (
+                "CAUGHT" if hit else "MISSED", mid, piece, target, "RED" if trc else "GREEN", control,
                 "GREEN" if crc == 0 else "RED"))
             if trc:
                 print("   " + "\n   ".join(tout.splitlines()[:4]))
@@ -246,8 +289,8 @@ def main():
                 print("   " + tout[-600:])
                 print("   control: " + cout[-600:])
         print("suite %s: mutants %d of %d caught" % (suite, caught, total))
-    unchanged = all(sha(os.path.join(PLUGIN, f)) == before[f] for f in TRACKED)
-    print("tracked plugin files unchanged:", unchanged)
+    unchanged = all(sha(srcs[f]) == before[f] for f in files)
+    print("source plugin files unchanged by the run:", unchanged)
     ok = ok and unchanged
     print("RESULT", "PASS" if ok else "FAIL")
     return 0 if ok else 1

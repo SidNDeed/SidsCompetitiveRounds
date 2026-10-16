@@ -180,6 +180,24 @@ namespace CompetitiveRounds
             return true;
         }
 
+        /// <summary>V3 P2 step 8: a bodiless apply's pick toast reads
+        /// "{name} (away) got {card}" where a bodied apply reads "{name}
+        /// picked {card}". Every other element is unchanged, so the expected
+        /// trace is the old projection with that one wording swapped.</summary>
+        private static List<string> Away(List<string> t)
+        {
+            return t.Select(e => e.Replace(" picked ", " (away) got ")).ToList();
+        }
+
+        /// <summary>The positive signal: the bodiless trace carries the away
+        /// wording at least once, so a swap that matched nothing cannot pass.</summary>
+        private static bool AwayText(string name, List<string> t)
+        {
+            if (t.Any(e => e.Contains(" (away) got "))) return true;
+            Console.WriteLine("FAIL " + name + ": no \"(away) got\" toast in the bodiless trace");
+            return false;
+        }
+
         private static bool Case(string name)
         {
             if (name == "bodiless")
@@ -192,14 +210,14 @@ namespace CompetitiveRounds
                 var newT = RunOne(true, f, true, false);
                 bool noPhysical = !newT.Any(e => Physical.Any(p => e.StartsWith(p, StringComparison.Ordinal)));
                 if (!noPhysical) { Console.WriteLine("FAIL bodiless: a physical event or yield in the bodiless trace"); return false; }
-                return Compare("bodiless", oldT, Logical(newT));
+                return AwayText("bodiless", newT) && Compare("bodiless", Away(oldT), Logical(newT));
             }
             if (name == "bodiless_plain")
             {
                 var f = Fixtures["remote"];
                 var oldT = Logical(RunOne(false, f, false, true));
                 var newT = RunOne(true, f, true, false);
-                return Compare("bodiless_plain", oldT, Logical(newT));
+                return AwayText("bodiless_plain", newT) && Compare("bodiless_plain", Away(oldT), Logical(newT));
             }
             Fixture fx;
             if (!Fixtures.TryGetValue(name, out fx)) { Console.WriteLine("FAIL unknown case " + name); return false; }
