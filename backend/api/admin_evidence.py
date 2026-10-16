@@ -13,8 +13,12 @@ writes to the database.
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import json
+import math
+import time
+from array import array
 from dataclasses import dataclass
 from typing import Optional
 
@@ -36,12 +40,26 @@ CONTRACT_BOUNDS = {
     "TIMELINE_WINDOWS_MAX": 12,
     "STEAM_ID_MIN_DIGITS": 15,
     "STEAM_ID_MAX_DIGITS": 20,
+    # Populations (design 2.6): the caps as lowered there, the derived-result
+    # memo, the entry lifetime, the request concurrency and the memory budget.
+    "POP_VALUES_MAX": 2000,
+    "WIN_VALUES_MAX": 1000,
+    "WIN_UNIT_DEPTH": 30,
+    "WIN_DERIVED_BYTES_MAX": 2 * 1024 * 1024,
+    "POP_TTL_S": 3600,
+    "REPORT_INFLIGHT_MAX": 2,
+    "POP_MEM_BUDGET_MB": 128,
+    "GAME_SETS_LIVE": 4,
+    "WINDOW_SOURCES_LIVE": 8,
 }
 
 DISPLAY_DEFAULTS = {
     "own_games": 20,
     "pop_days": 30,
     "games": 10,
+    # D4's READY_LAG_S (review_measures.py CONTRACT_BOUNDS["ready_lag_s"] at
+    # the D4 round 15 pin); re-read at D4_TIP when the D4 files land.
+    "lag_s": 120,
 }
 
 # ── Cell identity (design 2.1) ─────────────────────────────────────────────
@@ -807,3 +825,238 @@ def window_cells(rows, account, basis, baseline, partner=None):
 def match_row_select(where):
     """A `matches` read selecting every column the registry names."""
     return "SELECT %s FROM matches m WHERE %s" % (_SELECT_LIST, where)
+
+
+# ── Populations (design 2.6) ───────────────────────────────────────────────
+#
+# One statement per game-population rebuild. A MATERIALIZED CTE reads the
+# window over `idx_matches_ended`; one UNION ALL branch per (ranked base key,
+# subject seat) yields `(ki, val, ended_at, id, subj)`, `subj` the fact's
+# canonical subject tuple as three columns (kind, account or `lo`, partner or
+# `hi`). Before any bound, the complete eligible relation is checked for a
+# repeated `(ki, id, subj)` (one fact per identity); then `row_number()` per
+# key in `ended_at DESC, id DESC, subj` order keeps the newest `cap` values,
+# `cap+1` read to tell a truncated key. `subj` is the last sort key, so a
+# match's two seat facts are ordered by identity, never by value (#606).
+
+_REP_SQL = ("CASE WHEN m.reported_by = m.player1_id THEN 'p1' "
+            "WHEN m.reported_by = m.player2_id THEN 'p2' END")
+
+
+def _seat_account_sql(seat):
+    return "g.player1_id" if seat == "p1" else "g.player2_id"
+
+
+def _applies_sql(entry, col_seat):
+    """The SQL twin of `_applies`: the seat a key's value can exist at."""
+    presence = entry.decl.presence
+    if presence == "reporter":
+        return "g.rep = '%s'" % col_seat
+    if presence == "non_reporter":
+        return "g.rep = '%s'" % _other(col_seat)
+    if presence == "by_prov":
+        own = entry.prov in ("SELF", "D:SELF")
+        return "g.rep = '%s'" % (col_seat if own else _other(col_seat))
+    raise ValueError("unknown presence %r" % presence)
+
+
+def _value_sql(entry, col_seat):
+    """The SQL twin of `seat_value` for a ranked key: NULL stays NULL (never
+    a 0), a derived rate is unknown (NULL) when its denominator is NULL or 0."""
+    col = entry.decl.column
+    if isinstance(col, tuple):
+        return ("CAST(g.%s AS double precision) / NULLIF(CAST(g.%s AS double precision), 0)"
+                % (col[0].format(s=col_seat), col[1].format(s=col_seat)))
+    return "CAST(g.%s AS double precision)" % col.format(s=col_seat)
+
+
+def population_branches(entries=None):
+    """One `(ki, val, ended_at, id, sk, sa, sb)` branch per ranked base key
+    and subject seat (phase 1: every fact is a seat fact `["seat",s,null]`)."""
+    entries = REPORT_REGISTRY if entries is None else entries
+    out = []
+    for e in entries:
+        if e.is_window or not e.ranked or e.source != "match_row":
+            continue
+        for seat in SEATS:
+            col_seat = _other(seat) if e.decl.subject == "opposite" else seat
+            val = _value_sql(e, col_seat)
+            out.append(
+                "SELECT %d AS ki, %s AS val, g.ended_at, g.id, 'seat'::text AS sk, "
+                "%s AS sa, CAST(NULL AS uuid) AS sb FROM g WHERE %s AND %s IS NOT NULL"
+                % (e.ki, val, _seat_account_sql(seat), _applies_sql(e, col_seat), val))
+    return out
+
+
+def population_sql(branches, ranked_only=False):
+    """The rebuild statement over `branches` (design 2.6, 2.9: the window by
+    `idx_matches_ended`, SQL-side bound, one row per key)."""
+    return """
+WITH g AS MATERIALIZED (
+  SELECT m.id, m.ended_at, m.player1_id, m.player2_id, %(rep)s AS rep, %(cols)s
+    FROM matches m
+   WHERE m.invalidated_at IS NULL%(ranked)s
+     AND m.ended_at >= now() - make_interval(days => CAST(:pop_days AS integer))
+     AND m.ended_at <= now() - make_interval(secs => CAST(:lag_s AS integer))),
+f AS (
+%(branches)s),
+dup AS (
+  SELECT count(*) AS n FROM (
+    SELECT 1 FROM f GROUP BY f.ki, f.id, f.sk, f.sa, f.sb HAVING count(*) > 1) d),
+r AS (
+  SELECT f.ki, f.val, f.ended_at,
+         row_number() OVER (PARTITION BY f.ki
+                            ORDER BY f.ended_at DESC, f.id DESC, f.sk, f.sa, f.sb) AS rn
+    FROM f)
+SELECT r.ki,
+       array_agg(r.val ORDER BY r.val) FILTER (WHERE r.rn <= CAST(:cap AS integer)) AS vals,
+       bool_or(r.rn = CAST(:cap AS integer) + 1) AS truncated,
+       max(r.ended_at) FILTER (WHERE r.rn = CAST(:cap AS integer)) AS cutoff,
+       (SELECT dup.n FROM dup) AS dup
+  FROM r
+ WHERE r.rn <= CAST(:cap AS integer) + 1
+ GROUP BY r.ki
+ ORDER BY r.ki""" % {"rep": _REP_SQL,
+                     "cols": ", ".join("m.%s" % c for c in MATCH_COLUMNS),
+                     "ranked": "\n     AND m.is_ranked" if ranked_only else "",
+                     "branches": "\n  UNION ALL\n".join("  " + b for b in branches)}
+
+
+class PopulationUnavailable(Exception):
+    """A population source holds two facts for one `(ki, id, subj)`: nothing
+    publishes, and the route answers `503 unavailable (population)`."""
+
+
+async def rebuild_game_population(conn, key, pop_days, lag_s, ranked_only=False,
+                                  branches=None, cap=None):
+    """Read one game population and return `(values, truncated)`: per key an
+    ascending `array('d')` of at most `cap` values and, for a truncated key,
+    its cutoff. Streamed one key's row at a time. A repeated identity
+    anywhere in the complete eligible relation raises PopulationUnavailable
+    before anything is kept."""
+    from sqlalchemy import text   # deferred: the registry half needs no driver
+    cap = CONTRACT_BOUNDS["POP_VALUES_MAX"] if cap is None else cap
+    sql = population_sql(population_branches() if branches is None else branches,
+                         ranked_only=ranked_only)
+    params = {"pop_days": pop_days, "lag_s": lag_s, "cap": cap}
+    values, truncated = {}, {}
+    result = await conn.stream(text(sql), params)
+    async for row in result:
+        if row.dup:
+            raise PopulationUnavailable(
+                "population %r: %d repeated (ki, id, subj) facts" % (key, row.dup))
+        values[row.ki] = array("d", row.vals or ())
+        if row.truncated:
+            truncated[row.ki] = row.cutoff
+    return values, truncated
+
+
+def _quantile(ordered, q):
+    """Nearest-rank quantile of an ascending sequence."""
+    k = max(1, int(math.ceil(q * len(ordered))))
+    return ordered[k - 1]
+
+
+def pop_measures(values, value):
+    """`pop_rank` (the mid-rank, design 2.7), `pop_n` and the three
+    percentiles of one ascending population for one value."""
+    n = len(values) if values is not None else 0
+    if not n:
+        return {"pop_rank": None, "pop_n": 0, "pop_p50": None, "pop_p90": None,
+                "pop_p99": None}
+    return {"pop_rank": mid_rank(value, values) if value is not None else None,
+            "pop_n": n, "pop_p50": _quantile(values, 0.5),
+            "pop_p90": _quantile(values, 0.9), "pop_p99": _quantile(values, 0.99)}
+
+
+@dataclass
+class Generation:
+    """One immutable published population; `gen` is process-monotonic."""
+    key: tuple
+    gen: int
+    computed_at: float
+    values: dict
+    truncated: dict
+    leases: int = 0
+    retired: bool = False
+
+    def nbytes(self):
+        return sum(len(a) * a.itemsize for a in self.values.values())
+
+
+class PopulationCache:
+    """The api process's population cache (design 2.6): generations, counted
+    leases, an LRU memo of derived results keyed by (comparability key,
+    source key, gen) within WIN_DERIVED_BYTES_MAX. No key carries a route
+    shape. A publish retires the generation it supersedes and evicts its
+    derived entries (#744); a retired generation stays counted until its last
+    lease is released."""
+
+    def __init__(self, clock=None):
+        self._clock = clock or time.time
+        self._gen = 0
+        self.live = {}
+        self.retired = []
+        self.memo = collections.OrderedDict()
+        self.memo_bytes = 0
+        self.in_progress = 0
+
+    def current(self, key):
+        g = self.live.get(key)
+        if g is None or self._clock() - g.computed_at >= CONTRACT_BOUNDS["POP_TTL_S"]:
+            return None
+        return g
+
+    def publish(self, key, values, truncated):
+        self._gen += 1
+        new = Generation(key=key, gen=self._gen, computed_at=self._clock(),
+                         values=values, truncated=truncated)
+        old = self.live.get(key)
+        self.live[key] = new
+        if old is not None:
+            self._retire(old)
+        return new
+
+    def _retire(self, g):
+        g.retired = True
+        for mk in [mk for mk in self.memo if mk[1] == g.key and mk[2] == g.gen]:
+            self.memo_bytes -= self.memo.pop(mk)["_bytes"]
+        if g.leases:
+            self.retired.append(g)
+
+    def lease(self, g):
+        g.leases += 1
+        return g
+
+    def release(self, g):
+        g.leases -= 1
+        if g.leases == 0 and g in self.retired:
+            self.retired.remove(g)
+
+    def memo_get(self, comp, lease):
+        mk = (comp, lease.key, lease.gen)
+        r = self.memo.get(mk)
+        if r is None or (r["source_key"], r["gen"], r["computed_at"]) != (
+                lease.key, lease.gen, lease.computed_at):
+            return None
+        self.memo.move_to_end(mk)
+        return r
+
+    def memo_put(self, comp, lease, result, nbytes):
+        mk = (comp, lease.key, lease.gen)
+        if mk in self.memo:
+            self.memo_bytes -= self.memo.pop(mk)["_bytes"]
+        stored = dict(result, source_key=lease.key, gen=lease.gen,
+                      computed_at=lease.computed_at, _bytes=nbytes)
+        self.memo[mk] = stored
+        self.memo_bytes += nbytes
+        while self.memo_bytes > CONTRACT_BOUNDS["WIN_DERIVED_BYTES_MAX"] and self.memo:
+            _k, old = self.memo.popitem(last=False)
+            self.memo_bytes -= old["_bytes"]
+        return stored
+
+    def cache_bytes(self):
+        """`_aer_cache_bytes()`: live, leased-retired, memo and in-progress."""
+        return (sum(g.nbytes() for g in self.live.values())
+                + sum(g.nbytes() for g in self.retired)
+                + self.memo_bytes + self.in_progress)
