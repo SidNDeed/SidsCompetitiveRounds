@@ -4558,7 +4558,15 @@ namespace CompetitiveRounds
         private static readonly List<CompetitiveUI.NotifSetItem> _cycleToasts =
             new List<CompetitiveUI.NotifSetItem>(12);
 
-        private static IEnumerator ApplyManifestPick(int pid, string cardName, int cycle)
+        /// <summary>The single reducer. RJ readmission P1: bodiless is true
+        /// ONLY from the readmission apply loop, for a pid with no kept body on
+        /// this client; there the logical statements (deck, history, toasts,
+        /// digest) run in the same relative order with no yield and the
+        /// physical ones (baseline, replay, ApplyCardTo, gun audit, deck views,
+        /// local-pick bookkeeping) do not run. With bodiless false the
+        /// statement sequence is the pre-split one exactly, the no-body bail
+        /// included.</summary>
+        private static IEnumerator ApplyManifestPick(int pid, string cardName, int cycle, bool bodiless = false)
         {
             // Self-heal a stale bar-suppression flag (Claude review of the
             // rebuild change): if a prior cycle's replay coroutine died
@@ -4572,12 +4580,14 @@ namespace CompetitiveRounds
                 FfaLateEntry.Refused("pick", player);
                 yield break;
             }
-            if (player == null || player.gameObject == null || player.data == null)
+            if (!bodiless && (player == null || player.gameObject == null || player.data == null))
             {
                 Plugin.Log.LogWarning($"[FFA] apply skipped — player {pid} gone (card {cardName})");
                 yield break;
             }
-            var prefab = ResolveCard(cardName);
+            var plan = FfaReadmitRules.PlanApply(decks.TryGetValue(pid, out var planDeck) ? planDeck : null,
+                                                 cardName, CardCap, ResolveCard, c => c.gameObject.name);
+            var prefab = plan.Prefab;
             if (prefab == null)
             {
                 Plugin.Log.LogWarning($"[FFA] apply skipped — unknown card '{cardName}' for pid {pid}");
@@ -4588,25 +4598,34 @@ namespace CompetitiveRounds
                 deck = new List<CardInfo>();
                 decks[pid] = deck;
             }
-            CaptureBaselineIfNeeded(player);
+            if (!bodiless) CaptureBaselineIfNeeded(player);
 
             // Display name for this pid, computed ONCE — both the pick line and
             // the removal line below need it, and the removal line needs it
             // before the rolling block's try/catch could swallow it.
             string who = "P" + pid;
-            try { who = GameStateWatcher.StripRichText(player.data.view?.Owner?.NickName ?? who); } catch { }
+            if (!bodiless)
+            {
+                try { who = GameStateWatcher.StripRichText(player.data.view?.Owner?.NickName ?? who); } catch { }
+            }
+            else
+            {
+                // RJ readmission P2 step 8: an absent seat is named from the
+                // locked roster, the only name every client holds for it.
+                try { who = GameStateWatcher.StripRichText(RosterDisplayName(pid) ?? who); } catch { }
+            }
             // 10 chars, not 14: a band cell caps at 34, and "{name} picked {card}"
             // is 10 + 8 + 14 = 32 at the longest.
             if (who.Length > 10) who = who.Substring(0, 10);
 
             bool rebuiltDeck = false;
-            if (deck.Count >= CardCap)
+            if (plan.Rolls)
             {
                 // Rolling Card Bar: the oldest card rolls off. No inverse-stats
                 // path exists in ROUNDS — reset to the cached baseline and
                 // replay the survivors, then apply the new card.
-                var survivors = deck.Skip(deck.Count - (CardCap - 1)).ToList();
-                string droppedRaw = deck[0].gameObject.name.Replace("(Clone)", "");
+                var survivors = plan.Survivors;
+                string droppedRaw = plan.DroppedRaw();
                 Plugin.Log.LogInfo($"[FFA] rolling removal for pid {pid}: dropping '{droppedRaw}'");
                 // Mark the earliest un-rolled history entry for this card so
                 // the Recent panel can paint it red (Sid round-2 item 2).
@@ -4635,14 +4654,17 @@ namespace CompetitiveRounds
                         I18n.TrF("{0} lost {1}", who, droppedShown), new Color(1f, 0.7f, 0.6f)));
                 }
                 catch { }
-                deckViewRebuilds.Add(pid);
-                rebuiltDeck = true;
-                yield return RollingResetAndReplay(player, survivors);
+                if (!bodiless)
+                {
+                    deckViewRebuilds.Add(pid);
+                    rebuiltDeck = true;
+                    yield return RollingResetAndReplay(player, survivors);
+                }
                 deck.Clear();
                 deck.AddRange(survivors);
             }
 
-            ApplyCardTo(player, prefab);
+            if (!bodiless) ApplyCardTo(player, prefab);
             deck.Add(prefab);
 
             // Bug 260 field audit (log-only): one line per apply naming the
@@ -4656,6 +4678,7 @@ namespace CompetitiveRounds
             // silently (decompile ObjectsToSpawn.cs:72). Explicit null
             // checks, no `?.`: Unity fake-null passes `?.` and would throw
             // on member access (review find 4).
+            if (!bodiless)
             try
             {
                 Gun gunW = null;
@@ -4731,7 +4754,7 @@ namespace CompetitiveRounds
                 string shown = CardTextLocalizer.PrettyNameIfCached(canon, cardName);
                 _cycleToasts.Add(new CompetitiveUI.NotifSetItem(
                     I18n.TrF("{0} picked {1}", who, shown), new Color(0.75f, 0.85f, 1f)));
-                if (player.data.view != null && player.data.view.IsMine)
+                if (!bodiless && player.data.view != null && player.data.view.IsMine)
                 {
                     try { GameStateWatcher.RecordFfaLocalPick(cardName, RoundsTotalAll()); } catch { }
                 }
@@ -4764,6 +4787,19 @@ namespace CompetitiveRounds
             });
             // V11 item 5: a deck changed, so the board digest (cr_bd) republishes.
             try { FfaLateEntry.MarkDigestDirty(); } catch { }
+        }
+
+        /// <summary>The locked roster's display name for a slot (pid is the
+        /// slot), or null. Read for a seat with no body on this client.</summary>
+        private static string RosterDisplayName(int pid)
+        {
+            try
+            {
+                var roster = ApiClient.FfaLockedRoster;
+                if (roster == null || pid < 0 || pid >= roster.Count || roster[pid] == null) return null;
+                return roster[pid].display_name;
+            }
+            catch { return null; }
         }
 
         private static CardInfo ResolveCard(string cardName)
