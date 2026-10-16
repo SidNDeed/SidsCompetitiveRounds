@@ -15608,9 +15608,9 @@ def _aer_fallback(header, plan, tag, n):
 
 
 async def _aer_worker_spawn():
-    """Start the render worker as its own python process (spawned, never
-    forked); it imports matplotlib itself and shares nothing with
-    `_mpl_render_lock`."""
+    """Start the render worker as a fresh python interpreter running
+    aer_render_worker.py (an exec, so no copy of the bot's state); it imports
+    matplotlib itself and shares nothing with `_mpl_render_lock`."""
     import sys
     return await asyncio.create_subprocess_exec(
         sys.executable, "-I", AER_WORKER_PATH, stdin=asyncio.subprocess.PIPE,

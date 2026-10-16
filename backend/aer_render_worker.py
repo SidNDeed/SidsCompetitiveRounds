@@ -1,7 +1,8 @@
 """Admin evidence report: the PNG render worker (design 5.2, phase 1a).
 
-discord_bot.py starts this file as its own long-lived python process (a new
-interpreter, never a fork) and talks to it over stdin and stdout. It imports
+discord_bot.py starts this file as its own long-lived python process (a fresh
+interpreter, so no copy of the bot's state) and talks to it over stdin and
+stdout. It imports
 matplotlib itself and shares no lock, figure or state with the bot's
 /compare charts (`_mpl_render_lock`).
 
