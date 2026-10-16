@@ -66,7 +66,7 @@ def max_body():
     body["subjects"] = [{"steam_id": "9" * 16, "name": ae._aer_enc("W" * 32 + chr(0x200E))},
                         {"steam_id": "8" * 16, "name": ae._aer_enc("$" * 32 + chr(0x061C))}]
     cells = [[e.ki, -1.2345678901234567e+300, 1.7976931348623157e+308, 2 ** 31 - 1,
-              "partial", 0.12345678901234568, 0.9876543210987654, 2 ** 31 - 1, "ok"]
+              "partial", 0.1234567890123456, 0.9876543210987654, 2 ** 31 - 1, "ok"]
              for e in base]
     games = []
     for n in range(5):
