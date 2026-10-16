@@ -875,9 +875,11 @@ def test_one_row_per_class_round_trips_through_the_class_schema(tmp_path, monkey
 EVIDENCE_HANDLERS = frozenset({
     ("admin_evidence", "evidence_report_game"), ("admin_evidence", "evidence_report_series"),
     ("admin_evidence", "evidence_report_pair"), ("admin_evidence", "evidence_report_player")})
-# The bot's evidence handlers (1a-6): the `/evidence` command and its page
-# buttons. Every other function of discord_bot.py stays off `_aer_*`.
-EVIDENCE_BOT_HANDLERS = frozenset({"evidence_command", "evidence_page_click"})
+# The bot's evidence handlers (1a-6): the four `/evidence` subcommands and
+# the raw component listener that routes an `aer:` page button to
+# `_aer_click`. Every other function of discord_bot.py stays off `_aer_*`.
+EVIDENCE_BOT_HANDLERS = frozenset({"evidence_game", "evidence_series", "evidence_pair",
+                                   "evidence_player", "on_interaction"})
 
 
 def test_aer_helpers_are_reached_only_from_the_evidence_handlers():
