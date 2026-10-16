@@ -26,10 +26,14 @@ API_DIR = pathlib.Path(__file__).resolve().parents[1] / "api"
 # The four files this delta owns. 330 and 337 belong to other lanes in the
 # same batch and are deliberately not asserted here: a gate that reaches into
 # a neighbouring lane's file fails for reasons its owner has not seen.
+#
+# 377 (admin evidence report order indexes) is held to the same header rules:
+# a deploy-order line, and catalog guards stated as such.
 OWNED = ("331_animal_title_ladders.sql",
          "332_pc_edition_schedule.sql",
          "333_pc_card_themes.sql",
-         "336_bug_reports_kind.sql")
+         "336_bug_reports_kind.sql",
+         "377_admin_evidence_indexes.sql")
 
 _ORDER_LINE = re.compile(r"^--\s*DEPLOY ORDER:\s*(.+)$", re.MULTILINE)
 

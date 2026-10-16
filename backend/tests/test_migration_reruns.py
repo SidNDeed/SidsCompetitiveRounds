@@ -136,6 +136,21 @@ PREREQ = {
     """,
     # 333 creates its own table and guards its only foreign reference.
     "333": "",
+    # 377 indexes `matches` only; the columns its four indexes name, plus one
+    # existing order index so the re-run is measured beside it.
+    "377": """
+        CREATE TABLE matches (
+            id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            player1_id  UUID NOT NULL,
+            player2_id  UUID NOT NULL,
+            series_id   UUID,
+            ended_at    TIMESTAMPTZ NOT NULL DEFAULT now());
+        CREATE INDEX idx_matches_player1 ON matches (player1_id, ended_at DESC);
+        INSERT INTO matches (player1_id, player2_id, series_id, ended_at)
+             VALUES (gen_random_uuid(), gen_random_uuid(), NULL, now()),
+                    (gen_random_uuid(), gen_random_uuid(), gen_random_uuid(),
+                     now() - interval '1 day');
+    """,
     "336": """
         CREATE TABLE bug_reports (
             id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -198,6 +213,7 @@ TABLES = {
     "333": ("pc_card_themes",),
     "336": ("bug_reports",),
     "337": ("shop_items",),
+    "377": ("matches",),
 }
 
 MIGRATION_FILES = {
@@ -208,6 +224,7 @@ MIGRATION_FILES = {
     "337": "337_demon_body_color.sql",
     "365": "365_title_ladders_five_tiers.sql",
     "366": "366_title_refunds_voidshot_kingslayer.sql",
+    "377": "377_admin_evidence_indexes.sql",
 }
 
 
@@ -366,7 +383,7 @@ async def _apply_twice(number, *, between=None, prereq_extra="", cleanup=None):
 
 # ── The bar: a second run changes nothing ───────────────────────────────────
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
 def test_a_second_run_writes_no_row(number):
     """Applied twice, back to back, on the state the first run left."""
     applied = _run(_apply_twice(number))
@@ -378,7 +395,7 @@ def test_a_second_run_writes_no_row(number):
         % (number, applied.rows_changed_on_second_run))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
 def test_a_second_run_leaves_every_row_byte_identical(number):
     """The value half of the bar, stated separately so a failure says which
     of the two properties broke."""
@@ -391,7 +408,7 @@ def test_a_second_run_leaves_every_row_byte_identical(number):
             % (number, table))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
 def test_a_second_run_replaces_no_constraint_or_index(number):
     """OIDs, not definitions. A dropped-and-recreated constraint has the same
     definition, a new OID, and cost an ACCESS EXCLUSIVE lock plus a validating
@@ -410,7 +427,7 @@ def test_a_second_run_replaces_no_constraint_or_index(number):
         "migration %s removed %s on its second run" % (number, vanished))
 
 
-@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366"])
+@pytest.mark.parametrize("number", ["331", "332", "333", "336", "337", "365", "366", "377"])
 def test_a_second_run_removes_no_relation_from_the_database(number):
     """THE THIRD MEASUREMENT, AND THE ONE THE OTHER TWO CANNOT MAKE.
 
@@ -549,7 +566,7 @@ _HOLDERS = {
 }
 
 _LOCK_CASES = [(number, table, who)
-               for number in ("331", "332", "333", "336")
+               for number in ("331", "332", "333", "336", "377")
                for table in TABLES[number]
                for who in sorted(_HOLDERS)]
 
