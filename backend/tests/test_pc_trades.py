@@ -15,13 +15,21 @@ empty database recorded, not fatal), the ORM creates the tables no migration
 creates, the replay runs again, the ORM's missing columns are added -- all
 but the ones 353 itself adds to older tables, which the ORM maps since F63
 and which 353 alone may create -- then every migration numbered above 353
-is replayed the same way (the routes this module drives read their objects:
-358's players.active_dance_id and pc_motions), and a statement of theirs that
-fails fails the build, and 353 is applied whole: the pre-353 schema (every
-object but 353's) is fingerprinted, then the full one. None of the later
+except the HELD_OUT names is replayed the same way (the routes this module
+drives read their objects: 358's players.active_dance_id and pc_motions), and
+a statement of theirs that fails fails the build, and 353 is applied whole:
+the pre-353 schema (every object but 353's) is fingerprinted, then the full
+one. None of the later
 files touches an object 353 creates, so replaying them before it leaves the
 schema 353 finds and the one it leaves as they are in numbered order; one
 that did would fail its replay here.
+HELD_OUT (by name, beside _numbered) is the one class kept out of every
+replay: data seeds and census corrections whose refusal guard refuses, by
+design and changing nothing, on a database the guard does not describe,
+this fresh schema included. A seed that writes a table this module or a
+route it drives reads is seeded in the fixture instead, never held out.
+pg_build fails, naming it, when a HELD_OUT name is not a numbered migration
+in backend/sql.
 The build is reused while the migrations, models.py and this harness are
 unchanged and the schema still fingerprints as built; anything else rebuilds
 it. Before any DROP or CREATE the harness CENSUSES every schema the role's
@@ -218,12 +226,20 @@ def _bare(stmt):
     return " ".join(re.sub(r"--[^\n]*|/\*.*?\*/", "", stmt, flags=re.S).split())
 
 
-# Held out of every replay here: 366 is the refund of a production census (one
-# paying title_regicide holder) and refuses, changing nothing, on any database
-# that census does not describe -- this harness's fresh schema included. It
-# touches no object this module reads (shop_items, players, player_items and
-# gold_transactions rows of two retired titles only).
-HELD_OUT = frozenset({"366_title_refunds_voidshot_kingslayer.sql"})
+# Held out of every replay here, by name (the class: the module docstring).
+# Each refuses by design, changing nothing, on this harness's fresh schema,
+# and that refusal is a production guard, so the file stays as it is.
+# - 366 is the refund of a production census (one paying title_regicide
+#   holder) and refuses on any database that census does not describe. It
+#   touches no object this module reads (shop_items, players, player_items
+#   and gold_transactions rows of two retired titles only).
+# - 376 seeds the item 337 translation proposals and refuses on any database
+#   whose i18n_keys lacks their key, i.e. one the key sync
+#   (tools/i18n_sync_keys.py) has not populated. It writes i18n_proposals
+#   only, which neither this module nor a route it drives reads (the
+#   translation portal's routes do).
+HELD_OUT = frozenset({"366_title_refunds_voidshot_kingslayer.sql",
+                      "376_i18n_337_demonic_proposals.sql"})
 
 
 def _numbered(upto=None, above=None):
@@ -234,6 +250,14 @@ def _numbered(upto=None, above=None):
     if above is not None:
         files = [p for p in files if int(p.name[:3]) > above]
     return files
+
+
+def _stale_held_out():
+    """The HELD_OUT names that are not a numbered migration in backend/sql. A
+    renamed or removed file leaves a name that excludes nothing, and the list
+    then no longer says what the replay leaves out."""
+    numbered = {p.name for p in SQL_DIR.glob("*.sql") if re.match(r"^\d{3}_", p.name)}
+    return sorted(HELD_OUT - numbered)
 
 
 def _sign(canon):
@@ -579,6 +603,8 @@ async def _reset(build):
 
 @pytest.fixture(scope="session")
 def pg_build():
+    stale = _stale_held_out()
+    assert not stale, ("HELD_OUT names a file that is not a numbered migration in backend/sql", stale)
     _require_pg()
     return _run(_build())
 
@@ -2458,8 +2484,9 @@ def test_f36_walk5_the_flag_column_alone_refuses_the_discard(env):
 
 def test_m53_later_migrations_keep_the_traded_value(env):
     """M53's database leg (E 10, F36, F46): after walk 1's trade every
-    numbered migration above 353 in backend/sql is applied in order, and the
-    flagged Legendary's discard then pays 0 or answers 503 -- never
+    numbered migration above 353 in backend/sql except the HELD_OUT names is
+    applied in order, and the flagged Legendary's discard then pays 0 or
+    answers 503 -- never
     shards_for("legendary"), which a file removing the flag column with the
     six would make it pay, and never a failure, which a file dropping the
     column alone would cause. With no such file this applies nothing.
