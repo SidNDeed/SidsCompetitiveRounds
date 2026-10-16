@@ -23878,7 +23878,7 @@ namespace CompetitiveRounds
         public static void ReportFfaMatch(
             string lobbyId, string room, string region, int durationSeconds,
             List<FfaReportPlayer> players, string winnerSteam, string reporterSteam,
-            string timeline = null)
+            string timeline = null, bool selfLag = false)
         {
             if (RoomActors.LocalIsSpectator) return;   // spectator: never reports (design §3.5)
             // §2c identity fence: the broadcast account never reports.
@@ -24001,6 +24001,12 @@ namespace CompetitiveRounds
             // Score-progression timeline (outside the frozen canonical).
             if (!string.IsNullOrEmpty(timeline))
                 sb.Append($"\"timeline\":\"{Escape(timeline.Length > 1900 ? timeline.Substring(0, 1900) : timeline)}\",");
+            // RJ readmission P3 step 2: the advisory self_lag mark, outside the
+            // signed canonical. Sent only in a readmission lobby from this
+            // seat's own lag record; the server reads it only to demote this
+            // report's class, never to promote it.
+            if (selfLag)
+                sb.Append("\"self_lag\":1,");
             // Canonical (v2): ffa:{lobby}:{room}:{reporter}:{is_ranked}:{winner}:{n}
             // then per player sorted by (len, ordinal): :{steam}:{rounds}:{points}:{kills}
             // kills MUST be the same clamped value the JSON body carries, or

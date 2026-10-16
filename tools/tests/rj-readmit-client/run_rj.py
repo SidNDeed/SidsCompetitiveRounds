@@ -103,6 +103,10 @@ MUTANTS = [
        "        internal static FfaOfferRecord AfterAudit(FfaOfferRecord published, FfaOfferRecord recomputed)\n"
        "        {\n            return recomputed ?? published;\n")],
      "C2.T2.7.master_mutation_audited", "C2.T2.1.twin_rule_s_ledger"),
+    # ---- C3 (P3 client half)
+    ("M3.5", "C3", "rules", "FfaReportRules.cs",
+     [("            if (readmitLobby) return localSid;\n", "")],
+     "C3.T3.2.lag_publication_lost_both_file", "C3.T3.6.flag_false_matrix_equals_base"),
 ]
 
 
