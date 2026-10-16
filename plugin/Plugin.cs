@@ -1421,6 +1421,8 @@ namespace CompetitiveRounds
                 // combat patch as attached, and the producers the census proves.
                 try { CombatEvidence.BootLine(); } catch { }
                 try { IdentityClockEvidence.BootLine(); } catch { }
+                // Stage 2: every hold patch named as attached or not (#83).
+                try { TeamHoldGlue.BootLine(); } catch { }
                 // Item 21: one line naming both damage-number hook pairs as attached (#83).
                 try { DamageNumbers.BootLine(); } catch { }
             }
@@ -3523,6 +3525,10 @@ namespace CompetitiveRounds
             try { IdentityClockEvidence.Tick(); } catch { }
 
             if (Plugin.modDisabled) return;
+
+            // Stage 2 (2v2 and 1v2 readmission): the seat log's point-start
+            // probe and the hold upkeep.
+            try { TeamHoldGlue.Tick(); } catch { }
 
             // Menu injection runs independently
             try { MainMenuInjector.TryInject(); } catch { }

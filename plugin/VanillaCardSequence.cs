@@ -188,6 +188,8 @@ namespace CompetitiveRounds
             _sharedDeals = _privateDeals = _sharedSlots = _vanillaSlots = 0;
             _verdictLogged = false;
             try { FfaCardSequence.OnRoomLeft(); } catch { }
+            // Stage 2: the seat deck log and the hold state are facts of one room.
+            try { TeamHoldGlue.OnRoomLeft(); } catch { }
         }
 
         /// <summary>Vanilla's own picker resolution (SpawnUniqueCard's head),

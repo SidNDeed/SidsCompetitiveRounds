@@ -1927,6 +1927,9 @@ namespace CompetitiveRounds
             try
             {
                 target.data.healthHandler.Revive(isFullRevive: false);
+                // Stage 2 S0: the revive completed, so the slot's next death is
+                // a new key of the accepted-death ledger.
+                TeamHoldGlue.OnPhoenixRevived(playerIDToRevive);
                 if (target.data.block != null) target.data.block.RPCA_DoBlock(firstBlock: true);
             }
             catch (Exception ex) { VanillaFixSupport.LogError("PhoenixRespawn.Revive", ex); }
