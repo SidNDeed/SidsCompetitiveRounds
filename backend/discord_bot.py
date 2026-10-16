@@ -15241,7 +15241,7 @@ def _aer_word(status, body, headers=None):
     if status == 403:
         return AER_REFUSED
     if status == 400 and re.fullmatch(r"bad_argument( \([a-z_ ;]{1,60}\))?", detail):
-        field = detail[len("bad_argument"):].strip()[1:-1]
+        field = _aer_enc_text(detail[len("bad_argument"):].strip()[1:-1])
         return AER_PREFIX + ("bad argument (%s)." % field if field else "bad argument.")
     if status == 404:
         return AER_PREFIX + "not found."
@@ -15254,7 +15254,7 @@ def _aer_word(status, body, headers=None):
     if status == 503:
         m = re.fullmatch(r"(?:unavailable \(([a-z_]{1,40})\)|([a-z_]{1,40}))", detail)
         if m:
-            return AER_PREFIX + "unavailable (%s)." % (m.group(1) or m.group(2))
+            return AER_PREFIX + "unavailable (%s)." % _aer_enc_text(m.group(1) or m.group(2))
     if status == 500 and detail == "too_large":
         return AER_PREFIX + "unavailable (too_large)."
     return AER_PREFIX + "unavailable (schema)."
@@ -15345,9 +15345,10 @@ async def _aer_message(page, req):
     header plus either one PNG drawn from the render plan or, when no PNG
     comes back in time, the text fallback (design 5.2, 5.3). One message per
     page either way."""
-    target = str(req.get("code") or req.get("steam_id")
-                 or "%s %s" % (req.get("a"), req.get("b")))
-    target = "".join(ch for ch in target if ord(ch) not in AER_ESC)
+    # the caller's own argument, shown as encoded display text (design 6.4,
+    # root (e)): every escaped-set code point is written as `\u{<hex>}`
+    target = _aer_enc_text(req.get("code") or req.get("steam_id")
+                           or "%s %s" % (req.get("a"), req.get("b")))
     header = ("Evidence report: %s %s, page %d of %d"
               % (page.shape, target, page.page, page.pages))
     tag = re.sub("[^0-9A-Za-z]+", "-", target).strip("-")[:40] or "report"
