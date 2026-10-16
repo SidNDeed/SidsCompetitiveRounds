@@ -28,10 +28,12 @@ import ast
 import asyncio
 import collections
 import copy
+import io
 import json
 import os
 import re
 import sys
+import threading
 import time
 import types
 import urllib.parse
@@ -77,8 +79,13 @@ class _Button:
         self.kw = kw
 
 
+class _File:
+    def __init__(self, fp, filename=None):
+        self.data, self.filename = fp.read(), filename
+
+
 FAKE_DISCORD = types.SimpleNamespace(
-    AllowedMentions=_AllowedMentions, Interaction=object,
+    AllowedMentions=_AllowedMentions, Interaction=object, File=_File,
     InteractionType=types.SimpleNamespace(component=3, application_command=2),
     ButtonStyle=types.SimpleNamespace(secondary="secondary"),
     ui=types.SimpleNamespace(View=_View, Button=_Button))
@@ -187,7 +194,8 @@ def _wanted(node):
             node.name == "AerSchemaError"
     if isinstance(node, ast.Assign):
         names = [t.id for t in node.targets if isinstance(t, ast.Name)]
-        return any(n.startswith(("AER_", "_AER_")) or n == "BotPage" for n in names)
+        return any(n.startswith(("AER_", "_AER_", "_aer_")) or n in ("BotPage", "AerItem")
+                   for n in names)
     return False
 
 
@@ -202,10 +210,14 @@ def _lift():
     return picked
 
 
-def bot_ns(api=None, events=None):
-    """The lifted evidence code in a fresh namespace with the globals it uses."""
+def bot_ns(api=None, events=None, mpl=False):
+    """The lifted evidence code in a fresh namespace with the globals it uses.
+    `mpl` stands for the bot's guarded matplotlib import (`_MPL_AVAILABLE`);
+    without it every page takes the text fallback."""
     ns = {"discord": FAKE_DISCORD, "aiohttp": FAKE_AIOHTTP, "json": json, "re": re,
-          "urllib": urllib, "collections": collections,
+          "urllib": urllib, "collections": collections, "asyncio": asyncio, "io": io,
+          "os": os, "__file__": SRC, "_MPL_AVAILABLE": mpl,
+          "_mpl_render_lock": threading.Lock(),
           "http_session": api, "API_SECRET_KEY": "internal-key",
           "API_BASE_URL": "http://api:8000", "ADMIN_CHANNEL_ID": ADMIN}
     exec(compile(ast.Module(body=_lift(), type_ignores=[]), SRC, "exec"), ns)

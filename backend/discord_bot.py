@@ -15340,15 +15340,23 @@ def _aer_local_gate(interaction):
     return interaction.guild is not None and interaction.channel_id == ADMIN_CHANNEL_ID
 
 
-def _aer_message(page, req):
-    """The public message for one served page: `(content, files)`. Item 1a-6
-    sends the page header; the renderer (1a-7) and the text fallback (1a-8)
-    give the page body."""
+async def _aer_message(page, req):
+    """The public message for one served page: `(content, files)`, the page
+    header plus either one PNG drawn from the render plan or, when no PNG
+    comes back in time, the text fallback (design 5.2, 5.3). One message per
+    page either way."""
     target = str(req.get("code") or req.get("steam_id")
                  or "%s %s" % (req.get("a"), req.get("b")))
     target = "".join(ch for ch in target if ord(ch) not in AER_ESC)
-    return ("Evidence report: %s %s, page %d of %d"
-            % (page.shape, target, page.page, page.pages)), []
+    header = ("Evidence report: %s %s, page %d of %d"
+              % (page.shape, target, page.page, page.pages))
+    tag = re.sub("[^0-9A-Za-z]+", "-", target).strip("-")[:40] or "report"
+    plan = _aer_plan(page)
+    png = await _aer_render(plan)
+    if png is not None:
+        return header, [discord.File(io.BytesIO(png),
+                                     filename="evidence-%s-p%d.png" % (tag, page.page))]
+    return _aer_fallback(header, plan, tag, page.page)
 
 
 async def _aer_fetch(path, actor_id):
@@ -15387,7 +15395,7 @@ async def _aer_command(interaction, req):
     if page is None:
         await interaction.followup.send(word, ephemeral=True)
         return
-    content, files = _aer_message(page, req)
+    content, files = await _aer_message(page, req)
     await interaction.channel.send(content, files=files,
                                    view=_aer_view(req, page.page, page.pages),
                                    allowed_mentions=discord.AllowedMentions.none())
@@ -15408,11 +15416,245 @@ async def _aer_click(interaction, cid):
     if page is None:
         await interaction.followup.send(word, ephemeral=True)
         return
-    content, files = _aer_message(page, req)
+    content, files = await _aer_message(page, req)
     await interaction.message.edit(content=content, attachments=files,
                                    view=_aer_view(req, page.page, page.pages),
                                    allowed_mentions=discord.AllowedMentions.none())
     await interaction.followup.send(AER_POSTED, ephemeral=True)
+
+
+# ── Admin evidence report: render plan, PNG worker, text fallback ─────────
+# Design 5.2, 5.3 and 5.6, phase 1a. The plan is built from the BotPage alone
+# and is the only thing the PNG worker and the fallback read. Every item lists
+# the page fields it shows (`fields`) and the text each one is shown as
+# (`parts`, in the same order); every page field is shown by exactly one item.
+# Phase 1a has no class, mark or swatch item kind and one neutral cell fill.
+
+AER_PROV_LETTER = {"SELF": "S", "PEER": "P", "OTHER": "O", "D:SELF": "D",
+                   "D:PEER": "D", "FLAG": "F", "MEAS": "M"}   # the api's PROV_LETTER, under an equality test
+AER_LEGEND_1A = (
+    "- = not recorded",
+    "? = unknown",
+    "T = own baseline truncated",
+    "FLAG = kept only when an advisory heuristic fired; not ranked",
+    "S SELF, P PEER, O OTHER, D derived, F FLAG, M MEAS",
+    "max/median of n = window over n values",
+    "\\u{..} = escaped character",
+    "ranks are mid-ranks in [0,1]",
+)
+AER_ITEM_KINDS_1A = ("title", "status", "subject", "game", "seat", "cell", "flag", "window",
+                     "summary_head", "summary", "label", "population", "baseline", "census",
+                     "legend", "footer")
+AER_RENDER_TIMEOUT_S = 15
+AER_FALLBACK_MSG_MAX = 1900
+AER_WORKER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aer_render_worker.py")
+_AER_STATUS_KEYS = ("truncated", "computed_at", "lag_s")
+_AER_SLOT_LABELS = {"ki": "#", "n": "n=", "val": "val=", "own_mean": "own=",
+                    "own_median": "own_med=", "own_n": "own_n=", "own_state": "own_state=",
+                    "own_rank": "own_rank=", "pop_rank": "pop_rank=", "pop_n": "pop_n=",
+                    "pop_p50": "p50=", "pop_p90": "p90=", "pop_p99": "p99=", "state": "state="}
+_AER_WINDOW_LABELS = (("oi", "oi="), ("basis", "basis="), ("subj", "subj="), ("games", "games="),
+                      ("covered", "covered="), ("flag_obs", "flag_obs="), ("newest", "newest="),
+                      ("oldest", "oldest="))
+_AER_CATALOG_LABELS = (("ki", "#"), ("key", ""), ("base", "base="), ("fam", "fam="),
+                       ("unit", "unit="), ("kind", "kind="), ("p50", "p50="), ("p90", "p90="),
+                       ("p99", "p99="))
+_AER_FLAG_LABELS = (("reason", ""), ("subject", "subject="), ("reviewed", "reviewed="),
+                    ("current", "current="), ("created_at", "at="))
+_AER_PNG_MAGIC = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+AerItem = collections.namedtuple("AerItem", ("kind", "fields", "parts", "text"))
+_aer_worker_proc = None     # the long-lived render worker, started on first use
+_aer_worker_lock = None     # an asyncio.Lock: one plan in the worker at a time
+
+
+def _aer_enc_text(value):
+    """The api's `_aer_enc` for a value from a part of the page the decoder
+    does not check slot by slot (population, baseline, registry, window
+    dates): backslash doubled, each escaped-set code point written as
+    backslash, `u{<hex>}`."""
+    bs = chr(0x5C)
+    return "".join(bs * 2 if ch == bs else ("%su{%x}" % (bs, ord(ch)) if ord(ch) in AER_ESC else ch)
+                   for ch in str(value))
+
+
+def _aer_txt(value, state=None):
+    """A checked display slot as plan text: None as `-` (`?` when the cell's
+    state is unknown), a bool as yes or no, a number exactly (repr), encoded
+    text as the api wrote it."""
+    if value is None:
+        return "?" if state == "unknown" else "-"
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, str):
+        return value
+    return _aer_free(value)
+
+
+def _aer_free(value):
+    """A value from an unchecked part of the page: numbers and None as
+    `_aer_txt`, text and anything else (compact JSON) encoded."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return _aer_txt(value)
+    if not isinstance(value, str):
+        value = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return _aer_enc_text(value)
+
+
+def _aer_item(kind, head, pairs):
+    """One plan item from `(field path, label, part)` triples."""
+    fields = tuple(p for p, _l, _t in pairs)
+    parts = tuple(t for _p, _l, t in pairs)
+    text = " ".join([head] + ["%s%s" % (lbl, t) for _p, lbl, t in pairs]).strip()
+    return AerItem(kind, fields, parts, text)
+
+
+def _aer_cell_item(page, path, table, cell, phase="1a"):
+    """One seat or summary cell: the provenance letter and variable of its
+    catalog key, then every wire slot in AER_WIRE order."""
+    slots = AER_WIRE[phase][table]
+    c = dict(zip(slots, cell))
+    key = str(page.catalog[c["ki"]]["key"]).split("|")
+    letter = AER_PROV_LETTER.get(key[1], "?") if len(key) > 1 else "?"
+    head = " ".join([letter, key[0]] + ([key[5]] if len(key) > 5 and key[5] != "cell" else []))
+    pairs = []
+    for slot in slots:
+        part = _aer_txt(c[slot], c["state"] if slot == "val" else None)
+        pairs.append((path + (slot,), _AER_SLOT_LABELS[slot], part))
+    return _aer_item("cell" if table == "seat" else "summary", head, tuple(pairs))
+
+
+def _aer_plan(page, phase="1a"):
+    """The render plan of one BotPage (design 5.2): a tuple of AerItems in
+    registry and subject order, never value order. Pure: the same page always
+    gives the same plan."""
+    if phase != "1a":
+        raise AerSchemaError("unknown phase %r" % (phase,))
+    items = []
+    add = items.append
+    add(_aer_item("title", "EVIDENCE", ((("shape",), "", _aer_txt(page.shape)),
+                                       (("page",), "page ", _aer_txt(page.page)),
+                                       (("pages",), "of ", _aer_txt(page.pages)))))
+    pop = page.population
+    add(_aer_item("status", "STATUS", ((("rules", "report"), "", "UNCOLORED (absent)"),) + tuple(
+        (("population", k), k + "=", _aer_free(pop[k])) for k in _AER_STATUS_KEYS if k in pop)))
+    for i, (steam, name) in enumerate(page.subjects):
+        add(_aer_item("subject", "SUBJECT #%d" % i, ((("subjects", i, "name"), "", _aer_txt(name)),
+                                                    (("subjects", i, "steam_id"), "", _aer_txt(steam)))))
+    for gi, g in enumerate(page.games):
+        at = ("games", gi)
+        add(_aer_item("game", "GAME", (
+            (at + ("code",), "", _aer_txt(g["code"])),
+            (at + ("ended_at",), "", _aer_txt(g["ended_at"])),
+            (at + ("is_ranked",), "", "ranked" if g["is_ranked"] else "casual"),
+            (at + ("invalidated",), "", "valid" if g["invalidated"] is None
+             else "INVALIDATED " + _aer_txt(g["invalidated"])),
+            (at + ("rounds",), "rounds ", "-".join(_aer_free(r) for r in g["rounds"])
+             if isinstance(g["rounds"], list) else _aer_free(g["rounds"])),
+            (at + ("series_id",), "series ", _aer_txt(g["series_id"])),
+            (at + ("match_id",), "id ", _aer_txt(g["match_id"])))))
+        for si, (subject, reporter, cells) in enumerate(g["seats"]):
+            add(_aer_item("seat", "SEAT", ((at + ("seats", si, "subject"), "#", _aer_txt(subject)),
+                                           (at + ("seats", si, "reporter"), "",
+                                            "R" if reporter else "-"))))
+            for ci, cell in enumerate(cells):
+                add(_aer_cell_item(page, at + ("seats", si, "cells", ci), "seat", cell, phase))
+        for fi, f in enumerate(g["flags"]):
+            add(_aer_item("flag", "FLAG", tuple(
+                (at + ("flags", fi, k), lbl,
+                 _aer_txt(f[k]) if k != "subject" else ("-" if f[k] is None else "#%d" % f[k]))
+                for k, lbl in _AER_FLAG_LABELS)))
+    for wi, w in enumerate(page.windows):
+        add(_aer_item("window", "WINDOW", tuple(
+            (("windows", wi, k), lbl,
+             " ".join(_aer_free(x) for x in w[k]) if k == "subj" else _aer_free(w[k]))
+            for k, lbl in _AER_WINDOW_LABELS)))
+    for si, (oi, rows) in enumerate(page.summary):
+        add(_aer_item("summary_head", "SUMMARY", ((("summary", si, "oi"), "window #", _aer_txt(oi)),)))
+        for ci, cell in enumerate(rows):
+            add(_aer_cell_item(page, ("summary", si, "cells", ci), "summary", cell, phase))
+    for ki in sorted(page.catalog):
+        row = page.catalog[ki]
+        add(_aer_item("label", "KEY", tuple(
+            (("catalog", ki, k), lbl, _aer_txt(row[k])) for k, lbl in _AER_CATALOG_LABELS if k in row)))
+    add(_aer_item("population", "POPULATION", tuple(
+        (("population", k), _aer_enc_text(k) + "=", _aer_free(pop[k]))
+        for k in sorted(pop) if k not in _AER_STATUS_KEYS)))
+    add(_aer_item("baseline", "BASELINE", tuple(
+        (("baseline", k), _aer_enc_text(k) + "=", _aer_free(page.baseline[k]))
+        for k in sorted(page.baseline))))
+    reg = page.registry
+    add(_aer_item("census", "CENSUS", tuple(
+        (("registry", k), "", _aer_free(reg[k])) for k in ("census",) if k in reg)))
+    for line in AER_LEGEND_1A:
+        add(AerItem("legend", (), (), line))
+    add(_aer_item("footer", "REGISTRY", tuple(
+        (("registry", k), _aer_enc_text(k) + "=", _aer_free(reg[k]))
+        for k in sorted(reg) if k != "census")))
+    return tuple(items)
+
+
+def _aer_fallback(header, plan, tag, n):
+    """The text fallback (design 5.3, 1a): every plan item's text, one line
+    each, as one message: inline in one code block up to
+    AER_FALLBACK_MSG_MAX characters, else the header and one complete
+    attachment. Encoded text holds no backtick; nothing is truncated."""
+    text = "\n".join(item.text for item in plan)
+    if len(text) <= AER_FALLBACK_MSG_MAX:
+        return header + "\n```\n" + text + "\n```", []
+    return header, [discord.File(io.BytesIO(text.encode("utf-8")),
+                                 filename="evidence-%s-p%d.txt" % (tag, n))]
+
+
+async def _aer_worker_spawn():
+    """Start the render worker as its own python process (spawned, never
+    forked); it imports matplotlib itself and shares nothing with
+    `_mpl_render_lock`."""
+    import sys
+    return await asyncio.create_subprocess_exec(
+        sys.executable, "-I", AER_WORKER_PATH, stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+
+
+async def _aer_worker_exchange(proc, data):
+    proc.stdin.write(len(data).to_bytes(4, "big") + data)
+    await proc.stdin.drain()
+    size = int.from_bytes(await proc.stdout.readexactly(4), "big")
+    return json.loads((await proc.stdout.readexactly(size)).decode("utf-8"))
+
+
+async def _aer_render(plan):
+    """One PNG for the plan, or None: without matplotlib at once; otherwise
+    from the long-lived worker within AER_RENDER_TIMEOUT_S. A worker that
+    times out, dies or answers out of shape is killed and replaced on the
+    next call."""
+    global _aer_worker_proc, _aer_worker_lock
+    import base64
+    if not _MPL_AVAILABLE:
+        return None
+    if _aer_worker_lock is None:
+        _aer_worker_lock = asyncio.Lock()
+    async with _aer_worker_lock:
+        proc = _aer_worker_proc
+        try:
+            if proc is None or proc.returncode is not None:
+                proc = _aer_worker_proc = await _aer_worker_spawn()
+            data = json.dumps([[item.kind, item.text] for item in plan]).encode("utf-8")
+            reply = await asyncio.wait_for(_aer_worker_exchange(proc, data), AER_RENDER_TIMEOUT_S)
+            png = base64.b64decode(reply["png"])
+            if not png.startswith(_AER_PNG_MAGIC) or len(reply["drawn"]) != len(plan):
+                raise ValueError("render reply out of shape")
+            return png
+        except Exception:
+            _aer_worker_proc = None
+            if proc is not None and proc.returncode is None:
+                try:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), 5)
+                except Exception:
+                    pass
+            return None
 
 
 # Slash only, neither guild_only nor default_permissions: every refusal
