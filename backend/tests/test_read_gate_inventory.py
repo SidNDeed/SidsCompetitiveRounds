@@ -142,9 +142,29 @@ NAMED = {
 }
 
 
-def check_classes(routes, named=None, index=None) -> list[str]:
+# Routes that reach a player-session check and keep a class that does not
+# say so, each with the class it keeps and why. An entry clears its route
+# only while the route has exactly that class and still reaches a session
+# check; otherwise, or when no GET route has the path, it is a problem.
+SESSION_REVIEWED: dict[str, tuple[str, str]] = {
+    "/api/v1/health": (
+        read_gate.C_OPEN,
+        "the session report's readiness probe (_session_report_bound) compares the "
+        "route table's endpoint to get_set_report by identity and never calls it; "
+        "the closure walk expands every name inside a def, so the reference reads "
+        "as a reach of get_set_report's session check"),
+    "/api/v1/pc/face/preview": (
+        read_gate.C_PUBLIC,
+        "the caller's own card: the route requires the strict session through the "
+        "verified actor (_pc_verified_actor) by design, HMAC over "
+        "pcread:{steam}:face:preview, and refuses a service account"),
+}
+
+
+def check_classes(routes, named=None, index=None, reviewed=None) -> list[str]:
     """Every problem with the classification of `routes`, as sentences."""
     named = NAMED if named is None else named
+    reviewed = SESSION_REVIEWED if reviewed is None else reviewed
     problems = []
     names = list(named)
     for i, a in enumerate(names):
@@ -163,14 +183,21 @@ def check_classes(routes, named=None, index=None) -> list[str]:
         stale = entries - live
         if stale:
             problems.append(f"stale {name} entries: {sorted(stale)}")
+    if set(reviewed) - live:
+        problems.append(f"stale session review entries: {sorted(set(reviewed) - live)}")
     for r in _get_routes(routes):
         reached = set(M._walk_bindings(M._route_seeds(r), index)) if index is not None else set(
             M._reached(M._route_seeds(r)))
         cls = read_gate.route_class(r.path)
-        if reached & SESSION_PRIMITIVES and cls not in (
+        session = bool(reached & SESSION_PRIMITIVES)
+        if session and cls not in (
                 read_gate.C_PLAYER, read_gate.C_ADMIN_SIGNED, read_gate.C_PORTAL,
                 read_gate.C_WRITE_ON_GET, read_gate.C_INTERNAL):
-            problems.append(f"{r.path} reaches a player-session check but is {cls}")
+            if reviewed.get(r.path, ("",))[0] != cls:
+                problems.append(f"{r.path} reaches a player-session check but is {cls}")
+        elif r.path in reviewed:
+            problems.append(f"{r.path} has a session review entry ({reviewed[r.path][0]}) "
+                            f"but is {cls} and reaches {'a' if session else 'no'} session check")
         if cls == read_gate.C_PLAYER and not reached & SESSION_PRIMITIVES:
             problems.append(f"{r.path} is PLAYER but reaches no session check")
         if cls == read_gate.C_ADMIN_SIGNED and not reached & ADMIN_PRIMITIVES:
@@ -211,6 +238,21 @@ def test_read_gate_inventory(capsys):
     for t in read_gate.OPEN:
         assert read_gate.OPEN[t].strip()
     assert counts[read_gate.C_OPEN] == len(read_gate.OPEN) == 9
+
+
+def test_session_review_controls():
+    """The entries are what clear their routes, and only with the class they
+    name: with one entry's class wrong and the other entry removed, both
+    routes are flagged again; an entry for a path no GET route has is
+    stale. Every entry carries a reason."""
+    (p1, (c1, why1)), (p2, (c2, _)) = sorted(SESSION_REVIEWED.items())
+    scratch = {p1: (read_gate.C_PROBE, why1), "/api/v1/zz-no-such-route": (c1, why1)}
+    problems = check_classes(main.app.routes, reviewed=scratch)
+    assert f"{p1} reaches a player-session check but is {c1}" in problems, problems
+    assert f"{p2} reaches a player-session check but is {c2}" in problems, problems
+    assert "stale session review entries: ['/api/v1/zz-no-such-route']" in problems, problems
+    for path, (cls, why) in SESSION_REVIEWED.items():
+        assert cls and why.strip(), path
 
 
 def test_inventory_controls(tmp_path):

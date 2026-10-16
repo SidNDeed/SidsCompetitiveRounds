@@ -883,23 +883,30 @@ def test_ws_connect_counted_other(env, monkeypatch):
 # -- bar BV-A: the advert only for a client that reads it ---------------------
 
 TRUNK_MOD_VERSION_KEYS = {"version", "min_version", main._INVOLUNTARY_CAUSE_CAPABILITY_FIELD}
+# This branch's /mod-version also states leaderboard_active_days, the
+# leaderboard inactivity window, to every client: the server advertises it
+# once and the client prints the window the server states (5b2eb387, "The
+# channel is the record"; the client surfaces in 880b881c). It is not a
+# read-gate key.
+MOD_VERSION_KEYS = TRUNK_MOD_VERSION_KEYS | {"leaderboard_active_days"}
 
 
 @pytest.mark.parametrize("sent", [None, "1.40.3", "1.40.99", "1.4", "0.0.0", "abc", "1.41.0-beta",
                                   " 1.41.0", "1.41.0.0.1", "-1.41.0"])
 def test_mod_version_without_advert_for_older_clients(env, sent):
-    """No header, an older version or an unparseable one: exactly trunk's
-    three keys, so a 1.40.3 client's answer is trunk's byte for byte."""
+    """No header, an older version or an unparseable one: no read-gate
+    advert, exactly trunk's three keys and this branch's leaderboard
+    window (MOD_VERSION_KEYS)."""
     env.stub.mode_row = "enforce"
     body = _get(env, "/api/v1/mod-version", version=sent).json()
-    assert set(body) == TRUNK_MOD_VERSION_KEYS, body
+    assert set(body) == MOD_VERSION_KEYS, body
 
 
 @pytest.mark.parametrize("sent", ["1.41.0", "1.41", "1.41.1", "1.42.0", "2.0.0"])
 def test_mod_version_advert_for_1410_and_later(env, sent):
     env.stub.mode_row = "log"
     body = _get(env, "/api/v1/mod-version", version=sent).json()
-    assert set(body) == TRUNK_MOD_VERSION_KEYS | {"read_gate", "read_gate_open"}, body
+    assert set(body) == MOD_VERSION_KEYS | {"read_gate", "read_gate_open"}, body
     assert body["read_gate"] == "log"
     assert body["read_gate_open"] == read_gate.ungated_templates(main.app.routes)
 

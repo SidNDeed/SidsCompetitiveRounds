@@ -260,6 +260,26 @@ WRITE_REVIEWED: dict[str, tuple[frozenset, str]] = {
                    "_pc_steam_write"}), _R_INTERNAL),
     "/api/v1/internal/stream-posts/pending": (frozenset({"internal_stream_posts_pending"}),
                                               _R_INTERNAL),
+    "/api/v1/internal/channel-posts/pending": (
+        frozenset({"pending_channel_posts"}),
+        _R_INTERNAL + "; a designed claim: the poll claims each row it hands out "
+        "(claimed_at, claimed_token) and records handed_revision and "
+        "handed_fingerprint, so a row is rendered by the holder of its claim only "
+        "(ecd12d05)"),
+    "/api/v1/internal/pending-dms": (
+        frozenset({"_PENDING_DM_RETIRE_SQL", "internal_pending_dms"}),
+        _R_INTERNAL + "; a designed claim: each poll first marks undeliverable the "
+        "rows past the hand-out cap or the age bound, then picks, locks and claims "
+        "one batch in one statement, and the claim prevents a double hand-out "
+        "(5c0f605a)"),
+    "/api/v1/pc/face/preview": (
+        frozenset({"_pc_release_portrait_blob", "_pc_steam_prime", "_pc_steam_process",
+                   "_pc_steam_write", "pc_face_preview"}),
+        "the caller's own card, drawn by _pc_preview_face, the helper the bot's /card "
+        "preview draws with: the handler commits to release the verified actor's "
+        "shared identity lock, then the helper's Steam prime writes the avatar cache "
+        "under the exclusive form of that lock and releases portrait blobs; the "
+        "strict session through the verified actor is by design"),
 }
 _R_PORTAL = ("the portal token's first-use address binding (_portal_auth), written only for "
              "a presented portal token; PORTAL: the gate refuses nothing")
