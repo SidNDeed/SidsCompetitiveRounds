@@ -4,7 +4,8 @@
 -- ending in the `id` its ordering breaks ties on, so every report read is an
 -- index-ordered scan under a LIMIT with no sort in between (design 2.9 and
 -- 7.1). The existing player indexes stop at `ended_at`
--- (001_schema.sql:91-93) and stay as they are.
+-- (001_schema.sql:91-93) and stay as they are. A statistics object on the
+-- seat pair lets the planner see that LIMIT bind (below).
 --
 --   idx_matches_pair      pair reads and pair-global baselines, both
 --                         orientation branches
@@ -44,12 +45,31 @@
 -- statement inside each guard is the design's text exactly, `IF NOT EXISTS`
 -- included.
 --
+-- STATISTICS ON THE SEAT PAIR. A fifth guarded block creates the extended
+-- statistics object `stx_matches_pair`, kind `mcv` only, on
+-- (player1_id, player2_id), then runs `ANALYZE matches`, both inside the
+-- same BEGIN and COMMIT. The planner must estimate the correlated seat pair
+-- from measured frequencies so that a pair read's branch LIMIT binds: with
+-- the two seat selectivities multiplied as independent, a pair-global
+-- baseline over a frequent pair was estimated at 308 rows where 4,999 were
+-- read, and the planner chose a bitmap read and a sort over the whole pair
+-- instead of an ordered index read under the LIMIT. The object corrects the
+-- estimate and forces no plan. `CREATE STATISTICS` and `ANALYZE` each take
+-- SHARE UPDATE EXCLUSIVE on `matches`, which readers and writers do not
+-- wait for; on a first run the index builds already hold SHARE until
+-- COMMIT, so the sampling time of the `ANALYZE` (about 30,000 rows at the
+-- default statistics target) adds to the write block stated above. The
+-- guard probes `pg_statistic_ext` by name, so a re-run issues neither
+-- statement; later automatic analyses keep the object current.
+--
 -- POST-CHECK. After the guards, one read compares all four indexes with the
 -- definition this file states: on `matches`, not unique, valid, and the same
 -- columns, directions and predicate. A same-named index with any other
 -- definition aborts the file with the names that differ, because the guard
 -- alone would accept it and every report read would then lose its bound
--- without any error.
+-- without any error. The statistics object is held to its definition the
+-- same way: on `matches`, kind `mcv` only, over exactly the two seat
+-- columns in that order.
 
 BEGIN;
 SET LOCAL lock_timeout = '5s';
@@ -94,9 +114,21 @@ BEGIN
   END IF;
 END $m377series$;
 
+DO $m377stats$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_statistic_ext s
+                   JOIN pg_namespace n ON n.oid = s.stxnamespace
+                  WHERE n.nspname = current_schema()
+                    AND s.stxname = 'stx_matches_pair') THEN
+    CREATE STATISTICS IF NOT EXISTS stx_matches_pair (mcv) ON player1_id, player2_id FROM matches;
+    ANALYZE matches;
+  END IF;
+END $m377stats$;
+
 DO $m377check$
 DECLARE
   differing text;
+  stats_matching integer;
 BEGIN
   SELECT string_agg(w.name, ', ' ORDER BY w.name) INTO differing
     FROM (VALUES
@@ -122,6 +154,21 @@ BEGIN
                        strpos(pg_get_indexdef(i.indexrelid), ' USING ') + 7) = w.def);
   IF differing IS NOT NULL THEN
     RAISE EXCEPTION '377: index definition differs from this file: %', differing;
+  END IF;
+  SELECT count(*) INTO stats_matching
+    FROM pg_statistic_ext s
+    JOIN pg_namespace n ON n.oid = s.stxnamespace
+    JOIN pg_class t ON t.oid = s.stxrelid
+   WHERE n.nspname = current_schema()
+     AND s.stxname = 'stx_matches_pair'
+     AND t.relname = 'matches'
+     AND s.stxkind::text = '{m}'
+     AND (SELECT array_agg(a.attname::text ORDER BY k.ord)
+            FROM unnest(s.stxkeys::int2[]) WITH ORDINALITY AS k(attnum, ord)
+            JOIN pg_attribute a ON a.attrelid = s.stxrelid AND a.attnum = k.attnum)
+         = ARRAY['player1_id', 'player2_id'];
+  IF stats_matching <> 1 THEN
+    RAISE EXCEPTION '377: statistics object differs from this file: stx_matches_pair';
   END IF;
 END $m377check$;
 

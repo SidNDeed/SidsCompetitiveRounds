@@ -437,6 +437,9 @@ class Match(Base):
         Index("idx_matches_p2_order", "player2_id", ended_at.desc(), id.desc()),
         Index("idx_matches_series", "series_id", "ended_at", "id",
               postgresql_where=series_id.isnot(None)),
+        # Migration 377 also creates the statistics object stx_matches_pair
+        # (kind mcv, on player1_id and player2_id). SQLAlchemy has no
+        # construct for a statistics object, so it is named here only.
     )
 
 

@@ -24,7 +24,10 @@ ruling 3; the lane notes carry it as a deviation from the certified wording)
 STATISTICS are part of the fixture: after the load every loaded table gets
 `VACUUM (ANALYZE)` (outside any open transaction), so the planner reads the
 statistics and visibility a maintained production table has; the
-`default_statistics_target` in force is printed. No planner setting (no
+`default_statistics_target` in force is printed. The migration's statistics
+object on the seat pair (`stx_matches_pair`, kind mcv; integrator pass 3
+ruling 5) is built by that analysis too, and the fixture gate requires its
+most-common-values list. No planner setting (no
 enable_* and no cost setting) appears anywhere in this module: a gate that
 forces its plan cannot fail. `plan_cache_mode` only selects WHICH plan is read
 (the generic one a statement cache reuses), never its shape.
@@ -45,9 +48,12 @@ binds this module to the route module's own statements. The population
 rebuild's sort-key gate is item 1a-3's.
 
 SCRATCH CYCLE. The migration is applied to a throwaway schema, the four
-indexes are read back from `pg_indexes`, the file is applied again and must
-leave every index OID and definition unchanged; a same-named index with
-another definition must abort the file.
+indexes are read back from `pg_indexes` and the statistics object from
+`pg_statistic_ext`, the file is applied again and must leave every index and the
+statistics object with its OID and definition unchanged; a same-named index
+or statistics object with another definition must abort the file; over a
+loaded table the file's own `ANALYZE` must leave the object's
+most-common-values list built.
 
 RUNNING IT. `ADMIN_EVIDENCE_TEST_PG_DSN` names a PostgreSQL database whose
 name carries `admin_evidence` (the module creates and drops its own schemas
@@ -478,9 +484,9 @@ def _gate_checks(plan, *, branch_limit, branches, equality=SEAT_EQUALITY,
         touched = _touched(node)
         assert touched <= branch_limit, (
             "%s read %d rows, ceiling %d" % (name, touched, branch_limit))
-        lines.append("%s %s read=%d (filter removed %d) ceiling=%d between=%r "
+        lines.append("%s %s est=%s read=%d (filter removed %d) ceiling=%d between=%r "
                      "shared_hit=%s shared_read=%s"
-                     % (node["Node Type"], name, touched,
+                     % (node["Node Type"], name, node.get("Plan Rows"), touched,
                         node.get("Rows Removed by Filter", 0), branch_limit, between,
                         node.get("Shared Hit Blocks"), node.get("Shared Read Blocks")))
     assert len(branch_limits) == branches, (
@@ -530,6 +536,20 @@ def test_fixture_statistics_are_those_of_a_maintained_table(db):
     for col in ("player1_id", "player2_id", "ended_at", "series_id", "id"):
         assert col in have, (col, sorted(have))
     lines.append("pg_stats matches columns: %s" % ", ".join(sorted(have)))
+    # Ruling 5: the seat-pair statistics object exists and the fixture's
+    # analysis built its most-common-values list.
+    ext = db.run(db.conn.fetchrow("""
+        SELECT kinds::text AS kinds, attnames::text AS attnames,
+               cardinality(most_common_vals) AS items
+          FROM pg_stats_ext
+         WHERE statistics_schemaname = current_schema()
+           AND statistics_name = 'stx_matches_pair'"""))
+    assert ext is not None, "no pg_stats_ext row for stx_matches_pair"
+    assert ext["kinds"] == "{m}", dict(ext)
+    assert ext["attnames"] == "{player1_id,player2_id}", dict(ext)
+    assert ext["items"] and ext["items"] > 0, dict(ext)
+    lines.append("pg_stats_ext stx_matches_pair kinds=%s attnames=%s mcv_items=%d"
+                 % (ext["kinds"], ext["attnames"], ext["items"]))
     _say("fixture statistics", lines)
 
 
@@ -676,9 +696,33 @@ async def _indexes(conn):
     return {r["name"]: (r["oid"], r["def"]) for r in rows}
 
 
+STATS = ("stx_matches_pair", "{m}", "{player1_id,player2_id}")
+
+
+async def _statistics(conn):
+    """The seat-pair statistics object from the catalog, with its OID:
+    (oid, name, kinds, attnames, mcv items or None). The items come from
+    `pg_stats_ext`, which lists an object only once an analysis of a
+    non-empty table has built it."""
+    row = await conn.fetchrow("""
+        SELECT s.oid::text AS oid, s.stxname::text AS name, s.stxkind::text AS kinds,
+               (SELECT array_agg(a.attname::text ORDER BY k.ord)
+                  FROM unnest(s.stxkeys::int2[]) WITH ORDINALITY AS k(attnum, ord)
+                  JOIN pg_attribute a ON a.attrelid = s.stxrelid AND a.attnum = k.attnum
+               )::text AS attnames,
+               cardinality(e.most_common_vals) AS items
+          FROM pg_statistic_ext s
+          JOIN pg_namespace n ON n.oid = s.stxnamespace
+          LEFT JOIN pg_stats_ext e
+                 ON e.statistics_schemaname = n.nspname AND e.statistics_name = s.stxname
+         WHERE n.nspname = current_schema() AND s.stxname = 'stx_matches_pair'""")
+    return None if row is None else tuple(row)
+
+
 async def _cycle(prepare=""):
     conn = await asyncpg.connect(DSN)
     schema = "ae_cycle_%s" % uuid.uuid4().hex[:10]
+    out = {"err": None}
     try:
         await conn.execute('CREATE SCHEMA "%s"' % schema)
         await conn.execute('SET search_path TO "%s"' % schema)
@@ -689,15 +733,19 @@ async def _cycle(prepare=""):
         try:
             await conn.execute(sql)
         except Exception as ex:
-            return None, None, "%s: %s" % (type(ex).__name__, ex)
+            out["err"] = "%s: %s" % (type(ex).__name__, ex)
+            return out
         pg_indexes = await conn.fetch(
             "SELECT indexname, indexdef FROM pg_indexes "
             " WHERE schemaname = current_schema() AND tablename = 'matches'"
             "   AND indexname = ANY($1::text[]) ORDER BY 1", list(FOUR))
-        first = await _indexes(conn)
+        out["listed"] = [tuple(r) for r in pg_indexes]
+        out["first"] = await _indexes(conn)
+        out["stats_first"] = await _statistics(conn)
         await conn.execute(sql)
-        second = await _indexes(conn)
-        return [tuple(r) for r in pg_indexes], (first, second), None
+        out["second"] = await _indexes(conn)
+        out["stats_second"] = await _statistics(conn)
+        return out
     finally:
         try:
             await conn.execute("ROLLBACK")
@@ -711,18 +759,26 @@ def test_scratch_cycle_apply_read_back_reapply_no_change():
     require_pg()
     loop = asyncio.new_event_loop()
     try:
-        listed, (first, second), err = loop.run_until_complete(_cycle())
+        out = loop.run_until_complete(_cycle())
     finally:
         loop.close()
-    assert err is None, err
+    assert out["err"] is None, out["err"]
+    listed, first, second = out["listed"], out["first"], out["second"]
     assert [name for name, _ in listed] == sorted(FOUR), listed
     for name, want in FOUR.items():
         assert first[name][1] == want, (name, first[name][1])
     assert second == first, "a re-apply changed an index OID or definition"
+    stats_first, stats_second = out["stats_first"], out["stats_second"]
+    assert stats_first is not None, "the file left no statistics object stx_matches_pair"
+    assert stats_first[1:4] == STATS, stats_first
+    assert stats_second == stats_first, (
+        "a re-apply changed the statistics object", stats_first, stats_second)
     print("GATE scratch cycle")
     for name, indexdef in listed:
         print("  pg_indexes %s: %s" % (name, indexdef))
-    print("  re-apply: %d index OIDs and definitions unchanged" % len(second))
+    print("  pg_stats_ext %s kinds=%s attnames=%s" % stats_first[1:4])
+    print("  re-apply: %d index OIDs and definitions and the statistics object "
+          "OID %s unchanged" % (len(second), stats_second[0]))
 
 
 def test_a_same_named_index_with_another_definition_aborts_the_file():
@@ -731,9 +787,51 @@ def test_a_same_named_index_with_another_definition_aborts_the_file():
     require_pg()
     loop = asyncio.new_event_loop()
     try:
-        _listed, _states, err = loop.run_until_complete(_cycle(
-            "CREATE INDEX idx_matches_p1_order ON matches (player1_id, ended_at DESC);"))
+        err = loop.run_until_complete(_cycle(
+            "CREATE INDEX idx_matches_p1_order ON matches (player1_id, ended_at DESC);"))["err"]
     finally:
         loop.close()
     assert err is not None and "idx_matches_p1_order" in err, err
     print("GATE same-named index refused: %s" % err.splitlines()[0])
+
+
+def test_a_same_named_statistics_object_of_another_kind_aborts_the_file():
+    """Ruling 5 kind mcv only: the guard alone would accept any statistics
+    object of the name; the post-check refuses one of another kind."""
+    require_pg()
+    loop = asyncio.new_event_loop()
+    try:
+        err = loop.run_until_complete(_cycle(
+            "CREATE STATISTICS stx_matches_pair (dependencies) "
+            "ON player1_id, player2_id FROM matches;"))["err"]
+    finally:
+        loop.close()
+    assert err is not None and "stx_matches_pair" in err, err
+    print("GATE same-named statistics object refused: %s" % err.splitlines()[0])
+
+
+def test_the_file_analyses_matches_after_creating_the_statistics_object():
+    """Ruling 5: the file's own ANALYZE, inside its BEGIN and COMMIT, builds
+    the object's most-common-values list on a loaded table, so production
+    plans read the corrected estimate from the landing on, not from the next
+    automatic analysis. Loaded here: 400 games, a quarter of them one pair."""
+    require_pg()
+    loop = asyncio.new_event_loop()
+    try:
+        out = loop.run_until_complete(_cycle("""
+            INSERT INTO matches (player1_id, player2_id, ended_at)
+            SELECT CASE WHEN i % 4 = 0 THEN '00000000-0000-4000-8000-00000000000a'::uuid
+                        ELSE gen_random_uuid() END,
+                   CASE WHEN i % 4 = 0 THEN '00000000-0000-4000-8000-00000000000b'::uuid
+                        ELSE gen_random_uuid() END,
+                   TIMESTAMPTZ '2026-01-01T00:00:00Z' + make_interval(mins => i)
+              FROM generate_series(1, 400) AS i;"""))
+    finally:
+        loop.close()
+    assert out["err"] is None, out["err"]
+    stats = out["stats_first"]
+    assert stats is not None and stats[1:4] == STATS, stats
+    assert stats[4] and stats[4] > 0, (
+        "the statistics object has no most-common-values list after the file "
+        "ran over a loaded table: the file's ANALYZE did not build it", stats)
+    print("GATE the file's ANALYZE built stx_matches_pair: mcv_items=%d" % stats[4])

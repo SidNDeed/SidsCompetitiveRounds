@@ -251,11 +251,13 @@ async def _fingerprint(conn, tables) -> dict:
 
 
 async def _objects(conn) -> dict:
-    """Constraint and index OIDs in this schema.
+    """Constraint, index and extended-statistics OIDs in this schema.
 
     A DROP-then-ADD ends in the same textual definition and a different OID.
     The OID is how "it did nothing" is told apart from "it did the same thing
-    again", and the second one took a table lock.
+    again", and the second one took a table lock. Statistics objects are
+    listed beside indexes because 377 creates one (`stx_matches_pair`); a
+    re-run that dropped and re-created it would also re-sample the table.
     """
     rows = await conn.fetch("""
         SELECT c.conname AS name, c.oid::text AS oid, 'constraint' AS what
@@ -266,6 +268,10 @@ async def _objects(conn) -> dict:
         SELECT ci.relname, ci.oid::text, 'index'
           FROM pg_index i JOIN pg_class ci ON ci.oid = i.indexrelid
           JOIN pg_namespace n ON n.oid = ci.relnamespace
+         WHERE n.nspname = current_schema()
+        UNION ALL
+        SELECT s.stxname, s.oid::text, 'statistics'
+          FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid = s.stxnamespace
          WHERE n.nspname = current_schema()
          ORDER BY 3, 1""")
     return {(r["what"], r["name"]): r["oid"] for r in rows}
@@ -450,6 +456,21 @@ def test_a_second_run_removes_no_relation_from_the_database(number):
         "migration %s removed %s from the database on its second run. A "
         "re-run may not delete a relation it did not create."
         % (number, gone))
+
+
+def test_377_keeps_its_statistics_object_across_a_second_run():
+    """The object census above can only see a replaced statistics object if
+    one exists: 377 must leave `stx_matches_pair` after its first run and the
+    SAME object (one OID) after its second, its guard issuing neither the
+    `CREATE STATISTICS` nor the `ANALYZE` again."""
+    applied = _run(_apply_twice("377"))
+    key = ("statistics", "stx_matches_pair")
+    assert key in applied.objects_first, (
+        "377 left no statistics object stx_matches_pair: %r"
+        % sorted(applied.objects_first))
+    assert applied.objects_second.get(key) == applied.objects_first[key], (
+        "377's second run replaced or removed stx_matches_pair: %r -> %r"
+        % (applied.objects_first[key], applied.objects_second.get(key)))
 
 
 def test_336_probe_cleanup_cannot_reach_a_same_named_ordinary_table():

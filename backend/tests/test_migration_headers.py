@@ -336,7 +336,7 @@ def test_the_defaulted_kind_field_is_not_read_as_a_deploy_order_permission():
 # ── "it runs unconditionally", said about statements that do not ───────────
 
 _GUARD_BLOCK = re.compile(r"DO \$(\w*)\$(.*?)END \$\1\$;", re.S)
-_GUARDABLE_DDL = ("CREATE INDEX", "ALTER TABLE")
+_GUARDABLE_DDL = ("CREATE INDEX", "ALTER TABLE", "CREATE STATISTICS")
 
 
 def _catalog_guarded_ddl(sql):
@@ -711,8 +711,10 @@ _NOT_WORK_A_RERUN_DOES = {
 # statement added, which must put it back in the arm.
 _EVERY_STATEMENT_GUARDED = {
     "377_admin_evidence_indexes.sql":
-        "four catalog-guarded CREATE INDEX blocks and a read-only post-check, "
-        "between BEGIN, SET LOCAL lock_timeout and COMMIT; a re-run issues no DDL",
+        "four catalog-guarded CREATE INDEX blocks, one catalog-guarded block "
+        "holding CREATE STATISTICS and its ANALYZE, and a read-only post-check, "
+        "between BEGIN, SET LOCAL lock_timeout and COMMIT; a re-run issues no "
+        "DDL and no ANALYZE",
 }
 _EVERY_STATEMENT_GUARDED_KINDS = {"BEGIN", "COMMIT", "SET LOCAL", "DO"}
 
@@ -1142,6 +1144,36 @@ def test_no_header_promises_an_unconditional_rerun_of_a_statement_it_guards():
             "with a statement-level CREATE INDEX added, the omission arm does not "
             "name %s, so the fully-guarded naming would hide unguarded work: %r"
             % (name, would_fire))
+
+
+def test_377_guards_its_statistics_object_and_its_analyze_together():
+    """377's fifth block (integrator pass 3 ruling 5): the statistics object
+    is created only behind a catalog probe of `pg_statistic_ext`, and the
+    `ANALYZE` that builds its statistics sits inside the same guard, so the
+    census reads neither as statement-level work and a re-run issues neither.
+    Measured both ways: the guard is found, and with the `ANALYZE` moved out
+    to statement level the census counts it."""
+    name = "377_admin_evidence_indexes.sql"
+    sql = (SQL_DIR / name).read_text(encoding="utf-8")
+    assert "CREATE STATISTICS" in _catalog_guarded_ddl(sql), (
+        "377 issues no catalog-guarded CREATE STATISTICS: %r"
+        % sorted(_catalog_guarded_ddl(sql)))
+    blocks = [body for _tag, body in _GUARD_BLOCK.findall(sql)
+              if "CREATE STATISTICS" in body]
+    assert len(blocks) == 1, "expected one guard block holding CREATE STATISTICS"
+    assert re.search(r"IF NOT EXISTS\s*\(\s*SELECT 1 FROM pg_statistic_ext\b", blocks[0]), (
+        "the CREATE STATISTICS guard does not probe pg_statistic_ext")
+    assert "ANALYZE matches;" in blocks[0], (
+        "the ANALYZE that builds the object's statistics is not inside its guard")
+    assert sql.count("ANALYZE matches;") == 1, "a second ANALYZE outside the guard"
+    census = _statement_census(sql)
+    assert "ANALYZE" not in census and "CREATE STATISTICS IF NOT EXISTS" not in census, census
+    moved = sql.replace("    ANALYZE matches;\n", "", 1).replace(
+        "END $m377stats$;", "END $m377stats$;\nANALYZE matches;", 1)
+    assert moved != sql and "ANALYZE" in _statement_census(moved), (
+        "with the ANALYZE moved to statement level the census does not count "
+        "it, so this test could not tell a guarded ANALYZE from an unguarded "
+        "one: %r" % (_statement_census(moved),))
 
 
 def test_every_unguarded_statement_kind_is_named_in_the_prose_that_discloses_it():
