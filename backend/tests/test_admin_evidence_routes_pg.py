@@ -32,8 +32,8 @@ which statements each request ran.
       one-fact twin served before.
   3.5 statement scan: admin_evidence.py writes nothing but the audit insert.
   4.7 (item 1a-5) the admin-authorized-consumer class: all 50 storage
-      sentinels served only inside the cells of the key that reads them, and
-      none on any refusal path.
+      sentinels served only inside the cells, or the catalog spread, of the
+      key that reads them, and none on any refusal path.
 
 Test accounts, steam ids and Discord ids are generated per run.
 `ADMIN_EVIDENCE_TEST_PG_DSN` names a database whose name carries
@@ -722,7 +722,10 @@ def _sentinel_suffix(column):
 def _sentinel_hits(body, by_value):
     """Every place a storage sentinel value sits in a served body, as
     `(column, ki or None, slot)`: inside a wire cell (`cells` rows, slot 0 the
-    key number) the hit carries that key, anywhere else `None`."""
+    key number) the hit carries that key and its slot number; inside a
+    catalog row (a base key's population spread, `p50`/`p90`/`p99`) it
+    carries the row's key and the field name; anywhere else `None` and the
+    JSON path."""
     hits = []
 
     def scan(v, ki, slot):
@@ -731,22 +734,26 @@ def _sentinel_hits(body, by_value):
         if isinstance(v, (int, float, str)) and v in by_value:
             hits.append((by_value[v], ki, slot))
 
-    def walk(v):
-        if isinstance(v, dict):
+    def walk(v, path):
+        if isinstance(v, dict) and set(v) >= {"ki", "key", "fam", "unit", "kind"}:
+            for k, child in v.items():
+                if k != "ki":
+                    scan(child, v["ki"], k)
+        elif isinstance(v, dict):
             for k, child in v.items():
                 if k == "cells" and isinstance(child, list):
                     for row in child:
                         for slot, x in enumerate(row):
                             scan(x, row[0], slot)
                 else:
-                    walk(child)
+                    walk(child, path + "/" + str(k))
         elif isinstance(v, list):
-            for child in v:
-                walk(child)
+            for i, child in enumerate(v):
+                walk(child, "%s/%d" % (path, i))
         else:
-            scan(v, None, None)
+            scan(v, None, path)     # outside any key: the slot names the place
 
-    walk(body)
+    walk(body, "")
     return hits
 
 
@@ -765,7 +772,8 @@ def test_admin_authorized_consumers_serve_sentinels_only_to_admins(rig, monkeypa
     50 storage sentinels (`net_seat_contract.storage_sentinels`); the first is
     reported by p1, the second by p2, so each seat's reporter-only columns
     are served once. (a) With the key and an admin actor, every route serves
-    the sentinels only inside the cells of the key that reads them; the game
+    the sentinels only inside the cells, or the catalog spread (a base key's
+    population p50/p90/p99), of the key that reads them; the game
     route serves the reporter's 25 once each per game (50 over the two), the
     series route all 50 once each among its game cells, and the pair and
     player routes all 50 among their pages. (b) On every 4.2 refusal path
