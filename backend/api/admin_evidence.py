@@ -1116,6 +1116,44 @@ class Generation:
 SIZING_BASE_RSS_MB = 80.0
 
 
+def process_rss_mb(peak=False):
+    """This process's resident set in MB, or its peak: VmRSS or VmHWM from
+    /proc on Linux (the api container); the working set or its peak through
+    psapi elsewhere (the Windows test seat), a different quantity."""
+    try:
+        with open("/proc/self/status", encoding="ascii") as fh:
+            want = "VmHWM:" if peak else "VmRSS:"
+            for line in fh:
+                if line.startswith(want):
+                    return int(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+    import ctypes
+    from ctypes import wintypes
+
+    class _Counters(ctypes.Structure):
+        _fields_ = ([("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)]
+                    + [(n, ctypes.c_size_t) for n in (
+                        "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+                        "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage",
+                        "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage")])
+
+    kernel32, psapi = ctypes.windll.kernel32, ctypes.windll.psapi
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Counters),
+                                           wintypes.DWORD]
+    c = _Counters()
+    c.cb = ctypes.sizeof(c)
+    if not psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(c), c.cb):
+        raise OSError("GetProcessMemoryInfo failed")
+    return (c.PeakWorkingSetSize if peak else c.WorkingSetSize) / 1048576.0
+
+
+# A measured B above this misses the floor caps (P 500, W 250): P9 red, and
+# the figure goes to Sid as a budget decision (design 2.6).
+BASE_RSS_FLOOR_MB = 94.7
+
+
 def budget_bytes(base_rss_mb):
     """The cache's byte budget (design 2.6): `128/1.25 - B - 2` MB."""
     return int((CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - base_rss_mb - 2)

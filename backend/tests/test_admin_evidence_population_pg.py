@@ -42,9 +42,13 @@ refuses with `503 unavailable (population)` and one log line, publishes
 nothing (the live generation and the gen counter unchanged), and its
 one-fact twin serves.
 
-Not here yet (later passes): cold-start `B` and peak RSS x 1.25 measured
-on the api process, the route halves (R1 to R4, 1a-4), the second decoded
-copy and route-shape mutants.
+Cold start: `B` measured in a fresh interpreter after the api's imports,
+then the worst-case cache; `B` within BASE_RSS_FLOOR_MB and peak x 1.25
+within POP_MEM_BUDGET_MB. On the Windows seat this reads the working set,
+not the api container's resident set.
+
+Not here yet (later passes): the cold start through the four routes
+(R1 to R4, 1a-4), the second decoded copy and route-shape mutants.
 
 `ADMIN_EVIDENCE_TEST_PG_DSN` names a database whose name carries
 `admin_evidence`; unset, the module fails (an affirmative
@@ -629,6 +633,63 @@ def test_p9_duplicate_window_source_refuses(live, monkeypatch, caplog, basis, pl
     assert cache.live[key] is twin and cache._gen == twin.gen and not twin.retired
     print("GATE p9 duplicate window %s %s: twin gen %d served offsets %s; refused: %s"
           % (basis, placement, twin.gen, list(twin.offsets[Z_KI]), exc))
+
+
+_COLD_START = r"""
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import main                      # the api's own imports (design 2.6: main.py)
+import admin_evidence as ae
+from array import array
+b = ae.process_rss_mb()
+P = ae.CONTRACT_BOUNDS["POP_VALUES_MAX"]
+W = ae.CONTRACT_BOUNDS["WIN_VALUES_MAX"]
+R = sum(1 for e in ae.REPORT_REGISTRY if not e.is_window and e.ranked)
+cache = ae.PopulationCache(base_rss_mb=b)
+def vals(n):
+    return {k: array("d", bytes(8 * n)) for k in range(R)}
+def offs(n):
+    return {k: array("i", bytes(4 * (n + 1))) for k in range(R)}
+for i in range(4):               # 4 live game sets, 4 retired under leases
+    cache.lease(cache.publish(("g", i), vals(P), {}))
+    cache.publish(("g", i), vals(P), {})
+replacement = vals(P)            # 1 replacement in progress
+cache.in_progress = sum(len(a) * 8 for a in replacement.values())
+for i in range(8):               # 8 live window sources, 4 retired, one value per unit
+    if i < 4:
+        cache.lease(cache.publish(("w", i), vals(W), {}, offsets=offs(W)))
+    cache.publish(("w", i), vals(W), {}, offsets=offs(W))
+lease = cache.current(("w", 0))
+for j in range(32):              # the memo at WIN_DERIVED_BYTES_MAX
+    cache.memo_put(("c", j), lease, {"d": array("d", bytes(65536))}, 65536)
+print(json.dumps({"b": b, "peak": ae.process_rss_mb(peak=True), "platform": sys.platform,
+                  "cache_bytes": cache.cache_bytes(), "budget": cache.budget,
+                  "live": len(cache.live), "retired": len(cache.retired)}))
+"""
+
+
+def test_p9_cold_start_base_rss_and_peak_within_the_budget():
+    """Cold start (design 2.6, P9): `B` is the resident set after the api's
+    imports, measured in a fresh interpreter; then the cache at its worst
+    case (4 live and 4 leased-retired game sets, a replacement, 8 live and 4
+    retired window sources at maximum fragmentation, the memo full). `B`
+    must not exceed BASE_RSS_FLOOR_MB, peak x 1.25 must fit
+    POP_MEM_BUDGET_MB. On a seat other than Linux the figure is that
+    platform's working set, not the api container's resident set."""
+    import subprocess
+    api = os.path.join(HERE, "..", "api")
+    out = subprocess.run([sys.executable, "-B", "-c", _COLD_START, api],
+                         capture_output=True, text=True, timeout=300)
+    assert out.returncode == 0, out.stderr[-2000:]
+    m = json.loads(out.stdout.strip().splitlines()[-1])
+    print("GATE p9 cold start (%s): B %.1f MB (floor %.1f), peak %.1f MB x 1.25 = %.1f "
+          "(budget %d), cache %d bytes against %d, %d live, %d retired"
+          % (m["platform"], m["b"], ae.BASE_RSS_FLOOR_MB, m["peak"], m["peak"] * 1.25,
+             ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m["cache_bytes"], m["budget"],
+             m["live"], m["retired"]))
+    assert (m["live"], m["retired"]) == (12, 8)
+    assert m["b"] <= ae.BASE_RSS_FLOOR_MB, "B %.1f MB misses the floor: a budget decision" % m["b"]
+    assert m["peak"] * 1.25 <= ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m
 
 
 def _builder_lines():
