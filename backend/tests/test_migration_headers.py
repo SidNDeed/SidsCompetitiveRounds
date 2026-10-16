@@ -703,6 +703,19 @@ _NOT_WORK_A_RERUN_DOES = {
           "never reaches this key",
 }
 
+# A file may guard every statement it issues. It has no statement-level work
+# to disclose and the omission arm does not reach it; naming it here, with its
+# reason, is what lets the arm's last check tell it apart from a file silenced
+# by an excused kind. The test measures each named file (census kinds within
+# `_EVERY_STATEMENT_GUARDED_KINDS`) and rehearses it with one unguarded
+# statement added, which must put it back in the arm.
+_EVERY_STATEMENT_GUARDED = {
+    "377_admin_evidence_indexes.sql":
+        "four catalog-guarded CREATE INDEX blocks and a read-only post-check, "
+        "between BEGIN, SET LOCAL lock_timeout and COMMIT; a re-run issues no DDL",
+}
+_EVERY_STATEMENT_GUARDED_KINDS = {"BEGIN", "COMMIT", "SET LOCAL", "DO"}
+
 # The body map is keyed on the leading VERB rather than the whole kind: a
 # PL/pgSQL read is spelled `SELECT count(*) INTO v` as often as
 # `SELECT COUNT(*) INTO v`, and the kind derivation keeps whatever case the
@@ -983,6 +996,22 @@ def test_no_header_promises_an_unconditional_rerun_of_a_statement_it_guards():
 
     unreached = sorted(name for name in sql
                        if guarded[name] and not _unguarded_statement_work(sql[name]))
+    # A file whose EVERY statement is guarded is the one legitimate way to be
+    # unreached, and it is checked positively rather than assumed: it must be
+    # named in `_EVERY_STATEMENT_GUARDED` with its reason, and the census of
+    # its top-level kinds must hold nothing but transaction control, a
+    # transaction-scoped setting and `DO` blocks whose bodies the census
+    # already reads as issuing nothing it counts. Any other file reaching
+    # this line still reds it.
+    for name in unreached:
+        if name not in _EVERY_STATEMENT_GUARDED:
+            continue
+        kinds = set(_statement_census(sql[name]))
+        assert kinds <= _EVERY_STATEMENT_GUARDED_KINDS, (
+            "%s is named as guarding every statement it issues, but the census "
+            "reads kinds beyond transaction control, a transaction-scoped "
+            "setting and guard blocks: %r" % (name, sorted(kinds)))
+    unreached = [name for name in unreached if name not in _EVERY_STATEMENT_GUARDED]
     assert not unreached, (
         "%r guard DDL on the catalog and the census counts NO statement-level "
         "work in them, so the arm is silent about them for a reason no reader "
@@ -1081,6 +1110,38 @@ def test_no_header_promises_an_unconditional_rerun_of_a_statement_it_guards():
         "%r"
         % (name, sorted(_catalog_guarded_ddl(stripped)),
            sorted(_unguarded_statement_work(stripped)), would_fire))
+
+    # THE EVERY-STATEMENT-GUARDED NAMING HIDES NOTHING ADDED LATER. Each named
+    # file is measured fully guarded today; give it one statement-level
+    # `CREATE INDEX IF NOT EXISTS` before its COMMIT and the census must count
+    # that as work (so the file is no longer exempt) and the omission arm must
+    # name it, since its header states no unconditional work.
+    for name in sorted(_EVERY_STATEMENT_GUARDED):
+        assert name in sql, (
+            "%s is named as guarding every statement but is not a file this "
+            "delta owns" % name)
+        assert _catalog_guarded_ddl(sql[name]) and not _unguarded_statement_work(sql[name]), (
+            "%s is named as guarding every statement, and the census disagrees: "
+            "guards %r, statement-level work %r"
+            % (name, sorted(_catalog_guarded_ddl(sql[name])),
+               sorted(_unguarded_statement_work(sql[name]))))
+        head, sep, tail = sql[name].rpartition("COMMIT;")
+        assert sep, "%s has no COMMIT; to rehearse against" % name
+        grown = head + "CREATE INDEX IF NOT EXISTS idx_rehearsal ON matches (id);\n" + sep + tail
+        assert any(kind.startswith("CREATE INDEX")
+                   for kind in _unguarded_statement_work(grown)), (
+            "a statement-level CREATE INDEX added to %s is not counted as work, so "
+            "naming the file as fully guarded would hide it: %r"
+            % (name, sorted(_unguarded_statement_work(grown))))
+        rehearsed = dict(sql, **{name: grown})
+        would_fire = [n for n in sorted(rehearsed)
+                      if _catalog_guarded_ddl(rehearsed[n])
+                      and _unguarded_statement_work(rehearsed[n])
+                      and not _states_unconditional_work(rehearsed[n])]
+        assert name in would_fire, (
+            "with a statement-level CREATE INDEX added, the omission arm does not "
+            "name %s, so the fully-guarded naming would hide unguarded work: %r"
+            % (name, would_fire))
 
 
 def test_every_unguarded_statement_kind_is_named_in_the_prose_that_discloses_it():
