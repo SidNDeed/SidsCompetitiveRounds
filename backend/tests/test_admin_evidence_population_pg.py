@@ -66,6 +66,7 @@ import sys
 import time
 import tracemalloc
 import uuid
+import warnings
 
 import pytest
 
@@ -663,7 +664,7 @@ lease = cache.current(("w", 0))
 for j in range(32):              # the memo at WIN_DERIVED_BYTES_MAX
     cache.memo_put(("c", j), lease, {"d": array("d", bytes(65536))}, 65536)
 print(json.dumps({"b": b, "peak": ae.process_rss_mb(peak=True), "platform": sys.platform,
-                  "cache_bytes": cache.cache_bytes(), "budget": cache.budget,
+                  "python": sys.version.split()[0], "cache_bytes": cache.cache_bytes(), "budget": cache.budget,
                   "live": len(cache.live), "retired": len(cache.retired)}))
 """
 
@@ -675,18 +676,23 @@ def test_p9_cold_start_base_rss_and_peak_within_the_budget():
     retired window sources at maximum fragmentation, the memo full). `B`
     must not exceed BASE_RSS_FLOOR_MB, peak x 1.25 must fit
     POP_MEM_BUDGET_MB. On a seat other than Linux the figure is that
-    platform's working set, not the api container's resident set."""
+    platform's working set, not the api container's resident set. The
+    measured line is also issued as a warning, so a quiet run (`-q`, no
+    captured output shown) still prints the figure whether it passes or
+    fails. This test reads no database, so it runs without the DSN."""
     import subprocess
     api = os.path.join(HERE, "..", "api")
     out = subprocess.run([sys.executable, "-B", "-c", _COLD_START, api],
                          capture_output=True, text=True, timeout=300)
     assert out.returncode == 0, out.stderr[-2000:]
     m = json.loads(out.stdout.strip().splitlines()[-1])
-    print("GATE p9 cold start (%s): B %.1f MB (floor %.1f), peak %.1f MB x 1.25 = %.1f "
-          "(budget %d), cache %d bytes against %d, %d live, %d retired"
-          % (m["platform"], m["b"], ae.BASE_RSS_FLOOR_MB, m["peak"], m["peak"] * 1.25,
-             ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m["cache_bytes"], m["budget"],
-             m["live"], m["retired"]))
+    line = ("GATE p9 cold start (%s, Python %s): B %.1f MB (floor %.1f), peak %.1f MB "
+            "x 1.25 = %.1f (budget %d), cache %d bytes against %d, %d live, %d retired"
+            % (m["platform"], m["python"], m["b"], ae.BASE_RSS_FLOOR_MB, m["peak"],
+               m["peak"] * 1.25, ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m["cache_bytes"],
+               m["budget"], m["live"], m["retired"]))
+    print(line)
+    warnings.warn(line)
     assert (m["live"], m["retired"]) == (12, 8)
     assert m["b"] <= ae.BASE_RSS_FLOOR_MB, "B %.1f MB misses the floor: a budget decision" % m["b"]
     assert m["peak"] * 1.25 <= ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m
