@@ -720,7 +720,10 @@ def test_p9_cache_bytes_within_five_percent_of_tracemalloc(live, monkeypatch):
     units = ae.CONTRACT_BOUNDS["WIN_VALUES_MAX"]
     cache = ae.PopulationCache(clock=_Clock())
     key = ("display", "all", "z", 30, 120, "pair")
-    path = os.path.abspath(ae.__file__)
+    # The file name tracemalloc records is the code object's own: the module is
+    # imported through a sys.path entry holding "..", which abspath would
+    # normalize away and then match nothing.
+    path = ae.rebuild_window_source.__code__.co_filename
 
     async def go():
         await _z_table(live)
