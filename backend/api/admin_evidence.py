@@ -13,13 +13,16 @@ writes to the database.
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import hashlib
+import itertools
 import json
+import logging
 import math
 import time
 from array import array
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 # ── Bounds and display defaults ────────────────────────────────────────────
@@ -788,6 +791,17 @@ def window_values(entry, rows, account, partner=None):
     return vals
 
 
+def window_stat(agg, vals):
+    """A window key's aggregation over its values (design 2.1), one rule for
+    the display cell and the window population: `win_max` the largest,
+    `win_median` the median (the mean of the middle two for an even count)."""
+    if agg == "win_max":
+        return max(vals)
+    ordered = sorted(vals)
+    mid = len(ordered) // 2
+    return ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
 def window_cells(rows, account, basis, baseline, partner=None):
     """One display cell per window key of seat scope (design 5.5): the
     aggregation over the covered games, its `n`, and the base key's own
@@ -801,13 +815,8 @@ def window_cells(rows, account, basis, baseline, partner=None):
         agg = w.agg.split(".")[0]
         if not vals:
             val, state = None, "not_recorded"
-        elif agg == "win_max":
-            val, state = max(vals), "ok"
         else:
-            ordered = sorted(vals)
-            mid = len(ordered) // 2
-            val = ordered[mid] if len(ordered) % 2 else (ordered[mid - 1] + ordered[mid]) / 2.0
-            state = "ok"
+            val, state = window_stat(agg, vals), "ok"
         cell = {"ki": w.ki, "n": len(vals), "val": val, "state": state,
                 "comparability": comparability_key(w.key, basis, len(vals)),
                 "pop_rank": None, "pop_n": None, "pop_p50": None, "pop_p90": None,
@@ -870,9 +879,11 @@ def _value_sql(entry, col_seat):
     return "CAST(g.%s AS double precision)" % col.format(s=col_seat)
 
 
-def population_branches(entries=None):
+def population_branches(entries=None, partner=False):
     """One `(ki, val, ended_at, id, sk, sa, sb)` branch per ranked base key
-    and subject seat (phase 1: every fact is a seat fact `["seat",s,null]`)."""
+    and subject seat (phase 1: every fact is a seat fact `["seat",s,null]`).
+    `partner` adds `po`, the other seat's account: the unit column of a
+    directional pair-seat window source."""
     entries = REPORT_REGISTRY if entries is None else entries
     out = []
     for e in entries:
@@ -881,33 +892,46 @@ def population_branches(entries=None):
         for seat in SEATS:
             col_seat = _other(seat) if e.decl.subject == "opposite" else seat
             val = _value_sql(e, col_seat)
+            po = (", %s AS po" % _seat_account_sql(_other(seat))) if partner else ""
             out.append(
                 "SELECT %d AS ki, %s AS val, g.ended_at, g.id, 'seat'::text AS sk, "
-                "%s AS sa, CAST(NULL AS uuid) AS sb FROM g WHERE %s AND %s IS NOT NULL"
-                % (e.ki, val, _seat_account_sql(seat), _applies_sql(e, col_seat), val))
+                "%s AS sa, CAST(NULL AS uuid) AS sb%s FROM g WHERE %s AND %s IS NOT NULL"
+                % (e.ki, val, _seat_account_sql(seat), po, _applies_sql(e, col_seat), val))
     return out
 
 
-def population_sql(branches, ranked_only=False):
-    """The rebuild statement over `branches` (design 2.6, 2.9: the window by
-    `idx_matches_ended`, SQL-side bound, one row per key)."""
-    return """
-WITH g AS MATERIALIZED (
+def _window_cte(ranked_only):
+    """The `g` CTE both population statements share: every 1v1 game, not
+    invalidated, ended within `:pop_days` days and at least `:lag_s` seconds
+    ago, read once by `idx_matches_ended`."""
+    return """g AS MATERIALIZED (
   SELECT m.id, m.ended_at, m.player1_id, m.player2_id, %(rep)s AS rep, %(cols)s
     FROM matches m
    WHERE m.invalidated_at IS NULL%(ranked)s
      AND m.ended_at >= now() - make_interval(days => CAST(:pop_days AS integer))
-     AND m.ended_at <= now() - make_interval(secs => CAST(:lag_s AS integer))),
+     AND m.ended_at <= now() - make_interval(secs => CAST(:lag_s AS integer)))""" % {
+        "rep": _REP_SQL,
+        "cols": ", ".join("m.%s" % c for c in MATCH_COLUMNS),
+        "ranked": "\n     AND m.is_ranked" if ranked_only else ""}
+
+
+def population_sql(branches, ranked_only=False):
+    """The rebuild statement over `branches` (design 2.6, 2.9: the window by
+    `idx_matches_ended`, SQL-side bound, one row per key). The identity
+    check `dup` reads `f`, the complete eligible relation, never `r`'s
+    bounded rows."""
+    return """
+WITH %(g)s,
 f AS (
 %(branches)s),
-dup AS (
-  SELECT count(*) AS n FROM (
-    SELECT 1 FROM f GROUP BY f.ki, f.id, f.sk, f.sa, f.sb HAVING count(*) > 1) d),
 r AS (
-  SELECT f.ki, f.val, f.ended_at,
+  SELECT f.ki, f.val, f.ended_at, f.id, f.sk, f.sa, f.sb,
          row_number() OVER (PARTITION BY f.ki
                             ORDER BY f.ended_at DESC, f.id DESC, f.sk, f.sa, f.sb) AS rn
-    FROM f)
+    FROM f),
+dup AS (
+  SELECT count(*) AS n FROM (
+    SELECT 1 FROM f GROUP BY f.ki, f.id, f.sk, f.sa, f.sb HAVING count(*) > 1) d)
 SELECT r.ki,
        array_agg(r.val ORDER BY r.val) FILTER (WHERE r.rn <= CAST(:cap AS integer)) AS vals,
        bool_or(r.rn = CAST(:cap AS integer) + 1) AS truncated,
@@ -916,19 +940,80 @@ SELECT r.ki,
   FROM r
  WHERE r.rn <= CAST(:cap AS integer) + 1
  GROUP BY r.ki
- ORDER BY r.ki""" % {"rep": _REP_SQL,
-                     "cols": ", ".join("m.%s" % c for c in MATCH_COLUMNS),
-                     "ranked": "\n     AND m.is_ranked" if ranked_only else "",
+ ORDER BY r.ki""" % {"g": _window_cte(ranked_only),
+                     "branches": "\n  UNION ALL\n".join("  " + b for b in branches)}
+
+
+# The player basis has one unit per account: its second unit column is a
+# constant, so units join on plain equality.
+_NO_PARTNER = "CAST('00000000-0000-0000-0000-000000000000' AS uuid)"
+
+
+def window_source_sql(branches, basis, ranked_only=False):
+    """The window source statement for one basis (design 2.6). Units are
+    accounts (basis `player`) or directional `(account, opponent)` pairs
+    (basis `pair`, a seat key). Per key and unit the newest `:depth` values
+    in `ended_at DESC, id DESC` order; units by newest game, then unit id,
+    kept whole while the key's values fit `:wmax`; the crossing unit and
+    every later one are dropped and the key is truncated. The identity
+    check `wd` reads `u`, the complete eligible relation, before the depth,
+    the crossing-unit drop and the aggregation. `branches` carry `po`."""
+    if basis not in ("player", "pair"):
+        raise ValueError("basis must be player or pair: %r" % (basis,))
+    unit = "f.po" if basis == "pair" else _NO_PARTNER
+    return """
+WITH %(g)s,
+f AS (
+%(branches)s),
+u AS (
+  SELECT f.ki, f.val, f.ended_at, f.id, f.sk, f.sa, f.sb, f.sa AS ua, %(unit)s AS ub,
+         row_number() OVER (PARTITION BY f.ki, f.sa, %(unit)s
+                            ORDER BY f.ended_at DESC, f.id DESC) AS rn
+    FROM f),
+d AS (
+  SELECT u.* FROM u WHERE u.rn <= CAST(:depth AS integer)),
+un AS (
+  SELECT d.ki, d.ua, d.ub, count(*) AS cnt, max(d.ended_at) AS ne,
+         (array_agg(d.id ORDER BY d.rn))[1] AS nid
+    FROM d GROUP BY d.ki, d.ua, d.ub),
+uo AS (
+  SELECT un.ki, un.ua, un.ub, un.cnt,
+         row_number() OVER w AS uo,
+         sum(un.cnt) OVER (w ROWS UNBOUNDED PRECEDING) AS cum
+    FROM un
+  WINDOW w AS (PARTITION BY un.ki ORDER BY un.ne DESC, un.nid DESC, un.ua, un.ub)),
+k AS (
+  SELECT uo.ki, uo.ua, uo.ub, uo.uo, uo.cnt FROM uo WHERE uo.cum <= CAST(:wmax AS integer)),
+wd AS (
+  SELECT count(*) AS n FROM (
+    SELECT 1 FROM u GROUP BY u.ki, u.id, u.sk, u.sa, u.sb HAVING count(*) > 1) x),
+kv AS (
+  SELECT k.ki, array_agg(d.val ORDER BY k.uo, d.rn) AS vals,
+         array_agg(k.cnt ORDER BY k.uo) FILTER (WHERE d.rn = 1) AS counts
+    FROM k JOIN d ON d.ki = k.ki AND d.ua = k.ua AND d.ub = k.ub
+   GROUP BY k.ki),
+t AS (
+  SELECT uo.ki, bool_or(uo.cum > CAST(:wmax AS integer)) AS truncated
+    FROM uo GROUP BY uo.ki)
+SELECT t.ki, kv.vals, kv.counts, t.truncated, (SELECT wd.n FROM wd) AS dup
+  FROM t LEFT JOIN kv ON kv.ki = t.ki
+ ORDER BY t.ki""" % {"g": _window_cte(ranked_only), "unit": unit,
                      "branches": "\n  UNION ALL\n".join("  " + b for b in branches)}
 
 
 class PopulationUnavailable(Exception):
-    """A population source holds two facts for one `(ki, id, subj)`: nothing
+    """A population source holds two facts for one `(ki, id, subj)`, or a
+    replacement found no room in the budget within the deadline: nothing
     publishes, and the route answers `503 unavailable (population)`."""
+    status = 503
+    detail = "unavailable (population)"
+
+
+_log = logging.getLogger("admin_evidence")
 
 
 async def rebuild_game_population(conn, key, pop_days, lag_s, ranked_only=False,
-                                  branches=None, cap=None):
+                                  cap=None):
     """Read one game population and return `(values, truncated)`: per key an
     ascending `array('d')` of at most `cap` values and, for a truncated key,
     its cutoff. Streamed one key's row at a time. A repeated identity
@@ -936,8 +1021,7 @@ async def rebuild_game_population(conn, key, pop_days, lag_s, ranked_only=False,
     before anything is kept."""
     from sqlalchemy import text   # deferred: the registry half needs no driver
     cap = CONTRACT_BOUNDS["POP_VALUES_MAX"] if cap is None else cap
-    sql = population_sql(population_branches() if branches is None else branches,
-                         ranked_only=ranked_only)
+    sql = population_sql(population_branches(), ranked_only=ranked_only)
     params = {"pop_days": pop_days, "lag_s": lag_s, "cap": cap}
     values, truncated = {}, {}
     result = await conn.stream(text(sql), params)
@@ -949,6 +1033,45 @@ async def rebuild_game_population(conn, key, pop_days, lag_s, ranked_only=False,
         if row.truncated:
             truncated[row.ki] = row.cutoff
     return values, truncated
+
+
+async def rebuild_window_source(conn, key, basis, pop_days, lag_s, ranked_only=False,
+                                wmax=None, depth=None):
+    """Read one window source and return `(values, offsets, truncated)`: per
+    key the kept units' values packed in unit order, newest first within a
+    unit, in `array('d')`, the unit start offsets (and the end) in
+    `array('i')`, and the truncated keys. Streamed one key's row at a time;
+    a repeated identity anywhere in the complete eligible relation raises
+    PopulationUnavailable before anything is kept."""
+    from sqlalchemy import text
+    wmax = CONTRACT_BOUNDS["WIN_VALUES_MAX"] if wmax is None else wmax
+    depth = CONTRACT_BOUNDS["WIN_UNIT_DEPTH"] if depth is None else depth
+    sql = window_source_sql(population_branches(partner=True), basis,
+                            ranked_only=ranked_only)
+    params = {"pop_days": pop_days, "lag_s": lag_s, "wmax": wmax, "depth": depth}
+    values, offsets, truncated = {}, {}, {}
+    result = await conn.stream(text(sql), params)
+    async for row in result:
+        if row.dup:
+            raise PopulationUnavailable(
+                "window source %r: %d repeated (ki, id, subj) facts" % (key, row.dup))
+        values[row.ki] = array("d", row.vals or ())
+        offsets[row.ki] = array("i", list(itertools.accumulate(row.counts or (), initial=0)))
+        if row.truncated:
+            truncated[row.ki] = True
+    return values, offsets, truncated
+
+
+def window_population(values, offsets, agg, n):
+    """The distribution a window cell is ranked in (design 2.6): each kept
+    unit's statistic over its first `n` values, units with fewer than `n`
+    values excluded; ascending."""
+    out = []
+    for i in range(len(offsets) - 1):
+        lo, hi = offsets[i], offsets[i + 1]
+        if hi - lo >= n:
+            out.append(window_stat(agg, values[lo:lo + n]))
+    return array("d", sorted(out))
 
 
 def _quantile(ordered, q):
@@ -977,11 +1100,26 @@ class Generation:
     computed_at: float
     values: dict
     truncated: dict
+    offsets: dict = field(default_factory=dict)
+    kind: str = "game"
     leases: int = 0
     retired: bool = False
 
     def nbytes(self):
-        return sum(len(a) * a.itemsize for a in self.values.values())
+        """The packed bytes: values (8 B each) and unit offsets (4 B each)."""
+        return (sum(len(a) * a.itemsize for a in self.values.values())
+                + sum(len(a) * a.itemsize for a in self.offsets.values()))
+
+
+# The design's sizing basis for the cold base RSS `B` (design 2.6); the api
+# replaces it with the value it measures at startup (item 1a-4).
+SIZING_BASE_RSS_MB = 80.0
+
+
+def budget_bytes(base_rss_mb):
+    """The cache's byte budget (design 2.6): `128/1.25 - B - 2` MB."""
+    return int((CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - base_rss_mb - 2)
+               * 1024 * 1024)
 
 
 class PopulationCache:
@@ -992,7 +1130,9 @@ class PopulationCache:
     derived entries (#744); a retired generation stays counted until its last
     lease is released."""
 
-    def __init__(self, clock=None):
+    LIVE_MAX = {"game": "GAME_SETS_LIVE", "window": "WINDOW_SOURCES_LIVE"}
+
+    def __init__(self, clock=None, base_rss_mb=SIZING_BASE_RSS_MB):
         self._clock = clock or time.time
         self._gen = 0
         self.live = {}
@@ -1000,6 +1140,12 @@ class PopulationCache:
         self.memo = collections.OrderedDict()
         self.memo_bytes = 0
         self.in_progress = 0
+        self.base_rss_mb = base_rss_mb
+        self._released = asyncio.Event()
+
+    @property
+    def budget(self):
+        return budget_bytes(self.base_rss_mb)
 
     def current(self, key):
         g = self.live.get(key)
@@ -1007,15 +1153,43 @@ class PopulationCache:
             return None
         return g
 
-    def publish(self, key, values, truncated):
+    def publish(self, key, values, truncated, offsets=None):
+        """Publish a new generation for `key`; a window source passes its
+        unit offsets. The superseded generation retires, and past the live
+        cap of its kind the oldest other live generation of that kind does."""
+        kind = "window" if offsets is not None else "game"
         self._gen += 1
         new = Generation(key=key, gen=self._gen, computed_at=self._clock(),
-                         values=values, truncated=truncated)
-        old = self.live.get(key)
+                         values=values, truncated=truncated, offsets=offsets or {},
+                         kind=kind)
+        old = self.live.pop(key, None)
         self.live[key] = new
         if old is not None:
             self._retire(old)
+        same = [g for g in self.live.values() if g.kind == kind]
+        while len(same) > CONTRACT_BOUNDS[self.LIVE_MAX[kind]]:
+            oldest = same.pop(0)
+            del self.live[oldest.key]
+            self._retire(oldest)
         return new
+
+    async def admit(self, nbytes, deadline):
+        """The budget gate (design 2.6): a replacement of `nbytes`, which the
+        caller already counts in `in_progress`, publishes only while
+        `cache_bytes()` (live, leased-retired, memo, in-progress, so the
+        replacement too) fits the budget; otherwise wait on lease releases
+        until `deadline` (time.monotonic), then refuse."""
+        while self.cache_bytes() > self.budget:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PopulationUnavailable(
+                    "budget: %d cached bytes (a %d-byte replacement among them) over %d"
+                    % (self.cache_bytes(), nbytes, self.budget))
+            self._released.clear()
+            try:
+                await asyncio.wait_for(self._released.wait(), remaining)
+            except asyncio.TimeoutError:
+                pass
 
     def _retire(self, g):
         g.retired = True
@@ -1032,18 +1206,25 @@ class PopulationCache:
         g.leases -= 1
         if g.leases == 0 and g in self.retired:
             self.retired.remove(g)
+        self._released.set()
+
+    @staticmethod
+    def _memo_key(comp, lease):
+        return (comp, lease.key, lease.gen)
 
     def memo_get(self, comp, lease):
-        mk = (comp, lease.key, lease.gen)
+        """A derived result, only when its stored source key, gen and
+        computed_at all equal the lease's; otherwise None (recompute)."""
+        mk = self._memo_key(comp, lease)
         r = self.memo.get(mk)
-        if r is None or (r["source_key"], r["gen"], r["computed_at"]) != (
+        if r is None or (r.get("source_key"), r.get("gen"), r.get("computed_at")) != (
                 lease.key, lease.gen, lease.computed_at):
             return None
         self.memo.move_to_end(mk)
         return r
 
     def memo_put(self, comp, lease, result, nbytes):
-        mk = (comp, lease.key, lease.gen)
+        mk = self._memo_key(comp, lease)
         if mk in self.memo:
             self.memo_bytes -= self.memo.pop(mk)["_bytes"]
         stored = dict(result, source_key=lease.key, gen=lease.gen,
@@ -1060,3 +1241,60 @@ class PopulationCache:
         return (sum(g.nbytes() for g in self.live.values())
                 + sum(g.nbytes() for g in self.retired)
                 + self.memo_bytes + self.in_progress)
+
+
+def _packed_bytes(*maps):
+    return sum(len(a) * a.itemsize for m in maps for a in m.values())
+
+
+def _deadline(deadline):
+    if deadline is not None:
+        return deadline
+    return (time.monotonic() + CONTRACT_BOUNDS["REPORT_DEADLINE_S"]
+            - CONTRACT_BOUNDS["AUDIT_RESERVE_S"])
+
+
+async def _admit_and_publish(cache, key, values, truncated, offsets, t0, deadline):
+    nbytes = _packed_bytes(values, offsets or {})
+    cache.in_progress += nbytes
+    try:
+        await cache.admit(nbytes, _deadline(deadline))
+    except PopulationUnavailable as exc:
+        _log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
+        raise
+    finally:
+        cache.in_progress -= nbytes
+    g = cache.publish(key, values, truncated, offsets)
+    _log.info("admin_evidence population rebuilt: key=%r gen=%d size=%d truncated=%s "
+              "duration_ms=%d bytes=%d", key, g.gen, sum(len(a) for a in values.values()),
+              sorted(truncated), int((time.monotonic() - t0) * 1000), g.nbytes())
+    return g
+
+
+async def refresh_game_set(cache, conn, key, pop_days, lag_s, ranked_only=False,
+                           cap=None, deadline=None):
+    """Rebuild and publish one game set. A refusal (a repeated identity, or
+    no room in the budget by the deadline) logs one line, publishes nothing
+    and raises PopulationUnavailable; the live generation stays as it was."""
+    t0 = time.monotonic()
+    try:
+        values, truncated = await rebuild_game_population(
+            conn, key, pop_days, lag_s, ranked_only=ranked_only, cap=cap)
+    except PopulationUnavailable as exc:
+        _log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
+        raise
+    return await _admit_and_publish(cache, key, values, truncated, None, t0, deadline)
+
+
+async def refresh_window_source(cache, conn, key, basis, pop_days, lag_s,
+                                ranked_only=False, wmax=None, depth=None, deadline=None):
+    """Rebuild and publish one window source; refusals as `refresh_game_set`."""
+    t0 = time.monotonic()
+    try:
+        values, offsets, truncated = await rebuild_window_source(
+            conn, key, basis, pop_days, lag_s, ranked_only=ranked_only, wmax=wmax,
+            depth=depth)
+    except PopulationUnavailable as exc:
+        _log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
+        raise
+    return await _admit_and_publish(cache, key, values, truncated, offsets, t0, deadline)

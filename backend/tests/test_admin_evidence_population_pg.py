@@ -22,18 +22,45 @@ and the cache's generation rules:
     `cache_bytes()` until its last release; a result stored under one
     generation is never returned for another.
 
-Not here yet (item 1a-3, later passes): window sources, the budget gate,
-cold-start B, tracemalloc and RSS measures, and the 1a-3N duplicates.
+Window sources (design 2.6): units newest first, a unit's values newest
+first; units with fewer than `n` values excluded; a warm derived result
+recomputed after its source expires and a value is added (new `pop_n`,
+rank, `computed_at`, provenance equal to the lease). The cache: at most
+4 game sets and 8 window sources live; the budget gate waits on a lease
+release and refuses at the deadline; `cache_bytes()` within 5% of the
+allocations tracemalloc attributes to the module after a window rebuild at
+maximum fragmentation.
+
+1a-3N duplicates (round 9 N19), seam family `Z` in this file only: a
+fixture table `z_facts` of up to two facts per `(id, subj)` read through
+test-only branches put in place of `population_branches` (no production
+key or parameter). Per sibling two differently valued facts sharing
+`(ki, id, subj)`: the game population at the cap and behind `cap` newer
+facts; the player-seat and directional pair-seat window sources in a kept
+unit, deeper than WIN_UNIT_DEPTH and in the dropped crossing unit. Each
+refuses with `503 unavailable (population)` and one log line, publishes
+nothing (the live generation and the gen counter unchanged), and its
+one-fact twin serves.
+
+Not here yet (later passes): cold-start `B` and peak RSS x 1.25 measured
+on the api process, the route halves (R1 to R4, 1a-4), the second decoded
+copy and route-shape mutants.
 
 `ADMIN_EVIDENCE_TEST_PG_DSN` names a database whose name carries
 `admin_evidence`; unset, the module fails (an affirmative
 `ADMIN_EVIDENCE_TEST_PG_OPTOUT` makes that named skips).
 """
 
+import asyncio
 import datetime as dt
+import gc
+import inspect
 import json
+import logging
 import os
 import sys
+import time
+import tracemalloc
 import uuid
 
 import pytest
@@ -78,6 +105,7 @@ async def _bulk(lv, games):
         "INSERT INTO matches (%s) VALUES (%s)"
         % (", ".join(names), ", ".join(":%s" % n for n in names))), rows)
     await lv.conn.commit()
+    return [r["id"] for r in rows]
 
 
 def _games(n, start, value_of):
@@ -91,10 +119,10 @@ def _games(n, start, value_of):
     return out
 
 
-async def _rebuild(lv, cap=None, branches=None):
+async def _rebuild(lv, cap=None):
     return await ae.rebuild_game_population(
         lv.conn, ("display", "all"), pop_days=ae.DISPLAY_DEFAULTS["pop_days"],
-        lag_s=ae.DISPLAY_DEFAULTS["lag_s"], cap=cap, branches=branches)
+        lag_s=ae.DISPLAY_DEFAULTS["lag_s"], cap=cap)
 
 
 # ── Ranks ──────────────────────────────────────────────────────────────────
@@ -163,7 +191,7 @@ def _two_seat_branch(ki, seat):
             % (ki, val, acc, val))
 
 
-def test_p9_cap_tie_is_broken_by_subject_in_both_branch_orders(live):
+def test_p9_cap_tie_is_broken_by_subject_in_both_branch_orders(live, monkeypatch):
     """cap-1 newer facts, then one game whose two seats both carry the key:
     positions cap and cap+1 share ended_at and id and differ only by subject.
     No phase-1 key carries values on both seats of one game, so the tie is
@@ -179,12 +207,12 @@ def test_p9_cap_tie_is_broken_by_subject_in_both_branch_orders(live):
         await _bulk(live, [(lo, hi, start, lo, {"p1_net_hitch50": 1000,
                                                 "p2_net_hitch50": 2000})])
         await _bulk(live, _games(small - 1, start + dt.timedelta(minutes=1), lambda i: i))
-        forward = await _rebuild(live, cap=small,
-                                 branches=[_two_seat_branch(ki, "p1"),
-                                           _two_seat_branch(ki, "p2")])
-        backward = await _rebuild(live, cap=small,
-                                  branches=[_two_seat_branch(ki, "p2"),
-                                            _two_seat_branch(ki, "p1")])
+        monkeypatch.setattr(ae, "population_branches", lambda *a, **k: [
+            _two_seat_branch(ki, "p1"), _two_seat_branch(ki, "p2")])
+        forward = await _rebuild(live, cap=small)
+        monkeypatch.setattr(ae, "population_branches", lambda *a, **k: [
+            _two_seat_branch(ki, "p2"), _two_seat_branch(ki, "p1")])
+        backward = await _rebuild(live, cap=small)
         return forward, backward
 
     (fv, ft), (bv, bt) = live.run(go())
@@ -281,3 +309,379 @@ def test_p9_a_result_is_never_returned_for_another_generation():
         a.key, a.gen, a.computed_at)
     print("GATE p9 relabel: a result stored under gen %d is not served to gen %d"
           % (a.gen, b.gen))
+
+
+def test_p9_a_result_is_served_only_to_its_own_provenance():
+    """A lease naming the same source key and gen but another computed_at is
+    not the result's provenance: the result is recomputed, never relabelled."""
+    cache = ae.PopulationCache(clock=_Clock())
+    a = cache.publish(("display", "all"), {HITCH.ki: _arr(1)}, {})
+    comp = ("w", "player", 1)
+    cache.memo_put(comp, a, {"pop_rank": 0.5}, 32)
+    other = ae.Generation(key=a.key, gen=a.gen, computed_at=a.computed_at + 1,
+                          values={}, truncated={})
+    assert cache.memo_get(comp, other) is None
+    assert cache.memo_get(comp, a)["computed_at"] == a.computed_at
+    print("GATE p9 provenance: same key and gen, computed_at %s against %s: recomputed"
+          % (other.computed_at, a.computed_at))
+
+
+def test_p9_live_generations_stay_within_four_game_sets_and_eight_window_sources():
+    cache = ae.PopulationCache(clock=_Clock())
+    games = [cache.publish(("display", "all", "fp", 30, i), {HITCH.ki: _arr(i)}, {})
+             for i in range(5)]
+    windows = [cache.publish(("display", "all", "fp", 30, i, "player"), {HITCH.ki: _arr(i)},
+                             {}, offsets={HITCH.ki: ae.array("i", [0, 1])})
+               for i in range(9)]
+    live = list(cache.live.values())
+    assert sum(g.kind == "game" for g in live) == ae.CONTRACT_BOUNDS["GAME_SETS_LIVE"]
+    assert sum(g.kind == "window" for g in live) == ae.CONTRACT_BOUNDS["WINDOW_SOURCES_LIVE"]
+    assert games[0].retired and windows[0].retired
+    assert not games[1].retired and not windows[1].retired
+    print("GATE p9 live caps: %d game sets, %d window sources live; the oldest of each retired"
+          % (sum(g.kind == "game" for g in live), sum(g.kind == "window" for g in live)))
+
+
+# ── Window sources ─────────────────────────────────────────────────────────
+
+MEDIAN_OF_HITCH = next(e for e in ae.REPORT_REGISTRY
+                       if e.is_window and e.base == HITCH.ki and e.agg.startswith("win_median"))
+
+
+async def _hitch_pairs(lv, start):
+    """X (p1, reporting) plays Y three games (values 1, 2, 3) then Z two
+    games (10, 20), one minute apart."""
+    x, y, z = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    games = [(x, y, start + dt.timedelta(minutes=i), x, {"p1_net_hitch50": v})
+             for i, v in enumerate((1, 2, 3))]
+    games += [(x, z, start + dt.timedelta(minutes=3 + i), x, {"p1_net_hitch50": v})
+              for i, v in enumerate((10, 20))]
+    await _bulk(lv, games)
+    return x
+
+
+def test_p9_window_source_units_newest_first_and_units_need_n_values(live):
+    start = NOW - dt.timedelta(days=6)
+    ki = HITCH.ki
+
+    async def go():
+        await _hitch_pairs(live, start)
+        out = {}
+        for basis in ("player", "pair"):
+            out[basis] = await ae.rebuild_window_source(
+                live.conn, ("display", "all", basis), basis, 30, 120)
+        return out
+
+    out = live.run(go())
+    pv, po, pt = out["player"]
+    assert list(pv[ki]) == [20.0, 10.0, 3.0, 2.0, 1.0] and list(po[ki]) == [0, 5]
+    qv, qo, qt = out["pair"]
+    assert list(qv[ki]) == [20.0, 10.0, 3.0, 2.0, 1.0] and list(qo[ki]) == [0, 2, 5]
+    assert ki not in pt and ki not in qt
+    assert list(ae.window_population(qv[ki], qo[ki], "win_median", 2)) == [2.5, 15.0]
+    assert list(ae.window_population(qv[ki], qo[ki], "win_median", 3)) == [2.0]
+    assert list(ae.window_population(qv[ki], qo[ki], "win_max", 2)) == [3.0, 20.0]
+    assert list(ae.window_population(pv[ki], po[ki], "win_median", 5)) == [3.0]
+    assert list(ae.window_population(pv[ki], po[ki], "win_median", 6)) == []
+    print("GATE p9 window units: player offsets %s, pair offsets %s; pair medians at n=2 "
+          "[2.5, 15.0], at n=3 [2.0]; player at n=6 none"
+          % (list(po[ki]), list(qo[ki])))
+
+
+def test_p9_generation_a_warm_result_is_recomputed_after_its_source_expires(live):
+    start = NOW - dt.timedelta(days=7)
+    ki = HITCH.ki
+    clock = _Clock()
+    cache = ae.PopulationCache(clock=clock)
+    key = ("display", "all", ae.registry_fingerprint(), 30, 120, "pair")
+    comp = ae.comparability_key(MEDIAN_OF_HITCH.key, "pair", 2)
+
+    async def go():
+        x = await _hitch_pairs(live, start)
+        g1 = await ae.refresh_window_source(cache, live.conn, key, "pair", 30, 120)
+        lease = cache.lease(g1)
+        dist = ae.window_population(g1.values[ki], g1.offsets[ki], "win_median", 2)
+        r1 = dict(cache.memo_put(comp, lease, ae.pop_measures(dist, 15.0), 64))
+        clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"] - 1
+        warm = cache.current(key) is g1 and cache.memo_get(comp, lease) is not None
+        cache.release(lease)
+        w = uuid.uuid4()
+        await _bulk(live, [(x, w, start + dt.timedelta(minutes=5 + i), x,
+                            {"p1_net_hitch50": v}) for i, v in enumerate((30, 40))])
+        clock.t += 2
+        expired = cache.current(key) is None
+        g2 = await ae.refresh_window_source(cache, live.conn, key, "pair", 30, 120)
+        lease2 = cache.lease(g2)
+        stale = cache.memo_get(comp, lease2)
+        dist2 = ae.window_population(g2.values[ki], g2.offsets[ki], "win_median", 2)
+        r2 = cache.memo_put(comp, lease2, ae.pop_measures(dist2, 15.0), 64)
+        cache.release(lease2)
+        return g1, g2, r1, r2, warm, expired, stale
+
+    g1, g2, r1, r2, warm, expired, stale = live.run(go())
+    assert warm and expired and stale is None
+    assert g2.gen > g1.gen and g2.computed_at > g1.computed_at
+    assert (r1["pop_n"], r2["pop_n"]) == (2, 3)
+    assert (r1["pop_rank"], r2["pop_rank"]) == (pytest.approx(0.75), pytest.approx(0.5))
+    assert (r2["source_key"], r2["gen"], r2["computed_at"]) == (g2.key, g2.gen, g2.computed_at)
+    assert (r1["source_key"], r1["gen"], r1["computed_at"]) == (g1.key, g1.gen, g1.computed_at)
+    assert all(mk[2] != g1.gen for mk in cache.memo)
+    print("GATE p9 generation: gen %d -> %d, pop_n 2 -> 3, rank 0.75 -> 0.50, "
+          "computed_at %s -> %s, provenance equal to the lease"
+          % (g1.gen, g2.gen, r1["computed_at"], r2["computed_at"]))
+
+
+# ── Budget gate and byte count ─────────────────────────────────────────────
+
+def _big(n_bytes):
+    from array import array
+    return array("d", bytes(n_bytes))
+
+
+def _gate_cache(budget_mb):
+    """A cache whose budget is `budget_mb`: B set so 128/1.25 - B - 2 = it."""
+    b = ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - 2 - budget_mb
+    return ae.PopulationCache(clock=_Clock(), base_rss_mb=b)
+
+
+def test_p9_budget_gate_waits_on_a_lease_release():
+    cache = _gate_cache(1.5)
+    key = ("display", "all", "fp", 30, 120)
+    part = 600 * 1024
+
+    async def go():
+        g1 = await ae._admit_and_publish(cache, key, {1: _big(part)}, {}, None,
+                                         time.monotonic(), None)
+        lease = cache.lease(g1)
+        g2 = await ae._admit_and_publish(cache, key, {1: _big(part)}, {}, None,
+                                         time.monotonic(), None)
+        assert g1.retired and g1 in cache.retired
+
+        async def later():
+            await asyncio.sleep(0.3)
+            cache.release(lease)
+
+        t0 = time.monotonic()
+        task = asyncio.ensure_future(later())
+        g3 = await ae._admit_and_publish(cache, key, {1: _big(part)}, {}, None,
+                                         t0, t0 + 5)
+        waited = time.monotonic() - t0
+        await task
+        return g2, g3, waited
+
+    loop = asyncio.new_event_loop()
+    try:
+        g2, g3, waited = loop.run_until_complete(go())
+    finally:
+        loop.close()
+    assert waited >= 0.25, "published after %.3f s, before the lease was released" % waited
+    assert cache.current(key) is g3 and g2.retired
+    print("GATE p9 budget wait: budget %d bytes, third %d-byte publish admitted after "
+          "%.3f s, at the lease release" % (cache.budget, part, waited))
+
+
+def test_p9_budget_gate_refuses_at_the_deadline(caplog):
+    cache = _gate_cache(1.5)
+    key = ("display", "all", "fp", 30, 120)
+    part = 600 * 1024
+
+    async def go():
+        g1 = await ae._admit_and_publish(cache, key, {1: _big(part)}, {}, None,
+                                         time.monotonic(), None)
+        cache.lease(g1)
+        g2 = await ae._admit_and_publish(cache, key, {1: _big(part)}, {}, None,
+                                         time.monotonic(), None)
+        t0 = time.monotonic()
+        try:
+            await ae._admit_and_publish(cache, key, {1: _big(part)}, {}, None, t0, t0 + 0.3)
+        except ae.PopulationUnavailable as exc:
+            return g2, exc
+        return g2, None
+
+    loop = asyncio.new_event_loop()
+    try:
+        with caplog.at_level(logging.WARNING, logger="admin_evidence"):
+            g2, exc = loop.run_until_complete(go())
+    finally:
+        loop.close()
+    assert exc is not None, "a replacement over the budget published"
+    assert (exc.status, exc.detail) == (503, "unavailable (population)")
+    assert cache.current(key) is g2 and cache.in_progress == 0
+    assert [r for r in caplog.records if "population unavailable" in r.getMessage()]
+    print("GATE p9 budget refusal: %s" % exc)
+
+
+# ── Seam family Z (test builds only) ───────────────────────────────────────
+
+Z_KI = 10000          # a test-only key number, outside the registry
+
+
+def _z_branches(entries=None, partner=False, kis=(Z_KI,)):
+    po = (", CASE z.seat WHEN 'p1' THEN g.player2_id ELSE g.player1_id END AS po"
+          if partner else "")
+    return ["SELECT z.ki, z.val, g.ended_at, g.id, 'seat'::text AS sk, "
+            "CASE z.seat WHEN 'p1' THEN g.player1_id ELSE g.player2_id END AS sa, "
+            "CAST(NULL AS uuid) AS sb%s FROM g JOIN z_facts z ON z.match_id = g.id "
+            "WHERE z.ki = %d AND z.val IS NOT NULL" % (po, k) for k in kis]
+
+
+async def _z_table(lv):
+    from sqlalchemy import text
+    await lv.conn.execute(text(
+        "CREATE TABLE z_facts (match_id uuid NOT NULL, seat text NOT NULL, "
+        "ki integer NOT NULL, val double precision)"))
+    await lv.conn.commit()
+
+
+async def _z_facts(lv, facts):
+    """`(match_id, seat, ki, val)` facts; up to two per `(id, subj)`."""
+    from sqlalchemy import text
+    await lv.conn.execute(text(
+        "INSERT INTO z_facts (match_id, seat, ki, val) VALUES (:m, :s, :k, :v)"),
+        [{"m": m, "s": s, "k": k, "v": v} for m, s, k, v in facts])
+    await lv.conn.commit()
+
+
+def _refused(records):
+    return [r for r in records if "admin_evidence population unavailable" in r.getMessage()]
+
+
+@pytest.mark.parametrize("placement", ["at_cap", "behind_cap"])
+def test_p9_duplicate_game_population_refuses(live, monkeypatch, caplog, placement):
+    monkeypatch.setattr(ae, "population_branches", _z_branches)
+    small = 40
+    newer = small - 1 if placement == "at_cap" else small
+    start = NOW - dt.timedelta(days=8)
+    clock = _Clock()
+    cache = ae.PopulationCache(clock=clock)
+    key = ("display", "all", "z", 30, 120)
+
+    async def go():
+        await _z_table(live)
+        a, b = uuid.uuid4(), uuid.uuid4()
+        [dup] = await _bulk(live, [(a, b, start, a, {})])
+        ids = await _bulk(live, _games(newer, start + dt.timedelta(minutes=1), lambda i: None))
+        await _z_facts(live, [(m, "p1", Z_KI, float(i)) for i, m in enumerate(ids)]
+                       + [(dup, "p1", Z_KI, 500.0)])
+        twin = await ae.refresh_game_set(cache, live.conn, key, 30, 120, cap=small)
+        await _z_facts(live, [(dup, "p1", Z_KI, 501.0)])
+        clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"]
+        try:
+            await ae.refresh_game_set(cache, live.conn, key, 30, 120, cap=small)
+        except ae.PopulationUnavailable as exc:
+            return twin, exc
+        return twin, None
+
+    with caplog.at_level(logging.WARNING, logger="admin_evidence"):
+        twin, exc = live.run(go())
+    assert len(twin.values[Z_KI]) == small
+    assert (500.0 in twin.values[Z_KI]) == (placement == "at_cap")
+    assert exc is not None, "the duplicate %s did not refuse" % placement
+    assert (exc.status, exc.detail) == (503, "unavailable (population)")
+    assert len(_refused(caplog.records)) == 1
+    assert cache.live[key] is twin and cache._gen == twin.gen and not twin.retired
+    print("GATE p9 duplicate game %s: twin gen %d served %d values; duplicate refused: %s"
+          % (placement, twin.gen, len(twin.values[Z_KI]), exc))
+
+
+# Units for the window placements, newest unit first: U1 35 games (30 kept
+# by depth), U2 10 games (kept, 40 values), U3 5 games (crosses 40: dropped).
+_WINDOW_PLACEMENT = {"kept": (0, 34), "deep": (0, 2), "crossing": (2, 4)}
+
+
+@pytest.mark.parametrize("placement", ["kept", "deep", "crossing"])
+@pytest.mark.parametrize("basis", ["player", "pair"])
+def test_p9_duplicate_window_source_refuses(live, monkeypatch, caplog, basis, placement):
+    monkeypatch.setattr(ae, "population_branches", _z_branches)
+    start = NOW - dt.timedelta(days=9)
+    clock = _Clock()
+    cache = ae.PopulationCache(clock=clock)
+    key = ("display", "all", "z", 30, 120, basis)
+    wmax = 40
+
+    async def go():
+        await _z_table(live)
+        units = []
+        for u, (count, base) in enumerate(((35, 100), (10, 50), (5, 0))):
+            a, b = uuid.uuid4(), uuid.uuid4()
+            units.append(await _bulk(live, [
+                (a, b, start + dt.timedelta(minutes=base + i), a, {}) for i in range(count)]))
+        await _z_facts(live, [(m, "p1", Z_KI, float(100 * u + i))
+                              for u, ids in enumerate(units) for i, m in enumerate(ids)])
+        twin = await ae.refresh_window_source(cache, live.conn, key, basis, 30, 120,
+                                              wmax=wmax)
+        u, i = _WINDOW_PLACEMENT[placement]
+        await _z_facts(live, [(units[u][i], "p1", Z_KI, 100 * u + i + 0.5)])
+        clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"]
+        try:
+            await ae.refresh_window_source(cache, live.conn, key, basis, 30, 120, wmax=wmax)
+        except ae.PopulationUnavailable as exc:
+            return twin, exc
+        return twin, None
+
+    with caplog.at_level(logging.WARNING, logger="admin_evidence"):
+        twin, exc = live.run(go())
+    assert list(twin.offsets[Z_KI]) == [0, 30, 40] and Z_KI in twin.truncated
+    assert list(twin.values[Z_KI][:3]) == [34.0, 33.0, 32.0]
+    assert exc is not None, "the duplicate %s (%s) did not refuse" % (placement, basis)
+    assert (exc.status, exc.detail) == (503, "unavailable (population)")
+    assert len(_refused(caplog.records)) == 1
+    assert cache.live[key] is twin and cache._gen == twin.gen and not twin.retired
+    print("GATE p9 duplicate window %s %s: twin gen %d served offsets %s; refused: %s"
+          % (basis, placement, twin.gen, list(twin.offsets[Z_KI]), exc))
+
+
+def _builder_lines():
+    """Line spans of the SQL text builders: a statement string the driver's
+    compiled cache keeps is no part of the population's bytes."""
+    spans = []
+    for fn in (ae.window_source_sql, ae.population_sql, ae._window_cte,
+               ae.population_branches):
+        src, first = inspect.getsourcelines(fn)
+        spans.append((first, first + len(src)))
+    return spans
+
+
+def test_p9_cache_bytes_within_five_percent_of_tracemalloc(live, monkeypatch):
+    """A window source at maximum fragmentation (one value per unit, eight
+    keys): the bytes `cache_bytes()` counts are within 5% of what tracemalloc
+    attributes to allocations made in admin_evidence.py and still held."""
+    kis = tuple(range(Z_KI, Z_KI + 8))
+    monkeypatch.setattr(ae, "population_branches",
+                        lambda entries=None, partner=False: _z_branches(partner=partner, kis=kis))
+    start = NOW - dt.timedelta(days=10)
+    units = ae.CONTRACT_BOUNDS["WIN_VALUES_MAX"]
+    cache = ae.PopulationCache(clock=_Clock())
+    key = ("display", "all", "z", 30, 120, "pair")
+    path = os.path.abspath(ae.__file__)
+
+    async def go():
+        await _z_table(live)
+        games = [(uuid.uuid4(), uuid.uuid4(), start + dt.timedelta(seconds=i), None, {})
+                 for i in range(units)]
+        games = [(p1, p2, ended, p1, cols) for p1, p2, ended, _r, cols in games]
+        ids = await _bulk(live, games)
+        await _z_facts(live, [(m, "p1", k, float(i)) for i, m in enumerate(ids) for k in kis])
+        gc.collect()
+        tracemalloc.start(1)
+        try:
+            g = await ae.refresh_window_source(cache, live.conn, key, "pair", 30, 120)
+            gc.collect()
+            snap = tracemalloc.take_snapshot()
+        finally:
+            tracemalloc.stop()
+        return g, snap
+
+    g, snap = live.run(go())
+    spans = _builder_lines()
+    held = 0
+    for stat in snap.filter_traces([tracemalloc.Filter(True, path)]).statistics("lineno"):
+        line = stat.traceback[0].lineno
+        if not any(lo <= line < hi for lo, hi in spans):
+            held += stat.size
+    counted = cache.cache_bytes()
+    assert len(g.values) == len(kis) and all(len(g.offsets[k]) == units + 1 for k in kis)
+    assert counted == g.nbytes()
+    assert abs(held - counted) <= 0.05 * held, (held, counted)
+    print("GATE p9 bytes: cache_bytes %d, tracemalloc held at module lines %d (%.2f%%)"
+          % (counted, held, 100.0 * abs(held - counted) / held))
