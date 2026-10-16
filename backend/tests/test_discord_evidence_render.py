@@ -64,13 +64,14 @@ def run(coro):
 # ── fixtures ──────────────────────────────────────────────────────────────
 
 def control_body():
-    """A game page with an escaped name and reason, `$` text, raw bidi and
-    Arabic-letter marks in an unchecked population value, a backslash, an
+    """A game page with an escaped name and reason, `$` text, the Arabic
+    letter mark, U+200E and U+200F raw in an unchecked population value, a
+    backslash, an
     invalidated game, and extreme or unknown cell values."""
     body = game_body()
     base = [e for e in ae.REPORT_REGISTRY if not e.is_window][:2]
     body["subjects"][1]["name"] = ae._aer_enc("$x^2$ " + chr(0x200F) + BS)
-    body["population"]["key"] = "all" + chr(0x61C) + chr(0x200E) + "`" + BS
+    body["population"]["key"] = "all" + chr(0x61C) + chr(0x200E) + chr(0x200F) + "`" + BS
     body["population"]["truncated"] = ["seat" + chr(0x202E)]
     body["baseline"]["note"] = {"k": [1, chr(0x1B)]}
     body["registry"]["census"] = {"macro": 3}
