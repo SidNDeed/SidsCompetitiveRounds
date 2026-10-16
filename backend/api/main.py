@@ -5855,6 +5855,12 @@ app.include_router(auto_logs_internal_router)
 # each call's reference id, and exactly three calls in this file.
 import title_ladders
 app.include_router(title_ladders.router)
+# Admin evidence report (phase 1a): the four GET report routes under
+# /api/v1/internal/evidence-report/, read-only but for one admin_actions audit
+# row per served page. Their outermost gate, evidence_key_gate, is registered
+# after replica_write_gate below.
+import admin_evidence as _admin_evidence
+app.include_router(_admin_evidence.router)
 
 
 # ── Version gate ───────────────────────────────────────────────
@@ -6632,8 +6638,12 @@ async def replica_write_gate(request: Request, call_next):
     The honest answer then is a clean refusal naming the reason, rather than a
     500 surfacing from postgres several layers down, or a half-applied write.
 
-    Registered LAST, so it is the OUTERMOST middleware and refuses before any
-    other layer does work. Inert on the primary: one boolean per request.
+    Registered after every other gate but one, so it refuses before them. The
+    one layer outside it is `evidence_key_gate` (admin_evidence.py), registered
+    right after this function: for the evidence report paths only it requires
+    the internal key before anything else runs, in every server state, and
+    passes every other path untouched. Inert on the primary: one boolean per
+    request.
 
     WHAT IT DOES NOT COVER, stated because a gate is easy to over-read:
       * WRITE-ON-GET. This codebase's dominant write shape is a GET that writes
@@ -6661,6 +6671,14 @@ async def replica_write_gate(request: Request, call_next):
                                "standby that should not have."},
         )
     return await call_next(request)
+
+
+# The evidence report's key gate (admin_evidence.py, design 4.2 step 1).
+# Registered LAST, so it is the outermost http middleware: a request under
+# /api/v1/internal/evidence-report/ without the internal key is refused here
+# with the report's one refusal body before maintenance or any other layer
+# answers. Every other path passes through it untouched.
+app.middleware("http")(_admin_evidence.evidence_key_gate)
 
 
 # ── Helpers ────────────────────────────────────────────────────

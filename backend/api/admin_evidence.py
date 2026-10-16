@@ -7,23 +7,37 @@ identity (design 2.1), the provenance letters, and the one encoding boundary
 every displayed string passes through (`_aer_enc`, `AER_ESC`, `AER_WIRE`,
 design 2.12 and 3.3).
 
-It imports no review module: phase 1a is structurally uncolored. Nothing here
-writes to the database.
+It imports no review module: phase 1a is structurally uncolored. Its one
+database write is the route audit row (`admin_actions`, design 4.4), in its
+own short transaction after the body is built.
+
+The four report routes (R1 to R4, design 4.1) live here in `router`, which
+main.py includes; `evidence_key_gate` is the outermost http middleware for
+their path prefix, registered by main.py after `replica_write_gate`.
 """
 
 from __future__ import annotations
 
 import asyncio
 import collections
+import datetime as _dt
 import hashlib
+import hmac
 import itertools
 import json
 import logging
 import math
+import os
 import time
 from array import array
 from dataclasses import dataclass, field
 from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from database import get_db
 
 # ── Bounds and display defaults ────────────────────────────────────────────
 #
@@ -54,6 +68,10 @@ CONTRACT_BOUNDS = {
     "POP_MEM_BUDGET_MB": 128,
     "GAME_SETS_LIVE": 4,
     "WINDOW_SOURCES_LIVE": 8,
+    # Routes (design 4.6): reports per actor per window, in process.
+    "RATE_MAX": 20,
+    "RATE_WINDOW_S": 600,
+    "ACTOR_ID_MAX_DIGITS": 32,
 }
 
 DISPLAY_DEFAULTS = {
@@ -1336,3 +1354,640 @@ async def refresh_window_source(cache, conn, key, basis, pop_days, lag_s,
         _log.warning("admin_evidence population unavailable: key=%r %s", key, exc)
         raise
     return await _admit_and_publish(cache, key, values, truncated, offsets, t0, deadline)
+
+
+# ── Routes (design 1.2, 1.3, 4.1 to 4.6; item 1a-4) ───────────────────────
+#
+# Order in a served request (design 4.4): key gate (middleware), actor gate,
+# parse, recovery probe, rate bound, in-flight bound and leases, reads, the
+# empty-cohort check, serialization and size check, audit, return. Every
+# refusal is a status with `{"detail": <word>}`; the gate's refusal is one
+# fixed body for every failure class.
+
+EVIDENCE_ROOT = "/api/v1/internal/evidence-report"
+EVIDENCE_PREFIX = EVIDENCE_ROOT + "/"
+REFUSED = "refused"
+
+router = APIRouter(prefix=EVIDENCE_ROOT, tags=["Internal"])
+
+
+def _evidence_refusal():
+    """The one refusal of the key and actor gates: `403 {"detail":"refused"}`."""
+    return JSONResponse(status_code=403, content={"detail": REFUSED})
+
+
+def _refuse_class(cls):
+    """Log the failure class once, without the actor id (design 4.2)."""
+    _log.info("admin_evidence refused: %s", cls)
+
+
+def _key_matches(given):
+    expected = os.getenv("API_SECRET_KEY", "")
+    if not expected or given is None:
+        return False
+    return hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))
+
+
+async def evidence_key_gate(request: Request, call_next):
+    """Outermost layer for the evidence report paths (design 4.2 step 1).
+
+    A request whose path is under `/api/v1/internal/evidence-report/` must
+    carry `X-Internal-Key` equal to `API_SECRET_KEY`, and that variable must
+    be set (fail closed); otherwise it gets `_evidence_refusal()` in every
+    server state and for any method. It reads the path and that one header
+    only and keeps no bypass list; every other path passes untouched, and a
+    request with the key continues through the unchanged chain. main.py
+    registers it after `replica_write_gate`, so it runs first."""
+    path = request.url.path
+    if path == EVIDENCE_ROOT or path.startswith(EVIDENCE_PREFIX):
+        if not _key_matches(request.headers.get("X-Internal-Key")):
+            _refuse_class("no_key")
+            return _evidence_refusal()
+    return await call_next(request)
+
+
+def _fail(status, word, headers=None):
+    raise HTTPException(status_code=status, detail=word, headers=headers)
+
+
+async def _aer_is_admin(db, steam_id):
+    """The account is on the admin roster (`admin_users`, as main._is_admin):
+    the one authority this report accepts (#447)."""
+    from sqlalchemy import text
+    row = (await db.execute(text("SELECT 1 FROM admin_users WHERE steam_id = :s"),
+                            {"s": steam_id})).first()
+    return row is not None
+
+
+async def _evidence_gate(request, db):
+    """The route seam (design 4.2 step 2, 6.2): the first statement of every
+    handler, before any argument is parsed. Requires `X-Actor-Discord-Id`, 1
+    to ACTOR_ID_MAX_DIGITS ASCII digits, linked to a live account, and that
+    account on the admin roster; returns the account's steam id. Any failure
+    is the same `403 refused`."""
+    from sqlalchemy import text
+    d = request.headers.get("X-Actor-Discord-Id")
+    if (d is None or not 1 <= len(d) <= CONTRACT_BOUNDS["ACTOR_ID_MAX_DIGITS"]
+            or not d.isascii() or not d.isdigit()):
+        _refuse_class("bad_actor")
+        _fail(403, REFUSED)
+    steam = (await db.execute(text(
+        "SELECT steam_id FROM players WHERE discord_id = :d AND deleted_at IS NULL"),
+        {"d": d})).scalar()
+    if not steam:
+        _refuse_class("not_linked")
+        _fail(403, REFUSED)
+    if not await _aer_is_admin(db, steam):
+        _refuse_class("not_admin")
+        _fail(403, REFUSED)
+    return steam
+
+
+# Argument forms (design 1.2).
+
+_HEX = frozenset("0123456789abcdef")
+
+
+def _aer_ident(raw):
+    """`("full", 32 hex)` or `("code", 12 hex)`: lowercased, dashes stripped;
+    anything else is `400 bad_argument`."""
+    s = (raw or "").strip().lower().replace("-", "")
+    if s and set(s) <= _HEX:
+        if len(s) == 32:
+            return "full", s
+        if len(s) == 12:
+            return "code", s
+    _fail(400, "bad_argument")
+
+
+def _aer_steam(raw):
+    s = raw or ""
+    lo, hi = CONTRACT_BOUNDS["STEAM_ID_MIN_DIGITS"], CONTRACT_BOUNDS["STEAM_ID_MAX_DIGITS"]
+    if lo <= len(s) <= hi and s.isascii() and s.isdigit():
+        return s
+    _fail(400, "bad_argument")
+
+
+def _aer_int(request, name, default, lo, hi):
+    raw = request.query_params.get(name)
+    if raw is None:
+        return default
+    if not (raw.isascii() and raw.isdigit()) or not lo <= int(raw) <= hi:
+        _fail(400, "bad_argument (%s)" % name)
+    return int(raw)
+
+
+def _aer_pages(shape, c):
+    """Page count for `c` selected games (design 1.2): game and series
+    `ceil(c/5)`; pair and player `1 + ceil(c/5)`, page 1 the summary. Shared by
+    route, bot and tests."""
+    per = CONTRACT_BOUNDS["PAGE_GAMES"]
+    games = (c + per - 1) // per
+    return games + 1 if shape in ("pair", "player") else games
+
+
+def _aer_require_games(c):
+    """The shared empty-cohort check (design 1.3): `404 not_found` at `c == 0`,
+    before the page bound, windows, the audit and any send."""
+    if c == 0:
+        _fail(404, "not_found")
+
+
+# Selectors (design 1.3): `matches` only, in the bind form the EXPLAIN gates
+# of item 1a-1 read (test_admin_evidence_explain_pg.py holds the same text).
+
+R1_ID_SQL = """
+SELECT m.id, m.ended_at FROM matches m
+ WHERE m.id = CAST(:id AS uuid)"""
+
+R1_CODE_SQL = """
+SELECT m.id FROM matches m
+ WHERE LEFT(REPLACE(m.id::text, '-', ''), 12) = CAST(:code AS text)
+ LIMIT 2"""
+
+R2_SERIES_ROW_SQL = """
+SELECT s.id FROM ranked_series s WHERE s.id = CAST(:id AS uuid)"""
+
+R2_GAME_SERIES_SQL = """
+SELECT m.series_id FROM matches m WHERE m.id = CAST(:id AS uuid)"""
+
+R2_SERIES_SQL = """
+SELECT m.id, m.ended_at FROM matches m
+ WHERE m.series_id = CAST(:sid AS uuid)
+ ORDER BY m.ended_at, m.id
+ LIMIT CAST(:lim AS integer)"""
+
+R3_PAIR_SQL = """
+SELECT u.id, u.ended_at FROM (
+  (SELECT m.id, m.ended_at FROM matches m
+    WHERE m.player1_id = CAST(:a AS uuid) AND m.player2_id = CAST(:b AS uuid)
+    ORDER BY m.ended_at DESC, m.id DESC LIMIT CAST(:games AS integer))
+  UNION ALL
+  (SELECT m.id, m.ended_at FROM matches m
+    WHERE m.player1_id = CAST(:b AS uuid) AND m.player2_id = CAST(:a AS uuid)
+    ORDER BY m.ended_at DESC, m.id DESC LIMIT CAST(:games AS integer))
+) u
+ ORDER BY u.ended_at DESC, u.id DESC
+ LIMIT CAST(:games AS integer)"""
+
+R4_PLAYER_SQL = """
+SELECT u.id, u.ended_at FROM (
+  (SELECT m.id, m.ended_at FROM matches m
+    WHERE m.player1_id = CAST(:s AS uuid)
+    ORDER BY m.ended_at DESC, m.id DESC LIMIT CAST(:games AS integer))
+  UNION ALL
+  (SELECT m.id, m.ended_at FROM matches m
+    WHERE m.player2_id = CAST(:s AS uuid)
+    ORDER BY m.ended_at DESC, m.id DESC LIMIT CAST(:games AS integer))
+) u
+ ORDER BY u.ended_at DESC, u.id DESC
+ LIMIT CAST(:games AS integer)"""
+
+PLAYER_BY_STEAM_SQL = """
+SELECT p.id FROM players p WHERE p.steam_id = :steam AND p.deleted_at IS NULL"""
+
+SUBJECTS_SQL = """
+SELECT p.id, p.steam_id, p.display_name FROM players p
+ WHERE p.id = ANY(CAST(:ids AS uuid[]))"""
+
+FLAGS_SQL = """
+SELECT f.id, f.match_id, f.flag_reason, f.flag_details, f.reviewed_at, f.created_at
+  FROM flagged_matches f
+ WHERE f.match_id = ANY(CAST(:ids AS uuid[]))"""
+
+GAME_ROWS_SQL = ("SELECT %s, m.p1_rounds_won, m.p2_rounds_won FROM matches m "
+                 "WHERE m.id = ANY(CAST(:ids AS uuid[]))" % _SELECT_LIST)
+
+AUDIT_SQL = """
+INSERT INTO admin_actions (id, admin_steam_id, action, target_steam_id, target_match_id,
+                           target_series_id, details, created_at)
+VALUES (CAST(:id AS uuid), :admin, 'evidence_report', :t_steam, CAST(:t_match AS uuid),
+        CAST(:t_series AS uuid), CAST(:details AS jsonb), now())"""
+
+
+async def _rows(db, sql, params):
+    from sqlalchemy import text
+    result = await db.execute(text(sql), params)
+    return [dict(r) for r in result.mappings().all()]
+
+
+async def _select_game(db, ident):
+    kind, s = ident
+    if kind == "full":
+        rows = await _rows(db, R1_ID_SQL, {"id": s})
+    else:
+        rows = await _rows(db, R1_CODE_SQL, {"code": s})
+        if len(rows) > 1:
+            _fail(400, "bad_argument (code ambiguous; use the full id)")
+    if not rows:
+        _fail(404, "not_found")
+    return rows[0]["id"]
+
+
+async def _select_series(db, ident):
+    """R2: a 32-hex value is a series id first; only with no series row is it
+    resolved as a game (R1's selector) and that game's series taken."""
+    kind, s = ident
+    sid = None
+    if kind == "full":
+        if await _rows(db, R2_SERIES_ROW_SQL, {"id": s}):
+            sid = s
+    if sid is None:
+        gid = await _select_game(db, ident)
+        got = await _rows(db, R2_GAME_SERIES_SQL, {"id": str(gid)})
+        sid = got[0]["series_id"] if got else None
+        if sid is None:
+            _fail(404, "not_found")
+    lim = CONTRACT_BOUNDS["SERIES_GAMES_MAX"] + 1
+    rows = await _rows(db, R2_SERIES_SQL, {"sid": str(sid), "lim": lim})
+    if len(rows) > CONTRACT_BOUNDS["SERIES_GAMES_MAX"]:
+        _fail(500, "too_large")
+    return sid, [r["id"] for r in rows]
+
+
+async def _player_id(db, steam):
+    rows = await _rows(db, PLAYER_BY_STEAM_SQL, {"steam": steam})
+    if not rows:
+        _fail(404, "not_found")
+    return rows[0]["id"]
+
+
+# Bounds in process (design 4.6, 2.6). Plain counters, so no primitive is
+# bound to one event loop.
+
+_RATE = {}
+_INFLIGHT = [0]
+_REBUILDING = [False]
+_POLL_S = 0.01
+
+
+def _rate_charge(actor, now=None):
+    """At most RATE_MAX reports per actor per RATE_WINDOW_S, after the gate;
+    over it, `429 rate` with `Retry-After`."""
+    now = time.monotonic() if now is None else now
+    window = CONTRACT_BOUNDS["RATE_WINDOW_S"]
+    q = _RATE.setdefault(actor, collections.deque())
+    while q and now - q[0] >= window:
+        q.popleft()
+    if len(q) >= CONTRACT_BOUNDS["RATE_MAX"]:
+        retry = max(1, int(math.ceil(window - (now - q[0]))))
+        _fail(429, "rate", headers={"Retry-After": str(retry)})
+    q.append(now)
+
+
+async def _wait_until(pred, deadline):
+    while not pred():
+        if time.monotonic() >= deadline:
+            _fail(503, "deadline")
+        await asyncio.sleep(_POLL_S)
+
+
+# The api's population cache (design 2.6). `B` is measured once, at the first
+# report, when every import of main.py has run.
+_CACHE = [None]
+
+
+def _aer_cache():
+    if _CACHE[0] is None:
+        _CACHE[0] = PopulationCache(base_rss_mb=process_rss_mb())
+    return _CACHE[0]
+
+
+def _display_key():
+    return ("display", "all", registry_fingerprint(), DISPLAY_DEFAULTS["pop_days"],
+            DISPLAY_DEFAULTS["lag_s"])
+
+
+async def _leased(cache, db, key, deadline, basis=None):
+    """The current generation for `key`, rebuilt when absent or expired (one
+    rebuild at a time; waiting counts against the deadline), leased."""
+    g = cache.current(key)
+    if g is None:
+        await _wait_until(lambda: not _REBUILDING[0], deadline)
+        g = cache.current(key)
+        if g is None:
+            _REBUILDING[0] = True
+            try:
+                if basis is None:
+                    g = await refresh_game_set(
+                        cache, db, key, DISPLAY_DEFAULTS["pop_days"],
+                        DISPLAY_DEFAULTS["lag_s"], deadline=deadline)
+                else:
+                    g = await refresh_window_source(
+                        cache, db, key, basis, DISPLAY_DEFAULTS["pop_days"],
+                        DISPLAY_DEFAULTS["lag_s"], deadline=deadline)
+            finally:
+                _REBUILDING[0] = False
+    return cache.lease(g)
+
+
+def _iso(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return _dt.datetime.fromtimestamp(value, _dt.timezone.utc).isoformat()
+    return value.isoformat()
+
+
+def _code(match_id):
+    return str(match_id).replace("-", "")[:12]
+
+
+def _text(value):
+    return _aer_enc((value or "")[:CONTRACT_BOUNDS["TEXT_MAX"]])
+
+
+def _catalog_row(entry, spread=None):
+    row = {"ki": entry.ki, "key": entry.key, "base": entry.base, "fam": entry.fam,
+           "unit": entry.unit, "kind": entry.kind}
+    if not entry.is_window:
+        spread = spread or {}
+        row.update({"p50": spread.get("pop_p50"), "p90": spread.get("pop_p90"),
+                    "p99": spread.get("pop_p99")})
+    return row
+
+
+class _Report:
+    """One request's reads and leases; every lease is released by `close`."""
+
+    def __init__(self, db, cache, deadline):
+        self.db, self.cache, self.deadline = db, cache, deadline
+        self.leases = []
+
+    async def lease(self, key, basis=None):
+        g = await _leased(self.cache, self.db, key, self.deadline, basis)
+        self.leases.append(g)
+        return g
+
+    def close(self):
+        while self.leases:
+            self.cache.release(self.leases.pop())
+
+
+async def _game_rows(db, ids):
+    rows = await _rows(db, GAME_ROWS_SQL, {"ids": [str(i) for i in ids]})
+    by_id = {str(r["id"]): r for r in rows}
+    return [by_id[str(i)] for i in ids if str(i) in by_id]
+
+
+async def _flag_rows(db, ids):
+    out = collections.defaultdict(list)
+    for r in await _rows(db, FLAGS_SQL, {"ids": [str(i) for i in ids]}):
+        out[str(r["match_id"])].append(r)
+    return out
+
+
+def _pop_fill(cell, values):
+    """A ranked base key's population slots from the leased game set."""
+    if cell["state"] != "ok" or values is None:
+        cell.update({"pop_rank": None, "pop_n": len(values) if values is not None else 0})
+        return
+    pm = pop_measures(values, cell["val"])
+    cell.update({"pop_rank": pm["pop_rank"], "pop_n": pm["pop_n"]})
+
+
+async def _game_page(rep, games, cohort, subjects, game_set):
+    db = rep.db
+    flags = await _flag_rows(db, [g["id"] for g in games])
+    steam_of = {str(pid): s["steam_id"] for pid, s in subjects.items()}
+    index = {str(pid): s["i"] for pid, s in subjects.items()}
+    steam_to_subject = {s["steam_id"]: s["i"] for s in subjects.values()}
+    out = []
+    for row in games:
+        mid = str(row["id"])
+        current = current_flags(flags.get(mid, ()))
+        seats = []
+        for seat in SEATS:
+            account = row["player1_id" if seat == "p1" else "player2_id"]
+            base = await read_baseline(db, account, row["ended_at"], row["id"],
+                                       covered=[str(c) for c in cohort])
+            cells = game_seat_cells(row, account, current.get(steam_of.get(str(account))),
+                                    base)
+            for c in cells:
+                e = REPORT_REGISTRY[c["ki"]]
+                if e.ranked:
+                    _pop_fill(c, game_set.values.get(e.ki))
+            seats.append({"subject": index[str(account)],
+                          "reporter": reporter_seat(row) == seat,
+                          "cells": [wire_row("seat", c) for c in cells]})
+        inv = None
+        if row.get("invalidated_at") is not None:
+            inv = _text(row.get("invalidation_reason") or "")
+        out.append({"match_id": mid, "code": _code(row["id"]),
+                    "ended_at": _iso(row["ended_at"]), "is_ranked": bool(row["is_ranked"]),
+                    "invalidated": inv,
+                    "series_id": str(row["series_id"]) if row["series_id"] else None,
+                    "rounds": [row["p1_rounds_won"], row["p2_rounds_won"]],
+                    "seats": seats, "pair_cells": [],
+                    "flags": [dict(f, created_at=_iso(f["created_at"]))
+                              for f in flag_list(flags.get(mid, ()), steam_to_subject,
+                                                 current)]})
+    return out
+
+
+async def _summary_page(rep, shape, rows, requested, subjects, accounts):
+    """Page 1 of a pair or player report (design 5.5): the windows over the
+    covered games and one display cell per window key of each window."""
+    db = rep.db
+    index = {str(pid): s["i"] for pid, s in subjects.items()}
+    steam_of = {str(pid): s["steam_id"] for pid, s in subjects.items()}
+    flags = await _flag_rows(db, [r["id"] for r in rows])
+    if shape == "player":
+        plan = [(accounts[0], None, "player")]
+    else:
+        plan = [(accounts[0], accounts[1], "pair"), (accounts[1], accounts[0], "pair")]
+    windows, summary, win_at = [], [], None
+    cohort = [str(r["id"]) for r in rows]
+    oldest = rows[-1]
+    for oi, (acc, partner, basis) in enumerate(plan):
+        source = await rep.lease(_display_key() + (basis,), basis=basis)
+        win_at = source.computed_at
+        base = await read_baseline(db, acc, oldest["ended_at"], oldest["id"],
+                                   covered=cohort, partner=partner)
+        cells = window_cells(rows, acc, basis, base, partner)
+        for c in cells:
+            comp = c.pop("comparability")
+            if c["state"] != "ok" or not c["n"]:
+                continue
+            w = REPORT_REGISTRY[c["ki"]]
+            r = rep.cache.memo_get(comp, source)
+            if r is None:
+                dist = window_population(source.values.get(w.base, array("d")),
+                                         source.offsets.get(w.base, array("i", [0])),
+                                         w.agg.split(".")[0], c["n"])
+                r = rep.cache.memo_put(comp, source, pop_measures(dist, c["val"]),
+                                       len(dist) * 8 + 64)
+            for k in ("pop_rank", "pop_n", "pop_p50", "pop_p90", "pop_p99"):
+                c[k] = r[k]
+        windows.append({"oi": oi, "basis": basis,
+                        "subj": ["seat", index[str(acc)],
+                                 index[str(partner)] if partner is not None else None],
+                        "games": requested, "covered": len(rows),
+                        "flag_obs": flag_obs(flags, steam_of.get(str(acc))),
+                        "newest": _code(rows[0]["id"]), "oldest": _code(oldest["id"])})
+        summary.append({"oi": oi, "cells": [wire_row("summary", c) for c in cells]})
+    return windows, summary, win_at
+
+
+async def _audit(db, actor, shape, target, details):
+    """The one `admin_actions` row (design 4.4), in its own short transaction.
+    A failed insert is `503 audit_unavailable`, no body."""
+    import uuid
+    from sqlalchemy import text
+    try:
+        await db.rollback()          # end the read transaction; nothing was written
+        await db.execute(text(AUDIT_SQL), {
+            "id": str(uuid.uuid4()), "admin": actor,
+            "t_steam": target.get("steam"), "t_match": target.get("match"),
+            "t_series": target.get("series"),
+            "details": json.dumps(details, separators=(",", ":"), sort_keys=True)})
+        await db.commit()
+    except Exception as exc:      # any failed insert: no row, no body
+        _log.warning("admin_evidence audit unavailable: %s", type(exc).__name__)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        _fail(503, "audit_unavailable")
+
+
+def _clock():
+    return time.monotonic()
+
+
+async def _aer_serve(shape, request, db, actor):
+    """Parse, probe, bound, read, build, size-check, audit, return (design
+    4.4 order); `actor` is the steam id `_evidence_gate` returned."""
+    from sqlalchemy import text
+    t0 = _clock()
+    deadline = (t0 + CONTRACT_BOUNDS["REPORT_DEADLINE_S"]
+                - CONTRACT_BOUNDS["AUDIT_RESERVE_S"])
+    gmax = CONTRACT_BOUNDS["GAMES_MAX"]
+    page = _aer_int(request, "page", 1, 1, 10 ** 6)
+    games_arg = None
+    if shape in ("game", "series"):
+        ident = _aer_ident(request.path_params.get("code"))
+    elif shape == "pair":
+        steams = (_aer_steam(request.query_params.get("a")),
+                  _aer_steam(request.query_params.get("b")))
+        if steams[0] == steams[1]:
+            _fail(400, "bad_argument")
+        games_arg = _aer_int(request, "games", DISPLAY_DEFAULTS["games"],
+                             CONTRACT_BOUNDS["GAMES_MIN"], gmax)
+    else:
+        steams = (_aer_steam(request.path_params.get("steam_id")),)
+        games_arg = _aer_int(request, "games", DISPLAY_DEFAULTS["games"],
+                             CONTRACT_BOUNDS["GAMES_MIN"], gmax)
+
+    if (await db.execute(text("SELECT pg_is_in_recovery()"))).scalar():
+        _fail(409, "primary_only")
+    _rate_charge(actor)
+    await _wait_until(lambda: _INFLIGHT[0] < CONTRACT_BOUNDS["REPORT_INFLIGHT_MAX"], deadline)
+    _INFLIGHT[0] += 1
+    rep = _Report(db, _aer_cache(), deadline)
+    try:
+        target, b_pid, accounts = {}, None, ()
+        if shape == "game":
+            ids = [await _select_game(db, ident)]
+            target["match"] = str(ids[0])
+        elif shape == "series":
+            sid, ids = await _select_series(db, ident)
+            target["series"] = str(sid)
+        elif shape == "pair":
+            accounts = (await _player_id(db, steams[0]), await _player_id(db, steams[1]))
+            ids = [r["id"] for r in await _rows(db, R3_PAIR_SQL, {
+                "a": str(accounts[0]), "b": str(accounts[1]), "games": games_arg})]
+            target["steam"], b_pid = steams[0], str(accounts[1])
+        else:
+            accounts = (await _player_id(db, steams[0]),)
+            ids = [r["id"] for r in await _rows(db, R4_PLAYER_SQL, {
+                "s": str(accounts[0]), "games": games_arg})]
+            target["steam"] = steams[0]
+        c = len(ids)
+        _aer_require_games(c)
+        pages = _aer_pages(shape, c)
+        if not 1 <= page <= pages:
+            _fail(400, "bad_argument (page)")
+        game_set = await rep.lease(_display_key())
+        per = CONTRACT_BOUNDS["PAGE_GAMES"]
+        summary_page = shape in ("pair", "player") and page == 1
+        first = (page - 2 if shape in ("pair", "player") else page - 1) * per
+        page_ids = [] if summary_page else ids[first:first + per]
+        rows = await _game_rows(db, ids if summary_page else page_ids)
+        pids = {r[k] for r in rows for k in ("player1_id", "player2_id")} | set(accounts)
+        subj_rows = await _rows(db, SUBJECTS_SQL, {"ids": [str(p) for p in pids]})
+        order = [str(a) for a in accounts] + sorted(
+            str(p) for p in pids if str(p) not in {str(a) for a in accounts})
+        by_id = {str(r["id"]): r for r in subj_rows}
+        subjects = {}
+        for i, pid in enumerate(order):
+            r = by_id.get(pid)
+            subjects[pid] = {"i": i, "steam_id": r["steam_id"] if r else None,
+                             "name": _text(r["display_name"]) if r else None}
+        body = {"shape": shape, "page": page, "pages": pages,
+                "subjects": [{"steam_id": subjects[p]["steam_id"],
+                              "name": subjects[p]["name"]} for p in order],
+                "rules": {"report": "absent"},
+                "population": {"key": "all", "days": DISPLAY_DEFAULTS["pop_days"],
+                               "lag_s": DISPLAY_DEFAULTS["lag_s"],
+                               "games": max((len(v) for v in game_set.values.values()),
+                                            default=0),
+                               "computed_at": _iso(game_set.computed_at),
+                               "truncated": sorted(game_set.truncated)},
+                "baseline": {"own_games": DISPLAY_DEFAULTS["own_games"],
+                             "scan": CONTRACT_BOUNDS["BASELINE_SCAN"]},
+                "registry": registry_block()}
+        if summary_page:
+            windows, summary, win_at = await _summary_page(
+                rep, shape, rows, games_arg, subjects, accounts)
+            body["population"]["win_computed_at"] = _iso(win_at)
+            body["catalog"] = [_catalog_row(e) for e in REPORT_REGISTRY
+                               if e.is_window and e.scope == "seat"]
+            body["windows"], body["summary"], body["games"] = windows, summary, []
+        else:
+            body["catalog"] = [_catalog_row(e, pop_measures(game_set.values.get(e.ki), None)
+                                            if e.ranked else None)
+                               for e in REPORT_REGISTRY if not e.is_window]
+            body["games"] = await _game_page(rep, rows, ids, subjects, game_set)
+        encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        if len(encoded) > CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]:
+            _fail(500, "too_large")
+        details = {"schema": "1a", "shape": shape, "games": games_arg if games_arg else c,
+                   "page": page, "pages": pages, "b_pid": b_pid,
+                   "rules": dict(body["rules"]),
+                   "registry": body["registry"]["fingerprint"],
+                   "pop_computed_at": body["population"]["computed_at"],
+                   "codes": [_code(i) for i in (page_ids or ids)], "via": "discord"}
+        if _clock() > deadline:
+            _fail(503, "deadline")
+        await _audit(db, actor, shape, target, details)
+        return Response(content=encoded, media_type="application/json")
+    except PopulationUnavailable:
+        _fail(503, PopulationUnavailable.detail)
+    finally:
+        rep.close()
+        _INFLIGHT[0] -= 1
+
+
+@router.get("/game/{code}")
+async def evidence_report_game(request: Request, db: AsyncSession = Depends(get_db)):
+    actor = await _evidence_gate(request, db)
+    return await _aer_serve("game", request, db, actor)
+
+
+@router.get("/series/{code}")
+async def evidence_report_series(request: Request, db: AsyncSession = Depends(get_db)):
+    actor = await _evidence_gate(request, db)
+    return await _aer_serve("series", request, db, actor)
+
+
+@router.get("/pair")
+async def evidence_report_pair(request: Request, db: AsyncSession = Depends(get_db)):
+    actor = await _evidence_gate(request, db)
+    return await _aer_serve("pair", request, db, actor)
+
+
+@router.get("/player/{steam_id}")
+async def evidence_report_player(request: Request, db: AsyncSession = Depends(get_db)):
+    actor = await _evidence_gate(request, db)
+    return await _aer_serve("player", request, db, actor)
