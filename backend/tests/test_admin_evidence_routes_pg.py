@@ -31,6 +31,9 @@ which statements each request ran.
       R4 summary pages (window source), no audit row, no new generation, the
       one-fact twin served before.
   3.5 statement scan: admin_evidence.py writes nothing but the audit insert.
+  4.7 (item 1a-5) the admin-authorized-consumer class: all 50 storage
+      sentinels served only inside the cells of the key that reads them, and
+      none on any refusal path.
 
 Test accounts, steam ids and Discord ids are generated per run.
 `ADMIN_EVIDENCE_TEST_PG_DSN` names a database whose name carries
@@ -708,6 +711,144 @@ def test_rate_bound_per_actor_with_retry_after(rig):
     assert another[0] == 404
     print("GATE rate: %d served, the next 429 rate Retry-After %s, another actor unaffected"
           % (len(first), over[2]["Retry-After"]))
+
+
+# ── 4.7 item 3: the admin-authorized-consumer class (1a-5) ─────────────────
+
+def _sentinel_suffix(column):
+    return column.split("_", 1)[1]
+
+
+def _sentinel_hits(body, by_value):
+    """Every place a storage sentinel value sits in a served body, as
+    `(column, ki or None, slot)`: inside a wire cell (`cells` rows, slot 0 the
+    key number) the hit carries that key, anywhere else `None`."""
+    hits = []
+
+    def scan(v, ki, slot):
+        if isinstance(v, bool) or v is None:
+            return
+        if isinstance(v, (int, float, str)) and v in by_value:
+            hits.append((by_value[v], ki, slot))
+
+    def walk(v):
+        if isinstance(v, dict):
+            for k, child in v.items():
+                if k == "cells" and isinstance(child, list):
+                    for row in child:
+                        for slot, x in enumerate(row):
+                            scan(x, row[0], slot)
+                else:
+                    walk(child)
+        elif isinstance(v, list):
+            for child in v:
+                walk(child)
+        else:
+            scan(v, None, None)
+
+    walk(body)
+    return hits
+
+
+def _under_its_key(column, ki):
+    """True when key `ki` reads `column`'s family: the registry entry's
+    declared column is `{s}_<suffix>` for this column's suffix."""
+    if ki is None or not (0 <= ki < len(ae.REPORT_REGISTRY)):
+        return False
+    decl = ae.REPORT_REGISTRY[ki].decl
+    cols = decl.column if isinstance(decl.column, tuple) else (decl.column,)
+    return any(c.startswith("{s}_") and c[4:] == _sentinel_suffix(column) for c in cols)
+
+
+def test_admin_authorized_consumers_serve_sentinels_only_to_admins(rig, monkeypatch):
+    """Design 4.7 item 3. Two games of one series between A and B carry all
+    50 storage sentinels (`net_seat_contract.storage_sentinels`); the first is
+    reported by p1, the second by p2, so each seat's reporter-only columns
+    are served once. (a) With the key and an admin actor, every route serves
+    the sentinels only inside the cells of the key that reads them; the game
+    route serves the reporter's 25 once each per game (50 over the two), the
+    series route all 50 once each among its game cells, and the pair and
+    player routes all 50 among their pages. (b) On every 4.2 refusal path
+    (no key, wrong key, unset key, no, malformed, unlinked or non-roster
+    actor) no sentinel name or value, and no value's text, is in the body or
+    the headers."""
+    from net_seat_contract import STORAGE_FIELDS, assert_no_net_seat_sentinels, storage_sentinels
+    sentinels = storage_sentinels()
+    assert len(sentinels) == 50 and set(sentinels) == set(STORAGE_FIELDS)
+    by_value = {v: k for k, v in sentinels.items()}
+
+    async def go():
+        admin = await _admin(rig)
+        _p, _s, linked = await rig.player(admin=False)
+        a, sa, _d = await rig.player()
+        b, sb, _d = await rig.player()
+        sid = await rig.series(a, b)
+        g1 = await rig.match(a, b, NOW - dt.timedelta(hours=2), reporter=a, series=sid,
+                             **sentinels)
+        g2 = await rig.match(a, b, NOW - dt.timedelta(hours=1), reporter=b, series=sid,
+                             **sentinels)
+        await rig.commit()
+        served = {}
+        for label, path in (("game1", "%s/game/%s" % (ROOT, g1.hex)),
+                            ("game2", "%s/game/%s" % (ROOT, g2.hex)),
+                            ("series", "%s/series/%s" % (ROOT, sid.hex)),
+                            ("pair", "%s/pair?a=%s&b=%s&games=2" % (ROOT, sa, sb)),
+                            ("player", "%s/player/%s?games=2" % (ROOT, sa))):
+            sep = "&" if "?" in path else "?"
+            pages, page, total = [], 1, 1
+            while page <= total:
+                status, content, _h = await rig.get(path + "%spage=%d" % (sep, page),
+                                                    actor=admin)
+                assert status == 200, (label, page, content[:300])
+                body = _body(content)
+                total = body["pages"]
+                pages.append(body)
+                page += 1
+            served[label] = pages
+        refusals = []
+        paths = _route_paths(g1.hex, sa, sb, games="2")
+        paths["series"] = "%s/series/%s" % (ROOT, sid.hex)
+        for shape, path in paths.items():
+            for label, key, actor in (
+                    ("no key", None, admin), ("wrong key", KEY + "x", admin),
+                    ("no actor", KEY, None), ("malformed actor", KEY, "12a4"),
+                    ("unlinked actor", KEY, _digits(18)), ("non-roster actor", KEY, linked)):
+                refusals.append((shape, label) + await rig.get(path, key=key, actor=actor))
+        monkeypatch.setenv("API_SECRET_KEY", "")
+        for shape, path in paths.items():
+            refusals.append((shape, "unset key") + await rig.get(path, key="", actor=admin))
+        return served, refusals
+
+    served, refusals = rig.run(go())
+    p1_cols = sorted(c for c in STORAGE_FIELDS if c.startswith("p1_"))
+    p2_cols = sorted(c for c in STORAGE_FIELDS if c.startswith("p2_"))
+    counts = {}
+    for label, pages in served.items():
+        hits = [h for body in pages for h in _sentinel_hits(body, by_value)]
+        stray = [h for h in hits if not _under_its_key(h[0], h[1])]
+        assert stray == [], (label, stray[:5])
+        base = sorted(c for c, ki, _slot in hits
+                      if not ae.REPORT_REGISTRY[ki].is_window and _slot == 1)
+        counts[label] = (len(hits), len(base))
+        if label == "game1":
+            assert base == p1_cols, (label, base)
+        elif label == "game2":
+            assert base == p2_cols, (label, base)
+        else:
+            assert base == sorted(STORAGE_FIELDS), (label, base)
+    assert len(refusals) == 28
+    texts = [str(v) for v in sentinels.values()]
+    for shape, label, status, content, headers in refusals:
+        assert (status, content) == REFUSED, (shape, label, status, content)
+        assert_no_net_seat_sentinels(_body(content), sentinels)
+        assert_no_net_seat_sentinels(dict(headers), sentinels)
+        blob = content.decode("utf-8") + "\n".join(
+            "%s: %s" % (k, v) for k, v in headers.items())
+        assert not [t for t in texts if t in blob], (shape, label)
+        assert not [c for c in STORAGE_FIELDS if c in blob], (shape, label)
+    print("GATE 4.7 sentinels: (all hits, base value slots) per route %s; every hit "
+          "under its own key; 28 refusals carry no sentinel name, value or text"
+          % sorted(counts.items()))
 
 
 # ── P9 through the routes (1a-3 route half) ────────────────────────────────

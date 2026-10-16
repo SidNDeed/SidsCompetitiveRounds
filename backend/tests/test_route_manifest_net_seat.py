@@ -30,6 +30,24 @@ from net_seat_contract import (
 
 
 MANIFEST_PATH = Path(__file__).with_name("route_manifest_net_seat.json")
+
+# The closed class-to-schema table (admin evidence design 4.7 item 1): the
+# fields each manifest row of a class carries, in order. The loader, the
+# allowed-class assertion and the repinner all read this one table; a class
+# not in it is refused everywhere, and a fingerprinted class is one whose
+# schema ends in `source_sha1`.
+#   sentinel-exercised        checked by being RUN with all 50 sentinels
+#   statically-nonconsumer    a static source review cleared its output
+#   admin-authorized-consumer serves W1 columns, but only to an internal-key
+#                             caller whose actor resolves to an admin
+_IDENTITY_FIELDS = ("path", "methods", "module", "qualname")
+ROUTE_CLASS_SCHEMA = {
+    "sentinel-exercised": _IDENTITY_FIELDS,
+    "statically-nonconsumer": _IDENTITY_FIELDS + ("source_sha1",),
+    "admin-authorized-consumer": _IDENTITY_FIELDS + ("source_sha1",),
+}
+FINGERPRINTED_CLASSES = frozenset(
+    cls for cls, fields in ROUTE_CLASS_SCHEMA.items() if "source_sha1" in fields)
 # The enumeration is only exhaustive on the PINNED FastAPI: 0.141+ wraps
 # include_router() targets as _IncludedRouter entries that app.routes never
 # flattens, which silently drops every tournaments route from this gate.
@@ -700,12 +718,13 @@ def _load_manifest():
     assert identity_fields == ["path", "methods", "module", "qualname"]
     static_review_fields = document["static_review_fields"]
     assert static_review_fields == ["source_sha1"]
+    assert tuple(identity_fields) == _IDENTITY_FIELDS
     entries = []
     for group in document["groups"]:
         classification = group["classification"]
-        route_fields = identity_fields + (
-            static_review_fields if classification == "statically-nonconsumer" else []
-        )
+        assert classification in ROUTE_CLASS_SCHEMA, (
+            "unknown route classification %r" % (classification,))
+        route_fields = list(ROUTE_CLASS_SCHEMA[classification])
         for route_values in group["routes"]:
             entry = dict(zip(route_fields, route_values, strict=True))
             entry["classification"] = group["classification"]
@@ -752,12 +771,13 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # lane: the union of the lane's 390 and main 6bb8208f's 394 over their
     # shared 388 (main e9a3f1e1) is 396: the trunk's 394 plus the lane's 2,
     # confirmed by the re-pin dry run
-    assert len(manifest) == 396
+    # admin evidence report 1a-5 (lane claude/admin-evidence-server, base main
+    # 9267b1fe's 396): +4, the four GET report routes R1 to R4 under
+    # /api/v1/internal/evidence-report/ (game, series, pair, player), all
+    # admin-authorized-consumer, confirmed by the re-pin dry run
+    assert len(manifest) == 400
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
-    assert all(
-        entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
-        for entry in manifest
-    )
+    assert all(entry["classification"] in ROUTE_CLASS_SCHEMA for entry in manifest)
     assert all(isinstance(entry["reason"], str) and entry["reason"].strip() for entry in manifest)
 
     exercised = [entry for entry in manifest if entry["classification"] == "sentinel-exercised"]
@@ -784,17 +804,121 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # re-pin dry run
     assert len(static) == 395
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
+    # admin evidence report 1a-5: the class holds exactly R1 to R4, each run
+    # with all 50 sentinels by
+    # test_admin_authorized_consumers_serve_sentinels_only_to_admins
+    # (test_admin_evidence_routes_pg.py) and fingerprinted like a static row.
+    authorized = [entry for entry in manifest
+                  if entry["classification"] == "admin-authorized-consumer"]
+    assert sorted(_manifest_id(entry)["qualname"] for entry in authorized) == [
+        "evidence_report_game", "evidence_report_pair", "evidence_report_player",
+        "evidence_report_series"]
+    assert {entry["module"] for entry in authorized} == {"admin_evidence"}
+    assert len(manifest) == len(exercised) + len(static) + len(authorized)
 
     actual_by_identity = {
         json.dumps(_manifest_id(entry), sort_keys=True): entry for entry in live_routes
     }
-    for entry in static:
+    fingerprinted = [entry for entry in manifest
+                     if entry["classification"] in FINGERPRINTED_CLASSES]
+    assert len(fingerprinted) == len(static) + len(authorized)
+    for entry in fingerprinted:
         identity = _manifest_id(entry)
         live = actual_by_identity[json.dumps(identity, sort_keys=True)]
         assert entry["source_sha1"] == live["source_sha1"], (
             f"{identity['methods']} {identity['path']} source fingerprint changed; "
             "re-review this handler"
         )
+
+
+def test_one_row_per_class_round_trips_through_the_class_schema(tmp_path, monkeypatch):
+    """Admin evidence design 4.7 item 4. The first row of each class, loaded
+    and re-written through `ROUTE_CLASS_SCHEMA`, is the row in the file; every
+    class of the table occurs. A row missing its class's field and a class the
+    table does not name are refused by the loader itself (a stale digest is
+    refused by the exhaustive test's fingerprint loop)."""
+    document = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+    loaded = {json.dumps(_manifest_id(e), sort_keys=True): e for e in _load_manifest()}
+    seen = {}
+    for group in document["groups"]:
+        cls = group["classification"]
+        if cls in seen:
+            continue
+        row = group["routes"][0]
+        entry = loaded[json.dumps(dict(zip(_IDENTITY_FIELDS, row[:4])), sort_keys=True)]
+        assert entry["classification"] == cls
+        assert [entry[field] for field in ROUTE_CLASS_SCHEMA[cls]] == row, cls
+        seen[cls] = row
+    assert sorted(seen) == sorted(ROUTE_CLASS_SCHEMA)
+
+    def refused(mutate):
+        doc = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        group = next(g for g in doc["groups"]
+                     if g["classification"] == "admin-authorized-consumer")
+        mutate(group)
+        path = tmp_path / ("m%d.json" % len(list(tmp_path.iterdir())))
+        path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "MANIFEST_PATH", path)
+        try:
+            _load_manifest()
+        except (AssertionError, ValueError):
+            return True
+        finally:
+            monkeypatch.undo()
+        return False
+
+    assert refused(lambda g: g["routes"][0].pop())          # missing source_sha1
+    assert refused(lambda g: g.update(classification="admin-authorised-consumer"))
+    assert not refused(lambda g: None)                      # the control loads
+
+
+EVIDENCE_HANDLERS = frozenset({
+    ("admin_evidence", "evidence_report_game"), ("admin_evidence", "evidence_report_series"),
+    ("admin_evidence", "evidence_report_pair"), ("admin_evidence", "evidence_report_player")})
+# The bot's evidence handlers (1a-6): the `/evidence` command and its page
+# buttons. Every other function of discord_bot.py stays off `_aer_*`.
+EVIDENCE_BOT_HANDLERS = frozenset({"evidence_command", "evidence_page_click"})
+
+
+def test_aer_helpers_are_reached_only_from_the_evidence_handlers():
+    """Admin evidence design 4.7 item 6. No route other than R1 to R4 reaches
+    an `_aer_*` binding through its reviewed closure (the gate's own walk,
+    which follows attribute names, so `_admin_evidence._aer_x(...)` from a
+    main.py handler counts), and in discord_bot.py only `_aer_*` functions
+    and the evidence handlers name one."""
+    reaching = []
+    evidence_seen = set()
+    for route in main.app.routes:
+        endpoint = getattr(route, "endpoint", None)
+        if endpoint is None:
+            continue
+        key = _binding_key(endpoint)
+        if key in EVIDENCE_HANDLERS:
+            evidence_seen.add(key)
+            assert any(n.startswith("_aer_") for _m, n in _reached(_route_seeds(route)))
+            continue
+        hits = sorted(n for _m, n in _reached(_route_seeds(route)) if n.startswith("_aer_"))
+        if hits:
+            reaching.append((getattr(route, "path", "?"), hits[:3]))
+    assert evidence_seen == EVIDENCE_HANDLERS
+    assert reaching == [], reaching[:5]
+
+    bot = Path(__file__).parents[1] / "discord_bot.py"
+    tree = ast.parse(bot.read_text(encoding="utf-8"))
+    outside = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name.startswith("_aer_") or node.name in EVIDENCE_BOT_HANDLERS:
+            continue
+        for sub in ast.walk(node):
+            name = (sub.id if isinstance(sub, ast.Name)
+                    else sub.attr if isinstance(sub, ast.Attribute) else None)
+            if name and name.startswith("_aer_"):
+                outside.append((node.name, name, sub.lineno))
+    # nested functions inside an allowed handler are walked as their own
+    # nodes too; a nested def is allowed only by its own name
+    assert outside == [], outside[:5]
 
 
 def test_the_helper_surface_is_computed_and_not_hand_curated():

@@ -3529,6 +3529,44 @@
       ]
     },
     {
+      "classification": "admin-authorized-consumer",
+      "reason": "Serves W1 columns only to an internal-key caller whose actor resolves to an admin; refusals carry no column.",
+      "routes": [
+        [
+          "/api/v1/internal/evidence-report/game/{code}",
+          [
+            "GET"
+          ],
+          "admin_evidence",
+          "evidence_report_game"
+        ],
+        [
+          "/api/v1/internal/evidence-report/series/{code}",
+          [
+            "GET"
+          ],
+          "admin_evidence",
+          "evidence_report_series"
+        ],
+        [
+          "/api/v1/internal/evidence-report/pair",
+          [
+            "GET"
+          ],
+          "admin_evidence",
+          "evidence_report_pair"
+        ],
+        [
+          "/api/v1/internal/evidence-report/player/{steam_id}",
+          [
+            "GET"
+          ],
+          "admin_evidence",
+          "evidence_report_player"
+        ]
+      ]
+    },
+    {
       "classification": "statically-nonconsumer",
       "reason": "verified-reads control routes (backend/api/main.py): GET /api/v1/read-gate/probe answers a fixed body once the read gate admits it; the other five require an admin signature: the operator-key routes (list, issue, revoke) and the read-gate mode route respond from api_operator_keys and runtime_settings, the read-census route from the in-process census. No route here reads matches, so no W1 private Match column can reach its output.",
       "routes": [
@@ -3615,6 +3653,11 @@
   ],
   "entry_points": {
     "middleware": [
+      [
+        "admin_evidence",
+        "evidence_key_gate",
+        "pending-first-fingerprint-evidence-key-gate"
+      ],
       [
         "main",
         "maintenance_gate",
