@@ -81,6 +81,14 @@ namespace CompetitiveRounds
             internal bool Flag;
         }
 
+        /// <summary>V3 P4.6: the flag a lock payload pins. Only a gated lock
+        /// (assembly 1) that names readmit 1 pins true; an absent key, any
+        /// other value or an ungated lock pins false (fails closed).</summary>
+        internal static int LockReadmit(int assembly, int payloadReadmit)
+        {
+            return assembly == 1 && payloadReadmit == 1 ? 1 : 0;
+        }
+
         /// <summary>The pin after a gated lock payload for lobby/room carrying
         /// readmit = payloadReadmit (1 is true, anything else false; an absent
         /// key is an older server, false).</summary>

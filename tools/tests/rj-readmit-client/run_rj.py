@@ -41,7 +41,8 @@ APPLY_CASES = ["rolling", "local", "remote", "unknown", "quarantined", "nobody",
 SUITE_FILES = {
     "apply": {"FfaMode.cs": None, "FfaReadmitRules.cs": "RulesSource"},
     "rules": {"FfaReadmitRules.cs": "RulesSource", "FfaReportRules.cs": "ReportSource",
-              "FfaLateRules.cs": "LateSource"},
+              "FfaLateRules.cs": "LateSource", "FfaReadmitEntryRules.cs": "EntrySource",
+              "RosterCensusRules.cs": "CensusSource"},
 }
 
 # (id, piece, suite, file, [(old, new), ...], target case, control case)
@@ -107,6 +108,37 @@ MUTANTS = [
     ("M3.5", "C3", "rules", "FfaReportRules.cs",
      [("            if (readmitLobby) return localSid;\n", "")],
      "C3.T3.2.lag_publication_lost_both_file", "C3.T3.6.flag_false_matrix_equals_base"),
+    # ---- C4 (P4 client half)
+    ("M4.12", "C4", "rules", "FfaReadmitEntryRules.cs",
+     [("return new FfaLateRules.EpochEntry(slot, actor, k, game < 0 ? -1 : game, 2,",
+       "return new FfaLateRules.EpochEntry(slot, actor, 'l', -1, 2,")],
+     "C4.T4.5.epoch_v2_parsed_with_kind_and_game", "C4.T4.5.every_refusal_reason_mapped"),
+    ("M4.15", "C4", "rules", "FfaReadmitEntryRules.cs",
+     [("return TokenMatches(senderRdt, r) ? LateReq.Accept : LateReq.RefuseToken;",
+       "return LateReq.Accept;")],
+     "C4.T4.6.token_checked_at_master", "C4.T4.6.identity_duplicate_refused"),
+    ("M4.16", "C4", "rules", "FfaReadmitEntryRules.cs",
+     [("            return r.Actor != actor;\n", "            return null;\n")],
+     "C4.T4.6.identity_duplicate_refused", "C4.T4.6.token_checked_at_master"),
+    ("M4.17", "C4", "rules", "FfaReadmitEntryRules.cs",
+     [("            if (readmitLobby && rosterCount > 0) return rosterCount;\n", "")],
+     "C4.T4.7.held_highest_slot_carried", "C4.T4.11.three_way_game_agreement"),
+    ("M4.18", "C4", "rules", "FfaReadmitEntryRules.cs",
+     [("            if (readmitLobby && rosterCount > 0)\n            {\n                for (int s = 0;",
+       "            if (false && readmitLobby && rosterCount > 0)\n            {\n                for (int s = 0;")],
+     "C4.T4.8.each_mutation_fails_the_gate", "C4.T4.11.three_way_game_agreement"),
+    ("M4.19", "C4", "rules", "FfaReadmitEntryRules.cs",
+     [("if (!v.VictimPresent || v.VictimDead", "if (v.VictimPresent || v.VictimDead")],
+     "C4.T4.9.departure_credits_exactly_staying", "C4.T4.11.three_way_game_agreement"),
+    ("M4.20", "C4", "rules", "FfaReadmitEntryRules.cs",
+     [("            return at;\n", "            return newId;\n")],
+     "C4.T4.10.same_position_any_purge_timing", "C4.T4.11.three_way_game_agreement"),
+    ("M4.21", "C4", "rules", "FfaReadmitEntryRules.cs",
+     [("return tailGame > 0 && tailGame == serverGame && tailGame == cycGame;", "return tailGame > 0;")],
+     "C4.T4.11.three_way_game_agreement", "C4.T4.10.same_position_any_purge_timing"),
+    ("M4.22", "C4", "rules", "FfaReadmitEntryRules.cs",
+     [("            return readmitLobby;\n", "            return false;\n")],
+     "C4.T4.12.kind_r_grant_releases_latch", "C4.T4.11.three_way_game_agreement"),
 ]
 
 

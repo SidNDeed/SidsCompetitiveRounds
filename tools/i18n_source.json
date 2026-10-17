@@ -564,6 +564,7 @@
   "Announcement",
   "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' Elo and histories aren't affected. You will no longer appear on leaderboards.\n<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches from this account will show as [Deleted User] and won't count toward stats.",
   "Another Round",
+  "Another player is using your seat identity",
   "Anti-cheat",
   "Apex",
   "Apex Shark",
@@ -588,6 +589,7 @@
   "Auras",
   "Aurora",
   "Aurora Gradient",
+  "Automatic pick: {0}",
   "Avatar auto-switch: <color=#88CCFF>OFF</color>",
   "Avatar auto-switch: <color=#88CCFF>ON</color>",
   "Avatar defaults",
@@ -919,6 +921,7 @@
   "Cosmetics & Identity",
   "Cosmetics live in the F5 Shop tab and are bought with the gold you earn by playing. This page covers every kind, how each equips, how drops and stock work, and where the art comes from.\n\n<color=#FFD94D><b>WHAT EACH KIND DOES</b></color>\n\n<color=#7FD4FF>Titles</color> - the label beside your name on mod surfaces (see <color=#7FD4FF>Titles</color>).\n<color=#7FD4FF>Trails</color> - a colored trail behind your body in matches. Length scales with price: 3,000 gold trails are short, 5,000 medium, 10,000 long.\n<color=#7FD4FF>Map skins</color> - recolor the whole map and background. Equip as many as you like and cycle through them mid-game with {0}. The catalog holds recolors styled after the six vanilla arts, more than thirty original presets including the night pack, and three premium sparkle skins: Gilded, Platinum and Aurora. <color=#7FE87F>Map skins are yours alone</color> - they're never sent to other players, so every player sees their own pick.\n<color=#7FD4FF>Name styling</color> - stackable styling on your display name. Formatting (bold, italic, underline, strike, float) stacks freely; glow, size, font transform and typeface allow one each, and the color effects (solids, neons, rainbow, per-letter gradients) share one slot.\n<color=#7FD4FF>Player colors</color> - replace your team orange or blue with a color of your own, and become your team identity on modded screens (see <color=#7FD4FF>Team & body colors</color>).\n<color=#7FD4FF>Cursor colors</color> - recolor your mouse cursor. The cursor SHAPE (default, arrow, dot, crosshair, circle) is a free preference. Nobody else ever sees your cursor.\n<color=#7FD4FF>Player effects</color> - a particle aura that follows your body in matches.\n<color=#7FD4FF>Faces</color> - custom eyes, mouths and accessories that slot into ROUNDS' own character editor next to the vanilla parts, and render everywhere a face renders. Some are animated; the Animated Cosmetics setting pins them to a still frame if you prefer.\n<color=#7FD4FF>Hide Gold</color> - a utility toggle that masks your gold on leaderboard surfaces.\n\n<color=#FFD94D><b>EQUIPPING</b></color>\n\n- One at a time: titles, trails, player colors, cursor colors and player effects use <color=#7FD4FF>Set Active</color> / <color=#7FD4FF>Unequip</color>.\n- Multi-equip: name styles and map skins use <color=#7FD4FF>Equip</color> / <color=#7FD4FF>Remove</color> - stack your name styles, hold a rotation of skins.\n- Hide Gold is an on/off toggle.\n\n<color=#FFD94D><b>WHO SEES WHAT</b></color>\n\n- <color=#7FE87F>The only cosmetic a player WITHOUT the mod can ever see is name styling</color> - styled names ride the same name field vanilla already renders, and putting styling in a name has always been possible in vanilla ROUNDS. Even there, glow and typeface are mod-side extras a vanilla screen can't display.\n- Everything else - trails, player colors, auras, faces, map skins - renders only for modded players. A vanilla opponent sees your default body color, no trail, no aura, and an empty slot where a custom face part would be. <color=#8A8A93>The game skips the unknown part cleanly: no crash, nothing substituted.</color>\n- Modded viewers can individually turn off other players' trails, player colors and animated cosmetics in Settings.\n\n<color=#FFD94D><b>STOCK, DROPS AND TEASERS</b></color>\n\n- The shop lists everything by price and shows what you own, each item's artist, and stock.\n- Community items can be limited: a drop shows N of M left and greys out once sold out.\n- An item can exist before its sale opens - it shows as not for sale until the artist opens sales, and brand-new arrivals tease on the Home tab's newest-cosmetics panel first. <color=#FF6666>Seeing an item on Home doesn't mean you can buy it yet.</color>\n- You can't buy an item twice, and a purchase you can't afford is refused - no debt, no partial buys.\n\n<color=#FFD94D><b>THE ARTIST STUDIO</b></color>\n\nCommunity artists make a large share of the catalog. The pipeline:\n\n- An artist (a role granted in-game) submits art from the Artist tab: one 512x512 PNG, a GIF, or up to 16 numbered PNG frames, positioned on a live on-body preview with slot, scale and offset.\n- The submission goes to review. Approval alone doesn't put it on sale: the art has to ship inside a mod release first, because cosmetics are bundled into the mod so every player's game can render them.\n- Once shipped, the artist opens sales and controls the price, the stock cap, and who may buy - an artist can block specific players from buying their items.\n- The artist earns <color=#7FE87F>a 30% royalty</color> (rounded down to whole Gold) when another player buys their item. No royalty on gifts.\n\n<color=#FFD94D><b>GIFTS</b></color>\n\nOnly artists can gift, and only their own items: a free copy to any player who has used the mod, including before sales open. Gifts still consume stock on a limited drop. There is no player-to-player gifting, and no way to send gold to another player.",
   "Could not cancel: {0}",
+  "Could not confirm your seat. Retrying",
   "Could not decode one of the animation frames.",
   "Could not join as spectator - the game may have ended.",
   "Could not load this report",
@@ -926,6 +929,7 @@
   "Could not open that cosmetic preview.",
   "Could not record the pack open on this PC - nothing was sent to the server",
   "Could not record the purchase on this PC - nothing was sent to the server",
+  "Could not rejoin at this point",
   "Could not spectate this game.",
   "Couldn't change Appear offline - try again",
   "Couldn't change Show Discord on leaderboard - try again",
@@ -2383,6 +2387,7 @@
   "Searing electric-green body color.",
   "Searing-lime neon name with a soft glow halo. Visible to everyone; modded players also see the glow.",
   "Seasonal Spring",
+  "Seat held for {0}: {1}",
   "Seats full",
   "Secure connection restored - opening the portal.",
   "Secure connection unavailable - signed-in features are off until it is back.",
@@ -2689,6 +2694,7 @@
   "That game is not ready to watch yet.",
   "That key is already used by another control.",
   "That key types into the chat box it would switch.",
+  "That match has ended",
   "That mode is not accepting spectators right now.",
   "That pack is not available any more",
   "That pack is still opening - hold on",
@@ -2766,6 +2772,7 @@
   "The report request could not be started",
   "The rule book for what gets recorded and what gets thrown away: games, series, disconnects, bets. If a result looks missing, the reason is almost always on this page.\n\n<color=#FFD94D><b>NEVER RECORDED AT ALL</b></color>\n\n- Data consent off: the mod runs fully offline. Nothing is ever sent except a version check.\n- Offline, practice and sandbox games: never reported by the client, and refused by the server as a backstop.\n- Spectator seats submit no match record and no persistent stats. (The mod keeps local diagnostics in its own log — frames, connection facts — and sends nothing automatically; they leave your PC only inside a bug report you choose to attach logs to.)\n\n<color=#FFD94D><b>RANKED OR CASUAL</b></color>\n\n- Either player's Ranked toggle off in a room-code game - it plays as CASUAL. Still fully recorded with stats and XP; it never touches rating (see <color=#7FD4FF>How games are tracked</color>).\n- Opponent has never run the mod - always casual, never upgraded. (A live unfinished series from an earlier sitting is the one thing that keeps ranked status across a gap.)\n- Toggling Ranked off MID-SERIES does not void the series. The running best-of-3 is your consent record; its games stay ranked.\n- A game reported as casual is UPGRADED to ranked when the server can see both players are modded, both have Ranked on, and the sitting is live.\n- A ranked-banned participant forces a 1v1 casual at report time - even in a queue room, even mid-series. (The other modes shut banned players out at the door instead.)\n- Mod-issued rooms are consented by definition; queueing is consent. The ranked queue, 2v2 and tournaments rate; ranked FFA lobbies rate while casual ones don't; 1v2 records without rating.\n\n<color=#FFD94D><b>DISCONNECTS - 1V1</b></color>\n\n- You leave a game to join a queued ranked match - the game you left is canceled: nothing recorded, no leave logged.\n- Opponent DCs at 4-4 - you get the win, recorded 5-4.\n- Opponent DCs while you hold 4 rounds - you get the win at the standing score.\n- Any other DC - <color=#FF6666>the game is canceled and no result is recorded</color>, even when the leaver was ahead. Nobody gets a free win and nobody eats an unfair loss (the leave itself can still be logged - see below).\n- Ranked leave %: a DC is logged against the leaver when the CURRENT game had meaningful play (2 or more points scored, or a completed round) and neither side was at 4 rounds. One DC per player per series. The stat is your DCs divided by your ranked series played plus your DCs.\n- Casual rage quits: ANY mid-game leave in a casual 1v1 is logged, even at 4-0. It feeds the Rage Quit % stat (how often opponents walk out on you) - never rating. (A survivor already at 4 rounds still takes the casual win and its XP.)\n\n<color=#FFD94D><b>DISCONNECTS - 2V2 AND FFA</b></color>\n\n- 2v2: a team DCs while the other team leads the series and the abandoned game had 2 or more points - the leading team takes the whole series, with full ratings and rewards.\n- Any other 2v2 DC - the series PAUSES for manual admin resolution instead of auto-deciding. If the same four re-queue within about 30 minutes, the matcher puts them back on the same series with the score kept.\n- FFA keeps playing when someone leaves, as long as 2 or more remain (a game that drops under 3 players before the field scored 2 half points is cancelled instead). The leaver's tallies are frozen, and they are still placed and rated for the game they left during - <color=#FF6666>leaving at 0 points does not dodge the loss</color>.\n- FFA early-leave grace: a leaver who left before the field had scored 2 half points, with a zero tally of their own, is unrated for that game - nothing was decided yet.\n- An FFA player who left in an EARLIER game rides later reports as absent, excluded from those games' ratings and rewards.\n\n<color=#FFD94D><b>SERIES: RESUME, STALL, EXPIRE</b></color>\n\n- <color=#7FE87F>An undecided best-of-3 resumes with no time limit.</color> Meet the same opponent tomorrow or next week and game 1 still stands. An expiry existed once - leavers waited it out to bank rating, so it was removed.\n- Rating moves ONLY when a series completes (first to 2 game wins). Games of a series that never completes keep their match rows, XP and gold; the rating change just never happens.\n- A series with no game recorded 30 minutes after it was created is abandoned and its bets are refunded.\n- A mid-series stall of an hour refunds the bets, but the series itself stays active and resumable.\n- Tournament series are exempt from this pruning - the bracket owns their lifecycle. A tournament match decided by forfeit can't be bet on.\n\n<color=#FFD94D><b>THROWN OUT AFTER THE FACT</b></color>\n\n- The one AUTOMATIC invalidation in the whole mod: a repeated pattern of implausibly short matches between the same two players inside a short window. The current match AND the earlier short ones are invalidated together, their gold and XP reversed, their series voided.\n- Admin reversal: an admin can void a series - rating changes subtracted, gold clawed back, every match in it invalidated, unsettled bets refunded. Invalidated matches disappear from every board and stat.\n- Quarantine (2v2 and FFA): a report that arrives for a lobby that's no longer active isn't deleted - it's held for admin review, and an admin can still accept it into the record or discard it.\n\n<color=#FFD94D><b>IF THE REPORT CAN'T SEND</b></color>\n\n- A failed report goes to a persistent outbox: retried in the background and saved to disk, so it's re-sent on your next launch even if you quit right after the game. You'll see 'Couldn't record the match - retrying in the background', then 'Match recorded' when it lands.\n- 1v1 reporter crashes before the report exists - the surviving opponent's disconnect path usually records the result instead.\n- FFA elects its reporter among the players still present, so a crashed reporter is never elected. A winner who quits before the report is still recorded from their frozen tallies.\n- A 2v2 game that ends without its series id retries the lookup and defers the send; if that also fails, the game is not recorded.",
   "The same actions in a different order",
+  "The seat was released before you returned",
   "The secure connection to {0} answered with an error (HTTP {1}). The portal needs it; the game keeps working on the backup connection.",
   "The secure connection to {0} answered, but not as the SCR server. The portal needs it; the game keeps working on the backup connection.",
   "The secure connection to {0} could not be opened. The portal needs it; the game keeps working on the backup connection.",
@@ -3119,6 +3126,8 @@
   "Yin & Yang",
   "You",
   "You already have an open trade with that player",
+  "You are back in the match",
+  "You are in another queue",
   "You are muted - mail is unavailable while the mute lasts.",
   "You are not in the card pool yet, so there is no card to show - this is your picture.",
   "You can shard up to {0} cards at once",
@@ -3135,6 +3144,7 @@
   "You have sent all the proposals allowed today - try again after midnight UTC",
   "You have too many proposals waiting - cancel one first",
   "You joined the match in progress. This game is unrated for you.",
+  "You left that match",
   "You should join Competitive Rounds, it's a discord community",
   "You show up.",
   "You two have made all the trades allowed today - try again after midnight UTC",
@@ -3147,6 +3157,7 @@
   "Your FFA is already starting — leave it first if you meant to switch.",
   "Your FFA lobby closed.",
   "Your FFA match continued without you - you've been removed from it.",
+  "Your FFA match is still running. Rejoin? {0}",
   "Your Hit Rate",
   "Your Player Cards settings changed elsewhere - refreshed, try again",
   "Your block list is full - unblock someone first.",
@@ -3467,6 +3478,7 @@
   "your trail",
   "{0:N0} XP",
   "{0}  {1}%  ({2} picks)",
+  "{0} (away) got {1}",
   "{0} (hold) - dance wheel; dancing locks your controls",
   "{0} (hold) - quick-chat wheel, release to send",
   "{0} (hold, in a lobby) - ready up / join",
@@ -3496,6 +3508,7 @@
   "{0} cards",
   "{0} d ago",
   "{0} days ago",
+  "{0} did not return; seat released",
   "{0} dps",
   "{0} elo",
   "{0} games",
@@ -3504,6 +3517,7 @@
   "{0} gold",
   "{0} h ago",
   "{0} half-point events",
+  "{0} is back",
   "{0} is now your title.",
   "{0} item(s), {1} cop(ies) out there.",
   "{0} keys/s",
@@ -6369,6 +6383,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Another player is using your seat identity": {
+   "surface": "FfaReadmit",
+   "location": "Refusal",
+   "kind": "ShowNotification"
+  },
   "Anti-cheat": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
@@ -6488,6 +6507,11 @@
    "surface": "shop catalog",
    "location": "cosmetic name/description",
    "kind": "shop"
+  },
+  "Automatic pick: {0}": {
+   "surface": "FfaMode",
+   "location": "FfaPickPhase",
+   "kind": "TrF"
   },
   "Avatar auto-switch: <color=#88CCFF>OFF</color>": {
    "surface": "NativeUI",
@@ -8144,6 +8168,11 @@
    "location": "ClickLobbyBet",
    "kind": "TrF"
   },
+  "Could not confirm your seat. Retrying": {
+   "surface": "FfaReadmit",
+   "location": "Act, Refusal",
+   "kind": "ShowNotification"
+  },
   "Could not decode one of the animation frames.": {
    "surface": "CompetitiveUI",
    "location": "OpenCosmeticAnimTestPreview",
@@ -8178,6 +8207,11 @@
    "surface": "PlayerCardsUI",
    "location": "BeginBuy",
    "kind": "Tr"
+  },
+  "Could not rejoin at this point": {
+   "surface": "FfaReadmit",
+   "location": "Refusal",
+   "kind": "ShowNotification"
   },
   "Could not spectate this game.": {
    "surface": "ApiClient",
@@ -8675,9 +8709,9 @@
    "kind": "TrF"
   },
   "Decline": {
-   "surface": "NativeUI, PlayerCardsUI",
-   "location": "BuildRankedRow, CreateTradeRow",
-   "kind": "CreateButton"
+   "surface": "FfaReadmit, NativeUI, PlayerCardsUI",
+   "location": "BuildRankedRow, CreateTradeRow, DrawBar",
+   "kind": "CreateButton, Tr"
   },
   "Decline (offline mode)": {
    "surface": "CompetitiveUI",
@@ -15464,6 +15498,11 @@
    "location": "cosmetic name/description",
    "kind": "shop"
   },
+  "Seat held for {0}: {1}": {
+   "surface": "FfaReadmit",
+   "location": "OnHoldsAnswer",
+   "kind": "TrF"
+  },
   "Seats full": {
    "surface": "ApiClient",
    "location": "SpectateReason, SpectateReasonExact",
@@ -16994,6 +17033,11 @@
    "location": "KeybindRefusalText",
    "kind": "Tr"
   },
+  "That match has ended": {
+   "surface": "FfaReadmit",
+   "location": "Refusal",
+   "kind": "ShowNotification"
+  },
   "That mode is not accepting spectators right now.": {
    "surface": "ApiClient",
    "location": "SpectateReason, SpectateReasonExact",
@@ -17378,6 +17422,11 @@
    "surface": "InfoViz",
    "location": "BuildRefreshWindowSequences, TextFallback",
    "kind": "Tr"
+  },
+  "The seat was released before you returned": {
+   "surface": "FfaReadmit",
+   "location": "Refusal",
+   "kind": "ShowNotification"
   },
   "The secure connection to {0} answered with an error (HTTP {1}). The portal needs it; the game keeps working on the backup connection.": {
    "surface": "SecureRouteText",
@@ -19125,8 +19174,8 @@
    "kind": "shop"
   },
   "Yes": {
-   "surface": "InfoViz",
-   "location": "BuildDamageMatrix, BuildRefreshFlow, BuildRefreshGate +1",
+   "surface": "FfaReadmit, InfoViz",
+   "location": "BuildDamageMatrix, BuildRefreshFlow, BuildRefreshGate +2",
    "kind": "Tr"
   },
   "Yin & Yang": {
@@ -19143,6 +19192,16 @@
    "surface": "PlayerCardsUI",
    "location": "ReasonText",
    "kind": "Tr"
+  },
+  "You are back in the match": {
+   "surface": "FfaLateEntry",
+   "location": "OnSelfKept",
+   "kind": "ShowNotification"
+  },
+  "You are in another queue": {
+   "surface": "FfaReadmit",
+   "location": "Refusal",
+   "kind": "ShowNotification"
   },
   "You are muted - mail is unavailable while the mute lasts.": {
    "surface": "MailClient",
@@ -19224,6 +19283,11 @@
    "location": "OnSelfKept",
    "kind": "ShowNotification"
   },
+  "You left that match": {
+   "surface": "FfaReadmit",
+   "location": "Refusal",
+   "kind": "ShowNotification"
+  },
   "You should join Competitive Rounds, it's a discord community": {
    "surface": "QuickChat",
    "location": "Phrases",
@@ -19283,6 +19347,11 @@
    "surface": "ApiClient",
    "location": "UpdateFfaQueuePoll",
    "kind": "ShowNotification"
+  },
+  "Your FFA match is still running. Rejoin? {0}": {
+   "surface": "FfaReadmit",
+   "location": "DrawBar",
+   "kind": "TrF"
   },
   "Your Hit Rate": {
    "surface": "CompetitiveUI",
@@ -20884,6 +20953,11 @@
    "location": "FavCardLine",
    "kind": "TrF"
   },
+  "{0} (away) got {1}": {
+   "surface": "FfaMode",
+   "location": "ApplyManifestPick",
+   "kind": "TrF"
+  },
   "{0} (hold) - dance wheel; dancing locks your controls": {
    "surface": "InfoViz",
    "location": "BuildKeyboard",
@@ -21029,6 +21103,11 @@
    "location": "Ago",
    "kind": "TrF"
   },
+  "{0} did not return; seat released": {
+   "surface": "FfaReadmit",
+   "location": "OnHoldsAnswer",
+   "kind": "TrF"
+  },
   "{0} dps": {
    "surface": "NativeUI, PostSessionReport",
    "location": "BuildFfaRecentRowText, FillRow, SideStats",
@@ -21067,6 +21146,11 @@
   "{0} half-point events": {
    "surface": "NativeUI",
    "location": "ParseFfaTimeline",
+   "kind": "TrF"
+  },
+  "{0} is back": {
+   "surface": "FfaLateEntry",
+   "location": "AfterPair",
    "kind": "TrF"
   },
   "{0} is now your title.": {

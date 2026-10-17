@@ -24,6 +24,8 @@
     <ReportSource Condition="'$(ReportSource)' == ''">$(PluginDir)FfaReportRules.cs</ReportSource>
     <LateSource Condition="'$(LateSource)' == ''">$(PluginDir)FfaLateRules.cs</LateSource>
     <NumberingSource Condition="'$(NumberingSource)' == ''">$(PluginDir)FfaNumberingRules.cs</NumberingSource>
+    <EntrySource Condition="'$(EntrySource)' == ''">$(PluginDir)FfaReadmitEntryRules.cs</EntrySource>
+    <CensusSource Condition="'$(CensusSource)' == ''">$(PluginDir)RosterCensusRules.cs</CensusSource>
   </PropertyGroup>
 
   <ItemGroup>
@@ -31,6 +33,8 @@
     <Compile Include="$(ReportSource)" />
     <Compile Include="$(LateSource)" />
     <Compile Include="$(NumberingSource)" />
+    <Compile Include="$(EntrySource)" />
+    <Compile Include="$(CensusSource)" />
     <Compile Include="$(MSBuildThisFileDirectory)*.cs" />
   </ItemGroup>
 

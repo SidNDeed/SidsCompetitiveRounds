@@ -146,6 +146,11 @@ FILES = [
     # re-form, dissolve and joined toasts, all literal notification or
     # I18n.Tr/TrF arguments.
     "FfaAssembly.cs", "FfaLateEntry.cs",
+    # FFA mid-game readmission (design V3 P4.5): the rejoin bar, its
+    # buttons, the held-seat lines and one refusal text per reason, all
+    # literal notification or I18n.Tr/TrF arguments. Its sibling
+    # FfaReadmitEntryRules.cs is absent on purpose: pure rules, no text.
+    "FfaReadmit.cs",
     # Item 19 (two default avatars by queue kind): the switch, unusable and
     # recovery notices, the portrait-grid legend and the preset option
     # labels, all at I18n.Tr/TrF sites. Its sibling AvatarDefaultRules.cs is

@@ -255,6 +255,19 @@ namespace CompetitiveRounds
             foreach (var n in rec.Ledger) _usedLocalSubstitutes.Add(n);
         }
 
+        /// <summary>V3 P4.3 step 6: the returner's draw indices and ledger from
+        /// the digest-covered tail, set after OnGameStart cleared them (the
+        /// latch never touches either; the fold is recomputed from the seed).</summary>
+        internal static void SeedReadmit(FfaReadmitEntryRules.Tail t)
+        {
+            if (t == null) return;
+            foreach (var s in t.Slots)
+                if (s.DrawIndex >= 0) _drawIndex[s.Slot] = s.DrawIndex;
+            Spend.Reset();
+            Spend.Ledger.AddRange(t.Ledger);
+            foreach (var n in t.Ledger) _usedLocalSubstitutes.Add(n);
+        }
+
         public static void OnRoomLeft() { OnGameStart(); }
 
         /// <summary>Master: publish the per-game seed prop. Idempotent across

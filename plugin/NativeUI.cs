@@ -4562,8 +4562,9 @@ namespace CompetitiveRounds
             TickPodiumSparkle();
             // One-shot membership discovery on first tab visit (design review
             // find 6): a relaunched client whose server row survived must
-            // find it before offering Create.
-            ApiClient.FfaProbeServerState();
+            // find it before offering Create. V3 P4.2: the readmission offer
+            // GET runs first; the probe runs only when it offers nothing.
+            FfaReadmit.DiscoverThenProbe();
             ApiClient.UpdateFfaQueuePoll(false);   // internally 2s-throttled; no-op when not polling
             ApiClient.FetchFfaLobbies(false);      // internally 3s-throttled (browser panel)
             if(Time.unscaledTime>=ffaRecentRefreshAt)

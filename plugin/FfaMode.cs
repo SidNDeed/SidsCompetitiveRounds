@@ -1415,6 +1415,8 @@ namespace CompetitiveRounds
                 if (gameOverFired) return;
                 if (RoomActors.LocalIsSpectator && spectatorGameOverAnnounced) return;
                 if (killed == null || killed.data == null) return;
+                // RJ readmission P4.7: a departure already counted this point.
+                if (DepartureCounted(killed)) return;
                 var src = killed.data.lastSourceOfDamage;
                 if (src == null || src.gameObject == null || src.data == null) return;
                 if (src.TeamID == killed.TeamID) return;
@@ -1727,7 +1729,7 @@ namespace CompetitiveRounds
             // Per-game, same lifetime as kills (bug #127/#130 telemetry).
             damageDealt.Clear(); killTimeline.Clear(); damageTimeline.Clear();
             timelineEvents.Clear();
-            decks.Clear(); pickHistory.Clear(); baselines.Clear();
+            decks.Clear(); pickHistory.Clear(); baselines.Clear(); departureDone.Clear();
             // Leavers PERSIST across rematches in the same room (Codex review
             // find 3): the server froze the roster at lock, so every game's
             // report must still cover the departed member or it 403s. Their
@@ -1850,7 +1852,7 @@ namespace CompetitiveRounds
             // Per-game, same lifetime as kills (bug #127/#130 telemetry).
             damageDealt.Clear(); killTimeline.Clear(); damageTimeline.Clear();
             timelineEvents.Clear();
-            decks.Clear(); pickHistory.Clear(); baselines.Clear();
+            decks.Clear(); pickHistory.Clear(); baselines.Clear(); departureDone.Clear();
             Leavers.Clear();
             isTransitioning = false;
             gameOverFired = false;
@@ -5061,6 +5063,187 @@ namespace CompetitiveRounds
             catch { return null; }
         }
 
+        // ── RJ readmission P4 (design V3): the returner's seat state ──────
+
+        /// <summary>The locked roster's name for a slot (held seat texts).</summary>
+        internal static string SeatName(int pid)
+        {
+            return RosterDisplayName(pid);
+        }
+
+        /// <summary>V3 P4.3 steps 3 and 4: this client's view of every roster
+        /// slot, read by slot and never from bodies (rounds, points, points
+        /// total, kills, logical deck, pick history, draw index), then the
+        /// ledger and the latest offer record's (game, cycle). Every kept peer
+        /// digests it and the master sends it in the late tail.</summary>
+        internal static FfaReadmitEntryRules.Tail ReadmitTail(IList<int> slots)
+        {
+            var t = new FfaReadmitEntryRules.Tail();
+            if (slots != null) foreach (int s in slots)
+            {
+                var ts = new FfaReadmitEntryRules.TailSlot
+                {
+                    Slot = s, Rounds = RoundsFor(s), Points = PointsFor(s),
+                    PointsTotal = PointsTotalFor(s), Kills = KillsFor(s),
+                    DrawIndex = FfaCardSequence.DrawIndexOf(s),
+                };
+                ts.Deck.AddRange(LogicalDeckNames(s));
+                if (pickHistory.TryGetValue(s, out var hist) && hist != null)
+                    foreach (var h in hist)
+                        if (h != null)
+                            ts.History.Add(FfaReadmitEntryRules.HistoryEntry(h.RoundNumber, h.Rolled, h.PickOrder, h.CardRarity, h.CardName));
+                t.Slots.Add(ts);
+            }
+            t.Ledger.AddRange(FfaCardSequence.Spend.Ledger);
+            try
+            {
+                var rec = FfaReadmitRules.Parse(ReadRawRoomProp(FfaReadmitRules.OfferProp));
+                if (rec != null) { t.OfferGame = rec.Game; t.OfferCycle = rec.Cycle; }
+            }
+            catch { }
+            return t;
+        }
+
+        /// <summary>V3 P4.3 step 6: after LateSeedScores, the returner sets
+        /// every slot's logical deck and pick history from the tail, then the
+        /// draw indices and the ledger (FfaCardSequence.SeedReadmit, after the
+        /// OnGameStart LateSeedScores ran). False when a deck card does not
+        /// resolve in this client's pool: the seat then fails closed.</summary>
+        internal static bool ReadmitSeedSeat(FfaReadmitEntryRules.Tail t)
+        {
+            if (t == null || RoomActors.LocalIsSpectator) return false;
+            var newDecks = new Dictionary<int, List<CardInfo>>();
+            foreach (var s in t.Slots)
+            {
+                var deck = new List<CardInfo>();
+                foreach (var n in s.Deck)
+                {
+                    var c = ResolveCard(n);
+                    if (c == null)
+                    {
+                        Plugin.Log.LogWarning($"[FFA-RDM] seed refused: card '{n}' of slot {s.Slot} not in this pool");
+                        return false;
+                    }
+                    deck.Add(c);
+                }
+                newDecks[s.Slot] = deck;
+            }
+            foreach (var s in t.Slots)
+            {
+                decks[s.Slot] = newDecks[s.Slot];
+                var hist = new List<MatchTracker.CardPickData>();
+                foreach (var h in s.History)
+                {
+                    if (!FfaReadmitEntryRules.ParseHistory(h, out int round, out bool rolled, out int order, out string rarity, out string name))
+                        continue;
+                    hist.Add(new MatchTracker.CardPickData
+                    {
+                        CardName = name, CardRarity = rarity, PickOrder = order, RoundNumber = round, Rolled = rolled,
+                    });
+                }
+                pickHistory[s.Slot] = hist;
+            }
+            FfaCardSequence.SeedReadmit(t);
+            Plugin.Log.LogInfo($"[FFA-RDM] seat seeded from the tail: {t.Slots.Count} slot(s), ledger {t.Ledger.Count}");
+            return true;
+        }
+
+        /// <summary>V3 P4.3 step 8: at a kind r seat's keep transition every
+        /// client replays that slot's logical deck onto the body in pick order
+        /// through the local-only apply (no pick RPC), from its own logical
+        /// deck. False while the body is not resolvable here (the caller
+        /// retries).</summary>
+        internal static bool ReadmitReplayAtKeep(int slot)
+        {
+            var player = ResolveFighter(slot);
+            if (player == null || player.gameObject == null || player.data == null) return false;
+            var cards = decks.TryGetValue(slot, out var deck) && deck != null ? new List<CardInfo>(deck) : new List<CardInfo>();
+            baselines.Remove(slot);           // the baseline of the body that left
+            CaptureBaselineIfNeeded(player);
+            if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(ReadmitReplayRun(player, cards));
+            return true;
+        }
+
+        private static IEnumerator ReadmitReplayRun(Player player, List<CardInfo> cards)
+        {
+            int pid = player.PlayerID;
+            deckViewRebuilds.Add(pid);
+            yield return RollingResetAndReplay(player, cards);
+            yield return null;
+            RebuildDeckViews(player, cards);
+            deckViewRebuilds.Remove(pid);
+            Plugin.Log.LogInfo($"[FFA-RDM] replayed {cards.Count} card(s) onto slot {pid} at keep");
+        }
+
+        // ── RJ readmission P4.7: departure as death ──
+
+        private static readonly HashSet<string> departureDone = new HashSet<string>();
+
+        private static string DepartureKey(int actor)
+        {
+            return actor.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":"
+                   + gameNumber.ToString(System.Globalization.CultureInfo.InvariantCulture) + ":"
+                   + FfaLateEntry.PointK.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>V3 P4.7: in a readmission lobby, from the leave callback
+        /// and before the purge (the body still exists there), a fighter that
+        /// leaves an ongoing point alive, unquarantined and not lagged credits
+        /// exactly the kill RecordKillFor would have credited at its death,
+        /// once per (actor, point). Elsewhere nothing runs.</summary>
+        internal static void RecordDepartureDeath(Photon.Realtime.Player leaver)
+        {
+            try
+            {
+                if (leaver == null || !FfaAssembly.ReadmitLobby || RoomActors.LocalIsSpectator) return;
+                var pm = PlayerManager.instance;
+                if (pm?.players == null) return;
+                Player victim = null;
+                foreach (var p in pm.players)
+                {
+                    if (p == null || p.gameObject == null || p.data == null || p.data.view == null) continue;
+                    var owner = p.data.view.Owner;
+                    if (owner != null && owner.ActorNumber == leaver.ActorNumber) { victim = p; break; }
+                }
+                if (victim == null) return;
+                bool battle = false;
+                try { battle = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
+                var v = new FfaReadmitEntryRules.DepartureView
+                {
+                    ReadmitLobby = true, GameOver = gameOverFired, BattleOngoing = battle,
+                    VictimPresent = true, VictimDead = victim.data.dead,
+                    VictimQuarantined = FfaLateEntry.IsQuarantined(victim),
+                    VictimLagOut = FfaLateEntry.BodyLagged(victim),
+                    VictimTeam = victim.TeamID, Key = DepartureKey(leaver.ActorNumber),
+                };
+                var src = victim.data.lastSourceOfDamage;
+                if (src != null && src.gameObject != null && src.data != null)
+                {
+                    v.SourceTeam = src.TeamID;
+                    v.SourceQuarantined = FfaLateEntry.IsQuarantined(src);
+                }
+                int team = FfaReadmitEntryRules.DepartureCredit(v, departureDone);
+                if (team >= 0)
+                {
+                    kills[team] = KillsFor(team) + 1;
+                    Plugin.Log.LogInfo($"[FFA-RDM] departure death: slot {victim.TeamID} left alive mid-point, kill credited to slot {team}");
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>A death of a victim whose departure already counted this
+        /// point credits nothing more (a leave and a death at one moment).</summary>
+        private static bool DepartureCounted(Player killed)
+        {
+            try
+            {
+                var owner = killed?.data?.view?.Owner;
+                return owner != null && departureDone.Contains(DepartureKey(owner.ActorNumber));
+            }
+            catch { return false; }
+        }
+
         private static CardInfo ResolveCard(string cardName)
         {
             try
@@ -5577,6 +5760,8 @@ namespace CompetitiveRounds
                 // player standing) and, when only one client is left, ends the
                 // game and reports before leaving the room itself.
                 Plugin.Log.LogInfo($"[FFA] player left, {remaining} remain — match continues (vanilla end-cascade suppressed)");
+                // RJ readmission P4.7: before the purge, while the body exists.
+                FfaMode.RecordDepartureDeath(otherPlayer);
                 if (Plugin.Instance != null)
                     Plugin.Instance.StartCoroutine(FfaMode.CheckRoundAfterLeave());
                 return false;

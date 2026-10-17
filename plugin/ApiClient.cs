@@ -20274,6 +20274,25 @@ namespace CompetitiveRounds
             UpdateFfaQueuePoll(force: true);
         }
 
+        /// <summary>V3 P4.2 discovery: the read-only readmission offer
+        /// {readmissible, lobby_id, slot, n, hold_s}. It sets no queue,
+        /// lease, lobby or seat state on either side.</summary>
+        internal static void FfaReadmitOffer(string sid, Action<bool, string> callback)
+        {
+            if (Plugin.Instance == null) { try { callback?.Invoke(false, "no plugin"); } catch { } return; }
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ffa/readmit/offer?steam_id={sid}",
+                callback ?? ((ok, r) => { }), detailedErrors: false, sessionAware: true));
+        }
+
+        /// <summary>V3 P4.2: after a readmission claim the seat's queue row is
+        /// ready_join for its lobby; the poll's lock routine joins it.</summary>
+        internal static void FfaStartReadmitPoll()
+        {
+            _ffaProbed = true;
+            IsFfaQueuePolling = true;
+            UpdateFfaQueuePoll(force: true);
+        }
+
         /// <summary>The cause tag an in-room FFA exit should send (bug 392
         /// item A step 2). "in_room_exit" — today's tag — unless this seat
         /// recorded a fresh involuntary DisconnectCause AND the server
@@ -20684,7 +20703,28 @@ namespace CompetitiveRounds
                         // refusal nor the unknown wait applies to it; the
                         // competitive-room decline below still does.
                         bool admissibleSeat = ExtractJsonInt(resp, "admissible") == 1;
-                        if (!inThatRoom && !admissibleSeat && resp.Contains("\"game_in_progress\":true"))
+                        // V3 P4.2, the belt of discovery: a seat whose readmission
+                        // hold is live (readmissible: 1) is offered the bar and
+                        // neither joins nor leaves here; the seat that claimed this
+                        // lobby's readmission proceeds to the join. Every other seat
+                        // meets the refusal and the unknown wait below unchanged.
+                        bool readmissibleSeat = ExtractJsonInt(resp, "readmissible") == 1;
+                        string gameInProgress = resp.Contains("\"game_in_progress\":true") ? "true"
+                            : (resp.Contains("\"game_in_progress\":null") ? "null" : "other");
+                        var belt = FfaReadmitEntryRules.Belt(inThatRoom, admissibleSeat, readmissibleSeat,
+                                                             FfaReadmit.ClaimedFor(cdLobby), gameInProgress);
+                        if (belt == FfaReadmitEntryRules.BeltAct.Offer)
+                        {
+                            FfaReadmit.OfferFromPoll(cdLobby, ExtractJsonInt(resp, "slot"),
+                                                     ExtractJsonInt(resp, "readmit_n"), ExtractJsonInt(resp, "hold_s"));
+                            NativeUI.MarkDirty();
+                            return;
+                        }
+                        // The explicit !inThatRoom and !admissibleSeat terms are
+                        // what Belt already requires for Refuse and Wait; they keep
+                        // the K35 shape (admissible: 1 skips this refusal and the
+                        // unknown wait, never the decline below) readable here.
+                        if (!inThatRoom && !admissibleSeat && belt == FfaReadmitEntryRules.BeltAct.Refuse)
                         {
                             Plugin.Log.LogWarning("[FFA] ready_join for a lobby whose game is LIVE — refusing rejoin (relaunched seat)");
                             FfaLeaveQueue(label: "rejoin_refused");
@@ -20698,7 +20738,8 @@ namespace CompetitiveRounds
                         // re-asks, and the server's window resolves within
                         // ~210s worst case. Acting on unknown was what made
                         // an API restart dissolve every fresh FFA.
-                        if (!inThatRoom && !admissibleSeat && resp.Contains("\"game_in_progress\":null"))
+                        if (!inThatRoom && !admissibleSeat && belt == FfaReadmitEntryRules.BeltAct.Wait
+                            && resp.Contains("\"game_in_progress\":null"))
                         {
                             Plugin.Log.LogInfo("[FFA] ready_join with game_in_progress UNKNOWN (server just restarted) — waiting for the next poll");
                             return;
@@ -20972,6 +21013,10 @@ namespace CompetitiveRounds
                     // same-card engine runs only when EVERY room member
                     // advertises this (#273 all-players rule).
                     prejoin[FfaCardSequence.CapabilityProp] = FfaCardSequence.FeatureLevel;
+                    // V3 P4.2: a readmission claim's cr_rdt = "{n}:{T}" rides the
+                    // join (#287); nothing is written without a claim held for
+                    // this lobby, and the seat joins as a fighter (no cr_spec).
+                    FfaReadmit.StageInto(prejoin, ActiveFfaLobbyId);
                     // V11: kept for the arrival's identity republish (item 1).
                     // A re-form sets them in IssueJoinOrCreate, immediately
                     // before JoinOrCreateRoom and outside any room (#287); a

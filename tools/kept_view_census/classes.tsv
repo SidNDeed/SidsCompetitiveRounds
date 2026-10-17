@@ -83,6 +83,8 @@ FfaLateEntry.cs	FfaLateEntry	OnStamp	Sender	R	a stamp is held with its sender an
 FfaLateEntry.cs	FfaLateEntry	OwnDeathAfterCallIn	players	N	finds the local body (IsMine) only	
 FfaLateEntry.cs	FfaLateEntry	OwnTicketServesLoad	IsMasterClient	R	whether this client's own count ticket serves its load; the ticket is armed only by MasterPublishCount, which reads MasterMaySend()	
 FfaLateEntry.cs	FfaLateEntry	PresentActors	PresentNonSpectators	R	the present non-spectator actors, raw by design (the readiness barrier and the fence target)	
+FfaLateEntry.cs	FfaLateEntry	ReadmitSlots	KeptPlayers	V	RJ readmission P4.3 step 4: the boundary digest and tail slot set read KeptPlayers(), the kept view; in a readmission lobby DigestSlotSet widens it to every roster slot, never to a raw body
+FfaLateEntry.cs	FfaReadmit_RegisterOrder_Patch	Prefix	players	R	RJ readmission P4.3 step 9: the registration-order prefix compacts and orders PlayerManager's own registry before one registration in a readmission lobby; it is the registry itself and decides no count, send gate, damage, pick or result
 FfaMapScale.cs	FfaMapScale	MasterPublishCount	ActiveFighterCount	V	published count over KeptPlayers() (surface 6)	
 FfaMapScale.cs	FfaMapScale	MasterPublishCount	KeptPlayers	V	published count over KeptPlayers() (surface 6)	
 FfaMapScale.cs	FfaMapScale	MasterPublishCount	MasterMaySend	F	master publishes the count; MasterMaySend()	
@@ -125,6 +127,7 @@ FfaMode.cs	FfaMode	MasterGameNow	IsMasterClient	R	RJ-DRIFT N2/N15: on the master
 FfaMode.cs	FfaMode	MasterGameNow	MasterClient	R	RJ-DRIFT N2/N15: the master's witness, read for the carry and the follow test; a read, no send	
 FfaMode.cs	FfaMode	MasterPublishConfig	MasterMaySend	F	NEW V7 site: master config publish (FfaMode.cs:89-93); MasterMaySend()	
 FfaMode.cs	FfaMode	NoEpochReason	IsMasterClient	N	log text only (the [FFA-NUM] reason this seat holds no epoch)	
+FfaMode.cs	FfaMode	OfferEndOfCycle	IsMasterClient	R	RJ readmission P2 step 9: a non-master recomputes the rule-s offer record only to log the audit; every client applies the PUBLISHED record either way, and nothing is sent
 FfaMode.cs	FfaMode	OnGameStart	ActiveFighterCount	V	the game_start line's count is the kept view's (telemetry)	
 FfaMode.cs	FfaMode	OnGameStart	Leavers	R	a reset and the per-game carry: each recorded leave's tallies zeroed and gamePointsAtLeave set to -1 (FfaMode.cs:1084-1100); it adds no entry	
 FfaMode.cs	FfaMode	OnMasterClientSwitched	OnMasterClientSwitched	R	RJ-DRIFT change 3: the handoff callback clears this seat's own cycle-write ticket; local state, no send	
@@ -132,6 +135,7 @@ FfaMode.cs	FfaMode	OnRoomLeft	Leavers	R	a reset on leaving the room (FfaMode.cs:
 FfaMode.cs	FfaMode	PurgeDepartedPlayers	players	R	removes destroyed entries from the raw list; must see every entry	
 FfaMode.cs	FfaMode	RawAnchorFallback	GetPlayersInTeam	R	vanilla indexes GetPlayersInTeam(anchor)[0] on the raw list, so an anchor it lacks falls back to a raw body; display only	
 FfaMode.cs	FfaMode	RawAnchorFallback	players	R	the anchor fallback's raw body (vanilla's victory flow); never a score, a point or a report	
+FfaMode.cs	FfaMode	RecordDepartureDeath	players	R	RJ readmission P4.7: resolves the LEAVING actor's own body by its owner before the purge, in a readmission lobby only; the credit itself is DepartureCredit's (alive, unquarantined, not lagged, battle ongoing), the RecordKillFor rule, once per actor and point
 FfaMode.cs	FfaMode	RecordLeaver	Leavers	R	the ledger's only writer, keyed by Steam id (FfaMode.cs:1195-1213); each call site is a census row of its own, classified there (row 53)	
 FfaMode.cs	FfaMode	RecordLeaver	RecordLeaver	R	the ledger writer's own declaration; each call site is a census row of its own (row 53)	
 FfaMode.cs	FfaMode	ResolveFighter	players	R	the beta lane's pid-to-body resolution, vanilla GetPlayerWithID's linear search with holes and destroyed bodies skipped; its four manifest callers (ApplyManifestPick, CollectPicks, CountStillPresent, DetectAheadPickIdentity) each test FfaLateEntry.IsQuarantined on the body it returns (row 50)	
