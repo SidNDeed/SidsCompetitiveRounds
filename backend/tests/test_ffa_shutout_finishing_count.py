@@ -316,7 +316,8 @@ def test_every_departed_ids_writer_updates_the_lobby_row_the_report_locks():
 HARNESS_SCHEMA = "ffa_trophies_harness"
 LANE_MARKER = re.compile(r"(?:^|_)ffa_trophies(?:_|$)")
 # Dependency order: each table is dropped before the tables it references.
-HARNESS_TABLES = ("player_achievements", "gold_transactions", "glicko_ratings_ffa",
+HARNESS_TABLES = ("ffa_report_windows", "player_achievements", "gold_transactions",
+                  "glicko_ratings_ffa",
                   "match_report_quarantine", "ffa_match_players", "ffa_matches",
                   "ffa_lobbies", "players")
 HARNESS_DROP = ["DROP TABLE IF EXISTS %s.%s RESTRICT" % (HARNESS_SCHEMA, t)
@@ -474,6 +475,24 @@ CREATE TABLE @S@.player_achievements (
 )
 """
 HARNESS_DDL = [s.strip().replace("@S@", HARNESS_SCHEMA) for s in _DDL.split(";;") if s.strip()]
+
+# FFA readmission (378): the report path reads ffa_lobbies.readmit_v1 and the
+# ffa_report_windows table on every report, so the harness carries both. They
+# are read from the migration file itself, each definition required to occur
+# exactly once, and every table they name is placed in the harness schema.
+READMIT_MIGRATION = SQL_DIR / "378_ffa_readmission.sql"
+_READMIT_DEFINITIONS = (r"ALTER TABLE ffa_lobbies ADD COLUMN IF NOT EXISTS readmit_v1\b[^;]*;",
+                        r"CREATE TABLE IF NOT EXISTS ffa_report_windows \([^;]*\);")
+
+
+def _readmit_ddl(sql):
+    found = [re.findall(p, sql) for p in _READMIT_DEFINITIONS]
+    assert [len(f) for f in found] == [1, 1], [len(f) for f in found]
+    return [re.sub(r"\b(ffa_lobbies|ffa_report_windows|players)\b", HARNESS_SCHEMA + r".\1",
+                   f[0].rstrip(";")) for f in found]
+
+
+HARNESS_DDL = HARNESS_DDL + _readmit_ddl(READMIT_MIGRATION.read_text(encoding="utf-8"))
 
 # Every relation outside the system schemas, with the table an index or a
 # column-owned sequence belongs to. Temporary schemas are other sessions'
