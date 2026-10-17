@@ -55375,7 +55375,8 @@ async def _asm_lock(db, lobby_id, steam_id, *, route, t0, cap=True, expire=True)
     lobby row FOR NO KEY UPDATE through _ffa_lock_lobby_slot (so k is the
     locked row's own next game); the live caller identity and seat row re-read
     below that lock, 404 with no write when either is gone; the writes cap (429); the
-    lobby's queue rows in UUID order; then the expiry once A has passed.
+    lobby's queue rows in UUID order (with the readmit caller appended to that
+    same sorted set); then the expiry once A has passed.
     Never _lock_queue_group_for_player, which follows the caller's queue row
     to another lobby (sec1.4). Lobby row first, queue rows second (#207)."""
     lob, k = await _ffa_lock_lobby_slot(db, lobby_id)
@@ -55397,6 +55398,8 @@ async def _asm_lock(db, lobby_id, steam_id, *, route, t0, cap=True, expire=True)
             raise HTTPException(429, "Too many assembly writes for this seat")
     qids = (await db.execute(text("SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
                              {"lid": lobby_id})).scalars().all()
+    if route == "readmit":
+        qids.append(pid)
     await _lock_queue_rows_ordered(db, "ffa_queue", qids)
     ctx = _AsmCtx(db, lobby_id, route=route, trigger=route, t0=t0)
     ctx.expected_game = k
@@ -56857,7 +56860,8 @@ async def _rdm_claim(ctx, pid, me, req) -> dict:
         return await _rdm_refuse(ctx, pid, me, "claim", n, "other_mode")
     if lease is not None and lease["group_id"] is not None and lease["group_id"] != ctx.lid:
         return await _rdm_refuse(ctx, pid, me, "claim", n, "other_lobby")
-    # The caller's own queue row, last (after the lobby's rows _asm_lock took).
+    # The caller's own queue row was included in _asm_lock's sorted set.  This
+    # reentrant read is still authoritative after every row lock is held.
     q = (await ctx.db.execute(text(
         "SELECT status, series_id FROM ffa_queue WHERE player_id = :pid FOR UPDATE"),
         {"pid": pid})).mappings().first()

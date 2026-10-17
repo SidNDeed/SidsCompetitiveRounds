@@ -469,6 +469,36 @@ def test_t4_4_the_lapse_order_and_one_commit(monkeypatch):
         assert sum(outcomes) == 1, ("T4.4 one outcome", outcomes)
         assert not _rdm_lines(env, "lapse failed"), ("T4.4 no failure", _rdm_lines(env, "failed"))
 
+        # Two callers whose unlocked queue husks point at each other's lobby
+        # still join one global UUID order before either authoritative reread.
+        left, right = await _held(env), await _held(env)
+        await env.conn.execute("DELETE FROM queue_leases WHERE player_id = ANY($1::uuid[])",
+                               [left.pids[1], right.pids[1]])
+        await env.conn.execute(
+            "UPDATE ffa_queue SET series_id = $2, status = 'ready_join' WHERE player_id = $1",
+            left.pids[1], right.lid)
+        await env.conn.execute(
+            "UPDATE ffa_queue SET series_id = $2, status = 'ready_join' WHERE player_id = $1",
+            right.pids[1], left.lid)
+        locked = []
+        real_ordered = main._lock_queue_rows_ordered
+
+        async def ordered_spy(db, table, ids):
+            if table == "ffa_queue":
+                locked.append(set(ids))
+            return await real_ordered(db, table, ids)
+
+        env.mp.setattr(main, "_lock_queue_rows_ordered", ordered_spy)
+        answers = await asyncio.wait_for(asyncio.gather(
+            _readmit(env, left, 1, "claim", 1),
+            _readmit(env, right, 1, "claim", 1)), 10.0)
+        env.mp.setattr(main, "_lock_queue_rows_ordered", real_ordered)
+        callers = {left.pids[1], right.pids[1]}
+        assert len(locked) == 2 and all(callers <= ids for ids in locked), \
+            ("T4.4 caller sorted", locked, callers)
+        assert all(a.status == 200 and a["reason"] == "other_lobby" for a in answers), \
+            ("T4.4 crossed husks bounded", [(a.status, a.body) for a in answers])
+
         # A failure between the clear and the departure: nothing commits.
         lob = await _rdm_lobby(env)
         await _present(env, lob, 2, 50.0)

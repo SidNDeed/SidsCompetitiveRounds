@@ -346,6 +346,12 @@ ROWS = [
                   '    if me.get("hold_n") is None or int(me["hold_n"]) != n:\n'
                   '        return await _rdm_refuse(ctx, pid, me, "decline", n, "not_held")\n',
                   1)]},
+    {"row": "F1.L1", "node": RP + "test_t4_4_the_lapse_order_and_one_commit",
+     "tag": "T4.4 caller sorted",
+     "mutant": [(MAIN,
+                  '    if route == "readmit":\n'
+                  '        qids.append(pid)\n',
+                  '', 1)]},
     {"row": "H1", "node": RP + "test_health_marker_counts_every_site", "tag": "health ffa_readmit",
      "mutant": [(MAIN, '            await _ffa_readmit_janitor(async_session)\n',
                  '            pass\n', 1)]},
