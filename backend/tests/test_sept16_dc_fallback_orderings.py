@@ -219,7 +219,8 @@ async def _take_clean_slate() -> None:
     try:
         await conn.execute(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-            " WHERE datname = current_database() AND pid <> pg_backend_pid()")
+            " WHERE datname = current_database() AND pid <> pg_backend_pid()"
+            " AND backend_type = 'client backend' AND usename = current_user")
         await conn.execute("SET lock_timeout = '5s'")
         await conn.execute(PRE_356_SCHEMA)
     finally:

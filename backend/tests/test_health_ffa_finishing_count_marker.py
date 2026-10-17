@@ -317,7 +317,8 @@ async def _drop_scratch_db(raw: str, name: str) -> bool:
     try:
         await conn.execute(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            "WHERE datname = $1 AND pid <> pg_backend_pid()", name)
+            "WHERE datname = $1 AND pid <> pg_backend_pid() "
+            "AND backend_type = 'client backend' AND usename = current_user", name)
         await conn.execute('DROP DATABASE IF EXISTS "%s"' % name)
         still_there = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", name)
     finally:

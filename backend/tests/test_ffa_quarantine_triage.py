@@ -375,7 +375,8 @@ async def _clean_slate(url):
     conn = await _pg(url)
     try:
         await conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-                           " WHERE datname = current_database() AND pid <> pg_backend_pid()")
+                           " WHERE datname = current_database() AND pid <> pg_backend_pid()"
+                           " AND backend_type = 'client backend' AND usename = current_user")
     finally:
         await conn.close()
 

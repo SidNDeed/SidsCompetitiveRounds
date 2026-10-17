@@ -182,10 +182,8 @@ async def _assert_target_is_disposable(conn) -> None:
     state for a fresh throwaway and passes; a present-but-empty one is what
     the second and later runs of this file see, and passes too.
     """
-    rows = await conn.fetchval("""
-        SELECT CASE WHEN to_regclass('public.players') IS NULL THEN -1
-                    ELSE (SELECT COUNT(*) FROM players) END
-    """)
+    present = await conn.fetchval("SELECT to_regclass('public.players') IS NOT NULL")
+    rows = await conn.fetchval("SELECT COUNT(*) FROM players") if present else -1
     if rows and rows > 0:
         raise AssertionError(
             f"the target database holds {rows} row(s) in `players`. This file "

@@ -515,7 +515,8 @@ async def reset_schema(url, sent, info):
             raise RuntimeError(f"schema {SCHEMA} is not a complete build of this harness")
         await send_destructive(conn, "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity"
                                      " WHERE datname = pg_catalog.current_database()"
-                                     " AND pid <> pg_catalog.pg_backend_pid()")
+                                     " AND pid <> pg_catalog.pg_backend_pid()"
+                                     " AND backend_type = 'client backend' AND usename = current_user")
         seeds = dict(s.split("=", 1) for s in (info.get("seeds") or "").split(";") if s)
         tables = [r["t"] for r in await conn.fetch(
             "SELECT c.relname::text AS t FROM pg_catalog.pg_class c"

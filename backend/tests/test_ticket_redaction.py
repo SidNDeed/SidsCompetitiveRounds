@@ -859,7 +859,9 @@ async def _clean_slate(url, sent):
     try:
         await _send_destructive(conn, "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity"
                                       " WHERE datname = pg_catalog.current_database()"
-                                      " AND pid <> pg_catalog.pg_backend_pid()", sent)
+                                      " AND pid <> pg_catalog.pg_backend_pid()"
+                                      " AND backend_type = 'client backend' AND usename = current_user",
+                                      sent)
     finally:
         await conn.close()
 

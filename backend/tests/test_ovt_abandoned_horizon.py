@@ -455,7 +455,8 @@ async def _reset(engine, schema: str = SCHEMA):
         await _assert_dedicated_db(conn)
         await conn.execute(text(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-            " WHERE datname = current_database() AND pid <> pg_backend_pid()"))
+            " WHERE datname = current_database() AND pid <> pg_backend_pid()"
+            " AND backend_type = 'client backend' AND usename = current_user"))
         await conn.commit()
     async with engine.begin() as conn:
         # A blocked DDL must fail loudly, not hang the suite.
@@ -1590,10 +1591,58 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     # once the 886bed8 LAND's +1 above is merged in).
     assert sum(r["func"] == "_pc_motion_janitor" for r in census["declines"]) == 2, census["declines"]
     assert not any(r["func"] == "_pc_motion_janitor" for r in census["waits"]), census["waits"]
-    assert len(census["declines"]) == 30, census["declines"]
-    assert len(census["waits"]) == 13, census["waits"]
-    assert len(census["decline_sites"]) == 27, census["decline_sites"]
-    assert len(census["wait_sites"]) == 10, census["wait_sites"]
+    # FFA readmission (the round 1 census ruling, 2026-10-17): the readmission
+    # janitor (_ffa_readmit_janitor, reached from queue_cleanup_loop) adds one
+    # decline at one site, the lapse's entry lock (_rdm_lapse_lobby, FOR NO
+    # KEY UPDATE SKIP LOCKED), and eight waits at eight sites: the lobby row
+    # twice (_ffa_lock_lobby_slot), the lobby's queue rows
+    # (_ffa_lock_queue_rows), the journal window three times
+    # (_ffa_settle_window, _ffa_report_gate, _rdm_journal_recheck) and the
+    # report body's players and glicko_ratings_ffa passes (submit_ffa_match).
+    # Each of the eight is BOUNDED, which is what the count alone cannot say:
+    # both readmission sessions are armed by _rdm_janitor_bound before their
+    # first statement, and it sets lock_timeout and statement_timeout on every
+    # transaction they begin (an after_begin listener, so a transaction begun
+    # after the report body's own rollback is armed too); a timeout ends only
+    # that lobby or window, with one bound line, for the next tick
+    # (test_ffa_readmit_pg T4.16 to T4.18, test_ffa_report_journal_pg T3.7 to
+    # T3.9). Lock order on every path holding a lobby and its queue rows:
+    # the lobby, then the queue rows in UUID order, then the leases; the one
+    # inverse order in reach, delete_player_data's players row before the
+    # lobby, is base code shared with the report route and ends as 40P01,
+    # caught per window. Before: 30/13 and 27/10.
+    bounded = {("_ffa_lock_lobby_slot", "FOR NO KEY UPDATE"): 2,
+               ("_ffa_lock_queue_rows", "FOR UPDATE"): 1,
+               ("_ffa_settle_window", "FOR UPDATE"): 1,
+               ("_ffa_report_gate", "FOR UPDATE"): 1,
+               ("_rdm_journal_recheck", "FOR UPDATE"): 1,
+               ("submit_ffa_match", "FOR NO KEY UPDATE"): 1,
+               ("submit_ffa_match", "FOR UPDATE"): 1}
+    funcs = {f for f, _c in bounded}
+    got = {}
+    for r in census["waits"]:
+        if r["func"] in funcs:
+            got[(r["func"], r["clause"])] = got.get((r["func"], r["clause"]), 0) + 1
+    assert got == bounded, got
+    assert [r["func"] for r in census["declines"]].count("_rdm_lapse_lobby") == 1, \
+        census["declines"]
+    arms = [n for n in ast.walk(ast.parse(textwrap.dedent(
+        inspect.getsource(main._ffa_readmit_janitor)))) if isinstance(n, ast.AsyncWith)]
+    assert len(arms) == 2, len(arms)
+    for w in arms:
+        first = w.body[0]
+        assert (isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)
+                and getattr(first.value.func, "id", None) == "_rdm_janitor_bound"
+                and [a.id for a in first.value.args] == [w.items[0].optional_vars.id]), \
+            ast.dump(first)
+    bound_sql = " ".join(main._RDM_JANITOR_BOUND_SQL.split())
+    assert "set_config('lock_timeout', CAST(:lv AS text), true)" in bound_sql, bound_sql
+    assert "set_config('statement_timeout', CAST(:sv AS text), true)" in bound_sql, bound_sql
+    assert 0 < main.RDM_JANITOR_LOCK_TIMEOUT_MS < main.RDM_JANITOR_STATEMENT_TIMEOUT_MS
+    assert len(census["declines"]) == 31, census["declines"]
+    assert len(census["waits"]) == 21, census["waits"]
+    assert len(census["decline_sites"]) == 28, census["decline_sites"]
+    assert len(census["wait_sites"]) == 18, census["wait_sites"]
 
 
 def test_a_lock_taking_path_outside_the_counted_set_reds_the_census():

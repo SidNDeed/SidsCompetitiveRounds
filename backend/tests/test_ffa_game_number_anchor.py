@@ -2426,6 +2426,7 @@ def test_the_live_checks_cannot_be_skipped_by_a_missing_dsn_alone():
 # Dropping the constraints is harmless in both directions, because each schema
 # block drops and recreates its own tables before using them.
 SCHEMA = """
+DROP TABLE IF EXISTS ffa_report_windows;
 DROP TABLE IF EXISTS match_report_quarantine;
 DROP TABLE IF EXISTS ffa_match_players;
 DROP TABLE IF EXISTS ffa_matches;
@@ -2503,6 +2504,27 @@ CREATE UNIQUE INDEX uq_quarantine_room
     ON match_report_quarantine (mode, photon_room_id)
     WHERE photon_room_id IS NOT NULL;
 """
+
+# The FFA readmission definitions the report route reads on every report,
+# flagged lobby or not, taken from 378_ffa_readmission.sql ITSELF so they
+# cannot drift from production: the lobby's readmit_v1 flag column, and the
+# journal windows the route settles for its own lobby before the report it
+# carries. Each must occur exactly once in the migration, or the harness
+# refuses to build at import.
+READMIT_MIGRATION = MIGRATION.parent / "378_ffa_readmission.sql"
+_READMIT_DEFINITIONS = (
+    r"ALTER TABLE ffa_lobbies ADD COLUMN IF NOT EXISTS readmit_v1\b[^;]*;",
+    r"CREATE TABLE IF NOT EXISTS ffa_report_windows \([^;]*\);",
+)
+
+
+def _readmit_definitions(sql):
+    found = [re.findall(p, sql) for p in _READMIT_DEFINITIONS]
+    assert [len(f) for f in found] == [1, 1], [len(f) for f in found]
+    return "\n".join(f[0] for f in found)
+
+
+SCHEMA = SCHEMA + "\n" + _readmit_definitions(READMIT_MIGRATION.read_text(encoding="utf-8"))
 
 LOBBY = uuid.UUID("0ea879a4-ff42-44c4-9473-4c58f89ef934")
 T0 = datetime(2026, 8, 7, 21, 15, 0, tzinfo=timezone.utc)

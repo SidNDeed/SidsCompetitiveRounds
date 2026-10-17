@@ -291,11 +291,13 @@ def test_every_departed_ids_writer_updates_the_lobby_row_the_report_locks():
     because every writer of departed_ids is an UPDATE of the ffa_lobbies row,
     which waits for the report's FOR NO KEY UPDATE on that row. A writer of
     any other shape would break that, so the writers are counted from the
-    module's own string constants: six today, and a seventh has to be looked
+    module's own string constants: seven today, and an eighth has to be looked
     at before this count moves. Three are ffa_queue_leave's; three arrived
     with the connect-failure landing (_asm_deferred_departure,
-    _ffa_expire_admissions and _asm_start_short), each an UPDATE of the same
-    ffa_lobbies row, so each waits for the report's lock the same way."""
+    _ffa_expire_admissions and _asm_start_short), and one with the FFA
+    readmission lane (_rdm_delete_player: a deleted player's held seat departs
+    its lobby), each an UPDATE of the same ffa_lobbies row, so each waits for
+    the report's lock the same way."""
     tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
     writers = [n.value for n in ast.walk(tree)
                if isinstance(n, ast.Constant) and isinstance(n.value, str)
@@ -304,7 +306,7 @@ def test_every_departed_ids_writer_updates_the_lobby_row_the_report_locks():
     offenders = [w.strip()[:120] for w in writers
                  if not re.match(r"\s*UPDATE\s+ffa_lobbies\b", w)]
     assert not offenders, offenders
-    assert len(writers) == 6, [w.strip()[:120] for w in writers]
+    assert len(writers) == 7, [w.strip()[:120] for w in writers]
     assert "FOR NO KEY UPDATE" in main._FFA_LOBBY_LOCK_SQL
     assert "FROM ffa_lobbies" in main._FFA_LOBBY_LOCK_SQL
 
