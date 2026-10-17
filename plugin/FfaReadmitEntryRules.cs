@@ -742,5 +742,22 @@ namespace CompetitiveRounds
             if (v.SourceTeam < 0 || v.SourceTeam == v.VictimTeam || v.SourceQuarantined) return -1;
             return v.SourceTeam;
         }
+
+        // ------------------------------------------------------------ the capability (P4.6)
+
+        /// <summary>V3 P4.6: the readmission client's caps token. The server
+        /// writes readmit_v1 at lock only when every locked member carries it.</summary>
+        internal const string RdmCapsToken = "ffa_rdm1";
+
+        /// <summary>The enroll call's caps, comma-joined ("" when there is no
+        /// assembly): ffa_adm1 only together with ffa_rdm1, and ffa_rdm1 never
+        /// without ffa_adm1, so every admission lobby this build joins is a
+        /// readmission lobby (V3:252).</summary>
+        internal static string CapsList(bool asm, bool adm, string asmToken, string admToken)
+        {
+            if (asm && adm) return asmToken + "," + admToken + "," + RdmCapsToken;
+            if (asm) return asmToken;
+            return "";
+        }
     }
 }

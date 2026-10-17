@@ -19932,8 +19932,9 @@ namespace CompetitiveRounds
             // v1.37 private lobbies: password rides create AND join; the server
             // ignores it on public lobbies, so a stale value is harmless.
             string pw = string.IsNullOrEmpty(password) ? "" : $",\"password\":\"{Escape(password)}\"";
-            // V11 sec5.1: the capability list (ffa_asm1, and ffa_adm1 only when
-            // every admission condition holds); empty on a client without them.
+            // V11 sec5.1: the capability list (ffa_asm1, and ffa_adm1 with
+            // ffa_rdm1 only when every admission condition holds, V3 P4.6);
+            // empty on a client without them.
             string capsList = "";
             try { capsList = FfaAssembly.Caps(); } catch { }
             string caps = string.IsNullOrEmpty(capsList) ? "" : $",\"caps\":\"{Escape(capsList)}\"";

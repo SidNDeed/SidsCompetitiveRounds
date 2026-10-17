@@ -150,6 +150,19 @@ MUTANTS = [
     ("M5.c3", "C5", "rules", "FfaReadmitEntryRules.cs",
      [("                case RdmState.Admitted: return \"bound\";\n", "                case RdmState.Binding: return \"bound\";\n")],
      "C5.T5.ladder_each_rung_once_in_order", "C5.T4.13.flag_false_no_rung"),
+    # ---- C4z (P4.6 the capability flip)
+    ("M4z.1", "C4z", "rules", "FfaReadmitEntryRules.cs",
+     [('            if (asm && adm) return asmToken + "," + admToken + "," + RdmCapsToken;\n',
+       '            if (asm && adm) return asmToken + "," + admToken;\n')],
+     "C4z.T4.6.adm_sends_all_three", "C4z.T4.6.asm_alone_no_rdm"),
+    ("M4z.2", "C4z", "rules", "FfaReadmitEntryRules.cs",
+     [('            if (asm) return asmToken;\n',
+       '            if (asm) return asmToken + "," + RdmCapsToken;\n')],
+     "C4z.T4.6.asm_alone_no_rdm", "C4z.T4.6.adm_sends_all_three"),
+    ("M4z.3", "C4z", "rules", "FfaReadmitEntryRules.cs",
+     [('        internal const string RdmCapsToken = "ffa_rdm1";\n',
+       '        internal const string RdmCapsToken = "ffa_rdm0";\n')],
+     "C4z.T4.6.adm_sends_all_three", "C4z.T4.6.asm_alone_no_rdm"),
 ]
 
 

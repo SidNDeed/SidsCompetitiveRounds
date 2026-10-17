@@ -63,23 +63,25 @@ namespace CompetitiveRounds
                    && FfaLateEntry.QuarantineAttached();
         }
 
-        /// <summary>The admission list of sec3.5 needs the Stage 1 automatic
-        /// pick record and the RJ-DRIFT room game number, neither of which
-        /// exists on this lane (DEPENDENCY). So this build never advertises
-        /// ffa_adm1, whatever AdvertiseAdm says.</summary>
+        /// <summary>The admission list of sec3.5: this build carries the
+        /// readmission client (V3 P1 to P4: the automatic pick record, the
+        /// offer record, every present seat filing, the claim, bind and late
+        /// entry), so the list is complete (V3 P4.6). ffa_adm1 still needs
+        /// the call-in hold and AdvertiseAdm, and Caps() sends it only
+        /// together with ffa_rdm1.</summary>
         internal static bool AdmissionListComplete()
         {
-            return false;
+            return true;
         }
 
-        /// <summary>The enroll call's caps, comma-joined ("" when neither).</summary>
+        /// <summary>The enroll call's caps, comma-joined ("" when there is no
+        /// assembly); ffa_adm1 only together with ffa_rdm1 (V3 P4.6, the
+        /// pure rule FfaReadmitEntryRules.CapsList).</summary>
         internal static string Caps()
         {
             bool asm = AsmCapable();
             bool adm = asm && AdmissionListComplete() && CallInHoldAttached && AdvertiseAdm;
-            if (asm && adm) return CapsToken + "," + AdmCapsToken;
-            if (asm) return CapsToken;
-            return "";
+            return FfaReadmitEntryRules.CapsList(asm, adm, CapsToken, AdmCapsToken);
         }
 
         /// <summary>Plugin.Awake, after the Harmony pass: every attach flag is
