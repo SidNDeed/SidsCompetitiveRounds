@@ -912,3 +912,140 @@ def test_s8_deletion_clears_the_readmission_tables(monkeypatch):
         assert s["hold_n"] is None, ("S8 hold", s["hold_n"])
         assert pid in list((await env.lobby_row(lob))["departed_ids"] or []), ("S8 departure",)
     run_env(monkeypatch, body)
+
+
+def test_h5_deletion_locks_an_active_seat_before_hold_creation(monkeypatch):
+    """H5 hold side: deletion discovers an active readmit seat even before it
+    has a hold, and a later census cannot recreate identity or a live hold."""
+    async def body(env):
+        lob = await _rdm_lobby(env)
+        await _present(env, lob, 1, 50.0)
+        await env.at(lob, 70.0)
+        await A._omit(env, lob, [2], 1)
+        real = main._rdm_delete_player
+        swept, release = asyncio.Event(), asyncio.Event()
+
+        async def after_sweep(*args, **kwargs):
+            await real(*args, **kwargs)
+            swept.set()
+            await release.wait()
+
+        env.mp.setattr(main, "_rdm_delete_player", after_sweep)
+        deleting = asyncio.create_task(A._delete_member(env, lob.sids[1]))
+        await asyncio.wait_for(swept.wait(), 10)
+        census = asyncio.create_task(env.census_of(lob, 0, [0, 2, 3]))
+        await asyncio.sleep(0)
+        release.set()
+        await deleting
+        await census
+        seat = await env.seat(lob, 1)
+        rows = await _rows(env, "ffa_seat_readmissions", lob, 1)
+        assert seat["hold_n"] is None and rows == [], \
+            ("H5 active lobby", seat["hold_n"], rows)
+        assert lob.pids[1] in list((await env.lobby_row(lob))["departed_ids"] or []), \
+            ("H5 active departed",)
+    run_env(monkeypatch, body)
+
+
+def test_h5_readmit_revalidates_identity_below_the_lobby_lock(monkeypatch):
+    """H5 readmit side: a caller paused before the lobby lock cannot write an
+    attempt after deletion commits."""
+    async def body(env):
+        lob = await _held(env)
+        await env.at(lob, 80.0)
+        real = main._ffa_lock_lobby_slot
+        reached, release = asyncio.Event(), asyncio.Event()
+        once = {"done": False}
+
+        async def before_lock(db, lid):
+            if str(lid) == str(lob.lid) and not once["done"]:
+                once["done"] = True
+                reached.set()
+                await release.wait()
+            return await real(db, lid)
+
+        env.mp.setattr(main, "_ffa_lock_lobby_slot", before_lock)
+        claiming = asyncio.create_task(_readmit(env, lob, 1, "claim", 1))
+        await asyncio.wait_for(reached.wait(), 10)
+        deleted = await A._delete_member(env, lob.sids[1])
+        release.set()
+        answer = await claiming
+        assert deleted.status == 200 and answer.status == 404, \
+            ("H5 readmit identity", deleted.status, answer.status, answer.body)
+        assert await _attempts(env, lob, 1) == [], ("H5 readmit attempt",)
+    run_env(monkeypatch, body)
+
+
+def test_h5_offer_holds_the_shared_identity_key_through_commit(monkeypatch):
+    """H5 offer side: deletion sweeps a writer-first offered attempt; a write
+    paused after selection cannot land after deletion's one-shot scrub."""
+    async def body(env):
+        lob = await _held(env)
+        await env.at(lob, 80.0)
+        real_attempt = main._rdm_attempt
+        real_delete = main._rdm_delete_player
+        offer_reached, offer_release = asyncio.Event(), asyncio.Event()
+        swept, delete_release = asyncio.Event(), asyncio.Event()
+
+        async def pause_offer(db, lid, pid, n, kind, at, outcome, reason=None):
+            if kind == "offered":
+                offer_reached.set()
+                await offer_release.wait()
+            return await real_attempt(db, lid, pid, n, kind, at, outcome, reason)
+
+        async def after_sweep(*args, **kwargs):
+            await real_delete(*args, **kwargs)
+            swept.set()
+            await delete_release.wait()
+
+        env.mp.setattr(main, "_rdm_attempt", pause_offer)
+        env.mp.setattr(main, "_rdm_delete_player", after_sweep)
+        offering = asyncio.create_task(_offer(env, lob, 1))
+        await asyncio.wait_for(offer_reached.wait(), 10)
+        deleting = asyncio.create_task(A._delete_member(env, lob.sids[1]))
+        try:
+            await asyncio.wait_for(asyncio.shield(swept.wait()), 0.3)
+        except asyncio.TimeoutError:
+            pass
+        offer_release.set()
+        await offering
+        await asyncio.wait_for(swept.wait(), 10)
+        delete_release.set()
+        deleted = await deleting
+        assert deleted.status == 200 and await _attempts(env, lob, 1) == [], \
+            ("H5 offer identity", deleted.status, await _attempts(env, lob, 1))
+    run_env(monkeypatch, body)
+
+
+def test_h5_report_repeats_participant_lookup_below_the_lobby_lock(monkeypatch):
+    """H5 report side: a participant deleted while a report waits for the
+    lobby lock is rejected before journaling; no raw identity is recreated."""
+    async def body(env):
+        lob = await _rdm_lobby(env)
+        await env.at(lob, 60.0)
+        results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7),
+                   lob.sids[2]: (2, 5), lob.sids[3]: (1, 2)}
+        rep = await env.report_req(lob, 1, results, reporter=lob.sids[0])
+        real = main._ffa_lock_lobby_slot
+        reached, release = asyncio.Event(), asyncio.Event()
+        once = {"done": False}
+
+        async def before_lock(db, lid):
+            if str(lid) == str(lob.lid) and not once["done"]:
+                once["done"] = True
+                reached.set()
+                await release.wait()
+            return await real(db, lid)
+
+        env.mp.setattr(main, "_ffa_lock_lobby_slot", before_lock)
+        filing = asyncio.create_task(env.submit(rep))
+        await asyncio.wait_for(reached.wait(), 10)
+        deleted = await A._delete_member(env, lob.sids[3])
+        release.set()
+        answer = await filing
+        raw = await env.conn.fetchval(
+            "SELECT count(*) FROM ffa_report_journal WHERE strpos(payload::text, $1) > 0",
+            lob.sids[3])
+        assert deleted.status == 200 and answer.status == 404 and raw == 0, \
+            ("H5 report identity", deleted.status, answer.status, raw)
+    run_env(monkeypatch, body)

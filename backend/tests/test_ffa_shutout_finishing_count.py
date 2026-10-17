@@ -295,8 +295,8 @@ def test_every_departed_ids_writer_updates_the_lobby_row_the_report_locks():
     at before this count moves. Three are ffa_queue_leave's; three arrived
     with the connect-failure landing (_asm_deferred_departure,
     _ffa_expire_admissions and _asm_start_short), and one with the FFA
-    readmission lane (_rdm_delete_player: a deleted player's held seat departs
-    its lobby), each an UPDATE of the same ffa_lobbies row, so each waits for
+    readmission lane (_rdm_delete_player: a deleted player's active readmit
+    seat departs its lobby), each an UPDATE of the same ffa_lobbies row, so each waits for
     the report's lock the same way."""
     tree = ast.parse(pathlib.Path(main.__file__).read_text(encoding="utf-8"))
     writers = [n.value for n in ast.walk(tree)

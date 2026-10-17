@@ -329,24 +329,29 @@ row("S14", "test_s14_the_writes_cap", [
 # -- S15 -------------------------------------------------------------------
 _ST_A = ('    if st == "A":\n'
          '        if info.get("wrong_region"):\n')
-_SEATREAD = ('"SELECT writes FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),')
+_SEATREAD = ('"SELECT s.player_id, s.writes FROM ffa_assembly_seats s"\n'
+             '        "  JOIN players p ON p.id = s.player_id"\n'
+             '        " WHERE s.lobby_id = :lid AND p.steam_id = :sid AND p.deleted_at IS NULL"),')
 row("S15", "test_s15_the_seat_row_answer", [
     M("fall_through_to_verdict", "S15 reformed",
       E(MAIN, _ST_A, _ST_A.replace('if st == "A":', 'if st in ("A", "E"):')),
       note="a final seat row answered as state A (the verdict's answer)"),
     M("lock_callers_queue_lobby", "S15 reformed",
       E(MAIN, _LOCKCALL, _LOCKCALL.replace(
-          '    lob, k = await _ffa_lock_lobby_slot(db, lobby_id)\n',
-          '    lobby_id = str((await db.execute(text(\n'
-          '        "SELECT series_id FROM ffa_queue WHERE player_id = :pid"),\n'
-          '        {"pid": pid})).scalar() or lobby_id)\n'
-          '    lob, k = await _ffa_lock_lobby_slot(db, lobby_id)\n')),
+           '    lob, k = await _ffa_lock_lobby_slot(db, lobby_id)\n',
+           '    lobby_id = str((await db.execute(text(\n'
+           '        "SELECT q.series_id FROM ffa_queue q JOIN players p ON p.id = q.player_id"\n'
+           '        " WHERE p.steam_id = :sid"),\n'
+           '        {"sid": steam_id})).scalar() or lobby_id)\n'
+           '    lob, k = await _ffa_lock_lobby_slot(db, lobby_id)\n')),
       note="_lock_queue_group_for_player's rule: the caller's queue row names the lobby"
            " (str(): the driver hands back a UUID, the route carries the id as text)"),
-], T("cte_read",
-     E(MAIN, _SEATREAD,
-       '"WITH s AS (SELECT writes FROM ffa_assembly_seats WHERE lobby_id = :lid AND '
-       'player_id = :pid) SELECT writes FROM s"),')))
+ ], T("cte_read",
+      E(MAIN, _SEATREAD,
+        '"WITH seat AS (SELECT s.player_id, s.writes FROM ffa_assembly_seats s"\n'
+        '        " JOIN players p ON p.id = s.player_id"\n'
+        '        " WHERE s.lobby_id = :lid AND p.steam_id = :sid AND p.deleted_at IS NULL)"\n'
+        '        " SELECT player_id, writes FROM seat"),')))
 
 # -- S16 -------------------------------------------------------------------
 _ATT_AT = ('"attempt_at = CASE WHEN CAST(:a AS smallint) >= attempt"\n'

@@ -40054,14 +40054,15 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
     # queue row first and touching ffa_lobbies afterwards inverts that and
     # deadlocks against a concurrent leave/poll. Take the lobby locks here,
     # BEFORE the queue-row deletes below, in canonical UUID order. A lobby
-    # holding this player's readmission seat hold (V3) is locked in the same
-    # pass, so its redaction below runs under its lobby row.
-    _rdm_held = await _rdm_held_lobbies(db, pid)
-    for _lid in sorted(set(_ffa_grp) | set(_rdm_held), key=str):
+    # containing this player's readmission seat is locked in the same pass,
+    # whether or not a hold exists yet, so no census/readmit/report writer can
+    # recreate identity after the one-shot scrub.
+    _rdm_active = await _rdm_active_lobbies(db, pid)
+    for _lid in sorted(set(_ffa_grp) | set(_rdm_active), key=str):
         await db.execute(text(
             "SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
         ), {"lid": _lid})
-    await _rdm_delete_player(db, pid, steam_id, _rdm_held)
+    await _rdm_delete_player(db, pid, steam_id, _rdm_active)
     # Round-15 find 2: the SAME series-first order for team and OVT — the
     # completion paths lock series (FOR UPDATE) then members
     # (_lock_queue_rows_ordered), so deleting queue rows first and updating
@@ -55371,24 +55372,23 @@ def _asm_deadline_answer(route, lobby_id, stage, t0):
 
 async def _asm_lock(db, lobby_id, steam_id, *, route, t0, cap=True, expire=True):
     """Writer 3's locking, keyed on the lobby the URL names (sec3.2): the
-    caller's player id by a plain read; the lobby row FOR NO KEY UPDATE through
-    _ffa_lock_lobby_slot (so k is the locked row's own next game); the seat
-    row, 404 with no write when there is none; the writes cap (429); the
+    lobby row FOR NO KEY UPDATE through _ffa_lock_lobby_slot (so k is the
+    locked row's own next game); the live caller identity and seat row re-read
+    below that lock, 404 with no write when either is gone; the writes cap (429); the
     lobby's queue rows in UUID order; then the expiry once A has passed.
     Never _lock_queue_group_for_player, which follows the caller's queue row
     to another lobby (sec1.4). Lobby row first, queue rows second (#207)."""
-    pid = (await db.execute(text("SELECT id FROM players WHERE steam_id = :sid"),
-                            {"sid": steam_id})).scalar()
-    if pid is None:
-        raise HTTPException(404, "No seat in that lobby")
     lob, k = await _ffa_lock_lobby_slot(db, lobby_id)
     if lob is None:
         raise HTTPException(404, "No seat in that lobby")
     seat = (await db.execute(text(
-        "SELECT writes FROM ffa_assembly_seats WHERE lobby_id = :lid AND player_id = :pid"),
-        {"lid": lobby_id, "pid": pid})).mappings().first()
+        "SELECT s.player_id, s.writes FROM ffa_assembly_seats s"
+        "  JOIN players p ON p.id = s.player_id"
+        " WHERE s.lobby_id = :lid AND p.steam_id = :sid AND p.deleted_at IS NULL"),
+        {"lid": lobby_id, "sid": steam_id})).mappings().first()
     if seat is None:
         raise HTTPException(404, "No seat in that lobby")
+    pid = seat["player_id"]
     if cap and int(seat["writes"] or 0) >= ASM_WRITES_CAP:
         raise HTTPException(429, "Too many assembly writes for this seat")
     qids = (await db.execute(text("SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
@@ -57049,6 +57049,12 @@ async def ffa_readmit_offer(request: Request, steam_id: str = Query(..., max_len
     if not _pg_text_ok(steam_id):
         raise HTTPException(422, "invalid steam_id")
     await _check_steam_session(request, steam_id, db)
+    # Offer is the one readmission identity writer outside a lobby lock.  Hold
+    # the shared identity key through its selection, attempt row and commit;
+    # after any wait, repeat the live session decision before selecting.
+    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(:sid))"),
+                     {"sid": steam_id})
+    await _check_steam_session(request, steam_id, db)
     now, _m = await _asm_clock(db)
     row = (await db.execute(text(_RDM_OFFER_SQL), {"sid": steam_id, "now": now})).mappings().first()
     if row is None:
@@ -57070,17 +57076,20 @@ async def ffa_readmit_offer(request: Request, steam_id: str = Query(..., max_len
 
 # -- Deletion: the readmission tables of a deleted account --------------------
 
-async def _rdm_held_lobbies(db, pid) -> list:
-    """The lobbies where this player's seat holds a hold now (the account
-    deletion locks them with its other FFA lobbies, lobby rows first)."""
+async def _rdm_active_lobbies(db, pid) -> list:
+    """Every active readmit-v1 lobby containing this player's seat.  Account
+    deletion locks the complete set before its one-shot scrub, including a
+    seat whose concurrent census has not created a hold yet."""
     if (await db.execute(text("SELECT to_regclass('ffa_readmit_attempts')"))).scalar() is None:
         return []
     return list((await db.execute(text(
-        "SELECT lobby_id FROM ffa_assembly_seats WHERE player_id = :pid AND hold_n IS NOT NULL"),
+        "SELECT s.lobby_id FROM ffa_assembly_seats s"
+        "  JOIN ffa_lobbies l ON l.id = s.lobby_id"
+        " WHERE s.player_id = :pid AND l.status = 'active' AND l.readmit_v1"),
         {"pid": pid})).scalars().all())
 
 
-async def _rdm_delete_player(db, pid, steam_id, held_lobbies) -> None:
+async def _rdm_delete_player(db, pid, steam_id, active_lobbies) -> None:
     """Account deletion (delete_player_data) for the readmission tables, under
     the lobby locks the caller already holds: a live hold ends and its
     departure is appended (the seat cannot return); ffa_seat_readmissions,
@@ -57092,7 +57101,7 @@ async def _rdm_delete_player(db, pid, steam_id, held_lobbies) -> None:
     these tables and is left alone."""
     if (await db.execute(text("SELECT to_regclass('ffa_readmit_attempts')"))).scalar() is None:
         return
-    for lid in sorted(set(held_lobbies), key=str):
+    for lid in sorted(set(active_lobbies), key=str):
         await db.execute(text(
             "UPDATE ffa_lobbies"
             "   SET departed_ids = (SELECT ARRAY(SELECT DISTINCT e FROM"
@@ -59464,6 +59473,17 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         # payloads). The recoverable incident class — a live lobby closed
         # mid-game — always leaves the row behind.
         raise HTTPException(404, "Lobby not found")
+    # The early lookup preserves validation order, but it cannot authorize a
+    # journal or settlement after waiting for this lobby lock.  Rebuild the
+    # complete participant map from live identities below the lock so account
+    # deletion cannot be followed by a stale raw-id write.
+    prows = (await db.execute(
+        select(Player.id, Player.steam_id).where(
+            Player.steam_id.in_(steams), Player.deleted_at.is_(None))
+    )).all()
+    id_by_steam = {r.steam_id: r.id for r in prows}
+    if len(id_by_steam) != len(steams):
+        raise HTTPException(404, "One or more players not registered")
     # V3 P3: a journaled payload settles only while its window is open and it
     # is still the report the class order chooses, re-checked under the lobby
     # lock before any other path (a replay echo included) can answer for it.

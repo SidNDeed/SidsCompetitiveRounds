@@ -286,6 +286,42 @@ ROWS = [
                   '        if ex.status_code >= 500:\n'
                   '            return False\n',
                   '', 1)]},
+    {"row": "F1.H5.ACTIVE",
+     "node": RP + "test_h5_deletion_locks_an_active_seat_before_hold_creation",
+     "tag": "H5 active lobby",
+     "mutant": [(MAIN,
+                  '        "SELECT s.lobby_id FROM ffa_assembly_seats s"\n'
+                  '        "  JOIN ffa_lobbies l ON l.id = s.lobby_id"\n'
+                  '        " WHERE s.player_id = :pid AND l.status = \'active\' AND l.readmit_v1"),\n',
+                  '        "SELECT lobby_id FROM ffa_assembly_seats"\n'
+                  '        " WHERE player_id = :pid AND hold_n IS NOT NULL"),\n', 1)]},
+    {"row": "F1.H5.READMIT",
+     "node": RP + "test_h5_readmit_revalidates_identity_below_the_lobby_lock",
+     "tag": "H5 readmit identity",
+     "mutant": [(MAIN,
+                  '        " WHERE s.lobby_id = :lid AND p.steam_id = :sid AND p.deleted_at IS NULL"),\n',
+                  '        " WHERE s.lobby_id = :lid"\n'
+                  '        "   AND (p.steam_id = :sid OR p.deleted_at IS NOT NULL)"),\n', 1)]},
+    {"row": "F1.H5.OFFER",
+     "node": RP + "test_h5_offer_holds_the_shared_identity_key_through_commit",
+     "tag": "H5 offer identity",
+     "mutant": [(MAIN,
+                  '    await db.execute(text("SELECT pg_advisory_xact_lock_shared(hashtext(:sid))"),\n'
+                  '                     {"sid": steam_id})\n'
+                  '    await _check_steam_session(request, steam_id, db)\n',
+                  '', 1)]},
+    {"row": "F1.H5.REPORT",
+     "node": RP + "test_h5_report_repeats_participant_lookup_below_the_lobby_lock",
+     "tag": "H5 report identity",
+     "mutant": [(MAIN,
+                  '    prows = (await db.execute(\n'
+                  '        select(Player.id, Player.steam_id).where(\n'
+                  '            Player.steam_id.in_(steams), Player.deleted_at.is_(None))\n'
+                  '    )).all()\n'
+                  '    id_by_steam = {r.steam_id: r.id for r in prows}\n'
+                  '    if len(id_by_steam) != len(steams):\n'
+                  '        raise HTTPException(404, "One or more players not registered")\n',
+                  '', 1)]},
     {"row": "H1", "node": RP + "test_health_marker_counts_every_site", "tag": "health ffa_readmit",
      "mutant": [(MAIN, '            await _ffa_readmit_janitor(async_session)\n',
                  '            pass\n', 1)]},
