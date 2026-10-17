@@ -19,6 +19,20 @@ namespace CompetitiveRounds
             // abort-to-menu lever. Each step isolated so the leave is
             // reached even if the disarm throws.
             try { EscMenuLeaveGuard.Disarm(); } catch { }
+            // RJ Stage 2 (S1 step 4): a deliberate exit is never held. The
+            // player key cr_vleave = 1 is sent before the leave, so every
+            // seat's hold classifier reads it on this departure and answers
+            // today.
+            try
+            {
+                if (PhotonNetwork.InRoom && PhotonNetwork.LocalPlayer != null)
+                {
+                    PhotonNetwork.LocalPlayer.SetCustomProperties(
+                        new ExitGames.Client.Photon.Hashtable { { TeamHoldRules.KEY_VLEAVE, "1" } });
+                    PhotonNetwork.SendAllOutgoingCommands();
+                }
+            }
+            catch { }
             try { NetworkConnectionHandler.instance.NetworkRestart(); } catch { }
         }
     }

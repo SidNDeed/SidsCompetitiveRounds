@@ -69,6 +69,32 @@ MUTANTS = [
     ("M0.6", "K0", "seat", [
         ("return TryClaim(slot, tuple, CLAIM_PHOENIX);", "return Claim.Won;")],
      "t02_phoenix_then_leave", "t02_dup_die"),
+    # K1, S1
+    ("M1.1", "K1", "rules", [
+        ("if (i == null || i.Pin == null || !i.Pin.Hold) return false;",
+         "if (i == null || i.Pin == null || !(i.Pin.Hold || i.QuorumCapable)) return false;")],
+     "t11_quorum_not_flag", "t11_gate_all_true"),
+    ("M1.2", "K1", "rules", [
+        ("if (i.IsSpec) return false;",
+         "if (i.IsSpec) return false;\n                if (i.LocalUnauthorized || !i.LocalInMatch) return false;")],
+     "t11_stale_cache", "t11_gate_all_true"),
+    ("M1.3", "K1", "rules", [
+        ("string mode = i.Pin.Mode;",
+         "string mode = (i.RoomName ?? \"\").StartsWith(\"ovt_\") ? MODE_OVT : (i.RoomName ?? \"\").StartsWith(\"team_\") ? MODE_TEAM : \"\";")],
+     "t11_hosted_lobby", "t11_gate_all_true"),
+    ("M1.4", "K1", "rules", [
+        ("catch { r = false; }", "catch { r = true; }")],
+     "t12_three_clients_throw", "t11_gate_all_true"),
+    ("M1.9", "K1", "rules", [
+        ("internal const bool ViaMasterArm = true;", "internal const bool ViaMasterArm = false;")],
+     "t15_2v2_team_down", "t15_2v2_partner_alive"),
+    ("M1.10", "K1", "rules", [
+        ("            if (observed != 'p' && observed != 'o' && observed != 'x') return Resolve.Wait;\n", "")],
+     "t15_handover_wait", "t15_2v2_team_down"),
+    # K1, lane-added: the extracted election must answer as the base callback did.
+    ("M1.E", "K1", "rules", [
+        ("int nonDcCount = 0, dcTeamCount = 1;", "int nonDcCount = 0, dcTeamCount = 0;")],
+     "t1_dc_equiv", "t11_gate_all_true"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

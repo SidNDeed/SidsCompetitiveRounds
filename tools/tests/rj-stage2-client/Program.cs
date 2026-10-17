@@ -36,7 +36,11 @@ namespace CompetitiveRounds.Stage2Harness
         }
 
         /// <summary>The fixtures of the pieces after K0.</summary>
-        private static void RegisterLater() { }
+        private static void RegisterLater()
+        {
+            RegisterK1();
+            RegisterK1Equiv();
+        }
 
         // ── helpers ─────────────────────────────────────────────────────────
 

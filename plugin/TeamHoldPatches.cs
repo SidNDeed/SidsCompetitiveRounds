@@ -104,6 +104,7 @@ namespace CompetitiveRounds
             try { battle = GameManager.instance != null && GameManager.instance.battleOngoing; } catch { }
             if (battle && !_battleWas) OnPointStart();
             _battleWas = battle;
+            try { TeamHold.Tick(); } catch { }
         }
 
         /// <summary>The drift probe: each present body's cards against its
@@ -132,6 +133,7 @@ namespace CompetitiveRounds
         internal static void OnRoomLeft()
         {
             try { SeatDeckLog.OnRoomLeft(); } catch { }
+            try { TeamHold.OnRoomLeft(); } catch { }
             _battleWas = false;
         }
 
@@ -142,6 +144,8 @@ namespace CompetitiveRounds
             new[] { "S0", "HealthHandler", "RPCA_Die_Phoenix", "TeamHold_PhoenixClaimPatch" },
             new[] { "S0", "HealthHandler", "RPCA_Die", "DeathClassifierPatch" },
             new[] { "S0", "GM_ArmsRace", "DoStartGame", "TeamHold_GameStartPatch" },
+            new[] { "S1", "GM_ArmsRace", "GameOverTransition", "TeamHold_GameOverPatch" },
+            new[] { "S1", "NetworkConnectionHandler", "OnPlayerLeftRoom", "NCH_OnPlayerLeftRoom_Hold_Patch" },
         };
 
         private static Type HookType(string name)
@@ -283,6 +287,40 @@ namespace CompetitiveRounds
         private static void Prefix()
         {
             try { if (TeamHoldGlue.SeatLogRoom()) SeatDeckLog.OnGameStart(); } catch { }
+            // S1 step 3: the master of a flagged room posts the game start
+            // and publishes cr_tgid = {G}:s. Inert in every unflagged room.
+            try { TeamHoldWriter.OnGameStart(); } catch { }
+        }
+    }
+
+    /// <summary>S1 step 3: the game-over edge publishes cr_tgid = {G}:g, so
+    /// no hold opens between games. Inert in every unflagged room.</summary>
+    [HarmonyPatch(typeof(GM_ArmsRace), "GameOverTransition")]
+    internal static class TeamHold_GameOverPatch
+    {
+        [HarmonyPrefix]
+        private static void Prefix()
+        {
+            try { TeamHoldWriter.OnGameOver(); } catch { }
+        }
+    }
+
+    /// <summary>S1 step 5: the vanilla teardown cascade of a held departure
+    /// does not run. Low priority, so the spectator prefix
+    /// (Spectator_LeaveIsInvisible_Patch) decides first; every prefix runs
+    /// even after one returned false (#352), so a departure another prefix
+    /// already suppressed stays suppressed and is not classified here. The
+    /// classification is the memo the mod leave callback reads.</summary>
+    [HarmonyPatch(typeof(NetworkConnectionHandler), "OnPlayerLeftRoom")]
+    internal static class NCH_OnPlayerLeftRoom_Hold_Patch
+    {
+        [HarmonyPrefix]
+        [HarmonyPriority(Priority.Low)]
+        private static bool Prefix(Photon.Realtime.Player otherPlayer, bool __runOriginal)
+        {
+            if (!__runOriginal) return false;
+            try { return !TeamHold.Classify(otherPlayer) && !TeamHold.HoldsAnother(otherPlayer); }
+            catch { return true; }
         }
     }
 }
