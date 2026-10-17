@@ -1080,7 +1080,15 @@ def test_the_helper_closure_stays_affordable():
     # /api/v1/releases/recent: 6 at the base and on the lane, 75 on the
     # trunk, + auto_logs.router); inside 77, so the bound stays. The table
     # is at the code worst bound.
-    assert code_median <= 77, f"median code closure {code_median} of {total}"
+    # Admin evidence 1a (2026-10-17): 78 measured (GET /api/v1/team/queue/count)
+    # over 399 routes. 77 at the lane's 402d7b85 (395 routes). 615a3e8c
+    # includes the evidence report router in main.app, so every route reaching
+    # main.app gains its two data bindings, admin_evidence.router and
+    # EVIDENCE_ROOT (+2 on 391 routes, 79); 1e0eea60 renames six report helpers
+    # whose names the walk folded into 189 other routes (-1, 78). The bound
+    # moves to 80, the measurement rounded up to the next multiple of 5, for
+    # that reason and no other.
+    assert code_median <= 80, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
     #
@@ -1350,7 +1358,15 @@ def test_the_helper_closure_stays_affordable():
     # (GET /api/v1/h2h/{steam_id}/{opponent_steam_id}: 71 at the base and on
     # the lane, 140 on the trunk, + auto_logs.router), 39 routes above it;
     # inside 147, so the bound stays. The table is at the code worst bound.
-    assert code_p90 <= 147, f"p90 code closure {code_p90} of {total}"
+    # Admin evidence 1a (2026-10-17): 161 measured (GET /api/v1/spectate/games,
+    # position 359 of 399, 39 routes above it). 144 at 615a3e8c, the same h2h
+    # route at the rank (+2, the router's two data bindings). 1e0eea60 builds
+    # the report router with read_gate.ReadGateRoute, so the four report routes
+    # reach the read gate's closure (126 -> 194 each) and cross the rank from
+    # below, which moves position 359 four routes up a sparse stretch. The
+    # bound moves to 165, the measurement rounded up to the next multiple of 5,
+    # for that reason and no other.
+    assert code_p90 <= 165, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1449,7 +1465,14 @@ def test_the_helper_closure_stays_affordable():
     # on 365 (see the code worst bound); nothing either side reached is
     # missing. The bound moves to 153, ~5% over the measurement, for that
     # reason and no other.
-    assert all_median <= 153, f"median closure {all_median} of {total}"
+    # Admin evidence 1a (2026-10-17): 158 measured (GET /api/v1/i18n/progress).
+    # 149 at the lane's 402d7b85. 615a3e8c adds +4 to +10 on every route: the
+    # router's two data bindings and admin_evidence's import-tier names folded
+    # in by name (HTTPException on 395 routes, AsyncSession 385, Depends 384,
+    # get_db 381, Request 320, os 306, hmac 294), 159; 1e0eea60's helper
+    # renames take 1 off (158). The bound moves to 160, the measurement
+    # rounded up to the next multiple of 5, for that reason and no other.
+    assert all_median <= 160, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1635,7 +1658,14 @@ def test_the_helper_closure_stays_affordable():
     # the trunk), 39 routes above it; the same by-name fold as the median
     # above. The bound moves to 256, ~5% over the measurement, for that
     # reason and no other.
-    assert all_p90 <= 256, f"p90 closure {all_p90} of {total}"
+    # Admin evidence 1a (2026-10-17): 281 measured (POST /api/v1/team/matches,
+    # position 359 of 399, 39 routes above it). 257 at 615a3e8c (GET
+    # /api/v1/players/{steam_id} at the rank, 248 -> 257 by the same fold as
+    # the median above). 1e0eea60's four report routes reach the read gate's
+    # closure (223 -> 303 each) and cross the rank from below. The bound moves
+    # to 285, the measurement rounded up to the next multiple of 5, for that
+    # reason and no other.
+    assert all_p90 <= 285, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
