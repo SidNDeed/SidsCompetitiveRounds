@@ -272,6 +272,14 @@ ROWS = [
                   '            c = "u"\n',
                   '        elif False:\n'
                   '            c = "u"\n', 1)]},
+    {"row": "F1.H3", "node": RJ + "test_h3_delayed_choice_uses_the_stored_receipt_class",
+     "tag": "H3 stored class",
+     "mutant": [(MAIN,
+                  '        c = jr.get("cls") or "u"\n',
+                  '        sid = jr["steam_id"]\n'
+                  '        c = classes.get(sid, {}).get("cls", "u")\n'
+                  '        if jr["self_lag"] and c == "c":\n'
+                  '            c = "g"\n', 1)]},
     {"row": "H1", "node": RP + "test_health_marker_counts_every_site", "tag": "health ffa_readmit",
      "mutant": [(MAIN, '            await _ffa_readmit_janitor(async_session)\n',
                  '            pass\n', 1)]},

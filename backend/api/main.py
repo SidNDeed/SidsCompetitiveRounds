@@ -57253,10 +57253,7 @@ def _rdm_choose(journal_rows, classes) -> tuple:
     (g1). Returns (steam_id, settle_class) or (None, None)."""
     by = {}
     for jr in journal_rows:
-        sid = jr["steam_id"]
-        c = classes.get(sid, {}).get("cls", "u")
-        if jr["self_lag"] and c == "c":
-            c = "g"
+        c = jr.get("cls") or "u"
         by.setdefault(c, []).append(jr)
     for c in _RDM_CLASS_ORDER:
         rows = sorted(by.get(c, []), key=lambda jr: _ffa_sort_key(jr["steam_id"]))
@@ -57283,14 +57280,15 @@ def _rdm_tally(payload) -> tuple:
 
 async def _rdm_journal_rows(db, lobby_uuid, g) -> list:
     rows = (await db.execute(text(
-        "SELECT p.steam_id, j.reporter_id, j.payload FROM ffa_report_journal j"
+        "SELECT p.steam_id, j.reporter_id, j.cls, j.payload FROM ffa_report_journal j"
         "  JOIN players p ON p.id = j.reporter_id"
         " WHERE j.lobby_id = :lid AND j.game = CAST(:g AS smallint) AND j.state = 'held'"),
         {"lid": lobby_uuid, "g": int(g)})).mappings().all()
     out = []
     for r in rows:
         pl = r["payload"] if isinstance(r["payload"], dict) else _json.loads(r["payload"])
-        out.append({"steam_id": r["steam_id"], "pid": r["reporter_id"], "payload": pl,
+        out.append({"steam_id": r["steam_id"], "pid": r["reporter_id"], "cls": r["cls"],
+                    "payload": pl,
                     "self_lag": int(pl.get("self_lag") or 0) == 1, "tally": _rdm_tally(pl)})
     return out
 

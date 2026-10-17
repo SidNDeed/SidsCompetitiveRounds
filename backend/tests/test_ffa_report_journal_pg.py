@@ -226,6 +226,33 @@ def test_h2_bound_but_unentered_returner_is_u(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_h3_delayed_choice_uses_the_stored_receipt_class(monkeypatch):
+    """H3: a C receipt remains C if its reporter actually drops before the
+    window expires.  The stored C wins both alone and against an R receipt;
+    later mutable gone state cannot erase or demote it."""
+    async def body(env):
+        lob = await _lobby(env)
+        a = await _file(env, lob, 0)
+        assert a.status == 202, ("H3 c journaled", a.status, a.body)
+        await R._witness_gone(env, lob, 0, 61.0, witnesses=(1, 2))
+        await _expire(env, lob, 91.0)
+        m = await _matches(env, lob)
+        assert [(r["rep_sid"], r["fallback_cls"]) for r in m] == [
+            (lob.sids[0], None)], ("H3 stored class", m)
+
+        lob = await _lobby(env)
+        await _entered_row(env, lob, 2)
+        r = await _file(env, lob, 2)
+        c = await _file(env, lob, 0)
+        assert r.status == c.status == 202, ("H3 receipts", r.body, c.body)
+        await R._witness_gone(env, lob, 0, 61.0, witnesses=(1, 2))
+        await _expire(env, lob, 91.0)
+        m = await _matches(env, lob)
+        assert [(row["rep_sid"], row["fallback_cls"]) for row in m] == [
+            (lob.sids[0], None)], ("H3 c over r", m)
+    run_env(monkeypatch, body)
+
+
 def test_t3_4_one_settlement_under_a_race(monkeypatch):
     """T3.4: two settlements of one expired window interleaved (the second
     reads the choice before the first commits) and a report call after it:
