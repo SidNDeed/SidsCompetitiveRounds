@@ -261,6 +261,13 @@ WRITE_REVIEWED: dict[str, tuple[frozenset, str]] = {
     "/api/v1/internal/stream-posts/pending": (frozenset({"internal_stream_posts_pending"}),
                                               _R_INTERNAL),
 }
+_R_EVIDENCE = ("one admin_actions audit row per served page, in its own short transaction; "
+               "no game, queue, lease or player state; " + _R_INTERNAL)
+for _p in ("/api/v1/internal/evidence-report/game/{code}",
+           "/api/v1/internal/evidence-report/series/{code}",
+           "/api/v1/internal/evidence-report/pair",
+           "/api/v1/internal/evidence-report/player/{steam_id}"):
+    WRITE_REVIEWED[_p] = (frozenset({"AUDIT_SQL", "_audit"}), _R_EVIDENCE)
 _R_PORTAL = ("the portal token's first-use address binding (_portal_auth), written only for "
              "a presented portal token; PORTAL: the gate refuses nothing")
 for _p in ("/api/v1/i18n/approved", "/api/v1/i18n/contributors", "/api/v1/i18n/grants/mine",

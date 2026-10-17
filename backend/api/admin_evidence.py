@@ -38,6 +38,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database import get_db
+from read_gate import ReadGateRoute
 
 # ── Bounds and display defaults ────────────────────────────────────────────
 #
@@ -249,7 +250,7 @@ class Entry:
         return self.base is not None
 
 
-def key_id(var, prov, scope, source, coverage="na", agg="cell", stratum="na"):
+def aer_key_id(var, prov, scope, source, coverage="na", agg="cell", stratum="na"):
     """Canonical key id `var|prov|scope|source|coverage|agg|stratum`."""
     return "|".join((var, prov, scope, source, coverage, agg, stratum))
 
@@ -266,7 +267,7 @@ def _expand(families):
             scope = "pair" if v.subject == "pair" else "seat"
             for prov in v.provs:
                 source = "flag_row" if prov == "FLAG" else v.source
-                base.append(dict(key=key_id(v.var, prov, scope, source),
+                base.append(dict(key=aer_key_id(v.var, prov, scope, source),
                                  fam=fam.code, var=v.var, prov=prov, scope=scope,
                                  source=source, coverage="na", agg="cell",
                                  stratum="na", unit=v.unit, kind=v.kind,
@@ -278,7 +279,7 @@ def _expand(families):
         for agg in WINDOW_AGGS:
             entries.append(Entry(
                 ki=len(entries),
-                key=key_id(b.var, b.prov, b.scope, b.source, b.coverage,
+                key=aer_key_id(b.var, b.prov, b.scope, b.source, b.coverage,
                            "%s.%s" % (agg, b.agg), b.stratum),
                 fam=b.fam, var=b.var, prov=b.prov, scope=b.scope,
                 source=b.source, coverage=b.coverage,
@@ -471,7 +472,7 @@ def wire_row(table, cell, phase="1a"):
 SEATS = ("p1", "p2")
 
 
-def _other(seat):
+def _aer_other(seat):
     return "p2" if seat == "p1" else "p1"
 
 
@@ -494,7 +495,7 @@ _ROW_COLUMNS = ("m.id", "m.ended_at", "m.player1_id", "m.player2_id",
 _SELECT_LIST = ", ".join(_ROW_COLUMNS + tuple("m.%s" % c for c in MATCH_COLUMNS))
 
 
-def seat_of(row, account):
+def aer_seat_of(row, account):
     """`p1`/`p2` for the account in this game, else None (compared as text:
     the driver's UUID type and the caller's need not be one class)."""
     if account is None:
@@ -507,11 +508,11 @@ def seat_of(row, account):
     return None
 
 
-def reporter_seat(row):
+def aer_reporter_seat(row):
     rep = row.get("reported_by")
     if rep is None:
         return None
-    return seat_of(row, rep)
+    return aer_seat_of(row, rep)
 
 
 def _timeline_display(text):
@@ -563,10 +564,10 @@ def seat_value(entry, row, subject_seat, current_flag=None):
         if raw is None or raw == "":
             return None, "not_recorded"
         return _display_value(entry, raw), "flag_only"
-    rep = reporter_seat(row)
+    rep = aer_reporter_seat(row)
     if rep is None:
         return None, "not_recorded"
-    col_seat = _other(subject_seat) if decl.subject == "opposite" else subject_seat
+    col_seat = _aer_other(subject_seat) if decl.subject == "opposite" else subject_seat
     if not _applies(entry, col_seat, rep):
         return None, "not_recorded"
     if isinstance(decl.column, tuple):
@@ -741,7 +742,7 @@ def own_measures(entry, baseline, value=None):
     want = DISPLAY_DEFAULTS["own_games"]
     vals = []
     for row in baseline.rows:
-        seat = seat_of(row, baseline.account)
+        seat = aer_seat_of(row, baseline.account)
         if seat is None:
             continue
         v, state = seat_value(entry, row, seat)
@@ -774,7 +775,7 @@ def game_seat_cells(row, account, current_flag, baseline):
     """Every base key's cell for one seat of one game (design 2.1, 4.5):
     value, state and the display own measures; population slots stay empty
     until the population half (1a-3)."""
-    seat = seat_of(row, account)
+    seat = aer_seat_of(row, account)
     if seat is None:
         raise ValueError("account did not play this game")
     cells = []
@@ -798,10 +799,10 @@ def window_values(entry, rows, account, partner=None):
     basis `pair`)."""
     vals = []
     for row in rows:
-        seat = seat_of(row, account)
+        seat = aer_seat_of(row, account)
         if seat is None:
             continue
-        if partner is not None and seat_of(row, partner) != _other(seat):
+        if partner is not None and aer_seat_of(row, partner) != _aer_other(seat):
             continue
         v, state = seat_value(entry, row, seat)
         if state == "ok" and v is not None:
@@ -880,10 +881,10 @@ def _applies_sql(entry, col_seat):
     if presence == "reporter":
         return "g.rep = '%s'" % col_seat
     if presence == "non_reporter":
-        return "g.rep = '%s'" % _other(col_seat)
+        return "g.rep = '%s'" % _aer_other(col_seat)
     if presence == "by_prov":
         own = entry.prov in ("SELF", "D:SELF")
-        return "g.rep = '%s'" % (col_seat if own else _other(col_seat))
+        return "g.rep = '%s'" % (col_seat if own else _aer_other(col_seat))
     raise ValueError("unknown presence %r" % presence)
 
 
@@ -908,9 +909,9 @@ def population_branches(entries=None, partner=False):
         if e.is_window or not e.ranked or e.source != "match_row":
             continue
         for seat in SEATS:
-            col_seat = _other(seat) if e.decl.subject == "opposite" else seat
+            col_seat = _aer_other(seat) if e.decl.subject == "opposite" else seat
             val = _value_sql(e, col_seat)
-            po = (", %s AS po" % _seat_account_sql(_other(seat))) if partner else ""
+            po = (", %s AS po" % _seat_account_sql(_aer_other(seat))) if partner else ""
             out.append(
                 "SELECT %d AS ki, %s AS val, g.ended_at, g.id, 'seat'::text AS sk, "
                 "%s AS sa, CAST(NULL AS uuid) AS sb%s FROM g WHERE %s AND %s IS NOT NULL"
@@ -1368,7 +1369,10 @@ EVIDENCE_ROOT = "/api/v1/internal/evidence-report"
 EVIDENCE_PREFIX = EVIDENCE_ROOT + "/"
 REFUSED = "refused"
 
-router = APIRouter(prefix=EVIDENCE_ROOT, tags=["Internal"])
+# Built with the read gate's route class, as main.app's own GET routes are, so
+# each report route carries the gate exactly once (INTERNAL class by prefix:
+# the gate refuses nothing and looks nothing up there).
+router = APIRouter(prefix=EVIDENCE_ROOT, tags=["Internal"], route_class=ReadGateRoute)
 
 
 def _evidence_refusal():
@@ -1406,7 +1410,7 @@ async def evidence_key_gate(request: Request, call_next):
     return await call_next(request)
 
 
-def _fail(status, word, headers=None):
+def _aer_fail(status, word, headers=None):
     raise HTTPException(status_code=status, detail=word, headers=headers)
 
 
@@ -1430,16 +1434,16 @@ async def _evidence_gate(request, db):
     if (d is None or not 1 <= len(d) <= CONTRACT_BOUNDS["ACTOR_ID_MAX_DIGITS"]
             or not d.isascii() or not d.isdigit()):
         _refuse_class("bad_actor")
-        _fail(403, REFUSED)
+        _aer_fail(403, REFUSED)
     steam = (await db.execute(text(
         "SELECT steam_id FROM players WHERE discord_id = :d AND deleted_at IS NULL"),
         {"d": d})).scalar()
     if not steam:
         _refuse_class("not_linked")
-        _fail(403, REFUSED)
+        _aer_fail(403, REFUSED)
     if not await _aer_is_admin(db, steam):
         _refuse_class("not_admin")
-        _fail(403, REFUSED)
+        _aer_fail(403, REFUSED)
     return steam
 
 
@@ -1457,7 +1461,7 @@ def _aer_ident(raw):
             return "full", s
         if len(s) == 12:
             return "code", s
-    _fail(400, "bad_argument")
+    _aer_fail(400, "bad_argument")
 
 
 def _aer_steam(raw):
@@ -1465,7 +1469,7 @@ def _aer_steam(raw):
     lo, hi = CONTRACT_BOUNDS["STEAM_ID_MIN_DIGITS"], CONTRACT_BOUNDS["STEAM_ID_MAX_DIGITS"]
     if lo <= len(s) <= hi and s.isascii() and s.isdigit():
         return s
-    _fail(400, "bad_argument")
+    _aer_fail(400, "bad_argument")
 
 
 def _aer_int(request, name, default, lo, hi):
@@ -1473,7 +1477,7 @@ def _aer_int(request, name, default, lo, hi):
     if raw is None:
         return default
     if not (raw.isascii() and raw.isdigit()) or not lo <= int(raw) <= hi:
-        _fail(400, "bad_argument (%s)" % name)
+        _aer_fail(400, "bad_argument (%s)" % name)
     return int(raw)
 
 
@@ -1490,7 +1494,7 @@ def _aer_require_games(c):
     """The shared empty-cohort check (design 1.3): `404 not_found` at `c == 0`,
     before the page bound, windows, the audit and any send."""
     if c == 0:
-        _fail(404, "not_found")
+        _aer_fail(404, "not_found")
 
 
 # Selectors (design 1.3): `matches` only, in the bind form the EXPLAIN gates
@@ -1565,7 +1569,7 @@ VALUES (CAST(:id AS uuid), :admin, 'evidence_report', :t_steam, CAST(:t_match AS
         CAST(:t_series AS uuid), CAST(:details AS jsonb), now())"""
 
 
-async def _rows(db, sql, params):
+async def _aer_rows(db, sql, params):
     from sqlalchemy import text
     result = await db.execute(text(sql), params)
     return [dict(r) for r in result.mappings().all()]
@@ -1574,13 +1578,13 @@ async def _rows(db, sql, params):
 async def _select_game(db, ident):
     kind, s = ident
     if kind == "full":
-        rows = await _rows(db, R1_ID_SQL, {"id": s})
+        rows = await _aer_rows(db, R1_ID_SQL, {"id": s})
     else:
-        rows = await _rows(db, R1_CODE_SQL, {"code": s})
+        rows = await _aer_rows(db, R1_CODE_SQL, {"code": s})
         if len(rows) > 1:
-            _fail(400, "bad_argument (code ambiguous; use the full id)")
+            _aer_fail(400, "bad_argument (code ambiguous; use the full id)")
     if not rows:
-        _fail(404, "not_found")
+        _aer_fail(404, "not_found")
     return rows[0]["id"]
 
 
@@ -1590,25 +1594,25 @@ async def _select_series(db, ident):
     kind, s = ident
     sid = None
     if kind == "full":
-        if await _rows(db, R2_SERIES_ROW_SQL, {"id": s}):
+        if await _aer_rows(db, R2_SERIES_ROW_SQL, {"id": s}):
             sid = s
     if sid is None:
         gid = await _select_game(db, ident)
-        got = await _rows(db, R2_GAME_SERIES_SQL, {"id": str(gid)})
+        got = await _aer_rows(db, R2_GAME_SERIES_SQL, {"id": str(gid)})
         sid = got[0]["series_id"] if got else None
         if sid is None:
-            _fail(404, "not_found")
+            _aer_fail(404, "not_found")
     lim = CONTRACT_BOUNDS["SERIES_GAMES_MAX"] + 1
-    rows = await _rows(db, R2_SERIES_SQL, {"sid": str(sid), "lim": lim})
+    rows = await _aer_rows(db, R2_SERIES_SQL, {"sid": str(sid), "lim": lim})
     if len(rows) > CONTRACT_BOUNDS["SERIES_GAMES_MAX"]:
-        _fail(500, "too_large")
+        _aer_fail(500, "too_large")
     return sid, [r["id"] for r in rows]
 
 
 async def _player_id(db, steam):
-    rows = await _rows(db, PLAYER_BY_STEAM_SQL, {"steam": steam})
+    rows = await _aer_rows(db, PLAYER_BY_STEAM_SQL, {"steam": steam})
     if not rows:
-        _fail(404, "not_found")
+        _aer_fail(404, "not_found")
     return rows[0]["id"]
 
 
@@ -1631,14 +1635,14 @@ def _rate_charge(actor, now=None):
         q.popleft()
     if len(q) >= CONTRACT_BOUNDS["RATE_MAX"]:
         retry = max(1, int(math.ceil(window - (now - q[0]))))
-        _fail(429, "rate", headers={"Retry-After": str(retry)})
+        _aer_fail(429, "rate", headers={"Retry-After": str(retry)})
     q.append(now)
 
 
 async def _wait_until(pred, deadline):
     while not pred():
         if time.monotonic() >= deadline:
-            _fail(503, "deadline")
+            _aer_fail(503, "deadline")
         await asyncio.sleep(_POLL_S)
 
 
@@ -1725,14 +1729,14 @@ class _Report:
 
 
 async def _game_rows(db, ids):
-    rows = await _rows(db, GAME_ROWS_SQL, {"ids": [str(i) for i in ids]})
+    rows = await _aer_rows(db, GAME_ROWS_SQL, {"ids": [str(i) for i in ids]})
     by_id = {str(r["id"]): r for r in rows}
     return [by_id[str(i)] for i in ids if str(i) in by_id]
 
 
 async def _flag_rows(db, ids):
     out = collections.defaultdict(list)
-    for r in await _rows(db, FLAGS_SQL, {"ids": [str(i) for i in ids]}):
+    for r in await _aer_rows(db, FLAGS_SQL, {"ids": [str(i) for i in ids]}):
         out[str(r["match_id"])].append(r)
     return out
 
@@ -1768,7 +1772,7 @@ async def _game_page(rep, games, cohort, subjects, game_set):
                 if e.ranked:
                     _pop_fill(c, game_set.values.get(e.ki))
             seats.append({"subject": index[str(account)],
-                          "reporter": reporter_seat(row) == seat,
+                          "reporter": aer_reporter_seat(row) == seat,
                           "cells": [wire_row("seat", c) for c in cells]})
         inv = None
         if row.get("invalidated_at") is not None:
@@ -1848,7 +1852,7 @@ async def _audit(db, actor, shape, target, details):
             await db.rollback()
         except Exception:
             pass
-        _fail(503, "audit_unavailable")
+        _aer_fail(503, "audit_unavailable")
 
 
 def _clock():
@@ -1871,7 +1875,7 @@ async def _aer_serve(shape, request, db, actor):
         steams = (_aer_steam(request.query_params.get("a")),
                   _aer_steam(request.query_params.get("b")))
         if steams[0] == steams[1]:
-            _fail(400, "bad_argument")
+            _aer_fail(400, "bad_argument")
         games_arg = _aer_int(request, "games", DISPLAY_DEFAULTS["games"],
                              CONTRACT_BOUNDS["GAMES_MIN"], gmax)
     else:
@@ -1880,7 +1884,7 @@ async def _aer_serve(shape, request, db, actor):
                              CONTRACT_BOUNDS["GAMES_MIN"], gmax)
 
     if (await db.execute(text("SELECT pg_is_in_recovery()"))).scalar():
-        _fail(409, "primary_only")
+        _aer_fail(409, "primary_only")
     _rate_charge(actor)
     await _wait_until(lambda: _INFLIGHT[0] < CONTRACT_BOUNDS["REPORT_INFLIGHT_MAX"], deadline)
     _INFLIGHT[0] += 1
@@ -1895,19 +1899,19 @@ async def _aer_serve(shape, request, db, actor):
             target["series"] = str(sid)
         elif shape == "pair":
             accounts = (await _player_id(db, steams[0]), await _player_id(db, steams[1]))
-            ids = [r["id"] for r in await _rows(db, R3_PAIR_SQL, {
+            ids = [r["id"] for r in await _aer_rows(db, R3_PAIR_SQL, {
                 "a": str(accounts[0]), "b": str(accounts[1]), "games": games_arg})]
             target["steam"], b_pid = steams[0], str(accounts[1])
         else:
             accounts = (await _player_id(db, steams[0]),)
-            ids = [r["id"] for r in await _rows(db, R4_PLAYER_SQL, {
+            ids = [r["id"] for r in await _aer_rows(db, R4_PLAYER_SQL, {
                 "s": str(accounts[0]), "games": games_arg})]
             target["steam"] = steams[0]
         c = len(ids)
         _aer_require_games(c)
         pages = _aer_pages(shape, c)
         if not 1 <= page <= pages:
-            _fail(400, "bad_argument (page)")
+            _aer_fail(400, "bad_argument (page)")
         game_set = await rep.lease(_display_key())
         per = CONTRACT_BOUNDS["PAGE_GAMES"]
         summary_page = shape in ("pair", "player") and page == 1
@@ -1915,7 +1919,7 @@ async def _aer_serve(shape, request, db, actor):
         page_ids = [] if summary_page else ids[first:first + per]
         rows = await _game_rows(db, ids if summary_page else page_ids)
         pids = {r[k] for r in rows for k in ("player1_id", "player2_id")} | set(accounts)
-        subj_rows = await _rows(db, SUBJECTS_SQL, {"ids": [str(p) for p in pids]})
+        subj_rows = await _aer_rows(db, SUBJECTS_SQL, {"ids": [str(p) for p in pids]})
         order = [str(a) for a in accounts] + sorted(
             str(p) for p in pids if str(p) not in {str(a) for a in accounts})
         by_id = {str(r["id"]): r for r in subj_rows}
@@ -1951,7 +1955,7 @@ async def _aer_serve(shape, request, db, actor):
             body["games"] = await _game_page(rep, rows, ids, subjects, game_set)
         encoded = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         if len(encoded) > CONTRACT_BOUNDS["RESPONSE_BYTES_MAX"]:
-            _fail(500, "too_large")
+            _aer_fail(500, "too_large")
         details = {"schema": "1a", "shape": shape, "games": games_arg if games_arg else c,
                    "page": page, "pages": pages, "b_pid": b_pid,
                    "rules": dict(body["rules"]),
@@ -1959,11 +1963,11 @@ async def _aer_serve(shape, request, db, actor):
                    "pop_computed_at": body["population"]["computed_at"],
                    "codes": [_code(i) for i in (page_ids or ids)], "via": "discord"}
         if _clock() > deadline:
-            _fail(503, "deadline")
+            _aer_fail(503, "deadline")
         await _audit(db, actor, shape, target, details)
         return Response(content=encoded, media_type="application/json")
     except PopulationUnavailable:
-        _fail(503, PopulationUnavailable.detail)
+        _aer_fail(503, PopulationUnavailable.detail)
     finally:
         rep.close()
         _INFLIGHT[0] -= 1

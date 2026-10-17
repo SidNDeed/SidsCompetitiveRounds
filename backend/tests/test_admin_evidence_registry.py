@@ -157,10 +157,10 @@ def test_p10_each_key_dimension_keeps_two_keys_apart():
                 coverage="na", agg="cell", stratum="na")
     alt = dict(var="w", prov="MEAS", scope="pair", source="card_record",
                coverage="paired", agg="win_max.cell", stratum="pool:ab")
-    k0 = ae.key_id(**base)
+    k0 = ae.aer_key_id(**base)
     for dim in base:
         changed = dict(base, **{dim: alt[dim]})
-        assert ae.key_id(**changed) != k0, dim
+        assert ae.aer_key_id(**changed) != k0, dim
     assert k0.count("|") == 6
 
 

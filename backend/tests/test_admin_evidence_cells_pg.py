@@ -440,7 +440,7 @@ def test_p10_player_and_pair_windows_are_distinct_cells(live):
         oldest = rows[-1]
         player_base = await ae.read_baseline(live.conn, a, oldest["ended_at"],
                                              oldest["id"], covered=ids)
-        pair_rows = [r for r in rows if ae.seat_of(r, b) is not None]
+        pair_rows = [r for r in rows if ae.aer_seat_of(r, b) is not None]
         pair_base = await ae.read_baseline(live.conn, a, pair_rows[-1]["ended_at"],
                                            pair_rows[-1]["id"], covered=ids, partner=b)
         return rows, pair_rows, player_base, pair_base
