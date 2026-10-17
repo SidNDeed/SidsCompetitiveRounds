@@ -139,6 +139,17 @@ MUTANTS = [
     ("M4.22", "C4", "rules", "FfaReadmitEntryRules.cs",
      [("            return readmitLobby;\n", "            return false;\n")],
      "C4.T4.12.kind_r_grant_releases_latch", "C4.T4.11.three_way_game_agreement"),
+    # ---- C5 (P5 client rungs of the positive ladder)
+    ("M5.c1", "C5", "rules", "FfaReadmitEntryRules.cs",
+     [("            if (after == before) return null;\n", "")],
+     "C5.T5.ladder_repeats_add_no_line", "C5.T5.ladder_each_rung_once_in_order"),
+    ("M5.c2", "C5", "rules", "FfaReadmitEntryRules.cs",
+     [("if (selfKept) return after == RdmState.Admitted || after == RdmState.Entered ? \"entered\" : null;",
+       "if (selfKept) return \"entered\";")],
+     "C5.T4.13.flag_false_no_rung", "C5.T5.ladder_each_rung_once_in_order"),
+    ("M5.c3", "C5", "rules", "FfaReadmitEntryRules.cs",
+     [("                case RdmState.Admitted: return \"bound\";\n", "                case RdmState.Binding: return \"bound\";\n")],
+     "C5.T5.ladder_each_rung_once_in_order", "C5.T4.13.flag_false_no_rung"),
 ]
 
 

@@ -2128,6 +2128,7 @@ namespace CompetitiveRounds
                 // V3 P4.3 step 11: a kind r seat posts `entered` (g, n and its
                 // bound actor) on the readmission route, which spends the token,
                 // and is told it is back, not that it joined unrated.
+                FfaReadmit.LadderEntered();
                 FfaReadmit.PostEntered(Math.Max(1, Math.Min(999, g)));
                 joined(true);
                 try { CompetitiveUI.ShowNotification("You are back in the match", new Color(0.6f, 0.9f, 1f), 7f); }

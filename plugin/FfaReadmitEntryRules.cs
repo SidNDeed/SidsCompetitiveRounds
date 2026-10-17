@@ -372,6 +372,41 @@ namespace CompetitiveRounds
             return held ? RdmNext.Leave : RdmNext.Probe;
         }
 
+        // ------------------------------------------------------------ the positive ladder (P5)
+
+        /// <summary>V3 P5, the client rungs of the positive ladder (#438): the
+        /// rung one transition of this client's machine reaches, or null. A rung
+        /// is named on the transition INTO its state only, so a refreshed offer,
+        /// a repeated answer or a retried bind adds no line. `entered` is the
+        /// self-kept moment of a kind r seat (selfKept), not the server's
+        /// answer; `held` is the server's rung.</summary>
+        internal static string LadderRung(RdmState before, RdmState after, bool selfKept)
+        {
+            if (selfKept) return after == RdmState.Admitted || after == RdmState.Entered ? "entered" : null;
+            if (after == before) return null;
+            switch (after)
+            {
+                case RdmState.Offered: return "offered";
+                case RdmState.Claimed: return before == RdmState.Claiming ? "claimed" : null;
+                case RdmState.Admitted: return "bound";
+                default: return null;
+            }
+        }
+
+        /// <summary>The line of a rung: the rung word, then the hold's lobby
+        /// (8 characters), slot and n; bound and entered add the server g and
+        /// the bound actor. Never the token. Null for no rung.</summary>
+        internal static string LadderLine(string rung, string lobby8, RdmClient c)
+        {
+            if (rung == null || c == null) return null;
+            var sb = new StringBuilder(96);
+            sb.Append("[FFA-RDM] ").Append(rung).Append(" lobby=").Append(string.IsNullOrEmpty(lobby8) ? "-" : lobby8)
+              .Append(" slot=").Append(I(c.Slot)).Append(" n=").Append(I(c.N));
+            if (rung == "bound" || rung == "entered")
+                sb.Append(" game=").Append(I(c.Game)).Append(" actor=").Append(I(c.Actor));
+            return sb.ToString();
+        }
+
         /// <summary>The body of one readmit POST (V3 P4.2), {steam_id, step,
         /// n, actor, region, game, client_ms}; the token is never in it.</summary>
         internal static string RequestBody(string steamIdEscaped, string step, int n, int actor, string regionEscaped,

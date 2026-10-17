@@ -31,6 +31,22 @@ namespace CompetitiveRounds
 
         private static string I(int v) { return v.ToString(CultureInfo.InvariantCulture); }
 
+        /// <summary>V3 P5, the client rungs of the positive ladder: one line on
+        /// the transition into offered, claimed and bound (and entered at the
+        /// self-kept moment), from FfaReadmitEntryRules.LadderRung.</summary>
+        private static void Ladder(FfaReadmitEntryRules.RdmState before, bool selfKept, string extra)
+        {
+            string line = FfaReadmitEntryRules.LadderLine(FfaReadmitEntryRules.LadderRung(before, State.State, selfKept),
+                                                          JoinTimeline.Id8(State.Lobby), State);
+            if (line != null) Plugin.Log.LogInfo(line + (extra ?? ""));
+        }
+
+        /// <summary>The self-kept moment of a kind r seat (OnSelfKept).</summary>
+        internal static void LadderEntered()
+        {
+            Ladder(State.State, true, null);
+        }
+
         private static float Now() { return Time.realtimeSinceStartup; }
 
         // ------------------------------------------------------------ discovery (P4.2)
@@ -91,9 +107,7 @@ namespace CompetitiveRounds
         {
             var before = State.State;
             FfaReadmitEntryRules.Offer(State, lobby, slot, n, holdS, Now());
-            if (State.State == FfaReadmitEntryRules.RdmState.Offered && before != FfaReadmitEntryRules.RdmState.Offered)
-                Plugin.Log.LogInfo("[FFA-RDM] bar shown lobby=" + JoinTimeline.Id8(lobby) + " slot=" + I(slot) + " n=" + I(n)
-                                   + " hold_s=" + I(holdS) + " src=" + src);
+            Ladder(before, false, " hold_s=" + I(holdS) + " src=" + src);
             try { NativeUI.MarkDirty(); } catch { }
         }
 
@@ -205,7 +219,10 @@ namespace CompetitiveRounds
                 FfaReadmitEntryRules.RdmAnswer a = null;
                 try { a = ParseAnswer(resp); } catch (Exception ex) { Plugin.Log.LogWarning("[FFA-RDM] answer parse: " + ex.Message); }
                 if (a == null) return;
-                Act(step, FfaReadmitEntryRules.OnAnswer(State, step, a, Now()), a);
+                var before = State.State;
+                var next = FfaReadmitEntryRules.OnAnswer(State, step, a, Now());
+                Ladder(before, false, null);
+                Act(step, next, a);
             }, timeout: PostTimeout);
         }
 
@@ -236,8 +253,6 @@ namespace CompetitiveRounds
             switch (next)
             {
                 case FfaReadmitEntryRules.RdmNext.JoinRoom:
-                    Plugin.Log.LogInfo("[FFA-RDM] claim answered lobby=" + JoinTimeline.Id8(State.Lobby) + " slot=" + I(State.Slot)
-                                       + " n=" + I(State.N));
                     // The claim set this seat's queue row to ready_join for the
                     // lobby: the poll's lock routine joins the room, with
                     // cr_rdt staged pre-join (StageInto).
@@ -253,8 +268,6 @@ namespace CompetitiveRounds
                     }
                     break;
                 case FfaReadmitEntryRules.RdmNext.ArmLate:
-                    Plugin.Log.LogInfo("[FFA-RDM] bind answered lobby=" + JoinTimeline.Id8(State.Lobby) + " n=" + I(State.N)
-                                       + " game=" + I(State.Game) + " actor=" + I(State.Actor));
                     try
                     {
                         FfaLateEntry.PrepareReadmitEntry();
