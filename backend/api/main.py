@@ -57206,10 +57206,12 @@ async def _rdm_report_classes(db, lobby, lobby_uuid, g) -> dict:
         "       s.gone_game, s.lag_games, s.census_at"
         "  FROM ffa_assembly_seats s JOIN players p ON p.id = s.player_id"
         " WHERE s.lobby_id = :lid ORDER BY s.slot"), {"lid": lobby_uuid})).mappings().all()
-    entered = set((await db.execute(text(
-        "SELECT player_id FROM ffa_seat_readmissions"
-        " WHERE lobby_id = :lid AND game = CAST(:g AS smallint) AND entered_at IS NOT NULL"),
-        {"lid": lobby_uuid, "g": int(g)})).scalars().all())
+    readmissions = (await db.execute(text(
+        "SELECT player_id, entered_at FROM ffa_seat_readmissions"
+        " WHERE lobby_id = :lid AND game = CAST(:g AS smallint)"),
+        {"lid": lobby_uuid, "g": int(g)})).mappings().all()
+    all_rdm = {r["player_id"] for r in readmissions}
+    entered = {r["player_id"] for r in readmissions if r["entered_at"] is not None}
     short = lobby.get("short_started_at") is not None
     out = {}
     for r in rows:
@@ -57217,6 +57219,8 @@ async def _rdm_report_classes(db, lobby, lobby_uuid, g) -> dict:
             c = "x"
         elif r["player_id"] in entered:
             c = "r"
+        elif r["player_id"] in all_rdm:
+            c = "u"
         elif r["late_admitted_at"] is not None or (short and not r["start_roster"]):
             c = "l"
         elif int(g) in [int(x) for x in (r["lag_games"] or [])]:

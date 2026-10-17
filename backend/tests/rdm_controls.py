@@ -265,6 +265,13 @@ ROWS = [
                   '        unrated = set()\n',
                   '    if False:\n'
                   '        unrated = set()\n', 1)]},
+    {"row": "F1.H2", "node": RJ + "test_h2_bound_but_unentered_returner_is_u",
+     "tag": "H2 bound unentered",
+     "mutant": [(MAIN,
+                  '        elif r["player_id"] in all_rdm:\n'
+                  '            c = "u"\n',
+                  '        elif False:\n'
+                  '            c = "u"\n', 1)]},
     {"row": "H1", "node": RP + "test_health_marker_counts_every_site", "tag": "health ffa_readmit",
      "mutant": [(MAIN, '            await _ffa_readmit_janitor(async_session)\n',
                  '            pass\n', 1)]},

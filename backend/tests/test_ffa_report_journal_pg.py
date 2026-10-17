@@ -192,6 +192,40 @@ def test_t3_3_edge_races(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_h2_bound_but_unentered_returner_is_u(monkeypatch):
+    """H2: a game-g readmission that has bound but not entered is U even
+    after it publishes a fresh census.  It cannot settle ahead of C; after the
+    real entered receipt the returned seat participates in the settled game."""
+    async def body(env):
+        lob = await R._held(env, gone=0)
+        await env.at(lob, 80.0)
+        claim = await R._readmit(env, lob, 0, "claim", 1)
+        assert claim["status"] == "claimed", ("H2 claim", claim.body)
+        await R._corroborate(env, lob, 0, 9, witness=1)
+        bind = await R._readmit(env, lob, 0, "bind", 1, actor=9)
+        assert bind["status"] == "admitted_late", ("H2 bind", bind.body)
+        await env.census_row(lob, 0, [(0, 9, 1, 0), (1, 2, 1, 1),
+                                      (2, 3, 1, 1), (3, 4, 1, 1)])
+        a = await _file(env, lob, 0)
+        assert a.status == 202 and await _journal(env, lob) == {
+            lob.sids[0]: ("u", "held")}, ("H2 bound unentered", a.status,
+                                           await _journal(env, lob))
+
+        await R._corroborate(env, lob, 0, 9, witness=1, kept=True)
+        entered = await R._readmit(env, lob, 0, "entered", 1, actor=9, game=1)
+        assert entered["status"] == "entered", ("H2 entered", entered.body)
+        await _fresh(env, lob, 1)
+        settled = await _file(env, lob, 1)
+        assert settled.status == 200, ("H2 c settles", settled.status, settled.body)
+        row = await env.conn.fetchrow(
+            "SELECT mp.rating_change, mp.gold_gained FROM ffa_match_players mp"
+            " JOIN ffa_matches m ON m.id = mp.match_id"
+            " WHERE m.lobby_id = $1 AND mp.player_id = $2", lob.lid, lob.pids[0])
+        assert row["rating_change"] is not None and row["gold_gained"] > 0, \
+            ("H2 entered economy", dict(row))
+    run_env(monkeypatch, body)
+
+
 def test_t3_4_one_settlement_under_a_race(monkeypatch):
     """T3.4: two settlements of one expired window interleaved (the second
     reads the choice before the first commits) and a report call after it:
