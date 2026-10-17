@@ -1054,7 +1054,8 @@ class Frame:
         if fn.funcs:
             out = []
             for fk in sorted(fn.funcs, key=str):
-                out.append(self.ps.call_func(fk, argvals, kwvals, self.ctx))
+                out.append(self.ps.call_func(fk, argvals, kwvals,
+                                             self.ctx | self.order_ctx))
             # a call of a module function: methods of the module's classes
             # receive their instance as data
             return vjoin(*out)
@@ -1063,7 +1064,8 @@ class Frame:
             # methods of the module's own classes are followed
             if meth in self.mod.methods and not (recv.alias and recv.alias[0] in
                                                  ("import", "builtin")):
-                out = [self.ps.call_func((self.mod.kind, q), argvals, kwvals, self.ctx)
+                out = [self.ps.call_func((self.mod.kind, q), argvals, kwvals,
+                                         self.ctx | self.order_ctx)
                        for q in self.mod.methods[meth]]
                 return vjoin(*out)
             if meth in _MUTATORS:
@@ -1143,7 +1145,7 @@ class Frame:
         called = {}
         for v in list(argvals) + list(kwvals.values()):
             for fk in v.funcs:
-                called[fk] = self.ps.call_func(fk, first, {}, self.ctx)
+                called[fk] = self.ps.call_func(fk, first, {}, self.ctx | self.order_ctx)
         out = vjoin(V({C}), *result) if result else V({C})
         if name in ("sorted", "min", "max", ".sort") and "key" in kwvals:
             keyret = vjoin(*[called.get(fk, V()) for fk in kwvals["key"].funcs])
@@ -1176,6 +1178,7 @@ class Frame:
         labels_ex = set(v.ex_all())
         labels_im = set(v.im_all()) | set(self.ctx)
         if klass == DISPLAY:
+            labels_im |= set(self.order_ctx)
             implicit_bad = labels_im & {K, O}
             bad = (labels_ex - DISPLAY_OK) | implicit_bad
         else:
@@ -1563,3 +1566,92 @@ def test_exact_constant_key_read_does_not_smear_a_rank_sibling():
 
 ''')
     assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
+
+
+_BOT_GO = '''async def _aer_go(body):
+    page = _aer_decode_response(body)
+    plan = _aer_plan(page)
+    return "\\n".join(item.text for item in plan)
+'''
+
+_ORDER_VALUE = '''def _order_value(cell):
+    return cell[3]
+
+
+'''
+
+
+def _order_context_fixture(go, helper=""):
+    source = _BOT_PERMITTED.replace(
+        "def _aer_plan(page):", _ORDER_VALUE + helper + "def _aer_plan(page):")
+    return source.replace(_BOT_GO, go)
+
+
+_ORDER_CONTEXT_NEGATIVES = [
+    ("direct display sink", _order_context_fixture('''async def _aer_go(body, channel):
+    page = _aer_decode_response(body)
+    for cell in sorted(page.cells, key=_order_value):
+        channel.send(content="DIRECT")
+    plan = _aer_plan(page)
+    return "\\n".join(item.text for item in plan)
+''')),
+    ("module helper display sink", _order_context_fixture('''async def _aer_go(body, channel):
+    page = _aer_decode_response(body)
+    for cell in sorted(page.cells, key=_order_value):
+        _show(channel)
+    plan = _aer_plan(page)
+    return "\\n".join(item.text for item in plan)
+''', '''def _show(channel):
+    channel.send(content="HELPER")
+
+
+''')),
+    ("local method display sink", _order_context_fixture('''async def _aer_go(body, channel, helper):
+    page = _aer_decode_response(body)
+    for cell in sorted(page.cells, key=_order_value):
+        helper.show(channel)
+    plan = _aer_plan(page)
+    return "\\n".join(item.text for item in plan)
+''', '''class Helper:
+    def show(self, channel):
+        channel.send(content="METHOD")
+
+
+''')),
+    ("callback display sink", _order_context_fixture('''async def _aer_go(body, channels):
+    page = _aer_decode_response(body)
+    for cell in sorted(page.cells, key=_order_value):
+        sorted(channels, key=_callback)
+    plan = _aer_plan(page)
+    return "\\n".join(item.text for item in plan)
+''', '''def _callback(channel):
+    channel.send(content="CALLBACK")
+    return 0
+
+
+''')),
+    ("return in ordered loop", _order_context_fixture('''async def _aer_go(body, channel):
+    page = _aer_decode_response(body)
+    _ordered(page.cells, channel)
+    plan = _aer_plan(page)
+    return "\\n".join(item.text for item in plan)
+''', '''def _show(channel):
+    return channel.send(content="RETURN")
+
+
+def _ordered(cells, channel):
+    for cell in sorted(cells, key=_order_value):
+        return _show(channel)
+    return None
+
+
+''')),
+]
+
+
+@pytest.mark.parametrize("label,bot", _ORDER_CONTEXT_NEGATIVES,
+                         ids=[row[0] for row in _ORDER_CONTEXT_NEGATIVES])
+def test_order_context_reaches_display_callees_and_callbacks(label, bot):
+    findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
+    assert len(findings) == 1 and ".send content= reads O" in str(findings[0]), (
+        label, _fmt(findings))
