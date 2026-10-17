@@ -122,6 +122,45 @@ MUTANTS = {
                 '        await _write_open_attempt(db, req, room, held, opener, now, "refused",'
                 ' reason,  None)\n')],
               HOLD_T, "t2_8_open_attempt"),
+    # N4 - S3 server: the claim predicates, the rotation, the bind corroboration
+    "M3.1": ("N4", "match_hold.py",
+             [('    if not _hold_live(hold, now):\n'
+               '        return await _refuse_attempt(db, hold_id, "claim", now, "hold_lapsed")',
+               '    if False:\n'
+               '        return await _refuse_attempt(db, hold_id, "claim", now, "hold_lapsed")')],
+             [('    if not _hold_live(hold, now):\n'
+               '        return await _refuse_attempt(db, hold_id, "claim", now, "hold_lapsed")',
+               '    if (not _hold_live(hold, now)):\n'
+               '        return await _refuse_attempt(db, hold_id, "claim", now, "hold_lapsed")')],
+             HOLD_T, "t3_1_claim"),
+    "M3.2": ("N4", "match_hold.py",
+             [('        "       verifier = CAST(:v AS varchar)"\n',
+               '        "       verifier = COALESCE(verifier, CAST(:v AS varchar))"\n')],
+             [('        "       verifier = CAST(:v AS varchar)"\n',
+               '        "       verifier =  CAST(:v AS varchar)"\n')],
+             HOLD_T, "t3_1_claim"),
+    "M3.3": ("N4", "match_hold.py",
+             [('    return bool((await db.execute(text(\n'
+               '        "SELECT 1 FROM team_queue WHERE player_id = CAST(:pid AS uuid)"',
+               '    return False and bool((await db.execute(text(\n'
+               '        "SELECT 1 FROM team_queue WHERE player_id = CAST(:pid AS uuid)"')],
+             [('    return bool((await db.execute(text(\n'
+               '        "SELECT 1 FROM team_queue WHERE player_id = CAST(:pid AS uuid)"',
+               '    return (bool((await db.execute(text(\n'
+               '        "SELECT 1 FROM team_queue WHERE player_id = CAST(:pid AS uuid)"'),
+              ('        {"pid": str(pid), "sid": str(series_id)})).first())\n',
+               '        {"pid": str(pid), "sid": str(series_id)})).first()))\n')],
+             HOLD_T, "t3_1_claim"),
+    "M3.18": ("N4", "match_hold.py",
+              [('    if not await _corroborated(db, hold, req.actor, now):\n'
+                '        return await _refuse_attempt(db, hold_id, "bind", now, "uncorroborated")',
+                '    if False:\n'
+                '        return await _refuse_attempt(db, hold_id, "bind", now, "uncorroborated")')],
+              [('    if not await _corroborated(db, hold, req.actor, now):\n'
+                '        return await _refuse_attempt(db, hold_id, "bind", now, "uncorroborated")',
+                '    if not (await _corroborated(db, hold, req.actor, now)):\n'
+                '        return await _refuse_attempt(db, hold_id, "bind", now, "uncorroborated")')],
+              HOLD_T, "t3_7_bind"),
 }
 
 

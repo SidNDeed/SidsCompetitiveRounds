@@ -21,6 +21,14 @@ WHAT THIS MODULE OWNS
       POST /api/v1/match/hold/{id}/end   closed_at and the reason, once
       hold_sweep()                    the write-once janitor sweep; called
                                       from queue_cleanup_loop by NX2
+  S3  GET  /api/v1/match/hold/mine    discovery, one `offered` row committed
+                                      before the answer
+      POST /api/v1/match/hold/{id}/claim   the token T (only its SHA-256
+                                      verifier stored), the lease re-taken
+      POST /api/v1/match/hold/{id}/bind    the corroborated new actor X
+      POST /api/v1/match/hold/{id}/entered the entry, closed_at = entered
+  S6  match_hold_attempts             one row per offered, claim, bind and
+                                      entered attempt, in its transaction
 
 ONE DB CLOCK. Every writer and reader reads clock_timestamp() once per
 transaction (`_ctx_now`), AFTER the transaction's first row lock, and binds
@@ -37,6 +45,7 @@ import hashlib
 import hmac
 import json
 import math
+import secrets
 import uuid
 from datetime import timedelta
 from typing import List, Optional
@@ -703,4 +712,298 @@ async def hold_sweep(db: AsyncSession) -> dict:
     out = {}
     for _, why in rows:
         out[why] = out.get(why, 0) + 1
+    return out
+
+
+# ---------------------------------------------------------------------------
+# S3. Discovery, claim, bind and entry (server half)
+# ---------------------------------------------------------------------------
+
+async def _attempt(db: AsyncSession, hold_id, kind: str, now, outcome: str,
+                   reason: Optional[str] = None) -> None:
+    """One match_hold_attempts row, numbered after the hold's last one, in
+    the caller's transaction (S6: rows share their transaction). Every
+    caller holds the hold row lock, so the numbering cannot race."""
+    await db.execute(text(
+        "INSERT INTO match_hold_attempts (hold_id, attempt_no, kind, at, outcome, reason)"
+        " SELECT CAST(:hid AS uuid), COALESCE(max(attempt_no), 0) + 1, CAST(:kind AS varchar),"
+        "        CAST(:now AS timestamptz), CAST(:outcome AS varchar), CAST(:reason AS varchar)"
+        "   FROM match_hold_attempts WHERE hold_id = CAST(:hid AS uuid)"),
+        {"hid": str(hold_id), "kind": kind, "now": now, "outcome": outcome,
+         "reason": reason})
+
+
+async def _refuse_attempt(db, hold_id, kind, now, reason):
+    await _attempt(db, hold_id, kind, now, "refused", reason)
+    await db.commit()
+    return _refused(reason)
+
+
+@router.get("/hold/mine")
+async def match_hold_mine(steam_id: str, request: Request,
+                          db: AsyncSession = Depends(get_db)):
+    """Discovery for a relaunched team or 1v2 client (S3). Requires the
+    caller's session. With a live hold of the caller it writes ONE `offered`
+    attempt row (and offered_at once) committed BEFORE the answer, and sets
+    no queue flag; a write failure answers 503 and offers nothing. Without a
+    live hold it writes nothing and answers readmissible 0."""
+    from main import _check_steam_session   # late import
+
+    await _check_steam_session(request, steam_id, db)
+    pid = await _player_id(db, steam_id)
+    hold = None
+    if pid is not None:
+        hold = (await db.execute(text(
+            f"SELECT {_HOLD_COLS} FROM match_seat_holds"
+            " WHERE player_id = CAST(:pid AS uuid) AND closed_at IS NULL"
+            " ORDER BY held_at DESC LIMIT 1 FOR NO KEY UPDATE"),
+            {"pid": str(pid)})).mappings().first()
+    now = await _ctx_now(db)
+    if hold is None or not _hold_live(hold, now):
+        await db.rollback()
+        return {"readmissible": 0}
+    try:
+        series = await _series_read(db, hold["mode"], hold["series_id"])
+        await db.execute(text(
+            "UPDATE match_seat_holds SET offered_at = COALESCE(offered_at, CAST(:now AS timestamptz))"
+            " WHERE id = CAST(:hid AS uuid)"), {"now": now, "hid": str(hold["id"])})
+        await _attempt(db, hold["id"], "offered", now, "ok")
+        await db.commit()
+    except Exception as ex:
+        await db.rollback()
+        print(f"[HOLD] offer row not written ({type(ex).__name__}); no offer")
+        raise HTTPException(503, "offer not recorded")
+    print(f"[HOLD] offered room={hold['room_name']} slot={hold['slot']} n={hold['n']}")
+    out = _state_payload(hold, now)
+    out.update({"readmissible": 1,
+                "room_region": series["region"] if series else None,
+                "series_tally": [series["w0"], series["w1"]] if series else None})
+    return out
+
+
+class HoldClaimReq(BaseModel):
+    steam_id: str = Field(..., min_length=1, max_length=20)
+
+
+async def _other_commitment(db, pid, mode, series_id) -> bool:
+    """A live lease of another mode (_lease_live_mode), or a team or 1v2
+    queue row of the caller outside this series (a hosted lobby seat or a
+    search is a queue commitment)."""
+    from main import _lease_live_mode   # late import
+
+    live = await _lease_live_mode(db, pid)
+    if live is not None and live != mode:
+        return True
+    return bool((await db.execute(text(
+        "SELECT 1 FROM team_queue WHERE player_id = CAST(:pid AS uuid)"
+        "   AND series_id IS DISTINCT FROM CAST(:sid AS uuid)"
+        " UNION ALL "
+        "SELECT 1 FROM ovt_queue WHERE player_id = CAST(:pid AS uuid)"
+        "   AND series_id IS DISTINCT FROM CAST(:sid AS uuid)"),
+        {"pid": str(pid), "sid": str(series_id)})).first())
+
+
+@router.post("/hold/{hold_id}/claim")
+async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Request,
+                           db: AsyncSession = Depends(get_db)):
+    """Claim a held seat (S3 step 1). One transaction, series row then hold
+    row locked, every predicate re-checked under the locks (#208): own hold
+    (not_yours), open and in time (hold_lapsed), series still active
+    (lobby_closed), no live lease of another mode and no other team or 1v2
+    queue commitment (other_mode). The grant stores only the SHA-256
+    verifier of a fresh 256-bit token T, re-takes the lease for this mode
+    and series, and answers T once; a repeat rotates T. Nothing here moves
+    held_until. Every claim, refused or granted, writes its attempt row in
+    this transaction."""
+    from main import _check_steam_session, _lease_acquire, LEASE_TTL_ASSEMBLY
+
+    await _check_steam_session(request, req.steam_id, db)
+    pid = await _player_id(db, req.steam_id)
+    peek = await _hold_row(db, hold_id)
+    if peek is None:
+        await db.rollback()
+        raise HTTPException(404, "no such hold")
+    series = await _series_lock(db, peek["mode"], peek["series_id"])
+    hold = await _hold_row(db, hold_id, lock=True)
+    now = await _ctx_now(db)                 # after both lock waits
+    if pid is None or hold["player_id"] != pid:
+        return await _refuse_attempt(db, hold_id, "claim", now, "not_yours")
+    if not _hold_live(hold, now):
+        return await _refuse_attempt(db, hold_id, "claim", now, "hold_lapsed")
+    if series is None or series["status"] not in _ACTIVE:
+        return await _refuse_attempt(db, hold_id, "claim", now, "lobby_closed")
+    if await _other_commitment(db, pid, hold["mode"], hold["series_id"]):
+        return await _refuse_attempt(db, hold_id, "claim", now, "other_mode")
+    token = secrets.token_hex(32)
+    verifier = hashlib.sha256(token.encode()).hexdigest()
+    await db.execute(text(
+        "UPDATE match_seat_holds SET claimed_at = COALESCE(claimed_at, CAST(:now AS timestamptz)),"
+        "       verifier = CAST(:v AS varchar)"
+        " WHERE id = CAST(:hid AS uuid)"), {"now": now, "v": verifier, "hid": str(hold_id)})
+    await _lease_acquire(db, pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)
+    digest = (await db.execute(text(
+        "SELECT boundary_digest FROM match_seat_presence"
+        " WHERE room_name = CAST(:room AS varchar) AND player_id = CAST(:pid AS uuid)"),
+        {"room": hold["room_name"], "pid": str(pid)})).scalar()
+    await _attempt(db, hold_id, "claim", now, "ok")
+    await db.commit()
+    print(f"[HOLD] claimed room={hold['room_name']} slot={hold['slot']} n={hold['n']}")
+    out = _state_payload(dict(hold, claimed_at=hold["claimed_at"] or now), now)
+    out.update({"status": "claimed", "token": token, "hold": True,
+                "room_region": series["region"], "boundary_digest": digest})
+    return out
+
+
+class HoldBindReq(BaseModel):
+    steam_id: str = Field(..., min_length=1, max_length=20)
+    actor: int = Field(..., ge=1, le=100000)
+    region: Optional[str] = Field(None, max_length=8)
+
+
+_CORROBORATED_SQL = (
+    "SELECT 1 FROM match_seat_presence"
+    " WHERE room_name = CAST(:room AS varchar) AND player_id <> CAST(:pid AS uuid)"
+    "   AND beat_at > CAST(:now AS timestamptz) - make_interval(secs => CAST(:f AS integer))"
+    "   AND seen @> CAST(:probe AS jsonb) LIMIT 1")
+_MISMATCH_SQL = (
+    "SELECT 1 FROM match_seat_presence"
+    " WHERE room_name = CAST(:room AS varchar)"
+    "   AND beat_at > CAST(:now AS timestamptz) - make_interval(secs => CAST(:f AS integer))"
+    "   AND (jsonb_path_exists(seen, '$[*] ? (@.u_id == $u && @.actor != $x)',"
+    "                          CAST(:vars AS jsonb))"
+    "        OR (player_id = CAST(:pid AS uuid) AND actor IS NOT NULL"
+    "            AND actor <> CAST(:x AS integer)))"
+    " LIMIT 1")
+
+
+async def _corroborated(db, hold, actor, now) -> bool:
+    """A fresh beat of ANOTHER fighter of the room lists actor X with the
+    held Steam id."""
+    steam = (await db.execute(text("SELECT steam_id FROM players WHERE id = CAST(:p AS uuid)"),
+                              {"p": str(hold["player_id"])})).scalar()
+    probe = json.dumps([{"actor": int(actor), "u_id": steam}])
+    return bool((await db.execute(text(_CORROBORATED_SQL), {
+        "room": hold["room_name"], "pid": str(hold["player_id"]), "now": now,
+        "f": BEAT_FRESH_S, "probe": probe})).scalar())
+
+
+async def _identity_mismatch(db, hold, actor, now) -> bool:
+    """A fresh beat lists ANOTHER actor for the held Steam id (or the held
+    player's own fresh beat names another actor)."""
+    steam = (await db.execute(text("SELECT steam_id FROM players WHERE id = CAST(:p AS uuid)"),
+                              {"p": str(hold["player_id"])})).scalar()
+    return bool((await db.execute(text(_MISMATCH_SQL), {
+        "room": hold["room_name"], "pid": str(hold["player_id"]), "now": now,
+        "f": BEAT_FRESH_S, "x": int(actor),
+        "vars": json.dumps({"u": steam, "x": int(actor)})})).scalar())
+
+
+@router.post("/hold/{hold_id}/bind")
+async def match_hold_bind(hold_id: uuid.UUID, req: HoldBindReq, request: Request,
+                          db: AsyncSession = Depends(get_db)):
+    """Bind the returner's new actor X (S3 step 3). Under the hold row lock:
+    the hold must be the caller's (not_yours), live (hold_lapsed) and claimed
+    (not_claimed); a fresh beat of another fighter must list X with the held
+    Steam id (uncorroborated, retried by the client); no fresh beat may list
+    another actor for that Steam id (actor_identity_mismatch); no other open
+    hold may have bound X (actor_conflict); a row already bound to another
+    actor refuses (already_bound) and one bound to X answers as bound. The
+    bind stamps bound_at, X and the region, seq + 1, and its attempt row,
+    in one transaction."""
+    from main import _check_steam_session   # late import
+
+    await _check_steam_session(request, req.steam_id, db)
+    pid = await _player_id(db, req.steam_id)
+    hold = await _hold_row(db, hold_id, lock=True)
+    if hold is None:
+        await db.rollback()
+        raise HTTPException(404, "no such hold")
+    now = await _ctx_now(db)                 # after the hold row lock
+    if pid is None or hold["player_id"] != pid:
+        return await _refuse_attempt(db, hold_id, "bind", now, "not_yours")
+    if not _hold_live(hold, now):
+        return await _refuse_attempt(db, hold_id, "bind", now, "hold_lapsed")
+    if hold["claimed_at"] is None:
+        return await _refuse_attempt(db, hold_id, "bind", now, "not_claimed")
+    if hold["bound_at"] is not None:
+        if hold["bound_actor"] != req.actor:
+            return await _refuse_attempt(db, hold_id, "bind", now, "already_bound")
+        await db.rollback()
+        out = _state_payload(hold, now)
+        out["status"] = "bound"
+        return out
+    if not await _corroborated(db, hold, req.actor, now):
+        return await _refuse_attempt(db, hold_id, "bind", now, "uncorroborated")
+    if await _identity_mismatch(db, hold, req.actor, now):
+        return await _refuse_attempt(db, hold_id, "bind", now, "actor_identity_mismatch")
+    conflict = (await db.execute(text(
+        "SELECT 1 FROM match_seat_holds WHERE room_name = CAST(:room AS varchar)"
+        "   AND id <> CAST(:hid AS uuid) AND closed_at IS NULL"
+        "   AND bound_actor = CAST(:x AS integer)"),
+        {"room": hold["room_name"], "hid": str(hold_id), "x": req.actor})).scalar()
+    if conflict:
+        return await _refuse_attempt(db, hold_id, "bind", now, "actor_conflict")
+    bound = (await db.execute(text(
+        "UPDATE match_seat_holds SET bound_at = CAST(:now AS timestamptz),"
+        "       bound_actor = CAST(:x AS integer), bound_region = CAST(:reg AS varchar),"
+        "       seq = seq + 1"
+        f" WHERE id = CAST(:hid AS uuid) RETURNING {_HOLD_COLS}"),
+        {"now": now, "x": req.actor, "reg": req.region, "hid": str(hold_id)})
+    ).mappings().first()
+    await _attempt(db, hold_id, "bind", now, "ok")
+    await db.commit()
+    print(f"[HOLD] bound room={hold['room_name']} slot={hold['slot']} n={hold['n']}")
+    out = _state_payload(bound, now)
+    out["status"] = "bound"
+    return out
+
+
+class HoldEnteredReq(BaseModel):
+    steam_id: str = Field(..., min_length=1, max_length=20)
+    game_id: uuid.UUID
+    actor: int = Field(..., ge=1, le=100000)
+
+
+@router.post("/hold/{hold_id}/entered")
+async def match_hold_entered(hold_id: uuid.UUID, req: HoldEnteredReq, request: Request,
+                             db: AsyncSession = Depends(get_db)):
+    """Accept the returner's entry (S3 step 8): only from the claiming
+    owner's session (not_yours), on a live (hold_lapsed, which includes the
+    entry bound after bind) and bound (not_bound) hold, with X equal to the
+    bound actor (actor_mismatch), G equal to the hold's game (game_mismatch)
+    and a fresh beat of another fighter listing X with the held Steam id
+    (uncorroborated). It stamps entered_at and closed_at = entered once,
+    spends T (the verifier is cleared) and seq + 1, with its attempt row."""
+    from main import _check_steam_session   # late import
+
+    await _check_steam_session(request, req.steam_id, db)
+    pid = await _player_id(db, req.steam_id)
+    hold = await _hold_row(db, hold_id, lock=True)
+    if hold is None:
+        await db.rollback()
+        raise HTTPException(404, "no such hold")
+    now = await _ctx_now(db)                 # after the hold row lock
+    if pid is None or hold["player_id"] != pid:
+        return await _refuse_attempt(db, hold_id, "entered", now, "not_yours")
+    if not _hold_live(hold, now):
+        return await _refuse_attempt(db, hold_id, "entered", now, "hold_lapsed")
+    if hold["bound_at"] is None:
+        return await _refuse_attempt(db, hold_id, "entered", now, "not_bound")
+    if hold["bound_actor"] != req.actor:
+        return await _refuse_attempt(db, hold_id, "entered", now, "actor_mismatch")
+    if hold["game_id"] != req.game_id:
+        return await _refuse_attempt(db, hold_id, "entered", now, "game_mismatch")
+    if not await _corroborated(db, hold, req.actor, now):
+        return await _refuse_attempt(db, hold_id, "entered", now, "uncorroborated")
+    done = (await db.execute(text(
+        "UPDATE match_seat_holds SET entered_at = CAST(:now AS timestamptz),"
+        "       closed_at = CAST(:now AS timestamptz), closed_reason = 'entered',"
+        "       verifier = NULL, seq = seq + 1"
+        f" WHERE id = CAST(:hid AS uuid) AND closed_at IS NULL RETURNING {_HOLD_COLS}"),
+        {"now": now, "hid": str(hold_id)})).mappings().first()
+    await _attempt(db, hold_id, "entered", now, "ok")
+    await db.commit()
+    print(f"[HOLD] entered room={hold['room_name']} slot={hold['slot']} n={hold['n']}")
+    out = _state_payload(done, now)
+    out["status"] = "entered"
     return out
