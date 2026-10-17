@@ -107,6 +107,7 @@ namespace CompetitiveRounds
             try { TeamHold.Tick(); } catch { }
             try { TeamHoldLoop.Tick(); } catch { }
             try { TeamHoldReturn.Tick(); } catch { }
+            try { TeamHoldPick.Tick(); } catch { }
         }
 
         /// <summary>The drift probe: each present body's cards against its
@@ -141,6 +142,7 @@ namespace CompetitiveRounds
             try { TeamHold.OnRoomLeft(); } catch { }
             try { TeamHoldLoop.Reset(); } catch { }
             try { TeamHoldReturn.OnRoomLeft(); } catch { }
+            try { TeamHoldPick.OnRoomLeft(); } catch { }
             _battleWas = false;
         }
 
@@ -156,6 +158,7 @@ namespace CompetitiveRounds
             new[] { "S2", "GM_ArmsRace", "PointTransition", "TeamHold_PointTransitionPatch" },
             new[] { "S2", "GM_ArmsRace", "RoundTransition", "TeamHold_RoundTransitionPatch" },
             new[] { "S2", "GM_ArmsRace", "DoStartGame", "TeamHold_RematchFencePatch" },
+            new[] { "S4", "CardChoice", "DoPick", "TeamHold_DoPickPatch" },
         };
 
         private static Type HookType(string name)

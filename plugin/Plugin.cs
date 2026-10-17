@@ -5559,6 +5559,9 @@ namespace CompetitiveRounds
             // evaluation and is logged; it never decides the face (fix pass 1,
             // BR-H1: only the every-fighter census can answer Modded).
             AvatarDefaults.Evaluate("E12-roomprops");
+            // RJ Stage 2 (S4 step 5): an absent seat's grant (cr_tap) is
+            // applied through the one seat-log writer on every client.
+            try { TeamHoldPick.OnRoomProps(propertiesThatChanged); } catch { }
         }
         public void OnMasterClientSwitched(Photon.Realtime.Player newMasterClient)
         {

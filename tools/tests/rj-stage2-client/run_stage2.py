@@ -133,6 +133,14 @@ MUTANTS = [
         ("if (string.IsNullOrEmpty(rdt) || string.IsNullOrEmpty(holdId) || string.IsNullOrEmpty(verifierHex)) return false;",
          "return true;")],
      "t37_token", "t37_genuine"),
+    # K4, S4
+    ("M4.5", "K4", "rules", [
+        ("return TryParseHold(th, out k) && IsLive(k.State) && k.Slot == slot;",
+         "return !bodyResolves;")],
+     "t43_delayed_purge", "t43_before_phase"),
+    ("M4.6", "K4", "seat", [
+        ("if (seat.Deals > k) { superseded = true; return false; }", "")],
+     "t43_after_own_pick", "t43_before_phase"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

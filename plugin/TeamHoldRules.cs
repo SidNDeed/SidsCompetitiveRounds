@@ -811,5 +811,91 @@ namespace CompetitiveRounds
 
         /// <summary>T3.9: discovery shows the offer only for a readmissible answer.</summary>
         internal static bool DiscoveryShows(TeamHoldNet.MineAnswer a) { return a != null && a.Readmissible; }
+
+        // ── S4: one record for every picker; the absent seat; the grant ────
+
+        internal const string KEY_TAP = "cr_tap";
+
+        /// <summary>The picker set of a phase (S4 step 1): the vanilla pickers
+        /// (every seat at the game start; the losing team at a round) plus
+        /// every held seat of that team, with the deals each makes. The 1v2
+        /// solo makes two initial deals when the series has the extra pick.</summary>
+        internal static List<KeyValuePair<int, int>> PickerSet(string mode, bool gameStart, int losingTeam,
+                                                               IList<int> presentSlots, IList<int> heldSlots, bool ovtSoloExtra)
+        {
+            var all = new SortedSet<int>();
+            if (presentSlots != null) foreach (var s in presentSlots) all.Add(s);
+            if (heldSlots != null) foreach (var s in heldSlots) all.Add(s);
+            var r = new List<KeyValuePair<int, int>>();
+            foreach (var s in all)
+            {
+                if (!gameStart && SlotToTeam(mode, s) != losingTeam) continue;
+                int deals = gameStart && mode == MODE_OVT && s == 0 && ovtSoloExtra ? 2 : 1;
+                r.Add(new KeyValuePair<int, int>(s, deals));
+            }
+            return r;
+        }
+
+        /// <summary>S4 step 4: a deal of a slot the room's hold names in a
+        /// waiting state is skipped on every client. The test reads cr_th,
+        /// never whether a body still resolves (a delayed purge keeps one).</summary>
+        internal static bool SkipDeal(int slot, string th, bool bodyResolves)
+        {
+            HoldKey k;
+            return TryParseHold(th, out k) && IsLive(k.State) && k.Slot == slot;
+        }
+
+        /// <summary>S4 step 4: the pick phase is waiting on the held slot's own
+        /// deal; every client ends it locally (vanilla RPCA_DonePicking, no RPC).</summary>
+        internal static bool DonePickingLocally(bool picking, int pickerSlot, string th)
+        {
+            return picking && SkipDeal(pickerSlot, th, true);
+        }
+
+        /// <summary>The record seam (S4 step 2). KX5 binds it to the FFA
+        /// offer record and its ledger; unbound it yields NO record, and no
+        /// record means no card.</summary>
+        internal static Func<string, int, int, string> RecordEntry0;
+
+        internal static string Entry0(string g, int slot, int k)
+        {
+            var f = RecordEntry0;
+            if (f == null) return null;
+            try { return f(g, slot, k); } catch { return null; }
+        }
+
+        /// <summary>A present owner's screen falls back to today when no
+        /// record arrived within 4 s of the phase start.</summary>
+        internal const double RecordLateS = 4;
+        internal static bool RecordLate(double phaseStart, double now, bool haveRecord)
+        {
+            return !haveRecord && now - phaseStart >= RecordLateS;
+        }
+
+        /// <summary>cr_tap = {G}:{slot}:{k}:{card}.</summary>
+        internal static string TapFormat(string g, int slot, int k, string card) { return g + ":" + I(slot) + ":" + I(k) + ":" + card; }
+
+        internal static bool TryParseTap(string s, out string g, out int slot, out int k, out string card)
+        {
+            g = null; slot = -1; k = -1; card = null;
+            if (string.IsNullOrEmpty(s)) return false;
+            var f = s.Split(new[] { ':' }, 4);
+            if (f.Length != 4) return false;
+            g = f[0]; slot = ParseInt(f[1], -1); k = ParseInt(f[2], -1); card = f[3];
+            return !string.IsNullOrEmpty(g) && slot >= 0 && k >= 0 && !string.IsNullOrEmpty(card);
+        }
+
+        internal enum GrantOutcome { Applied, Superseded, Refused }
+
+        /// <summary>S4 step 5 on every client: the grant goes through the one
+        /// writer; a real pick for that slot at deal k received first is kept
+        /// and the grant ignored.</summary>
+        internal static GrantOutcome ApplyGrant(string g, string currentG, int slot, int k, string card)
+        {
+            if (string.IsNullOrEmpty(card) || g != currentG) return GrantOutcome.Refused;
+            bool superseded;
+            if (SeatDeckLog.CommitGrant(k, slot, card, out superseded)) return GrantOutcome.Applied;
+            return superseded ? GrantOutcome.Superseded : GrantOutcome.Refused;
+        }
     }
 }
