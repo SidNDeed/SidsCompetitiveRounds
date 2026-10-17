@@ -121,7 +121,7 @@ ROWS = [
                  '        "       hold_n = NULL', 1)]},
     {"row": "M4.1", "node": RP + "test_t4_1_the_hold_writer_and_its_predicates",
      "tag": "T4.1 in_room_exit",
-     "mutant": [(MAIN, '    if (seat["left_cause"] or "") == "in_room_exit":\n',
+     "mutant": [(MAIN, '    if _rdm_chosen_exit(seat["left_cause"]):\n',
                  '    if False:\n', 1)]},
     {"row": "M4.2", "node": RP + "test_t4_1_the_hold_writer_and_its_predicates",
      "tag": "T4.1 departed",
@@ -177,16 +177,16 @@ ROWS = [
                  1)]},
     {"row": "M4.9", "node": RP + "test_t4_4_the_lapse_order_and_one_commit", "tag": "T4.4 order",
      "mutant": [(MAIN,
-                 '            ctx = await _asm_ctx_slot(db, lid, route="readmit_lapse", trigger="lapse")\n'
-                 '            qids = (await db.execute(text("SELECT player_id FROM ffa_queue'
+                 '        ctx = await _asm_ctx_slot(db, lid, route="readmit_lapse", trigger="lapse")\n'
+                 '        qids = (await db.execute(text("SELECT player_id FROM ffa_queue'
                  ' WHERE series_id = :lid"),\n'
-                 '                                     {"lid": lid})).scalars().all()\n'
-                 '            await _ffa_lock_queue_rows(db, qids)\n',
-                 '            qids = (await db.execute(text("SELECT player_id FROM ffa_queue'
+                 '                                 {"lid": lid})).scalars().all()\n'
+                 '        await _ffa_lock_queue_rows(db, qids)\n',
+                 '        qids = (await db.execute(text("SELECT player_id FROM ffa_queue'
                  ' WHERE series_id = :lid"),\n'
-                 '                                     {"lid": lid})).scalars().all()\n'
-                 '            await _ffa_lock_queue_rows(db, qids)\n'
-                 '            ctx = await _asm_ctx_slot(db, lid, route="readmit_lapse", trigger="lapse")\n',
+                 '                                 {"lid": lid})).scalars().all()\n'
+                 '        await _ffa_lock_queue_rows(db, qids)\n'
+                 '        ctx = await _asm_ctx_slot(db, lid, route="readmit_lapse", trigger="lapse")\n',
                  1)]},
     {"row": "M4.10", "node": RP + "test_t4_4_the_lapse_order_and_one_commit",
      "tag": "T4.4 one commit",
@@ -256,6 +256,65 @@ ROWS = [
      "mutant": [(MAIN,
                  '    await db.execute(text("DELETE FROM ffa_report_journal WHERE reporter_id = :pid"),\n'
                  '                     {"pid": pid})\n', '', 1)]},
+    # The leave-cause helpers (r1b F3): the trailing timeout leave keeps a hold.
+    {"row": "B10", "node": RP + "test_t4_3_old_clears_leave_the_hold",
+     "tag": "T4.3 hold unchanged",
+     "mutant": [(MAIN, '                elif not _rdm_trailing_drop(cause):\n',
+                 '                elif True:\n', 1)]},
+    # The janitor bound (the round 1 census ruling): one row per route of it.
+    {"row": "B1", "node": RP + "test_t4_16_the_lapse_entry_declines_a_held_lobby",
+     "tag": "T4.16 busy",
+     "mutant": [(MAIN,
+                 '    "SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE SKIP LOCKED")\n',
+                 '    "SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE")\n', 1)]},
+    {"row": "B2", "node": RP + "test_t4_16_the_lapse_entry_declines_a_held_lobby",
+     "tag": "T4.16 gone",
+     "mutant": [(MAIN, '            outcome = "busy" if there is not None else "gone"\n',
+                 '            outcome = "busy"\n', 1)]},
+    {"row": "B3", "node": RP + "test_t4_17_a_held_queue_row_bounds_the_lapse",
+     "tag": "T4.17 bounded",
+     "mutant": [(MAIN, '        _rdm_janitor_bound(db)\n        await _rdm_lapse_sweep(db)\n',
+                 '        await _rdm_lapse_sweep(db)\n', 1)]},
+    {"row": "B4", "node": RP + "test_t4_17_a_held_queue_row_bounds_the_lapse",
+     "tag": "T4.17 bound line",
+     "mutant": [(MAIN,
+                 '        stage = _rdm_bound_stage(ex)\n'
+                 '        if stage is not None:\n'
+                 '            print(f"[FFA-RDM] lapse lobby',
+                 '        stage = None\n'
+                 '        if stage is not None:\n'
+                 '            print(f"[FFA-RDM] lapse lobby', 1)]},
+    {"row": "B5", "node": RP + "test_t4_18_the_bound_arms_every_janitor_transaction",
+     "tag": "T4.18 every transaction",
+     "mutant": [(MAIN, '    _sa_event.listen(db.sync_session, "after_begin", _arm)\n',
+                 '    _sa_event.listen(db.sync_session, "after_begin", _arm, once=True)\n', 1)]},
+    {"row": "B6", "node": RJ + "test_t3_7_a_held_window_bounds_settle_phase_one",
+     "tag": "T3.7 bounded",
+     "mutant": [(MAIN, '        _rdm_janitor_bound(db)\n        await _ffa_settle_due_windows(db)\n',
+                 '        await _ffa_settle_due_windows(db)\n', 1)]},
+    {"row": "B7", "node": RJ + "test_t3_8_a_bound_refusal_is_not_a_supersede",
+     "tag": "T3.8 kept",
+     "mutant": [(MAIN,
+                 '        todo.extend((getattr(e, "orig", None), e.__cause__, e.__context__))\n',
+                 '        todo.extend((getattr(e, "orig", None), e.__cause__))\n', 1)]},
+    {"row": "B8", "node": RJ + "test_t3_8_a_bound_refusal_is_not_a_supersede",
+     "tag": "T3.8 kept",
+     "mutant": [(MAIN,
+                 '        stage = _rdm_bound_stage(ex)\n'
+                 '        if stage is not None:\n'
+                 '            # The body turned',
+                 '        stage = None\n'
+                 '        if stage is not None:\n'
+                 '            # The body turned', 1)]},
+    {"row": "B9", "node": RJ + "test_t3_9_a_held_reporter_row_bounds_settle_phase_two",
+     "tag": "T3.9 bound line",
+     "mutant": [(MAIN,
+                 '        stage = _rdm_bound_stage(ex)\n'
+                 '        if stage is not None:\n'
+                 '            print(f"[FFA-REPORT] journal window',
+                 '        stage = None\n'
+                 '        if stage is not None:\n'
+                 '            print(f"[FFA-REPORT] journal window', 1)]},
 ]
 for _row in ROWS:
     _row["twin"] = _site_twin(_row)

@@ -409,6 +409,119 @@ def test_t4_4_the_lapse_order_and_one_commit(monkeypatch):
     run_env(monkeypatch, body)
 
 
+# -- the janitor bound (the round 1 census ruling: no unbounded janitor wait) --
+
+def bound_fast(env):
+    """The janitor bound at test scale: its lock timeout cut to 300 ms and its
+    statement timeout to 2 s, so a held row ends as a bound line at once."""
+    env.mp.setattr(main, "RDM_JANITOR_LOCK_TIMEOUT_MS", 300)
+    env.mp.setattr(main, "RDM_JANITOR_STATEMENT_TIMEOUT_MS", 2000)
+
+
+async def tick_within(env, s=20.0):
+    """One janitor pass that must end within s seconds: True when it did."""
+    try:
+        await asyncio.wait_for(A._janitor_tick(env), s)
+        return True
+    except asyncio.TimeoutError:
+        return False
+
+
+async def tick_holding(env, sql, *args):
+    """One janitor pass while a second transaction (the case connection, all
+    fixtures written before) holds the row lock `sql` takes; the hold is
+    rolled back whatever the pass did. Returns tick_within's answer."""
+    tr = env.conn.transaction()
+    await tr.start()
+    try:
+        await env.conn.execute(sql, *args)
+        return await tick_within(env)
+    finally:
+        await tr.rollback()
+
+
+def test_t4_16_the_lapse_entry_declines_a_held_lobby(monkeypatch):
+    """T4.16: the lapse takes its lobby row with SKIP LOCKED: a lobby another
+    transaction holds is skipped this tick with one busy line and its hold
+    left whole, and the next tick lapses it; a lobby with no row answers
+    gone, never busy (#430: one value never means both)."""
+    async def body(env):
+        bound_fast(env)
+        lob = await _held(env)
+        await env.at(lob, 200.0)
+        done = await tick_holding(env, "SELECT 1 FROM ffa_lobbies WHERE id = $1 FOR UPDATE",
+                                  lob.lid)
+        assert done, ("T4.16 bounded",)
+        busy = _rdm_lines(env, "lapse lobby %s busy" % main._asm_id8(lob.lid))
+        assert len(busy) == 1, ("T4.16 busy", _rdm_lines(env))
+        s = await env.seat(lob, 1)
+        assert s["hold_n"] == 1, ("T4.16 hold kept", s["hold_n"])
+        await A._janitor_tick(env)
+        s = await env.seat(lob, 1)
+        assert s["hold_n"] is None, ("T4.16 next tick", s["hold_n"])
+
+        got = {}
+
+        async def gone():
+            async with env.sm() as db:
+                got["out"] = await main._rdm_lapse_lobby(db, cf_asm.uuid.uuid4())
+        await env._call(gone)
+        assert got.get("out") == ("gone", 0), ("T4.16 gone", got.get("out"))
+    run_env(monkeypatch, body)
+
+
+def test_t4_17_a_held_queue_row_bounds_the_lapse(monkeypatch):
+    """T4.17: under the lobby lock the lapse's queue rows wait no longer than
+    the janitor bound: a member's queue row another transaction holds ends
+    that lobby's lapse as one bound line (stage=lock), the pass finishes and
+    the hold is whole; the next tick lapses it."""
+    async def body(env):
+        bound_fast(env)
+        lob = await _held(env)
+        await env.at(lob, 200.0)
+        q = await env.queue_row(lob, 0)
+        assert q is not None and q["series_id"] == lob.lid, ("T4.17 precondition", q)
+        done = await tick_holding(env, "SELECT 1 FROM ffa_queue WHERE player_id = $1 FOR UPDATE",
+                                  lob.pids[0])
+        assert done, ("T4.17 bounded",)
+        line = _rdm_lines(env, "lapse lobby %s bound stage=lock" % main._asm_id8(lob.lid))
+        assert len(line) == 1, ("T4.17 bound line", _rdm_lines(env))
+        s = await env.seat(lob, 1)
+        assert s["hold_n"] == 1, ("T4.17 hold kept", s["hold_n"])
+        await A._janitor_tick(env)
+        s = await env.seat(lob, 1)
+        assert s["hold_n"] is None, ("T4.17 next tick", s["hold_n"])
+    run_env(monkeypatch, body)
+
+
+def test_t4_18_the_bound_arms_every_janitor_transaction(monkeypatch):
+    """T4.18: the bound is armed on every transaction the janitor session
+    begins, one begun after a rollback or a commit included (the report body
+    rolls back and re-locks the lobby on its insert-failure branches), and on
+    no session the janitor did not arm."""
+    async def body(env):
+        bound_fast(env)
+
+        async def shown(db):
+            return ((await db.execute(main.text("SHOW lock_timeout"))).scalar(),
+                    (await db.execute(main.text("SHOW statement_timeout"))).scalar())
+        async with env.sm() as db:
+            main._rdm_janitor_bound(db)
+            first = await shown(db)
+            await db.rollback()
+            second = await shown(db)
+            await db.commit()
+            third = await shown(db)
+            await db.rollback()
+        async with env.sm() as db:
+            plain = await shown(db)
+            await db.rollback()
+        assert first == second == third == ("300ms", "2s"), \
+            ("T4.18 every transaction", first, second, third)
+        assert plain != first, ("T4.18 only the armed session", plain)
+    run_env(monkeypatch, body)
+
+
 # -- S5: discovery, claim, bind, decline, entered, epoch version 2 -----------
 
 def test_t4_5_claim_bind_entered_and_a_second_drop(monkeypatch):

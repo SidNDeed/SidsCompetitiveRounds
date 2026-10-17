@@ -303,3 +303,80 @@ def test_s3k_departure_credited_kill_places_as_a_death(monkeypatch):
         got = {r["steam_id"]: r["placement"] for r in rows}
         assert [got[s] for s in lob.sids] == [1, 2, 3, 4], ("S3k placements", got)
     run_env(monkeypatch, body)
+
+
+# -- the janitor bound on the settle arm (the round 1 census ruling) ----------
+
+def _report_lines(env, needle=""):
+    return [ln for ln in env.lines if ln.startswith("[FFA-REPORT]") and needle in ln]
+
+
+async def _journaled_r(env):
+    """A lobby whose one report (an r seat's) is journaled and whose window is
+    due at lobby age 91."""
+    lob = await _lobby(env)
+    await _entered_row(env, lob, 2)
+    a = await _file(env, lob, 2)
+    assert a.status == 202, ("T3.7 precondition", a.status, a.body)
+    await env.at(lob, 91.0)
+    return lob
+
+
+async def _bound_then_next(env, lob, tag, sql, *args):
+    """The settle arm under a held row: the pass ends within the bound with one
+    bound line for game 1, settles nothing and supersedes nothing; the next
+    tick, the row free, settles the report."""
+    R.bound_fast(env)
+    done = await R.tick_holding(env, sql, *args)
+    assert done, (tag + " bounded",)
+    assert await _matches(env, lob) == [], (tag + " nothing settled",)
+    assert await _journal(env, lob) == {lob.sids[2]: ("r", "held")}, \
+        (tag + " kept", await _journal(env, lob))
+    line = _report_lines(env, "journal window lobby %s game 1 bound stage="
+                         % main._asm_id8(lob.lid))
+    assert len(line) == 1, (tag + " bound line", _report_lines(env))
+    await A._janitor_tick(env)
+    m = await _matches(env, lob)
+    assert [(r["rep_sid"], r["fallback_cls"]) for r in m] == [(lob.sids[2], "r")], \
+        (tag + " next tick", [(r["rep_sid"], r["fallback_cls"]) for r in m])
+
+
+def test_t3_7_a_held_window_bounds_settle_phase_one(monkeypatch):
+    """T3.7: phase 1 of a due window (the lobby, then the window FOR UPDATE)
+    waits no longer than the janitor bound on a window row another
+    transaction holds: one bound line, nothing settled or superseded, and the
+    next tick settles it."""
+    async def body(env):
+        lob = await _journaled_r(env)
+        await _bound_then_next(env, lob, "T3.7",
+                               "SELECT 1 FROM ffa_report_windows WHERE lobby_id = $1 FOR UPDATE",
+                               lob.lid)
+    run_env(monkeypatch, body)
+
+
+def test_t3_8_a_bound_refusal_is_not_a_supersede(monkeypatch):
+    """T3.8: phase 2 under the bound, through the body's insert branch: an
+    uncommitted ffa_matches row of the same room (another transaction) makes
+    the settlement's insert wait, the bound ends it as 55P03, the body answers
+    its 503 retry refusal from inside the database error's except (and re-locks
+    the lobby after its rollback, still bounded); the window reads that as a
+    bound, not as a refusal, so the journaled report is not superseded."""
+    async def body(env):
+        lob = await _journaled_r(env)
+        room = (await env.lobby_row(lob.lid))["photon_room_id"] + "_r1"
+        await _bound_then_next(env, lob, "T3.8",
+                               "INSERT INTO ffa_matches (id, photon_room_id, player_count,"
+                               " game_number) VALUES (gen_random_uuid(), $1, 4, 1)", room)
+    run_env(monkeypatch, body)
+
+
+def test_t3_9_a_held_reporter_row_bounds_settle_phase_two(monkeypatch):
+    """T3.9: phase 2 under the bound, raw: a reported player's players row
+    another transaction holds FOR UPDATE makes the body's sorted players pass
+    wait; the bound ends it and the window prints a bound line, not a failure;
+    nothing settled or superseded; the next tick settles it."""
+    async def body(env):
+        lob = await _journaled_r(env)
+        await _bound_then_next(env, lob, "T3.9",
+                               "SELECT 1 FROM players WHERE id = $1 FOR UPDATE", lob.pids[0])
+    run_env(monkeypatch, body)

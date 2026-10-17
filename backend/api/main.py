@@ -4485,7 +4485,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:48987 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:49001 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4551,7 +4551,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:48799 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:48813 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4621,7 +4621,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:48702 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:48716 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -54253,8 +54253,10 @@ class _AsmCtx:
 
 async def _asm_ctx_slot(db, lobby_id, *, route, trigger, t0=None):
     """A context under the lobby row lock: _ffa_lock_lobby_slot takes it (FOR
-    NO KEY UPDATE, a no-op beside the leave route's and the poll's FOR UPDATE)
-    and derives k = games_played + 1 from the locked row, the only number a
+    NO KEY UPDATE; inside a transaction that already holds the row FOR UPDATE,
+    as the leave route and the poll do, it waits on nothing, while across
+    transactions it conflicts with another's FOR UPDATE or FOR NO KEY UPDATE,
+    so the two serialize) and derives k = games_played + 1 from the locked row, the only number a
     gone record may name (I2's gone rule). Then the clock, the row, the seats."""
     _row, k = await _ffa_lock_lobby_slot(db, lobby_id)
     ctx = _AsmCtx(db, lobby_id, route=route, trigger=trigger, t0=t0)
@@ -56000,7 +56002,7 @@ async def _asm_leave_plan(db, lobby_id, player_id, cause, label, *, pre_room=Fal
                 # leave route then appends the departure itself.
                 if me["hold_until"] <= ctx.now:
                     await _rdm_end_hold(ctx, me, "lapsed", depart=False)
-                elif _persistable_exit_cause(cause or "") != "in_room_timeout":
+                elif not _rdm_trailing_drop(cause):
                     await _rdm_end_hold(ctx, me, "declined", depart=False)
             # N8's corroboration is the gone record, whichever transaction
             # wrote it: this leave's own witness test, or the witnesses'
@@ -56348,7 +56350,7 @@ async def _asm_report_entered(db, lobby, lobby_uuid, g) -> None:
 
 
 # ===========================================================================
-# FFA mid-game readmission (design V3, ai-collab/rejoin/RJ-READMIT-DESIGN-V3.md):
+# FFA mid-game readmission (design V3):
 # the hold on the seat row (P4.1), discovery, claim, bind, decline and entered
 # (P4.2, P4.3 step 11), the chain version 2 epoch (P4.8), the report journal
 # and its settlement (P3), and the attempt rows (P5).
@@ -56366,6 +56368,31 @@ RDM_HOLD_S = 120                  # P4.1 (Q3): the hold, from its anchor
 RDM_MIN_WINDOW_S = 15             # P4.1: below this much hold left, no hold is written
 RDM_REPORT_WINDOW_S = 30          # P3: the journal window from a game's first receipt
 _RDM_STEPS = frozenset({"claim", "bind", "decline", "entered"})
+
+# Readmission asks the leave cause two questions of its own, beside in-room?
+# and involuntary? (the vocabulary at _IN_ROOM_EXIT_CAUSES), each through a
+# named helper and never a literal:
+#   _rdm_chosen_exit       the voluntary in-room tag: the gone seat gets no
+#                          hold (V3 P4.1, Q1: a menu quit gets no hold);
+#   _rdm_trailing_drop     the drop's own trailing timeout leave: a leave
+#                          reaching a held seat keeps the hold; every other
+#                          leave there, an absent cause included, ends it as
+#                          declined (V3 P4.1/P4.2).
+# The cause is client-attested: the first answer only denies a hold, and the
+# second only spares one a seat already holds, it never writes one.
+# _is_involuntary_exit_cause keeps its contract (it grants nothing) by not
+# being asked here.
+_RDM_CHOSEN_EXIT_CAUSES = _IN_ROOM_EXIT_CAUSES - _INVOLUNTARY_EXIT_CAUSES
+
+
+def _rdm_chosen_exit(cause: str | None) -> bool:
+    """True when the leave cause is the voluntary in-room tag."""
+    return _persistable_exit_cause(cause or "") in _RDM_CHOSEN_EXIT_CAUSES
+
+
+def _rdm_trailing_drop(cause: str | None) -> bool:
+    """True when the leave cause is the drop's own trailing timeout leave."""
+    return _persistable_exit_cause(cause or "") in _INVOLUNTARY_EXIT_CAUSES
 
 
 def _rdm_line(lobby_id, msg: str) -> str:
@@ -56453,7 +56480,7 @@ async def _asm_hold_after_gone(ctx, subject) -> bool:
     if seat is None or seat["released_at"] is not None or seat["gone_game"] is None \
             or seat["hold_until"] is not None:
         return False
-    if (seat["left_cause"] or "") == "in_room_exit":
+    if _rdm_chosen_exit(seat["left_cause"]):
         ctx.prints.append(_rdm_line(ctx.lid, f"no_hold slot={seat['slot']} why=in_room_exit"))
         return False
     # A bound readmission that never reached `entered` and now drops again
@@ -56563,35 +56590,126 @@ _RDM_LAPSE_DISCOVERY_SQL = (
     " LIMIT 50")
 
 
+# The janitor bound (the round 1 census ruling, 2026-10-17). This engine
+# configures no lock_timeout and no statement_timeout, and the readmission arms
+# run inside queue_cleanup_loop ahead of the tick's later arms, so a wait they
+# take with no bound would hold the rest of the tick and say nothing (#276 /
+# #430). Every transaction the two readmission janitor sessions begin
+# therefore opens with these two settings, local to that transaction: a row
+# wait (the lobby, its queue rows, a journal window, a reporter's players or
+# glicko row inside the report body) ends within RDM_JANITOR_LOCK_TIMEOUT_MS as
+# 55P03, a statement within RDM_JANITOR_STATEMENT_TIMEOUT_MS as 57014, and
+# either one rolls back only that lobby or window, prints one bound line and
+# leaves it to the next tick. Armed by an after_begin listener on the session,
+# not by one call per transaction: the report body rolls back and re-locks
+# the lobby on its insert-failure branches (_ffa_progress_relocked), and a
+# transaction-local setting does not outlive a rollback. The COMMIT itself is
+# not bounded (as R39 says of the routes), and a pool checkout waits the main
+# pool's own pool_timeout.
+RDM_JANITOR_LOCK_TIMEOUT_MS = 3000
+RDM_JANITOR_STATEMENT_TIMEOUT_MS = 5000
+_RDM_JANITOR_BOUND_SQL = (
+    "SELECT set_config('lock_timeout', CAST(:lv AS text), true),"
+    "       set_config('statement_timeout', CAST(:sv AS text), true)")
+
+
+def _rdm_janitor_bound(db) -> None:
+    """Arm the janitor bound on every transaction `db` begins from now on."""
+    from sqlalchemy import event as _sa_event
+
+    def _arm(_session, _transaction, connection):
+        connection.execute(text(_RDM_JANITOR_BOUND_SQL),
+                           {"lv": "%dms" % RDM_JANITOR_LOCK_TIMEOUT_MS,
+                            "sv": "%dms" % RDM_JANITOR_STATEMENT_TIMEOUT_MS})
+    _sa_event.listen(db.sync_session, "after_begin", _arm)
+
+
+def _rdm_bound_stage(exc):
+    """'lock' or 'stmt' when `exc`, or anything it was raised from or while
+    handling, carries 55P03, 57014 or 25P02 (_ASM_SQLSTATE_STAGE); else None.
+    The context is walked as well as the cause: the report body raises its
+    503 refusal inside the database error's except, so the code sits on the
+    refusal's __context__."""
+    seen = set()
+    todo = [exc]
+    while todo:
+        e = todo.pop()
+        if e is None or id(e) in seen:
+            continue
+        seen.add(id(e))
+        for attr in ("sqlstate", "pgcode"):
+            v = getattr(e, attr, None)
+            if isinstance(v, str) and v in _ASM_SQLSTATE_STAGE:
+                return _ASM_SQLSTATE_STAGE[v]
+        todo.extend((getattr(e, "orig", None), e.__cause__, e.__context__))
+    return None
+
+
+# The lapse's entry lock, janitor-only: a lobby row another transaction holds
+# is declined (SKIP LOCKED), not waited for; the existence read that follows a
+# decline tells busy from gone and takes no lock.
+_RDM_LAPSE_LOBBY_SKIP_SQL = (
+    "SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE SKIP LOCKED")
+_RDM_LAPSE_LOBBY_EXISTS_SQL = "SELECT 1 FROM ffa_lobbies WHERE id = :lid"
+
+
+async def _rdm_lapse_lobby(db, lid):
+    """One lobby's lapse in one transaction. Returns (outcome, ended), the
+    outcome one of: 'done' (committed, `ended` holds ended), 'closed' (not
+    active under the lock), 'busy' (the entry lock declined: another
+    transaction holds the lobby row), 'gone' (no lobby row), 'bound' (a lock or
+    statement timeout of the janitor bound) or 'failed'. busy, gone, bound and
+    failed print one line each and leave every hold as it was, for the next
+    tick to re-read."""
+    try:
+        took = (await db.execute(text(_RDM_LAPSE_LOBBY_SKIP_SQL), {"lid": lid})).scalar()
+        if took is None:
+            there = (await db.execute(text(_RDM_LAPSE_LOBBY_EXISTS_SQL),
+                                      {"lid": lid})).scalar()
+            await db.rollback()
+            outcome = "busy" if there is not None else "gone"
+            print(f"[FFA-RDM] lapse lobby {_asm_id8(lid)} {outcome}; next tick")
+            return outcome, 0
+        ctx = await _asm_ctx_slot(db, lid, route="readmit_lapse", trigger="lapse")
+        qids = (await db.execute(text("SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
+                                 {"lid": lid})).scalars().all()
+        await _ffa_lock_queue_rows(db, qids)
+        await ctx.reload()
+        if ctx.lobby is None or ctx.lobby["status"] != "active":
+            await db.rollback()
+            return "closed", 0
+        ended = 0
+        for s in ctx.seats:
+            if s.get("hold_until") is not None and s["hold_until"] <= ctx.now:
+                if await _rdm_end_hold(ctx, s, "lapsed", depart=True):
+                    ended += 1
+        await db.commit()
+        ctx.emit()
+        return "done", ended
+    except Exception as ex:
+        await _asm_rollback(db)
+        stage = _rdm_bound_stage(ex)
+        if stage is not None:
+            print(f"[FFA-RDM] lapse lobby {_asm_id8(lid)} bound stage={stage}; next tick")
+            return "bound", 0
+        print(f"[FFA-RDM] lapse failed for lobby {_asm_id8(lid)}: {type(ex).__name__}")
+        return "failed", 0
+
+
 async def _rdm_lapse_sweep(db) -> int:
     """P4.1 the lapse (RJ2-M4): candidates found by a plain SELECT holding no
-    lock; then per lobby one transaction in _asm_lock order (the lobby row,
-    then its queue rows in UUID order), the expiry re-checked against that
-    transaction's clock, and one commit for the clear, lapsed_at and the
-    postponed departure. Returns the number of holds ended."""
+    lock; then per lobby one transaction (_rdm_lapse_lobby) in _asm_lock
+    order (the lobby row, declined when held, then its queue rows in UUID
+    order), the expiry re-checked against that transaction's clock, and one
+    commit for the clear, lapsed_at and the postponed departure. Returns the
+    number of holds ended."""
     now, _m = await _asm_clock(db)
     lids = (await db.execute(text(_RDM_LAPSE_DISCOVERY_SQL), {"now": now})).scalars().all()
     await db.rollback()
     ended = 0
     for lid in lids:
-        try:
-            ctx = await _asm_ctx_slot(db, lid, route="readmit_lapse", trigger="lapse")
-            qids = (await db.execute(text("SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
-                                     {"lid": lid})).scalars().all()
-            await _ffa_lock_queue_rows(db, qids)
-            await ctx.reload()
-            if ctx.lobby is None or ctx.lobby["status"] != "active":
-                await db.rollback()
-                continue
-            for s in ctx.seats:
-                if s.get("hold_until") is not None and s["hold_until"] <= ctx.now:
-                    if await _rdm_end_hold(ctx, s, "lapsed", depart=True):
-                        ended += 1
-            await db.commit()
-            ctx.emit()
-        except Exception as ex:
-            await _asm_rollback(db)
-            print(f"[FFA-RDM] lapse failed for lobby {_asm_id8(lid)}: {type(ex).__name__}")
+        _outcome, n = await _rdm_lapse_lobby(db, lid)
+        ended += n
     return ended
 
 
@@ -57344,10 +57462,19 @@ async def _ffa_settle_window(db, lid, g) -> bool:
         await _asm_rollback(db)
         return False
     except HTTPException as ex:
+        await _asm_rollback(db)
+        stage = _rdm_bound_stage(ex)
+        if stage is not None:
+            # The body turned a lock or statement timeout of the janitor bound
+            # into its 503 retry answer (the insert branches raise their
+            # refusal inside the database error's except): nothing was
+            # refused, so nothing is superseded; the next tick settles it.
+            print(f"[FFA-REPORT] journal window lobby {_asm_id8(lid)} game {g} "
+                  f"bound stage={stage}; next tick")
+            return False
         # The chosen report was refused at settlement (its refusal record is
         # the body's own): it is kept, marked superseded, and the next pass
         # settles from the rest of the journal.
-        await _asm_rollback(db)
         print(f"[FFA-REPORT] journal window lobby {_asm_id8(lid)} game {g} not settled: "
               f"{ex.status_code}")
         try:
@@ -57362,6 +57489,11 @@ async def _ffa_settle_window(db, lid, g) -> bool:
         return False
     except Exception as ex:
         await _asm_rollback(db)
+        stage = _rdm_bound_stage(ex)
+        if stage is not None:
+            print(f"[FFA-REPORT] journal window lobby {_asm_id8(lid)} game {g} "
+                  f"bound stage={stage}; next tick")
+            return False
         print(f"[FFA-REPORT] journal window lobby {_asm_id8(lid)} game {g} failed: "
               f"{type(ex).__name__}")
         return False
@@ -57369,10 +57501,13 @@ async def _ffa_settle_window(db, lid, g) -> bool:
 
 async def _ffa_readmit_janitor(session_factory) -> None:
     """The janitor's readmission arms: the hold lapse (P4.1) and the expired
-    journal windows (P3), each in sessions of its own."""
+    journal windows (P3), each in sessions of its own, each session under the
+    janitor bound (_rdm_janitor_bound) before its first statement."""
     async with session_factory() as db:
+        _rdm_janitor_bound(db)
         await _rdm_lapse_sweep(db)
     async with session_factory() as db:
+        _rdm_janitor_bound(db)
         await _ffa_settle_due_windows(db)
 
 

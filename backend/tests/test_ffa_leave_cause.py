@@ -199,6 +199,23 @@ def test_no_in_room_literal_comparison_survives_anywhere():
         f"main.py {hits} — every such site must ask _is_in_room_exit_cause")
 
 
+def test_the_readmission_cause_helpers_answer_what_the_literals_answered():
+    """The two readmission sites that compared against a literal now ask
+    _rdm_chosen_exit (the gone seat gets no hold) and _rdm_trailing_drop (a
+    held seat's leave keeps the hold). Over every member of the in-room set,
+    one non-member and the absent cause, they answer exactly what the literals
+    answered: no hold iff the cause is in_room_exit; the hold ends declined iff
+    the cause is not in_room_timeout. The two sets are pinned whole, because a
+    third member would change that truth table and has to be looked at first."""
+    assert main._IN_ROOM_EXIT_CAUSES == frozenset({"in_room_exit", "in_room_timeout"})
+    assert main._INVOLUNTARY_EXIT_CAUSES == frozenset({"in_room_timeout"})
+    causes = sorted(main._IN_ROOM_EXIT_CAUSES) + ["not_a_cause", "", None]
+    for cause in causes:
+        assert main._rdm_chosen_exit(cause) == ((cause or "") == "in_room_exit"), cause
+        assert (not main._rdm_trailing_drop(cause)) == \
+            (main._persistable_exit_cause(cause or "") != "in_room_timeout"), cause
+
+
 @pytest.mark.parametrize(
     "handler, flag, expected_loads",
     [("ffa_queue_leave", "_in_room_exit", 3),
