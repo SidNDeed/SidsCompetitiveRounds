@@ -56647,9 +56647,11 @@ def _rdm_bound_stage(exc):
 
 # The lapse's entry lock, janitor-only: a lobby row another transaction holds
 # is declined (SKIP LOCKED), not waited for; the existence read that follows a
-# decline tells busy from gone and takes no lock.
+# decline tells busy from gone and takes no lock. Its text occurs nowhere
+# else: it selects id, not 1, because the account deletion's lobby lock
+# (SELECT 1 ... FOR NO KEY UPDATE) is pinned as the one place that text occurs.
 _RDM_LAPSE_LOBBY_SKIP_SQL = (
-    "SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE SKIP LOCKED")
+    "SELECT id FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE SKIP LOCKED")
 _RDM_LAPSE_LOBBY_EXISTS_SQL = "SELECT 1 FROM ffa_lobbies WHERE id = :lid"
 
 
