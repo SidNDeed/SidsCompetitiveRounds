@@ -1337,19 +1337,43 @@ class Frame:
             return [(node.args[0].value, value, meth == "setdefault")]
         return None
 
+    def setdefault_result(self, recv, node, argvals):
+        """The existing slot, inserted default, or conservative dynamic element."""
+        default = argvals[1] if len(argvals) > 1 else V({C})
+        if node.args and isinstance(node.args[0], ast.Constant) and \
+                isinstance(node.args[0].value, str):
+            key = node.args[0].value
+            selected = []
+            for arm in _dict_arms(recv):
+                ref = arm.alias[1]
+                if ref.keys is None:
+                    value = vjoin(ref.element(), default)
+                else:
+                    value = ref.read(key)
+                    if value is None:
+                        value = default
+                selected.append(add_im(value, arm.im))
+            return vjoin(*selected)
+        key_value = argvals[0] if argvals else V({C})
+        value = vjoin(element(recv), default)
+        return V(value.ex | (key_value.ex - {C}), value.im | key_value.im,
+                 value.funcs, value.elems, value.item, value.alias)
+
     def mutate(self, meth, recv, recv_node, node, argvals, kwvals):
         v = vjoin(*(list(argvals) + list(kwvals.values()))) if (argvals or kwvals) else V({C})
         v = add_im(v, self.order_ctx)
         slots = self.literal_mutation_slots(meth, node, argvals, kwvals)
         dicts = _dict_arms(recv)
         if dicts:
+            result = self.setdefault_result(recv, node, argvals) \
+                if meth == "setdefault" else V({C})
             if slots is not None:
                 for key, slot, only_if_missing in slots:
                     _dict_slot_update(
                         recv, key, add_im(slot, self.ctx | self.order_ctx), only_if_missing)
             else:
                 _dict_dynamic_update(recv, add_im(v, self.ctx))
-            return V({C})
+            return result
         tgt = recv_node
         if isinstance(tgt, ast.Name):
             name = tgt.id
@@ -2107,6 +2131,56 @@ def test_independent_equal_dictionary_literals_keep_distinct_identities():
         '        if untouched["rank"] > 0.5:\n'
         '            word = "HOT"\n'
         '        items.append(AerItem("cell", (), (), word))')
+    assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
+
+
+_SETDEFAULT_RESULTS = [
+    ("present slot",
+     '        box = {"rank": cell[3]}\n'
+     '        result = box.setdefault("rank", 0.0)\n'),
+    ("inserted default",
+     '        box = {}\n'
+     '        result = box.setdefault("rank", cell[3])\n'),
+    ("dynamic key",
+     '        box = {"rank": cell[3]}\n'
+     '        key = "rank"\n'
+     '        result = box.setdefault(key, 0.0)\n'),
+]
+
+
+@pytest.mark.parametrize("label,setup", _SETDEFAULT_RESULTS,
+                         ids=[row[0] for row in _SETDEFAULT_RESULTS])
+def test_setdefault_returns_the_selected_shared_dictionary_value(label, setup):
+    bot = _dict_fixture(
+        setup
+        + '        word = "COLD"\n'
+          '        if result > 0.5:\n'
+          '            word = "HOT"\n'
+          '        items.append(AerItem("cell", (), (), word))')
+    findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (label, _fmt(findings))
+
+
+def test_setdefault_present_slot_does_not_return_or_insert_its_default():
+    bot = _dict_fixture(
+        '        box = {"rank": 0.0}\n'
+        '        result = box.setdefault("rank", cell[3])\n'
+        '        word = "COLD"\n'
+        '        if result > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))')
+    assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("call", [
+    'box.update(rank=cell[3])',
+    'box.__setitem__("rank", cell[3])',
+], ids=["update", "dunder setitem"])
+def test_non_setdefault_mutators_keep_their_constant_return(call):
+    bot = _dict_fixture(
+        '        box = {"rank": 0.0}\n'
+        '        result = %s\n' % call
+        + '        items.append(AerItem("cell", (), (), result))')
     assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
 
 
