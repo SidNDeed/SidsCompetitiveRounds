@@ -632,7 +632,7 @@ def flag_list(flag_rows, steam_to_subject, current):
     """Every row for the game, current or not, unmerged (design 2.4)."""
     current_ids = {c["id"] for c in current.values()}
     out = []
-    for r in sorted(flag_rows, key=lambda r: (r["created_at"], str(r["id"]))):
+    for r in flag_rows:
         out.append({"reason": _aer_enc(r["flag_reason"]),     # a display slot (2.12)
                     "subject": steam_to_subject.get(_flag_subject_steam(_details(r))),
                     "reviewed": r["reviewed_at"] is not None,
@@ -1571,7 +1571,8 @@ SELECT p.id, p.steam_id, p.display_name FROM players p
 FLAGS_SQL = """
 SELECT f.id, f.match_id, f.flag_reason, f.flag_details, f.reviewed_at, f.created_at
   FROM flagged_matches f
- WHERE f.match_id = ANY(CAST(:ids AS uuid[]))"""
+ WHERE f.match_id = ANY(CAST(:ids AS uuid[]))
+ ORDER BY f.id"""
 
 GAME_ROWS_SQL = ("SELECT %s, m.p1_rounds_won, m.p2_rounds_won FROM matches m "
                  "WHERE m.id = ANY(CAST(:ids AS uuid[]))" % _SELECT_LIST)

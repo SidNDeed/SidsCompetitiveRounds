@@ -346,6 +346,51 @@ def test_the_1a_decoder_accepts_a_served_page_and_refuses_every_break(bot):
         dec(game_body(), "1b")
 
 
+def test_flag_identity_order_reaches_the_page_plan_and_fallback(bot, monkeypatch):
+    match_id = "0" * 32
+    later = ae._dt.datetime(2026, 10, 17, tzinfo=ae._dt.timezone.utc)
+    earlier = ae._dt.datetime(2026, 10, 16, tzinfo=ae._dt.timezone.utc)
+    rows = [
+        {"id": "0" * 31 + "1", "match_id": match_id, "flag_reason": "id_first",
+         "flag_details": {}, "reviewed_at": None, "created_at": later},
+        {"id": "0" * 31 + "2", "match_id": match_id, "flag_reason": "id_second",
+         "flag_details": {}, "reviewed_at": None, "created_at": earlier},
+    ]
+
+    async def flag_rows(_db, _ids):
+        return {match_id: rows}
+
+    async def baseline(*_args, **_kwargs):
+        return {}
+
+    monkeypatch.setattr(ae, "_flag_rows", flag_rows)
+    monkeypatch.setattr(ae, "read_baseline", baseline)
+    monkeypatch.setattr(ae, "game_seat_cells", lambda *_args, **_kwargs: [])
+    game = {"id": match_id, "player1_id": "p1", "player2_id": "p2",
+            "ended_at": later, "is_ranked": True, "invalidated_at": None,
+            "series_id": None, "p1_rounds_won": 5, "p2_rounds_won": 3}
+    subjects = {"p1": {"steam_id": "1001", "i": 0},
+                "p2": {"steam_id": "1002", "i": 1}}
+    api_games = run(ae._game_page(
+        types.SimpleNamespace(db=object()), [game], [], subjects,
+        types.SimpleNamespace(values={})))
+    expected = ["id_first", "id_second"]
+    assert ae.FLAGS_SQL.strip().endswith("ORDER BY f.id")
+    assert ae.FLAGS_SQL.upper().count("ORDER BY") == 1
+    assert [f["reason"] for f in api_games[0]["flags"]] == expected
+
+    body = game_body()
+    body["games"] = api_games
+    page = bot["_aer_decode_response"](body, "1a")
+    assert [f["reason"] for f in page.games[0]["flags"]] == expected
+    plan = bot["_aer_plan"](page)
+    flag_lines = [item.text for item in plan if item.kind == "flag"]
+    assert [line.split()[1] for line in flag_lines] == expected
+    content, files = bot["_aer_fallback"]("header", plan, "order", 1)
+    fallback = files[0].data.decode("utf-8") if files else content
+    assert fallback.index("FLAG id_first") < fallback.index("FLAG id_second")
+
+
 @pytest.mark.parametrize("label,maker,mutate", _phase_leaf_breaks(),
                          ids=lambda value: value if isinstance(value, str) else None)
 def test_the_1a_decoder_refuses_a_phase_leaf_of_the_wrong_type(
