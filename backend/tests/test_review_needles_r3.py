@@ -1120,8 +1120,8 @@ _PURE_METHODS = frozenset({
     "rjust", "center", "zfill", "expandtabs", "translate", "removeprefix", "removesuffix", "hex",
     "match", "fullmatch", "search", "findall", "finditer", "is_integer", "hexdigest", "digest"})
 _PURE_LIBRARY_RECEIVERS = {
-    # os._Environ.get reads its string storage; protocol_rows still judges every argument.
-    "os.environ": frozenset({"get"}),
+    # os._Environ get and keys read its string storage; protocol_rows still judges every argument.
+    "os.environ": frozenset({"get", "keys"}),
 }
 _MUTATOR_NAMES = _MUTATORS | frozenset({
     "append", "extend", "insert", "remove", "add", "discard", "sort", "reverse", "appendleft", "extendleft",
@@ -1214,6 +1214,12 @@ _BLOCKING_IO_PROTOCOL_ARGUMENTS = {
     (None, None, None, None): (False, False, True, False),
     (None, None, None, None, None): (False, False, True, False, False),
 }
+_OS_ERROR_PROTOCOL_ARGUMENTS = {
+    (None, None): (True, False),
+    (None, None, None): (True, False, True),
+    (None, None, None, None): (True, False, True, False),
+    (None, None, None, None, None): (True, False, True, False, False),
+}
 _PROTOCOL_ARGUMENTS = {
     "builtins.BaseExceptionGroup": {(None, None): (False, True)},
     "builtins.ExceptionGroup": {(None, None): (False, True)},
@@ -1231,7 +1237,7 @@ _PROTOCOL_ARGUMENTS = {
         (None, None, None, None): (False, True, True, False),
     },
 }
-_PROTOCOL_ARGUMENTS.update({name: _BLOCKING_IO_PROTOCOL_ARGUMENTS
+_PROTOCOL_ARGUMENTS.update({name: _OS_ERROR_PROTOCOL_ARGUMENTS
                             for name in ("builtins.OSError", "builtins.EnvironmentError",
                                          "builtins.IOError", "builtins.WindowsError")
                             if name in _ARG_SAFE_EXCEPTIONS})
@@ -1243,6 +1249,19 @@ _RECEIVER_ELEMENT_BLIND = frozenset({
     "keys", "values", "items", "copy", "__len__", "__iter__", "append", "extend", "insert", "reverse", "popitem",
 })
 _POP_ELEMENT_BLIND = frozenset({"list", "set"})
+_CONTAINER_NONE_RESULTS = {
+    "list": frozenset({"append", "extend", "insert", "reverse", "sort", "clear"}),
+    "dict": frozenset({"update", "clear"}),
+    "set": frozenset({"add", "discard", "remove", "update", "difference_update",
+                      "intersection_update", "symmetric_difference_update", "clear"}),
+}
+_EXACT_BUILTIN_DISPOSAL_METHODS = frozenset({"write"})
+_OPEN_FILE_SCALAR_RESULTS = frozenset({"read"})
+_BENIGN_EXEC_SCALAR_RESULTS = frozenset({"timeit.timeit"})
+_BINARY_SCALAR_RESULTS = frozenset({"operator.add"})
+_IMPLICIT_SAFE_ATTRIBUTES = frozenset({
+    "tempfile.TemporaryDirectory", "contextlib.suppress", "operator.add",
+})
 _GUARD_TYPES = frozenset({"builtins.str", "builtins.bytes"})       # an exact scalar a type guard can prove
 _RESULT_TYPED = frozenset({"os.walk"})                 # a library call whose result is a builtin generator
 _PROTOCOL_SAFE_VALUES = frozenset({"datetime.timezone.utc"})  # exact library singleton, no caller protocol
@@ -1730,16 +1749,14 @@ class _Flow:
 
     def prepared_unknown(self, cls):
         """Whether the selected metaclass may prepopulate the class mapping."""
-        for keyword in cls.keywords:
-            if keyword.arg is None:
-                return True
-            if keyword.arg == "metaclass":
-                return not (isinstance(keyword.value, ast.Name) and keyword.value.id == "type"
-                            and self.builtin_certain("type", keyword.value))
-        return any(not (isinstance(base, ast.Name) and self.builtin_certain(base.id, base)
-                       and hasattr(builtins, base.id)
-                       and isinstance(getattr(builtins, base.id), type)
-                       and type(getattr(builtins, base.id)) is type) for base in cls.bases)
+        keyword_unknown = any(keyword.arg is None or keyword.arg == "metaclass" and not (
+            isinstance(keyword.value, ast.Name) and keyword.value.id == "type"
+            and self.builtin_certain("type", keyword.value)) for keyword in cls.keywords)
+        base_unknown = any(not (isinstance(base, ast.Name) and self.builtin_certain(base.id, base)
+                               and hasattr(builtins, base.id)
+                               and isinstance(getattr(builtins, base.id), type)
+                               and type(getattr(builtins, base.id)) is type) for base in cls.bases)
+        return keyword_unknown or base_unknown
 
     def prepared_at(self, node):
         """Whether this direct class-body read uses a custom class mapping."""
@@ -1761,7 +1778,41 @@ class _Flow:
                 "Assign", "AnnAssign", "AugAssign", "Import", "ImportFrom",
                 "FunctionDef", "AsyncFunctionDef", "ClassDef"):
             return True
+        if d.src == "NamedExpr" and self.namedexpr_runs(binder, statement):
+            return True
         return None
+
+    def namedexpr_runs(self, binder, boundary, truth_required=False) -> bool:
+        """Whether reaching boundary's successor (or its true body) proves
+        that binder's assignment expression ran."""
+        assignment = self.parents.get(id(binder))
+        if not isinstance(assignment, ast.NamedExpr):
+            return False
+
+        def holds(node):
+            return node is assignment or any(child is assignment for child in ast.walk(node))
+
+        def required(node, must_be_true):
+            if node is assignment:
+                return True
+            if isinstance(node, (ast.Lambda, ast.comprehension, ast.ListComp,
+                    ast.SetComp, ast.DictComp, ast.GeneratorExp, ast.match_case)):
+                return False
+            if isinstance(node, ast.BoolOp):
+                if must_be_true and isinstance(node.op, ast.And):
+                    return any(holds(value) and required(value, True) for value in node.values)
+                first = next(iter(node.values), None)
+                return first is not None and holds(first) and required(first, False)
+            if isinstance(node, ast.IfExp):
+                return holds(node.test) and required(node.test, False)
+            if isinstance(node, ast.Compare):
+                first_right = next(iter(node.comparators), None)
+                guaranteed = (node.left, first_right)
+                return any(value is not None and holds(value) and required(value, False)
+                           for value in guaranteed)
+            return any(holds(child) and required(child, False) for child in ast.iter_child_nodes(node))
+
+        return holds(boundary) and required(boundary, truth_required)
 
     def class_bound_before(self, sid, name, node):
         """True, False or None when the class name is bound, unbound or may
@@ -2270,8 +2321,8 @@ class _Reach:
     def resolve(self, node, seen=frozenset()) -> set:
         """Fix pass 13: every value a reference can stand for, through every
         binding the table delivers: a dotted name (an import, a builtin), a
-        ("local", node) for a module def, class or lambda (a class's instance
-        too), or None for anything the resolution cannot follow (a parameter,
+        ("local", node) for a module def, class or lambda, ("instance", node)
+        for a class instance, or None for anything resolution cannot follow (a parameter,
         an except target, a capture, an element of a container it cannot see
         into, the result of a call other than a local callee's return paths,
         or next, min or max over elements it can see)."""
@@ -2440,10 +2491,14 @@ class _Reach:
         for x in self.resolve(f, seen):
             if special and x == "builtins." + f.id:
                 continue
-            if isinstance(x, tuple) and isinstance(x[1], ast.ClassDef):
-                out.add(x)                                           # an instance of a module class
-            elif isinstance(x, tuple) and ("ret", id(x[1])) not in seen:
-                out |= self.returns(x[1], seen | {("ret", id(x[1]))})
+            if isinstance(x, tuple):
+                kind, target = x
+                if kind == "local" and isinstance(target, ast.ClassDef):
+                    out.add(("instance", target))                    # an instance, not its constructor route
+                elif kind == "local" and ("ret", id(target)) not in seen:
+                    out |= self.returns(target, seen | {("ret", id(target))})
+                else:
+                    out.add(None)
             else:
                 out.add(None)
         return out or {None}
@@ -2465,6 +2520,20 @@ class _Reach:
                 out |= self.resolve(x.value, seen) if x.value is not None else {None}
             stack.extend(ast.iter_child_nodes(x))
         return out or {None}
+
+    def open_file_binding(self, binding) -> bool:
+        """A value delivered by entering an exact builtin open call."""
+        expr = binding.expr
+        return binding.mode == "value" and binding.path == ("enter",) \
+            and isinstance(expr, ast.Call) and self.cands(expr.func) == {"builtins.open"}
+
+    def open_file_receiver(self, node, seen=frozenset()) -> bool:
+        """A name whose every visible value is an exact opened file."""
+        if not isinstance(node, ast.Name) or node.id in seen:
+            return False
+        binds = self.flow.binds_at(node.id, node)
+        return bool(binds) and not self.flow.unbound_at(node.id, node) and all(
+            self.open_file_binding(self.recs[(id(binder), node.id)]) for binder in binds)
 
     def builtin_typed(self, node, seen=frozenset()) -> bool:
         """Fix pass 13: a list, tuple, set, dict, generator, string or bytes
@@ -2499,9 +2568,7 @@ class _Reach:
             return bool(binds) and not self.flow.unbound_at(node.id, node) and all(
                 d.mode == "aug" and self.builtin_typed(d.expr, seen | {node.id})
                 or d.mode == "value" and not d.path and self.builtin_typed(d.expr, seen | {node.id})
-                or d.mode == "value" and d.path == ("enter",) and isinstance(d.expr, ast.Call)
-                and isinstance(d.expr.func, ast.Name) and d.expr.func.id == "open"
-                and self.flow.builtin_certain("open", d.expr.func)
+                or self.open_file_binding(d)
                 for d in (self.recs[(id(b), node.id)] for b in binds))   # with open(...) as f: the file itself
         return False
 
@@ -2634,6 +2701,281 @@ class _Reach:
                 and all(isinstance(value, str) for value in resolved):
             return False
         return self.level_at(node) >= _HOLDS or self.import_held(node, seen)
+
+    def implicit_protocol_safe(self, node, operation, owner) -> bool:
+        """Whether a syntax protocol is fixed to code that cannot call an
+        unresolved or imported value. The proof is deliberately narrower for
+        comparison and formatting, whose exact containers can call elements."""
+        if self.builtin_scalar(node):
+            return True
+        if isinstance(owner, ast.Attribute):
+            candidates = self.cands(owner)
+            if candidates and all(name is not None and (
+                    _arg_safe(name) or name in _PURE_LIBRARY_RECEIVERS
+                    or name in _IMPLICIT_SAFE_ATTRIBUTES) for name in candidates):
+                return True
+        method = node.func if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            else owner if isinstance(owner, ast.Attribute) else None
+        exact_method = False
+        if method is not None and method.attr in _PURE_METHODS:
+            routes = self.cands(method.value)
+            exact_method = self.builtin_typed(method.value) or bool(routes) and all(
+                name is not None and method.attr in _PURE_LIBRARY_RECEIVERS.get(name, ()) for name in routes)
+        if exact_method:
+            return True
+        if operation == "result disposal" and isinstance(node, ast.Call):
+            if self.exact_call_disposal_safe(node):
+                return True
+            routes = self.resolve(node.func)
+            if routes and all(isinstance(route, str) and (
+                    route in _NO_PROTOCOL or _arg_safe(route)) for route in routes):
+                return True
+        if operation == "iteration":
+            return self.protocol_container(node)
+        if operation in ("truth test", "attribute read", "unary operator", "result disposal"):
+            return self.builtin_typed(node)
+        if operation == "subscript read":
+            kinds = self.container_kinds(node)
+            return bool(kinds) and kinds <= frozenset({"list", "tuple"})
+        if operation == "binary operator" and isinstance(owner, ast.BinOp) \
+                and isinstance(owner.op, (ast.Add, ast.Mult)):
+            kinds = self.container_kinds(node)
+            return bool(kinds) and kinds <= frozenset({"list", "tuple"})
+        return False
+
+    def literal_mapping_unmutated(self, mapping) -> bool:
+        """Whether a literal-mapping name is only read through exact safe operations."""
+        for use in ast.walk(self.tree):
+            if not (isinstance(use, ast.Name) and isinstance(use.ctx, ast.Load)
+                    and use.id == mapping.id):
+                continue
+            parent = self.parents.get(id(use))
+            if isinstance(parent, ast.Attribute) and parent.value is use:
+                call = self.parents.get(id(parent))
+                if isinstance(call, ast.Call) and call.func is parent and parent.attr in _PURE_METHODS:
+                    continue
+                return False
+            if isinstance(parent, ast.Call):
+                supplied = any(argument is use for argument in parent.args) \
+                    or any(keyword.value is use for keyword in parent.keywords)
+                routes = self.cands(parent.func)
+                if supplied and routes and all(
+                        isinstance(route, str) and _arg_safe(route) for route in routes):
+                    continue
+                return False
+            if isinstance(parent, ast.Compare) and any(
+                    right is use and isinstance(operator, (ast.In, ast.NotIn))
+                    for operator, right in zip(parent.ops, parent.comparators)):
+                continue
+            return False
+        return True
+
+    def literal_dict_values(self, mapping, key, default):
+        """Values selected by a literal key from exact, unmutated dict displays."""
+        if isinstance(mapping, ast.Dict):
+            if any(candidate is None or not isinstance(candidate, ast.Constant)
+                   for candidate in mapping.keys):
+                return None
+            selected = []
+            for candidate, value in zip(mapping.keys, mapping.values):
+                if type(candidate.value) is type(key.value) and candidate.value == key.value:
+                    selected = [value]
+            return selected or ([] if default is None else [default])
+        if not isinstance(mapping, ast.Name) or not self.literal_mapping_unmutated(mapping):
+            return None
+        binds = self.flow.binds_at(mapping.id, mapping)
+        if not binds or self.flow.unbound_at(mapping.id, mapping):
+            return None
+        out = []
+        for binder in binds:
+            record = self.recs[(id(binder), mapping.id)]
+            if record.mode != "value" or record.path or not isinstance(record.expr, ast.Dict):
+                return None
+            values = self.literal_dict_values(record.expr, key, default)
+            if not values:
+                return None
+            out.extend(values)
+        return out
+
+    def dict_get_container_kinds(self, receiver, seen=frozenset()) -> frozenset:
+        """Exact container kinds selected by a name bound to literal-dict get."""
+        if not isinstance(receiver, ast.Name) or receiver.id in seen:
+            return frozenset()
+        binds = self.flow.binds_at(receiver.id, receiver)
+        if not binds or self.flow.unbound_at(receiver.id, receiver):
+            return frozenset()
+        values = []
+        for binder in binds:
+            record = self.recs[(id(binder), receiver.id)]
+            call = record.expr
+            if record.mode != "value" or record.path or not isinstance(call, ast.Call) \
+                    or not isinstance(call.func, ast.Attribute) or call.func.attr != "get":
+                return frozenset()
+            shape = _plain_signature(call.args, call.keywords)
+            if shape == (None,):
+                key, = call.args
+                default = None
+            elif shape == (None, None):
+                key, default = call.args
+            else:
+                return frozenset()
+            if not isinstance(key, ast.Constant):
+                return frozenset()
+            selected = self.literal_dict_values(call.func.value, key, default)
+            if not selected:
+                return frozenset()
+            values.extend(selected)
+        kinds = [self.container_kinds(value, seen | {receiver.id}) for value in values]
+        if not kinds or any(not kind for kind in kinds):
+            return frozenset()
+        combined = frozenset().union(*kinds)
+        return combined if _only(combined) is not None else frozenset()
+
+    def exact_call_disposal_safe(self, call) -> bool:
+        """Whether an exact call result is None, a proven scalar/container,
+        or a written local-method result whose every return is exact."""
+        routes = self.cands(call.func)
+        shape = _plain_signature(call.args, call.keywords)
+        if routes and routes <= _BENIGN_EXEC_SCALAR_RESULTS and self.benign_exec_call(call):
+            return True
+        if routes and routes <= _BINARY_SCALAR_RESULTS and shape == (None, None) \
+                and all(self.builtin_scalar(argument) for argument in call.args):
+            return True
+        if not isinstance(call.func, ast.Attribute):
+            return False
+        receiver, method = call.func.value, call.func.attr
+        size = _only(call.args)
+        if method in _OPEN_FILE_SCALAR_RESULTS and self.open_file_receiver(receiver) \
+                and (shape == () or shape == (None,) and _const_index(size) is not None):
+            return True
+        kinds = self.container_kinds(receiver)
+        if isinstance(receiver, (ast.List, ast.Set, ast.Dict)) \
+                and self.receiver_element_blind(receiver, method):
+            return True
+        if self.builtin_typed(receiver) and method in _EXACT_BUILTIN_DISPOSAL_METHODS:
+            return True
+        result_kinds = kinds or self.dict_get_container_kinds(receiver)
+        if result_kinds and all(method in _CONTAINER_NONE_RESULTS.get(kind, ()) for kind in result_kinds):
+            return True
+        values = self.receiver_initial_elements(receiver)
+        pop_shape = not call.keywords and (
+            not call.args or kinds <= frozenset({"list"}) and self.builtin_scalar(_only(call.args)))
+        if method == "pop" and kinds and kinds <= _POP_ELEMENT_BLIND and pop_shape \
+                and values is not None and all(self.builtin_scalar(value) for value in values):
+            return True
+        routes = self.resolve(receiver)
+        return bool(routes) and all(self.direct_local_method_disposal_safe(route, method) for route in routes)
+
+    def implicit_rows(self, node) -> list:
+        """Rows for the bounded implicit-syntax families, dispatched by the
+        syntax node's exact AST class. Every row uses the unresolved-base kind
+        so the site-identity exemption remains fail-closed."""
+        family = _IMPLICIT_PROTOCOL_DISPATCH.get(type(node))
+        if family is None:
+            return []
+        checks = []
+
+        def unpack_checks(target, value):
+            if not isinstance(target, (ast.Tuple, ast.List)):
+                return []
+            elements = self.elements(value, frozenset())
+            if elements is None:
+                return [("iteration", value)]
+            prefix, suffix, starred = [], [], None
+            before_star = True
+            for nested in target.elts:
+                if isinstance(nested, ast.Starred):
+                    before_star = False
+                    starred = nested
+                elif before_star:
+                    prefix.append(nested)
+                else:
+                    suffix.append(nested)
+            pairs = zip(prefix, elements) if before_star else (
+                list(zip(prefix, elements)) + list(zip(reversed(suffix), reversed(elements))))
+            checks = [check for nested, element in pairs for check in unpack_checks(nested, element)]
+            if starred is not None:
+                middle_end = len(elements) - len(suffix) if suffix else None
+                middle = ast.List(elts=elements[len(prefix):middle_end], ctx=ast.Load())
+                checks += unpack_checks(starred.value, middle)
+            return checks
+
+        if family == "iteration":
+            checks = [("iteration", node.iter)]
+            if isinstance(node.target, (ast.Tuple, ast.List)):
+                elements = self.elements(node.iter, frozenset())
+                checks += [("iteration", node.iter)] if elements is None else [
+                    check for value in elements for check in unpack_checks(node.target, value)]
+        elif family == "comprehension":
+            checks = [("iteration", node.iter)] + [("truth test", value) for value in node.ifs]
+            if isinstance(node.target, (ast.Tuple, ast.List)):
+                elements = self.elements(node.iter, frozenset())
+                checks += [("iteration", node.iter)] if elements is None else [
+                    check for value in elements for check in unpack_checks(node.target, value)]
+        elif family == "yield from":
+            checks = [("iteration", node.value)]
+        elif family == "starred":
+            checks = [("iteration", node.value)] if isinstance(node.ctx, ast.Load) else []
+        elif family == "keyword":
+            checks = [("iteration", node.value)] if node.arg is None else []
+        elif family == "dictionary":
+            checks = [("iteration", value) for key, value in zip(node.keys, node.values) if key is None]
+        elif family == "assignment":
+            checks = [check for target in node.targets for check in unpack_checks(target, node.value)]
+        elif family == "with item":
+            if isinstance(node.optional_vars, (ast.Tuple, ast.List)):
+                entered = self.entered(node.context_expr)
+                if entered is None:
+                    return ["implicit iteration through unresolved base %s" % ast.unparse(node.context_expr)]
+                checks = [check for value in entered
+                          for check in unpack_checks(node.optional_vars, value)]
+        elif family == "comparison":
+            left = node.left
+            for operator, right in zip(node.ops, node.comparators):
+                if not isinstance(operator, (ast.Is, ast.IsNot)):
+                    checks += [("comparison", left), ("comparison", right)]
+                left = right
+        elif family == "truth":
+            checks = [("truth test", node.test)]
+        elif family == "boolean":
+            values = iter(node.values)
+            current = next(values, None)
+            for following in values:
+                checks.append(("truth test", current))
+                current = following
+        elif family == "match guard":
+            checks = [("truth test", node.guard)] if node.guard is not None else []
+        elif family == "formatting":
+            checks = [("formatting", node.value)]
+        elif family == "attribute":
+            parent = self.parents.get(id(node))
+            checks = [("attribute read", node.value)] if isinstance(node.ctx, ast.Load) \
+                and not (isinstance(parent, ast.Call) and parent.func is node) else []
+        elif family == "subscript":
+            def slice_values(value):
+                if isinstance(value, ast.Slice):
+                    return [part for part in (value.lower, value.upper, value.step) if part is not None]
+                if isinstance(value, ast.Tuple):
+                    return [part for element in value.elts for part in slice_values(element)]
+                return [value]
+            checks = [("subscript read", node.value)] + [
+                ("subscript read", value) for value in slice_values(node.slice)] \
+                if isinstance(node.ctx, ast.Load) else []
+        elif family == "unary":
+            operation = "truth test" if isinstance(node.op, ast.Not) else "unary operator"
+            checks = [(operation, node.operand)]
+        elif family == "binary":
+            checks = [("binary operator", node.left), ("binary operator", node.right)]
+        elif family == "disposal":
+            checks = [("result disposal", node.value)] if isinstance(node.value, ast.Call) else []
+        rows = []
+        for operation in dict.fromkeys(label for label, _operand in checks):
+            operand = next((candidate for label, candidate in checks if label == operation
+                            and self.protocol_marked(candidate)
+                            and not self.implicit_protocol_safe(candidate, operation, node)), None)
+            if operand is not None:
+                rows.append("implicit %s through unresolved base %s" % (operation, ast.unparse(operand)))
+        return rows
 
     def receiver_element_blind(self, node, method) -> bool:
         """Whether an exact receiver method executes no code of values the
@@ -2773,6 +3115,232 @@ class _Reach:
         rs = self.resolve(node)
         return bool(rs) and all(isinstance(x, str) and x in self.modules for x in rs)
 
+    def ordered_bindings_before(self, sid, name, node) -> set:
+        """Possible binders immediately before node in a module or function
+        body. None is the module's unbound route to a builtin."""
+        root = self.tree if sid is None else self.flow.snode(sid)
+        binders = self.flow.own.get((sid, name), ())
+        choices = {None} if sid is None else set()
+        current = node
+        while current is not None and not isinstance(current, ast.stmt):
+            current = self.parents.get(id(current))
+        blocks = []
+        while isinstance(current, ast.stmt):
+            owner = self.parents.get(id(current))
+            body = next((value for _field, value in ast.iter_fields(owner)
+                         if isinstance(value, list) and current in value), None)
+            if body is None:
+                break
+            blocks.append((owner, body, current))
+            if owner is root:
+                break
+            current = owner
+            while current is not None and not isinstance(current, (ast.stmt, ast.Module)):
+                current = self.parents.get(id(current))
+        for owner, body, use in reversed(blocks):
+            entries = []
+            if isinstance(owner, (ast.For, ast.AsyncFor)):
+                for binder in binders:
+                    nearest = binder
+                    while nearest is not None and not isinstance(nearest, ast.stmt):
+                        nearest = self.parents.get(id(nearest))
+                    record = self.recs[(id(binder), name)]
+                    if nearest is owner and record.src in ("For", "AsyncFor"):
+                        entries.append(binder)
+            if entries:
+                choices = {next(reversed(entries))}
+            if isinstance(owner, (ast.With, ast.AsyncWith)):
+                for item in owner.items:
+                    entries = []
+                    for binder in binders:
+                        ancestor = binder
+                        while ancestor is not None and ancestor is not item:
+                            ancestor = self.parents.get(id(ancestor))
+                        if ancestor is item:
+                            entries.append(binder)
+                    if entries:
+                        choices = {next(reversed(entries))}
+            if isinstance(owner, ast.match_case):
+                entries = []
+                for binder in binders:
+                    ancestor = binder
+                    while ancestor is not None and ancestor is not owner.pattern:
+                        ancestor = self.parents.get(id(ancestor))
+                    if ancestor is owner.pattern:
+                        entries.append(binder)
+                if entries:
+                    choices = {next(reversed(entries))}
+            if isinstance(owner, ast.ExceptHandler) and owner in binders:
+                choices = {owner}
+            if isinstance(owner, (ast.If, ast.While)):
+                entries = []
+                direct_entries = []
+                for binder in binders:
+                    nearest = binder
+                    while nearest is not None and not isinstance(nearest, ast.stmt):
+                        nearest = self.parents.get(id(nearest))
+                    record = self.recs[(id(binder), name)]
+                    if nearest is owner and record.src == "NamedExpr":
+                        entries.append(binder)
+                        if self.flow.namedexpr_runs(binder, owner.test, truth_required=True):
+                            direct_entries.append(binder)
+                if direct_entries:
+                    choices = {next(reversed(direct_entries))}
+                else:
+                    choices.update(entries)
+            for statement in body:
+                if statement is use:
+                    break
+                here = []
+                for binder in binders:
+                    ancestor = binder
+                    while ancestor is not None and ancestor is not statement:
+                        ancestor = self.parents.get(id(ancestor))
+                    if ancestor is statement:
+                        here.append((binder, self.recs[(id(binder), name)]))
+                pairs = [(binder, record) for binder, record in here
+                         if not (record.src == "AnnAssign" and record.mode == "fresh")]
+                direct = [(binder, self.flow.direct_class_effect(self.tree, name, binder, statement))
+                          for binder, _record in pairs]
+                direct = [(binder, effect) for binder, effect in direct if effect is not None]
+                if direct:
+                    binder, effect = next(reversed(direct))
+                    choices = {binder} if effect else {None}
+                elif pairs:
+                    choices.update(binder for binder, record in pairs
+                                   if record.src not in ("Delete", "ExceptHandler"))
+                    if any(record.src in ("Delete", "ExceptHandler") for _binder, record in pairs):
+                        choices.add(None)
+        return choices
+
+    def point_binding_context(self, node):
+        """The ordered binding choices for a same-activation name, else None."""
+        if not isinstance(node, ast.Name):
+            return None
+        sid = self.flow.lookup(node.id, node)
+        scope = None if sid is None else self.flow.snode(sid)
+        activation = self.flow.encl.get(id(node))
+        ordered = isinstance(scope, _FUNCS) and scope is activation or sid is None and activation is None
+        return (sid, self.ordered_bindings_before(sid, node.id, node)) if ordered else None
+
+    def point_routes(self, node, seen=frozenset()) -> set:
+        """Routes for a base expression at the point where Python reads it."""
+        if isinstance(node, ast.Attribute):
+            return {route + "." + node.attr if isinstance(route, str) else None
+                    for route in self.point_routes(node.value, seen)}
+        if isinstance(node, ast.Subscript):
+            selected = self.indexed(node)
+            if selected is None and isinstance(node.value, (ast.Tuple, ast.List)) \
+                    and not any(isinstance(element, ast.Starred) for element in node.value.elts) \
+                    and isinstance(node.slice, ast.Constant) and type(node.slice.value) is bool:
+                try:
+                    selected = node.value.elts[node.slice.value]
+                except IndexError:
+                    pass
+            if selected is not None:
+                return self.point_routes(selected, seen)
+            origins = self.point_routes(node.value, seen)
+            generic_origins = {route for route in origins
+                               if route in {"builtins." + name for name in _BUILTIN_CONTAINERS}
+                               or self.local_container_class(route, seen)}
+            if generic_origins:
+                return generic_origins | {route for route in origins if route not in generic_origins}
+            context = self.point_binding_context(node.value)
+            if context is None:
+                return self.resolve(node)
+            _sid, choices = context
+            out = set()
+            for binder in choices:
+                if binder is None:
+                    out.add(None)
+                    continue
+                record = self.recs[(id(binder), node.value.id)]
+                values = self.values(record.expr, record.path, frozenset()) if record.mode == "value" else None
+                if values is None:
+                    out.add(None)
+                    continue
+                for value in values:
+                    selected = self.indexed(ast.Subscript(value=value, slice=node.slice, ctx=ast.Load()))
+                    out.update({None} if selected is None else self.point_routes(selected, seen))
+            return out or {None}
+        if isinstance(node, ast.Starred):
+            context = self.point_binding_context(node.value)
+            values = None
+            if context is not None:
+                _context_sid, choices = context
+                values = []
+                for binder in choices:
+                    if binder is None:
+                        continue
+                    record = self.recs[(id(binder), node.value.id)]
+                    bound = self.values(record.expr, record.path, frozenset()) if record.mode == "value" else None
+                    if bound is not None:
+                        values.extend(bound)
+            else:
+                values = [node.value]
+            out = set()
+            for value in values:
+                elements = self.elements(value, seen)
+                if elements is not None:
+                    for element in elements:
+                        out.update(self.point_routes(element, seen))
+            return out or {None}
+        if isinstance(node, ast.NamedExpr):
+            return self.point_routes(node.value, seen)
+        if isinstance(node, ast.IfExp):
+            return self.point_routes(node.body, seen) | self.point_routes(node.orelse, seen)
+        if isinstance(node, ast.BoolOp):
+            return set().union(*(self.point_routes(value, seen) for value in node.values))
+        if not isinstance(node, ast.Name):
+            return self.resolve(node)
+        context = self.point_binding_context(node)
+        if context is None:
+            return self.resolve(node)
+        sid, choices = context
+        key = (sid, node.id, id(node))
+        if key in seen:
+            return {None}
+        out = set()
+        for binder in choices:
+            if binder is None:
+                out.add("builtins." + node.id if sid is None and hasattr(builtins, node.id) else None)
+                continue
+            record = self.recs[(id(binder), node.id)]
+            if record.mode == "import":
+                out.add(record.expr)
+            elif record.mode == "local":
+                out.add(("local", record.expr))
+            elif record.mode == "value":
+                values = self.values(record.expr, record.path, frozenset())
+                if values is None:
+                    out.add(None)
+                else:
+                    for value in values:
+                        out.update(self.point_routes(value, seen | {key}))
+            elif record.mode == "capture" and record.expr is not None:
+                out.update(self.point_routes(record.expr, seen | {key}))
+            else:
+                out.add(None)
+        return out or {None}
+
+    def container_class_base(self, node, builtin_classes, seen) -> bool:
+        """Whether a base can be an exact builtin container or local subclass."""
+        return any(route in builtin_classes or self.local_container_class(route, seen)
+                   for route in self.point_routes(node, seen))
+
+    def local_container_class(self, route, seen=frozenset()) -> bool:
+        """Whether a local class route inherits an exact builtin container,
+        directly or through another local class."""
+        if not isinstance(route, tuple):
+            return False
+        kind, cls = route
+        if kind != "local" or not isinstance(cls, ast.ClassDef) or id(cls) in seen:
+            return False
+        seen = seen | {id(cls)}
+        builtin_classes = {"builtins." + name for name in _BUILTIN_CONTAINERS
+                           if isinstance(getattr(builtins, name, None), type)}
+        return any(self.container_class_base(base, builtin_classes, seen) for base in cls.bases)
+
     def protocol_rows(self, call, f, args,
                       what="call of protocol-running callable %s through unresolved base %s",
                       elements=False) -> list:
@@ -2793,6 +3361,7 @@ class _Reach:
         callback = bool(elements)
         shape = _protocol_shape(call, callback, operation)
         unsafe_receiver = None
+        local_class = any(self.local_container_class(route) for route in self.point_routes(f))
         update_blind = isinstance(f, ast.Attribute) and self.receiver_update_blind(
             call, f.value, f.attr, args, shape)
         if isinstance(f, ast.Attribute) and not self.library(f) and self.builtin_typed(f.value):
@@ -2804,12 +3373,14 @@ class _Reach:
                     unsafe_receiver = f.value
             rs = set()
         else:
-            rs = {x for x in self.resolve(f) if isinstance(x, str)}
-            if not rs and unsafe_receiver is None:
+            routes = self.resolve(f)
+            rs = {x for x in routes if isinstance(x, str)}
+            if not rs and unsafe_receiver is None and not local_class:
                 return []                                            # module code: judged where it is written
             if rs and all(_no_protocol(x, shape) for x in rs):
-                return []
-        risks = [False for _a in args]
+                if not local_class:
+                    return []
+        risks = [local_class for _a in args]
         if not rs:
             risks = [True for _a in args]
         for dotted in rs:
@@ -2824,7 +3395,7 @@ class _Reach:
         for a, risky in zip(args, risks):
             if not risky:
                 continue
-            blind = bool(rs) and not elements and id(a) not in starred and all(
+            blind = not local_class and bool(rs) and not elements and id(a) not in starred and all(
                 x in _ELEMENT_BLIND or x in _FIRST_ELEMENT_BLIND and a is first and not starred for x in rs)
             if not self.protocol_marked(a) or self.builtin_scalar(a) \
                     or blind and self.protocol_container(a) or update_blind:
@@ -2864,6 +3435,28 @@ class _Reach:
                 and self.flow.builtin_certain(decorator.id, decorator)
                 for decorator in method.decorator_list)
             for method in methods)
+
+    def direct_local_method_disposal_safe(self, route, name) -> bool:
+        """Whether every normal result of a written local method is exact."""
+        if not self.direct_local_method(route, name):
+            return False
+        _kind, owner = route
+        methods = [item for item in owner.body if isinstance(item, ast.FunctionDef) and item.name == name]
+        if not methods:
+            return False
+        for method in methods:
+            stack = list(method.body)
+            while stack:
+                item = stack.pop()
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                    continue
+                if isinstance(item, (ast.Yield, ast.YieldFrom, ast.Await)):
+                    return False
+                if isinstance(item, ast.Return) and item.value is not None \
+                        and not self.builtin_scalar(item.value) and not self.builtin_typed(item.value):
+                    return False
+                stack.extend(ast.iter_child_nodes(item))
+        return True
 
     def callee_rows(self, f, marked, what, imp=None) -> list:
         """Fix pass 13: the rows of calling the value f with arguments of
@@ -3651,6 +4244,484 @@ _MEASURED_CLEAN = {"review_needles.py": [
         ('snapshot_rows', 'unproven pure method call hexdigest through unresolved base hashlib.sha256(raw)'),
         ('write_manifest', 'call of protocol-running callable os.path.basename through unresolved base out'),
         ('write_manifest', 'call of protocol-running callable os.path.join through unresolved base pin'),
+        ('<module>', 'implicit attribute read through unresolved base sys'),
+        ('<module>', 'implicit subscript read through unresolved base sys.argv'),
+        ('_Values.add', 'implicit attribute read through unresolved base self'),
+        ('_Values.add', 'implicit attribute read through unresolved base self'),
+        ('_Values.add', 'implicit binary operator through unresolved base where'),
+        ('_Values.add', 'implicit comparison through unresolved base x'),
+        ('_Values.add', 'implicit iteration through unresolved base keys'),
+        ('_Values.add', 'implicit iteration through unresolved base v'),
+        ('_Values.add', 'implicit iteration through unresolved base v'),
+        ('_Values.add', 'implicit result disposal through unresolved base self.add(x, keys, group, where)'),
+        ('_Values.add', 'implicit result disposal through unresolved base self.items.append((keys, v, t, group))'),
+        ('_Values.add', 'implicit result disposal through unresolved base self.lists.append(tuple(near))'),
+        ('_Values.add', 'implicit subscript read through unresolved base t'),
+        ('_Values.add', 'implicit truth test through unresolved base _finite(x)'),
+        ('_Values.add', 'implicit truth test through unresolved base _finite(x) and x not in (0, 1, -1)'),
+        ('_data_refs', 'implicit comparison through unresolved base set(node)'),
+        ('_data_refs', 'implicit iteration through unresolved base node'),
+        ('_data_refs', 'implicit iteration through unresolved base node.values()'),
+        ('_data_refs', 'implicit subscript read through unresolved base node'),
+        ('_data_refs', 'implicit subscript read through unresolved base node'),
+        ('_data_refs', "implicit truth test through unresolved base set(node) == {'data'}"),
+        ('_data_refs', "implicit truth test through unresolved base set(node) == {'data'} and isinstance(node['data'], str)"),
+        ('_derive', 'implicit binary operator through unresolved base (name, e)'),
+        ('_derive', 'implicit comparison through unresolved base name'),
+        ('_derive', 'implicit comparison through unresolved base name'),
+        ('_derive', 'implicit iteration through unresolved base os.listdir(base)'),
+        ('_derive', 'implicit result disposal through unresolved base _revision(path, out)'),
+        ('_derive', "implicit result disposal through unresolved base out['basename'].add(name)"),
+        ('_derive', 'implicit subscript read through unresolved base out'),
+        ('_derive', 'implicit truth test through unresolved base _REV_DIR.fullmatch(name)'),
+        ('_derive', 'implicit truth test through unresolved base _is_dir(path)'),
+        ('_derive', 'implicit truth test through unresolved base _is_file(os.path.join(base, name))'),
+        ('_derive', "implicit truth test through unresolved base _is_file(os.path.join(base, name)) and '.' in name and (len(name) >= BASENAME_MIN) and (name not in PUBLIC_NAMES)"),
+        ('_derive', "implicit truth test through unresolved base ln.startswith('#')"),
+        ('_derive', "implicit truth test through unresolved base ln.startswith('#')"),
+        ('_derive', 'implicit truth test through unresolved base ln.strip()'),
+        ('_derive', 'implicit truth test through unresolved base ln.strip()'),
+        ('_derive', "implicit truth test through unresolved base ln.strip() and (not ln.startswith('#'))"),
+        ('_derive', "implicit truth test through unresolved base ln.strip() and (not ln.startswith('#'))"),
+        ('_dispatch', 'implicit comparison through unresolved base cmd'),
+        ('_dispatch', 'implicit comparison through unresolved base cmd'),
+        ('_dispatch', 'implicit comparison through unresolved base cmd'),
+        ('_dispatch', 'implicit comparison through unresolved base cmd'),
+        ('_dispatch', 'implicit comparison through unresolved base cmd'),
+        ('_dispatch', 'implicit comparison through unresolved base cmd'),
+        ('_dispatch', 'implicit comparison through unresolved base cmd'),
+        ('_dispatch', 'implicit iteration through unresolved base rest'),
+        ('_dispatch', 'implicit iteration through unresolved base scan_range(rest[0], rest[1], rest[2], needles)'),
+        ('_dispatch', "implicit subscript read through unresolved base __doc__.split('Modes:')"),
+        ('_dispatch', "implicit subscript read through unresolved base __doc__.split('Modes:')[1].split('Exit 0')"),
+        ('_dispatch', 'implicit subscript read through unresolved base rest'),
+        ('_dispatch', 'implicit subscript read through unresolved base rest'),
+        ('_dispatch', 'implicit subscript read through unresolved base rest'),
+        ('_dispatch', 'implicit subscript read through unresolved base rest'),
+        ('_dispatch', 'implicit subscript read through unresolved base rest'),
+        ('_dispatch', 'implicit subscript read through unresolved base rest'),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'message'"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'message' and len(rest) == 1"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'packet'"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'packet' and len(rest) == 4"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'packet-verify'"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'packet-verify' and len(rest) == 2"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'range'"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'range' and len(rest) == 3"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'scan-dir'"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'scan-dir' and len(rest) == 1"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'seal'"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'seal' and len(rest) == 6"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'staged'"),
+        ('_dispatch', "implicit truth test through unresolved base cmd == 'staged' and len(rest) == 1"),
+        ('_entries', 'implicit attribute read through unresolved base e'),
+        ('_entries', 'implicit attribute read through unresolved base st'),
+        ('_entries', 'implicit attribute read through unresolved base st'),
+        ('_entries', 'implicit attribute read through unresolved base st'),
+        ('_entries', 'implicit attribute read through unresolved base st'),
+        ('_entries', 'implicit attribute read through unresolved base type(e)'),
+        ('_entries', "implicit binary operator through unresolved base (type(e).__name__, prefix or '.')"),
+        ('_entries', "implicit binary operator through unresolved base getattr(st, 'st_file_attributes', 0)"),
+        ('_entries', "implicit binary operator through unresolved base getattr(st, 'st_file_attributes', 0)"),
+        ('_entries', 'implicit binary operator through unresolved base prefix'),
+        ('_entries', 'implicit binary operator through unresolved base rel'),
+        ('_entries', 'implicit binary operator through unresolved base rel'),
+        ('_entries', 'implicit binary operator through unresolved base rel'),
+        ('_entries', 'implicit binary operator through unresolved base rel'),
+        ('_entries', 'implicit binary operator through unresolved base str(root)'),
+        ('_entries', 'implicit iteration through unresolved base it'),
+        ('_entries', 'implicit iteration through unresolved base todo.pop()'),
+        ('_entries', 'implicit truth test through unresolved base prefix'),
+        ('_entries', "implicit truth test through unresolved base st is None or not stat.S_ISDIR(st.st_mode) or getattr(st, 'st_file_attributes', 0) & _REPARSE_POINT"),
+        ('_entries', 'implicit truth test through unresolved base stat.S_ISDIR(st.st_mode)'),
+        ('_entries', 'implicit truth test through unresolved base stat.S_ISDIR(st.st_mode)'),
+        ('_entries', 'implicit truth test through unresolved base stat.S_ISLNK(st.st_mode)'),
+        ('_entries', "implicit truth test through unresolved base stat.S_ISLNK(st.st_mode) or getattr(st, 'st_file_attributes', 0) & _REPARSE_POINT"),
+        ('_entries', 'implicit truth test through unresolved base stat.S_ISREG(st.st_mode)'),
+        ('_expr', 'implicit comparison through unresolved base k'),
+        ('_expr', 'implicit comparison through unresolved base k'),
+        ('_expr', 'implicit comparison through unresolved base k'),
+        ('_expr', 'implicit comparison through unresolved base k'),
+        ('_expr', 'implicit iteration through unresolved base node.items()'),
+        ('_expr', 'implicit iteration through unresolved base v'),
+        ('_expr', 'implicit result disposal through unresolved base _expr(v, keys, group, vals)'),
+        ('_expr', 'implicit result disposal through unresolved base _expr(x, keys, group, vals)'),
+        ('_expr', "implicit result disposal through unresolved base vals.add(v, keys, group, 'literal')"),
+        ('_expr', "implicit truth test through unresolved base k == 'abs'"),
+        ('_expr', "implicit truth test through unresolved base k == 'm'"),
+        ('_expr', "implicit truth test through unresolved base k == 'v'"),
+        ('_git', "implicit attribute read through unresolved base subprocess.run(['git', '-C', repo, *args], check=True, capture_output=True)"),
+        ('_git', 'implicit iteration through unresolved base args'),
+        ('_git', 'implicit truth test through unresolved base binary'),
+        ('_ident', 'implicit attribute read through unresolved base st'),
+        ('_inside', 'implicit comparison through unresolved base os.path.commonpath([a, b])'),
+        ('_is_dir', 'implicit attribute read through unresolved base st'),
+        ('_is_file', 'implicit attribute read through unresolved base st'),
+        ('_key_pattern', 'implicit binary operator through unresolved base re.escape(words.pop())'),
+        ('_key_pattern', 'implicit binary operator through unresolved base unit'),
+        ('_key_pattern', 'implicit comparison through unresolved base words[-1]'),
+        ('_key_pattern', "implicit iteration through unresolved base re.split('[_\\\\W]+', key)"),
+        ('_key_pattern', 'implicit truth test through unresolved base w'),
+        ('_keys', 'implicit comparison through unresolved base n'),
+        ('_keys', 'implicit iteration through unresolved base names'),
+        ('_manifest_body', 'implicit binary operator through unresolved base (len(rows), total)'),
+        ('_manifest_body', 'implicit binary operator through unresolved base (m, n, r)'),
+        ('_manifest_body', 'implicit binary operator through unresolved base (pin, head)'),
+        ('_manifest_body', 'implicit binary operator through unresolved base (title, attester, stamp)'),
+        ('_manifest_body', 'implicit binary operator through unresolved base note'),
+        ('_manifest_body', 'implicit iteration through unresolved base snap'),
+        ('_manifest_body', 'implicit truth test through unresolved base stamp'),
+        ('_manifest_lines_of', 'implicit binary operator through unresolved base (hashlib.sha256(raw).hexdigest(), rel)'),
+        ('_manifest_lines_of', 'implicit comparison through unresolved base rel'),
+        ('_manifest_lines_of', 'implicit truth test through unresolved base rel != MANIFEST'),
+        ('_measure_keys', 'implicit comparison through unresolved base set(node)'),
+        ('_measure_keys', 'implicit iteration through unresolved base node'),
+        ('_measure_keys', 'implicit iteration through unresolved base node.values()'),
+        ('_measure_keys', 'implicit subscript read through unresolved base node'),
+        ('_measure_keys', 'implicit subscript read through unresolved base node'),
+        ('_measure_keys', "implicit subscript read through unresolved base node['m'].rsplit('.', 1)"),
+        ('_measure_keys', "implicit truth test through unresolved base set(node) == {'m'}"),
+        ('_measure_keys', "implicit truth test through unresolved base set(node) == {'m'} and isinstance(node['m'], str)"),
+        ('_merge', 'implicit binary operator through unresolved base a.get(k, 0)'),
+        ('_merge', 'implicit iteration through unresolved base b.items()'),
+        ('_meta', 'implicit comparison through unresolved base r'),
+        ('_meta', 'implicit comparison through unresolved base r'),
+        ('_meta', 'implicit comparison through unresolved base r'),
+        ('_meta', 'implicit comparison through unresolved base set(r)'),
+        ('_meta', 'implicit iteration through unresolved base s'),
+        ('_meta', 'implicit iteration through unresolved base show'),
+        ('_meta', 'implicit subscript read through unresolved base r'),
+        ('_meta', 'implicit subscript read through unresolved base r'),
+        ('_meta', 'implicit subscript read through unresolved base r'),
+        ('_meta', "implicit truth test through unresolved base set(r) <= RULE_META | {'when', 'sitting'}"),
+        ('_num_tokens', 'implicit binary operator through unresolved base t[2:]'),
+        ('_num_tokens', 'implicit binary operator through unresolved base v'),
+        ('_num_tokens', 'implicit subscript read through unresolved base t'),
+        ('_num_tokens', 'implicit subscript read through unresolved base t'),
+        ('_num_tokens', 'implicit truth test through unresolved base isinstance(v, float) and v.is_integer()'),
+        ('_num_tokens', "implicit truth test through unresolved base t.startswith('-0.')"),
+        ('_num_tokens', "implicit truth test through unresolved base t.startswith('0.')"),
+        ('_pred', 'implicit comparison through unresolved base set(node)'),
+        ('_pred', 'implicit comparison through unresolved base set(node)'),
+        ('_pred', 'implicit comparison through unresolved base set(node)'),
+        ('_pred', 'implicit comparison through unresolved base set(v)'),
+        ('_pred', "implicit iteration through unresolved base _measure_keys(node['args'])"),
+        ('_pred', 'implicit iteration through unresolved base node.items()'),
+        ('_pred', "implicit iteration through unresolved base node['args'].items()"),
+        ('_pred', 'implicit iteration through unresolved base v'),
+        ('_pred', 'implicit result disposal through unresolved base _expr(v, keys, group, vals)'),
+        ('_pred', "implicit result disposal through unresolved base _pred(node['not'], group, vals)"),
+        ('_pred', 'implicit result disposal through unresolved base _pred(x, group, vals)'),
+        ('_pred', "implicit result disposal through unresolved base vals.add(v, keys, group, 'predicate argument')"),
+        ('_pred', 'implicit subscript read through unresolved base node'),
+        ('_pred', 'implicit subscript read through unresolved base node'),
+        ('_pred', 'implicit subscript read through unresolved base node'),
+        ('_pred', 'implicit subscript read through unresolved base node'),
+        ('_pred', "implicit subscript read through unresolved base node['op'].rsplit('.', 1)"),
+        ('_pred', 'implicit subscript read through unresolved base v'),
+        ('_pred', "implicit truth test through unresolved base _keys(*_measure_keys(node['args']))"),
+        ('_pred', "implicit truth test through unresolved base isinstance(v, dict) and set(v) == {'data'}"),
+        ('_pred', "implicit truth test through unresolved base set(node) == {'all'}"),
+        ('_pred', "implicit truth test through unresolved base set(node) == {'all'} or set(node) == {'any'}"),
+        ('_pred', "implicit truth test through unresolved base set(node) == {'not'}"),
+        ('_pred', "implicit truth test through unresolved base set(node) == {'op', 'args'}"),
+        ('_pred', "implicit truth test through unresolved base set(node) == {'op', 'args'} and isinstance(node['op'], str) and isinstance(node['args'], dict)"),
+        ('_read_regular', 'implicit binary operator through unresolved base rel'),
+        ('_read_regular', 'implicit binary operator through unresolved base rel'),
+        ('_read_regular', 'implicit comparison through unresolved base _ident(os.fstat(f.fileno()))'),
+        ('_read_regular', 'implicit comparison through unresolved base want[3]'),
+        ('_read_regular', 'implicit subscript read through unresolved base want'),
+        ('_read_regular', 'implicit truth test through unresolved base _ident(os.fstat(f.fileno())) != want'),
+        ('_read_regular', 'implicit truth test through unresolved base len(raw) != want[3]'),
+        ('_report_line', 'implicit binary operator through unresolved base (k, found[k])'),
+        ('_report_line', "implicit binary operator through unresolved base (label, found['refused'])"),
+        ('_report_line', "implicit binary operator through unresolved base (label, total, detail, '' if n is None else ' over %d commit(s)' % n, '' if manifest is None else ' manifest ' + manifest, '' if sealed is None else ' seal ' + sealed)"),
+        ('_report_line', 'implicit binary operator through unresolved base manifest'),
+        ('_report_line', 'implicit binary operator through unresolved base n'),
+        ('_report_line', 'implicit binary operator through unresolved base sealed'),
+        ('_report_line', 'implicit comparison through unresolved base found'),
+        ('_report_line', 'implicit subscript read through unresolved base found'),
+        ('_report_line', 'implicit subscript read through unresolved base found'),
+        ('_report_line', 'implicit truth test through unresolved base total'),
+        ('_revision', 'implicit attribute read through unresolved base type(e)'),
+        ('_revision', 'implicit binary operator through unresolved base shipped'),
+        ('_revision', "implicit iteration through unresolved base _PLACE.split(r.get('line') or '')"),
+        ('_revision', "implicit iteration through unresolved base doc.get('rules') or []"),
+        ('_revision', 'implicit iteration through unresolved base shipped'),
+        ('_revision', 'implicit iteration through unresolved base shipped + sorted(_data_refs(doc))'),
+        ('_revision', "implicit result disposal through unresolved base out['data'].add(dn)"),
+        ('_revision', "implicit result disposal through unresolved base out['data'].add(stem)"),
+        ('_revision', "implicit result disposal through unresolved base out['nonce'].add(doc['nonce'])"),
+        ('_revision', "implicit result disposal through unresolved base out['rule_id'].add(r['id'])"),
+        ('_revision', "implicit result disposal through unresolved base out['wording'].add(frags)"),
+        ('_revision', "implicit subscript read through unresolved base dn.rsplit('.', 1)"),
+        ('_revision', 'implicit subscript read through unresolved base doc'),
+        ('_revision', 'implicit subscript read through unresolved base doc'),
+        ('_revision', 'implicit subscript read through unresolved base out'),
+        ('_revision', 'implicit subscript read through unresolved base out'),
+        ('_revision', 'implicit subscript read through unresolved base out'),
+        ('_revision', 'implicit subscript read through unresolved base out'),
+        ('_revision', 'implicit subscript read through unresolved base out'),
+        ('_revision', 'implicit subscript read through unresolved base r'),
+        ('_revision', 'implicit truth test through unresolved base _is_dir(ddir)'),
+        ('_revision', "implicit truth test through unresolved base dn.endswith('.json')"),
+        ('_revision', "implicit truth test through unresolved base doc.get('rules')"),
+        ('_revision', 'implicit truth test through unresolved base frags and sum((len(f) for f in frags)) >= WORDING_MIN'),
+        ('_revision', "implicit truth test through unresolved base isinstance(doc.get('nonce'), str) and doc['nonce']"),
+        ('_revision', "implicit truth test through unresolved base r.get('line')"),
+        ('_rx', 'implicit comparison through unresolved base p'),
+        ('_rx', 'implicit subscript read through unresolved base _RX'),
+        ('_sequence', 'implicit comparison through unresolved base frags'),
+        ('_sequence', 'implicit iteration through unresolved base frags'),
+        ('_sequence', 'implicit subscript read through unresolved base _SEQ'),
+        ('_sitting', 'implicit comparison through unresolved base set(node)'),
+        ('_sitting', 'implicit comparison through unresolved base v'),
+        ('_sitting', 'implicit comparison through unresolved base x'),
+        ('_sitting', "implicit iteration through unresolved base node['args'].items()"),
+        ('_sitting', 'implicit iteration through unresolved base v'),
+        ('_sitting', "implicit result disposal through unresolved base vals.add(v, _keys(name) or _keys(tail), group, 'sitting argument')"),
+        ('_sitting', 'implicit subscript read through unresolved base node'),
+        ('_sitting', 'implicit subscript read through unresolved base node'),
+        ('_sitting', 'implicit subscript read through unresolved base node'),
+        ('_sitting', 'implicit subscript read through unresolved base node'),
+        ('_sitting', "implicit subscript read through unresolved base node['op'].rsplit('.', 1)"),
+        ('_sitting', 'implicit truth test through unresolved base _keys(name)'),
+        ('_sitting', 'implicit truth test through unresolved base isinstance(v, list) and v and all((isinstance(x, str) and x in names for x in v))'),
+        ('_sitting', "implicit truth test through unresolved base not isinstance(node, dict) or set(node) != {'op', 'args'} or (not isinstance(node['op'], str)) or (not isinstance(node['args'], dict))"),
+        ('_sitting', "implicit truth test through unresolved base set(node) != {'op', 'args'}"),
+        ('_sitting', 'implicit truth test through unresolved base v'),
+        ('_status', 'implicit attribute read through unresolved base type(e)'),
+        ('_status', 'implicit truth test through unresolved base follow'),
+        ('_table', 'implicit iteration through unresolved base node'),
+        ('_table', 'implicit iteration through unresolved base node'),
+        ('_table', 'implicit iteration through unresolved base node.items()'),
+        ('_table', 'implicit result disposal through unresolved base _table(v, _keys(k) or keys, group, vals)'),
+        ('_table', 'implicit result disposal through unresolved base _table(x, keys, group, vals)'),
+        ('_table', "implicit result disposal through unresolved base vals.add(flat, keys, group, 'data table value')"),
+        ('_table', "implicit result disposal through unresolved base vals.add(k, keys, group, 'data table key')"),
+        ('_table', "implicit result disposal through unresolved base vals.add(node, keys, group, 'data table value')"),
+        ('_table', 'implicit truth test through unresolved base _keys(k)'),
+        ('_text_lines', 'implicit iteration through unresolved base text.splitlines()'),
+        ('_text_lines', 'implicit truth test through unresolved base ln.strip()'),
+        ('_text_value', 'implicit comparison through unresolved base tok'),
+        ('_text_value', 'implicit truth test through unresolved base _TEXT_NUM.fullmatch(tok)'),
+        ('_value_items', 'implicit attribute read through unresolved base vals'),
+        ('_value_items', 'implicit binary operator through unresolved base name'),
+        ('_value_items', 'implicit comparison through unresolved base ln.strip()'),
+        ('_value_items', 'implicit comparison through unresolved base r'),
+        ('_value_items', 'implicit comparison through unresolved base r'),
+        ('_value_items', 'implicit comparison through unresolved base set(doc)'),
+        ('_value_items', 'implicit iteration through unresolved base _TEXT_SPLIT.split(ln)'),
+        ('_value_items', 'implicit iteration through unresolved base _text_lines(table)'),
+        ('_value_items', 'implicit iteration through unresolved base params.items()'),
+        ('_value_items', 'implicit iteration through unresolved base ps.items()'),
+        ('_value_items', 'implicit iteration through unresolved base rules'),
+        ('_value_items', 'implicit iteration through unresolved base vocab'),
+        ('_value_items', 'implicit iteration through unresolved base vocab'),
+        ('_value_items', 'implicit result disposal through unresolved base _meta(r)'),
+        ('_value_items', "implicit result disposal through unresolved base _pred(r['when'], group, vals)"),
+        ('_value_items', "implicit result disposal through unresolved base _sitting(r['sitting'], names, group, vals)"),
+        ('_value_items', 'implicit result disposal through unresolved base _table(table, keys, group, vals)'),
+        ('_value_items', "implicit result disposal through unresolved base _table(v, _keys(name, name.rsplit('.', 1)[-1]), 'vocabulary', vals)"),
+        ('_value_items', "implicit subscript read through unresolved base name.rsplit('.', 1)"),
+        ('_value_items', "implicit subscript read through unresolved base name.rsplit('.', 1)"),
+        ('_value_items', 'implicit subscript read through unresolved base r'),
+        ('_value_items', 'implicit subscript read through unresolved base r'),
+        ('_value_items', "implicit subscript read through unresolved base str(fam).rsplit('.', 1)"),
+        ('_value_items', 'implicit truth test through unresolved base _keys(k)'),
+        ('_value_items', 'implicit truth test through unresolved base _keys(stem)'),
+        ('_value_items', "implicit truth test through unresolved base doc.get('measure_params')"),
+        ('_value_items', "implicit truth test through unresolved base doc.get('rules')"),
+        ('_value_items', 'implicit truth test through unresolved base ln.strip() != ln'),
+        ('_value_items', 'implicit truth test through unresolved base set(doc) <= TOP_KEYS'),
+        ('_value_items', 'implicit truth test through unresolved base t'),
+        ('_value_items', 'implicit truth test through unresolved base tables'),
+        ('_value_needles', 'implicit binary operator through unresolved base (_CMP, val)'),
+        ('_value_needles', 'implicit binary operator through unresolved base (kp, VALUE_NEAR, val)'),
+        ('_value_needles', 'implicit binary operator through unresolved base (one, one)'),
+        ('_value_needles', 'implicit binary operator through unresolved base (val, VALUE_NEAR, kp)'),
+        ('_value_needles', 'implicit binary operator through unresolved base (val, _SIGN)'),
+        ('_value_needles', 'implicit binary operator through unresolved base (x, y)'),
+        ('_value_needles', 'implicit binary operator through unresolved base val'),
+        ('_value_needles', 'implicit binary operator through unresolved base val'),
+        ('_value_needles', 'implicit binary operator through unresolved base val'),
+        ('_value_needles', 'implicit comparison through unresolved base t'),
+        ('_value_needles', 'implicit iteration through unresolved base _num_tokens(v)'),
+        ('_value_needles', 'implicit iteration through unresolved base _num_tokens(x)'),
+        ('_value_needles', 'implicit iteration through unresolved base _value_items(doc, tables)'),
+        ('_value_needles', 'implicit iteration through unresolved base items'),
+        ('_value_needles', 'implicit iteration through unresolved base keys'),
+        ('_value_needles', 'implicit iteration through unresolved base keys'),
+        ('_value_needles', 'implicit iteration through unresolved base keys'),
+        ('_value_needles', 'implicit iteration through unresolved base lists'),
+        ('_value_needles', 'implicit iteration through unresolved base members'),
+        ('_value_needles', 'implicit iteration through unresolved base zip(alts, alts[1:])'),
+        ('_value_needles', "implicit result disposal through unresolved base by_group.setdefault(group, set()).add('|'.join((re.escape(x) for x in _num_tokens(v))))"),
+        ('_value_needles', 'implicit subscript read through unresolved base alts'),
+        ('_value_needles', 'implicit subscript read through unresolved base t'),
+        ('_value_needles', 'implicit truth test through unresolved base kp'),
+        ('_value_needles', "implicit truth test through unresolved base t == 'string'"),
+        ('_value_rx', 'implicit binary operator through unresolved base re.escape(v)'),
+        ('_value_rx', 'implicit comparison through unresolved base t'),
+        ('_value_rx', 'implicit comparison through unresolved base t'),
+        ('_value_rx', 'implicit comparison through unresolved base t'),
+        ('_value_rx', 'implicit comparison through unresolved base v'),
+        ('_value_rx', 'implicit iteration through unresolved base _num_tokens(v)'),
+        ('_value_rx', "implicit truth test through unresolved base t == 'bool'"),
+        ('_value_rx', "implicit truth test through unresolved base t == 'null'"),
+        ('_value_rx', 'implicit truth test through unresolved base v'),
+        ('_value_rx', "implicit truth test through unresolved base v == ''"),
+        ('corpus_digest', 'implicit binary operator through unresolved base (name, size, digest)'),
+        ('corpus_digest', 'implicit iteration through unresolved base rows'),
+        ('corpus_digest', "implicit result disposal through unresolved base h.update(('%s\\t%d\\t%s\\n' % (name, size, digest)).encode('utf-8'))"),
+        ('count', 'implicit comparison through unresolved base cls'),
+        ('count', 'implicit comparison through unresolved base cls'),
+        ('count', 'implicit comparison through unresolved base s'),
+        ('count', 'implicit iteration through unresolved base items'),
+        ('count', 'implicit iteration through unresolved base needles.items()'),
+        ('count', 'implicit subscript read through unresolved base s'),
+        ('count', "implicit truth test through unresolved base cls == 'value'"),
+        ('count', 'implicit truth test through unresolved base paths_only'),
+        ('count', "implicit truth test through unresolved base paths_only and cls not in ('basename', 'value')"),
+        ('count', 'implicit truth test through unresolved base s'),
+        ('count', "implicit truth test through unresolved base s and (_rx(s[1]).search(public_cut) if cls == 'value' else _sequence(s).search(text) if isinstance(s, tuple) else s in text)"),
+        ('derive', 'implicit attribute read through unresolved base type(e)'),
+        ('leaf_type', 'implicit attribute read through unresolved base type(v)'),
+        ('leaf_type', 'implicit binary operator through unresolved base type(v).__name__'),
+        ('leaf_type', 'implicit comparison through unresolved base abs(v)'),
+        ('leaf_type', 'implicit truth test through unresolved base _finite(v)'),
+        ('leaf_type', 'implicit truth test through unresolved base abs(v) >= VALUE_MIN_BARE'),
+        ('leaf_type', 'implicit truth test through unresolved base v.is_integer()'),
+        ('main', 'implicit attribute read through unresolved base type(e)'),
+        ('main', 'implicit attribute read through unresolved base type(e)'),
+        ('main', 'implicit binary operator through unresolved base e'),
+        ('main', 'implicit binary operator through unresolved base e if isinstance(e, NoVerdict) else type(e).__name__'),
+        ('main', 'implicit binary operator through unresolved base e if isinstance(e, NoVerdict) else type(e).__name__'),
+        ('main', 'implicit comparison through unresolved base argv[0]'),
+        ('main', "implicit subscript read through unresolved base __doc__.split('Modes:')"),
+        ('main', "implicit subscript read through unresolved base __doc__.split('Modes:')[1].split('Exit 0')"),
+        ('main', 'implicit subscript read through unresolved base argv'),
+        ('main', 'implicit subscript read through unresolved base argv'),
+        ('main', 'implicit subscript read through unresolved base argv'),
+        ('main', 'implicit truth test through unresolved base argv'),
+        ('main', "implicit truth test through unresolved base argv[0] == 'seal-verify'"),
+        ('main', "implicit truth test through unresolved base argv[0] == 'seal-verify' and len(argv) == 3"),
+        ('main', 'implicit truth test through unresolved base store'),
+        ('packet', 'implicit binary operator through unresolved base (commit, p)'),
+        ('packet', 'implicit binary operator through unresolved base (commit, p)'),
+        ('packet', 'implicit binary operator through unresolved base got'),
+        ('packet', 'implicit binary operator through unresolved base name'),
+        ('packet', 'implicit binary operator through unresolved base snap'),
+        ('packet', 'implicit comparison through unresolved base [rel for rel, _raw in snap]'),
+        ('packet', "implicit comparison through unresolved base hashlib.sha1(b'blob %d\\x00' % len(got) + got).hexdigest()"),
+        ('packet', 'implicit comparison through unresolved base hashlib.sha256(got).hexdigest()'),
+        ('packet', 'implicit comparison through unresolved base hashlib.sha256(raw).hexdigest()'),
+        ('packet', 'implicit comparison through unresolved base kind'),
+        ('packet', 'implicit comparison through unresolved base kind'),
+        ('packet', 'implicit comparison through unresolved base p'),
+        ('packet', "implicit comparison through unresolved base p.split('/')"),
+        ('packet', 'implicit comparison through unresolved base parts[0]'),
+        ('packet', 'implicit comparison through unresolved base paths'),
+        ('packet', 'implicit comparison through unresolved base {os.path.basename(d) for d, _h in docs}'),
+        ('packet', 'implicit iteration through unresolved base f'),
+        ('packet', "implicit iteration through unresolved base p.split('/')"),
+        ('packet', 'implicit iteration through unresolved base pins[rel]'),
+        ('packet', 'implicit iteration through unresolved base snap'),
+        ('packet', 'implicit iteration through unresolved base snap'),
+        ('packet', 'implicit subscript read through unresolved base parts'),
+        ('packet', 'implicit subscript read through unresolved base parts'),
+        ('packet', 'implicit subscript read through unresolved base parts'),
+        ('packet', 'implicit subscript read through unresolved base parts'),
+        ('packet', 'implicit subscript read through unresolved base pins'),
+        ('packet', 'implicit truth test through unresolved base _present(out_dir) and os.listdir(out_dir)'),
+        ('packet', 'implicit truth test through unresolved base hashlib.sha256(raw).hexdigest() != want'),
+        ('packet', "implicit truth test through unresolved base kind == 'blob'"),
+        ('packet', "implicit truth test through unresolved base kind == 'blob' and hashlib.sha1(b'blob %d\\x00' % len(got) + got).hexdigest() != want"),
+        ('packet', "implicit truth test through unresolved base kind == 'doc'"),
+        ('packet', "implicit truth test through unresolved base kind == 'doc' and hashlib.sha256(got).hexdigest() != want"),
+        ('packet', 'implicit truth test through unresolved base len(snap) != len(paths) + len(docs) or [rel for rel, _raw in snap] != sorted(pins)'),
+        ('packet', "implicit truth test through unresolved base ln.startswith('#')"),
+        ('packet', 'implicit truth test through unresolved base ln.strip()'),
+        ('packet', "implicit truth test through unresolved base ln.strip() and (not ln.startswith('#'))"),
+        ('packet', 'implicit truth test through unresolved base os.path.isabs(parts[1])'),
+        ('packet', "implicit truth test through unresolved base p not in tracked or p.startswith('/') or '..' in p.split('/') or p.startswith('docs/')"),
+        ('packet', "implicit truth test through unresolved base p.startswith('/')"),
+        ('packet', "implicit truth test through unresolved base parts[0] == 'doc'"),
+        ('packet', "implicit truth test through unresolved base re.fullmatch('[0-9a-f]{64}', parts[2])"),
+        ('packet_verify', 'implicit comparison through unresolved base _manifest_lines_of(snap)'),
+        ('packet_verify', 'implicit comparison through unresolved base hashlib.sha256(raw).hexdigest()'),
+        ('packet_verify', "implicit truth test through unresolved base _manifest_lines_of(snap) != raw.decode('utf-8', 'replace').splitlines()"),
+        ('packet_verify', 'implicit truth test through unresolved base hashlib.sha256(raw).hexdigest() != want'),
+        ('report', 'implicit iteration through unresolved base _report_line(label, found, n)'),
+        ('scan_range', 'implicit binary operator through unresolved base (base, tip)'),
+        ('scan_range', 'implicit comparison through unresolved base set(blob)'),
+        ('scan_range', 'implicit iteration through unresolved base commits'),
+        ('scan_range', "implicit result disposal through unresolved base _merge(found, count(_blob_text(_git(repo, 'cat-file', 'blob', blob, binary=True)), needles))"),
+        ('scan_range', "implicit result disposal through unresolved base _merge(found, count(_git(repo, 'show', '-s', '--format=%an%n%ae%n%cn%n%ce%n%B', c), needles))"),
+        ('scan_range', 'implicit result disposal through unresolved base _merge(found, count(path, needles, paths_only=True))'),
+        ('scan_range', 'implicit subscript read through unresolved base parts'),
+        ('scan_range', 'implicit subscript read through unresolved base tree'),
+        ('scan_range', 'implicit truth test through unresolved base meta'),
+        ('scan_range', "implicit truth test through unresolved base status.startswith('D')"),
+        ('scan_range', "implicit truth test through unresolved base status.startswith('D') or set(blob) == {'0'}"),
+        ('scan_snapshot', 'implicit iteration through unresolved base snap'),
+        ('scan_snapshot', 'implicit result disposal through unresolved base _merge(found, count(_blob_text(raw), needles))'),
+        ('scan_snapshot', 'implicit result disposal through unresolved base _merge(found, count(rel, needles, paths_only=True))'),
+        ('scan_staged', 'implicit binary operator through unresolved base p'),
+        ('scan_staged', "implicit iteration through unresolved base _git(repo, 'diff', '--cached', '--name-only', '-z').split('\\x00')"),
+        ('scan_staged', "implicit iteration through unresolved base _git(repo, 'diff', '--cached', '--name-only', '-z', '--diff-filter=d').split('\\x00')"),
+        ('scan_staged', "implicit result disposal through unresolved base _merge(found, count(_blob_text(_git(repo, 'show', ':' + p, binary=True)), needles))"),
+        ('scan_staged', 'implicit result disposal through unresolved base _merge(found, count(p, needles, paths_only=True))'),
+        ('scan_staged', 'implicit truth test through unresolved base p'),
+        ('scan_staged', 'implicit truth test through unresolved base p'),
+        ('seal', 'implicit binary operator through unresolved base (d, n, name)'),
+        ('seal', 'implicit binary operator through unresolved base digest'),
+        ('seal', 'implicit binary operator through unresolved base line'),
+        ('seal', 'implicit binary operator through unresolved base snap'),
+        ('seal', "implicit iteration through unresolved base _report_line('seal', dict(found))"),
+        ('seal', 'implicit iteration through unresolved base rows'),
+        ('seal', 'implicit truth test through unresolved base _inside(seal_file, ri)'),
+        ('seal_verify', 'implicit binary operator through unresolved base set(cur)'),
+        ('seal_verify', 'implicit binary operator through unresolved base set(was)'),
+        ('seal_verify', 'implicit comparison through unresolved base corpus_digest(sealed)'),
+        ('seal_verify', 'implicit comparison through unresolved base cur[k]'),
+        ('seal_verify', 'implicit comparison through unresolved base int(lines[2].split()[1])'),
+        ('seal_verify', 'implicit iteration through unresolved base lines[3:]'),
+        ('seal_verify', "implicit iteration through unresolved base ln.split(' ', 2)"),
+        ('seal_verify', 'implicit iteration through unresolved base now'),
+        ('seal_verify', 'implicit subscript read through unresolved base cur'),
+        ('seal_verify', 'implicit subscript read through unresolved base lines'),
+        ('seal_verify', 'implicit subscript read through unresolved base lines'),
+        ('seal_verify', 'implicit subscript read through unresolved base lines'),
+        ('seal_verify', 'implicit subscript read through unresolved base lines[0].split()'),
+        ('seal_verify', 'implicit subscript read through unresolved base lines[2].split()'),
+        ('seal_verify', 'implicit subscript read through unresolved base r'),
+        ('seal_verify', 'implicit subscript read through unresolved base was'),
+        ('seal_verify', 'implicit truth test through unresolved base len(sealed) != int(lines[2].split()[1])'),
+        ('seal_verify', 'implicit truth test through unresolved base len(sealed) != int(lines[2].split()[1]) or corpus_digest(sealed) != lines[0].split()[1]'),
+        ('seal_verify', "implicit truth test through unresolved base lines[0].startswith('SEAL ')"),
+        ('seal_verify', "implicit truth test through unresolved base lines[2].startswith('FILES ')"),
+        ('seal_verify', 'implicit truth test through unresolved base set(cur) - set(was)'),
+        ('seal_verify', 'implicit truth test through unresolved base set(was) - set(cur)'),
+        ('snapshot', 'implicit binary operator through unresolved base moved[0]'),
+        ('snapshot', 'implicit binary operator through unresolved base set(again)'),
+        ('snapshot', 'implicit comparison through unresolved base again'),
+        ('snapshot', 'implicit comparison through unresolved base again[k]'),
+        ('snapshot', 'implicit comparison through unresolved base listed[rel][0]'),
+        ('snapshot', 'implicit comparison through unresolved base rel'),
+        ('snapshot', 'implicit iteration through unresolved base listed'),
+        ('snapshot', "implicit iteration through unresolved base rel.split('/')"),
+        ('snapshot', 'implicit subscript read through unresolved base again'),
+        ('snapshot', 'implicit subscript read through unresolved base listed'),
+        ('snapshot', 'implicit subscript read through unresolved base listed'),
+        ('snapshot', 'implicit subscript read through unresolved base listed'),
+        ('snapshot', 'implicit subscript read through unresolved base listed[rel]'),
+        ('snapshot', 'implicit subscript read through unresolved base moved'),
+        ('snapshot', 'implicit truth test through unresolved base again != listed'),
+        ('snapshot', 'implicit truth test through unresolved base again[k] != listed[k]'),
+        ('snapshot', 'implicit truth test through unresolved base listed[rel][0] == stat.S_IFREG'),
+        ('snapshot', 'implicit truth test through unresolved base listed[rel][0] == stat.S_IFREG and rel not in skip'),
+        ('snapshot_rows', 'implicit iteration through unresolved base snap'),
 ]}
 
 
@@ -3687,6 +4758,19 @@ _ESCAPES = {ast.Call: "a call argument", ast.keyword: "a call argument", ast.Ret
             ast.Yield: "a yielded value", ast.YieldFrom: "a yielded value", ast.Await: "an awaited value",
             ast.Lambda: "a lambda body", ast.Raise: "a raised value", ast.Assign: "a stored value",
             ast.AnnAssign: "a stored value", ast.AugAssign: "a stored value"}
+
+_IMPLICIT_PROTOCOL_DISPATCH = {
+    ast.For: "iteration", ast.AsyncFor: "iteration", ast.comprehension: "comprehension",
+    ast.YieldFrom: "yield from", ast.Starred: "starred", ast.keyword: "keyword",
+    ast.Dict: "dictionary", ast.Assign: "assignment", ast.withitem: "with item",
+    ast.Compare: "comparison",
+    ast.If: "truth", ast.While: "truth", ast.Assert: "truth", ast.IfExp: "truth", ast.BoolOp: "boolean",
+    ast.match_case: "match guard",
+    ast.FormattedValue: "formatting",
+    ast.Attribute: "attribute", ast.Subscript: "subscript",
+    ast.UnaryOp: "unary", ast.BinOp: "binary",
+    ast.Expr: "disposal",
+}
 
 
 def _namespace_reach(tree, names, file="<source>") -> list:
@@ -3782,12 +4866,13 @@ def _namespace_reach(tree, names, file="<source>") -> list:
           protocol and is positional where needed;
       (9) remains the imported-object rule above; receiver-element checking
           applies to the exact builtin values above, not imported namespaces.
-    The implicit protocols (iteration, subscript and attribute reads, in,
-    formatting, an operator's own method) are not calls and are not refused
-    by (8); an operator's RESULT over an unresolved operand is unresolved.
-    Finalization caused after a call by discarding its result or temporary
-    receiver is likewise outside this explicit-call rule; a method such as
-    clear that drops held references before returning is not receiver-blind.
+    Fix pass seventeen adds one class-keyed implicit-protocol dispatcher for
+    iteration and comprehensions, containment and non-identity comparisons,
+    truth and formatting, attribute and subscript reads, unary and binary
+    operators, and result disposal. It runs before the older escape skips and
+    reuses exact-builtin, literal and exact-receiver proofs without changing
+    explicit-call masks or result provenance. A method such as clear that
+    drops held references before returning remains outside receiver blindness.
     Fix pass 9's _manager_rebinds still runs beside it; later passes retain
     the namespace operation named by an import (from os import __dict__)."""
     r = _Reach(tree, names)
@@ -3846,6 +4931,9 @@ def _namespace_reach(tree, names, file="<source>") -> list:
             out += [(n.lineno, k) for k in r.call_rows(n)]
         if isinstance(n, ast.Call) and r.reaching(n):                                                     # (2)
             out.append((n.lineno, "call of namespace-reaching %s" % ast.unparse(n.func)))
+        implicit = r.implicit_rows(n)
+        implicit_line = n if hasattr(n, "lineno") else parents.get(id(n))
+        out += [(implicit_line.lineno, kind) for kind in implicit]
         if isinstance(n, (ast.Import, ast.ImportFrom)):                                                  # (3)
             mods = [a.name for a in n.names] if isinstance(n, ast.Import) else \
                 [n.module or ""] + ["%s.%s" % (n.module, a.name) for a in n.names if n.module]
@@ -4084,16 +5172,16 @@ def test_m5_fix4_alias_controls_are_clean():
 
 # M5(c): an os.walk handler must be proven to reach the exit-3 refusal
 WALK_OK = ("import os\n\n\nclass NoVerdict(Exception):\n    pass\n\n\n"
-           "def _walk_error(e):\n    raise NoVerdict(type(e).__name__)\n\n\n"
+           "def _walk_error(e):\n    raise NoVerdict('walk')\n\n\n"
            "def scan(p):\n    if type(p) is not str:\n        raise NoVerdict('root')\n"
            "    return list(os.walk(p, onerror=_walk_error))\n\n\n"
-           "def main(argv):\n    try:\n        scan(argv[0])\n    except NoVerdict:\n"
+           "def main(argv):\n    try:\n        result = scan('root')\n    except NoVerdict:\n"
            "        print('refused')\n        return 3\n    return 0\n")
 WALK_BAD = [
     ("lambda_handler", ("onerror=_walk_error", "onerror=lambda e: None")),
     ("none_handler", ("onerror=_walk_error", "onerror=None")),
-    ("handler_that_returns", ("    raise NoVerdict(type(e).__name__)\n", "    return None\n")),
-    ("handler_other_error", ("    raise NoVerdict(type(e).__name__)\n", "    raise ValueError(e)\n")),
+    ("handler_that_returns", ("    raise NoVerdict('walk')\n", "    return None\n")),
+    ("handler_other_error", ("    raise NoVerdict('walk')\n", "    raise ValueError(e)\n")),
     ("handler_rebound", ("def scan(p):", "_walk_error = print\n\n\ndef scan(p):")),
     ("refusal_swallowed", ("    return list(os.walk(p, onerror=_walk_error))\n",
                            "    try:\n        return list(os.walk(p, onerror=_walk_error))\n"
@@ -4221,7 +5309,7 @@ def test_m5_fix15_a_protocol_exemptions_are_signature_specific():
 def test_m5_fix15_b_exact_safe_signatures_stay_trusted():
     source = ("import sys\n\n\ndef f(obj):\n    type(obj)\n    id(obj)\n    callable(obj)\n    ord(obj)\n"
               "    slice(obj)\n    slice(None, obj)\n    slice(None, None, obj)\n    super(obj)\n"
-              "    ValueError(obj)\n    OSError(obj, None)\n    PermissionError(obj, None)\n"
+              "    ValueError(obj)\n    OSError(False, None)\n    PermissionError(obj, None)\n"
               "    BlockingIOError(obj, None, False)\n"
               "    SyntaxError(obj, ('file', None, None, None))\n"
               "    ExceptionGroup(obj, [])\n"
@@ -4396,7 +5484,9 @@ def test_m5_fix15_k_higher_order_aliases_and_expansions_are_judged():
     generator_boundary = ("def f(obj):\n    tuple(False for _ in (False,))\n"
                           "    tuple(False for _ in (False,) for inner in obj)\n"
                           "    tuple(value == False for value in (obj,))\n")
-    assert not _fix15_rows(generator_boundary)
+    boundary_rows = _fix15_rows(generator_boundary)
+    assert "implicit iteration through unresolved base obj" in boundary_rows
+    assert "implicit comparison through unresolved base value" in boundary_rows
 
 
 def test_m5_fix15_l_held_receiver_results_and_custom_class_mappings_are_refused():
@@ -4471,9 +5561,10 @@ def test_m5_fix15_l_held_receiver_results_and_custom_class_mappings_are_refused(
 def test_m5_fix16_a_exact_library_receiver_reads_are_trusted():
     sources = (
         "import os\nos.environ.get('KEY')\n",
+        "import os\nos.environ.keys()\n",
         "from os import environ as settings\nsettings.get('KEY')\n",
     )
-    assert _PURE_LIBRARY_RECEIVERS == {"os.environ": frozenset({"get"})}
+    assert _PURE_LIBRARY_RECEIVERS == {"os.environ": frozenset({"get", "keys"})}
     for source in sources:
         assert not _fix15_rows(source), source
 
@@ -4482,8 +5573,8 @@ def test_m5_fix16_b_receiver_and_method_boundaries_stay_refused():
     cases = {
         "impure_method": ("import os\nos.environ.update({'KEY': 'value'})\n",
                           "method call update through imported namespace os.environ"),
-        "method_off_receiver_table": ("import os\nos.environ.keys()\n",
-                                      "method call keys through imported namespace os.environ"),
+        "method_off_receiver_table": ("import os\nos.environ.values()\n",
+                                      "method call values through imported namespace os.environ"),
         "unresolved_receiver": ("def f(receiver):\n    receiver.get('KEY')\n",
                                 "unproven pure method call get through unresolved base receiver"),
         "other_imported_receiver": ("from helper import environ\nenviron.get('KEY')\n",
@@ -4498,16 +5589,20 @@ def test_m5_fix16_c_known_receiver_arguments_keep_the_existing_protocol_rule():
     source = "import os\ndef f(obj):\n    os.environ.get(obj)\n"
     assert _fix15_has(source, "call of protocol-running callable os.environ.get through unresolved base obj")
     assert not _fix15_has(source, "method call get through imported namespace os.environ")
+    keys = "import os\ndef f(obj):\n    os.environ.keys(obj)\n"
+    assert _fix15_has(keys, "call of protocol-running callable os.environ.keys through unresolved base obj")
 
 
 def test_m5_fix16_d_callback_receivers_use_the_same_exact_rule():
     known = "import os\nsorted(('KEY',), key=os.environ.get)\n"
+    known_keys = "import os\niter(os.environ.keys, ())\n"
     listed = "import os\nsorted(('KEY',), key=os.path.basename)\n"
     unresolved = "def f(receiver):\n    sorted(('KEY',), key=receiver.get)\n"
     imported = "from helper import environ\nsorted(('KEY',), key=environ.get)\n"
     mixed = ("import os\ndef f(receiver, condition):\n"
              "    sorted(('KEY',), key=(os.path if condition else receiver).join)\n")
     assert not _fix15_rows(known)
+    assert not _fix15_rows(known_keys)
     assert not _fix15_rows(listed)
     assert _fix15_has(unresolved, "callback method get of sorted through unresolved base receiver")
     assert _fix15_has(imported, "callback method get of sorted through imported namespace environ")
@@ -4538,6 +5633,8 @@ def test_m5_fix16_f_library_storage_results_remain_unresolved():
     source = "import os\nvalue = os.environ.get('KEY')\nvalue.get('other')\n"
     assert _fix15_has(source, "unproven pure method call get through unresolved base value")
     assert not _fix15_has(source, "method call get through imported namespace os.environ")
+    view = "import os\nvalue = os.environ.keys()\nvalue.isdisjoint(())\n"
+    assert _fix15_has(view, "unproven pure method call isdisjoint through unresolved base value")
 
 
 def test_m5_fix16_g_removing_the_rule_lapses_the_real_module_clean_check(monkeypatch):
@@ -4553,3 +5650,317 @@ def test_m5_fix16_g_removing_the_rule_lapses_the_real_module_clean_check(monkeyp
     assert _site_names(tree, remaining) == [
         ("main", "method call get through imported namespace os.environ"),
     ]
+
+
+# Fix pass seventeen: errno dispatch, local constructors, metaclass selection,
+# bounded implicit protocols, and the exact os.environ keys read.
+def test_m5_fix17_a_exact_oserror_errno_masks_cover_direct_and_callback_routes(monkeypatch):
+    aliases = tuple(name.removeprefix("builtins.") for name in (
+        "builtins.OSError", "builtins.EnvironmentError", "builtins.IOError", "builtins.WindowsError")
+        if name in _ARG_SAFE_EXCEPTIONS)
+    for name in aliases:
+        source = "def f(obj):\n    %s(obj, None)\n" % name
+        assert _fix15_has(source, "protocol-running callable %s through unresolved base obj" % name), name
+    for source in ("def f(obj):\n    OSError(obj, None, False)\n",
+                   "def f(obj):\n    OSError(obj, None, False, False, False)\n"):
+        assert _fix15_has(source, "protocol-running callable OSError through unresolved base obj")
+    callback = "def f(obj):\n    map(OSError, (obj,), (None,), (False,), (False,))\n"
+    assert _fix15_has(callback, "callback of map (protocol-running callable OSError) through unresolved base (obj,)")
+
+    original = os.walk
+    replacement = lambda *_args, **_kwargs: ()
+
+    class Errno(int):
+        def __hash__(self):
+            monkeypatch.setattr(os, "walk", replacement)
+            return super().__hash__()
+
+    OSError(Errno(False), None)
+    assert os.walk is replacement
+    monkeypatch.setattr(os, "walk", original)
+
+
+def test_m5_fix17_b_exact_oserror_boundaries_keep_their_prior_policy():
+    clean = ("def f(obj):\n    OSError(False, None)\n    ValueError(obj)\n"
+             "    PermissionError(obj, None)\n    BlockingIOError(obj, None, False)\n"
+             "    OSError(False, None, None, obj)\n")
+    assert not _fix15_rows(clean)
+    third = "def f(obj):\n    OSError(False, None, obj)\n"
+    assert _fix15_has(third, "call of protocol-running callable OSError through unresolved base obj")
+    assert _fix15_has("def f(obj):\n    OSError(*obj)\n", "call of protocol-running callable OSError")
+    assert _fix15_has("def f(obj):\n    OSError(errno=obj, strerror=None)\n",
+                      "call of protocol-running callable OSError")
+
+
+def test_m5_fix17_c_local_class_constructors_keep_every_route():
+    cases = {
+        "list": "class C(list):\n    pass\ndef f(obj):\n    C(obj)\n",
+        "dict": "class C(dict):\n    pass\ndef f(obj):\n    C(obj)\n",
+        "transitive_list": ("class Base(list):\n    pass\nclass C(Base):\n    pass\n"
+                            "def f(obj):\n    C(obj)\n"),
+        "transitive_dict": ("class Base(dict):\n    pass\nclass C(Base):\n    pass\n"
+                            "def f(obj):\n    C(obj)\n"),
+        "mixed": ("condition = False\nclass C(list):\n    pass\ndef local(value):\n    return ()\n"
+                  "runner = C if condition else local\ndef f(obj):\n    runner(obj)\n"),
+        "mixed_dotted": ("condition = False\nclass C(list):\n    pass\n"
+                         "runner = C if condition else len\ndef f(obj):\n    runner([obj])\n"),
+        "callback": "class C(list):\n    pass\ndef f(obj):\n    map(C, (obj,))\n",
+        "late_shadow": ("class Plain:\n    pass\nclass C(list):\n    pass\nlist = Plain\n"
+                        "def f(obj):\n    stored = C(obj)\n"),
+        "conditional_shadow": ("condition = False\nclass Plain:\n    pass\nif condition:\n    list = Plain\n"
+                               "class C(list):\n    pass\ndef f(obj):\n    stored = C(obj)\n"),
+        "deleted_shadow": ("class Plain:\n    pass\nlist = Plain\ndel list\nclass C(list):\n    pass\n"
+                           "def f(obj):\n    stored = C(obj)\n"),
+        "alias_before_shadow": ("class Plain:\n    pass\nAlias = list\nclass C(Alias):\n    pass\n"
+                                "list = Plain\ndef f(obj):\n    stored = C(obj)\n"),
+        "self_alias": "list = list\nclass C(list):\n    pass\ndef f(obj):\n    stored = C(obj)\n",
+        "alias_chain": ("A = list\nB = A\nA = B\nclass C(A):\n    pass\n"
+                        "def f(obj):\n    stored = C(obj)\n"),
+        "dotted_builtin": ("import builtins as namespace\nclass C(namespace.list):\n    pass\n"
+                           "def f(obj):\n    stored = C(obj)\n"),
+        "loop_alias": ("for Base in (list,):\n    class C(Base):\n        pass\n"
+                       "    def f(obj):\n        stored = C(obj)\n"),
+        "walrus_alias": ("if (Base := list):\n    class C(Base):\n        pass\n"
+                         "    def f(obj):\n        stored = C(obj)\n"),
+        "optional_walrus_builtin": ("from helper import condition\nclass Plain:\n    pass\n"
+                                    "if condition or (list := Plain):\n"
+                                    "    class C(list):\n        pass\n"
+                                    "    def f(obj):\n        stored = C(obj)\n"),
+        "composite_before_shadow": ("from helper import condition\nclass Plain:\n    pass\n"
+                                    "class C(list if condition else Plain):\n    pass\nlist = Plain\n"
+                                    "def f(obj):\n    stored = C(obj)\n"),
+        "closure_route": ("Exact = list\ndef outer(obj):\n    class Plain:\n        pass\n"
+                          "    Base = Plain\n    def inner():\n        class C(Base):\n            pass\n"
+                          "        stored = C(obj)\n    Base = Exact\n    inner()\n"),
+        "starred_base": "class C(*(list,)):\n    pass\ndef f(obj):\n    stored = C(obj)\n",
+        "generic_list_base": "class C(list[str]):\n    pass\ndef f(obj):\n    stored = C(obj)\n",
+        "generic_dict_base": ("class C(dict[str, object]):\n    pass\n"
+                              "def f(obj):\n    stored = C(obj)\n"),
+        "match_capture": ("match list:\n    case Base:\n        class C(Base):\n            pass\n"
+                          "        def f(obj):\n            stored = C(obj)\n"),
+    }
+    for name, source in cases.items():
+        assert _fix15_has(source, "protocol-running callable"), name
+
+
+def test_m5_fix17_d_local_constructor_controls_stay_narrow():
+    source = ("class C:\n    pass\nclass L(list):\n    pass\ndef local(value):\n    return ()\n"
+              "alias = lambda value: ()\ndef f(obj):\n    C()\n    L(())\n    local(obj)\n    alias(obj)\n"
+              "    type(obj)\n    stored = C(obj)\n")
+    assert not _fix15_rows(source)
+    method = ("class C:\n    def count(self, value):\n        return False\n"
+              "def f(obj):\n    C().count(obj)\n")
+    assert not _fix15_rows(method)
+    shadowed = ("class Plain:\n    pass\nlist = Plain\nclass C(list):\n    pass\n"
+                "def f(obj):\n    stored = C(obj)\n")
+    assert not _fix15_rows(shadowed)
+    same_branch = ("condition = False\nclass Plain:\n    pass\nif condition:\n    list = Plain\n"
+                   "    class C(list):\n        pass\n    def f(obj):\n        stored = C(obj)\n")
+    loop_shadow = ("class Plain:\n    pass\nfor list in [Plain]:\n    class C(list):\n        pass\n"
+                   "    def f(obj):\n        stored = C(obj)\n")
+    assert not _fix15_rows(same_branch)
+    assert not _fix15_rows(loop_shadow)
+    dotted_shadow = ("import builtins as namespace\nclass Plain:\n    pass\nclass Fake:\n    list = Plain\n"
+                     "namespace = Fake\nclass C(namespace.list):\n    pass\n"
+                     "def f(obj):\n    stored = C(obj)\n")
+    nested_shadow = ("ExactList = list\ndef f(obj):\n    class Plain:\n"
+                     "        def __init__(self, value):\n            pass\n    list = Plain\n"
+                     "    class C(list):\n        pass\n    list = ExactList\n    return C(obj)\n")
+    instance_call = ("class C(list):\n    def __call__(self, value):\n        pass\n"
+                     "def f(obj):\n    c = C()\n    c(obj)\n    map(c, (obj,))\n")
+    local_delete = ("def f(obj):\n    class Plain:\n        pass\n    list = Plain\n    del list\n"
+                    "    class C(list):\n        pass\n    stored = C(obj)\n")
+    repeated_with = ("import contextlib\nclass Plain:\n    pass\nwith contextlib.nullcontext(list) as Base, "
+                     "contextlib.nullcontext(Plain) as Base:\n    class C(Base):\n        pass\n"
+                     "    def f(obj):\n        stored = C(obj)\n")
+    exception_shadow = ("try:\n    raise Exception()\nexcept Exception as list:\n"
+                        "    class C(list):\n        pass\n    def f(obj):\n        stored = C(obj)\n")
+    walrus_shadow = ("class Plain:\n    pass\nif (list := Plain):\n    class C(list):\n        pass\n"
+                      "    def f(obj):\n        stored = C(obj)\n")
+    statement_walrus_shadow = ("class Plain:\n    pass\n(list := Plain)\nclass C(list):\n    pass\n"
+                               "def f(obj):\n    stored = C(obj)\n")
+    conjunction_walrus_shadow = ("class Plain:\n    pass\ncondition = True\n"
+                                 "if condition and (list := Plain):\n"
+                                 "    class C(list):\n        pass\n"
+                                 "    def f(obj):\n        stored = C(obj)\n")
+    rebound_class = ("def f(obj):\n    class C(list):\n        pass\n    class C:\n"
+                     "        def __init__(self, value):\n            pass\n    stored = C(obj)\n")
+    rebound_alias = ("def f(obj):\n    class L(list):\n        pass\n    class Plain:\n"
+                     "        def __init__(self, value):\n            pass\n    Alias = L\n"
+                     "    Alias = Plain\n    stored = Alias(obj)\n")
+    assert not _fix15_has(dotted_shadow, "protocol-running callable C")
+    assert not _fix15_rows(nested_shadow)
+    assert not _fix15_has(instance_call, "protocol-running callable c")
+    assert not _fix15_has(local_delete, "protocol-running callable C")
+    assert not _fix15_has(repeated_with, "protocol-running callable C")
+    assert not _fix15_has(exception_shadow, "protocol-running callable C")
+    assert not _fix15_has(walrus_shadow, "protocol-running callable C")
+    assert not _fix15_has(statement_walrus_shadow, "protocol-running callable C")
+    assert not _fix15_has(conjunction_walrus_shadow, "protocol-running callable C")
+    assert not _fix15_has(rebound_class, "protocol-running callable C")
+    assert not _fix15_has(rebound_alias, "protocol-running callable Alias")
+
+
+def test_m5_fix17_e_selected_metaclass_joins_exact_type_with_every_base_and_keyword():
+    prepared = ("from posixpath import os as imported\nx = {}\nreplacement = None\n"
+                "class Meta(type):\n    @classmethod\n    def __prepare__(mcls, name, bases):\n"
+                "        return {'x': imported}\nclass Base(metaclass=Meta):\n    pass\n"
+                "class C(Base, metaclass=type):\n    x.walk = replacement\n    x = {}\n")
+    assert _fix15_has(prepared, "attribute store through unresolved base x")
+    pure_receiver = ("import os\nsettings = os.environ\nclass Meta(type):\n    @classmethod\n"
+                     "    def __prepare__(mcls, name, bases):\n        return {'settings': object()}\n"
+                     "class Base(metaclass=Meta):\n    pass\nclass C(Base, metaclass=type):\n"
+                     "    settings.get('KEY')\n    settings = {}\n")
+    assert _fix15_has(pure_receiver, "unproven pure method call get through unresolved base settings")
+    later_expansion = ("options = {}\nx = {}\nclass C(metaclass=type, **options):\n"
+                       "    x.get('KEY')\n    x = {}\n")
+    assert _fix15_has(later_expansion, "unproven pure method call get through unresolved base x")
+
+
+def test_m5_fix17_f_selected_metaclass_controls_keep_lookup_order_and_builtin_bases():
+    source = ("x = {}\nclass Exact(metaclass=type):\n    x.get('KEY')\n    x = {}\n"
+              "class Builtin(dict, metaclass=type):\n    x.get('KEY')\n    x = {}\n"
+              "class Prior:\n    x = {}\n    x.get('KEY')\n")
+    assert not _fix15_rows(source)
+
+
+def test_m5_fix17_g_implicit_protocol_dispatch_covers_each_bounded_family():
+    cases = {
+        "iteration": ("def f(obj):\n    for value in obj:\n        pass\n", "implicit iteration"),
+        "comprehension": ("def f(obj):\n    [False for value in obj]\n", "implicit iteration"),
+        "yield_from": ("def f(obj):\n    yield from obj\n", "implicit iteration"),
+        "starred": ("def local(*values):\n    return ()\ndef f(obj):\n    local(*obj)\n",
+                    "implicit iteration"),
+        "keyword_expansion": ("def local(**values):\n    return ()\ndef f(obj):\n    local(**obj)\n",
+                              "implicit iteration"),
+        "dictionary_expansion": ("def f(obj):\n    {**obj}\n", "implicit iteration"),
+        "unpacking": ("def f(obj):\n    left, right = obj\n", "implicit iteration"),
+        "nested_unpacking": ("def f(obj):\n    left, (right, third) = [False, obj]\n",
+                             "implicit iteration"),
+        "star_suffix_unpacking": (
+            "def f(obj):\n    head, *middle, (left, right) = [False, False, False, obj]\n",
+            "implicit iteration"),
+        "nested_star_unpacking": (
+            "def f(obj):\n    head, *(middle, (left, right)), tail = [False, False, obj, False]\n",
+            "implicit iteration"),
+        "loop_unpacking": ("def f(obj):\n    for left, right in [obj]:\n        pass\n",
+                           "implicit iteration"),
+        "nested_loop_unpacking": ("def f(obj):\n    for left, (right, third) in [(False, obj)]:\n"
+                                  "        pass\n", "implicit iteration"),
+        "star_suffix_loop_unpacking": (
+            "def f(obj):\n    for head, *middle, (left, right) in [(False, False, False, obj)]:\n"
+            "        pass\n", "implicit iteration"),
+        "nested_star_loop_unpacking": (
+            "def f(obj):\n    for head, *(middle, (left, right)), tail "
+            "in [(False, False, obj, False)]:\n        pass\n", "implicit iteration"),
+        "nested_comprehension_unpacking": (
+            "def f(obj):\n    [False for left, (right, third) in [(False, obj)]]\n",
+            "implicit iteration"),
+        "star_suffix_comprehension_unpacking": (
+            "def f(obj):\n    [False for head, *middle, (left, right) "
+            "in [(False, False, False, obj)]]\n", "implicit iteration"),
+        "nested_star_comprehension_unpacking": (
+            "def f(obj):\n    [False for head, *(middle, (left, right)), tail "
+            "in [(False, False, obj, False)]]\n", "implicit iteration"),
+        "with_unpacking": ("def f(manager):\n    with manager as (left, right):\n        pass\n",
+                           "implicit iteration"),
+        "with_local_enter_result": (
+            "def f(obj):\n    class C:\n        def __enter__(self):\n            return obj\n"
+            "        def __exit__(self, kind, value, traceback):\n            return False\n"
+            "    with C() as (left, right):\n        pass\n", "implicit iteration"),
+        "with_imported_enter_result": (
+            "from helper import obj\nclass C:\n    def __enter__(self):\n        return obj\n"
+            "    def __exit__(self, kind, value, traceback):\n        return False\n"
+            "with C() as (left, right):\n    pass\n", "implicit iteration"),
+        "with_known_nested_result": (
+            "import contextlib\ndef f(obj):\n    with contextlib.nullcontext((False, obj)) "
+            "as (head, (left, right)):\n        pass\n", "implicit iteration"),
+        "containment": ("def f(obj):\n    False in obj\n", "implicit comparison"),
+        "comparison": ("def f(obj):\n    obj == False\n", "implicit comparison"),
+        "truth": ("def f(obj):\n    if obj:\n        pass\n", "implicit truth test"),
+        "boolean": ("def f(obj):\n    obj or False\n", "implicit truth test"),
+        "match_guard": ("def f(obj):\n    match False:\n        case _ if obj:\n            pass\n",
+                        "implicit truth test"),
+        "formatting": ("def f(obj):\n    f'{obj}'\n", "implicit formatting"),
+        "attribute": ("def f(obj):\n    obj.value\n", "implicit attribute read"),
+        "subscript_base": ("def f(obj):\n    obj[False]\n", "implicit subscript read"),
+        "subscript_index": ("def f(obj):\n    [False][obj]\n", "implicit subscript read"),
+        "slice_component": ("def f(obj):\n    [False][obj:]\n", "implicit subscript read"),
+        "unary": ("def f(obj):\n    -obj\n", "implicit unary operator"),
+        "binary": ("def f(obj):\n    obj + False\n", "implicit binary operator"),
+        "percent_formatting": ("def f(obj):\n    '%s' % [obj]\n", "implicit binary operator"),
+        "disposal": ("def identity(value):\n    return value\ndef f(obj):\n    identity(obj)\n",
+                     "implicit result disposal"),
+        "builtin_element_disposal": ("def f(obj):\n    list([obj]).pop()\n", "implicit result disposal"),
+        "local_method_disposal": ("class C:\n    def get(self, value):\n        return value\n"
+                                  "def f(obj):\n    C().get(obj)\n", "implicit result disposal"),
+        "imported": ("from helper import obj\nobj == False\n", "implicit comparison"),
+        "imported_module_comparison": ("import helper\nhelper == False\n", "implicit comparison"),
+        "imported_module_attribute": ("import helper\nhelper.value\n", "implicit attribute read"),
+        "imported_module_subscript": ("import helper\nhelper[False]\n", "implicit subscript read"),
+    }
+    for name, (source, expected) in cases.items():
+        assert _fix15_has(source, expected + " through unresolved base"), name
+
+
+def test_m5_fix17_h_implicit_protocol_controls_stay_exact():
+    source = ("def f(obj):\n    for value in [obj]:\n        pass\n    if [obj]:\n        pass\n"
+              "    [False for value in [obj]]\n    obj is None\n    obj is False == False\n"
+              "    False == False\n    False or obj\n    f'{False}'\n    [False][False:]\n"
+              "    -False\n    False + False\n    [obj] + []\n    (obj,) + ()\n"
+              "    [obj] * False\n    list([obj])\n"
+              "    head, *middle, (left, right) = [False, False, (False, False)]\n"
+              "    head, *(middle, (left, right)), tail = "
+              "[False, False, (False, False), False]\n")
+    assert not _fix15_rows(source)
+    safe_disposal = ("def f(obj):\n    list([obj])\n    [].append(obj)\n"
+                     "def local():\n    return False\nlocal()\n[False].pop()\n")
+    assert not _fix15_rows(safe_disposal)
+    exact_iteration = ("def local(*values):\n    return ()\ndef f(obj):\n    items = iter((obj,))\n"
+                       "    for value in items:\n        pass\n    local(*[obj])\n    left, = [obj]\n")
+    assert not _fix15_rows(exact_iteration)
+    exact_with = ("import contextlib\ndef f():\n"
+                  "    with contextlib.nullcontext((False,)) as (value,):\n        pass\n")
+    assert not _fix15_rows(exact_with)
+
+
+def test_m5_fix17_i_removing_only_keys_restores_both_receiver_rows(monkeypatch):
+    monkeypatch.setitem(_PURE_LIBRARY_RECEIVERS, "os.environ", frozenset({"get"}))
+    direct = "import os\nos.environ.keys()\n"
+    callback = "import os\niter(os.environ.keys, ())\n"
+    assert _fix15_has(direct, "method call keys through imported namespace os.environ")
+    assert _fix15_has(callback, "callback method keys of iter through imported namespace os.environ")
+    assert not _fix15_rows("import os\nos.environ.get('KEY')\n")
+
+
+def test_m5_fix17c_a_transitive_generic_alias_and_bool_bases_keep_every_route():
+    cases = {
+        "direct": ("class Base(list):\n    pass\nclass C(Base[str]):\n    pass\n"
+                   "def f(obj):\n    C(obj)\n"),
+        "mixed": ("condition = False\nclass Base(list):\n    pass\nclass C(Base[str]):\n    pass\n"
+                  "def local(value):\n    return ()\nrunner = C if condition else local\n"
+                  "def f(obj):\n    runner(obj)\n"),
+        "callback": ("class Base(list):\n    pass\nclass C(Base[str]):\n    pass\n"
+                     "def f(obj):\n    map(C, (obj,))\n"),
+        "dict": ("class Base(dict):\n    pass\nclass C(Base[str, object]):\n    pass\n"
+                 "def f(obj):\n    C(obj)\n"),
+        "computed": ("class Base((list,)[False]):\n    pass\nclass C(Base[str]):\n    pass\n"
+                     "def f(obj):\n    C(obj)\n"),
+    }
+    for name, source in cases.items():
+        assert _fix15_has(source, "protocol-running callable"), name
+
+    bool_selector = "class C((list[str],)[False]):\n    pass\ndef f(obj):\n    C(obj)\n"
+    assert "call of protocol-running callable C through unresolved base obj" in _fix15_rows(bool_selector)
+
+    exact_type = "class C:\n    pass\ndef f(obj):\n    C(obj)\n"
+    builtin_base = "class C(list[str]):\n    pass\ndef f(obj):\n    C(obj)\n"
+    unrelated = "from helper import Base\nclass C(Base[str]):\n    pass\ndef f(obj):\n    C(obj)\n"
+    integer_index = ("class C((list[str],)[%s]):\n    pass\n"
+                     "def f(obj):\n    C(obj)\n") % int(False)
+    starred_display = "class C((*(), list)[False]):\n    pass\ndef f(obj):\n    C(obj)\n"
+    assert not _fix15_has(exact_type, "protocol-running callable C")
+    assert _fix15_has(builtin_base, "protocol-running callable C")
+    assert not _fix15_has(unrelated, "protocol-running callable C")
+    assert _fix15_has(integer_index, "protocol-running callable C")
+    assert _fix15_has(starred_display, "protocol-running callable C")
