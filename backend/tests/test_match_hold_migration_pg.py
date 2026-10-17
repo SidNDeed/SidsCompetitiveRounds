@@ -352,3 +352,104 @@ def test_383_proof_block_raises_on_a_gap():
             assert "default ovt_series.hold_v2" in msg, msg
             assert await conn.fetchval("SELECT to_regclass('match_report_journal')") is None
     _run(go())
+
+
+# -- 384 and 385: the client keys and their machine-translation proposals -----
+
+M384 = os.path.join(cf_pg.SQL_DIR, "384_i18n_keys_stage2_hold.sql")
+M385 = os.path.join(cf_pg.SQL_DIR, "385_seed_machine_translations_stage2_hold.sql")
+KEYS_384 = ("98dca83410faa64d", "21a77f99b9e86f48", "e247d0f66676e2fa", "690eba24c1191a59",
+            "b933f3c706c40e83", "dff040f0708dc38d", "fe3e2890029979eb", "5ff81c1cbcb1bc7b",
+            "66acd1c2d1011708", "bd57f21b2e779ae1", "5be7e933e570652e")
+
+
+def _read(p):
+    return io.open(p, encoding="utf-8").read()
+
+
+def test_384_385_header_one_transaction_no_now_no_bind_in_comments():
+    """Both files are one explicit transaction (#340), read no NOW() (one DB
+    clock), and no comment names a bind (#697). Each key id is
+    sha1("client" NUL English)[:16] and each source hash sha1(English), the
+    form tools/i18n_sync_keys.py computes."""
+    import hashlib
+    for p in (M384, M385):
+        stmts = cf_pg.lh._split_sql(_read(p))
+        assert stmts[0].upper() == "BEGIN" and stmts[-1].upper() == "COMMIT", p
+        assert "NOW()" not in _read(p).upper().replace(" ", ""), p
+        for line in _read(p).splitlines():
+            if "--" in line:
+                assert not re.search(r":[a-z_]+\b", line.split("--", 1)[1]), line
+    rows = re.findall(r"\('([0-9a-f]{16})', 'client', \$k384\$(.*?)\$k384\$, '([0-9a-f]{40})'",
+                      _read(M384))
+    assert [k for k, _, _ in rows] == list(KEYS_384)
+    for k, eng, h in rows:
+        assert hashlib.sha1(("client\0" + eng).encode("utf-8")).hexdigest()[:16] == k, eng
+        assert hashlib.sha1(eng.encode("utf-8")).hexdigest() == h, eng
+    seeded = set(re.findall(r"\('([0-9a-f]{16})', '(es|ru|uk|sv)', '([0-9a-f]{40})'",
+                            _read(M385)))
+    assert len(seeded) == 44
+    assert {(k, h) for k, _, h in seeded} == {(k, h) for k, _, h in rows}
+
+
+def test_384_385_executed_twice_and_each_post_check_raises():
+    """On a scratch case schema: 385 before 384 RAISES and lands nothing;
+    384 twice leaves exactly the 11 keys live with their hashes and
+    contexts; 385 twice leaves exactly 44 pending claude-mt proposals and
+    no duplicate; 384 with one key row removed RAISES when that key is
+    retired, rolls back whole, and the real 384 then revives it."""
+    cf_pg.require_live_pg()
+
+    async def count_keys(conn):
+        return await conn.fetchval(
+            "SELECT count(*) FROM i18n_keys WHERE key_id = ANY($1::text[])"
+            "   AND retired_at IS NULL AND max_px IS NULL AND namespace = 'client'"
+            "   AND context LIKE 'MatchHold · %'", list(KEYS_384))
+
+    async def count_props(conn):
+        return await conn.fetchval(
+            "SELECT count(*) FROM i18n_proposals WHERE key_id = ANY($1::text[])"
+            "   AND proposer_steam_id = 'claude-mt' AND status = 'pending'", list(KEYS_384))
+
+    async def go():
+        async with cf_pg.case("rjs2_i18n") as (c, _sm):
+            conn = c.conn
+            assert await conn.fetchval(
+                "SELECT count(*) FROM i18n_keys WHERE key_id = ANY($1::text[])",
+                list(KEYS_384)) == 0
+            try:
+                await conn.execute(_read(M385))
+                raise AssertionError("385 ran without its keys")
+            except _asyncpg.exceptions.RaiseError as e:
+                assert "migration 385: 44 of 44" in str(e), str(e)
+            await conn.execute("ROLLBACK")
+            assert await count_props(conn) == 0
+
+            for _ in range(2):
+                await conn.execute(_read(M384))
+                assert await count_keys(conn) == 11
+            for _ in range(2):
+                await conn.execute(_read(M385))
+                assert await count_props(conn) == 44
+            assert await conn.fetchval(
+                "SELECT count(*) FROM (SELECT key_id, language_code FROM i18n_proposals"
+                " WHERE key_id = ANY($1::text[]) GROUP BY 1, 2 HAVING count(*) > 1) d",
+                list(KEYS_384)) == 0
+
+            line = next(l for l in _read(M384).splitlines(True)
+                        if l.startswith("('98dca83410faa64d', 'client'"))
+            gap = _read(M384).replace(line, "", 1)
+            assert gap.count("98dca83410faa64d") == 1      # only the post-check names it
+            await conn.execute(
+                "UPDATE i18n_keys SET retired_at = clock_timestamp()"
+                " WHERE key_id = '98dca83410faa64d'")
+            try:
+                await conn.execute(gap)
+                raise AssertionError("384 post-check passed with a key missing")
+            except _asyncpg.exceptions.RaiseError as e:
+                assert "post-check FAILED: 10 of 11" in str(e), str(e)
+            await conn.execute("ROLLBACK")
+            assert await count_keys(conn) == 10
+            await conn.execute(_read(M384))
+            assert await count_keys(conn) == 11
+    _run(go())
