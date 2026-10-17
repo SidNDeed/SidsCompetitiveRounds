@@ -584,8 +584,8 @@ class Pass:
                 inherited |= v.flat()
             current = set(ctx)
             for v in list(argvals) + list(kwvals.values()):
-                current |= v.im_all()
-            intrinsic = set(ret.im_all()) - inherited
+                current |= v.flat()
+            intrinsic = set(ret.flat()) - inherited
             return V(root, (current | intrinsic) & {K, O})
         return ret if ret is not None else V()
 
@@ -1441,6 +1441,24 @@ def direct_order(r):
     return {"name": _aer_enc(_ordered_value(r["rows"]))}
 '''
 
+_API_ROOT_EXPLICIT_RANK = _API_PERMITTED + '''
+
+
+def direct_explicit_rank(r):
+    return {"name": _aer_enc(r["rank"] > 0.5)}
+'''
+
+_API_ROOT_INDEXED_ORDER = _API_PERMITTED + '''
+
+
+def _order_value(row):
+    return row["rank"]
+
+
+def direct_indexed_order(r):
+    return {"name": _aer_enc(sorted(r["rows"], key=_order_value)[0]["name"])}
+'''
+
 _BOT_ROOT_RANK = _BOT_PERMITTED.replace(
     '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
     '        items.append(AerItem("cell", (), (),\n'
@@ -1463,6 +1481,22 @@ _BOT_ROOT_ORDER = _BOT_PERMITTED.replace(
     '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
     '        items.append(AerItem("cell", (), (), _aer_enc_text(_ordered_value(page))))')
 
+_DIRECT_ORDER_HELPER = '''def _order_value(cell):
+    return cell[3]
+
+
+'''
+
+_BOT_ROOT_EXPLICIT_RANK = _BOT_PERMITTED.replace(
+    '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+    '        items.append(AerItem("cell", (), (), _aer_enc_text(cell[3] > 0.5)))')
+
+_BOT_ROOT_INDEXED_ORDER = _BOT_PERMITTED.replace(
+    "def _aer_plan(page):", _DIRECT_ORDER_HELPER + "def _aer_plan(page):").replace(
+    '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+    '        items.append(AerItem("cell", (), (),\n'
+    '                             _aer_enc_text(sorted(page.cells, key=_order_value)[0][0])))')
+
 _BOT_DECODER_RANK = _BOT_PERMITTED.replace(
     '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
     '        again = _aer_decode_response(\n'
@@ -1475,6 +1509,17 @@ _BOT_DECODER_ORDER = _BOT_PERMITTED.replace(
     '        again = _aer_decode_response(_ordered_value(page))\n'
     '        items.append(AerItem("cell", (), (), again))')
 
+_BOT_DECODER_EXPLICIT_RANK = _BOT_PERMITTED.replace(
+    '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+    '        again = _aer_decode_response(page.cells[0][3] > 0.5)\n'
+    '        items.append(AerItem("cell", (), (), again))')
+
+_BOT_DECODER_INDEXED_ORDER = _BOT_PERMITTED.replace(
+    "def _aer_plan(page):", _DIRECT_ORDER_HELPER + "def _aer_plan(page):").replace(
+    '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+    '        again = _aer_decode_response(sorted(page.cells, key=_order_value)[0][0])\n'
+    '        items.append(AerItem("cell", (), (), again))')
+
 
 @pytest.mark.parametrize("label,api,bot,needle", [
     ("api encoder direct rank", _API_ROOT_RANK, "", "reads K"),
@@ -1483,6 +1528,12 @@ _BOT_DECODER_ORDER = _BOT_PERMITTED.replace(
     ("bot encoder direct order", "", _BOT_ROOT_ORDER, "reads O"),
     ("decoder direct rank", "", _BOT_DECODER_RANK, "reads K"),
     ("decoder direct order", "", _BOT_DECODER_ORDER, "reads O"),
+    ("api encoder explicit rank", _API_ROOT_EXPLICIT_RANK, "", "reads K"),
+    ("api encoder indexed order", _API_ROOT_INDEXED_ORDER, "", "reads O"),
+    ("bot encoder explicit rank", "", _BOT_ROOT_EXPLICIT_RANK, "reads K"),
+    ("bot encoder indexed order", "", _BOT_ROOT_INDEXED_ORDER, "reads O"),
+    ("decoder explicit rank", "", _BOT_DECODER_EXPLICIT_RANK, "reads K"),
+    ("decoder indexed order", "", _BOT_DECODER_INDEXED_ORDER, "reads O"),
 ])
 def test_declared_roots_preserve_direct_rank_and_order_selection(
         label, api, bot, needle):
