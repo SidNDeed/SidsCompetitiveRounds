@@ -244,7 +244,7 @@ namespace CompetitiveRounds
                 // The cascade prefix suppresses on the same memo, so from here
                 // the departure is held whatever fails below: the cut is
                 // latched first and filled field by field.
-                var cut = new TeamHoldRules.DropCut { Actor = p.ActorNumber, At = Time.unscaledTime };
+                var cut = new TeamHoldRules.DropCut { Actor = p.ActorNumber, At = Time.unscaledTime, Leaver = p };
                 _cut = cut;
                 _leaveAt = Time.unscaledTime;
                 _purged = _resolved = false;
@@ -333,6 +333,8 @@ namespace CompetitiveRounds
             TeamHoldLoop.NoteEnded(cut, reason == "second_departure");
             Plugin.Log.LogInfo(TAG + " ended reason=" + (reason ?? "") + " slot=" + cut.Slot.ToString(CultureInfo.InvariantCulture)
                 + " g=" + (cut.G ?? ""));
+            // S5: the path of today, once, with the cut as input.
+            try { TeamHoldExpiry.Run(cut, reason); } catch (Exception ex) { Plugin.Log.LogWarning(TAG + " expiry: " + ex.Message); }
         }
 
         /// <summary>A verified e: the returner is in play; nothing of the

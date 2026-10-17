@@ -141,6 +141,20 @@ MUTANTS = [
     ("M4.6", "K4", "seat", [
         ("if (seat.Deals > k) { superseded = true; return false; }", "")],
      "t43_after_own_pick", "t43_before_phase"),
+    # K5, S5
+    ("M5.2", "K5", "rules", [
+        ("case DcKind.Floor: r.Add(ExpiryOp.ReportFloor); break;",
+         "case DcKind.Floor: case DcKind.StandDown: r.Add(ExpiryOp.ReportFloor); break;")],
+     "t52_stand_down_kept", "t56_ovt_no_report"),
+    ("M5.3", "K5", "rules", [
+        ("                switch (cut.Eligibility)",
+         "                if (presentAtExpiry != null && presentAtExpiry.Count < 2 && cut.Eligibility == DcKind.Fallback) { r.Add(ExpiryOp.ReportPrompt); r.Add(ExpiryOp.VanillaLeave); return r; }\n"
+         "                switch (cut.Eligibility)")],
+     "t52_census_changed", "t52_clean_census"),
+    ("M5.9", "K5", "rules", [
+        ("            if (cut.Mode == MODE_TEAM)\n            {\n                switch (cut.Eligibility)",
+         "            if (cut.Mode == MODE_TEAM || cut.Mode == MODE_OVT)\n            {\n                switch (cut.Eligibility)")],
+     "t56_ovt_no_report", "t52_clean_census"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

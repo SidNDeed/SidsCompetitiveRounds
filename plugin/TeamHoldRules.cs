@@ -386,6 +386,9 @@ namespace CompetitiveRounds
             /// <summary>The glue's executable form of the eligibility (the
             /// report fields, the watched seat); opaque here.</summary>
             internal object Plan;
+            /// <summary>The departing Photon player, retained for the vanilla
+            /// leave body at the expiry (S5); opaque here.</summary>
+            internal object Leaver;
         }
 
         // ── S2: the hold at the boundary ───────────────────────────────────
@@ -896,6 +899,36 @@ namespace CompetitiveRounds
             bool superseded;
             if (SeatDeckLog.CommitGrant(k, slot, card, out superseded)) return GrantOutcome.Applied;
             return superseded ? GrantOutcome.Superseded : GrantOutcome.Refused;
+        }
+
+        // ── S5: the expiry from the cut ────────────────────────────────────
+
+        internal enum ExpiryOp { ReportPrompt, ReportFloor, ArmFallback, VanillaLeave }
+
+        /// <summary>At a verified x every client runs the path of today with
+        /// the cut as input: a team survivor executes its OWN latched
+        /// eligibility (a prompt or floor reporter posts with the cut's
+        /// points, a watcher re-arms the fallback watch on its latched target,
+        /// the leaver's team stands down), then the vanilla leave body for the
+        /// first drop. A 1v2 survivor runs the vanilla body and reports
+        /// nothing. <paramref name="presentAtExpiry"/> is the fighters present
+        /// at x; the rule must not read it (the set of today is the set at the
+        /// drop).</summary>
+        internal static List<ExpiryOp> ExpiryActions(DropCut cut, IList<int> presentAtExpiry)
+        {
+            var r = new List<ExpiryOp>();
+            if (cut == null) return r;
+            if (cut.Mode == MODE_TEAM)
+            {
+                switch (cut.Eligibility)
+                {
+                    case DcKind.Prompt: r.Add(ExpiryOp.ReportPrompt); break;
+                    case DcKind.Floor: r.Add(ExpiryOp.ReportFloor); break;
+                    case DcKind.Fallback: r.Add(ExpiryOp.ArmFallback); break;
+                }
+            }
+            r.Add(ExpiryOp.VanillaLeave);
+            return r;
         }
     }
 }
