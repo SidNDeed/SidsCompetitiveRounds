@@ -57492,10 +57492,17 @@ async def _ffa_settle_window(db, lid, g) -> bool:
         if stage is not None:
             # The body turned a lock or statement timeout of the janitor bound
             # into its 503 retry answer (the insert branches raise their
-            # refusal inside the database error's except): nothing was
-            # refused, so nothing is superseded; the next tick settles it.
+            # refusal inside the database error's except).  The stage is only
+            # diagnostic; the status below decides whether the row is terminal.
             print(f"[FFA-REPORT] journal window lobby {_asm_id8(lid)} game {g} "
                   f"bound stage={stage}; next tick")
+        elif ex.status_code >= 500:
+            print(f"[FFA-REPORT] journal window lobby {_asm_id8(lid)} game {g} "
+                  f"retryable status={ex.status_code}; next tick")
+        # Every 5xx means settlement did not reach a terminal judgement.  Keep
+        # the sole receipt held so the next report-route or janitor tick can
+        # retry it; only captured terminal 4xx refusals may supersede.
+        if ex.status_code >= 500:
             return False
         # The chosen report was refused at settlement (its refusal record is
         # the body's own): it is kept, marked superseded, and the next pass

@@ -519,6 +519,58 @@ def test_t3_8_a_bound_refusal_is_not_a_supersede(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_h4_retryable_failures_keep_the_chosen_receipt(monkeypatch):
+    """H4: generic and quarantine-lock 503s keep the chosen row held for the
+    next tick; a captured terminal 409 supersedes it."""
+    async def body(env):
+        # A non-bound 503 is retryable even though it carries no SQLSTATE.
+        lob = await _journaled_r(env)
+        real = main._ffa_settle_report
+        calls = {"n": 0}
+
+        async def once(rep, db, *, journal):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise main.FfaReportRefusal(503, "retry", main._ffa_progress(0))
+            return await real(rep, db, journal=journal)
+
+        env.mp.setattr(main, "_ffa_settle_report", once)
+        await A._janitor_tick(env)
+        assert await _journal(env, lob) == {lob.sids[2]: ("r", "held")}, \
+            ("H4 retryable held", await _journal(env, lob))
+        await A._janitor_tick(env)
+        assert len(await _matches(env, lob)) == 1, ("H4 retry next tick",)
+        env.mp.setattr(main, "_ffa_settle_report", real)
+
+        # A terminal branch whose quarantine advisory lock is temporarily held
+        # becomes a retryable 503 and must likewise retain its only receipt.
+        lob = await _journaled_r(env)
+        await env.set_lobby(lob, status="completed")
+        R.bound_fast(env)
+        done = await R.tick_holding(
+            env, "SELECT pg_advisory_xact_lock(hashtext('mrq:' || $1::text))",
+            str(lob.lid))
+        assert done and await _journal(env, lob) == {
+            lob.sids[2]: ("r", "held")}, ("H4 quarantine retry", done,
+                                           await _journal(env, lob))
+        await env.set_lobby(lob, status="active")
+        await A._janitor_tick(env)
+        assert len(await _matches(env, lob)) == 1, ("H4 quarantine next tick",)
+
+        # Once the same terminal 409 is durably captured, it is terminal and
+        # the chosen row is superseded rather than retried forever.
+        lob = await _journaled_r(env)
+        await env.set_lobby(lob, status="completed")
+        await A._janitor_tick(env)
+        assert await _journal(env, lob) == {lob.sids[2]: ("r", "superseded")}, \
+            ("H4 terminal superseded", await _journal(env, lob))
+        kept = await env.conn.fetchval(
+            "SELECT count(*) FROM match_report_quarantine"
+            " WHERE mode = 'ffa' AND group_id = $1", lob.lid)
+        assert kept == 1, ("H4 terminal captured", kept)
+    run_env(monkeypatch, body)
+
+
 def test_t3_9_a_held_reporter_row_bounds_settle_phase_two(monkeypatch):
     """T3.9: phase 2 under the bound, raw: a reported player's players row
     another transaction holds FOR UPDATE makes the body's sorted players pass

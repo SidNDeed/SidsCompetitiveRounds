@@ -280,6 +280,12 @@ ROWS = [
                   '        c = classes.get(sid, {}).get("cls", "u")\n'
                   '        if jr["self_lag"] and c == "c":\n'
                   '            c = "g"\n', 1)]},
+    {"row": "F1.H4", "node": RJ + "test_h4_retryable_failures_keep_the_chosen_receipt",
+     "tag": "H4 retryable held",
+     "mutant": [(MAIN,
+                  '        if ex.status_code >= 500:\n'
+                  '            return False\n',
+                  '', 1)]},
     {"row": "H1", "node": RP + "test_health_marker_counts_every_site", "tag": "health ffa_readmit",
      "mutant": [(MAIN, '            await _ffa_readmit_janitor(async_session)\n',
                  '            pass\n', 1)]},
@@ -327,12 +333,12 @@ ROWS = [
      "mutant": [(MAIN, '        _rdm_janitor_bound(db)\n        await _ffa_settle_due_windows(db)\n',
                  '        await _ffa_settle_due_windows(db)\n', 1)]},
     {"row": "B7", "node": RJ + "test_t3_8_a_bound_refusal_is_not_a_supersede",
-     "tag": "T3.8 kept",
+     "tag": "T3.8 bound line",
      "mutant": [(MAIN,
                  '        todo.extend((getattr(e, "orig", None), e.__cause__, e.__context__))\n',
                  '        todo.extend((getattr(e, "orig", None), e.__cause__))\n', 1)]},
     {"row": "B8", "node": RJ + "test_t3_8_a_bound_refusal_is_not_a_supersede",
-     "tag": "T3.8 kept",
+     "tag": "T3.8 bound line",
      "mutant": [(MAIN,
                  '        stage = _rdm_bound_stage(ex)\n'
                  '        if stage is not None:\n'
