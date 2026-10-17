@@ -1061,6 +1061,14 @@ class HealthResponse(BaseModel):
     # Absent on any build before that batch, which is how the train reads the
     # old build.
     connect_failure: int
+    # ffa_readmit: how many of the FFA mid-game readmission wiring sites (the
+    # flag at lock, present_at, the hold, the janitor arms, the readmission
+    # route, discovery, epoch version 2, the report journal and the spectator
+    # headroom) load their helper in this build (main._FFA_READMIT; 9 = every
+    # one). DERIVED from compiled code, never written down (#342); the release
+    # train's build discriminator for the readmission batch, read by nothing
+    # else (#306). No default, so building the answer without it raises.
+    ffa_readmit: int
     # auto_log: the automatic post-match log upload (main._auto_log_health_word).
     # auto_logs.AUTO_LOG_REVISION when POST /api/v1/logs/auto is MOUNTED on the
     # app that answers -- read from the routing table on every request, never
@@ -1880,6 +1888,10 @@ class FfaMatchReport(BaseModel):
     # engine (score-progression hover graph). Outside the frozen HMAC
     # canonical; absent from pre-timeline clients.
     timeline: str | None = Field(None, max_length=2000)
+    # FFA readmission (V3 P3): 1 when the reporting seat holds a local lag
+    # record for this game. Outside the HMAC canonical and advisory: it can
+    # only move its own report behind the continuous reports of the game.
+    self_lag: int = Field(0, ge=0, le=1)
 
 
 class FfaMatchResponse(BaseModel):

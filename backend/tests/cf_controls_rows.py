@@ -207,8 +207,8 @@ row("S10", "test_s10_the_start_refactor_is_equivalent", [
       note="the ffa_adm1 conjunct dropped: the enrolled member without the token "
            "gates admission_v1 TRUE"),
 ], T("rename_local",
-     E(MAIN, '    _a1, _a2 = await _ffa_asm_gates(db, _pids)\n',
-       '    _g1, _g2 = await _ffa_asm_gates(db, _pids)\n    _a1, _a2 = _g1, _g2\n')))
+     E(MAIN, '    _a1, _a2, _a3 = await _ffa_asm_gates(db, _pids)\n',
+       '    _g1, _g2, _g3 = await _ffa_asm_gates(db, _pids)\n    _a1, _a2, _a3 = _g1, _g2, _g3\n')))
 
 # -- S11a-j ----------------------------------------------------------------
 _W1 = ('        await db.execute(text(\n'
@@ -606,7 +606,7 @@ _INS_BLOCK = (
     '    INSERT INTO ffa_lobbies (\n'
     '        id, status, photon_room_id, region, player_count, member_ids, created_at,\n'
     '        host_player_id, reformed_from, bets_disabled, assembly_v1, admission_v1,\n'
-    '        region_why, region_detail,\n'
+    '        readmit_v1, region_why, region_detail,\n'
     '        score_target, card_candidates, initial_picks, card_cap, same_card_rule,\n'
     '        is_ranked, settings_known, settings_changed_at, password_hash, kicked_steam_ids,\n'
     '        kills_tiebreak, sudden_death,\n'
@@ -618,7 +618,7 @@ _INS_BLOCK = (
     '    VALUES (\n'
     '        :new, \'open\', NULL, NULL, CAST(:n AS smallint), CAST(:members AS uuid[]), NOW(),\n'
     '        :host, :old, TRUE, FALSE, FALSE,\n'
-    '        NULL, NULL,\n'
+    '        FALSE, NULL, NULL,\n'
     '        :score_target, :card_candidates, :initial_picks, :card_cap, :same_card_rule,\n'
     '        :is_ranked, :settings_known, :settings_changed_at, :password_hash, :kicked_steam_ids,\n'
     '        :kills_tiebreak, :sudden_death,\n'
@@ -1434,8 +1434,13 @@ row("S47", "test_s47_entered_is_telemetry", [
 
 
 # -- S48 -------------------------------------------------------------------
-_W7C = '        if rep["late_admitted_at"] is not None or (short and not rep["start_roster"]):\n'
-_W7E = '        if g in [int(x) for x in (rep["lag_games"] or [])]:\n'
+# The readmission lane (V3 P3) prefixed both rules with `not journaled and`
+# (a report the journal settled is not refused again). Every lobby these
+# fixtures build is locked readmit_v1 false, so journaled is False there and
+# each mutant below keeps its meaning without the prefix.
+_W7C = ('        if not journaled and (rep["late_admitted_at"] is not None\n'
+        '                              or (short and not rep["start_roster"])):\n')
+_W7E = '        if not journaled and g in [int(x) for x in (rep["lag_games"] or [])]:\n'
 _LAG = '        ctx.log(f"lag slot={me[\'slot\']} game={req.game} k={req.k} why={req.why}")\n'
 _LATE_DETAIL = '                detail="This seat may not report this sitting\'s games", progress=progress)\n'
 row("S48", "test_s48_the_sticky_reporter_rule", [
@@ -1461,7 +1466,7 @@ row("S48", "test_s48_the_sticky_reporter_rule", [
        "    return \"This seat may not report this sitting's games\"\n"
        "\n\nasync def _asm_report_rules("),
      E(MAIN, _W7E, '        _lags = [int(x) for x in (rep["lag_games"] or [])]\n'
-                   '        if g in _lags:\n')))
+                   '        if not journaled and g in _lags:\n')))
 
 # -- S49 -------------------------------------------------------------------
 _STARTED = ('        if ctx.lobby.get("start_granted_at") is not None and (\n'
@@ -1736,7 +1741,11 @@ row("S57", "test_s57_the_g3_server_gate", [
 # -- S58: structural, both states ----------------------------------------------
 _G3_FLAG = ("ADM_PRODUCTION_ENABLED = False    # while False, admission_v1 also needs every"
             " member in ffa_g3_seats\n")
-_G3_DOC = '    holds an unexpired ffa_g3_seats enrolment. A member with no queue row, or\n'
+# The readmission lane rewrapped _ffa_asm_gates' docstring; this is the line
+# that now names the table (the mutants below replace it with the same words
+# less the table name).
+_G3_DOC = '    ffa_g3_seats enrolment. readmit_v1: admission_v1 and every member carries\n'
+_G3_DOC_GONE = '    G3 enrolment. readmit_v1: admission_v1 and every member carries\n'
 _G3_INS = '        "INSERT INTO ffa_g3_seats (player_id, added_at, expires_at)"\n'
 _G3_ROUTE = '@app.post("/api/v1/admin/ffa-g3-seats", tags=["Admin"])\n'
 _S58_ASSERTS = (
@@ -1749,7 +1758,7 @@ row("S58", "test_s58_the_g3_fence", [
       note="the production release with the enrolment clause (and the route) still in"),
     M("route_left_in_production", "S58 production route",
       E(MAIN, _G3_FLAG, "ADM_PRODUCTION_ENABLED = True\n"),
-      E(MAIN, _G3_DOC, '    holds an unexpired G3 enrolment. A member with no queue row, or\n'),
+      E(MAIN, _G3_DOC, _G3_DOC_GONE),
       E(MAIN, _G3_Q, '        "SELECT q.player_id, q.caps, FALSE AS enrolled"\n'
                      '        "  FROM ffa_queue q"\n'
                      '        " WHERE q.player_id = ANY(:ids)"), {"ids": ids})).mappings().all()\n'),
@@ -1758,7 +1767,7 @@ row("S58", "test_s58_the_g3_fence", [
     M("route_deleted_before_it", "S58 route", E(MAIN, _G3_ROUTE, "")),
     M("configuration_kept_after_release", "S58 production configuration",
       E(MAIN, _G3_FLAG, "ADM_PRODUCTION_ENABLED = True\n"),
-      E(MAIN, _G3_DOC, '    holds an unexpired G3 enrolment. A member with no queue row, or\n'),
+      E(MAIN, _G3_DOC, _G3_DOC_GONE),
       E(MAIN, _G3_Q, '        "SELECT q.player_id, q.caps, FALSE AS enrolled"\n'
                      '        "  FROM ffa_queue q"\n'
                      '        " WHERE q.player_id = ANY(:ids)"), {"ids": ids})).mappings().all()\n'),
@@ -1865,28 +1874,32 @@ row("S62", "test_s62_no_rebinding_after_a_grant", [
        "\n\nasync def _asm_claim_trigger(ctx, me) -> None:\n")))
 
 # -- S63 -------------------------------------------------------------------
-_EPI = ('        await ctx.db.execute(text(\n'
-        '            "INSERT INTO ffa_kept_epochs (lobby_id, epoch_no, slot, actor_nr, chain)"\n'
-        '            " VALUES (:lid, CAST(:n AS smallint), CAST(:slot AS smallint),"\n'
-        '            "         CAST(:a AS smallint), :chain)"),\n'
-        '            {"lid": ctx.lid, "n": n, "slot": int(p["slot"]), "a": int(claim[0]), "chain": chain})\n')
+# The readmission lane put the version 1 epoch write in the else branch of a
+# readmit_v1 test (V3 P4.8); these fixtures lock readmit_v1 false, so this
+# branch is the one they run, one indent deeper than before.
+_EPI = ('            await ctx.db.execute(text(\n'
+        '                "INSERT INTO ffa_kept_epochs (lobby_id, epoch_no, slot, actor_nr, chain)"\n'
+        '                " VALUES (:lid, CAST(:n AS smallint), CAST(:slot AS smallint),"\n'
+        '                "         CAST(:a AS smallint), :chain)"),\n'
+        '                {"lid": ctx.lid, "n": n, "slot": int(p["slot"]), "a": int(claim[0]),\n'
+        '                 "chain": chain})\n')
 _PREV = ('        prev = (await ctx.db.execute(text(\n'
          '            "SELECT epoch_no, chain FROM ffa_kept_epochs WHERE lobby_id = :lid"\n'
          '            " ORDER BY epoch_no DESC LIMIT 1"), {"lid": ctx.lid})).mappings().first()\n')
-_CHAIN = ('        chain = _ffa_epoch_chain(prev["chain"] if prev is not None else "0",\n'
-          '                                 _asm_id8(ctx.lid), n, int(p["slot"]), int(claim[0]))\n')
+_CHAIN = ('            chain = _ffa_epoch_chain(prev["chain"] if prev is not None else "0",\n'
+          '                                     _asm_id8(ctx.lid), n, int(p["slot"]), int(claim[0]))\n')
 _RUN_COMMIT = '        await db.commit()\n    except _AsmDeadline as d:\n'
 row("S63", "test_s63_the_kept_epoch", [
     M("rechain_row_1", "S63 ii row 1 unchanged",
-      E(MAIN, _EPI, _EPI + '        if n > 1:\n'
-                           '            await ctx.db.execute(text(\n'
-                           '                "UPDATE ffa_kept_epochs SET chain = :chain"\n'
-                           '                " WHERE lobby_id = :lid AND epoch_no = 1"),\n'
-                           '                {"chain": chain, "lid": ctx.lid})\n')),
+      E(MAIN, _EPI, _EPI + '            if n > 1:\n'
+                           '                await ctx.db.execute(text(\n'
+                           '                    "UPDATE ffa_kept_epochs SET chain = :chain"\n'
+                           '                    " WHERE lobby_id = :lid AND epoch_no = 1"),\n'
+                           '                    {"chain": chain, "lid": ctx.lid})\n')),
     M("row_after_the_commit", "S63 i admitting answer",
-      E(MAIN, _EPI, '        ctx.__dict__.setdefault("late_epochs", []).append(\n'
-                    '            {"lid": ctx.lid, "n": n, "slot": int(p["slot"]), "a": int(claim[0]),\n'
-                    '             "chain": chain})\n'),
+      E(MAIN, _EPI, '            ctx.__dict__.setdefault("late_epochs", []).append(\n'
+                    '                {"lid": ctx.lid, "n": n, "slot": int(p["slot"]), "a": int(claim[0]),\n'
+                    '                 "chain": chain})\n'),
       E(MAIN, _RUN_COMMIT,
         '        await db.commit()\n'
         '        for _e in ctx.__dict__.get("late_epochs", []):\n'
@@ -1922,7 +1935,7 @@ row("S63", "test_s63_the_kept_epoch", [
       note="both concurrent admissions read no row before the lobby lock; the second one's "
            "epoch_no 1 is refused by the primary key"),
 ], T("chain_through_a_helper",
-     E(MAIN, _CHAIN, '        chain = _asm_next_chain(prev, ctx.lid, n, p["slot"], claim[0])\n'),
+     E(MAIN, _CHAIN, '            chain = _asm_next_chain(prev, ctx.lid, n, p["slot"], claim[0])\n'),
      E(MAIN, "\n\nasync def _ffa_admission_check(ctx) -> list:\n",
        "\n\ndef _asm_next_chain(prev, lid, n, slot, actor) -> str:\n"
        "    return _ffa_epoch_chain(prev[\"chain\"] if prev is not None else \"0\",\n"
@@ -1975,7 +1988,10 @@ _CENSUS_BLOCK = ('        if _asm_gone_subject(ctx, s):\n'
                  '            found = _asm_gone_test(ctx, s)\n'
                  '            if found is not None:\n'
                  '                await _asm_gone_write(ctx, s, found)\n')
+# The readmission lane reads held_before between the test and the trigger
+# (V3 P4.1); the mutant below keeps that line and plants its write before it.
 _STARTED_LEAVE = ('        if me["verdict"] in _ASM_GRANTED:\n'
+                  '            held_before = me.get("hold_n") is not None\n'
                   '            await _asm_leave_trigger(ctx, me)\n')
 _SLOT_LOCK = '    _row, k = await _ffa_lock_lobby_slot(db, lobby_id)\n'
 _K0 = ('    _k0 = (await db.execute(text("SELECT games_played FROM ffa_lobbies WHERE id = :lid"),\n'
@@ -2062,6 +2078,7 @@ row("S64", _S64, [
         '                " verdict_at = CAST(:now AS timestamptz)"\n'
         '                " WHERE lobby_id = :lid AND player_id = :pid"),\n'
         '                {"now": ctx.now, "lid": lobby_id, "pid": player_id})\n'
+        '            held_before = me.get("hold_n") is not None\n'
         '            await _asm_leave_trigger(ctx, me)\n'),
       nodes=[_n64("test_s64_xi_the_false_leave[leave]")]),
     M("else_branch_when_started", "S64 xi all but one", E(MAIN, _LIVE5, L(29, "or False)")),

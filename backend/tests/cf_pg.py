@@ -7,7 +7,8 @@ migration makes, the mapped tables are widened, and the DDL is replayed again;
 then the held-out migrations run whole, in this order: 331, then
 365_title_ladders_five_tiers.sql (it rewrites 331's tables, so a replay
 cannot run it before 331 exists; the ladder suite runs it the same way),
-then 355. Two differences, both on purpose:
+then 355, then 378_ffa_readmission.sql (it alters 355's tables). Two
+differences, both on purpose:
 
   - 355_ffa_assembly.sql is held out of both replays and run WHOLE last,
     inside its own BEGIN/COMMIT, so every case runs the migration this lane
@@ -60,8 +61,11 @@ M355 = os.path.join(SQL_DIR, "355_ffa_assembly.sql")
 # out with 331 and run whole right after it, as the ladder suite does: a
 # statement-by-statement replay cannot run it before 331 exists.
 M365 = lh.MIGRATION_365
+# 378 (FFA readmission) alters 355's tables, so it is held out with 355 and
+# run whole right after it: a replay cannot run it before 355 exists.
+M378 = os.path.join(SQL_DIR, "378_ffa_readmission.sql")
 HELD_OUT = frozenset({os.path.basename(M331), os.path.basename(M355),
-                      os.path.basename(M365)})
+                      os.path.basename(M365), os.path.basename(M378)})
 
 
 def require_live_pg():
@@ -107,6 +111,11 @@ async def apply_355(conn):
     """Run 355 whole on `conn` (its own BEGIN/COMMIT). The connection must not
     be inside a transaction."""
     await conn.execute(read_355())
+
+
+async def apply_378(conn):
+    """Run 378 whole on `conn` (its own BEGIN/COMMIT)."""
+    await conn.execute(io.open(M378, encoding="utf-8").read())
 
 
 async def _replay_refused(conn, statements):
@@ -158,6 +167,7 @@ async def build(case, *, with_355=True, dsn=None, faithful=False):
     await conn.execute(io.open(M365, encoding="utf-8").read())
     if with_355:
         await apply_355(conn)
+        await apply_378(conn)
 
 
 @contextlib.asynccontextmanager
