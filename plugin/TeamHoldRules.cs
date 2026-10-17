@@ -383,5 +383,229 @@ namespace CompetitiveRounds
             /// report fields, the watched seat); opaque here.</summary>
             internal object Plan;
         }
+
+        // ── S2: the hold at the boundary ───────────────────────────────────
+
+        /// <summary>Rank of a state in the hold's order; x is terminal.</summary>
+        internal static int Rank(char s)
+        {
+            switch (s) { case 'p': return 0; case 'o': return 1; case 'c': return 2; case 'b': return 3; case 'e': return 4; case 'x': return 5; default: return -1; }
+        }
+
+        internal enum Verdict { Act, Inert, End }
+
+        /// <summary>The transition envelope (RJS-H9). A room state after p is
+        /// acted on only when this client's own server read shows that state
+        /// (or a later one) of the same hold and game at the same or a later
+        /// sequence. <paramref name="server"/> is null while no read issued
+        /// after this client observed the room value has answered: the check
+        /// is pending and the state is inert (the ceilings bound the wait).
+        /// An answered read that does not show the state is the unverified
+        /// case: o or c reads as x (end toward today); b or e is inert (keep
+        /// waiting); x is inert until the server shows the hold closed or a
+        /// ceiling passes. A read that answered nothing parsable is passed as
+        /// an empty answer, which shows nothing.</summary>
+        internal static Verdict Verify(HoldKey room, TeamHoldNet.StateAnswer server)
+        {
+            if (room == null) return Verdict.Inert;
+            if (room.State == 'p') return Verdict.Act;
+            if (server == null) return Verdict.Inert;
+            bool same = server.HoldId == room.HoldId && server.G == room.G && server.Seq >= room.Seq;
+            bool shows = same && (room.State == 'x' ? server.Closed : Rank(server.State) >= Rank(room.State) && server.State != 'x');
+            if (shows) return Verdict.Act;
+            if (room.State == 'o' || room.State == 'c') return Verdict.End;
+            return Verdict.Inert;
+        }
+
+        /// <summary>The local ceilings (RJS-M1), every client: 10 s from the
+        /// first p to a verified o; hold_s + 20 s from a verified o; 60 s for
+        /// bind and entry from a verified c. Witness timing only shortens.</summary>
+        internal sealed class Ceilings
+        {
+            internal const double PendingS = 10, ClaimedS = 60, Margin = 20;
+            internal double FirstP = -1, VerifiedO = -1, VerifiedC = -1;
+            internal int HoldS;
+
+            internal void SawP(double now) { if (FirstP < 0) FirstP = now; }
+            internal void SawO(double now, int holdS) { if (VerifiedO < 0) { VerifiedO = now; HoldS = holdS; } }
+            internal void SawC(double now) { if (VerifiedC < 0) VerifiedC = now; }
+
+            internal bool Passed(double now)
+            {
+                if (VerifiedC >= 0 && now - VerifiedC >= ClaimedS) return true;
+                if (VerifiedO >= 0 && now - VerifiedO >= HoldS + Margin) return true;
+                if (FirstP >= 0 && VerifiedO < 0 && now - FirstP >= PendingS) return true;
+                return false;
+            }
+        }
+
+        /// <summary>The fence (RJS-M4): a boundary waits while cr_th names a
+        /// waiting state.</summary>
+        internal static bool FenceWaits(string th) { return ThLive(th); }
+
+        /// <summary>The vanilla statements of the two two-team transitions, in
+        /// order (V:GM_ArmsRace.cs:245-258 and 276-306), with the one inserted
+        /// fence immediately before the boundary sync. The mod copies in
+        /// TeamHoldFence.cs execute exactly these tables.</summary>
+        internal enum Step
+        {
+            Visualize, WinVisualize, Wait1, Wait05, Wait03, LoadNext, SpeedUp, SlowDown, PickPhase,
+            Fence, SyncUp, CallInMove, Revive, BattleOn, TransitionOff, ShowCounter,
+        }
+
+        internal static readonly Step[] PointSteps =
+        {
+            Step.Visualize, Step.Wait1, Step.LoadNext, Step.Wait05, Step.Fence, Step.SyncUp, Step.CallInMove, Step.Revive,
+            Step.Wait03, Step.SpeedUp, Step.BattleOn, Step.TransitionOff,
+        };
+
+        internal static readonly Step[] RoundSteps =
+        {
+            Step.WinVisualize, Step.Wait1, Step.LoadNext, Step.Wait03, Step.Wait1, Step.SpeedUp, Step.PickPhase,
+            Step.Fence, Step.SyncUp, Step.SlowDown, Step.CallInMove, Step.Revive, Step.Wait03, Step.SpeedUp,
+            Step.TransitionOff, Step.BattleOn, Step.ShowCounter,
+        };
+
+        /// <summary>The master writer's machine (S2 writer steps 1 to 6). It
+        /// decides; the glue performs each action it returns (Photon
+        /// compare-and-set writes, HTTP calls) and feeds the answers back.</summary>
+        internal sealed class Writer
+        {
+            internal enum Phase { Idle, Pending, Mirroring, Ending, Done }
+            internal enum Op { WriteTh, AppendTrd, PostOpen, GetState, GetByRoom, PostEnd }
+
+            internal sealed class Action
+            {
+                internal Op Op;
+                internal HoldKey Key;
+                internal char TrdKind;
+                internal string Reason;
+                public override string ToString() { return Op + (Key != null ? " " + Key.Format() : "") + (Reason != null ? " " + Reason : ""); }
+            }
+
+            internal Phase P = Phase.Idle;
+            internal HoldKey Key;
+            internal string RequestId;
+            internal double PendingAt = -1, LastPoll = -1, EndAt = -1;
+            internal const double OpenTimeoutS = 10, PollS = 2, EndWaitS = 3;
+            internal string EndReason;
+
+            private readonly List<Action> _out = new List<Action>();
+            private List<Action> Flush() { var r = new List<Action>(_out); _out.Clear(); return r; }
+            private void Th(HoldKey k) { Key = k; _out.Add(new Action { Op = Op.WriteTh, Key = k }); }
+
+            /// <summary>Step 1: a suppressed drop with no cr_th.</summary>
+            internal List<Action> OnDrop(double now, int slot, int team, string g, int writerActor, string requestId)
+            {
+                if (P != Phase.Idle) return Flush();
+                RequestId = requestId;
+                PendingAt = now;
+                P = Phase.Pending;
+                Th(new HoldKey { HoldId = "", Slot = slot, Team = team, G = g, State = 'p', Seq = 0, Writer = writerActor });
+                _out.Add(new Action { Op = Op.AppendTrd, Key = Key, TrdKind = 'h' });
+                _out.Add(new Action { Op = Op.PostOpen, Key = Key });
+                return Flush();
+            }
+
+            /// <summary>Step 5: a promoted master finding p reads the hold by
+            /// room; finding o, c or b it mirrors.</summary>
+            internal List<Action> OnPromoted(double now, HoldKey current, string requestId)
+            {
+                if (P != Phase.Idle || current == null) return Flush();
+                Key = current;
+                RequestId = requestId;
+                if (current.State == 'p') { P = Phase.Pending; PendingAt = now; _out.Add(new Action { Op = Op.GetByRoom, Key = current }); }
+                else if (IsLive(current.State)) { P = Phase.Mirroring; LastPoll = -1; }
+                return Flush();
+            }
+
+            /// <summary>Step 2: the open answer (status 0 = no transport).</summary>
+            internal List<Action> OnOpen(double now, int status, TeamHoldNet.OpenAnswer a)
+            {
+                if (P != Phase.Pending) return Flush();
+                if (a != null && a.Opened)
+                {
+                    var k = Key.With('o', a.Seq);
+                    k.HoldId = a.HoldId; k.HoldS = a.HoldS;
+                    Th(k);
+                    P = Phase.Mirroring;
+                    LastPoll = now;
+                    return Flush();
+                }
+                return End(now, a != null ? "refused:" + a.Reason : "no_answer");
+            }
+
+            /// <summary>Step 5: the by-room read. A row resumes; a 404 reposts
+            /// the open with the same request key; anything else waits on the
+            /// pending ceiling.</summary>
+            internal List<Action> OnByRoom(double now, int status, TeamHoldNet.StateAnswer a)
+            {
+                if (P != Phase.Pending) return Flush();
+                if (a != null && !a.Closed)
+                {
+                    var k = Key.With(a.State, a.Seq);
+                    k.HoldId = a.HoldId;
+                    if (a.DeadlineS > 0 && k.HoldS == 0) k.HoldS = a.DeadlineS;
+                    Th(k);
+                    P = Phase.Mirroring;
+                    LastPoll = now;
+                    return Flush();
+                }
+                if (a != null && a.Closed) { Th(Key.With('x', a.Seq)); P = Phase.Done; return Flush(); }
+                if (status == 404) _out.Add(new Action { Op = Op.PostOpen, Key = Key });
+                return Flush();
+            }
+
+            /// <summary>Step 3: mirror the server state.</summary>
+            internal List<Action> OnState(double now, TeamHoldNet.StateAnswer a)
+            {
+                if (P != Phase.Mirroring || a == null || a.HoldId != Key.HoldId) return Flush();
+                if (a.Closed) { Th(Key.With('x', a.Seq)); P = Phase.Done; return Flush(); }
+                if (a.Seq <= Key.Seq && Rank(a.State) <= Rank(Key.State)) return Flush();
+                var k = Key.With(a.State, a.Seq);
+                if (a.State == 'b') k.BoundActor = a.BoundActor;
+                Th(k);
+                if (a.State == 'e') { _out.Add(new Action { Op = Op.AppendTrd, Key = k, TrdKind = 'r' }); P = Phase.Done; }
+                return Flush();
+            }
+
+            /// <summary>Step 6: every local end reason posts the end first,
+            /// waits up to 3 s, then writes x.</summary>
+            internal List<Action> End(double now, string reason)
+            {
+                if (P == Phase.Done || P == Phase.Ending) return Flush();
+                EndReason = reason;
+                if (Key != null && !string.IsNullOrEmpty(Key.HoldId))
+                {
+                    P = Phase.Ending;
+                    EndAt = now;
+                    _out.Add(new Action { Op = Op.PostEnd, Key = Key, Reason = reason });
+                    return Flush();
+                }
+                if (Key != null) Th(Key.With('x', Key.Seq + 1));
+                P = Phase.Done;
+                return Flush();
+            }
+
+            internal List<Action> OnEndAnswer(double now)
+            {
+                if (P != Phase.Ending) return Flush();
+                Th(Key.With('x', Key.Seq + 1));
+                P = Phase.Done;
+                return Flush();
+            }
+
+            internal List<Action> Tick(double now)
+            {
+                if (P == Phase.Pending && now - PendingAt >= OpenTimeoutS) return End(now, "no_answer");
+                if (P == Phase.Ending && now - EndAt >= EndWaitS) return OnEndAnswer(now);
+                if (P == Phase.Mirroring && (LastPoll < 0 || now - LastPoll >= PollS))
+                {
+                    LastPoll = now;
+                    _out.Add(new Action { Op = Op.GetState, Key = Key });
+                }
+                return Flush();
+            }
+        }
     }
 }

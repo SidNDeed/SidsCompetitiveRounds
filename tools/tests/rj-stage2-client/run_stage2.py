@@ -95,6 +95,28 @@ MUTANTS = [
     ("M1.E", "K1", "rules", [
         ("int nonDcCount = 0, dcTeamCount = 1;", "int nonDcCount = 0, dcTeamCount = 0;")],
      "t1_dc_equiv", "t11_gate_all_true"),
+    # K2, S2
+    ("M2.8", "K2", "rules", [
+        ("if (room.State == 'p') return Verdict.Act;", "return Verdict.Act;")],
+     "t23_forged_b_e_x", "t23_verified_o"),
+    ("M2.9", "K2", "rules", [
+        ("if (observed != 'p' && observed != 'o' && observed != 'x') return Resolve.Wait;",
+         "if (observed == '\\u0001') return Resolve.Wait;")],
+     "t24_resolve_waits", "t24_promote_before_p"),
+    ("M2.10", "K2", "rules", [
+        ("if (P == Phase.Pending && now - PendingAt >= OpenTimeoutS) return End(now, \"no_answer\");", "")],
+     "t24_404_by_room_ends", "t24_during_post"),
+    ("M2.11", "K2", "rules", [
+        ("if (FirstP >= 0 && VerifiedO < 0 && now - FirstP >= PendingS) return true;", "")],
+     "t25_pending_ceiling", "t25_bind_ceiling"),
+    ("M2.12", "K2", "rules", [
+        ("Step.Visualize, Step.Wait1, Step.LoadNext, Step.Wait05, Step.Fence, Step.SyncUp,",
+         "Step.Visualize, Step.Wait1, Step.LoadNext, Step.Wait05, Step.SyncUp,")],
+     "t26_point_fenced", "t26_round_pick_inside"),
+    # K2, lane-added: a state is not refuted before this client's own read answers.
+    ("M2.E", "K2", "rules", [
+        ("if (server == null) return Verdict.Inert;", "if (server == null) server = new TeamHoldNet.StateAnswer();")],
+     "t23_read_pending", "t23_verified_o"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

@@ -134,6 +134,11 @@ namespace CompetitiveRounds
         private static TeamHoldRules.DropCut _cut;
         private static float _leaveAt;
         private static bool _purged, _resolved;
+        /// <summary>Actors whose departure this client held (the first drop
+        /// and any second departure). The cascade prefix reads it too, so a
+        /// held departure is suppressed whichever of the prefix and the leave
+        /// callback runs first, even after the hold ended.</summary>
+        private static readonly HashSet<int> _held = new HashSet<int>();
 
         /// <summary>The drop this client holds for, or null.</summary>
         internal static TeamHoldRules.DropCut Cut { get { return _cut; } }
@@ -201,13 +206,16 @@ namespace CompetitiveRounds
             try
             {
                 if (p == null) return false;
+                if (_held.Contains(p.ActorNumber)) return true;
                 if (_cut != null)
                 {
                     if (!HoldsAnother(p)) return false;
+                    _held.Add(p.ActorNumber);
                     OnSecondDeparture(p);
                     return true;
                 }
                 if (!Classify(p)) return false;
+                _held.Add(p.ActorNumber);
                 // The cascade prefix suppresses on the same memo, so from here
                 // the departure is held whatever fails below: the cut is
                 // latched first and filled field by field.
@@ -220,6 +228,7 @@ namespace CompetitiveRounds
                 Plugin.Log.LogInfo(TAG + " cascade suppressed slot=" + cut.Slot.ToString(CultureInfo.InvariantCulture)
                     + " team=" + cut.Team.ToString(CultureInfo.InvariantCulture) + " g=" + (cut.G ?? "")
                     + " eligibility=" + cut.Eligibility);
+                try { TeamHoldLoop.OnDrop(cut); } catch { }
                 return true;
             }
             catch (Exception ex)
@@ -235,6 +244,7 @@ namespace CompetitiveRounds
         /// today once.</summary>
         internal static bool HoldsAnother(Photon.Realtime.Player p)
         {
+            if (p != null && _held.Contains(p.ActorNumber)) return true;
             var c = _cut;
             return c != null && p != null && p.ActorNumber != c.Actor && !RoomActors.IsSpectatorReplicated(p)
                    && string.Equals(TeamHoldWriter.CurrentRoom(), c.Room, StringComparison.Ordinal);
@@ -281,7 +291,25 @@ namespace CompetitiveRounds
         private static void OnSecondDeparture(Photon.Realtime.Player p)
         {
             Plugin.Log.LogInfo(TAG + " second departure actor=" + (p != null ? p.ActorNumber.ToString(CultureInfo.InvariantCulture) : "?"));
+            try { TeamHoldLoop.EndLocal(Time.unscaledTime, null, "second_departure"); } catch { }
         }
+
+        /// <summary>The hold ended toward today on this client (S2 release:
+        /// a verified x, a refusal, no answer, a second departure, a local
+        /// ceiling, a survivor leave). Nothing of the hold remains here.</summary>
+        internal static void Expire(string reason)
+        {
+            var cut = _cut;
+            if (cut == null) return;
+            _cut = null;
+            TeamHoldLoop.NoteEnded(cut, reason == "second_departure");
+            Plugin.Log.LogInfo(TAG + " ended reason=" + (reason ?? "") + " slot=" + cut.Slot.ToString(CultureInfo.InvariantCulture)
+                + " g=" + (cut.G ?? ""));
+        }
+
+        /// <summary>A verified e: the returner is in play; nothing of the
+        /// drop runs.</summary>
+        internal static void Released() { _cut = null; }
 
         /// <summary>The hold state this client observes for the cut's drop.</summary>
         internal static char ObservedState()
@@ -334,7 +362,353 @@ namespace CompetitiveRounds
         {
             _cut = null;
             _purged = _resolved = false;
+            _held.Clear();
             TeamHoldRules.HoldGate.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Stage 2 S2 on every client of a flagged room: the presence beat, the
+    /// master writer, the transition envelope, the local ceilings and the
+    /// release. Every answer the server does not give (an unbound transport,
+    /// a 404, a refusal) ends toward today; the ceilings bound every wait.
+    /// </summary>
+    internal static class TeamHoldLoop
+    {
+        internal const double BeatS = 10, VerifyS = 2;
+
+        private static TeamHoldRules.Writer _writer;
+        private static bool _wasMaster;
+        private static double _lastBeat = -1000, _lastVerify = -1000;
+        /// <summary>This client's own last answered state read, issued after
+        /// it observed the current cr_th value (generation <see cref="_readGen"/>);
+        /// null while none has answered.</summary>
+        private static TeamHoldNet.StateAnswer _server;
+        private static int _readGen;
+        private static string _obsTh;
+        private static TeamHoldRules.Ceilings _ceil = new TeamHoldRules.Ceilings();
+        private static string _room;
+        private static TeamHoldRules.DropCut _endingCut;
+        /// <summary>The cr_th value this master last sent. A compare-and-set
+        /// applies on the server before the local cache shows it, so the next
+        /// write expects what was sent, not the cache.</summary>
+        private static string _thSent;
+        /// <summary>Holds this client has ended or released ("{G}:{slot}"): a
+        /// cr_th still naming one of them no longer fences this client.</summary>
+        private static readonly HashSet<string> _ended = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>The boundary checkpoint this seat posts in every beat
+        /// (S3 step 7); empty until a boundary has been recorded.</summary>
+        internal static string LastBoundaryDigest = "";
+
+        /// <summary>What the banner shows: the last verified state of the
+        /// held seat, or '\0'.</summary>
+        internal static char Shown { get; private set; }
+        internal static double DeadlineAt { get; private set; }
+        internal static string EndedName { get; private set; }
+        internal static bool EndedBySecond { get; private set; }
+        internal static double EndedAt { get; private set; } = -1000;
+
+        private static double Now { get { return Time.unscaledTime; } }
+
+        private static void ForgetRead()
+        {
+            _server = null;
+            _readGen++;
+            _obsTh = null;
+            _lastVerify = -1000;
+        }
+
+        /// <summary>A new drop: the pending ceiling runs from the drop, so a
+        /// client that never sees p (it was overwritten at once) still ends.</summary>
+        internal static void OnDrop(TeamHoldRules.DropCut cut)
+        {
+            _ceil = new TeamHoldRules.Ceilings();
+            _ceil.SawP(cut.At);
+            ForgetRead();
+            _writer = null;
+            _endingCut = null;
+            Shown = 'p';
+            DeadlineAt = 0;
+        }
+
+        internal static void Reset()
+        {
+            _writer = null;
+            ForgetRead();
+            _ceil = new TeamHoldRules.Ceilings();
+            _wasMaster = false;
+            Shown = '\0';
+            _room = null;
+            _endingCut = null;
+            _thSent = null;
+            _ended.Clear();
+        }
+
+        private static string HoldName(string g, int slot) { return (g ?? "") + ":" + slot.ToString(CultureInfo.InvariantCulture); }
+
+        /// <summary>The fence (RJS-M4): a boundary waits while this client
+        /// still holds a drop it has neither released nor expired, or while
+        /// cr_th names a waiting state of a hold this client has not ended.
+        /// A held drop ends at a ceiling, and an ended hold never fences this
+        /// client again whatever cr_th still says.</summary>
+        internal static bool FenceHolds()
+        {
+            string room = TeamHoldWriter.CurrentRoom();
+            if (!TeamHoldRules.Flagged(room)) return false;
+            if (TeamHold.Cut != null) return true;
+            string th = TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH);
+            if (!TeamHoldRules.FenceWaits(th)) return false;
+            TeamHoldRules.HoldKey k;
+            return !(TeamHoldRules.TryParseHold(th, out k) && _ended.Contains(HoldName(k.G, k.Slot)));
+        }
+
+        internal static void Tick()
+        {
+            string room = TeamHoldWriter.CurrentRoom();
+            if (!TeamHoldRules.Flagged(room)) return;
+            if (!string.Equals(room, _room, StringComparison.Ordinal)) { Reset(); _room = room; }
+            double now = Now;
+            Beat(now, room);
+            var cut = TeamHold.Cut;
+            // An expired drop's writer still finishes its end: post, wait up
+            // to 3 s, write x (writer step 6).
+            if (_writer != null && _endingCut != null && _endingCut != cut && PhotonNetwork.IsMasterClient
+                && _writer.P == TeamHoldRules.Writer.Phase.Ending)
+            {
+                try { Perform(_writer.Tick(now), _endingCut); } catch { }
+            }
+            if (cut == null) { _wasMaster = PhotonNetwork.IsMasterClient; return; }
+
+            bool master = PhotonNetwork.IsMasterClient;
+            if (!master) _thSent = null;
+            if (master)
+            {
+                try { RunWriter(now, cut, !_wasMaster); }
+                catch (Exception ex) { Plugin.Log.LogWarning(TeamHold.TAG + " writer error: " + ex.Message); EndLocal(now, null, "writer_error"); return; }
+            }
+            _wasMaster = master;
+
+            string thRaw = TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH);
+            TeamHoldRules.HoldKey k;
+            bool have = TeamHoldRules.TryParseHold(thRaw, out k) && k.Slot == cut.Slot && k.G == cut.G;
+            if (have)
+            {
+                // A new room value: only a read issued after this observation
+                // may verify or refute it.
+                if (!string.Equals(thRaw, _obsTh, StringComparison.Ordinal)) { ForgetRead(); _obsTh = thRaw; }
+                if (k.State == 'p') _ceil.SawP(now);
+                else if (!string.IsNullOrEmpty(k.HoldId)) VerifyRead(now, k.HoldId);
+                var v = TeamHoldRules.Verify(k, _server);
+                if (v == TeamHoldRules.Verdict.End) { EndLocal(now, k, "unverified_" + k.State); return; }
+                if (v == TeamHoldRules.Verdict.Act)
+                {
+                    switch (k.State)
+                    {
+                        case 'o':
+                            _ceil.SawO(now, k.HoldS);
+                            if (DeadlineAt <= 0 && _server != null) DeadlineAt = now + _server.DeadlineS;
+                            break;
+                        case 'c':
+                        case 'b':
+                            _ceil.SawC(now);
+                            break;
+                        case 'e':
+                            Release(cut);
+                            return;
+                        case 'x':
+                            TeamHold.Expire(_server != null && !string.IsNullOrEmpty(_server.ClosedReason) ? _server.ClosedReason : "closed");
+                            return;
+                    }
+                    Shown = k.State;
+                }
+            }
+            if (_ceil.Passed(now)) EndLocal(now, have ? k : null, "ceiling");
+        }
+
+        /// <summary>Every local end reason (writer step 6): this client's own
+        /// end post when the hold has an id, the master's x through its
+        /// writer, then the expiry on this client.</summary>
+        internal static void EndLocal(double now, TeamHoldRules.HoldKey k, string reason)
+        {
+            var cut = TeamHold.Cut;
+            if (cut == null) return;
+            string holdId = k != null ? k.HoldId : (_writer != null && _writer.Key != null ? _writer.Key.HoldId : null);
+            if (PhotonNetwork.IsMasterClient && _writer != null)
+            {
+                _endingCut = cut;
+                try { Perform(_writer.End(now, reason), cut); } catch { }
+            }
+            else if (!string.IsNullOrEmpty(holdId))
+            {
+                TeamHoldNet.Call("POST", TeamHoldNet.PathEnd(holdId), TeamHoldNet.EndBody(reason), (st, body) => { });
+            }
+            TeamHold.Expire(reason);
+        }
+
+        /// <summary>A verified e: the boundary proceeds with the returner in play.</summary>
+        private static void Release(TeamHoldRules.DropCut cut)
+        {
+            Shown = 'e';
+            EndedName = cut.Name;
+            EndedAt = Now;
+            Plugin.Log.LogInfo(TeamHold.TAG + " entered slot=" + cut.Slot.ToString(CultureInfo.InvariantCulture) + " g=" + (cut.G ?? ""));
+            _ended.Add(HoldName(cut.G, cut.Slot));
+            TeamHold.Released();
+        }
+
+        internal static void NoteEnded(TeamHoldRules.DropCut cut, bool second)
+        {
+            Shown = 'x';
+            EndedName = cut != null ? cut.Name : null;
+            EndedBySecond = second;
+            EndedAt = Now;
+            if (cut != null) _ended.Add(HoldName(cut.G, cut.Slot));
+        }
+
+        /// <summary>This client's own state read (the envelope). An answer
+        /// belongs to the room value observed when it was issued; one that
+        /// arrives after the value changed is dropped. An answer with nothing
+        /// parsable is kept as an empty answer, which verifies nothing.</summary>
+        private static void VerifyRead(double now, string holdId)
+        {
+            if (now - _lastVerify < VerifyS) return;
+            _lastVerify = now;
+            int gen = _readGen;
+            TeamHoldNet.Call("GET", TeamHoldNet.PathState(holdId), null, (st, body) =>
+            {
+                if (gen != _readGen) return;
+                TeamHoldNet.StateAnswer a;
+                _server = TeamHoldNet.TryParseState(st, body, out a) ? a : new TeamHoldNet.StateAnswer();
+            });
+        }
+
+        private static void Beat(double now, string room)
+        {
+            if (now - _lastBeat < BeatS) return;
+            _lastBeat = now;
+            try
+            {
+                if (RoomActors.LocalIsSpectator || PhotonNetwork.LocalPlayer == null) return;
+                var seen = new List<KeyValuePair<int, string>>();
+                foreach (var a in PhotonNetwork.PlayerList)
+                {
+                    if (a == null || RoomActors.IsSpectatorReplicated(a)) continue;
+                    seen.Add(new KeyValuePair<int, string>(a.ActorNumber, TeamHoldWriter.PlayerProp(a, "u_id") ?? ""));
+                }
+                TeamHoldNet.Call("POST", TeamHoldNet.PathBeat,
+                    TeamHoldNet.BeatBody(room, PhotonNetwork.LocalPlayer.ActorNumber, seen, LastBoundaryDigest), (st, body) => { });
+            }
+            catch { }
+        }
+
+        // ── The master writer's glue (S2 writer steps 1 to 6) ──────────────
+
+        private static void RunWriter(double now, TeamHoldRules.DropCut cut, bool promoted)
+        {
+            if (_writer == null) _writer = new TeamHoldRules.Writer();
+            var acts = new List<TeamHoldRules.Writer.Action>();
+            if (_writer.P == TeamHoldRules.Writer.Phase.Idle)
+            {
+                TeamHoldRules.HoldKey cur;
+                bool have = TeamHoldRules.TryParseHold(TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH), out cur)
+                            && cur.Slot == cut.Slot && cur.G == cut.G;
+                string req = Guid.NewGuid().ToString("N");
+                if (!have) acts.AddRange(_writer.OnDrop(now, cut.Slot, cut.Team, cut.G, PhotonNetwork.LocalPlayer.ActorNumber, req));
+                else if (TeamHoldRules.IsLive(cur.State)) acts.AddRange(_writer.OnPromoted(now, cur, req));
+                else { _writer.P = TeamHoldRules.Writer.Phase.Done; return; }
+            }
+            acts.AddRange(_writer.Tick(now));
+            Perform(acts, cut);
+            // A writer that ended for its own reason (a refusal, no answer,
+            // no signer) wrote x without a hold id, which no client can
+            // verify; this client expires at once rather than at its ceiling.
+            var w = _writer;
+            if (w != null && w.P == TeamHoldRules.Writer.Phase.Done && w.EndReason != null && TeamHold.Cut == cut)
+                TeamHold.Expire(w.EndReason);
+        }
+
+        private static void Perform(List<TeamHoldRules.Writer.Action> acts, TeamHoldRules.DropCut cut)
+        {
+            if (acts == null) return;
+            for (int i = 0; i < acts.Count; i++)
+            {
+                var a = acts[i];
+                switch (a.Op)
+                {
+                    case TeamHoldRules.Writer.Op.WriteTh:
+                    {
+                        string old = _thSent ?? TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH);
+                        string val = a.Key.Format();
+                        var set = new Hashtable { { TeamHoldRules.KEY_TH, val } };
+                        // cr_trd rides the same call as the transition it records.
+                        if (i + 1 < acts.Count && acts[i + 1].Op == TeamHoldRules.Writer.Op.AppendTrd)
+                        {
+                            var t = acts[++i];
+                            set[TeamHoldRules.KEY_TRD] = TeamHoldRules.TrdAppend(TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TRD), t.Key.G, t.Key.Slot, t.TrdKind);
+                        }
+                        if (TeamHoldWriter.CasRoomProps(set, TeamHoldRules.KEY_TH, old)) _thSent = val;
+                        break;
+                    }
+                    case TeamHoldRules.Writer.Op.AppendTrd:
+                        TeamHoldWriter.CasRoomProps(new Hashtable { { TeamHoldRules.KEY_TRD,
+                            TeamHoldRules.TrdAppend(TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TRD), a.Key.G, a.Key.Slot, a.TrdKind) } }, null, null);
+                        break;
+                    case TeamHoldRules.Writer.Op.PostOpen:
+                    {
+                        string me = MatchTracker.LocalSteamId;
+                        string sig = TeamHoldNet.SignOrNull(TeamHoldNet.HoldOpenCanonical(cut.Mode, cut.Room, cut.G, cut.LeaverUid, cut.Slot, cut.Team, me));
+                        var w = _writer;
+                        if (sig == null)
+                        {
+                            // No signer bound: the open is not sent (toward today).
+                            Perform(w.OnOpen(Now, TeamHoldNet.NoTransport, null), cut);
+                            break;
+                        }
+                        string body = TeamHoldNet.OpenBody(w.RequestId, cut.Mode, cut.Room, cut.G, cut.LeaverUid, cut.Slot, cut.Team, me, sig);
+                        TeamHoldNet.Call("POST", TeamHoldNet.PathOpen, body, (st, rb) =>
+                        {
+                            TeamHoldNet.OpenAnswer oa;
+                            TeamHoldNet.TryParseOpen(st, rb, out oa);
+                            if (w == _writer && TeamHold.Cut == cut) Perform(w.OnOpen(Now, st, oa), cut);
+                        });
+                        break;
+                    }
+                    case TeamHoldRules.Writer.Op.GetState:
+                    {
+                        // The writer mirrors from its own reads; the envelope
+                        // of this client is verified only by VerifyRead.
+                        var w = _writer;
+                        TeamHoldNet.Call("GET", TeamHoldNet.PathState(a.Key.HoldId), null, (st, rb) =>
+                        {
+                            TeamHoldNet.StateAnswer sa;
+                            if (!TeamHoldNet.TryParseState(st, rb, out sa)) return;
+                            if (w == _writer && TeamHold.Cut == cut) Perform(w.OnState(Now, sa), cut);
+                        });
+                        break;
+                    }
+                    case TeamHoldRules.Writer.Op.GetByRoom:
+                    {
+                        var w = _writer;
+                        TeamHoldNet.Call("GET", TeamHoldNet.PathByRoom(cut.Room, cut.G), null, (st, rb) =>
+                        {
+                            TeamHoldNet.StateAnswer sa;
+                            TeamHoldNet.TryParseState(st, rb, out sa);
+                            if (w == _writer && TeamHold.Cut == cut) Perform(w.OnByRoom(Now, st, sa), cut);
+                        });
+                        break;
+                    }
+                    case TeamHoldRules.Writer.Op.PostEnd:
+                    {
+                        var w = _writer;
+                        TeamHoldNet.Call("POST", TeamHoldNet.PathEnd(a.Key.HoldId), TeamHoldNet.EndBody(a.Reason), (st, rb) =>
+                        {
+                            if (w == _writer) Perform(w.OnEndAnswer(Now), cut);
+                        });
+                        break;
+                    }
+                }
+            }
         }
     }
 }
