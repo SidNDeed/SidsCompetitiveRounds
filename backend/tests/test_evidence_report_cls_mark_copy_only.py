@@ -291,7 +291,13 @@ def vjoin(*vals):
                 im |= e.im_all()
     items = [v.item for v in vals if v.item is not None]
     item = vjoin(*items) if items else None
-    return V(ex, im, funcs, elems, item, _join_alias([v.alias for v in vals]))
+    aliases = [v.alias for v in vals]
+    alias = _join_alias(aliases)
+    if alias is None and all(a is not None for a in aliases):
+        for v in vals:
+            ex |= v.ex_all()
+            im |= v.im_all()
+    return V(ex, im, funcs, elems, item, alias)
 
 
 def _alias_key(a):
@@ -498,7 +504,8 @@ class Pass:
                 env[n] = V({Q if kind == "bot" else D})
         if isinstance(node, ast.Lambda):
             ret = fa.expr(node.body)
-            fa.ret = vjoin(fa.ret, V(ret.ex, ret.im | fa.ctx, ret.funcs, ret.elems, ret.item))
+            fa.ret = vjoin(fa.ret, V(ret.ex, ret.im | fa.ctx, ret.funcs, ret.elems, ret.item,
+                                     ret.alias))
         else:
             for dec in node.decorator_list:
                 fa.expr(dec)
@@ -628,7 +635,7 @@ class Frame:
             self.assign(s.target, v)
         elif t is ast.Return:
             v = self.expr(s.value) if s.value is not None else V({C})
-            v = V(v.ex, v.im | self.ctx | self.order_ctx, v.funcs, v.elems, v.item)
+            v = V(v.ex, v.im | self.ctx | self.order_ctx, v.funcs, v.elems, v.item, v.alias)
             self.ret = vjoin(self.ret, v) if self.ret is not None else v
         elif t is ast.If:
             tv = self.test(s.test)
@@ -714,7 +721,7 @@ class Frame:
             if name in self.globals:
                 key = (self.mod.kind, name)
                 self.ps.state_vals[key] = vjoin(self.ps.state_vals.get(key),
-                                                V(v.ex, v.im | self.ctx, v.funcs))
+                                                V(v.ex_all(), v.im_all() | self.ctx, v.funcs))
                 return
             old = self.env.get(name)
             nv = V(v.ex, v.im | self.ctx, v.funcs, v.elems, v.item, v.alias)
@@ -969,7 +976,7 @@ class Frame:
         tv = self.expr(n.test)
         a, b = self.expr(n.body), self.expr(n.orelse)
         j = vjoin(a, b)
-        return V(j.ex | (tv.ex & {K}), j.im | tv.flat(), j.funcs, j.elems, j.item)
+        return V(j.ex | (tv.ex & {K}), j.im | tv.flat(), j.funcs, j.elems, j.item, j.alias)
 
     def e_Await(self, n):
         return self.expr(n.value)
@@ -1001,7 +1008,8 @@ class Frame:
             if k not in saved:
                 del self.env[k]
         v = vjoin(*vals)
-        return V((), (), v.funcs, None, V(v.ex, v.im | implicit, v.funcs, v.elems, v.item))
+        return V((), (), v.funcs, None,
+                 V(v.ex, v.im | implicit, v.funcs, v.elems, v.item, v.alias))
 
     def e_ListComp(self, n):
         return self.comp(n, [n.elt])
@@ -1093,7 +1101,8 @@ class Frame:
             if name in self.env:
                 cur = self.env[name]
                 self.env[name] = vjoin(cur, V((), (), v.funcs, None,
-                                              V(v.ex, v.im | self.ctx, v.funcs, v.elems, v.item)))
+                                              V(v.ex, v.im | self.ctx, v.funcs, v.elems, v.item,
+                                                v.alias)))
             elif name in self.mod.state or name in self.mod.consts:
                 key = (self.mod.kind, name)
                 self.ps.state_vals[key] = vjoin(self.ps.state_vals.get(key),
@@ -1454,3 +1463,103 @@ def test_declared_roots_preserve_direct_rank_and_order_selection(
         label, api, bot, needle):
     findings = _fixture(api or _API_PERMITTED, bot or _BOT_PERMITTED, _WORKER_FIXTURE)
     assert len(findings) == 1 and needle in str(findings[0]), (label, _fmt(findings))
+
+
+_CASUAL_ITEM = '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))'
+
+
+def _dict_fixture(statement, helper=""):
+    source = _BOT_PERMITTED.replace(
+        "def _aer_plan(page):", helper + "def _aer_plan(page):")
+    return source.replace(_CASUAL_ITEM, statement)
+
+
+_DICT_HELPER = '''def _box(cell):
+    return {"rank": cell[3]}
+
+
+'''
+
+_DICT_NEGATIVES = [
+    ("helper return rank", _dict_fixture(
+        '        box = _box(cell)\n'
+        '        word = "COLD"\n'
+        '        if box["rank"] > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))', _DICT_HELPER), "reads K"),
+    ("helper return keyed order", _dict_fixture(
+        '        word = "COLD"\n'
+        '        for _unused in sorted(page.cells, key=_box_order):\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))',
+        _DICT_HELPER + '''def _box_order(cell):
+    return _box(cell)["rank"]
+
+
+'''), "reads O"),
+    ("lambda return", _dict_fixture(
+        '        box = (lambda value: {"rank": value[3]})(cell)\n'
+        '        word = "COLD"\n'
+        '        if box["rank"] > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))'), "reads K"),
+    ("conditional return", _dict_fixture(
+        '        box = ({"rank": cell[3], "x": cell[0]} if cell[2]\n'
+        '               else {"rank": cell[3], "x": cell[1]})\n'
+        '        word = "COLD"\n'
+        '        if box["rank"] > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))'), "reads K"),
+    ("unjoinable conditional aliases", _dict_fixture(
+        '        box = ({"rank": cell[3], "x": cell[0]} if cell[2]\n'
+        '               else {"x": cell[1], "rank": cell[3]})\n'
+        '        word = "COLD"\n'
+        '        if box["rank"] > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))'), "reads K"),
+    ("comprehension return", _dict_fixture(
+        '        boxes = [{"rank": value[3]} for value in page.cells]\n'
+        '        word = "COLD"\n'
+        '        if boxes[0]["rank"] > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))'), "reads K"),
+    ("global return", _dict_fixture(
+        '        _store_box(cell)\n'
+        '        word = "COLD"\n'
+        '        if BOX["rank"] > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))', '''BOX = {}
+
+
+def _store_box(cell):
+    global BOX
+    BOX = {"rank": cell[3]}
+
+
+'''), "reads K"),
+    ("appended return", _dict_fixture(
+        '        boxes = []\n'
+        '        boxes.append({"rank": cell[3]})\n'
+        '        word = "COLD"\n'
+        '        if boxes[0]["rank"] > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))'), "reads K"),
+]
+
+
+@pytest.mark.parametrize("label,bot,needle", _DICT_NEGATIVES,
+                         ids=[row[0] for row in _DICT_NEGATIVES])
+def test_constant_key_dict_labels_survive_structural_boundaries(label, bot, needle):
+    findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
+    assert len(findings) == 1 and needle in str(findings[0]), (label, _fmt(findings))
+
+
+def test_exact_constant_key_read_does_not_smear_a_rank_sibling():
+    bot = _dict_fixture(
+        '        box = _shown_box(cell)\n'
+        '        items.append(AerItem("cell", (), (), box["shown"]))', '''def _shown_box(cell):
+    return {"shown": _aer_enc_text(cell[0]), "rank": cell[3]}
+
+
+''')
+    assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
