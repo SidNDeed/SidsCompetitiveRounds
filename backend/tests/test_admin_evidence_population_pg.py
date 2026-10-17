@@ -751,16 +751,17 @@ def _builder_lines():
 
 
 def test_p9_cache_bytes_within_five_percent_of_tracemalloc(live, monkeypatch):
-    """A window source at maximum fragmentation (one value per unit, eight
-    keys): the bytes `cache_bytes()` counts are within 5% of what tracemalloc
-    attributes to allocations made in admin_evidence.py and still held."""
+    """A game set and a window source at maximum fragmentation (one value per
+    unit, eight keys): the bytes `cache_bytes()` counts are within 5% of what
+    tracemalloc attributes to allocations made in admin_evidence.py and held."""
     kis = tuple(range(Z_KI, Z_KI + 8))
     monkeypatch.setattr(ae, "population_branches",
                         lambda entries=None, partner=False: _z_branches(partner=partner, kis=kis))
     start = NOW - dt.timedelta(days=10)
     units = ae.CONTRACT_BOUNDS["WIN_VALUES_MAX"]
     cache = ae.PopulationCache(clock=_Clock())
-    key = ("display", "all", "z", 30, 120, "pair")
+    game_key = ("display", "all", "z", 30, 120)
+    window_key = game_key + ("pair",)
     # The file name tracemalloc records is the code object's own: the module is
     # imported through a sys.path entry holding "..", which abspath would
     # normalize away and then match nothing.
@@ -776,14 +777,16 @@ def test_p9_cache_bytes_within_five_percent_of_tracemalloc(live, monkeypatch):
         gc.collect()
         tracemalloc.start(1)
         try:
-            g = await ae.refresh_window_source(cache, live.conn, key, "pair", 30, 120)
+            game = await ae.refresh_game_set(cache, live.conn, game_key, 30, 120)
+            window = await ae.refresh_window_source(
+                cache, live.conn, window_key, "pair", 30, 120)
             gc.collect()
             snap = tracemalloc.take_snapshot()
         finally:
             tracemalloc.stop()
-        return g, snap
+        return game, window, snap
 
-    g, snap = live.run(go())
+    game, window, snap = live.run(go())
     spans = _builder_lines()
     held = 0
     for stat in snap.filter_traces([tracemalloc.Filter(True, path)]).statistics("lineno"):
@@ -791,8 +794,10 @@ def test_p9_cache_bytes_within_five_percent_of_tracemalloc(live, monkeypatch):
         if not any(lo <= line < hi for lo, hi in spans):
             held += stat.size
     counted = cache.cache_bytes()
-    assert len(g.values) == len(kis) and all(len(g.offsets[k]) == units + 1 for k in kis)
-    assert counted == g.nbytes()
+    assert len(game.values) == len(kis) and all(len(game.values[k]) == units for k in kis)
+    assert len(window.values) == len(kis) and all(
+        len(window.values[k]) == units and len(window.offsets[k]) == units + 1 for k in kis)
+    assert counted == game.nbytes() + window.nbytes()
     assert abs(held - counted) <= 0.05 * held, (held, counted)
     print("GATE p9 bytes: cache_bytes %d, tracemalloc held at module lines %d (%.2f%%)"
           % (counted, held, 100.0 * abs(held - counted) / held))
