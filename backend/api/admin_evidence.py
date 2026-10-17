@@ -1814,12 +1814,13 @@ async def _summary_page(rep, shape, rows, requested, subjects, accounts):
         plan = [(accounts[0], None, "player")]
     else:
         plan = [(accounts[0], accounts[1], "pair"), (accounts[1], accounts[0], "pair")]
-    windows, summary, win_at = [], [], None
+    windows, summary = [], []
     cohort = [str(r["id"]) for r in rows]
     oldest = rows[-1]
+    source_basis = plan[0][2]
+    source = await rep.lease(_display_key() + (source_basis,), basis=source_basis)
+    win_at = source.computed_at
     for oi, (acc, partner, basis) in enumerate(plan):
-        source = await rep.lease(_display_key() + (basis,), basis=basis)
-        win_at = source.computed_at
         base = await read_baseline(db, acc, oldest["ended_at"], oldest["id"],
                                    covered=cohort, partner=partner)
         cells = window_cells(rows, acc, basis, base, partner)

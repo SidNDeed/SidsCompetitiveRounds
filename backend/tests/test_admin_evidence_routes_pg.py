@@ -486,6 +486,58 @@ def test_p6_one_audit_row_per_page_over_seven_pages_of_pair_and_player(rig):
           "rules {report: absent}; page 8 400 no row; games in cohort order")
 
 
+def test_p9_pair_summary_ttl_boundary_uses_one_window_generation(rig, monkeypatch):
+    """Both pair orientations and win_computed_at use one leased source even
+    when that source reaches its TTL after the first lease."""
+    clock = _Clock()
+    cache = ae.PopulationCache(clock=clock, base_rss_mb=ae.SIZING_BASE_RSS_MB)
+    monkeypatch.setattr(ae, "_CACHE", [cache])
+    window_leases, result_sources = [], []
+    original_lease = ae._Report.lease
+    original_memo_get = ae.PopulationCache.memo_get
+
+    async def lease(rep, key, basis=None):
+        generation = await original_lease(rep, key, basis)
+        if basis is not None:
+            window_leases.append((generation.gen, generation.computed_at))
+            if len(window_leases) == 1:
+                clock.t += ae.CONTRACT_BOUNDS["POP_TTL_S"]
+        return generation
+
+    def memo_get(self, comp, generation):
+        result_sources.append((generation.gen, generation.computed_at))
+        return original_memo_get(self, comp, generation)
+
+    monkeypatch.setattr(ae._Report, "lease", lease)
+    monkeypatch.setattr(ae.PopulationCache, "memo_get", memo_get)
+
+    async def go():
+        admin = await _admin(rig)
+        a, sa, _d = await rig.player()
+        b, sb, _d = await rig.player()
+        await rig.match(a, b, NOW - dt.timedelta(hours=1), reporter=a,
+                        p1_net_hitch50=10)
+        await rig.match(b, a, NOW - dt.timedelta(hours=2), reporter=b,
+                        p1_net_hitch50=20)
+        await rig.commit()
+        return await rig.get("%s/pair?a=%s&b=%s&games=2" % (ROOT, sa, sb), actor=admin)
+
+    status, content, _headers = rig.run(go())
+    assert status == 200, content[:300]
+    body = _body(content)
+    assert [w["oi"] for w in body["windows"]] == [0, 1]
+    assert [s["oi"] for s in body["summary"]] == [0, 1]
+    slots = ae.AER_WIRE["1a"]["summary"]
+    decoded = [[dict(zip(slots, row)) for row in s["cells"]] for s in body["summary"]]
+    assert all(any(c["state"] == "ok" and c["pop_n"] for c in cells)
+               for cells in decoded), decoded
+    assert len(window_leases) == 1, window_leases
+    assert result_sources and set(result_sources) == {window_leases[0]}, result_sources
+    assert body["population"]["win_computed_at"] == ae._iso(window_leases[0][1])
+    print("GATE p9 pair TTL boundary: two orientations use window generation %d at %s"
+          % window_leases[0])
+
+
 def test_p6_a_failed_audit_insert_is_503_with_no_body_and_no_row(rig, monkeypatch):
     monkeypatch.setattr(ae, "AUDIT_SQL", ae.AUDIT_SQL.replace(
         "INSERT INTO admin_actions ", "INSERT INTO admin_actions_absent "))
