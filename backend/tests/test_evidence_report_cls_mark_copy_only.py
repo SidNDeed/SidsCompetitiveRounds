@@ -117,6 +117,7 @@ _MUTATORS = ("append", "extend", "add", "update", "insert", "setdefault", "appen
              "discard", "remove", "clear", "sort", "__setitem__")
 _SET_CONTAINMENT_CALLS = frozenset({
     ".issubset", ".issuperset", ".__le__", ".__ge__", "operator.le", "operator.ge"})
+_SET_ORDERED_CALLS = frozenset({".__le__", ".__ge__", "operator.le", "operator.ge"})
 _TRANSPORT_METHODS = (
     "execute", "stream", "commit", "rollback", "close", "begin", "begin_nested", "flush",
     "write", "drain", "read", "readexactly", "wait", "kill", "terminate", "acquire",
@@ -1417,6 +1418,12 @@ class Frame:
             klass = self.lookup_class(name, k if k is not None else "*")
             self.sink(node, "%s %s=" % (name, k), v, klass)
             result.append(v)
+        if name in _SET_ORDERED_CALLS:
+            operands = [a.value if isinstance(a, ast.Starred) else a for a in node.args]
+            if recv is not None and isinstance(node.func, ast.Attribute):
+                operands.insert(0, node.func.value)
+            operands.extend(k.value for k in node.keywords)
+            self.numeric_check(node, operands, result)
         if name in _SET_CONTAINMENT_CALLS:
             return self.containment_result(result)
         # a function handed to a third-party callable (a sort key, a callback)
@@ -2366,6 +2373,64 @@ def test_set_ordering_classifies_implicit_e_or_d_from_either_operand(label, expr
     findings = _fixture(_set_call_api(expr), _BOT_PERMITTED, _WORKER_FIXTURE)
     assert len(findings) == 1 and "api display slot 'name' reads K" in str(findings[0]), (
         label, _fmt(findings))
+
+
+_ORDERED_CALL_SPELLINGS = ("operator.le", "operator.ge", "__le__", "__ge__")
+_ORDERED_NUMERIC_PROVENANCE = (
+    ("E", 'set(_aer_enc(r["value"]))'),
+    ("D", 'set(r["value"])'),
+)
+
+
+def _unused_set_call_api(expr, bound=False):
+    bounds = 'CONTRACT_BOUNDS = {"limit": 0.83}\n\n' if bound else ""
+    return '''import operator
+
+
+%sdef _aer_enc(value):
+    return str(value)
+
+
+def evidence_report(r):
+    %s
+    return {"name": "SAFE"}
+''' % (bounds, expr)
+
+
+_ORDERED_NUMERIC_NEGATIVES = [
+    ("%s %s literal %s" % (spelling, provenance, side),
+     _set_call_expr(spelling,
+                    value if side == "receiver" else "(0.83)",
+                    value if side == "argument" else "0.83"))
+    for spelling in _ORDERED_CALL_SPELLINGS
+    for provenance, value in _ORDERED_NUMERIC_PROVENANCE
+    for side in ("receiver", "argument")
+]
+
+
+@pytest.mark.parametrize("label,expr", _ORDERED_NUMERIC_NEGATIVES,
+                         ids=[row[0] for row in _ORDERED_NUMERIC_NEGATIVES])
+def test_ordered_call_spellings_audit_non_allowlisted_numeric_literals(label, expr):
+    findings = _fixture(_unused_set_call_api(expr), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "numeric literal 0.83" in str(findings[0]), (
+        label, _fmt(findings))
+
+
+def test_ordered_call_numeric_audit_keeps_allowlisted_and_bound_values():
+    value = 'set(_aer_enc(r["value"]))'
+    allowlisted = _set_call_expr("operator.le", value, "0.5")
+    assert _fixture(_unused_set_call_api(allowlisted),
+                    _BOT_PERMITTED, _WORKER_FIXTURE) == []
+    bound = _set_call_expr("operator.ge", value, 'CONTRACT_BOUNDS["limit"]')
+    assert _fixture(_unused_set_call_api(bound, bound=True),
+                    _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("spelling", ["issubset", "issuperset"])
+def test_non_ordered_set_containment_calls_do_not_gain_numeric_audits(spelling):
+    value = 'set(_aer_enc(r["value"]))'
+    expr = _set_call_expr(spelling, value, "0.83")
+    assert _fixture(_unused_set_call_api(expr), _BOT_PERMITTED, _WORKER_FIXTURE) == []
 
 
 _REQUEST_IDENT_API = '''from fastapi import Request
