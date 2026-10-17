@@ -921,3 +921,86 @@ def test_t3_7_bind_identity_and_entry(monkeypatch):
         await beat(env, u, 2, seen=[(12, u.steam(2)), (31, u.steam(1))])
         assert (await entered(env, u, 1, hidu, gu, 31))["reason"] == "hold_lapsed"
     run_env(monkeypatch, body)
+
+
+# == N6. S6 attempt rows: numbering, the second hold, rollback together =======
+
+def test_t6_1_attempt_rows_numbered_and_rolled_back_with_their_action(monkeypatch):
+    """T6.1: every hold action writes its attempt row in the action's own
+    transaction. One full flow numbers its rows 1..5 in order (offered,
+    claim, a refused bind, bind, entered); a second hold of the same player
+    in the same room, at the next game, is n = 2 with its own numbering from
+    1; an open refused while the room holds an open hold writes one open
+    attempt row with no hold id; and a claim whose lease step fails leaves
+    NO claim row, no claimed_at and no verifier, so the next claim is
+    attempt 1."""
+    async def body(env):
+        s, g, hid = await held(env)
+        m = await mine(env, s, 1)
+        assert m["readmissible"] == 1 and m["hold_id"] == hid, m
+        await claim(env, s, 1, hid)
+        assert (await bind(env, s, 1, hid, 21))["reason"] == "uncorroborated"
+        await beat(env, s, 0, seen=[(10, s.steam(0)), (21, s.steam(1))])
+        assert (await bind(env, s, 1, hid, 21))["status"] == "bound"
+        assert (await entered(env, s, 1, hid, g, 21))["status"] == "entered"
+        assert await attempts(env, hid) == [
+            (1, "offered", "ok", None), (2, "claim", "ok", None),
+            (3, "bind", "refused", "uncorroborated"), (4, "bind", "ok", None),
+            (5, "entered", "ok", None)]
+        opened = await env.conn.fetch(
+            "SELECT outcome, hold_id FROM match_hold_open_attempts WHERE room_name = $1",
+            s.room)
+        assert [(r["outcome"], str(r["hold_id"])) for r in opened] == [("opened", hid)]
+
+        g2 = (await game_start(env, s, 0, prev=g))["game_id"]
+        await beat(env, s, 1, actor=21)
+        await backdate_presence(env, s, 1, 30)
+        r2 = await open_hold(env, s, 1, 0, g2)
+        assert r2.status_code == 200 and r2.json()["status"] == "opened", r2.text
+        hid2 = r2.json()["hold_id"]
+        h2 = await hold_db(env, hid2)
+        assert (h2["n"], h2["player_id"], str(h2["game_id"])) == (2, s.pid(1), g2)
+        assert await attempts(env, hid2) == []
+        assert (await mine(env, s, 1))["hold_id"] == hid2
+        assert await attempts(env, hid2) == [(1, "offered", "ok", None)]
+        assert await attempts(env, hid) == [
+            (1, "offered", "ok", None), (2, "claim", "ok", None),
+            (3, "bind", "refused", "uncorroborated"), (4, "bind", "ok", None),
+            (5, "entered", "ok", None)], "a row moved on the closed hold"
+
+        await backdate_presence(env, s, 2, 30)
+        rid = "reqbusy" + uuid.uuid4().hex[:8]
+        busy = await open_hold(env, s, 2, 0, g2, rid=rid)
+        assert busy.json()["reason"] == "room_busy", busy.text
+        rows = await env.conn.fetch(
+            "SELECT outcome, reason, hold_id FROM match_hold_open_attempts WHERE request_id = $1",
+            rid)
+        assert [(r["outcome"], r["reason"], r["hold_id"]) for r in rows] == \
+            [("refused", "room_busy", None)]
+
+        u, gu, hidu = await held(env, "ovt")
+        fail = {"on": True}
+        real = main._lease_acquire
+
+        async def lease(*a, **k):
+            if fail["on"]:
+                raise RuntimeError("lease step failed (test)")
+            return await real(*a, **k)
+        monkeypatch.setattr(main, "_lease_acquire", lease)
+        try:
+            r = await env.post("/api/v1/match/hold/%s/claim" % hidu, u.steam(1),
+                               {"steam_id": u.steam(1)})
+            failed = r.status_code >= 500
+        except RuntimeError:
+            failed = True
+        assert failed, "the claim answered through a failed lease step"
+        h = await hold_db(env, hidu)
+        assert (h["claimed_at"], h["verifier"]) == (None, None), dict(h)
+        assert await attempts(env, hidu) == [], "an attempt row outlived its rolled-back claim"
+        fail["on"] = False
+        c = await claim(env, u, 1, hidu)
+        assert c["status"] == "claimed" and len(c["token"]) == 64, c
+        assert await attempts(env, hidu) == [(1, "claim", "ok", None)]
+        h = await hold_db(env, hidu)
+        assert h["claimed_at"] is not None and h["verifier"] is not None
+    run_env(monkeypatch, body)

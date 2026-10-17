@@ -187,6 +187,15 @@ MUTANTS = {
                "    for e in entries:\n        if e[\"cls\"] == CLASS_R:\n            continue\n")],
              [("    for e in entries:\n", "    for e in list(entries):\n")],
              WIN_T, "t5_4_matrix"),
+    # N6 - S6 attempt rows commit with their action, never ahead of it
+    "M6.1": ("N6", "match_hold.py",
+             [('    await _lease_acquire(db, pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)\n',
+               '    await _attempt(db, hold_id, "claim", now, "ok")\n'
+               '    await db.commit()\n'
+               '    await _lease_acquire(db, pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)\n')],
+             [('    await _lease_acquire(db, pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)\n',
+               '    await _lease_acquire(db,  pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)\n')],
+             HOLD_T, "t6_1"),
 }
 
 
