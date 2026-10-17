@@ -257,8 +257,10 @@ ROWS = [
                  '    await db.execute(text("DELETE FROM ffa_report_journal WHERE reporter_id = :pid"),\n'
                  '                     {"pid": pid})\n', '', 1)]},
     # The leave-cause helpers (r1b F3): the trailing timeout leave keeps a hold.
-    {"row": "B10", "node": RP + "test_t4_3_old_clears_leave_the_hold",
-     "tag": "T4.3 hold unchanged",
+    # Run 16:3xZ: on T4.3 this mutant stayed GREEN (T4.3 never checks that the
+    # guard is reached), so the row names T4.3b, which does.
+    {"row": "B10", "node": RP + "test_t4_3b_the_trailing_timeout_leave_reaches_the_leave_guard",
+     "tag": "T4.3b hold kept",
      "mutant": [(MAIN, '                elif not _rdm_trailing_drop(cause):\n',
                  '                elif True:\n', 1)]},
     # The janitor bound (the round 1 census ruling): one row per route of it.

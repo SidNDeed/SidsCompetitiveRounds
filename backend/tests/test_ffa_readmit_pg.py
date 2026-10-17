@@ -342,6 +342,40 @@ def test_t4_3_old_clears_leave_the_hold(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_t4_3b_the_trailing_timeout_leave_reaches_the_leave_guard(monkeypatch):
+    """T4.3b: on a held seat whose queue row is still ready_join, the leave
+    route runs the leave plan, and the plan asks _rdm_trailing_drop about the
+    cause. The drop's own trailing in_room_timeout leave keeps the hold. A
+    chosen in_room_exit through the same route ends the hold. T4.3 does not
+    check that the guard was reached, so this test does (control B10)."""
+    async def body(env):
+        seen = []
+        real = main._rdm_trailing_drop
+
+        def spy(cause):
+            out = real(cause)
+            seen.append((cause, out))
+            return out
+        monkeypatch.setattr(main, "_rdm_trailing_drop", spy)
+        for cause, kept in (("in_room_timeout", True), ("in_room_exit", False)):
+            lob = await _held(env)
+            q = await env.queue_row(lob, 1)
+            assert q is not None and q["status"] == "ready_join" \
+                and q["series_id"] == lob.lid, ("T4.3b queue row", cause, q)
+            before = (await env.seat(lob, 1))["hold_n"]
+            del seen[:]
+            ans = await env.leave(lob, 1, cause=cause)
+            assert ans.status == 200, ("T4.3b leave answered", cause, ans.status, ans.body)
+            s = await env.seat(lob, 1)
+            if kept:
+                assert before == 1 and s["hold_n"] == 1 and s["hold_until"] is not None, \
+                    ("T4.3b hold kept", s["hold_n"], s["hold_until"])
+            else:
+                assert before == 1 and s["hold_n"] is None, ("T4.3b chosen exit ends", s["hold_n"])
+            assert seen == [(cause, kept)], ("T4.3b guard reached", cause, seen)
+    run_env(monkeypatch, body)
+
+
 def test_t4_4_the_lapse_order_and_one_commit(monkeypatch):
     """T4.4: the lapse takes the lobby row before the lobby's queue rows; a
     lapse racing a bind ends in exactly one outcome with no failure line;
