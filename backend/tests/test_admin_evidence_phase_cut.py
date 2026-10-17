@@ -32,7 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, ".."))
 
-from test_discord_evidence_bot import ae, bot_ns, game_body  # noqa: E402
+from test_discord_evidence_bot import ae, bot_ns, game_body, summary_body  # noqa: E402
 import aer_render_worker as worker  # noqa: E402
 
 BACKEND = os.path.dirname(HERE)
@@ -153,6 +153,18 @@ def test_p14_the_1a_decoder_refuses_a_class_slot_and_1b_rules():
     legend = game_body()
     legend["legend"] = {"c1": "x"}
     assert ns["_aer_outcome"](200, legend) == (None, word)
+
+
+def test_p14_the_1a_decoder_refuses_metadata_map_extras():
+    ns = bot_ns()
+    word = "Evidence report: unavailable (schema)."
+    assert ns["_aer_outcome"](200, game_body())[1] is None
+    assert ns["_aer_outcome"](200, summary_body())[1] is None
+    for part, key in (("population", "cls"), ("baseline", "mark"),
+                      ("registry", "legend")):
+        body = game_body()
+        body[part][key] = "extra"
+        assert ns["_aer_outcome"](200, body) == (None, word), (part, key)
 
 
 def test_p14_the_plan_and_the_worker_have_only_the_1a_item_kinds():

@@ -15152,9 +15152,34 @@ def _aer_decode_response(body, phase="1a"):
                                               and s["steam_id"].isdigit()):
             raise AerSchemaError("subject steam id")
         subjects.append((s["steam_id"], _aer_display(s["name"])))
-    for part in ("population", "baseline", "registry"):
-        if not isinstance(body[part], dict):
-            raise AerSchemaError(part)
+    population_keys = frozenset({"key", "days", "lag_s", "games", "computed_at", "truncated"})
+    if summary_page:
+        population_keys |= {"win_computed_at"}
+    population = _aer_keys(body["population"], population_keys)
+    if population["key"] != "all":
+        raise AerSchemaError("population key")
+    for key in ("days", "lag_s", "games"):
+        _aer_check_int(population[key], 0)
+    if not isinstance(population["computed_at"], str) or (summary_page and not isinstance(
+            population["win_computed_at"], str)):
+        raise AerSchemaError("population timestamp")
+    if not isinstance(population["truncated"], list) or any(
+            isinstance(ki, bool) or not isinstance(ki, int) or ki < 0
+            for ki in population["truncated"]):
+        raise AerSchemaError("population truncated")
+    baseline = _aer_keys(body["baseline"], frozenset({"own_games", "scan"}))
+    for key in ("own_games", "scan"):
+        _aer_check_int(baseline[key], 0)
+    registry = _aer_keys(body["registry"], frozenset({"fingerprint", "census"}))
+    if not isinstance(registry["fingerprint"], str) or not re.fullmatch(
+            r"[0-9a-f]{8}", registry["fingerprint"]):
+        raise AerSchemaError("registry fingerprint")
+    census = _aer_keys(registry["census"], frozenset({"M", "N", "O", "C"}))
+    for pair in census.values():
+        if not isinstance(pair, list) or len(pair) != 2:
+            raise AerSchemaError("registry census")
+        for count in pair:
+            _aer_check_int(count, 0)
     if not isinstance(body["catalog"], list):
         raise AerSchemaError("catalog")
     catalog = {}

@@ -241,7 +241,8 @@ def game_body(page=1, pages=1, shape="game"):
             "population": {"key": "all", "days": 30, "lag_s": 120, "games": 4,
                            "computed_at": "2026-10-16T00:00:00+00:00", "truncated": []},
             "baseline": {"own_games": 5, "scan": 200},
-            "registry": {"fingerprint": "f", "census": {}},
+            "registry": {"fingerprint": ae.registry_fingerprint(),
+                         "census": ae.registry_census()},
             "catalog": [ae._catalog_row(e) for e in base],
             "games": [{"match_id": "0" * 32, "code": "0" * 12,
                        "ended_at": "2026-10-16T00:00:00+00:00", "is_ranked": True,
@@ -259,6 +260,7 @@ def summary_body(page=1, pages=3, shape="pair"):
     body = game_body(page, pages, shape)
     body["catalog"] = [ae._catalog_row(w)]
     body["games"] = []
+    body["population"]["win_computed_at"] = "2026-10-16T00:00:00+00:00"
     body["windows"] = [{"oi": 0, "basis": "pair", "subj": ["seat", 0, 1], "games": 10,
                         "covered": 10, "flag_obs": 0, "newest": "a" * 12,
                         "oldest": "b" * 12}]
@@ -289,6 +291,9 @@ def test_the_1a_decoder_accepts_a_served_page_and_refuses_every_break(bot):
     assert page.subjects[1][1] == ae._aer_enc("B`eta")
     s = dec(summary_body(), "1a")
     assert (s.shape, len(s.windows), len(s.summary), s.games) == ("pair", 1, 1, ())
+    assert set(page.population) == {"key", "days", "lag_s", "games", "computed_at",
+                                    "truncated"}
+    assert set(s.population) == set(page.population) | {"win_computed_at"}
 
     def broken(mutate, maker=game_body):
         b = maker()
@@ -299,6 +304,14 @@ def test_the_1a_decoder_accepts_a_served_page_and_refuses_every_break(bot):
 
     assert broken(lambda b: b.pop("registry"))
     assert broken(lambda b: b.update(extra=1))
+    assert broken(lambda b: b["population"].update(cls="c1"))
+    assert broken(lambda b: b["baseline"].update(mark="m1"))
+    assert broken(lambda b: b["registry"].update(legend={}))
+    assert broken(lambda b: b["population"].update(win_computed_at="now"))
+    assert broken(lambda b: b["population"].pop("win_computed_at"), summary_body)
+    assert broken(lambda b: b["population"].update(games=True))
+    assert broken(lambda b: b["baseline"].update(scan=True))
+    assert broken(lambda b: b["registry"]["census"].update(M=[True, 1]))
     assert broken(lambda b: b["games"][0]["seats"][0]["cells"][0].append("c1"))   # a cls slot
     assert broken(lambda b: b.update(rules={"report": "armed"}))
     assert broken(lambda b: b["subjects"][0].update(name="a‮b"))
@@ -453,6 +466,32 @@ WORDS = [
      "Evidence report: unavailable (schema)."),
     ("refused", 403, {"detail": "refused"}, {}, "Evidence report refused."),
 ]
+
+
+def _metadata_extra(part, key):
+    body = game_body()
+    body[part][key] = "extra"
+    return body
+
+
+@pytest.mark.parametrize("via", ["command", "button"])
+def test_p3_metadata_schema_failures_publish_nothing(via):
+    word = "Evidence report: unavailable (schema)."
+    for part, key in (("population", "cls"), ("baseline", "mark"),
+                      ("registry", "legend")):
+        events = []
+        body = _metadata_extra(part, key)
+        api = _Api(lambda p, a, b=body: (200, b, {}), events)
+        ns = bot_ns(api, events)
+        msg = _Message(events)
+        if via == "command":
+            it = _Interaction(events, ADMIN)
+            run(_command(ns, it))
+        else:
+            it = _Interaction(events, ADMIN, custom_id="aer:g:%s:2" % ("0" * 12),
+                              message=msg)
+            run(_click(ns, it))
+        assert (it.ephemeral, _public(events), msg.edits) == ([word], [], []), (part, key)
 
 
 @pytest.mark.parametrize("via", ["command", "button"])
