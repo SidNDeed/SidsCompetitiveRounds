@@ -293,7 +293,11 @@ def vjoin(*vals):
     items = [v.item for v in vals if v.item is not None]
     item = vjoin(*items) if items else None
     aliases = [v.alias for v in vals]
-    alias = _join_alias(aliases)
+    scalar_arms = all(a is not None or
+                      (v.ex == frozenset({C}) and v.im <= {S} and not v.funcs and
+                       v.elems is None and v.item is None)
+                      for v, a in zip(vals, aliases))
+    alias = _join_alias(aliases) if scalar_arms else None
     if alias is None and all(a is not None for a in aliases):
         for v in vals:
             ex |= v.ex_all()
@@ -307,10 +311,10 @@ def _alias_key(a):
 
 
 def _join_alias(aliases):
-    """One alias when every joined value names the same thing; dicts with the
-    same constant keys join key by key."""
+    """One alias when the named alternatives agree; aliasless optional
+    alternatives do not erase it, and equal-key dicts join key by key."""
     present = [a for a in aliases if a is not None]
-    if len(present) != len(aliases) or not present:
+    if not present:
         return None
     if all(a[0] == "dict" for a in present) and len({a[1] for a in present}) == 1:
         keys = present[0][1]
@@ -350,6 +354,31 @@ def element(v):
     if P in out.ex:
         out = V((out.ex - {P}) | {E}, out.im, out.funcs)
     return out
+
+
+def _dict_slot_update(value, key, new, only_if_missing=False):
+    """Join `new` into one literal dictionary slot while retaining siblings."""
+    if value.alias is None or value.alias[0] != "dict":
+        return None
+    keys = list(value.alias[1])
+    vals = list(value.alias[2])
+    if key in keys:
+        if only_if_missing:
+            return value
+        pos = keys.index(key)
+        vals[pos] = vjoin(vals[pos], new)
+    else:
+        keys.append(key)
+        vals.append(new)
+    return V(value.ex, value.im, value.funcs | new.funcs, value.elems, value.item,
+             ("dict", tuple(keys), tuple(vals)))
+
+
+def _dict_dynamic_update(value, new):
+    """Forget a dictionary's slots after a dynamic mutation, but keep their
+    joined element structure for conservative reads."""
+    item = vjoin(element(value), new)
+    return V(value.ex, value.im, value.funcs | item.funcs, None, item)
 
 
 def annotation_origin(mod, node):
@@ -775,7 +804,16 @@ class Frame:
             self.expr(tgt.slice)
             if isinstance(base, ast.Name) and base.id in self.env:
                 cur = self.env[base.id]
-                self.env[base.id] = vjoin(cur, V((), (), v.funcs, None, add_im(v, self.ctx)))
+                incoming = add_im(v, self.ctx)
+                updated = None
+                if isinstance(tgt.slice, ast.Constant) and isinstance(tgt.slice.value, str):
+                    updated = _dict_slot_update(cur, tgt.slice.value, incoming)
+                if updated is not None:
+                    self.env[base.id] = updated
+                elif cur.alias is not None and cur.alias[0] == "dict":
+                    self.env[base.id] = _dict_dynamic_update(cur, incoming)
+                else:
+                    self.env[base.id] = vjoin(cur, V((), (), v.funcs, None, incoming))
             elif isinstance(base, ast.Name) and base.id in self.mod.state:
                 key = (self.mod.kind, base.id)
                 self.ps.state_vals[key] = vjoin(self.ps.state_vals.get(key), V(v.flat() | self.ctx))
@@ -1092,7 +1130,7 @@ class Frame:
                 return vjoin(*out)
             if meth in _MUTATORS:
                 # `items.append(x)`, or `add = items.append` then `add(x)`
-                self.mutate(fn.alias[3], argvals, kwvals)
+                self.mutate(meth, fn.alias[3], n, argvals, kwvals)
                 return V({C})
             return self.third_party("." + meth, n, argvals, kwvals, recv)
         if name is None:
@@ -1116,7 +1154,35 @@ class Frame:
             return node.id
         return None
 
-    def mutate(self, recv_node, argvals, kwvals):
+    def literal_mutation_slots(self, meth, node, argvals, kwvals):
+        """The exact slots changed by a supported literal-key dictionary call.
+        None means that the mutation must conservatively forget key identity."""
+        if meth == "update":
+            slots = []
+            for value in argvals:
+                if value.alias is None or value.alias[0] != "dict":
+                    return None
+                slots.extend((key, slot, False)
+                             for key, slot in zip(value.alias[1], value.alias[2]))
+            for key, value in kwvals.items():
+                if key is None:
+                    if value.alias is None or value.alias[0] != "dict":
+                        return None
+                    slots.extend((slot_key, slot, False)
+                                 for slot_key, slot in zip(value.alias[1], value.alias[2]))
+                else:
+                    slots.append((key, value, False))
+            return slots
+        if meth in ("setdefault", "__setitem__") and node.args and \
+                isinstance(node.args[0], ast.Constant) and \
+                isinstance(node.args[0].value, str):
+            if meth == "__setitem__" and len(argvals) < 2:
+                return None
+            value = argvals[1] if len(argvals) > 1 else V({C})
+            return [(node.args[0].value, value, meth == "setdefault")]
+        return None
+
+    def mutate(self, meth, recv_node, node, argvals, kwvals):
         v = vjoin(*(list(argvals) + list(kwvals.values()))) if (argvals or kwvals) else V({C})
         v = add_im(v, self.order_ctx)
         tgt = recv_node
@@ -1124,6 +1190,18 @@ class Frame:
             name = tgt.id
             if name in self.env:
                 cur = self.env[name]
+                slots = self.literal_mutation_slots(meth, node, argvals, kwvals)
+                if cur.alias is not None and cur.alias[0] == "dict" and slots is not None:
+                    updated = cur
+                    for key, slot, only_if_missing in slots:
+                        updated = _dict_slot_update(
+                            updated, key, add_im(slot, self.ctx | self.order_ctx),
+                            only_if_missing)
+                    self.env[name] = updated
+                    return
+                if cur.alias is not None and cur.alias[0] == "dict":
+                    self.env[name] = _dict_dynamic_update(cur, add_im(v, self.ctx))
+                    return
                 self.env[name] = vjoin(cur, V((), (), v.funcs, None,
                                               V(v.ex, v.im | self.ctx, v.funcs, v.elems, v.item,
                                                 v.alias)))
@@ -1639,6 +1717,121 @@ def test_exact_constant_key_read_does_not_smear_a_rank_sibling():
 
 ''')
     assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
+
+
+_OPTIONAL_BOX_HELPER = '''def _optional_box(cell):
+    if cell[2]:
+        return {"rank": cell[3], "shown": _aer_enc_text(cell[0])}
+    return None
+
+
+'''
+
+_SCALAR_BOX_HELPER = _OPTIONAL_BOX_HELPER.replace("return None", 'return "EMPTY"')
+
+
+def _mixed_box_use(box_expr, sink):
+    return (
+        '        box = %s\n' % box_expr
+        + ('        word = "COLD"\n'
+           '        if isinstance(box, dict) and box["rank"] > 0.5:\n'
+           '            word = "HOT"\n'
+           '        items.append(AerItem("cell", (), (), word))'
+           if sink == "rank" else
+           '        items.append(AerItem("cell", (), (), box["shown"]))'))
+
+
+_MIXED_JOIN_CASES = [
+    ("helper dict or None", "_optional_box(cell)", _OPTIONAL_BOX_HELPER),
+    ("helper dict or scalar", "_optional_box(cell)", _SCALAR_BOX_HELPER),
+    ("conditional dict or None",
+     '({"rank": cell[3], "shown": _aer_enc_text(cell[0])} if cell[2] else None)', ""),
+    ("conditional dict or scalar",
+     '({"rank": cell[3], "shown": _aer_enc_text(cell[0])} if cell[2] else "EMPTY")', ""),
+]
+
+
+@pytest.mark.parametrize("label,box_expr,helper", _MIXED_JOIN_CASES,
+                         ids=[row[0] for row in _MIXED_JOIN_CASES])
+def test_constant_key_alias_survives_mixed_optional_and_union_joins(
+        label, box_expr, helper):
+    bot = _dict_fixture(_mixed_box_use(box_expr, "rank"), helper)
+    findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (label, _fmt(findings))
+    bot = _dict_fixture(_mixed_box_use(box_expr, "shown"), helper)
+    assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == [], label
+
+
+_LITERAL_MUTATIONS = [
+    ("subscript assignment", 'box["shown"] = "CHANGED"',
+     'box["rank"] = cell[3]', 'box["rank"] = cell[3] > 0.5', True),
+    ("augmented subscript assignment", 'box["shown"] += "X"',
+     'box["rank"] += cell[3]', 'box["rank"] += cell[3] > 0.5', False),
+    ("update mapping", 'box.update({"shown": "CHANGED"})',
+     'box.update({"rank": cell[3]})', 'box.update({"rank": cell[3] > 0.5})', True),
+    ("update keyword", 'box.update(shown="CHANGED")',
+     'box.update(rank=cell[3])', 'box.update(rank=cell[3] > 0.5)', True),
+    ("setdefault", 'box.setdefault("shown", "CHANGED")',
+     'box.setdefault("rank", cell[3])', 'box.setdefault("rank", cell[3] > 0.5)', True),
+    ("dunder setitem", 'box.__setitem__("shown", "CHANGED")',
+     'box.__setitem__("rank", cell[3])',
+     'box.__setitem__("rank", cell[3] > 0.5)', True),
+]
+
+
+def _literal_mutation_rank(mutation, rank_absent=False):
+    initial = '{"shown": "SAFE"}' if rank_absent else '{"rank": 0.0, "shown": "SAFE"}'
+    return _dict_fixture(
+        '        box = %s\n' % initial
+        + '        %s\n' % mutation
+        + '        word = "COLD"\n'
+          '        if box["rank"] > 0.5:\n'
+          '            word = "HOT"\n'
+          '        items.append(AerItem("cell", (), (), word))')
+
+
+@pytest.mark.parametrize("label,preserve,update,no_smear,rank_absent", _LITERAL_MUTATIONS,
+                         ids=[row[0] for row in _LITERAL_MUTATIONS])
+def test_literal_dict_mutation_updates_only_the_matching_slot(
+        label, preserve, update, no_smear, rank_absent):
+    findings = _fixture(
+        _API_PERMITTED, _literal_mutation_rank(update, rank_absent), _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (label, _fmt(findings))
+    bot = _dict_fixture(
+        '        box = {"rank": cell[3], "shown": "SAFE"}\n'
+        '        %s\n' % preserve
+        + '        word = "COLD"\n'
+          '        if box["rank"] > 0.5:\n'
+          '            word = "HOT"\n'
+          '        items.append(AerItem("cell", (), (), word))')
+    findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (label, _fmt(findings))
+    initial = '{"shown": _aer_enc_text(cell[0]), "rank": False}'
+    bot = _dict_fixture(
+        '        box = %s\n' % initial
+        + '        %s\n' % no_smear
+        + '        items.append(AerItem("cell", (), (), box["shown"]))')
+    assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == [], label
+
+
+_DYNAMIC_MUTATIONS = [
+    ("subscript assignment", 'box[cell[1]] = "CHANGED"'),
+    ("update mapping", 'box.update({cell[1]: "CHANGED"})'),
+    ("setdefault", 'box.setdefault(cell[1], "CHANGED")'),
+    ("dunder setitem", 'box.__setitem__(cell[1], "CHANGED")'),
+]
+
+
+@pytest.mark.parametrize("label,mutation", _DYNAMIC_MUTATIONS,
+                         ids=[row[0] for row in _DYNAMIC_MUTATIONS])
+def test_dynamic_dict_mutation_folds_all_old_and_new_slots(label, mutation):
+    bot = _dict_fixture(
+        '        box = {"shown": _aer_enc_text(cell[0]),\n'
+        '               "classified": cell[3] > 0.5}\n'
+        '        %s\n' % mutation
+        + '        items.append(AerItem("cell", (), (), box["shown"]))')
+    findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (label, _fmt(findings))
 
 
 _BOT_GO = '''async def _aer_go(body):
