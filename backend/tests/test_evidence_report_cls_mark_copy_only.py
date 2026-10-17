@@ -1158,7 +1158,7 @@ class Frame:
                     im |= arm.im_all()
         if P in ex:
             ex = (ex - {P}) | {E}
-        if ordering and ex & {E, D}:
+        if ordering and (ex | im) & {E, D}:
             ex |= {K}
         return V(ex, im)
 
@@ -2332,6 +2332,40 @@ def test_set_containment_call_spellings_classify_e_or_d_from_either_operand(
         generic = _API_PERMITTED.replace('_text(r["display_name"])',
                                          '_text(r["display_name"]).lower()')
         assert _fixture(generic, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+_SET_ORDER_SPELLINGS = ("native",) + _SET_CALL_SPELLINGS
+_SET_IMPLICIT_PROVENANCE = (
+    ("E", '_aer_enc(r["value"])'),
+    ("D", 'r["value"]'),
+)
+
+
+def _set_order_expr(spelling, left, right):
+    if spelling == "native":
+        return "%s <= %s" % (left, right)
+    return _set_call_expr(spelling, left, right)
+
+
+_SET_IMPLICIT_NEGATIVES = [
+    ("%s implicit %s %s" % (spelling, provenance, side),
+     _set_order_expr(
+         spelling,
+         conditional if side == "left" else '{"z"}',
+         conditional if side == "right" else '{"z"}'))
+    for spelling in _SET_ORDER_SPELLINGS
+    for provenance, source in _SET_IMPLICIT_PROVENANCE
+    for conditional in ['({"x"} if %s else {"y"})' % source]
+    for side in ("left", "right")
+]
+
+
+@pytest.mark.parametrize("label,expr", _SET_IMPLICIT_NEGATIVES,
+                         ids=[row[0] for row in _SET_IMPLICIT_NEGATIVES])
+def test_set_ordering_classifies_implicit_e_or_d_from_either_operand(label, expr):
+    findings = _fixture(_set_call_api(expr), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "api display slot 'name' reads K" in str(findings[0]), (
+        label, _fmt(findings))
 
 
 _REQUEST_IDENT_API = '''from fastapi import Request
