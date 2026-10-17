@@ -76,6 +76,52 @@ MUTANTS = {
              [("  CONSTRAINT uq_msh_room_game_player UNIQUE (room_name, game_id, player_id),\n",
                "  CONSTRAINT  uq_msh_room_game_player UNIQUE (room_name, game_id, player_id),\n")],
              MIG_T, "first_apply_rerun"),
+    # N3 - S2 server: the DB clock, the anchor, closure once, attempt rows
+    "M2.2": ("N3", "match_hold.py",
+             [('text("SELECT clock_timestamp()")', 'text("SELECT now()")')],
+             [('text("SELECT clock_timestamp()")', 'text("SELECT  clock_timestamp()")')],
+             HOLD_T, "t2_1_open_anchor"),
+    "M2.3": ("N3", "match_hold.py",
+             [("   SET closed_at = due.at, closed_reason = due.why\n",
+               "   SET closed_at = due.at, closed_reason = due.why,"
+               " held_until = CAST(:now AS timestamptz)\n")],
+             [("   SET closed_at = due.at, closed_reason = due.why\n",
+               "   SET closed_at = due.at,  closed_reason = due.why\n")],
+             HOLD_T, "t2_2_closure"),
+    "M2.4": ("N3", "match_hold.py",
+             [('"anchor": pres["present_at"], "now": now,', '"anchor": now, "now": now,')],
+             [('"anchor": pres["present_at"], "now": now,',
+               '"anchor": pres["present_at"],  "now": now,')],
+             HOLD_T, "t2_1_open_anchor"),
+    "M2.5": ("N3", "match_hold.py",
+             [("import uuid\n", "import uuid\nfrom datetime import datetime, timezone\n"),
+              ('return (await db.execute(text("SELECT clock_timestamp()"))).scalar()',
+               "return datetime.now(timezone.utc)")],
+             [('return (await db.execute(text("SELECT clock_timestamp()"))).scalar()',
+               'return ((await db.execute(text("SELECT clock_timestamp()"))).scalar())')],
+             HOLD_T, "t2_1_open_anchor"),
+    "M2.6": ("N3", "match_hold.py",
+             [('    if latest != game["id"]:\n', "    if False:\n")],
+             [('    if latest != game["id"]:\n', '    if (latest != game["id"]):\n')],
+             HOLD_T, "t2_1_open_anchor or t2_8_open_attempt"),
+    "M2.7": ("N3", "match_hold.py",
+             [('" WHERE id = CAST(:hid AS uuid) AND closed_at IS NULL"),\n'
+               '            {"at": closure[0]',
+               '" WHERE FALSE AND id = CAST(:hid AS uuid) AND closed_at IS NULL"),\n'
+               '            {"at": closure[0]')],
+             [('" WHERE id = CAST(:hid AS uuid) AND closed_at IS NULL"),\n'
+               '            {"at": closure[0]',
+               '" WHERE  id = CAST(:hid AS uuid) AND closed_at IS NULL"),\n'
+               '            {"at": closure[0]')],
+             HOLD_T, "t2_2_closure"),
+    "M2.14": ("N3", "match_hold.py",
+              [('        await _write_open_attempt(db, req, room, held, opener, now, "refused",'
+                ' reason, None)\n', "        pass\n")],
+              [('        await _write_open_attempt(db, req, room, held, opener, now, "refused",'
+                ' reason, None)\n',
+                '        await _write_open_attempt(db, req, room, held, opener, now, "refused",'
+                ' reason,  None)\n')],
+              HOLD_T, "t2_8_open_attempt"),
 }
 
 

@@ -292,3 +292,414 @@ def test_hold_latch_helper(monkeypatch):
             v = await seed_series(env.conn, mode, flag=False)
             assert await latch(env, v, "  ") == (False, None)
     run_env(monkeypatch, body)
+
+
+# == N3. S2 server: beat, open, state, by-room, end, attempts, sweep ===========
+
+import hashlib  # noqa: E402
+import hmac as _hmac  # noqa: E402
+from datetime import datetime as _dt, timedelta  # noqa: E402
+
+
+def sign_open(body):
+    msg = match_hold.hold_open_canonical(body["mode"], body["room"], body["game_id"],
+                                         body["held_steam_id"], body["slot"], body["team"],
+                                         body["opener_steam_id"])
+    return _hmac.new(SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
+
+
+def seat_of(s, i):
+    """(slot, team) of seat i: team = slot // 2 in 2v2; slot 0 solo in 1v2."""
+    return i, (i // 2 if s.mode == "team" else (0 if i == 0 else 1))
+
+
+async def beat(env, s, i, actor=None, seen=(), digest=None, room=None):
+    r = await env.post("/api/v1/match/hold/beat", s.steam(i), {
+        "steam_id": s.steam(i), "mode": s.mode, "series_id": str(s.sid),
+        "room": room or s.room, "actor": actor if actor is not None else 10 + i,
+        "seen": [{"actor": a, "u_id": u} for a, u in seen], "boundary_digest": digest})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def open_hold(env, s, held, opener, g, rid=None, sign=True, **over):
+    slot, team = seat_of(s, held)
+    body = {"request_id": rid or ("req" + uuid.uuid4().hex[:16]),
+            "opener_steam_id": s.steam(opener), "mode": s.mode, "room": s.room,
+            "game_id": str(g), "held_steam_id": s.steam(held), "slot": slot, "team": team,
+            "t1_points": 1, "t2_points": 0}
+    body.update(over)
+    body["hmac"] = sign_open(body) if sign else "0" * 64
+    r = await env.post("/api/v1/match/hold/open", body["opener_steam_id"], body)
+    return r
+
+
+async def backdate_presence(env, s, i, secs):
+    """The seat stopped beating `secs` ago (a dropped fighter beats no more)."""
+    await env.conn.execute(
+        "UPDATE match_seat_presence SET present_at = clock_timestamp() - make_interval(secs => $3),"
+        " beat_at = clock_timestamp() - make_interval(secs => $3)"
+        " WHERE room_name = $1 AND player_id = $2", s.room, s.pid(i), float(secs))
+    return await env.conn.fetchval(
+        "SELECT present_at FROM match_seat_presence WHERE room_name = $1 AND player_id = $2",
+        s.room, s.pid(i))
+
+
+async def hold_db(env, hid):
+    return await env.conn.fetchrow("SELECT * FROM match_seat_holds WHERE id = $1",
+                                   uuid.UUID(str(hid)))
+
+
+async def shift_hold(env, hid, secs):
+    """Move one hold back in time by `secs`, every stamp together (the
+    invariant held_until = held_anchor_at + HOLD_S is kept)."""
+    await env.conn.execute(
+        "UPDATE match_seat_holds SET held_anchor_at = held_anchor_at - make_interval(secs => $2),"
+        " held_at = held_at - make_interval(secs => $2),"
+        " held_until = held_until - make_interval(secs => $2),"
+        " claimed_at = claimed_at - make_interval(secs => $2),"
+        " bound_at = bound_at - make_interval(secs => $2) WHERE id = $1",
+        uuid.UUID(str(hid)), float(secs))
+
+
+async def sweep(env):
+    async with env.sm() as db:
+        return await match_hold.hold_sweep(db)
+
+
+async def dbclock(env):
+    return await env.conn.fetchval("SELECT clock_timestamp()")
+
+
+async def opened_series(env, mode="team", held=1, opener=0, back=30):
+    """A flagged series, G1 started, the held seat's beat backdated `back` s
+    and every other seat beating now."""
+    s = await seed_series(env.conn, mode)
+    g = (await game_start(env, s, opener))["game_id"]
+    for i in range(len(s.seats)):
+        await beat(env, s, i)
+    pres = await backdate_presence(env, s, held, back)
+    return s, g, pres
+
+
+class _SkewedDatetime(_dt):
+    """An application clock five minutes ahead of the DB clock: a route that
+    reads it instead of clock_timestamp() writes a stamp outside the
+    transaction's DB-clock bounds."""
+    @classmethod
+    def now(cls, tz=None):
+        return _dt.now(tz) + timedelta(minutes=5)
+
+
+def test_t2_1_open_anchor_idempotent_and_refusals(monkeypatch):
+    """T2.1: one row; held_anchor_at = the held seat's last present_at and
+    held_until = present_at + 120 s exactly; held_at is the DB clock read
+    after the series lock wait (inside the request's DB-clock bounds, even
+    with a skewed application clock and a 2 s lock wait); the lease of the
+    held player is released; a repeat answers the same row; each refusal on
+    its own fixture; a sweep with nothing due moves no held_until, and the
+    sweep of a lapsed row stamps closed_at = held_until, never moving it."""
+    monkeypatch.setattr(match_hold, "datetime", _SkewedDatetime, raising=False)
+
+    async def body(env):
+        s, g, pres = await opened_series(env)
+        await env.conn.execute(
+            "INSERT INTO queue_leases (player_id, mode, group_id, generation, acquired_at, "
+            " renewed_at, expires_at) VALUES ($1, 'team', $2, gen_random_uuid(), "
+            " clock_timestamp(), clock_timestamp(), clock_timestamp() + interval '10 minutes')",
+            s.pid(1), s.sid)
+        blk = await cf_pg.harness.connect_bound(env.c.dsn, env.c.schema)
+        tr = blk.transaction()
+        await tr.start()
+        await blk.execute("SELECT 1 FROM team_series WHERE id = $1 FOR NO KEY UPDATE", s.sid)
+        t0 = await dbclock(env)
+        task = asyncio.ensure_future(open_hold(env, s, 1, 0, g, rid="req-first-open"))
+        await asyncio.sleep(2.0)
+        released = await blk.fetchval("SELECT clock_timestamp()")
+        await tr.rollback()
+        await blk.close()
+        r = await task
+        t1 = await dbclock(env)
+        out = r.json()
+        assert (r.status_code, out["status"], out["repeat"]) == (200, "opened", False), out
+        h = await hold_db(env, out["hold_id"])
+        assert h["held_anchor_at"] == pres, (h["held_anchor_at"], pres)
+        assert h["held_until"] == pres + timedelta(seconds=120)
+        assert released <= h["held_at"] <= t1 and t0 <= h["held_at"], (released, h["held_at"])
+        assert (h["n"], h["slot"], h["team"], h["seq"], h["closed_at"]) == (1, 1, 0, 0, None)
+        assert h["opener_player_id"] == s.pid(0) and h["game_id"] == uuid.UUID(g)
+        assert 85 <= out["deadline_s"] <= 90, out
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM queue_leases WHERE player_id = $1", s.pid(1)) == 0
+        rep = (await open_hold(env, s, 1, 2, g)).json()
+        assert (rep["status"], rep["repeat"], rep["hold_id"]) == ("opened", True, out["hold_id"])
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", s.room) == 1
+
+        assert await sweep(env) == {}
+        assert (await hold_db(env, out["hold_id"]))["held_until"] == h["held_until"]
+        await shift_hold(env, out["hold_id"], 200)
+        lapsed_until = (await hold_db(env, out["hold_id"]))["held_until"]
+        late = (await open_hold(env, s, 1, 2, g)).json()     # past the deadline, unswept
+        assert (late["status"], late["reason"]) == ("refused", "duplicate_game"), late
+        assert await sweep(env) == {"lapsed": 1}
+        hh = await hold_db(env, out["hold_id"])
+        assert (hh["held_until"], hh["closed_at"], hh["closed_reason"]) == \
+            (lapsed_until, lapsed_until, "lapsed")
+        assert await sweep(env) == {}
+
+        # each refusal on its fixture
+        async def refusal(r):
+            assert r.status_code == 200, r.text
+            j = r.json()
+            assert j["status"] == "refused", j
+            return j["reason"]
+
+        assert await refusal(await open_hold(env, s, 1, 0, g)) == "duplicate_game"
+        busy, gb, _ = await opened_series(env)
+        assert (await open_hold(env, busy, 1, 0, gb)).json()["status"] == "opened"
+        await beat(env, busy, 2)
+        assert await refusal(await open_hold(env, busy, 2, 0, gb)) == "room_busy"
+        nm, gn, _ = await opened_series(env)
+        stranger = (await seed_players(env.conn, 1))[0]
+        assert await refusal(await open_hold(env, nm, 1, 0, gn,
+                                             held_steam_id=stranger[1])) == "not_member"
+        assert await refusal(await open_hold(env, nm, 1, 1, gn)) == "not_member"
+        assert await refusal(await open_hold(env, nm, 1, 0, gn, team=1)) == "not_member"
+        assert await refusal(await open_hold(env, nm, 1, 0, gn, slot=3)) == "not_member"
+        cl, gc, _ = await opened_series(env, "ovt")
+        await env.conn.execute("UPDATE ovt_series SET status = 'completed' WHERE id = $1", cl.sid)
+        assert await refusal(await open_hold(env, cl, 1, 0, gc)) == "series_closed"
+        nf, gf, _ = await opened_series(env)
+        await env.conn.execute("UPDATE team_series SET hold_room = 'elsewhere' WHERE id = $1",
+                               nf.sid)
+        assert await refusal(await open_hold(env, nf, 1, 0, gf)) == "not_flagged"
+        nc, g1, _ = await opened_series(env)
+        await game_start(env, nc, 0, prev=g1)
+        assert await refusal(await open_hold(env, nc, 1, 0, g1)) == "not_current_game"
+        assert await refusal(await open_hold(env, nc, 1, 0, uuid.uuid4())) == "not_current_game"
+        npz = await seed_series(env.conn, "ovt")
+        gp = (await game_start(env, npz, 0))["game_id"]
+        assert await refusal(await open_hold(env, npz, 2, 0, gp)) == "no_presence"
+        ws, gw, _ = await opened_series(env, back=110)
+        assert await refusal(await open_hold(env, ws, 1, 0, gw)) == "window_spent"
+        bad = await open_hold(env, ws, 1, 0, gw, sign=False)
+        assert bad.status_code == 403
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds WHERE room_name = ANY($1::text[])",
+            [nm.room, cl.room, nf.room, nc.room, npz.room, ws.room]) == 0
+    run_env(monkeypatch, body)
+
+
+def test_t2_1_open_stores_the_crossing_of_the_locked_series(monkeypatch):
+    """A team hold stores what _team_game_crossed_two answers for the series
+    row read under the lock (wins and room), as crossed_at_hold; a 1v2 hold
+    never asks it."""
+    seen = []
+
+    async def crossed(db, series_id, row, reported_points=None):
+        seen.append((series_id, dict(row)))
+        return True
+
+    async def body(env):
+        monkeypatch.setattr(main, "_team_game_crossed_two", crossed)
+        s, g, _ = await opened_series(env)
+        await env.conn.execute(
+            "UPDATE team_series SET t1_series_wins = 1 WHERE id = $1", s.sid)
+        out = (await open_hold(env, s, 1, 0, g)).json()
+        assert (await hold_db(env, out["hold_id"]))["crossed_at_hold"] is True
+        assert seen == [(s.sid, {"t1_series_wins": 1, "t2_series_wins": 0,
+                                 "photon_room_id": s.room})], seen
+        o, go, _ = await opened_series(env, "ovt")
+        out = (await open_hold(env, o, 1, 0, go)).json()
+        assert (await hold_db(env, out["hold_id"]))["crossed_at_hold"] is False
+        assert len(seen) == 1
+    run_env(monkeypatch, body)
+
+
+def test_t2_2_closure_once_for_every_reason(monkeypatch):
+    """T2.2: every end reason stamps closed_at and the reason exactly once;
+    a member without a fresh beat, a non-member and an unknown reason are
+    refused; two racing ends stamp one closure and both answer it; after an
+    end the hold reads closed, a re-open of the seat is duplicate_game and
+    the room takes another hold; a bound row with no entry closes
+    entry_failed at bound_at + 60 s; an end after a deadline answers the
+    deadline's closure."""
+    async def body(env):
+        for reason in sorted(match_hold.END_REASONS):
+            s, g, _ = await opened_series(env, "ovt" if len(reason) % 2 else "team")
+            hid = (await open_hold(env, s, 1, 0, g)).json()["hold_id"]
+            r = await env.post("/api/v1/match/hold/%s/end" % hid, s.steam(2),
+                               {"steam_id": s.steam(2), "reason": reason})
+            j = r.json()
+            assert (j["status"], j["closed_reason"], j["already"]) == ("closed", reason, False)
+            h = await hold_db(env, hid)
+            assert (h["closed_reason"], h["closed_at"].isoformat()) == (reason, j["closed_at"])
+            st = (await env.get("/api/v1/match/hold/%s/state" % hid, s.steam(0),
+                                {"steam_id": s.steam(0)})).json()
+            assert (st["state"], st["closed_reason"]) == ("closed", reason), st
+
+        s, g, _ = await opened_series(env)
+        hid = (await open_hold(env, s, 1, 0, g)).json()["hold_id"]
+        r = await env.post("/api/v1/match/hold/%s/end" % hid, s.steam(2),
+                           {"steam_id": s.steam(2), "reason": "dance"})
+        assert r.status_code == 400
+        stranger = (await seed_players(env.conn, 1))[0]
+        r = await env.post("/api/v1/match/hold/%s/end" % hid, stranger[1],
+                           {"steam_id": stranger[1], "reason": "ceiling"})
+        assert r.status_code == 404
+        await env.conn.execute(
+            "UPDATE match_seat_presence SET beat_at = clock_timestamp() - interval '30 seconds'"
+            " WHERE room_name = $1 AND player_id = $2", s.room, s.pid(3))
+        r = await env.post("/api/v1/match/hold/%s/end" % hid, s.steam(3),
+                           {"steam_id": s.steam(3), "reason": "ceiling"})
+        assert r.json() == {"status": "refused", "reason": "no_fresh_beat"}
+        assert (await hold_db(env, hid))["closed_at"] is None
+        race = await asyncio.gather(*[
+            env.post("/api/v1/match/hold/%s/end" % hid, s.steam(i),
+                     {"steam_id": s.steam(i), "reason": why})
+            for i, why in ((0, "ceiling"), (2, "second_departure"))])
+        answers = [x.json() for x in race]
+        assert answers[0]["closed_at"] == answers[1]["closed_at"], answers
+        assert answers[0]["closed_reason"] == answers[1]["closed_reason"], answers
+        assert sorted(a["already"] for a in answers) == [False, True], answers
+        h = await hold_db(env, hid)
+        assert h["closed_reason"] == answers[0]["closed_reason"]
+        assert (await open_hold(env, s, 1, 0, g)).json()["reason"] == "duplicate_game"
+        await beat(env, s, 3)
+        assert (await open_hold(env, s, 3, 0, g)).json()["status"] == "opened"
+
+        b, gb, _ = await opened_series(env, "ovt")
+        hid = (await open_hold(env, b, 1, 0, gb)).json()["hold_id"]
+        await env.conn.execute(
+            "UPDATE match_seat_holds SET claimed_at = clock_timestamp() - interval '70 seconds',"
+            " bound_at = clock_timestamp() - interval '61 seconds', bound_actor = 7, seq = 1"
+            " WHERE id = $1", uuid.UUID(hid))
+        st = (await env.get("/api/v1/match/hold/%s/state" % hid, b.steam(0),
+                            {"steam_id": b.steam(0)})).json()
+        assert (st["state"], st["closed_reason"]) == ("closed", "entry_failed"), st
+        until_before = (await hold_db(env, hid))["held_until"]
+        assert await sweep(env) == {"entry_failed": 1}
+        h = await hold_db(env, hid)
+        assert h["held_until"] == until_before, "the sweep moved held_until"
+        assert h["closed_at"] == h["bound_at"] + timedelta(seconds=60)
+        assert h["closed_at"].isoformat() == st["closed_at"]
+
+        late, gl, _ = await opened_series(env)
+        hid = (await open_hold(env, late, 1, 0, gl)).json()["hold_id"]
+        await shift_hold(env, hid, 300)
+        j = (await env.post("/api/v1/match/hold/%s/end" % hid, late.steam(0),
+                            {"steam_id": late.steam(0), "reason": "ceiling"})).json()
+        h = await hold_db(env, hid)
+        assert (j["closed_reason"], j["already"], h["closed_reason"]) == \
+            ("lapsed", True, "lapsed")
+        assert h["closed_at"] == h["held_until"]
+    run_env(monkeypatch, body)
+
+
+def test_t2_state_by_room_and_beat(monkeypatch):
+    """The state and by-room reads answer series members only (404
+    otherwise); by-room answers 404 for a game with no hold; a beat from a
+    non-member or for an unflagged room is refused; present_at moves only
+    when the poster names itself with its own actor, beat_at always."""
+    async def body(env):
+        s, g, _ = await opened_series(env)
+        out = (await open_hold(env, s, 1, 0, g)).json()
+        st = (await env.get("/api/v1/match/hold/%s/state" % out["hold_id"], s.steam(3),
+                            {"steam_id": s.steam(3)})).json()
+        assert (st["state"], st["seq"], st["slot"], st["team"]) == ("opened", 0, 1, 0)
+        br = (await env.get("/api/v1/match/hold/by-room", s.steam(2), {
+            "steam_id": s.steam(2), "room": s.room, "game_id": g})).json()
+        assert br["hold_id"] == out["hold_id"]
+        stranger = (await seed_players(env.conn, 1))[0]
+        assert (await env.get("/api/v1/match/hold/%s/state" % out["hold_id"], stranger[1],
+                              {"steam_id": stranger[1]})).status_code == 404
+        assert (await env.get("/api/v1/match/hold/by-room", s.steam(2), {
+            "steam_id": s.steam(2), "room": s.room,
+            "game_id": str(uuid.uuid4())})).status_code == 404
+        assert (await env.get("/api/v1/match/hold/%s/state" % out["hold_id"], s.steam(3),
+                              {"steam_id": s.steam(3)}, token="tok:x")).status_code == 401
+
+        r = await env.post("/api/v1/match/hold/beat", stranger[1], {
+            "steam_id": stranger[1], "mode": "team", "series_id": str(s.sid),
+            "room": s.room, "actor": 3})
+        assert r.json() == {"status": "refused", "reason": "not_member"}
+        assert (await beat(env, s, 0, room=s.room + "_x"))["reason"] == "not_flagged"
+        before = await env.conn.fetchrow(
+            "SELECT present_at, beat_at FROM match_seat_presence WHERE room_name = $1 "
+            " AND player_id = $2", s.room, s.pid(2))
+        await beat(env, s, 2, actor=12, seen=[(99, s.steam(2)), (11, s.steam(1))])
+        after = await env.conn.fetchrow(
+            "SELECT present_at, beat_at, seen FROM match_seat_presence WHERE room_name = $1 "
+            " AND player_id = $2", s.room, s.pid(2))
+        assert after["present_at"] == before["present_at"], "named itself with another actor"
+        assert after["beat_at"] > before["beat_at"]
+        await beat(env, s, 2, actor=12, seen=[(12, s.steam(2))], digest="d" * 64)
+        last = await env.conn.fetchrow(
+            "SELECT present_at, beat_at, boundary_digest FROM match_seat_presence "
+            " WHERE room_name = $1 AND player_id = $2", s.room, s.pid(2))
+        assert last["present_at"] == last["beat_at"] and last["boundary_digest"] == "d" * 64
+    run_env(monkeypatch, body)
+
+
+def test_t2_8_open_attempt_rows(monkeypatch):
+    """T2.8: every open request writes its own match_hold_open_attempts row
+    in the request's transaction: each refusal and each retry its own row
+    with no hold, the open and the repeat rows naming the hold; a request id
+    reused writes no second row."""
+    async def body(env):
+        s, g, _ = await opened_series(env)
+        other = await seed_series(env.conn, "team")
+        go = (await game_start(env, other, 0))["game_id"]
+        await game_start(env, other, 0, prev=go)
+        await open_hold(env, s, 1, 0, uuid.uuid4(), rid="req-unknown-g1")
+        await open_hold(env, s, 1, 0, uuid.uuid4(), rid="req-unknown-g2")
+        await open_hold(env, other, 1, 0, go, rid="req-stale-g001")
+        await open_hold(env, s, 1, 0, g, rid="req-opened-001")
+        await open_hold(env, s, 1, 2, g, rid="req-repeat-001")
+        await open_hold(env, s, 1, 2, g, rid="req-repeat-001")
+        rows = await env.conn.fetch(
+            "SELECT request_id, outcome, reason, hold_id, held_player_id, opener_player_id "
+            "  FROM match_hold_open_attempts WHERE request_id LIKE 'req-%' ORDER BY at, request_id")
+        got = {r["request_id"]: (r["outcome"], r["reason"], r["hold_id"] is not None)
+               for r in rows}
+        assert got == {
+            "req-unknown-g1": ("refused", "not_current_game", False),
+            "req-unknown-g2": ("refused", "not_current_game", False),
+            "req-stale-g001": ("refused", "not_current_game", False),
+            "req-opened-001": ("opened", None, True),
+            "req-repeat-001": ("repeat", None, True),
+        }, got
+        assert len(rows) == 5
+        assert await env.conn.fetchval("SELECT count(*) FROM match_seat_holds") == 1
+        byid = {r["request_id"]: r for r in rows}
+        assert byid["req-opened-001"]["hold_id"] == byid["req-repeat-001"]["hold_id"]
+        assert byid["req-opened-001"]["held_player_id"] == s.pid(1)
+        assert byid["req-repeat-001"]["opener_player_id"] == s.pid(2)
+    run_env(monkeypatch, body)
+
+
+def test_t7_1_hold_open_canonical_one_field_at_a_time(monkeypatch):
+    """T7.1 (hold-open half): changing any one of the eight fields of the
+    hold-open canonical makes the signature reject; the team-DC canonical
+    of today is a different message (its signature never verifies as a
+    hold-open signature, nor the reverse), and main's team-DC verifier still
+    accepts its own signature unchanged."""
+    monkeypatch.setattr(main, "MATCH_HMAC_SECRET", SECRET)
+    base = {"mode": "team", "room": "team_room1", "game_id": str(uuid.uuid4()),
+            "held_steam_id": "s2held", "slot": 1, "team": 0, "opener_steam_id": "s2open",
+            "request_id": "req-canonical-1"}
+    sig = sign_open(base)
+    req = match_hold.HoldOpenReq(**base, hmac=sig)
+    assert match_hold._verify_hold_open_hmac(req)
+    changes = {"mode": "ovt", "room": "team_room2", "game_id": str(uuid.uuid4()),
+               "held_steam_id": "s2held2", "slot": 2, "team": 1,
+               "opener_steam_id": "s2open2"}
+    for field, value in changes.items():
+        bad = dict(base, **{field: value})
+        assert not match_hold._verify_hold_open_hmac(match_hold.HoldOpenReq(**bad, hmac=sig)), \
+            field
+    dc_sig = _hmac.new(SECRET.encode(), b"s2open:sid1:s2held:dc", hashlib.sha256).hexdigest()
+    assert main._verify_team_dc_hmac("s2open", "sid1", "s2held", dc_sig)
+    assert not main._verify_team_dc_hmac("s2open", "sid1", "s2held", sig)
+    assert not match_hold._verify_hold_open_hmac(match_hold.HoldOpenReq(**base, hmac=dc_sig))
