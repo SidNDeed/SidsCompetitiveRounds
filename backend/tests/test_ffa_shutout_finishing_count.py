@@ -480,6 +480,8 @@ HARNESS_DDL = [s.strip().replace("@S@", HARNESS_SCHEMA) for s in _DDL.split(";;"
 # ffa_report_windows table on every report, so the harness carries both. They
 # are read from the migration file itself, each definition required to occur
 # exactly once, and every table they name is placed in the harness schema.
+# The harness drops its tables first, so the CREATE runs without IF NOT
+# EXISTS, the plain form test_every_harness_statement_names_its_schema reads.
 READMIT_MIGRATION = SQL_DIR / "378_ffa_readmission.sql"
 _READMIT_DEFINITIONS = (r"ALTER TABLE ffa_lobbies ADD COLUMN IF NOT EXISTS readmit_v1\b[^;]*;",
                         r"CREATE TABLE IF NOT EXISTS ffa_report_windows \([^;]*\);")
@@ -489,7 +491,8 @@ def _readmit_ddl(sql):
     found = [re.findall(p, sql) for p in _READMIT_DEFINITIONS]
     assert [len(f) for f in found] == [1, 1], [len(f) for f in found]
     return [re.sub(r"\b(ffa_lobbies|ffa_report_windows|players)\b", HARNESS_SCHEMA + r".\1",
-                   f[0].rstrip(";")) for f in found]
+                   f[0].rstrip(";").replace("CREATE TABLE IF NOT EXISTS ", "CREATE TABLE "))
+            for f in found]
 
 
 HARNESS_DDL = HARNESS_DDL + _readmit_ddl(READMIT_MIGRATION.read_text(encoding="utf-8"))
