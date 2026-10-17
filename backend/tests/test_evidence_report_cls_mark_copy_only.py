@@ -268,6 +268,8 @@ class V:
         alias = self.alias
         if alias is not None and alias[0] == "dict":
             alias = ("dict", alias[1], tuple(v.key() for v in alias[2]))
+        elif alias is not None and alias[0] == "dict_alternatives":
+            alias = ("dict_alternatives", tuple(arm.key() for arm in alias[1]))
         elif alias is not None:
             alias = _alias_key(alias)
         return (self.ex, self.im, self.funcs,
@@ -297,20 +299,70 @@ def vjoin(*vals):
     item = vjoin(*items) if items else None
     aliases = [v.alias for v in vals]
     scalar_arms = all(a is not None or
-                      (v.ex == frozenset({C}) and v.im <= {S} and not v.funcs and
+                      (v.ex in (frozenset(), frozenset({C})) and v.im <= {S} and not v.funcs and
                        v.elems is None and v.item is None)
                       for v, a in zip(vals, aliases))
     alias = _join_alias(aliases) if scalar_arms else None
-    if alias is None and all(a is not None for a in aliases):
-        for v in vals:
-            ex |= v.ex_all()
-            im |= v.im_all()
+    if alias is None:
+        alias = _dict_alternatives(vals)
+        if alias is not None:
+            for v, a in zip(vals, aliases):
+                if a is not None and not _dict_aliases(a):
+                    ex |= v.ex_all()
+                    im |= v.im_all()
+        elif all(a is not None for a in aliases):
+            for v in vals:
+                ex |= v.ex_all()
+                im |= v.im_all()
     return V(ex, im, funcs, elems, item, alias)
 
 
 def _alias_key(a):
     return None if a is None else tuple(x if not isinstance(x, (V, ast.AST)) else id(x)
-                                        if isinstance(x, ast.AST) else None for x in a)
+                                         if isinstance(x, ast.AST) else None for x in a)
+
+
+def _dict_aliases(alias):
+    """Every constant-key dictionary arm retained by an alias."""
+    if alias is None:
+        return ()
+    if alias[0] == "dict":
+        return (alias,)
+    if alias[0] == "dict_alternatives":
+        return tuple(arm.alias for arm in alias[1])
+    return ()
+
+
+def _dict_arms(value):
+    if value.alias is None:
+        return ()
+    if value.alias[0] == "dict":
+        return (value,)
+    if value.alias[0] == "dict_alternatives":
+        return value.alias[1]
+    return ()
+
+
+def _dict_alternatives(values):
+    """Retain incompatible dictionary arms without folding their sibling slots."""
+    if all(_dict_arms(value) for value in values):
+        return None
+    if not all(_dict_arms(value) or
+               (value.alias is None and value.ex == frozenset({C}) and not value.funcs and
+                value.elems is None and value.item is None)
+               for value in values):
+        return None
+    arms = []
+    seen = set()
+    for value in values:
+        for arm in _dict_arms(value):
+            key = arm.key()
+            if key not in seen:
+                seen.add(key)
+                arms.append(arm)
+    if not arms:
+        return None
+    return ("dict_alternatives", tuple(arms))
 
 
 def _join_alias(aliases):
@@ -319,9 +371,13 @@ def _join_alias(aliases):
     present = [a for a in aliases if a is not None]
     if not present:
         return None
-    if all(a[0] == "dict" for a in present) and len({a[1] for a in present}) == 1:
-        keys = present[0][1]
-        return ("dict", keys, tuple(vjoin(*[a[2][i] for a in present]) for i in range(len(keys))))
+    dicts = [_dict_aliases(a) for a in present]
+    if all(dicts):
+        arms = [arm for group in dicts for arm in group]
+        if len({a[1] for a in arms}) == 1:
+            keys = arms[0][1]
+            return ("dict", keys,
+                    tuple(vjoin(*[a[2][i] for a in arms]) for i in range(len(keys))))
     if len({_alias_key(a) for a in present}) == 1:
         return present[0]
     return None
@@ -331,7 +387,10 @@ def add_im(v, labels):
     """`v` with more implicit labels, its structure kept."""
     if not labels:
         return v
-    return V(v.ex, v.im | frozenset(labels), v.funcs, v.elems, v.item, v.alias)
+    alias = v.alias
+    if alias is not None and alias[0] == "dict_alternatives":
+        alias = ("dict_alternatives", tuple(add_im(arm, labels) for arm in alias[1]))
+    return V(v.ex, v.im | frozenset(labels), v.funcs, v.elems, v.item, alias)
 
 
 def contract_value(spec):
@@ -347,8 +406,9 @@ def contract_value(spec):
 
 def element(v):
     """The value of one element of `v` when iterated or indexed by a value."""
-    if v.alias is not None and v.alias[0] == "dict":
-        return add_im(vjoin(*v.alias[2]), v.im)
+    dicts = _dict_arms(v)
+    if dicts:
+        return vjoin(*[add_im(vjoin(*arm.alias[2]), arm.im) for arm in dicts])
     if v.item is not None:
         return add_im(v.item, v.ex | v.im)
     if v.elems is not None:
@@ -925,9 +985,12 @@ class Frame:
     def e_Subscript(self, n):
         base = self.expr(n.value)
         idx = self.expr(n.slice)
-        if base.alias and base.alias[0] == "dict" and isinstance(n.slice, ast.Constant) and \
-                n.slice.value in base.alias[1]:
-            return add_im(base.alias[2][base.alias[1].index(n.slice.value)], base.im)
+        dicts = _dict_arms(base)
+        if dicts and isinstance(n.slice, ast.Constant):
+            slots = [add_im(arm.alias[2][arm.alias[1].index(n.slice.value)], arm.im)
+                     for arm in dicts if n.slice.value in arm.alias[1]]
+            if slots:
+                return vjoin(*slots)
         if base.elems is not None and isinstance(n.slice, ast.Constant) and \
                 isinstance(n.slice.value, int) and -len(base.elems) <= n.slice.value < len(base.elems):
             return add_im(base.elems[n.slice.value], base.im)
@@ -1008,6 +1071,10 @@ class Frame:
         for v in vals:
             ex |= v.ex_all()
             im |= v.im_all()
+            if v.alias is not None and v.alias[0] == "dict_alternatives":
+                for arm in v.alias[1]:
+                    ex |= arm.ex_all()
+                    im |= arm.im_all()
         if P in ex:
             ex = (ex - {P}) | {E}
         if ordering and ex & {E, D}:
@@ -1738,6 +1805,30 @@ _OPTIONAL_BOX_HELPER = '''def _optional_box(cell):
 _SCALAR_BOX_HELPER = _OPTIONAL_BOX_HELPER.replace("return None", 'return "EMPTY"')
 
 
+_EXPLICIT_OPTIONAL_BOX_HELPER = '''def _explicit_optional_box(cell):
+    if cell[2]:
+        return {"rank": cell[3], "shown": _aer_enc_text(cell[0])}
+    else:
+        return None
+
+
+'''
+
+_EXPLICIT_SCALAR_BOX_HELPER = _EXPLICIT_OPTIONAL_BOX_HELPER.replace(
+    "return None", 'return "EMPTY"')
+
+_INCOMPATIBLE_SCALAR_BOX_HELPER = '''def _incompatible_scalar_box(cell):
+    if cell[2]:
+        return {"rank": cell[3], "shown": _aer_enc_text(cell[0])}
+    elif cell[1]:
+        return {"shown": _aer_enc_text(cell[1]), "rank": cell[3]}
+    else:
+        return "EMPTY"
+
+
+'''
+
+
 def _mixed_box_use(box_expr, sink):
     return (
         '        box = %s\n' % box_expr
@@ -1768,6 +1859,39 @@ def test_constant_key_alias_survives_mixed_optional_and_union_joins(
     assert len(findings) == 1 and "reads K" in str(findings[0]), (label, _fmt(findings))
     bot = _dict_fixture(_mixed_box_use(box_expr, "shown"), helper)
     assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == [], label
+
+
+@pytest.mark.parametrize("label,box_expr,helper", [
+    ("explicit-else dict or None", "_explicit_optional_box(cell)",
+     _EXPLICIT_OPTIONAL_BOX_HELPER),
+    ("explicit-else dict or scalar", "_explicit_optional_box(cell)",
+     _EXPLICIT_SCALAR_BOX_HELPER),
+    ("incompatible dictionaries plus scalar", "_incompatible_scalar_box(cell)",
+     _INCOMPATIBLE_SCALAR_BOX_HELPER),
+], ids=["explicit-else dict or None", "explicit-else dict or scalar",
+        "incompatible dictionaries plus scalar"])
+def test_unresolved_mixed_joins_keep_nested_labels_from_every_dict_arm(
+        label, box_expr, helper):
+    bot = _dict_fixture(_mixed_box_use(box_expr, "rank"), helper)
+    findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (label, _fmt(findings))
+    bot = _dict_fixture(_mixed_box_use(box_expr, "shown"), helper)
+    assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == [], label
+
+
+def test_compatible_joined_dict_siblings_do_not_smear_exact_key_reads():
+    bot = _dict_fixture(_mixed_box_use(
+        '({"rank": cell[3], "shown": _aer_enc_text(cell[0])} if cell[2] '
+        'else {"rank": cell[3], "shown": _aer_enc_text(cell[1])})', "shown"))
+    assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
+
+
+def test_dynamic_mapping_join_keeps_nested_exact_key_precision():
+    bot = _dict_fixture(
+        '        boxes = {}\n'
+        '        boxes[cell[1]] = {"shown": _aer_enc_text(cell[0]), "rank": cell[3]}\n'
+        '        items.append(AerItem("cell", (), (), boxes[cell[1]]["shown"]))')
+    assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
 
 
 _LITERAL_MUTATIONS = [
