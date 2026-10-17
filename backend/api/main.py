@@ -57179,20 +57179,23 @@ async def _rdm_spectate_fighters(db, room_name):
 async def _rdm_spectate_held(db, lobby_ref) -> set | None:
     """P4.9 attest (RJ2-M7): H, the Steam ids of the members of a readmission
     lobby whose seat hold is live, from the server's rows only; None when
-    the lobby is not a readmission lobby (exact equality stands)."""
+    there is no active readmission lobby row (exact equality stands)."""
     try:
         lid = UUID(str(lobby_ref))
     except (ValueError, TypeError):
         return None
-    on = (await db.execute(text("SELECT readmit_v1 FROM ffa_lobbies WHERE id = :lid"),
-                           {"lid": lid})).scalar()
-    if not on:
+    row = (await db.execute(text(
+        "SELECT l.readmit_v1,"
+        "       ARRAY(SELECT p.steam_id FROM ffa_assembly_seats s"
+        "               JOIN players p ON p.id = s.player_id"
+        "              WHERE s.lobby_id = l.id"
+        "                AND s.hold_until > clock_timestamp()) AS held"
+        "  FROM ffa_lobbies l"
+        " WHERE l.id = :lid AND l.status = 'active'"),
+        {"lid": lid})).mappings().first()
+    if row is None or not row["readmit_v1"]:
         return None
-    rows = (await db.execute(text(
-        "SELECT p.steam_id FROM ffa_assembly_seats s JOIN players p ON p.id = s.player_id"
-        " WHERE s.lobby_id = :lid AND s.hold_until > clock_timestamp()"),
-        {"lid": lid})).scalars().all()
-    return set(rows)
+    return set(row["held"] or [])
 
 
 def _rdm_attest_ok(roster, true_roster, held, steam_id) -> bool:

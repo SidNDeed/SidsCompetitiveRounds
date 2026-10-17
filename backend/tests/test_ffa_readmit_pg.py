@@ -933,6 +933,74 @@ def test_t4_15_attest_counts_a_held_seat_present(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_l2_attest_held_snapshot_has_an_active_lobby_fence(monkeypatch):
+    """L2: the held set is one snapshot of an active flagged lobby.  Bind
+    and lapse remove H, and an attest paused after its roster read cannot use
+    a stale held seat after the real poll closer completes the lobby."""
+    async def body(env):
+        bound = await _held(env)
+        await _claim_bind(env, bound, 1, 1, 9)
+        async with env.sm() as db:
+            held = await main._rdm_spectate_held(db, str(bound.lid))
+            await db.rollback()
+        assert held == set(), ("L2 bind clears held", held)
+
+        lapsed = await _held(env)
+        await env.at(lapsed, 171.0)
+        await A._janitor_tick(env)
+        async with env.sm() as db:
+            held = await main._rdm_spectate_held(db, str(lapsed.lid))
+            await db.rollback()
+        assert held == set(), ("L2 lapse clears held", held)
+
+        async def session_ok(request, steam_id, db):
+            return True
+
+        env.mp.setattr(main, "_strict_steam_session_ok", session_ok)
+        lob = await _held(env)
+        room = (await env.lobby_row(lob))["photon_room_id"]
+        roster = sorted(s for i, s in enumerate(lob.sids) if i != 1)
+        req = main.SpectateAttestBody(
+            steam_id=roster[0], mode="ffa", room_name=room, region=lob.region,
+            actor_number=1, fighter_target=len(roster), room_capacity=lob.n,
+            spectator_protocol=main.SPECTATE_PROTOCOL, phase="transition",
+            roster=",".join(roster))
+        roster_read, release = asyncio.Event(), asyncio.Event()
+        real_roster = main._spectate_authoritative_roster
+
+        async def paused_roster(db, mode, room_name):
+            out = await real_roster(db, mode, room_name)
+            roster_read.set()
+            await release.wait()
+            return out
+
+        env.mp.setattr(main, "_spectate_authoritative_roster", paused_roster)
+
+        async def attest():
+            async with env.sm() as db:
+                return await main.spectate_participant_attest(req, None, db=db)
+
+        task = asyncio.create_task(env._call(attest))
+        await asyncio.wait_for(roster_read.wait(), 10.0)
+        await env.at(lob, 1000.0)
+        poll = await env.poll(lob, 0)
+        closed = await env.lobby_row(lob)
+        assert poll.status == 200 and closed["status"] == "completed", \
+            ("L2 close premise", poll.status, closed["status"])
+        release.set()
+        answer = await asyncio.wait_for(task, 10.0)
+        env.mp.setattr(main, "_spectate_authoritative_roster", real_roster)
+        assert answer.status == 409 and answer.body == "roster_mismatch", \
+            ("T4.15 close fence", answer.status, answer.body)
+
+        async with env.sm() as db:
+            retry = await env._call(
+                lambda: main.spectate_participant_attest(req, None, db=db))
+        assert retry.status == 409 and retry.body == "room_unknown", \
+            ("L2 closed retry", retry.status, retry.body)
+    run_env(monkeypatch, body)
+
+
 # -- S7: P5 rows -------------------------------------------------------------
 
 def test_t5_1_rows_per_transition(monkeypatch):
