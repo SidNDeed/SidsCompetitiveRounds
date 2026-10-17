@@ -507,11 +507,7 @@ class Pass:
                 fa.block(node.body)
                 if tuple(sorted((k, v.key()) for k, v in env.items())) == before:
                     break
-        root = AER_ROOTS.get((kind, q))
-        if root is not None:
-            self.returns[fk] = V(root)
-        else:
-            self.returns[fk] = fa.ret if fa.ret is not None else V({C})
+        self.returns[fk] = fa.ret if fa.ret is not None else V({C})
 
     def call_func(self, fk, argvals, kwvals, ctx):
         """Join a call site's arguments into the callee's parameters."""
@@ -538,6 +534,16 @@ class Pass:
             params[k] = vjoin(params.get(k), v)
         self.ctx_in[fk] = frozenset(self.ctx_in.get(fk, frozenset()) | ctx)
         ret = self.returns.get(fk)
+        root = AER_ROOTS.get(fk)
+        if root is not None and ret is not None:
+            inherited = set(self.ctx_in.get(fk, ()))
+            for v in params.values():
+                inherited |= v.flat()
+            current = set(ctx)
+            for v in list(argvals) + list(kwvals.values()):
+                current |= v.im_all()
+            intrinsic = set(ret.im_all()) - inherited
+            return V(root, (current | intrinsic) & {K, O})
         return ret if ret is not None else V()
 
     # -- module-level scans (literals) --
@@ -1373,5 +1379,78 @@ def formatted(r):
 def test_display_rejects_implicit_rank_or_order_with_explicit_display_root(
         label, api, bot, needle):
     """Explicit display roots do not hide rank or value-order selection."""
+    findings = _fixture(api or _API_PERMITTED, bot or _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and needle in str(findings[0]), (label, _fmt(findings))
+
+
+_API_ROOT_RANK = _API_PERMITTED + '''
+
+
+def direct_rank(r):
+    return {"name": _aer_enc(r["left"] if r["rank"] > 0.5 else r["right"])}
+'''
+
+_API_ROOT_ORDER = _API_PERMITTED + '''
+
+
+def _order_value(row):
+    return row["rank"]
+
+
+def _ordered_value(rows):
+    for row in sorted(rows, key=_order_value):
+        return row["name"]
+    return ""
+
+
+def direct_order(r):
+    return {"name": _aer_enc(_ordered_value(r["rows"]))}
+'''
+
+_BOT_ROOT_RANK = _BOT_PERMITTED.replace(
+    '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+    '        items.append(AerItem("cell", (), (),\n'
+    '                             _aer_enc_text(cell[0] if cell[3] > 0.5 else cell[1])))')
+
+_ORDER_HELPER = '''def _order_value(cell):
+    return cell[3]
+
+
+def _ordered_value(page):
+    for cell in sorted(page.cells, key=_order_value):
+        return cell[0]
+    return ""
+
+
+'''
+
+_BOT_ROOT_ORDER = _BOT_PERMITTED.replace(
+    "def _aer_plan(page):", _ORDER_HELPER + "def _aer_plan(page):").replace(
+    '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+    '        items.append(AerItem("cell", (), (), _aer_enc_text(_ordered_value(page))))')
+
+_BOT_DECODER_RANK = _BOT_PERMITTED.replace(
+    '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+    '        again = _aer_decode_response(\n'
+    '            page.left if page.cells[0][3] > 0.5 else page.right)\n'
+    '        items.append(AerItem("cell", (), (), again))')
+
+_BOT_DECODER_ORDER = _BOT_PERMITTED.replace(
+    "def _aer_plan(page):", _ORDER_HELPER + "def _aer_plan(page):").replace(
+    '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+    '        again = _aer_decode_response(_ordered_value(page))\n'
+    '        items.append(AerItem("cell", (), (), again))')
+
+
+@pytest.mark.parametrize("label,api,bot,needle", [
+    ("api encoder direct rank", _API_ROOT_RANK, "", "reads K"),
+    ("api encoder direct order", _API_ROOT_ORDER, "", "reads O"),
+    ("bot encoder direct rank", "", _BOT_ROOT_RANK, "reads K"),
+    ("bot encoder direct order", "", _BOT_ROOT_ORDER, "reads O"),
+    ("decoder direct rank", "", _BOT_DECODER_RANK, "reads K"),
+    ("decoder direct order", "", _BOT_DECODER_ORDER, "reads O"),
+])
+def test_declared_roots_preserve_direct_rank_and_order_selection(
+        label, api, bot, needle):
     findings = _fixture(api or _API_PERMITTED, bot or _BOT_PERMITTED, _WORKER_FIXTURE)
     assert len(findings) == 1 and needle in str(findings[0]), (label, _fmt(findings))
