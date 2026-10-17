@@ -269,6 +269,20 @@ def summary_body(page=1, pages=3, shape="pair"):
     return body
 
 
+def _phase_leaf_breaks():
+    return [
+        ("rounds object", game_body,
+         lambda b: b["games"][0].update(rounds={"cls": "c1"})),
+        ("class word in numeric cell", game_body,
+         lambda b: b["games"][0]["seats"][0]["cells"][0].__setitem__(
+             ae.AER_WIRE["1a"]["seat"].index("pop_rank"), "c1")),
+        ("mark object in catalog base", summary_body,
+         lambda b: b["catalog"][0].update(base={"mark": True})),
+        ("malformed window leaf", summary_body,
+         lambda b: b["windows"][0].update(newest={"cls": "c1"})),
+    ]
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -330,6 +344,16 @@ def test_the_1a_decoder_accepts_a_served_page_and_refuses_every_break(bot):
     assert broken(lambda b: b["windows"][0].update(flag_obs=True), summary_body)
     with pytest.raises(err):
         dec(game_body(), "1b")
+
+
+@pytest.mark.parametrize("label,maker,mutate", _phase_leaf_breaks(),
+                         ids=lambda value: value if isinstance(value, str) else None)
+def test_the_1a_decoder_refuses_a_phase_leaf_of_the_wrong_type(
+        bot, label, maker, mutate):
+    body = maker()
+    mutate(body)
+    with pytest.raises(bot["AerSchemaError"]):
+        bot["_aer_decode_response"](body, "1a")
 
 
 # ── 5.4: the button request ───────────────────────────────────────────────
@@ -492,6 +516,26 @@ def test_p3_metadata_schema_failures_publish_nothing(via):
                               message=msg)
             run(_click(ns, it))
         assert (it.ephemeral, _public(events), msg.edits) == ([word], [], []), (part, key)
+
+
+@pytest.mark.parametrize("via", ["command", "button"])
+@pytest.mark.parametrize("label,maker,mutate", _phase_leaf_breaks(),
+                         ids=lambda value: value if isinstance(value, str) else None)
+def test_p3_phase_leaf_schema_failures_publish_nothing(via, label, maker, mutate):
+    word = "Evidence report: unavailable (schema)."
+    events = []
+    body = maker()
+    mutate(body)
+    api = _Api(lambda p, a: (200, body, {}), events)
+    ns = bot_ns(api, events)
+    msg = _Message(events)
+    if via == "command":
+        it = _Interaction(events, ADMIN)
+        run(_command(ns, it))
+    else:
+        it = _Interaction(events, ADMIN, custom_id="aer:g:%s:2" % ("0" * 12), message=msg)
+        run(_click(ns, it))
+    assert (it.ephemeral, _public(events), msg.edits) == ([word], [], []), label
 
 
 @pytest.mark.parametrize("via", ["command", "button"])

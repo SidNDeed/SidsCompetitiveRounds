@@ -15083,7 +15083,15 @@ class AerSchemaError(ValueError):
     """A response that does not meet the phase's closed schema."""
 
 
-def _aer_check_int(value, lo=None):
+def _aer_check_number(value):
+    if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))):
+        raise AerSchemaError("not a nullable number: %r" % (value,))
+    return value
+
+
+def _aer_check_int(value, lo=None, nullable=False):
+    if value is None and nullable:
+        return value
     if isinstance(value, bool) or not isinstance(value, int):
         raise AerSchemaError("not an integer: %r" % (value,))
     if lo is not None and value < lo:
@@ -15091,13 +15099,18 @@ def _aer_check_int(value, lo=None):
     return value
 
 
-def _aer_display(value):
-    """A display slot: None, a number, or encoded text holding no escaped-set
-    code point (the api's `_aer_enc` wrote it)."""
-    if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
+def _aer_check_text(value, nullable=False):
+    """Encoded text holding no escaped-set code point."""
+    if value is None and nullable:
         return value
     if not isinstance(value, str) or any(ord(ch) in AER_ESC for ch in value):
-        raise AerSchemaError("display slot not encoded text")
+        raise AerSchemaError("not encoded text")
+    return value
+
+
+def _aer_check_list(value, length):
+    if not isinstance(value, list) or len(value) != length:
+        raise AerSchemaError("not a fixed list of %d" % length)
     return value
 
 
@@ -15110,17 +15123,33 @@ def _aer_keys(obj, required, optional=frozenset()):
     return obj
 
 
-def _aer_cell(row, table, phase="1a"):
+def _aer_cell(row, table, catalog, phase="1a"):
     slots = AER_WIRE[phase][table]
     if not isinstance(row, list) or len(row) != len(slots):
         raise AerSchemaError("%s cell slot count" % table)
     cell = dict(zip(slots, row))
-    _aer_check_int(cell["ki"], 0)
+    ki = _aer_check_int(cell["ki"], 0)
+    if ki not in catalog:
+        raise AerSchemaError("cell key not in the catalog")
     if cell["state"] not in AER_CELL_STATES or cell["own_state"] not in AER_OWN_STATES:
         raise AerSchemaError("cell state")
-    for slot in slots:
-        if slot not in ("ki", "state", "own_state"):
-            _aer_display(cell[slot])
+    if table == "summary":
+        for slot in ("n",):
+            _aer_check_int(cell[slot], 0)
+        for slot in ("own_n", "pop_n"):
+            _aer_check_int(cell[slot], 0, nullable=True)
+        for slot in ("val", "own_mean", "own_median", "pop_rank", "pop_p50", "pop_p90",
+                     "pop_p99"):
+            _aer_check_number(cell[slot])
+    else:
+        if isinstance(cell["val"], str):
+            _aer_check_text(cell["val"])
+        else:
+            _aer_check_number(cell["val"])
+        for slot in ("own_n", "pop_n"):
+            _aer_check_int(cell[slot], 0, nullable=True)
+        for slot in ("own_mean", "own_rank", "pop_rank"):
+            _aer_check_number(cell[slot])
     return tuple(row)
 
 
@@ -15151,7 +15180,7 @@ def _aer_decode_response(body, phase="1a"):
         if s["steam_id"] is not None and not (isinstance(s["steam_id"], str)
                                               and s["steam_id"].isdigit()):
             raise AerSchemaError("subject steam id")
-        subjects.append((s["steam_id"], _aer_display(s["name"])))
+        subjects.append((s["steam_id"], _aer_check_text(s["name"], nullable=True)))
     population_keys = frozenset({"key", "days", "lag_s", "games", "computed_at", "truncated"})
     if summary_page:
         population_keys |= {"win_computed_at"}
@@ -15187,10 +15216,13 @@ def _aer_decode_response(body, phase="1a"):
         base = isinstance(row, dict) and row.get("base") is None
         _aer_keys(row, _AER_CATALOG_KEYS, _AER_SPREAD_KEYS if base else frozenset())
         ki = _aer_check_int(row["ki"], 0)
+        _aer_check_int(row["base"], 0, nullable=True)
         for k in ("key", "fam", "unit", "kind"):
-            _aer_display(row[k])
+            _aer_check_text(row[k])
+        if row["kind"] not in ("R", "T", "D"):
+            raise AerSchemaError("catalog kind")
         for k in _AER_SPREAD_KEYS & set(row):
-            _aer_display(row[k])
+            _aer_check_number(row[k])
         catalog[ki] = dict(row)
     games = []
     if not isinstance(body["games"], list):
@@ -15205,12 +15237,15 @@ def _aer_decode_response(body, phase="1a"):
             if _aer_check_int(seat["subject"], 0) >= len(subjects) or not isinstance(
                     seat["reporter"], bool) or not isinstance(seat["cells"], list):
                 raise AerSchemaError("seat")
-            cells = tuple(_aer_cell(c, "seat", phase) for c in seat["cells"])
-            if any(c[0] not in catalog for c in cells):
-                raise AerSchemaError("seat cell key not in the catalog")
+            cells = tuple(_aer_cell(c, "seat", catalog, phase) for c in seat["cells"])
             seats.append((seat["subject"], seat["reporter"], cells))
-        for k in ("code", "ended_at", "invalidated", "match_id", "series_id"):
-            _aer_display(g[k])
+        for k in ("code", "ended_at", "match_id"):
+            _aer_check_text(g[k])
+        for k in ("invalidated", "series_id"):
+            _aer_check_text(g[k], nullable=True)
+        rounds = _aer_check_list(g["rounds"], 2)
+        for score in rounds:
+            _aer_check_int(score, 0)
         if not isinstance(g["is_ranked"], bool) or not isinstance(g["flags"], list):
             raise AerSchemaError("game fields")
         flags = []
@@ -15219,8 +15254,8 @@ def _aer_decode_response(body, phase="1a"):
             if not all(isinstance(f[k], bool) for k in ("reviewed", "current")) or (
                     f["subject"] is not None and _aer_check_int(f["subject"], 0) >= len(subjects)):
                 raise AerSchemaError("flag")
-            _aer_display(f["reason"])
-            _aer_display(f["created_at"])
+            _aer_check_text(f["reason"])
+            _aer_check_text(f["created_at"])
             flags.append(dict(f))
         games.append(dict(g, seats=tuple(seats), flags=tuple(flags)))
     windows, summary = (), ()
@@ -15230,13 +15265,22 @@ def _aer_decode_response(body, phase="1a"):
         wins = []
         for w in body["windows"]:
             _aer_keys(w, _AER_WINDOW_KEYS)
-            subj = w["subj"]
-            if (not isinstance(subj, list) or len(subj) != 3 or subj[0] not in ("seat", "pair")
+            oi = _aer_check_int(w["oi"], 0)
+            for k in ("games", "covered"):
+                _aer_check_int(w[k], 0)
+            for k in ("newest", "oldest"):
+                _aer_check_text(w[k])
+            subj = _aer_check_list(w["subj"], 3)
+            if (subj[0] not in ("seat", "pair")
                     or w["basis"] not in ("player", "pair")
                     or (subj[0] != "seat" and w["flag_obs"] is not None)):
                 raise AerSchemaError("window")
+            _aer_check_int(subj[1], 0)
+            _aer_check_int(subj[2], 0, nullable=True)
             if subj[0] == "seat":
                 _aer_check_int(w["flag_obs"], 0)
+            elif subj[2] is None:
+                raise AerSchemaError("window subject")
             wins.append(dict(w))
         cells = []
         for s in body["summary"]:
@@ -15244,7 +15288,7 @@ def _aer_decode_response(body, phase="1a"):
             oi = _aer_check_int(s["oi"], 0)
             if oi >= len(wins) or not isinstance(s["cells"], list):
                 raise AerSchemaError("summary window")
-            rows = tuple(_aer_cell(c, "summary", phase) for c in s["cells"])
+            rows = tuple(_aer_cell(c, "summary", catalog, phase) for c in s["cells"])
             if any(c[0] not in catalog or catalog[c[0]]["base"] is None for c in rows):
                 raise AerSchemaError("summary cell not a window key of the catalog")
             cells.append((oi, rows))
