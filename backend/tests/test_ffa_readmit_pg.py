@@ -558,6 +558,63 @@ def test_t4_18_the_bound_arms_every_janitor_transaction(monkeypatch):
 
 # -- S5: discovery, claim, bind, decline, entered, epoch version 2 -----------
 
+def test_m1_started_readmit_uses_cadence_and_per_hold_caps(monkeypatch):
+    """M1: a started readmit-v1 sitting is not killed by the historical
+    lifetime write count.  Its census uses the stored server receipt cadence,
+    and claim/bind/entered traffic is instead bounded per hold by attempts."""
+    async def body(env):
+        lob = await _rdm_lobby(env)
+        await env.set_seat(lob, 0, writes=170, census_at=30.0)
+        await env.at(lob, 40.0)
+        first = await env.census_of(lob, 0, list(range(lob.n)))
+        assert first.status == 200, ("M1 post-start census", first.status, first.body)
+        after_first = await env.seat(lob, 0)
+        second = await env.census_of(lob, 0, list(range(lob.n)))
+        after_second = await env.seat(lob, 0)
+        assert second.status == 429 and after_second == after_first, \
+            ("M1 census cadence", second.status, after_first, after_second)
+
+        returning = await _held(env)
+        await env.set_seat(returning, 1, writes=170)
+        claim, bind = await _claim_bind(env, returning, 1, 1, 9)
+        await _corroborate(env, returning, 1, 9)
+        entered = await _readmit(env, returning, 1, "entered", 1, actor=9, game=1)
+        assert claim["status"] == "claimed" and bind["status"] == "admitted_late" \
+            and entered["status"] == "entered", \
+            ("M1 post-start readmit", claim.body, bind.body, entered.body)
+
+        capped = await _held(env)
+        await env.set_seat(capped, 1, writes=170)
+        await env.conn.execute(
+            "INSERT INTO ffa_readmit_attempts"
+            " (lobby_id, player_id, n, attempt_no, kind, at, outcome, reason)"
+            " SELECT $1, $2, 1, g, 'claim', now(), 'refused', 'uncorroborated'"
+            " FROM generate_series(1, 170) AS g", capped.lid, capped.pids[1])
+        blocked = await _readmit(env, capped, 1, "claim", 1)
+        n1 = await env.conn.fetchval(
+            "SELECT count(*) FROM ffa_readmit_attempts"
+            " WHERE lobby_id = $1 AND player_id = $2 AND n = 1",
+            capped.lid, capped.pids[1])
+        assert blocked.status == 429 and n1 == 170, \
+            ("M1 per-hold cap", blocked.status, n1)
+        fresh = await _readmit(env, capped, 1, "claim", 2)
+        assert fresh.status == 200 and fresh["reason"] == "not_held", \
+            ("M1 fresh hold independent", fresh.status, fresh.body)
+
+        plain = await _rdm_lobby(env, flag=False)
+        await env.set_seat(plain, 0, writes=170)
+        plain_ans = await env.census_of(plain, 0, list(range(plain.n)))
+        assert plain_ans.status == 429, ("M1 flag false cap", plain_ans.status)
+
+        pre = await env.lobby(4, admission=True, t=30.0)
+        await env.set_lobby(pre, readmit_v1=True)
+        await env.set_seat(pre, 0, writes=170)
+        await env.at(pre, 40.0)
+        pre_ans = await env.census_of(pre, 0, list(range(pre.n)))
+        assert pre_ans.status == 429, ("M1 pre-start cap", pre_ans.status)
+    run_env(monkeypatch, body)
+
+
 def test_t4_5_claim_bind_entered_and_a_second_drop(monkeypatch):
     """T4.5: from hold through discovery, claim, bind and entered, then a
     second drop with hold n = 2: the claim answers a token whose SHA-256 alone

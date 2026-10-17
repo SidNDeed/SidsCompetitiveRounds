@@ -55389,8 +55389,12 @@ async def _asm_lock(db, lobby_id, steam_id, *, route, t0, cap=True, expire=True)
     if seat is None:
         raise HTTPException(404, "No seat in that lobby")
     pid = seat["player_id"]
-    if cap and int(seat["writes"] or 0) >= ASM_WRITES_CAP:
-        raise HTTPException(429, "Too many assembly writes for this seat")
+    started_readmit = route in ("assembly", "readmit") \
+        and lob["status"] == "active" and bool(lob["readmit_v1"]) \
+        and lob["start_granted_at"] is not None
+    if not started_readmit:
+        if cap and int(seat["writes"] or 0) >= ASM_WRITES_CAP:
+            raise HTTPException(429, "Too many assembly writes for this seat")
     qids = (await db.execute(text("SELECT player_id FROM ffa_queue WHERE series_id = :lid"),
                              {"lid": lobby_id})).scalars().all()
     await _lock_queue_rows_ordered(db, "ffa_queue", qids)
@@ -55426,6 +55430,15 @@ async def _asm_run(route, lobby_id, steam_id, request, db, work, req, *, pre=Non
             await pre(db, t0)
         ctx, pid = await _asm_lock(db, lobby_id, steam_id, route=route, t0=t0,
                                    cap=(route != "release"), expire=(route != "release"))
+        if route == "readmit" and req.step in ("claim", "bind", "entered"):
+            attempts = (await db.execute(text(
+                "SELECT COUNT(*) FROM ffa_readmit_attempts"
+                " WHERE lobby_id = :lid AND player_id = :pid"
+                "   AND n = CAST(:n AS smallint)"
+                "   AND kind IN ('claim', 'bind', 'entered')"),
+                {"lid": lobby_id, "pid": pid, "n": int(req.n)})).scalar()
+            if int(attempts or 0) >= ASM_WRITES_CAP:
+                raise HTTPException(429, "Too many readmission attempts for this hold")
         plan = await work(ctx, pid, req)
         pre_ms = _asm_elapsed_ms(t0)
         if pre_ms > ASM_TXN_DEADLINE_S * 1000:
@@ -55684,6 +55697,11 @@ async def _asm_census_write(ctx, me, state, req, resolved, anon, seen_at) -> Non
     """The census columns, replaced together, and the sender's claim (A-D).
     `resolved` is [(slot, a, b, k)] for the entries whose s names a member of
     this lobby; every other entry only counts in census_anon (V4, V3-F2)."""
+    if ctx.lobby["status"] == "active" and bool(ctx.lobby["readmit_v1"]) \
+            and ctx.lobby["start_granted_at"] is not None \
+            and me["census_at"] is not None \
+            and (ctx.now - me["census_at"]).total_seconds() < ASM_PRESENCE_PERIOD_S:
+        raise HTTPException(429, "Presence census is too frequent")
     p = {"lid": ctx.lid, "pid": me["player_id"], "now": ctx.now, "seen": seen_at,
          "cs": [r[0] for r in resolved], "ca": [r[1] for r in resolved],
          "cn": sorted({r[0] for r in resolved if r[2] == 0}),

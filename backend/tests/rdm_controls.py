@@ -322,6 +322,13 @@ ROWS = [
                   '    if len(id_by_steam) != len(steams):\n'
                   '        raise HTTPException(404, "One or more players not registered")\n',
                   '', 1)]},
+    {"row": "F1.M1", "node": RP + "test_m1_started_readmit_uses_cadence_and_per_hold_caps",
+     "tag": "M1 post-start census",
+     "mutant": [(MAIN,
+                  '    if not started_readmit:\n'
+                  '        if cap and int(seat["writes"] or 0) >= ASM_WRITES_CAP:\n',
+                  '    if True:\n'
+                  '        if cap and int(seat["writes"] or 0) >= ASM_WRITES_CAP:\n', 1)]},
     {"row": "H1", "node": RP + "test_health_marker_counts_every_site", "tag": "health ffa_readmit",
      "mutant": [(MAIN, '            await _ffa_readmit_janitor(async_session)\n',
                  '            pass\n', 1)]},
