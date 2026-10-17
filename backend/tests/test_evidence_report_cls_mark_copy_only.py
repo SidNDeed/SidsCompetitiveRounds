@@ -105,7 +105,8 @@ _VALUE_METHODS = (
     "encode", "decode", "index", "count", "copy", "isoformat", "group", "groups",
     "to_bytes", "from_bytes", "hexdigest", "digest", "fullmatch", "match", "search",
     "total_seconds", "timestamp", "astimezone", "pop", "popitem", "union", "intersection",
-    "difference", "issubset", "issuperset", "format", "zfill", "ljust", "rjust", "find",
+    "difference", "issubset", "issuperset", "__le__", "__ge__", "format", "zfill", "ljust",
+    "rjust", "find",
     "partition", "rpartition", "casefold", "title", "tolist", "tobytes", "hex",
     "most_common", "elements", "bit_length", "getvalue", "get_text", "get_window_extent",
     "get_renderer", "translate", "removeprefix", "removesuffix", "move_to_end",
@@ -114,6 +115,8 @@ _VALUE_METHODS = (
     "_asdict", "_replace", "result", "done", "locked", "cancelled", "exception")
 _MUTATORS = ("append", "extend", "add", "update", "insert", "setdefault", "appendleft",
              "discard", "remove", "clear", "sort", "__setitem__")
+_SET_CONTAINMENT_CALLS = frozenset({
+    ".issubset", ".issuperset", ".__le__", ".__ge__", "operator.le", "operator.ge"})
 _TRANSPORT_METHODS = (
     "execute", "stream", "commit", "rollback", "close", "begin", "begin_nested", "flush",
     "write", "drain", "read", "readexactly", "wait", "kill", "terminate", "acquire",
@@ -999,21 +1002,24 @@ class Frame:
     def e_BoolOp(self, n):
         return vjoin(*[self.expr(v) for v in n.values])
 
-    def e_Compare(self, n):
-        vals = [self.expr(n.left)] + [self.expr(c) for c in n.comparators]
+    def containment_result(self, vals, ordering=True):
         ex = set()
         im = set()
         for v in vals:
             ex |= v.ex_all()
             im |= v.im_all()
-        operands = [n.left] + list(n.comparators)
-        ordering = any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in n.ops)
-        self.numeric_check(n, [n.left] + list(n.comparators), vals)
         if P in ex:
             ex = (ex - {P}) | {E}
         if ordering and ex & {E, D}:
             ex |= {K}
         return V(ex, im)
+
+    def e_Compare(self, n):
+        vals = [self.expr(n.left)] + [self.expr(c) for c in n.comparators]
+        operands = [n.left] + list(n.comparators)
+        ordering = any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in n.ops)
+        self.numeric_check(n, operands, vals)
+        return self.containment_result(vals, ordering)
 
     def numeric_check(self, node, operands, vals):
         """A numeric literal compared with E or D data (the place a copied
@@ -1239,6 +1245,8 @@ class Frame:
             klass = self.lookup_class(name, k if k is not None else "*")
             self.sink(node, "%s %s=" % (name, k), v, klass)
             result.append(v)
+        if name in _SET_CONTAINMENT_CALLS:
+            return self.containment_result(result)
         # a function handed to a third-party callable (a sort key, a callback)
         # is followed, called with an element of the first argument
         first = [element(argvals[0])] if argvals else []
@@ -1931,6 +1939,59 @@ def test_report_data_set_containment_is_a_classification_flow():
     assert len(findings) == 1 and "reads K" in str(findings[0]), _fmt(findings)
 
 
+_SET_CALL_SPELLINGS = (
+    "issubset", "issuperset", "operator.le", "operator.ge", "__le__", "__ge__")
+_SET_CALL_PROVENANCE = (
+    ("E", 'set(_aer_enc(r["value"]))'),
+    ("D", 'set(r["value"])'),
+)
+
+
+def _set_call_expr(spelling, left, right):
+    if spelling.startswith("operator."):
+        return "%s(%s, %s)" % (spelling, left, right)
+    return "%s.%s(%s)" % (left, spelling, right)
+
+
+def _set_call_api(expr):
+    return '''import operator
+
+
+def _aer_enc(value):
+    return str(value)
+
+
+def evidence_report(r):
+    selected = %s
+    return {"name": "HOT" if selected else "COLD"}
+''' % expr
+
+
+_SET_CALL_NEGATIVES = [
+    ("%s %s %s" % (spelling, provenance, side), spelling, provenance,
+     _set_call_expr(spelling, value if side == "receiver" else '{"x"}',
+                    value if side == "argument" else '{"x"}'))
+    for spelling in _SET_CALL_SPELLINGS
+    for provenance, value in _SET_CALL_PROVENANCE
+    for side in ("receiver", "argument")
+]
+
+
+@pytest.mark.parametrize("label,spelling,_provenance,expr", _SET_CALL_NEGATIVES,
+                         ids=[row[0] for row in _SET_CALL_NEGATIVES])
+def test_set_containment_call_spellings_classify_e_or_d_from_either_operand(
+        label, spelling, _provenance, expr):
+    findings = _fixture(_set_call_api(expr), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "api display slot 'name' reads K" in str(findings[0]), (
+        label, _fmt(findings))
+    fixed = _set_call_expr(spelling, '{"x"}', '{"x"}')
+    assert _fixture(_set_call_api(fixed), _BOT_PERMITTED, _WORKER_FIXTURE) == [], label
+    if label == "issubset E receiver":
+        generic = _API_PERMITTED.replace('_text(r["display_name"])',
+                                         '_text(r["display_name"]).lower()')
+        assert _fixture(generic, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
 _REQUEST_IDENT_API = '''from fastapi import Request
 
 _HEX = frozenset("0123456789abcdef")
@@ -1942,7 +2003,7 @@ def _aer_enc(value):
 
 def _aer_ident(raw):
     s = (raw or "").strip().lower().replace("-", "")
-    if s and set(s) <= _HEX:
+    if s and set(s) <= _HEX and set(s).issubset(_HEX):
         if len(s) == 32:
             return "full", s
         if len(s) == 12:
