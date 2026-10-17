@@ -226,6 +226,83 @@ SQL_BAD = re.compile(r"\b(c1|c2|c3|cls|mark)\b")
 
 # ── Values ─────────────────────────────────────────────────────────────────
 
+class DictRef:
+    """One allocation-site identity and its monotone mutable dictionary state."""
+
+    __slots__ = ("token", "initialized", "keys", "vals", "item")
+
+    def __init__(self, token):
+        self.token = token
+        self.initialized = False
+        self.keys = None
+        self.vals = ()
+        self.item = None
+
+    def seed(self, keys, vals):
+        keys = tuple(keys)
+        vals = tuple(vals)
+        if not self.initialized:
+            self.initialized = True
+            self.keys = keys
+            self.vals = vals
+        elif self.keys is None:
+            self.item = vjoin(self.item, *vals)
+        else:
+            current_keys = list(self.keys)
+            current_vals = list(self.vals)
+            for key, value in zip(keys, vals):
+                if key in current_keys:
+                    pos = current_keys.index(key)
+                    current_vals[pos] = vjoin(current_vals[pos], value)
+                else:
+                    current_keys.append(key)
+                    current_vals.append(value)
+            self.keys = tuple(current_keys)
+            self.vals = tuple(current_vals)
+
+    def element(self):
+        if self.keys is not None:
+            return vjoin(*self.vals)
+        return self.item if self.item is not None else V()
+
+    def read(self, key):
+        if self.keys is None:
+            return self.element()
+        if key not in self.keys:
+            return None
+        return self.vals[self.keys.index(key)]
+
+    def slot_update(self, key, new, only_if_missing=False):
+        if self.keys is None:
+            self.item = vjoin(self.item, new)
+            return
+        keys = list(self.keys)
+        vals = list(self.vals)
+        if key in keys:
+            if only_if_missing:
+                return
+            pos = keys.index(key)
+            vals[pos] = vjoin(vals[pos], new)
+        else:
+            keys.append(key)
+            vals.append(new)
+        self.keys = tuple(keys)
+        self.vals = tuple(vals)
+
+    def dynamic_update(self, new):
+        self.item = vjoin(self.element(), new)
+        self.keys = None
+        self.vals = ()
+
+    def key(self, seen=frozenset()):
+        if self.token in seen:
+            return ("dict_ref", self.token)
+        nested = seen | {self.token}
+        return ("dict_ref", self.token, self.keys,
+                tuple(v.key(nested) for v in self.vals),
+                self.item.key(nested) if self.item is not None else None)
+
+
 class V:
     """An abstract value: explicit labels, implicit labels, the functions it
     may name, and (for fixed tuples and homogeneous sequences) its parts."""
@@ -247,7 +324,8 @@ class V:
         if self.item is not None:
             out.append(self.item)
         if self.alias is not None and self.alias[0] == "dict":
-            out.extend(self.alias[2])
+            ref = self.alias[1]
+            out.extend(ref.vals if ref.keys is not None else (ref.element(),))
         return out
 
     def ex_all(self):
@@ -264,17 +342,17 @@ class V:
             out |= e.im_all()
         return frozenset(out)
 
-    def key(self):
+    def key(self, seen=frozenset()):
         alias = self.alias
         if alias is not None and alias[0] == "dict":
-            alias = ("dict", alias[1], tuple(v.key() for v in alias[2]))
+            alias = alias[1].key(seen)
         elif alias is not None and alias[0] == "dict_alternatives":
-            alias = ("dict_alternatives", tuple(arm.key() for arm in alias[1]))
+            alias = ("dict_alternatives", tuple(arm.key(seen) for arm in alias[1]))
         elif alias is not None:
             alias = _alias_key(alias)
         return (self.ex, self.im, self.funcs,
-                tuple(e.key() for e in self.elems) if self.elems is not None else None,
-                self.item.key() if self.item is not None else None, alias)
+                tuple(e.key(seen) for e in self.elems) if self.elems is not None else None,
+                self.item.key(seen) if self.item is not None else None, alias)
 
 
 def vjoin(*vals):
@@ -345,8 +423,6 @@ def _dict_arms(value):
 
 def _dict_alternatives(values):
     """Retain incompatible dictionary arms without folding their sibling slots."""
-    if all(_dict_arms(value) for value in values):
-        return None
     if not all(_dict_arms(value) or
                (value.alias is None and value.ex == frozenset({C}) and not value.funcs and
                 value.elems is None and value.item is None)
@@ -367,17 +443,16 @@ def _dict_alternatives(values):
 
 def _join_alias(aliases):
     """One alias when the named alternatives agree; aliasless optional
-    alternatives do not erase it, and equal-key dicts join key by key."""
+    alternatives do not erase it, and distinct dictionaries stay distinct."""
     present = [a for a in aliases if a is not None]
     if not present:
         return None
     dicts = [_dict_aliases(a) for a in present]
     if all(dicts):
         arms = [arm for group in dicts for arm in group]
-        if len({a[1] for a in arms}) == 1:
-            keys = arms[0][1]
-            return ("dict", keys,
-                    tuple(vjoin(*[a[2][i] for a in arms]) for i in range(len(keys))))
+        refs = {a[1].token: a[1] for a in arms}
+        if len(refs) == 1:
+            return ("dict", next(iter(refs.values())))
     if len({_alias_key(a) for a in present}) == 1:
         return present[0]
     return None
@@ -408,7 +483,7 @@ def element(v):
     """The value of one element of `v` when iterated or indexed by a value."""
     dicts = _dict_arms(v)
     if dicts:
-        return vjoin(*[add_im(vjoin(*arm.alias[2]), arm.im) for arm in dicts])
+        return vjoin(*[add_im(arm.alias[1].element(), arm.im) for arm in dicts])
     if v.item is not None:
         return add_im(v.item, v.ex | v.im)
     if v.elems is not None:
@@ -421,27 +496,32 @@ def element(v):
 
 def _dict_slot_update(value, key, new, only_if_missing=False):
     """Join `new` into one literal dictionary slot while retaining siblings."""
-    if value.alias is None or value.alias[0] != "dict":
+    refs = {arm.alias[1].token: arm.alias[1] for arm in _dict_arms(value)}
+    if not refs:
         return None
-    keys = list(value.alias[1])
-    vals = list(value.alias[2])
-    if key in keys:
-        if only_if_missing:
-            return value
-        pos = keys.index(key)
-        vals[pos] = vjoin(vals[pos], new)
-    else:
-        keys.append(key)
-        vals.append(new)
-    return V(value.ex, value.im, value.funcs | new.funcs, value.elems, value.item,
-             ("dict", tuple(keys), tuple(vals)))
+    for ref in refs.values():
+        ref.slot_update(key, new, only_if_missing)
+    return value
 
 
 def _dict_dynamic_update(value, new):
     """Forget a dictionary's slots after a dynamic mutation, but keep their
     joined element structure for conservative reads."""
-    item = vjoin(element(value), new)
-    return V(value.ex, value.im, value.funcs | item.funcs, None, item)
+    refs = {arm.alias[1].token: arm.alias[1] for arm in _dict_arms(value)}
+    if not refs:
+        return None
+    for ref in refs.values():
+        ref.dynamic_update(new)
+    return value
+
+
+def _dict_literal_slots(value):
+    """Literal slots for every possible dictionary identity, or None if folded."""
+    refs = {arm.alias[1].token: arm.alias[1] for arm in _dict_arms(value)}
+    if not refs or any(ref.keys is None for ref in refs.values()):
+        return None
+    return [(key, slot) for ref in refs.values()
+            for key, slot in zip(ref.keys, ref.vals)]
 
 
 def annotation_origin(mod, node):
@@ -538,6 +618,7 @@ class Pass:
         self.findings = set()
         self.recording = False
         self.state_vals = {}    # (kind, name) -> V for `global` module state
+        self.dict_refs = {}     # (function, literal site) -> shared mutable dictionary
         self.called = set()     # functions with a call site inside the closure
         self.entries = set()    # functions no closure function calls
 
@@ -570,7 +651,14 @@ class Pass:
                              for k, d in self.params.items())),
                 tuple(sorted((str(k), v.key()) for k, v in self.returns.items())),
                 tuple(sorted((str(k), tuple(sorted(v))) for k, v in self.ctx_in.items())),
-                tuple(sorted((str(k), v.key()) for k, v in self.state_vals.items())))
+                tuple(sorted((str(k), v.key()) for k, v in self.state_vals.items())),
+                tuple(sorted((str(k), v.key()) for k, v in self.dict_refs.items())))
+
+    def dict_value(self, fk, node, keys, vals):
+        token = (fk[0], str(fk[1]), node.lineno, node.col_offset)
+        ref = self.dict_refs.setdefault(token, DictRef(token))
+        ref.seed(keys, vals)
+        return V((), (), vjoin(*vals).funcs, None, None, ("dict", ref))
 
     def flag(self, mod, node, msg):
         if self.recording:
@@ -865,23 +953,19 @@ class Frame:
         elif isinstance(tgt, ast.Subscript):
             base = tgt.value
             self.expr(tgt.slice)
-            if isinstance(base, ast.Name) and base.id in self.env:
-                cur = self.env[base.id]
-                incoming = add_im(v, self.ctx)
-                updated = None
+            cur = self.expr(base)
+            incoming = add_im(v, self.ctx)
+            dicts = _dict_arms(cur)
+            if dicts:
                 if isinstance(tgt.slice, ast.Constant) and isinstance(tgt.slice.value, str):
-                    updated = _dict_slot_update(cur, tgt.slice.value, incoming)
-                if updated is not None:
-                    self.env[base.id] = updated
-                elif cur.alias is not None and cur.alias[0] == "dict":
-                    self.env[base.id] = _dict_dynamic_update(cur, incoming)
+                    _dict_slot_update(cur, tgt.slice.value, incoming)
                 else:
-                    self.env[base.id] = vjoin(cur, V((), (), v.funcs, None, incoming))
+                    _dict_dynamic_update(cur, incoming)
+            elif isinstance(base, ast.Name) and base.id in self.env:
+                self.env[base.id] = vjoin(cur, V((), (), v.funcs, None, incoming))
             elif isinstance(base, ast.Name) and base.id in self.mod.state:
                 key = (self.mod.kind, base.id)
                 self.ps.state_vals[key] = vjoin(self.ps.state_vals.get(key), V(v.flat() | self.ctx))
-            else:
-                self.expr(base)
             self.cls_mark_slot(tgt.slice, v, tgt)
         elif isinstance(tgt, ast.Attribute):
             self.expr(tgt.value)
@@ -987,8 +1071,8 @@ class Frame:
         idx = self.expr(n.slice)
         dicts = _dict_arms(base)
         if dicts and isinstance(n.slice, ast.Constant):
-            slots = [add_im(arm.alias[2][arm.alias[1].index(n.slice.value)], arm.im)
-                     for arm in dicts if n.slice.value in arm.alias[1]]
+            slots = [add_im(slot, arm.im) for arm in dicts
+                     for slot in (arm.alias[1].read(n.slice.value),) if slot is not None]
             if slots:
                 return vjoin(*slots)
         if base.elems is not None and isinstance(n.slice, ast.Constant) and \
@@ -1029,13 +1113,10 @@ class Frame:
                     self.sink(v, "api display slot %r" % k.value, vv, DISPLAY)
             out.append(vv)
         j = vjoin(*out) if out else V({C})
-        alias = None
         if all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in n.keys):
-            # constant keys: each key's value is kept for a constant-key read
-            alias = ("dict", tuple(k.value for k in n.keys), tuple(vals))
-            # The alias retains each slot; top-level labels would smear every
-            # sibling onto a precise constant-key read.
-            return V((), (), j.funcs, None, None, alias)
+            # One allocation identity is shared by every view of this literal.
+            return self.ps.dict_value(
+                self.fk, n, tuple(k.value for k in n.keys), tuple(vals))
         return V(j.ex_all(), j.im_all(), j.funcs)
 
     def e_Starred(self, n):
@@ -1203,8 +1284,7 @@ class Frame:
                 return vjoin(*out)
             if meth in _MUTATORS:
                 # `items.append(x)`, or `add = items.append` then `add(x)`
-                self.mutate(meth, fn.alias[3], n, argvals, kwvals)
-                return V({C})
+                return self.mutate(meth, recv, fn.alias[3], n, argvals, kwvals)
             return self.third_party("." + meth, n, argvals, kwvals, recv)
         if name is None:
             self.ps.flag(self.mod, n, "unresolvable call target (a callable value of no "
@@ -1233,16 +1313,18 @@ class Frame:
         if meth == "update":
             slots = []
             for value in argvals:
-                if value.alias is None or value.alias[0] != "dict":
+                literal = _dict_literal_slots(value)
+                if literal is None:
                     return None
                 slots.extend((key, slot, False)
-                             for key, slot in zip(value.alias[1], value.alias[2]))
+                             for key, slot in literal)
             for key, value in kwvals.items():
                 if key is None:
-                    if value.alias is None or value.alias[0] != "dict":
+                    literal = _dict_literal_slots(value)
+                    if literal is None:
                         return None
                     slots.extend((slot_key, slot, False)
-                                 for slot_key, slot in zip(value.alias[1], value.alias[2]))
+                                 for slot_key, slot in literal)
                 else:
                     slots.append((key, value, False))
             return slots
@@ -1255,26 +1337,24 @@ class Frame:
             return [(node.args[0].value, value, meth == "setdefault")]
         return None
 
-    def mutate(self, meth, recv_node, node, argvals, kwvals):
+    def mutate(self, meth, recv, recv_node, node, argvals, kwvals):
         v = vjoin(*(list(argvals) + list(kwvals.values()))) if (argvals or kwvals) else V({C})
         v = add_im(v, self.order_ctx)
+        slots = self.literal_mutation_slots(meth, node, argvals, kwvals)
+        dicts = _dict_arms(recv)
+        if dicts:
+            if slots is not None:
+                for key, slot, only_if_missing in slots:
+                    _dict_slot_update(
+                        recv, key, add_im(slot, self.ctx | self.order_ctx), only_if_missing)
+            else:
+                _dict_dynamic_update(recv, add_im(v, self.ctx))
+            return V({C})
         tgt = recv_node
         if isinstance(tgt, ast.Name):
             name = tgt.id
             if name in self.env:
                 cur = self.env[name]
-                slots = self.literal_mutation_slots(meth, node, argvals, kwvals)
-                if cur.alias is not None and cur.alias[0] == "dict" and slots is not None:
-                    updated = cur
-                    for key, slot, only_if_missing in slots:
-                        updated = _dict_slot_update(
-                            updated, key, add_im(slot, self.ctx | self.order_ctx),
-                            only_if_missing)
-                    self.env[name] = updated
-                    return
-                if cur.alias is not None and cur.alias[0] == "dict":
-                    self.env[name] = _dict_dynamic_update(cur, add_im(v, self.ctx))
-                    return
                 self.env[name] = vjoin(cur, V((), (), v.funcs, None,
                                               V(v.ex, v.im | self.ctx, v.funcs, v.elems, v.item,
                                                 v.alias)))
@@ -1284,6 +1364,7 @@ class Frame:
                                                 V(v.flat() | self.ctx))
         else:
             self.expr(tgt)
+        return V({C})
 
     def lookup_class(self, name, param):
         for key in ((name, param), (name, "*")):
@@ -1964,6 +2045,69 @@ def test_dynamic_dict_mutation_folds_all_old_and_new_slots(label, mutation):
         + '        items.append(AerItem("cell", (), (), box["shown"]))')
     findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
     assert len(findings) == 1 and "reads K" in str(findings[0]), (label, _fmt(findings))
+
+
+_SHARED_DICT_ASSIGN_HELPER = '''def _mutate_box(box, cell):
+    box["rank"] = cell[3]
+
+
+'''
+
+_SHARED_DICT_UPDATE_HELPER = '''def _mutate_box(box, cell):
+    box.update(rank=cell[3])
+
+
+'''
+
+_SHARED_DICT_MUTATIONS = [
+    ("local alias subscript",
+     '        box = {"rank": 0.0}\n'
+     '        other = box\n'
+     '        other["rank"] = cell[3]\n', ""),
+    ("local alias update",
+     '        box = {"rank": 0.0}\n'
+     '        other = box\n'
+     '        other.update(rank=cell[3])\n', ""),
+    ("nested alias subscript",
+     '        box = {"rank": 0.0}\n'
+     '        boxes = [box]\n'
+     '        boxes[0]["rank"] = cell[3]\n', ""),
+    ("nested alias update",
+     '        box = {"rank": 0.0}\n'
+     '        boxes = [box]\n'
+     '        boxes[0].update(rank=cell[3])\n', ""),
+    ("callee parameter subscript",
+     '        box = {"rank": 0.0}\n'
+     '        _mutate_box(box, cell)\n', _SHARED_DICT_ASSIGN_HELPER),
+    ("callee parameter update",
+     '        box = {"rank": 0.0}\n'
+     '        _mutate_box(box, cell)\n', _SHARED_DICT_UPDATE_HELPER),
+]
+
+
+@pytest.mark.parametrize("label,setup,helper", _SHARED_DICT_MUTATIONS,
+                         ids=[row[0] for row in _SHARED_DICT_MUTATIONS])
+def test_mutable_dictionary_identity_updates_every_later_view(label, setup, helper):
+    bot = _dict_fixture(
+        setup
+        + '        word = "COLD"\n'
+          '        if box["rank"] > 0.5:\n'
+          '            word = "HOT"\n'
+          '        items.append(AerItem("cell", (), (), word))', helper)
+    findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (label, _fmt(findings))
+
+
+def test_independent_equal_dictionary_literals_keep_distinct_identities():
+    bot = _dict_fixture(
+        '        changed = {"rank": 0.0}\n'
+        '        untouched = {"rank": 0.0}\n'
+        '        changed["rank"] = cell[3]\n'
+        '        word = "COLD"\n'
+        '        if untouched["rank"] > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))')
+    assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
 
 
 _BOT_GO = '''async def _aer_go(body):
