@@ -1128,7 +1128,8 @@ class Frame:
         labels_ex = set(v.ex_all())
         labels_im = set(v.im_all()) | set(self.ctx)
         if klass == DISPLAY:
-            bad = labels_ex - DISPLAY_OK
+            implicit_bad = set() if labels_ex & {E, F, P} else labels_im & {K, O}
+            bad = (labels_ex - DISPLAY_OK) | implicit_bad
         else:
             bad = (labels_ex - APPEARANCE_OK) | (labels_im - APPEARANCE_OK - {Q})
         if bad:
@@ -1266,6 +1267,25 @@ def test_the_permitted_fixture_is_green():
     ("class word by threshold", "", _BOT_PERMITTED.replace(
         '"ranked" if cell[2] else "casual"', '"HOT" if cell[3] > 0.83 else "COLD"'), "",
      "display sink AerItem #3"),
+    ("class word by statement branch", "", _BOT_PERMITTED.replace(
+        '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+        '        word = "COLD"\n'
+        '        if cell[3] > 0.5:\n'
+        '            word = "HOT"\n'
+        '        items.append(AerItem("cell", (), (), word))'), "",
+     "display sink AerItem #3 reads K"),
+    ("value order through helper return", "", _BOT_PERMITTED.replace(
+        "def _aer_plan(page):",
+        "def _order_value(cell):\n"
+        "    return cell[3]\n\n\n"
+        "def _aer_plan(page):").replace(
+        "    for cell in page.cells:",
+        '    order_word = "COLD"\n'
+        '    for _unused in sorted(page.cells, key=_order_value):\n'
+        '        order_word = "HOT"\n'
+        '    items.append(AerItem("cell", (), (), order_word))\n'
+        "    for cell in page.cells:"), "",
+     "display sink AerItem #3 reads O"),
     ("unresolvable getattr", "", _BOT_PERMITTED.replace(
         "plan = _aer_plan(page)", "plan = getattr(page, body['k'])()"), "",
      "unresolvable call target (getattr)"),
