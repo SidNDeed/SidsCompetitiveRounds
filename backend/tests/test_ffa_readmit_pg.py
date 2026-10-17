@@ -267,10 +267,10 @@ def test_t4_1_the_hold_writer_and_its_predicates(monkeypatch):
 
 
 def test_t4_2_the_anchor_is_the_last_presence(monkeypatch):
-    """T4.2: the deadline is present_at + 120 s whatever the witnesses did
-    (delayed, a vetoing census in between); the clock is the transaction
-    clock: with the application clock behind it a window the transaction
-    clock calls too short writes no hold, and held_at is that clock."""
+    """T4.2: withheld, reordered and post-expiry witnesses cannot move the
+    present_at + 120 s deadline; a vetoing census cannot move it either.  The
+    clock is the transaction clock: with the application clock behind it a
+    window that clock calls too short writes no hold, and held_at is it."""
     async def body(env):
         lob = await _rdm_lobby(env)
         await _present(env, lob, 1, 50.0)
@@ -288,6 +288,42 @@ def test_t4_2_the_anchor_is_the_last_presence(monkeypatch):
             ("T4.2 anchor", s["hold_anchor_at"] - await env.ts(lob, 0.0))
         assert s["hold_until"] == await env.ts(lob, 170.0), \
             ("T4.2 deadline", s["hold_until"] - await env.ts(lob, 0.0))
+
+        # Withhold the second witness, then deliver the two real route
+        # receipts in either order.  Their client seen-age values and receipt
+        # order move neither the server presence anchor nor age-170 deadline.
+        for first, second in ((0, 2), (2, 0)):
+            lob = await _rdm_lobby(env)
+            await _present(env, lob, 1, 50.0)
+            present = [0, 2, 3]
+            await env.at(lob, 91.0)
+            await env.census_of(lob, first, present, seen_age_ms=90000)
+            withheld = await env.seat(lob, 1)
+            assert withheld["hold_n"] is None and withheld["gone_game"] is None, \
+                ("T4.2 withheld witness", first, withheld["hold_n"], withheld["gone_game"])
+            await env.at(lob, 100.0)
+            await env.census_of(lob, second, present, seen_age_ms=60000)
+            first_row, second_row = await env.seat(lob, first), await env.seat(lob, second)
+            assert second_row["census_seen_at"] < first_row["census_seen_at"], \
+                ("T4.2 reordered witness", first, second,
+                 first_row["census_seen_at"], second_row["census_seen_at"])
+            s = await env.seat(lob, 1)
+            assert s["hold_anchor_at"] == await env.ts(lob, 50.0) \
+                and s["hold_until"] == await env.ts(lob, 170.0), \
+                ("T4.2 reordered deadline", first, second,
+                 s["hold_anchor_at"], s["hold_until"])
+
+        # A genuine quorum only after the shared deadline still records the
+        # gone fact, but cannot create either a hold or readmission row.
+        lob = await _rdm_lobby(env)
+        await _present(env, lob, 1, 50.0)
+        await env.at(lob, 171.0)
+        await env.census_of(lob, 0, [0, 2, 3], seen_age_ms=60000)
+        await env.census_of(lob, 2, [0, 2, 3], seen_age_ms=60000)
+        s = await env.seat(lob, 1)
+        assert s["gone_game"] is not None and s["hold_n"] is None \
+            and await _rows(env, "ffa_seat_readmissions", lob, 1) == [], \
+            ("T4.2 post-edge no hold", s["gone_game"], s["hold_n"])
 
         # Skew A: the transaction clock 60 s ahead of the application clock.
         lob = await _rdm_lobby(env)
@@ -423,9 +459,9 @@ def test_m2_decline_checks_lifecycle_and_writes_one_success(monkeypatch):
 
 def test_t4_4_the_lapse_order_and_one_commit(monkeypatch):
     """T4.4: the lapse takes the lobby row before the lobby's queue rows; a
-    lapse racing a bind ends in exactly one outcome with no failure line;
-    a failure between the clear and the departure leaves the hold whole
-    (one commit)."""
+    lapse racing a bind ends in exactly one outcome with no failure line; two
+    lobbies may lapse while a claim runs; a failure between the clear and the
+    departure leaves the hold whole (one commit)."""
     async def body(env):
         order = []
         real_slot, real_rows = main._ffa_lock_lobby_slot, main._ffa_lock_queue_rows
@@ -498,6 +534,31 @@ def test_t4_4_the_lapse_order_and_one_commit(monkeypatch):
             ("T4.4 caller sorted", locked, callers)
         assert all(a.status == 200 and a["reason"] == "other_lobby" for a in answers), \
             ("T4.4 crossed husks bounded", [(a.status, a.body) for a in answers])
+
+        # Two expired lobbies lapse concurrently while a real claim contends
+        # with one of them.  Each hold has one terminal outcome and no partial
+        # bound/failed residue, whichever lobby-lock winner runs first.
+        first, second = await _held(env), await _held(env)
+        await env.at(first, 200.0)
+        await env.at(second, 200.0)
+
+        async def lapse(lob):
+            async with env.sm() as db:
+                return await main._rdm_lapse_lobby(db, lob.lid)
+
+        l1, l2, claim = await asyncio.wait_for(asyncio.gather(
+            lapse(first), lapse(second), _readmit(env, first, 1, "claim", 1)), 20.0)
+        assert l1[0] in ("done", "busy") and l2 == ("done", 1) \
+            and claim.status == 200 and claim["reason"] in ("hold_lapsed", "not_held"), \
+            ("T4.4 two-lobby bounded", l1, l2, claim.status, claim.body)
+        for lob in (first, second):
+            seat = await env.seat(lob, 1)
+            row = (await _rows(env, "ffa_seat_readmissions", lob, 1))[0]
+            assert seat["hold_n"] is None and row["lapsed_at"] is not None \
+                and row["bound_at"] is None and row["refused_at"] is None, \
+                ("T4.4 terminal hold", str(lob.lid), seat["hold_n"], dict(row))
+        assert not _rdm_lines(env, "lapse failed"), \
+            ("T4.4 two-lobby no failure", _rdm_lines(env, "failed"))
 
         # A failure between the clear and the departure: nothing commits.
         lob = await _rdm_lobby(env)

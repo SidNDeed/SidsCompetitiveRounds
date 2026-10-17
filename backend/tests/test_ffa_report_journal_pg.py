@@ -8,8 +8,14 @@ its message for the readmit mutation runner (rdm_controls.py).
 """
 
 import asyncio
+import datetime as _dt
+import importlib.util
+import itertools
 import os
+import subprocess
 import sys
+
+import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "api"))
@@ -18,6 +24,32 @@ sys.path.insert(0, HERE)
 import main  # noqa: E402
 import test_ffa_assembly_pg as A  # noqa: E402
 import test_ffa_readmit_pg as R  # noqa: E402
+
+
+LANE_BASE_COMMIT = "9267b1fe86b636dd9a25306d9f0a64d02ca6a7cd"
+_LANE_BASE = {}
+
+
+def _lane_base_main():
+    """The lane-base main.py, imported lazily without writing a temp tree."""
+    if "mod" in _LANE_BASE:
+        return _LANE_BASE["mod"]
+    repo = os.path.normpath(os.path.join(HERE, "..", ".."))
+    src = subprocess.run(
+        ["git", "-C", repo, "show", LANE_BASE_COMMIT + ":backend/api/main.py"],
+        capture_output=True, check=True).stdout
+    name = "main_rdm_lane_base"
+    spec = importlib.util.spec_from_loader(name, loader=None,
+                                           origin="lane-base/backend/api/main.py")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    try:
+        exec(compile(src, spec.origin, "exec"), mod.__dict__)
+    except Exception:
+        sys.modules.pop(name, None)
+        raise
+    _LANE_BASE["mod"] = mod
+    return mod
 
 
 def run_env(monkeypatch, body):
@@ -67,10 +99,69 @@ async def _expire(env, lob, t):
     await A._janitor_tick(env)
 
 
-async def _lobby(env, t_report=60.0, flag=True):
-    lob = await R._rdm_lobby(env, 4, flag=flag)
+async def _lobby(env, t_report=60.0, flag=True, n=4):
+    lob = await R._rdm_lobby(env, n, flag=flag)
     await env.at(lob, t_report)
     return lob
+
+
+def _assert_t3_1_pure_matrix(n):
+    """Assert every C/R/L/G/X assignment for one seat count."""
+    receipt = _dt.datetime(2026, 1, 1, tzinfo=_dt.timezone.utc)
+    sids = [str(100 + i) for i in range(n)]
+    priorities = ("c", "r", "l", "g")
+    all_x_seen = False
+    for assignment in itertools.product(("c", "r", "l", "g", "x"), repeat=n):
+        classes = {sid: {"cls": cls, "census_at": receipt}
+                   for sid, cls in zip(sids, assignment)}
+        elected = min((sid for sid, cls in zip(sids, assignment) if cls == "c"),
+                      default=None, key=main._ffa_sort_key)
+        assert main._rdm_elected(classes, receipt) == elected, \
+            ("T3.1 elected matrix", n, assignment, elected)
+        for elected_files in (False, True):
+            if elected_files and elected is not None:
+                got = (elected, "c")
+            else:
+                journal = [{"steam_id": sid, "cls": cls, "tally": ("same",)}
+                           for sid, cls in zip(sids, assignment)
+                           if cls != "x" and sid != elected]
+                got = main._rdm_choose(journal, classes)
+            if elected_files and elected is not None:
+                expected = (elected, "c")
+            else:
+                eligible = [(sid, cls) for sid, cls in zip(sids, assignment)
+                            if cls != "x" and sid != elected]
+                chosen_cls = next((cls for cls in priorities
+                                   if any(c == cls for _sid, c in eligible)), None)
+                if chosen_cls is None:
+                    expected = (None, None)
+                else:
+                    chosen = min((sid for sid, cls in eligible if cls == chosen_cls),
+                                 key=main._ffa_sort_key)
+                    if chosen_cls == "g":
+                        count = sum(cls == "g" for _sid, cls in eligible)
+                        expected = (chosen, "g" if count >= 2 else "g1")
+                    else:
+                        expected = (chosen, chosen_cls)
+            assert got == expected, \
+                ("T3.1 pure matrix", n, assignment, elected_files, got, expected)
+        if all(cls == "x" for cls in assignment):
+            all_x_seen = True
+            assert main._rdm_choose([], classes) == (None, None), ("T3.1 all X", n)
+    assert all_x_seen, ("T3.1 all X covered", n)
+
+    disagree = [{"steam_id": sid, "cls": "g", "tally": (sid,)} for sid in sids]
+    assert main._rdm_choose(disagree, {}) == (sids[0], "g1"), \
+        ("T3.1 disagreeing G", n, main._rdm_choose(disagree, {}))
+
+
+@pytest.mark.parametrize("n", range(2, 9))
+def test_t3_1_pure_class_election_matrix(n):
+    """T3.1 pure matrix: for every 2-to-8-seat C/R/L/G/X assignment,
+    exercise both whether the elected C files and whether it does not.  X is
+    never a journal filer; delayed choice is C > R > L > G and then the
+    UUID-order-equivalent Steam-id order, with g1 unless G has a quorum."""
+    _assert_t3_1_pure_matrix(n)
 
 
 def test_t3_1_the_class_matrix(monkeypatch):
@@ -79,6 +170,11 @@ def test_t3_1_the_class_matrix(monkeypatch):
     within a class; a lone lagged report settles recorded and unrated (g1),
     two agreeing lagged reports settle rated (g); a leaver stays refused;
     exactly one settlement per game."""
+    # M3.1-M3.4 execute the exhaustive chooser matrix before their
+    # route/economy-specific controls and named mutant assertions.
+    for n in range(2, 9):
+        _assert_t3_1_pure_matrix(n)
+
     async def body(env):
         # (a) the elected seat (fresh census, lowest Steam id among them).
         lob = await _lobby(env)
@@ -163,32 +259,96 @@ def test_t3_1_the_class_matrix(monkeypatch):
     run_env(monkeypatch, body)
 
 
-def test_t3_3_edge_races(monkeypatch):
-    """T3.3: a returner's report never settles at once; with the continuous
-    seat's census stale at the receipt its report is journaled too and the
-    window settles it; with no continuous report the window settles the
-    returner."""
+def test_t3_2_server_lag_without_client_publication_cannot_win_election(monkeypatch):
+    """T3.2: in a two-seat flagged lobby the lowest Steam id is server-class
+    G even though its report publishes no self-lag bit.  Its receipt waits;
+    the other, genuinely continuous seat remains the elected C and settles."""
     async def body(env):
-        lob = await _lobby(env)
-        await _entered_row(env, lob, 2)
-        a = await _file(env, lob, 2)
-        assert a.status == 202, ("T3.3 r waits", a.status, a.body)
-        a = await _file(env, lob, 0)
-        assert a.status == 202, ("T3.3 stale c journaled", a.status, a.body)
-        await _expire(env, lob, 91.0)
-        m = await _matches(env, lob)
-        assert [r["rep_sid"] for r in m] == [lob.sids[0]], ("T3.3 c settles",
-                                                           [r["rep_sid"] for r in m])
-
-        lob = await _lobby(env)
-        await _entered_row(env, lob, 2)
+        lob = await _lobby(env, n=2)
+        results = {lob.sids[0]: (5, 10), lob.sids[1]: (3, 7)}
+        lag = await env.connect(lob, 0, "lag", game=1, k=1, why="timeout")
+        assert lag.status == 200, ("T3.2 server lag route", lag.status, lag.body)
         await _fresh(env, lob, 0)
-        a = await _file(env, lob, 2)
-        assert a.status == 202, ("T3.3 r waits", a.status, a.body)
-        await _expire(env, lob, 91.0)
+        await _fresh(env, lob, 1)
+        lagged = await _file(env, lob, 0, results=results)
+        assert lagged.status == 202 and await _journal(env, lob) == {
+            lob.sids[0]: ("g", "held")}, \
+            ("T3.2 server lag journals", lagged.status, await _journal(env, lob))
+        continuous = await _file(env, lob, 1, results=results)
+        matches = await _matches(env, lob)
+        assert continuous.status == 200 and [m["rep_sid"] for m in matches] == [lob.sids[1]], \
+            ("T3.2 class C settles", continuous.status, matches)
+    run_env(monkeypatch, body)
+
+
+def test_t3_3_edge_races(monkeypatch):
+    """T3.3: real pre-edge and post-edge drops do not change receipt class.
+    A returner's report waits and wins when C dropped first; a stored C wins
+    after its later drop, alone and over R; an immediately settled C stays
+    the one settlement after its own subsequent drop."""
+    async def body(env):
+        async def return_for_game(lob, slot, actor):
+            await env.at(lob, 80.0)
+            claim = await R._readmit(env, lob, slot, "claim", 1)
+            assert claim["status"] == "claimed", ("T3.3 real claim", claim.body)
+            await R._corroborate(env, lob, slot, actor, witness=1)
+            bind = await R._readmit(env, lob, slot, "bind", 1, actor=actor)
+            assert bind["status"] == "admitted_late", ("T3.3 real bind", bind.body)
+            await R._corroborate(env, lob, slot, actor, witness=1, kept=True)
+            entered = await R._readmit(env, lob, slot, "entered", 1, actor=actor, game=1)
+            assert entered["status"] == "entered", ("T3.3 real entered", entered.body)
+
+        async def held_returner():
+            lob = await R._rdm_lobby(env)
+            await R._present(env, lob, 2, 50.0)
+            await R._witness_gone(env, lob, 2, 70.0, witnesses=(0, 1))
+            seat = await env.seat(lob, 2)
+            assert seat["hold_n"] == 1, ("T3.3 real hold", seat["hold_n"])
+            return lob
+
+        # Pre-edge: C actually drops before any report; the actual returner R
+        # is the only filer and wins only after the window.
+        lob = await held_returner()
+        await return_for_game(lob, 2, 9)
+        gone = await R._witness_gone(env, lob, 0, 82.0, witnesses=(3, 1))
+        dropped = await env.seat(lob, 0)
+        assert gone.status == 200 and dropped["gone_game"] == 1, \
+            ("T3.3 real pre-edge drop", gone.status, gone.body, dropped["gone_game"])
+        report = await _file(env, lob, 2)
+        assert report.status == 202, ("T3.3 r waits", report.status, report.body)
+        await _expire(env, lob, 113.0)
         m = await _matches(env, lob)
         assert [(r["rep_sid"], r["fallback_cls"]) for r in m] == [(lob.sids[2], "r")], \
-            ("T3.3 r settles", [(r["rep_sid"], r["fallback_cls"]) for r in m])
+            ("T3.3 real pre-edge R", m)
+
+        # Post-edge: C and an actual R are journaled before C really drops;
+        # the stored C receipt remains authoritative at expiry.
+        lob = await held_returner()
+        await return_for_game(lob, 2, 9)
+        await env.at(lob, 81.0)
+        c = await _file(env, lob, 0)
+        r = await _file(env, lob, 2)
+        assert c.status == r.status == 202, ("T3.3 real post-edge receipts", c.body, r.body)
+        gone = await R._witness_gone(env, lob, 0, 82.0, witnesses=(3, 1))
+        dropped = await env.seat(lob, 0)
+        assert gone.status == 200 and dropped["gone_game"] == 1, \
+            ("T3.3 real post-edge drop", gone.status, gone.body, dropped["gone_game"])
+        await _expire(env, lob, 112.0)
+        m = await _matches(env, lob)
+        assert [(row["rep_sid"], row["fallback_cls"]) for row in m] == [
+            (lob.sids[0], None)], ("T3.3 real post-edge C", m)
+
+        # An elected C may settle immediately; its subsequent real drop never
+        # creates a second settlement for the already-finished game.
+        lob = await _lobby(env)
+        await _fresh(env, lob, 0)
+        c = await _file(env, lob, 0)
+        assert c.status == 200, ("T3.3 immediate C", c.status, c.body)
+        gone = await R._witness_gone(env, lob, 0, 71.0, witnesses=(1, 2))
+        dropped = await env.seat(lob, 0)
+        assert gone.status == 200 and dropped["gone_game"] == 2, \
+            ("T3.3 immediate real drop", gone.status, gone.body, dropped["gone_game"])
+        assert len(await _matches(env, lob)) == 1, ("T3.3 immediate stays one",)
     run_env(monkeypatch, body)
 
 
@@ -321,24 +481,94 @@ def test_t3_6_flag_false_keeps_today(monkeypatch):
     """T3.6 (#391 negative control): in a lobby locked without the flag a late
     reporter is refused late_reporter, a lagged reporter lag_reporter, a
     continuous report settles at once whatever its census age, and no
-    journal or window row is written."""
-    async def body(env):
-        lob = await _lobby(env, flag=False)
-        await env.set_seat(lob, 1, late_admitted_at=20.0)
-        await env.set_seat(lob, 3, lag_games=[1])
-        a = await _file(env, lob, 1)
-        assert a.status not in (200, 202), ("T3.6 late", a.status, a.body)
-        a = await _file(env, lob, 3)
-        assert a.status not in (200, 202), ("T3.6 lag", a.status, a.body)
-        a = await _file(env, lob, 2)
-        assert a.status == 200, ("T3.6 settles at once", a.status, a.body)
-        n = await env.conn.fetchval(
-            "SELECT (SELECT count(*) FROM ffa_report_journal WHERE lobby_id = $1)"
-            "     + (SELECT count(*) FROM ffa_report_windows WHERE lobby_id = $1)", lob.lid)
-        assert n == 0, ("T3.6 no journal", n)
-        m = await _matches(env, lob)
-        assert len(m) == 1 and m[0]["fallback_cls"] is None, ("T3.6 row", m)
-    run_env(monkeypatch, body)
+    journal or window row is written.  The route-level wire bodies, including
+    a successful replay, are compared as bytes rather than re-serialized."""
+    import database
+    import httpx
+    lane_base = _lane_base_main()
+    wire = {}
+
+    async def exercise(env, app_main, label):
+        async def override():
+            async with env.sm() as db:
+                yield db
+
+        async def rows(lob):
+            return await env.conn.fetchval(
+                "SELECT (SELECT count(*) FROM ffa_report_journal WHERE lobby_id = $1)"
+                "     + (SELECT count(*) FROM ffa_report_windows WHERE lobby_id = $1)", lob.lid)
+
+        async def no_session(request, steam_id, db):
+            return None
+
+        env.mp.setattr(app_main, "_check_steam_session", no_session)
+        env.mp.setattr(app_main, "MATCH_HMAC_SECRET", "")
+        env.mp.setattr(app_main, "_presence_seen", {})
+        env.mp.setattr(app_main, "time", main.time)
+        env.mp.setattr(app_main, "_asm_clock", env._clock, raising=False)
+        real_uuid4 = app_main.uuid.uuid4
+        env.mp.setattr(app_main.uuid, "uuid4",
+                       lambda: main.UUID("abcdabcd-abcd-4abc-8abc-abcdabcdabcd"))
+        app_main.app.dependency_overrides[database.get_db] = override
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_main.app),
+                                         base_url="http://rdj") as client:
+                async def post(rep):
+                    response = await client.post("/api/v1/ffa/matches",
+                                                 json=rep.model_dump(mode="json"),
+                                                 headers={"X-Mod-Version": "1.41.0"})
+                    return response.status_code, bytes(response.content)
+
+                late = await _lobby(env, flag=False)
+                await env.set_seat(late, 1, late_admitted_at=20.0)
+                rep = await env.report_req(late, 1, _results(late), reporter=late.sids[1])
+                answer = await post(rep)
+                again = await post(rep)
+                want = (b'{"detail":"This seat may not report this sitting\'s games",'
+                        b'"games_played":0,"expected_game":1}')
+                assert answer == again == (409, want), \
+                    ("T3.6 late bytes", label, answer, again)
+                late_wire = (answer, again)
+                assert await rows(late) == 0, ("T3.6 late no journal", await rows(late))
+
+                lagged = await _lobby(env, flag=False)
+                lag_write = await env.connect(lagged, 1, "lag", game=1, k=1,
+                                              why="timeout")
+                assert lag_write.status == 200, \
+                    ("T3.6 lag route", label, lag_write.status, lag_write.body)
+                rep = await env.report_req(lagged, 1, _results(lagged), reporter=lagged.sids[1])
+                answer = await post(rep)
+                again = await post(rep)
+                want = (b'{"detail":"This seat may not report this game",'
+                        b'"games_played":0,"expected_game":1}')
+                assert answer == again == (409, want), \
+                    ("T3.6 lag bytes", label, answer, again)
+                lag_wire = (answer, again)
+                assert await rows(lagged) == 0, ("T3.6 lag no journal", await rows(lagged))
+
+                continuous = await _lobby(env, flag=False)
+                rep = await env.report_req(continuous, 1, _results(continuous),
+                                           reporter=continuous.sids[2])
+                first = await post(rep)
+                replay = await post(rep)
+                replay_again = await post(rep)
+                assert first[0] == replay[0] == replay_again[0] == 200 \
+                    and replay == replay_again, \
+                    ("T3.6 replay bytes", label, first, replay, replay_again)
+                assert await rows(continuous) == 0, \
+                    ("T3.6 success no journal", await rows(continuous))
+                matches = await _matches(env, continuous)
+                assert len(matches) == 1 and matches[0]["fallback_cls"] is None, \
+                    ("T3.6 row", matches)
+                wire[label] = (late_wire, lag_wire, first, replay, replay_again)
+        finally:
+            app_main.uuid.uuid4 = real_uuid4
+            app_main.app.dependency_overrides.pop(database.get_db, None)
+
+    run_env(monkeypatch, lambda env: exercise(env, main, "current"))
+    run_env(monkeypatch, lambda env: exercise(env, lane_base, "lane_base"))
+    assert wire["current"] == wire["lane_base"], \
+        ("T3.6 flag-false wire compatibility", wire["current"], wire["lane_base"])
 
 
 def test_h1_readmit_economics_use_only_server_absence(monkeypatch):
