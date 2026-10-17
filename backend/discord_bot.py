@@ -15134,6 +15134,8 @@ def _aer_cell(row, table, catalog, phase="1a"):
     if cell["state"] not in AER_CELL_STATES or cell["own_state"] not in AER_OWN_STATES:
         raise AerSchemaError("cell state")
     if table == "summary":
+        if catalog[ki]["kind"] != "R":
+            raise AerSchemaError("summary cell kind")
         for slot in ("n",):
             _aer_check_int(cell[slot], 0)
         for slot in ("own_n", "pop_n"):

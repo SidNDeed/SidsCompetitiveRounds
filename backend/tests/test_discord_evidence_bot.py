@@ -303,6 +303,10 @@ def _phase_leaf_breaks():
          lambda b: _set_first_cell_value(b, 7)),
         ("D cell carrying number", lambda: _body_with_cell_kind("D"),
          lambda b: _set_first_cell_value(b, 7)),
+        ("T window carrying numeric summary", summary_body,
+         lambda b: b["catalog"][0].update(kind="T")),
+        ("D window carrying numeric summary", summary_body,
+         lambda b: b["catalog"][0].update(kind="D")),
     ]
 
 
