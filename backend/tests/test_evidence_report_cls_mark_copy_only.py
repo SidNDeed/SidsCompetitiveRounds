@@ -22,7 +22,8 @@ Labels. Each value carries the roots it may come from:
      BotPage display slot;
   P  a decoded BotPage (its display slots are E, its page fields S);
   F  a number formatted into text (`%d`, `%f`, `{:.2f}`, ...);
-  D  any other data (request, database row, process input);
+  D  any other data (database row, process input, untyped API argument);
+  R  structural request data from an API entry point's Request annotation;
   Q  the bot's request and delivery data (command arguments, the api's
      status and refusal detail); cell data reaches the bot only inside a
      served body and leaves the 1a decoder as P;
@@ -76,7 +77,7 @@ API = os.path.join(BACKEND, "api", "admin_evidence.py")
 BOT = os.path.join(BACKEND, "discord_bot.py")
 WORKER = os.path.join(BACKEND, "aer_render_worker.py")
 
-C, S, E, P, F, D, Q, K, O = "C", "S", "E", "P", "F", "D", "Q", "K", "O"
+C, S, E, P, F, D, R, Q, K, O = "C", "S", "E", "P", "F", "D", "R", "Q", "K", "O"
 APPEARANCE_OK = frozenset({C, S})
 DISPLAY_OK = frozenset({C, S, E, F, P})
 
@@ -351,6 +352,32 @@ def element(v):
     return out
 
 
+def annotation_origin(mod, node):
+    """The import-resolved dotted name of a direct annotation node."""
+    if isinstance(node, ast.Name):
+        return mod.imports.get(node.id, node.id)
+    if isinstance(node, ast.Attribute):
+        base = annotation_origin(mod, node.value)
+        return (base + "." + node.attr) if base else None
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return mod.imports.get(node.value, node.value)
+    return None
+
+
+def is_request_annotation(mod, node):
+    """Whether an annotation denotes the framework's structural request."""
+    origin = annotation_origin(mod, node)
+    if origin in ("fastapi.Request", "starlette.requests.Request"):
+        return True
+    if isinstance(node, ast.Subscript):
+        return is_request_annotation(mod, node.slice)
+    if isinstance(node, ast.BinOp):
+        return is_request_annotation(mod, node.left) or is_request_annotation(mod, node.right)
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return any(is_request_annotation(mod, item) for item in node.elts)
+    return False
+
+
 # ── Modules and the closure ────────────────────────────────────────────────
 
 class Module:
@@ -474,7 +501,8 @@ class Pass:
         node = self.func_node(fk)
         env = {}
         args = node.args
-        names = [a.arg for a in args.posonlyargs + args.args]
+        named_args = args.posonlyargs + args.args
+        names = [a.arg for a in named_args]
         params = self.params.setdefault(fk, {})
         defaults = list(args.defaults)
         dnames = names[len(names) - len(defaults):] if defaults else []
@@ -485,10 +513,13 @@ class Pass:
             if dnode is not None:
                 params[a.arg] = vjoin(params.get(a.arg), fa.expr(dnode))
         allp = names + [a.arg for a in args.kwonlyargs]
+        annotations = {a.arg: a.annotation for a in named_args + args.kwonlyargs}
         if args.vararg:
             allp.append(args.vararg.arg)
+            annotations[args.vararg.arg] = args.vararg.annotation
         if args.kwarg:
             allp.append(args.kwarg.arg)
+            annotations[args.kwarg.arg] = args.kwarg.annotation
         for n in allp:
             contract = AER_CONTRACTS.get((kind, q, n))
             if contract is not None:
@@ -501,7 +532,12 @@ class Pass:
                 # an entry point's argument: data; in the bot it is request
                 # and delivery data (Q), never cell data, which reaches the
                 # bot only inside a response body and leaves the decoder as P
-                env[n] = V({Q if kind == "bot" else D})
+                if kind == "bot":
+                    env[n] = V({Q})
+                elif kind == "api" and is_request_annotation(mod, annotations.get(n)):
+                    env[n] = V({R})
+                else:
+                    env[n] = V({D})
         if isinstance(node, ast.Lambda):
             ret = fa.expr(node.body)
             fa.ret = vjoin(fa.ret, V(ret.ex, ret.im | fa.ctx, ret.funcs, ret.elems, ret.item,
@@ -788,8 +824,8 @@ class Frame:
 
     def numeric_format(self, v):
         ex = set(v.ex_all())
-        if ex & {D, Q}:
-            ex = (ex - {D, Q}) | {F}
+        if ex & {D, R, Q}:
+            ex = (ex - {D, R, Q}) | {F}
         return V(ex, v.im_all())
 
     def e_Name(self, n):
@@ -933,9 +969,7 @@ class Frame:
             ex |= v.ex_all()
             im |= v.im_all()
         operands = [n.left] + list(n.comparators)
-        ordering = any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
-                       and not (self.set_shaped(left) or self.set_shaped(right))
-                       for left, op, right in zip(operands, n.ops, operands[1:]))
+        ordering = any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in n.ops)
         self.numeric_check(n, [n.left] + list(n.comparators), vals)
         if P in ex:
             ex = (ex - {P}) | {E}
@@ -943,23 +977,11 @@ class Frame:
             ex |= {K}
         return V(ex, im)
 
-    def set_shaped(self, node):
-        """True for syntax whose ordered comparison is set inclusion."""
-        if isinstance(node, (ast.Set, ast.SetComp)):
-            return True
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and \
-                node.func.id in ("set", "frozenset"):
-            return True
-        if isinstance(node, ast.Name) and node.id in self.mod.consts:
-            value = self.mod.consts[node.id]
-            return value is not node and self.set_shaped(value)
-        return False
-
     def numeric_check(self, node, operands, vals):
         """A numeric literal compared with E or D data (the place a copied
         threshold sits) must be allowlisted or a CONTRACT_BOUNDS or
         DISPLAY_DEFAULTS read."""
-        if not any(v.flat() & {E, D, P} for v in vals):
+        if not any(v.flat() & {E, D, R, P} for v in vals):
             return
         for o in operands:
             lit = o.operand if isinstance(o, ast.UnaryOp) else o
@@ -1655,3 +1677,43 @@ def test_order_context_reaches_display_callees_and_callbacks(label, bot):
     findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
     assert len(findings) == 1 and ".send content= reads O" in str(findings[0]), (
         label, _fmt(findings))
+
+
+def test_report_data_set_containment_is_a_classification_flow():
+    bot = _dict_fixture(
+        '        word = "HOT" if set(cell[0]) <= {"x"} else "COLD"\n'
+        '        items.append(AerItem("cell", (), (), word))')
+    findings = _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), _fmt(findings)
+
+
+_REQUEST_IDENT_API = '''from fastapi import Request
+
+_HEX = frozenset("0123456789abcdef")
+
+
+def _aer_enc(value):
+    return str(value)
+
+
+def _aer_ident(raw):
+    s = (raw or "").strip().lower().replace("-", "")
+    if s and set(s) <= _HEX:
+        if len(s) == 32:
+            return "full", s
+        if len(s) == 12:
+            return "code", s
+    return None
+
+
+def evidence_report(request: Request):
+    ident = _aer_ident(request.path_params["code"])
+    return {"name": _aer_enc(ident[1])}
+'''
+
+
+def test_structural_request_identifier_validation_keeps_request_provenance():
+    ps = Pass([Module("api", _REQUEST_IDENT_API, "fixture_api.py", lambda q: True)])
+    findings = ps.run()
+    labels = ps.returns[("api", "_aer_ident")].flat()
+    assert "R" in labels and K not in labels and findings == [], (labels, _fmt(findings))
