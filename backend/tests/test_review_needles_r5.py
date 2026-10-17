@@ -616,7 +616,7 @@ def test_m5_fix5_bindings_that_never_settle_are_refused_not_partial():
 SCAN = "    return list(os.walk(p, onerror=_walk_error))\n"
 SHADOWS = [
     ("parameter_shadow", ("def scan(p):", "def scan(p, _walk_error):"),
-     ("        scan(argv[0])\n", "        scan(argv[0], print)\n")),
+     ("        result = scan('root')\n", "        result = scan('root', print)\n")),
     ("default_argument_swallowing_lambda", ("def scan(p):", "def scan(p, _walk_error=lambda e: None):"), None),
     ("lambda_parameter", (SCAN, "    return (lambda _walk_error: list(os.walk(p, onerror=_walk_error)))(print)\n"),
      None),
@@ -626,7 +626,7 @@ SHADOWS = [
      None),
     ("import_alias", ("import os\n", "import os\nfrom os import fspath as _walk_error\n"), None),
     ("except_target", ("    except NoVerdict:\n", "    except NoVerdict as _walk_error:\n"), None),
-    ("raise_construction_can_fail", ("    raise NoVerdict(type(e).__name__)\n", "    raise NoVerdict(e.args[3])\n"),
+    ("raise_construction_can_fail", ("    raise NoVerdict('walk')\n", "    raise NoVerdict(e.args[3])\n"),
      None),
     ("finally_returns", (SCAN, "    try:\n    " + SCAN + "    finally:\n        return []\n"), None),
     ("suppressing_with", (SCAN, "    with contextlib.suppress(Exception):\n    " + SCAN),
