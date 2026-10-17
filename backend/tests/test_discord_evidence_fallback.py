@@ -169,9 +169,10 @@ def test_p13_p14_the_control_fixture_parses_back_inline():
     assert chr(0x1B) not in content and "class" not in {i.kind for i in plan}
     assert not [i for i in plan if i.kind in ("class", "mark", "swatch")]
     name = next(p for i in plan for f, p in zip(i.fields, i.parts) if f == ("subjects", 1, "name"))
-    assert unescape(name) == "$x^2$ " + chr(0x200F) + BS
+    assert unescape(name) == ("$x^2$ " + chr(0x061C) + chr(0x200E) + chr(0x200F)
+                              + chr(0x202E) + "`" + BS)
     pop = next(p for i in plan for f, p in zip(i.fields, i.parts) if f == ("population", "key"))
-    assert unescape(pop) == "all" + chr(0x61C) + chr(0x200E) + chr(0x200F) + "`" + BS
+    assert unescape(pop) == "all"
     for cp in (0x061C, 0x200E, 0x200F):
         assert chr(cp) not in content
     print("GATE p13 control: inline, %d lines, %d stored values parsed back; U+061C, U+200E, "
