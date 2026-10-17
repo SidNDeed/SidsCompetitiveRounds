@@ -127,9 +127,7 @@ namespace CompetitiveRounds
                     if (p == null || p.data == null || p.data.currentCards == null) continue;
                     var names = new List<string>();
                     foreach (var c in p.data.currentCards) names.Add(CardName(c) ?? "");
-                    if (SeatDeckLog.DriftCheck(p.PlayerID, names))
-                        Plugin.Log.LogWarning(SEATLOG + " drift slot=" + p.PlayerID.ToString(CultureInfo.InvariantCulture)
-                            + " log=" + SeatDeckLog.Describe(p.PlayerID) + " body=" + names.Count.ToString(CultureInfo.InvariantCulture));
+                    SeatDeckLog.DriftCheck(p.PlayerID, names);
                 }
             }
             catch { }
@@ -175,9 +173,16 @@ namespace CompetitiveRounds
         }
 
         /// <summary>One boot line naming every Stage 2 patch as attached or
-        /// not (#83); <see cref="AllAttached"/> is true only when all are.</summary>
+        /// not (#83); <see cref="AllAttached"/> is true only when all are.
+        /// It also binds the S6 ladder sink: [SEATLOG] lines as warnings,
+        /// every other ladder line as info.</summary>
         internal static void BootLine()
         {
+            SeatDeckLog.Ladder = line =>
+            {
+                if (line.StartsWith(SEATLOG, StringComparison.Ordinal)) Plugin.Log.LogWarning(line);
+                else Plugin.Log.LogInfo(line);
+            };
             try
             {
                 var all = new List<string[]>(HOOKS);

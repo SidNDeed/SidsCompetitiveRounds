@@ -61,7 +61,6 @@ namespace CompetitiveRounds
                     if (!TeamHoldRules.DiscoveryShows(a)) { _offer = null; return; }
                     _offer = a;
                     _offerAt = Now;
-                    Plugin.Log.LogInfo(TeamHold.TAG + " offered mode=" + a.Mode + " slot=" + a.Slot.ToString(CultureInfo.InvariantCulture) + " (" + why + ")");
                 });
             }
             catch { }
@@ -93,7 +92,7 @@ namespace CompetitiveRounds
                 }
                 _claim = a;
                 _token = a.Token;
-                Plugin.Log.LogInfo(TeamHold.TAG + " claimed slot=" + a.Slot.ToString(CultureInfo.InvariantCulture) + " g=" + a.G);
+                route.Slot = a.Slot;
                 Stage(offer, a);
                 route.Done(TeamHoldRules.ReturnRoute.Stage.Claim, true, Now);
             });
@@ -234,7 +233,7 @@ namespace CompetitiveRounds
                 if (route != _route) return;
                 bool bound; string reason;
                 if (!TeamHoldNet.TryParseBind(st, body, out bound, out reason)) return;
-                if (bound) { Plugin.Log.LogInfo(TeamHold.TAG + " bound actor=" + actor.ToString(CultureInfo.InvariantCulture)); route.Done(TeamHoldRules.ReturnRoute.Stage.Bind, true, Now); }
+                if (bound) route.Done(TeamHoldRules.ReturnRoute.Stage.Bind, true, Now);
                 else if (reason != "uncorroborated") Fail(TeamHoldRules.ReturnRoute.Stage.Bind, reason);
             });
         }
@@ -320,10 +319,9 @@ namespace CompetitiveRounds
             Photon.Realtime.Player x = null;
             foreach (var p in PhotonNetwork.PlayerList) if (p != null && p.ActorNumber == k.BoundActor) x = p;
             string rdt = TeamHoldWriter.PlayerProp(x, TeamHoldRules.KEY_RDT);
-            if (!TeamHoldRules.TokenOk(rdt, k.HoldId, server.Verifier))
+            if (!TeamHoldRules.TokenCheck(rdt, k.HoldId, server.Verifier, k.BoundActor))
             {
                 _snapWrittenFor = k.HoldId;
-                Plugin.Log.LogInfo(TeamHold.TAG + " token refused actor=" + k.BoundActor.ToString(CultureInfo.InvariantCulture));
                 TeamHoldLoop.EndLocal(Time.unscaledTime, k, "token_refused");
                 return;
             }

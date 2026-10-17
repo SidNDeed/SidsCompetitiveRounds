@@ -252,12 +252,26 @@ namespace CompetitiveRounds
             SeatOf(slot).Life++;
         }
 
+        // ── the S6 ladder sink ───────────────────────────────────────────────
+
+        /// <summary>Where the [SEATLOG] and [HOLD] ladder lines go. The boot
+        /// line binds it to the plugin log; unbound (the harness, before boot)
+        /// a line goes nowhere. A throwing sink never reaches the caller.</summary>
+        internal static Action<string> Ladder;
+
+        internal static void Emit(string line)
+        {
+            var f = Ladder;
+            if (f == null || line == null) return;
+            try { f(line); } catch { }
+        }
+
         // ── the drift probe (log only) ──────────────────────────────────────
 
         /// <summary>Point start: the body's current card names against the
         /// slot log. A mismatch marks the slot and answers true once per slot
-        /// per game (the caller logs [SEATLOG] drift). A slot with no log and
-        /// no cards is not a mismatch.</summary>
+        /// per game, and that first answer emits [SEATLOG] drift. A slot with
+        /// no log and no cards is not a mismatch.</summary>
         internal static bool DriftCheck(int slot, IList<string> bodyNames)
         {
             if (slot < 0 || bodyNames == null) return false;
@@ -271,6 +285,9 @@ namespace CompetitiveRounds
             seat = SeatOf(slot);
             bool first = !seat.Drifted;
             seat.Drifted = true;
+            if (first)
+                Emit("[SEATLOG] drift slot=" + slot.ToString(CultureInfo.InvariantCulture) + " log=" + Describe(slot)
+                     + " body=" + bodyNames.Count.ToString(CultureInfo.InvariantCulture));
             return first;
         }
 

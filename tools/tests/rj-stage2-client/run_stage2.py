@@ -155,6 +155,22 @@ MUTANTS = [
         ("            if (cut.Mode == MODE_TEAM)\n            {\n                switch (cut.Eligibility)",
          "            if (cut.Mode == MODE_TEAM || cut.Mode == MODE_OVT)\n            {\n                switch (cut.Eligibility)")],
      "t56_ovt_no_report", "t52_clean_census"),
+    # K6, S6 ladder lines (lane-added: each removes or widens one emission).
+    ("M6.E1", "K6", "rules", [
+        ("                SeatDeckLog.Emit(\"[HOLD] auto grant slot=\" + I(slot) + \" card=\" + card);\n", "")],
+     "t6_auto_grant", "t6_grant_superseded"),
+    ("M6.E2", "K6", "rules", [
+        ("if (r && inputs != null) SeatDeckLog.Emit(", "if (inputs != null) SeatDeckLog.Emit(")],
+     "t6_negative", "t6_cascade_suppressed"),
+    ("M6.E3", "K6", "rules", [
+        ("if (next != 'o' || prev == 'o' || prev == 'c'", "if (next != 'o' || prev == 'c'")],
+     "t6_held", "t6_offered"),
+    ("M6.E4", "K6", "net", [
+        ("if (a.Ok) SeatDeckLog.Emit(\"[HOLD] claimed slot=\"", "SeatDeckLog.Emit(\"[HOLD] claimed slot=\"")],
+     "t6_claimed", "t6_bound"),
+    ("M6.E5", "K6", "seat", [
+        ("            if (first)\n                Emit(\"[SEATLOG] drift slot=\"", "            if (first && slot < 0)\n                Emit(\"[SEATLOG] drift slot=\"")],
+     "t6_drift", "t0_drift"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

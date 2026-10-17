@@ -80,11 +80,7 @@ namespace CompetitiveRounds
                 if (!TeamHoldRules.TryParseTap(changed[TeamHoldRules.KEY_TAP] as string, out g, out slot, out k, out card)) return;
                 string cur;
                 TeamHoldRules.GidStarted(TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TGID), out cur);
-                var o = TeamHoldRules.ApplyGrant(g, cur, slot, k, card);
-                if (o == TeamHoldRules.GrantOutcome.Applied)
-                    Plugin.Log.LogInfo(TeamHold.TAG + " auto grant slot=" + slot.ToString(CultureInfo.InvariantCulture) + " card=" + card);
-                else if (o == TeamHoldRules.GrantOutcome.Superseded)
-                    Plugin.Log.LogInfo(TeamHold.TAG + " grant superseded slot=" + slot.ToString(CultureInfo.InvariantCulture) + " k=" + k.ToString(CultureInfo.InvariantCulture));
+                TeamHoldRules.ApplyGrant(g, cur, slot, k, card);
             }
             catch { }
         }
@@ -125,11 +121,7 @@ namespace CompetitiveRounds
             {
                 bool have = TeamHoldRules.Entry0(g, slot, k) != null;
                 if (have) break;
-                if (TeamHoldRules.RecordLate(start, Time.unscaledTime, have))
-                {
-                    Plugin.Log.LogInfo(TeamHold.TAG + " record late slot=" + slot.ToString(CultureInfo.InvariantCulture));
-                    break;
-                }
+                if (TeamHoldRules.RecordLateFor(slot, start, Time.unscaledTime, have)) break;
                 yield return null;
             }
             yield return inner;
@@ -146,8 +138,7 @@ namespace CompetitiveRounds
             if (f == null || PhotonNetwork.IsMasterClient) return;
             bool? match = null;
             try { match = f(g, slot); } catch { }
-            if (match.HasValue)
-                Plugin.Log.LogInfo(TeamHold.TAG + " audit slot=" + slot.ToString(CultureInfo.InvariantCulture) + " match=" + (match.Value ? "1" : "0"));
+            if (match.HasValue) TeamHoldRules.AuditLine(slot, match.Value);
         }
 
         internal static void OnRoomLeft()

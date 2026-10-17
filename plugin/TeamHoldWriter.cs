@@ -250,7 +250,7 @@ namespace CompetitiveRounds
                 _purged = _resolved = false;
                 try { Fill(cut, p, buildPlan); }
                 catch (Exception ex) { Plugin.Log.LogWarning(TAG + " cut incomplete: " + ex.Message); }
-                Plugin.Log.LogInfo(TAG + " cascade suppressed slot=" + cut.Slot.ToString(CultureInfo.InvariantCulture)
+                Plugin.Log.LogInfo(TAG + " cut slot=" + cut.Slot.ToString(CultureInfo.InvariantCulture)
                     + " team=" + cut.Team.ToString(CultureInfo.InvariantCulture) + " g=" + (cut.G ?? "")
                     + " eligibility=" + cut.Eligibility);
                 try { TeamHoldLoop.OnDrop(cut); } catch { }
@@ -592,6 +592,7 @@ namespace CompetitiveRounds
                             TeamHold.Expire(_server != null && !string.IsNullOrEmpty(_server.ClosedReason) ? _server.ClosedReason : "closed");
                             return;
                     }
+                    TeamHoldRules.NoteShown(Shown, k.State, cut.Slot);
                     Shown = k.State;
                 }
             }
@@ -624,7 +625,7 @@ namespace CompetitiveRounds
             Shown = 'e';
             EndedName = cut.Name;
             EndedAt = Now;
-            Plugin.Log.LogInfo(TeamHold.TAG + " entered slot=" + cut.Slot.ToString(CultureInfo.InvariantCulture) + " g=" + (cut.G ?? ""));
+            Plugin.Log.LogInfo(TeamHold.TAG + " released slot=" + cut.Slot.ToString(CultureInfo.InvariantCulture) + " g=" + (cut.G ?? ""));
             _ended.Add(HoldName(cut.G, cut.Slot));
             TeamHold.Released();
         }

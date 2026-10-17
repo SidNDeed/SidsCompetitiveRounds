@@ -307,6 +307,7 @@ namespace CompetitiveRounds
             if (tally.Length == 2) { a.W0 = TeamHoldRules.ParseInt(tally[0], -1); a.W1 = TeamHoldRules.ParseInt(tally[1], -1); }
             if (string.IsNullOrEmpty(a.Token) || string.IsNullOrEmpty(a.Room) || a.Slot < 0 || string.IsNullOrEmpty(a.G))
             { a.Ok = false; a.Reason = "malformed"; }
+            if (a.Ok) SeatDeckLog.Emit("[HOLD] claimed slot=" + a.Slot.ToString(CultureInfo.InvariantCulture) + " g=" + a.G);
             return true;
         }
 
@@ -315,7 +316,7 @@ namespace CompetitiveRounds
         {
             bound = false; reason = null;
             if (string.IsNullOrEmpty(body)) return false;
-            if (status == 200 && Field(body, "outcome") == "bound") { bound = true; return true; }
+            if (status == 200 && Field(body, "outcome") == "bound") { bound = true; SeatDeckLog.Emit("[HOLD] bound"); return true; }
             reason = Field(body, "reason") ?? ("http_" + status.ToString(CultureInfo.InvariantCulture));
             return true;
         }

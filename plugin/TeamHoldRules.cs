@@ -218,14 +218,17 @@ namespace CompetitiveRounds
 
             /// <summary>Memoised per actor number: computed once by whichever
             /// runs first of the cascade prefix and the mod leave callback;
-            /// both read the memo. Any exception answers today.</summary>
+            /// both read the memo. Any exception answers today. The one
+            /// computation that holds emits [HOLD] cascade suppressed.</summary>
             internal static bool DecideOnce(int actor, Func<GateInputs> read)
             {
                 bool r;
                 if (_memo.TryGetValue(actor, out r)) return r;
-                try { r = Decide(read()); }
+                GateInputs inputs = null;
+                try { inputs = read(); r = Decide(inputs); }
                 catch { r = false; }
                 _memo[actor] = r;
+                if (r && inputs != null) SeatDeckLog.Emit("[HOLD] cascade suppressed slot=" + I(inputs.Slot));
                 return r;
             }
 
@@ -782,6 +785,25 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>The master's token check as the hand-over runs it: a
+        /// refusal emits [HOLD] token refused for the bound actor.</summary>
+        internal static bool TokenCheck(string rdt, string holdId, string verifierHex, int boundActor)
+        {
+            bool ok = TokenOk(rdt, holdId, verifierHex);
+            if (!ok) SeatDeckLog.Emit("[HOLD] token refused actor=" + I(boundActor));
+            return ok;
+        }
+
+        /// <summary>A survivor's verified room state moved from prev to next:
+        /// the first verified o of a hold emits [HOLD] held (the base of the
+        /// S6 ladder). Answers whether it emitted.</summary>
+        internal static bool NoteShown(char prev, char next, int slot)
+        {
+            if (next != 'o' || prev == 'o' || prev == 'c' || prev == 'b' || prev == 'e') return false;
+            SeatDeckLog.Emit("[HOLD] held slot=" + I(slot));
+            return true;
+        }
+
         /// <summary>The U2 route (S3 step 9), one returner. Each stage must
         /// complete in order; any failure ends the hold toward today and the
         /// boundary stays closed. The boundary is released only after the
@@ -792,14 +814,17 @@ namespace CompetitiveRounds
             internal Stage S = Stage.Claim;
             internal string EndReason;
             internal double ClaimedAt = -1;
+            internal int Slot = -1;
             internal const double EntryBoundS = 60;
 
-            /// <summary>Report one stage's outcome. Out of order is a failure.</summary>
+            /// <summary>Report one stage's outcome. Out of order is a failure.
+            /// The in-order Entered stage emits [HOLD] entered.</summary>
             internal void Done(Stage stage, bool ok, double now, string why = null)
             {
                 if (S == Stage.Ended || S == Stage.Released) return;
                 if (stage != S || !ok) { S = Stage.Ended; EndReason = why ?? (stage + (ok ? " out of order" : " failed")); return; }
                 if (stage == Stage.Claim) ClaimedAt = now;
+                if (stage == Stage.Entered) SeatDeckLog.Emit("[HOLD] entered slot=" + I(Slot));
                 S = stage + 1;
             }
 
@@ -812,8 +837,14 @@ namespace CompetitiveRounds
             internal bool BoundaryReleased { get { return S == Stage.Released; } }
         }
 
-        /// <summary>T3.9: discovery shows the offer only for a readmissible answer.</summary>
-        internal static bool DiscoveryShows(TeamHoldNet.MineAnswer a) { return a != null && a.Readmissible; }
+        /// <summary>T3.9: discovery shows the offer only for a readmissible
+        /// answer, and only a shown offer emits [HOLD] offered.</summary>
+        internal static bool DiscoveryShows(TeamHoldNet.MineAnswer a)
+        {
+            bool shows = a != null && a.Readmissible;
+            if (shows) SeatDeckLog.Emit("[HOLD] offered mode=" + (a.Mode ?? "") + " slot=" + I(a.Slot));
+            return shows;
+        }
 
         // ── S4: one record for every picker; the absent seat; the grant ────
 
@@ -875,6 +906,22 @@ namespace CompetitiveRounds
             return !haveRecord && now - phaseStart >= RecordLateS;
         }
 
+        /// <summary>The owner screen's wait as the deal runs it: the late
+        /// answer emits [HOLD] record late for that slot.</summary>
+        internal static bool RecordLateFor(int slot, double phaseStart, double now, bool haveRecord)
+        {
+            bool late = RecordLate(phaseStart, now, haveRecord);
+            if (late) SeatDeckLog.Emit("[HOLD] record late slot=" + I(slot));
+            return late;
+        }
+
+        /// <summary>S4 step 6: one audit answer emits [HOLD] audit; it never
+        /// changes what is applied.</summary>
+        internal static void AuditLine(int slot, bool match)
+        {
+            SeatDeckLog.Emit("[HOLD] audit slot=" + I(slot) + " match=" + (match ? "1" : "0"));
+        }
+
         /// <summary>cr_tap = {G}:{slot}:{k}:{card}.</summary>
         internal static string TapFormat(string g, int slot, int k, string card) { return g + ":" + I(slot) + ":" + I(k) + ":" + card; }
 
@@ -897,8 +944,14 @@ namespace CompetitiveRounds
         {
             if (string.IsNullOrEmpty(card) || g != currentG) return GrantOutcome.Refused;
             bool superseded;
-            if (SeatDeckLog.CommitGrant(k, slot, card, out superseded)) return GrantOutcome.Applied;
-            return superseded ? GrantOutcome.Superseded : GrantOutcome.Refused;
+            if (SeatDeckLog.CommitGrant(k, slot, card, out superseded))
+            {
+                SeatDeckLog.Emit("[HOLD] auto grant slot=" + I(slot) + " card=" + card);
+                return GrantOutcome.Applied;
+            }
+            if (!superseded) return GrantOutcome.Refused;
+            SeatDeckLog.Emit("[HOLD] grant superseded slot=" + I(slot) + " k=" + I(k));
+            return GrantOutcome.Superseded;
         }
 
         // ── S5: the expiry from the cut ────────────────────────────────────
