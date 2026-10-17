@@ -161,6 +161,32 @@ MUTANTS = {
                 '    if not (await _corroborated(db, hold, req.actor, now)):\n'
                 '        return await _refuse_attempt(db, hold_id, "bind", now, "uncorroborated")')],
               HOLD_T, "t3_7_bind"),
+    # N5 - S5 server rules: the window and the class order
+    "M5.4": ("N5", "match_report_window.py",
+             [("        lo = start if start > v else v\n", "        lo = start\n")],
+             [("        lo = start if start > v else v\n",
+               "        lo = start if (start > v) else v\n")],
+             WIN_T, "t5_3_overlap"),
+    "M5.5": ("N5", "match_report_window.py",
+             [("from datetime import timedelta\n",
+               "from datetime import datetime, timedelta, timezone\n"),
+              ("    return any(anchor_fresh(_get(row, col), holds, now=now, window=window)",
+               "    return any(anchor_fresh(_get(row, col), holds,"
+               " now=datetime.now(timezone.utc), window=window)")],
+             [("    return any(anchor_fresh(_get(row, col), holds, now=now, window=window)",
+               "    return any(anchor_fresh(_get(row, col), holds, now=(now), window=window)")],
+             WIN_T, "t5_3_application_skew"),
+    "M5.6": ("N5", "match_report_window.py",
+             [('        key = (_CLASS_RANK[e["cls"]], steam_order(e["reporter_steam"]))\n',
+               "        key = (0, 0)\n")],
+             [('        key = (_CLASS_RANK[e["cls"]], steam_order(e["reporter_steam"]))\n',
+               '        key = (_CLASS_RANK[e["cls"]], steam_order(e["reporter_steam"]),)\n')],
+             WIN_T, "t5_4_matrix"),
+    "M5.7": ("N5", "match_report_window.py",
+             [("    for e in entries:\n",
+               "    for e in entries:\n        if e[\"cls\"] == CLASS_R:\n            continue\n")],
+             [("    for e in entries:\n", "    for e in list(entries):\n")],
+             WIN_T, "t5_4_matrix"),
 }
 
 
