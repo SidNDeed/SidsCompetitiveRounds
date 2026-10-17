@@ -443,6 +443,9 @@ namespace CompetitiveRounds
             DrawLogViewerModal();
             DrawBlockDebug();  // debug-only; toggle via BlockDebugEnabled below
             DrawInputOverlay();
+            // V3 P4.2: the non-modal FFA readmission bar. Drawn before the
+            // session report, so the report (and any popup) covers it.
+            if (!PageImguiHidden) { try { FfaReadmit.DrawBar(); } catch { } }
             // v1.28: the physical "match-found stuck" escape-hatch overlay is retired.
             // Its real target — the EscapeMenuHandler/SetInputActive NRE that wedged
             // Escape and locked inputs — is now fixed in code (PlayerManagerSetInputActiveNullGuard

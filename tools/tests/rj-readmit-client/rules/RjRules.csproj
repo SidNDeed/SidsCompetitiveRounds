@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- RJ readmission client rules (V3 P2 to P5): the pure-rules form. Compiles
+       the REAL plugin rule files under a plain compiler, each replaceable by a
+       mutant COPY through its property (run_rj.py plants mutants in copies;
+       the tracked files are never written). -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>RjRules</AssemblyName>
+    <RootNamespace>CompetitiveRounds</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0169;CS0649;CS0414;CS0162;CS0168;CS8321;CS0219</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PluginDir>$(MSBuildThisFileDirectory)..\..\..\..\plugin\</PluginDir>
+    <RulesSource Condition="'$(RulesSource)' == ''">$(PluginDir)FfaReadmitRules.cs</RulesSource>
+    <ReportSource Condition="'$(ReportSource)' == ''">$(PluginDir)FfaReportRules.cs</ReportSource>
+    <LateSource Condition="'$(LateSource)' == ''">$(PluginDir)FfaLateRules.cs</LateSource>
+    <NumberingSource Condition="'$(NumberingSource)' == ''">$(PluginDir)FfaNumberingRules.cs</NumberingSource>
+    <EntrySource Condition="'$(EntrySource)' == ''">$(PluginDir)FfaReadmitEntryRules.cs</EntrySource>
+    <CensusSource Condition="'$(CensusSource)' == ''">$(PluginDir)RosterCensusRules.cs</CensusSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(RulesSource)" />
+    <Compile Include="$(ReportSource)" />
+    <Compile Include="$(LateSource)" />
+    <Compile Include="$(NumberingSource)" />
+    <Compile Include="$(EntrySource)" />
+    <Compile Include="$(CensusSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)*.cs" />
+  </ItemGroup>
+
+</Project>

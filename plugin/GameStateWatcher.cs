@@ -7596,9 +7596,13 @@ namespace CompetitiveRounds
 
             // V11 item 12 (the lag rule): a client that entered LAG_OUT in this
             // game files no report of it, read from LagGame and never from its
-            // own cr_lag (#428).
+            // own cr_lag (#428). RJ readmission P3: in a readmission lobby
+            // (the flag pinned at lock) the seat files anyway, marked self_lag,
+            // and the server classes the report from its own rows.
             int reportGame = FfaMode.GameNumber;
-            if (reportGame > 0 && FfaLateEntry.LagGame == reportGame)
+            bool readmitLobby = FfaAssembly.ReadmitLobby;
+            bool selfLag = FfaReportRules.SelfLag(readmitLobby, reportGame, FfaLateEntry.LagGame);
+            if (FfaReportRules.LagSkipsReport(readmitLobby, reportGame, FfaLateEntry.LagGame))
             {
                 Plugin.Log.LogInfo("[FFA-REPORT] report_skip why=lag_out game=" + reportGame);
                 return true;
@@ -7858,25 +7862,27 @@ namespace CompetitiveRounds
             var sidOfActor = new Dictionary<int, string>();
             foreach (var c in cands)
                 if (presentActorBySteam.TryGetValue(c.Value, out int ca)) { candActors.Add(ca); sidOfActor[ca] = c.Value; }
-            int elected = FfaLateRules.ElectReporter(candActors,
-                a => FfaLateEntry.LaggedInGame(a, reportGame), a => FfaLateEntry.LateInSitting(a));
-            string lowest = null;
-            if (elected >= 0) sidOfActor.TryGetValue(elected, out lowest);
-            else if (cands.Count == 0)
-            {
-                // TOTAL (#430): no present id parses, so numeric order names
-                // nobody and every seat would fall back to electing itself.
-                // FfaReportRules.ElectReporter's ordinal pass over the same
-                // replicated set names one seat on every client instead; a seat
-                // item 12 bars is not elected by it either.
-                string ord = FfaReportRules.ElectReporter(presentSteams, null, out bool _);
-                if (ord != null && presentActorBySteam.TryGetValue(ord, out int oa)
-                    && !FfaLateEntry.LateInSitting(oa) && !FfaLateEntry.LaggedInGame(oa, reportGame))
-                    lowest = ord;
-            }
             int ownActor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : -1;
-            bool selfBarred = FfaLateEntry.LateInSitting(ownActor) || FfaLateEntry.LaggedInGame(ownActor, reportGame);
-            if (lowest == null && !selfBarred) lowest = localSteamId;
+            // RJ readmission P3 step 1: in a readmission lobby every present
+            // kept seat files (the census above is the kept view while a gated
+            // game runs, RoomActors.ActiveFighters) and the server elects;
+            // FilerOf returns this seat's own id there. Elsewhere it is the
+            // election that stood here, unchanged.
+            string lowest = FfaReportRules.FilerOf(readmitLobby, localSteamId, ownActor, candActors, sidOfActor,
+                a => FfaLateEntry.LaggedInGame(a, reportGame), a => FfaLateEntry.LateInSitting(a),
+                FfaLateRules.ElectReporter, cands.Count == 0, () =>
+                {
+                    // TOTAL (#430): no present id parses, so numeric order names
+                    // nobody and every seat would fall back to electing itself.
+                    // FfaReportRules.ElectReporter's ordinal pass over the same
+                    // replicated set names one seat on every client instead; a seat
+                    // item 12 bars is not elected by it either.
+                    string ord = FfaReportRules.ElectReporter(presentSteams, null, out bool _);
+                    if (ord != null && presentActorBySteam.TryGetValue(ord, out int oa)
+                        && !FfaLateEntry.LateInSitting(oa) && !FfaLateEntry.LaggedInGame(oa, reportGame))
+                        return ord;
+                    return null;
+                });
             if (lowest == null)
             {
                 Plugin.Log.LogInfo("[FFA-REPORT] no eligible reporter present and this seat is barred - game " + reportGame + " unreported");
@@ -7889,7 +7895,7 @@ namespace CompetitiveRounds
             }
 
             ApiClient.ReportFfaMatch(lobbyId, reportRoomId, photonRegion, duration,
-                entries, winnerSteam, localSteamId, FfaMode.TimelineString);
+                entries, winnerSteam, localSteamId, FfaMode.TimelineString, selfLag);
             Plugin.Log.LogInfo($"[FFA-REPORT] submitted lobby={lobbyId} n={entries.Count} winner={winnerSteam}");
             return true;
         }

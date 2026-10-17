@@ -3657,6 +3657,24 @@ namespace CompetitiveRounds
             ["nothing moves until you accept a proposal"] = "nada se mueve hasta que aceptes una propuesta",
             ["via Discord"] = "vía Discord",
             ["{0}'s binder is private - they can still propose a trade to you"] = "El álbum de {0} es privado - aún puede proponerte un intercambio",
+            // Added 2026-10-16 (RJ readmission client lane, FFA mid-game
+            // readmission): the bar, the refusal toasts, the automatic pick and
+            // the survivors' seat texts (14 keys). Sorted among themselves;
+            // existing entries above are untouched.
+            ["Another player is using your seat identity"] = "Otro jugador está usando la identidad de tu plaza",
+            ["Automatic pick: {0}"] = "Elección automática: {0}",
+            ["Could not confirm your seat. Retrying"] = "No se pudo confirmar tu plaza. Reintentando",
+            ["Could not rejoin at this point"] = "No se pudo volver a entrar en este momento",
+            ["Seat held for {0}: {1}"] = "Plaza reservada para {0}: {1}",
+            ["That match has ended"] = "Esa partida ha terminado",
+            ["The seat was released before you returned"] = "La plaza se liberó antes de que volvieras",
+            ["You are back in the match"] = "Has vuelto a la partida",
+            ["You are in another queue"] = "Estás en otra cola",
+            ["You left that match"] = "Abandonaste esa partida",
+            ["Your FFA match is still running. Rejoin? {0}"] = "Tu partida de FFA sigue en curso. ¿Volver a entrar? {0}",
+            ["{0} (away) got {1}"] = "{0} (ausente) recibió {1}",
+            ["{0} did not return; seat released"] = "{0} no volvió; plaza liberada",
+            ["{0} is back"] = "{0} ha vuelto",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -7276,6 +7294,24 @@ namespace CompetitiveRounds
             ["nothing moves until you accept a proposal"] = "ничего не переходит, пока ты не примешь предложение",
             ["via Discord"] = "через Discord",
             ["{0}'s binder is private - they can still propose a trade to you"] = "Альбом игрока {0} закрыт - но он всё ещё может предложить тебе обмен",
+            // Added 2026-10-16 (RJ readmission client lane, FFA mid-game
+            // readmission): the bar, the refusal toasts, the automatic pick and
+            // the survivors' seat texts (14 keys). Sorted among themselves;
+            // existing entries above are untouched.
+            ["Another player is using your seat identity"] = "Другой игрок использует идентификатор вашего места",
+            ["Automatic pick: {0}"] = "Автоматический выбор: {0}",
+            ["Could not confirm your seat. Retrying"] = "Не удалось подтвердить ваше место. Повторная попытка",
+            ["Could not rejoin at this point"] = "Сейчас вернуться в матч нельзя",
+            ["Seat held for {0}: {1}"] = "Место удерживается для {0}: {1}",
+            ["That match has ended"] = "Этот матч завершён",
+            ["The seat was released before you returned"] = "Место освободилось до вашего возвращения",
+            ["You are back in the match"] = "Вы снова в матче",
+            ["You are in another queue"] = "Вы в другой очереди",
+            ["You left that match"] = "Вы покинули этот матч",
+            ["Your FFA match is still running. Rejoin? {0}"] = "Ваш матч FFA ещё идёт. Вернуться? {0}",
+            ["{0} (away) got {1}"] = "{0} (отсутствует) получил {1}",
+            ["{0} did not return; seat released"] = "{0} не вернулся; место освобождено",
+            ["{0} is back"] = "{0} вернулся",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -10821,6 +10857,24 @@ namespace CompetitiveRounds
             ["nothing moves until you accept a proposal"] = "нічого не переходить, доки ви не приймете пропозицію",
             ["via Discord"] = "через Discord",
             ["{0}'s binder is private - they can still propose a trade to you"] = "Альбом гравця {0} приватний - але він усе ще може запропонувати вам обмін",
+            // Added 2026-10-16 (RJ readmission client lane, FFA mid-game
+            // readmission): the bar, the refusal toasts, the automatic pick and
+            // the survivors' seat texts (14 keys). Sorted among themselves;
+            // existing entries above are untouched.
+            ["Another player is using your seat identity"] = "Інший гравець використовує ідентифікатор вашого місця",
+            ["Automatic pick: {0}"] = "Автоматичний вибір: {0}",
+            ["Could not confirm your seat. Retrying"] = "Не вдалося підтвердити ваше місце. Повторна спроба",
+            ["Could not rejoin at this point"] = "Зараз повернутися до матчу неможливо",
+            ["Seat held for {0}: {1}"] = "Місце утримується для {0}: {1}",
+            ["That match has ended"] = "Цей матч завершився",
+            ["The seat was released before you returned"] = "Місце звільнилося до вашого повернення",
+            ["You are back in the match"] = "Ви знову в матчі",
+            ["You are in another queue"] = "Ви в іншій черзі",
+            ["You left that match"] = "Ви покинули цей матч",
+            ["Your FFA match is still running. Rejoin? {0}"] = "Ваш матч FFA ще триває. Повернутися? {0}",
+            ["{0} (away) got {1}"] = "{0} (відсутній) отримав {1}",
+            ["{0} did not return; seat released"] = "{0} не повернувся; місце звільнено",
+            ["{0} is back"] = "{0} повернувся",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -14366,6 +14420,24 @@ namespace CompetitiveRounds
             ["nothing moves until you accept a proposal"] = "inget flyttas förrän du accepterar ett förslag",
             ["via Discord"] = "via Discord",
             ["{0}'s binder is private - they can still propose a trade to you"] = "{0}s pärm är privat - de kan fortfarande föreslå ett byte till dig",
+            // Added 2026-10-16 (RJ readmission client lane, FFA mid-game
+            // readmission): the bar, the refusal toasts, the automatic pick and
+            // the survivors' seat texts (14 keys). Sorted among themselves;
+            // existing entries above are untouched.
+            ["Another player is using your seat identity"] = "En annan spelare använder din platsidentitet",
+            ["Automatic pick: {0}"] = "Automatiskt val: {0}",
+            ["Could not confirm your seat. Retrying"] = "Kunde inte bekräfta din plats. Försöker igen",
+            ["Could not rejoin at this point"] = "Kunde inte återansluta just nu",
+            ["Seat held for {0}: {1}"] = "Platsen hålls för {0}: {1}",
+            ["That match has ended"] = "Den matchen har avslutats",
+            ["The seat was released before you returned"] = "Platsen släpptes innan du kom tillbaka",
+            ["You are back in the match"] = "Du är tillbaka i matchen",
+            ["You are in another queue"] = "Du står i en annan kö",
+            ["You left that match"] = "Du lämnade den matchen",
+            ["Your FFA match is still running. Rejoin? {0}"] = "Din FFA-match pågår fortfarande. Återanslut? {0}",
+            ["{0} (away) got {1}"] = "{0} (borta) fick {1}",
+            ["{0} did not return; seat released"] = "{0} kom inte tillbaka; platsen släpptes",
+            ["{0} is back"] = "{0} är tillbaka",
         };
     }
 }

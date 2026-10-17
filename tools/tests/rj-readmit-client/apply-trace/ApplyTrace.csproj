@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- RJ readmission P1 twin run (V3 T1.1, T1.2). Compiles the REAL
+       plugin/FfaReadmitRules.cs (or a mutant copy, RulesSource) with the two
+       reducers run_rj.py extracts into GenDir: ApplyManifestPick at the lane
+       base and ApplyManifestPick from the tree under test (or a mutant copy).
+       The tracked plugin files are never written. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RollForward>LatestMajor</RollForward>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>ApplyTrace</AssemblyName>
+    <RootNamespace>CompetitiveRounds</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>$(NoWarn);CS0169;CS0649;CS0414;CS0162;CS0168;CS8321</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(RulesSource)' == ''">
+    <RulesSource>$(MSBuildThisFileDirectory)..\..\..\..\plugin\FfaReadmitRules.cs</RulesSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(RulesSource)" />
+    <Compile Include="$(GenDir)\Reducers.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)TraceProgram.cs" />
+  </ItemGroup>
+
+</Project>
