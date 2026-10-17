@@ -623,20 +623,28 @@ def test_p11_interleaved_newest_games_in_order_beside_a_distractor(rig, shape):
         distract = [await rig.match(a, c, NOW - dt.timedelta(hours=1, minutes=i))
                     for i in range(3)]
         await rig.commit()
-        path = ("%s/pair?a=%s&b=%s&games=10" % (ROOT, sb, sa) if shape == "pair"
-                else "%s/player/%s?games=10" % (ROOT, sb))
-        got = []
-        for page in (2, 3):
-            status, content, _h = await rig.get(path + "&page=%d" % page, actor=admin)
-            assert status == 200, content[:300]
-            got += [g["match_id"] for g in _body(content)["games"]]
-        return ids, distract, got
+        # pair: both orientations of the request, so each branch of the pair
+        # query binds :a to A, the player who also has the distractor games
+        paths = (["%s/pair?a=%s&b=%s&games=10" % (ROOT, sa, sb),
+                  "%s/pair?a=%s&b=%s&games=10" % (ROOT, sb, sa)] if shape == "pair"
+                 else ["%s/player/%s?games=10" % (ROOT, sb)])
+        gots = []
+        for path in paths:
+            got = []
+            for page in (2, 3):
+                status, content, _h = await rig.get(path + "&page=%d" % page, actor=admin)
+                assert status == 200, content[:300]
+                got += [g["match_id"] for g in _body(content)["games"]]
+            gots.append(got)
+        return ids, distract, gots
 
-    ids, distract, got = rig.run(go())
-    assert got == [str(i) for i in ids[:10]]
-    assert not set(got) & {str(d) for d in distract}
+    ids, distract, gots = rig.run(go())
+    assert len(gots) == (2 if shape == "pair" else 1)
+    for got in gots:
+        assert got == [str(i) for i in ids[:10]]
+        assert not set(got) & {str(d) for d in distract}
     print("GATE p11 %s interleaved: newest 10 of 12 in order, equal timestamps included, "
-          "distractor excluded" % shape)
+          "distractor excluded, %d request orientation(s)" % (shape, len(gots)))
 
 
 def test_p11_zero_and_one_game_cohorts(rig):

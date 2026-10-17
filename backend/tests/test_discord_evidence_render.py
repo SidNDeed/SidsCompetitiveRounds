@@ -312,13 +312,19 @@ def test_without_matplotlib_the_page_falls_back_without_a_worker():
     events = []
     ns = bot_ns(_Api(lambda path, actor: (200, game_body(), {}), events), events, mpl=False)
 
+    started = []
+
     async def never():
+        # recorded, not only raised: the render path catches every exception
+        # and falls back, so a raise alone would not reach this test
+        started.append(True)
         raise AssertionError("a worker was started without matplotlib")
 
     ns["_aer_worker_spawn"] = never
     it = _Interaction(events, ADMIN)
     run(ns["_aer_command"](it, dict(REQ)))
     content, kw = it.channel.sent[0]
+    assert started == [], "a worker was started without matplotlib"
     assert kw["files"] == [] and content.startswith("Evidence report: game 000000000000")
     assert "UNCOLORED (absent)" in content
 
