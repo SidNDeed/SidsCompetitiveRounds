@@ -106,6 +106,7 @@ namespace CompetitiveRounds
             _battleWas = battle;
             try { TeamHold.Tick(); } catch { }
             try { TeamHoldLoop.Tick(); } catch { }
+            try { TeamHoldReturn.Tick(); } catch { }
         }
 
         /// <summary>The drift probe: each present body's cards against its
@@ -115,6 +116,9 @@ namespace CompetitiveRounds
             try
             {
                 if (!SeatLogRoom()) return;
+                // S3 step 7: the boundary just passed (the scoreboard and
+                // every slot's deck), the held seat's checkpoint source.
+                try { TeamHold.NoteBoundary(); } catch { }
                 var pm = PlayerManager.instance;
                 if (pm == null || pm.players == null) return;
                 foreach (var p in pm.players)
@@ -136,6 +140,7 @@ namespace CompetitiveRounds
             try { SeatDeckLog.OnRoomLeft(); } catch { }
             try { TeamHold.OnRoomLeft(); } catch { }
             try { TeamHoldLoop.Reset(); } catch { }
+            try { TeamHoldReturn.OnRoomLeft(); } catch { }
             _battleWas = false;
         }
 

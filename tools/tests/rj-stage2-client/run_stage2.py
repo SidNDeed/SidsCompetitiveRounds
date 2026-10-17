@@ -117,6 +117,22 @@ MUTANTS = [
     ("M2.E", "K2", "rules", [
         ("if (server == null) return Verdict.Inert;", "if (server == null) server = new TeamHoldNet.StateAnswer();")],
      "t23_read_pending", "t23_verified_o"),
+    # K3, S3
+    ("M3.5", "K3", "rules", [
+        ("internal static string SnapshotDigest(Snapshot s) { return Fnv64Hex(s.Format()); }",
+         "internal static string SnapshotDigest(Snapshot s) { return Fnv64Hex(s.HoldId + \":\" + s.G + \":\" + s.Boundary()); }")],
+     "t33_mutations", "t33_honest"),
+    ("M3.6", "K3", "rules", [
+        ("if (expectedPeers < 1 || present < expectedPeers) return \"digest missing\";",
+         "if (expectedPeers < 1 || present < expectedPeers - 1) return \"digest missing\";")],
+     "t33_ovt_digest_absent", "t33_honest"),
+    ("M3.7", "K3", "rules", [
+        ("if (BoundaryDigest(snap.BR0, snap.BR1, snap.BP0, snap.BP1, snap.BNames) != serverBoundaryDigest) return \"boundary checkpoint mismatch\";", "")],
+     "t33_colluding_duo", "t33_honest"),
+    ("M3.16", "K3", "rules", [
+        ("if (string.IsNullOrEmpty(rdt) || string.IsNullOrEmpty(holdId) || string.IsNullOrEmpty(verifierHex)) return false;",
+         "return true;")],
+     "t37_token", "t37_genuine"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

@@ -3970,6 +3970,8 @@ namespace CompetitiveRounds
             // RJ Stage 2 (S2): the non-modal hold banner; draws nothing
             // unless this client holds or just ended a hold.
             try { TeamHoldBanner.Draw(); } catch { }
+            // RJ Stage 2 (S3): the rejoin offer and its outcome line.
+            try { TeamHoldReturn.DrawOffer(); } catch { }
         }
 
         /// <summary>

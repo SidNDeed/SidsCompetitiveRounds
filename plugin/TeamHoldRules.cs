@@ -376,6 +376,10 @@ namespace CompetitiveRounds
             internal int W0, W1;
             internal string SlotLog;
             internal int LastP1, LastP2;
+            /// <summary>The state at the last boundary before the drop (S3
+            /// step 7): the scoreboard and the held slot's deck names.</summary>
+            internal int BR0, BR1, BP0, BP1;
+            internal readonly List<string> BNames = new List<string>();
             internal double At;
             /// <summary>This survivor's own eligibility (team only).</summary>
             internal DcKind Eligibility = DcKind.Nothing;
@@ -607,5 +611,205 @@ namespace CompetitiveRounds
                 return Flush();
             }
         }
+
+        // ── S3: the snapshot, its digest and the returner's gate ───────────
+
+        internal const string KEY_TSN = "cr_tsn";
+        internal const string KEY_TBD = "cr_tbd";
+        internal const string KEY_RDT = "cr_rdt";
+        internal const string KEY_TOFF = "cr_toff";
+
+        /// <summary>FNV-1a 64 over UTF-16 code units, as hex (16 digits).</summary>
+        internal static string Fnv64Hex(string s)
+        {
+            ulong h = 0xcbf29ce484222325UL;   // the FNV-1a 64 offset basis
+            foreach (char c in s ?? "") { h ^= c; h *= 0x100000001b3UL; }   // the FNV-1a 64 prime
+            return h.ToString("x16", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>One slot of the snapshot: deals, deaths and the names.</summary>
+        internal sealed class SlotState
+        {
+            internal int Slot;
+            internal int Deals;
+            internal int Deaths;
+            internal List<string> Names = new List<string>();
+            internal string Format() { return I(Slot) + "," + I(Deals) + "," + I(Deaths) + "," + string.Join("/", Names.ToArray()); }
+        }
+
+        /// <summary>cr_tsn = {hold_id}:{G}:{r0}:{r1}:{p0}:{p1}:{w0}:{w1}:{ledger}:{slots}:{bnd}.
+        /// slots = slot,deals,deaths,names separated by ';' (names by '/');
+        /// bnd = the state at the last boundary before the drop:
+        /// r0,r1,p0,p1,held deals,held names.</summary>
+        internal sealed class Snapshot
+        {
+            internal string HoldId = "", G = "";
+            internal int R0, R1, P0, P1, W0, W1;
+            internal string Ledger = "";
+            internal List<SlotState> Slots = new List<SlotState>();
+            internal int BR0, BR1, BP0, BP1, BDeals;
+            internal List<string> BNames = new List<string>();
+
+            internal string Boundary()
+            {
+                return I(BR0) + "," + I(BR1) + "," + I(BP0) + "," + I(BP1) + "," + I(BDeals) + "," + string.Join("/", BNames.ToArray());
+            }
+
+            internal string Format()
+            {
+                var sl = new List<string>();
+                foreach (var s in Slots) sl.Add(s.Format());
+                return HoldId + ":" + G + ":" + I(R0) + ":" + I(R1) + ":" + I(P0) + ":" + I(P1) + ":" + I(W0) + ":" + I(W1)
+                       + ":" + Ledger + ":" + string.Join(";", sl.ToArray()) + ":" + Boundary();
+            }
+
+            internal SlotState SlotOf(int slot)
+            {
+                foreach (var s in Slots) if (s.Slot == slot) return s;
+                return null;
+            }
+        }
+
+        private static List<string> SplitNames(string s)
+        {
+            var r = new List<string>();
+            if (!string.IsNullOrEmpty(s)) r.AddRange(s.Split('/'));
+            return r;
+        }
+
+        internal static bool TryParseSnapshot(string s, out Snapshot snap)
+        {
+            snap = null;
+            if (string.IsNullOrEmpty(s)) return false;
+            var f = s.Split(':');
+            if (f.Length != 11) return false;
+            var n = new Snapshot { HoldId = f[0], G = f[1], R0 = ParseInt(f[2], -1), R1 = ParseInt(f[3], -1), P0 = ParseInt(f[4], -1),
+                                   P1 = ParseInt(f[5], -1), W0 = ParseInt(f[6], -1), W1 = ParseInt(f[7], -1), Ledger = f[8] };
+            if (!string.IsNullOrEmpty(f[9]))
+                foreach (var e in f[9].Split(';'))
+                {
+                    var p = e.Split(',');
+                    if (p.Length != 4) return false;
+                    n.Slots.Add(new SlotState { Slot = ParseInt(p[0], -1), Deals = ParseInt(p[1], -1), Deaths = ParseInt(p[2], -1), Names = SplitNames(p[3]) });
+                }
+            var b = f[10].Split(',');
+            if (b.Length != 6) return false;
+            n.BR0 = ParseInt(b[0], -1); n.BR1 = ParseInt(b[1], -1); n.BP0 = ParseInt(b[2], -1); n.BP1 = ParseInt(b[3], -1);
+            n.BDeals = ParseInt(b[4], -1); n.BNames = SplitNames(b[5]);
+            if (n.R0 < 0 || n.R1 < 0 || n.P0 < 0 || n.P1 < 0 || n.W0 < 0 || n.W1 < 0
+                || n.BR0 < 0 || n.BR1 < 0 || n.BP0 < 0 || n.BP1 < 0 || n.BDeals < 0) return false;
+            foreach (var x in n.Slots) if (x.Slot < 0 || x.Deals < 0 || x.Deaths < 0 || x.Deals != x.Names.Count) return false;
+            snap = n;
+            return true;
+        }
+
+        /// <summary>The digest every remaining fighter publishes (cr_tbd) and
+        /// the returner recomputes from cr_tsn: every field of the snapshot.</summary>
+        internal static string SnapshotDigest(Snapshot s) { return Fnv64Hex(s.Format()); }
+
+        /// <summary>The held seat's own boundary checkpoint, which it posts in
+        /// every beat and the server stores: the scoreboard and its own deck
+        /// at the last boundary.</summary>
+        internal static string BoundaryDigest(int r0, int r1, int p0, int p1, IList<string> ownNames)
+        {
+            return Fnv64Hex(I(r0) + "," + I(r1) + "," + I(p0) + "," + I(p1) + "," + I(ownNames != null ? ownNames.Count : 0)
+                            + "," + string.Join("/", ownNames != null ? new List<string>(ownNames).ToArray() : new string[0]));
+        }
+
+        /// <summary>The delta from the boundary to the snapshot is legal:
+        /// exactly one point to one team, or one round transition (the
+        /// winner's rounds +1, both points 0). A game transition changes G,
+        /// which the G check refuses (toward today).</summary>
+        internal static bool DeltaLegal(Snapshot s, int pointsToWinRound)
+        {
+            bool point0 = s.R0 == s.BR0 && s.R1 == s.BR1 && s.P0 == s.BP0 + 1 && s.P1 == s.BP1;
+            bool point1 = s.R0 == s.BR0 && s.R1 == s.BR1 && s.P1 == s.BP1 + 1 && s.P0 == s.BP0;
+            bool round0 = s.R0 == s.BR0 + 1 && s.R1 == s.BR1 && s.P0 == 0 && s.P1 == 0 && s.BP0 + 1 >= pointsToWinRound;
+            bool round1 = s.R1 == s.BR1 + 1 && s.R0 == s.BR0 && s.P0 == 0 && s.P1 == 0 && s.BP1 + 1 >= pointsToWinRound;
+            return point0 || point1 || round0 || round1;
+        }
+
+        /// <summary>The returner's gate (S3 step 7). Null when the snapshot may
+        /// be restored, else the refusal reason. <paramref name="peerDigests"/>
+        /// holds the cr_tbd digest of every remaining non-master fighter, null
+        /// for one that published none; <paramref name="expectedPeers"/> is how
+        /// many there must be (2v2: two; 1v2: one).</summary>
+        internal static string CheckSnapshot(string tsn, IList<string> peerDigests, int expectedPeers, string claimG,
+                                             int serverW0, int serverW1, string serverBoundaryDigest, int heldSlot,
+                                             int pointsToWinRound, out Snapshot snap)
+        {
+            if (!TryParseSnapshot(tsn, out snap)) return "snapshot unreadable";
+            string d = SnapshotDigest(snap);
+            int present = 0;
+            if (peerDigests != null)
+                foreach (var pd in peerDigests)
+                {
+                    if (pd == null) continue;
+                    if (pd != d) return "digest mismatch";
+                    present++;
+                }
+            if (expectedPeers < 1 || present < expectedPeers) return "digest missing";
+            if (snap.G != claimG) return "game id mismatch";
+            if (snap.W0 != serverW0 || snap.W1 != serverW1) return "series tally mismatch";
+            var held = snap.SlotOf(heldSlot);
+            if (held == null) return "held slot missing";
+            if (BoundaryDigest(snap.BR0, snap.BR1, snap.BP0, snap.BP1, snap.BNames) != serverBoundaryDigest) return "boundary checkpoint mismatch";
+            if (snap.BDeals != snap.BNames.Count) return "boundary deck malformed";
+            if (!DeltaLegal(snap, pointsToWinRound)) return "illegal delta";
+            if (held.Names.Count < snap.BNames.Count || held.Names.Count > snap.BNames.Count + 2) return "held deck delta illegal";
+            for (int i = 0; i < snap.BNames.Count; i++) if (held.Names[i] != snap.BNames[i]) return "held deck differs from the checkpoint";
+            return null;
+        }
+
+        /// <summary>The master's hand-over token check (S3 step 4): X carries
+        /// cr_rdt = {hold_id}:{T} and SHA-256(T) equals the server verifier.</summary>
+        internal static bool TokenOk(string rdt, string holdId, string verifierHex)
+        {
+            if (string.IsNullOrEmpty(rdt) || string.IsNullOrEmpty(holdId) || string.IsNullOrEmpty(verifierHex)) return false;
+            int i = rdt.IndexOf(':');
+            if (i <= 0 || rdt.Substring(0, i) != holdId) return false;
+            string t = rdt.Substring(i + 1);
+            if (t.Length == 0) return false;
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                var h = sha.ComputeHash(Encoding.UTF8.GetBytes(t));
+                var sb = new StringBuilder();
+                foreach (var b in h) sb.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+                return string.Equals(sb.ToString(), verifierHex, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        /// <summary>The U2 route (S3 step 9), one returner. Each stage must
+        /// complete in order; any failure ends the hold toward today and the
+        /// boundary stays closed. The boundary is released only after the
+        /// server shows entered.</summary>
+        internal sealed class ReturnRoute
+        {
+            internal enum Stage { Claim, Join, Bind, Token, Latch, Snapshot, Register, Activate, Entered, Released, Ended }
+            internal Stage S = Stage.Claim;
+            internal string EndReason;
+            internal double ClaimedAt = -1;
+            internal const double EntryBoundS = 60;
+
+            /// <summary>Report one stage's outcome. Out of order is a failure.</summary>
+            internal void Done(Stage stage, bool ok, double now, string why = null)
+            {
+                if (S == Stage.Ended || S == Stage.Released) return;
+                if (stage != S || !ok) { S = Stage.Ended; EndReason = why ?? (stage + (ok ? " out of order" : " failed")); return; }
+                if (stage == Stage.Claim) ClaimedAt = now;
+                S = stage + 1;
+            }
+
+            internal void Tick(double now)
+            {
+                if (S == Stage.Ended || S == Stage.Released) return;
+                if (ClaimedAt >= 0 && now - ClaimedAt >= EntryBoundS) { S = Stage.Ended; EndReason = "entry bound"; }
+            }
+
+            internal bool BoundaryReleased { get { return S == Stage.Released; } }
+        }
+
+        /// <summary>T3.9: discovery shows the offer only for a readmissible answer.</summary>
+        internal static bool DiscoveryShows(TeamHoldNet.MineAnswer a) { return a != null && a.Readmissible; }
     }
 }

@@ -140,6 +140,31 @@ namespace CompetitiveRounds
         /// callback runs first, even after the hold ended.</summary>
         private static readonly HashSet<int> _held = new HashSet<int>();
 
+        /// <summary>The state at the last boundary this client passed (S3
+        /// step 7): the scoreboard and every slot's deck at that point start.</summary>
+        private static int _bR0, _bR1, _bP0, _bP1;
+        private static readonly Dictionary<int, List<string>> _bNames = new Dictionary<int, List<string>>();
+
+        /// <summary>At every point start (the boundary just passed): the
+        /// scoreboard and every slot's deck; this seat's own checkpoint goes
+        /// out in its next beat at once.</summary>
+        internal static void NoteBoundary()
+        {
+            var gm = GM_ArmsRace.instance;
+            if (gm == null) return;
+            _bR0 = gm.p1Rounds; _bR1 = gm.p2Rounds; _bP0 = gm.p1Points; _bP1 = gm.p2Points;
+            _bNames.Clear();
+            foreach (var slot in new List<int>(SeatDeckLog.Slots()))
+            {
+                SeatDeckLog.Seat s;
+                if (SeatDeckLog.TryGetSeat(slot, out s)) _bNames[slot] = new List<string>(s.Names);
+            }
+            int mine = TeamHoldRules.ParseInt(TeamHoldWriter.PlayerProp(PhotonNetwork.LocalPlayer, Player.VAR_PLAYERID), -1);
+            List<string> own;
+            _bNames.TryGetValue(mine, out own);
+            TeamHoldLoop.NoteBoundary(TeamHoldRules.BoundaryDigest(_bR0, _bR1, _bP0, _bP1, own ?? new List<string>()));
+        }
+
         /// <summary>The drop this client holds for, or null.</summary>
         internal static TeamHoldRules.DropCut Cut { get { return _cut; } }
 
@@ -272,6 +297,9 @@ namespace CompetitiveRounds
             cut.SlotLog = SeatDeckLog.Describe(slot);
             cut.LastP1 = GameStateWatcher.LastP1Points;
             cut.LastP2 = GameStateWatcher.LastP2Points;
+            cut.BR0 = _bR0; cut.BR1 = _bR1; cut.BP0 = _bP0; cut.BP1 = _bP1;
+            List<string> bn;
+            if (_bNames.TryGetValue(slot, out bn)) cut.BNames.AddRange(bn);
             int w0, w1;
             SeriesTally(cut.Mode, out w0, out w1);
             cut.W0 = w0; cut.W1 = w1;
@@ -363,6 +391,8 @@ namespace CompetitiveRounds
             _cut = null;
             _purged = _resolved = false;
             _held.Clear();
+            _bNames.Clear();
+            _bR0 = _bR1 = _bP0 = _bP1 = 0;
             TeamHoldRules.HoldGate.Clear();
         }
     }
@@ -401,6 +431,39 @@ namespace CompetitiveRounds
         /// (S3 step 7); empty until a boundary has been recorded.</summary>
         internal static string LastBoundaryDigest = "";
 
+        /// <summary>A boundary passed: the new checkpoint goes out in the next
+        /// frame's beat rather than up to a beat period later.</summary>
+        internal static void NoteBoundary(string d)
+        {
+            LastBoundaryDigest = d ?? "";
+            _lastBeat = -1000;
+        }
+
+        /// <summary>The survivor's replay of the returner's deck ran for this
+        /// hold (once per hold, S3 step 8).</summary>
+        private static bool _survivorReplayed;
+
+        /// <summary>Once per hold, when the returner's new body (owned by the
+        /// bound actor, at the held slot) exists: replay that slot's deck from
+        /// this client's own record. The departed body never qualifies: its
+        /// owner is the departed actor, never the bound one.</summary>
+        private static void SurvivorReplay(TeamHoldRules.DropCut cut, TeamHoldRules.HoldKey k)
+        {
+            if (_survivorReplayed || cut == null || k == null || k.BoundActor <= 0) return;
+            var pm = PlayerManager.instance;
+            if (pm == null) return;
+            foreach (var body in pm.players)
+            {
+                if (body == null || body.PlayerID != cut.Slot) continue;
+                int owner = -1;
+                try { owner = body.data != null && body.data.view != null ? body.data.view.OwnerActorNr : -1; } catch { }
+                if (owner != k.BoundActor) continue;
+                _survivorReplayed = true;
+                TeamHoldReturn.Replay(false, cut.Slot);
+                return;
+            }
+        }
+
         /// <summary>What the banner shows: the last verified state of the
         /// held seat, or '\0'.</summary>
         internal static char Shown { get; private set; }
@@ -428,6 +491,7 @@ namespace CompetitiveRounds
             ForgetRead();
             _writer = null;
             _endingCut = null;
+            _survivorReplayed = false;
             Shown = 'p';
             DeadlineAt = 0;
         }
@@ -510,8 +574,14 @@ namespace CompetitiveRounds
                             if (DeadlineAt <= 0 && _server != null) DeadlineAt = now + _server.DeadlineS;
                             break;
                         case 'c':
+                            _ceil.SawC(now);
+                            break;
                         case 'b':
                             _ceil.SawC(now);
+                            // S3 steps 4, 7 and 8: the hand-over over this
+                            // client's own verified read.
+                            try { TeamHoldReturn.OnVerifiedBound(cut, k, _server); } catch (Exception ex) { Plugin.Log.LogWarning(TeamHold.TAG + " hand-over: " + ex.Message); }
+                            try { SurvivorReplay(cut, k); } catch { }
                             break;
                         case 'e':
                             Release(cut);
