@@ -259,7 +259,7 @@
           ],
           "main",
           "admin_quarantine_triage_group",
-          "c47575a2797e297dc6b7b92c3113ee9d48670922"
+          "e03feb26d4149165924ab503c3774760d985adee"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/accept",
@@ -520,7 +520,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "ba2b0df889c4a5fff7807385d3592914e2ff8627"
+          "4a6c0939c273dfa3b05b46a8168ce875fbb151ad"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
@@ -952,7 +952,7 @@
           ],
           "main",
           "delete_player_data",
-          "a5c4c2499582c69d36073d3e6fbb18bb7b6f3a27"
+          "c8ff8eed54fbfb587a9903dd49509762276407aa"
         ],
         [
           "/api/v1/players/{steam_id}/ffa-history",
@@ -1768,7 +1768,7 @@
           ],
           "main",
           "ffa_lobby_assembly",
-          "46d03d2a4e0bff6ded69ced384eecc66ed0d2a97"
+          "4c827ef7a562a7ce28d462628e18db6794a0aea6"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/connect",
@@ -1777,7 +1777,7 @@
           ],
           "main",
           "ffa_lobby_connect",
-          "7a33600512fe5118e6aca64455293e63b1589de7"
+          "baff01e872ce3ee718424ba5a694c0e25c914ad1"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/release",
@@ -1786,7 +1786,7 @@
           ],
           "main",
           "ffa_lobby_release",
-          "c9e80f19385885a9ab0492f9caa071cb6c309bd3"
+          "5a7a3d46e4d795a6b55b3be3d07f683183c4318c"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/readmit",
@@ -1795,7 +1795,7 @@
           ],
           "main",
           "ffa_lobby_readmit",
-          "2c53d27b53eed0af50974a6ef550b5720077f5ce"
+          "b9d344cdccc7e5bb2d32cf797fc9b87bb2aa96d4"
         ],
         [
           "/api/v1/ffa/readmit/offer",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "ffa_readmit_offer",
-          "f0bc9594831476f93d34ba63574fccac8cbe35c3"
+          "5a58e6cc0f23c2809a47d9789b9aa277826a3427"
         ],
         [
           "/api/v1/ffa/queue/join",
@@ -1822,7 +1822,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "0d401dae6dd4712c21940296271165531238bfcc"
+          "672e0fa0eff760e8930bab170cd7e1bc69cb1fda"
         ],
         [
           "/api/v1/ffa/queue/list",
@@ -2677,7 +2677,7 @@
           ],
           "main",
           "spectate_participant_attest",
-          "abf02d7ae629a9bca06822b18f54c0365273606c"
+          "93c50ff074628785ca1db09eb9b7dcc8763502aa"
         ],
         [
           "/api/v1/spectate/validate",
@@ -3670,7 +3670,7 @@
       [
         "main",
         "lifespan",
-        "63ee1a2e43d763879523fce8021ebcf57b386a92"
+        "41a948f12b8a60a0f864e91ee18205370a437240"
       ]
     ]
   },
