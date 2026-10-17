@@ -333,6 +333,8 @@ def contract_value(spec):
 
 def element(v):
     """The value of one element of `v` when iterated or indexed by a value."""
+    if v.alias is not None and v.alias[0] == "dict":
+        return add_im(vjoin(*v.alias[2]), v.im)
     if v.item is not None:
         return add_im(v.item, v.ex | v.im)
     if v.elems is not None:
@@ -587,6 +589,7 @@ class Frame:
         self.fk = fk
         self.env = env
         self.ctx = ctx
+        self.order_ctx = frozenset()
         self.ret = None
         self.globals = set()
 
@@ -619,7 +622,7 @@ class Frame:
             self.assign(s.target, v)
         elif t is ast.Return:
             v = self.expr(s.value) if s.value is not None else V({C})
-            v = V(v.ex, v.im | self.ctx, v.funcs, v.elems, v.item)
+            v = V(v.ex, v.im | self.ctx | self.order_ctx, v.funcs, v.elems, v.item)
             self.ret = vjoin(self.ret, v) if self.ret is not None else v
         elif t is ast.If:
             tv = self.test(s.test)
@@ -630,8 +633,14 @@ class Frame:
         elif t in (ast.For, ast.AsyncFor):
             it = self.expr(s.iter)
             self.assign(s.target, element(it))
-            self.with_ctx(self.loop_labels(s.iter, it),
-                          lambda: (self.block(s.body), self.block(s.orelse)))
+            labels = self.loop_labels(s.iter, it)
+            old_order = self.order_ctx
+            self.order_ctx = frozenset(old_order | (labels & {O}))
+            try:
+                self.with_ctx(labels - {O},
+                              lambda: (self.block(s.body), self.block(s.orelse)))
+            finally:
+                self.order_ctx = old_order
         elif t in (ast.With, ast.AsyncWith):
             for item in s.items:
                 v = self.expr(item.context_expr)
@@ -693,6 +702,7 @@ class Frame:
         return labels
 
     def assign(self, tgt, v):
+        v = add_im(v, self.order_ctx)
         if isinstance(tgt, ast.Name):
             name = tgt.id
             if name in self.globals:
@@ -852,8 +862,10 @@ class Frame:
 
     def e_Dict(self, n):
         out = []
+        vals = []
         for k, v in zip(n.keys, n.values):
             vv = self.expr(v)
+            vals.append(vv)
             if k is not None:
                 kv = self.expr(k)
                 out.append(kv)
@@ -867,9 +879,11 @@ class Frame:
         alias = None
         if all(isinstance(k, ast.Constant) and isinstance(k.value, str) for k in n.keys):
             # constant keys: each key's value is kept for a constant-key read
-            alias = ("dict", tuple(k.value for k in n.keys),
-                     tuple(self.expr(v) for v in n.values))
-        return V(j.ex_all(), j.im_all(), j.funcs, None, None, alias)
+            alias = ("dict", tuple(k.value for k in n.keys), tuple(vals))
+            # The alias retains each slot; top-level labels would smear every
+            # sibling onto a precise constant-key read.
+            return V((), (), j.funcs, None, None, alias)
+        return V(j.ex_all(), j.im_all(), j.funcs)
 
     def e_Starred(self, n):
         return element(self.expr(n.value))
@@ -905,13 +919,28 @@ class Frame:
         for v in vals:
             ex |= v.ex_all()
             im |= v.im_all()
-        ordering = any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE)) for op in n.ops)
+        operands = [n.left] + list(n.comparators)
+        ordering = any(isinstance(op, (ast.Lt, ast.LtE, ast.Gt, ast.GtE))
+                       and not (self.set_shaped(left) or self.set_shaped(right))
+                       for left, op, right in zip(operands, n.ops, operands[1:]))
         self.numeric_check(n, [n.left] + list(n.comparators), vals)
         if P in ex:
             ex = (ex - {P}) | {E}
         if ordering and ex & {E, D}:
             ex |= {K}
         return V(ex, im)
+
+    def set_shaped(self, node):
+        """True for syntax whose ordered comparison is set inclusion."""
+        if isinstance(node, (ast.Set, ast.SetComp)):
+            return True
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and \
+                node.func.id in ("set", "frozenset"):
+            return True
+        if isinstance(node, ast.Name) and node.id in self.mod.consts:
+            value = self.mod.consts[node.id]
+            return value is not node and self.set_shaped(value)
+        return False
 
     def numeric_check(self, node, operands, vals):
         """A numeric literal compared with E or D data (the place a copied
@@ -954,11 +983,14 @@ class Frame:
             for cond in g.ifs:
                 implicit |= self.expr(cond).flat()
         old = self.ctx
-        self.ctx = frozenset(old | implicit)
+        old_order = self.order_ctx
+        self.ctx = frozenset(old | (implicit - {O}))
+        self.order_ctx = frozenset(old_order | (implicit & {O}))
         try:
             vals = [self.expr(e) for e in elts]
         finally:
             self.ctx = old
+            self.order_ctx = old_order
         for k in list(self.env):
             if k not in saved:
                 del self.env[k]
@@ -1048,6 +1080,7 @@ class Frame:
 
     def mutate(self, recv_node, argvals, kwvals):
         v = vjoin(*(list(argvals) + list(kwvals.values()))) if (argvals or kwvals) else V({C})
+        v = add_im(v, self.order_ctx)
         tgt = recv_node
         if isinstance(tgt, ast.Name):
             name = tgt.id
@@ -1128,10 +1161,11 @@ class Frame:
         labels_ex = set(v.ex_all())
         labels_im = set(v.im_all()) | set(self.ctx)
         if klass == DISPLAY:
-            implicit_bad = set() if labels_ex & {E, F, P} else labels_im & {K, O}
+            implicit_bad = labels_im & {K, O}
             bad = (labels_ex - DISPLAY_OK) | implicit_bad
         else:
-            bad = (labels_ex - APPEARANCE_OK) | (labels_im - APPEARANCE_OK - {Q})
+            appearance_im = labels_im | set(self.order_ctx)
+            bad = (labels_ex - APPEARANCE_OK) | (appearance_im - APPEARANCE_OK - {Q})
         if bad:
             self.ps.flag(self.mod, node, "%s sink %s reads %s" % (klass, what,
                                                                    "".join(sorted(bad))))
@@ -1300,3 +1334,44 @@ def test_each_refused_shape_is_a_finding(label, api, bot, worker, needle):
     """Negative controls of the fixture: each one refused shape, one finding."""
     findings = _fixture(api or _API_PERMITTED, bot or _BOT_PERMITTED, worker or _WORKER_FIXTURE)
     assert any(needle in str(f) for f in findings), (label, _fmt(findings))
+
+
+@pytest.mark.parametrize("label,api,bot,needle", [
+    ("explicit E under rank", "", _BOT_PERMITTED.replace(
+        '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+        '        shown = _aer_enc_text(cell[0])\n'
+        '        if cell[3] > 0.5:\n'
+        '            shown = _aer_enc_text(cell[1])\n'
+        '        items.append(AerItem("cell", (), (), shown))'), "reads K"),
+    ("explicit F under rank", _API_PERMITTED + '''
+
+
+def formatted(r):
+    shown = "%d" % r["left"]
+    if r["rank"] > 0.5:
+        shown = "%d" % r["right"]
+    return {"name": shown}
+''', "", "reads K"),
+    ("explicit P under rank", "", _BOT_PERMITTED.replace(
+        '        items.append(AerItem("cell", (), (), "ranked" if cell[2] else "casual"))',
+        '        shown = page\n'
+        '        if page.cells[0][3] > 0.5:\n'
+        '            shown = page\n'
+        '        items.append(AerItem("cell", (), (), shown))'), "reads K"),
+    ("explicit E under value order", "", _BOT_PERMITTED.replace(
+        "def _aer_plan(page):",
+        "def _order_value(cell):\n"
+        "    return cell[3]\n\n\n"
+        "def _aer_plan(page):").replace(
+        "    for cell in page.cells:",
+        '    shown = _aer_enc_text(page.cells[0][0])\n'
+        '    for ordered in sorted(page.cells, key=_order_value):\n'
+        '        shown = _aer_enc_text(ordered[0])\n'
+        '    items.append(AerItem("cell", (), (), shown))\n'
+        "    for cell in page.cells:"), "reads O"),
+])
+def test_display_rejects_implicit_rank_or_order_with_explicit_display_root(
+        label, api, bot, needle):
+    """Explicit display roots do not hide rank or value-order selection."""
+    findings = _fixture(api or _API_PERMITTED, bot or _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and needle in str(findings[0]), (label, _fmt(findings))
