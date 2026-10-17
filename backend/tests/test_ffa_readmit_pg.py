@@ -370,9 +370,54 @@ def test_t4_3b_the_trailing_timeout_leave_reaches_the_leave_guard(monkeypatch):
             if kept:
                 assert before == 1 and s["hold_n"] == 1 and s["hold_until"] is not None, \
                     ("T4.3b hold kept", s["hold_n"], s["hold_until"])
+                assert await _attempts(env, lob, 1) == [], ("M2 trailing no decline row",)
             else:
                 assert before == 1 and s["hold_n"] is None, ("T4.3b chosen exit ends", s["hold_n"])
+                assert await _attempts(env, lob, 1) == [(1, "decline", "ok", None)], \
+                    ("M2 implicit decline row", await _attempts(env, lob, 1))
             assert seen == [(cause, kept)], ("T4.3b guard reached", cause, seen)
+    run_env(monkeypatch, body)
+
+
+def test_m2_decline_checks_lifecycle_and_writes_one_success(monkeypatch):
+    """M2: every successful decline writes exactly one ok attempt in the
+    hold-ending transaction; expiry and closure refuse without that row, and
+    automatic lapse writes no attempt."""
+    async def body(env):
+        live = await _held(env)
+        ans = await _readmit(env, live, 1, "decline", 1)
+        row = (await _rows(env, "ffa_seat_readmissions", live, 1))[0]
+        attempts = await _attempts(env, live, 1)
+        assert ans["status"] == "declined" and row["refused_reason"] == "declined" \
+            and attempts == [(1, "decline", "ok", None)], \
+            ("M2 explicit decline row", ans.body, row["refused_reason"], attempts)
+
+        expired = await _held(env)
+        await env.at(expired, 171.0)
+        ans = await _readmit(env, expired, 1, "decline", 1)
+        row = (await _rows(env, "ffa_seat_readmissions", expired, 1))[0]
+        attempts = await _attempts(env, expired, 1)
+        assert ans["reason"] == "hold_lapsed" and row["lapsed_at"] is not None \
+            and not any(a[1:3] == ("decline", "ok") for a in attempts), \
+            ("M2 expired decline", ans.body, row["lapsed_at"], attempts)
+
+        closed = await _held(env)
+        await env.set_lobby(closed, status="completed")
+        ans = await _readmit(env, closed, 1, "decline", 1)
+        row = (await _rows(env, "ffa_seat_readmissions", closed, 1))[0]
+        attempts = await _attempts(env, closed, 1)
+        assert ans["reason"] == "lobby_closed" and row["refused_at"] is None \
+            and row["lapsed_at"] is None \
+            and not any(a[1:3] == ("decline", "ok") for a in attempts), \
+            ("M2 closed decline", ans.body, row["refused_at"], attempts)
+
+        automatic = await _held(env)
+        await env.at(automatic, 171.0)
+        await A._janitor_tick(env)
+        row = (await _rows(env, "ffa_seat_readmissions", automatic, 1))[0]
+        assert row["lapsed_at"] is not None and await _attempts(env, automatic, 1) == [], \
+            ("M2 automatic lapse no row", row["lapsed_at"],
+             await _attempts(env, automatic, 1))
     run_env(monkeypatch, body)
 
 
@@ -887,6 +932,12 @@ def test_t5_1_rows_per_transition(monkeypatch):
         att = await _attempts(env, lob, 1)
         assert att[0] == (1, "entered", "refused", "not_held"), ("T5.1 early row", att)
         assert {a[0] for a in att} == {1}, ("T5.1 attempts n", att)
+        exact = {(kind, outcome): sum(1 for a in att if a[1:3] == (kind, outcome))
+                 for kind, outcome in (("claim", "ok"), ("bind", "ok"),
+                                       ("entered", "ok"), ("entered", "refused"))}
+        assert exact == {("claim", "ok"): 1, ("bind", "ok"): 1,
+                         ("entered", "ok"): 1, ("entered", "refused"): 1}, \
+            ("T5.1 exact attempts", exact, att)
 
         async def broken(*a, **k):
             raise RuntimeError("attempt write failed")

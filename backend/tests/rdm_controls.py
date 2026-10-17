@@ -329,6 +329,23 @@ ROWS = [
                   '        if cap and int(seat["writes"] or 0) >= ASM_WRITES_CAP:\n',
                   '    if True:\n'
                   '        if cap and int(seat["writes"] or 0) >= ASM_WRITES_CAP:\n', 1)]},
+    {"row": "F1.M2.ATTEMPT",
+     "node": RP + "test_t4_3b_the_trailing_timeout_leave_reaches_the_leave_guard",
+     "tag": "M2 implicit decline row",
+     "mutant": [(MAIN,
+                  '        await _rdm_attempt(ctx.db, ctx.lid, seat["player_id"], int(n),\n'
+                  '                           "decline", ctx.now, "ok")\n',
+                  '', 1)]},
+    {"row": "F1.M2.LIFECYCLE",
+     "node": RP + "test_m2_decline_checks_lifecycle_and_writes_one_success",
+     "tag": "M2 expired decline",
+     "mutant": [(MAIN,
+                  '    refused = await _rdm_live_or_lapse(ctx, pid, me, "decline", n)\n'
+                  '    if refused is not None:\n'
+                  '        return refused\n',
+                  '    if me.get("hold_n") is None or int(me["hold_n"]) != n:\n'
+                  '        return await _rdm_refuse(ctx, pid, me, "decline", n, "not_held")\n',
+                  1)]},
     {"row": "H1", "node": RP + "test_health_marker_counts_every_site", "tag": "health ffa_readmit",
      "mutant": [(MAIN, '            await _ffa_readmit_janitor(async_session)\n',
                  '            pass\n', 1)]},

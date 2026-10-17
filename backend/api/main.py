@@ -56600,6 +56600,8 @@ async def _rdm_end_hold(ctx, seat, how: str, *, depart: bool) -> bool:
             " WHERE lobby_id = :lid AND player_id = :pid AND n = CAST(:n AS smallint)"
             "   AND lapsed_at IS NULL AND refused_at IS NULL AND bound_at IS NULL"),
             {"now": ctx.now, "lid": ctx.lid, "pid": seat["player_id"], "n": int(n)})
+        await _rdm_attempt(ctx.db, ctx.lid, seat["player_id"], int(n),
+                           "decline", ctx.now, "ok")
     seat.update({"hold_n": None, "hold_anchor_at": None, "hold_until": None})
     ctx.prints.append(_rdm_line(ctx.lid, f"{how} slot={row['slot']} n={int(n)}"))
     if depart and row["left_at"] is not None:
@@ -56962,10 +56964,10 @@ async def _rdm_decline(ctx, pid, me, req) -> dict:
     """Step decline (P4.2): the player said no; the hold ends as the lapse ends
     it, at once."""
     n = int(req.n)
-    if me.get("hold_n") is None or int(me["hold_n"]) != n:
-        return await _rdm_refuse(ctx, pid, me, "decline", n, "not_held")
+    refused = await _rdm_live_or_lapse(ctx, pid, me, "decline", n)
+    if refused is not None:
+        return refused
     await _rdm_end_hold(ctx, me, "declined", depart=True)
-    await _rdm_attempt(ctx.db, ctx.lid, pid, n, "decline", ctx.now, "ok")
     return {"readmit": {"status": "declined", "n": n}}
 
 
