@@ -49,8 +49,8 @@ case within the budget gate. The gate binds on Linux only (the api
 container's resident set); elsewhere the figure is the working set, so the
 test reports it and skips with a reason naming the platform.
 
-Not here yet (later passes): the cold start through the four routes
-(R1 to R4, 1a-4), the second decoded copy and route-shape mutants.
+Present: the two-producer cache-copy observer (:753-801) and route-shape coverage
+(test_admin_evidence_routes_pg.py:359-388). Not here yet: route-level cold start (R1-R4, 1a-4).
 
 `ADMIN_EVIDENCE_TEST_PG_DSN` names a database whose name carries
 `admin_evidence`; unset, the module fails (an affirmative
