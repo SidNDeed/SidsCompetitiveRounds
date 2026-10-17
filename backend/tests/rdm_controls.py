@@ -246,8 +246,25 @@ ROWS = [
                  ' AND group_id = :lid"),\n',
                  '    await ctx.db.commit()\n'
                  '    await ctx.db.execute(text(\n'
-                 '        "DELETE FROM queue_leases WHERE player_id = :pid AND mode = \'ffa\''
-                 ' AND group_id = :lid"),\n', 1)]},
+                  '        "DELETE FROM queue_leases WHERE player_id = :pid AND mode = \'ffa\''
+                  ' AND group_id = :lid"),\n', 1)]},
+    {"row": "F1.H1", "node": RJ + "test_h1_readmit_economics_use_only_server_absence",
+     "tag": "H1 present economics",
+     "mutant": [(MAIN,
+                  '    if _rdm_on:\n'
+                  '        ghosts, graced, _leave_log = set(), set(), []\n'
+                  '    else:\n'
+                  '        ghosts, graced, _leave_log = _ffa_leave_decision(report, kills_in_canonical)\n',
+                  '    if False:\n'
+                  '        ghosts, graced, _leave_log = set(), set(), []\n'
+                  '    else:\n'
+                  '        ghosts, graced, _leave_log = _ffa_leave_decision(report, kills_in_canonical)\n',
+                  1),
+                 (MAIN,
+                  '    if lobby.get("readmit_v1"):\n'
+                  '        unrated = set()\n',
+                  '    if False:\n'
+                  '        unrated = set()\n', 1)]},
     {"row": "H1", "node": RP + "test_health_marker_counts_every_site", "tag": "health ffa_readmit",
      "mutant": [(MAIN, '            await _ffa_readmit_janitor(async_session)\n',
                  '            pass\n', 1)]},

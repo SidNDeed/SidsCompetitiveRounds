@@ -56313,6 +56313,25 @@ async def _asm_report_rules(db, *, lobby, lobby_uuid, g, report, id_by_steam,
                 reason="lag_reporter",
                 why=f"reporter slot {rep['slot']} sat a point of game {g} out",
                 detail="This seat may not report this game", progress=progress)
+    # Readmit-v1 does not let the reporter's unsigned absence or leave-score
+    # fields decide who played.  Rebuild the starting set from the server rows
+    # written under this lobby lock.  A moved gone_game opens an absence
+    # interval and an entered receipt closes it; later merely-held rows do not
+    # erase an earlier open interval.
+    historical_gone = {}
+    if lobby.get("readmit_v1"):
+        unrated = set()
+        rdm_rows = (await db.execute(text(
+            "SELECT p.steam_id, r.n, r.gone_game, r.entered_at"
+            "  FROM ffa_seat_readmissions r JOIN players p ON p.id = r.player_id"
+            " WHERE r.lobby_id = :lid ORDER BY p.steam_id, r.n"),
+            {"lid": lobby_uuid})).mappings().all()
+        for rr in rdm_rows:
+            sid = rr["steam_id"]
+            if rr["gone_game"] is not None:
+                historical_gone[sid] = int(rr["gone_game"])
+            if rr["entered_at"] is not None:
+                historical_gone.pop(sid, None)
     out = set(unrated)
     added = []
     for sid, r in by.items():
@@ -56326,6 +56345,8 @@ async def _asm_report_rules(db, *, lobby, lobby_uuid, g, report, id_by_steam,
         elif short and not r["start_roster"] and not admitted_for_g:
             reason = "b"
         elif r["gone_game"] is not None and g > int(r["gone_game"]):
+            reason = "d"
+        elif sid in historical_gone and g > historical_gone[sid]:
             reason = "d"
         if reason is not None and sid not in out:
             out.add(sid)
@@ -59033,7 +59054,8 @@ def _ffa_leave_decision(report, kills_in_canonical: bool) -> tuple[set, set, lis
     return ghosts, graced, log
 
 
-def _ffa_finishing_count(member_ids, departed_ids, report) -> tuple[int, int, int]:
+def _ffa_finishing_count(member_ids, departed_ids, report,
+                         effective_absent=None) -> tuple[int, int, int]:
     """How many players FINISHED the game a report describes, for every
     "N or more players" FFA achievement. Returns (count, server, attested).
 
@@ -59076,6 +59098,11 @@ def _ffa_finishing_count(member_ids, departed_ids, report) -> tuple[int, int, in
     counts only while the report says it stayed, and never beyond `server`.
     """
     seated = set(member_ids or ())
+    if effective_absent is not None:
+        # Readmit-v1's server-row decision is both accounts: no unsigned client
+        # flag may lower or raise an achievement tier in these lobbies.
+        server = len(seated - (seated & set(effective_absent)))
+        return server, server, server
     departed = seated & set(departed_ids or ())
     server = len(seated) - len(departed)
     attested = sum(1 for p in report.players
@@ -59084,7 +59111,8 @@ def _ffa_finishing_count(member_ids, departed_ids, report) -> tuple[int, int, in
 
 
 def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
-                              kills_signed: bool) -> str | None:
+                              kills_signed: bool,
+                              effective_absent=None) -> str | None:
     """None when an incoming report says the same thing about a game as the row
     already recorded for it; otherwise a short phrase naming the first
     disagreement, for the log line. (The quarantine row's own reason is the
@@ -59161,13 +59189,19 @@ def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
     # difference explained by the incoming report's HMAC form alone is not
     # reported as a difference about the game. `kills_signed` still gates the
     # kills comparison below, where it is a fact about what was signed.
-    _g_signed, _c_signed, _ = _ffa_leave_decision(report, True)
-    _g_plain, _c_plain, _ = _ffa_leave_decision(report, False)
-    _unrated_either = ((_g_signed | _c_signed), (_g_plain | _c_plain))
+    if effective_absent is None:
+        _g_signed, _c_signed, _ = _ffa_leave_decision(report, True)
+        _g_plain, _c_plain, _ = _ffa_leave_decision(report, False)
+        _unrated_either = ((_g_signed | _c_signed), (_g_plain | _c_plain))
+    else:
+        # A readmit duplicate compares the persisted server decision, not a
+        # fresh interpretation of mutable client absence fields.
+        _unrated_either = (set(effective_absent),)
     # The message names the reading that matches THIS report's own form, so a
     # log line says what the submitted report concluded rather than what the
     # other reading of it would have.
-    _unrated_said = _unrated_either[0 if kills_signed else 1]
+    _unrated_said = (_unrated_either[0] if effective_absent is not None
+                     else _unrated_either[0 if kills_signed else 1])
     seen = set()
     for p in report.players:
         seen.add(p.steam_id)
@@ -59229,7 +59263,13 @@ async def _ffa_prior_field_disagreement(db: AsyncSession, prior, id_by_steam, re
                                             {"m": prior["id"]})).mappings().all()}
     prior_winner = next((s for s, pid in id_by_steam.items()
                          if pid == prior["winner_id"]), None)
-    return _ffa_report_contradiction(prior_winner, prior_vec, report, kills_signed)
+    readmit_v1 = bool((await db.execute(text(
+        "SELECT l.readmit_v1 FROM ffa_matches m JOIN ffa_lobbies l ON l.id = m.lobby_id"
+        " WHERE m.id = :m"), {"m": prior["id"]})).scalar())
+    effective_absent = ({sid for sid, vec in prior_vec.items() if bool(vec[4])}
+                        if readmit_v1 else None)
+    return _ffa_report_contradiction(prior_winner, prior_vec, report, kills_signed,
+                                     effective_absent)
 
 
 async def _ffa_record_and_refuse(db: AsyncSession, *, report, lobby_uuid, id_by_steam,
@@ -59768,7 +59808,8 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # today's refusal; a journaled payload settles only while its window is
     # open and it is still the report the class order chooses.
     _rdm_settle = None
-    if await _asm_readmit_on(db, lobby):
+    _rdm_on = await _asm_readmit_on(db, lobby)
+    if _rdm_on:
         _rdm_gate = await _ffa_report_gate(
             db, lobby=lobby, lobby_uuid=lobby_uuid, g=_game_number, report=report,
             id_by_steam=id_by_steam, journal=_rdm_journal, progress=_progress)
@@ -59853,7 +59894,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     #       client still in the room at game over, never by the leaver, and
     #       voiding a leaver's result is worth nothing to the reporter.
     # Old clients omit the field entirely -> no grace, pre-fix behaviour.
-    ghosts, graced, _leave_log = _ffa_leave_decision(report, kills_in_canonical)
+    if _rdm_on:
+        ghosts, graced, _leave_log = set(), set(), []
+    else:
+        ghosts, graced, _leave_log = _ffa_leave_decision(report, kills_in_canonical)
     for _line in _leave_log:
         print(_line)
     # Everyone excluded from rating/economy for this game. `ghosts` still names
@@ -60406,7 +60450,8 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 _n_played, _n_server, _n_attested = _ffa_finishing_count(
                     member_set,
                     lobby["departed_ids"] if "departed_ids" in lobby else member_set,
-                    report)
+                    report,
+                    ({id_by_steam[sid] for sid in unrated} if _rdm_on else None))
 
                 # 1-3: shutout tiers, WINNER only, nested (a 5-player 5-0
                 # unlocks all three). "5-0" = the winner converted 5 full
