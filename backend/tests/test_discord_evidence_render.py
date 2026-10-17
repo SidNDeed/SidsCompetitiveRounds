@@ -64,23 +64,21 @@ def run(coro):
 # ── fixtures ──────────────────────────────────────────────────────────────
 
 def control_body():
-    """A game page with an escaped name and reason, `$` text, the Arabic
-    letter mark, U+200E and U+200F raw in an unchecked population value, a
-    backslash, an
-    invalidated game, and extreme or unknown cell values."""
+    """A game page with an escaped name and reason, `$` text, every covered
+    Bidi control, a backtick and backslash, an invalidated game, and extreme,
+    unknown, rank-zero and rank-one cell values."""
     body = game_body()
     base = [e for e in ae.REPORT_REGISTRY if not e.is_window][:2]
-    body["subjects"][1]["name"] = ae._aer_enc("$x^2$ " + chr(0x200F) + BS)
-    body["population"]["key"] = "all" + chr(0x61C) + chr(0x200E) + chr(0x200F) + "`" + BS
-    body["population"]["truncated"] = ["seat" + chr(0x202E)]
-    body["baseline"]["note"] = {"k": [1, chr(0x1B)]}
-    body["registry"]["census"] = {"macro": 3}
+    escaped = "$x^2$ " + "".join(chr(cp) for cp in (0x61C, 0x200E, 0x200F, 0x202E))
+    body["subjects"][1]["name"] = ae._aer_enc(escaped + "`" + BS)
     g = body["games"][0]
     g["invalidated"] = ae._aer_enc("cheat $1")
     g["series_id"] = "s" * 32
     cells = [[base[0].ki, 1e308, -0.0, 3, "truncated", 0.5, 1.0, 40, "ok"],
              [base[1].ki, None, None, None, "none", None, None, None, "unknown"]]
     g["seats"][0]["cells"] = cells
+    g["seats"][1]["cells"] = [list(cell) for cell in cells]
+    g["seats"][1]["cells"][0][6] = 0.0
     g["flags"][0]["reason"] = ae._aer_enc("macro" + chr(0x1B) + "[31m")
     g["flags"].append({"reason": "manual", "subject": None, "reviewed": True,
                        "current": False, "created_at": "2026-10-15T00:00:00+00:00"})
@@ -374,7 +372,8 @@ def test_p12_p14_the_png_draws_the_plan_on_fixed_chrome():
     pytest.importorskip("matplotlib")
     import matplotlib.image as mpimg
     ns = bot_ns()
-    for body in (game_body(), spread_body(), control_body()):
+    control = control_body()
+    for body in (game_body(), spread_body(), control):
         page = ns["_aer_decode_response"](copy.deepcopy(body), "1a")
         plan = ns["_aer_plan"](page)
         png, drawn = worker.render([(i.kind, i.text) for i in plan])
@@ -386,5 +385,13 @@ def test_p12_p14_the_png_draws_the_plan_on_fixed_chrome():
             px = img[int(height - (y0 + y1) / 2), max(int(x0) - 1, 0)]
             want = worker.CELL_FILL if item.kind in ("cell", "summary") else worker.BACKGROUND
             assert _hex(px) == want, (item.kind, _hex(px))
+        if body is control:
+            rank0 = [d for d in drawn if "pop_rank=0.0" in d[1]]
+            rank1 = [d for d in drawn if "pop_rank=1.0" in d[1]]
+            assert len(rank0) == len(rank1) == 1, (rank0, rank1)
+            assert plan[rank0[0][0]].kind == plan[rank1[0][0]].kind == "cell"
+            height0 = rank0[0][2][3] - rank0[0][2][1]
+            height1 = rank1[0][2][3] - rank1[0][2][1]
+            assert height0 == pytest.approx(height1), (height0, height1)
         status = next(i for i in plan if i.kind == "status")
         assert status.text.startswith("STATUS UNCOLORED (absent)")
