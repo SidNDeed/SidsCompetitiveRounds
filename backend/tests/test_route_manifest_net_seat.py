@@ -752,7 +752,9 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # lane: the union of the lane's 390 and main 6bb8208f's 394 over their
     # shared 388 (main e9a3f1e1) is 396: the trunk's 394 plus the lane's 2,
     # confirmed by the re-pin dry run
-    assert len(manifest) == 396
+    # FFA mid-game readmission (2026-10-17): +2, the readmit step route and
+    # the offer read (396 before), confirmed by the re-pin dry run
+    assert len(manifest) == 398
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -782,7 +784,10 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # and main 6bb8208f's 393 over their shared 387 is 395: the trunk's 393
     # plus the lane's 2 (both statically-nonconsumer), confirmed by the
     # re-pin dry run
-    assert len(static) == 395
+    # FFA mid-game readmission (2026-10-17): +2, both statically-nonconsumer:
+    # the step answers a fixed readmit projection and the offer a fixed
+    # projection of seat columns; neither reads the matches table (395 before)
+    assert len(static) == 397
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
