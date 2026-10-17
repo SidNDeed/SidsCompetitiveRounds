@@ -43,9 +43,11 @@ nothing (the live generation and the gen counter unchanged), and its
 one-fact twin serves.
 
 Cold start: `B` measured in a fresh interpreter after the api's imports,
-then the worst-case cache; `B` within BASE_RSS_FLOOR_MB and peak x 1.25
-within POP_MEM_BUDGET_MB. On the Windows seat this reads the working set,
-not the api container's resident set.
+compiled from source with no bytecode cache, then the worst-case cache; `B`
+within BASE_RSS_FLOOR_MB, peak x 1.25 within POP_MEM_BUDGET_MB and the worst
+case within the budget gate. The gate binds on Linux only (the api
+container's resident set); elsewhere the figure is the working set, so the
+test reports it and skips with a reason naming the platform.
 
 Not here yet (later passes): the cold start through the four routes
 (R1 to R4, 1a-4), the second decoded copy and route-shape mutants.
@@ -444,7 +446,7 @@ def _big(n_bytes):
 
 
 def _gate_cache(budget_mb):
-    """A cache whose budget is `budget_mb`: B set so 128/1.25 - B - 2 = it."""
+    """A cache whose budget is `budget_mb`: B set so POP_MEM_BUDGET_MB/1.25 - B - 2 = it."""
     b = ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"] / 1.25 - 2 - budget_mb
     return ae.PopulationCache(clock=_Clock(), base_rss_mb=b)
 
@@ -665,8 +667,13 @@ for j in range(32):              # the memo at WIN_DERIVED_BYTES_MAX
     cache.memo_put(("c", j), lease, {"d": array("d", bytes(65536))}, 65536)
 print(json.dumps({"b": b, "peak": ae.process_rss_mb(peak=True), "platform": sys.platform,
                   "python": sys.version.split()[0], "cache_bytes": cache.cache_bytes(), "budget": cache.budget,
-                  "live": len(cache.live), "retired": len(cache.retired)}))
+                  "live": len(cache.live), "retired": len(cache.retired),
+                  "pycache_prefix": sys.pycache_prefix, "dont_write": sys.dont_write_bytecode}))
 """
+
+# The marker every off-Linux run of the cold-start gate carries in its skip
+# reason, so the skip is visible in a summary and countable by a reader.
+P9_OFF_LINUX = "P9-OFF-LINUX"
 
 
 def test_p9_cold_start_base_rss_and_peak_within_the_budget():
@@ -675,17 +682,46 @@ def test_p9_cold_start_base_rss_and_peak_within_the_budget():
     case (4 live and 4 leased-retired game sets, a replacement, 8 live and 4
     retired window sources at maximum fragmentation, the memo full). `B`
     must not exceed BASE_RSS_FLOOR_MB, peak x 1.25 must fit
-    POP_MEM_BUDGET_MB. On a seat other than Linux the figure is that
-    platform's working set, not the api container's resident set. The
+    POP_MEM_BUDGET_MB, and the worst-case cache must fit the budget gate at
+    the measured `B`.
+
+    The bytecode cache is an input of `B` (one Linux seat, one tree: 160.4
+    MB alone, 102.7 MB in a run whose earlier tests had imported the api;
+    on win32 a compiled copy of backend/api measured 109.5 against 114.5
+    uncompiled, peak 126 against 164), so the fresh interpreter runs with -B and
+    PYTHONPYCACHEPREFIX naming a new empty directory: it reads no tree's
+    __pycache__ and writes nothing, and every module compiles from source,
+    as the api container's first start does. The test proves that state
+    from the child (the prefix it saw, bytecode writing off) and from the
+    directory (still empty after the run).
+
+    The gate binds on Linux only, where the figure is the api container's
+    resident set. On any other platform the figure is that platform's
+    working set (win32 measured about 114 MB compiled cold), which the
+    design's bounds do not describe; the test runs the same measurement and
+    the same state checks, then skips with a reason that starts with
+    P9_OFF_LINUX and names the platform and the measured line. The
     measured line is also issued as a warning, so a quiet run (`-q`, no
-    captured output shown) still prints the figure whether it passes or
-    fails. This test reads no database, so it runs without the DSN."""
+    captured output shown) still prints the figure on every outcome. This
+    test reads no database, so it runs without the DSN."""
+    import shutil
     import subprocess
+    import tempfile
     api = os.path.join(HERE, "..", "api")
-    out = subprocess.run([sys.executable, "-B", "-c", _COLD_START, api],
-                         capture_output=True, text=True, timeout=300)
+    prefix = tempfile.mkdtemp(prefix="p9-pycache-")
+    env = dict(os.environ, PYTHONPYCACHEPREFIX=prefix)
+    try:
+        out = subprocess.run([sys.executable, "-B", "-c", _COLD_START, api],
+                             capture_output=True, text=True, timeout=300, env=env)
+        left = sorted(os.listdir(prefix))
+    finally:
+        shutil.rmtree(prefix, ignore_errors=True)
     assert out.returncode == 0, out.stderr[-2000:]
     m = json.loads(out.stdout.strip().splitlines()[-1])
+    assert os.path.normcase(os.path.abspath(m["pycache_prefix"] or "")) == \
+        os.path.normcase(os.path.abspath(prefix)), m
+    assert m["dont_write"] is True, m
+    assert left == [], "the cold interpreter wrote bytecode: %s" % left[:5]
     line = ("GATE p9 cold start (%s, Python %s): B %.1f MB (floor %.1f), peak %.1f MB "
             "x 1.25 = %.1f (budget %d), cache %d bytes against %d, %d live, %d retired"
             % (m["platform"], m["python"], m["b"], ae.BASE_RSS_FLOOR_MB, m["peak"],
@@ -694,8 +730,13 @@ def test_p9_cold_start_base_rss_and_peak_within_the_budget():
     print(line)
     warnings.warn(line)
     assert (m["live"], m["retired"]) == (12, 8)
+    if sys.platform != "linux":
+        pytest.skip("%s platform=%s: the cold-start gate binds on Linux only (the api "
+                    "container's resident set); this figure is the %s working set, "
+                    "reported, not gated: %s" % (P9_OFF_LINUX, sys.platform, sys.platform, line))
     assert m["b"] <= ae.BASE_RSS_FLOOR_MB, "B %.1f MB misses the floor: a budget decision" % m["b"]
     assert m["peak"] * 1.25 <= ae.CONTRACT_BOUNDS["POP_MEM_BUDGET_MB"], m
+    assert m["cache_bytes"] <= m["budget"], "the worst-case cache misses the budget gate: %s" % m
 
 
 def _builder_lines():
