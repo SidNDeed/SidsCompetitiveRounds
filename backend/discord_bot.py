@@ -15142,10 +15142,10 @@ def _aer_cell(row, table, catalog, phase="1a"):
                      "pop_p99"):
             _aer_check_number(cell[slot])
     else:
-        if isinstance(cell["val"], str):
-            _aer_check_text(cell["val"])
-        else:
+        if catalog[ki]["kind"] == "R":
             _aer_check_number(cell["val"])
+        else:
+            _aer_check_text(cell["val"], nullable=True)
         for slot in ("own_n", "pop_n"):
             _aer_check_int(cell[slot], 0, nullable=True)
         for slot in ("own_mean", "own_rank", "pop_rank"):

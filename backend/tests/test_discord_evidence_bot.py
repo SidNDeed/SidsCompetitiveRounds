@@ -269,6 +269,23 @@ def summary_body(page=1, pages=3, shape="pair"):
     return body
 
 
+def _body_with_cell_kind(kind):
+    entry = next(e for e in ae.REPORT_REGISTRY
+                 if not e.is_window and e.scope == "seat" and e.kind == kind)
+    body = game_body()
+    body["catalog"] = [ae._catalog_row(entry)]
+    value = 7 if kind == "R" else ae._aer_enc(kind.lower() + " value")
+    cell = [entry.ki, value, None, None, "none", None, None, None, "ok"]
+    for seat in body["games"][0]["seats"]:
+        seat["cells"] = [list(cell)]
+    return body
+
+
+def _set_first_cell_value(body, value):
+    body["games"][0]["seats"][0]["cells"][0][
+        ae.AER_WIRE["1a"]["seat"].index("val")] = value
+
+
 def _phase_leaf_breaks():
     return [
         ("rounds object", game_body,
@@ -280,6 +297,12 @@ def _phase_leaf_breaks():
          lambda b: b["catalog"][0].update(base={"mark": True})),
         ("malformed window leaf", summary_body,
          lambda b: b["windows"][0].update(newest={"cls": "c1"})),
+        ("R cell carrying text", lambda: _body_with_cell_kind("R"),
+         lambda b: _set_first_cell_value(b, "c1")),
+        ("T cell carrying number", lambda: _body_with_cell_kind("T"),
+         lambda b: _set_first_cell_value(b, 7)),
+        ("D cell carrying number", lambda: _body_with_cell_kind("D"),
+         lambda b: _set_first_cell_value(b, 7)),
     ]
 
 
@@ -305,6 +328,8 @@ def test_the_1a_decoder_accepts_a_served_page_and_refuses_every_break(bot):
     assert page.subjects[1][1] == ae._aer_enc("B`eta")
     s = dec(summary_body(), "1a")
     assert (s.shape, len(s.windows), len(s.summary), s.games) == ("pair", 1, 1, ())
+    kind_pages = [dec(_body_with_cell_kind(k), "1a") for k in ("R", "T", "D")]
+    assert [next(iter(p.catalog.values()))["kind"] for p in kind_pages] == ["R", "T", "D"]
     assert set(page.population) == {"key", "days", "lag_s", "games", "computed_at",
                                     "truncated"}
     assert set(s.population) == set(page.population) | {"win_computed_at"}

@@ -65,7 +65,10 @@ def max_body():
                                            "pop_p99": 1.7976931348623157e+308}) for e in base]
     body["subjects"] = [{"steam_id": "9" * 16, "name": ae._aer_enc("W" * 32 + chr(0x200E))},
                         {"steam_id": "8" * 16, "name": ae._aer_enc("$" * 32 + chr(0x061C))}]
-    cells = [[e.ki, -1.2345678901234567e+300, 1.7976931348623157e+308, 2 ** 31 - 1,
+    text_values = {kind: ae._aer_enc(kind * (ae.CONTRACT_BOUNDS["TEXT_MAX"] - 1)
+                                     + chr(0x200E)) for kind in ("T", "D")}
+    cells = [[e.ki, (-1.2345678901234567e+300 if e.kind == "R" else text_values[e.kind]),
+              1.7976931348623157e+308, 2 ** 31 - 1,
               "partial", 0.1234567890123456, 0.9876543210987654, 2 ** 31 - 1, "ok"]
              for e in base]
     games = []
