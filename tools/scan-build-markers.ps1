@@ -62,6 +62,13 @@ $utf8 = [System.Text.Encoding]::UTF8
 #            needle is gated on both; the variant marker is a literal, is not a
 #            type name, and is therefore not expected here - 'any' records that
 #            rather than asserting a fact about the compiler's heaps.
+#
+# The worktree needle is the name of the tree this script runs from, never a
+# typed name: a typed name is another tree's and cannot fire here (#342). In
+# the main checkout that name is also the repository name the DLL carries in
+# its release URLs, so there it is the plugin source folder under it.
+$treeName = Split-Path -Leaf (Split-Path -Parent $PSScriptRoot)
+if ($treeName -eq 'SidsCompetitiveRounds') { $treeName += '\plugin' }
 $needles = @(
     @{ Text = 'SCR_BUILD_VARIANT=STANDALONE';    Utf16 = 'present'; Utf8 = 'any';    Why = 'build gate: this is the standalone variant' },
     @{ Text = 'SCR_BUILD_VARIANT=THUNDERSTORE';  Utf16 = 'absent';  Utf8 = 'absent'; Why = 'build gate: the Thunderstore variant must not be in this build' },
@@ -72,7 +79,7 @@ $needles = @(
     @{ Text = '/Users/';                         Utf16 = 'absent';  Utf8 = 'absent'; Why = 'privacy: any users path segment, forward-slash spelling' },
     @{ Text = 'Documents\SidsCompetitiveRounds'; Utf16 = 'absent';  Utf8 = 'absent'; Why = 'privacy: this checkout path, backslash spelling' },
     @{ Text = 'Documents/SidsCompetitiveRounds'; Utf16 = 'absent';  Utf8 = 'absent'; Why = 'privacy: this checkout path, forward-slash spelling' },
-    @{ Text = 'scr-wt-bug391-client';            Utf16 = 'absent';  Utf8 = 'absent'; Why = 'privacy: this worktree directory name' }
+    @{ Text = $treeName;                         Utf16 = 'absent';  Utf8 = 'absent'; Why = 'privacy: this worktree directory name' }
 )
 
 function Get-Variants {
