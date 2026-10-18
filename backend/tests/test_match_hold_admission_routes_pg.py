@@ -238,6 +238,8 @@ async def _ffa_lock_roster(w, mp):
 
 async def _ffa_queue_poll(w, mp):
     ps = await hold_test.seed_players(w.conn, 3)
+    # The join stamps this module clock; registered so the test leaves it as found.
+    mp.setattr(main, "_ffa_gather_last_join_mono", main._ffa_gather_last_join_mono)
     for _, s in ps:
         await w.ok("POST", "/api/v1/ffa/queue/join", s, {"steam_id": s}, tag="ffa queue join")
     me = min((s for _, s in ps), key=main._ffa_sort_key)
