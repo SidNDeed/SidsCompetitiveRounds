@@ -60,6 +60,10 @@ def test_module_census():
     for fn in (mrw.settle_window, mrw.receive, mrw.release_held, mrw.supersede_held):
         assert "async with database_deadline(db)" in inspect.getsource(fn)
     assert "await _settle_locked(" in inspect.getsource(mrw._receive)
+    for fn in (mrw._settle_locked, mrw._receive, mrw._release_held,
+               mrw._supersede_held):
+        assert "_window_terminal(" in inspect.getsource(fn)
+    assert "AND superseded_at IS NULL" in inspect.getsource(mrw._mark_settled)
 
 
 # == T5.3 the window =============================================================
@@ -458,8 +462,8 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
 
             room = "team_r" + uuid.uuid4().hex[:8]
             g = await _window_game(conn, "team", room)
-            await rec(room, g, 0, held=True)
-            before_supersede = len(settled)
+            await rec(room, g, 2, held=True)
+            before_terminal = len(settled)
             async with sm() as db:
                 now = await _db_now(db)
                 assert await mrw.supersede_held(db, mode="team", room=room, game_id=g,
@@ -467,11 +471,33 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                 assert await mrw.settle_window(db, mode="team", room=room, game_id=g,
                                                now=now + timedelta(seconds=31),
                                                settle=stub) is None
+                assert await mrw.release_held(
+                    db, mode="team", room=room, game_id=g, now=now, settle=stub) == 0
                 await db.commit()
-            assert await conn.fetchval(
-                "SELECT state FROM match_report_journal WHERE room_name = $1", room) == \
-                "superseded"
-            assert len(settled) == before_supersede
+            terminal = await conn.fetchrow(
+                "SELECT settled_at, superseded_at FROM match_report_windows"
+                " WHERE room_name = $1 AND game_id = $2", room, g)
+            assert terminal["settled_at"] is None
+            assert terminal["superseded_at"] == now
+            await beat(room, 0)
+            await conn.execute(
+                "UPDATE match_seat_presence"
+                " SET present_at = $1::timestamptz, beat_at = $1::timestamptz"
+                " WHERE room_name = $2 AND player_id = $3",
+                now, room, seats[0][0])
+            async with sm() as db:
+                late = await mrw.receive(
+                    db, mode="team", room=room, game_id=g, reported_game_id=g,
+                    reporter_id=seats[0][0], reporter_steam=seats[0][1], payload="{}",
+                    member_ids=ids, now=now, settle=stub)
+                await db.commit()
+            assert late == {"status": "duplicate"}
+            rows = await conn.fetch(
+                "SELECT reporter_id, state FROM match_report_journal"
+                " WHERE room_name = $1 AND game_id = $2", room, g)
+            assert [(r["reporter_id"], r["state"]) for r in rows] == \
+                [(seats[2][0], "superseded")]
+            assert len(settled) == before_terminal
 
             # H4: once the stored window expires, a later better C cannot
             # enter the journal or displace evidence received in-window.

@@ -223,6 +223,12 @@ def test_383_first_apply_rerun_defaults_and_constraints():
                 ("ovt_series", "hold_v2")}
             for r in booleans:
                 assert (r["is_nullable"], r["column_default"]) == ("NO", "false"), dict(r)
+            terminal = await conn.fetchrow(
+                "SELECT ordinal_position, data_type, is_nullable, column_default"
+                " FROM information_schema.columns"
+                " WHERE table_schema = current_schema() AND table_name = 'match_report_windows'"
+                "   AND column_name = 'superseded_at'")
+            assert tuple(terminal) == (9, "timestamp with time zone", "YES", None)
 
             # the write half: each constraint refuses its bad row, admits the good one
             async def refused(sql, *args):

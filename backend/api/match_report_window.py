@@ -179,9 +179,14 @@ async def lock_window(db, *, mode, room, game_id, now):
         {"room": room, "g": str(game_id), "mode": mode, "now": now, "w": WINDOW_S})
     return (await db.execute(text(
         "SELECT room_name, game_id, mode, opened_at, settle_after, settled_at,"
-        "       settled_reporter_id, settled_cls FROM match_report_windows"
+        "       superseded_at, settled_reporter_id, settled_cls FROM match_report_windows"
         " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
         " FOR NO KEY UPDATE"), {"room": room, "g": str(game_id)})).mappings().first()
+
+
+def _window_terminal(window) -> bool:
+    """A settled or superseded window accepts no later report action."""
+    return window["settled_at"] is not None or window["superseded_at"] is not None
 
 
 async def journal(db, *, mode, room, game_id, reporter_id, reporter_steam, cls, payload,
@@ -225,7 +230,7 @@ async def _mark_settled(db, room, game_id, chosen, now):
         "UPDATE match_report_windows SET settled_at = CAST(:now AS timestamptz),"
         "       settled_reporter_id = CAST(:pid AS uuid), settled_cls = CAST(:cls AS varchar)"
         " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
-        "   AND settled_at IS NULL"),
+        "   AND settled_at IS NULL AND superseded_at IS NULL"),
         {"now": now, "pid": str(chosen["reporter_id"]), "cls": chosen["cls"],
          "room": room, "g": str(game_id)})
     await db.execute(text(
@@ -239,7 +244,7 @@ async def _mark_settled(db, room, game_id, chosen, now):
 
 async def _settle_locked(db, window, *, room, game_id, now, settle):
     """Settle one already-locked expired window from only its stored rows."""
-    if window["settled_at"] is not None or window["settle_after"] > now:
+    if _window_terminal(window) or window["settle_after"] > now:
         return None
     chosen = pick(await _journaled(db, room, game_id))
     if chosen is None:
@@ -290,7 +295,7 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
     `journaled` (202), and an expired window settles by `pick`. The caller
     commits."""
     window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
-    if window["settled_at"] is not None:
+    if _window_terminal(window):
         return {"status": "duplicate"}
     if window["settle_after"] <= now:
         await _settle_locked(
@@ -331,12 +336,15 @@ async def _release_held(db, *, mode, room, game_id, now, settle) -> int:
     lowest stored C immediately. Only a release without C opens 30 seconds."""
     window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
     params = {"now": now, "w": WINDOW_S, "room": room, "g": str(game_id)}
+    terminal = _window_terminal(window)
+    if terminal and window["settled_at"] is None:
+        return 0
     res = await db.execute(text(
         "UPDATE match_report_journal SET state = 'journaled'"
         " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
         "   AND state = 'held'"), params)
     released = res.rowcount or 0
-    if window["settled_at"] is not None:
+    if terminal:
         await _mark_settled(
             db, room, game_id,
             {"reporter_id": window["settled_reporter_id"], "cls": window["settled_cls"]},
@@ -366,7 +374,14 @@ async def supersede_held(db, *, mode, room, game_id, now) -> int:
 async def _supersede_held(db, *, mode, room, game_id, now) -> int:
     """At a lapse (x): the `held` reports of G are superseded, kept for
     review and never settled. Returns the rows superseded."""
-    await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
+    window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
+    if _window_terminal(window):
+        return 0
+    await db.execute(text(
+        "UPDATE match_report_windows SET superseded_at = CAST(:now AS timestamptz)"
+        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+        "   AND settled_at IS NULL AND superseded_at IS NULL"),
+        {"now": now, "room": room, "g": str(game_id)})
     res = await db.execute(text(
         "UPDATE match_report_journal SET state = 'superseded',"
         "       decided_at = CAST(:now AS timestamptz)"

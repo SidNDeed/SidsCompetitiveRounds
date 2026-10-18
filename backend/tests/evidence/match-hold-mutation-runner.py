@@ -138,6 +138,15 @@ MUTANTS = {
               [('    if chosen is not None and chosen["cls"] == CLASS_C:\n',
                 '    if (chosen is not None and chosen["cls"] == CLASS_C):\n')],
               WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
+    "F1.H5": ("FIX1", "match_report_window.py",
+              [('    return window["settled_at"] is not None or '
+                'window["superseded_at"] is not None\n',
+                '    return window["settled_at"] is not None\n')],
+              [('    return window["settled_at"] is not None or '
+                'window["superseded_at"] is not None\n',
+                '    return (window["settled_at"] is not None or '
+                'window["superseded_at"] is not None)\n')],
+              WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
     "F1.M1": ("FIX1", "match_hold.py",
               [('            or member_seats.get(held) != (req.slot, req.team)\n', '')],
               [('            or member_seats.get(held) != (req.slot, req.team)\n',
