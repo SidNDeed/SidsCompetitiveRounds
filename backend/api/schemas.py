@@ -1069,6 +1069,11 @@ class HealthResponse(BaseModel):
     # train's build discriminator for the readmission batch, read by nothing
     # else (#306). No default, so building the answer without it raises.
     ffa_readmit: int
+    # match_hold: the 2v2 and 1v2 mid-game readmission server half
+    # (main._MATCH_HOLD; 1 = this build). A marker read by nothing else
+    # (#306); the release train's build discriminator for it. No default,
+    # so building the answer without it raises.
+    match_hold: int
     # auto_log: the automatic post-match log upload (main._auto_log_health_word).
     # auto_logs.AUTO_LOG_REVISION when POST /api/v1/logs/auto is MOUNTED on the
     # app that answers -- read from the routing table on every request, never
