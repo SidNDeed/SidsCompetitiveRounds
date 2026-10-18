@@ -673,6 +673,7 @@ namespace CompetitiveRounds
         {
             baseUrl = url.TrimEnd('/');
             Plugin.Log.LogInfo($"API client initialized: {baseUrl}");
+            BindTeamHold();
             // The HTTPS migration rewrites the config to the TLS endpoint and
             // Config.Bind never revisits a written value, so a player for whom
             // :8444 does not work (port-filtering network, TLS-intercepting
@@ -2998,6 +2999,38 @@ namespace CompetitiveRounds
 
         internal static string SeatEvidenceSig(string canonical) { return ComputeHmacHex(canonical); }
 
+        // ── RJ Stage 2 hold routes (KX1) ─────────────────────────
+        // TeamHoldNet's transport and signer, bound to the shared request
+        // path every authenticated route uses: GetRequest (sessionAware, the
+        // detailed error text) and PostRequest, both stamping X-Mod-Version
+        // and X-Session-Token through StampVersionHeader and reading a 401
+        // through HandleSessionReject. Every hold route requires a verified
+        // session, so TeamHoldNet.Bound sends a call only while the token is
+        // held and this route's transport may carry it, and maps a 401 to
+        // NoTransport (toward today). The signer is the build HMAC over the
+        // hold-open canonical; an empty signature is no signature.
+
+        internal static void BindTeamHold()
+        {
+            TeamHoldNet.Sign = canonical =>
+            {
+                string s = ComputeHmacHex(canonical);
+                return string.IsNullOrEmpty(s) ? null : s;
+            };
+            TeamHoldNet.Send = TeamHoldNet.Bound(
+                () => SteamAuth.SessionToken,
+                path => CredentialedTransportAllowed(baseUrl + path),
+                (method, path, body, answer) =>
+                {
+                    if (Plugin.Instance == null || string.IsNullOrEmpty(baseUrl)) { answer(false, "not ready"); return; }
+                    string url = baseUrl + path;
+                    if (method == "GET")
+                        Plugin.Instance.StartCoroutine(GetRequest(url, (ok, text) => answer(ok, text), detailedErrors: true, sessionAware: true));
+                    else
+                        Plugin.Instance.StartCoroutine(PostRequest(url, body ?? "{}", (ok, text) => answer(ok, text)));
+                });
+        }
+
         /// <summary>The compat sender on a seat the other-plug-in check
         /// disabled (Initialize never runs there): sets the base the one compat
         /// send and its Steam ticket exchange use, and starts nothing else (no
@@ -3530,6 +3563,9 @@ namespace CompetitiveRounds
             // one is accepted (the series' later posts then go without the
             // pair; see PostTeamLivePoints).
             public string fallbackUrl; public bool fellBack; public Action onFallbackOk;
+            // RJ Stage 2 S2 live points (RJS-M5): a team post's creation stamp
+            // and room (TeamHoldRules.LiveGate); 0 for every other channel.
+            public long holdStamp; public string holdRoom;
         }
         private static readonly Dictionary<string, LivePointRetry> livePointRetries =
             new Dictionary<string, LivePointRetry>();
@@ -3537,16 +3573,33 @@ namespace CompetitiveRounds
 
         private static void SendLivePoints(string key, string url, string tag,
                                            Func<string, string> rewriteOnRefusal = null,
-                                           string fallbackUrl = null, Action onFallbackOk = null)
+                                           string fallbackUrl = null, Action onFallbackOk = null,
+                                           long holdStamp = 0, string holdRoom = null)
         {
+            // A team post created after this seat observed a waiting hold is
+            // dropped before it can supersede a pending earlier one, which
+            // still goes as today.
+            if (!TeamHoldRules.LiveGate.Dispatch(holdStamp, holdRoom))
+            {
+                Plugin.Log.LogInfo($"[LIVE-POINTS] {tag} not sent: created while a seat is held");
+                return;
+            }
             var entry = new LivePointRetry { url = url, attempts = 0, tag = tag, rewriteOnRefusal = rewriteOnRefusal,
-                                             fallbackUrl = fallbackUrl, onFallbackOk = onFallbackOk };
+                                             fallbackUrl = fallbackUrl, onFallbackOk = onFallbackOk,
+                                             holdStamp = holdStamp, holdRoom = holdRoom };
             livePointRetries[key] = entry;   // newest score wins outright
             SendLivePointsOnce(key, entry);
         }
 
         private static void SendLivePointsOnce(string key, LivePointRetry entry)
         {
+            if (!TeamHoldRules.LiveGate.Dispatch(entry.holdStamp, entry.holdRoom))
+            {
+                LivePointRetry pending;
+                if (livePointRetries.TryGetValue(key, out pending) && pending == entry) livePointRetries.Remove(key);
+                Plugin.Log.LogInfo($"[LIVE-POINTS] {entry.tag} not sent: created while a seat is held");
+                return;
+            }
             entry.attempts++;
             Plugin.Instance.StartCoroutine(PostRequest(entry.url, "", (ok, resp) =>
             {
@@ -3655,9 +3708,13 @@ namespace CompetitiveRounds
         /// filed under as proof that the record holds another physical
         /// game.</summary>
         public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points,
-                                              int gameNumber = 0, string photonRoomId = null, string gameToken = null)
+                                              int gameNumber = 0, string photonRoomId = null, string gameToken = null,
+                                              long holdStamp = 0, string holdRoom = null)
         {
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId)) return;
+            // RJ Stage 2 S2 live points (RJS-M5): holdStamp and holdRoom are
+            // the post's creation stamp (TeamHoldRules.LiveGate); SendLivePoints
+            // drops a post created after this seat observed a waiting hold.
             string query = $"{baseUrl}/api/v1/team/series/{Escape(seriesId)}/live-points" +
                            $"?t1_points={t1Points}&t2_points={t2Points}" +
                            $"&reporter_steam_id={Escape(reporterSteamId)}";
@@ -3667,7 +3724,7 @@ namespace CompetitiveRounds
             if (!TeamGameNumber.Sendable(gameNumber, photonRoomId)
                 || TeamGameNumber.Live.AttestationRefused(seriesId))
             {
-                SendLivePoints("2v2:" + seriesId, legacyUrl, tag);
+                SendLivePoints("2v2:" + seriesId, legacyUrl, tag, holdStamp: holdStamp, holdRoom: holdRoom);
                 return;
             }
             string namedUrl = query + TeamGameNumber.QueryPair(gameNumber, UnityWebRequest.EscapeURL(photonRoomId))
@@ -3681,7 +3738,8 @@ namespace CompetitiveRounds
             }
             SendLivePoints("2v2:" + seriesId, namedUrl, tag + " game " + gameNumber,
                 fallbackUrl: legacyUrl,
-                onFallbackOk: () => TeamGameNumber.Live.NoteAttestationRefused(seriesId));
+                onFallbackOk: () => TeamGameNumber.Live.NoteAttestationRefused(seriesId),
+                holdStamp: holdStamp, holdRoom: holdRoom);
         }
 
         /// <summary>Points scored ACROSS THE FIELD in the FFA game in progress
@@ -15801,7 +15859,7 @@ namespace CompetitiveRounds
             if (!EnrollGateBegin("team")) return;
             string qt = (queueType == "manual") ? "manual" : "auto";
             string safeName = Escape(displayName ?? steamId);
-            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"queue_type\":\"{qt}\"}}";
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"queue_type\":\"{qt}\"{TeamHoldRules.CapsField(TeamHoldGlue.AllAttached)}}}";
             int gen = ++teamGen;
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/team/queue/join", json,
@@ -16130,6 +16188,16 @@ namespace CompetitiveRounds
                     // canonicalization sorts the same way, so all 4 clients agree.
                     int slot = ComputeMy2v2Slot(MatchTracker.LocalSteamId, data.team_assigned, data.teammates);
                     Plugin.SetPending2v2Slot(slot);
+                    // RJ Stage 2 (KX1): pin (room, hold, mode, series, roster)
+                    // from this answer, the one that names the room.
+                    try
+                    {
+                        var holdRoster = new List<string> { MatchTracker.LocalSteamId };
+                        foreach (var m in data.teammates) if (m != null) holdRoster.Add(m.steam_id);
+                        foreach (var m in data.opponents) if (m != null) holdRoster.Add(m.steam_id);
+                        TeamHoldNet.PinFromJoin(response, TeamHoldRules.MODE_TEAM, data.room_name, data.series_id, holdRoster);
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] hold pin: {ex.Message}"); }
                     // Pre-populate Photon LocalPlayer custom properties NOW, before the
                     // room is even joined. When we join the team_ room these props ride
                     // along with the Photon Player record sent to all room members, so
@@ -17898,6 +17966,24 @@ namespace CompetitiveRounds
             sb.Append("},");
         }
 
+        /// <summary>KX6 (Stage 2 S5): the advisory game id of a flagged room's
+        /// report, signed with its own canonical ("game-id:{G}:{reporter}:{room}"),
+        /// never the frozen report canonicals. G is read from cr_tgid while
+        /// this client is in that room; otherwise no fields (today's body).</summary>
+        private static string GameIdAdvisory(string reporter, string room)
+        {
+            try
+            {
+                if (TeamHoldWriter.CurrentRoom() != room) return "";
+                string tgid = TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TGID);
+                int i = string.IsNullOrEmpty(tgid) ? -1 : tgid.LastIndexOf(':');
+                string g = i > 0 ? tgid.Substring(0, i) : null;
+                if (string.IsNullOrEmpty(g) || !TeamHoldRules.Flagged(room)) return "";
+                return TeamHoldRules.GameIdFields(room, g, ComputeHmacHex(TeamHoldRules.GameIdCanonical(g, reporter, room)));
+            }
+            catch { return ""; }
+        }
+
         public static void ReportTeamMatch(
             string seriesId,
             string t1aSteam, string t1aName, List<MatchTracker.CardPickData> t1aCards,
@@ -17962,6 +18048,7 @@ namespace CompetitiveRounds
                 $"{(isRanked ? "true" : "false")}:{reporterSteamId}:" +
                 $"{photonRoomId ?? ""}:{winnerTeam}:{seriesId}";
             string sig = ComputeHmacHex(canonical);
+            sb.Append(GameIdAdvisory(reporterSteamId, photonRoomId));   // KX6, advisory
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
 
@@ -17971,6 +18058,12 @@ namespace CompetitiveRounds
                 $"{baseUrl}/api/v1/team/matches", json,
                 (success, response) =>
                 {
+                    if (success && TeamHoldRules.Journaled(response))
+                    {
+                        // KX6: 202 journaled is terminal; the server settles it.
+                        Plugin.Log.LogInfo($"2v2 match report journaled: {response}");
+                        return;
+                    }
                     if (success)
                     {
                         Plugin.Log.LogInfo($"2v2 match reported: {response}");
@@ -18726,7 +18819,7 @@ namespace CompetitiveRounds
             // flight per mode, shared with the hosted Create/Join paths.
             if (!EnrollGateBegin("ovt")) return;
             string body = $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"," +
-                          $"\"preferred_side\":{preferredSide},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}}}";
+                          $"\"preferred_side\":{preferredSide},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}{TeamHoldRules.CapsField(TeamHoldGlue.AllAttached)}}}";
             int gen = ++ovtGen;
             Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ovt/queue/join", body, (ok, resp) =>
             {
@@ -18920,6 +19013,20 @@ namespace CompetitiveRounds
                             }
                         }
                         Plugin.SetPendingOvtSlot(slot);
+                        // RJ Stage 2 (KX1): pin (room, hold, mode, series,
+                        // roster) from this answer, the one that names the room.
+                        try
+                        {
+                            var holdRoster = new List<string> { sid };
+                            int hsIdx = resp.IndexOf("\"solo\":");
+                            int hsStart = hsIdx >= 0 ? resp.IndexOf('{', hsIdx) : -1;
+                            int hsEnd = hsStart >= 0 ? FindMatchingBrace(resp, hsStart) : -1;
+                            if (hsStart >= 0 && hsEnd > hsStart)
+                                holdRoster.Add(ExtractJsonString(resp.Substring(hsStart, hsEnd - hsStart + 1), "steam_id"));
+                            foreach (var m in duo) if (m != null) holdRoster.Add(m.steam_id);
+                            TeamHoldNet.PinFromJoin(resp, TeamHoldRules.MODE_OVT, room, ActiveOvt1v2SeriesId, holdRoster);
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] hold pin: {ex.Message}"); }
 
                         // Pre-join Photon props — identical rationale to the
                         // 2v2 ready_join path: remote clients must have
@@ -19209,12 +19316,19 @@ namespace CompetitiveRounds
             sb.Append($"\"duo_b_damage_timeline\":\"{Escape(ClampTimeline(duoBDamageTimeline, 1024))}\",");
             string canonical = $"{soloSteam}:{duoASteam}:{duoBSteam}:{soloRounds}:{duoRounds}:" +
                                $"{(isRanked ? "true" : "false")}:{reporterSteam}:{room ?? ""}:{winnerSide}:{seriesId}";
+            sb.Append(GameIdAdvisory(reporterSteam, room));   // KX6, advisory
             sb.Append($"\"hmac_signature\":\"{ComputeHmacHex(canonical)}\"");
             sb.Append("}");
             string json = sb.ToString();
             Plugin.Log.LogInfo($"[1v2-REPORT] submitting series={seriesId} winner=side{winnerSide} {soloRounds}-{duoRounds}");
             Plugin.Instance.StartCoroutine(PostMatchReportWithRetry($"{baseUrl}/api/v1/ovt/matches", json, (ok, resp) =>
             {
+                if (ok && TeamHoldRules.Journaled(resp))
+                {
+                    // KX6: 202 journaled is terminal; the server settles it.
+                    Plugin.Log.LogInfo($"[1v2] match report journaled: {resp}");
+                    return;
+                }
                 if (ok)
                 {
                     Plugin.Log.LogInfo($"[1v2] match reported: {resp}");
@@ -21388,7 +21502,7 @@ namespace CompetitiveRounds
                 string region = BestKnownPhotonRegion();
                 string lob = lobbyId == null ? "" : $",\"lobby_id\":\"{Escape(lobbyId)}\"";
                 string pw = string.IsNullOrEmpty(password) ? "" : $",\"password\":\"{Escape(password)}\"";
-                return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}{pw}{extras ?? ""}}}";
+                return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}{pw}{extras ?? ""}{TeamHoldRules.CapsField(TeamHoldGlue.AllAttached)}}}";
             }
 
             private static bool PasswordTooLong(string password)

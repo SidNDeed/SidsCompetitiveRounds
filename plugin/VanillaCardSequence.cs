@@ -123,10 +123,14 @@ namespace CompetitiveRounds
         public static void OnDeal(CardChoice choice)
         {
             _deal = null; _dealPos = 0;
-            if (choice == null || !InVanillaRoom() || !RoomRules.SameCards) return;
+            if (choice == null || !InVanillaRoom()) return;
             if (choice.picks <= 0) return;
             var picker = ResolvePicker(choice);
             if (picker == null || picker.data == null || picker.data.view == null || !picker.data.view.IsMine) return;
+            // KX5 (Stage 2 S4 step 3): in a flagged room the phase record's
+            // list is this deal, same cards or not.
+            if (RecordDeal(choice, picker.PlayerID)) return;
+            if (!RoomRules.SameCards) return;
             FfaCardSequence.MasterPublishSeed(_game);
             FfaCardSequence.LatchForGame(_game);   // retries a pending latch; a no-op once verdicted
             LogVerdictOnce();
@@ -151,6 +155,29 @@ namespace CompetitiveRounds
                     Plugin.Log.LogInfo($"[SC] game {_game}: private deal for player {picker.PlayerID} ({why})");
                 }
             }
+        }
+
+        /// <summary>KX5 (Stage 2 S4 step 3): the owner screen. In a flagged
+        /// room, the local picker's first deal of a phase with a record is the
+        /// record's list, served slot by slot through TrySpawnShared like a
+        /// shared deal; under rule s with Same Cards the draw index advances
+        /// as today. False (no record, no list, a name the deal's cards do not
+        /// hold) leaves today's deal.</summary>
+        private static bool RecordDeal(CardChoice choice, int pid)
+        {
+            bool ruleS;
+            List<string> names;
+            try { names = TeamHoldPick.ScreenFor(pid, out ruleS); } catch { return false; }
+            if (names == null || names.Count == 0 || choice.cards == null) return false;
+            var cands = new List<CardInfo>();
+            foreach (var n in names)
+                foreach (var c in choice.cards)
+                    if (c != null && c.gameObject != null && c.gameObject.name == n) { cands.Add(c); break; }
+            if (cands.Count == 0) return false;
+            if (ruleS && RoomRules.SameCards) FfaCardSequence.ConsumeOffers(new List<int> { pid });
+            _deal = cands; _dealPos = 0; _dealGame = _game; _sharedDeals++;
+            Plugin.Log.LogInfo($"[SC] game {_game}: deal for player {pid} from the hold record ({cands.Count} card(s))");
+            return true;
         }
 
         /// <summary>SpawnUniqueCard: serve the deal's next shared candidate

@@ -37,6 +37,14 @@ PIECES = {
     "K4": ("t43_", "t45_", "t4_"),
     "K5": ("t52_", "t56_", "t58_", "t5_"),
     "K6": ("t6_",),
+    # The refit lane (claude/rj-stage2-refit), one entry per continuation piece.
+    "KX1": ("tx1_", "t16_"),
+    "KX2": ("t27_",),
+    "KX3": ("t35_", "tx3_"),
+    "KX4": ("t34_", "tx4_"),
+    "KX5": ("t41_", "t42_", "t44_", "tx5_"),
+    "KX6": ("t55_", "t57_", "tx6_"),
+    "KX8": ("tx8_", "t16_", "t29_", "t39_", "t58_"),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -171,6 +179,105 @@ MUTANTS = [
     ("M6.E5", "K6", "seat", [
         ("            if (first)\n                Emit(\"[SEATLOG] drift slot=\"", "            if (first && slot < 0)\n                Emit(\"[SEATLOG] drift slot=\"")],
      "t6_drift", "t0_drift"),
+    # KX1 (lane-added: the transport binding has no V3 mutant row).
+    ("MX1.1", "KX1", "net", [
+        ("try { carried = !string.IsNullOrEmpty(token()) && carries(path); } catch { carried = false; }",
+         "carried = true;")],
+     "tx1_no_token_today", "tx1_token_reaches_route"),
+    ("MX1.2", "KX1", "net", [
+        ("if (code == 401) { body = SessionRequired; return; }", "")],
+     "tx1_401_today", "tx1_map_codes"),
+    ("MX1.3", "KX1", "net", [
+        ("TeamHoldRules.PinRoom(room, BoolField(answer, \"hold\"), mode, seriesId, roster);",
+         "TeamHoldRules.PinRoom(room, true, mode, seriesId, roster);")],
+     "t16_join_pin_today", "tx1_server_shapes"),
+    # KX2, live points (V3 M2.13; MX2.1 and MX2.2 lane-added).
+    ("M2.13", "KX2", "rules", [
+        ("return !(Held(room) && stamp > _observedAt);", "return true;")],
+     "t27_open_delayed_reordered", "t27_no_post_while_held"),
+    ("MX2.1", "KX2", "rules", [
+        ("                Observe(room, th);\n                if (ThLive(th)) return 0;\n", "                Observe(room, th);\n")],
+     "t27_no_post_while_held", "t27_open_delayed_reordered"),
+    ("MX2.2", "KX2", "rules", [
+        ("else if (_room == room && _g == k.G && _slot == k.Slot) { _observedAt = -1;", "else if (_room == room) { _observedAt = -1;")],
+     "t27_lift_and_rooms", "t27_open_delayed_reordered"),
+    # KX3, admission (V3 M3.11, M3.12, M3.17; MX3.1 lane-added).
+    ("M3.11", "KX3", "rules", [
+        ("if (!Flagged(room)) return null;", "return null;")],
+     "t35_span_games", "t35_release_at_bind"),
+    ("M3.12", "KX3", "rules", [
+        ("var ids = new List<string>(pin.Roster);",
+         "var ids = new List<string>(pin.Roster); foreach (var u in present()) if (!ids.Contains(u)) ids.Add(u);")],
+     "t35_stranger", "t35_span_games"),
+    ("M3.17", "KX3", "rules", [
+        ("return k.BoundActor <= 0 || actor != k.BoundActor;", "return null;")],
+     "tx3_held_seat_identity", "t35_span_games"),
+    ("MX3.1", "KX3", "rules", [
+        ("if (lastReleased == id) return false;", "")],
+     "t35_release_at_bind", "t35_span_games"),
+    # KX4, registration (V3 M3.8, M3.9, M3.10; MX4.1 to MX4.3 lane-added).
+    ("M3.8", "KX4", "rules", [
+        ("            int at = index(ids, newId);\n            if (at < 0) return -1;\n            list.Insert(at, null);\n            return at;\n",
+         "            if (ids.Contains(newId)) return -1;\n            return newId;\n")],
+     "t34_high_slot", "t34_duplicate_and_today"),
+    ("M3.9", "KX4", "rules", [
+        ("            list.Insert(at, null);\n", "")],
+     "t34_low_slot", "t34_high_slot"),
+    ("M3.10", "KX4", "rules", [
+        ("list.Insert(at, null);", "list.Insert(at, null); list.Insert(at, null);")],
+     "t34_high_slot", "t34_duplicate_and_today"),
+    ("MX4.1", "KX4", "rules", [
+        ("{ return readmitLobby || Flagged(room); }", "{ return readmitLobby; }")],
+     "t34_high_slot", "tx4_seed_plan"),
+    ("MX4.2", "KX4", "rules", [
+        ("p.DrawIndex = st.Deals;", "p.DrawIndex = st.Deals - 1;")],
+     "tx4_seed_plan", "t34_high_slot"),
+    ("MX4.3", "KX4", "rules", [
+        ("            list.RemoveAll(p => p == null || dead(p));\n", "")],
+     "t34_low_slot", "t34_high_slot"),
+    # KX5, the record (V3 M4.1, M4.2, M4.3, M4.4, M4.7).
+    ("M4.1", "KX5", "rules", [
+        ("internal static bool BuildsRecord(bool flagged, bool holdLive) { return flagged; }",
+         "internal static bool BuildsRecord(bool flagged, bool holdLive) { return flagged && holdLive; }")],
+     "t41_twin_run", "tx5_off_codec"),
+    ("M4.2", "KX5", "rules", [
+        ("return r != null ? r.FirstOf(slot) : null;",
+         "return r != null && r.ListOf(slot) != null && r.ListOf(slot).Count > 1 ? r.ListOf(slot)[1] : null;")],
+     "t41_twin_run", "t42_ledger"),
+    ("M4.3", "KX5", "rules", [
+        ("FfaReadmitRules.AdoptRecord(rec, spend, setDrawIndex);",
+         "FfaReadmitRules.AdoptRecord(rec, new FfaReadmitRules.SpendState(), setDrawIndex);")],
+     "t42_ledger", "tx5_off_codec"),
+    ("M4.4", "KX5", "rules", [
+        ("FfaReadmitRules.AdoptRecord(rec, spend, setDrawIndex);", ""),
+        ("internal static void NoteGrantApplied(FfaReadmitRules.SpendState spend, string card) { }",
+         "internal static void NoteGrantApplied(FfaReadmitRules.SpendState spend, string card) { if (card != null) spend.Ledger.Add(card); }")],
+     "t42_ledger", "tx5_off_codec"),
+    ("M4.7", "KX5", "rules", [
+        ("if (h != null) return h;", "")],
+     "t44_rule_p_promotion", "t41_twin_run"),
+    # KX6, reports after a return (V3 M5.8; MX6.1 to MX6.4 lane-added).
+    ("M5.8", "KX6", "rules", [
+        ("            if (Flagged(room)) return true;\n            return me == lowest;\n",
+         "            return me == lowest;\n")],
+     "t55_every_present_files", "t57_held_census"),
+    ("MX6.1", "KX6", "rules", [
+        ("presentUids.Count != need - 1", "presentUids.Count > need - 1")],
+     "t57_held_census", "t55_every_present_files"),
+    ("MX6.2", "KX6", "rules", [
+        ("if (u == heldUid || !pin.Roster.Contains(u)) return null;", "if (u == heldUid) return null;")],
+     "t57_held_census", "t55_every_present_files"),
+    ("MX6.3", "KX6", "rules", [
+        ('return "game-id:" + (g ?? "") + ":" + (reporter ?? "") + ":" + (room ?? "");',
+         'return "game-id:" + (g ?? "") + ":" + (room ?? "") + ":" + (reporter ?? "");')],
+     "tx6_game_id", "t55_every_present_files"),
+    ("MX6.4", "KX6", "rules", [
+        ('return body != null && body.Replace(" ", "").IndexOf(', 'return body != null || body.Replace(" ", "").IndexOf(')],
+     "tx6_journaled_terminal", "t55_every_present_files"),
+    # KX8, the capability token (MX8.1 lane-added).
+    ("MX8.1", "KX8", "rules", [
+        ("return allAttached ? ", "return true ? ")],
+     "tx8_caps", "t16_join_pin_today"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an
@@ -222,6 +329,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", required=True)
     ap.add_argument("--piece", default=None)
+    # The refit lane logs fixtures and mutants apart: fixtures runs every
+    # fixture of the piece (and the K0 inventory), mutants every mutant.
+    ap.add_argument("--part", choices=("all", "fixtures", "mutants"), default="all")
     a = ap.parse_args()
     work = os.path.abspath(a.work)
     os.makedirs(work, exist_ok=True)
@@ -256,15 +366,16 @@ def main():
     prefixes = PIECES[a.piece] if a.piece else tuple(p for v in PIECES.values() for p in v)
     cases = [c for c in listed if c.startswith(prefixes)]
     passed = 0
-    for case in cases:
+    for case in (cases if a.part != "mutants" else []):
         rc, out = run_case(dll, case)
         print(out)
         passed += rc == 0
         ok = ok and rc == 0
-    print("fixtures: %d of %d pass" % (passed, len(cases)))
-    ok = ok and len(cases) > 0
+    if a.part != "mutants":
+        print("fixtures: %d of %d pass" % (passed, len(cases)))
+        ok = ok and len(cases) > 0
 
-    mutants = [m for m in MUTANTS if a.piece is None or m[1] == a.piece]
+    mutants = [m for m in MUTANTS if (a.piece is None or m[1] == a.piece) and a.part != "fixtures"]
     caught = 0
     for name, piece, key, edits, target, control in mutants:
         src = os.path.join(PLUGIN, FILES[key])

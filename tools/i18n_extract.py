@@ -161,6 +161,10 @@ FILES = [
     # partial. Keybinds.cs and KeybindRules.cs are absent on purpose: they
     # hold no display text (#357, #464).
     "NativeUI.Keybinds.cs",
+    # RJ Stage 2 (team and 1v2 seat hold): the room banner lines and the
+    # returner's offer, buttons and outcome lines, all I18n.Tr/TrF sites.
+    # The other TeamHold*.cs files hold no display text.
+    "TeamHoldBanner.cs", "TeamHoldReturn.cs",
 ]
 
 # call(...) sites and which ARGUMENT POSITIONS carry display text (wave-2

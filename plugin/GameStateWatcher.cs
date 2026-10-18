@@ -5492,11 +5492,19 @@ namespace CompetitiveRounds
             bool tokenNews = teamToken != liveSentTeamToken && (sp1 > 0 || sp2 > 0);
             if (force || tokenNews || sp1 != liveSentTeamP1 || sp2 != liveSentTeamP2)
             {
+                // RJ Stage 2 S2 live points (RJS-M5): no team post is created
+                // while this seat reads a waiting hold (cr_th p, o, c, b) in
+                // the room, and nothing is latched, so the pair goes once the
+                // hold has ended. The post carries its creation stamp: the
+                // sender drops one created after the writer's own observation.
+                string holdRoom = TeamHoldWriter.CurrentRoom();
+                long holdStamp = TeamHoldRules.LiveGate.Create(holdRoom, TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH));
+                if (holdStamp == 0) return;
                 liveSentTeamP1 = sp1; liveSentTeamP2 = sp2;
                 liveSentTeamToken = teamToken;
                 int teamGame = TeamGameNumber.Live.For(ApiClient.ActiveTeamSeriesId, teamRoom);
                 ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId, sp1, sp2,
-                                             teamGame, teamRoom, teamToken);
+                                             teamGame, teamRoom, teamToken, holdStamp, holdRoom);
             }
         }
 
@@ -6977,7 +6985,9 @@ namespace CompetitiveRounds
             // Census: gate + roster from ONE fighter view (converted together
             // with the foreach below — recon structural hazard).
             var reportFighters = RoomActors.ActiveFighters();
-            if (reportFighters.Length != 3) return false;
+            int heldTeam = -1;   // KX6: the held seat, as the team census
+            string heldSid = reportFighters.Length == 2 ? HeldCensusSid(reportFighters, 3, out heldTeam) : null;
+            if (reportFighters.Length != 3 && heldSid == null) return false;
             var pm = PlayerManager.instance;
             if (pm == null || pm.players == null) return false;
             if (string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId))
@@ -7018,6 +7028,8 @@ namespace CompetitiveRounds
                 else if (TryGetPeerTelemetry(pp.ActorNumber, out _, out _, out _, out _, out string pDmg, out _, out _)) dmgTl = pDmg ?? "";
                 info[sid] = (name, teamId, picks, fps, dmgTl);
             }
+            if (heldSid != null && !info.ContainsKey(heldSid))
+                info[heldSid] = (heldSid, heldTeam, new List<MatchTracker.CardPickData>(), 0, "");
             if (info.Count != 3) { Plugin.Log.LogWarning($"[1v2-REPORT] resolved {info.Count}/3 players"); return false; }
 
             // Group by in-game team; the singleton team is the solo.
@@ -7036,7 +7048,7 @@ namespace CompetitiveRounds
             string lowest = null; long lowVal = long.MaxValue;
             foreach (var sid in info.Keys) { if (long.TryParse(sid, out long v) && v < lowVal) { lowVal = v; lowest = sid; } }
             if (lowest == null) lowest = localSteamId;
-            if (lowest != localSteamId) { Plugin.Log.LogInfo($"[1v2-REPORT] reporter is {lowest}, not me — skipping"); return true; }
+            if (!TeamHoldRules.Files(TeamHoldWriter.CurrentRoom(), localSteamId, lowest)) { Plugin.Log.LogInfo($"[1v2-REPORT] reporter is {lowest}, not me — skipping"); return true; }
 
             // Rounds: solo's team maps to p1Rounds if it's ROUNDS team 0, else p2Rounds.
             int soloRounds = soloTeam == 0 ? p1Rounds : p2Rounds;
@@ -7566,13 +7578,17 @@ namespace CompetitiveRounds
 
         /// <summary>V11 K47: in a gated room each roster freeze takes the lock
         /// roster's Steam ids (ApiClient.FfaLockedRoster) and reads no fighter
-        /// view; null for every other room, which freezes as today.</summary>
+        /// view. RJ Stage 2 S3 step 5: in a flagged room (team or 1v2) it
+        /// takes the pinned series roster (TeamHoldRules.LockRoster), so the
+        /// per-game freeze never narrows below the series while a seat is
+        /// held. Null for every other room, which freezes as today.</summary>
         private static List<string> GatedFreezeIds()
         {
             try
             {
                 string room = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : "";
-                if (!FfaAssembly.IsGatedRoom(room)) return null;
+                if (!FfaAssembly.IsGatedRoom(room))
+                    return TeamHoldRules.LockRoster(room, PresentFighterIds);
                 var ids = new List<string>();
                 var roster = ApiClient.FfaLockedRoster;
                 if (roster != null)
@@ -7581,6 +7597,20 @@ namespace CompetitiveRounds
                 return ids;
             }
             catch { return null; }
+        }
+
+        /// <summary>The present fighters' Steam ids, the view a freeze of
+        /// today reads; handed to the lock-roster feeder, which never reads
+        /// it in a flagged room.</summary>
+        private static IEnumerable<string> PresentFighterIds()
+        {
+            var ids = new List<string>();
+            foreach (var f in RoomActors.ActiveFighters())
+            {
+                var s = RoomActors.SteamIdOf(f);
+                if (!string.IsNullOrEmpty(s)) ids.Add(s);
+            }
+            return ids;
         }
 
         private static bool TryReportFfaMatch(string reportRoomId, int duration, int winnerTeam)
@@ -7913,7 +7943,11 @@ namespace CompetitiveRounds
             // Census: gate + roster from ONE fighter view (converted with the
             // photonPlayers assignment below — recon structural hazard).
             var reportFighters = RoomActors.ActiveFighters();
-            if (reportFighters.Length != 4)
+            // KX6 (Stage 2 S5): a game-over during a hold counts the held
+            // seat from the pinned roster.
+            int heldTeam = -1;
+            string heldSid = reportFighters.Length == 3 ? HeldCensusSid(reportFighters, 4, out heldTeam) : null;
+            if (reportFighters.Length != 4 && heldSid == null)
             {
                 Plugin.Log.LogWarning($"[2v2-REPORT] aborting: fighters={reportFighters.Length} (expected 4)");
                 return null;
@@ -8060,6 +8094,8 @@ namespace CompetitiveRounds
                 bySteam[sid] = (name, peerTeamId, pickList, fps);
             }
 
+            if (heldSid != null && !bySteam.ContainsKey(heldSid))
+                bySteam[heldSid] = (heldSid, heldTeam, new List<MatchTracker.CardPickData>(), 0);
             if (bySteam.Count != 4)
             {
                 Plugin.Log.LogWarning($"[2v2-REPORT] resolved {bySteam.Count}/4 players, aborting");
@@ -8074,7 +8110,8 @@ namespace CompetitiveRounds
                 if (long.TryParse(sid, out long v) && v < lowestVal) { lowestVal = v; lowestSid = sid; }
             }
             if (lowestSid == null) lowestSid = localSteamId;
-            if (lowestSid != localSteamId)
+            // KX6: in a flagged room every present fighter files its own.
+            if (!TeamHoldRules.Files(TeamHoldWriter.CurrentRoom(), localSteamId, lowestSid))
             {
                 // Routed correctly, just not by us. A payload rather than null:
                 // "someone else is posting this" is a SUCCESS for the caller,
@@ -8179,6 +8216,35 @@ namespace CompetitiveRounds
             }
             SubmitTeamReport(payload);
             return true;
+        }
+
+        /// <summary>KX6 (Stage 2 S5): the held seat a game-over census counts
+        /// from the pinned roster while a hold is live (TeamHoldRules.
+        /// HeldCensusSeat over the present fighters' ids), and its team from
+        /// its slot. Null: the census of today.</summary>
+        private static string HeldCensusSid(IList<Photon.Realtime.Player> fighters, int need, out int team)
+        {
+            team = -1;
+            try
+            {
+                var cut = TeamHold.Cut;
+                if (cut == null || !TeamHoldRules.ThLive(TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH))) return null;
+                var uids = new List<string>();
+                foreach (var f in fighters)
+                {
+                    string s = f != null ? ResolvePhotonSteamId(f) : null;
+                    if (string.IsNullOrEmpty(s)) return null;
+                    uids.Add(s);
+                }
+                string room = TeamHoldWriter.CurrentRoom();
+                string held = TeamHoldRules.HeldCensusSeat(room, uids, cut.LeaverUid, need);
+                if (held == null) return null;
+                var pin = TeamHoldRules.PinFor(room);
+                team = TeamHoldRules.SlotToTeam(pin != null ? pin.Mode : null, cut.Slot);
+                Plugin.Log.LogInfo(TeamHold.TAG + " report census counts the held seat (slot " + cut.Slot + ")");
+                return held;
+            }
+            catch { return null; }
         }
 
         /// <summary>Maps a Photon player to a Steam ID. ROUNDS publishes the Steam
@@ -8827,6 +8893,35 @@ namespace CompetitiveRounds
             {
                 Plugin.Log.LogWarning($"[POLL] Card broadcast failed: {ex.Message}");
             }
+        }
+
+        /// <summary>KX4 (Stage 2 S3 step 8): the returner's watcher seeded
+        /// from the snapshot it gated. The score counters and their last
+        /// readings (so the poll sees no change it did not watch), the live
+        /// points the snapshot proves (a round won is two points; the sent
+        /// pair matches, so the returner posts nothing lower than the room
+        /// already posted), the pick count, and cr_cards republished as the
+        /// slot's names, pipe-joined, as BroadcastCardPick writes it.</summary>
+        internal static void SeedFromHold(int r0, int r1, int p0, int p1, IList<string> names)
+        {
+            p1Rounds = r0; p2Rounds = r1; p1Points = p0; p2Points = p1;
+            lastP1Rounds = r0; lastP2Rounds = r1; lastP1Points = p0; lastP2Points = p1;
+            currentRound = r0 + r1 + 1;
+            liveCumP1 = Math.Min(r0 > 0 ? 2 : p0, 2);
+            liveCumP2 = Math.Min(r1 > 0 ? 2 : p1, 2);
+            liveSentTeamP1 = liveCumP1; liveSentTeamP2 = liveCumP2;
+            broadcastCardNames.Clear();
+            if (names != null) broadcastCardNames.AddRange(names);
+            pickCountThisMatch = broadcastCardNames.Count;
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.LocalPlayer == null) return;
+                var props = new Hashtable();
+                props[CARD_PROP_KEY] = string.Join("|", broadcastCardNames.ToArray());
+                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                Plugin.Log.LogInfo($"[POLL] Seeded from the hold: rounds {r0}-{r1}, points {p0}-{p1}, {broadcastCardNames.Count} cards");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POLL] Hold seeding: {ex.Message}"); }
         }
 
         /// <summary>

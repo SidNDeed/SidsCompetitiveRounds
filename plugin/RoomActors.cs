@@ -758,6 +758,18 @@ namespace CompetitiveRounds
                                                                        FfaLateEntry.Record);
                     if (kindR.HasValue) return kindR.Value;
                 }
+                // RJ Stage 2 S3 step 4, the held-seat conjunct: in a flagged
+                // room an actor whose u_id names the held seat is a fighter
+                // only if it is X, the bound actor of that seat's hold. The
+                // departed actor itself is not judged by it (its departure
+                // stays a fighter's departure).
+                var cut = TeamHold.Cut;
+                if (cut != null && actor.ActorNumber != cut.Actor)
+                {
+                    var held = TeamHoldRules.HeldSeatUnauthorized(TeamHoldWriter.CurrentRoom(), TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH),
+                                                                  actor.ActorNumber, sid, cut.LeaverUid, cut.Slot);
+                    if (held.HasValue) return held.Value;
+                }
                 // DUPLICATE-IDENTITY rule (Codex r3 CRITICAL): a roster
                 // fighter's identity belongs to the EARLIEST actor carrying
                 // it. A later actor claiming the same u_id while the real one

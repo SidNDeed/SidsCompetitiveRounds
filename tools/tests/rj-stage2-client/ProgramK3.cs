@@ -185,7 +185,7 @@ namespace CompetitiveRounds.Stage2Harness
                 N.MineAnswer a, b, c;
                 N.TryParseMine(200, "{\"readmissible\":0}", out a);
                 N.TryParseMine(404, "{\"detail\":\"Not Found\"}", out b);
-                N.TryParseMine(200, "{\"readmissible\":1,\"hold_id\":\"h1\",\"mode\":\"team\",\"room_name\":\"team_x\",\"slot\":1,\"team\":0,\"hold_s\":100,\"series_tally\":\"1:0\"}", out c);
+                N.TryParseMine(200, "{\"readmissible\":1,\"hold_id\":\"h1\",\"mode\":\"team\",\"room_name\":\"team_x\",\"slot\":1,\"team\":0,\"hold_s\":100,\"series_tally\":[1, 0]}", out c);
                 return All(Expect("zero", R.DiscoveryShows(a), false), Expect("404", R.DiscoveryShows(b), false),
                            Expect("live", R.DiscoveryShows(c), true));
             });

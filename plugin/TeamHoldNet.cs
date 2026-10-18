@@ -12,9 +12,10 @@ namespace CompetitiveRounds
     /// THE SEAM (lane notes row 1). Every call needs ApiClient's shared request
     /// path and its HMAC helper, which are private to an FFA-owned file. This
     /// file therefore carries two delegates, <see cref="Send"/> and
-    /// <see cref="Sign"/>, which KX1 binds inside ApiClient. Unbound, a call
-    /// answers <see cref="NoTransport"/> at once and every caller ends toward
-    /// today (V3:157). Answers are parsed by manual string splitting:
+    /// <see cref="Sign"/>, which ApiClient.BindTeamHold binds at Initialize
+    /// (Send through <see cref="Bound"/>: no session token, no send). Unbound,
+    /// without a token, or answered 401, a call answers <see cref="NoTransport"/>
+    /// and every caller ends toward today (V3:157). Answers are parsed by manual string splitting:
     /// JsonUtility silently fails on nested arrays.
     /// </summary>
     internal static class TeamHoldNet
@@ -54,6 +55,74 @@ namespace CompetitiveRounds
             if (t == null) { done(NoTransport, "no-transport"); return; }
             try { t(method, path, body, done); }
             catch { done(NoTransport, "transport-threw"); }
+        }
+
+        // ── The binding (KX1) ──────────────────────────────────────────────
+
+        /// <summary>The shared request path of ApiClient as KX1 hands it in:
+        /// method, path, JSON body (null for GET), answer(ok, text), where text
+        /// is the body on success and ApiClient.FormatRequestError's
+        /// "HTTP &lt;code&gt;: &lt;body&gt;" on a refusal (anything else: no answer).</summary>
+        internal delegate void SharedSend(string method, string path, string body, Action<bool, string> answer);
+
+        /// <summary>The body a 401 maps to; the status is NoTransport, so the
+        /// caller ends toward today exactly as with no transport (V3:157).</summary>
+        internal const string SessionRequired = "session_required";
+
+        /// <summary>The bound transport. A call goes out only when the session
+        /// token is held AND the shared path would carry it on this route
+        /// (<paramref name="carries"/>: ApiClient's credentialed-transport
+        /// rule); otherwise it answers NoTransport at once and nothing is sent,
+        /// because every hold route requires a verified session. Each answer
+        /// is mapped once by <see cref="MapShared"/>.</summary>
+        internal static Transport Bound(Func<string> token, Func<string, bool> carries, SharedSend shared)
+        {
+            if (token == null || carries == null || shared == null) return null;
+            return (method, path, body, done) =>
+            {
+                bool carried;
+                try { carried = !string.IsNullOrEmpty(token()) && carries(path); } catch { carried = false; }
+                if (!carried) { done(NoTransport, "no-session"); return; }
+                bool answered = false;
+                shared(method, path, body, (ok, text) =>
+                {
+                    if (answered) return;
+                    answered = true;
+                    int st; string b;
+                    MapShared(ok, text, out st, out b);
+                    done(st, b);
+                });
+            };
+        }
+
+        /// <summary>The shared path's (ok, text) as (status, body): success is
+        /// 200 with the body; "HTTP &lt;code&gt;: &lt;body&gt;" is that code with its
+        /// body (a trailing Retry-After line dropped); a 401 is NoTransport with
+        /// <see cref="SessionRequired"/>; anything else (a timeout, a local
+        /// refusal) is NoTransport with the text.</summary>
+        internal static void MapShared(bool ok, string text, out int status, out string body)
+        {
+            if (ok) { status = 200; body = text ?? ""; return; }
+            status = NoTransport;
+            body = text ?? "";
+            if (string.IsNullOrEmpty(text) || !text.StartsWith("HTTP ", StringComparison.Ordinal)) return;
+            int colon = text.IndexOf(':', 5);
+            int code;
+            if (colon <= 5 || !int.TryParse(text.Substring(5, colon - 5).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out code)) return;
+            if (code == 401) { body = SessionRequired; return; }
+            string rest = text.Substring(colon + 1).TrimStart();
+            int ra = rest.IndexOf("\nRetry-After:", StringComparison.Ordinal);
+            status = code;
+            body = ra >= 0 ? rest.Substring(0, ra) : rest;
+        }
+
+        /// <summary>The pin of S1 step 2 from a join answer naming the room:
+        /// the team ready_join or the 1v2 poll ready_join. `hold` is read from
+        /// the answer; an answer without it pins false (unflagged: today).
+        /// A written pin never changes for its room (TeamHoldRules.PinRoom).</summary>
+        internal static void PinFromJoin(string answer, string mode, string room, string seriesId, IEnumerable<string> roster)
+        {
+            TeamHoldRules.PinRoom(room, BoolField(answer, "hold"), mode, seriesId, roster);
         }
 
         /// <summary>The hold-open canonical (RJS-L3), new and separate from the
@@ -179,6 +248,30 @@ namespace CompetitiveRounds
             return s == "true" || s == "1";
         }
 
+        /// <summary>A two-integer JSON array `"key": [a, b]` (the server's
+        /// series_tally); false when absent, null or not two integers.</summary>
+        internal static bool IntPairField(string json, string key, out int a, out int b)
+        {
+            a = -1; b = -1;
+            if (string.IsNullOrEmpty(json)) return false;
+            string pat = "\"" + key + "\"";
+            int k = json.IndexOf(pat, StringComparison.Ordinal);
+            if (k < 0) return false;
+            int i = k + pat.Length;
+            while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+            if (i >= json.Length || json[i] != ':') return false;
+            i++;
+            while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+            if (i >= json.Length || json[i] != '[') return false;
+            int end = json.IndexOf(']', i);
+            if (end < 0) return false;
+            var parts = json.Substring(i + 1, end - i - 1).Split(',');
+            if (parts.Length != 2) return false;
+            a = TeamHoldRules.ParseInt(parts[0].Trim(), -1);
+            b = TeamHoldRules.ParseInt(parts[1].Trim(), -1);
+            return a >= 0 && b >= 0;
+        }
+
         internal sealed class OpenAnswer
         {
             internal bool Opened;
@@ -188,12 +281,13 @@ namespace CompetitiveRounds
             internal string Reason;
         }
 
-        /// <summary>`opened` with hold_id, seq and hold_s, or `refused` with a reason.</summary>
+        /// <summary>`opened` with hold_id, seq and hold_s, or `refused` with a
+        /// reason, in the answer's `status` field (the server half's name).</summary>
         internal static bool TryParseOpen(int status, string body, out OpenAnswer a)
         {
             a = null;
             if (status != 200 || string.IsNullOrEmpty(body)) return false;
-            string outcome = Field(body, "outcome");
+            string outcome = Field(body, "status");
             if (outcome == "opened")
             {
                 a = new OpenAnswer { Opened = true, HoldId = Field(body, "hold_id"), Seq = IntField(body, "seq", -1), HoldS = IntField(body, "hold_s", 0) };
@@ -217,7 +311,8 @@ namespace CompetitiveRounds
         }
 
         /// <summary>The hold row as the server answers it to a series member.
-        /// `state` is one of open, claimed, bound, entered, closed.</summary>
+        /// `state` is one of opened, claimed, bound, entered, closed (the
+        /// server half's words, match_hold.py _state_word).</summary>
         internal static bool TryParseState(int status, string body, out StateAnswer a)
         {
             a = null;
@@ -226,7 +321,7 @@ namespace CompetitiveRounds
             char c;
             switch (st)
             {
-                case "open": c = 'o'; break;
+                case "opened": c = 'o'; break;
                 case "claimed": c = 'c'; break;
                 case "bound": c = 'b'; break;
                 case "entered": c = 'e'; break;
@@ -257,7 +352,7 @@ namespace CompetitiveRounds
             internal int W0, W1;
         }
 
-        /// <summary>The discovery answer; `series_tally` is "w0:w1".</summary>
+        /// <summary>The discovery answer; `series_tally` is the array [w0, w1].</summary>
         internal static bool TryParseMine(int status, string body, out MineAnswer a)
         {
             a = null;
@@ -267,9 +362,7 @@ namespace CompetitiveRounds
             a.HoldId = Field(body, "hold_id"); a.N = IntField(body, "n", 0); a.Mode = Field(body, "mode");
             a.Room = Field(body, "room_name"); a.Region = Field(body, "room_region");
             a.Slot = IntField(body, "slot", -1); a.Team = IntField(body, "team", -1); a.HoldS = IntField(body, "hold_s", 0);
-            var tally = (Field(body, "series_tally") ?? "").Split(':');
-            a.W0 = tally.Length == 2 ? TeamHoldRules.ParseInt(tally[0], -1) : -1;
-            a.W1 = tally.Length == 2 ? TeamHoldRules.ParseInt(tally[1], -1) : -1;
+            IntPairField(body, "series_tally", out a.W0, out a.W1);
             bool ok = !string.IsNullOrEmpty(a.HoldId) && !string.IsNullOrEmpty(a.Room) && a.Slot >= 0 && a.Team >= 0
                       && (a.Mode == TeamHoldRules.MODE_TEAM || a.Mode == TeamHoldRules.MODE_OVT) && a.W0 >= 0 && a.W1 >= 0;
             if (!ok) a.Readmissible = false;
@@ -296,15 +389,15 @@ namespace CompetitiveRounds
         {
             a = null;
             if (string.IsNullOrEmpty(body)) return false;
-            if (status != 200) { a = new ClaimAnswer { Ok = false, Reason = Field(body, "reason") ?? ("http_" + status.ToString(CultureInfo.InvariantCulture)) }; return true; }
+            if (status != 200 || Field(body, "status") != "claimed")
+            { a = new ClaimAnswer { Ok = false, Reason = Field(body, "reason") ?? ("http_" + status.ToString(CultureInfo.InvariantCulture)) }; return true; }
             a = new ClaimAnswer
             {
                 Ok = true, Token = Field(body, "token"), Room = Field(body, "room_name"), Region = Field(body, "room_region"),
                 Slot = IntField(body, "slot", -1), Team = IntField(body, "team", -1), G = Field(body, "game_id"),
                 Hold = BoolField(body, "hold"), BoundaryDigest = Field(body, "boundary_digest"), SeriesId = Field(body, "series_id"),
             };
-            var tally = (Field(body, "series_tally") ?? "").Split(':');
-            if (tally.Length == 2) { a.W0 = TeamHoldRules.ParseInt(tally[0], -1); a.W1 = TeamHoldRules.ParseInt(tally[1], -1); }
+            IntPairField(body, "series_tally", out a.W0, out a.W1);
             if (string.IsNullOrEmpty(a.Token) || string.IsNullOrEmpty(a.Room) || a.Slot < 0 || string.IsNullOrEmpty(a.G))
             { a.Ok = false; a.Reason = "malformed"; }
             if (a.Ok) SeatDeckLog.Emit("[HOLD] claimed slot=" + a.Slot.ToString(CultureInfo.InvariantCulture) + " g=" + a.G);
@@ -316,9 +409,20 @@ namespace CompetitiveRounds
         {
             bound = false; reason = null;
             if (string.IsNullOrEmpty(body)) return false;
-            if (status == 200 && Field(body, "outcome") == "bound") { bound = true; SeatDeckLog.Emit("[HOLD] bound"); return true; }
+            if (status == 200 && Field(body, "status") == "bound") { bound = true; SeatDeckLog.Emit("[HOLD] bound"); return true; }
             reason = Field(body, "reason") ?? ("http_" + status.ToString(CultureInfo.InvariantCulture));
             return true;
+        }
+
+        /// <summary>The entry receipt: true only for a 200 whose `status` is
+        /// entered. The server answers a refusal as 200 with status refused
+        /// and a reason, which is a failure (toward today), never an entry.</summary>
+        internal static bool TryParseEntered(int status, string body, out string reason)
+        {
+            reason = null;
+            if (status == 200 && Field(body, "status") == "entered") return true;
+            reason = Field(body, "reason") ?? ("entered_" + status.ToString(CultureInfo.InvariantCulture));
+            return false;
         }
 
         internal static bool TryParseGameStart(int status, string body, out string g)

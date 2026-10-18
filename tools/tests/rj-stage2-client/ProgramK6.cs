@@ -36,8 +36,12 @@ namespace CompetitiveRounds.Stage2Harness
             return l.StartsWith("[HOLD] ", StringComparison.Ordinal) || l.StartsWith("[SEATLOG] ", StringComparison.Ordinal);
         }
 
-        private const string ClaimBody = "{\"token\":\"tok-genuine\",\"room_name\":\"team_x\",\"room_region\":\"eu\",\"slot\":1,\"team\":0,"
-                                       + "\"game_id\":\"g-7\",\"hold\":true,\"boundary_digest\":\"d0\",\"series_id\":\"s1\",\"series_tally\":\"1:0\"}";
+        // The server half's claim answer (match_hold.py match_hold_claim at
+        // fe0ab988): the state payload plus status, token, hold, room_region
+        // and boundary_digest; no series_tally, series_id or roster.
+        private const string ClaimBody = "{\"hold_id\":\"h1\",\"game_id\":\"g-7\",\"mode\":\"team\",\"room_name\":\"team_x\",\"slot\":1,\"team\":0,\"n\":1,"
+                                       + "\"state\":\"claimed\",\"seq\":0,\"deadline_s\":90,\"hold_s\":90,\"bound_actor\":null,\"closed_at\":null,\"closed_reason\":null,"
+                                       + "\"status\":\"claimed\",\"token\":\"tok-genuine\",\"hold\":true,\"room_region\":\"eu\",\"boundary_digest\":\"d0\"}";
 
         private static void RegisterK6()
         {
@@ -71,7 +75,7 @@ namespace CompetitiveRounds.Stage2Harness
             Add("t6_offered", () =>
             {
                 N.MineAnswer a;
-                N.TryParseMine(200, "{\"readmissible\":1,\"hold_id\":\"h1\",\"mode\":\"team\",\"room_name\":\"team_x\",\"slot\":1,\"team\":0,\"hold_s\":100,\"series_tally\":\"1:0\"}", out a);
+                N.TryParseMine(200, "{\"readmissible\":1,\"hold_id\":\"h1\",\"mode\":\"team\",\"room_name\":\"team_x\",\"slot\":1,\"team\":0,\"hold_s\":100,\"series_tally\":[1, 0]}", out a);
                 bool shown = false;
                 var got = Capture(() => shown = R.DiscoveryShows(a));
                 return All(Expect("shown", shown, true), ExpectLines(got, "[HOLD] offered mode=team slot=1"));
@@ -94,7 +98,7 @@ namespace CompetitiveRounds.Stage2Harness
                 bool b1 = false, b2 = true; string r1, r2;
                 var got = Capture(() =>
                 {
-                    N.TryParseBind(200, "{\"outcome\":\"bound\",\"seq\":4}", out b1, out r1);
+                    N.TryParseBind(200, "{\"status\":\"bound\",\"seq\":4}", out b1, out r1);
                     N.TryParseBind(409, "{\"reason\":\"uncorroborated\"}", out b2, out r2);
                 });
                 return All(Expect("bound", b1, true), Expect("retry", b2, false), ExpectLines(got, "[HOLD] bound"));

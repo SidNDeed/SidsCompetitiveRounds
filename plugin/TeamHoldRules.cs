@@ -45,9 +45,10 @@ namespace CompetitiveRounds
             return int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out v) ? v : dflt;
         }
 
-        // ── The pin store (S1 step 2). Filled ONLY by KX1 from the server's
-        //    join, poll, Start and claim answers; at this lane tip nothing
-        //    pins, so every room reads unflagged and nothing changes. ───────
+        // ── The pin store (S1 step 2). Filled ONLY from the server's answers
+        //    naming the room: the team and 1v2 ready_join polls
+        //    (TeamHoldNet.PinFromJoin) and the claim answer (TeamHoldReturn).
+        //    A room no answer flagged reads unflagged, which is today. ──────
 
         internal sealed class Pin
         {
@@ -982,6 +983,343 @@ namespace CompetitiveRounds
             }
             r.Add(ExpiryOp.VanillaLeave);
             return r;
+        }
+
+
+        // ── KX2: live points (V3 S2, RJS-M5) ───────────────────────────────
+
+        /// <summary>The team live-points gate (V3 S2 live points, RJS-M5).
+        /// While this seat observes a waiting hold (cr_th p, o, c or b) in a
+        /// room, the team channel creates no post there, and a post created
+        /// after the observation never dispatches, neither its first send nor
+        /// a retry; a post created before it is sent as today. Two readings
+        /// feed the observation: the writer's own cr_th write (its compare-and
+        /// -set reaches the room cache only when the server echoes it) and the
+        /// room's cr_th as MaybeSendLivePoints reads it. A reading of the same
+        /// hold (its game and slot) ended, e or x, lifts the observation (an
+        /// older hold's x still in the room does not); it is keyed on
+        /// the room, so a seat that left a held room posts in the next one as
+        /// today. Posts of other channels carry stamp 0 and always dispatch.</summary>
+        internal static class LiveGate
+        {
+            private static long _created;
+            private static long _observedAt = -1;
+            private static string _room, _g;
+            private static int _slot = -1;
+
+            internal static void Reset() { _created = 0; _observedAt = -1; _room = null; _g = null; _slot = -1; }
+
+            /// <summary>One reading of the room's hold. The first waiting
+            /// reading in a room marks the observation; a reading of the
+            /// same hold (game and slot) ended lifts it; an unreadable value
+            /// (no hold written yet, or a cache the echo has not reached)
+            /// changes nothing.</summary>
+            internal static void Observe(string room, string th)
+            {
+                if (string.IsNullOrEmpty(room)) return;
+                HoldKey k;
+                if (!TryParseHold(th, out k)) return;
+                if (IsLive(k.State))
+                {
+                    if (_observedAt < 0 || _room != room) _observedAt = _created;
+                    _room = room; _g = k.G; _slot = k.Slot;
+                }
+                else if (_room == room && _g == k.G && _slot == k.Slot) { _observedAt = -1; _room = null; _g = null; _slot = -1; }
+            }
+
+            internal static bool Held(string room) { return _observedAt >= 0 && room == _room; }
+
+            /// <summary>MaybeSendLivePoints: the creation stamp of a new team
+            /// post in <paramref name="room"/>, or 0 (no post) while
+            /// <paramref name="th"/>, its own reading of the room's cr_th,
+            /// is a waiting hold.</summary>
+            internal static long Create(string room, string th)
+            {
+                Observe(room, th);
+                if (ThLive(th)) return 0;
+                return ++_created;
+            }
+
+            /// <summary>PostTeamLivePoints and SendLivePoints, before every
+            /// send: false for a team post created after the observation in
+            /// its room.</summary>
+            internal static bool Dispatch(long stamp, string room)
+            {
+                if (stamp <= 0) return true;
+                return !(Held(room) && stamp > _observedAt);
+            }
+        }
+
+        // ── KX3: admission (V3 S3 steps 4 and 5) ───────────────────────────
+
+        /// <summary>The lock-roster feeder of a flagged room (S3 step 5,
+        /// lesson g): every roster freeze there, the per-game freeze at each
+        /// game start included, reads the pinned series roster and never the
+        /// present fighters, so a hold spanning game N to N+1 keeps the held
+        /// seat on the roster and a stranger present at the freeze is not on
+        /// it. <paramref name="present"/> is the view the freeze would have
+        /// read today; the rule never invokes it. Null for a room that is not
+        /// flagged or whose pin carries no roster (a pin from the claim answer
+        /// alone), which freezes as today.</summary>
+        internal static List<string> LockRoster(string room, Func<IEnumerable<string>> present)
+        {
+            if (!Flagged(room)) return null;
+            var pin = PinFor(room);
+            if (pin == null || pin.Roster.Count == 0) return null;
+            var ids = new List<string>(pin.Roster);
+            ids.Sort(StringComparer.Ordinal);
+            return ids;
+        }
+
+        /// <summary>The held-seat conjunct of RoomActors.IsUnauthorized (S3
+        /// step 4): in a flagged room whose cr_th names the held seat's hold
+        /// (its slot), an actor whose u_id is the held seat's is a fighter
+        /// only if it is X, the hold's
+        /// bound actor; before a bind (no X) every such actor is refused, and
+        /// so is every one after an x that bound nobody. Null when the rule
+        /// does not apply (no flagged room, no readable hold, no held identity
+        /// known, or another identity), and the rules of today decide.</summary>
+        internal static bool? HeldSeatUnauthorized(string room, string th, int actor, string actorUid, string heldUid, int heldSlot)
+        {
+            if (!Flagged(room) || string.IsNullOrEmpty(heldUid) || !string.Equals(actorUid, heldUid, StringComparison.Ordinal)) return null;
+            HoldKey k;
+            if (!TryParseHold(th, out k) || k.Slot != heldSlot) return null;
+            return k.BoundActor <= 0 || actor != k.BoundActor;
+        }
+
+        /// <summary>S3 step 5: on a verified b every client releases the
+        /// latches the roster now covers, once per hold, so an actor refused
+        /// before its identity was readable is released at the bind.
+        /// <paramref name="lastReleased"/> carries the hold last released.</summary>
+        internal static bool ReleaseAtBind(HoldKey verified, ref string lastReleased)
+        {
+            if (verified == null || verified.State != 'b') return false;
+            string id = verified.G + ":" + I(verified.Slot) + ":" + (verified.HoldId ?? "");
+            if (lastReleased == id) return false;
+            lastReleased = id;
+            return true;
+        }
+
+
+        // ── KX4: registration and the returner's seeding (V3 S3 step 8) ───
+
+        /// <summary>The rooms whose RegisterPlayer is the sorted insert (V3
+        /// P4.3 step 9): the FFA readmission lobbies and every flagged room.</summary>
+        internal static bool SortedRegistration(bool readmitLobby, string room) { return readmitLobby || Flagged(room); }
+
+        /// <summary>The sorted insert, for the RegisterPlayer prefix: the
+        /// player list stays sorted by PlayerID with no holes. Dead entries
+        /// are dropped, the new PlayerID's sorted index comes from
+        /// <paramref name="index"/> (FfaReadmitEntryRules.RegisterIndex), one
+        /// placeholder is inserted there for vanilla's assignment and that
+        /// index is returned as the forced index, so vanilla never pads with
+        /// nulls and never assigns over a live entry. -1 refuses a duplicate
+        /// PlayerID and inserts nothing.</summary>
+        internal static int PlaceRegistration<T>(List<T> list, Func<T, bool> dead, Func<T, int> idOf, int newId,
+                                                 Func<IList<int>, int, int> index) where T : class
+        {
+            list.RemoveAll(p => p == null || dead(p));
+            var ids = new List<int>(list.Count);
+            foreach (var p in list) ids.Add(idOf(p));
+            int at = index(ids, newId);
+            if (at < 0) return -1;
+            list.Insert(at, null);
+            return at;
+        }
+
+        /// <summary>The returner's seeding from the snapshot (S3 step 8),
+        /// beyond the vanilla score fields and the seat logs: the watcher's
+        /// own score counters, its draw index (the deals its slot made), and
+        /// its cr_cards value (its slot's names, pipe-joined, as
+        /// GameStateWatcher.BroadcastCardPick writes them).</summary>
+        internal sealed class SeedPlan
+        {
+            internal int R0, R1, P0, P1;
+            internal int DrawIndex = -1;
+            internal string Cards = "";
+            internal List<string> Names = new List<string>();
+        }
+
+        internal static SeedPlan PlanSeed(Snapshot s, int slot)
+        {
+            if (s == null) return null;
+            var p = new SeedPlan { R0 = s.R0, R1 = s.R1, P0 = s.P0, P1 = s.P1 };
+            foreach (var st in s.Slots)
+            {
+                if (st.Slot != slot) continue;
+                p.DrawIndex = st.Deals;
+                p.Names.AddRange(st.Names);
+                p.Cards = string.Join("|", st.Names.ToArray());
+            }
+            return p;
+        }
+
+
+        // ── KX5: the record (V3 S4 step 2 over the FFA P2 record) ──────────
+
+        /// <summary>The pick phases of a game run at its start and after each
+        /// round, so the rounds played number them (0 at the game start).</summary>
+        internal static int PhaseOf(int r0, int r1) { return r0 + r1; }
+
+        /// <summary>S4 step 2: in a flagged room the master builds the record
+        /// of EVERY pick phase, whether or not a seat is held, so every seat
+        /// spends from one ledger at record build (the integrity bar, lesson
+        /// e: a departure changes no other list or later offer).</summary>
+        internal static bool BuildsRecord(bool flagged, bool holdLive) { return flagged; }
+
+        /// <summary>cr_toff = {G}:{phase}:{rule}:{ledger}:{entries}: the FFA P2
+        /// offer record's codec (FfaReadmitRules.Encode and Parse) with G in
+        /// the epoch field, the phase in the game field and no cycle field.
+        /// Null when the record does not encode (a name or G carrying a
+        /// reserved separator): no record is written, which is today.</summary>
+        internal static string EncodeOff(FfaReadmitRules.FfaOfferRecord r)
+        {
+            if (r == null) return null;
+            string v = FfaReadmitRules.Encode(r);
+            if (v == null) return null;
+            var f = v.Split(new[] { ':' }, 4);
+            return f.Length == 4 ? f[0] + ":" + f[1] + ":" + f[3] : null;
+        }
+
+        internal static FfaReadmitRules.FfaOfferRecord ParseOff(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return null;
+            var f = v.Split(new[] { ':' }, 3);
+            return f.Length == 3 ? FfaReadmitRules.Parse(f[0] + ":" + f[1] + ":0:" + f[2]) : null;
+        }
+
+        /// <summary>The record of (G, phase) in a cr_toff value, or null.</summary>
+        internal static FfaReadmitRules.FfaOfferRecord OffFor(string off, string g, int phase)
+        {
+            var r = ParseOff(off);
+            return r != null && r.Epoch == g && r.Game == phase ? r : null;
+        }
+
+        /// <summary>The record over the phase's picker set: rule s when the
+        /// same-card rule runs (FfaReadmitRules.BuildRuleS: the shared entry
+        /// at the deal's index, DeckLegal over the S0 logical deck, the
+        /// no-repeat test reading the replicated ledger, each substitute
+        /// spent as it is chosen), rule p when it is off (the master's private
+        /// roll in the deck form). <paramref name="kOf"/> is the draw index
+        /// the slot's deal of this phase consumes. Null when the state it
+        /// needs is missing: no record, no card.</summary>
+        internal static FfaReadmitRules.FfaOfferRecord BuildOff(string g, int phase, IList<int> pickers, bool sameCards,
+                                                                Func<int, int> kOf, Func<int, IList<string>> deckOf,
+                                                                FfaReadmitRules.OfferPool pool, FfaReadmitRules.SeqState seq,
+                                                                int count, Func<string> roll, FfaReadmitRules.SpendState spend)
+        {
+            if (string.IsNullOrEmpty(g) || pickers == null || pool == null || spend == null) return null;
+            if (sameCards)
+                return seq == null ? null : FfaReadmitRules.BuildRuleS(g, phase, 0, pickers, kOf, deckOf, pool, seq, spend);
+            return roll == null ? null : FfaReadmitRules.BuildRuleP(g, phase, 0, pickers, deckOf, pool, count, roll, spend);
+        }
+
+        /// <summary>The master's record of (G, phase): one already readable
+        /// is ADOPTED and never rewritten (a promoted master); otherwise
+        /// <paramref name="build"/> runs once.</summary>
+        internal static FfaReadmitRules.FfaOfferRecord MasterOff(string held, string g, int phase, Func<FfaReadmitRules.FfaOfferRecord> build)
+        {
+            var h = OffFor(held, g, phase);
+            if (h != null) return h;
+            return build != null ? build() : null;
+        }
+
+        /// <summary>Every client, as the record arrives (the master as it
+        /// publishes): the ledger becomes the record's, and under rule s every
+        /// listed slot's draw index becomes the record's k (FfaReadmitRules.
+        /// AdoptRecord). The ledger resets at game start with the engine's.</summary>
+        internal static void AdoptOff(FfaReadmitRules.FfaOfferRecord rec, FfaReadmitRules.SpendState spend, Action<int, int> setDrawIndex)
+        {
+            FfaReadmitRules.AdoptRecord(rec, spend, setDrawIndex);
+        }
+
+        /// <summary>A grant applied: the ledger was spent at build, so this
+        /// changes nothing (FfaReadmitRules.NoteApplied, V3 P2 step 3).</summary>
+        internal static void NoteGrantApplied(FfaReadmitRules.SpendState spend, string card) { }
+
+        /// <summary>Entry 0 of the slot's list in the record of (G, phase):
+        /// the card a held seat is granted. Null with no record.</summary>
+        internal static string Entry0Of(string off, string g, int phase, int slot)
+        {
+            var r = OffFor(off, g, phase);
+            return r != null ? r.FirstOf(slot) : null;
+        }
+
+        /// <summary>The owner screen (S4 step 3): a present owner's deal shows
+        /// its record list, entry 0 included. Null with no record.</summary>
+        internal static List<string> ScreenOf(string off, string g, int phase, int slot)
+        {
+            var r = OffFor(off, g, phase);
+            return r != null ? r.ListOf(slot) : null;
+        }
+
+
+        // ── KX6: the reports after a return (V3 S5, client half) ───────────
+
+        /// <summary>A game-over during a hold (S5): the 2v2 census of four and
+        /// the 1v2 census of three count the held seat from the pinned roster.
+        /// The seat to add: the held identity, when the room is flagged, every
+        /// present fighter and the held seat are on the pinned roster, and the
+        /// present fighters are exactly one short. Null: the census of today.</summary>
+        internal static string HeldCensusSeat(string room, IList<string> presentUids, string heldUid, int need)
+        {
+            if (!Flagged(room) || string.IsNullOrEmpty(heldUid) || presentUids == null) return null;
+            var pin = PinFor(room);
+            if (pin == null || !pin.Roster.Contains(heldUid) || presentUids.Count != need - 1) return null;
+            foreach (var u in presentUids)
+                if (u == heldUid || !pin.Roster.Contains(u)) return null;
+            return heldUid;
+        }
+
+        /// <summary>Who files a game report (S5, the report acceptance after a
+        /// return): in a flagged room every present fighter files its own, and
+        /// the server classes and settles one; elsewhere the lowest Steam id
+        /// of the census, as today.</summary>
+        internal static bool Files(string room, string me, string lowest)
+        {
+            if (Flagged(room)) return true;
+            return me == lowest;
+        }
+
+        /// <summary>The advisory game id's canonical, signed apart from the
+        /// eleven-field team and ten-field 1v2 canonicals (RJS-L3; the server
+        /// half's match_report_window.game_id_canonical).</summary>
+        internal static string GameIdCanonical(string g, string reporter, string room)
+        {
+            return "game-id:" + (g ?? "") + ":" + (reporter ?? "") + ":" + (room ?? "");
+        }
+
+        /// <summary>The advisory fields of a report body in a flagged room
+        /// with a started G: `"game_id":G,"game_id_sig":sig,` (the report
+        /// bodies append each field with its trailing comma, hmac_signature
+        /// last); "" otherwise (the body of today). No signature, no fields.</summary>
+        internal static string GameIdFields(string room, string g, string sig)
+        {
+            if (!Flagged(room) || string.IsNullOrEmpty(g) || string.IsNullOrEmpty(sig)) return "";
+            return "\"game_id\":\"" + g + "\",\"game_id_sig\":\"" + sig + "\",";
+        }
+
+        /// <summary>A report answered 2xx is terminal for the outbox, the
+        /// 202 journaled answer included: the server keeps the HMAC-verified
+        /// payload and settles it by class, so a resend can only duplicate.</summary>
+        internal static bool ReportTerminal(bool ok, string body) { return ok; }
+
+        /// <summary>The 202 journaled answer of the report routes.</summary>
+        internal static bool Journaled(string body)
+        {
+            return body != null && body.Replace(" ", "").IndexOf("\"status\":\"journaled\"", StringComparison.Ordinal) >= 0;
+        }
+
+        // ── KX8: the capability token (V3 S0 step 4) ───────────────────────
+
+        /// <summary>The rjs1 capability field of the team and 1v2 queue join
+        /// and lobby create/join bodies: sent only when every Stage 2 patch
+        /// attached at boot (TeamHoldGlue.AllAttached, #83), so the server
+        /// opens holds only for clients that can run them. "" otherwise: the
+        /// body of today.</summary>
+        internal static string CapsField(bool allAttached)
+        {
+            return allAttached ? ",\"caps\":\"rjs1\"" : "";
         }
     }
 }

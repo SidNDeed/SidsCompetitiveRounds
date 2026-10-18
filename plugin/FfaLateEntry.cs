@@ -2373,7 +2373,9 @@ namespace CompetitiveRounds
     /// fighter; here a placeholder is inserted at the sorted index and
     /// forceIndex is pointed at it. Runs after the registration firewall
     /// (Priority.Low, __runOriginal), and binds the forced index positionally
-    /// (#364, #83). Elsewhere vanilla runs untouched.</summary>
+    /// (#364, #83). KX4: the same in every flagged team or 1v2 room (Stage 2
+    /// S3 step 8), through TeamHoldRules.PlaceRegistration. Elsewhere
+    /// vanilla runs untouched.</summary>
     [HarmonyPatch(typeof(PlayerManager), "RegisterPlayer")]
     internal static class FfaReadmit_RegisterOrder_Patch
     {
@@ -2383,19 +2385,19 @@ namespace CompetitiveRounds
             if (!__runOriginal) return false;
             try
             {
-                if (!FfaAssembly.ReadmitLobby || __0 == null || __1 < 0) return true;
+                // KX4: the FFA readmission lobbies and every flagged room
+                // (a team or 1v2 room whose join answer pinned a hold).
+                if (!TeamHoldRules.SortedRegistration(FfaAssembly.ReadmitLobby, TeamHoldWriter.CurrentRoom())
+                    || __0 == null || __1 < 0) return true;
                 var list = PlayerManager.instance != null ? PlayerManager.instance.players : null;
                 if (list == null) return true;
-                list.RemoveAll(p => p == null || p.gameObject == null || p.data == null);
-                var ids = new List<int>(list.Count);
-                foreach (var p in list) ids.Add(p.PlayerID);
-                int at = FfaReadmitEntryRules.RegisterIndex(ids, __1);
+                int at = TeamHoldRules.PlaceRegistration(list, p => p.gameObject == null || p.data == null,
+                                                         p => p.PlayerID, __1, FfaReadmitEntryRules.RegisterIndex);
                 if (at < 0)
                 {
                     Plugin.Log.LogWarning("[FFA-RDM] registration refused: PlayerID " + __1 + " is already registered");
                     return false;
                 }
-                list.Insert(at, null);
                 if (at != __1)
                     Plugin.Log.LogInfo("[FFA-RDM] registration of PlayerID " + __1 + " at sorted index " + at);
                 __1 = at;
