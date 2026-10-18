@@ -755,6 +755,92 @@ def test_t2_8_open_attempt_rows(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_m6_open_request_id_replays_only_its_original_tuple(monkeypatch):
+    """An exact request-id retry replays its recorded result; cross-game or
+    cross-seat reuse refuses without a hold, lease action, or ledger rewrite."""
+    async def body(env):
+        opened, opened_game, _ = await opened_series(env)
+        opened_rid = "req-m6-opened"
+        first = (await open_hold(
+            env, opened, 1, 0, opened_game, rid=opened_rid)).json()
+        replay = (await open_hold(
+            env, opened, 1, 0, opened_game, rid=opened_rid)).json()
+        assert (first["status"], first["repeat"], replay["status"], replay["repeat"]) == \
+            ("opened", False, "opened", False)
+        assert replay["hold_id"] == first["hold_id"]
+
+        refused, refused_game, _ = await opened_series(env, back=110)
+        refused_rid = "req-m6-refused"
+        initial_refusal = (await open_hold(
+            env, refused, 1, 0, refused_game, rid=refused_rid)).json()
+        assert initial_refusal == {"status": "refused", "reason": "window_spent"}
+        await beat(env, refused, 1)
+        await backdate_presence(env, refused, 1, 30)
+        refusal_replay = (await open_hold(
+            env, refused, 1, 0, refused_game, rid=refused_rid)).json()
+        assert refusal_replay == initial_refusal
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", refused.room) == 0
+
+        other, other_game, _ = await opened_series(env)
+        cross_game = (await open_hold(
+            env, other, 1, 0, other_game, rid=opened_rid)).json()
+        assert cross_game == {"status": "refused", "reason": "request_mismatch"}
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", other.room) == 0
+
+        seat, seat_game, _ = await opened_series(env)
+        seat_rid = "req-m6-seat"
+        original = (await open_hold(env, seat, 1, 0, seat_game, rid=seat_rid)).json()
+        ended = await env.post(
+            "/api/v1/match/hold/%s/end" % original["hold_id"], seat.steam(2),
+            {"steam_id": seat.steam(2), "reason": "ceiling"})
+        assert ended.json()["status"] == "closed"
+        cross_seat = (await open_hold(env, seat, 3, 2, seat_game, rid=seat_rid)).json()
+        assert cross_seat == {"status": "refused", "reason": "request_mismatch"}
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", seat.room) == 1
+
+        rows = await env.conn.fetch(
+            "SELECT request_id, room_name, game_id, held_player_id, opener_player_id, outcome, reason "
+            "FROM match_hold_open_attempts WHERE request_id = ANY($1::varchar[]) ORDER BY request_id",
+            [opened_rid, refused_rid, seat_rid])
+        assert len(rows) == 3
+        by_id = {row["request_id"]: row for row in rows}
+        assert (by_id[opened_rid]["room_name"], by_id[opened_rid]["game_id"],
+                by_id[opened_rid]["held_player_id"], by_id[opened_rid]["opener_player_id"],
+                by_id[opened_rid]["outcome"]) == \
+            (opened.room, uuid.UUID(opened_game), opened.pid(1), opened.pid(0), "opened")
+        assert (by_id[refused_rid]["outcome"], by_id[refused_rid]["reason"]) == \
+            ("refused", "window_spent")
+
+    run_env(monkeypatch, body, prefix="rjs2m6tuple")
+
+
+def test_m6_bad_signature_records_refusal_before_403(monkeypatch):
+    """A bad signature records one refusal with the authenticated opener and
+    no asserted held identity before the route returns 403."""
+    async def body(env):
+        s, g, _ = await opened_series(env)
+        rid = "req-m6-bad-signature"
+        bad = await open_hold(env, s, 1, 0, g, rid=rid, sign=False)
+        assert bad.status_code == 403
+        row = await env.conn.fetchrow(
+            "SELECT room_name, game_id, held_player_id, opener_player_id, outcome, reason, hold_id "
+            "FROM match_hold_open_attempts WHERE request_id = $1", rid)
+        assert (row["room_name"], row["game_id"], row["held_player_id"],
+                row["opener_player_id"], row["outcome"], row["reason"], row["hold_id"]) == \
+            (s.room, uuid.UUID(g), None, s.pid(0), "refused", "bad_signature", None)
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", s.room) == 0
+        again = await open_hold(env, s, 1, 0, g, rid=rid, sign=False)
+        assert again.status_code == 403
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_hold_open_attempts WHERE request_id = $1", rid) == 1
+
+    run_env(monkeypatch, body, prefix="rjs2m6sig")
+
+
 def test_t7_1_hold_open_canonical_one_field_at_a_time(monkeypatch):
     """T7.1 (hold-open half): changing any one of the eight fields of the
     hold-open canonical makes the signature reject; the team-DC canonical

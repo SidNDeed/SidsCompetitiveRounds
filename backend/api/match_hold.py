@@ -511,14 +511,26 @@ async def _write_open_attempt(db, req, room, held, opener, now, outcome, reason,
          "hid": str(hold_id) if hold_id else None})
 
 
+async def _open_attempt_row(db, request_id: str):
+    return (await db.execute(text(
+        "SELECT room_name, game_id, held_player_id, opener_player_id, outcome, reason, hold_id"
+        "  FROM match_hold_open_attempts WHERE request_id = CAST(:rid AS varchar)"),
+        {"rid": request_id})).mappings().first()
+
+
+def _open_attempt_matches(row, req, room, held, opener) -> bool:
+    return (row["room_name"], row["game_id"], row["held_player_id"], row["opener_player_id"]) == \
+        (room, req.game_id, held, opener)
+
+
 @router.post("/hold/open")
 async def match_hold_open(req: HoldOpenReq, request: Request,
                           db: AsyncSession = Depends(get_db)):
     """Open the hold of one dropped seat (S2 server half).
 
     Requires the opener's Steam session and the build HMAC over the hold-open
-    canonical (403 otherwise; nothing recorded). In ONE transaction under the
-    series lock: G must be the latest game of a series flagged for this room
+    canonical (403 otherwise, after one refused attempt is recorded). In ONE
+    transaction under the series lock: G must be the latest game of a series flagged for this room
     and still active, both players series members on the seat posted. The
     anchor is the held seat's last present_at in this room, which no late or
     withheld open moves: held_until = anchor + HOLD_S, held_at = the DB clock
@@ -532,10 +544,33 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
     mode = _mode_or_400(req.mode)
     room = req.room.strip()
     await _require_verified_session(request, req.opener_steam_id, db)
-    if not _verify_hold_open_hmac(req):
-        raise HTTPException(403, "Invalid hold-open signature")
     opener = await _player_id(db, req.opener_steam_id)
     held = await _player_id(db, req.held_steam_id)
+    known = await _open_attempt_row(db, req.request_id)
+    if not _verify_hold_open_hmac(req):
+        if known is None:
+            now = await _ctx_now(db)
+            await _write_open_attempt(
+                db, req, room, None, opener, now, "refused", "bad_signature", None)
+            await db.commit()
+        else:
+            await db.rollback()
+        raise HTTPException(403, "Invalid hold-open signature")
+    if known is not None:
+        if not _open_attempt_matches(known, req, room, held, opener):
+            await db.rollback()
+            return _refused("request_mismatch")
+        if known["outcome"] == "refused":
+            await db.rollback()
+            return _refused(known["reason"])
+        hold = await _hold_row(db, known["hold_id"])
+        now = await _ctx_now(db)
+        await db.rollback()
+        if hold is None:
+            raise HTTPException(503, "hold_open_replay_unavailable")
+        out = _state_payload(hold, now)
+        out.update({"status": "opened", "repeat": known["outcome"] == "repeat"})
+        return out
     reason, existing, row, game = await _open_decide(db, req, mode, room, opener, held)
     now = await _ctx_now(db)                 # after the series lock wait
     made = None

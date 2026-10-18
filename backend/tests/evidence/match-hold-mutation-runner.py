@@ -68,6 +68,28 @@ MUTANTS = {
               [('            or member_seats.get(held) != (req.slot, req.team)\n',
                 '            or (member_seats.get(held) != (req.slot, req.team))\n')],
               HOLD_T, "m1_hold_open_requires_exact_roster_slot_and_team"),
+    "F1.M6.TUPLE": ("FIX1", "match_hold.py",
+                    [('    if known is not None:\n'
+                      '        if not _open_attempt_matches(known, req, room, held, opener):',
+                      '    if False:\n'
+                      '        if not _open_attempt_matches(known, req, room, held, opener):')],
+                    [('    if known is not None:\n'
+                      '        if not _open_attempt_matches(known, req, room, held, opener):',
+                      '    if (known is not None):\n'
+                      '        if not _open_attempt_matches(known, req, room, held, opener):')],
+                    HOLD_T, "m6_open_request_id_replays_only_its_original_tuple"),
+    "F1.M6.SIG": ("FIX1", "match_hold.py",
+                  [('            await _write_open_attempt(\n'
+                    '                db, req, room, None, opener, now, "refused", "bad_signature", None)\n'
+                    '            await db.commit()',
+                    '            await db.rollback()')],
+                  [('            await _write_open_attempt(\n'
+                    '                db, req, room, None, opener, now, "refused", "bad_signature", None)\n'
+                    '            await db.commit()',
+                    '            await _write_open_attempt(\n'
+                    '                db, req, room, None, opener, now, "refused", "bad_signature", None)\n'
+                    '            await  db.commit()')],
+                  HOLD_T, "m6_bad_signature_records_refusal_before_403"),
     # N2 - the game id chain and the hold latch
     "M1.7": ("N2", "match_hold.py",
              [('"   AND prev_game = CAST(:prev AS uuid)"), key)',
