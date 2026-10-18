@@ -539,7 +539,7 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
     Every request, refused or not, writes its match_hold_open_attempts row in
     the same transaction; a refusal is never a hold. A repeat for the same
     (room, G, held player) answers the existing open row."""
-    from main import _lease_release, _team_game_crossed_two
+    from main import _lease_admission_gate, _lease_release, _team_game_crossed_two
 
     mode = _mode_or_400(req.mode)
     room = req.room.strip()
@@ -572,7 +572,23 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
         out.update({"status": "opened", "repeat": known["outcome"] == "repeat"})
         return out
     reason, existing, row, game = await _open_decide(db, req, mode, room, opener, held)
-    now = await _ctx_now(db)                 # after the series lock wait
+    if reason is None:
+        admitted, now = await _lease_admission_gate(
+                db, [held], mode, game["series_id"],
+                allowed_hold_ids=((existing["id"],) if existing is not None else ()),
+                hold_entry_bound_seconds=ENTRY_BOUND_S)
+        if not admitted:
+            # The player gate may have waited behind a winning formation.
+            # Discard every action write before recording the refusal in a
+            # fresh transaction with that transaction's own single clock.
+            await db.rollback()
+            now = await _ctx_now(db)
+            await _write_open_attempt(
+                db, req, room, held, opener, now, "refused", "other_mode", None)
+            await db.commit()
+            return _refused("other_mode")
+    else:
+        now = await _ctx_now(db)
     made = None
     if (reason is None and mode == "team"
             and (req.t1_points is None or req.t2_points is None)):
@@ -860,7 +876,7 @@ async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Reque
     and series, and answers T once; a repeat rotates T. Nothing here moves
     held_until. Every claim, refused or granted, writes its attempt row in
     this transaction."""
-    from main import _lease_acquire, LEASE_TTL_ASSEMBLY
+    from main import _lease_acquire, _lease_admission_gate, LEASE_TTL_ASSEMBLY
 
     await _require_verified_session(request, req.steam_id, db)
     pid = await _player_id(db, req.steam_id)
@@ -870,22 +886,32 @@ async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Reque
         raise HTTPException(404, "no such hold")
     series = await _series_lock(db, peek["mode"], peek["series_id"])
     hold = await _hold_row(db, hold_id, lock=True)
-    now = await _ctx_now(db)                 # after both lock waits
     if pid is None or hold["player_id"] != pid:
+        now = await _ctx_now(db)
         return await _refuse_attempt(db, hold_id, "claim", now, "not_yours")
+    admitted, now = await _lease_admission_gate(
+            db, [pid], hold["mode"], hold["series_id"],
+            allowed_hold_ids=(hold_id,), hold_entry_bound_seconds=ENTRY_BOUND_S,
+            strict_team_ovt_queue=True)
+    if not admitted:
+        # Roll back the losing claim before its required audit row. Re-locking
+        # the hold gives the fresh audit transaction its numbering invariant.
+        await db.rollback()
+        hold = await _hold_row(db, hold_id, lock=True)
+        now = await _ctx_now(db)
+        return await _refuse_attempt(db, hold_id, "claim", now, "other_mode")
     if not _hold_live(hold, now):
         return await _refuse_attempt(db, hold_id, "claim", now, "hold_lapsed")
     if series is None or series["status"] not in _ACTIVE:
         return await _refuse_attempt(db, hold_id, "claim", now, "lobby_closed")
-    if await _other_commitment(db, pid, hold["mode"], hold["series_id"]):
-        return await _refuse_attempt(db, hold_id, "claim", now, "other_mode")
     token = secrets.token_hex(32)
     verifier = hashlib.sha256(token.encode()).hexdigest()
     await db.execute(text(
         "UPDATE match_seat_holds SET claimed_at = COALESCE(claimed_at, CAST(:now AS timestamptz)),"
         "       verifier = CAST(:v AS varchar)"
         " WHERE id = CAST(:hid AS uuid)"), {"now": now, "v": verifier, "hid": str(hold_id)})
-    await _lease_acquire(db, pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)
+    await _lease_acquire(db, pid, hold["mode"], hold["series_id"],
+                         LEASE_TTL_ASSEMBLY, _gate_held=True)
     digest = (await db.execute(text(
         "SELECT boundary_digest FROM match_seat_presence"
         " WHERE room_name = CAST(:room AS varchar) AND player_id = CAST(:pid AS uuid)"),

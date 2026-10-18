@@ -33,6 +33,7 @@ SQL = os.path.join(BACKEND, "sql")
 MODULES = ("match_hold.py", "match_report_window.py")
 
 HOLD_T = "test_match_hold_pg.py"
+ADMIT_T = "test_match_hold_admission_gate_pg.py"
 WIN_T = "test_match_report_window.py"
 MIG_T = "test_match_hold_migration_pg.py"
 M383 = "383_match_hold_stage2.sql"
@@ -63,6 +64,26 @@ MUTANTS = {
                     [('        dict(hold, claimed_at=hold["claimed_at"] or now, verifier=verifier), now)',
                       '        dict(hold, claimed_at=hold["claimed_at"] or now, verifier=(verifier)), now)')],
                     HOLD_T, "h2_verifier_lifecycle"),
+    "F1.H3.GATE": ("FIX1", "match_hold.py",
+                   [('        if not admitted:\n'
+                     '            # The player gate may have waited behind a winning formation.',
+                     '        if False:\n'
+                     '            # The player gate may have waited behind a winning formation.')],
+                   [('        if not admitted:\n'
+                     '            # The player gate may have waited behind a winning formation.',
+                     '        if not (admitted):\n'
+                     '            # The player gate may have waited behind a winning formation.')],
+                   ADMIT_T, "h3_hold_open_and_claim_reject_another_live_commitment"),
+    "F1.H3.RECHECK": ("FIX1", "match_hold.py",
+                      [('    if not admitted:\n'
+                        '        # Roll back the losing claim before its required audit row.',
+                        '    if False:\n'
+                        '        # Roll back the losing claim before its required audit row.')],
+                      [('    if not admitted:\n'
+                        '        # Roll back the losing claim before its required audit row.',
+                        '    if not (admitted):\n'
+                        '        # Roll back the losing claim before its required audit row.')],
+                      ADMIT_T, "h3_hold_open_and_claim_reject_another_live_commitment"),
     "F1.M1": ("FIX1", "match_hold.py",
               [('            or member_seats.get(held) != (req.slot, req.team)\n', '')],
               [('            or member_seats.get(held) != (req.slot, req.team)\n',
@@ -263,12 +284,16 @@ MUTANTS = {
              WIN_T, "t5_4_matrix"),
     # N6 - S6 attempt rows commit with their action, never ahead of it
     "M6.1": ("N6", "match_hold.py",
-             [('    await _lease_acquire(db, pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)\n',
-               '    await _attempt(db, hold_id, "claim", now, "ok")\n'
-               '    await db.commit()\n'
-               '    await _lease_acquire(db, pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)\n')],
-             [('    await _lease_acquire(db, pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)\n',
-               '    await _lease_acquire(db,  pid, hold["mode"], hold["series_id"], LEASE_TTL_ASSEMBLY)\n')],
+             [('    await _lease_acquire(db, pid, hold["mode"], hold["series_id"],\n'
+               '                         LEASE_TTL_ASSEMBLY, _gate_held=True)\n',
+                '    await _attempt(db, hold_id, "claim", now, "ok")\n'
+                '    await db.commit()\n'
+                '    await _lease_acquire(db, pid, hold["mode"], hold["series_id"],\n'
+                '                         LEASE_TTL_ASSEMBLY, _gate_held=True)\n')],
+             [('    await _lease_acquire(db, pid, hold["mode"], hold["series_id"],\n'
+               '                         LEASE_TTL_ASSEMBLY, _gate_held=True)\n',
+               '    await _lease_acquire(db,  pid, hold["mode"], hold["series_id"],\n'
+               '                         LEASE_TTL_ASSEMBLY, _gate_held=True)\n')],
              HOLD_T, "t6_1"),
 }
 
