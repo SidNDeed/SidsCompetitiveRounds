@@ -101,6 +101,19 @@ MUTANTS = {
                 '            and ((req.t1_points is None) or req.t2_points is None)):\n'
                 '        reason = "missing_points"\n')],
               HOLD_T, "m7_team_open_requires_both_point_snapshots"),
+    "F1.L1": ("FIX1", "match_hold.py",
+              [('        await _attempt(db, hold_id, "bind", now, "ok")\n'
+                '        await db.commit()\n'
+                '        out = _state_payload(hold, now)',
+                '        await db.commit()\n'
+                '        out = _state_payload(hold, now)')],
+              [('        await _attempt(db, hold_id, "bind", now, "ok")\n'
+                '        await db.commit()\n'
+                '        out = _state_payload(hold, now)',
+                '        await _attempt(db,  hold_id, "bind", now, "ok")\n'
+                '        await db.commit()\n'
+                '        out = _state_payload(hold, now)')],
+              HOLD_T, "t3_7_bind_identity_and_entry"),
     # N2 - the game id chain and the hold latch
     "M1.7": ("N2", "match_hold.py",
              [('"   AND prev_game = CAST(:prev AS uuid)"), key)',

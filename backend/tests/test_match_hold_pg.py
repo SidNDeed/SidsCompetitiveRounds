@@ -1155,7 +1155,8 @@ def test_t3_7_bind_identity_and_entry(monkeypatch):
             ("bind", "refused", "not_claimed"), ("claim", "ok", None),
             ("bind", "refused", "not_yours"), ("bind", "refused", "uncorroborated"),
             ("bind", "refused", "actor_identity_mismatch"), ("bind", "refused", "uncorroborated"),
-            ("bind", "ok", None), ("bind", "refused", "already_bound"),
+            ("bind", "ok", None), ("bind", "ok", None),
+            ("bind", "refused", "already_bound"),
             ("entered", "refused", "not_yours"), ("entered", "refused", "actor_mismatch"),
             ("entered", "refused", "game_mismatch"), ("entered", "ok", None),
             ("entered", "refused", "hold_lapsed"), ("claim", "refused", "hold_lapsed")], kinds

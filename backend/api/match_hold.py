@@ -972,7 +972,8 @@ async def match_hold_bind(hold_id: uuid.UUID, req: HoldBindReq, request: Request
     if hold["bound_at"] is not None:
         if hold["bound_actor"] != req.actor:
             return await _refuse_attempt(db, hold_id, "bind", now, "already_bound")
-        await db.rollback()
+        await _attempt(db, hold_id, "bind", now, "ok")
+        await db.commit()
         out = _state_payload(hold, now)
         out["status"] = "bound"
         return out
