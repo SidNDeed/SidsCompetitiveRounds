@@ -14,6 +14,7 @@ import hashlib
 import hmac as _hmac
 import inspect
 import itertools
+import json
 import os
 import sys
 import uuid
@@ -401,6 +402,42 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                 " WHERE room_name = $1 AND game_id = $2 ORDER BY reporter_steam", room, g)
             assert {r["reporter_id"] for r in rows} == {seats[1][0], seats[2][0]}
             assert sorted(r["state"] for r in rows) == ["kept", "settled"]
+
+            # H6: a retry can trigger settlement, but only the first payload
+            # accepted into the journal is authoritative.
+            room = "team_r" + uuid.uuid4().hex[:8]
+            g = await _window_game(conn, "team", room)
+            await beat(room, 0)
+            await beat(room, 2)
+            receipt = await conn.fetchval("SELECT clock_timestamp()")
+
+            async def receive_payload(payload):
+                async with sm() as db:
+                    out = await mrw.receive(
+                        db, mode="team", room=room, game_id=g, reported_game_id=g,
+                        reporter_id=seats[2][0], reporter_steam=seats[2][1],
+                        payload=payload, member_ids=ids, now=receipt, settle=stub)
+                    await db.commit()
+                return out
+
+            before = len(settled)
+            assert await receive_payload('{"proof": "A"}') == \
+                {"status": "journaled", "cls": "c"}
+            await conn.execute(
+                "UPDATE match_seat_presence"
+                " SET beat_at = $1 - interval '26 seconds'"
+                " WHERE room_name = $2 AND player_id = $3", receipt, room, seats[0][0])
+            assert await receive_payload('{"proof": "B"}') == \
+                {"status": "settled", "cls": "c"}
+            assert len(settled) == before + 1
+            settled_payload = settled[-1]["payload"]
+            if isinstance(settled_payload, str):
+                settled_payload = json.loads(settled_payload)
+            assert settled_payload == {"proof": "A"}
+            stored = await conn.fetchrow(
+                "SELECT payload ->> 'proof' AS proof, state"
+                " FROM match_report_journal WHERE room_name = $1 AND game_id = $2", room, g)
+            assert (stored["proof"], stored["state"]) == ("A", "settled")
 
             for operation in ("settle", "receive", "release", "supersede"):
                 room = "m2_%s_%s" % (operation, uuid.uuid4().hex[:8])

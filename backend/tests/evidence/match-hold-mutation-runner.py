@@ -119,6 +119,14 @@ MUTANTS = {
               [('    if window["settle_after"] <= now:\n',
                 '    if (window["settle_after"] <= now):\n')],
               WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
+    "F1.H6": ("FIX1", "match_report_window.py",
+              [('            await settle(db, entry)\n',
+                '            await settle(db, {"reporter_id": reporter_id,\n'
+                '                              "reporter_steam": reporter_steam,\n'
+                '                              "cls": cls, "payload": payload})\n')],
+              [('            await settle(db, entry)\n',
+                '            await settle(db, (entry))\n')],
+              WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
     "F1.M1": ("FIX1", "match_hold.py",
               [('            or member_seats.get(held) != (req.slot, req.team)\n', '')],
               [('            or member_seats.get(held) != (req.slot, req.team)\n',

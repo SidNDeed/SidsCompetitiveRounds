@@ -184,21 +184,30 @@ async def lock_window(db, *, mode, room, game_id, now):
 
 
 async def journal(db, *, mode, room, game_id, reporter_id, reporter_steam, cls, payload,
-                  now, held=False) -> bool:
+                  now, held=False):
     """Keep one HMAC-verified report (`payload`, JSON text) of (room, G,
     reporter); a repeat keeps the first. `held` journals a game-over that
-    arrived during a hold. True when this call wrote the row."""
-    res = await db.execute(text(
+    arrived during a hold. Return the canonical stored row, whether this call
+    inserted it or lost an insertion conflict to the first receipt."""
+    inserted = (await db.execute(text(
         "INSERT INTO match_report_journal (room_name, game_id, reporter_id, mode,"
         "        reporter_steam, cls, state, payload, received_at)"
         " VALUES (CAST(:room AS varchar), CAST(:g AS uuid), CAST(:pid AS uuid),"
         "         CAST(:mode AS varchar), CAST(:steam AS varchar), CAST(:cls AS varchar),"
         "         CAST(:state AS varchar), CAST(:payload AS jsonb), CAST(:now AS timestamptz))"
-        " ON CONFLICT (room_name, game_id, reporter_id) DO NOTHING"),
+        " ON CONFLICT (room_name, game_id, reporter_id) DO NOTHING"
+        " RETURNING reporter_id, reporter_steam, cls, state, payload, received_at"),
         {"room": room, "g": str(game_id), "pid": str(reporter_id), "mode": mode,
          "steam": reporter_steam, "cls": cls, "state": "held" if held else "journaled",
-         "payload": payload, "now": now})
-    return (res.rowcount or 0) > 0
+         "payload": payload, "now": now})).mappings().first()
+    if inserted is not None:
+        return inserted
+    return (await db.execute(text(
+        "SELECT reporter_id, reporter_steam, cls, state, payload, received_at"
+        "  FROM match_report_journal"
+        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+        "   AND reporter_id = CAST(:pid AS uuid)"),
+        {"room": room, "g": str(game_id), "pid": str(reporter_id)})).mappings().first()
 
 
 async def _journaled(db, room, game_id):
@@ -288,16 +297,16 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
         return {"status": "duplicate"}
     cls = await classify(db, room=room, game_id=game_id, reported_game_id=reported_game_id,
                          reporter_id=reporter_id)
-    await journal(db, mode=mode, room=room, game_id=game_id, reporter_id=reporter_id,
-                  reporter_steam=reporter_steam, cls=cls, payload=payload, now=now, held=held)
-    if held:
+    entry = await journal(
+        db, mode=mode, room=room, game_id=game_id, reporter_id=reporter_id,
+        reporter_steam=reporter_steam, cls=cls, payload=payload, now=now, held=held)
+    cls = entry["cls"]
+    if entry["state"] == "held":
         return {"status": "journaled", "cls": cls, "state": "held"}
     if cls == CLASS_C:
         fresh = await fresh_class_c_steams(db, room=room, game_id=game_id,
                                            member_ids=member_ids, now=now)
-        if fresh and min(fresh, key=steam_order) == reporter_steam:
-            entry = {"reporter_id": reporter_id, "reporter_steam": reporter_steam,
-                     "cls": cls, "payload": payload}
+        if fresh and min(fresh, key=steam_order) == entry["reporter_steam"]:
             await settle(db, entry)
             await _mark_settled(db, room, game_id, entry, now)
             return {"status": "settled", "cls": cls}
