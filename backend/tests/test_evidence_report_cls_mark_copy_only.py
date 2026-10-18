@@ -230,12 +230,13 @@ SQL_BAD = re.compile(r"\b(c1|c2|c3|cls|mark)\b")
 class DictRef:
     """One allocation-site identity and its monotone mutable dictionary state."""
 
-    __slots__ = ("token", "initialized", "keys", "vals", "item")
+    __slots__ = ("token", "initialized", "keys", "must_keys", "vals", "item")
 
     def __init__(self, token):
         self.token = token
         self.initialized = False
         self.keys = None
+        self.must_keys = frozenset()
         self.vals = ()
         self.item = None
 
@@ -245,6 +246,7 @@ class DictRef:
         if not self.initialized:
             self.initialized = True
             self.keys = keys
+            self.must_keys = frozenset(keys)
             self.vals = vals
         elif self.keys is None:
             self.item = vjoin(self.item, *vals)
@@ -280,7 +282,7 @@ class DictRef:
         keys = list(self.keys)
         vals = list(self.vals)
         if key in keys:
-            if only_if_missing:
+            if only_if_missing and key in self.must_keys:
                 return
             pos = keys.index(key)
             vals[pos] = vjoin(vals[pos], new)
@@ -299,7 +301,7 @@ class DictRef:
         if self.token in seen:
             return ("dict_ref", self.token)
         nested = seen | {self.token}
-        return ("dict_ref", self.token, self.keys,
+        return ("dict_ref", self.token, self.keys, self.must_keys,
                 tuple(v.key(nested) for v in self.vals),
                 self.item.key(nested) if self.item is not None else None)
 
@@ -1339,11 +1341,12 @@ class Frame:
     def setdefault_result(self, recv, node, argvals):
         """The existing slot, inserted default, or conservative dynamic element."""
         default = argvals[1] if len(argvals) > 1 else V({C})
+        dicts = _dict_arms(recv)
         if node.args and isinstance(node.args[0], ast.Constant) and \
-                isinstance(node.args[0].value, str):
+                isinstance(node.args[0].value, str) and dicts:
             key = node.args[0].value
             selected = []
-            for arm in _dict_arms(recv):
+            for arm in dicts:
                 ref = arm.alias[1]
                 if ref.keys is None:
                     value = vjoin(ref.element(), default)
@@ -1351,6 +1354,8 @@ class Frame:
                     value = ref.read(key)
                     if value is None:
                         value = default
+                    elif key not in ref.must_keys:
+                        value = vjoin(value, default)
                 selected.append(add_im(value, arm.im))
             return vjoin(*selected)
         key_value = argvals[0] if argvals else V({C})
@@ -1362,10 +1367,10 @@ class Frame:
         v = vjoin(*(list(argvals) + list(kwvals.values()))) if (argvals or kwvals) else V({C})
         v = add_im(v, self.order_ctx)
         slots = self.literal_mutation_slots(meth, node, argvals, kwvals)
+        result = self.setdefault_result(recv, node, argvals) \
+            if meth == "setdefault" else V({C})
         dicts = _dict_arms(recv)
         if dicts:
-            result = self.setdefault_result(recv, node, argvals) \
-                if meth == "setdefault" else V({C})
             if slots is not None:
                 for key, slot, only_if_missing in slots:
                     _dict_slot_update(
@@ -1387,7 +1392,7 @@ class Frame:
                                                 V(v.flat() | self.ctx))
         else:
             self.expr(tgt)
-        return V({C})
+        return result
 
     def lookup_class(self, name, param):
         for key in ((name, param), (name, "*")):
@@ -2252,6 +2257,99 @@ def test_non_setdefault_mutators_keep_their_constant_return(call):
         '        result = %s\n' % call
         + '        items.append(AerItem("cell", (), (), result))')
     assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
+
+
+def _setdefault_api(setup, selected="result", helper=""):
+    return helper + '''def evidence_report(row):
+%s    word = "COLD"
+    if %s > 0.5:
+        word = "HOT"
+    return {"name": word}
+''' % (setup, selected)
+
+
+@pytest.mark.parametrize("selected", ["result", 'box["rank"]'],
+                         ids=["returned result", "stored slot"])
+def test_setdefault_on_an_api_key_that_may_be_present_joins_the_default(selected):
+    api = _setdefault_api(
+        '    box = {}\n'
+        '    result = box.setdefault("rank", row["rank"])\n', selected)
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (
+        selected, _fmt(findings))
+
+
+def test_setdefault_result_directly_joins_a_may_present_slot_and_default():
+    ref = DictRef(("fixture", "may-present"))
+    ref.seed((), ())
+    ref.slot_update("rank", V({C}))
+    recv = V(alias=("dict", ref))
+    node = ast.parse('box.setdefault("rank", default)').body[0].value
+    result = Frame.setdefault_result(None, recv, node, [V({C}), V({D})])
+    assert result.flat() == {C, D}
+
+
+def test_setdefault_same_site_runtime_instances_join_later_defaults():
+    helper = '''def _remember(value):
+    box = {}
+    return box.setdefault("rank", value)
+
+
+'''
+    api = _setdefault_api(
+        '    _remember(0.0)\n'
+        '    result = _remember(row["rank"])\n', helper=helper)
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), _fmt(findings)
+
+
+def test_setdefault_after_a_request_controlled_path_keeps_the_data_default():
+    api = '''from fastapi import Request
+
+
+def evidence_report(request: Request, row):
+    box = {}
+    if request.path_params["mode"]:
+        box.setdefault("rank", 0.0)
+    result = box.setdefault("rank", row["rank"])
+    word = "COLD"
+    if result > 0.5:
+        word = "HOT"
+    return {"name": word}
+'''
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), _fmt(findings)
+
+
+@pytest.mark.parametrize("setup", [
+    '    box = row["mapping"]\n'
+    '    result = box.setdefault("rank", 0.0)\n',
+    '    box = dict()\n'
+    '    result = box.setdefault("rank", row["rank"])\n',
+], ids=["receiver element", "default value"])
+def test_setdefault_on_a_non_literal_mapping_returns_element_plus_default(setup):
+    findings = _fixture(
+        _setdefault_api(setup), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (
+        setup, _fmt(findings))
+
+
+@pytest.mark.parametrize("selected", ["result", 'box["rank"]'],
+                         ids=["returned result", "stored slot"])
+def test_setdefault_on_a_definitely_present_literal_key_suppresses_the_default(selected):
+    api = _setdefault_api(
+        '    box = {"rank": 0.0}\n'
+        '    result = box.setdefault("rank", row["rank"])\n', selected)
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+def test_setdefault_state_does_not_merge_distinct_empty_literal_sites():
+    api = _setdefault_api(
+        '    changed = {}\n'
+        '    untouched = {}\n'
+        '    changed.setdefault("rank", row["rank"])\n'
+        '    result = untouched.setdefault("rank", 0.0)\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
 
 
 _BOT_GO = '''async def _aer_go(body):
