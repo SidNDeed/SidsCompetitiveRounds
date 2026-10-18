@@ -1031,10 +1031,14 @@ def test_l2_attest_held_snapshot_has_an_active_lobby_fence(monkeypatch):
 
         env.mp.setattr(main, "_strict_steam_session_ok", session_ok)
         # The close must land while the hold is still LIVE: a hold anchored at
-        # lobby age 950 runs to 1070, past the poll closer at 1000.  (Anchored
+        # lobby age 940 runs to 1060, past the poll closer at 1000.  (Anchored
         # at the default 50, the hold had expired by 1000, the pre-fix reader
-        # already returned an empty H, and the fence was never observed.)
-        lob = await _held(env, t_present=950.0, t_gone=960.0)
+        # already returned an empty H, and the fence was never observed.)  The
+        # gone census comes 20 s after the seat's own, as in the default: an
+        # own census at most ASM_WITNESS_FRESH_S old that lists itself vetoes
+        # the gone rule.
+        lob = await _held(env, t_present=940.0, t_gone=960.0)
+        assert (await env.seat(lob, 1))["hold_n"] is not None, ("L2 hold premise",)
         room = (await env.lobby_row(lob))["photon_room_id"]
         roster = sorted(s for i, s in enumerate(lob.sids) if i != 1)
         req = main.SpectateAttestBody(
