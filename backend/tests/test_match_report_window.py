@@ -58,7 +58,7 @@ def test_module_census():
     assert got == want, (got, want)
     for fn in (mrw.settle_window, mrw.receive, mrw.release_held, mrw.supersede_held):
         assert "async with database_deadline(db)" in inspect.getsource(fn)
-    assert "await settle_window(" in inspect.getsource(mrw._receive)
+    assert "await _settle_locked(" in inspect.getsource(mrw._receive)
 
 
 # == T5.3 the window =============================================================
@@ -374,6 +374,34 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                 "superseded"
             assert len(settled) == n + 1
 
+            # H4: once the stored window expires, a later better C cannot
+            # enter the journal or displace evidence received in-window.
+            room = "team_r" + uuid.uuid4().hex[:8]
+            g = await _window_game(conn, "team", room)
+            await _entered(conn, "team", room, g, seats[1][0], seats[0][0])
+            assert await rec(room, g, 1) == {"status": "journaled", "cls": "r"}
+            assert await rec(room, g, 2) == {"status": "journaled", "cls": "c"}
+            settle_after = await conn.fetchval(
+                "SELECT settle_after FROM match_report_windows"
+                " WHERE room_name = $1 AND game_id = $2", room, g)
+            before = len(settled)
+            async with sm() as db:
+                late = await mrw.receive(
+                    db, mode="team", room=room, game_id=g, reported_game_id=g,
+                    reporter_id=seats[0][0], reporter_steam=seats[0][1],
+                    payload='{"late": true}', member_ids=ids,
+                    now=settle_after + timedelta(seconds=1), settle=stub)
+                await db.commit()
+            assert late == {"status": "duplicate"}
+            assert len(settled) == before + 1
+            assert (settled[-1]["reporter_steam"], settled[-1]["cls"]) == \
+                (seats[2][1], "c")
+            rows = await conn.fetch(
+                "SELECT reporter_id, state FROM match_report_journal"
+                " WHERE room_name = $1 AND game_id = $2 ORDER BY reporter_steam", room, g)
+            assert {r["reporter_id"] for r in rows} == {seats[1][0], seats[2][0]}
+            assert sorted(r["state"] for r in rows) == ["kept", "settled"]
+
             for operation in ("settle", "receive", "release", "supersede"):
                 room = "m2_%s_%s" % (operation, uuid.uuid4().hex[:8])
                 game_id = await _window_game(conn, "team", room)
@@ -381,8 +409,8 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                 await conn.execute(
                     "INSERT INTO match_report_windows"
                     " (room_name, game_id, mode, opened_at, settle_after)"
-                    " VALUES ($1, $2, 'team', $3 - interval '31 seconds',"
-                    "         $3 - interval '1 second')", room, game_id, now)
+                    " VALUES ($1, $2, 'team', $3::timestamptz - interval '31 seconds',"
+                    "         $3::timestamptz - interval '1 second')", room, game_id, now)
                 state = "held" if operation in ("release", "supersede") else "journaled"
                 if operation != "receive":
                     await conn.execute(

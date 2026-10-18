@@ -110,6 +110,15 @@ MUTANTS = {
                    [('            await _install_database_timeouts(self.db)',
                      '            await _install_database_timeouts((self.db))')],
                    WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
+    "F1.H4": ("FIX1", "match_report_window.py",
+              [('    if window["settle_after"] <= now:\n'
+                '        await _settle_locked(\n'
+                '            db, window, room=room, game_id=game_id, now=now, settle=settle)\n'
+                '        return {"status": "duplicate"}\n',
+                '')],
+              [('    if window["settle_after"] <= now:\n',
+                '    if (window["settle_after"] <= now):\n')],
+              WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
     "F1.M1": ("FIX1", "match_hold.py",
               [('            or member_seats.get(held) != (req.slot, req.team)\n', '')],
               [('            or member_seats.get(held) != (req.slot, req.team)\n',

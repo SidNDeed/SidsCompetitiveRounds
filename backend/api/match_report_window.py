@@ -227,6 +227,18 @@ async def _mark_settled(db, room, game_id, chosen, now):
         {"now": now, "pid": str(chosen["reporter_id"]), "room": room, "g": str(game_id)})
 
 
+async def _settle_locked(db, window, *, room, game_id, now, settle):
+    """Settle one already-locked expired window from only its stored rows."""
+    if window["settled_at"] is not None or window["settle_after"] > now:
+        return None
+    chosen = pick(await _journaled(db, room, game_id))
+    if chosen is None:
+        return None
+    await settle(db, chosen)
+    await _mark_settled(db, room, game_id, chosen, now)
+    return chosen
+
+
 async def settle_window(db, *, mode, room, game_id, now, settle):
     """Run one settle operation inside the shared match database budget."""
     async with database_deadline(db):
@@ -240,14 +252,8 @@ async def _settle_window(db, *, mode, room, game_id, now, settle):
     `settle(db, entry)` once with the report `pick` chooses and write
     settled_at once. Returns the settled entry or None. The caller commits."""
     window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
-    if window["settled_at"] is not None or window["settle_after"] > now:
-        return None
-    chosen = pick(await _journaled(db, room, game_id))
-    if chosen is None:
-        return None
-    await settle(db, chosen)
-    await _mark_settled(db, room, game_id, chosen, now)
-    return chosen
+    return await _settle_locked(
+        db, window, room=room, game_id=game_id, now=now, settle=settle)
 
 
 async def receive(db, *, mode, room, game_id, reported_game_id, reporter_id, reporter_steam,
@@ -276,6 +282,10 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
     window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
     if window["settled_at"] is not None:
         return {"status": "duplicate"}
+    if window["settle_after"] <= now:
+        await _settle_locked(
+            db, window, room=room, game_id=game_id, now=now, settle=settle)
+        return {"status": "duplicate"}
     cls = await classify(db, room=room, game_id=game_id, reported_game_id=reported_game_id,
                          reporter_id=reporter_id)
     await journal(db, mode=mode, room=room, game_id=game_id, reporter_id=reporter_id,
@@ -291,8 +301,8 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
             await settle(db, entry)
             await _mark_settled(db, room, game_id, entry, now)
             return {"status": "settled", "cls": cls}
-    done = await settle_window(db, mode=mode, room=room, game_id=game_id, now=now,
-                               settle=settle)
+    done = await _settle_locked(
+        db, window, room=room, game_id=game_id, now=now, settle=settle)
     if done is not None:
         return {"status": "settled", "cls": done["cls"],
                 "settled_reporter": done["reporter_steam"]}
