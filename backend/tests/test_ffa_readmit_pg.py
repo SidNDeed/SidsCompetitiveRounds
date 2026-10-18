@@ -1200,36 +1200,64 @@ def test_s8_deletion_clears_the_readmission_tables(monkeypatch):
     run_env(monkeypatch, body)
 
 
+async def _h5_delete_active_seat(env, *, queue_row):
+    """An active readmit seat (present at 50, omitted by one stored census at
+    70, no hold yet) whose account is deleted; a census that would complete
+    the gone rule is sent while deletion is paused after its readmission
+    sweep.  queue_row=False first removes the seat's ffa_queue row, so the
+    seat-row discovery is deletion's only route to the lobby (the queue-row
+    route also closes a played lobby, which fences the hold by itself).
+    Returns (lobby, seat, readmission rows, departed ids)."""
+    lob = await _rdm_lobby(env)
+    await _present(env, lob, 1, 50.0)
+    await env.at(lob, 70.0)
+    await A._omit(env, lob, [2], 1)
+    if not queue_row:
+        await env.conn.execute("DELETE FROM ffa_queue WHERE player_id = $1", lob.pids[1])
+    real = main._rdm_delete_player
+    swept, release = asyncio.Event(), asyncio.Event()
+
+    async def after_sweep(*args, **kwargs):
+        await real(*args, **kwargs)
+        swept.set()
+        await release.wait()
+
+    env.mp.setattr(main, "_rdm_delete_player", after_sweep)
+    deleting = asyncio.create_task(A._delete_member(env, lob.sids[1]))
+    await asyncio.wait_for(swept.wait(), 10)
+    census = asyncio.create_task(env.census_of(lob, 0, [0, 2, 3]))
+    await asyncio.sleep(0)
+    release.set()
+    await deleting
+    await census
+    env.mp.setattr(main, "_rdm_delete_player", real)
+    seat = await env.seat(lob, 1)
+    rows = await _rows(env, "ffa_seat_readmissions", lob, 1)
+    departed = list((await env.lobby_row(lob))["departed_ids"] or [])
+    return lob, seat, rows, departed
+
+
 def test_h5_deletion_locks_an_active_seat_before_hold_creation(monkeypatch):
-    """H5 hold side: deletion discovers an active readmit seat even before it
-    has a hold, and a later census cannot recreate identity or a live hold."""
+    """H5 hold side: deletion discovers an active readmit seat from its seat
+    row even before it has a hold and when no queue row names the lobby, and
+    a later census cannot recreate identity or a live hold."""
     async def body(env):
-        lob = await _rdm_lobby(env)
-        await _present(env, lob, 1, 50.0)
-        await env.at(lob, 70.0)
-        await A._omit(env, lob, [2], 1)
-        real = main._rdm_delete_player
-        swept, release = asyncio.Event(), asyncio.Event()
-
-        async def after_sweep(*args, **kwargs):
-            await real(*args, **kwargs)
-            swept.set()
-            await release.wait()
-
-        env.mp.setattr(main, "_rdm_delete_player", after_sweep)
-        deleting = asyncio.create_task(A._delete_member(env, lob.sids[1]))
-        await asyncio.wait_for(swept.wait(), 10)
-        census = asyncio.create_task(env.census_of(lob, 0, [0, 2, 3]))
-        await asyncio.sleep(0)
-        release.set()
-        await deleting
-        await census
-        seat = await env.seat(lob, 1)
-        rows = await _rows(env, "ffa_seat_readmissions", lob, 1)
+        lob, seat, rows, departed = await _h5_delete_active_seat(env, queue_row=False)
         assert seat["hold_n"] is None and rows == [], \
             ("H5 active lobby", seat["hold_n"], rows)
-        assert lob.pids[1] in list((await env.lobby_row(lob))["departed_ids"] or []), \
-            ("H5 active departed",)
+        assert lob.pids[1] in departed, ("H5 active lobby departed", departed)
+    run_env(monkeypatch, body)
+
+
+def test_h5_deletion_records_the_departure_of_an_active_seat(monkeypatch):
+    """H5 departure side: with the seat's queue row in place (deletion closes
+    the played lobby through it), the seat-row discovery still appends the
+    departure before the lobby closes, and no hold is recreated."""
+    async def body(env):
+        lob, seat, rows, departed = await _h5_delete_active_seat(env, queue_row=True)
+        assert lob.pids[1] in departed, ("H5 active departed", departed)
+        assert seat["hold_n"] is None and rows == [], \
+            ("H5 departed no hold", seat["hold_n"], rows)
     run_env(monkeypatch, body)
 
 

@@ -303,6 +303,16 @@ ROWS = [
                   '        " WHERE s.player_id = :pid AND l.status = \'active\' AND l.readmit_v1"),\n',
                   '        "SELECT lobby_id FROM ffa_assembly_seats"\n'
                   '        " WHERE player_id = :pid AND hold_n IS NOT NULL"),\n', 1)]},
+    # Gate repair D6: the departure append is its own route. With the queue
+    # row in place deletion closes the played lobby, so no hold can return and
+    # only the departure record observes a deletion that discovered the seat
+    # but wrote nothing.
+    {"row": "F1.H5.DEPARTED",
+     "node": RP + "test_h5_deletion_records_the_departure_of_an_active_seat",
+     "tag": "H5 active departed",
+     "mutant": [(MAIN,
+                  '    for lid in sorted(set(active_lobbies), key=str):\n',
+                  '    for lid in []:\n', 1)]},
     {"row": "F1.H5.READMIT",
      "node": RP + "test_h5_readmit_revalidates_identity_below_the_lobby_lock",
      "tag": "H5 readmit identity",
