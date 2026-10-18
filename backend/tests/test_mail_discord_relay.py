@@ -103,7 +103,7 @@ needs_pg = pytest.mark.skipif(
 # Exactly this many tests in this module need the DSN. Pinned from OUT here
 # so that moving one behind the gate is a deliberate edit and not a silent
 # "1 skipped" that still reads as a clean run.
-LIVE_TESTS = 18
+LIVE_TESTS = 20
 
 
 def _read(path):
@@ -1041,7 +1041,8 @@ def test_a_worst_case_relayed_mail_fits_in_one_discord_message():
 # it. (The previous version of this block re-typed the post-330 shape by
 # hand, which could only ever confirm what I already believed.)
 BASE_SCHEMA = """
-DROP TABLE IF EXISTS pending_dms, mail_recipients, mail_messages, players CASCADE;
+DROP TABLE IF EXISTS pending_dms_v1410_parked, pending_dms,
+    mail_recipients, mail_messages, players CASCADE;
 CREATE TABLE players (
     id UUID PRIMARY KEY,
     steam_id VARCHAR(20) UNIQUE NOT NULL,
@@ -1076,6 +1077,8 @@ SQL_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sql")
 MIGRATION_330 = _read(os.path.join(SQL_DIR, "330_mail_discord_relay.sql"))
 MIGRATION_349 = _read(os.path.join(SQL_DIR, "349_pending_dms_sender_identity.sql"))
+MIGRATION_374 = _read(os.path.join(SQL_DIR, "374_v1410_rollback_park_relay.sql"))
+MIGRATION_375 = _read(os.path.join(SQL_DIR, "375_v1410_rollback_resume_relay.sql"))
 
 
 def _pg(sql, *names):
@@ -2463,10 +2466,184 @@ def test_the_recheck_route_refuses_a_caller_without_the_key(monkeypatch):
 
 # ── Live: the whole path, against the real migration ─────────────────────
 
+def test_rollback_park_and_resume_are_exact_inverses_in_source():
+    """The rollback pair keeps one exact parked-state protocol."""
+    park = " ".join(MIGRATION_374.split())
+    resume = " ".join(MIGRATION_375.split())
+    assert MIGRATION_374.count("BEGIN;") == 1
+    assert MIGRATION_374.count("COMMIT;") == 1
+    assert MIGRATION_375.count("BEGIN;") == 1
+    assert MIGRATION_375.count("COMMIT;") == 1
+    assert (
+        "WHERE u.id = c.id AND u.delivered_at IS NULL "
+        "AND NOT u.undeliverable AND u.cancelled_at = c.cancelled_at"
+    ) in park
+    assert (
+        "SET delivered_at = k.was_delivered_at, "
+        "undeliverable = k.was_undeliverable, "
+        "cancelled_at = k.was_cancelled_at"
+    ) in resume
+    assert (
+        "AND d.delivered_at = k.parked_at "
+        "AND NOT d.undeliverable AND d.cancelled_at IS NULL"
+    ) in resume
+
+
 def _live(coro_factory):
     import asyncio
     return asyncio.get_event_loop_policy().new_event_loop() \
         .run_until_complete(coro_factory())
+
+
+@needs_pg
+def test_rollback_park_then_resume_restores_changed_columns_and_ignores_decoys():
+    """D5c followed by D5e is lossless, selective and idempotent."""
+    import asyncpg
+
+    async def run():
+        conn = await asyncpg.connect(DSN)
+        try:
+            await _seed(conn)
+            rows = await conn.fetch("""
+                INSERT INTO pending_dms
+                       (steam_id, content, delivered_at, undeliverable, cancelled_at)
+                VALUES ('1', 'eligible', NULL, false, NOW() - INTERVAL '4 minutes'),
+                       ('1', 'live', NULL, false, NULL),
+                       ('1', 'undeliverable', NULL, true, NOW() - INTERVAL '3 minutes'),
+                       ('1', 'already-delivered', NOW() - INTERVAL '2 minutes', false,
+                        NOW() - INTERVAL '5 minutes')
+                RETURNING id, content
+            """)
+            ids = {r["content"]: r["id"] for r in rows}
+
+            async def pending_snapshot():
+                got = await conn.fetch("""
+                    SELECT content, delivered_at, undeliverable, cancelled_at
+                      FROM pending_dms
+                     WHERE id = ANY($1::bigint[])
+                     ORDER BY content
+                """, list(ids.values()))
+                return {r["content"]: (r["delivered_at"], r["undeliverable"],
+                                        r["cancelled_at"]) for r in got}
+
+            before = await pending_snapshot()
+            await conn.execute(MIGRATION_374)
+            parked = await pending_snapshot()
+            ledger = await conn.fetchrow("""
+                SELECT id, was_delivered_at, was_undeliverable, was_cancelled_at,
+                       acked, parked_at, resumed_at
+                  FROM pending_dms_v1410_parked
+            """)
+            assert ledger is not None and ledger["id"] == ids["eligible"], ledger
+            assert ledger["was_delivered_at"] is None
+            assert ledger["was_undeliverable"] is False
+            assert ledger["was_cancelled_at"] == before["eligible"][2]
+            assert ledger["acked"] is True and ledger["resumed_at"] is None
+            assert parked["eligible"] == (ledger["parked_at"], False, None)
+            for name in ("live", "undeliverable", "already-delivered"):
+                assert parked[name] == before[name], (name, before[name], parked[name])
+
+            await conn.execute(MIGRATION_374)
+            assert await pending_snapshot() == parked
+            assert await conn.fetchval(
+                "SELECT COUNT(*) FROM pending_dms_v1410_parked") == 1
+
+            await conn.execute(MIGRATION_375)
+            restored = await pending_snapshot()
+            assert restored == before, (before, restored)
+            resumed = await conn.fetchrow("""
+                SELECT was_delivered_at, was_undeliverable, was_cancelled_at,
+                       acked, parked_at, resumed_at
+                  FROM pending_dms_v1410_parked
+                 WHERE id = $1
+            """, ids["eligible"])
+            assert resumed["resumed_at"] is not None, resumed
+            assert tuple(resumed[k] for k in (
+                "was_delivered_at", "was_undeliverable", "was_cancelled_at", "acked")) \
+                == (None, False, before["eligible"][2], True)
+
+            await conn.execute(MIGRATION_375)
+            assert await pending_snapshot() == restored
+            assert await conn.fetchval(
+                "SELECT COUNT(*) FROM pending_dms_v1410_parked WHERE resumed_at IS NOT NULL") == 1
+        finally:
+            await conn.close()
+
+    _live(run)
+
+
+@needs_pg
+def test_rollback_park_rechecks_selected_rows_after_a_blocked_update():
+    """Rows changed while D5c waits are not overwritten from its stale CTE."""
+    import asyncpg
+    from datetime import timedelta
+
+    async def run():
+        observer = await asyncpg.connect(DSN)
+        blocker = worker = None
+        blocker_tx = None
+        task = None
+        try:
+            await _seed(observer)
+            rows = await observer.fetch("""
+                INSERT INTO pending_dms
+                       (steam_id, content, delivered_at, undeliverable, cancelled_at)
+                VALUES ('1', 'became-undeliverable', NULL, false,
+                        NOW() - INTERVAL '4 minutes'),
+                       ('1', 'cancellation-moved', NULL, false,
+                        NOW() - INTERVAL '3 minutes')
+                RETURNING id, content, cancelled_at
+            """)
+            by_name = {r["content"]: r for r in rows}
+            blocker = await asyncpg.connect(DSN)
+            worker = await asyncpg.connect(DSN)
+            blocker_tx = blocker.transaction()
+            await blocker_tx.start()
+            await blocker.execute(
+                "UPDATE pending_dms SET undeliverable = true WHERE id = $1",
+                by_name["became-undeliverable"]["id"])
+            await blocker.execute(
+                "UPDATE pending_dms SET cancelled_at = cancelled_at + INTERVAL '1 hour' "
+                "WHERE id = $1", by_name["cancellation-moved"]["id"])
+
+            task = asyncio.ensure_future(worker.execute(MIGRATION_374))
+            assert await _blocked_or_done(observer, task), (
+                "D5c never waited behind the concurrent row updates")
+            await blocker_tx.commit()
+            blocker_tx = None
+            await asyncio.wait_for(task, 10)
+
+            got = {r["content"]: r for r in await observer.fetch("""
+                SELECT content, delivered_at, undeliverable, cancelled_at
+                  FROM pending_dms
+                 WHERE id = ANY($1::bigint[])
+            """, [r["id"] for r in rows])}
+            assert got["became-undeliverable"]["delivered_at"] is None
+            assert got["became-undeliverable"]["undeliverable"] is True
+            assert got["became-undeliverable"]["cancelled_at"] \
+                == by_name["became-undeliverable"]["cancelled_at"]
+            assert got["cancellation-moved"]["delivered_at"] is None
+            assert got["cancellation-moved"]["undeliverable"] is False
+            assert got["cancellation-moved"]["cancelled_at"] \
+                == by_name["cancellation-moved"]["cancelled_at"] + timedelta(hours=1)
+            assert await observer.fetchval(
+                "SELECT COUNT(*) FROM pending_dms_v1410_parked") == 0
+        finally:
+            if blocker_tx is not None:
+                await blocker_tx.rollback()
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if worker is not None:
+                await worker.close()
+            if blocker is not None:
+                await blocker.close()
+            await observer.close()
+
+    _live(run)
 
 
 

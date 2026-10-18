@@ -4,12 +4,14 @@ SET LOCAL lock_timeout = '5s';
 WITH r AS (
     UPDATE pending_dms d
        SET delivered_at = k.was_delivered_at,
-           undeliverable = k.was_undeliverable
+           undeliverable = k.was_undeliverable,
+           cancelled_at = k.was_cancelled_at
       FROM pending_dms_v1410_parked k
      WHERE k.id = d.id
        AND k.resumed_at IS NULL
        AND d.delivered_at = k.parked_at
-       AND d.undeliverable
+       AND NOT d.undeliverable
+       AND d.cancelled_at IS NULL
  RETURNING k.id, k.parked_at
 )
 UPDATE pending_dms_v1410_parked k
