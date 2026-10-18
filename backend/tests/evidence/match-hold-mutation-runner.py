@@ -40,6 +40,17 @@ M383 = "383_match_hold_stage2.sql"
 # id: (piece, module file, [(anchor, mutant text)], [(anchor, control text)],
 #      test file, -k selection of the tests that must fail)
 MUTANTS = {
+    # Fix 1 - every stage 2 route requires a positively verified session
+    "F1.H1": ("FIX1", "match_hold.py",
+              [('    if not _session_was_verified(request):\n'
+                '        raise HTTPException(status_code=401, detail="session_required")',
+                '    if False:\n'
+                '        raise HTTPException(status_code=401, detail="session_required")')],
+              [('    if not _session_was_verified(request):\n'
+                '        raise HTTPException(status_code=401, detail="session_required")',
+                '    if not (_session_was_verified(request)):\n'
+                '        raise HTTPException(status_code=401, detail="session_required")')],
+              HOLD_T, "h1_real_helper_soft_fail_paths"),
     # N2 - the game id chain and the hold latch
     "M1.7": ("N2", "match_hold.py",
              [('"   AND prev_game = CAST(:prev AS uuid)"), key)',

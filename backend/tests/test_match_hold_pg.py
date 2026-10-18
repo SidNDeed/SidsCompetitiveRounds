@@ -61,6 +61,60 @@ async def _fake_session(request, steam_id, db):
     token = request.headers.get("X-Session-Token") if request is not None else None
     if token != "tok:" + str(steam_id):
         raise HTTPException(401, "session")
+    request.state.scr_session_verified = True
+
+
+class _SessionLookupErrorDB:
+    async def execute(self, *args, **kwargs):
+        raise RuntimeError("session lookup unavailable")
+
+
+@pytest.mark.parametrize("method,path,body,params", [
+    ("POST", "/game/start",
+     {"steam_id": "s2auth", "mode": "team", "series_id": str(uuid.uuid4()), "room": "r"}, None),
+    ("POST", "/hold/beat",
+     {"steam_id": "s2auth", "mode": "team", "series_id": str(uuid.uuid4()), "room": "r"}, None),
+    ("POST", "/hold/open",
+     {"request_id": "authreq1", "opener_steam_id": "s2auth", "mode": "team", "room": "r",
+      "game_id": str(uuid.uuid4()), "held_steam_id": "s2held", "slot": 0, "team": 0,
+      "t1_points": 0, "t2_points": 0, "hmac": "invalid"}, None),
+    ("GET", f"/hold/{uuid.uuid4()}/state", None, {"steam_id": "s2auth"}),
+    ("GET", "/hold/by-room", None,
+     {"room": "r", "game_id": str(uuid.uuid4()), "steam_id": "s2auth"}),
+    ("POST", f"/hold/{uuid.uuid4()}/end", {"steam_id": "s2auth", "reason": "refused"}, None),
+    ("GET", "/hold/mine", None, {"steam_id": "s2auth"}),
+    ("POST", f"/hold/{uuid.uuid4()}/claim", {"steam_id": "s2auth"}, None),
+    ("POST", f"/hold/{uuid.uuid4()}/bind", {"steam_id": "s2auth", "actor": 1}, None),
+    ("POST", f"/hold/{uuid.uuid4()}/entered",
+     {"steam_id": "s2auth", "game_id": str(uuid.uuid4()), "actor": 1}, None),
+])
+def test_h1_real_helper_soft_fail_paths_require_verified_session(
+        monkeypatch, method, path, body, params):
+    """Log-only and lookup-error returns never authorize a stage 2 route."""
+    real_check = main._check_steam_session
+    app = FastAPI()
+    app.include_router(match_hold.router)
+
+    async def _db():
+        yield _SessionLookupErrorDB()
+
+    app.dependency_overrides[database.get_db] = _db
+    monkeypatch.setattr(main, "_check_steam_session", real_check)
+    monkeypatch.setattr(main.os, "getenv", lambda *args, **kwargs: "")
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            route = "/api/v1/match" + path
+            log_only = await client.request(method, route, json=body, params=params)
+            lookup_error = await client.request(
+                method, route, json=body, params=params,
+                headers={"X-Session-Token": "unavailable"})
+        for response in (log_only, lookup_error):
+            assert response.status_code == 401
+            assert response.json() == {"detail": "session_required"}
+
+    _run(exercise())
 
 
 class Env:

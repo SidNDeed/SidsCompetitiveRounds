@@ -168,6 +168,15 @@ def _refused(reason: str) -> dict:
     return {"status": "refused", "reason": reason}
 
 
+async def _require_verified_session(request: Request, steam_id: str, db) -> None:
+    """Require the compatibility session check to establish the claimed id."""
+    from main import _check_steam_session, _session_was_verified   # late import
+
+    await _check_steam_session(request, steam_id, db)
+    if not _session_was_verified(request):
+        raise HTTPException(status_code=401, detail="session_required")
+
+
 @router.post("/game/start")
 async def match_game_start(req: GameStartReq, request: Request,
                            db: AsyncSession = Depends(get_db)):
@@ -181,11 +190,9 @@ async def match_game_start(req: GameStartReq, request: Request,
     handover never forks a game; otherwise one row is inserted with seq one
     more than the latest of (series, room). A previous G that is not a game
     of this series and room is refused."""
-    from main import _check_steam_session   # late import: main mounts this module at NX1
-
     mode = _mode_or_400(req.mode)
     room = req.room.strip()
-    await _check_steam_session(request, req.steam_id, db)
+    await _require_verified_session(request, req.steam_id, db)
     pid = await _player_id(db, req.steam_id)
     row = await _series_lock(db, mode, req.series_id)
     now = await _ctx_now(db)                 # after the lock wait, never before it
@@ -387,11 +394,9 @@ async def match_hold_beat(req: BeatReq, request: Request,
     entry naming the poster with another actor); beat_at, seen and the
     boundary digest are stored on every accepted beat. A beat decides no
     result."""
-    from main import _check_steam_session   # late import
-
     mode = _mode_or_400(req.mode)
     room = req.room.strip()
-    await _check_steam_session(request, req.steam_id, db)
+    await _require_verified_session(request, req.steam_id, db)
     pid = await _player_id(db, req.steam_id)
     row = await _series_read(db, mode, req.series_id)
     if row is None or pid is None or pid not in _members(mode, row):
@@ -512,11 +517,11 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
     Every request, refused or not, writes its match_hold_open_attempts row in
     the same transaction; a refusal is never a hold. A repeat for the same
     (room, G, held player) answers the existing open row."""
-    from main import _check_steam_session, _lease_release, _team_game_crossed_two
+    from main import _lease_release, _team_game_crossed_two
 
     mode = _mode_or_400(req.mode)
     room = req.room.strip()
-    await _check_steam_session(request, req.opener_steam_id, db)
+    await _require_verified_session(request, req.opener_steam_id, db)
     if not _verify_hold_open_hmac(req):
         raise HTTPException(403, "Invalid hold-open signature")
     opener = await _player_id(db, req.opener_steam_id)
@@ -592,9 +597,7 @@ async def match_hold_state(hold_id: uuid.UUID, steam_id: str, request: Request,
     """The server row of one hold for a series member: state, seq,
     deadline_s, bound_actor, closed_at and closed_reason (the transition
     envelope of S2). A row past its deadline reads closed at that deadline."""
-    from main import _check_steam_session   # late import
-
-    await _check_steam_session(request, steam_id, db)
+    await _require_verified_session(request, steam_id, db)
     pid = await _player_id(db, steam_id)
     hold = await _hold_row(db, hold_id)
     if hold is None or not await _member_of_hold(db, hold, pid):
@@ -610,9 +613,7 @@ async def match_hold_by_room(room: str, game_id: uuid.UUID, steam_id: str,
                              request: Request, db: AsyncSession = Depends(get_db)):
     """The hold of (room, G) for a series member, newest first; 404 when the
     room holds none for G (the promoted master then reposts the open)."""
-    from main import _check_steam_session   # late import
-
-    await _check_steam_session(request, steam_id, db)
+    await _require_verified_session(request, steam_id, db)
     pid = await _player_id(db, steam_id)
     hold = (await db.execute(text(
         f"SELECT {_HOLD_COLS} FROM match_seat_holds"
@@ -640,11 +641,9 @@ async def match_hold_end(hold_id: uuid.UUID, req: HoldEndReq, request: Request,
     END_REASONS. Under the hold row lock closed_at and the reason are stamped
     exactly once; a row already closed (or past its own deadline, which the
     sweep would stamp) answers that closure and stamps nothing new."""
-    from main import _check_steam_session   # late import
-
     if req.reason not in END_REASONS:
         raise HTTPException(400, "unknown end reason")
-    await _check_steam_session(request, req.steam_id, db)
+    await _require_verified_session(request, req.steam_id, db)
     pid = await _player_id(db, req.steam_id)
     hold = await _hold_row(db, hold_id, lock=True)
     if hold is None or not await _member_of_hold(db, hold, pid):
@@ -747,9 +746,7 @@ async def match_hold_mine(steam_id: str, request: Request,
     attempt row (and offered_at once) committed BEFORE the answer, and sets
     no queue flag; a write failure answers 503 and offers nothing. Without a
     live hold it writes nothing and answers readmissible 0."""
-    from main import _check_steam_session   # late import
-
-    await _check_steam_session(request, steam_id, db)
+    await _require_verified_session(request, steam_id, db)
     pid = await _player_id(db, steam_id)
     hold = None
     if pid is not None:
@@ -815,9 +812,9 @@ async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Reque
     and series, and answers T once; a repeat rotates T. Nothing here moves
     held_until. Every claim, refused or granted, writes its attempt row in
     this transaction."""
-    from main import _check_steam_session, _lease_acquire, LEASE_TTL_ASSEMBLY
+    from main import _lease_acquire, LEASE_TTL_ASSEMBLY
 
-    await _check_steam_session(request, req.steam_id, db)
+    await _require_verified_session(request, req.steam_id, db)
     pid = await _player_id(db, req.steam_id)
     peek = await _hold_row(db, hold_id)
     if peek is None:
@@ -910,9 +907,7 @@ async def match_hold_bind(hold_id: uuid.UUID, req: HoldBindReq, request: Request
     actor refuses (already_bound) and one bound to X answers as bound. The
     bind stamps bound_at, X and the region, seq + 1, and its attempt row,
     in one transaction."""
-    from main import _check_steam_session   # late import
-
-    await _check_steam_session(request, req.steam_id, db)
+    await _require_verified_session(request, req.steam_id, db)
     pid = await _player_id(db, req.steam_id)
     hold = await _hold_row(db, hold_id, lock=True)
     if hold is None:
@@ -974,9 +969,7 @@ async def match_hold_entered(hold_id: uuid.UUID, req: HoldEnteredReq, request: R
     and a fresh beat of another fighter listing X with the held Steam id
     (uncorroborated). It stamps entered_at and closed_at = entered once,
     spends T (the verifier is cleared) and seq + 1, with its attempt row."""
-    from main import _check_steam_session   # late import
-
-    await _check_steam_session(request, req.steam_id, db)
+    await _require_verified_session(request, req.steam_id, db)
     pid = await _player_id(db, req.steam_id)
     hold = await _hold_row(db, hold_id, lock=True)
     if hold is None:
