@@ -1049,5 +1049,55 @@ namespace CompetitiveRounds
                 return !(Held(room) && stamp > _observedAt);
             }
         }
+
+        // ── KX3: admission (V3 S3 steps 4 and 5) ───────────────────────────
+
+        /// <summary>The lock-roster feeder of a flagged room (S3 step 5,
+        /// lesson g): every roster freeze there, the per-game freeze at each
+        /// game start included, reads the pinned series roster and never the
+        /// present fighters, so a hold spanning game N to N+1 keeps the held
+        /// seat on the roster and a stranger present at the freeze is not on
+        /// it. <paramref name="present"/> is the view the freeze would have
+        /// read today; the rule never invokes it. Null for a room that is not
+        /// flagged or whose pin carries no roster (a pin from the claim answer
+        /// alone), which freezes as today.</summary>
+        internal static List<string> LockRoster(string room, Func<IEnumerable<string>> present)
+        {
+            if (!Flagged(room)) return null;
+            var pin = PinFor(room);
+            if (pin == null || pin.Roster.Count == 0) return null;
+            var ids = new List<string>(pin.Roster);
+            ids.Sort(StringComparer.Ordinal);
+            return ids;
+        }
+
+        /// <summary>The held-seat conjunct of RoomActors.IsUnauthorized (S3
+        /// step 4): in a flagged room whose cr_th names the held seat's hold
+        /// (its slot), an actor whose u_id is the held seat's is a fighter
+        /// only if it is X, the hold's
+        /// bound actor; before a bind (no X) every such actor is refused, and
+        /// so is every one after an x that bound nobody. Null when the rule
+        /// does not apply (no flagged room, no readable hold, no held identity
+        /// known, or another identity), and the rules of today decide.</summary>
+        internal static bool? HeldSeatUnauthorized(string room, string th, int actor, string actorUid, string heldUid, int heldSlot)
+        {
+            if (!Flagged(room) || string.IsNullOrEmpty(heldUid) || !string.Equals(actorUid, heldUid, StringComparison.Ordinal)) return null;
+            HoldKey k;
+            if (!TryParseHold(th, out k) || k.Slot != heldSlot) return null;
+            return k.BoundActor <= 0 || actor != k.BoundActor;
+        }
+
+        /// <summary>S3 step 5: on a verified b every client releases the
+        /// latches the roster now covers, once per hold, so an actor refused
+        /// before its identity was readable is released at the bind.
+        /// <paramref name="lastReleased"/> carries the hold last released.</summary>
+        internal static bool ReleaseAtBind(HoldKey verified, ref string lastReleased)
+        {
+            if (verified == null || verified.State != 'b') return false;
+            string id = verified.G + ":" + I(verified.Slot) + ":" + (verified.HoldId ?? "");
+            if (lastReleased == id) return false;
+            lastReleased = id;
+            return true;
+        }
     }
 }

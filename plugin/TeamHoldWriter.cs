@@ -418,6 +418,8 @@ namespace CompetitiveRounds
         private static TeamHoldNet.StateAnswer _server;
         private static int _readGen;
         private static string _obsTh;
+        /// <summary>KX3: the hold whose verified b last released the latches.</summary>
+        private static string _releasedFor;
         private static TeamHoldRules.Ceilings _ceil = new TeamHoldRules.Ceilings();
         private static string _room;
         private static TeamHoldRules.DropCut _endingCut;
@@ -584,6 +586,9 @@ namespace CompetitiveRounds
                             // client's own verified read.
                             try { TeamHoldReturn.OnVerifiedBound(cut, k, _server); } catch (Exception ex) { Plugin.Log.LogWarning(TeamHold.TAG + " hand-over: " + ex.Message); }
                             try { SurvivorReplay(cut, k); } catch { }
+                            // KX3 (S3 step 5): once per hold, the latches the
+                            // roster now covers are released at the bind.
+                            try { if (TeamHoldRules.ReleaseAtBind(k, ref _releasedFor)) RoomActors.ReleaseCoveredLatches(); } catch { }
                             break;
                         case 'e':
                             Release(cut);

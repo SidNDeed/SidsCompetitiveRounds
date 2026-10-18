@@ -40,6 +40,7 @@ PIECES = {
     # The refit lane (claude/rj-stage2-refit), one entry per continuation piece.
     "KX1": ("tx1_", "t16_"),
     "KX2": ("t27_",),
+    "KX3": ("t35_", "tx3_"),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -196,6 +197,20 @@ MUTANTS = [
     ("MX2.2", "KX2", "rules", [
         ("else if (_room == room && _g == k.G && _slot == k.Slot) { _observedAt = -1;", "else if (_room == room) { _observedAt = -1;")],
      "t27_lift_and_rooms", "t27_open_delayed_reordered"),
+    # KX3, admission (V3 M3.11, M3.12, M3.17; MX3.1 lane-added).
+    ("M3.11", "KX3", "rules", [
+        ("if (!Flagged(room)) return null;", "return null;")],
+     "t35_span_games", "t35_release_at_bind"),
+    ("M3.12", "KX3", "rules", [
+        ("var ids = new List<string>(pin.Roster);",
+         "var ids = new List<string>(pin.Roster); foreach (var u in present()) if (!ids.Contains(u)) ids.Add(u);")],
+     "t35_stranger", "t35_span_games"),
+    ("M3.17", "KX3", "rules", [
+        ("return k.BoundActor <= 0 || actor != k.BoundActor;", "return null;")],
+     "tx3_held_seat_identity", "t35_span_games"),
+    ("MX3.1", "KX3", "rules", [
+        ("if (lastReleased == id) return false;", "")],
+     "t35_release_at_bind", "t35_span_games"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

@@ -28,6 +28,26 @@ namespace CompetitiveRounds
         /// <summary>KX4: the sorted registration and spawn of the returner.</summary>
         internal static Func<bool> Registered;
 
+        // KX3: the admission seam, bound here. The returner's own view of
+        // its latch: its Steam id is on the pinned series roster of this
+        // flagged room, its roster is frozen to that roster when it has none,
+        // a latch the roster now covers is released, and it is not
+        // unauthorized. A room with no roster pin never completes it.
+        static TeamHoldReturn() { AdmissionLatched = AdmissionNow; }
+
+        private static bool AdmissionNow()
+        {
+            var me = PhotonNetwork.LocalPlayer;
+            if (me == null) return false;
+            var roster = TeamHoldRules.LockRoster(TeamHoldWriter.CurrentRoom(), null);
+            if (roster == null) return false;
+            string sid = RoomActors.SteamIdOf(me);
+            if (string.IsNullOrEmpty(sid) || !roster.Contains(sid)) return false;
+            if (!RoomActors.RosterFrozen && roster.Count >= 2) RoomActors.FreezeFighterRoster(roster);
+            if (RoomActors.IsRejected(me)) RoomActors.ReleaseCoveredLatches();
+            return !RoomActors.IsUnauthorized(me);
+        }
+
         private static TeamHoldNet.MineAnswer _offer;
         private static double _offerAt;
         private static bool _menuDone;

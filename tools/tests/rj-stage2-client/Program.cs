@@ -47,6 +47,7 @@ namespace CompetitiveRounds.Stage2Harness
             RegisterK6();
             RegisterKX1();
             RegisterKX2();
+            RegisterKX3();
         }
 
         // ── helpers ─────────────────────────────────────────────────────────

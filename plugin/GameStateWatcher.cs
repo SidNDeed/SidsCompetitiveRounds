@@ -7574,13 +7574,17 @@ namespace CompetitiveRounds
 
         /// <summary>V11 K47: in a gated room each roster freeze takes the lock
         /// roster's Steam ids (ApiClient.FfaLockedRoster) and reads no fighter
-        /// view; null for every other room, which freezes as today.</summary>
+        /// view. RJ Stage 2 S3 step 5: in a flagged room (team or 1v2) it
+        /// takes the pinned series roster (TeamHoldRules.LockRoster), so the
+        /// per-game freeze never narrows below the series while a seat is
+        /// held. Null for every other room, which freezes as today.</summary>
         private static List<string> GatedFreezeIds()
         {
             try
             {
                 string room = PhotonNetwork.CurrentRoom != null ? PhotonNetwork.CurrentRoom.Name : "";
-                if (!FfaAssembly.IsGatedRoom(room)) return null;
+                if (!FfaAssembly.IsGatedRoom(room))
+                    return TeamHoldRules.LockRoster(room, PresentFighterIds);
                 var ids = new List<string>();
                 var roster = ApiClient.FfaLockedRoster;
                 if (roster != null)
@@ -7589,6 +7593,20 @@ namespace CompetitiveRounds
                 return ids;
             }
             catch { return null; }
+        }
+
+        /// <summary>The present fighters' Steam ids, the view a freeze of
+        /// today reads; handed to the lock-roster feeder, which never reads
+        /// it in a flagged room.</summary>
+        private static IEnumerable<string> PresentFighterIds()
+        {
+            var ids = new List<string>();
+            foreach (var f in RoomActors.ActiveFighters())
+            {
+                var s = RoomActors.SteamIdOf(f);
+                if (!string.IsNullOrEmpty(s)) ids.Add(s);
+            }
+            return ids;
         }
 
         private static bool TryReportFfaMatch(string reportRoomId, int duration, int winnerTeam)
