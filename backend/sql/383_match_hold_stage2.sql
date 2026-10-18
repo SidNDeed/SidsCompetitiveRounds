@@ -143,6 +143,7 @@ CREATE TABLE IF NOT EXISTS match_report_windows (
   settled_at           TIMESTAMPTZ,
   settled_reporter_id  UUID REFERENCES players(id),
   settled_cls          VARCHAR(1),
+  superseded_at        TIMESTAMPTZ,
   PRIMARY KEY (room_name, game_id),
   CONSTRAINT ck_mrw_mode CHECK (mode IN ('team', 'ovt')),
   CONSTRAINT ck_mrw_cls CHECK (settled_cls IS NULL OR settled_cls IN ('c', 'r', 'u')),
@@ -220,7 +221,8 @@ BEGIN
             ('team_queue', 'caps'), ('ovt_queue', 'caps'),
             ('team_series', 'hold_v2'), ('team_series', 'hold_room'),
             ('ovt_series', 'hold_v2'), ('ovt_series', 'hold_room'),
-            ('team_matches', 'fallback_cls'), ('ovt_matches', 'fallback_cls')
+            ('team_matches', 'fallback_cls'), ('ovt_matches', 'fallback_cls'),
+            ('match_report_windows', 'superseded_at')
         ) AS v(tbl, col)
     LOOP
         IF NOT EXISTS (
