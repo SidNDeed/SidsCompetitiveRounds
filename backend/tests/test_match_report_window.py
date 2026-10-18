@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import HTTPException
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 API = os.path.normpath(os.path.join(HERE, "..", "api"))
@@ -55,6 +56,9 @@ def test_module_census():
     want = os.path.normcase(os.path.normpath(SRC or API))
     got = os.path.normcase(os.path.dirname(os.path.abspath(mrw.__file__)))
     assert got == want, (got, want)
+    for fn in (mrw.settle_window, mrw.receive, mrw.release_held, mrw.supersede_held):
+        assert "async with database_deadline(db)" in inspect.getsource(fn)
+    assert "await settle_window(" in inspect.getsource(mrw._receive)
 
 
 # == T5.3 the window =============================================================
@@ -277,8 +281,11 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
     journaled while a lower class C fighter beats; the lowest fresh class C
     fighter's report settles at once, exactly once; a class C fighter with
     no fresh beat is not waited for; a held game-over settles nothing until
-    released, and a superseded one never."""
+    released, and a superseded one never. M2 also proves every public window
+    operation bounds a blocked row and nested receipt settlement installs one
+    database budget."""
     import cf_pg
+    import match_hold
     cf_pg.require_live_pg()
 
     async def go():
@@ -366,4 +373,93 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                 "SELECT state FROM match_report_journal WHERE room_name = $1", room) == \
                 "superseded"
             assert len(settled) == n + 1
+
+            for operation in ("settle", "receive", "release", "supersede"):
+                room = "m2_%s_%s" % (operation, uuid.uuid4().hex[:8])
+                game_id = await _window_game(conn, "team", room)
+                now = await conn.fetchval("SELECT clock_timestamp()")
+                await conn.execute(
+                    "INSERT INTO match_report_windows"
+                    " (room_name, game_id, mode, opened_at, settle_after)"
+                    " VALUES ($1, $2, 'team', $3 - interval '31 seconds',"
+                    "         $3 - interval '1 second')", room, game_id, now)
+                state = "held" if operation in ("release", "supersede") else "journaled"
+                if operation != "receive":
+                    await conn.execute(
+                        "INSERT INTO match_report_journal"
+                        " (room_name, game_id, reporter_id, mode, reporter_steam, cls, state,"
+                        "  payload, received_at) VALUES ($1, $2, $3, 'team', $4, 'c', $5,"
+                        "  '{}'::jsonb, $6 - interval '2 seconds')",
+                        room, game_id, seats[0][0], seats[0][1], state, now)
+
+                blocker = await cf_pg.harness.connect_bound(c.dsn, c.schema)
+                transaction = blocker.transaction()
+                await transaction.start()
+                await blocker.execute(
+                    "SELECT 1 FROM match_report_windows"
+                    " WHERE room_name = $1 AND game_id = $2 FOR UPDATE", room, game_id)
+                before_settled = len(settled)
+                started = asyncio.get_running_loop().time()
+                try:
+                    async with sm() as db:
+                        if operation == "settle":
+                            call = mrw.settle_window(
+                                db, mode="team", room=room, game_id=game_id,
+                                now=now, settle=stub)
+                        elif operation == "receive":
+                            call = mrw.receive(
+                                db, mode="team", room=room, game_id=game_id,
+                                reported_game_id=game_id, reporter_id=seats[0][0],
+                                reporter_steam=seats[0][1], payload="{}",
+                                member_ids=[s[0] for s in seats], now=now, settle=stub)
+                        elif operation == "release":
+                            call = mrw.release_held(
+                                db, mode="team", room=room, game_id=game_id, now=now)
+                        else:
+                            call = mrw.supersede_held(
+                                db, mode="team", room=room, game_id=game_id, now=now)
+                        with pytest.raises(HTTPException) as caught:
+                            await asyncio.wait_for(call, 7.5)
+                        elapsed = asyncio.get_running_loop().time() - started
+                        assert (caught.value.status_code, caught.value.detail) == \
+                            (503, "database_deadline")
+                        assert 4.0 <= elapsed < 7.0, (operation, elapsed)
+                        assert db.info.get(match_hold._DB_DEADLINE_INFO) is None
+                finally:
+                    await transaction.rollback()
+                    await blocker.close()
+
+                window = await conn.fetchrow(
+                    "SELECT settled_at FROM match_report_windows"
+                    " WHERE room_name = $1 AND game_id = $2", room, game_id)
+                rows = await conn.fetch(
+                    "SELECT state FROM match_report_journal"
+                    " WHERE room_name = $1 AND game_id = $2", room, game_id)
+                assert window["settled_at"] is None
+                assert [row["state"] for row in rows] == \
+                    ([] if operation == "receive" else [state])
+                assert len(settled) == before_settled
+
+            setups = 0
+            original_setup = match_hold._install_database_timeouts
+
+            async def counted_setup(db):
+                nonlocal setups
+                setups += 1
+                await original_setup(db)
+
+            monkeypatch.setattr(match_hold, "_install_database_timeouts", counted_setup)
+            room = "m2_nested_" + uuid.uuid4().hex[:8]
+            game_id = await _window_game(conn, "team", room)
+            now = await conn.fetchval("SELECT clock_timestamp()")
+            async with sm() as db:
+                answer = await mrw.receive(
+                    db, mode="team", room=room, game_id=game_id, reported_game_id=None,
+                    reporter_id=seats[0][0], reporter_steam=seats[0][1], payload="{}",
+                    member_ids=[s[0] for s in seats], now=now, settle=stub)
+                assert db.info.get(match_hold._DB_DEADLINE_INFO) is None
+                await db.commit()
+            assert answer == {"status": "journaled", "cls": "u"}
+            assert setups == 1
+
     _run(go())

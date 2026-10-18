@@ -32,7 +32,7 @@ from datetime import timedelta
 
 from sqlalchemy import text
 
-from match_hold import BEAT_FRESH_S
+from match_hold import BEAT_FRESH_S, database_deadline
 
 WINDOW_S = 30
 CLASS_C, CLASS_R, CLASS_U = "c", "r", "u"
@@ -228,6 +228,13 @@ async def _mark_settled(db, room, game_id, chosen, now):
 
 
 async def settle_window(db, *, mode, room, game_id, now, settle):
+    """Run one settle operation inside the shared match database budget."""
+    async with database_deadline(db):
+        return await _settle_window(
+            db, mode=mode, room=room, game_id=game_id, now=now, settle=settle)
+
+
+async def _settle_window(db, *, mode, room, game_id, now, settle):
     """Settle an EXPIRED window of (room, G): lock the window row first;
     nothing when it is already settled or not yet expired; otherwise call
     `settle(db, entry)` once with the report `pick` chooses and write
@@ -245,6 +252,17 @@ async def settle_window(db, *, mode, room, game_id, now, settle):
 
 async def receive(db, *, mode, room, game_id, reported_game_id, reporter_id, reporter_steam,
                   payload, member_ids, now, settle, held=False) -> dict:
+    """Run one receipt inside the shared match database budget."""
+    async with database_deadline(db):
+        return await _receive(
+            db, mode=mode, room=room, game_id=game_id,
+            reported_game_id=reported_game_id, reporter_id=reporter_id,
+            reporter_steam=reporter_steam, payload=payload, member_ids=member_ids,
+            now=now, settle=settle, held=held)
+
+
+async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, reporter_steam,
+                   payload, member_ids, now, settle, held=False) -> dict:
     """The settle driver for one HMAC-verified report of a flagged room.
 
     The window row of (room, G) is locked first. A settled window answers
@@ -282,6 +300,12 @@ async def receive(db, *, mode, room, game_id, reported_game_id, reporter_id, rep
 
 
 async def release_held(db, *, mode, room, game_id, now) -> int:
+    """Run one held-report release inside the shared match database budget."""
+    async with database_deadline(db):
+        return await _release_held(db, mode=mode, room=room, game_id=game_id, now=now)
+
+
+async def _release_held(db, *, mode, room, game_id, now) -> int:
     """At entry: the `held` reports of G become journaled and the window of
     G opens (or re-opens its 30 s from now when it was opened during the
     hold and is unsettled). Returns the rows released."""
@@ -300,6 +324,12 @@ async def release_held(db, *, mode, room, game_id, now) -> int:
 
 
 async def supersede_held(db, *, mode, room, game_id, now) -> int:
+    """Run one held-report supersession inside the shared database budget."""
+    async with database_deadline(db):
+        return await _supersede_held(db, mode=mode, room=room, game_id=game_id, now=now)
+
+
+async def _supersede_held(db, *, mode, room, game_id, now) -> int:
     """At a lapse (x): the `held` reports of G are superseded, kept for
     review and never settled. Returns the rows superseded."""
     await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)

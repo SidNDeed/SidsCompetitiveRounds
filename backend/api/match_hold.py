@@ -59,6 +59,147 @@ from database import get_db
 
 router = APIRouter(prefix="/api/v1/match", tags=["Match Hold"])
 
+DB_REQUEST_TIMEOUT_S = 8.0
+DB_LOCK_TIMEOUT_MS = 5000
+DB_STATEMENT_TIMEOUT_MS = 7000
+DB_ROLLBACK_TIMEOUT_S = 1.0
+_DB_DEADLINE_INFO = "match_database_deadline"
+
+
+def _database_sqlstate(exc):
+    """Find an asyncpg/PostgreSQL SQLSTATE through SQLAlchemy's wrappers."""
+    pending, seen = [exc], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        for name in ("sqlstate", "pgcode"):
+            value = getattr(current, name, None)
+            if value:
+                return value
+        pending.extend(getattr(current, name, None)
+                       for name in ("orig", "__cause__", "__context__"))
+    return None
+
+
+async def _bounded_rollback(db, asyncio):
+    """Give rollback a shielded bound without hiding the triggering error."""
+    def consume(done):
+        try:
+            done.exception()
+        except BaseException:
+            pass
+
+    task = asyncio.create_task(db.rollback())
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=DB_ROLLBACK_TIMEOUT_S)
+    except BaseException:
+        if not task.done():
+            task.cancel()
+            task.add_done_callback(consume)
+        else:
+            consume(task)
+
+
+async def _install_database_timeouts(db):
+    """Force checkout, then arm both transaction-local PostgreSQL bounds."""
+    await db.execute(text(
+        "SELECT set_config('lock_timeout', CAST(:lock_ms AS text), true),"
+        "       set_config('statement_timeout', CAST(:statement_ms AS text), true)"),
+        {"lock_ms": f"{DB_LOCK_TIMEOUT_MS}ms",
+         "statement_ms": f"{DB_STATEMENT_TIMEOUT_MS}ms"})
+
+
+class database_deadline:
+    """One absolute database budget shared by nested match operations."""
+
+    def __init__(self, db):
+        self.db = db
+        self.state = None
+        self.outer = False
+        self.timer = None
+        self.asyncio = None
+
+    def _clear(self):
+        self.state["depth"] -= 1
+        if self.state["depth"] == 0:
+            if self.db.info.get(_DB_DEADLINE_INFO) is self.state:
+                self.db.info.pop(_DB_DEADLINE_INFO, None)
+
+    async def _raise_enter_error(self, exc):
+        expired = self.timer.expired()
+        try:
+            suppressed = await self.timer.__aexit__(type(exc), exc, exc.__traceback__)
+            if suppressed:
+                exc = None
+        except BaseException as converted:
+            exc = converted
+        self._clear()
+        if expired or _database_sqlstate(exc) in ("55P03", "57014"):
+            await _bounded_rollback(self.db, self.asyncio)
+            raise HTTPException(status_code=503, detail="database_deadline") from exc
+        if isinstance(exc, self.asyncio.CancelledError):
+            await _bounded_rollback(self.db, self.asyncio)
+        if exc is not None:
+            raise exc
+
+    async def __aenter__(self):
+        from main import asyncio
+
+        self.asyncio = asyncio
+        self.state = self.db.info.get(_DB_DEADLINE_INFO)
+        if self.state is not None:
+            self.state["depth"] += 1
+            return self
+        self.outer = True
+        self.state = {
+            "deadline": asyncio.get_running_loop().time() + DB_REQUEST_TIMEOUT_S,
+            "depth": 1,
+            "setup": False,
+        }
+        self.db.info[_DB_DEADLINE_INFO] = self.state
+        self.timer = asyncio.timeout_at(self.state["deadline"])
+        try:
+            await self.timer.__aenter__()
+        except BaseException:
+            self._clear()
+            raise
+        try:
+            await _install_database_timeouts(self.db)
+            self.state["setup"] = True
+        except BaseException as exc:
+            await self._raise_enter_error(exc)
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        if not self.outer:
+            self._clear()
+            return False
+        converted = exc
+        try:
+            suppressed = await self.timer.__aexit__(exc_type, exc, traceback)
+            if suppressed:
+                converted = None
+        except BaseException as raised:
+            converted = raised
+        expired = self.timer.expired()
+        self._clear()
+        if expired or _database_sqlstate(converted) in ("55P03", "57014"):
+            await _bounded_rollback(self.db, self.asyncio)
+            raise HTTPException(status_code=503, detail="database_deadline") from converted
+        if isinstance(converted, self.asyncio.CancelledError):
+            await _bounded_rollback(self.db, self.asyncio)
+            return False
+        if converted is not exc and converted is not None:
+            raise converted
+        return False
+
+
+async def _bounded_match_db(db: AsyncSession = Depends(get_db)):
+    async with database_deadline(db):
+        yield db
+
 # The capability token a team or 1v2 client sends in its queue and lobby join
 # bodies only when every Stage 2 patch attached at boot (S1 step 1).
 HOLD_CAPS_TOKEN = "rjs1"
@@ -185,7 +326,7 @@ async def _require_verified_session(request: Request, steam_id: str, db) -> None
 
 @router.post("/game/start")
 async def match_game_start(req: GameStartReq, request: Request,
-                           db: AsyncSession = Depends(get_db)):
+                           db: AsyncSession = Depends(_bounded_match_db)):
     """Mint or return the game id G of the game starting in a flagged room.
 
     Requires the poster's Steam session and series membership, a series row
@@ -395,7 +536,7 @@ class BeatReq(BaseModel):
 
 @router.post("/hold/beat")
 async def match_hold_beat(req: BeatReq, request: Request,
-                          db: AsyncSession = Depends(get_db)):
+                          db: AsyncSession = Depends(_bounded_match_db)):
     """Record one presence beat. Requires the poster's session and its
     membership of a series flagged for this room. present_at moves only when
     the poster names itself with its own actor (an actor given, and no seen
@@ -556,7 +697,7 @@ def _open_attempt_matches(row, req, room, held, opener) -> bool:
 
 @router.post("/hold/open")
 async def match_hold_open(req: HoldOpenReq, request: Request,
-                          db: AsyncSession = Depends(get_db)):
+                          db: AsyncSession = Depends(_bounded_match_db)):
     """Open the hold of one dropped seat (S2 server half).
 
     Requires the opener's Steam session and the build HMAC over the hold-open
@@ -618,6 +759,7 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
             # Discard every action write before recording the refusal in a
             # fresh transaction with that transaction's own single clock.
             await db.rollback()
+            await _install_database_timeouts(db)
             now = await _ctx_now(db)
             await _write_open_attempt(
                 db, req, room, held, opener, now, "refused", "other_mode", None)
@@ -705,7 +847,7 @@ async def _member_of_hold(db, hold, pid) -> bool:
 
 @router.get("/hold/{hold_id}/state")
 async def match_hold_state(hold_id: uuid.UUID, steam_id: str, request: Request,
-                           db: AsyncSession = Depends(get_db)):
+                           db: AsyncSession = Depends(_bounded_match_db)):
     """The server row of one hold for a series member: state, seq,
     deadline_s, bound_actor, closed_at and closed_reason (the transition
     envelope of S2). A row past its deadline reads closed at that deadline."""
@@ -722,7 +864,7 @@ async def match_hold_state(hold_id: uuid.UUID, steam_id: str, request: Request,
 
 @router.get("/hold/by-room")
 async def match_hold_by_room(room: str, game_id: uuid.UUID, steam_id: str,
-                             request: Request, db: AsyncSession = Depends(get_db)):
+                             request: Request, db: AsyncSession = Depends(_bounded_match_db)):
     """The hold of (room, G) for a series member, newest first; 404 when the
     room holds none for G (the promoted master then reposts the open)."""
     await _require_verified_session(request, steam_id, db)
@@ -747,7 +889,7 @@ class HoldEndReq(BaseModel):
 
 @router.post("/hold/{hold_id}/end")
 async def match_hold_end(hold_id: uuid.UUID, req: HoldEndReq, request: Request,
-                         db: AsyncSession = Depends(get_db)):
+                         db: AsyncSession = Depends(_bounded_match_db)):
     """End a hold toward today (writer step 6). Requires a series member's
     session and a fresh beat of that member in the room, and one of the
     END_REASONS. Under the hold row lock closed_at and the reason are stamped
@@ -816,6 +958,11 @@ async def hold_sweep(db: AsyncSession) -> dict:
     ENTRY_BOUND_S with no entry), never the time of the sweep, and no
     statement here moves held_until: a late sweep never extends a hold.
     The janitor call is NX2 of the build brief. Returns {reason: count}."""
+    async with database_deadline(db):
+        return await _hold_sweep(db)
+
+
+async def _hold_sweep(db: AsyncSession) -> dict:
     now = await _ctx_now(db)
     rows = (await db.execute(text(_SWEEP_SQL),
                              {"now": now, "eb": ENTRY_BOUND_S})).all()
@@ -852,7 +999,7 @@ async def _refuse_attempt(db, hold_id, kind, now, reason):
 
 @router.get("/hold/mine")
 async def match_hold_mine(steam_id: str, request: Request,
-                          db: AsyncSession = Depends(get_db)):
+                          db: AsyncSession = Depends(_bounded_match_db)):
     """Discovery for a relaunched team or 1v2 client (S3). Requires the
     caller's session. With a live hold of the caller it writes ONE `offered`
     attempt row (and offered_at once) committed BEFORE the answer, and sets
@@ -914,7 +1061,7 @@ async def _other_commitment(db, pid, mode, series_id) -> bool:
 
 @router.post("/hold/{hold_id}/claim")
 async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Request,
-                           db: AsyncSession = Depends(get_db)):
+                           db: AsyncSession = Depends(_bounded_match_db)):
     """Claim a held seat (S3 step 1). One transaction, series row then hold
     row locked, every predicate re-checked under the locks (#208): own hold
     (not_yours), open and in time (hold_lapsed), series still active
@@ -945,6 +1092,7 @@ async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Reque
         # Roll back the losing claim before its required audit row. Re-locking
         # the hold gives the fresh audit transaction its numbering invariant.
         await db.rollback()
+        await _install_database_timeouts(db)
         hold = await _hold_row(db, hold_id, lock=True)
         now = await _ctx_now(db)
         return await _refuse_attempt(db, hold_id, "claim", now, "other_mode")
@@ -1020,7 +1168,7 @@ async def _identity_mismatch(db, hold, actor, now) -> bool:
 
 @router.post("/hold/{hold_id}/bind")
 async def match_hold_bind(hold_id: uuid.UUID, req: HoldBindReq, request: Request,
-                          db: AsyncSession = Depends(get_db)):
+                          db: AsyncSession = Depends(_bounded_match_db)):
     """Bind the returner's new actor X (S3 step 3). Under the hold row lock:
     the hold must be the caller's (not_yours), live (hold_lapsed) and claimed
     (not_claimed); a fresh beat of another fighter must list X with the held
@@ -1090,7 +1238,7 @@ class HoldEnteredReq(BaseModel):
 
 @router.post("/hold/{hold_id}/entered")
 async def match_hold_entered(hold_id: uuid.UUID, req: HoldEnteredReq, request: Request,
-                             db: AsyncSession = Depends(get_db)):
+                             db: AsyncSession = Depends(_bounded_match_db)):
     """Accept the returner's entry (S3 step 8): only from the claiming
     owner's session (not_yours), on a live (hold_lapsed, which includes the
     entry bound after bind) and bound (not_bound) hold, with X equal to the

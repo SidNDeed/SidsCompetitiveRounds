@@ -52,6 +52,9 @@ def test_module_census():
     got = os.path.normcase(os.path.dirname(os.path.abspath(match_hold.__file__)))
     assert got == want, (got, want)
     assert sys.modules["match_hold"] is match_hold
+    source = inspect.getsource(match_hold)
+    assert source.count("Depends(_bounded_match_db)") == 10
+    assert "async with database_deadline(db)" in inspect.getsource(match_hold.hold_sweep)
 
 
 def test_m3_open_keeps_series_hold_player_lock_order():
@@ -79,8 +82,202 @@ async def _fake_session(request, steam_id, db):
 
 
 class _SessionLookupErrorDB:
+    def __init__(self):
+        self.info = {}
+        self.timeout_setups = 0
+
     async def execute(self, *args, **kwargs):
+        sql = str(args[0])
+        if ("set_config('lock_timeout'" in sql
+                and "set_config('statement_timeout'" in sql):
+            assert args[1] == {"lock_ms": "5000ms", "statement_ms": "7000ms"}
+            self.timeout_setups += 1
+            return None
         raise RuntimeError("session lookup unavailable")
+
+
+class _EmptyResult:
+    def scalar(self):
+        return None
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return None
+
+
+class _DeadlineProbeDB:
+    def __init__(self, checkout_delay=0):
+        self.info = {}
+        self.checkout_delay = checkout_delay
+        self.setups = []
+        self.rollbacks = 0
+        self.commits = 0
+
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        if "set_config('lock_timeout'" in sql:
+            if self.checkout_delay:
+                await asyncio.sleep(self.checkout_delay)
+            self.setups.append((sql, params))
+        return _EmptyResult()
+
+    async def rollback(self):
+        self.rollbacks += 1
+
+    async def commit(self):
+        self.commits += 1
+
+
+def test_m2_deadline_covers_checkout_before_any_route_work(monkeypatch):
+    """The absolute budget starts before the setup execute that forces lazy
+    checkout; expiry rolls back and returns 503 without reaching the route."""
+    fake = _DeadlineProbeDB(checkout_delay=0.2)
+    monkeypatch.setattr(match_hold, "DB_REQUEST_TIMEOUT_S", 0.03)
+    monkeypatch.setattr(match_hold, "DB_ROLLBACK_TIMEOUT_S", 0.03)
+
+    async def verified(request, steam_id, db):
+        request.state.scr_session_verified = True
+
+    async def _db():
+        yield fake
+
+    app = FastAPI()
+    app.include_router(match_hold.router)
+    app.dependency_overrides[database.get_db] = _db
+    monkeypatch.setattr(main, "_check_steam_session", verified)
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            return await asyncio.wait_for(client.post("/api/v1/match/game/start", json={
+                "steam_id": "s2deadline", "mode": "team",
+                "series_id": str(uuid.uuid4()), "room": "deadline-room"}), 0.15)
+
+    response = _run(exercise())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "database_deadline"}
+    assert fake.rollbacks == 1 and fake.info == {}
+
+
+def test_m2_deadline_nesting_error_ownership_and_cleanup(monkeypatch):
+    """Nested operations reuse setup and the absolute deadline; only owned
+    expiry and PostgreSQL timeout states map to 503, while cancellation and
+    an unrelated inner TimeoutError retain their identity."""
+    class StateError(RuntimeError):
+        def __init__(self, state):
+            super().__init__(state)
+            self.sqlstate = state
+
+    async def exercise():
+        nested = _DeadlineProbeDB()
+        async with match_hold.database_deadline(nested):
+            deadline = nested.info[match_hold._DB_DEADLINE_INFO]["deadline"]
+            async with match_hold.database_deadline(nested):
+                assert nested.info[match_hold._DB_DEADLINE_INFO]["deadline"] == deadline
+        assert len(nested.setups) == 1 and nested.info == {}
+
+        unrelated = _DeadlineProbeDB()
+        with pytest.raises(TimeoutError, match="inner"):
+            async with match_hold.database_deadline(unrelated):
+                raise TimeoutError("inner")
+        assert unrelated.rollbacks == 0 and unrelated.info == {}
+
+        for state in ("55P03", "57014"):
+            timed = _DeadlineProbeDB()
+            with pytest.raises(HTTPException) as caught:
+                async with match_hold.database_deadline(timed):
+                    raise RuntimeError("outer") from StateError(state)
+            assert (caught.value.status_code, caught.value.detail) == \
+                (503, "database_deadline")
+            assert timed.rollbacks == 1 and timed.info == {}
+
+        cancelled = _DeadlineProbeDB()
+
+        async def wait_forever():
+            async with match_hold.database_deadline(cancelled):
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(wait_forever())
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cancelled.rollbacks == 1 and cancelled.info == {}
+
+        class SlowRollbackDB(_DeadlineProbeDB):
+            async def rollback(self):
+                self.rollbacks += 1
+                await asyncio.sleep(60)
+
+        monkeypatch.setattr(match_hold, "DB_ROLLBACK_TIMEOUT_S", 0.01)
+        slow = SlowRollbackDB()
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(HTTPException):
+            async with match_hold.database_deadline(slow):
+                raise StateError("55P03")
+        assert asyncio.get_running_loop().time() - started < 0.5
+        assert slow.rollbacks == 1 and slow.info == {}
+
+    _run(exercise())
+
+
+def test_m2_gate_loser_rearms_transaction_timeouts(monkeypatch):
+    """A gate loser rolls back its action transaction, then installs both
+    local limits again before the fresh refusal clock and audit write."""
+    fake = _DeadlineProbeDB()
+    opener, held, series_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    now = object()
+    writes = []
+
+    async def verified(request, steam_id, db):
+        return None
+
+    async def player_id(db, steam_id):
+        return opener if steam_id == "s2opener" else held
+
+    async def no_attempt(db, request_id):
+        return None
+
+    async def decide(db, req, mode, room, opener_id, held_id):
+        return None, None, {}, {"series_id": series_id}
+
+    async def lose(*args, **kwargs):
+        return False, object()
+
+    async def clock(db):
+        assert len(fake.setups) == 2
+        return now
+
+    async def write(*args):
+        writes.append(args)
+
+    monkeypatch.setattr(match_hold, "_require_verified_session", verified)
+    monkeypatch.setattr(match_hold, "_player_id", player_id)
+    monkeypatch.setattr(match_hold, "_open_attempt_row", no_attempt)
+    monkeypatch.setattr(match_hold, "_verify_hold_open_hmac", lambda req: True)
+    monkeypatch.setattr(match_hold, "_open_decide", decide)
+    monkeypatch.setattr(match_hold, "_ctx_now", clock)
+    monkeypatch.setattr(match_hold, "_write_open_attempt", write)
+    monkeypatch.setattr(main, "_lease_admission_gate", lose)
+    req = match_hold.HoldOpenReq(
+        request_id="m2rearm1", opener_steam_id="s2opener", mode="ovt",
+        room="m2-rearm", game_id=uuid.uuid4(), held_steam_id="s2held",
+        slot=0, team=0, hmac="ok")
+
+    async def exercise():
+        async with match_hold.database_deadline(fake):
+            answer = await match_hold.match_hold_open(req, object(), fake)
+        return answer
+
+    assert _run(exercise()) == {"status": "refused", "reason": "other_mode"}
+    assert len(fake.setups) == 2 and fake.rollbacks == 1 and fake.commits == 1
+    assert len(writes) == 1 and writes[0][-3:-1] == ("refused", "other_mode")
+    open_source = inspect.getsource(match_hold.match_hold_open)
+    claim_source = inspect.getsource(match_hold.match_hold_claim)
+    assert "await db.rollback()\n            await _install_database_timeouts(db)\n" in open_source
+    assert "await db.rollback()\n        await _install_database_timeouts(db)\n" in claim_source
 
 
 @pytest.mark.parametrize("method,path,body,params", [
@@ -108,9 +305,12 @@ def test_h1_real_helper_soft_fail_paths_require_verified_session(
     real_check = main._check_steam_session
     app = FastAPI()
     app.include_router(match_hold.router)
+    seen_dbs = []
 
     async def _db():
-        yield _SessionLookupErrorDB()
+        fake = _SessionLookupErrorDB()
+        seen_dbs.append(fake)
+        yield fake
 
     app.dependency_overrides[database.get_db] = _db
     monkeypatch.setattr(main, "_check_steam_session", real_check)
@@ -127,6 +327,8 @@ def test_h1_real_helper_soft_fail_paths_require_verified_session(
         for response in (log_only, lookup_error):
             assert response.status_code == 401
             assert response.json() == {"detail": "session_required"}
+        assert len(seen_dbs) == 2
+        assert [db.timeout_setups for db in seen_dbs] == [1, 1]
 
     _run(exercise())
 
@@ -510,7 +712,6 @@ def test_t2_1_open_anchor_idempotent_and_refusals(monkeypatch):
         lapsed_until = (await hold_db(env, out["hold_id"]))["held_until"]
         late = (await open_hold(env, s, 1, 2, g)).json()     # past the deadline, unswept
         assert (late["status"], late["reason"]) == ("refused", "duplicate_game"), late
-        assert await sweep(env) == {"lapsed": 1}
         hh = await hold_db(env, out["hold_id"])
         assert (hh["held_until"], hh["closed_at"], hh["closed_reason"]) == \
             (lapsed_until, lapsed_until, "lapsed")
@@ -641,17 +842,17 @@ def test_m3_due_prior_game_closes_before_later_open(monkeypatch):
 
 def test_m3_bind_actor_conflict_uses_live_deadlines(monkeypatch):
     """The defensive actor-conflict check ignores a physically open sibling
-    past its entry deadline, but still refuses the same actor on a live row."""
+    past either stored deadline, but still refuses the actor on a live row."""
     async def body(env):
         # The production partial index makes this defensive sibling predicate
         # redundant in a healthy catalog.  This case schema removes that one
         # redundancy so the predicate itself is controlled; migration tests
         # separately prove the index remains present.
         await env.conn.execute("DROP INDEX uq_msh_one_open_per_room")
-        for expired in (True, False):
+        for state in ("entry_expired", "held_expired", "live"):
             s, _, hid = await held(env, "ovt")
             await claim(env, s, 1, hid)
-            actor = 41 + int(expired)
+            actor = {"entry_expired": 41, "held_expired": 42, "live": 43}[state]
             await beat(env, s, 0, seen=[(10, s.steam(0)), (actor, s.steam(1))])
             await env.conn.execute(
                 "INSERT INTO match_seat_holds"
@@ -660,20 +861,67 @@ def test_m3_bind_actor_conflict_uses_live_deadlines(monkeypatch):
                 "  claimed_at, verifier, bound_at, bound_actor, bound_region,"
                 "  crossed_at_hold, drop_t1_points, drop_t2_points)"
                 " SELECT mode, room_name, series_id, game_id, $2, 1, 2, 1,"
-                "        opener_player_id, held_anchor_at, held_at, held_until, 1, offered_at,"
+                "        opener_player_id, held_anchor_at, held_at,"
+                "        CASE WHEN CAST($3 AS text) = 'held_expired'"
+                "             THEN clock_timestamp() - interval '1 second' ELSE held_until END,"
+                "        1, offered_at,"
                 "        claimed_at, verifier,"
-                "        clock_timestamp() - make_interval(secs => $3), $4, 'eu',"
+                "        CASE WHEN CAST($3 AS text) = 'held_expired' THEN NULL"
+                "             WHEN CAST($3 AS text) = 'entry_expired'"
+                "             THEN clock_timestamp() - interval '61 seconds'"
+                "             ELSE clock_timestamp() END, $4, 'eu',"
                 "        crossed_at_hold, drop_t1_points, drop_t2_points"
                 "   FROM match_seat_holds WHERE id = $1",
-                uuid.UUID(hid), s.pid(2), 61.0 if expired else 0.0, actor)
+                uuid.UUID(hid), s.pid(2), state, actor)
 
             answer = await bind(env, s, 1, hid, actor)
-            if expired:
+            if state != "live":
                 assert answer["status"] == "bound", answer
             else:
                 assert answer == {"status": "refused", "reason": "actor_conflict"}, answer
 
     run_env(monkeypatch, body, prefix="rjs2m3actor")
+
+
+def test_m2_lock_timeout_rolls_back_before_a_blocker_releases(monkeypatch):
+    """A series-row blocker outliving lock_timeout returns 503 below the
+    outer budget, and no open attempt, hold, or lease release appears later."""
+    async def body(env):
+        s, g, _ = await opened_series(env)
+        await env.conn.execute(
+            "INSERT INTO queue_leases (player_id, mode, group_id, generation, acquired_at,"
+            " renewed_at, expires_at) VALUES ($1, 'team', $2, gen_random_uuid(),"
+            " clock_timestamp(), clock_timestamp(), clock_timestamp() + interval '10 minutes')",
+            s.pid(1), s.sid)
+        blocker = await cf_pg.harness.connect_bound(env.c.dsn, env.c.schema)
+        transaction = blocker.transaction()
+        await transaction.start()
+        await blocker.execute(
+            "SELECT 1 FROM team_series WHERE id = $1 FOR NO KEY UPDATE", s.sid)
+        started = asyncio.get_running_loop().time()
+        try:
+            response = await open_hold(env, s, 1, 0, g, rid="req-m2-lock-timeout")
+            elapsed = asyncio.get_running_loop().time() - started
+            assert response.status_code == 503, response.text
+            assert response.json() == {"detail": "database_deadline"}
+            assert 4.0 <= elapsed < 7.0, elapsed
+            assert await env.conn.fetchval(
+                "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", s.room) == 0
+            assert await env.conn.fetchval(
+                "SELECT count(*) FROM match_hold_open_attempts WHERE request_id = $1",
+                "req-m2-lock-timeout") == 0
+            assert await env.conn.fetchval(
+                "SELECT count(*) FROM queue_leases WHERE player_id = $1", s.pid(1)) == 1
+        finally:
+            await transaction.rollback()
+            await blocker.close()
+        await asyncio.sleep(0.1)
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", s.room) == 0
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM queue_leases WHERE player_id = $1", s.pid(1)) == 1
+
+    run_env(monkeypatch, body, prefix="rjs2m2lock")
 
 
 def test_t2_1_open_stores_the_crossing_of_the_locked_series(monkeypatch):
