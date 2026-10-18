@@ -5492,11 +5492,19 @@ namespace CompetitiveRounds
             bool tokenNews = teamToken != liveSentTeamToken && (sp1 > 0 || sp2 > 0);
             if (force || tokenNews || sp1 != liveSentTeamP1 || sp2 != liveSentTeamP2)
             {
+                // RJ Stage 2 S2 live points (RJS-M5): no team post is created
+                // while this seat reads a waiting hold (cr_th p, o, c, b) in
+                // the room, and nothing is latched, so the pair goes once the
+                // hold has ended. The post carries its creation stamp: the
+                // sender drops one created after the writer's own observation.
+                string holdRoom = TeamHoldWriter.CurrentRoom();
+                long holdStamp = TeamHoldRules.LiveGate.Create(holdRoom, TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH));
+                if (holdStamp == 0) return;
                 liveSentTeamP1 = sp1; liveSentTeamP2 = sp2;
                 liveSentTeamToken = teamToken;
                 int teamGame = TeamGameNumber.Live.For(ApiClient.ActiveTeamSeriesId, teamRoom);
                 ApiClient.PostTeamLivePoints(ApiClient.ActiveTeamSeriesId, LocalSteamId, sp1, sp2,
-                                             teamGame, teamRoom, teamToken);
+                                             teamGame, teamRoom, teamToken, holdStamp, holdRoom);
             }
         }
 

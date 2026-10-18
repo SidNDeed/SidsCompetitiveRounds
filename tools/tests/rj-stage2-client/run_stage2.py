@@ -39,6 +39,7 @@ PIECES = {
     "K6": ("t6_",),
     # The refit lane (claude/rj-stage2-refit), one entry per continuation piece.
     "KX1": ("tx1_", "t16_"),
+    "KX2": ("t27_",),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -185,6 +186,16 @@ MUTANTS = [
         ("TeamHoldRules.PinRoom(room, BoolField(answer, \"hold\"), mode, seriesId, roster);",
          "TeamHoldRules.PinRoom(room, true, mode, seriesId, roster);")],
      "t16_join_pin_today", "tx1_server_shapes"),
+    # KX2, live points (V3 M2.13; MX2.1 and MX2.2 lane-added).
+    ("M2.13", "KX2", "rules", [
+        ("return !(Held(room) && stamp > _observedAt);", "return true;")],
+     "t27_open_delayed_reordered", "t27_no_post_while_held"),
+    ("MX2.1", "KX2", "rules", [
+        ("                Observe(room, th);\n                if (ThLive(th)) return 0;\n", "                Observe(room, th);\n")],
+     "t27_no_post_while_held", "t27_open_delayed_reordered"),
+    ("MX2.2", "KX2", "rules", [
+        ("else if (_room == room && _g == k.G && _slot == k.Slot) { _observedAt = -1;", "else if (_room == room) { _observedAt = -1;")],
+     "t27_lift_and_rooms", "t27_open_delayed_reordered"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

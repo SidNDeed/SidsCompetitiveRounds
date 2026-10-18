@@ -984,5 +984,70 @@ namespace CompetitiveRounds
             r.Add(ExpiryOp.VanillaLeave);
             return r;
         }
+
+
+        // ── KX2: live points (V3 S2, RJS-M5) ───────────────────────────────
+
+        /// <summary>The team live-points gate (V3 S2 live points, RJS-M5).
+        /// While this seat observes a waiting hold (cr_th p, o, c or b) in a
+        /// room, the team channel creates no post there, and a post created
+        /// after the observation never dispatches, neither its first send nor
+        /// a retry; a post created before it is sent as today. Two readings
+        /// feed the observation: the writer's own cr_th write (its compare-and
+        /// -set reaches the room cache only when the server echoes it) and the
+        /// room's cr_th as MaybeSendLivePoints reads it. A reading of the same
+        /// hold (its game and slot) ended, e or x, lifts the observation (an
+        /// older hold's x still in the room does not); it is keyed on
+        /// the room, so a seat that left a held room posts in the next one as
+        /// today. Posts of other channels carry stamp 0 and always dispatch.</summary>
+        internal static class LiveGate
+        {
+            private static long _created;
+            private static long _observedAt = -1;
+            private static string _room, _g;
+            private static int _slot = -1;
+
+            internal static void Reset() { _created = 0; _observedAt = -1; _room = null; _g = null; _slot = -1; }
+
+            /// <summary>One reading of the room's hold. The first waiting
+            /// reading in a room marks the observation; a reading of the
+            /// same hold (game and slot) ended lifts it; an unreadable value
+            /// (no hold written yet, or a cache the echo has not reached)
+            /// changes nothing.</summary>
+            internal static void Observe(string room, string th)
+            {
+                if (string.IsNullOrEmpty(room)) return;
+                HoldKey k;
+                if (!TryParseHold(th, out k)) return;
+                if (IsLive(k.State))
+                {
+                    if (_observedAt < 0 || _room != room) _observedAt = _created;
+                    _room = room; _g = k.G; _slot = k.Slot;
+                }
+                else if (_room == room && _g == k.G && _slot == k.Slot) { _observedAt = -1; _room = null; _g = null; _slot = -1; }
+            }
+
+            internal static bool Held(string room) { return _observedAt >= 0 && room == _room; }
+
+            /// <summary>MaybeSendLivePoints: the creation stamp of a new team
+            /// post in <paramref name="room"/>, or 0 (no post) while
+            /// <paramref name="th"/>, its own reading of the room's cr_th,
+            /// is a waiting hold.</summary>
+            internal static long Create(string room, string th)
+            {
+                Observe(room, th);
+                if (ThLive(th)) return 0;
+                return ++_created;
+            }
+
+            /// <summary>PostTeamLivePoints and SendLivePoints, before every
+            /// send: false for a team post created after the observation in
+            /// its room.</summary>
+            internal static bool Dispatch(long stamp, string room)
+            {
+                if (stamp <= 0) return true;
+                return !(Held(room) && stamp > _observedAt);
+            }
+        }
     }
 }

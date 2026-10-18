@@ -3563,6 +3563,9 @@ namespace CompetitiveRounds
             // one is accepted (the series' later posts then go without the
             // pair; see PostTeamLivePoints).
             public string fallbackUrl; public bool fellBack; public Action onFallbackOk;
+            // RJ Stage 2 S2 live points (RJS-M5): a team post's creation stamp
+            // and room (TeamHoldRules.LiveGate); 0 for every other channel.
+            public long holdStamp; public string holdRoom;
         }
         private static readonly Dictionary<string, LivePointRetry> livePointRetries =
             new Dictionary<string, LivePointRetry>();
@@ -3570,16 +3573,33 @@ namespace CompetitiveRounds
 
         private static void SendLivePoints(string key, string url, string tag,
                                            Func<string, string> rewriteOnRefusal = null,
-                                           string fallbackUrl = null, Action onFallbackOk = null)
+                                           string fallbackUrl = null, Action onFallbackOk = null,
+                                           long holdStamp = 0, string holdRoom = null)
         {
+            // A team post created after this seat observed a waiting hold is
+            // dropped before it can supersede a pending earlier one, which
+            // still goes as today.
+            if (!TeamHoldRules.LiveGate.Dispatch(holdStamp, holdRoom))
+            {
+                Plugin.Log.LogInfo($"[LIVE-POINTS] {tag} not sent: created while a seat is held");
+                return;
+            }
             var entry = new LivePointRetry { url = url, attempts = 0, tag = tag, rewriteOnRefusal = rewriteOnRefusal,
-                                             fallbackUrl = fallbackUrl, onFallbackOk = onFallbackOk };
+                                             fallbackUrl = fallbackUrl, onFallbackOk = onFallbackOk,
+                                             holdStamp = holdStamp, holdRoom = holdRoom };
             livePointRetries[key] = entry;   // newest score wins outright
             SendLivePointsOnce(key, entry);
         }
 
         private static void SendLivePointsOnce(string key, LivePointRetry entry)
         {
+            if (!TeamHoldRules.LiveGate.Dispatch(entry.holdStamp, entry.holdRoom))
+            {
+                LivePointRetry pending;
+                if (livePointRetries.TryGetValue(key, out pending) && pending == entry) livePointRetries.Remove(key);
+                Plugin.Log.LogInfo($"[LIVE-POINTS] {entry.tag} not sent: created while a seat is held");
+                return;
+            }
             entry.attempts++;
             Plugin.Instance.StartCoroutine(PostRequest(entry.url, "", (ok, resp) =>
             {
@@ -3688,9 +3708,13 @@ namespace CompetitiveRounds
         /// filed under as proof that the record holds another physical
         /// game.</summary>
         public static void PostTeamLivePoints(string seriesId, string reporterSteamId, int t1Points, int t2Points,
-                                              int gameNumber = 0, string photonRoomId = null, string gameToken = null)
+                                              int gameNumber = 0, string photonRoomId = null, string gameToken = null,
+                                              long holdStamp = 0, string holdRoom = null)
         {
             if (string.IsNullOrEmpty(seriesId) || string.IsNullOrEmpty(reporterSteamId)) return;
+            // RJ Stage 2 S2 live points (RJS-M5): holdStamp and holdRoom are
+            // the post's creation stamp (TeamHoldRules.LiveGate); SendLivePoints
+            // drops a post created after this seat observed a waiting hold.
             string query = $"{baseUrl}/api/v1/team/series/{Escape(seriesId)}/live-points" +
                            $"?t1_points={t1Points}&t2_points={t2Points}" +
                            $"&reporter_steam_id={Escape(reporterSteamId)}";
@@ -3700,7 +3724,7 @@ namespace CompetitiveRounds
             if (!TeamGameNumber.Sendable(gameNumber, photonRoomId)
                 || TeamGameNumber.Live.AttestationRefused(seriesId))
             {
-                SendLivePoints("2v2:" + seriesId, legacyUrl, tag);
+                SendLivePoints("2v2:" + seriesId, legacyUrl, tag, holdStamp: holdStamp, holdRoom: holdRoom);
                 return;
             }
             string namedUrl = query + TeamGameNumber.QueryPair(gameNumber, UnityWebRequest.EscapeURL(photonRoomId))
@@ -3714,7 +3738,8 @@ namespace CompetitiveRounds
             }
             SendLivePoints("2v2:" + seriesId, namedUrl, tag + " game " + gameNumber,
                 fallbackUrl: legacyUrl,
-                onFallbackOk: () => TeamGameNumber.Live.NoteAttestationRefused(seriesId));
+                onFallbackOk: () => TeamGameNumber.Live.NoteAttestationRefused(seriesId),
+                holdStamp: holdStamp, holdRoom: holdRoom);
         }
 
         /// <summary>Points scored ACROSS THE FIELD in the FFA game in progress
