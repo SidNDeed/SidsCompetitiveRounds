@@ -1486,6 +1486,28 @@ def test_fix1b_r3_locked_rated_rejoin_refuses_only_below_floor(monkeypatch):
     run_env(monkeypatch, body, prefix="cf_f1b_r3")
 
 
+def test_fix1b_r4_null_is_unrated_at_both_locks_and_refused_on_rejoin(monkeypatch):
+    async def body(env):
+        floor = main.MIN_MOD_VERSION
+        hosted = await _open_lobby(env, 3, [""] * 3, [floor, None, floor])
+        answer = await _start(env, main, hosted)
+        assert answer.status == 200 and answer["ranked_refusal"] == "unranked"
+        assert (await env.lobby_row(hosted))["is_ranked"] is False
+
+        automatic, answer = await _fix1b_auto_lock(env, [floor, None, floor])
+        assert answer["ranked_refusal"] == "unranked"
+        assert (await env.lobby_row(automatic))["is_ranked"] is False
+
+        rated = await env.lobby(3, ranked=True)
+        before = await env.queue_row(rated, 0)
+        answer = await _fix1b_rejoin(env, rated, 0, None)
+        assert answer.status == 409
+        assert answer.body == \
+            "You're locked into another FFA game — finish or leave it first"
+        assert await env.queue_row(rated, 0) == before
+    run_env(monkeypatch, body, prefix="cf_f1b_r4")
+
+
 def _anon(obj, names):
     if isinstance(obj, dict):
         return {k: _anon(v, names) for k, v in obj.items()}

@@ -1733,3 +1733,18 @@ def test_fix1b_r3_locked_rejoin_rechecks_under_locks_before_any_write():
     refusal = "You're locked into another FFA game — finish or leave it first"
     assert src.count(refusal) == 2
     assert refusal in _inspect.getsource(main._ffa_lobby_enroll_caller)
+
+
+def test_fix1b_r4_null_stays_below_every_floor_consumer():
+    assert not main._ffa_roster_clears_proximity_floor([None], 1)
+    assert not main._ffa_roster_clears_proximity_floor([""], 1)
+    assert not main._ffa_roster_clears_proximity_floor(["not-a-version"], 1)
+    expected = {
+        "_ffa_lock_roster": "_ffa_roster_clears_proximity_floor(_kt_vals, len(ordered))",
+        "_ffa_queue_poll_inner": "_ffa_roster_clears_proximity_floor(_kt_vals, len(ordered))",
+        "ffa_queue_join": "_ffa_roster_clears_proximity_floor([_join_mv], 1)",
+    }
+    for function_name, expression in expected.items():
+        calls = _fix1b_calls(function_name, "_ffa_roster_clears_proximity_floor")
+        assert len(calls) == 1, function_name
+        assert _ast.unparse(calls[0]) == expression, function_name
