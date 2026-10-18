@@ -15,6 +15,7 @@ runner (backend/tests/evidence/match-hold-mutation-runner.py) sets it.
 """
 
 import asyncio
+import inspect
 import os
 import sys
 import uuid
@@ -51,6 +52,19 @@ def test_module_census():
     got = os.path.normcase(os.path.dirname(os.path.abspath(match_hold.__file__)))
     assert got == want, (got, want)
     assert sys.modules["match_hold"] is match_hold
+
+
+def test_m3_open_keeps_series_hold_player_lock_order():
+    """Open locks an existing room hold before the player gate, then uses
+    the gate's clock to close due state before its authoritative row read."""
+    decide = inspect.getsource(match_hold._open_decide)
+    route = inspect.getsource(match_hold.match_hold_open)
+    assert decide.index("FOR NO KEY UPDATE") < decide.index(
+        "return None, allowed_hold_id")
+    gate = route.index("await _lease_admission_gate")
+    close = route.index("await _close_due_room_hold")
+    reread = route.index('f"SELECT {_HOLD_COLS} FROM match_seat_holds"')
+    assert gate < close < reread
 
 
 def _run(coro):
@@ -565,6 +579,101 @@ def test_m1_hold_open_requires_exact_roster_slot_and_team(monkeypatch):
                 ("opened", *seat_of(s, held_seat)), valid
 
     run_env(monkeypatch, body, prefix="rjs2m1")
+
+
+def test_m3_due_prior_game_closes_before_later_open(monkeypatch):
+    """A prior-game row due but not swept is stamped at its stored deadline
+    before room occupancy is decided; a genuinely live predecessor remains
+    the one open room row and refuses another seat in the later game."""
+    async def body(env):
+        expired, g1, _ = await opened_series(env)
+        first = (await open_hold(env, expired, 1, 0, g1)).json()
+        await shift_hold(env, first["hold_id"], 200)
+        due_at = (await hold_db(env, first["hold_id"]))["held_until"]
+        g2 = (await game_start(env, expired, 0, prev=g1))["game_id"]
+        await beat(env, expired, 1)
+        await backdate_presence(env, expired, 1, 30)
+
+        later = (await open_hold(env, expired, 1, 0, g2)).json()
+        assert (later["status"], later["repeat"]) == ("opened", False), later
+        old = await hold_db(env, first["hold_id"])
+        assert (old["closed_at"], old["closed_reason"], old["held_until"]) == \
+            (due_at, "lapsed", due_at)
+        assert (await hold_db(env, later["hold_id"]))["closed_at"] is None
+
+        bound, gb1, _ = await opened_series(env, "ovt")
+        bound_first = (await open_hold(env, bound, 1, 0, gb1)).json()
+        await env.conn.execute(
+            "UPDATE match_seat_holds"
+            " SET claimed_at = clock_timestamp() - interval '70 seconds',"
+            "     bound_at = clock_timestamp() - interval '61 seconds',"
+            "     bound_actor = 31, seq = 1 WHERE id = $1",
+            uuid.UUID(bound_first["hold_id"]))
+        bound_before = await hold_db(env, bound_first["hold_id"])
+        entry_due_at = bound_before["bound_at"] + timedelta(seconds=60)
+        assert entry_due_at < bound_before["held_until"]
+        gb2 = (await game_start(env, bound, 0, prev=gb1))["game_id"]
+        await beat(env, bound, 1)
+        await backdate_presence(env, bound, 1, 30)
+
+        after_bound = (await open_hold(env, bound, 1, 0, gb2)).json()
+        assert after_bound["status"] == "opened", after_bound
+        bound_old = await hold_db(env, bound_first["hold_id"])
+        assert (bound_old["closed_at"], bound_old["closed_reason"],
+                bound_old["held_until"]) == \
+            (entry_due_at, "entry_failed", bound_before["held_until"])
+
+        live, gl1, _ = await opened_series(env)
+        live_hold = (await open_hold(env, live, 1, 0, gl1)).json()
+        gl2 = (await game_start(env, live, 0, prev=gl1))["game_id"]
+        await beat(env, live, 1)
+        await backdate_presence(env, live, 1, 30)
+        refused = (await open_hold(env, live, 1, 0, gl2)).json()
+        assert refused == {"status": "refused", "reason": "room_busy"}, refused
+        predecessor = await hold_db(env, live_hold["hold_id"])
+        assert predecessor["closed_at"] is None
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds"
+            " WHERE room_name = $1 AND closed_at IS NULL", live.room) == 1
+
+    run_env(monkeypatch, body, prefix="rjs2m3")
+
+
+def test_m3_bind_actor_conflict_uses_live_deadlines(monkeypatch):
+    """The defensive actor-conflict check ignores a physically open sibling
+    past its entry deadline, but still refuses the same actor on a live row."""
+    async def body(env):
+        # The production partial index makes this defensive sibling predicate
+        # redundant in a healthy catalog.  This case schema removes that one
+        # redundancy so the predicate itself is controlled; migration tests
+        # separately prove the index remains present.
+        await env.conn.execute("DROP INDEX uq_msh_one_open_per_room")
+        for expired in (True, False):
+            s, _, hid = await held(env, "ovt")
+            await claim(env, s, 1, hid)
+            actor = 41 + int(expired)
+            await beat(env, s, 0, seen=[(10, s.steam(0)), (actor, s.steam(1))])
+            await env.conn.execute(
+                "INSERT INTO match_seat_holds"
+                " (mode, room_name, series_id, game_id, player_id, n, slot, team,"
+                "  opener_player_id, held_anchor_at, held_at, held_until, seq, offered_at,"
+                "  claimed_at, verifier, bound_at, bound_actor, bound_region,"
+                "  crossed_at_hold, drop_t1_points, drop_t2_points)"
+                " SELECT mode, room_name, series_id, game_id, $2, 1, 2, 1,"
+                "        opener_player_id, held_anchor_at, held_at, held_until, 1, offered_at,"
+                "        claimed_at, verifier,"
+                "        clock_timestamp() - make_interval(secs => $3), $4, 'eu',"
+                "        crossed_at_hold, drop_t1_points, drop_t2_points"
+                "   FROM match_seat_holds WHERE id = $1",
+                uuid.UUID(hid), s.pid(2), 61.0 if expired else 0.0, actor)
+
+            answer = await bind(env, s, 1, hid, actor)
+            if expired:
+                assert answer["status"] == "bound", answer
+            else:
+                assert answer == {"status": "refused", "reason": "actor_conflict"}, answer
+
+    run_env(monkeypatch, body, prefix="rjs2m3actor")
 
 
 def test_t2_1_open_stores_the_crossing_of_the_locked_series(monkeypatch):

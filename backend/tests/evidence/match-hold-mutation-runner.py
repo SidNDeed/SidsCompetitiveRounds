@@ -84,6 +84,20 @@ MUTANTS = {
                         '    if not (admitted):\n'
                         '        # Roll back the losing claim before its required audit row.')],
                       ADMIT_T, "h3_hold_open_and_claim_reject_another_live_commitment"),
+    "F1.M3": ("FIX1", "match_hold.py",
+              [('        await _close_due_room_hold(db, room, now)\n',
+                '        pass\n'),
+               ('        "   AND held_until > CAST(:now AS timestamptz)"\n'
+                '        "   AND (bound_at IS NULL OR entered_at IS NOT NULL"\n'
+                '        "        OR bound_at + make_interval(secs => CAST(:eb AS integer))"\n'
+                '        "             > CAST(:now AS timestamptz))"\n',
+                '')],
+              [('        await _close_due_room_hold(db, room, now)\n',
+                '        await _close_due_room_hold(db, (room), now)\n'),
+               ('        "   AND held_until > CAST(:now AS timestamptz)"\n',
+                '        "   AND  held_until > CAST(:now AS timestamptz)"\n')],
+              HOLD_T, "m3_due_prior_game_closes_before_later_open or "
+                      "m3_bind_actor_conflict_uses_live_deadlines"),
     "F1.M1": ("FIX1", "match_hold.py",
               [('            or member_seats.get(held) != (req.slot, req.team)\n', '')],
               [('            or member_seats.get(held) != (req.slot, req.team)\n',

@@ -454,9 +454,45 @@ class HoldOpenReq(BaseModel):
     hmac: str = Field("", max_length=128)
 
 
+_CLOSE_DUE_ROOM_SQL = """
+WITH due AS (
+    SELECT id,
+           CASE WHEN bound_at IS NOT NULL AND entered_at IS NULL
+                     AND bound_at + make_interval(secs => CAST(:eb AS integer)) < held_until
+                THEN bound_at + make_interval(secs => CAST(:eb AS integer))
+                ELSE held_until END AS deadline_at,
+           CASE WHEN bound_at IS NOT NULL AND entered_at IS NULL
+                     AND bound_at + make_interval(secs => CAST(:eb AS integer)) < held_until
+                THEN 'entry_failed' ELSE 'lapsed' END AS deadline_reason
+      FROM match_seat_holds
+     WHERE room_name = CAST(:room AS varchar)
+       AND closed_at IS NULL
+       AND CASE WHEN bound_at IS NOT NULL AND entered_at IS NULL
+                     AND bound_at + make_interval(secs => CAST(:eb AS integer)) < held_until
+                THEN bound_at + make_interval(secs => CAST(:eb AS integer))
+                ELSE held_until END <= CAST(:now AS timestamptz)
+     FOR UPDATE
+)
+UPDATE match_seat_holds AS h
+   SET closed_at = due.deadline_at, closed_reason = due.deadline_reason
+  FROM due
+ WHERE h.id = due.id AND h.closed_at IS NULL
+"""
+
+
+async def _close_due_room_hold(db, room, now):
+    """Close the room's physically-open row only when its stored deadline is due."""
+    await db.execute(text(_CLOSE_DUE_ROOM_SQL),
+                     {"room": room, "now": now, "eb": ENTRY_BOUND_S})
+
+
 async def _open_decide(db, req, mode, room, opener, held):
-    """(reason or None, existing hold or None, series row, game row) under
-    the series lock; the series lock is taken here when the game is known."""
+    """(reason, gate-allowed hold id, series row, game row) under the series lock.
+
+    The room's physically open row is locked before the player gate.  Its id
+    lets the same player reach the authoritative room decision; the exact-game
+    row is reread only after the gate and M3's due-row closure.
+    """
     game = (await db.execute(text(
         "SELECT id, mode, series_id, room_name FROM match_games WHERE id = CAST(:g AS uuid)"),
         {"g": str(req.game_id)})).mappings().first()
@@ -482,19 +518,14 @@ async def _open_decide(db, req, mode, room, opener, held):
             or member_seats.get(held) != (req.slot, req.team)
             or not _slot_ok(mode, req.slot, req.team)):
         return "not_member", None, row, game
-    existing = (await db.execute(text(
-        f"SELECT {_HOLD_COLS} FROM match_seat_holds"
-        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
-        "   AND player_id = CAST(:pid AS uuid)"),
-        {"room": room, "g": str(req.game_id), "pid": str(held)})).mappings().first()
-    if existing is not None:
-        return (None if existing["closed_at"] is None else "duplicate_game"), existing, row, game
-    busy = (await db.execute(text(
-        "SELECT 1 FROM match_seat_holds WHERE room_name = CAST(:room AS varchar)"
-        "   AND closed_at IS NULL"), {"room": room})).scalar()
-    if busy:
-        return "room_busy", None, row, game
-    return None, None, row, game
+    open_room = (await db.execute(text(
+        "SELECT id, game_id, player_id FROM match_seat_holds"
+        " WHERE room_name = CAST(:room AS varchar) AND closed_at IS NULL"
+        " FOR NO KEY UPDATE"), {"room": room})).mappings().first()
+    allowed_hold_id = None
+    if open_room is not None and open_room["player_id"] == held:
+        allowed_hold_id = open_room["id"]
+    return None, allowed_hold_id, row, game
 
 
 async def _write_open_attempt(db, req, room, held, opener, now, outcome, reason, hold_id):
@@ -571,11 +602,16 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
         out = _state_payload(hold, now)
         out.update({"status": "opened", "repeat": known["outcome"] == "repeat"})
         return out
-    reason, existing, row, game = await _open_decide(db, req, mode, room, opener, held)
+    reason, allowed_hold_id, row, game = await _open_decide(
+        db, req, mode, room, opener, held)
+    if (reason is None and mode == "team"
+            and (req.t1_points is None or req.t2_points is None)):
+        reason = "missing_points"
+    existing = None
     if reason is None:
         admitted, now = await _lease_admission_gate(
                 db, [held], mode, game["series_id"],
-                allowed_hold_ids=((existing["id"],) if existing is not None else ()),
+                allowed_hold_ids=((allowed_hold_id,) if allowed_hold_id is not None else ()),
                 hold_entry_bound_seconds=ENTRY_BOUND_S)
         if not admitted:
             # The player gate may have waited behind a winning formation.
@@ -587,12 +623,24 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
                 db, req, room, held, opener, now, "refused", "other_mode", None)
             await db.commit()
             return _refused("other_mode")
+        await _close_due_room_hold(db, room, now)
+        existing = (await db.execute(text(
+            f"SELECT {_HOLD_COLS} FROM match_seat_holds"
+            " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+            "   AND player_id = CAST(:pid AS uuid)"),
+            {"room": room, "g": str(req.game_id), "pid": str(held)}
+        )).mappings().first()
+        if existing is not None and existing["closed_at"] is not None:
+            reason = "duplicate_game"
+        elif existing is None:
+            busy = (await db.execute(text(
+                "SELECT 1 FROM match_seat_holds WHERE room_name = CAST(:room AS varchar)"
+                "   AND closed_at IS NULL"), {"room": room})).scalar()
+            if busy:
+                reason = "room_busy"
     else:
         now = await _ctx_now(db)
     made = None
-    if (reason is None and mode == "team"
-            and (req.t1_points is None or req.t2_points is None)):
-        reason = "missing_points"
     if reason is None and existing is not None and not _hold_live(existing, now):
         reason = "duplicate_game"            # past its own deadline, not yet swept
     if reason is None and existing is None:
@@ -1010,8 +1058,13 @@ async def match_hold_bind(hold_id: uuid.UUID, req: HoldBindReq, request: Request
     conflict = (await db.execute(text(
         "SELECT 1 FROM match_seat_holds WHERE room_name = CAST(:room AS varchar)"
         "   AND id <> CAST(:hid AS uuid) AND closed_at IS NULL"
+        "   AND held_until > CAST(:now AS timestamptz)"
+        "   AND (bound_at IS NULL OR entered_at IS NOT NULL"
+        "        OR bound_at + make_interval(secs => CAST(:eb AS integer))"
+        "             > CAST(:now AS timestamptz))"
         "   AND bound_actor = CAST(:x AS integer)"),
-        {"room": hold["room_name"], "hid": str(hold_id), "x": req.actor})).scalar()
+        {"room": hold["room_name"], "hid": str(hold_id), "now": now,
+         "eb": ENTRY_BOUND_S, "x": req.actor})).scalar()
     if conflict:
         return await _refuse_attempt(db, hold_id, "bind", now, "actor_conflict")
     bound = (await db.execute(text(
