@@ -425,7 +425,12 @@ MUTANTS = {
 
 def _plant(src_text, edits, mid, kind):
     out = src_text
+    crlf = "\r\n" in src_text
     for anchor, repl in edits:
+        if crlf:
+            # A checkout with CRLF line ends (core.autocrlf): the registry is
+            # written in LF, so its anchors and texts take the file's ends.
+            anchor, repl = anchor.replace("\n", "\r\n"), repl.replace("\n", "\r\n")
         n = out.count(anchor)
         if n != 1:
             raise SystemExit(f"REFUSED {mid} {kind}: anchor occurs {n} times: {anchor!r}")
