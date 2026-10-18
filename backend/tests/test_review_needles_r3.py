@@ -1139,6 +1139,11 @@ _ARG_SAFE = frozenset({"builtins." + n for n in (
     "time.strftime", "time.gmtime", "sys.exit", "os.open", "os.read", "os.write", "os.close", "os.readlink",
     "os.rename", "os.replace", "os.rmdir", "os.remove", "os.unlink", "os.fsync"})
 #   re.sub/re.subn and shutil.rmtree stay off: they call a callable they are handed
+# Fix pass eighteen: exact callable classes already trusted by the suppression,
+# benign-executor, copy and implicit-attribute policies are safe as callees too.
+_ARG_SAFE = _ARG_SAFE | _NEVER_SUPPRESS | _BENIGN_EXEC | frozenset({
+    "contextlib.nullcontext", "contextlib.suppress", "copy.copy", "copy.deepcopy", "operator.add",
+})
 _ARG_SAFE_MODULES = ("os.path", "stat", "math")
 _ARG_SAFE_EXCEPTIONS = frozenset({"builtins." + n for n, v in vars(builtins).items()
                                   if isinstance(v, type) and issubclass(v, BaseException)})   # a raise's argument
@@ -3510,11 +3515,16 @@ class _Reach:
         an argument that stands for an imported object (`imp`, a module or a
         member of one) handed to either is refused too, as a write through an
         imported namespace (functools.update_wrapper(os, f) updates os's
-        namespace from f's)."""
+        namespace from f's). Fix pass 18: a resolved module callable outside
+        _ARG_SAFE is refused even without a marked argument; imported-object
+        methods remain under rule (9)."""
         rs = self.resolve(f)
         rows = []
-        if marked is not None and any(not _arg_safe(d) for d in rs if isinstance(d, str)):
-            rows.append("%s %s through unresolved base %s" % (what % "unlisted", ast.unparse(f), ast.unparse(marked)))
+        module_callee = self.module_ref(f.value) if isinstance(f, ast.Attribute) else self.imported(f)
+        if (marked is not None or module_callee) \
+                and any(not _arg_safe(d) for d in rs if isinstance(d, str)):
+            base = f if marked is None else marked
+            rows.append("%s %s through unresolved base %s" % (what % "unlisted", ast.unparse(f), ast.unparse(base)))
         if imp is not None and any(not _arg_safe(d) for d in rs if isinstance(d, str)):
             rows.append("%s %s through imported namespace %s" % (what % "unlisted", ast.unparse(f), ast.unparse(imp)))
         if self.unresolved_callee(f, rs):
@@ -4934,6 +4944,9 @@ def _namespace_reach(tree, names, file="<source>") -> list:
     keys, including comprehensions. Exact scalars stay clean; an exact
     unhashable container cannot inspect a held value, while tuple hashing can
     do so and is admitted only when every visible element is scalar.
+    It also refuses a resolved module callable outside _ARG_SAFE without
+    requiring a marked argument, on ordinary and higher-order callback calls;
+    imported-object methods retain rule (9)'s separate receiver policy.
     Fix pass 9's _manager_rebinds still runs beside it; later passes retain
     the namespace operation named by an import (from os import __dict__)."""
     r = _Reach(tree, names)
@@ -5089,7 +5102,9 @@ def walk_handler_proven(tree, handler, file="<source>") -> bool:
           binding node outside it is refused), a method on an unresolved
           receiver off _PURE_METHODS and a call of an unresolved callable or
           of a library callable off _ARG_SAFE with a marked argument are
-          refused, and iter and reversed may return their argument.
+          refused, and iter and reversed may return their argument; since fix
+          pass 18 a resolved module callable off _ARG_SAFE is refused even
+          without a marked argument, for assigned and disposed results alike.
           It is a bound over those lists and that data flow, not a claim
           that every conceivable rebinding is detected."""
     if not isinstance(handler, ast.Name):
@@ -6123,3 +6138,41 @@ def test_m5_fix18_d_await_pattern_and_hashing_controls_stay_exact():
               "    stored = {False: None for _value in (None,)}\n"
               "    match obj:\n        case _ if obj is False:\n            pass\n")
     assert not _fix15_rows(source)
+
+
+def test_m5_fix18_e_off_table_module_calls_are_rows_without_marked_arguments():
+    cases = {
+        "assigned": ("import helper\nresult = helper.patch()\n", [
+            "call of unlisted callable helper.patch through unresolved base helper.patch",
+        ]),
+        "expression": ("import helper\nhelper.patch()\n", [
+            "call of unlisted callable helper.patch through unresolved base helper.patch",
+            "implicit result disposal through unresolved base helper.patch()",
+        ]),
+        "alias": ("from helper import patch\nresult = patch()\n", [
+            "call of unlisted callable patch through unresolved base patch",
+        ]),
+        "callback": ("import helper\nresult = sorted((False,), key=helper.patch)\n", [
+            "callback of sorted (unlisted) helper.patch through unresolved base helper.patch",
+            "implicit attribute read through unresolved base helper",
+        ]),
+    }
+    for name, (source, expected) in cases.items():
+        assert _fix15_rows(source) == expected, name
+
+
+def test_m5_fix18_f_module_call_controls_keep_exact_callable_and_receiver_policy():
+    trusted = _NEVER_SUPPRESS | _BENIGN_EXEC | frozenset({
+        "contextlib.nullcontext", "contextlib.suppress", "copy.copy", "copy.deepcopy", "operator.add",
+    })
+    assert trusted <= _ARG_SAFE
+    exact_library = 'import os\nresult = os.stat("x")\nos.stat("x")\n'
+    written_local = "def local():\n    return False\nresult = local()\nlocal()\n"
+    exact_receivers = ('import os\nresult = os.environ.get("K")\nos.environ.keys()\n'
+                       "map(os.environ.keys, ())\n")
+    assert not _fix15_rows(exact_library)
+    assert not _fix15_rows(written_local)
+    assert not _fix15_rows(exact_receivers)
+    marked = "import helper\ndef f(obj):\n    result = helper.patch(obj)\n"
+    assert "call of unlisted callable helper.patch through unresolved base obj" in _fix15_rows(marked)
+    assert "call of protocol-running callable helper.patch through unresolved base obj" in _fix15_rows(marked)
