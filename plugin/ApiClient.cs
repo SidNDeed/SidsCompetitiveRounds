@@ -15859,7 +15859,7 @@ namespace CompetitiveRounds
             if (!EnrollGateBegin("team")) return;
             string qt = (queueType == "manual") ? "manual" : "auto";
             string safeName = Escape(displayName ?? steamId);
-            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"queue_type\":\"{qt}\"}}";
+            string json = $"{{\"steam_id\":\"{Escape(steamId)}\",\"display_name\":\"{safeName}\",\"region\":\"{Escape(region ?? "")}\",\"queue_type\":\"{qt}\"{TeamHoldRules.CapsField(TeamHoldGlue.AllAttached)}}}";
             int gen = ++teamGen;
             Plugin.Instance.StartCoroutine(PostRequest(
                 $"{baseUrl}/api/v1/team/queue/join", json,
@@ -18819,7 +18819,7 @@ namespace CompetitiveRounds
             // flight per mode, shared with the hosted Create/Join paths.
             if (!EnrollGateBegin("ovt")) return;
             string body = $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"," +
-                          $"\"preferred_side\":{preferredSide},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}}}";
+                          $"\"preferred_side\":{preferredSide},\"solo_extra_pick\":{(soloExtraPick ? "true" : "false")}{TeamHoldRules.CapsField(TeamHoldGlue.AllAttached)}}}";
             int gen = ++ovtGen;
             Plugin.Instance.StartCoroutine(PostRequest($"{baseUrl}/api/v1/ovt/queue/join", body, (ok, resp) =>
             {
@@ -21502,7 +21502,7 @@ namespace CompetitiveRounds
                 string region = BestKnownPhotonRegion();
                 string lob = lobbyId == null ? "" : $",\"lobby_id\":\"{Escape(lobbyId)}\"";
                 string pw = string.IsNullOrEmpty(password) ? "" : $",\"password\":\"{Escape(password)}\"";
-                return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}{pw}{extras ?? ""}}}";
+                return $"{{\"steam_id\":\"{sid}\",\"display_name\":\"{name}\",\"region\":\"{Escape(region)}\"{lob}{pw}{extras ?? ""}{TeamHoldRules.CapsField(TeamHoldGlue.AllAttached)}}}";
             }
 
             private static bool PasswordTooLong(string password)

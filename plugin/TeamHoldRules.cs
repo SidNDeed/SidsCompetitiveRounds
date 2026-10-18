@@ -1309,5 +1309,17 @@ namespace CompetitiveRounds
         {
             return body != null && body.Replace(" ", "").IndexOf("\"status\":\"journaled\"", StringComparison.Ordinal) >= 0;
         }
+
+        // ── KX8: the capability token (V3 S0 step 4) ───────────────────────
+
+        /// <summary>The rjs1 capability field of the team and 1v2 queue join
+        /// and lobby create/join bodies: sent only when every Stage 2 patch
+        /// attached at boot (TeamHoldGlue.AllAttached, #83), so the server
+        /// opens holds only for clients that can run them. "" otherwise: the
+        /// body of today.</summary>
+        internal static string CapsField(bool allAttached)
+        {
+            return allAttached ? ",\"caps\":\"rjs1\"" : "";
+        }
     }
 }

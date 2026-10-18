@@ -44,6 +44,7 @@ PIECES = {
     "KX4": ("t34_", "tx4_"),
     "KX5": ("t41_", "t42_", "t44_", "tx5_"),
     "KX6": ("t55_", "t57_", "tx6_"),
+    "KX8": ("tx8_", "t16_", "t29_", "t39_", "t58_"),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -273,6 +274,10 @@ MUTANTS = [
     ("MX6.4", "KX6", "rules", [
         ('return body != null && body.Replace(" ", "").IndexOf(', 'return body != null || body.Replace(" ", "").IndexOf(')],
      "tx6_journaled_terminal", "t55_every_present_files"),
+    # KX8, the capability token (MX8.1 lane-added).
+    ("MX8.1", "KX8", "rules", [
+        ("return allAttached ? ", "return true ? ")],
+     "tx8_caps", "t16_join_pin_today"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an
