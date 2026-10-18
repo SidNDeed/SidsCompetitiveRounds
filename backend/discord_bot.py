@@ -15219,17 +15219,30 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
     if not isinstance(body["catalog"], list):
         raise AerSchemaError("catalog")
     catalog = {}
+    canonical_keys = set()
+    catalog_row_keys = (_AER_CATALOG_KEYS if summary_page
+                        else _AER_CATALOG_KEYS | _AER_SPREAD_KEYS)
     for row in body["catalog"]:
-        base = isinstance(row, dict) and row.get("base") is None
-        _aer_keys(row, _AER_CATALOG_KEYS, _AER_SPREAD_KEYS if base else frozenset())
+        _aer_keys(row, catalog_row_keys)
         ki = _aer_check_int(row["ki"], 0)
+        if ki in catalog:
+            raise AerSchemaError("duplicate catalog ki")
         _aer_check_int(row["base"], 0, nullable=True)
         for k in ("key", "fam", "unit", "kind"):
             _aer_check_text(row[k])
+        if row["key"] in canonical_keys:
+            raise AerSchemaError("duplicate catalog key")
         if row["kind"] not in ("R", "T", "D"):
             raise AerSchemaError("catalog kind")
+        if summary_page and row["base"] is None:
+            raise AerSchemaError("summary catalog base")
+        if summary_page and row["kind"] != "R":
+            raise AerSchemaError("summary catalog kind")
+        if not summary_page and row["base"] is not None:
+            raise AerSchemaError("game catalog row")
         for k in _AER_SPREAD_KEYS & set(row):
             _aer_check_number(row[k])
+        canonical_keys.add(row["key"])
         catalog[ki] = dict(row)
     games = []
     if not isinstance(body["games"], list):
@@ -15296,8 +15309,6 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
             if oi >= len(wins) or not isinstance(s["cells"], list):
                 raise AerSchemaError("summary window")
             rows = tuple(_aer_cell(c, "summary", catalog, phase) for c in s["cells"])
-            if any(c[0] not in catalog or catalog[c[0]]["base"] is None for c in rows):
-                raise AerSchemaError("summary cell not a window key of the catalog")
             cells.append((oi, rows))
         windows, summary = tuple(wins), tuple(cells)
     return BotPage(shape, page, pages, tuple(subjects), dict(body["population"]),

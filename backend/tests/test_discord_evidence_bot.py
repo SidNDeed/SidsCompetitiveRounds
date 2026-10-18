@@ -433,6 +433,79 @@ def test_m19_button_rejects_a_wrong_page_response():
     assert message.edits == []
 
 
+def test_m20_catalog_ki_and_canonical_key_are_injective(bot):
+    duplicate_ki = game_body()
+    repeated = copy.deepcopy(duplicate_ki["catalog"][0])
+    repeated["key"] += ".duplicate"
+    duplicate_ki["catalog"].append(repeated)
+
+    duplicate_key = game_body()
+    repeated = copy.deepcopy(duplicate_key["catalog"][0])
+    repeated["ki"] = max(row["ki"] for row in duplicate_key["catalog"]) + 1000
+    duplicate_key["catalog"].append(repeated)
+    for seat in duplicate_key["games"][0]["seats"]:
+        cell = list(seat["cells"][0])
+        cell[0] = repeated["ki"]
+        seat["cells"].append(cell)
+
+    for body in (duplicate_ki, duplicate_key):
+        with pytest.raises(bot["AerSchemaError"]):
+            bot["_aer_decode_response"](body, "1a")
+
+
+def test_m20_game_catalog_rows_are_base_rows_with_every_spread(bot):
+    missing_spread = game_body()
+    missing_spread["catalog"][0].pop("p90")
+
+    producer_window_as_game = game_body()
+    window = next(e for e in ae.REPORT_REGISTRY if e.is_window and e.scope == "seat")
+    producer_window_as_game["catalog"] = [ae._catalog_row(window)]
+    for seat in producer_window_as_game["games"][0]["seats"]:
+        seat["cells"] = [list(seat["cells"][0])]
+        seat["cells"][0][0] = window.ki
+
+    spread_shaped_window_as_game = copy.deepcopy(producer_window_as_game)
+    window_row = ae._catalog_row(window)
+    window_row.update(p50=None, p90=None, p99=None)
+    spread_shaped_window_as_game["catalog"] = [window_row]
+
+    for body in (missing_spread, producer_window_as_game, spread_shaped_window_as_game):
+        with pytest.raises(bot["AerSchemaError"]):
+            bot["_aer_decode_response"](body, "1a")
+
+
+def test_m20_summary_catalog_rows_are_r_windows(bot):
+    base_as_summary = summary_body()
+    base = next(e for e in ae.REPORT_REGISTRY if not e.is_window and e.kind == "R")
+    base_as_summary["catalog"] = [ae._catalog_row(base)]
+    base_as_summary["summary"][0]["cells"] = []
+
+    non_r_window = summary_body()
+    non_r_window["catalog"][0]["kind"] = "T"
+    non_r_window["summary"][0]["cells"] = []
+
+    for body in (base_as_summary, non_r_window):
+        with pytest.raises(bot["AerSchemaError"]):
+            bot["_aer_decode_response"](body, "1a")
+
+
+@pytest.mark.parametrize("slot,value", [("base", None), ("kind", "T")],
+                         ids=("base", "kind"))
+def test_m20_summary_catalog_role_precedes_cell_decoding(bot, monkeypatch, slot, value):
+    body = summary_body()
+    body["catalog"][0][slot] = value
+    decoded_cells = []
+
+    def permissive_cell(row, *_args, **_kwargs):
+        decoded_cells.append(row)
+        return tuple(row)
+
+    monkeypatch.setitem(bot, "_aer_cell", permissive_cell)
+    with pytest.raises(bot["AerSchemaError"]):
+        bot["_aer_decode_response"](body, "1a")
+    assert decoded_cells == []
+
+
 def test_flag_identity_order_reaches_the_page_plan_and_fallback(bot, monkeypatch):
     match_id = "0" * 32
     later = ae._dt.datetime(2026, 10, 17, tzinfo=ae._dt.timezone.utc)
@@ -486,6 +559,10 @@ def test_the_1a_decoder_refuses_a_phase_leaf_of_the_wrong_type(
     mutate(body)
     with pytest.raises(bot["AerSchemaError"]):
         bot["_aer_decode_response"](body, "1a")
+    if label in ("T window carrying numeric summary", "D window carrying numeric summary"):
+        catalog = {body["catalog"][0]["ki"]: body["catalog"][0]}
+        with pytest.raises(bot["AerSchemaError"]):
+            bot["_aer_cell"](body["summary"][0]["cells"][0], "summary", catalog, "1a")
 
 
 # ── 5.4: the button request ───────────────────────────────────────────────
