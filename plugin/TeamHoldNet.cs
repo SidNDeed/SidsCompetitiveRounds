@@ -37,15 +37,22 @@ namespace CompetitiveRounds
         internal const string PathOpen = "/api/v1/match/hold/open";
         internal const string PathMine = "/api/v1/match/hold/mine";
 
-        internal static string PathState(string holdId) { return "/api/v1/match/hold/" + Uri.EscapeDataString(holdId ?? "") + "/state"; }
+        // KX9: every query and body field below is the server request
+        // model's (match_hold.py; field table in the refit notes).
+        internal static string PathMineFor(string steamId) { return PathMine + "?steam_id=" + Uri.EscapeDataString(steamId ?? ""); }
+        internal static string PathState(string holdId, string steamId)
+        {
+            return "/api/v1/match/hold/" + Uri.EscapeDataString(holdId ?? "") + "/state?steam_id=" + Uri.EscapeDataString(steamId ?? "");
+        }
         internal static string PathEnd(string holdId) { return "/api/v1/match/hold/" + Uri.EscapeDataString(holdId ?? "") + "/end"; }
         internal static string PathClaim(string holdId) { return "/api/v1/match/hold/" + Uri.EscapeDataString(holdId ?? "") + "/claim"; }
         internal static string PathBind(string holdId) { return "/api/v1/match/hold/" + Uri.EscapeDataString(holdId ?? "") + "/bind"; }
         internal static string PathEntered(string holdId) { return "/api/v1/match/hold/" + Uri.EscapeDataString(holdId ?? "") + "/entered"; }
 
-        internal static string PathByRoom(string room, string g)
+        internal static string PathByRoom(string room, string g, string steamId)
         {
-            return "/api/v1/match/hold/by-room?room=" + Uri.EscapeDataString(room ?? "") + "&g=" + Uri.EscapeDataString(g ?? "");
+            return "/api/v1/match/hold/by-room?room=" + Uri.EscapeDataString(room ?? "") + "&game_id=" + Uri.EscapeDataString(g ?? "")
+                   + "&steam_id=" + Uri.EscapeDataString(steamId ?? "");
         }
 
         /// <summary>One call. Unbound or throwing transport: NoTransport, at once.</summary>
@@ -158,14 +165,24 @@ namespace CompetitiveRounds
             return sb.Append('"').ToString();
         }
 
-        internal static string GameStartBody(string mode, string seriesId, string room, string prevG)
+        // KX9: each body is its server request model, field for field
+        // (match_hold.py at the fix 1 author tip): GameStartReq, BeatReq,
+        // HoldOpenReq, HoldEndReq, HoldClaimReq, HoldBindReq, HoldEnteredReq.
+        // steam_id is the caller's own id; every route also carries the
+        // session token through the KX1 binding.
+
+        internal static string GameStartBody(string steamId, string mode, string seriesId, string room, string prevG)
         {
-            return "{\"mode\":" + Q(mode) + ",\"series_id\":" + Q(seriesId) + ",\"room\":" + Q(room) + ",\"prev_game\":" + Q(prevG) + "}";
+            return "{\"steam_id\":" + Q(steamId) + ",\"mode\":" + Q(mode) + ",\"series_id\":" + Q(seriesId)
+                   + ",\"room\":" + Q(room) + ",\"prev_game\":" + Q(prevG) + "}";
         }
 
-        internal static string BeatBody(string room, int actor, IList<KeyValuePair<int, string>> seen, string boundaryDigest)
+        internal static string BeatBody(string steamId, string mode, string seriesId, string room, int actor,
+                                        IList<KeyValuePair<int, string>> seen, string boundaryDigest)
         {
-            var sb = new StringBuilder("{\"room\":").Append(Q(room)).Append(",\"actor\":").Append(I(actor)).Append(",\"seen\":[");
+            var sb = new StringBuilder("{\"steam_id\":").Append(Q(steamId)).Append(",\"mode\":").Append(Q(mode))
+                .Append(",\"series_id\":").Append(Q(seriesId))
+                .Append(",\"room\":").Append(Q(room)).Append(",\"actor\":").Append(I(actor)).Append(",\"seen\":[");
             for (int i = 0; seen != null && i < seen.Count; i++)
             {
                 if (i > 0) sb.Append(',');
@@ -174,16 +191,67 @@ namespace CompetitiveRounds
             return sb.Append("],\"boundary_digest\":").Append(Q(boundaryDigest)).Append('}').ToString();
         }
 
-        internal static string OpenBody(string requestId, string mode, string room, string g, string heldSteam, int slot, int team, string openerSteam, string sig)
+        /// <summary>HoldOpenReq: the M1 exact slot and team, the M6 request
+        /// id, the M7 point snapshot at the drop (team holds require it), and
+        /// the build HMAC over the hold-open canonical as `hmac`.</summary>
+        internal static string OpenBody(string requestId, string mode, string room, string g, string heldSteam, int slot, int team,
+                                        string openerSteam, int t1Points, int t2Points, string sig)
         {
-            return "{\"request_id\":" + Q(requestId) + ",\"mode\":" + Q(mode) + ",\"room\":" + Q(room) + ",\"game_id\":" + Q(g)
-                   + ",\"held_steam\":" + Q(heldSteam) + ",\"slot\":" + I(slot) + ",\"team\":" + I(team)
-                   + ",\"opener_steam\":" + Q(openerSteam) + ",\"sig\":" + Q(sig) + "}";
+            return "{\"request_id\":" + Q(requestId) + ",\"opener_steam_id\":" + Q(openerSteam) + ",\"mode\":" + Q(mode)
+                   + ",\"room\":" + Q(room) + ",\"game_id\":" + Q(g)
+                   + ",\"held_steam_id\":" + Q(heldSteam) + ",\"slot\":" + I(slot) + ",\"team\":" + I(team)
+                   + ",\"t1_points\":" + I(t1Points) + ",\"t2_points\":" + I(t2Points)
+                   + ",\"hmac\":" + Q(sig) + "}";
         }
 
-        internal static string EndBody(string reason) { return "{\"reason\":" + Q(reason) + "}"; }
-        internal static string BindBody(int actor, string region) { return "{\"actor\":" + I(actor) + ",\"region\":" + Q(region) + "}"; }
-        internal static string EnteredBody(string g, int actor) { return "{\"game_id\":" + Q(g) + ",\"actor\":" + I(actor) + "}"; }
+        /// <summary>The server's END_REASONS (match_hold.py): a reason outside
+        /// it is refused with 400, so every local reason is mapped into it.</summary>
+        internal static readonly string[] EndReasons = {
+            "refused", "no_answer", "second_departure", "ceiling", "survivor_leave",
+            "token_refused", "snapshot_failed", "registration_refused",
+            "activation_timeout", "entry_refused", "bind_timeout",
+        };
+
+        /// <summary>A writer reason as the server reads it: itself when it is
+        /// one of END_REASONS, its word before ':' when that is ("refused:x"),
+        /// else "refused".</summary>
+        internal static string EndReasonFor(string local)
+        {
+            if (string.IsNullOrEmpty(local)) return "refused";
+            if (Array.IndexOf(EndReasons, local) >= 0) return local;
+            int i = local.IndexOf(':');
+            if (i > 0 && Array.IndexOf(EndReasons, local.Substring(0, i)) >= 0) return local.Substring(0, i);
+            return "refused";
+        }
+
+        /// <summary>The returner's end, by the route stage that failed.</summary>
+        internal static string ReturnEndReason(string stage, string why)
+        {
+            switch (stage)
+            {
+                case "Token": return "token_refused";
+                case "Snapshot": return "snapshot_failed";
+                case "Register": return "registration_refused";
+                case "Activate": return "activation_timeout";
+                case "Ended": return "activation_timeout";
+                case "Bind": return why == "timeout" ? "bind_timeout" : "entry_refused";
+                default: return "entry_refused";
+            }
+        }
+
+        internal static string EndBody(string steamId, string reason)
+        {
+            return "{\"steam_id\":" + Q(steamId) + ",\"reason\":" + Q(EndReasonFor(reason)) + "}";
+        }
+        internal static string ClaimBody(string steamId) { return "{\"steam_id\":" + Q(steamId) + "}"; }
+        internal static string BindBody(string steamId, int actor, string region)
+        {
+            return "{\"steam_id\":" + Q(steamId) + ",\"actor\":" + I(actor) + ",\"region\":" + Q(region) + "}";
+        }
+        internal static string EnteredBody(string steamId, string g, int actor)
+        {
+            return "{\"steam_id\":" + Q(steamId) + ",\"game_id\":" + Q(g) + ",\"actor\":" + I(actor) + "}";
+        }
 
         // ── answer parsing (manual) ────────────────────────────────────────
 

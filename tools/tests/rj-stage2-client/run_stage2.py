@@ -45,6 +45,7 @@ PIECES = {
     "KX5": ("t41_", "t42_", "t44_", "tx5_"),
     "KX6": ("t55_", "t57_", "tx6_"),
     "KX8": ("tx8_", "t16_", "t29_", "t39_", "t58_"),
+    "KX9A": ("t16_", "tx9_", "t6_claimed"),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -278,6 +279,24 @@ MUTANTS = [
     ("MX8.1", "KX8", "rules", [
         ("return allAttached ? ", "return true ? ")],
      "tx8_caps", "t16_join_pin_today"),
+    # KX9 Part A, the request side (MX9.1 to MX9.4 lane-added).
+    ("MX9.1", "KX9A", "net", [
+        (".Append(\",\\\"series_id\\\":\").Append(Q(seriesId))\n", "\n")],
+     "t16_server_model_fields", "t16_join_pin_today"),
+    ("MX9.2", "KX9A", "net", [
+        ("+ \",\\\"held_steam_id\\\":\" + Q(heldSteam)", "+ \",\\\"held_steam\\\":\" + Q(heldSteam)")],
+     "t16_server_model_fields", "t16_join_pin_today"),
+    ("MX9.3", "KX9A", "net", [
+        ("internal static string ClaimBody(string steamId) { return \"{\\\"steam_id\\\":\" + Q(steamId) + \"}\"; }",
+         "internal static string ClaimBody(string steamId) { return \"{}\"; }")],
+     "t16_server_model_fields", "t16_join_pin_today"),
+    ("MX9.4", "KX9A", "net", [
+        ("            return \"refused\";\n        }\n\n        /// <summary>The returner's end",
+         "            return local;\n        }\n\n        /// <summary>The returner's end")],
+     "t16_end_reasons_server_set", "t16_join_pin_today"),
+    ("MX9.5", "KX9A", "net", [
+        ("Verifier = Field(body, \"verifier\")", "Verifier = Field(body, \"hand_over_verifier\")")],
+     "tx9_verifier_k3", "t16_join_pin_today"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

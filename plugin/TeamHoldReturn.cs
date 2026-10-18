@@ -86,7 +86,7 @@ namespace CompetitiveRounds
             try
             {
                 if (string.IsNullOrEmpty(SteamAuth.SessionToken) || PhotonNetwork.InRoom || _route != null) return;
-                TeamHoldNet.Call("GET", TeamHoldNet.PathMine, null, (st, body) =>
+                TeamHoldNet.Call("GET", TeamHoldNet.PathMineFor(MatchTracker.LocalSteamId), null, (st, body) =>
                 {
                     TeamHoldNet.MineAnswer a;
                     TeamHoldNet.TryParseMine(st, body, out a);
@@ -112,7 +112,7 @@ namespace CompetitiveRounds
             _enteredPosted = _replayed = false;
             _callInFlight = true;
             var route = _route;
-            TeamHoldNet.Call("POST", TeamHoldNet.PathClaim(offer.HoldId), "{}", (st, body) =>
+            TeamHoldNet.Call("POST", TeamHoldNet.PathClaim(offer.HoldId), TeamHoldNet.ClaimBody(MatchTracker.LocalSteamId), (st, body) =>
             {
                 _callInFlight = false;
                 if (route != _route) return;
@@ -156,16 +156,16 @@ namespace CompetitiveRounds
             var route = _route;
             if (route != null && route.S != TeamHoldRules.ReturnRoute.Stage.Ended) route.Done(stage, false, Now, why);
             Plugin.Log.LogInfo(TeamHold.TAG + " rejoin failed at " + stage + ": " + (why ?? ""));
-            End(why);
+            End(why, TeamHoldNet.ReturnEndReason(stage.ToString(), why));
         }
 
-        private static void End(string why)
+        private static void End(string why, string serverReason)
         {
             var offer = _claimed;
             Message = I18n.Tr("Could not rejoin at this point");
             MessageAt = Now;
             if (offer != null && !string.IsNullOrEmpty(offer.HoldId))
-                TeamHoldNet.Call("POST", TeamHoldNet.PathEnd(offer.HoldId), TeamHoldNet.EndBody("entry_failed:" + (why ?? "")), (st, b) => { });
+                TeamHoldNet.Call("POST", TeamHoldNet.PathEnd(offer.HoldId), TeamHoldNet.EndBody(MatchTracker.LocalSteamId, serverReason), (st, b) => { });
             _route = null;
             _claim = null;
             _token = null;
@@ -196,7 +196,7 @@ namespace CompetitiveRounds
                 if (route == null) return;
                 double now = Now;
                 route.Tick(now);
-                if (route.S == TeamHoldRules.ReturnRoute.Stage.Ended) { Plugin.Log.LogInfo(TeamHold.TAG + " rejoin ended: " + route.EndReason); End(route.EndReason); return; }
+                if (route.S == TeamHoldRules.ReturnRoute.Stage.Ended) { Plugin.Log.LogInfo(TeamHold.TAG + " rejoin ended: " + route.EndReason); End(route.EndReason, TeamHoldNet.ReturnEndReason("Ended", route.EndReason)); return; }
                 if (route.BoundaryReleased) { Finish(); return; }
                 var a = _claim;
                 if (a == null) return;
@@ -259,7 +259,7 @@ namespace CompetitiveRounds
             _lastBind = now;
             _callInFlight = true;
             int actor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : 0;
-            TeamHoldNet.Call("POST", TeamHoldNet.PathBind(_claimed.HoldId), TeamHoldNet.BindBody(actor, a.Region), (st, body) =>
+            TeamHoldNet.Call("POST", TeamHoldNet.PathBind(_claimed.HoldId), TeamHoldNet.BindBody(MatchTracker.LocalSteamId, actor, a.Region), (st, body) =>
             {
                 _callInFlight = false;
                 if (route != _route) return;
@@ -320,7 +320,7 @@ namespace CompetitiveRounds
             if (_enteredPosted) return;
             _enteredPosted = true;
             int actor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : 0;
-            TeamHoldNet.Call("POST", TeamHoldNet.PathEntered(_claimed.HoldId), TeamHoldNet.EnteredBody(a.G, actor), (st, body) =>
+            TeamHoldNet.Call("POST", TeamHoldNet.PathEntered(_claimed.HoldId), TeamHoldNet.EnteredBody(MatchTracker.LocalSteamId, a.G, actor), (st, body) =>
             {
                 if (route != _route) return;
                 string why;
