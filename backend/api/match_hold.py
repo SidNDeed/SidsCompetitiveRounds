@@ -111,6 +111,12 @@ def _members(mode: str, row) -> dict:
     return {row[c]: team for c, team in _MEMBER_COLS[mode] if row[c] is not None}
 
 
+def _member_seats(mode: str, row) -> dict:
+    """{player_id: (slot, team)} derived from the locked series roster."""
+    return {row[c]: (slot, team) for slot, (c, team) in enumerate(_MEMBER_COLS[mode])
+            if row[c] is not None}
+
+
 # ---------------------------------------------------------------------------
 # S1. The hold flag latch (S1 step 2)
 # ---------------------------------------------------------------------------
@@ -470,8 +476,10 @@ async def _open_decide(db, req, mode, room, opener, held):
     if latest != game["id"]:
         return "not_current_game", None, row, game
     members = _members(mode, row)
+    member_seats = _member_seats(mode, row)
     if (opener is None or held is None or opener == held or opener not in members
-            or held not in members or members[held] != req.team
+            or held not in members
+            or member_seats.get(held) != (req.slot, req.team)
             or not _slot_ok(mode, req.slot, req.team)):
         return "not_member", None, row, game
     existing = (await db.execute(text(

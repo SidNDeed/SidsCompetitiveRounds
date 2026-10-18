@@ -545,6 +545,28 @@ def test_t2_1_open_anchor_idempotent_and_refusals(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_m1_hold_open_requires_exact_roster_slot_and_team(monkeypatch):
+    """A valid geometric slot cannot identify a roster sibling: both 2v2
+    teams and the 1v2 duo require the held player's exact server-side seat."""
+    async def body(env):
+        for mode, held_seat, sibling_slot, sibling_team in (
+                ("team", 1, 0, 0),
+                ("team", 3, 2, 1),
+                ("ovt", 2, 1, 1)):
+            s, g, _ = await opened_series(env, mode, held=held_seat)
+            swapped = (await open_hold(
+                env, s, held_seat, 0, g,
+                slot=sibling_slot, team=sibling_team)).json()
+            assert swapped == {"status": "refused", "reason": "not_member"}, swapped
+            assert await env.conn.fetchval(
+                "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", s.room) == 0
+            valid = (await open_hold(env, s, held_seat, 0, g)).json()
+            assert (valid["status"], valid["slot"], valid["team"]) == \
+                ("opened", *seat_of(s, held_seat)), valid
+
+    run_env(monkeypatch, body, prefix="rjs2m1")
+
+
 def test_t2_1_open_stores_the_crossing_of_the_locked_series(monkeypatch):
     """A team hold stores what _team_game_crossed_two answers for the series
     row read under the lock (wins and room), as crossed_at_hold; a 1v2 hold
