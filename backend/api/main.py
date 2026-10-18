@@ -44627,7 +44627,8 @@ async def team_queue_recent_joins(seconds: int = Query(20, ge=1, le=86400), db: 
 
 @app.get("/api/v1/team/queue/poll/{steam_id}", response_model=TeamQueuePollResponse, tags=["Team Queue"])
 async def team_queue_poll(steam_id: str, request: Request,
-                          db: AsyncSession = Depends(get_db)):
+                          db: AsyncSession = Depends(get_db),
+                          rdm: int = Query(0, ge=0, le=1)):
     """Polled by all 4 participants. Drives the searching → matched → ready_join state machine.
     At lock time, runs the balancer to assign teams. Identical safety pattern to 1v1:
     SELECT FOR UPDATE SKIP LOCKED on the candidate set, atomic update of all 4 rows.
@@ -44649,6 +44650,11 @@ async def team_queue_poll(steam_id: str, request: Request,
 
     await _check_steam_session(request, steam_id, db)
     _presence_touch(steam_id)
+    # Stage 2 (V3 S3): with rdm=1, a caller with a live hold is answered
+    # readmissible and seated nowhere; every other poll answers today.
+    _rdm_out = await _s2_poll_readmissible(db, steam_id, rdm)
+    if _rdm_out is not None:
+        return JSONResponse(content=_rdm_out)
     # Region map store (migration 307) — before any queue-row lock, see
     # _region_pings_store; the result rides into this poll's own issuance.
     _cur_pings = await _region_pings_store(request, steam_id, "team")
@@ -45072,6 +45078,11 @@ async def team_queue_poll(steam_id: str, request: Request,
                          {"pid": my_pid})
         await db.commit()
         return TeamQueuePollResponse(status="not_in_queue")
+    # Stage 2 (V3 S3): a caller with a live hold is seated in no new quartet
+    # while the hold lasts; its row stays searching.
+    if await _s2_player_live_hold(db, my_pid):
+        await db.commit()
+        return TeamQueuePollResponse(status="searching", queue_count=0, elo_range=elo_range)
     # Find 3 other compatible players. Bilateral Elo overlap, no mutual blocks.
     # BILATERAL for real since Aug 23 (Codex wiki-batch finding): this comment
     # claimed bilateral for months while the SQL applied only the CALLER's
@@ -45123,6 +45134,8 @@ async def team_queue_poll(steam_id: str, request: Request,
               AND NOT EXISTS (SELECT 1 FROM player_bans pb
                                WHERE pb.steam_id = tq.steam_id
                                  AND pb.unbanned_at IS NULL)
+              -- Stage 2 (V3 S3): no candidate with a live hold.
+              AND NOT {_S2_TQ_LIVE_HOLD_SQL}
               AND NOT (tq.steam_id = ANY(CAST(:service_ids AS text[])))
             ORDER BY ABS(tq.rating - :my_r), tq.joined_at
             LIMIT 3
@@ -48493,7 +48506,8 @@ async def ovt_queue_list(db: AsyncSession = Depends(get_db)):
 
 
 @app.get("/api/v1/ovt/queue/poll/{steam_id}", tags=["1v2 Queue"])
-async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends(get_db),
+                         rdm: int = Query(0, ge=0, le=1)):
     """Poll the 1v2 queue. When 3 searching players are present, the lowest
     Steam ID locks the match: assigns 1 solo + 2 duo (honoring preferences,
     else join order), creates the series + room, and flips all three to
@@ -48508,6 +48522,10 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     STEAM_AUTH_ENFORCE fully arms)."""
     await _check_steam_session(request, steam_id, db)
     _presence_touch(steam_id)
+    # Stage 2 (V3 S3): the discovery belt behind rdm=1, as the team poll.
+    _rdm_out = await _s2_poll_readmissible(db, steam_id, rdm)
+    if _rdm_out is not None:
+        return _rdm_out
     # Region map store (migration 307) — before any queue-row lock, see
     # _region_pings_store; the result rides into this poll's own issuance.
     _cur_pings = await _region_pings_store(request, steam_id, "ovt")
@@ -48748,6 +48766,8 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
                             WHERE pb.steam_id = ovt_queue.steam_id
                               AND pb.unbanned_at IS NULL)
            AND NOT (steam_id = ANY(CAST(:service_ids AS text[])))
+           -- Stage 2 (V3 S3): no row with a live hold.
+           AND NOT """ + _S2_LIVE_HOLD_SQL.format(col="ovt_queue.player_id") + """
          ORDER BY joined_at
          LIMIT 3
          FOR UPDATE SKIP LOCKED
@@ -51664,6 +51684,9 @@ async def _lobby_create_impl(mode: str, req: _LobbyCreateReq, request: Request,
         select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(404, "Player not registered")
+    if await _s2_player_live_hold(db, player.id):
+        # Stage 2 (V3 S3): the held seat is reserved for its owner.
+        raise HTTPException(409, "Your match is still running - rejoin it or wait for the hold to end")
     _other = await _locked_in_other_queue(db, player.id, cfg["queue"])
     if _other:
         raise HTTPException(409, "You're in a live match in another mode - finish it first")
@@ -51704,6 +51727,9 @@ async def _lobby_join_impl(mode: str, req: _LobbyJoinReq, request: Request,
         lobby_id = UUID(req.lobby_id)
     except (ValueError, TypeError):
         raise HTTPException(400, "Invalid lobby_id")
+    if await _s2_player_live_hold(db, player.id):
+        # Stage 2 (V3 S3): the held seat is reserved for its owner.
+        raise HTTPException(409, "Your match is still running - rejoin it or wait for the hold to end")
     _other = await _locked_in_other_queue(db, player.id, cfg["queue"])
     if _other:
         raise HTTPException(409, "You're in a live match in another mode - finish it first")
@@ -57496,6 +57522,102 @@ async def _rdm_attest_check(db, mode, lobby_ref, roster, true_roster, steam_id):
     if held is None:
         return None
     return _rdm_attest_ok(roster, true_roster, held, steam_id)
+
+
+# -- Stage 2 (design V3 S3): discovery belt and the live-hold seat rule -------
+#
+# A live hold is an open match_seat_holds row of the player before its
+# held_until: the seat is reserved for its owner, so no matcher or lobby seats
+# that player anywhere else while it lasts (the shared admission gate refuses
+# it at the lease as well; these predicates keep a held player out of the
+# candidate set, so one held searcher never fails a whole formation).
+_S2_LIVE_HOLD_SQL = (
+    "EXISTS (SELECT 1 FROM match_seat_holds _h"
+    " WHERE _h.player_id = {col} AND _h.closed_at IS NULL"
+    "   AND _h.held_until > clock_timestamp())")
+_S2_TQ_LIVE_HOLD_SQL = _S2_LIVE_HOLD_SQL.format(col="tq.player_id")
+
+
+async def _s2_player_live_hold(db, player_id) -> bool:
+    if player_id is None:
+        return False
+    return bool((await db.execute(text(
+        "SELECT " + _S2_LIVE_HOLD_SQL.format(col="CAST(:pid AS uuid)")),
+        {"pid": str(player_id)})).scalar())
+
+
+async def _s2_poll_readmissible(db, steam_id: str, rdm) -> dict | None:
+    """The team and 1v2 polls answer `readmissible` only to a request that
+    carries rdm=1, and then only for a live hold of the caller: the payload
+    of GET /match/hold/mine without its offered row (the discovery route
+    writes that). Any other poll answers exactly today (None)."""
+    if rdm != 1:
+        return None
+    pid = await _match_hold._player_id(db, steam_id)
+    if pid is None:
+        return None
+    hold = (await db.execute(text(
+        f"SELECT {_match_hold._HOLD_COLS} FROM match_seat_holds"
+        " WHERE player_id = CAST(:pid AS uuid) AND closed_at IS NULL"
+        " ORDER BY held_at DESC LIMIT 1"), {"pid": str(pid)})).mappings().first()
+    now = await _match_hold._ctx_now(db)
+    if hold is None or not _match_hold._hold_live(hold, now):
+        return None
+    series = await _match_hold._series_read(db, hold["mode"], hold["series_id"])
+    out = _match_hold._state_payload(hold, now)
+    out.update({"status": "readmissible", "readmissible": 1,
+                "room_region": series["region"] if series else None,
+                "series_tally": [series["w0"], series["w1"]] if series else None})
+    await db.commit()
+    return out
+
+
+_S2_SPECTATE_SERIES = {"2v2": ("team", "team_series"), "1v2": ("ovt", "ovt_series")}
+
+
+async def _s2_spectate_held(db, mode: str, series_ref, room: str):
+    """H for a 2v2 or 1v2 room (V3 S3 step 6): the Steam ids of the series
+    members with a live hold in this room, from the server's rows only.
+    None when the room is not the flagged room of its series (the exact
+    roster equality of today applies)."""
+    if mode not in _S2_SPECTATE_SERIES:
+        return None
+    try:
+        sid = UUID(str(series_ref))
+    except (ValueError, TypeError):
+        return None
+    _hmode, table = _S2_SPECTATE_SERIES[mode]
+    row = (await db.execute(text(
+        f"SELECT s.hold_v2, s.hold_room,"
+        f"       ARRAY(SELECT p.steam_id FROM match_seat_holds h"
+        f"               JOIN players p ON p.id = h.player_id"
+        f"              WHERE h.series_id = s.id AND h.mode = CAST(:m AS varchar)"
+        f"                AND h.room_name = CAST(:room AS varchar)"
+        f"                AND h.closed_at IS NULL"
+        f"                AND h.held_until > clock_timestamp()) AS held"
+        f"  FROM {table} s WHERE s.id = :sid"),
+        {"sid": sid, "m": _hmode, "room": room})).mappings().first()
+    if row is None or not row["hold_v2"] or (row["hold_room"] or "") != room:
+        return None
+    return set(row["held"] or [])
+
+
+async def _s2_spectate_fighters(db, game):
+    """Headroom (V3 S3 step 6): in the flagged room of a 2v2 or 1v2 series
+    the fighter count is the series roster, so a held seat stays counted as
+    occupied; None for any other room (the attested fighter_target)."""
+    room = str(game["room_name"] or "")
+    mode = next((m for m in _S2_SPECTATE_SERIES
+                 if room.startswith(_SPECTATE_ROOM_PREFIX[m])), None)
+    if mode is None:
+        return None
+    _hmode, table = _S2_SPECTATE_SERIES[mode]
+    flagged = (await db.execute(text(
+        f"SELECT 1 FROM {table} s WHERE s.photon_room_id = CAST(:room AS varchar)"
+        f"   AND s.hold_v2 AND s.hold_room = s.photon_room_id"
+        f"   AND s.status IN ('active', 'dc_paused') LIMIT 1"),
+        {"room": game["room_name"]})).scalar()
+    return _SPECTATE_MODE_TARGET[mode] if flagged else None
 
 
 # -- P3: the report journal of a readmission lobby ----------------------------
@@ -66670,6 +66792,11 @@ async def _spectate_admission(
     if _rdm_r is not None:
         # V3 P4.9: a readmission lobby reserves a held seat's place.
         _fighters = _rdm_r
+    _s2_r = await _s2_spectate_fighters(db, game)
+    if _s2_r is not None:
+        # Stage 2 (V3 S3 step 6): the flagged room of a 2v2 or 1v2 series
+        # counts the whole series roster, a held seat as occupied.
+        _fighters = max(_fighters, _s2_r)
     headroom = max(0, int(game["room_capacity"] or 0) - _fighters)
     # H2 gate: strict occupancy + stale-drain conjuncts apply only once the
     # phase-2 client can actually clear ghosts (see SPECTATE_DRAIN_ENFORCEMENT).
@@ -67051,9 +67178,15 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
         raise HTTPException(status_code=422, detail="bad_roster")
     if sorted(roster) != roster or len(set(roster)) != len(roster):
         raise HTTPException(status_code=422, detail="roster_not_canonical")
+    _s2_short = False
     if req.mode in _SPECTATE_MODE_TARGET:
         if req.fighter_target != _SPECTATE_MODE_TARGET[req.mode]:
-            raise HTTPException(status_code=422, detail="bad_cardinality")
+            # Stage 2 (V3 S3 step 6): a 2v2 or 1v2 roster short of the mode
+            # may stand only over the server's held set, judged below.
+            if not (req.mode in _S2_SPECTATE_SERIES
+                    and 1 <= req.fighter_target < _SPECTATE_MODE_TARGET[req.mode]):
+                raise HTTPException(status_code=422, detail="bad_cardinality")
+            _s2_short = True
     elif not (2 <= req.fighter_target <= 10):   # ffa (2 tolerates leavers mid-sitting)
         raise HTTPException(status_code=422, detail="bad_cardinality")
     if not await _strict_steam_session_ok(request, req.steam_id, db):
@@ -67069,6 +67202,8 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
     # exist): the claimed roster must be members of the room's real locked
     # group, and the claimed room must actually belong to this mode's flow.
     true_roster, derived_ref = await _spectate_authoritative_roster(db, req.mode, req.room_name)
+    if true_roster is None and _s2_short:
+        raise HTTPException(status_code=422, detail="bad_cardinality")
     if true_roster is not None:
         if not true_roster:
             raise HTTPException(status_code=409, detail="room_unknown")
@@ -67078,6 +67213,15 @@ async def spectate_participant_attest(req: SpectateAttestBody, request: Request,
         # (V3 P4.9); the held set is the server's, never the caller's.
         _rdm_ok = await _rdm_attest_check(db, req.mode, derived_ref, roster, true_roster,
                                           req.steam_id)
+        # Stage 2 (V3 S3 step 6): in the flagged room of a 2v2 or 1v2 series
+        # the attested set united with H (members with a live hold, from the
+        # server's rows, never the caller's) must equal the true roster, every
+        # member outside H attested, as the FFA readmission lobby does.
+        _s2_held = await _s2_spectate_held(db, req.mode, derived_ref, req.room_name)
+        if _s2_held is not None:
+            _rdm_ok = _rdm_attest_ok(roster, true_roster, _s2_held, req.steam_id)
+        elif _s2_short:
+            raise HTTPException(status_code=422, detail="bad_cardinality")
         if _rdm_ok is not None:
             if not _rdm_ok:
                 raise HTTPException(status_code=409, detail="roster_mismatch")

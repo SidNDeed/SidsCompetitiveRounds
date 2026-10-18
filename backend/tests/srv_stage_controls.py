@@ -25,6 +25,7 @@ import rdm_controls as rc  # noqa: E402
 
 MAIN = rc.MAIN
 WT = "test_match_hold_wiring_pg.py::"
+DT = "test_match_hold_discovery_pg.py::"
 
 ROWS = [
     # NX1: the 1v2 Start issues its room without latching the hold flag.
@@ -47,6 +48,37 @@ ROWS = [
                '                   hold_room = NULL,\n',
                '                   hold_v2 = (FALSE),\n'
                '                   hold_room = (NULL),\n', 2)]},
+    # NX3: the polls answer readmissible without rdm=1.
+    {"row": "M3.4", "node": DT + "test_t3_2_polls_answer_readmissible_only_with_rdm",
+     "tag": "T3.2 no rdm",
+     "mutant": [(MAIN,
+                 '    if rdm != 1:\n'
+                 '        return None\n'
+                 '    pid = await _match_hold._player_id(db, steam_id)\n',
+                 '    if False:\n'
+                 '        return None\n'
+                 '    pid = await _match_hold._player_id(db, steam_id)\n', 1)]},
+    # NX3: the attest accepts a roster that omits a live fighter.
+    {"row": "M3.13", "node": DT + "test_t3_6_attest_omitting_a_live_fighter_is_refused",
+     "tag": "T3.6 live omitted",
+     "mutant": [(MAIN,
+                 '    return (steam_id in true_roster and (att | held) == true_roster\n'
+                 '            and (true_roster - held) <= att)\n',
+                 '    return (steam_id in true_roster and att <= true_roster)\n', 1)]},
+    # NX3: H is taken from what the caller left out, not the server's rows.
+    {"row": "M3.14", "node": DT + "test_t3_6_attest_without_a_server_hold_is_refused",
+     "tag": "T3.6 no server hold",
+     "mutant": [(MAIN,
+                 '            _rdm_ok = _rdm_attest_ok(roster, true_roster, _s2_held, req.steam_id)\n',
+                 '            _rdm_ok = _rdm_attest_ok(roster, true_roster,\n'
+                 '                                     true_roster - set(roster), req.steam_id)\n',
+                 1)]},
+    # NX3: the headroom counts only the live fighters.
+    {"row": "M3.15", "node": DT + "test_t3_6_attest_over_the_server_held_set",
+     "tag": "T3.6 headroom",
+     "mutant": [(MAIN,
+                 '        _fighters = max(_fighters, _s2_r)\n',
+                 '        _fighters = _fighters\n', 1)]},
 ]
 for _row in ROWS:
     if "twin" not in _row:
