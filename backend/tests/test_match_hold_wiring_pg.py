@@ -221,20 +221,26 @@ def test_t1_3_team_issue_relock_and_continuation(monkeypatch):
         assert (row["hold_v2"], row["hold_room"]) == (True, poll["room_name"]), \
             ("T1.3 team row", dict(row))
 
-        # Relock: the four drop out of the sitting (queue rows and leases
-        # gone, series paused) and start a new lobby; Start adopts the series.
+        # Relock: one game played (the series is resumable while active),
+        # the four drop out of the sitting (queue rows and leases gone) and
+        # start a new lobby asking for the stored split; Start adopts it.
         old_room = poll["room_name"]
         ids = [p[0] for p in ps]
+        split = await w.conn.fetchrow(
+            "SELECT t1a_id, t1b_id FROM team_series WHERE id = $1", row["id"])
+        team_of = {p[0]: (1 if p[0] in (split["t1a_id"], split["t1b_id"]) else 2) for p in ps}
         await w.conn.execute("DELETE FROM team_queue WHERE player_id = ANY($1::uuid[])", ids)
         await w.conn.execute("DELETE FROM queue_leases WHERE player_id = ANY($1::uuid[])", ids)
-        await w.conn.execute("UPDATE team_series SET status = 'dc_paused' WHERE id = $1",
+        await w.conn.execute("UPDATE team_series SET t1_series_wins = 1 WHERE id = $1",
                              row["id"])
         lob = await w.ok("POST", "/api/v1/team/lobby/create", ps[0][1],
-                         {"steam_id": ps[0][1], "caps": "rjs1"}, tag="relock create")
+                         {"steam_id": ps[0][1], "caps": "rjs1",
+                          "preferred_team": team_of[ps[0][0]]}, tag="relock create")
         for i in (1, 2, 3):
             await w.ok("POST", "/api/v1/team/lobby/join", ps[i][1],
                        {"steam_id": ps[i][1], "lobby_id": lob["lobby_id"],
-                        "caps": "rjs1" if i != 3 else ""}, tag="relock join")
+                        "caps": "rjs1" if i != 3 else "",
+                        "preferred_team": team_of[ps[i][0]]}, tag="relock join")
         start = await w.ok("POST", "/api/v1/team/lobby/start", ps[0][1],
                            {"steam_id": ps[0][1]}, tag="relock start")
         assert start.get("series_id") in (None, str(row["id"])), ("adopt", start)
