@@ -1273,9 +1273,11 @@ def _pre_refactor_main():
     return mod
 
 
-async def _open_lobby(env, n, caps):
+async def _open_lobby(env, n, caps, versions=None):
     """An open hosted lobby of n fresh members (queue rows status 'lobby'),
     slot 0 hosting."""
+    versions = ["1.41.0"] * n if versions is None else list(versions)
+    assert len(caps) == len(versions) == n
     env.serial += 1
     base = cf_asm.STEAM_BASE + env.serial * 20
     sids = [str(base + i) for i in range(n)]
@@ -1295,8 +1297,9 @@ async def _open_lobby(env, n, caps):
             "INSERT INTO ffa_queue (player_id, steam_id, display_name, status, series_id,"
             "  joined_at, last_polled, caps, mod_version)"
             " VALUES ($1, $2, $3, 'lobby', $4, clock_timestamp() - make_interval(secs => $5),"
-            "         clock_timestamp(), $6, '1.41.0')",
-            pids[i], sids[i], "cf o%d-%d" % (env.serial, i), lid, float(300 - i), caps[i])
+            "         clock_timestamp(), $6, $7)",
+            pids[i], sids[i], "cf o%d-%d" % (env.serial, i), lid, float(300 - i),
+            caps[i], versions[i])
     lob = cf_asm.Lob(lid, sids, pids, None, False, True)
     env.lobbies.append(lob)
     return lob
@@ -1309,6 +1312,75 @@ async def _start(env, module, lob):
         async with env.sm() as db:
             return await module.ffa_lobby_start(req, None, db=db)
     return await env._call(go)
+
+
+async def _fix1b_auto_lock(env, versions):
+    """Form one automatic room through the public poll route."""
+    env.serial += 1
+    n = len(versions)
+    base = cf_asm.STEAM_BASE + env.serial * 20
+    sids = [str(base + i) for i in range(n)]
+    pids = []
+    for i, sid in enumerate(sids):
+        pid = await env.conn.fetchval(
+            "INSERT INTO players (id, steam_id, display_name, mod_version)"
+            " VALUES ($3, $1, $2, '1.41.0') RETURNING id",
+            sid, "cf auto%d-%d" % (env.serial, i), cf_asm.fixture_uuid("player", sid))
+        pids.append(pid)
+        await env.conn.execute(
+            "INSERT INTO ffa_queue (player_id, steam_id, display_name, status, region,"
+            " joined_at, last_polled, caps, mod_version)"
+            " VALUES ($1, $2, $3, 'searching', 'eu', clock_timestamp(),"
+            " clock_timestamp(), '', $4)", pid, sid, "cf auto%d-%d" % (env.serial, i),
+            versions[i])
+    env.mp.setattr(main, "_ffa_gather_started_mono",
+                   env.mono - main.FFA_GATHER_CAP_SECONDS)
+    env.mp.setattr(main, "_ffa_gather_last_join_mono",
+                   env.mono - main.FFA_GATHER_CAP_SECONDS)
+    env.mp.setattr(main, "_ffa_gather_pool_seen_mono", env.mono)
+
+    async def go():
+        async with env.sm() as db:
+            return await main.ffa_queue_poll(sids[0], cf_asm.FakeRequest(), db=db)
+
+    answer = await env._call(go)
+    assert answer.status == 200 and answer["status"] == "ready_join", answer
+    lid = uuid.UUID(answer["lobby_id"])
+    locked = await env.conn.fetch(
+        "SELECT player_id, steam_id FROM ffa_queue WHERE series_id = $1 ORDER BY slot", lid)
+    lob = cf_asm.Lob(lid, [r["steam_id"] for r in locked],
+                     [r["player_id"] for r in locked], answer["room_region"], False, False)
+    env.lobbies.append(lob)
+    return lob, answer
+
+
+def test_fix1b_r1_hosted_and_automatic_locks_freeze_rating_floor(monkeypatch):
+    async def settled(env, lob, answer, rated, tag):
+        row = await env.lobby_row(lob)
+        assert row["is_ranked"] is rated, (tag, row["is_ranked"])
+        assert answer.get("ranked_refusal") == (None if rated else "unranked"), \
+            (tag, answer)
+        results = {sid: (5 - i, 10 - i) for i, sid in enumerate(lob.sids)}
+        report = await env.report(lob, 1, results)
+        assert report.status == 200, (tag, report)
+        counts = await _report_counts(env, lob)
+        assert counts["matches"] == 1
+        assert counts["ratings"] == (len(lob.pids) if rated else 0), (tag, counts)
+        assert bool(report["rating_changes"]) is rated, (tag, report)
+
+    async def body(env):
+        floor = main.MIN_MOD_VERSION
+        caps = [""] * 3
+        hosted_ok = await _open_lobby(env, 3, caps, [floor] * 3)
+        await settled(env, hosted_ok, await _start(env, main, hosted_ok), True, "hosted floor")
+        hosted_low = await _open_lobby(env, 3, caps, [floor, "1.38.6", floor])
+        await settled(env, hosted_low, await _start(env, main, hosted_low), False, "hosted mixed")
+
+        auto_ok, answer = await _fix1b_auto_lock(env, [floor] * 3)
+        await settled(env, auto_ok, answer, True, "automatic floor")
+        auto_low, answer = await _fix1b_auto_lock(env, [floor, "1.38.6", floor])
+        await settled(env, auto_low, answer, False, "automatic mixed")
+    run_env(monkeypatch, body, prefix="cf_f1b_r1")
 
 
 def _anon(obj, names):

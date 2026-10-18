@@ -72,6 +72,7 @@ CREATE TABLE ffa_queue (
     player_id UUID PRIMARY KEY,
     steam_id TEXT NOT NULL,
     display_name TEXT,
+    mod_version TEXT,
     region TEXT,
     status TEXT NOT NULL DEFAULT 'searching',
     joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -231,6 +232,34 @@ def test_ffa_predicate_runs_both_ways():
             ids = [r["player_id"] for r in found]
             again = await _ffa(sm, ids)
             assert [r["player_id"] for r in again] == ids
+        finally:
+            await engine.dispose()
+    run(go())
+
+
+def test_ffa_proximity_floor_uses_complete_queue_stamps():
+    async def go():
+        engine, sm, pids = await _setup()
+        try:
+            async with sm() as db:
+                await db.execute(text(
+                    "UPDATE ffa_queue SET mod_version = :version"),
+                    {"version": main.MIN_MOD_VERSION})
+                await db.commit()
+                vals = (await db.execute(text(
+                    "SELECT mod_version FROM ffa_queue"
+                    " WHERE player_id = ANY(:ids)"), {"ids": pids})).scalars().all()
+                assert main._ffa_roster_clears_proximity_floor(vals, len(pids))
+
+                await db.execute(text(
+                    "UPDATE ffa_queue SET mod_version = NULL WHERE player_id = :pid"),
+                    {"pid": pids[-1]})
+                await db.commit()
+                vals = (await db.execute(text(
+                    "SELECT mod_version FROM ffa_queue"
+                    " WHERE player_id = ANY(:ids)"), {"ids": pids})).scalars().all()
+                assert not main._ffa_roster_clears_proximity_floor(vals, len(pids))
+                assert not main._ffa_roster_clears_proximity_floor(vals[:-1], len(pids))
         finally:
             await engine.dispose()
     run(go())

@@ -1633,3 +1633,53 @@ def test_the_identity_barrier_bounds_its_wait_and_answers_contended():
     db = _LockTimeoutSession(sqlstate="40001")
     with pytest.raises(_DBAPIError):
         run(main._identity_lock_many(db, SIDS))
+
+
+# --- merged fix 1b: rated-FFA proximity admission -------------------------
+
+def _fix1b_calls(function_name, callee):
+    tree = _ast.parse(_inspect.getsource(getattr(main, function_name)))
+    return [node for node in _ast.walk(tree)
+            if isinstance(node, _ast.Call)
+            and getattr(node.func, "id", None) == callee]
+
+
+def test_fix1b_r1_floor_is_independent_inert_and_complete():
+    assert main.FFA_PROXIMITY_VICTIM_MIN_VERSION == main.MIN_MOD_VERSION == "1.38.7"
+    floor = main.MIN_MOD_VERSION
+    assert main._ffa_roster_clears_proximity_floor([floor, "v" + floor, "V" + floor], 3)
+    assert not main._ffa_roster_clears_proximity_floor([floor, "1.38.6", floor], 3)
+    assert not main._ffa_roster_clears_proximity_floor([floor, floor], 3)
+    helper = _ast.parse(_inspect.getsource(main._ffa_roster_clears_proximity_floor))
+    assert not any(isinstance(node, _ast.Await) for node in _ast.walk(helper))
+
+
+def test_fix1b_r1_hosted_lock_freezes_the_queue_floor_once():
+    calls = _fix1b_calls("_ffa_lock_roster", "_ffa_roster_clears_proximity_floor")
+    assert len(calls) == 1
+    assert _ast.unparse(calls[0]) == \
+        "_ffa_roster_clears_proximity_floor(_kt_vals, len(ordered))"
+    src = " ".join(_inspect.getsource(main._ffa_lock_roster).split())
+    assert "is_ranked=COALESCE(is_ranked, TRUE) AND CAST(:proximity_capable AS boolean)" in src
+    assert "RETURNING is_ranked" in src
+    assert '"proximity_capable": _ranked_floor_ok' in src
+    assert src.index("_ffa_roster_clears_proximity_floor") < src.index("SET status='active'")
+    assert src.index("RETURNING is_ranked") < src.index("_bind_lobby_bets")
+
+
+def test_fix1b_r1_automatic_lock_freezes_the_queue_floor_once():
+    calls = _fix1b_calls("_ffa_queue_poll_inner", "_ffa_roster_clears_proximity_floor")
+    assert len(calls) == 1
+    assert _ast.unparse(calls[0]) == \
+        "_ffa_roster_clears_proximity_floor(_kt_vals, len(ordered))"
+    src = " ".join(_inspect.getsource(main._ffa_queue_poll_inner).split())
+    assert "kills_tiebreak, is_ranked, assembly_v1" in src
+    assert ":proximity_capable, FALSE, FALSE" in src
+    assert '"proximity_capable": _proximity_capable' in src
+    assert src.index("_ffa_roster_clears_proximity_floor") < src.index("INSERT INTO ffa_lobbies")
+
+
+def test_fix1b_r1_locked_payload_names_only_an_unranked_refusal():
+    src = _inspect.getsource(main._ffa_poll_locked_payload)
+    assert '"lobby_ranked": _lobby_ranked' in src
+    assert '**({"ranked_refusal": "unranked"} if not _lobby_ranked else {})' in src
