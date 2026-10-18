@@ -319,28 +319,42 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
     return {"status": "journaled", "cls": cls}
 
 
-async def release_held(db, *, mode, room, game_id, now) -> int:
+async def release_held(db, *, mode, room, game_id, now, settle) -> int:
     """Run one held-report release inside the shared match database budget."""
     async with database_deadline(db):
-        return await _release_held(db, mode=mode, room=room, game_id=game_id, now=now)
+        return await _release_held(
+            db, mode=mode, room=room, game_id=game_id, now=now, settle=settle)
 
 
-async def _release_held(db, *, mode, room, game_id, now) -> int:
-    """At entry: the `held` reports of G become journaled and the window of
-    G opens (or re-opens its 30 s from now when it was opened during the
-    hold and is unsettled). Returns the rows released."""
-    await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
+async def _release_held(db, *, mode, room, game_id, now, settle) -> int:
+    """At entry, release held rows under the window lock and settle the
+    lowest stored C immediately. Only a release without C opens 30 seconds."""
+    window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
+    params = {"now": now, "w": WINDOW_S, "room": room, "g": str(game_id)}
+    res = await db.execute(text(
+        "UPDATE match_report_journal SET state = 'journaled'"
+        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+        "   AND state = 'held'"), params)
+    released = res.rowcount or 0
+    if window["settled_at"] is not None:
+        await _mark_settled(
+            db, room, game_id,
+            {"reporter_id": window["settled_reporter_id"], "cls": window["settled_cls"]},
+            now)
+        return released
+    chosen = pick(await _journaled(db, room, game_id))
+    if chosen is not None and chosen["cls"] == CLASS_C:
+        await settle(db, chosen)
+        await _mark_settled(db, room, game_id, chosen, now)
+        return released
+    if released == 0:
+        return 0
     await db.execute(text(
         "UPDATE match_report_windows"
         "   SET settle_after = CAST(:now AS timestamptz) + make_interval(secs => CAST(:w AS integer))"
         " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
-        "   AND settled_at IS NULL"),
-        {"now": now, "w": WINDOW_S, "room": room, "g": str(game_id)})
-    res = await db.execute(text(
-        "UPDATE match_report_journal SET state = 'journaled'"
-        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
-        "   AND state = 'held'"), {"room": room, "g": str(game_id)})
-    return res.rowcount or 0
+        "   AND settled_at IS NULL"), params)
+    return released
 
 
 async def supersede_held(db, *, mode, room, game_id, now) -> int:

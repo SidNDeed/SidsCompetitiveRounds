@@ -350,18 +350,116 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                                                now=now + timedelta(seconds=31),
                                                settle=stub) is None
                 assert await mrw.release_held(db, mode="team", room=room, game_id=g,
-                                              now=now) == 2
+                                              now=now, settle=stub) == 2
+                assert len(settled) == n + 1
+                assert settled[-1]["reporter_steam"] == seats[0][1]
                 assert await mrw.settle_window(db, mode="team", room=room, game_id=g,
                                                now=now + timedelta(seconds=29),
                                                settle=stub) is None
-                done = await mrw.settle_window(db, mode="team", room=room, game_id=g,
-                                               now=now + timedelta(seconds=31), settle=stub)
+                assert await mrw.settle_window(db, mode="team", room=room, game_id=g,
+                                               now=now + timedelta(seconds=31),
+                                               settle=stub) is None
                 await db.commit()
-            assert done["reporter_steam"] == seats[0][1] and len(settled) == n + 1
+            states = await conn.fetch(
+                "SELECT state FROM match_report_journal"
+                " WHERE room_name = $1 AND game_id = $2", room, g)
+            assert sorted(r["state"] for r in states) == ["kept", "settled"]
+
+            # With no stored C, both R and U retain the 30-second fallback;
+            # a zero-release retry must not move that deadline.
+            for fallback_cls in ("r", "u"):
+                room = "team_r" + uuid.uuid4().hex[:8]
+                g = await _window_game(conn, "team", room)
+                if fallback_cls == "r":
+                    await _entered(conn, "team", room, g, seats[0][0], seats[1][0])
+                assert (await rec(
+                    room, g, 0, held=True, reported=fallback_cls != "u")) == \
+                    {"status": "journaled", "cls": fallback_cls, "state": "held"}
+                n = len(settled)
+                async with sm() as db:
+                    now = await _db_now(db)
+                    assert await mrw.release_held(
+                        db, mode="team", room=room, game_id=g, now=now, settle=stub) == 1
+                    await db.commit()
+                fallback_deadline = await conn.fetchval(
+                    "SELECT settle_after FROM match_report_windows"
+                    " WHERE room_name = $1 AND game_id = $2", room, g)
+                async with sm() as db:
+                    assert await mrw.release_held(
+                        db, mode="team", room=room, game_id=g,
+                        now=now + timedelta(seconds=5), settle=stub) == 0
+                    assert len(settled) == n
+                    assert await mrw.settle_window(
+                        db, mode="team", room=room, game_id=g,
+                        now=now + timedelta(seconds=29), settle=stub) is None
+                    done = await mrw.settle_window(
+                        db, mode="team", room=room, game_id=g,
+                        now=now + timedelta(seconds=31), settle=stub)
+                    await db.commit()
+                assert await conn.fetchval(
+                    "SELECT settle_after FROM match_report_windows"
+                    " WHERE room_name = $1 AND game_id = $2", room, g) == fallback_deadline
+                assert done["reporter_steam"] == seats[0][1]
+                assert done["cls"] == fallback_cls and len(settled) == n + 1
+
+            # A stored C is settled even when no held row remains to release;
+            # this zero-release path does not move its existing deadline.
+            room = "team_r" + uuid.uuid4().hex[:8]
+            g = await _window_game(conn, "team", room)
+            assert await rec(room, g, 2) == {"status": "journaled", "cls": "c"}
+            stored_c_deadline = await conn.fetchval(
+                "SELECT settle_after FROM match_report_windows"
+                " WHERE room_name = $1 AND game_id = $2", room, g)
+            n = len(settled)
+            async with sm() as db:
+                now = await _db_now(db)
+                assert await mrw.release_held(
+                    db, mode="team", room=room, game_id=g, now=now, settle=stub) == 0
+                await db.commit()
+            assert len(settled) == n + 1
+            assert settled[-1]["reporter_steam"] == seats[2][1]
+            assert await conn.fetchval(
+                "SELECT settle_after FROM match_report_windows"
+                " WHERE room_name = $1 AND game_id = $2", room, g) == stored_c_deadline
+            assert await conn.fetchval(
+                "SELECT state FROM match_report_journal"
+                " WHERE room_name = $1 AND game_id = $2", room, g) == "settled"
+
+            # A window already marked settled releases held rows through the
+            # recorded winner, without calling settlement again.
+            room = "team_r" + uuid.uuid4().hex[:8]
+            g = await _window_game(conn, "team", room)
+            now = await conn.fetchval("SELECT clock_timestamp()")
+            await conn.execute(
+                "INSERT INTO match_report_windows"
+                " (room_name, game_id, mode, opened_at, settle_after, settled_at,"
+                "  settled_reporter_id, settled_cls)"
+                " VALUES ($1, $2, 'team', $3::timestamptz,"
+                "         $3::timestamptz + interval '30 seconds', $3::timestamptz, $4, 'c')",
+                room, g, now, seats[0][0])
+            for i in (0, 1):
+                await conn.execute(
+                    "INSERT INTO match_report_journal"
+                    " (room_name, game_id, reporter_id, mode, reporter_steam, cls, state,"
+                    "  payload, received_at) VALUES ($1, $2, $3, 'team', $4, 'c', 'held',"
+                    "  '{}'::jsonb, $5)", room, g, seats[i][0], seats[i][1], now)
+            n = len(settled)
+            async with sm() as db:
+                assert await mrw.release_held(
+                    db, mode="team", room=room, game_id=g,
+                    now=now + timedelta(seconds=1), settle=stub) == 2
+                await db.commit()
+            assert len(settled) == n
+            states = await conn.fetch(
+                "SELECT reporter_id, state FROM match_report_journal"
+                " WHERE room_name = $1 AND game_id = $2", room, g)
+            assert {row["reporter_id"]: row["state"] for row in states} == {
+                seats[0][0]: "settled", seats[1][0]: "kept"}
 
             room = "team_r" + uuid.uuid4().hex[:8]
             g = await _window_game(conn, "team", room)
             await rec(room, g, 0, held=True)
+            before_supersede = len(settled)
             async with sm() as db:
                 now = await _db_now(db)
                 assert await mrw.supersede_held(db, mode="team", room=room, game_id=g,
@@ -373,7 +471,7 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
             assert await conn.fetchval(
                 "SELECT state FROM match_report_journal WHERE room_name = $1", room) == \
                 "superseded"
-            assert len(settled) == n + 1
+            assert len(settled) == before_supersede
 
             # H4: once the stored window expires, a later better C cannot
             # enter the journal or displace evidence received in-window.
@@ -501,7 +599,8 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                                 member_ids=[s[0] for s in seats], now=now, settle=stub)
                         elif operation == "release":
                             call = mrw.release_held(
-                                db, mode="team", room=room, game_id=game_id, now=now)
+                                db, mode="team", room=room, game_id=game_id,
+                                now=now, settle=stub)
                         else:
                             call = mrw.supersede_held(
                                 db, mode="team", room=room, game_id=game_id, now=now)
