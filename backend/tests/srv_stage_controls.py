@@ -102,6 +102,69 @@ ROWS = [
                  '        "DELETE FROM match_seat_presence WHERE player_id = CAST(:pid AS uuid)"), ids)\n',
                  '', 1)]},
 ]
+
+# NX0b (fix 1 H3, the twenty main-path patches re-anchored by text): at each
+# admission site, GATE skips the acquire (the gate is never reached) and
+# RECHECK ignores its refusal (the route commits past it). Each is red on the
+# site's route_loses node of the full-route test.
+HT = "test_match_hold_admission_routes_pg.py::test_h3_full_route_gate_in_both_winner_orders"
+H3_SITES = [
+    ("ranked_queue_poll",
+     '        if (await _lease_acquire_many(\n'
+     '                db, [my_pid, opp["player_id"]], "ranked",\n'
+     '                None, LEASE_TTL_POLLING)) is False:\n'),
+    ("team_queue_poll",
+     '    if (await _lease_acquire_many(\n'
+     '            db, team1_ids + team2_ids, "team", series_id,\n'
+     '            LEASE_TTL_ASSEMBLY)) is False:\n'),
+    ("team_relock",
+     '    if (await _lease_acquire_many(\n'
+     '            db, list(member_pids), "team", srow["id"],\n'
+     '            LEASE_TTL_ASSEMBLY)) is False:\n'),
+    ("ovt_queue_poll",
+     '    if (await _lease_acquire_many(\n'
+     '            db, [r["player_id"] for r in lobby], "ovt",\n'
+     '            series_id, LEASE_TTL_ASSEMBLY)) is False:\n'),
+    ("lobby_enroll",
+     '    if (await _lease_acquire(\n'
+     '            db, player.id, cfg["lease"], lobby_id,\n'
+     '            LEASE_TTL_POLLING)) is False:\n'),
+    ("team_lobby_start",
+     '    if (await _lease_acquire_many(\n'
+     '            db, all4, "team", series_id, LEASE_TTL_ASSEMBLY,\n'
+     '            allowed_group_ids=(lobby_id,))) is False:\n'),
+    ("ovt_lobby_start",
+     '    if (await _lease_acquire_many(\n'
+     '            db, ids, "ovt", series_id, LEASE_TTL_ASSEMBLY,\n'
+     '            allowed_group_ids=(lobby_id,))) is False:\n'),
+    ("ffa_lobby_enroll",
+     '        if (await _lease_acquire(\n'
+     '                db, player.id, "ffa", lobby_id,\n'
+     '                LEASE_TTL_POLLING)) is False:\n'),
+    ("ffa_lock_roster",
+     '    if (await _lease_acquire_many(\n'
+     '            db, _pids, "ffa", lobby_id, LEASE_TTL_ASSEMBLY,\n'
+     '            allowed_group_ids=(reform_of,))) is False:\n'),
+    ("ffa_queue_poll",
+     '    if (await _lease_acquire_many(\n'
+     '            db, [r["player_id"] for r in ordered], "ffa",\n'
+     '            lobby_id, LEASE_TTL_ASSEMBLY)) is False:\n'),
+]
+# Short row codes: the scratch copy path carries the row name, and Windows
+# path limits refuse the longest sql file names under a long one.
+H3_CODE = {"ranked_queue_poll": "rq", "team_queue_poll": "tq", "team_relock": "tr",
+           "ovt_queue_poll": "oq", "lobby_enroll": "le", "team_lobby_start": "ts",
+           "ovt_lobby_start": "os", "ffa_lobby_enroll": "fe", "ffa_lock_roster": "fl",
+           "ffa_queue_poll": "fq"}
+for _name, _site in H3_SITES:
+    _node = "%s[%s-route_loses]" % (HT, _name)
+    ROWS.append({"row": "H3.%s.G" % H3_CODE[_name], "node": _node, "tag": "H3 route gate",
+                 "mutant": [(MAIN, _site, _site.replace("if (await", "if False and (await", 1),
+                             1)]})
+    ROWS.append({"row": "H3.%s.R" % H3_CODE[_name], "node": _node, "tag": "H3 route refused",
+                 "mutant": [(MAIN, _site, _site.replace(")) is False:", ")) is False and False:",
+                                                        1), 1)]})
+
 for _row in ROWS:
     if "twin" not in _row:
         _row["twin"] = rc._site_twin(_row)
