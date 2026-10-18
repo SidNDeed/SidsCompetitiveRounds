@@ -531,13 +531,19 @@ def test_t4_4_the_lapse_order_and_one_commit(monkeypatch):
             return await real_ordered(db, table, ids)
 
         env.mp.setattr(main, "_lock_queue_rows_ordered", ordered_spy)
+        # return_exceptions: the defect this row proves is the ABBA itself.
+        # Without the caller in the sorted set, PostgreSQL aborts one claim
+        # with 40P01 (a bounded wait that ends in an exception, never an
+        # answer), so the deadlock is reported on THIS row's tag rather than
+        # escaping the test as an unnamed error.
         answers = await asyncio.wait_for(asyncio.gather(
             _readmit(env, left, 1, "claim", 1),
-            _readmit(env, right, 1, "claim", 1)), 10.0)
+            _readmit(env, right, 1, "claim", 1), return_exceptions=True), 10.0)
         env.mp.setattr(main, "_lock_queue_rows_ordered", real_ordered)
         callers = {left.pids[1], right.pids[1]}
-        assert len(locked) == 2 and all(callers <= ids for ids in locked), \
-            ("T4.4 caller sorted", locked, callers)
+        failed = [repr(a) for a in answers if isinstance(a, BaseException)]
+        assert not failed and len(locked) == 2 and all(callers <= ids for ids in locked), \
+            ("T4.4 caller sorted", failed, locked, callers)
         assert all(a.status == 200 and a["reason"] == "other_lobby" for a in answers), \
             ("T4.4 crossed husks bounded", [(a.status, a.body) for a in answers])
 
