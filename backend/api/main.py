@@ -4905,6 +4905,14 @@ async def queue_cleanup_loop():
                 print(f"[HOLD] sweep closed {_closed}")
         except Exception as e:
             print(f"[HOLD] sweep error: {type(e).__name__}: {e}")
+        # Stage 2 report windows (V3 S5, NX4): settle every expired window
+        # and finish the held reports of every closed hold.
+        try:
+            _wj = await _report_window_janitor()
+            if _wj:
+                print(f"[HOLD] report windows {_wj}")
+        except Exception as e:
+            print(f"[HOLD] report window janitor error: {type(e).__name__}: {e}")
         # Multiplayer region maps (migration 307, Sept 10): a row outlives its
         # last write by ONE HOUR at most — the consent copy's promise; the
         # rule itself reads only maps under 180 s old. SKIP LOCKED so the
@@ -36674,6 +36682,46 @@ async def _team_game_crossed_two(db, series_id, series_row, reported_points=None
     return crossed
 
 
+async def _team_dc_hold_crossing(db, sid, s):
+    """The crossing a team hold of the game in progress froze, or None.
+    Closes an open hold of that game as expiry_report first (the caller
+    holds the series row lock and commits). Holds closed by an entry are
+    passed over: the game continued after them."""
+    room = (s["photon_room_id"] or "").strip()
+    if not room:
+        return None
+    g = (await db.execute(text(
+        "SELECT id FROM match_games WHERE series_id = CAST(:sid AS uuid)"
+        "   AND room_name = CAST(:room AS varchar) ORDER BY seq DESC LIMIT 1"),
+        {"sid": str(sid), "room": room})).scalar()
+    if g is None:
+        return None
+    h = (await db.execute(text(
+        "SELECT id, closed_at, crossed_at_hold FROM match_seat_holds"
+        " WHERE series_id = CAST(:sid AS uuid) AND mode = 'team'"
+        "   AND room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+        "   AND (closed_at IS NULL OR closed_reason <> 'entered')"
+        " ORDER BY (closed_at IS NULL) DESC, held_at DESC LIMIT 1"
+        " FOR NO KEY UPDATE"), {"sid": str(sid), "room": room, "g": str(g)})).mappings().first()
+    if h is None:
+        return None
+    if h["closed_at"] is None:
+        await db.execute(text(
+            "UPDATE match_seat_holds SET closed_at = clock_timestamp(),"
+            "       closed_reason = 'expiry_report'"
+            " WHERE id = CAST(:hid AS uuid) AND closed_at IS NULL"), {"hid": str(h["id"])})
+        print(f"[HOLD] closed by DC report series={sid} room={room}")
+    return bool(h["crossed_at_hold"])
+
+
+async def _team_dc_crossed(db, sid, s, total_points, hold_crossed) -> bool:
+    """The DC report's crossing: the one a hold froze when there is one
+    (Stage 2 V3 S5), else the per-game record read now, as today."""
+    if hold_crossed is not None:
+        return hold_crossed
+    return await _team_game_crossed_two(db, sid, s, total_points)
+
+
 @app.post("/api/v1/ffa/lobbies/{lobby_id}/live-points", tags=["Betting"])
 async def update_ffa_live_points(
     lobby_id: str,
@@ -46944,24 +46992,24 @@ async def _team_quartet_lock(db: AsyncSession, pids) -> None:
     ), {"k": _team_quartet_key(pids)})
 
 
-def _team_series_resumable(row, now=None) -> bool:
+def _team_series_resumable(row, holds, now) -> bool:
     """ONE resume-eligibility predicate for every path (r1 finding 8 — the
     dedupe backstop bypassing the sticky path's age/reason/grace rules is
     how a two-hour-old husk got reactivated with a stale score). `row` must
     carry status, dc_grace_until, invalidation_reason, created_at,
     room_issued_at, last_game_at (newest valid team_matches.ended_at, may
-    be None), games, t1/t2_series_wins."""
-    now = now or datetime.now(timezone.utc)
+    be None), games, t1/t2_series_wins.
+
+    Stage 2 (V3 S5, RJS-H6, RJS-M7): `holds` are the series' holds and
+    `now` is REQUIRED, the DB clock the caller read once in its
+    transaction; each anchor is fresh when its age less the hold time
+    after it is under the window (match_report_window.series_fresh). With
+    no holds it is the predicate of today."""
     if (row["games"] or 0) <= 0 and \
             (row["t1_series_wins"] or 0) <= 0 and (row["t2_series_wins"] or 0) <= 0:
         return False   # zero-game rows are superseded, never resumed
     window = timedelta(minutes=_TEAM_RESUME_WINDOW_MINUTES)
-    fresh = False
-    for ts_col in ("created_at", "room_issued_at", "last_game_at"):
-        v = row.get(ts_col) if hasattr(row, "get") else row[ts_col]
-        if v is not None and (now - v) < window:
-            fresh = True
-            break
+    fresh = _mrw_mod().series_fresh(row, holds, now=now, window=window)
     st = row["status"]
     if st == "active":
         return fresh
@@ -47031,8 +47079,12 @@ async def _team_lock_family_pick(db: AsyncSession, four_pids,
             return ("defer", None)
         locked_rows.append(r)
     candidates = []
+    # Stage 2 (V3 S5, RJS-H6): one DB clock for the family, read after
+    # every row lock, and each row's own holds.
+    _now = (await db.execute(text("SELECT clock_timestamp()"))).scalar()
     for r in locked_rows:
-        if not _team_series_resumable(r):
+        if not _team_series_resumable(
+                r, await _mrw_mod().series_holds(db, r["id"]), _now):
             continue
         if req_t1 is not None and req_t2 is not None:
             stored_t1 = {r["t1a_id"], r["t1b_id"]}
@@ -47352,6 +47404,16 @@ async def team_series_report_dc(
     if rep_team is None or rep_team == dc_team:
         raise HTTPException(400, "reporter must be a member of the non-DC team")
 
+    # Stage 2 (V3 S5, RJS-H7): the game in progress is the latest game of
+    # the stored sitting room. A DC report of a member arriving while a
+    # hold of that game is open closes it (closed_reason expiry_report) in
+    # this transaction, under the series row lock taken above, so the
+    # result below and the closure are one commit. When a hold of the game
+    # closed other than by an entry, its crossed_at_hold is the crossing
+    # read below: nothing during the hold moved an input. After an entry
+    # the game continued, and the record is read fresh as today.
+    _hold_crossed = await _team_dc_hold_crossing(db, sid_uuid, s)
+
     # ── Deferred fallback: the report that decides nothing ─────────────────
     # is_fallback marks a report filed by a survivor that is NOT the elected
     # reporter. ONE condition produces it in the client THIS release carries
@@ -47492,7 +47554,7 @@ async def team_series_report_dc(
     # to dc_incomplete below for manual resolution in the mod admin panel, so a 2v2
     # that breaks and needs a restart never auto-penalizes anyone.
     if ((other_team_existing_wins or 0) >= 1
-            and await _team_game_crossed_two(db, sid_uuid, s, total_points)):
+            and await _team_dc_crossed(db, sid_uuid, s, total_points, _hold_crossed)):
         # Record a synthetic forfeit game for history parity.
         await db.execute(
             text("""INSERT INTO team_matches
@@ -49011,14 +49073,337 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
             "rules": _rules_payload(_c_rules), "rules_prop": _rules_prop(_c_rules)}
 
 
+# -- Stage 2 report windows (design V3 S5, NX4) --------------------------------
+# In a flagged room every present fighter files its own report of each game
+# (with the advisory game_id and game_id_sig); the server classes each from
+# its own rows (C: no entered hold for the room and G, R: one, u: no valid G)
+# and settles exactly one through match_report_window, which locks the
+# window row of (room, G) first and writes settled_at once. Elsewhere the
+# routes settle at once, as today.
+
+def _mrw_mod():
+    """match_report_window as loaded now (a test may load a copy of it)."""
+    import match_report_window
+    return match_report_window
+
+
+_WINDOW_TABLES = {"team": ("team_series", "team_matches"),
+                  "ovt": ("ovt_series", "ovt_matches")}
+
+
+def _report_members(mode, series):
+    if mode == "team":
+        return [series["t1a_id"], series["t1b_id"], series["t2a_id"], series["t2b_id"]]
+    return [series["solo_id"], series["duo_a_id"], series["duo_b_id"]]
+
+
+def _report_steams(mode, report):
+    if mode == "team":
+        return {report.t1a.steam_id, report.t1b.steam_id,
+                report.t2a.steam_id, report.t2b.steam_id}
+    return {report.solo.steam_id, report.duo_a.steam_id, report.duo_b.steam_id}
+
+
+def _class_r_report(mode, report):
+    """A class R report settles with its damage timelines NULL (V3 S5)."""
+    if mode == "ovt":
+        return report.model_copy(update={"solo_damage_timeline": None,
+                                         "duo_a_damage_timeline": None,
+                                         "duo_b_damage_timeline": None})
+    upd = {}
+    for k in ("t1a_telemetry", "t1b_telemetry", "t2a_telemetry", "t2b_telemetry"):
+        t = getattr(report, k)
+        if t is not None:
+            upd[k] = t.model_copy(update={"damage_dealt_timeline": None})
+    return report.model_copy(update=upd)
+
+
+async def _report_commit(db, in_window):
+    """A settle body's commit: a flush inside a report window, whose
+    transaction (window lock, journal, settled_at) the caller commits."""
+    if in_window:
+        await db.flush()
+    else:
+        await db.commit()
+
+
+async def _report_rollback(db, in_window):
+    """A settle body's rollback: none inside a report window, so the window
+    lock and the journal stay in the caller's transaction."""
+    if not in_window:
+        await db.rollback()
+
+
+async def _report_window_settle(db, mode, entry, out=None):
+    """The settle callable match_report_window calls with the one report a
+    window settles: the mode's settle body on the stored payload, inside the
+    window's transaction, then the class stamped on the recorded game row
+    (fallback_cls)."""
+    payload = entry["payload"]
+    if isinstance(payload, str):
+        payload = _json.loads(payload)
+    model = TeamMatchReport if mode == "team" else OvtMatchReport
+    report = model.model_validate(payload)
+    cls = entry["cls"]
+    if cls == "r":
+        report = _class_r_report(mode, report)
+    settle = _settle_team_report if mode == "team" else _settle_ovt_report
+    resp = await settle(db, report, in_window=True)
+    await db.execute(text(
+        "UPDATE " + _WINDOW_TABLES[mode][1] + " SET fallback_cls = CAST(:cls AS varchar)"
+        " WHERE series_id = CAST(:sid AS uuid) AND photon_room_id = CAST(:room AS varchar)"),
+        {"cls": cls, "sid": str(report.series_id), "room": (report.photon_room_id or "")[:64]})
+    if out is not None:
+        out[str(entry["reporter_id"])] = resp
+    print(f"[HOLD] report settled mode={mode} cls={cls} room={report.photon_room_id}")
+    return resp
+
+
+def _report_window_settler(mode, out=None):
+    async def _settle(db, entry):
+        return await _report_window_settle(db, mode, entry, out)
+    return _settle
+
+
+async def _report_window_game(db, series_id, room, reported):
+    """(G of the window, the reported G when valid): the reported game when
+    it is a game of this series in this room, else the room's latest game."""
+    g = None
+    if reported is not None:
+        g = (await db.execute(text(
+            "SELECT id FROM match_games WHERE id = CAST(:g AS uuid)"
+            "   AND series_id = CAST(:sid AS uuid) AND room_name = CAST(:room AS varchar)"),
+            {"g": str(reported), "sid": str(series_id), "room": room})).scalar()
+    if g is None:
+        g = (await db.execute(text(
+            "SELECT id FROM match_games WHERE series_id = CAST(:sid AS uuid)"
+            "   AND room_name = CAST(:room AS varchar) ORDER BY seq DESC LIMIT 1"),
+            {"sid": str(series_id), "room": room})).scalar()
+    return g
+
+
+async def _report_window_duplicate(db, mode, series_id, report):
+    """Today's duplicate answer for a report of a settled window."""
+    stable, mtable = _WINDOW_TABLES[mode]
+    s2 = (await db.execute(text("SELECT * FROM " + stable + " WHERE id = :sid"),
+                           {"sid": series_id})).mappings().first()
+    m = (await db.execute(text(
+        "SELECT id FROM " + mtable + " WHERE series_id = :sid"
+        "   AND photon_room_id = CAST(:room AS varchar) LIMIT 1"),
+        {"sid": series_id, "room": (report.photon_room_id or "")[:64]})).scalar()
+    if s2 is None or m is None:
+        return JSONResponse(status_code=202, content={"status": "journaled", "state": "kept"})
+    if mode == "team":
+        mine = 1 if report.reported_by_steam_id in (report.t1a.steam_id, report.t1b.steam_id) else 2
+        w1, w2 = int(s2["t1_series_wins"] or 0), int(s2["t2_series_wins"] or 0)
+        return TeamMatchResponse(
+            match_id=m, series_id=series_id, series_status=s2["status"],
+            series_score=(f"{w1}-{w2}" if mine == 1 else f"{w2}-{w1}"),
+            winner_team=report.winner_team,
+            message="Team match already recorded (duplicate report)")
+    side = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
+    a, b = s2["solo_series_wins"], s2["duo_series_wins"]
+    return OvtMatchResponse(
+        match_id=m, series_id=series_id, series_status=s2["status"],
+        series_score=(f"{a}-{b}" if side == 1 else f"{b}-{a}"),
+        winner_side=report.winner_side, message="Already recorded")
+
+
+async def _report_window_receive(db, mode, report):
+    """The flagged-room arm of the team and 1v2 report routes, after their
+    session and signature checks. None = not a flagged room of a series with
+    a started game (or a report this arm does not bind), and the route
+    settles at once as today. Otherwise the report is classed and journaled
+    by match_report_window.receive and the answer is the settle's (this
+    report settled), 202 journaled, or today's duplicate answer."""
+    try:
+        series_id = UUID(report.series_id)
+    except (ValueError, TypeError):
+        return None
+    stable = _WINDOW_TABLES[mode][0]
+    series = (await db.execute(text("SELECT * FROM " + stable + " WHERE id = :sid"),
+                               {"sid": series_id})).mappings().first()
+    if series is None or not series.get("hold_v2"):
+        return None
+    room = (series.get("hold_room") or "").strip()
+    if not room or room != (series["photon_room_id"] or "").strip():
+        return None
+    if not _re.fullmatch(_re.escape(room) + r"_\d{6}_r\d+", report.photon_room_id or ""):
+        return None
+    members = _report_members(mode, series)
+    prows = (await db.execute(select(Player.id, Player.steam_id).where(
+        Player.steam_id.in_(list(_report_steams(mode, report)))))).all()
+    by_steam = {r.steam_id: r.id for r in prows}
+    if (len(by_steam) != len(members) or set(by_steam.values()) != set(members)
+            or report.reported_by_steam_id not in by_steam):
+        return None
+    mrw = _mrw_mod()
+    reported = None
+    if report.game_id and mrw.verify_game_id(MATCH_HMAC_SECRET, report.game_id,
+                                             report.reported_by_steam_id, room,
+                                             report.game_id_sig):
+        try:
+            reported = UUID(str(report.game_id))
+        except (ValueError, TypeError):
+            reported = None
+    g = await _report_window_game(db, series_id, room, reported)
+    if g is None:
+        return None
+    now = await _match_hold._ctx_now(db)
+    _held = bool((await db.execute(text(
+        "SELECT 1 FROM match_seat_holds WHERE room_name = CAST(:room AS varchar)"
+        "   AND game_id = CAST(:g AS uuid) AND closed_at IS NULL"),
+        {"room": room, "g": str(g)})).scalar())
+    out = {}
+    res = await mrw.receive(
+        db, mode=mode, room=room, game_id=g, reported_game_id=reported,
+        reporter_id=by_steam[report.reported_by_steam_id],
+        reporter_steam=report.reported_by_steam_id, payload=report.model_dump_json(),
+        member_ids=members, now=now, settle=_report_window_settler(mode, out),
+        held=_held)
+    if res["status"] == "duplicate":
+        win = (await db.execute(text(
+            "SELECT superseded_at FROM match_report_windows"
+            " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"),
+            {"room": room, "g": str(g)})).mappings().first()
+        await db.commit()
+        if win is not None and win["superseded_at"] is not None:
+            return JSONResponse(status_code=202,
+                                content={"status": "journaled", "state": "superseded"})
+        return await _report_window_duplicate(db, mode, series_id, report)
+    await db.commit()
+    mine = out.get(str(by_steam[report.reported_by_steam_id]))
+    if res["status"] == "settled" and mine is not None:
+        return mine
+    print(f"[HOLD] report journaled mode={mode} room={room} cls={res.get('cls')} "
+          f"state={res.get('state', res['status'])}")
+    body = {"status": "journaled", "cls": res.get("cls")}
+    if res.get("state"):
+        body["state"] = res["state"]
+    return JSONResponse(status_code=202, content=body)
+
+
+async def _finish_held_reports(db, mode, room, game_id, entered):
+    """The held game-over reports of (room, G) once its hold has closed: on
+    an entry they are released and settle by the acceptance; on any other
+    closure (x) they are superseded, kept for review and never settled. Its
+    own transaction, committed here; nothing when no report is held."""
+    has = (await db.execute(text(
+        "SELECT 1 FROM match_report_journal WHERE room_name = CAST(:room AS varchar)"
+        "   AND game_id = CAST(:g AS uuid) AND state = 'held' LIMIT 1"),
+        {"room": room, "g": str(game_id)})).scalar()
+    if not has:
+        await db.commit()
+        return 0
+    mrw = _mrw_mod()
+    now = await _match_hold._ctx_now(db)
+    if entered:
+        n = await mrw.release_held(db, mode=mode, room=room, game_id=game_id, now=now,
+                                   settle=_report_window_settler(mode))
+    else:
+        n = await mrw.supersede_held(db, mode=mode, room=room, game_id=game_id, now=now)
+    await db.commit()
+    print(f"[HOLD] held reports {'released' if entered else 'superseded'} "
+          f"room={room} n={n}")
+    return n
+
+
+async def _report_window_janitor() -> dict:
+    """The janitor arm of the report windows: settle every expired window
+    from its stored rows, and finish the held reports of every closed hold.
+    Each window in its own transaction. A settle that raises keeps its
+    chosen report out of the next pick (state kept), so one report no
+    settle body accepts never blocks the window. Returns counts."""
+    from database import async_session
+    mrw = _mrw_mod()
+    out = {}
+    async with async_session() as db:
+        now = await _match_hold._ctx_now(db)
+        due = (await db.execute(text(
+            "SELECT w.room_name, w.game_id, w.mode FROM match_report_windows w"
+            " WHERE w.settled_at IS NULL AND w.superseded_at IS NULL"
+            "   AND w.settle_after <= CAST(:now AS timestamptz)"
+            "   AND EXISTS (SELECT 1 FROM match_report_journal j"
+            "                WHERE j.room_name = w.room_name AND j.game_id = w.game_id"
+            "                  AND j.state = 'journaled')"
+            " ORDER BY w.settle_after LIMIT 50"), {"now": now})).mappings().all()
+        held = (await db.execute(text(
+            "SELECT DISTINCT j.room_name, j.game_id, j.mode,"
+            "       EXISTS (SELECT 1 FROM match_seat_holds h"
+            "                WHERE h.room_name = j.room_name AND h.game_id = j.game_id"
+            "                  AND h.closed_reason = 'entered') AS entered"
+            "  FROM match_report_journal j"
+            " WHERE j.state = 'held'"
+            "   AND NOT EXISTS (SELECT 1 FROM match_seat_holds h"
+            "                    WHERE h.room_name = j.room_name AND h.game_id = j.game_id"
+            "                      AND h.closed_at IS NULL)"
+            " LIMIT 50"))).mappings().all()
+        await db.commit()
+    for w in due:
+        async with async_session() as db:
+            try:
+                done = await mrw.settle_window(
+                    db, mode=w["mode"], room=w["room_name"], game_id=w["game_id"],
+                    now=await _match_hold._ctx_now(db),
+                    settle=_report_window_settler(w["mode"]))
+                await db.commit()
+                if done is not None:
+                    out["settled"] = out.get("settled", 0) + 1
+            except Exception as ex:
+                await db.rollback()
+                rows = (await db.execute(text(
+                    "SELECT reporter_id, reporter_steam, cls FROM match_report_journal"
+                    " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+                    "   AND state = 'journaled'"),
+                    {"room": w["room_name"], "g": str(w["game_id"])})).mappings().all()
+                chosen = mrw.pick(rows)
+                if chosen is not None:
+                    await db.execute(text(
+                        "UPDATE match_report_journal SET state = 'kept',"
+                        "       decided_at = clock_timestamp()"
+                        " WHERE room_name = CAST(:room AS varchar)"
+                        "   AND game_id = CAST(:g AS uuid) AND reporter_id = CAST(:pid AS uuid)"
+                        "   AND state = 'journaled'"),
+                        {"room": w["room_name"], "g": str(w["game_id"]),
+                         "pid": str(chosen["reporter_id"])})
+                await db.commit()
+                print(f"[HOLD] report window settle refused room={w['room_name']}: "
+                      f"{type(ex).__name__}: {ex}")
+                out["refused"] = out.get("refused", 0) + 1
+    for h in held:
+        async with async_session() as db:
+            n = await _finish_held_reports(db, h["mode"], h["room_name"], h["game_id"],
+                                           bool(h["entered"]))
+            if n:
+                key = "released" if h["entered"] else "superseded"
+                out[key] = out.get(key, 0) + n
+    return out
+
+
+
 @app.post("/api/v1/ovt/matches", response_model=OvtMatchResponse, tags=["1v2 Matches"])
 async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """Record one 1v2 game. Advances the series (first to 2), applies gold+XP
     (NO rating at launch), stores the full replay surface. Concurrency-safe:
-    the series completion path locks the row and re-checks status (#78)."""
+    the series completion path locks the row and re-checks status (#78).
+    In a flagged room (Stage 2 V3 S5) the report is classed and journaled
+    through match_report_window and settles by class; elsewhere it settles at
+    once through _settle_ovt_report, as today."""
     await _check_steam_session(request, report.reported_by_steam_id, db)
     if not _verify_ovt_hmac(report):
         raise HTTPException(403, "Invalid 1v2 match signature")
+    _windowed = await _report_window_receive(db, "ovt", report)
+    if _windowed is not None:
+        return _windowed
+    return await _settle_ovt_report(db, report)
+
+
+async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
+                             in_window: bool = False):
+    """The settle body of /ovt/matches after its session and signature
+    checks (V3 S5). With in_window it runs inside a report window's
+    transaction, which its caller commits: its commits are flushes and its
+    duplicate answers keep the transaction."""
     # bug 391 r3: ONE order for the duo pair before any comparison and any
     # write (see _ovt_canonical_duo). After the HMAC check on purpose: the
     # signature covers the order the client sent.
@@ -49124,7 +49509,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
         two can never say different things: 200, "Already recorded", the
         series as it stands and the score from the reporter's side. Nothing
         this report did is kept."""
-        await db.rollback()
+        await _report_rollback(db, in_window)
         # Already recorded (replay). Return the current series state idempotently.
         s2 = (await db.execute(text("SELECT * FROM ovt_series WHERE id = :sid"), {"sid": series_uuid})).mappings().first()
         if s2 is None:
@@ -49225,7 +49610,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                   f"holds solo {series['solo_id']} with duo {series['duo_a_id']}, "
                   f"{series['duo_b_id']} and has {prior_games} recorded game(s); a "
                   f"series keeps one solo-versus-duo split for every game")
-            await db.rollback()
+            await _report_rollback(db, in_window)
             raise HTTPException(403, "Reported solo seat does not match the series")
         else:
             # The series' own split, its duo pair stored in the other order.
@@ -49438,7 +49823,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                  WHERE id = :sid
             """), {"sx": _sx, "ax": _ax, "bx": _bx, "sg": _sg, "ag": _ag,
                    "bg": _bg, "sid": series_uuid})
-            await db.commit()
+            await _report_commit(db, in_window)
             print(f"[OVT-REPORT] match {match_id} series {series_uuid} landed on a "
                   f"series settled without play (status={series['status']} "
                   f"reason={series['invalidation_reason']}); the game and its "
@@ -49456,7 +49841,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
                 xp_gained=_rx, gold_gained=_rg,
                 xp_bonuses=list(_lbl_a.get(_rp, [])),
                 message="Series already resolved")
-        await db.commit()  # keeps the match/card rows we already inserted
+        await _report_commit(db, in_window)  # keeps the match/card rows we already inserted
         # 'completed' today; any status word outside the settled-without-play
         # set lands here, which is why this line names the status instead of
         # asserting how the series was resolved (#302). TWO reasons reach this
@@ -49570,7 +49955,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
             db, "ovt_queue", [solo_id, duo_a_id, duo_b_id])
         await db.execute(text("DELETE FROM ovt_queue WHERE series_id = :sid"), {"sid": series_uuid})
 
-    await db.commit()
+    await _report_commit(db, in_window)
     # Score from the REPORTER's own side (reporter-first, learning #121).
     reporter_side = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
     score = f"{solo_wins}-{duo_wins}" if reporter_side == 1 else f"{duo_wins}-{solo_wins}"
@@ -63385,10 +63770,25 @@ async def player_ovt_history(steam_id: str, limit: int = Query(10, ge=1, le=30),
 async def submit_team_match(report: TeamMatchReport, request: Request, db: AsyncSession = Depends(get_db)):
     """Submitted by the lowest-Steam-ID participant after a 2v2 game ends.
     HMAC verifies the canonical 11-field message. On series completion, applies
-    Glicko-2 update to all 4 players (each player has 2 opponents = the other team)."""
+    Glicko-2 update to all 4 players (each player has 2 opponents = the other team).
+    In a flagged room (Stage 2 V3 S5) the report is classed and journaled
+    through match_report_window and settles by class; elsewhere it settles at
+    once through _settle_team_report, as today."""
     await _check_steam_session(request, report.reported_by_steam_id, db)
     if not _verify_team_hmac(report):
         raise HTTPException(403, "Invalid team match signature")
+    _windowed = await _report_window_receive(db, "team", report)
+    if _windowed is not None:
+        return _windowed
+    return await _settle_team_report(db, report)
+
+
+async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
+                              in_window: bool = False):
+    """The settle body of /team/matches after its session and signature
+    checks (V3 S5). With in_window it runs inside a report window's
+    transaction, which its caller commits: its commit is a flush and its
+    duplicate answer keeps the transaction."""
     try:
         series_uuid = UUID(report.series_id)
     except (ValueError, TypeError):
@@ -63458,7 +63858,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
          "t1a": report.t1a.steam_id, "t1b": report.t1b.steam_id,
          "t2a": report.t2a.steam_id, "t2b": report.t2b.steam_id})).first()
     if _dup is not None:
-        await db.rollback()
+        await _report_rollback(db, in_window)
         _dup_team = 1 if report.reported_by_steam_id in (
             report.t1a.steam_id, report.t1b.steam_id) else 2
         _dup_t1w = int(series["t1_series_wins"] or 0)
@@ -64266,7 +64666,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
     except Exception as _lex:
         print(f"[LADDER-CREDIT] 2v2 credit dropped (game={_lref}, series={series_uuid}): {_lex}")
 
-    await db.commit()
+    await _report_commit(db, in_window)
 
     # Build response: series_score from the reporter's team perspective.
     reporter_team = 1 if reporter.id in (p_t1a.id, p_t1b.id) else 2

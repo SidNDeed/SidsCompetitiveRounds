@@ -26,6 +26,7 @@ import rdm_controls as rc  # noqa: E402
 MAIN = rc.MAIN
 WT = "test_match_hold_wiring_pg.py::"
 DT = "test_match_hold_discovery_pg.py::"
+RT = "test_match_hold_reports_pg.py::"
 
 ROWS = [
     # NX1: the 1v2 Start issues its room without latching the hold flag.
@@ -79,6 +80,19 @@ ROWS = [
      "mutant": [(MAIN,
                  '        _fighters = max(_fighters, _s2_r)\n',
                  '        _fighters = _fighters\n', 1)]},
+    # NX4: the DC report re-evaluates the crossing instead of the frozen one.
+    {"row": "M5.1", "node": RT + "test_t5_1_dc_report_reads_the_crossing_the_hold_froze",
+     "tag": "T5.1 frozen",
+     "mutant": [(MAIN,
+                 '    if hold_crossed is not None:\n'
+                 '        return hold_crossed\n'
+                 '    return await _team_game_crossed_two(db, sid, s, total_points)\n',
+                 '    return await _team_game_crossed_two(db, sid, s, total_points)\n', 1)]},
+    # NX4: a game-over during a hold settles at its receipt.
+    {"row": "M5.10",
+     "node": RT + "test_t5_7_held_game_over_settles_at_entry_and_is_superseded_at_lapse",
+     "tag": "T5.7 held",
+     "mutant": [(MAIN, '        held=_held)\n', '        held=False)\n', 1)]},
 ]
 for _row in ROWS:
     if "twin" not in _row:

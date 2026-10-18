@@ -1349,6 +1349,15 @@ async def match_hold_entered(hold_id: uuid.UUID, req: HoldEnteredReq, request: R
     await _attempt(db, hold_id, "entered", now, "ok")
     await db.commit()
     print(f"[HOLD] entered room={hold['room_name']} slot={hold['slot']} n={hold['n']}")
+    # V3 S5: the game-over reports held during the hold are released now,
+    # in their own transaction (window row first); the janitor finishes
+    # them if this does not.
+    try:
+        from main import _finish_held_reports
+        await _finish_held_reports(db, hold["mode"], hold["room_name"], hold["game_id"], True)
+    except Exception as ex:
+        await db.rollback()
+        print(f"[HOLD] held reports at entry left to the janitor: {type(ex).__name__}")
     out = _state_payload(done, now)
     out["status"] = "entered"
     return out

@@ -1617,6 +1617,11 @@ class TeamMatchReport(BaseModel):
     t1b_telemetry: TeamPlayerTelemetry | None = None
     t2a_telemetry: TeamPlayerTelemetry | None = None
     t2b_telemetry: TeamPlayerTelemetry | None = None
+    # Stage 2 (V3 S5): the advisory game id of a flagged room's report and
+    # its separate signature over "game-id:{G}:{reporter}:{room}", outside
+    # the frozen eleven-field canonical. None from every other report.
+    game_id: str | None = Field(None, max_length=64)
+    game_id_sig: str | None = Field(None, max_length=128)
 
 
 class TeamMatchResponse(BaseModel):
@@ -1705,6 +1710,11 @@ class OvtMatchReport(BaseModel):
     solo_damage_timeline: str | None = Field(None, max_length=1024)
     duo_a_damage_timeline: str | None = Field(None, max_length=1024)
     duo_b_damage_timeline: str | None = Field(None, max_length=1024)
+    # Stage 2 (V3 S5): the advisory game id of a flagged room's report and
+    # its separate signature over "game-id:{G}:{reporter}:{room}", outside
+    # the frozen ten-field canonical. None from every other report.
+    game_id: str | None = Field(None, max_length=64)
+    game_id_sig: str | None = Field(None, max_length=128)
 
 
 class OvtMatchResponse(BaseModel):
