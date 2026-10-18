@@ -15360,8 +15360,117 @@ _LEASE_MODE_FOR_TABLE = {
 _LEASE_TABLE_FOR_MODE = {v: k for k, v in _LEASE_MODE_FOR_TABLE.items()}
 
 
+def _admission_key(mode: str, group_id) -> tuple[str, str | None]:
+    return mode, None if group_id is None else str(group_id)
+
+
+async def _lease_admission_gate(
+    db: AsyncSession,
+    player_ids,
+    mode: str,
+    group_id=None,
+    *,
+    allowed_group_ids=(),
+    allowed_hold_ids=(),
+    hold_entry_bound_seconds: int = 60,
+    strict_team_ovt_queue: bool = False,
+) -> tuple[bool, datetime]:
+    """Serialize commitment writers, then re-check the live database truth.
+
+    The durable players rows are the common lock relation for all four queue
+    families and match-seat holds. They are locked in UUID-text order after
+    each path's existing parent/group locks, so overlapping rosters serialize
+    without serializing unrelated players or reversing the group lock order.
+    The predicates run only after that wait, making a second writer observe the
+    first writer's committed hold, queue and lease state.
+
+    Queue rows remain lease-authoritative (migration 174): a non-searching
+    husk without its matching live lease is not a commitment. Claim alone asks
+    for the stricter historical team/ovt rule, where even an out-of-series
+    search row is a refusal. Allowed groups carry a hosted lobby into its new
+    series; allowed holds carry the exact hold that open repeats or claim uses.
+    """
+    ordered = sorted({p for p in player_ids if p is not None}, key=str)
+    if not ordered:
+        ctx_now = (await db.execute(text("SELECT clock_timestamp()"))).scalar_one()
+        return True, ctx_now
+    pid_text = [str(p) for p in ordered]
+    # One indexed equality statement per id makes acquisition order a Python
+    # fact. A single ORDER BY query may place LockRows below Sort in a changed
+    # plan and then acquire physical-row order instead of canonical UUID order.
+    for pid in pid_text:
+        locked = (await db.execute(text(
+            "SELECT id FROM players WHERE id = CAST(:pid AS uuid) "
+            "FOR NO KEY UPDATE"), {"pid": pid})).scalar()
+        if locked is None:
+            ctx_now = (await db.execute(text("SELECT clock_timestamp()"))).scalar_one()
+            return False, ctx_now
+
+    ctx_now = (await db.execute(text("SELECT clock_timestamp()"))).scalar_one()
+    # Ranked has no group id, so (ranked, NULL) cannot prove a same-game
+    # retake: every ranked formation is new and an existing live ranked lease
+    # must make the later pair lose. Grouped modes retain exact-series retakes.
+    allowed = set() if mode == "ranked" else {_admission_key(mode, group_id)}
+    allowed.update(_admission_key(mode, gid) for gid in allowed_group_ids
+                   if gid is not None)
+    allowed_holds = {str(hid) for hid in allowed_hold_ids if hid is not None}
+
+    leases = (await db.execute(text("""
+        SELECT player_id, mode, group_id
+          FROM queue_leases
+         WHERE player_id = ANY(CAST(:pids AS uuid[]))
+           AND expires_at > CAST(:now AS timestamptz)
+    """), {"pids": pid_text, "now": ctx_now})).mappings().all()
+    lease_by_player = {str(row["player_id"]): row for row in leases}
+    if any(_admission_key(row["mode"], row["group_id"]) not in allowed
+           for row in leases):
+        return False, ctx_now
+
+    queues = (await db.execute(text("""
+        SELECT player_id, 'ranked'::varchar AS mode, NULL::uuid AS group_id, status
+          FROM ranked_queue WHERE player_id = ANY(CAST(:pids AS uuid[]))
+        UNION ALL
+        SELECT player_id, 'team'::varchar, series_id, status
+          FROM team_queue WHERE player_id = ANY(CAST(:pids AS uuid[]))
+        UNION ALL
+        SELECT player_id, 'ovt'::varchar, series_id, status
+          FROM ovt_queue WHERE player_id = ANY(CAST(:pids AS uuid[]))
+        UNION ALL
+        SELECT player_id, 'ffa'::varchar, series_id, status
+          FROM ffa_queue WHERE player_id = ANY(CAST(:pids AS uuid[]))
+    """), {"pids": pid_text})).mappings().all()
+    target_group = _admission_key(mode, group_id)[1]
+    for row in queues:
+        row_key = _admission_key(row["mode"], row["group_id"])
+        if (strict_team_ovt_queue and row["mode"] in ("team", "ovt")
+                and row_key[1] != target_group):
+            return False, ctx_now
+        if row["status"] == "searching":
+            continue
+        lease = lease_by_player.get(str(row["player_id"]))
+        if (lease is not None
+                and _admission_key(lease["mode"], lease["group_id"]) == row_key
+                and row_key not in allowed):
+            return False, ctx_now
+
+    holds = (await db.execute(text("""
+        SELECT id
+          FROM match_seat_holds
+         WHERE player_id = ANY(CAST(:pids AS uuid[]))
+           AND closed_at IS NULL
+           AND held_until > CAST(:now AS timestamptz)
+           AND (bound_at IS NULL OR entered_at IS NOT NULL
+                OR bound_at + make_interval(secs => CAST(:entry_s AS integer))
+                    > CAST(:now AS timestamptz))
+    """), {"pids": pid_text, "now": ctx_now,
+             "entry_s": int(hold_entry_bound_seconds)})).scalars().all()
+    return (all(str(hold_id) in allowed_holds for hold_id in holds), ctx_now)
+
+
 async def _lease_acquire(db: AsyncSession, player_id, mode: str,
-                         group_id=None, ttl_seconds: int = LEASE_TTL_ASSEMBLY):
+                         group_id=None, ttl_seconds: int = LEASE_TTL_ASSEMBLY,
+                         *, _gate_held: bool = False, allowed_group_ids=(),
+                         allowed_hold_ids=(), strict_team_ovt_queue: bool = False):
     """Grant (or supersede) this player's single queue commitment.
 
     Always overwrites: acquiring a new commitment necessarily ends the old one,
@@ -15369,6 +15478,14 @@ async def _lease_acquire(db: AsyncSession, player_id, mode: str,
     previous commitment can no longer renew it. Callers must run this in the
     SAME transaction as the status write that locks the row, so a rolled-back
     lock cannot leave a lease behind."""
+    if not _gate_held:
+        admitted, _ = await _lease_admission_gate(
+            db, [player_id], mode, group_id,
+            allowed_group_ids=allowed_group_ids,
+            allowed_hold_ids=allowed_hold_ids,
+            strict_team_ovt_queue=strict_team_ovt_queue)
+        if not admitted:
+            return False
     gen = uuid.uuid4()
     await db.execute(text("""
         INSERT INTO queue_leases (player_id, mode, group_id, generation,
@@ -15394,29 +15511,15 @@ async def _lease_acquire(db: AsyncSession, player_id, mode: str,
     return gen
 
 
-# SCOPE NOTE — the double-lock race is NOT fixed here, deliberately.
-#
-# A player may legitimately search several modes at once (the cross-mode gate
-# blocks only LOCKED players), and the check every lock path runs first is an
-# unlocked read, so two matchmakers can both pass it and both lock the same
-# player. That is pre-existing; the lease neither causes it nor cures it.
-#
-# I tried two ways to cure it here and both were wrong. Refusing the second
-# claim looks right but does not help: the losing FORMATION still commits its
-# series and its other members' rows, so instead of one player in two matches
-# you get three players in a room whose fourth never arrives — strictly worse,
-# and repairing it needs a clean abort path in five different matchmakers.
-# A pre-read plus a warning was worse still: in the concurrent case both
-# pre-reads see no lease, so it stayed silent exactly when it mattered.
-#
-# So this supersedes unconditionally and claims nothing about that race. The
-# guarantee the lease DOES make is narrower and is the one that matters here:
-# no player can be excluded from queueing indefinitely. Fixing double-lock
-# properly is its own change.
+# The gate above deliberately does not reject searching rows: searching several
+# modes is still legal. Only a transaction that turns a search into a game or
+# hold takes the durable player lock, rechecks, and either commits all of its
+# formation writes or rolls them all back.
 
 
 async def _lease_acquire_many(db: AsyncSession, player_ids, mode: str,
-                              group_id=None, ttl_seconds: int = LEASE_TTL_ASSEMBLY):
+                              group_id=None, ttl_seconds: int = LEASE_TTL_ASSEMBLY,
+                              *, allowed_group_ids=(), allowed_hold_ids=()):
     """Acquire for a whole group in ONE deterministic global order.
 
     Ordering is mandatory, not tidiness. Two match formations that overlap on
@@ -15425,8 +15528,17 @@ async def _lease_acquire_many(db: AsyncSession, player_ids, mode: str,
     it orders rows in the mode-specific queue table, a different relation.
     Sorting by str(player_id) matches the canonical ordering this codebase
     already uses for its other cross-row lock passes (#197/#202)."""
-    for pid in sorted({p for p in player_ids if p is not None}, key=str):
-        await _lease_acquire(db, pid, mode, group_id, ttl_seconds)
+    ordered = sorted({p for p in player_ids if p is not None}, key=str)
+    admitted, _ = await _lease_admission_gate(
+            db, ordered, mode, group_id,
+            allowed_group_ids=allowed_group_ids,
+            allowed_hold_ids=allowed_hold_ids)
+    if not admitted:
+        return False
+    for pid in ordered:
+        await _lease_acquire(db, pid, mode, group_id, ttl_seconds,
+                             _gate_held=True)
+    return True
 
 
 async def _lease_renew(db: AsyncSession, player_id, mode: str, group_id=None,
@@ -18098,8 +18210,11 @@ async def queue_poll(steam_id: str, request: Request, db: AsyncSession = Depends
         # itself — strictly MORE generous than the 90s last_polled window it
         # replaces, so no behaviour is lost. Acquired in sorted order, outside
         # the loop, so two formations sharing a player cannot deadlock.
-        await _lease_acquire_many(db, [my_pid, opp["player_id"]], "ranked",
-                                  None, LEASE_TTL_POLLING)
+        if (await _lease_acquire_many(
+                db, [my_pid, opp["player_id"]], "ranked",
+                None, LEASE_TTL_POLLING)) is False:
+            await db.rollback()
+            raise HTTPException(status_code=503, detail="admission_contended")
         await db.commit()
 
         return QueuePollResponse(
@@ -45221,8 +45336,11 @@ async def team_queue_poll(steam_id: str, request: Request,
     # once battleOngoing stops for good it lapses on its own, which is what
     # replaces team_queue's old predicate — the one that had NO recency bound
     # at all and could therefore block a player indefinitely.
-    await _lease_acquire_many(db, team1_ids + team2_ids, "team", series_id,
-                              LEASE_TTL_ASSEMBLY)
+    if (await _lease_acquire_many(
+            db, team1_ids + team2_ids, "team", series_id,
+            LEASE_TTL_ASSEMBLY)) is False:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="admission_contended")
     await db.commit()
 
     # Reload our row to figure out our team.
@@ -46923,8 +47041,11 @@ async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
             """),
             {"sid": srow["id"], "t": t, "pid": pid, "rules": _relock_rules},
         )
-    await _lease_acquire_many(db, list(member_pids), "team", srow["id"],
-                              LEASE_TTL_ASSEMBLY)
+    if (await _lease_acquire_many(
+            db, list(member_pids), "team", srow["id"],
+            LEASE_TTL_ASSEMBLY)) is False:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="admission_contended")
     # Flip the series back to active and clear DC fields so the next match
     # plays through normally. Status guard is belt-and-suspenders — the
     # caller's row lock already pins it.
@@ -48599,8 +48720,11 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
              WHERE player_id=:pid
         """), {"sid": series_id, "side": this_side, "room": room, "reg": (region or "us")[:8],
                "pid": r["player_id"]})
-    await _lease_acquire_many(db, [r["player_id"] for r in lobby], "ovt",
-                              series_id, LEASE_TTL_ASSEMBLY)
+    if (await _lease_acquire_many(
+            db, [r["player_id"] for r in lobby], "ovt",
+            series_id, LEASE_TTL_ASSEMBLY)) is False:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="admission_contended")
     await db.commit()
     print(f"[OVT-LOCK] series {series_id} room {room} solo={solo['steam_id']} extra_pick={extra_pick}")
     # Post-commit, own transaction: a locked trio is out of every other queue.
@@ -51384,7 +51508,13 @@ async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_i
     # BOTH branches (the FFA version once had this inside the else, so anyone
     # joining a lobby fresh — the common case — got a membership with NO lease
     # at all and stayed cross-mode available until Start yanked them).
-    await _lease_acquire(db, player.id, cfg["lease"], lobby_id, LEASE_TTL_POLLING)
+    if (await _lease_acquire(
+            db, player.id, cfg["lease"], lobby_id,
+            LEASE_TTL_POLLING)) is False:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="You're in a live match in another mode - finish it first")
 
 
 class _LobbyCreateReq(BaseModel):
@@ -52594,7 +52724,12 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
                           if _pick_outcome == "picked" else None))
     # Assembly-length lease, then renewed by the authenticated in_match ping
     # for as long as battles actually run.
-    await _lease_acquire_many(db, all4, "team", series_id, LEASE_TTL_ASSEMBLY)
+    if (await _lease_acquire_many(
+            db, all4, "team", series_id, LEASE_TTL_ASSEMBLY,
+            allowed_group_ids=(lobby_id,))) is False:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=
+                            "A lobby member entered another live match")
     if _pick_outcome == "picked":
         # r4 finding (H1 placement): the relock stamp must be the LAST write
         # before commit so the 10-minute DC fence measures externally-visible
@@ -52723,7 +52858,12 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
                "reg": (region or "us")[:8], "pid": m["player_id"]})
     ids = [m["player_id"] for m in live]
     await _lobby_activate(db, "ovt", lobby_id, series_id, ids, region, room)
-    await _lease_acquire_many(db, ids, "ovt", series_id, LEASE_TTL_ASSEMBLY)
+    if (await _lease_acquire_many(
+            db, ids, "ovt", series_id, LEASE_TTL_ASSEMBLY,
+            allowed_group_ids=(lobby_id,))) is False:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=
+                            "A lobby member entered another live match")
     await db.commit()
     print(f"[1v2-LOBBY] host {req.steam_id} started lobby {lobby_id} "
           f"series {series_id} room {room} solo={solo['steam_id']}")
@@ -52981,7 +53121,13 @@ async def _ffa_lobby_enroll_caller(db: AsyncSession, player, req, lobby_id) -> N
     # open-lobby wait and another mode could have locked them out from under
     # the host's Start.
     if _enrolled:
-        await _lease_acquire(db, player.id, "ffa", lobby_id, LEASE_TTL_POLLING)
+        if (await _lease_acquire(
+                db, player.id, "ffa", lobby_id,
+                LEASE_TTL_POLLING)) is False:
+            await db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="You're in a live match in another mode - finish it first")
 
 
 @app.post("/api/v1/ffa/lobby/create", tags=["FFA Queue"])
@@ -53488,7 +53634,11 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
     # in_match ping for as long as battles are actually running. Once the
     # sitting genuinely ends nothing renews it and it lapses on its own -- no
     # cleanup path has to fire, which is the whole point (migration 174).
-    await _lease_acquire_many(db, _pids, "ffa", lobby_id, LEASE_TTL_ASSEMBLY)
+    if (await _lease_acquire_many(
+            db, _pids, "ffa", lobby_id, LEASE_TTL_ASSEMBLY,
+            allowed_group_ids=(reform_of,))) is False:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="admission_contended")
     return room, region, ordered
 class _FfaLobbyStartReq(BaseModel):
     steam_id: str
@@ -58243,8 +58393,11 @@ async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSessio
     # in_match ping for as long as battles are actually running. Once the
     # sitting genuinely ends nothing renews it and it lapses on its own -- no
     # cleanup path has to fire, which is the whole point (migration 174).
-    await _lease_acquire_many(db, [r["player_id"] for r in ordered], "ffa",
-                              lobby_id, LEASE_TTL_ASSEMBLY)
+    if (await _lease_acquire_many(
+            db, [r["player_id"] for r in ordered], "ffa",
+            lobby_id, LEASE_TTL_ASSEMBLY)) is False:
+        await db.rollback()
+        raise HTTPException(status_code=503, detail="admission_contended")
     await db.commit()
     print(f"[FFA-LOCK] lobby {lobby_id} room {room} n={len(ordered)} decider={steam_id}")
     # This gather is consumed — the next trio starts a fresh window.

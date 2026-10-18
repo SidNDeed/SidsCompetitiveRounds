@@ -307,7 +307,7 @@ row("S12", "test_s12_start_short_is_one_transaction_and_refunds_none", [
                       '        "       short_started_at = NOW(), start_granted_at = NOW()"\n')))
 
 # -- S12b ------------------------------------------------------------------
-_LR_END = ('    await _lease_acquire_many(db, _pids, "ffa", lobby_id, LEASE_TTL_ASSEMBLY)\n'
+_LR_END = ('        raise HTTPException(status_code=503, detail="admission_contended")\n'
            '    return room, region, ordered\n')
 _RF_UPD = ('        "UPDATE ffa_lobbies SET status = \'canceled\', invalidation_reason = '
            '\'assembly_reformed\',"\n')
