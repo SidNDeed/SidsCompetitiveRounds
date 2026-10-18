@@ -344,7 +344,10 @@ CREATE TABLE @S@.players (
     gold_earned INTEGER NOT NULL DEFAULT 0,
     gold_spent INTEGER NOT NULL DEFAULT 0,
     ffa_gold_earned INTEGER NOT NULL DEFAULT 0,
-    active_player_color_id BIGINT
+    active_player_color_id BIGINT,
+    -- as 017_anonymize_not_delete.sql adds it, nullable with no default, the
+    -- live-identity filter of the report's participant lookup reads it
+    deleted_at TIMESTAMPTZ
 )
 ;;
 CREATE TABLE @S@.ffa_lobbies (

@@ -2435,7 +2435,10 @@ DROP TABLE IF EXISTS players CASCADE;
 
 CREATE TABLE players (
     id UUID PRIMARY KEY,
-    steam_id TEXT NOT NULL UNIQUE
+    steam_id TEXT NOT NULL UNIQUE,
+    -- as 017_anonymize_not_delete.sql adds it, nullable with no default, the
+    -- live-identity filter of the report's participant lookup reads it
+    deleted_at TIMESTAMPTZ
 );
 -- games_played is INTEGER, as 154_ffa_schema.sql declares it: the catch-up in
 -- _ffa_lock_lobby_slot casts its bind to INTEGER, and a test table that
