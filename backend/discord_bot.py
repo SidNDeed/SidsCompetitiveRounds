@@ -15155,7 +15155,7 @@ def _aer_cell(row, table, catalog, phase="1a"):
     return tuple(row)
 
 
-def _aer_decode_response(body, phase="1a"):
+def _aer_decode_response(body, phase="1a", *, expected=None):
     """`_aer_fetch`'s parsed JSON checked against the phase's closed schema
     (design 3.3) and returned as a BotPage; any other shape raises
     AerSchemaError. Phase 1a: rules exactly {"report":"absent"}, no class or
@@ -15166,14 +15166,19 @@ def _aer_decode_response(body, phase="1a"):
         raise AerSchemaError("unknown phase %r" % (phase,))
     if not isinstance(body, dict):
         raise AerSchemaError("not an object")
-    summary_page = "windows" in body
-    _aer_keys(body, _AER_TOP_KEYS | (_AER_SUMMARY_KEYS if summary_page else frozenset()))
-    if body["shape"] not in _AER_LETTERS:
+    shape = body.get("shape")
+    if not isinstance(shape, str) or shape not in _AER_LETTERS:
         raise AerSchemaError("shape")
+    page = _aer_check_int(body.get("page"), 1)
+    summary_page = shape in ("pair", "player") and page == 1
+    _aer_keys(body, _AER_TOP_KEYS | (_AER_SUMMARY_KEYS if summary_page else frozenset()))
     pages = _aer_check_int(body["pages"], 1)
-    page = _aer_check_int(body["page"], 1)
     if page > pages or body["rules"] != {"report": "absent"}:
         raise AerSchemaError("page or rules")
+    if expected is not None and shape != expected.get("shape"):
+        raise AerSchemaError("response shape")
+    if expected is not None and page != expected.get("page"):
+        raise AerSchemaError("response page")
     if not isinstance(body["subjects"], list):
         raise AerSchemaError("subjects")
     subjects = []
@@ -15295,7 +15300,7 @@ def _aer_decode_response(body, phase="1a"):
                 raise AerSchemaError("summary cell not a window key of the catalog")
             cells.append((oi, rows))
         windows, summary = tuple(wins), tuple(cells)
-    return BotPage(body["shape"], page, pages, tuple(subjects), dict(body["population"]),
+    return BotPage(shape, page, pages, tuple(subjects), dict(body["population"]),
                    dict(body["baseline"]), dict(body["registry"]), catalog, tuple(games),
                    windows, summary)
 
@@ -15331,12 +15336,12 @@ def _aer_word(status, body, headers=None):
     return AER_PREFIX + "unavailable (schema)."
 
 
-def _aer_outcome(status, body, headers=None):
+def _aer_outcome(status, body, headers=None, *, expected=None):
     """`(BotPage, None)` for a served page that meets the 1a schema, else
     `(None, word)`."""
     if status == 200:
         try:
-            return _aer_decode_response(body, "1a"), None
+            return _aer_decode_response(body, "1a", expected=expected), None
         except AerSchemaError:
             return None, AER_PREFIX + "unavailable (schema)."
     return None, _aer_word(status, body, headers)
@@ -15463,7 +15468,7 @@ async def _aer_command(interaction, req):
         return
     await interaction.response.defer(ephemeral=True)
     status, body, headers = await _aer_fetch(_aer_path(req), interaction.user.id)
-    page, word = _aer_outcome(status, body, headers)
+    page, word = _aer_outcome(status, body, headers, expected=req)
     if page is None:
         await interaction.followup.send(word, ephemeral=True)
         return
@@ -15484,7 +15489,7 @@ async def _aer_click(interaction, cid):
         return
     await interaction.response.defer(ephemeral=True)
     status, body, headers = await _aer_fetch(_aer_path(req), interaction.user.id)
-    page, word = _aer_outcome(status, body, headers)
+    page, word = _aer_outcome(status, body, headers, expected=req)
     if page is None:
         await interaction.followup.send(word, ephemeral=True)
         return

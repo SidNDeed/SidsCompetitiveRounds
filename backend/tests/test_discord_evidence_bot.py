@@ -261,7 +261,9 @@ def summary_body(page=1, pages=3, shape="pair"):
     body["catalog"] = [ae._catalog_row(w)]
     body["games"] = []
     body["population"]["win_computed_at"] = "2026-10-16T00:00:00+00:00"
-    body["windows"] = [{"oi": 0, "basis": "pair", "subj": ["seat", 0, 1], "games": 10,
+    basis = "player" if shape == "player" else "pair"
+    partner = None if shape == "player" else 1
+    body["windows"] = [{"oi": 0, "basis": basis, "subj": ["seat", 0, partner], "games": 10,
                         "covered": 10, "flag_obs": 0, "newest": "a" * 12,
                         "oldest": "b" * 12}]
     body["summary"] = [{"oi": 0, "cells": [[w.ki, 10, 4.5, None, None, None, "none",
@@ -373,6 +375,62 @@ def test_the_1a_decoder_accepts_a_served_page_and_refuses_every_break(bot):
     assert broken(lambda b: b["windows"][0].update(flag_obs=True), summary_body)
     with pytest.raises(err):
         dec(game_body(), "1b")
+
+
+@pytest.mark.parametrize("shape", [[], {}], ids=("list", "dict"))
+def test_m19_decoder_type_checks_shape_before_membership(bot, shape):
+    body = game_body()
+    body["shape"] = shape
+    with pytest.raises(bot["AerSchemaError"]):
+        bot["_aer_decode_response"](body, "1a")
+
+
+def test_m19_decoder_summary_fields_follow_the_validated_shape_and_page(bot):
+    dec, err = bot["_aer_decode_response"], bot["AerSchemaError"]
+    valid = [game_body(), game_body(2, 3, "series"),
+             summary_body(shape="pair"), summary_body(shape="player"),
+             game_body(2, 3, "pair"), game_body(3, 3, "player")]
+    assert [(p.shape, p.page) for p in map(dec, valid)] == [
+        ("game", 1), ("series", 2), ("pair", 1),
+        ("player", 1), ("pair", 2), ("player", 3)]
+    refused = [game_body(shape="pair"), game_body(shape="player"),
+               summary_body(2, 3, "pair"), summary_body(2, 3, "player"),
+               summary_body(shape="game"), summary_body(shape="series")]
+    for body in refused:
+        with pytest.raises(err):
+            dec(body, "1a")
+
+
+@pytest.mark.parametrize(
+    "body,expected",
+    [(game_body(), {"shape": "series", "page": 1}),
+     (game_body(2, 3), {"shape": "game", "page": 1})],
+    ids=("shape", "page"))
+def test_m19_decoder_matches_the_parsed_request(bot, body, expected):
+    with pytest.raises(bot["AerSchemaError"]):
+        bot["_aer_decode_response"](body, "1a", expected=expected)
+
+
+def test_m19_command_rejects_a_cross_shape_response():
+    events = []
+    api = _Api(lambda _path, _actor: (200, game_body(shape="series"), {}), events)
+    ns = bot_ns(api, events)
+    interaction = _Interaction(events, ADMIN)
+    run(_command(ns, interaction, "game"))
+    assert interaction.ephemeral == ["Evidence report: unavailable (schema)."]
+    assert _public(events) == []
+
+
+def test_m19_button_rejects_a_wrong_page_response():
+    events = []
+    api = _Api(lambda _path, _actor: (200, game_body(1, 2), {}), events)
+    ns = bot_ns(api, events)
+    message = _Message(events)
+    cid = "aer:g:%s:2" % ("0" * 12)
+    interaction = _Interaction(events, ADMIN, custom_id=cid, message=message)
+    run(_click(ns, interaction))
+    assert interaction.ephemeral == ["Evidence report: unavailable (schema)."]
+    assert message.edits == []
 
 
 def test_flag_identity_order_reaches_the_page_plan_and_fallback(bot, monkeypatch):
