@@ -549,7 +549,7 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                 {"status": "journaled", "cls": "c"}
             await conn.execute(
                 "UPDATE match_seat_presence"
-                " SET beat_at = $1 - interval '26 seconds'"
+                " SET beat_at = CAST($1 AS timestamptz) - make_interval(secs => 26)"
                 " WHERE room_name = $2 AND player_id = $3", receipt, room, seats[0][0])
             assert await receive_payload('{"proof": "B"}') == \
                 {"status": "settled", "cls": "c"}
@@ -600,7 +600,7 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                         "INSERT INTO match_report_journal"
                         " (room_name, game_id, reporter_id, mode, reporter_steam, cls, state,"
                         "  payload, received_at) VALUES ($1, $2, $3, 'team', $4, 'c', $5,"
-                        "  '{}'::jsonb, $6 - interval '2 seconds')",
+                        "  '{}'::jsonb, CAST($6 AS timestamptz) - make_interval(secs => 2))",
                         room, game_id, seats[0][0], seats[0][1], state, now)
 
                 blocker = await cf_pg.harness.connect_bound(c.dsn, c.schema)
