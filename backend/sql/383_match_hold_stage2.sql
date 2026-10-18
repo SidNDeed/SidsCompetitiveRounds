@@ -178,79 +178,379 @@ ALTER TABLE team_matches ADD COLUMN IF NOT EXISTS fallback_cls VARCHAR(1)
 ALTER TABLE ovt_matches  ADD COLUMN IF NOT EXISTS fallback_cls VARCHAR(1)
   CONSTRAINT ck_ovt_matches_fallback_cls CHECK (fallback_cls IS NULL OR fallback_cls IN ('c', 'r', 'u'));
 
--- Proof: every new table, unique key, partial index and column is present,
--- and the two flags are NOT NULL with a FALSE default. Any gap raises and
--- rolls the whole file back.
-DO $$
+-- Proof: every relation this file creates has its intended kind, and every
+-- column, constraint and explicit index this file owns has its complete
+-- catalog shape. Guarded DDL never repairs a same-named malformed object, so
+-- any mismatch raises and rolls the whole file back.
+DO $proof$
 DECLARE
     missing text[] := ARRAY[]::text[];
     r record;
 BEGIN
     FOR r IN
-        SELECT * FROM (VALUES
-            ('match_games'), ('match_seat_holds'), ('match_seat_presence'),
-            ('match_hold_open_attempts'), ('match_hold_attempts'),
-            ('match_report_windows'), ('match_report_journal'),
-            ('uq_match_games_first'), ('uq_msh_one_open_per_room'),
-            ('idx_msh_player_open')
-        ) AS v(rel)
+        WITH expected(rel, kind, persistence) AS (VALUES
+            ('match_games', 'r', 'p'),
+            ('match_seat_presence', 'r', 'p'),
+            ('match_seat_holds', 'r', 'p'),
+            ('match_hold_open_attempts', 'r', 'p'),
+            ('match_hold_attempts', 'r', 'p'),
+            ('match_report_windows', 'r', 'p'),
+            ('match_report_journal', 'r', 'p'),
+            ('uq_match_games_first', 'i', 'p'),
+            ('uq_msh_one_open_per_room', 'i', 'p'),
+            ('idx_msh_player_open', 'i', 'p')
+        ),
+        actual AS (
+            SELECT c.relname::text AS rel, c.relkind::text AS kind,
+                   c.relpersistence::text AS persistence
+              FROM pg_class c
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = current_schema()
+               AND EXISTS (SELECT 1 FROM expected e WHERE e.rel = c.relname)
+        )
+        SELECT e.rel
+          FROM expected e LEFT JOIN actual a USING (rel)
+         WHERE a.rel IS NULL OR a.kind IS DISTINCT FROM e.kind
+            OR a.persistence IS DISTINCT FROM e.persistence
     LOOP
-        IF to_regclass(r.rel) IS NULL THEN
-            missing := missing || ('relation ' || r.rel);
-        END IF;
+        missing := missing || ('relation ' || r.rel);
     END LOOP;
+
     FOR r IN
-        SELECT * FROM (VALUES
-            ('match_games', 'uq_match_games_seq'), ('match_games', 'uq_match_games_prev'),
-            ('match_seat_holds', 'uq_msh_room_game_player'),
-            ('match_seat_holds', 'uq_msh_room_player_n'),
-            ('match_seat_holds', 'ck_msh_closed'),
-            ('team_matches', 'ck_team_matches_fallback_cls'),
-            ('ovt_matches', 'ck_ovt_matches_fallback_cls')
-        ) AS v(tbl, con)
+        WITH expected(tbl, ord, col, typ, not_null, def) AS (VALUES
+            ('match_games', 1, 'id', 'uuid', true, 'gen_random_uuid()'),
+            ('match_games', 2, 'mode', 'character varying(8)', true, ''),
+            ('match_games', 3, 'series_id', 'uuid', true, ''),
+            ('match_games', 4, 'room_name', 'character varying(64)', true, ''),
+            ('match_games', 5, 'seq', 'integer', true, ''),
+            ('match_games', 6, 'prev_game', 'uuid', false, ''),
+            ('match_games', 7, 'started_at', 'timestamp with time zone', true,
+             'clock_timestamp()'),
+            ('match_seat_presence', 1, 'room_name', 'character varying(64)', true, ''),
+            ('match_seat_presence', 2, 'player_id', 'uuid', true, ''),
+            ('match_seat_presence', 3, 'mode', 'character varying(8)', true, ''),
+            ('match_seat_presence', 4, 'series_id', 'uuid', true, ''),
+            ('match_seat_presence', 5, 'actor', 'integer', false, ''),
+            ('match_seat_presence', 6, 'present_at', 'timestamp with time zone', false, ''),
+            ('match_seat_presence', 7, 'beat_at', 'timestamp with time zone', true, ''),
+            ('match_seat_presence', 8, 'seen', 'jsonb', true, $d$'[]'::jsonb$d$),
+            ('match_seat_presence', 9, 'boundary_digest', 'character varying(64)', false, ''),
+            ('match_seat_holds', 1, 'id', 'uuid', true, 'gen_random_uuid()'),
+            ('match_seat_holds', 2, 'mode', 'character varying(8)', true, ''),
+            ('match_seat_holds', 3, 'room_name', 'character varying(64)', true, ''),
+            ('match_seat_holds', 4, 'series_id', 'uuid', true, ''),
+            ('match_seat_holds', 5, 'game_id', 'uuid', true, ''),
+            ('match_seat_holds', 6, 'player_id', 'uuid', true, ''),
+            ('match_seat_holds', 7, 'n', 'smallint', true, ''),
+            ('match_seat_holds', 8, 'slot', 'smallint', true, ''),
+            ('match_seat_holds', 9, 'team', 'smallint', true, ''),
+            ('match_seat_holds', 10, 'opener_player_id', 'uuid', true, ''),
+            ('match_seat_holds', 11, 'held_anchor_at', 'timestamp with time zone', true, ''),
+            ('match_seat_holds', 12, 'held_at', 'timestamp with time zone', true, ''),
+            ('match_seat_holds', 13, 'held_until', 'timestamp with time zone', true, ''),
+            ('match_seat_holds', 14, 'seq', 'integer', true, '0'),
+            ('match_seat_holds', 15, 'offered_at', 'timestamp with time zone', false, ''),
+            ('match_seat_holds', 16, 'claimed_at', 'timestamp with time zone', false, ''),
+            ('match_seat_holds', 17, 'verifier', 'character(64)', false, ''),
+            ('match_seat_holds', 18, 'bound_at', 'timestamp with time zone', false, ''),
+            ('match_seat_holds', 19, 'bound_actor', 'integer', false, ''),
+            ('match_seat_holds', 20, 'bound_region', 'character varying(8)', false, ''),
+            ('match_seat_holds', 21, 'entered_at', 'timestamp with time zone', false, ''),
+            ('match_seat_holds', 22, 'closed_at', 'timestamp with time zone', false, ''),
+            ('match_seat_holds', 23, 'closed_reason', 'character varying(48)', false, ''),
+            ('match_seat_holds', 24, 'crossed_at_hold', 'boolean', true, 'false'),
+            ('match_seat_holds', 25, 'drop_t1_points', 'smallint', false, ''),
+            ('match_seat_holds', 26, 'drop_t2_points', 'smallint', false, ''),
+            ('match_hold_open_attempts', 1, 'request_id', 'character varying(64)', true, ''),
+            ('match_hold_open_attempts', 2, 'room_name', 'character varying(64)', true, ''),
+            ('match_hold_open_attempts', 3, 'game_id', 'uuid', false, ''),
+            ('match_hold_open_attempts', 4, 'held_player_id', 'uuid', false, ''),
+            ('match_hold_open_attempts', 5, 'opener_player_id', 'uuid', false, ''),
+            ('match_hold_open_attempts', 6, 'at', 'timestamp with time zone', true, ''),
+            ('match_hold_open_attempts', 7, 'outcome', 'character varying(12)', true, ''),
+            ('match_hold_open_attempts', 8, 'reason', 'character varying(32)', false, ''),
+            ('match_hold_open_attempts', 9, 'hold_id', 'uuid', false, ''),
+            ('match_hold_attempts', 1, 'hold_id', 'uuid', true, ''),
+            ('match_hold_attempts', 2, 'attempt_no', 'integer', true, ''),
+            ('match_hold_attempts', 3, 'kind', 'character varying(12)', true, ''),
+            ('match_hold_attempts', 4, 'at', 'timestamp with time zone', true, ''),
+            ('match_hold_attempts', 5, 'outcome', 'character varying(12)', true, ''),
+            ('match_hold_attempts', 6, 'reason', 'character varying(48)', false, ''),
+            ('match_report_windows', 1, 'room_name', 'character varying(64)', true, ''),
+            ('match_report_windows', 2, 'game_id', 'uuid', true, ''),
+            ('match_report_windows', 3, 'mode', 'character varying(8)', true, ''),
+            ('match_report_windows', 4, 'opened_at', 'timestamp with time zone', true, ''),
+            ('match_report_windows', 5, 'settle_after', 'timestamp with time zone', true, ''),
+            ('match_report_windows', 6, 'settled_at', 'timestamp with time zone', false, ''),
+            ('match_report_windows', 7, 'settled_reporter_id', 'uuid', false, ''),
+            ('match_report_windows', 8, 'settled_cls', 'character varying(1)', false, ''),
+            ('match_report_windows', 9, 'superseded_at', 'timestamp with time zone', false, ''),
+            ('match_report_journal', 1, 'room_name', 'character varying(64)', true, ''),
+            ('match_report_journal', 2, 'game_id', 'uuid', true, ''),
+            ('match_report_journal', 3, 'reporter_id', 'uuid', true, ''),
+            ('match_report_journal', 4, 'mode', 'character varying(8)', true, ''),
+            ('match_report_journal', 5, 'reporter_steam', 'character varying(20)', true, ''),
+            ('match_report_journal', 6, 'cls', 'character varying(1)', true, ''),
+            ('match_report_journal', 7, 'state', 'character varying(12)', true,
+             $d$'journaled'::charactervarying$d$),
+            ('match_report_journal', 8, 'payload', 'jsonb', true, ''),
+            ('match_report_journal', 9, 'received_at', 'timestamp with time zone', true, ''),
+            ('match_report_journal', 10, 'decided_at', 'timestamp with time zone', false, ''),
+            ('team_queue', NULL, 'caps', 'character varying(64)', true,
+             $d$''::charactervarying$d$),
+            ('ovt_queue', NULL, 'caps', 'character varying(64)', true,
+             $d$''::charactervarying$d$),
+            ('team_series', NULL, 'hold_v2', 'boolean', true, 'false'),
+            ('team_series', NULL, 'hold_room', 'character varying(64)', false, ''),
+            ('ovt_series', NULL, 'hold_v2', 'boolean', true, 'false'),
+            ('ovt_series', NULL, 'hold_room', 'character varying(64)', false, ''),
+            ('team_matches', NULL, 'fallback_cls', 'character varying(1)', false, ''),
+            ('ovt_matches', NULL, 'fallback_cls', 'character varying(1)', false, '')
+        ),
+        actual AS (
+            SELECT c.relname::text AS tbl, a.attnum::integer AS ord,
+                   a.attname::text AS col, format_type(a.atttypid, a.atttypmod) AS typ,
+                   a.attnotnull AS not_null,
+                   regexp_replace(coalesce(pg_get_expr(d.adbin, d.adrelid, false), ''),
+                                  '[[:space:]]+', '', 'g') AS def
+              FROM pg_attribute a
+              JOIN pg_class c ON c.oid = a.attrelid
+              JOIN pg_namespace n ON n.oid = c.relnamespace
+              LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+             WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p')
+               AND a.attnum > 0 AND NOT a.attisdropped
+               AND EXISTS (SELECT 1 FROM expected e
+                            WHERE e.tbl = c.relname AND e.col = a.attname)
+        )
+        SELECT e.tbl, e.col
+          FROM expected e LEFT JOIN actual a USING (tbl, col)
+         WHERE a.col IS NULL
+            OR (e.ord IS NOT NULL AND a.ord IS DISTINCT FROM e.ord)
+            OR a.typ IS DISTINCT FROM e.typ
+            OR a.not_null IS DISTINCT FROM e.not_null
+            OR a.def IS DISTINCT FROM e.def
     LOOP
-        IF NOT EXISTS (
-            SELECT 1 FROM pg_constraint c
-             WHERE c.conname = r.con AND c.conrelid = to_regclass(r.tbl)
-        ) THEN
-            missing := missing || ('constraint ' || r.con);
-        END IF;
+        missing := missing || ('column ' || r.tbl || '.' || r.col);
     END LOOP;
+
     FOR r IN
-        SELECT * FROM (VALUES
-            ('team_queue', 'caps'), ('ovt_queue', 'caps'),
-            ('team_series', 'hold_v2'), ('team_series', 'hold_room'),
-            ('ovt_series', 'hold_v2'), ('ovt_series', 'hold_room'),
-            ('team_matches', 'fallback_cls'), ('ovt_matches', 'fallback_cls'),
-            ('match_report_windows', 'superseded_at')
-        ) AS v(tbl, col)
+        WITH expected(tbl, con, kind, keys, ref_tbl, ref_keys, definition, validated) AS (VALUES
+            ('match_games', 'match_games_pkey', 'p', ARRAY['id'], NULL, NULL,
+             $c$PRIMARYKEY(id)$c$, true),
+            ('match_games', 'match_games_prev_game_fkey', 'f', ARRAY['prev_game'],
+             'match_games', ARRAY['id'],
+             $c$FOREIGNKEY(prev_game)REFERENCESmatch_games(id)$c$, true),
+            ('match_games', 'ck_match_games_mode', 'c', NULL, NULL, NULL,
+             $c$CHECK(((mode)::text=ANY((ARRAY['team'::charactervarying,'ovt'::charactervarying])::text[])))$c$, true),
+            ('match_games', 'ck_match_games_seq', 'c', NULL, NULL, NULL,
+             $c$CHECK((seq>=1))$c$, true),
+            ('match_games', 'uq_match_games_seq', 'u',
+             ARRAY['series_id', 'room_name', 'seq'], NULL, NULL,
+             $c$UNIQUE(series_id,room_name,seq)$c$, true),
+            ('match_games', 'uq_match_games_prev', 'u',
+             ARRAY['series_id', 'room_name', 'prev_game'], NULL, NULL,
+             $c$UNIQUE(series_id,room_name,prev_game)$c$, true),
+            ('match_seat_presence', 'match_seat_presence_pkey', 'p',
+             ARRAY['room_name', 'player_id'], NULL, NULL,
+             $c$PRIMARYKEY(room_name,player_id)$c$, true),
+            ('match_seat_presence', 'match_seat_presence_player_id_fkey', 'f',
+             ARRAY['player_id'], 'players', ARRAY['id'],
+             $c$FOREIGNKEY(player_id)REFERENCESplayers(id)$c$, true),
+            ('match_seat_presence', 'ck_match_seat_presence_mode', 'c', NULL, NULL, NULL,
+             $c$CHECK(((mode)::text=ANY((ARRAY['team'::charactervarying,'ovt'::charactervarying])::text[])))$c$, true),
+            ('match_seat_holds', 'match_seat_holds_pkey', 'p', ARRAY['id'], NULL, NULL,
+             $c$PRIMARYKEY(id)$c$, true),
+            ('match_seat_holds', 'match_seat_holds_game_id_fkey', 'f', ARRAY['game_id'],
+             'match_games', ARRAY['id'],
+             $c$FOREIGNKEY(game_id)REFERENCESmatch_games(id)$c$, true),
+            ('match_seat_holds', 'match_seat_holds_player_id_fkey', 'f',
+             ARRAY['player_id'], 'players', ARRAY['id'],
+             $c$FOREIGNKEY(player_id)REFERENCESplayers(id)$c$, true),
+            ('match_seat_holds', 'match_seat_holds_opener_player_id_fkey', 'f',
+             ARRAY['opener_player_id'], 'players', ARRAY['id'],
+             $c$FOREIGNKEY(opener_player_id)REFERENCESplayers(id)$c$, true),
+            ('match_seat_holds', 'ck_msh_mode', 'c', NULL, NULL, NULL,
+             $c$CHECK(((mode)::text=ANY((ARRAY['team'::charactervarying,'ovt'::charactervarying])::text[])))$c$, true),
+            ('match_seat_holds', 'ck_msh_n', 'c', NULL, NULL, NULL,
+             $c$CHECK((n>=1))$c$, true),
+            ('match_seat_holds', 'ck_msh_seat', 'c', NULL, NULL, NULL,
+             $c$CHECK(((team=ANY(ARRAY[0,1]))AND((slot>=0)AND(slot<=3))))$c$, true),
+            ('match_seat_holds', 'ck_msh_closed', 'c', NULL, NULL, NULL,
+             $c$CHECK(((closed_atISNULL)=(closed_reasonISNULL)))$c$, true),
+            ('match_seat_holds', 'ck_msh_until', 'c', NULL, NULL, NULL,
+             $c$CHECK((held_until>held_anchor_at))$c$, true),
+            ('match_seat_holds', 'uq_msh_room_game_player', 'u',
+             ARRAY['room_name', 'game_id', 'player_id'], NULL, NULL,
+             $c$UNIQUE(room_name,game_id,player_id)$c$, true),
+            ('match_seat_holds', 'uq_msh_room_player_n', 'u',
+             ARRAY['room_name', 'player_id', 'n'], NULL, NULL,
+             $c$UNIQUE(room_name,player_id,n)$c$, true),
+            ('match_hold_open_attempts', 'match_hold_open_attempts_pkey', 'p',
+             ARRAY['request_id'], NULL, NULL, $c$PRIMARYKEY(request_id)$c$, true),
+            ('match_hold_open_attempts', 'match_hold_open_attempts_held_player_id_fkey', 'f',
+             ARRAY['held_player_id'], 'players', ARRAY['id'],
+             $c$FOREIGNKEY(held_player_id)REFERENCESplayers(id)$c$, true),
+            ('match_hold_open_attempts', 'match_hold_open_attempts_opener_player_id_fkey', 'f',
+             ARRAY['opener_player_id'], 'players', ARRAY['id'],
+             $c$FOREIGNKEY(opener_player_id)REFERENCESplayers(id)$c$, true),
+            ('match_hold_open_attempts', 'match_hold_open_attempts_hold_id_fkey', 'f',
+             ARRAY['hold_id'], 'match_seat_holds', ARRAY['id'],
+             $c$FOREIGNKEY(hold_id)REFERENCESmatch_seat_holds(id)$c$, true),
+            ('match_hold_open_attempts', 'ck_mhoa_outcome', 'c', NULL, NULL, NULL,
+             $c$CHECK(((outcome)::text=ANY((ARRAY['opened'::charactervarying,'repeat'::charactervarying,'refused'::charactervarying])::text[])))$c$, true),
+            ('match_hold_open_attempts', 'ck_mhoa_hold', 'c', NULL, NULL, NULL,
+             $c$CHECK((((outcome)::text='refused'::text)=(hold_idISNULL)))$c$, true),
+            ('match_hold_attempts', 'match_hold_attempts_pkey', 'p',
+             ARRAY['hold_id', 'attempt_no'], NULL, NULL,
+             $c$PRIMARYKEY(hold_id,attempt_no)$c$, true),
+            ('match_hold_attempts', 'match_hold_attempts_hold_id_fkey', 'f',
+             ARRAY['hold_id'], 'match_seat_holds', ARRAY['id'],
+             $c$FOREIGNKEY(hold_id)REFERENCESmatch_seat_holds(id)$c$, true),
+            ('match_hold_attempts', 'ck_mha_kind', 'c', NULL, NULL, NULL,
+             $c$CHECK(((kind)::text=ANY((ARRAY['offered'::charactervarying,'claim'::charactervarying,'bind'::charactervarying,'entered'::charactervarying])::text[])))$c$, true),
+            ('match_hold_attempts', 'ck_mha_outcome', 'c', NULL, NULL, NULL,
+             $c$CHECK(((outcome)::text=ANY((ARRAY['ok'::charactervarying,'refused'::charactervarying])::text[])))$c$, true),
+            ('match_hold_attempts', 'ck_mha_reason', 'c', NULL, NULL, NULL,
+             $c$CHECK((((outcome)::text='refused'::text)=(reasonISNOTNULL)))$c$, true),
+            ('match_report_windows', 'match_report_windows_pkey', 'p',
+             ARRAY['room_name', 'game_id'], NULL, NULL,
+             $c$PRIMARYKEY(room_name,game_id)$c$, true),
+            ('match_report_windows', 'match_report_windows_game_id_fkey', 'f',
+             ARRAY['game_id'], 'match_games', ARRAY['id'],
+             $c$FOREIGNKEY(game_id)REFERENCESmatch_games(id)$c$, true),
+            ('match_report_windows', 'match_report_windows_settled_reporter_id_fkey', 'f',
+             ARRAY['settled_reporter_id'], 'players', ARRAY['id'],
+             $c$FOREIGNKEY(settled_reporter_id)REFERENCESplayers(id)$c$, true),
+            ('match_report_windows', 'ck_mrw_mode', 'c', NULL, NULL, NULL,
+             $c$CHECK(((mode)::text=ANY((ARRAY['team'::charactervarying,'ovt'::charactervarying])::text[])))$c$, true),
+            ('match_report_windows', 'ck_mrw_cls', 'c', NULL, NULL, NULL,
+             $c$CHECK(((settled_clsISNULL)OR((settled_cls)::text=ANY((ARRAY['c'::charactervarying,'r'::charactervarying,'u'::charactervarying])::text[]))))$c$, true),
+            ('match_report_windows', 'ck_mrw_settled', 'c', NULL, NULL, NULL,
+             $c$CHECK(((settled_atISNULL)=(settled_clsISNULL)))$c$, true),
+            ('match_report_journal', 'match_report_journal_pkey', 'p',
+             ARRAY['room_name', 'game_id', 'reporter_id'], NULL, NULL,
+             $c$PRIMARYKEY(room_name,game_id,reporter_id)$c$, true),
+            ('match_report_journal', 'match_report_journal_game_id_fkey', 'f',
+             ARRAY['game_id'], 'match_games', ARRAY['id'],
+             $c$FOREIGNKEY(game_id)REFERENCESmatch_games(id)$c$, true),
+            ('match_report_journal', 'match_report_journal_reporter_id_fkey', 'f',
+             ARRAY['reporter_id'], 'players', ARRAY['id'],
+             $c$FOREIGNKEY(reporter_id)REFERENCESplayers(id)$c$, true),
+            ('match_report_journal', 'ck_mrj_mode', 'c', NULL, NULL, NULL,
+             $c$CHECK(((mode)::text=ANY((ARRAY['team'::charactervarying,'ovt'::charactervarying])::text[])))$c$, true),
+            ('match_report_journal', 'ck_mrj_cls', 'c', NULL, NULL, NULL,
+             $c$CHECK(((cls)::text=ANY((ARRAY['c'::charactervarying,'r'::charactervarying,'u'::charactervarying])::text[])))$c$, true),
+            ('match_report_journal', 'ck_mrj_state', 'c', NULL, NULL, NULL,
+             $c$CHECK(((state)::text=ANY((ARRAY['journaled'::charactervarying,'held'::charactervarying,'settled'::charactervarying,'kept'::charactervarying,'superseded'::charactervarying])::text[])))$c$, true),
+            ('team_matches', 'ck_team_matches_fallback_cls', 'c', NULL, NULL, NULL,
+             $c$CHECK(((fallback_clsISNULL)OR((fallback_cls)::text=ANY((ARRAY['c'::charactervarying,'r'::charactervarying,'u'::charactervarying])::text[]))))$c$, true),
+            ('ovt_matches', 'ck_ovt_matches_fallback_cls', 'c', NULL, NULL, NULL,
+             $c$CHECK(((fallback_clsISNULL)OR((fallback_cls)::text=ANY((ARRAY['c'::charactervarying,'r'::charactervarying,'u'::charactervarying])::text[]))))$c$, true)
+        ),
+        actual AS (
+            SELECT tc.relname::text AS tbl, c.conname::text AS con,
+                   c.contype::text AS kind,
+                   CASE WHEN c.contype IN ('p', 'u', 'f') THEN
+                       ARRAY(SELECT a.attname::text
+                               FROM unnest(c.conkey) WITH ORDINALITY k(attnum, ord)
+                               JOIN pg_attribute a
+                                 ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+                              ORDER BY k.ord)
+                   END AS keys,
+                   CASE WHEN c.contype = 'f' THEN rc.relname::text END AS ref_tbl,
+                   CASE WHEN c.contype = 'f' THEN
+                       ARRAY(SELECT a.attname::text
+                               FROM unnest(c.confkey) WITH ORDINALITY k(attnum, ord)
+                               JOIN pg_attribute a
+                                 ON a.attrelid = c.confrelid AND a.attnum = k.attnum
+                              ORDER BY k.ord)
+                   END AS ref_keys,
+                   regexp_replace(pg_get_constraintdef(c.oid, false),
+                                  '[[:space:]]+', '', 'g') AS definition,
+                   c.convalidated AS validated, c.condeferrable, c.condeferred
+              FROM pg_constraint c
+              JOIN pg_class tc ON tc.oid = c.conrelid
+              JOIN pg_namespace n ON n.oid = tc.relnamespace
+              LEFT JOIN pg_class rc ON rc.oid = c.confrelid
+             WHERE n.nspname = current_schema()
+               AND EXISTS (SELECT 1 FROM expected e
+                            WHERE e.tbl = tc.relname AND e.con = c.conname)
+        )
+        SELECT e.tbl, e.con
+          FROM expected e LEFT JOIN actual a USING (tbl, con)
+         WHERE a.con IS NULL
+            OR a.kind IS DISTINCT FROM e.kind
+            OR a.keys IS DISTINCT FROM e.keys
+            OR a.ref_tbl IS DISTINCT FROM e.ref_tbl
+            OR a.ref_keys IS DISTINCT FROM e.ref_keys
+            OR a.definition IS DISTINCT FROM e.definition
+            OR a.validated IS DISTINCT FROM e.validated
+            OR a.condeferrable IS DISTINCT FROM false
+            OR a.condeferred IS DISTINCT FROM false
     LOOP
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns c
-             WHERE c.table_schema = current_schema()
-               AND c.table_name = r.tbl AND c.column_name = r.col
-        ) THEN
-            missing := missing || ('column ' || r.tbl || '.' || r.col);
-        END IF;
+        missing := missing || ('constraint ' || r.tbl || '.' || r.con);
     END LOOP;
+
     FOR r IN
-        SELECT * FROM (VALUES
-            ('team_series', 'hold_v2'), ('ovt_series', 'hold_v2'),
-            ('match_seat_holds', 'crossed_at_hold')
-        ) AS v(tbl, col)
+        WITH expected(idx, tbl, method, keys, key_defs, is_unique, predicate) AS (VALUES
+            ('uq_match_games_first', 'match_games', 'btree',
+             ARRAY['series_id', 'room_name'], ARRAY['series_id', 'room_name'], true,
+             '(prev_gameISNULL)'),
+            ('uq_msh_one_open_per_room', 'match_seat_holds', 'btree',
+             ARRAY['room_name'], ARRAY['room_name'], true, '(closed_atISNULL)'),
+            ('idx_msh_player_open', 'match_seat_holds', 'btree',
+             ARRAY['player_id'], ARRAY['player_id'], false, '(closed_atISNULL)')
+        ),
+        actual AS (
+            SELECT ic.relname::text AS idx, tc.relname::text AS tbl,
+                   am.amname::text AS method,
+                   ARRAY(SELECT a.attname::text
+                           FROM unnest(i.indkey) WITH ORDINALITY k(attnum, ord)
+                           JOIN pg_attribute a
+                             ON a.attrelid = i.indrelid AND a.attnum = k.attnum
+                          WHERE k.ord <= i.indnkeyatts ORDER BY k.ord) AS keys,
+                   ARRAY(SELECT pg_get_indexdef(i.indexrelid, k, false)
+                           FROM generate_series(1, i.indnkeyatts::integer) k
+                          ORDER BY k) AS key_defs,
+                   i.indisunique AS is_unique,
+                   regexp_replace(coalesce(pg_get_expr(i.indpred, i.indrelid, false), ''),
+                                  '[[:space:]]+', '', 'g') AS predicate,
+                   (i.indnatts = i.indnkeyatts) AS no_includes,
+                   (i.indexprs IS NULL) AS no_expressions,
+                   i.indisprimary, i.indisexclusion, i.indnullsnotdistinct,
+                   i.indisvalid, i.indisready, i.indislive
+              FROM pg_index i
+              JOIN pg_class ic ON ic.oid = i.indexrelid
+              JOIN pg_namespace n ON n.oid = ic.relnamespace
+              JOIN pg_class tc ON tc.oid = i.indrelid
+              JOIN pg_am am ON am.oid = ic.relam
+             WHERE n.nspname = current_schema()
+               AND EXISTS (SELECT 1 FROM expected e WHERE e.idx = ic.relname)
+        )
+        SELECT e.idx
+          FROM expected e LEFT JOIN actual a USING (idx)
+         WHERE a.idx IS NULL
+            OR a.tbl IS DISTINCT FROM e.tbl
+            OR a.method IS DISTINCT FROM e.method
+            OR a.keys IS DISTINCT FROM e.keys
+            OR a.key_defs IS DISTINCT FROM e.key_defs
+            OR a.is_unique IS DISTINCT FROM e.is_unique
+            OR a.predicate IS DISTINCT FROM e.predicate
+            OR a.no_includes IS DISTINCT FROM true
+            OR a.no_expressions IS DISTINCT FROM true
+            OR a.indisprimary IS DISTINCT FROM false
+            OR a.indisexclusion IS DISTINCT FROM false
+            OR a.indnullsnotdistinct IS DISTINCT FROM false
+            OR a.indisvalid IS DISTINCT FROM true
+            OR a.indisready IS DISTINCT FROM true
+            OR a.indislive IS DISTINCT FROM true
     LOOP
-        IF NOT EXISTS (
-            SELECT 1 FROM information_schema.columns c
-             WHERE c.table_schema = current_schema()
-               AND c.table_name = r.tbl AND c.column_name = r.col
-               AND c.is_nullable = 'NO' AND c.column_default = 'false'
-        ) THEN
-            missing := missing || ('default ' || r.tbl || '.' || r.col);
-        END IF;
+        missing := missing || ('index ' || r.idx);
     END LOOP;
+
     IF cardinality(missing) > 0 THEN
-        RAISE EXCEPTION '383_match_hold_stage2: missing after apply: %', missing;
+        RAISE EXCEPTION '383_match_hold_stage2: shape mismatch after apply: %', missing;
     END IF;
-END $$;
+END $proof$;
 
 COMMIT;
