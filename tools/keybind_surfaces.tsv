@@ -2185,6 +2185,7 @@ c5b3b9f5cd30f77e	N	rule:N1	Predator
 97a6e94ae4eed9bb	N	rule:N1	President Meow
 f759566b7428a79b	N	rev:7580b72803876541 a click or press on one of the mod's own buttons, rows, tiles or links; names no key	Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.
 425872a6007bf097	F	rev:faf33a04a3aee3c3 fixed:Esc Escape cancels and closes; not rebindable	Press Esc to leave
+30a77f9e3bf9ae01	F	rev:e1e05ef619fea083 fixed:Esc Escape opens the game menu, where the leave is taken; Escape is reserved and not rebindable	Press Esc to leave. The match then ends as a disconnect.
 86df78d70f5dd74c	P	rule:P	Press [{0}] when ready
 74ddb069e508c3a9	N	rev:d7ce71ceadda2550 Controls-page text (a row's help, a refusal, an outcome or a button) that names no key; the bound key is drawn beside it by the row's own face	Press a key...
 6925d2481c0e8eef	P	rule:P	Press\n[{0}]\nto join
