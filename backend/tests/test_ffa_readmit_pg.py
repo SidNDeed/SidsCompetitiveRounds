@@ -887,6 +887,40 @@ def test_t4_5_every_refusal_reason(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_nx0c_claim_takes_the_admission_gate_over_an_open_match_hold(monkeypatch):
+    """NX0c: the FFA claim takes the per-player admission gate of every
+    formation path. A held FFA seat whose player also has an open 2v2 match
+    hold is refused other_mode with its refused claim row and no claimed
+    stamp or verifier; once that match hold is closed the same claim is
+    granted (the negative control)."""
+    async def body(env):
+        lob = await _held(env)
+        room = "nx0c_" + lob.sids[1][-6:]
+        series = await env.conn.fetchval("SELECT gen_random_uuid()")
+        game = await env.conn.fetchval(
+            "INSERT INTO match_games (mode, series_id, room_name, seq)"
+            " VALUES ('team', $1, $2, 1) RETURNING id", series, room)
+        hold = await env.conn.fetchval(
+            "INSERT INTO match_seat_holds (mode, room_name, series_id, game_id, player_id, n,"
+            "        slot, team, opener_player_id, held_anchor_at, held_at, held_until)"
+            " VALUES ('team', $1, $2, $3, $4, 1, 1, 0, $5, clock_timestamp(),"
+            "         clock_timestamp(), clock_timestamp() + make_interval(secs => 120))"
+            " RETURNING id", room, series, game, lob.pids[1], lob.pids[0])
+        r = await _readmit(env, lob, 1, "claim", 1)
+        assert r["reason"] == "other_mode", ("NX0c refused", r.body)
+        assert (await _attempts(env, lob, 1))[-1] == (1, "claim", "refused", "other_mode"), \
+            ("NX0c attempt row",)
+        rows = await _rows(env, "ffa_seat_readmissions", lob, 1)
+        assert rows and all(x["claimed_at"] is None and x["verifier"] is None for x in rows), \
+            ("NX0c no claim write", rows)
+        await env.conn.execute(
+            "UPDATE match_seat_holds SET closed_at = clock_timestamp(), closed_reason = 'ceiling'"
+            " WHERE id = $1", hold)
+        r = await _readmit(env, lob, 1, "claim", 1)
+        assert r["status"] == "claimed", ("NX0c control", r.body)
+    run_env(monkeypatch, body)
+
+
 def test_t4_6_identity_mismatch(monkeypatch):
     """T4.6 (server half): a bind of actor X refused actor_identity_mismatch
     while a fresh census lists the seat's slot with another actor; the genuine

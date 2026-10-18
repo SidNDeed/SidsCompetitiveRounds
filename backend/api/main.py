@@ -57018,6 +57018,14 @@ async def _rdm_claim(ctx, pid, me, req) -> dict:
     if q is not None and q["series_id"] is not None and q["series_id"] != ctx.lid \
             and q["status"] != "searching":
         return await _rdm_refuse(ctx, pid, me, "claim", n, "other_lobby")
+    # The per-player admission gate every formation path takes (Stage 2 fix 1
+    # H3): under the caller's players row lock, after the lobby and queue
+    # locks above, it re-reads leases, queue rows and open match holds and
+    # refuses a commitment outside this lobby. It writes nothing, so the
+    # refusal row is the only write of a refused claim.
+    admitted, _ = await _lease_admission_gate(ctx.db, [pid], "ffa", ctx.lid)
+    if not admitted:
+        return await _rdm_refuse(ctx, pid, me, "claim", n, "other_mode")
     token = secrets.token_hex(32)
     verifier = hashlib.sha256(token.encode("ascii")).hexdigest()
     await ctx.db.execute(text(
@@ -57040,7 +57048,7 @@ async def _rdm_claim(ctx, pid, me, req) -> dict:
         "        matched_at = EXCLUDED.matched_at, last_polled = EXCLUDED.last_polled"),
         {"lid": ctx.lid, "slot": int(me["slot"]), "room": lob["photon_room_id"],
          "reg": lob["region"], "now": ctx.now, "pid": pid})
-    await _lease_acquire(ctx.db, pid, "ffa", ctx.lid, LEASE_TTL_ASSEMBLY)
+    await _lease_acquire(ctx.db, pid, "ffa", ctx.lid, LEASE_TTL_ASSEMBLY, _gate_held=True)
     await _rdm_attempt(ctx.db, ctx.lid, pid, n, "claim", ctx.now, "ok")
     ctx.prints.append(_rdm_line(ctx.lid, f"claimed slot={me['slot']} n={n}"))
     return {"readmit": {"status": "claimed", "token": token, "room": lob["photon_room_id"],
