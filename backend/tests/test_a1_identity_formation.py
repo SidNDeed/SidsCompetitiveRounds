@@ -1683,3 +1683,27 @@ def test_fix1b_r1_locked_payload_names_only_an_unranked_refusal():
     src = _inspect.getsource(main._ffa_poll_locked_payload)
     assert '"lobby_ranked": _lobby_ranked' in src
     assert '**({"ranked_refusal": "unranked"} if not _lobby_ranked else {})' in src
+
+
+def test_fix1b_r2_reform_copy_ands_rating_and_gates_the_wager_move():
+    lock_src = _inspect.getsource(main._ffa_lock_roster)
+    assert "_ranked_floor_ok = _proximity_capable" in lock_src
+    assert "if reform_of is None else True" not in lock_src
+
+    src = _inspect.getsource(main._asm_reform)
+    tree = _ast.parse(src)
+    gates = [node for node in _ast.walk(tree) if isinstance(node, _ast.If)
+             and _ast.unparse(node.test) == "_locked_ranked"]
+    assert len(gates) == 1
+    rated = _ast.unparse(_ast.Module(body=gates[0].body, type_ignores=[]))
+    unrated = _ast.unparse(_ast.Module(body=gates[0].orelse, type_ignores=[]))
+    move = "UPDATE ffa_bets SET lobby_id = :new WHERE lobby_id = :old AND settled_at IS NULL"
+    assert move in " ".join(rated.split())
+    assert move not in " ".join(unrated.split())
+    assert "_refund_ffa_lobby_bets(ctx.db, old, 'lobby_casual')" in unrated
+    assert "refund_all_reason='lobby_casual'" in unrated
+    assert "ctx.refund_flush = True" in unrated
+    assert "_refund_ffa_game_bets_strict" not in src
+    assert src.count("UPDATE ffa_bets SET lobby_id = :new") == 1
+    assert main._ASM_REFORM_CLASSES["COPY_AND"] == \
+        ("is_ranked", "kills_tiebreak", "sudden_death")

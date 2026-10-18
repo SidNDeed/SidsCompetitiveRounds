@@ -1383,6 +1383,72 @@ def test_fix1b_r1_hosted_and_automatic_locks_freeze_rating_floor(monkeypatch):
     run_env(monkeypatch, body, prefix="cf_f1b_r1")
 
 
+async def _fix1b_gold_snapshot(env, pid):
+    return tuple(await env.conn.fetchrow(
+        "SELECT COALESCE(gold_earned, 0) - COALESCE(gold_spent, 0),"
+        " COALESCE((SELECT SUM(amount) FROM gold_transactions WHERE player_id = $1), 0)"
+        " FROM players WHERE id = $1", pid))
+
+
+def test_fix1b_r2_floor_unrated_reform_refunds_parent_wagers(monkeypatch):
+    async def body(env):
+        floor = main.MIN_MOD_VERSION
+        lob = await _open_lobby(env, 5, ["ffa_asm1"] * 5, [floor] * 5)
+        started = await _start(env, main, lob)
+        assert started.status == 200 and (await env.lobby_row(lob))["is_ranked"] is True
+        lob.region = (await env.lobby_row(lob))["region"]
+
+        bettors = [await env.bettor() for _ in range(4)]
+        before = {pid: await _fix1b_gold_snapshot(env, pid) for pid, _sid in bettors}
+        wager_ids = [
+            await env.wager(lob, bettors[0][0], lob.pids[0]),
+            await env.wager(lob, bettors[1][0], lob.pids[4]),
+            await env.wager(lob, bettors[2][0], lob.pids[1]),
+        ]
+        await _bound_lobby_bet(env, lob, bettors[2][0], 1, wager_ids[2])
+        await env.conn.execute(
+            "UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + 100 WHERE id = $1",
+            bettors[3][0])
+        await env.conn.execute(
+            "INSERT INTO gold_transactions (player_id, amount, reason, reference_id)"
+            " VALUES ($1, -100, 'lobby_bet_stake', $2)", bettors[3][0], str(lob.lid))
+        open_id = await env.conn.fetchval(
+            "INSERT INTO lobby_bets (mode, lobby_id, player_id, amount, target_steams, status)"
+            " VALUES ('ffa', $1, $2, 100, $3, 'open') RETURNING id",
+            lob.lid, bettors[3][0], lob.sids[0])
+
+        env.mp.setattr(main, "FFA_PROXIMITY_VICTIM_MIN_VERSION", "1.41.0")
+        await env.at(lob, 40.0)
+        answer = await _post(env, lob, 0, [0, 1, 2, 3])
+        assert answer["status"] == "reformed", answer
+        new = (await env.lobby_row(lob))["reformed_to"]
+        child = await env.lobby_row(new)
+        assert child["is_ranked"] is False
+        assert answer["lock"]["ranked_refusal"] == "unranked"
+        bets = await env.bets(lob)
+        assert {b["id"] for b in bets} == set(wager_ids)
+        assert all(b["settlement_kind"] == "refunded" and b["payout"] == b["amount"]
+                   for b in bets), bets
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM ffa_bets WHERE lobby_id = $1", new) == 0
+        assert await env.refunds(lob) == len(wager_ids)
+        assert await env.conn.fetchval(
+            "SELECT status FROM lobby_bets WHERE id = $1", open_id) == "refunded"
+        assert await env.conn.fetchval(
+            "SELECT status FROM lobby_bets WHERE bound_bet_id = $1", wager_ids[2]) == "bound"
+        for pid, _sid in bettors:
+            assert await _fix1b_gold_snapshot(env, pid) == before[pid]
+
+        child_lob = cf_asm.Lob(new, lob.sids[:4], lob.pids[:4], child["region"], False, True)
+        results = {sid: (5 - i, 10 - i) for i, sid in enumerate(child_lob.sids)}
+        report = await env.report(child_lob, 1, results)
+        assert report.status == 200 and report["rating_changes"] == {}
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM ffa_bets WHERE lobby_id = $1"
+            " AND settlement_kind IN ('won', 'lost')", lob.lid) == 0
+    run_env(monkeypatch, body, prefix="cf_f1b_r2")
+
+
 def _anon(obj, names):
     if isinstance(obj, dict):
         return {k: _anon(v, names) for k, v in obj.items()}
@@ -6067,9 +6133,8 @@ def test_m2b_a_refused_attest_after_a_keeps_the_expiry(monkeypatch):
 
 _N12_CLASSES = {
     "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap", "same_card_rule",
-             "is_ranked", "settings_known", "settings_changed_at", "password_hash",
-             "kicked_steam_ids"),
-    "COPY_AND": ("kills_tiebreak", "sudden_death"),
+             "settings_known", "settings_changed_at", "password_hash", "kicked_steam_ids"),
+    "COPY_AND": ("is_ranked", "kills_tiebreak", "sudden_death"),
     "FRESH": ("id", "status", "photon_room_id", "region", "player_count", "member_ids",
               "created_at", "host_player_id", "reformed_from", "bets_disabled", "assembly_v1",
               "admission_v1", "region_why", "region_detail"),
@@ -6084,14 +6149,14 @@ _N12_CLASSES = {
 
 def test_n12_the_46_column_partition(monkeypatch):
     """Section 12, N12: the L' partition, class by class and column by column,
-    is V11's table (COPY 10, COPY-AND 2, FRESH 14, RESET 20), disjoint, and
+    is V11's table (COPY 9, COPY-AND 3, FRESH 14, RESET 20), disjoint, and
     its union is information_schema's ffa_lobbies."""
     async def body(env):
         classes = main._ASM_REFORM_CLASSES
         assert {k: set(v) for k, v in classes.items()} == \
             {k: set(v) for k, v in _N12_CLASSES.items()}, ("N12 classes", classes)
         assert {k: len(v) for k, v in classes.items()} == \
-            {"COPY": 10, "COPY_AND": 2, "FRESH": 14, "RESET": 20}, "N12 counts"
+            {"COPY": 9, "COPY_AND": 3, "FRESH": 14, "RESET": 20}, "N12 counts"
         names = [c for v in classes.values() for c in v]
         cols = {r[0] for r in await env.conn.fetch(
             "SELECT column_name FROM information_schema.columns"
@@ -6101,9 +6166,9 @@ def test_n12_the_46_column_partition(monkeypatch):
     run_env(monkeypatch, body, fresh=True)
 
 
-def test_n12_reform_keeps_the_ranked_flag(monkeypatch):
-    """Section 12, N12: is_ranked is COPIED into L', never left to the schema's
-    TRUE default: a casual lobby's re-form stays casual, a rated one's stays
+def test_n12_reform_copy_ands_the_ranked_flag(monkeypatch):
+    """Section 12, N12: is_ranked is COPY-AND, never left to the schema's TRUE
+    default: a casual parent stays casual and a capable rated parent stays
     rated."""
     async def body(env):
         for ranked in (False, True):

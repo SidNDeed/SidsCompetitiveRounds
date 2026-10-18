@@ -57679,7 +57679,9 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
     at that lobby's own lock); kills_tiebreak is L''s copied value AND the
     carried roster's capability; sudden_death is turned off when the carried
     roster is not capable (both COPY-AND, sec3.4); lobby-phase wagers are not
-    re-bound. Returns (room, region, ordered, locked_ranked)."""
+    re-bound. Rated children move the parent's wagers after this lock;
+    floor-unrated children refund them on the canceled parent. Returns
+    (room, region, ordered, locked_ranked)."""
     ordered = sorted(rows, key=lambda r: _ffa_sort_key(r["steam_id"]))
     _pids = [r["player_id"] for r in ordered]
     if reform_of is None:
@@ -57728,8 +57730,6 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
     # Queue-stamped capability evidence is read once for every lock decision.
     # The proximity floor controls rating eligibility; the other two flags
     # keep their own independent floors and safe fallback values.
-    # R1 keeps REFORM on its existing rating behavior until R2 adds the wager
-    # refund branch that makes a floor-unrated child safe.
     #
     # Kills tie-break capability, frozen HERE (migration 187): TRUE only when
     # EVERY member's ffa_queue.mod_version -- stamped by that member's OWN
@@ -57743,7 +57743,7 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
     ), {"ids": [r["player_id"] for r in ordered]})).scalars().all()
     _proximity_capable = _ffa_roster_clears_proximity_floor(
         _kt_vals, len(ordered))
-    _ranked_floor_ok = _proximity_capable if reform_of is None else True
+    _ranked_floor_ok = _proximity_capable
     _kt_floor = _parse_version(FFA_KILLS_TIEBREAK_MIN_VERSION)
     _kills_tiebreak = len(_kt_vals) == len(ordered) and all(
         _parse_version((v or "0").lstrip("vV")) >= _kt_floor for v in _kt_vals)
@@ -59559,7 +59559,7 @@ async def _asm_start_short(ctx, rule, cls) -> bool:
 async def _asm_reform(ctx, rule, cls, trigger):
     """REFORM (Table 2, fallback, |READY| >= 3; sec3.4 steps 1-7). The new
     row L' is one explicit-column INSERT in the pre-lock state: every one of
-    the 46 columns by class (COPY 10, COPY-AND 2, FRESH 14, RESET 20), never
+    the 46 columns by class (COPY 9, COPY-AND 3, FRESH 14, RESET 20), never
     a schema default (is_ranked defaults to TRUE; N12). Returns True when
     re-formed, False when too few seats carry (the caller dissolves), None
     when this transaction does not hold every carried identity (nothing
@@ -59650,16 +59650,28 @@ async def _asm_reform(ctx, rule, cls, trigger):
         "  FROM ffa_queue WHERE series_id = :new AND player_id = ANY(:ids)"
         " ORDER BY joined_at, CAST(player_id AS text)"),
         {"new": new, "ids": k_ids})).mappings().all()
-    await _ffa_lock_roster(ctx.db, new, rows_of_k, reform_of=old)
+    _room, _region, _ordered, _locked_ranked = await _ffa_lock_roster(
+        ctx.db, new, rows_of_k, reform_of=old)
     await ctx.db.execute(text(
         "UPDATE ffa_lobbies SET status = 'canceled', invalidation_reason = 'assembly_reformed',"
         "       invalidated_at = NOW(), reformed_to = :new, asm_rule = :r, "
         + _FFA_CLOSE_RECORD_SET +
         " WHERE id = :lid AND status = 'active'"),
         {"new": new, "r": rule, "lid": old, "rec_path": "asm_reform", "rec_trigger": trigger})
-    await ctx.db.execute(text(
-        "UPDATE ffa_bets SET lobby_id = :new WHERE lobby_id = :old AND settled_at IS NULL"),
-        {"new": new, "old": old})
+    if _locked_ranked:
+        await ctx.db.execute(text(
+            "UPDATE ffa_bets SET lobby_id = :new"
+            " WHERE lobby_id = :old AND settled_at IS NULL"),
+            {"new": new, "old": old})
+    else:
+        # REFORM is reachable only for a zero-game parent.  Keep every wager
+        # on that now-canceled parent and refund claim-first in its own
+        # savepoint; a failed/capped pass remains stranded there for the
+        # closure sweep, never on a child that report settlement can pay.
+        await _refund_ffa_lobby_bets(ctx.db, old, "lobby_casual")
+        await _bind_lobby_bets(
+            ctx.db, "ffa", old, {}, refund_all_reason="lobby_casual")
+        ctx.refund_flush = True
     for p in x_seats:
         await _asm_release_row(ctx.db, old, p["player_id"])
     if x_seats:
@@ -59756,9 +59768,9 @@ _ASM_REFORM_INSERT_SQL = """
 # information_schema in both directions; N12's column-by-column control).
 _ASM_REFORM_CLASSES = {
     "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap",
-             "same_card_rule", "is_ranked", "settings_known", "settings_changed_at",
+             "same_card_rule", "settings_known", "settings_changed_at",
              "password_hash", "kicked_steam_ids"),
-    "COPY_AND": ("kills_tiebreak", "sudden_death"),
+    "COPY_AND": ("is_ranked", "kills_tiebreak", "sudden_death"),
     "FRESH": ("id", "status", "photon_room_id", "region", "player_count", "member_ids",
               "created_at", "host_player_id", "reformed_from", "bets_disabled",
               "assembly_v1", "admission_v1", "region_why", "region_detail"),
