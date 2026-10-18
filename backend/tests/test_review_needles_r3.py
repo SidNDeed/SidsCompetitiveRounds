@@ -2716,7 +2716,10 @@ class _Reach:
     def implicit_protocol_safe(self, node, operation, owner) -> bool:
         """Whether a syntax protocol is fixed to code that cannot call an
         unresolved or imported value. The proof is deliberately narrower for
-        comparison and formatting, whose exact containers can call elements."""
+        comparison, formatting and hashing, whose exact containers can call
+        elements. Await and top-level structural patterns may trust an exact
+        builtin; hashing trusts scalars and containers that cannot inspect a
+        held value."""
         if self.builtin_scalar(node):
             return True
         if isinstance(owner, ast.Attribute):
@@ -2743,6 +2746,17 @@ class _Reach:
                 return True
         if operation == "iteration":
             return self.protocol_container(node)
+        if operation == "await":
+            return self.builtin_typed(node)
+        if operation in ("mapping pattern", "class pattern", "sequence pattern"):
+            return isinstance(self.parents.get(id(owner)), ast.match_case) and self.builtin_typed(node)
+        if operation == "hashing":
+            kinds = self.container_kinds(node)
+            if kinds and kinds <= frozenset({"dict", "list", "set"}):
+                return True                                          # exact unhashable types inspect no held value
+            values = self.receiver_initial_elements(node)
+            return kinds == frozenset({"tuple"}) and values is not None \
+                and all(self.builtin_scalar(value) for value in values)
         if operation in ("truth test", "attribute read", "unary operator", "result disposal"):
             return self.builtin_typed(node)
         if operation == "subscript read":
@@ -2931,6 +2945,25 @@ class _Reach:
             checks = [("iteration", node.value)] if node.arg is None else []
         elif family == "dictionary":
             checks = [("iteration", value) for key, value in zip(node.keys, node.values) if key is None]
+            checks += [("hashing", key) for key in node.keys if key is not None]
+        elif family == "await":
+            checks = [("await", node.value)]
+        elif family in ("mapping pattern", "class pattern", "sequence pattern"):
+            subject = self.match_subject(node)
+            checks = [] if subject is None else [(family, subject)]
+        elif family == "set hashing":
+            checks = []
+            for value in node.elts:
+                if not isinstance(value, ast.Starred):
+                    checks.append(("hashing", value))
+                    continue
+                elements = self.elements(value.value, frozenset())
+                checks += [("hashing", value.value)] if elements is None else [
+                    ("hashing", element) for element in elements]
+        elif family == "set comprehension hashing":
+            checks = [("hashing", node.elt)]
+        elif family == "dictionary comprehension hashing":
+            checks = [("hashing", node.key)]
         elif family == "assignment":
             checks = [check for target in node.targets for check in unpack_checks(target, node.value)]
         elif family == "with item":
@@ -4278,6 +4311,8 @@ _MEASURED_CLEAN = {"review_needles.py": [
         ('_derive', 'implicit binary operator through unresolved base (name, e)'),
         ('_derive', 'implicit comparison through unresolved base name'),
         ('_derive', 'implicit comparison through unresolved base name'),
+        ('_derive', "implicit hashing through unresolved base ln.rstrip('\\n')"),
+        ('_derive', 'implicit hashing through unresolved base ln.strip()'),
         ('_derive', 'implicit iteration through unresolved base os.listdir(base)'),
         ('_derive', 'implicit result disposal through unresolved base _revision(path, out)'),
         ('_derive', "implicit result disposal through unresolved base out['basename'].add(name)"),
@@ -4405,6 +4440,9 @@ _MEASURED_CLEAN = {"review_needles.py": [
         ('_meta', "implicit truth test through unresolved base set(r) <= RULE_META | {'when', 'sitting'}"),
         ('_num_tokens', 'implicit binary operator through unresolved base t[2:]'),
         ('_num_tokens', 'implicit binary operator through unresolved base v'),
+        ('_num_tokens', "implicit hashing through unresolved base '%g' % v"),
+        ('_num_tokens', "implicit hashing through unresolved base '-' + t[2:]"),
+        ('_num_tokens', 'implicit hashing through unresolved base t[1:]'),
         ('_num_tokens', 'implicit subscript read through unresolved base t'),
         ('_num_tokens', 'implicit subscript read through unresolved base t'),
         ('_num_tokens', 'implicit truth test through unresolved base isinstance(v, float) and v.is_integer()'),
@@ -4555,6 +4593,7 @@ _MEASURED_CLEAN = {"review_needles.py": [
         ('_value_needles', 'implicit binary operator through unresolved base val'),
         ('_value_needles', 'implicit binary operator through unresolved base val'),
         ('_value_needles', 'implicit comparison through unresolved base t'),
+        ('_value_needles', "implicit hashing through unresolved base ('re', p)"),
         ('_value_needles', 'implicit iteration through unresolved base _num_tokens(v)'),
         ('_value_needles', 'implicit iteration through unresolved base _num_tokens(x)'),
         ('_value_needles', 'implicit iteration through unresolved base _value_items(doc, tables)'),
@@ -4632,6 +4671,8 @@ _MEASURED_CLEAN = {"review_needles.py": [
         ('packet', 'implicit comparison through unresolved base parts[0]'),
         ('packet', 'implicit comparison through unresolved base paths'),
         ('packet', 'implicit comparison through unresolved base {os.path.basename(d) for d, _h in docs}'),
+        ('packet', 'implicit hashing through unresolved base os.path.basename(d)'),
+        ('packet', 'implicit hashing through unresolved base os.path.basename(d)'),
         ('packet', 'implicit iteration through unresolved base f'),
         ('packet', "implicit iteration through unresolved base p.split('/')"),
         ('packet', 'implicit iteration through unresolved base pins[rel]'),
@@ -4695,6 +4736,7 @@ _MEASURED_CLEAN = {"review_needles.py": [
         ('seal_verify', 'implicit comparison through unresolved base corpus_digest(sealed)'),
         ('seal_verify', 'implicit comparison through unresolved base cur[k]'),
         ('seal_verify', 'implicit comparison through unresolved base int(lines[2].split()[1])'),
+        ('seal_verify', 'implicit hashing through unresolved base r[0]'),
         ('seal_verify', 'implicit iteration through unresolved base lines[3:]'),
         ('seal_verify', "implicit iteration through unresolved base ln.split(' ', 2)"),
         ('seal_verify', 'implicit iteration through unresolved base now'),
@@ -4772,6 +4814,11 @@ _IMPLICIT_PROTOCOL_DISPATCH = {
     ast.For: "iteration", ast.AsyncFor: "iteration", ast.comprehension: "comprehension",
     ast.YieldFrom: "yield from", ast.Starred: "starred", ast.keyword: "keyword",
     ast.Dict: "dictionary", ast.Assign: "assignment", ast.withitem: "with item",
+    ast.Await: "await",
+    ast.MatchMapping: "mapping pattern", ast.MatchClass: "class pattern",
+    ast.MatchSequence: "sequence pattern",
+    ast.Set: "set hashing", ast.SetComp: "set comprehension hashing",
+    ast.DictComp: "dictionary comprehension hashing",
     ast.Compare: "comparison",
     ast.If: "truth", ast.While: "truth", ast.Assert: "truth", ast.IfExp: "truth", ast.BoolOp: "boolean",
     ast.match_case: "match guard",
@@ -4882,6 +4929,11 @@ def _namespace_reach(tree, names, file="<source>") -> list:
     reuses exact-builtin, literal and exact-receiver proofs without changing
     explicit-call masks or result provenance. A method such as clear that
     drops held references before returning remains outside receiver blindness.
+    Fix pass eighteen extends that exact-class dispatcher to await, mapping,
+    class and sequence patterns, and hashing by set elements and dictionary
+    keys, including comprehensions. Exact scalars stay clean; an exact
+    unhashable container cannot inspect a held value, while tuple hashing can
+    do so and is admitted only when every visible element is scalar.
     Fix pass 9's _manager_rebinds still runs beside it; later passes retain
     the namespace operation named by an import (from os import __dict__)."""
     r = _Reach(tree, names)
@@ -5387,7 +5439,8 @@ def test_m5_fix15_f_element_blind_receiver_controls_stay_trusted():
               '    {}.update({"key": obj})\n'
               "    [obj].append(extra)\n    [obj].extend(())\n    [obj].insert(False, False)\n"
               "    [obj].reverse()\n    [obj].pop()\n    {obj}.pop()\n    {obj: None}.popitem()\n")
-    assert not _fix15_rows(source)
+    hashing = "implicit hashing through unresolved base obj"
+    assert _fix15_rows(source) == [hashing] * source.count("{obj")
     dunder_rows = _fix15_rows("def f(obj):\n    [obj].__len__()\n    [obj].__iter__()\n")
     assert set(dunder_rows) == {
         "call of namespace-reaching [obj].__len__",
@@ -6023,3 +6076,50 @@ def test_m5_fix18_b_alias_delivered_bool_base_controls_keep_prior_outcomes():
     expected = "call of protocol-running callable C through unresolved base obj"
     assert _fix15_rows(literal_list) == [expected]
     assert _fix15_rows(literal_dict) == [expected]
+
+
+def test_m5_fix18_c_await_patterns_and_collection_hashing_are_rows():
+    cases = {
+        "await": ("async def f(obj):\n    stored = await obj\n",
+                  "implicit await through unresolved base obj"),
+        "mapping_pattern": ("def f(obj):\n    match obj:\n        case {False: _}:\n            pass\n",
+                            "implicit mapping pattern through unresolved base obj"),
+        "class_pattern": ("from helper import C\ndef f(obj):\n    match obj:\n"
+                          "        case C(value):\n            pass\n",
+                          "implicit class pattern through unresolved base obj"),
+        "sequence_pattern": ("def f(obj):\n    match obj:\n        case [value]:\n            pass\n",
+                             "implicit sequence pattern through unresolved base obj"),
+        "set_display": ("def f(obj):\n    stored = {obj}\n",
+                        "implicit hashing through unresolved base obj"),
+        "dictionary_key": ("def f(obj):\n    stored = {obj: None}\n",
+                           "implicit hashing through unresolved base obj"),
+        "set_expansion": ("def f(obj):\n    stored = {*[obj]}\n",
+                          "implicit hashing through unresolved base obj"),
+        "set_comprehension": ("def f(obj):\n    stored = {obj for _value in (None,)}\n",
+                              "implicit hashing through unresolved base obj"),
+        "dictionary_comprehension": ("def f(obj):\n    stored = {obj: None for _value in (None,)}\n",
+                                     "implicit hashing through unresolved base obj"),
+        "imported_set": ("from helper import obj\nstored = {obj}\n",
+                         "implicit hashing through unresolved base obj"),
+    }
+    for name, (source, expected) in cases.items():
+        assert _fix15_rows(source) == [expected], name
+
+
+def test_m5_fix18_d_await_pattern_and_hashing_controls_stay_exact():
+    source = ("async def awaiting(obj):\n    stored = await [obj]\n    scalar = await False\n"
+              "def patterns(obj):\n    match False:\n        case {False: _}:\n            pass\n"
+              "    match False:\n        case int():\n            pass\n"
+              "    match False:\n        case []:\n            pass\n"
+              "    match {False: obj}:\n        case {False: _}:\n            pass\n"
+              "    match [obj]:\n        case list():\n            pass\n"
+              "    match [obj]:\n        case [value]:\n            pass\n"
+              "    stored = {[obj]}\n    stored = {[obj]: None}\n"
+              "    stored = {*[[obj]]}\n    stored = {*(False,)}\n"
+              "    stored = {[obj] for _value in (None,)}\n"
+              "    stored = {[obj]: None for _value in (None,)}\n"
+              "    stored = {False}\n    stored = {False: None}\n"
+              "    stored = {False for _value in (None,)}\n"
+              "    stored = {False: None for _value in (None,)}\n"
+              "    match obj:\n        case _ if obj is False:\n            pass\n")
+    assert not _fix15_rows(source)
