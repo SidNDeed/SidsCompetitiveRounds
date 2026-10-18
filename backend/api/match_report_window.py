@@ -155,6 +155,7 @@ async def fresh_class_c_steams(db, *, room, game_id, member_ids, now):
         " WHERE m.room_name = CAST(:room AS varchar)"
         "   AND m.player_id = ANY(CAST(:ids AS uuid[]))"
         "   AND m.beat_at > CAST(:now AS timestamptz) - make_interval(secs => CAST(:f AS integer))"
+        "   AND m.beat_at <= CAST(:now AS timestamptz)"
         "   AND NOT EXISTS (SELECT 1 FROM match_seat_holds h"
         "                    WHERE h.room_name = m.room_name AND h.game_id = CAST(:g AS uuid)"
         "                      AND h.player_id = m.player_id AND h.entered_at IS NOT NULL)"),

@@ -439,6 +439,28 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
                 " FROM match_report_journal WHERE room_name = $1 AND game_id = $2", room, g)
             assert (stored["proof"], stored["state"]) == ("A", "settled")
 
+            # M5: a lower Steam id whose beat is later than the receipt clock
+            # cannot retroactively block the reporter present at that clock.
+            room = "team_r" + uuid.uuid4().hex[:8]
+            g = await _window_game(conn, "team", room)
+            receipt = await conn.fetchval("SELECT clock_timestamp()")
+            for i, beat_at in ((0, receipt + timedelta(seconds=1)), (1, receipt)):
+                await conn.execute(
+                    "INSERT INTO match_seat_presence"
+                    " (room_name, player_id, mode, series_id, present_at, beat_at)"
+                    " VALUES ($1, $2, 'team', gen_random_uuid(), $3, $4)",
+                    room, seats[i][0], receipt, beat_at)
+            before = len(settled)
+            async with sm() as db:
+                answer = await mrw.receive(
+                    db, mode="team", room=room, game_id=g, reported_game_id=g,
+                    reporter_id=seats[1][0], reporter_steam=seats[1][1], payload="{}",
+                    member_ids=ids, now=receipt, settle=stub)
+                await db.commit()
+            assert answer == {"status": "settled", "cls": "c"}
+            assert len(settled) == before + 1
+            assert settled[-1]["reporter_steam"] == seats[1][1]
+
             for operation in ("settle", "receive", "release", "supersede"):
                 room = "m2_%s_%s" % (operation, uuid.uuid4().hex[:8])
                 game_id = await _window_game(conn, "team", room)
