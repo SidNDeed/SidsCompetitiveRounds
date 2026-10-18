@@ -40283,6 +40283,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
             "SELECT 1 FROM ffa_lobbies WHERE id = :lid FOR NO KEY UPDATE"
         ), {"lid": _lid})
     await _rdm_delete_player(db, pid, steam_id, _rdm_active)
+    # Stage 2 (NX6): the report half before the series locks below.
+    await _s2_delete_reports(db, pid, steam_id)
     # Round-15 find 2: the SAME series-first order for team and OVT — the
     # completion paths lock series (FOR UPDATE) then members
     # (_lock_queue_rows_ordered), so deleting queue rows first and updating
@@ -40309,6 +40311,8 @@ async def delete_player_data(steam_id: str, request: Request, sig: str = Query(.
         await db.execute(text(
             "SELECT 1 FROM ovt_lobbies WHERE id = :lid FOR NO KEY UPDATE"
         ), {"lid": _lid})
+    # Stage 2 (NX6): the hold half, after the series and lobby locks above.
+    await _s2_delete_holds(db, pid, steam_id)
     _discovered = {"team_queue": {str(s) for s in _grp},
                    "ovt_queue": {str(s) for s in _ovt_grp},
                    "ffa_queue": {str(s) for s in _ffa_grp}}
@@ -49081,6 +49085,76 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     print(f"[OVT-CONTINUATION] created {new_id} for {steams} room={req.room_id}")
     return {"series_id": str(new_id), "status": "created",
             "rules": _rules_payload(_c_rules), "rules_prop": _rules_prop(_c_rules)}
+
+
+# -- Deletion: the Stage 2 readmission tables of a deleted account (NX6) -------
+# In the form of the FFA S8 scrub (_rdm_delete_player): operational rows with
+# no value once the account is gone are deleted, and another player's row
+# keeps its place with this account's Steam id replaced by "deleted". Two
+# halves, so each takes its rows in the order the routes do: the report half
+# (window, then journal) runs before delete_player_data's series lock pass,
+# as every report transaction locks the window before the series; the hold
+# half runs after it, as every hold write locks the series before the hold.
+# A schema before migration 383 holds none of these tables and is left alone.
+
+async def _s2_tables_present(db) -> bool:
+    return (await db.execute(text(
+        "SELECT to_regclass('match_seat_holds')"))).scalar() is not None
+
+
+async def _s2_delete_reports(db, pid, steam_id) -> None:
+    """The report half: the account's own journal rows are deleted, another
+    reporter's payload keeps its row with this Steam id replaced, and a
+    window this account settled keeps its result with settled_reporter_id
+    NULL."""
+    if not await _s2_tables_present(db):
+        return
+    await db.execute(text(
+        "UPDATE match_report_windows SET settled_reporter_id = NULL"
+        " WHERE settled_reporter_id = CAST(:pid AS uuid)"), {"pid": str(pid)})
+    await db.execute(text(
+        "DELETE FROM match_report_journal WHERE reporter_id = CAST(:pid AS uuid)"),
+        {"pid": str(pid)})
+    await db.execute(text(
+        "UPDATE match_report_journal"
+        "   SET payload = CAST(replace(CAST(payload AS text), CAST(:q AS text),"
+        "                              CAST(:t AS text)) AS jsonb)"
+        " WHERE strpos(CAST(payload AS text), CAST(:q AS text)) > 0"),
+        {"q": _json.dumps(str(steam_id)), "t": _json.dumps("deleted")})
+
+
+async def _s2_delete_holds(db, pid, steam_id) -> None:
+    """The hold half: a live hold the account holds or opened ends
+    (member_deleted: the seat cannot return), then every hold naming the
+    account is deleted with its attempt rows and open-attempt rows, its own
+    presence rows are deleted, and another fighter's beat keeps its row
+    with this Steam id replaced in what it saw."""
+    if not await _s2_tables_present(db):
+        return
+    ids = {"pid": str(pid)}
+    await db.execute(text(
+        "UPDATE match_seat_holds SET closed_at = clock_timestamp(),"
+        "       closed_reason = 'member_deleted'"
+        " WHERE closed_at IS NULL"
+        "   AND (player_id = CAST(:pid AS uuid) OR opener_player_id = CAST(:pid AS uuid))"),
+        ids)
+    holds = ("(SELECT id FROM match_seat_holds WHERE player_id = CAST(:pid AS uuid)"
+             " OR opener_player_id = CAST(:pid AS uuid))")
+    await db.execute(text("DELETE FROM match_hold_attempts WHERE hold_id IN " + holds), ids)
+    await db.execute(text(
+        "DELETE FROM match_hold_open_attempts WHERE held_player_id = CAST(:pid AS uuid)"
+        "    OR opener_player_id = CAST(:pid AS uuid) OR hold_id IN " + holds), ids)
+    await db.execute(text(
+        "DELETE FROM match_seat_holds WHERE player_id = CAST(:pid AS uuid)"
+        "    OR opener_player_id = CAST(:pid AS uuid)"), ids)
+    await db.execute(text(
+        "DELETE FROM match_seat_presence WHERE player_id = CAST(:pid AS uuid)"), ids)
+    await db.execute(text(
+        "UPDATE match_seat_presence"
+        "   SET seen = CAST(replace(CAST(seen AS text), CAST(:q AS text),"
+        "                           CAST(:t AS text)) AS jsonb)"
+        " WHERE strpos(CAST(seen AS text), CAST(:q AS text)) > 0"),
+        {"q": _json.dumps(str(steam_id)), "t": _json.dumps("deleted")})
 
 
 # -- Stage 2 report windows (design V3 S5, NX4) --------------------------------

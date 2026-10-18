@@ -27,6 +27,7 @@ MAIN = rc.MAIN
 WT = "test_match_hold_wiring_pg.py::"
 DT = "test_match_hold_discovery_pg.py::"
 RT = "test_match_hold_reports_pg.py::"
+XT = "test_match_hold_deletion_pg.py::"
 
 ROWS = [
     # NX1: the 1v2 Start issues its room without latching the hold flag.
@@ -93,6 +94,13 @@ ROWS = [
      "node": RT + "test_t5_7_held_game_over_settles_at_entry_and_is_superseded_at_lapse",
      "tag": "T5.7 held",
      "mutant": [(MAIN, '        held=_held)\n', '        held=False)\n', 1)]},
+    # NX6: the deletion omits one table (the player's own presence rows).
+    {"row": "M6.1", "node": XT + "test_nx6_deletion_leaves_no_stage2_row_naming_the_player",
+     "tag": "NX6 no identity",
+     "mutant": [(MAIN,
+                 '    await db.execute(text(\n'
+                 '        "DELETE FROM match_seat_presence WHERE player_id = CAST(:pid AS uuid)"), ids)\n',
+                 '', 1)]},
 ]
 for _row in ROWS:
     if "twin" not in _row:
