@@ -39,6 +39,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\DcReporterElection.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaReadmitEntryRules.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaLateRules.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaReadmitRules.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Program*.cs" />
   </ItemGroup>
 

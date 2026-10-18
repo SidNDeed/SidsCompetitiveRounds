@@ -42,6 +42,7 @@ PIECES = {
     "KX2": ("t27_",),
     "KX3": ("t35_", "tx3_"),
     "KX4": ("t34_", "tx4_"),
+    "KX5": ("t41_", "t42_", "t44_", "tx5_"),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -232,6 +233,27 @@ MUTANTS = [
     ("MX4.3", "KX4", "rules", [
         ("            list.RemoveAll(p => p == null || dead(p));\n", "")],
      "t34_low_slot", "t34_high_slot"),
+    # KX5, the record (V3 M4.1, M4.2, M4.3, M4.4, M4.7).
+    ("M4.1", "KX5", "rules", [
+        ("internal static bool BuildsRecord(bool flagged, bool holdLive) { return flagged; }",
+         "internal static bool BuildsRecord(bool flagged, bool holdLive) { return flagged && holdLive; }")],
+     "t41_twin_run", "tx5_off_codec"),
+    ("M4.2", "KX5", "rules", [
+        ("return r != null ? r.FirstOf(slot) : null;",
+         "return r != null && r.ListOf(slot) != null && r.ListOf(slot).Count > 1 ? r.ListOf(slot)[1] : null;")],
+     "t41_twin_run", "t42_ledger"),
+    ("M4.3", "KX5", "rules", [
+        ("FfaReadmitRules.AdoptRecord(rec, spend, setDrawIndex);",
+         "FfaReadmitRules.AdoptRecord(rec, new FfaReadmitRules.SpendState(), setDrawIndex);")],
+     "t42_ledger", "tx5_off_codec"),
+    ("M4.4", "KX5", "rules", [
+        ("FfaReadmitRules.AdoptRecord(rec, spend, setDrawIndex);", ""),
+        ("internal static void NoteGrantApplied(FfaReadmitRules.SpendState spend, string card) { }",
+         "internal static void NoteGrantApplied(FfaReadmitRules.SpendState spend, string card) { if (card != null) spend.Ledger.Add(card); }")],
+     "t42_ledger", "tx5_off_codec"),
+    ("M4.7", "KX5", "rules", [
+        ("if (h != null) return h;", "")],
+     "t44_rule_p_promotion", "t41_twin_run"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

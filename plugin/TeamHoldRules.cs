@@ -1153,5 +1153,104 @@ namespace CompetitiveRounds
             }
             return p;
         }
+
+
+        // ── KX5: the record (V3 S4 step 2 over the FFA P2 record) ──────────
+
+        /// <summary>The pick phases of a game run at its start and after each
+        /// round, so the rounds played number them (0 at the game start).</summary>
+        internal static int PhaseOf(int r0, int r1) { return r0 + r1; }
+
+        /// <summary>S4 step 2: in a flagged room the master builds the record
+        /// of EVERY pick phase, whether or not a seat is held, so every seat
+        /// spends from one ledger at record build (the integrity bar, lesson
+        /// e: a departure changes no other list or later offer).</summary>
+        internal static bool BuildsRecord(bool flagged, bool holdLive) { return flagged; }
+
+        /// <summary>cr_toff = {G}:{phase}:{rule}:{ledger}:{entries}: the FFA P2
+        /// offer record's codec (FfaReadmitRules.Encode and Parse) with G in
+        /// the epoch field, the phase in the game field and no cycle field.
+        /// Null when the record does not encode (a name or G carrying a
+        /// reserved separator): no record is written, which is today.</summary>
+        internal static string EncodeOff(FfaReadmitRules.FfaOfferRecord r)
+        {
+            if (r == null) return null;
+            string v = FfaReadmitRules.Encode(r);
+            if (v == null) return null;
+            var f = v.Split(new[] { ':' }, 4);
+            return f.Length == 4 ? f[0] + ":" + f[1] + ":" + f[3] : null;
+        }
+
+        internal static FfaReadmitRules.FfaOfferRecord ParseOff(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return null;
+            var f = v.Split(new[] { ':' }, 3);
+            return f.Length == 3 ? FfaReadmitRules.Parse(f[0] + ":" + f[1] + ":0:" + f[2]) : null;
+        }
+
+        /// <summary>The record of (G, phase) in a cr_toff value, or null.</summary>
+        internal static FfaReadmitRules.FfaOfferRecord OffFor(string off, string g, int phase)
+        {
+            var r = ParseOff(off);
+            return r != null && r.Epoch == g && r.Game == phase ? r : null;
+        }
+
+        /// <summary>The record over the phase's picker set: rule s when the
+        /// same-card rule runs (FfaReadmitRules.BuildRuleS: the shared entry
+        /// at the deal's index, DeckLegal over the S0 logical deck, the
+        /// no-repeat test reading the replicated ledger, each substitute
+        /// spent as it is chosen), rule p when it is off (the master's private
+        /// roll in the deck form). <paramref name="kOf"/> is the draw index
+        /// the slot's deal of this phase consumes. Null when the state it
+        /// needs is missing: no record, no card.</summary>
+        internal static FfaReadmitRules.FfaOfferRecord BuildOff(string g, int phase, IList<int> pickers, bool sameCards,
+                                                                Func<int, int> kOf, Func<int, IList<string>> deckOf,
+                                                                FfaReadmitRules.OfferPool pool, FfaReadmitRules.SeqState seq,
+                                                                int count, Func<string> roll, FfaReadmitRules.SpendState spend)
+        {
+            if (string.IsNullOrEmpty(g) || pickers == null || pool == null || spend == null) return null;
+            if (sameCards)
+                return seq == null ? null : FfaReadmitRules.BuildRuleS(g, phase, 0, pickers, kOf, deckOf, pool, seq, spend);
+            return roll == null ? null : FfaReadmitRules.BuildRuleP(g, phase, 0, pickers, deckOf, pool, count, roll, spend);
+        }
+
+        /// <summary>The master's record of (G, phase): one already readable
+        /// is ADOPTED and never rewritten (a promoted master); otherwise
+        /// <paramref name="build"/> runs once.</summary>
+        internal static FfaReadmitRules.FfaOfferRecord MasterOff(string held, string g, int phase, Func<FfaReadmitRules.FfaOfferRecord> build)
+        {
+            var h = OffFor(held, g, phase);
+            if (h != null) return h;
+            return build != null ? build() : null;
+        }
+
+        /// <summary>Every client, as the record arrives (the master as it
+        /// publishes): the ledger becomes the record's, and under rule s every
+        /// listed slot's draw index becomes the record's k (FfaReadmitRules.
+        /// AdoptRecord). The ledger resets at game start with the engine's.</summary>
+        internal static void AdoptOff(FfaReadmitRules.FfaOfferRecord rec, FfaReadmitRules.SpendState spend, Action<int, int> setDrawIndex)
+        {
+            FfaReadmitRules.AdoptRecord(rec, spend, setDrawIndex);
+        }
+
+        /// <summary>A grant applied: the ledger was spent at build, so this
+        /// changes nothing (FfaReadmitRules.NoteApplied, V3 P2 step 3).</summary>
+        internal static void NoteGrantApplied(FfaReadmitRules.SpendState spend, string card) { }
+
+        /// <summary>Entry 0 of the slot's list in the record of (G, phase):
+        /// the card a held seat is granted. Null with no record.</summary>
+        internal static string Entry0Of(string off, string g, int phase, int slot)
+        {
+            var r = OffFor(off, g, phase);
+            return r != null ? r.FirstOf(slot) : null;
+        }
+
+        /// <summary>The owner screen (S4 step 3): a present owner's deal shows
+        /// its record list, entry 0 included. Null with no record.</summary>
+        internal static List<string> ScreenOf(string off, string g, int phase, int slot)
+        {
+            var r = OffFor(off, g, phase);
+            return r != null ? r.ListOf(slot) : null;
+        }
     }
 }
