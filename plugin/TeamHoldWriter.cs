@@ -82,7 +82,7 @@ namespace CompetitiveRounds
                     int i = old.LastIndexOf(':');
                     prev = i > 0 ? old.Substring(0, i) : null;
                 }
-                TeamHoldNet.Call("POST", TeamHoldNet.PathGameStart, TeamHoldNet.GameStartBody(pin.Mode, pin.SeriesId, room, prev), (st, body) =>
+                TeamHoldNet.Call("POST", TeamHoldNet.PathGameStart, TeamHoldNet.GameStartBody(MatchTracker.LocalSteamId, pin.Mode, pin.SeriesId, room, prev), (st, body) =>
                 {
                     try
                     {
@@ -619,7 +619,7 @@ namespace CompetitiveRounds
             }
             else if (!string.IsNullOrEmpty(holdId))
             {
-                TeamHoldNet.Call("POST", TeamHoldNet.PathEnd(holdId), TeamHoldNet.EndBody(reason), (st, body) => { });
+                TeamHoldNet.Call("POST", TeamHoldNet.PathEnd(holdId), TeamHoldNet.EndBody(MatchTracker.LocalSteamId, reason), (st, body) => { });
             }
             TeamHold.Expire(reason);
         }
@@ -653,7 +653,7 @@ namespace CompetitiveRounds
             if (now - _lastVerify < VerifyS) return;
             _lastVerify = now;
             int gen = _readGen;
-            TeamHoldNet.Call("GET", TeamHoldNet.PathState(holdId), null, (st, body) =>
+            TeamHoldNet.Call("GET", TeamHoldNet.PathState(holdId, MatchTracker.LocalSteamId), null, (st, body) =>
             {
                 if (gen != _readGen) return;
                 TeamHoldNet.StateAnswer a;
@@ -674,8 +674,10 @@ namespace CompetitiveRounds
                     if (a == null || RoomActors.IsSpectatorReplicated(a)) continue;
                     seen.Add(new KeyValuePair<int, string>(a.ActorNumber, TeamHoldWriter.PlayerProp(a, "u_id") ?? ""));
                 }
+                var pin = TeamHoldRules.PinFor(room);
                 TeamHoldNet.Call("POST", TeamHoldNet.PathBeat,
-                    TeamHoldNet.BeatBody(room, PhotonNetwork.LocalPlayer.ActorNumber, seen, LastBoundaryDigest), (st, body) => { });
+                    TeamHoldNet.BeatBody(MatchTracker.LocalSteamId, pin != null ? pin.Mode : null, pin != null ? pin.SeriesId : null,
+                                         room, PhotonNetwork.LocalPlayer.ActorNumber, seen, LastBoundaryDigest), (st, body) => { });
             }
             catch { }
         }
@@ -749,7 +751,8 @@ namespace CompetitiveRounds
                             Perform(w.OnOpen(Now, TeamHoldNet.NoTransport, null), cut);
                             break;
                         }
-                        string body = TeamHoldNet.OpenBody(w.RequestId, cut.Mode, cut.Room, cut.G, cut.LeaverUid, cut.Slot, cut.Team, me, sig);
+                        string body = TeamHoldNet.OpenBody(w.RequestId, cut.Mode, cut.Room, cut.G, cut.LeaverUid, cut.Slot, cut.Team, me,
+                                                              cut.P0, cut.P1, sig);
                         TeamHoldNet.Call("POST", TeamHoldNet.PathOpen, body, (st, rb) =>
                         {
                             TeamHoldNet.OpenAnswer oa;
@@ -763,7 +766,7 @@ namespace CompetitiveRounds
                         // The writer mirrors from its own reads; the envelope
                         // of this client is verified only by VerifyRead.
                         var w = _writer;
-                        TeamHoldNet.Call("GET", TeamHoldNet.PathState(a.Key.HoldId), null, (st, rb) =>
+                        TeamHoldNet.Call("GET", TeamHoldNet.PathState(a.Key.HoldId, MatchTracker.LocalSteamId), null, (st, rb) =>
                         {
                             TeamHoldNet.StateAnswer sa;
                             if (!TeamHoldNet.TryParseState(st, rb, out sa)) return;
@@ -774,7 +777,7 @@ namespace CompetitiveRounds
                     case TeamHoldRules.Writer.Op.GetByRoom:
                     {
                         var w = _writer;
-                        TeamHoldNet.Call("GET", TeamHoldNet.PathByRoom(cut.Room, cut.G), null, (st, rb) =>
+                        TeamHoldNet.Call("GET", TeamHoldNet.PathByRoom(cut.Room, cut.G, MatchTracker.LocalSteamId), null, (st, rb) =>
                         {
                             TeamHoldNet.StateAnswer sa;
                             TeamHoldNet.TryParseState(st, rb, out sa);
@@ -785,7 +788,7 @@ namespace CompetitiveRounds
                     case TeamHoldRules.Writer.Op.PostEnd:
                     {
                         var w = _writer;
-                        TeamHoldNet.Call("POST", TeamHoldNet.PathEnd(a.Key.HoldId), TeamHoldNet.EndBody(a.Reason), (st, rb) =>
+                        TeamHoldNet.Call("POST", TeamHoldNet.PathEnd(a.Key.HoldId), TeamHoldNet.EndBody(MatchTracker.LocalSteamId, a.Reason), (st, rb) =>
                         {
                             if (w == _writer) Perform(w.OnEndAnswer(Now), cut);
                         });

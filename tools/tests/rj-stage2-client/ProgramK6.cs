@@ -88,7 +88,7 @@ namespace CompetitiveRounds.Stage2Harness
                 {
                     N.TryParseClaim(200, ClaimBody, out ok);
                     N.TryParseClaim(409, "{\"reason\":\"lapsed\"}", out refused);
-                    N.TryParseClaim(200, "{\"room_name\":\"team_x\",\"slot\":1,\"game_id\":\"g-7\"}", out bad);
+                    N.TryParseClaim(200, "{\"status\":\"claimed\",\"room_name\":\"team_x\",\"slot\":1,\"game_id\":\"g-7\"}", out bad);
                 });
                 return All(Expect("ok", ok != null && ok.Ok, true), Expect("refused", refused != null && !refused.Ok, true),
                            Expect("malformed", bad != null && !bad.Ok, true), ExpectLines(got, "[HOLD] claimed slot=1 g=g-7"));
