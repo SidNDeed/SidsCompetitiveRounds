@@ -30,6 +30,13 @@ sys.path.insert(0, HERE)
 SRC = os.environ.get("MATCH_HOLD_SRC") or ""
 if SRC:
     sys.path.insert(0, SRC)
+    # A file collected earlier may have imported main, which caches the
+    # tracked Stage 2 modules (NX1): load the named copies instead.
+    for _name in ("match_report_window", "match_hold"):
+        _m = sys.modules.get(_name)
+        if _m is not None and os.path.normcase(os.path.dirname(os.path.abspath(
+                _m.__file__))) != os.path.normcase(os.path.normpath(SRC)):
+            sys.modules.pop(_name, None)
 
 import match_report_window as mrw  # noqa: E402
 

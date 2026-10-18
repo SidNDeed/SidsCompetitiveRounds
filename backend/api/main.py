@@ -5835,6 +5835,13 @@ app.add_middleware(
 # Tournament endpoints (router module).
 from tournaments import router as tournaments_router
 app.include_router(tournaments_router)
+# 2v2 and 1v2 mid-game readmission (Stage 2 design V3, NX1): the hold,
+# claim, bind and entry routes under /api/v1/match. The module reaches main's
+# helpers by late imports inside its functions. Main's own call sites reach
+# the module through this bound name, so a test that loads a copy of the
+# module rebinds the one name.
+import match_hold as _match_hold
+app.include_router(_match_hold.router)
 
 # Opt-in automatic post-match log upload (v1.41.0 Item 3). LIVE, not inert:
 # the client half is in the v1.41.0 client lane build 46f54d4 on Sid's desktop
@@ -44241,6 +44248,28 @@ def _team_balance_rating(rating: float, completed_series: int, fallback_rating: 
     return fallback_rating
 
 
+def _hold_caps(req) -> str:
+    """The capability list a team or 1v2 join or lobby body advertised (V3 S1
+    step 1), stored on the queue row as sent, bounded to the column. The
+    latch (match_hold._hold_latch) reads it at the room issue; a body
+    without it stores '' and latches the room unflagged, the result of
+    today."""
+    return str(getattr(req, "caps", "") or "")[:64]
+
+
+def _continuation_hold(prior, room):
+    """(hold_v2, hold_room) that a team or 1v2 continuation copies in its
+    insert (V3 S1 step 2): the prior series row's flag when that row was
+    latched for this same room, else false; hold_room names the room, so a
+    later latch call for it is inert (a written flag never changes for its
+    room). An empty room latches nothing: (false, NULL)."""
+    room = (room or "").strip()
+    if not room:
+        return False, None
+    same = (prior.get("hold_room") or "") == room
+    return bool(same and prior.get("hold_v2")), room
+
+
 @app.post("/api/v1/team/queue/join", tags=["Team Queue"])
 async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """Upsert player into team_queue. Snapshots their 2v2 + 1v1 ratings so the
@@ -44336,12 +44365,14 @@ async def team_queue_join(req: TeamQueueJoinRequest, request: Request, db: Async
         # frozen record only ever means something next to a match.
         mod_version=_request_mod_version(request),
         rules=None,
+        caps=_hold_caps(req),
     ).on_conflict_do_update(
         index_elements=[TeamQueue.player_id],
         set_={
             "status": "searching",
             "mod_version": _request_mod_version(request),
             "rules": None,
+            "caps": _hold_caps(req),
             "rating": rating_2v2,
             "rating_deviation": rd_2v2,
             "completed_series": completed,
@@ -44865,6 +44896,11 @@ async def team_queue_poll(steam_id: str, request: Request,
                     {"rn": room_name, "rr": chosen_region, "sid": me["series_id"],
                      "has_rules": me["rules"] is not None, "rules": _rules_json(rules)},
                 )
+                # Stage 2 hold flag (V3 S1 step 2), in the transaction that
+                # issues the room: hold_room = this room, hold_v2 = every
+                # member's queue row carries rjs1. This is the team issue of
+                # the queue, the hosted Start and the relock alike.
+                await _match_hold._hold_latch(db, "team", me["series_id"], room_name)
                 # ISSUING A ROOM ATTEMPTS THE DEFERRAL-MARKER CLEAR, on the one
                 # statement in this file that stamps room_issued_at. What that
                 # buys is an ATTEMPT and not an invariant: the helper clears
@@ -44928,6 +44964,13 @@ async def team_queue_poll(steam_id: str, request: Request,
                 room_out = me["room_name"]
                 region_out = me["room_region"]
                 rules = _rules_normalize(me["rules"])
+            # The hold flag the series row holds for the room this answer
+            # names (V3 S1 step 2): false for any other room or none.
+            _hold_row = (await db.execute(
+                text("SELECT hold_v2, hold_room FROM team_series WHERE id = :sid"),
+                {"sid": me["series_id"]})).mappings().first()
+            hold_out = bool(_hold_row is not None and _hold_row["hold_v2"]
+                            and room_out and _hold_row["hold_room"] == room_out)
 
             await db.commit()
             # Room just issued — all four are committed to a 2v2 game; drop
@@ -44951,6 +44994,7 @@ async def team_queue_poll(steam_id: str, request: Request,
                 my_ready=bool(me["ready"]),
                 rules=_rules_payload(rules),
                 rules_prop=_rules_prop(rules),
+                hold=hold_out,
             )
 
         # Matched but not all-ready
@@ -47058,6 +47102,10 @@ async def _team_relock_existing_series(db: AsyncSession, srow, member_pids,
                    dc_player_id = NULL,
                    photon_room_id = NULL,
                    room_issued_at = NULL,
+                   -- Stage 2 (V3 S1 step 2) - the hold flag goes with the room
+                   -- it was latched for; the next room issue re-judges it.
+                   hold_v2 = FALSE,
+                   hold_room = NULL,
                    spawn_confirmations = 0,
                    spawn_confirmed_by = '[]'::jsonb,
                    invalidation_reason = CASE
@@ -47740,7 +47788,8 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     # Otherwise require a recent COMPLETED series for the same four (proves this is a
     # real rematch of an ongoing sitting, not a fabricated pairing).
     prior = (await db.execute(text("""
-        SELECT id, completed_at, t1a_id, t1b_id, t2a_id, t2b_id, photon_room_id, rules
+        SELECT id, completed_at, t1a_id, t1b_id, t2a_id, t2b_id, photon_room_id, rules,
+               hold_v2, hold_room
           FROM team_series
          WHERE status = 'completed'
            AND t1a_id = ANY(:ids) AND t1b_id = ANY(:ids)
@@ -47789,17 +47838,24 @@ async def team_series_continuation(req: _TeamContinuationReq, db: AsyncSession =
     # Room rules (r1): a continuation is the SAME sitting in the SAME room,
     # so the new series carries the prior's frozen record — nobody re-chose
     # anything. A prior born before the record existed played the defaults.
+    # Stage 2 hold flag (V3 S1 step 2): a continuation is the same room, so
+    # its insert copies the flag its prior row holds for that room; a prior
+    # latched for another room or none gives false (the result of today).
+    _c_room = (req.room_id or "")[:64]
+    _c_hold = _continuation_hold(prior, _c_room)
     await db.execute(text("""
         INSERT INTO team_series (id, t1a_id, t1b_id, t2a_id, t2b_id,
-                                 status, was_auto_balanced, photon_room_id, region, created_at, rules)
+                                 status, was_auto_balanced, photon_room_id, region, created_at, rules,
+                                 hold_v2, hold_room)
         VALUES (:sid, :t1a, :t1b, :t2a, :t2b, 'active', false, :room, :region, NOW(),
-                CAST(:rules AS JSONB))
+                CAST(:rules AS JSONB), CAST(:hv2 AS boolean), CAST(:hroom AS varchar))
     """), {
         "sid": new_id,
         "t1a": id_by_steam[t1[0]], "t1b": id_by_steam[t1[1]],
         "t2a": id_by_steam[t2[0]], "t2b": id_by_steam[t2[1]],
-        "room": (req.room_id or "")[:64], "region": (req.region or "")[:8] or None,
+        "room": _c_room, "region": (req.region or "")[:8] or None,
         "rules": _rules_json(_c_rules),
+        "hv2": _c_hold[0], "hroom": _c_hold[1],
     })
     # Aug 8 (Sid): a continuation is the SAME sitting — INHERIT the prior
     # series' frozen colour identity (side-swapped when the split flipped)
@@ -48121,6 +48177,7 @@ class _OvtQueueJoinReq(BaseModel):
     preferred_side: int = 0            # 0 none, 1 solo, 2 duo
     solo_extra_pick: bool = False
     hmac_signature: str | None = None
+    caps: str = ""                     # Stage 2 capability list (_hold_caps)
 
 
 @app.post("/api/v1/ovt/queue/join", tags=["1v2 Queue"])
@@ -48187,12 +48244,12 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
         INSERT INTO ovt_queue (player_id, steam_id, display_name, rating, rating_deviation,
                                completed_series, fallback_rating, region, queue_type,
                                preferred_side, solo_extra_pick, status, joined_at, last_polled,
-                               mod_version)
+                               mod_version, caps)
         VALUES (:pid, :sid, :dn, :r, :rd, :cs, :fr, :reg, 'manual', :side, :sep, 'searching', NOW(), NOW(),
-                :mv)
+                :mv, CAST(:caps AS varchar))
         ON CONFLICT (player_id) DO UPDATE SET
             display_name = EXCLUDED.display_name, region = EXCLUDED.region,
-            mod_version = EXCLUDED.mod_version,
+            mod_version = EXCLUDED.mod_version, caps = EXCLUDED.caps,
             preferred_side = EXCLUDED.preferred_side, solo_extra_pick = EXCLUDED.solo_extra_pick,
             -- Bug #109 (same contract as the FFA join): rejoin of a SEARCHING
             -- row resets the search clock and rating snapshot; LOCKED rows
@@ -48210,7 +48267,8 @@ async def ovt_queue_join(req: _OvtQueueJoinReq, request: Request, db: AsyncSessi
                              THEN NOW() ELSE ovt_queue.joined_at END
     """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64], "r": rating,
            "rd": rd, "cs": cs, "fr": fallback, "reg": (req.region or "")[:8] or None,
-           "side": side, "sep": req.solo_extra_pick, "mv": _request_mod_version(request)})
+           "side": side, "sep": req.solo_extra_pick, "mv": _request_mod_version(request),
+           "caps": _hold_caps(req)})
     await db.commit()
     n = (await db.execute(text("SELECT COUNT(*) FROM ovt_queue WHERE status = 'searching'"))).scalar() or 0
     return {"status": "ok", "queue_count": int(n), "preferred_side": side}
@@ -48712,6 +48770,9 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     """), {"sid": series_id, "solo": solo["player_id"], "da": duo[0]["player_id"],
            "db": duo[1]["player_id"], "sep": extra_pick, "room": room, "reg": (region or "us")[:8],
            "rules": _rules_json(_lobby_rules)})
+    # Stage 2 (V3 S1 step 2): this insert issues the room; latch its hold
+    # flag from the three queue rows' caps in the same transaction.
+    await _match_hold._hold_latch(db, "ovt", series_id, room)
     for r in lobby:
         this_side = 1 if r["player_id"] == solo["player_id"] else 2
         await db.execute(text("""
@@ -48761,6 +48822,8 @@ async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str,
         "rules": _rules_payload(_rules),
         "rules_prop": _rules_prop(_rules),
         "solo_extra_pick": bool(s["solo_extra_pick"]),
+        # Stage 2 (V3 S1): the flag latched for THIS room (PinFromJoin).
+        "hold": bool(s["hold_v2"]) and s["hold_room"] == s["photon_room_id"],
         "solo": {"steam_id": s["solo_sid"], "display_name": s["solo_name"]},
         "duo": [
             {"steam_id": s["da_sid"], "display_name": s["da_name"]},
@@ -48836,7 +48899,7 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     # match pipeline would silently stop recording (review finding).
     prior = (await db.execute(text("""
         SELECT completed_at, created_at, solo_id, duo_a_id, duo_b_id, solo_extra_pick,
-               photon_room_id, rules
+               photon_room_id, rules, hold_v2, hold_room
           FROM ovt_series
          WHERE status IN ('completed', 'canceled', 'cancelled')
            AND solo_id = ANY(:ids) AND duo_a_id = ANY(:ids) AND duo_b_id = ANY(:ids)
@@ -48868,15 +48931,20 @@ async def ovt_series_continuation(req: _TeamContinuationReq, db: AsyncSession = 
     # Room rules (r1): a continuation is the SAME sitting in the SAME room,
     # so the new series carries the prior's frozen record — nobody re-chose
     # anything. A prior born before the record existed played the defaults.
+    # Stage 2 hold flag (V3 S1 step 2): copied from the prior row for the
+    # same room (_continuation_hold), as the team continuation does.
+    _c_room = (req.room_id or "")[:64]
+    _c_hold = _continuation_hold(prior, _c_room)
     await db.execute(text("""
         INSERT INTO ovt_series (id, solo_id, duo_a_id, duo_b_id, status, is_ranked,
-                                solo_extra_pick, photon_room_id, region, created_at, rules)
+                                solo_extra_pick, photon_room_id, region, created_at, rules,
+                                hold_v2, hold_room)
         VALUES (:sid, :solo, :da, :db, 'active', false, :sep, :room, :region, NOW(),
-                CAST(:rules AS JSONB))
+                CAST(:rules AS JSONB), CAST(:hv2 AS boolean), CAST(:hroom AS varchar))
     """), {"sid": new_id, "solo": prior["solo_id"], "da": prior["duo_a_id"], "db": prior["duo_b_id"],
-           "sep": bool(prior["solo_extra_pick"]), "room": (req.room_id or "")[:64],
+           "sep": bool(prior["solo_extra_pick"]), "room": _c_room,
            "region": (req.region or "")[:8] or None,
-           "rules": _rules_json(_c_rules)})
+           "rules": _rules_json(_c_rules), "hv2": _c_hold[0], "hroom": _c_hold[1]})
     await db.commit()
     print(f"[OVT-CONTINUATION] created {new_id} for {steams} room={req.room_id}")
     return {"series_id": str(new_id), "status": "created",
@@ -51440,11 +51508,11 @@ async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_i
             _re_sep_sql = ", solo_extra_pick = :sep" if mode == "ovt" else ""
             await db.execute(text(
                 f"UPDATE {q} SET last_polled = NOW(), display_name = :dn,"
-                f"       mod_version = :mv,"
+                f"       mod_version = :mv, caps = CAST(:caps AS varchar),"
                 f"       {_re_pref_col} = :pref{_re_sep_sql}"
                 f" WHERE player_id = :pid"
             ), {"pid": player.id, "dn": (req.display_name or "Player")[:64],
-                "pref": _re_pref, "mv": mod_version,
+                "pref": _re_pref, "mv": mod_version, "caps": _hold_caps(req),
                 **({"sep": bool(getattr(req, "solo_extra_pick", False))} if mode == "ovt" else {})})
             return
         raise HTTPException(409, "Leave your current lobby first")
@@ -51474,15 +51542,16 @@ async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_i
                              completed_series, fallback_rating, region, status, series_id,
                              queue_type, {_pref_col},
                              {'solo_extra_pick, ' if mode == 'ovt' else ''}joined_at, last_polled,
-                             mod_version, seen_settings_version)
+                             mod_version, seen_settings_version, caps)
             VALUES (:pid, :sid, :dn, :r, :rd, :cs, :fr, :reg, 'lobby', :lid,
                     'manual', :pref, {':sep, ' if mode == 'ovt' else ''}NOW(), NOW(),
-                    :mv, 0)
+                    :mv, 0, CAST(:caps AS varchar))
             ON CONFLICT (player_id) DO NOTHING
             RETURNING player_id
         """), {"pid": player.id, "sid": req.steam_id, "dn": (req.display_name or "Player")[:64],
                "reg": (req.region or "")[:8] or None, "lid": lobby_id,
-               "pref": _pref_val, "sep": _sep_val, "mv": mod_version, **snap})).scalar()
+               "pref": _pref_val, "sep": _sep_val, "mv": mod_version,
+               "caps": _hold_caps(req), **snap})).scalar()
         if inserted is None:
             raise HTTPException(409, "Your queue state just changed — try again")
     else:
@@ -51495,13 +51564,14 @@ async def _lobby_enroll_caller(db: AsyncSession, mode: str, player, req, lobby_i
                    completed_series=:cs, fallback_rating=:fr, queue_type='manual',
                    {_pref_col}=:pref,
                    {'solo_extra_pick=:sep,' if mode == 'ovt' else ''}
-                   mod_version=:mv, seen_settings_version=0,
+                   mod_version=:mv, seen_settings_version=0, caps=CAST(:caps AS varchar),
                    joined_at=NOW(), last_polled=NOW()
              WHERE player_id=:pid AND status='searching'
             RETURNING player_id
         """), {"pid": player.id, "dn": (req.display_name or "Player")[:64],
                "reg": (req.region or "")[:8] or None, "lid": lobby_id,
-               "pref": _pref_val, "sep": _sep_val, "mv": mod_version, **snap})).scalar()
+               "pref": _pref_val, "sep": _sep_val, "mv": mod_version,
+               "caps": _hold_caps(req), **snap})).scalar()
         if flipped is None:
             raise HTTPException(409, "Your queue state just changed — try again")
     # Open-lobby seat: short lease renewed by this member's own poll. Taken on
@@ -51533,6 +51603,9 @@ class _LobbyCreateReq(BaseModel):
     # carried the field since 1v2 shipped; the lobby path just never mirrored
     # it. Ignored for 2v2 (no such rule).
     solo_extra_pick: bool = False
+    # Stage 2 capability list (V3 S1 step 1, _hold_caps): stored on the
+    # member's queue row by _lobby_enroll_caller for create and join alike.
+    caps: str = ""
 
 
 class _LobbyJoinReq(_LobbyCreateReq):
@@ -52642,6 +52715,10 @@ async def team_lobby_start(req: _LobbyStartReq, request: Request,
                    dc_player_id = NULL,
                    photon_room_id = NULL,
                    room_issued_at = NULL,
+                   -- Stage 2 (V3 S1 step 2) - the hold flag goes with the room
+                   -- it was latched for; the next room issue re-judges it.
+                   hold_v2 = FALSE,
+                   hold_room = NULL,
                    spawn_confirmations = 0,
                    spawn_confirmed_by = '[]'::jsonb,
                    invalidation_reason = CASE
@@ -52848,6 +52925,8 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     """), {"sid": series_id, "solo": solo["player_id"], "da": duo[0]["player_id"],
            "db": duo[1]["player_id"], "sep": extra_pick, "room": room,
            "reg": (region or "us")[:8], "rules": _rules_json(_lobby_rules)})
+    # Stage 2 (V3 S1 step 2): the 1v2 Start issues the room here; latch.
+    _start_hold = await _match_hold._hold_latch(db, "ovt", series_id, room)
     for m in live:
         this_side = 1 if m["player_id"] == solo["player_id"] else 2
         await db.execute(text("""
@@ -52873,7 +52952,8 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     _rules_admit(request, _lobby_rules)
     return {"status": "ok", "series_id": str(series_id), "lobby_id": str(lobby_id),
             "room_name": room, "room_region": (region or "us")[:8],
-            "rules": _rules_payload(_lobby_rules), "rules_prop": _rules_prop(_lobby_rules)}
+            "rules": _rules_payload(_lobby_rules), "rules_prop": _rules_prop(_lobby_rules),
+            "hold": bool(_start_hold)}
 
 
 # ── FFA host lobbies (July 29 redesign — Sid's spec) ───────────────────────

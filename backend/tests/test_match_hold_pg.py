@@ -40,7 +40,17 @@ import main  # noqa: E402
 # rj-s2s-N2-mut1).
 if SRC:
     sys.path.insert(0, SRC)
+    # main imports match_hold (and match_report_window through it) at
+    # module load since NX1, so the tracked copies are cached by now:
+    # drop them, load the named copies, and rebind main's one name.
+    for _name in ("match_report_window", "match_hold"):
+        _m = sys.modules.get(_name)
+        if _m is not None and os.path.normcase(os.path.dirname(os.path.abspath(
+                _m.__file__))) != os.path.normcase(os.path.normpath(SRC)):
+            sys.modules.pop(_name, None)
 import match_hold  # noqa: E402
+if SRC:
+    main._match_hold = match_hold
 
 SECRET = "rjs2-test-secret"
 

@@ -23,8 +23,10 @@ sys.path.insert(0, HERE)
 
 import cf_pg  # noqa: E402
 import main  # noqa: E402
-import match_hold  # noqa: E402
 import test_match_hold_pg as hold_test  # noqa: E402
+# The match_hold the hold suite loaded: the MATCH_HOLD_SRC copy when set
+# (a plain import here would bind the tracked copy main cached).
+match_hold = hold_test.match_hold
 
 
 def test_h3_every_admission_site_uses_shared_gate_recheck_and_rollback():

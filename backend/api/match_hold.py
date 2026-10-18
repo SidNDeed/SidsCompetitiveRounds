@@ -258,6 +258,21 @@ def _member_seats(mode: str, row) -> dict:
             if row[c] is not None}
 
 
+async def _roster(db: AsyncSession, mode: str, series) -> list:
+    """The pinned series roster a claim answers (V3 S1: the roster the join
+    answer pins): one {steam_id, slot, team} per seat in slot order, read
+    from the locked series row and players."""
+    seats = _member_seats(mode, series)
+    if not seats:
+        return []
+    rows = (await db.execute(text(
+        "SELECT id, steam_id FROM players WHERE id = ANY(CAST(:ids AS uuid[]))"),
+        {"ids": [str(k) for k in seats]})).mappings().all()
+    steam = {str(r["id"]): r["steam_id"] for r in rows}
+    return [{"steam_id": steam.get(str(pid)), "slot": slot, "team": team}
+            for pid, (slot, team) in sorted(seats.items(), key=lambda kv: kv[1][0])]
+
+
 # ---------------------------------------------------------------------------
 # S1. The hold flag latch (S1 step 2)
 # ---------------------------------------------------------------------------
@@ -1168,13 +1183,17 @@ async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Reque
         "SELECT boundary_digest FROM match_seat_presence"
         " WHERE room_name = CAST(:room AS varchar) AND player_id = CAST(:pid AS uuid)"),
         {"room": hold["room_name"], "pid": str(pid)})).scalar()
+    roster = await _roster(db, hold["mode"], series)
     await _attempt(db, hold_id, "claim", now, "ok")
     await db.commit()
     print(f"[HOLD] claimed room={hold['room_name']} slot={hold['slot']} n={hold['n']}")
     out = _state_payload(
         dict(hold, claimed_at=hold["claimed_at"] or now, verifier=verifier), now)
     out.update({"status": "claimed", "token": token, "hold": True,
-                "room_region": series["region"], "boundary_digest": digest})
+                "room_region": series["region"], "boundary_digest": digest,
+                "series_id": str(hold["series_id"]),
+                "series_tally": [series["w0"], series["w1"]],
+                "roster": roster})
     return out
 
 

@@ -1508,6 +1508,10 @@ class TeamQueueJoinRequest(BaseModel):
     display_name: str | None = Field(None, max_length=64)
     region: str | None = Field(None, max_length=8)
     queue_type: str | None = Field(None, max_length=8)  # 'auto' (default) or 'manual'
+    # Stage 2 readmission (V3 S1 step 1): the client's capability list, "rjs1"
+    # when every Stage 2 patch attached at boot; stored on the queue row
+    # (bounded to the column there, so a longer list never refuses a join).
+    caps: str = ""
 
 
 class TeamQueueMember(BaseModel):
@@ -1549,6 +1553,10 @@ class TeamQueuePollResponse(BaseModel):
     # Room rules (migration 306, ready_join only) — see QueuePollResponse.
     rules: dict | None = None
     rules_prop: str | None = None
+    # Stage 2 readmission (V3 S1 step 2, ready_join only): the hold flag the
+    # series row latched for room_name. The client pins (room, hold, mode,
+    # series, roster = this player, teammates, opponents) from this answer.
+    hold: bool = False
 
 
 class TeamPlayerTelemetry(BaseModel):
