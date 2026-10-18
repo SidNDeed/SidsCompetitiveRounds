@@ -898,7 +898,9 @@ def test_pg_the_old_roster_count_pays_the_replayed_sitting_all_three_tiers(capsy
     "no tier" is the rule's doing, not the harness's."""
     require_pg()
 
-    def roster_count(member_ids, departed_ids, report):
+    # The production signature (fix 1 H1 added effective_absent, which the
+    # call site always passes); the old count read none of it.
+    def roster_count(member_ids, departed_ids, report, effective_absent=None):
         seated = len(set(member_ids or ()))
         return seated, seated, seated
 
