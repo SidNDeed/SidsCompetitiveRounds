@@ -37,6 +37,8 @@
     <Compile Include="$(RulesSource)" Condition="Exists('$(RulesSource)')" />
     <Compile Include="$(NetSource)" Condition="Exists('$(NetSource)')" />
     <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\DcReporterElection.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaReadmitEntryRules.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaLateRules.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Program*.cs" />
   </ItemGroup>
 

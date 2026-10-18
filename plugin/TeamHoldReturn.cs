@@ -33,7 +33,7 @@ namespace CompetitiveRounds
         // flagged room, its roster is frozen to that roster when it has none,
         // a latch the roster now covers is released, and it is not
         // unauthorized. A room with no roster pin never completes it.
-        static TeamHoldReturn() { AdmissionLatched = AdmissionNow; }
+        static TeamHoldReturn() { AdmissionLatched = AdmissionNow; Registered = RegisteredNow; }
 
         private static bool AdmissionNow()
         {
@@ -46,6 +46,18 @@ namespace CompetitiveRounds
             if (!RoomActors.RosterFrozen && roster.Count >= 2) RoomActors.FreezeFighterRoster(roster);
             if (RoomActors.IsRejected(me)) RoomActors.ReleaseCoveredLatches();
             return !RoomActors.IsUnauthorized(me);
+        }
+
+        // KX4: the registration seam. The returner's own player is registered
+        // (the sorted prefix placed it) and spawned: PlayerManager holds a
+        // live player owned by its actor.
+        private static bool RegisteredNow()
+        {
+            var me = PhotonNetwork.LocalPlayer;
+            var pm = PlayerManager.instance;
+            if (me == null || pm == null || pm.players == null) return false;
+            var p = pm.GetPlayerWithActorID(me.ActorNumber);
+            return p != null && p.gameObject != null && p.data != null && pm.players.Contains(p);
         }
 
         private static TeamHoldNet.MineAnswer _offer;
@@ -282,18 +294,24 @@ namespace CompetitiveRounds
             if (why == "digest missing") return;   // a digest still in flight: wait, the entry bound ends it
             if (why != null) { Fail(TeamHoldRules.ReturnRoute.Stage.Snapshot, why); return; }
             _snap = snap;
-            Seed(snap);
+            Seed(snap, a.Slot);
             route.Done(TeamHoldRules.ReturnRoute.Stage.Snapshot, true, now);
         }
 
-        /// <summary>Step 8: the vanilla score fields and every SeatDeckLog.
-        /// The watcher counters, the draw index and the cr_cards republish
-        /// are KX4 (GameStateWatcher and VanillaCardSequence privates).</summary>
-        private static void Seed(TeamHoldRules.Snapshot s)
+        /// <summary>Step 8: the vanilla score fields, every SeatDeckLog,
+        /// and (KX4) the watcher counters, the returner's draw index and
+        /// its cr_cards republish, from TeamHoldRules.PlanSeed.</summary>
+        private static void Seed(TeamHoldRules.Snapshot s, int slot)
         {
             var gm = GM_ArmsRace.instance;
             if (gm != null) { gm.p1Rounds = s.R0; gm.p2Rounds = s.R1; gm.p1Points = s.P0; gm.p2Points = s.P1; }
-            foreach (var slot in s.Slots) SeatDeckLog.Seed(slot.Slot, slot.Names, slot.Deaths);
+            foreach (var st in s.Slots) SeatDeckLog.Seed(st.Slot, st.Names, st.Deaths);
+            var plan = TeamHoldRules.PlanSeed(s, slot);
+            if (plan != null)
+            {
+                if (plan.DrawIndex >= 0) FfaCardSequence.SetDrawIndex(slot, plan.DrawIndex);
+                GameStateWatcher.SeedFromHold(plan.R0, plan.R1, plan.P0, plan.P1, plan.Names);
+            }
             Plugin.Log.LogInfo(TeamHold.TAG + " restored score " + s.R0 + "-" + s.R1 + " points " + s.P0 + "-" + s.P1);
         }
 

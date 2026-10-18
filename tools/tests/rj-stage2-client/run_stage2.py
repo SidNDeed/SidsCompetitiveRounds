@@ -41,6 +41,7 @@ PIECES = {
     "KX1": ("tx1_", "t16_"),
     "KX2": ("t27_",),
     "KX3": ("t35_", "tx3_"),
+    "KX4": ("t34_", "tx4_"),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -211,6 +212,26 @@ MUTANTS = [
     ("MX3.1", "KX3", "rules", [
         ("if (lastReleased == id) return false;", "")],
      "t35_release_at_bind", "t35_span_games"),
+    # KX4, registration (V3 M3.8, M3.9, M3.10; MX4.1 to MX4.3 lane-added).
+    ("M3.8", "KX4", "rules", [
+        ("            int at = index(ids, newId);\n            if (at < 0) return -1;\n            list.Insert(at, null);\n            return at;\n",
+         "            if (ids.Contains(newId)) return -1;\n            return newId;\n")],
+     "t34_high_slot", "t34_duplicate_and_today"),
+    ("M3.9", "KX4", "rules", [
+        ("            list.Insert(at, null);\n", "")],
+     "t34_low_slot", "t34_high_slot"),
+    ("M3.10", "KX4", "rules", [
+        ("list.Insert(at, null);", "list.Insert(at, null); list.Insert(at, null);")],
+     "t34_high_slot", "t34_duplicate_and_today"),
+    ("MX4.1", "KX4", "rules", [
+        ("{ return readmitLobby || Flagged(room); }", "{ return readmitLobby; }")],
+     "t34_high_slot", "tx4_seed_plan"),
+    ("MX4.2", "KX4", "rules", [
+        ("p.DrawIndex = st.Deals;", "p.DrawIndex = st.Deals - 1;")],
+     "tx4_seed_plan", "t34_high_slot"),
+    ("MX4.3", "KX4", "rules", [
+        ("            list.RemoveAll(p => p == null || dead(p));\n", "")],
+     "t34_low_slot", "t34_high_slot"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

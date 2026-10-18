@@ -1099,5 +1099,59 @@ namespace CompetitiveRounds
             lastReleased = id;
             return true;
         }
+
+
+        // ── KX4: registration and the returner's seeding (V3 S3 step 8) ───
+
+        /// <summary>The rooms whose RegisterPlayer is the sorted insert (V3
+        /// P4.3 step 9): the FFA readmission lobbies and every flagged room.</summary>
+        internal static bool SortedRegistration(bool readmitLobby, string room) { return readmitLobby || Flagged(room); }
+
+        /// <summary>The sorted insert, for the RegisterPlayer prefix: the
+        /// player list stays sorted by PlayerID with no holes. Dead entries
+        /// are dropped, the new PlayerID's sorted index comes from
+        /// <paramref name="index"/> (FfaReadmitEntryRules.RegisterIndex), one
+        /// placeholder is inserted there for vanilla's assignment and that
+        /// index is returned as the forced index, so vanilla never pads with
+        /// nulls and never assigns over a live entry. -1 refuses a duplicate
+        /// PlayerID and inserts nothing.</summary>
+        internal static int PlaceRegistration<T>(List<T> list, Func<T, bool> dead, Func<T, int> idOf, int newId,
+                                                 Func<IList<int>, int, int> index) where T : class
+        {
+            list.RemoveAll(p => p == null || dead(p));
+            var ids = new List<int>(list.Count);
+            foreach (var p in list) ids.Add(idOf(p));
+            int at = index(ids, newId);
+            if (at < 0) return -1;
+            list.Insert(at, null);
+            return at;
+        }
+
+        /// <summary>The returner's seeding from the snapshot (S3 step 8),
+        /// beyond the vanilla score fields and the seat logs: the watcher's
+        /// own score counters, its draw index (the deals its slot made), and
+        /// its cr_cards value (its slot's names, pipe-joined, as
+        /// GameStateWatcher.BroadcastCardPick writes them).</summary>
+        internal sealed class SeedPlan
+        {
+            internal int R0, R1, P0, P1;
+            internal int DrawIndex = -1;
+            internal string Cards = "";
+            internal List<string> Names = new List<string>();
+        }
+
+        internal static SeedPlan PlanSeed(Snapshot s, int slot)
+        {
+            if (s == null) return null;
+            var p = new SeedPlan { R0 = s.R0, R1 = s.R1, P0 = s.P0, P1 = s.P1 };
+            foreach (var st in s.Slots)
+            {
+                if (st.Slot != slot) continue;
+                p.DrawIndex = st.Deals;
+                p.Names.AddRange(st.Names);
+                p.Cards = string.Join("|", st.Names.ToArray());
+            }
+            return p;
+        }
     }
 }

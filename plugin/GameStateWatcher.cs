@@ -8855,6 +8855,35 @@ namespace CompetitiveRounds
             }
         }
 
+        /// <summary>KX4 (Stage 2 S3 step 8): the returner's watcher seeded
+        /// from the snapshot it gated. The score counters and their last
+        /// readings (so the poll sees no change it did not watch), the live
+        /// points the snapshot proves (a round won is two points; the sent
+        /// pair matches, so the returner posts nothing lower than the room
+        /// already posted), the pick count, and cr_cards republished as the
+        /// slot's names, pipe-joined, as BroadcastCardPick writes it.</summary>
+        internal static void SeedFromHold(int r0, int r1, int p0, int p1, IList<string> names)
+        {
+            p1Rounds = r0; p2Rounds = r1; p1Points = p0; p2Points = p1;
+            lastP1Rounds = r0; lastP2Rounds = r1; lastP1Points = p0; lastP2Points = p1;
+            currentRound = r0 + r1 + 1;
+            liveCumP1 = Math.Min(r0 > 0 ? 2 : p0, 2);
+            liveCumP2 = Math.Min(r1 > 0 ? 2 : p1, 2);
+            liveSentTeamP1 = liveCumP1; liveSentTeamP2 = liveCumP2;
+            broadcastCardNames.Clear();
+            if (names != null) broadcastCardNames.AddRange(names);
+            pickCountThisMatch = broadcastCardNames.Count;
+            try
+            {
+                if (!PhotonNetwork.InRoom || PhotonNetwork.LocalPlayer == null) return;
+                var props = new Hashtable();
+                props[CARD_PROP_KEY] = string.Join("|", broadcastCardNames.ToArray());
+                PhotonNetwork.LocalPlayer.SetCustomProperties(props);
+                Plugin.Log.LogInfo($"[POLL] Seeded from the hold: rounds {r0}-{r1}, points {p0}-{p1}, {broadcastCardNames.Count} cards");
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"[POLL] Hold seeding: {ex.Message}"); }
+        }
+
         /// <summary>
         /// Polls opponent's Photon custom properties for card picks they've broadcast.
         /// Only works when the opponent also has the mod installed.

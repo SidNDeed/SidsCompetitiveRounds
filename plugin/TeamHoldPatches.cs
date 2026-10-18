@@ -157,6 +157,7 @@ namespace CompetitiveRounds
             new[] { "S2", "GM_ArmsRace", "RoundTransition", "TeamHold_RoundTransitionPatch" },
             new[] { "S2", "GM_ArmsRace", "DoStartGame", "TeamHold_RematchFencePatch" },
             new[] { "S4", "CardChoice", "DoPick", "TeamHold_DoPickPatch" },
+            new[] { "S3", "PlayerManager", "RegisterPlayer", "FfaReadmit_RegisterOrder_Patch" },
         };
 
         private static Type HookType(string name)
@@ -168,6 +169,7 @@ namespace CompetitiveRounds
                 case "GM_ArmsRace": return typeof(GM_ArmsRace);
                 case "NetworkConnectionHandler": return typeof(NetworkConnectionHandler);
                 case "CardChoice": return typeof(CardChoice);
+                case "PlayerManager": return typeof(PlayerManager);
                 default: return null;
             }
         }
