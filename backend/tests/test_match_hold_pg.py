@@ -907,6 +907,58 @@ def test_t3_1_claim_refusals_grant_and_rotation(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_h2_verifier_lifecycle_on_claim_state_bind_and_entry(monkeypatch, capsys):
+    """Only the claim answer carries raw T; authorized reads carry SHA-256(T)
+    while claimed or bound, including rotation, and clear it after entry."""
+    raw_tokens = []
+
+    async def body(env):
+        s, g, hid = await held(env)
+
+        async def views():
+            state = (await env.get(
+                "/api/v1/match/hold/%s/state" % hid, s.steam(0),
+                {"steam_id": s.steam(0)})).json()
+            by_room = (await env.get(
+                "/api/v1/match/hold/by-room", s.steam(2),
+                {"steam_id": s.steam(2), "room": s.room, "game_id": g})).json()
+            return state, by_room
+
+        before = await views()
+        assert [v["verifier"] for v in before] == [None, None]
+
+        first = await claim(env, s, 1, hid)
+        raw_tokens.append(first["token"])
+        first_hash = hashlib.sha256(first["token"].encode()).hexdigest()
+        assert first["verifier"] == first_hash
+        claimed = await views()
+        assert [v["verifier"] for v in claimed] == [first_hash, first_hash]
+        assert all(first["token"] not in str(v) for v in claimed)
+
+        second = await claim(env, s, 1, hid)
+        raw_tokens.append(second["token"])
+        second_hash = hashlib.sha256(second["token"].encode()).hexdigest()
+        assert second["verifier"] == second_hash and second_hash != first_hash
+        rotated = await views()
+        assert [v["verifier"] for v in rotated] == [second_hash, second_hash]
+        assert all(second["token"] not in str(v) for v in rotated)
+
+        await beat(env, s, 0, seen=[(10, s.steam(0)), (21, s.steam(1))])
+        bound = await bind(env, s, 1, hid, 21)
+        assert bound["verifier"] == second_hash
+        bound_views = await views()
+        assert [v["verifier"] for v in bound_views] == [second_hash, second_hash]
+
+        accepted = await entered(env, s, 1, hid, g, 21)
+        assert accepted["verifier"] is None
+        after = await views()
+        assert [v["verifier"] for v in after] == [None, None]
+
+    run_env(monkeypatch, body, prefix="rjs2h2")
+    captured = capsys.readouterr()
+    assert all(token not in captured.out and token not in captured.err for token in raw_tokens)
+
+
 def test_t3_7_bind_identity_and_entry(monkeypatch):
     """T3.7 server half: another session cannot bind the seat (not_yours);
     an unclaimed hold refuses (not_claimed); a bind no fresh beat of

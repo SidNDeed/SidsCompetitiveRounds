@@ -51,6 +51,18 @@ MUTANTS = {
                 '    if not (_session_was_verified(request)):\n'
                 '        raise HTTPException(status_code=401, detail="session_required")')],
               HOLD_T, "h1_real_helper_soft_fail_paths"),
+    "F1.H2.OMIT": ("FIX1", "match_hold.py",
+                   [('        "verifier": row["verifier"] if state in ("claimed", "bound") else None,\n',
+                     '')],
+                   [('        "verifier": row["verifier"] if state in ("claimed", "bound") else None,\n',
+                     '        "verifier": (row["verifier"] if state in ("claimed", "bound") else None),\n')],
+                   HOLD_T, "h2_verifier_lifecycle"),
+    "F1.H2.STALE": ("FIX1", "match_hold.py",
+                    [('        dict(hold, claimed_at=hold["claimed_at"] or now, verifier=verifier), now)',
+                      '        dict(hold, claimed_at=hold["claimed_at"] or now), now)')],
+                    [('        dict(hold, claimed_at=hold["claimed_at"] or now, verifier=verifier), now)',
+                      '        dict(hold, claimed_at=hold["claimed_at"] or now, verifier=(verifier)), now)')],
+                    HOLD_T, "h2_verifier_lifecycle"),
     # N2 - the game id chain and the hold latch
     "M1.7": ("N2", "match_hold.py",
              [('"   AND prev_game = CAST(:prev AS uuid)"), key)',

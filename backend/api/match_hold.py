@@ -315,13 +315,15 @@ def _deadline_s(row, now) -> int:
 
 def _state_payload(row, now) -> dict:
     closure = _effective_closure(row, now)
+    state = _state_word(row, now)
     return {
         "hold_id": str(row["id"]), "game_id": str(row["game_id"]),
         "mode": row["mode"], "room_name": row["room_name"],
         "slot": row["slot"], "team": row["team"], "n": row["n"],
-        "state": _state_word(row, now), "seq": row["seq"],
+        "state": state, "seq": row["seq"],
         "deadline_s": _deadline_s(row, now), "hold_s": _deadline_s(row, now),
         "bound_actor": row["bound_actor"],
+        "verifier": row["verifier"] if state in ("claimed", "bound") else None,
         "closed_at": closure[0].isoformat() if closure else None,
         "closed_reason": closure[1] if closure else None,
     }
@@ -845,7 +847,8 @@ async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Reque
     await _attempt(db, hold_id, "claim", now, "ok")
     await db.commit()
     print(f"[HOLD] claimed room={hold['room_name']} slot={hold['slot']} n={hold['n']}")
-    out = _state_payload(dict(hold, claimed_at=hold["claimed_at"] or now), now)
+    out = _state_payload(
+        dict(hold, claimed_at=hold["claimed_at"] or now, verifier=verifier), now)
     out.update({"status": "claimed", "token": token, "hold": True,
                 "room_region": series["region"], "boundary_digest": digest})
     return out
