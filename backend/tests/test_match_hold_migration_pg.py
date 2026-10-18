@@ -331,10 +331,12 @@ def test_383_first_apply_rerun_defaults_and_constraints():
 
 
 def test_383_proof_block_raises_on_a_gap():
-    """The proof block is enforcing: with one proved column renamed away and
-    one proved default changed before a re-run (and the statement that would
-    restore the column taken out of the re-run), the file raises naming both
-    gaps, and its transaction rolls back (a table it re-created is gone)."""
+    """The proof rejects missing and malformed catalog objects without repair.
+
+    The original missing-column/default case still proves rollback.  Further
+    isolated cases cover a renamed column, typmod, default, constraint body and
+    validation state, and partial-index predicate before an exact restore.
+    """
     cf_pg.require_live_pg()
 
     async def go():
@@ -342,21 +344,129 @@ def test_383_proof_block_raises_on_a_gap():
             conn = c.conn
             await _build_without_383(c)
             await conn.execute(_src())
+
+            async def refuses(source, *labels):
+                msg = ""
+                try:
+                    await conn.execute(source)
+                except _asyncpg.RaiseError as e:
+                    msg = str(e)
+                if conn.is_in_transaction():
+                    await conn.execute("ROLLBACK")
+                for label in labels:
+                    assert label in msg, (label, msg)
+
+            # Preserve the original two-gap case and its rollback witness.
             await conn.execute("ALTER TABLE ovt_series RENAME COLUMN hold_room TO hold_room_x")
             await conn.execute("ALTER TABLE ovt_series ALTER COLUMN hold_v2 SET DEFAULT TRUE")
             await conn.execute("DROP TABLE match_report_journal")
             gap = "ALTER TABLE ovt_series   ADD COLUMN IF NOT EXISTS hold_room VARCHAR(64);"
             assert _src().count(gap) == 1
-            msg = ""
-            try:
-                await conn.execute(_src().replace(gap, ""))
-            except _asyncpg.RaiseError as e:
-                msg = str(e)
-            if conn.is_in_transaction():
-                await conn.execute("ROLLBACK")
-            assert "column ovt_series.hold_room" in msg, msg
-            assert "default ovt_series.hold_v2" in msg, msg
+            await refuses(
+                _src().replace(gap, ""),
+                "column ovt_series.hold_room",
+                "column ovt_series.hold_v2",
+            )
             assert await conn.fetchval("SELECT to_regclass('match_report_journal')") is None
+
+            await conn.execute("ALTER TABLE ovt_series RENAME COLUMN hold_room_x TO hold_room")
+            await conn.execute("ALTER TABLE ovt_series ALTER COLUMN hold_v2 SET DEFAULT FALSE")
+            await conn.execute(_src())
+
+            # A same-named table cannot hide a renamed required column.
+            await conn.execute(
+                "ALTER TABLE match_seat_presence RENAME COLUMN seen TO seen_x")
+            await refuses(_src(), "column match_seat_presence.seen")
+            assert await conn.fetchval(
+                "SELECT count(*) FROM information_schema.columns "
+                " WHERE table_schema = current_schema() "
+                "   AND table_name = 'match_seat_presence' "
+                "   AND column_name IN ('seen', 'seen_x')") == 1
+            assert await conn.fetchval(
+                "SELECT column_name FROM information_schema.columns "
+                " WHERE table_schema = current_schema() "
+                "   AND table_name = 'match_seat_presence' "
+                "   AND column_name IN ('seen', 'seen_x')") == "seen_x"
+            await conn.execute(
+                "ALTER TABLE match_seat_presence RENAME COLUMN seen_x TO seen")
+
+            # pg_attribute: same column name, wrong VARCHAR typmod.
+            await conn.execute(
+                "ALTER TABLE match_seat_presence ALTER COLUMN boundary_digest "
+                "TYPE VARCHAR(32)")
+            await refuses(_src(), "column match_seat_presence.boundary_digest")
+            assert await conn.fetchval(
+                "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+                " WHERE attrelid = 'match_seat_presence'::regclass "
+                "   AND attname = 'boundary_digest'") == "character varying(32)"
+            await conn.execute(
+                "ALTER TABLE match_seat_presence ALTER COLUMN boundary_digest "
+                "TYPE VARCHAR(64)")
+
+            # pg_attrdef: guarded CREATE TABLE does not restore a changed default.
+            await conn.execute(
+                "ALTER TABLE match_seat_holds ALTER COLUMN seq SET DEFAULT 1")
+            await refuses(_src(), "column match_seat_holds.seq")
+            assert await conn.fetchval(
+                "SELECT regexp_replace(pg_get_expr(d.adbin, d.adrelid, false), "
+                " '[[:space:]]+', '', 'g') FROM pg_attrdef d "
+                " WHERE d.adrelid = 'match_seat_holds'::regclass "
+                "   AND d.adnum = (SELECT attnum FROM pg_attribute "
+                "                    WHERE attrelid = d.adrelid AND attname = 'seq')") == "1"
+            await conn.execute(
+                "ALTER TABLE match_seat_holds ALTER COLUMN seq SET DEFAULT 0")
+
+            # pg_constraint: the same name with another admitted set is refused.
+            await conn.execute(
+                "ALTER TABLE match_seat_holds DROP CONSTRAINT ck_msh_mode")
+            await conn.execute(
+                "ALTER TABLE match_seat_holds ADD CONSTRAINT ck_msh_mode "
+                "CHECK (mode IN ('team', 'ovt', 'bad'))")
+            await refuses(_src(), "constraint match_seat_holds.ck_msh_mode")
+            assert "'bad'" in await conn.fetchval(
+                "SELECT pg_get_constraintdef(oid, false) FROM pg_constraint "
+                " WHERE conrelid = 'match_seat_holds'::regclass "
+                "   AND conname = 'ck_msh_mode'")
+            await conn.execute(
+                "ALTER TABLE match_seat_holds DROP CONSTRAINT ck_msh_mode")
+            await conn.execute(
+                "ALTER TABLE match_seat_holds ADD CONSTRAINT ck_msh_mode "
+                "CHECK (mode IN ('team', 'ovt'))")
+
+            # Validation is catalog state beside the constraint definition.
+            await conn.execute(
+                "ALTER TABLE match_seat_holds DROP CONSTRAINT ck_msh_mode")
+            await conn.execute(
+                "ALTER TABLE match_seat_holds ADD CONSTRAINT ck_msh_mode "
+                "CHECK (mode IN ('team', 'ovt')) NOT VALID")
+            await refuses(_src(), "constraint match_seat_holds.ck_msh_mode")
+            assert await conn.fetchval(
+                "SELECT convalidated FROM pg_constraint "
+                " WHERE conrelid = 'match_seat_holds'::regclass "
+                "   AND conname = 'ck_msh_mode'") is False
+            await conn.execute(
+                "ALTER TABLE match_seat_holds VALIDATE CONSTRAINT ck_msh_mode")
+
+            # pg_index: the same index name and key with the inverse predicate.
+            await conn.execute("DROP INDEX uq_msh_one_open_per_room")
+            await conn.execute(
+                "CREATE UNIQUE INDEX uq_msh_one_open_per_room "
+                "ON match_seat_holds (room_name) WHERE closed_at IS NOT NULL")
+            await refuses(_src(), "index uq_msh_one_open_per_room")
+            predicate = await conn.fetchval(
+                "SELECT pg_get_expr(i.indpred, i.indrelid, false) "
+                "  FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
+                " WHERE c.relnamespace = (SELECT oid FROM pg_namespace "
+                "                           WHERE nspname = current_schema()) "
+                "   AND c.relname = 'uq_msh_one_open_per_room'")
+            assert "IS NOT NULL" in predicate, predicate
+            await conn.execute("DROP INDEX uq_msh_one_open_per_room")
+            await conn.execute(
+                "CREATE UNIQUE INDEX uq_msh_one_open_per_room "
+                "ON match_seat_holds (room_name) WHERE closed_at IS NULL")
+
+            # Every explicit restore matches the VALUES catalog and re-runs cleanly.
+            await conn.execute(_src())
     _run(go())
 
 
