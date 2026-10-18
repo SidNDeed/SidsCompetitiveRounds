@@ -1707,3 +1707,29 @@ def test_fix1b_r2_reform_copy_ands_rating_and_gates_the_wager_move():
     assert src.count("UPDATE ffa_bets SET lobby_id = :new") == 1
     assert main._ASM_REFORM_CLASSES["COPY_AND"] == \
         ("is_ranked", "kills_tiebreak", "sudden_death")
+
+
+def test_fix1b_r3_locked_rejoin_rechecks_under_locks_before_any_write():
+    src = _inspect.getsource(main.ffa_queue_join)
+    compact = " ".join(src.split())
+    assert src.count("_current_mod_version.get()") == 1
+    assert '"mv": _join_mv' in src
+    calls = _fix1b_calls("ffa_queue_join", "_ffa_roster_clears_proximity_floor")
+    assert len(calls) == 1
+    assert _ast.unparse(calls[0]) == \
+        "_ffa_roster_clears_proximity_floor([_join_mv], 1)"
+
+    identity = src.index("_enrollment_identity_gate")
+    lobby_lock = src.index("FROM ffa_lobbies")
+    queue_lock = src.index("FROM ffa_queue", lobby_lock)
+    guard = src.index("_ffa_roster_clears_proximity_floor")
+    husk = src.index("_lease_live_mode")
+    upsert = src.index("INSERT INTO ffa_queue")
+    assert identity < lobby_lock < queue_lock < guard < husk < upsert
+    assert compact.count("FOR NO KEY UPDATE") == 2
+    assert '_locked_queue["status"] == "ready_join"' in src
+    assert '_locked_queue["series_id"] != _locked_hint["series_id"]' in src
+    assert '_locked_lobby["status"] == "active"' in src
+    refusal = "You're locked into another FFA game — finish or leave it first"
+    assert src.count(refusal) == 2
+    assert refusal in _inspect.getsource(main._ffa_lobby_enroll_caller)

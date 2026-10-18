@@ -1449,6 +1449,43 @@ def test_fix1b_r2_floor_unrated_reform_refunds_parent_wagers(monkeypatch):
     run_env(monkeypatch, body, prefix="cf_f1b_r2")
 
 
+async def _fix1b_rejoin(env, lob, slot, version):
+    token = main._current_mod_version.set(version)
+    try:
+        req = main._FfaQueueJoinReq(
+            steam_id=lob.sids[slot], display_name="cf rejoin", region=lob.region)
+
+        async def go():
+            async with env.sm() as db:
+                return await main.ffa_queue_join(req, cf_asm.FakeRequest(), db=db)
+
+        return await env._call(go)
+    finally:
+        main._current_mod_version.reset(token)
+
+
+def test_fix1b_r3_locked_rated_rejoin_refuses_only_below_floor(monkeypatch):
+    async def body(env):
+        refusal = "You're locked into another FFA game — finish or leave it first"
+        rated = await env.lobby(3, ranked=True)
+        before = await env.queue_row(rated, 0)
+        answer = await _fix1b_rejoin(env, rated, 0, "1.38.6")
+        assert answer.status == 409 and answer.body == refusal
+        assert await env.queue_row(rated, 0) == before
+
+        answer = await _fix1b_rejoin(env, rated, 0, main.MIN_MOD_VERSION)
+        assert answer.status == 200, answer
+        at_floor = await env.queue_row(rated, 0)
+        assert at_floor["mod_version"] == main.MIN_MOD_VERSION
+        assert at_floor["status"] == "ready_join" and at_floor["series_id"] == rated.lid
+
+        casual = await env.lobby(3, ranked=False)
+        answer = await _fix1b_rejoin(env, casual, 0, "1.38.6")
+        assert answer.status == 200, answer
+        assert (await env.queue_row(casual, 0))["mod_version"] == "1.38.6"
+    run_env(monkeypatch, body, prefix="cf_f1b_r3")
+
+
 def _anon(obj, names):
     if isinstance(obj, dict):
         return {k: _anon(v, names) for k, v in obj.items()}

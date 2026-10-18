@@ -55043,6 +55043,44 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(404, "Player not registered")
+    _join_mv = ((_current_mod_version.get() or "")[:16] or None)
+    # A retry may refresh a searching row, but it must not lower the evidence
+    # already used to admit a rated locked room.  Discover without a row lock,
+    # then take the canonical parent -> queue locks and re-check every
+    # predicate before the first write.  If the locked row moved to a different
+    # lobby during discovery, refuse rather than acquiring a parent after its
+    # child row and reversing the global lock order.
+    _locked_hint = (await db.execute(text(
+        "SELECT status, series_id FROM ffa_queue WHERE player_id = :pid"
+    ), {"pid": player.id})).mappings().first()
+    if (_locked_hint is not None
+            and _locked_hint["status"] == "ready_join"
+            and _locked_hint["series_id"] is not None):
+        _locked_lobby = (await db.execute(text(
+            "SELECT id, status, is_ranked FROM ffa_lobbies"
+            " WHERE id = :lid FOR NO KEY UPDATE"
+        ), {"lid": _locked_hint["series_id"]})).mappings().first()
+        _locked_queue = (await db.execute(text(
+            "SELECT status, series_id FROM ffa_queue"
+            " WHERE player_id = :pid FOR NO KEY UPDATE"
+        ), {"pid": player.id})).mappings().first()
+        if _locked_queue is not None and _locked_queue["status"] == "ready_join":
+            if _locked_queue["series_id"] != _locked_hint["series_id"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="You're locked into another FFA game — finish or leave it first")
+            _locked_lobby_ranked = (
+                bool(_locked_lobby["is_ranked"])
+                if _locked_lobby is not None and _locked_lobby["is_ranked"] is not None
+                else True
+            )
+            if (_locked_lobby is not None
+                    and _locked_lobby["status"] == "active"
+                    and _locked_lobby_ranked
+                    and not _ffa_roster_clears_proximity_floor([_join_mv], 1)):
+                raise HTTPException(
+                    status_code=409,
+                    detail="You're locked into another FFA game — finish or leave it first")
     # Cross-queue guard (Codex post-release find 1): the auto-rejoin path must
     # not recreate a row the lock-time eviction removed — see /queue/join.
     _other = await _locked_in_other_queue(db, player.id, "ffa_queue")
@@ -55106,7 +55144,7 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
         RETURNING status
     """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64], "r": rating,
            "rd": rd, "gp": games, "fr": fallback, "reg": (req.region or "")[:8] or None,
-           "mv": (_current_mod_version.get() or "")[:16] or None})
+           "mv": _join_mv})
     _row_status = _res.scalar_one_or_none()
     if _row_status == "searching":
         # Authoritative arrival stamp for the gather window (Codex find 5):
