@@ -327,6 +327,8 @@ class V:
         if self.alias is not None and self.alias[0] == "dict":
             ref = self.alias[1]
             out.extend(ref.vals if ref.keys is not None else (ref.element(),))
+        elif self.alias is not None and self.alias[0] == "dict_alternatives":
+            out.extend(self.alias[1])
         return out
 
     def ex_all(self):
@@ -1153,10 +1155,6 @@ class Frame:
         for v in vals:
             ex |= v.ex_all()
             im |= v.im_all()
-            if v.alias is not None and v.alias[0] == "dict_alternatives":
-                for arm in v.alias[1]:
-                    ex |= arm.ex_all()
-                    im |= arm.im_all()
         if P in ex:
             ex = (ex - {P}) | {E}
         if ordering and (ex | im) & {E, D}:
@@ -1410,22 +1408,23 @@ class Frame:
         # The result carries every argument's labels (an object built from a
         # checked argument still holds it); each argument was checked here.
         result = [recv] if recv is not None else []
+        transported = []
         for i, v in enumerate(argvals):
             klass = self.lookup_class(name, "#%d" % i)
             self.sink(node, "%s #%d" % (name, i), v, klass)
-            result.append(v)
+            (transported if klass == TRANSPORT else result).append(v)
         for k, v in kwvals.items():
             klass = self.lookup_class(name, k if k is not None else "*")
             self.sink(node, "%s %s=" % (name, k), v, klass)
-            result.append(v)
+            (transported if klass == TRANSPORT else result).append(v)
         if name in _SET_ORDERED_CALLS:
             operands = [a.value if isinstance(a, ast.Starred) else a for a in node.args]
             if recv is not None and isinstance(node.func, ast.Attribute):
                 operands.insert(0, node.func.value)
             operands.extend(k.value for k in node.keywords)
-            self.numeric_check(node, operands, result)
+            self.numeric_check(node, operands, result + transported)
         if name in _SET_CONTAINMENT_CALLS:
-            return self.containment_result(result)
+            return self.containment_result(result + transported)
         # a function handed to a third-party callable (a sort key, a callback)
         # is followed, called with an element of the first argument
         first = [element(argvals[0])] if argvals else []
@@ -1455,6 +1454,9 @@ class Frame:
         for v in result:
             ex |= v.ex_all()
             im |= v.im_all()
+        for v in transported:
+            ex |= v.ex
+            im |= v.im
         if P in ex:
             ex = (ex - {P}) | {E}
         return V(ex, im, out.funcs)
@@ -2004,6 +2006,67 @@ def test_dynamic_mapping_join_keeps_nested_exact_key_precision():
         '        boxes[cell[1]] = {"shown": _aer_enc_text(cell[0]), "rank": cell[3]}\n'
         '        items.append(AerItem("cell", (), (), boxes[cell[1]]["shown"]))')
     assert _fixture(_API_PERMITTED, bot, _WORKER_FIXTURE) == []
+
+
+_REQUEST_AGGREGATE_API = '''from fastapi import Request
+
+
+def _order_value(row):
+    return row["rank"]
+
+
+def evidence_report(request: Request, row, rows):
+%s    if request.path_params["mode"]:
+        box = {"word": %s}
+    else:
+        box = None
+    return {"name": %s}
+'''
+
+
+@pytest.mark.parametrize("label,setup,nested,needle", [
+    ("nested D", "", 'row["name"]', "D"),
+    ("nested K", "", '"HOT" if row["rank"] > 0.5 else "COLD"', "K"),
+    ("nested O", "    ordered = sorted(rows, key=_order_value)\n", "ordered", "DO"),
+], ids=["nested D", "nested K", "nested O"])
+@pytest.mark.parametrize("sink", ["box", "str(box)"], ids=["direct DISPLAY", "VALUE str"])
+def test_request_controlled_dictionary_alternatives_reach_aggregate_sinks(
+        label, setup, nested, needle, sink):
+    api = _REQUEST_AGGREGATE_API % (setup, nested, sink)
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads %s" % needle in str(findings[0]), (
+        label, sink, _fmt(findings))
+
+
+def test_request_ifexp_dictionary_or_none_keeps_its_single_alias_coverage():
+    api = '''from fastapi import Request
+
+
+def evidence_report(request: Request, row):
+    box = ({"word": "HOT" if row["rank"] > 0.5 else "COLD"}
+           if request.path_params["mode"] else None)
+    return {"name": str(box)}
+'''
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), _fmt(findings)
+
+
+def test_transport_results_do_not_aggregate_nested_payload_labels():
+    api = '''from fastapi import Request
+
+
+DB = object()
+
+
+async def evidence_report(request: Request, row):
+    if request.path_params["mode"]:
+        params = {"word": "HOT" if row["rank"] > 0.5 else "COLD"}
+    else:
+        params = None
+    result = await DB.execute("query", params)
+    return {"name": str(result)}
+'''
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
 
 
 _LITERAL_MUTATIONS = [
