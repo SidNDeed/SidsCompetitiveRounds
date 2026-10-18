@@ -54251,6 +54251,14 @@ FFA_KILLS_TIEBREAK_MIN_VERSION = "1.36.0"
 # the SAME commit as the version bump, or the feature either never engages or
 # engages one release early against clients that cannot honour it.
 FFA_SUDDEN_DEATH_MIN_VERSION = "1.37.0"
+# Proximity-victim attribution changes which opponent receives a kill, so a
+# rated room may use it only when every seat can honour the same decision.
+#
+# ⚠ SHIP COUPLING — this MUST be raised to the version that first ships the
+# cr_prox1 client capability in the SAME ship commit as that version bump.  It
+# is deliberately inert at the oldest admitted version in this authoring
+# commit; the two-SHA release order raises it only after the server is live.
+FFA_PROXIMITY_VICTIM_MIN_VERSION = "1.38.7"
 FFA_CONFIG_DEFAULTS = {
     "score_target": 5, "card_candidates": 5, "initial_picks": 1,
     "card_cap": 5, "same_card_rule": False,
@@ -54349,6 +54357,22 @@ def _mod_version_at_least(version, floor: str) -> bool:
         return _parse_version(str(version)) >= _parse_version(floor)
     except Exception:
         return False
+
+
+def _ffa_roster_clears_proximity_floor(mod_versions, roster_size: int) -> bool:
+    """Whether one complete queue-stamped FFA roster clears cr_prox1.
+
+    The floor is read on every call so a rolling API deploy can tighten it
+    between a parent's lock and REFORM.  Missing, NULL and malformed stamps
+    fail toward an unrated room.
+    """
+    if len(mod_versions) != roster_size:
+        return False
+    floor = _parse_version(FFA_PROXIMITY_VICTIM_MIN_VERSION)
+    return all(
+        _parse_version(str(version or "0").lstrip("vV")) >= floor
+        for version in mod_versions
+    )
 
 
 def _request_mod_version(request):
@@ -55019,6 +55043,44 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
     player = (await db.execute(select(Player).where(Player.steam_id == req.steam_id))).scalar_one_or_none()
     if player is None:
         raise HTTPException(404, "Player not registered")
+    _join_mv = ((_current_mod_version.get() or "")[:16] or None)
+    # A retry may refresh a searching row, but it must not lower the evidence
+    # already used to admit a rated locked room.  Discover without a row lock,
+    # then take the canonical parent -> queue locks and re-check every
+    # predicate before the first write.  If the locked row moved to a different
+    # lobby during discovery, refuse rather than acquiring a parent after its
+    # child row and reversing the global lock order.
+    _locked_hint = (await db.execute(text(
+        "SELECT status, series_id FROM ffa_queue WHERE player_id = :pid"
+    ), {"pid": player.id})).mappings().first()
+    if (_locked_hint is not None
+            and _locked_hint["status"] == "ready_join"
+            and _locked_hint["series_id"] is not None):
+        _locked_lobby = (await db.execute(text(
+            "SELECT id, status, is_ranked FROM ffa_lobbies"
+            " WHERE id = :lid FOR NO KEY UPDATE"
+        ), {"lid": _locked_hint["series_id"]})).mappings().first()
+        _locked_queue = (await db.execute(text(
+            "SELECT status, series_id FROM ffa_queue"
+            " WHERE player_id = :pid FOR NO KEY UPDATE"
+        ), {"pid": player.id})).mappings().first()
+        if _locked_queue is not None and _locked_queue["status"] == "ready_join":
+            if _locked_queue["series_id"] != _locked_hint["series_id"]:
+                raise HTTPException(
+                    status_code=409,
+                    detail="You're locked into another FFA game — finish or leave it first")
+            _locked_lobby_ranked = (
+                bool(_locked_lobby["is_ranked"])
+                if _locked_lobby is not None and _locked_lobby["is_ranked"] is not None
+                else True
+            )
+            if (_locked_lobby is not None
+                    and _locked_lobby["status"] == "active"
+                    and _locked_lobby_ranked
+                    and not _ffa_roster_clears_proximity_floor([_join_mv], 1)):
+                raise HTTPException(
+                    status_code=409,
+                    detail="You're locked into another FFA game — finish or leave it first")
     # Cross-queue guard (Codex post-release find 1): the auto-rejoin path must
     # not recreate a row the lock-time eviction removed — see /queue/join.
     _other = await _locked_in_other_queue(db, player.id, "ffa_queue")
@@ -55082,7 +55144,7 @@ async def ffa_queue_join(req: _FfaQueueJoinReq, request: Request, db: AsyncSessi
         RETURNING status
     """), {"pid": player.id, "sid": req.steam_id, "dn": req.display_name[:64], "r": rating,
            "rd": rd, "gp": games, "fr": fallback, "reg": (req.region or "")[:8] or None,
-           "mv": (_current_mod_version.get() or "")[:16] or None})
+           "mv": _join_mv})
     _row_status = _res.scalar_one_or_none()
     if _row_status == "searching":
         # Authoritative arrival stamp for the gather window (Codex find 5):
@@ -57655,8 +57717,9 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
     at that lobby's own lock); kills_tiebreak is L''s copied value AND the
     carried roster's capability; sudden_death is turned off when the carried
     roster is not capable (both COPY-AND, sec3.4); lobby-phase wagers are not
-    re-bound (they move by lobby id, sec3.4 step 4). Returns (room, region,
-    ordered)."""
+    re-bound. Rated children move the parent's wagers after this lock;
+    floor-unrated children refund them on the canceled parent. Returns
+    (room, region, ordered, locked_ranked)."""
     ordered = sorted(rows, key=lambda r: _ffa_sort_key(r["steam_id"]))
     _pids = [r["player_id"] for r in ordered]
     if reform_of is None:
@@ -57664,10 +57727,9 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
         # decides HERE -- before any Photon room exists, so there is no
         # propagation race to lose. If ANY roster member's build is below the
         # floor, the lobby's config collapses to the defaults AS A SET (never
-        # partially): a mixed lobby plays exactly today's rules. is_ranked is
-        # deliberately not part of the collapse (mixed-version safe -- the
-        # server ANDs it at submit; an old client only mis-renders its own HUD
-        # badge).
+        # partially): a mixed lobby plays exactly today's rules. Rating
+        # eligibility is deliberately not part of THIS weaker, player-row
+        # collapse; the queue-stamped proximity floor below freezes it.
         _vrows = (await db.execute(
             select(Player.id, Player.mod_version).where(Player.id.in_(_pids))
         )).all()
@@ -57703,6 +57765,10 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
             """), {"lid": lobby_id})
             print(f"[FFA-LOBBY] lobby {lobby_id}: roster below config floor "
                   f"{FFA_CONFIG_MIN_VERSION} -- config collapsed to defaults")
+    # Queue-stamped capability evidence is read once for every lock decision.
+    # The proximity floor controls rating eligibility; the other two flags
+    # keep their own independent floors and safe fallback values.
+    #
     # Kills tie-break capability, frozen HERE (migration 187): TRUE only when
     # EVERY member's ffa_queue.mod_version -- stamped by that member's OWN
     # session-authenticated join/create call -- clears the floor.
@@ -57713,6 +57779,9 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
     _kt_vals = (await db.execute(text(
         "SELECT mod_version FROM ffa_queue WHERE player_id = ANY(:ids)"
     ), {"ids": [r["player_id"] for r in ordered]})).scalars().all()
+    _proximity_capable = _ffa_roster_clears_proximity_floor(
+        _kt_vals, len(ordered))
+    _ranked_floor_ok = _proximity_capable
     _kt_floor = _parse_version(FFA_KILLS_TIEBREAK_MIN_VERSION)
     _kills_tiebreak = len(_kt_vals) == len(ordered) and all(
         _parse_version((v or "0").lstrip("vV")) >= _kt_floor for v in _kt_vals)
@@ -57766,17 +57835,23 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
         _rx.get("why"), _rx.get("raw"),
         {str(r["player_id"]): slot for slot, r in enumerate(ordered)})
     _a1, _a2 = await _ffa_asm_gates(db, _pids)
-    await db.execute(text("""
+    _locked_ranked = (await db.execute(text("""
         UPDATE ffa_lobbies
            SET status='active', photon_room_id=:room, region=:reg,
                player_count=:n, member_ids=:members, created_at=NOW(),
                kills_tiebreak=:kt, assembly_v1=:a1, admission_v1=:a2,
+               is_ranked=COALESCE(is_ranked, TRUE)
+                         AND CAST(:proximity_capable AS boolean),
                region_why=:rw, region_detail=CAST(:rd AS jsonb)
          WHERE id=:lid AND status='open'
+        RETURNING is_ranked
     """), {"room": room, "reg": (region or "us")[:8], "n": len(ordered),
            "members": _pids, "lid": lobby_id,
            "kt": _kills_tiebreak, "a1": _a1, "a2": _a2,
+           "proximity_capable": _ranked_floor_ok,
            "rw": _rwhy, "rd": _json.dumps(_rdetail)})
+    ).scalar()
+    _locked_ranked = bool(_locked_ranked) if _locked_ranked is not None else True
     if reform_of is None:
         # Lobby-phase wagers resolve against the roster just frozen above
         # (migration 207). The helper re-reads score_target/is_ranked from the
@@ -57801,7 +57876,7 @@ async def _ffa_lock_roster(db, lobby_id, rows, *, reform_of=None, offered_pid=No
     # sitting genuinely ends nothing renews it and it lapses on its own -- no
     # cleanup path has to fire, which is the whole point (migration 174).
     await _lease_acquire_many(db, _pids, "ffa", lobby_id, LEASE_TTL_ASSEMBLY)
-    return room, region, ordered
+    return room, region, ordered, _locked_ranked
 class _FfaLobbyStartReq(BaseModel):
     steam_id: str
 
@@ -58000,8 +58075,8 @@ async def ffa_lobby_start(req: _FfaLobbyStartReq, request: Request, db: AsyncSes
     # minutes would otherwise be janitor-closed on the next sweep). The
     # host's seat row carries lock_offered_at: this response offers it the
     # lock (I2 writer 1).
-    room, region, ordered = await _ffa_lock_roster(db, lobby_id, live,
-                                                   offered_pid=me["player_id"])
+    room, region, ordered, _locked_ranked = await _ffa_lock_roster(
+        db, lobby_id, live, offered_pid=me["player_id"])
     await db.commit()
     print(f"[FFA-LOBBY] host {req.steam_id} started lobby {lobby_id} room {room} n={len(ordered)}")
     try:
@@ -59522,7 +59597,7 @@ async def _asm_start_short(ctx, rule, cls) -> bool:
 async def _asm_reform(ctx, rule, cls, trigger):
     """REFORM (Table 2, fallback, |READY| >= 3; sec3.4 steps 1-7). The new
     row L' is one explicit-column INSERT in the pre-lock state: every one of
-    the 46 columns by class (COPY 10, COPY-AND 2, FRESH 14, RESET 20), never
+    the 46 columns by class (COPY 9, COPY-AND 3, FRESH 14, RESET 20), never
     a schema default (is_ranked defaults to TRUE; N12). Returns True when
     re-formed, False when too few seats carry (the caller dissolves), None
     when this transaction does not hold every carried identity (nothing
@@ -59613,16 +59688,28 @@ async def _asm_reform(ctx, rule, cls, trigger):
         "  FROM ffa_queue WHERE series_id = :new AND player_id = ANY(:ids)"
         " ORDER BY joined_at, CAST(player_id AS text)"),
         {"new": new, "ids": k_ids})).mappings().all()
-    await _ffa_lock_roster(ctx.db, new, rows_of_k, reform_of=old)
+    _room, _region, _ordered, _locked_ranked = await _ffa_lock_roster(
+        ctx.db, new, rows_of_k, reform_of=old)
     await ctx.db.execute(text(
         "UPDATE ffa_lobbies SET status = 'canceled', invalidation_reason = 'assembly_reformed',"
         "       invalidated_at = NOW(), reformed_to = :new, asm_rule = :r, "
         + _FFA_CLOSE_RECORD_SET +
         " WHERE id = :lid AND status = 'active'"),
         {"new": new, "r": rule, "lid": old, "rec_path": "asm_reform", "rec_trigger": trigger})
-    await ctx.db.execute(text(
-        "UPDATE ffa_bets SET lobby_id = :new WHERE lobby_id = :old AND settled_at IS NULL"),
-        {"new": new, "old": old})
+    if _locked_ranked:
+        await ctx.db.execute(text(
+            "UPDATE ffa_bets SET lobby_id = :new"
+            " WHERE lobby_id = :old AND settled_at IS NULL"),
+            {"new": new, "old": old})
+    else:
+        # REFORM is reachable only for a zero-game parent.  Keep every wager
+        # on that now-canceled parent and refund claim-first in its own
+        # savepoint; a failed/capped pass remains stranded there for the
+        # closure sweep, never on a child that report settlement can pay.
+        await _refund_ffa_lobby_bets(ctx.db, old, "lobby_casual")
+        await _bind_lobby_bets(
+            ctx.db, "ffa", old, {}, refund_all_reason="lobby_casual")
+        ctx.refund_flush = True
     for p in x_seats:
         await _asm_release_row(ctx.db, old, p["player_id"])
     if x_seats:
@@ -59719,9 +59806,9 @@ _ASM_REFORM_INSERT_SQL = """
 # information_schema in both directions; N12's column-by-column control).
 _ASM_REFORM_CLASSES = {
     "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap",
-             "same_card_rule", "is_ranked", "settings_known", "settings_changed_at",
+             "same_card_rule", "settings_known", "settings_changed_at",
              "password_hash", "kicked_steam_ids"),
-    "COPY_AND": ("kills_tiebreak", "sudden_death"),
+    "COPY_AND": ("is_ranked", "kills_tiebreak", "sudden_death"),
     "FRESH": ("id", "status", "photon_room_id", "region", "player_count", "member_ids",
               "created_at", "host_player_id", "reformed_from", "bets_disabled",
               "assembly_v1", "admission_v1", "region_why", "region_detail"),
@@ -61745,6 +61832,8 @@ async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSessio
     _kt_vals = (await db.execute(text(
         "SELECT mod_version FROM ffa_queue WHERE player_id = ANY(:ids)"
     ), {"ids": [r["player_id"] for r in ordered]})).scalars().all()
+    _proximity_capable = _ffa_roster_clears_proximity_floor(
+        _kt_vals, len(ordered))
     _kt_floor = _parse_version(FFA_KILLS_TIEBREAK_MIN_VERSION)
     _kills_tiebreak = len(_kt_vals) == len(ordered) and all(
         _parse_version((v or "0").lstrip("vV")) >= _kt_floor for v in _kt_vals)
@@ -61759,11 +61848,13 @@ async def _ffa_queue_poll_inner(steam_id: str, request: Request, db: AsyncSessio
         db, affected_player_ids=[r["player_id"] for r in ordered])
     await db.execute(text("""
         INSERT INTO ffa_lobbies (id, status, photon_room_id, region, player_count, member_ids,
-                                 created_at, kills_tiebreak, assembly_v1, admission_v1)
-        VALUES (:lid, 'active', :room, :reg, :n, :members, NOW(), :kt, FALSE, FALSE)
+                                 created_at, kills_tiebreak, is_ranked,
+                                 assembly_v1, admission_v1)
+        VALUES (:lid, 'active', :room, :reg, :n, :members, NOW(), :kt,
+                :proximity_capable, FALSE, FALSE)
     """), {"lid": lobby_id, "room": room, "reg": (region or "us")[:8],
            "n": len(ordered), "members": [r["player_id"] for r in ordered],
-           "kt": _kills_tiebreak})
+           "kt": _kills_tiebreak, "proximity_capable": _proximity_capable})
     for slot, r in enumerate(ordered):
         await db.execute(text("""
             UPDATE ffa_queue SET status='ready_join', series_id=:lid, slot=:slot,
@@ -61831,6 +61922,8 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
                     if m["steam_id"] == steam_id and m["slot"] is not None), -1)
     _cfg = _ffa_lobby_config(lobby)
     _asm_fields = await _asm_payload_fields(db, lobby, lobby_id, steam_id)
+    _lobby_ranked = bool(lobby["is_ranked"]) \
+        if "is_ranked" in lobby and lobby["is_ranked"] is not None else True
     return {
         "status": "ready_join",
         "lobby_id": str(lobby_id),
@@ -61847,7 +61940,8 @@ async def _ffa_poll_locked_payload(db: AsyncSession, lobby_id, steam_id: str) ->
         "card_cap": _cfg["card_cap"],
         "same_card_rule": _cfg["same_card_rule"],
         "sudden_death": _cfg["sudden_death"],
-        "lobby_ranked": bool(lobby["is_ranked"]) if "is_ranked" in lobby and lobby["is_ranked"] is not None else True,
+        "lobby_ranked": _lobby_ranked,
+        **({"ranked_refusal": "unranked"} if not _lobby_ranked else {}),
         # Round-4 find F1 / round-5 gate correction: a relaunched client's
         # recovery must NOT rejoin a room whose game is LIVE. TRI-STATE
         # (round-5: the conservative _group_game_in_progress returns True

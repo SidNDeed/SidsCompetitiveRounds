@@ -1633,3 +1633,118 @@ def test_the_identity_barrier_bounds_its_wait_and_answers_contended():
     db = _LockTimeoutSession(sqlstate="40001")
     with pytest.raises(_DBAPIError):
         run(main._identity_lock_many(db, SIDS))
+
+
+# --- merged fix 1b: rated-FFA proximity admission -------------------------
+
+def _fix1b_calls(function_name, callee):
+    tree = _ast.parse(_inspect.getsource(getattr(main, function_name)))
+    return [node for node in _ast.walk(tree)
+            if isinstance(node, _ast.Call)
+            and getattr(node.func, "id", None) == callee]
+
+
+def test_fix1b_r1_floor_is_independent_inert_and_complete():
+    assert main.FFA_PROXIMITY_VICTIM_MIN_VERSION == main.MIN_MOD_VERSION == "1.38.7"
+    floor = main.MIN_MOD_VERSION
+    assert main._ffa_roster_clears_proximity_floor([floor, "v" + floor, "V" + floor], 3)
+    assert not main._ffa_roster_clears_proximity_floor([floor, "1.38.6", floor], 3)
+    assert not main._ffa_roster_clears_proximity_floor([floor, floor], 3)
+    helper = _ast.parse(_inspect.getsource(main._ffa_roster_clears_proximity_floor))
+    assert not any(isinstance(node, _ast.Await) for node in _ast.walk(helper))
+
+
+def test_fix1b_r1_hosted_lock_freezes_the_queue_floor_once():
+    calls = _fix1b_calls("_ffa_lock_roster", "_ffa_roster_clears_proximity_floor")
+    assert len(calls) == 1
+    assert _ast.unparse(calls[0]) == \
+        "_ffa_roster_clears_proximity_floor(_kt_vals, len(ordered))"
+    src = " ".join(_inspect.getsource(main._ffa_lock_roster).split())
+    assert "is_ranked=COALESCE(is_ranked, TRUE) AND CAST(:proximity_capable AS boolean)" in src
+    assert "RETURNING is_ranked" in src
+    assert '"proximity_capable": _ranked_floor_ok' in src
+    assert src.index("_ffa_roster_clears_proximity_floor") < src.index("SET status='active'")
+    assert src.index("RETURNING is_ranked") < src.index("_bind_lobby_bets")
+
+
+def test_fix1b_r1_automatic_lock_freezes_the_queue_floor_once():
+    calls = _fix1b_calls("_ffa_queue_poll_inner", "_ffa_roster_clears_proximity_floor")
+    assert len(calls) == 1
+    assert _ast.unparse(calls[0]) == \
+        "_ffa_roster_clears_proximity_floor(_kt_vals, len(ordered))"
+    src = " ".join(_inspect.getsource(main._ffa_queue_poll_inner).split())
+    assert "kills_tiebreak, is_ranked, assembly_v1" in src
+    assert ":proximity_capable, FALSE, FALSE" in src
+    assert '"proximity_capable": _proximity_capable' in src
+    assert src.index("_ffa_roster_clears_proximity_floor") < src.index("INSERT INTO ffa_lobbies")
+
+
+def test_fix1b_r1_locked_payload_names_only_an_unranked_refusal():
+    src = _inspect.getsource(main._ffa_poll_locked_payload)
+    assert '"lobby_ranked": _lobby_ranked' in src
+    assert '**({"ranked_refusal": "unranked"} if not _lobby_ranked else {})' in src
+
+
+def test_fix1b_r2_reform_copy_ands_rating_and_gates_the_wager_move():
+    lock_src = _inspect.getsource(main._ffa_lock_roster)
+    assert "_ranked_floor_ok = _proximity_capable" in lock_src
+    assert "if reform_of is None else True" not in lock_src
+
+    src = _inspect.getsource(main._asm_reform)
+    tree = _ast.parse(src)
+    gates = [node for node in _ast.walk(tree) if isinstance(node, _ast.If)
+             and _ast.unparse(node.test) == "_locked_ranked"]
+    assert len(gates) == 1
+    rated = _ast.unparse(_ast.Module(body=gates[0].body, type_ignores=[]))
+    unrated = _ast.unparse(_ast.Module(body=gates[0].orelse, type_ignores=[]))
+    move = "UPDATE ffa_bets SET lobby_id = :new WHERE lobby_id = :old AND settled_at IS NULL"
+    assert move in " ".join(rated.split())
+    assert move not in " ".join(unrated.split())
+    assert "_refund_ffa_lobby_bets(ctx.db, old, 'lobby_casual')" in unrated
+    assert "refund_all_reason='lobby_casual'" in unrated
+    assert "ctx.refund_flush = True" in unrated
+    assert "_refund_ffa_game_bets_strict" not in src
+    assert src.count("UPDATE ffa_bets SET lobby_id = :new") == 1
+    assert main._ASM_REFORM_CLASSES["COPY_AND"] == \
+        ("is_ranked", "kills_tiebreak", "sudden_death")
+
+
+def test_fix1b_r3_locked_rejoin_rechecks_under_locks_before_any_write():
+    src = _inspect.getsource(main.ffa_queue_join)
+    compact = " ".join(src.split())
+    assert src.count("_current_mod_version.get()") == 1
+    assert '"mv": _join_mv' in src
+    calls = _fix1b_calls("ffa_queue_join", "_ffa_roster_clears_proximity_floor")
+    assert len(calls) == 1
+    assert _ast.unparse(calls[0]) == \
+        "_ffa_roster_clears_proximity_floor([_join_mv], 1)"
+
+    identity = src.index("_enrollment_identity_gate")
+    lobby_lock = src.index("FROM ffa_lobbies")
+    queue_lock = src.index("FROM ffa_queue", lobby_lock)
+    guard = src.index("_ffa_roster_clears_proximity_floor")
+    husk = src.index("_lease_live_mode")
+    upsert = src.index("INSERT INTO ffa_queue")
+    assert identity < lobby_lock < queue_lock < guard < husk < upsert
+    assert compact.count("FOR NO KEY UPDATE") == 2
+    assert '_locked_queue["status"] == "ready_join"' in src
+    assert '_locked_queue["series_id"] != _locked_hint["series_id"]' in src
+    assert '_locked_lobby["status"] == "active"' in src
+    refusal = "You're locked into another FFA game — finish or leave it first"
+    assert src.count(refusal) == 2
+    assert refusal in _inspect.getsource(main._ffa_lobby_enroll_caller)
+
+
+def test_fix1b_r4_null_stays_below_every_floor_consumer():
+    assert not main._ffa_roster_clears_proximity_floor([None], 1)
+    assert not main._ffa_roster_clears_proximity_floor([""], 1)
+    assert not main._ffa_roster_clears_proximity_floor(["not-a-version"], 1)
+    expected = {
+        "_ffa_lock_roster": "_ffa_roster_clears_proximity_floor(_kt_vals, len(ordered))",
+        "_ffa_queue_poll_inner": "_ffa_roster_clears_proximity_floor(_kt_vals, len(ordered))",
+        "ffa_queue_join": "_ffa_roster_clears_proximity_floor([_join_mv], 1)",
+    }
+    for function_name, expression in expected.items():
+        calls = _fix1b_calls(function_name, "_ffa_roster_clears_proximity_floor")
+        assert len(calls) == 1, function_name
+        assert _ast.unparse(calls[0]) == expression, function_name

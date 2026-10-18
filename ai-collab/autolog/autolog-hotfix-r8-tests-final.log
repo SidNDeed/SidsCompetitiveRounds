@@ -3320,7 +3320,7 @@ case definitions: r5_cases2_src.py  sha256 b9bf7f84145a6163070d7516c9446fb58c49e
     MUTANT applied: '_STEAM64_SHAPE = re.compile(r"(?<!\\d)\\d{17}(?!\\d)")' -> '_STEAM64_SHAPE = re.compile(r"7656119\\d{10}")'
     INVOCATION: PYTHON -m pytest tests/test_auto_logs.py::test_the_steam_identifier_pattern_catches_every_shape_it_claims -q --no-header -p no:cacheprovider
     RESULT: exit=1  1 failed in 11.14s
-    first assertion: E           AssertionError: the pattern does not catch a individual, a different instance identifier (76561202000000001), so an id of that shape pasted into a fixture would not redden the check below
+    first assertion: E           AssertionError: the pattern does not catch a individual, a different instance identifier (<STEAM-ID-SHAPED FIXTURE>), so an id of that shape pasted into a fixture would not redden the check below
     OK: the named test REDS under the mutant
     sha256 RESTORE a349eec9c74c42364f4feb64e784c0304b3dab9f867d365ab03a08bb7df23d03  test_auto_logs.py  [EQUAL]
     INERT TWIN applied at the SAME site: '_STEAM64_SHAPE = re.compile(r"(?<!\\d)\\d{17}(?!\\d)")' -> '_STEAM64_SHAPE = re.compile(r"(?<![0-9])[0-9]{17}(?![0-9])")'

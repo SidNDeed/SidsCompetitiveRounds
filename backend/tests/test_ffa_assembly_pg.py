@@ -1273,9 +1273,11 @@ def _pre_refactor_main():
     return mod
 
 
-async def _open_lobby(env, n, caps):
+async def _open_lobby(env, n, caps, versions=None):
     """An open hosted lobby of n fresh members (queue rows status 'lobby'),
     slot 0 hosting."""
+    versions = ["1.41.0"] * n if versions is None else list(versions)
+    assert len(caps) == len(versions) == n
     env.serial += 1
     base = cf_asm.STEAM_BASE + env.serial * 20
     sids = [str(base + i) for i in range(n)]
@@ -1295,8 +1297,9 @@ async def _open_lobby(env, n, caps):
             "INSERT INTO ffa_queue (player_id, steam_id, display_name, status, series_id,"
             "  joined_at, last_polled, caps, mod_version)"
             " VALUES ($1, $2, $3, 'lobby', $4, clock_timestamp() - make_interval(secs => $5),"
-            "         clock_timestamp(), $6, '1.41.0')",
-            pids[i], sids[i], "cf o%d-%d" % (env.serial, i), lid, float(300 - i), caps[i])
+            "         clock_timestamp(), $6, $7)",
+            pids[i], sids[i], "cf o%d-%d" % (env.serial, i), lid, float(300 - i),
+            caps[i], versions[i])
     lob = cf_asm.Lob(lid, sids, pids, None, False, True)
     env.lobbies.append(lob)
     return lob
@@ -1309,6 +1312,200 @@ async def _start(env, module, lob):
         async with env.sm() as db:
             return await module.ffa_lobby_start(req, None, db=db)
     return await env._call(go)
+
+
+async def _fix1b_auto_lock(env, versions):
+    """Form one automatic room through the public poll route."""
+    env.serial += 1
+    n = len(versions)
+    base = cf_asm.STEAM_BASE + env.serial * 20
+    sids = [str(base + i) for i in range(n)]
+    pids = []
+    for i, sid in enumerate(sids):
+        pid = await env.conn.fetchval(
+            "INSERT INTO players (id, steam_id, display_name, mod_version)"
+            " VALUES ($3, $1, $2, '1.41.0') RETURNING id",
+            sid, "cf auto%d-%d" % (env.serial, i), cf_asm.fixture_uuid("player", sid))
+        pids.append(pid)
+        await env.conn.execute(
+            "INSERT INTO ffa_queue (player_id, steam_id, display_name, status, region,"
+            " joined_at, last_polled, caps, mod_version)"
+            " VALUES ($1, $2, $3, 'searching', 'eu', clock_timestamp(),"
+            " clock_timestamp(), '', $4)", pid, sid, "cf auto%d-%d" % (env.serial, i),
+            versions[i])
+    env.mp.setattr(main, "_ffa_gather_started_mono",
+                   env.mono - main.FFA_GATHER_CAP_SECONDS)
+    env.mp.setattr(main, "_ffa_gather_last_join_mono",
+                   env.mono - main.FFA_GATHER_CAP_SECONDS)
+    env.mp.setattr(main, "_ffa_gather_pool_seen_mono", env.mono)
+
+    async def go():
+        async with env.sm() as db:
+            return await main.ffa_queue_poll(sids[0], cf_asm.FakeRequest(), db=db)
+
+    answer = await env._call(go)
+    assert answer.status == 200 and answer["status"] == "ready_join", answer
+    lid = uuid.UUID(answer["lobby_id"])
+    locked = await env.conn.fetch(
+        "SELECT player_id, steam_id FROM ffa_queue WHERE series_id = $1 ORDER BY slot", lid)
+    lob = cf_asm.Lob(lid, [r["steam_id"] for r in locked],
+                     [r["player_id"] for r in locked], answer["room_region"], False, False)
+    env.lobbies.append(lob)
+    return lob, answer
+
+
+def test_fix1b_r1_hosted_and_automatic_locks_freeze_rating_floor(monkeypatch):
+    async def settled(env, lob, answer, rated, tag):
+        row = await env.lobby_row(lob)
+        assert row["is_ranked"] is rated, (tag, row["is_ranked"])
+        assert answer.get("ranked_refusal") == (None if rated else "unranked"), \
+            (tag, answer)
+        results = {sid: (5 - i, 10 - i) for i, sid in enumerate(lob.sids)}
+        report = await env.report(lob, 1, results)
+        assert report.status == 200, (tag, report)
+        counts = await _report_counts(env, lob)
+        assert counts["matches"] == 1
+        assert counts["ratings"] == (len(lob.pids) if rated else 0), (tag, counts)
+        assert bool(report["rating_changes"]) is rated, (tag, report)
+
+    async def body(env):
+        floor = main.MIN_MOD_VERSION
+        caps = [""] * 3
+        hosted_ok = await _open_lobby(env, 3, caps, [floor] * 3)
+        await settled(env, hosted_ok, await _start(env, main, hosted_ok), True, "hosted floor")
+        hosted_low = await _open_lobby(env, 3, caps, [floor, "1.38.6", floor])
+        await settled(env, hosted_low, await _start(env, main, hosted_low), False, "hosted mixed")
+
+        auto_ok, answer = await _fix1b_auto_lock(env, [floor] * 3)
+        await settled(env, auto_ok, answer, True, "automatic floor")
+        auto_low, answer = await _fix1b_auto_lock(env, [floor, "1.38.6", floor])
+        await settled(env, auto_low, answer, False, "automatic mixed")
+    run_env(monkeypatch, body, prefix="cf_f1b_r1")
+
+
+async def _fix1b_gold_snapshot(env, pid):
+    return tuple(await env.conn.fetchrow(
+        "SELECT COALESCE(gold_earned, 0) - COALESCE(gold_spent, 0),"
+        " COALESCE((SELECT SUM(amount) FROM gold_transactions WHERE player_id = $1), 0)"
+        " FROM players WHERE id = $1", pid))
+
+
+def test_fix1b_r2_floor_unrated_reform_refunds_parent_wagers(monkeypatch):
+    async def body(env):
+        floor = main.MIN_MOD_VERSION
+        lob = await _open_lobby(env, 5, ["ffa_asm1"] * 5, [floor] * 5)
+        started = await _start(env, main, lob)
+        assert started.status == 200 and (await env.lobby_row(lob))["is_ranked"] is True
+        lob.region = (await env.lobby_row(lob))["region"]
+
+        bettors = [await env.bettor() for _ in range(4)]
+        before = {pid: await _fix1b_gold_snapshot(env, pid) for pid, _sid in bettors}
+        wager_ids = [
+            await env.wager(lob, bettors[0][0], lob.pids[0]),
+            await env.wager(lob, bettors[1][0], lob.pids[4]),
+            await env.wager(lob, bettors[2][0], lob.pids[1]),
+        ]
+        await _bound_lobby_bet(env, lob, bettors[2][0], 1, wager_ids[2])
+        await env.conn.execute(
+            "UPDATE players SET gold_spent = COALESCE(gold_spent, 0) + 100 WHERE id = $1",
+            bettors[3][0])
+        await env.conn.execute(
+            "INSERT INTO gold_transactions (player_id, amount, reason, reference_id)"
+            " VALUES ($1, -100, 'lobby_bet_stake', $2)", bettors[3][0], str(lob.lid))
+        open_id = await env.conn.fetchval(
+            "INSERT INTO lobby_bets (mode, lobby_id, player_id, amount, target_steams, status)"
+            " VALUES ('ffa', $1, $2, 100, $3, 'open') RETURNING id",
+            lob.lid, bettors[3][0], lob.sids[0])
+
+        env.mp.setattr(main, "FFA_PROXIMITY_VICTIM_MIN_VERSION", "1.41.0")
+        await env.at(lob, 40.0)
+        answer = await _post(env, lob, 0, [0, 1, 2, 3])
+        assert answer["status"] == "reformed", answer
+        new = (await env.lobby_row(lob))["reformed_to"]
+        child = await env.lobby_row(new)
+        assert child["is_ranked"] is False
+        assert answer["lock"]["ranked_refusal"] == "unranked"
+        bets = await env.bets(lob)
+        assert {b["id"] for b in bets} == set(wager_ids)
+        assert all(b["settlement_kind"] == "refunded" and b["payout"] == b["amount"]
+                   for b in bets), bets
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM ffa_bets WHERE lobby_id = $1", new) == 0
+        assert await env.refunds(lob) == len(wager_ids)
+        assert await env.conn.fetchval(
+            "SELECT status FROM lobby_bets WHERE id = $1", open_id) == "refunded"
+        assert await env.conn.fetchval(
+            "SELECT status FROM lobby_bets WHERE bound_bet_id = $1", wager_ids[2]) == "bound"
+        for pid, _sid in bettors:
+            assert await _fix1b_gold_snapshot(env, pid) == before[pid]
+
+        child_lob = cf_asm.Lob(new, lob.sids[:4], lob.pids[:4], child["region"], False, True)
+        results = {sid: (5 - i, 10 - i) for i, sid in enumerate(child_lob.sids)}
+        report = await env.report(child_lob, 1, results)
+        assert report.status == 200 and report["rating_changes"] == {}
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM ffa_bets WHERE lobby_id = $1"
+            " AND settlement_kind IN ('won', 'lost')", lob.lid) == 0
+    run_env(monkeypatch, body, prefix="cf_f1b_r2")
+
+
+async def _fix1b_rejoin(env, lob, slot, version):
+    token = main._current_mod_version.set(version)
+    try:
+        req = main._FfaQueueJoinReq(
+            steam_id=lob.sids[slot], display_name="cf rejoin", region=lob.region)
+
+        async def go():
+            async with env.sm() as db:
+                return await main.ffa_queue_join(req, cf_asm.FakeRequest(), db=db)
+
+        return await env._call(go)
+    finally:
+        main._current_mod_version.reset(token)
+
+
+def test_fix1b_r3_locked_rated_rejoin_refuses_only_below_floor(monkeypatch):
+    async def body(env):
+        refusal = "You're locked into another FFA game — finish or leave it first"
+        rated = await env.lobby(3, ranked=True)
+        before = await env.queue_row(rated, 0)
+        answer = await _fix1b_rejoin(env, rated, 0, "1.38.6")
+        assert answer.status == 409 and answer.body == refusal
+        assert await env.queue_row(rated, 0) == before
+
+        answer = await _fix1b_rejoin(env, rated, 0, main.MIN_MOD_VERSION)
+        assert answer.status == 200, answer
+        at_floor = await env.queue_row(rated, 0)
+        assert at_floor["mod_version"] == main.MIN_MOD_VERSION
+        assert at_floor["status"] == "ready_join" and at_floor["series_id"] == rated.lid
+
+        casual = await env.lobby(3, ranked=False)
+        answer = await _fix1b_rejoin(env, casual, 0, "1.38.6")
+        assert answer.status == 200, answer
+        assert (await env.queue_row(casual, 0))["mod_version"] == "1.38.6"
+    run_env(monkeypatch, body, prefix="cf_f1b_r3")
+
+
+def test_fix1b_r4_null_is_unrated_at_both_locks_and_refused_on_rejoin(monkeypatch):
+    async def body(env):
+        floor = main.MIN_MOD_VERSION
+        hosted = await _open_lobby(env, 3, [""] * 3, [floor, None, floor])
+        answer = await _start(env, main, hosted)
+        assert answer.status == 200 and answer["ranked_refusal"] == "unranked"
+        assert (await env.lobby_row(hosted))["is_ranked"] is False
+
+        automatic, answer = await _fix1b_auto_lock(env, [floor, None, floor])
+        assert answer["ranked_refusal"] == "unranked"
+        assert (await env.lobby_row(automatic))["is_ranked"] is False
+
+        rated = await env.lobby(3, ranked=True)
+        before = await env.queue_row(rated, 0)
+        answer = await _fix1b_rejoin(env, rated, 0, None)
+        assert answer.status == 409
+        assert answer.body == \
+            "You're locked into another FFA game — finish or leave it first"
+        assert await env.queue_row(rated, 0) == before
+    run_env(monkeypatch, body, prefix="cf_f1b_r4")
 
 
 def _anon(obj, names):
@@ -5995,9 +6192,8 @@ def test_m2b_a_refused_attest_after_a_keeps_the_expiry(monkeypatch):
 
 _N12_CLASSES = {
     "COPY": ("score_target", "card_candidates", "initial_picks", "card_cap", "same_card_rule",
-             "is_ranked", "settings_known", "settings_changed_at", "password_hash",
-             "kicked_steam_ids"),
-    "COPY_AND": ("kills_tiebreak", "sudden_death"),
+             "settings_known", "settings_changed_at", "password_hash", "kicked_steam_ids"),
+    "COPY_AND": ("is_ranked", "kills_tiebreak", "sudden_death"),
     "FRESH": ("id", "status", "photon_room_id", "region", "player_count", "member_ids",
               "created_at", "host_player_id", "reformed_from", "bets_disabled", "assembly_v1",
               "admission_v1", "region_why", "region_detail"),
@@ -6012,14 +6208,14 @@ _N12_CLASSES = {
 
 def test_n12_the_46_column_partition(monkeypatch):
     """Section 12, N12: the L' partition, class by class and column by column,
-    is V11's table (COPY 10, COPY-AND 2, FRESH 14, RESET 20), disjoint, and
+    is V11's table (COPY 9, COPY-AND 3, FRESH 14, RESET 20), disjoint, and
     its union is information_schema's ffa_lobbies."""
     async def body(env):
         classes = main._ASM_REFORM_CLASSES
         assert {k: set(v) for k, v in classes.items()} == \
             {k: set(v) for k, v in _N12_CLASSES.items()}, ("N12 classes", classes)
         assert {k: len(v) for k, v in classes.items()} == \
-            {"COPY": 10, "COPY_AND": 2, "FRESH": 14, "RESET": 20}, "N12 counts"
+            {"COPY": 9, "COPY_AND": 3, "FRESH": 14, "RESET": 20}, "N12 counts"
         names = [c for v in classes.values() for c in v]
         cols = {r[0] for r in await env.conn.fetch(
             "SELECT column_name FROM information_schema.columns"
@@ -6029,9 +6225,9 @@ def test_n12_the_46_column_partition(monkeypatch):
     run_env(monkeypatch, body, fresh=True)
 
 
-def test_n12_reform_keeps_the_ranked_flag(monkeypatch):
-    """Section 12, N12: is_ranked is COPIED into L', never left to the schema's
-    TRUE default: a casual lobby's re-form stays casual, a rated one's stays
+def test_n12_reform_copy_ands_the_ranked_flag(monkeypatch):
+    """Section 12, N12: is_ranked is COPY-AND, never left to the schema's TRUE
+    default: a casual parent stays casual and a capable rated parent stays
     rated."""
     async def body(env):
         for ranked in (False, True):

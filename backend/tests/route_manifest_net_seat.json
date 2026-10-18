@@ -1759,7 +1759,7 @@
           ],
           "main",
           "ffa_lobby_start",
-          "e831b3aac27ed996284cc930314da04d24079e54"
+          "f897ae097c26f1bd57884f1c2b689aedc2fb6931"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/assembly",
@@ -1768,7 +1768,7 @@
           ],
           "main",
           "ffa_lobby_assembly",
-          "b959b03a27d749a4c70e11e8ccc3452780a88d2b"
+          "0358b42eca78d03f90b3508dfda6ba0428b3c3ac"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/connect",
@@ -1777,7 +1777,7 @@
           ],
           "main",
           "ffa_lobby_connect",
-          "306659776cf47ca5ae3b8df531f4c318776486a4"
+          "9acd0b50218f4810b291d43fbd42d218e9f71aff"
         ],
         [
           "/api/v1/ffa/lobby/{lobby_id}/release",
@@ -1786,7 +1786,7 @@
           ],
           "main",
           "ffa_lobby_release",
-          "81d5fbb150aad7da69bc392eb2ddeac5256bd9f0"
+          "4f04008a29b96771fe5286e2405fa822d88fc012"
         ],
         [
           "/api/v1/ffa/queue/join",
@@ -1795,7 +1795,7 @@
           ],
           "main",
           "ffa_queue_join",
-          "d34365210604d43e53f9db50b0a1393141675557"
+          "019754159a04c5024f1b3aae7668e687bea88b3a"
         ],
         [
           "/api/v1/ffa/queue/leave",
@@ -1804,7 +1804,7 @@
           ],
           "main",
           "ffa_queue_leave",
-          "b36cb404e39cc997225f213855b13a26144cdfb2"
+          "f8b71e34d2f587cbb6cbccadec55cd96ac73cde0"
         ],
         [
           "/api/v1/ffa/queue/list",
@@ -1822,7 +1822,7 @@
           ],
           "main",
           "ffa_queue_poll",
-          "2872b386b06ac60cefd96841f7be6de4f0d8bdaa"
+          "98cd5ddabcf6e5d24f22ed6d095dd41b3ae2c4e2"
         ],
         [
           "/api/v1/ffa/queue/recent-joins",
