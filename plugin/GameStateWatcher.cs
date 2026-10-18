@@ -6985,7 +6985,9 @@ namespace CompetitiveRounds
             // Census: gate + roster from ONE fighter view (converted together
             // with the foreach below — recon structural hazard).
             var reportFighters = RoomActors.ActiveFighters();
-            if (reportFighters.Length != 3) return false;
+            int heldTeam = -1;   // KX6: the held seat, as the team census
+            string heldSid = reportFighters.Length == 2 ? HeldCensusSid(reportFighters, 3, out heldTeam) : null;
+            if (reportFighters.Length != 3 && heldSid == null) return false;
             var pm = PlayerManager.instance;
             if (pm == null || pm.players == null) return false;
             if (string.IsNullOrEmpty(ApiClient.ActiveOvt1v2SeriesId))
@@ -7026,6 +7028,8 @@ namespace CompetitiveRounds
                 else if (TryGetPeerTelemetry(pp.ActorNumber, out _, out _, out _, out _, out string pDmg, out _, out _)) dmgTl = pDmg ?? "";
                 info[sid] = (name, teamId, picks, fps, dmgTl);
             }
+            if (heldSid != null && !info.ContainsKey(heldSid))
+                info[heldSid] = (heldSid, heldTeam, new List<MatchTracker.CardPickData>(), 0, "");
             if (info.Count != 3) { Plugin.Log.LogWarning($"[1v2-REPORT] resolved {info.Count}/3 players"); return false; }
 
             // Group by in-game team; the singleton team is the solo.
@@ -7044,7 +7048,7 @@ namespace CompetitiveRounds
             string lowest = null; long lowVal = long.MaxValue;
             foreach (var sid in info.Keys) { if (long.TryParse(sid, out long v) && v < lowVal) { lowVal = v; lowest = sid; } }
             if (lowest == null) lowest = localSteamId;
-            if (lowest != localSteamId) { Plugin.Log.LogInfo($"[1v2-REPORT] reporter is {lowest}, not me — skipping"); return true; }
+            if (!TeamHoldRules.Files(TeamHoldWriter.CurrentRoom(), localSteamId, lowest)) { Plugin.Log.LogInfo($"[1v2-REPORT] reporter is {lowest}, not me — skipping"); return true; }
 
             // Rounds: solo's team maps to p1Rounds if it's ROUNDS team 0, else p2Rounds.
             int soloRounds = soloTeam == 0 ? p1Rounds : p2Rounds;
@@ -7939,7 +7943,11 @@ namespace CompetitiveRounds
             // Census: gate + roster from ONE fighter view (converted with the
             // photonPlayers assignment below — recon structural hazard).
             var reportFighters = RoomActors.ActiveFighters();
-            if (reportFighters.Length != 4)
+            // KX6 (Stage 2 S5): a game-over during a hold counts the held
+            // seat from the pinned roster.
+            int heldTeam = -1;
+            string heldSid = reportFighters.Length == 3 ? HeldCensusSid(reportFighters, 4, out heldTeam) : null;
+            if (reportFighters.Length != 4 && heldSid == null)
             {
                 Plugin.Log.LogWarning($"[2v2-REPORT] aborting: fighters={reportFighters.Length} (expected 4)");
                 return null;
@@ -8086,6 +8094,8 @@ namespace CompetitiveRounds
                 bySteam[sid] = (name, peerTeamId, pickList, fps);
             }
 
+            if (heldSid != null && !bySteam.ContainsKey(heldSid))
+                bySteam[heldSid] = (heldSid, heldTeam, new List<MatchTracker.CardPickData>(), 0);
             if (bySteam.Count != 4)
             {
                 Plugin.Log.LogWarning($"[2v2-REPORT] resolved {bySteam.Count}/4 players, aborting");
@@ -8100,7 +8110,8 @@ namespace CompetitiveRounds
                 if (long.TryParse(sid, out long v) && v < lowestVal) { lowestVal = v; lowestSid = sid; }
             }
             if (lowestSid == null) lowestSid = localSteamId;
-            if (lowestSid != localSteamId)
+            // KX6: in a flagged room every present fighter files its own.
+            if (!TeamHoldRules.Files(TeamHoldWriter.CurrentRoom(), localSteamId, lowestSid))
             {
                 // Routed correctly, just not by us. A payload rather than null:
                 // "someone else is posting this" is a SUCCESS for the caller,
@@ -8205,6 +8216,35 @@ namespace CompetitiveRounds
             }
             SubmitTeamReport(payload);
             return true;
+        }
+
+        /// <summary>KX6 (Stage 2 S5): the held seat a game-over census counts
+        /// from the pinned roster while a hold is live (TeamHoldRules.
+        /// HeldCensusSeat over the present fighters' ids), and its team from
+        /// its slot. Null: the census of today.</summary>
+        private static string HeldCensusSid(IList<Photon.Realtime.Player> fighters, int need, out int team)
+        {
+            team = -1;
+            try
+            {
+                var cut = TeamHold.Cut;
+                if (cut == null || !TeamHoldRules.ThLive(TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH))) return null;
+                var uids = new List<string>();
+                foreach (var f in fighters)
+                {
+                    string s = f != null ? ResolvePhotonSteamId(f) : null;
+                    if (string.IsNullOrEmpty(s)) return null;
+                    uids.Add(s);
+                }
+                string room = TeamHoldWriter.CurrentRoom();
+                string held = TeamHoldRules.HeldCensusSeat(room, uids, cut.LeaverUid, need);
+                if (held == null) return null;
+                var pin = TeamHoldRules.PinFor(room);
+                team = TeamHoldRules.SlotToTeam(pin != null ? pin.Mode : null, cut.Slot);
+                Plugin.Log.LogInfo(TeamHold.TAG + " report census counts the held seat (slot " + cut.Slot + ")");
+                return held;
+            }
+            catch { return null; }
         }
 
         /// <summary>Maps a Photon player to a Steam ID. ROUNDS publishes the Steam

@@ -43,6 +43,7 @@ PIECES = {
     "KX3": ("t35_", "tx3_"),
     "KX4": ("t34_", "tx4_"),
     "KX5": ("t41_", "t42_", "t44_", "tx5_"),
+    "KX6": ("t55_", "t57_", "tx6_"),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -254,6 +255,24 @@ MUTANTS = [
     ("M4.7", "KX5", "rules", [
         ("if (h != null) return h;", "")],
      "t44_rule_p_promotion", "t41_twin_run"),
+    # KX6, reports after a return (V3 M5.8; MX6.1 to MX6.4 lane-added).
+    ("M5.8", "KX6", "rules", [
+        ("            if (Flagged(room)) return true;\n            return me == lowest;\n",
+         "            return me == lowest;\n")],
+     "t55_every_present_files", "t57_held_census"),
+    ("MX6.1", "KX6", "rules", [
+        ("presentUids.Count != need - 1", "presentUids.Count > need - 1")],
+     "t57_held_census", "t55_every_present_files"),
+    ("MX6.2", "KX6", "rules", [
+        ("if (u == heldUid || !pin.Roster.Contains(u)) return null;", "if (u == heldUid) return null;")],
+     "t57_held_census", "t55_every_present_files"),
+    ("MX6.3", "KX6", "rules", [
+        ('return "game-id:" + (g ?? "") + ":" + (reporter ?? "") + ":" + (room ?? "");',
+         'return "game-id:" + (g ?? "") + ":" + (room ?? "") + ":" + (reporter ?? "");')],
+     "tx6_game_id", "t55_every_present_files"),
+    ("MX6.4", "KX6", "rules", [
+        ('return body != null && body.Replace(" ", "").IndexOf(', 'return body != null || body.Replace(" ", "").IndexOf(')],
+     "tx6_journaled_terminal", "t55_every_present_files"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

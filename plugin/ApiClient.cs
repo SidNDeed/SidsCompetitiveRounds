@@ -17966,6 +17966,24 @@ namespace CompetitiveRounds
             sb.Append("},");
         }
 
+        /// <summary>KX6 (Stage 2 S5): the advisory game id of a flagged room's
+        /// report, signed with its own canonical ("game-id:{G}:{reporter}:{room}"),
+        /// never the frozen report canonicals. G is read from cr_tgid while
+        /// this client is in that room; otherwise no fields (today's body).</summary>
+        private static string GameIdAdvisory(string reporter, string room)
+        {
+            try
+            {
+                if (TeamHoldWriter.CurrentRoom() != room) return "";
+                string tgid = TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TGID);
+                int i = string.IsNullOrEmpty(tgid) ? -1 : tgid.LastIndexOf(':');
+                string g = i > 0 ? tgid.Substring(0, i) : null;
+                if (string.IsNullOrEmpty(g) || !TeamHoldRules.Flagged(room)) return "";
+                return TeamHoldRules.GameIdFields(room, g, ComputeHmacHex(TeamHoldRules.GameIdCanonical(g, reporter, room)));
+            }
+            catch { return ""; }
+        }
+
         public static void ReportTeamMatch(
             string seriesId,
             string t1aSteam, string t1aName, List<MatchTracker.CardPickData> t1aCards,
@@ -18030,6 +18048,7 @@ namespace CompetitiveRounds
                 $"{(isRanked ? "true" : "false")}:{reporterSteamId}:" +
                 $"{photonRoomId ?? ""}:{winnerTeam}:{seriesId}";
             string sig = ComputeHmacHex(canonical);
+            sb.Append(GameIdAdvisory(reporterSteamId, photonRoomId));   // KX6, advisory
             sb.Append($"\"hmac_signature\":\"{sig}\"");
             sb.Append("}");
 
@@ -18039,6 +18058,12 @@ namespace CompetitiveRounds
                 $"{baseUrl}/api/v1/team/matches", json,
                 (success, response) =>
                 {
+                    if (success && TeamHoldRules.Journaled(response))
+                    {
+                        // KX6: 202 journaled is terminal; the server settles it.
+                        Plugin.Log.LogInfo($"2v2 match report journaled: {response}");
+                        return;
+                    }
                     if (success)
                     {
                         Plugin.Log.LogInfo($"2v2 match reported: {response}");
@@ -19291,12 +19316,19 @@ namespace CompetitiveRounds
             sb.Append($"\"duo_b_damage_timeline\":\"{Escape(ClampTimeline(duoBDamageTimeline, 1024))}\",");
             string canonical = $"{soloSteam}:{duoASteam}:{duoBSteam}:{soloRounds}:{duoRounds}:" +
                                $"{(isRanked ? "true" : "false")}:{reporterSteam}:{room ?? ""}:{winnerSide}:{seriesId}";
+            sb.Append(GameIdAdvisory(reporterSteam, room));   // KX6, advisory
             sb.Append($"\"hmac_signature\":\"{ComputeHmacHex(canonical)}\"");
             sb.Append("}");
             string json = sb.ToString();
             Plugin.Log.LogInfo($"[1v2-REPORT] submitting series={seriesId} winner=side{winnerSide} {soloRounds}-{duoRounds}");
             Plugin.Instance.StartCoroutine(PostMatchReportWithRetry($"{baseUrl}/api/v1/ovt/matches", json, (ok, resp) =>
             {
+                if (ok && TeamHoldRules.Journaled(resp))
+                {
+                    // KX6: 202 journaled is terminal; the server settles it.
+                    Plugin.Log.LogInfo($"[1v2] match report journaled: {resp}");
+                    return;
+                }
                 if (ok)
                 {
                     Plugin.Log.LogInfo($"[1v2] match reported: {resp}");

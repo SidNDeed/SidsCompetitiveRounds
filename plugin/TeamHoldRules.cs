@@ -1252,5 +1252,62 @@ namespace CompetitiveRounds
             var r = OffFor(off, g, phase);
             return r != null ? r.ListOf(slot) : null;
         }
+
+
+        // ── KX6: the reports after a return (V3 S5, client half) ───────────
+
+        /// <summary>A game-over during a hold (S5): the 2v2 census of four and
+        /// the 1v2 census of three count the held seat from the pinned roster.
+        /// The seat to add: the held identity, when the room is flagged, every
+        /// present fighter and the held seat are on the pinned roster, and the
+        /// present fighters are exactly one short. Null: the census of today.</summary>
+        internal static string HeldCensusSeat(string room, IList<string> presentUids, string heldUid, int need)
+        {
+            if (!Flagged(room) || string.IsNullOrEmpty(heldUid) || presentUids == null) return null;
+            var pin = PinFor(room);
+            if (pin == null || !pin.Roster.Contains(heldUid) || presentUids.Count != need - 1) return null;
+            foreach (var u in presentUids)
+                if (u == heldUid || !pin.Roster.Contains(u)) return null;
+            return heldUid;
+        }
+
+        /// <summary>Who files a game report (S5, the report acceptance after a
+        /// return): in a flagged room every present fighter files its own, and
+        /// the server classes and settles one; elsewhere the lowest Steam id
+        /// of the census, as today.</summary>
+        internal static bool Files(string room, string me, string lowest)
+        {
+            if (Flagged(room)) return true;
+            return me == lowest;
+        }
+
+        /// <summary>The advisory game id's canonical, signed apart from the
+        /// eleven-field team and ten-field 1v2 canonicals (RJS-L3; the server
+        /// half's match_report_window.game_id_canonical).</summary>
+        internal static string GameIdCanonical(string g, string reporter, string room)
+        {
+            return "game-id:" + (g ?? "") + ":" + (reporter ?? "") + ":" + (room ?? "");
+        }
+
+        /// <summary>The advisory fields of a report body in a flagged room
+        /// with a started G: `"game_id":G,"game_id_sig":sig,` (the report
+        /// bodies append each field with its trailing comma, hmac_signature
+        /// last); "" otherwise (the body of today). No signature, no fields.</summary>
+        internal static string GameIdFields(string room, string g, string sig)
+        {
+            if (!Flagged(room) || string.IsNullOrEmpty(g) || string.IsNullOrEmpty(sig)) return "";
+            return "\"game_id\":\"" + g + "\",\"game_id_sig\":\"" + sig + "\",";
+        }
+
+        /// <summary>A report answered 2xx is terminal for the outbox, the
+        /// 202 journaled answer included: the server keeps the HMAC-verified
+        /// payload and settles it by class, so a resend can only duplicate.</summary>
+        internal static bool ReportTerminal(bool ok, string body) { return ok; }
+
+        /// <summary>The 202 journaled answer of the report routes.</summary>
+        internal static bool Journaled(string body)
+        {
+            return body != null && body.Replace(" ", "").IndexOf("\"status\":\"journaled\"", StringComparison.Ordinal) >= 0;
+        }
     }
 }
