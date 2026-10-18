@@ -618,6 +618,7 @@ cf84a98d6cf7f156	N	rule:N1	Announcement
 c294dd8cfffa97ad	N	rule:N1	Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' Elo and his
 857132eebe84c050	N	rule:N1	Another Round
 26795e3f58417857	N	rule:N1	Another player is using your seat identity
+07b5dcb71a45699b	N	rule:N1	Another player left. The match ends as a disconnect.
 4c632b2b3d50160e	N	rev:2c0a303db2f9d4f6 a page or section title of the info library (InfoLibrary's file scope is binding-dependent: its pages name keys through KeybindRowFace); names no key	Anti-cheat
 4c459601c34257dd	N	rule:N1	Apex
 cfde026b5eb11e8b	N	rule:N1	Apex Shark
@@ -896,6 +897,7 @@ ea95f55d84ec2572	N	rule:N1	Chat overlay: MUTED - hidden, and the room is told
 f960a3c53bbd484f	N	rule:N1	Chat overlay: NORMAL - messages fade out
 f8143ac3985dcfb6	N	rule:N1	Chat overlay: PINNED - messages stay on screen
 5c05b0ae062af07a	N	rule:N1	Checking the secure connection...
+6ef502c0684ae18a	N	rule:N1	Checking whether {0} can rejoin
 f9491ed1720722bc	N	rule:N1	Choose a metric
 745fffa486b3d6bc	N	rule:N1	Choose cards (left) to compare {0}.
 20e26e2d014fa87e	N	rule:N1	Choose up to {0} of their cards
@@ -1954,6 +1956,7 @@ c610f55babd60201	N	rule:N1	Not enough gold for a pack
 53e9d819b2c611a2	N	rule:N1	Not granted
 b8a8dabdec32830a	N	rule:N1	Not great. Not terrible.
 bcdd436f6f0ca66e	N	rule:N1	Not in queue.
+e45714907316a161	N	rule:N1	Not now
 55657e24a43eff6a	N	rule:N1	Not on sale yet
 f9f151938094b0bc	N	rule:N1	Not ready yet
 93039e609d94a24f	N	rule:N1	Not set
@@ -2370,6 +2373,7 @@ ad0e59467721c89f	N	rule:N1	Region Time
 d3c9dbb10b2776ca	N	rule:N1	Region distribution
 8d4e4ef3ea5252ec	N	rule:N1	Regular
 89891d2edf2bd28e	N	rule:N1	Rejected Reports
+c6240d696b95c745	N	rule:N1	Rejoin
 cce7155371fc2668	N	rev:2171f8408984c6f0 a live-scoreboard stat label (TabStatsOverlay.EnsureLocaleStrings is binding-dependent: it names the scoreboard key through KeybindRowFace); names no key	Reload
 35360f9710e17843	N	rule:N1	Reloader
 2b8ca1c6f332d7ac	N	rule:N1	Rematch?
@@ -3792,6 +3796,7 @@ b94232afdb4a102e	N	rule:N1	Your card trading is off - turn it on in Settings
 586d2a346956f0f8	N	rule:N1	Your game is dropping frames (worst {0} ms)
 a2e51f8d50cb3129	N	rule:N1	Your last pack ({0}) - {1}
 c2c4b1271a540c47	N	rule:N1	Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>
+3bddba2aa07f0439	N	rule:N1	Your match is still running. Rejoin? {0}
 71214d5968543108	N	rule:N1	Your message was removed and you are muted for {0} minutes (auto-moderation).
 2bbe77e5794acb11	N	rule:N1	Your name fades from warm amber into deep pink.
 932d39ba6afffe50	N	rule:N1	Your no-show penalty: <color=#FFCC44>{0}%</color>
@@ -4141,6 +4146,7 @@ fbea931837908137	N	rule:N1	{0} Hit Rate
 4b2e608f2980000e	N	rule:N1	{0} cards
 4a93a5aeeee725af	N	rule:N1	{0} d ago
 9344533c4118c35c	N	rule:N1	{0} days ago
+7648b75aafbc51b1	N	rule:N1	{0} did not return. The match ends as a disconnect.
 dde36fb32699b8f4	N	rule:N1	{0} did not return; seat released
 f274e414cfaafd05	N	rule:N1	{0} dps
 5519c24b363f6799	N	rule:N1	{0} elo
@@ -4154,6 +4160,7 @@ f29997e604005ce5	N	rule:N1	{0} h ago
 cc3dd7d00b80a320	N	rule:N1	{0} is back
 061163b74173560c	O	rule:O	{0} is earned at {1} series on this line.
 793854d7e383649b	N	rule:N1	{0} is now your title.
+37a2e787a323c769	N	rule:N1	{0} is rejoining
 1ab5b75b0bfcc6c6	N	rule:N1	{0} item(s), {1} cop(ies) out there.
 a2df9cb008e9644c	N	rev:24567407ced4bc49 a key-press statistic: counts presses, names no key	{0} keys/s
 b752606308eb98d0	N	rule:N1	{0} kills   {1} dmg
