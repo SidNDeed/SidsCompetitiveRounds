@@ -252,10 +252,15 @@ def test_m2_gate_loser_rearms_transaction_timeouts(monkeypatch):
 
     async def write(*args):
         writes.append(args)
+        return True
+
+    async def own_ledger(*args):
+        return True
 
     monkeypatch.setattr(match_hold, "_require_verified_session", verified)
     monkeypatch.setattr(match_hold, "_player_id", player_id)
     monkeypatch.setattr(match_hold, "_open_attempt_row", no_attempt)
+    monkeypatch.setattr(match_hold, "_claim_open_ledger", own_ledger)
     monkeypatch.setattr(match_hold, "_verify_hold_open_hmac", lambda req: True)
     monkeypatch.setattr(match_hold, "_open_decide", decide)
     monkeypatch.setattr(match_hold, "_ctx_now", clock)
@@ -1196,6 +1201,85 @@ def test_m6_bad_signature_records_refusal_before_403(monkeypatch):
             "SELECT count(*) FROM match_hold_open_attempts WHERE request_id = $1", rid) == 1
 
     run_env(monkeypatch, body, prefix="rjs2m6sig")
+
+
+async def _lock_waiters(env, want, bound=200):
+    """Wait (capped) until `want` backends of this database wait on a lock
+    in a hold-open statement; the count reached, or the bound's last count."""
+    n = 0
+    for _ in range(bound):
+        n = await env.conn.fetchval(
+            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+            "   AND wait_event_type = 'Lock'"
+            "   AND (query LIKE '%team_series%' OR query LIKE '%match_hold_open_attempts%')")
+        if n >= want:
+            return n
+        await asyncio.sleep(0.02)
+    return n
+
+
+async def _concurrent_opens(env, series_rows, calls):
+    """Start `calls` together while a blocker holds every series row in
+    `series_rows`, so each call has passed its ledger step before any can
+    act; release once both wait, and return both responses."""
+    blocker = await cf_pg.harness.connect_bound(env.c.dsn, env.c.schema)
+    transaction = blocker.transaction()
+    await transaction.start()
+    try:
+        for sid in series_rows:
+            await blocker.execute(
+                "SELECT 1 FROM team_series WHERE id = $1 FOR NO KEY UPDATE", sid)
+        tasks = [asyncio.ensure_future(c) for c in calls]
+        assert await _lock_waiters(env, len(tasks)) >= len(tasks)
+    finally:
+        await transaction.rollback()
+        await blocker.close()
+    return await asyncio.gather(*tasks)
+
+
+def test_nx0a_concurrent_first_use_of_one_request_id_acts_once(monkeypatch):
+    """NX0a: two concurrent first uses of one request id commit exactly one
+    action. Same tuple: one hold, and both answers carry the recorded tuple
+    (opened, that hold, not a repeat). Different tuples in two series: one
+    hold across both rooms, one ledger row naming the room that holds it,
+    and the other use answers request_mismatch with no hold of its own."""
+    async def body(env):
+        s, g, _ = await opened_series(env)
+        rid = "req-nx0a-same"
+        a, b = await _concurrent_opens(env, [s.sid], [
+            open_hold(env, s, 1, 0, g, rid=rid), open_hold(env, s, 1, 0, g, rid=rid)])
+        assert (a.status_code, b.status_code) == (200, 200), (a.text, b.text)
+        ja, jb = a.json(), b.json()
+        assert (ja["status"], ja["hold_id"], ja["repeat"]) == \
+            (jb["status"], jb["hold_id"], jb["repeat"]) == ("opened", ja["hold_id"], False)
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", s.room) == 1
+        row = await env.conn.fetchrow(
+            "SELECT outcome, hold_id FROM match_hold_open_attempts WHERE request_id = $1", rid)
+        assert (row["outcome"], str(row["hold_id"])) == ("opened", ja["hold_id"])
+
+        x, gx, _ = await opened_series(env)
+        y, gy, _ = await opened_series(env)
+        rid2 = "req-nx0a-split"
+        rx, ry = await _concurrent_opens(env, [x.sid, y.sid], [
+            open_hold(env, x, 1, 0, gx, rid=rid2), open_hold(env, y, 1, 0, gy, rid=rid2)])
+        answers = sorted([rx.json()["status"], ry.json()["status"]])
+        assert answers == ["opened", "refused"], (rx.text, ry.text)
+        loser = rx.json() if rx.json()["status"] == "refused" else ry.json()
+        assert loser == {"status": "refused", "reason": "request_mismatch"}
+        holds = await env.conn.fetch(
+            "SELECT room_name FROM match_seat_holds WHERE room_name = ANY($1::varchar[])",
+            [x.room, y.room])
+        assert len(holds) == 1
+        ledger = await env.conn.fetch(
+            "SELECT room_name, outcome FROM match_hold_open_attempts WHERE request_id = $1",
+            rid2)
+        assert [(r["room_name"], r["outcome"]) for r in ledger] == \
+            [(holds[0]["room_name"], "opened")]
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_hold_open_attempts WHERE reason = 'pending'") == 0
+
+    run_env(monkeypatch, body, prefix="rjs2nx0a")
 
 
 def test_m7_team_open_requires_both_point_snapshots(monkeypatch):

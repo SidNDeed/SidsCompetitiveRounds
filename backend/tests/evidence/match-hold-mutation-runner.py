@@ -177,27 +177,64 @@ MUTANTS = {
                 '            or (member_seats.get(held) != (req.slot, req.team))\n')],
               HOLD_T, "m1_hold_open_requires_exact_roster_slot_and_team"),
     "F1.M6.TUPLE": ("FIX1", "match_hold.py",
-                    [('    if known is not None:\n'
-                      '        if not _open_attempt_matches(known, req, room, held, opener):',
+                    # NX0a re-anchor: the tuple check now lives in _open_replay;
+                    # the mutant still answers a reused id without its tuple check.
+                    [('    if not _open_attempt_matches(known, req, room, held, opener):\n'
+                      '        await db.rollback()\n'
+                      '        return _refused("request_mismatch")',
                       '    if False:\n'
-                      '        if not _open_attempt_matches(known, req, room, held, opener):')],
-                    [('    if known is not None:\n'
-                      '        if not _open_attempt_matches(known, req, room, held, opener):',
-                      '    if (known is not None):\n'
-                      '        if not _open_attempt_matches(known, req, room, held, opener):')],
+                      '        await db.rollback()\n'
+                      '        return _refused("request_mismatch")')],
+                    [('    if not _open_attempt_matches(known, req, room, held, opener):\n'
+                      '        await db.rollback()\n'
+                      '        return _refused("request_mismatch")',
+                      '    if not (_open_attempt_matches(known, req, room, held, opener)):\n'
+                      '        await db.rollback()\n'
+                      '        return _refused("request_mismatch")')],
                     HOLD_T, "m6_open_request_id_replays_only_its_original_tuple"),
     "F1.M6.SIG": ("FIX1", "match_hold.py",
-                  [('            await _write_open_attempt(\n'
-                    '                db, req, room, None, opener, now, "refused", "bad_signature", None)\n'
+                  # NX0a re-anchor: the write now reports whether it inserted.
+                  [('        if await _write_open_attempt(\n'
+                    '                db, req, room, None, opener, now, "refused", "bad_signature", None):\n'
                     '            await db.commit()',
-                    '            await db.rollback()')],
-                  [('            await _write_open_attempt(\n'
-                    '                db, req, room, None, opener, now, "refused", "bad_signature", None)\n'
+                    '        if False:\n'
+                    '            await db.commit()')],
+                  [('        if await _write_open_attempt(\n'
+                    '                db, req, room, None, opener, now, "refused", "bad_signature", None):\n'
                     '            await db.commit()',
-                    '            await _write_open_attempt(\n'
-                    '                db, req, room, None, opener, now, "refused", "bad_signature", None)\n'
+                    '        if await _write_open_attempt(\n'
+                    '                db, req, room, None, opener, now, "refused", "bad_signature", None):\n'
                     '            await  db.commit()')],
                   HOLD_T, "m6_bad_signature_records_refusal_before_403"),
+    # NX0a - the request-id ledger insert is the serialization point: the
+    # mutant moves the insert after the action (a pre-read, then a
+    # conflict-dropping insert at the outcome), the form fix 1 shipped.
+    "NX0a": ("NX0a", "match_hold.py",
+             [('    if not await _claim_open_ledger(db, req, room, held, opener):\n'
+               '        return await _open_replay(db, req, room, held, opener)\n',
+               '    if await _open_attempt_row(db, req.request_id) is not None:\n'
+               '        return await _open_replay(db, req, room, held, opener)\n'),
+              ('        "UPDATE match_hold_open_attempts SET at = CAST(:now AS timestamptz),"\n'
+               '        "       outcome = CAST(:outcome AS varchar), reason = CAST(:reason AS varchar),"\n'
+               '        "       hold_id = CAST(:hid AS uuid)"\n'
+               '        " WHERE request_id = CAST(:rid AS varchar)"\n'
+               '        "   AND outcome = \'refused\' AND reason = \'pending\'"),\n'
+               '        {"rid": req.request_id, "now": now,',
+               '        "INSERT INTO match_hold_open_attempts (request_id, room_name, game_id,"\n'
+               '        "        held_player_id, opener_player_id, at, outcome, reason, hold_id)"\n'
+               '        " SELECT CAST(:rid AS varchar), CAST(:room AS varchar), CAST(:g AS uuid),"\n'
+               '        "        (SELECT id FROM players WHERE steam_id = CAST(:hs AS varchar)),"\n'
+               '        "        (SELECT id FROM players WHERE steam_id = CAST(:os AS varchar)),"\n'
+               '        "        CAST(:now AS timestamptz), CAST(:outcome AS varchar),"\n'
+               '        "        CAST(:reason AS varchar), CAST(:hid AS uuid)"\n'
+               '        " ON CONFLICT (request_id) DO NOTHING"),\n'
+               '        {"rid": req.request_id, "now": now, "room": req.room.strip(),'
+               ' "g": str(req.game_id), "hs": req.held_steam_id, "os": req.opener_steam_id,')],
+             [('    if not await _claim_open_ledger(db, req, room, held, opener):\n'
+               '        return await _open_replay(db, req, room, held, opener)\n',
+               '    if not (await _claim_open_ledger(db, req, room, held, opener)):\n'
+               '        return await _open_replay(db, req, room, held, opener)\n')],
+             HOLD_T, "nx0a_concurrent_first_use"),
     "F1.M7": ("FIX1", "match_hold.py",
               [('    if (reason is None and mode == "team"\n'
                 '            and (req.t1_points is None or req.t2_points is None)):\n'
@@ -299,12 +336,11 @@ MUTANTS = {
                '            {"at": closure[0]')],
              HOLD_T, "t2_2_closure"),
     "M2.14": ("N3", "match_hold.py",
-              [('        await _write_open_attempt(db, req, room, held, opener, now, "refused",'
-                ' reason, None)\n', "        pass\n")],
-              [('        await _write_open_attempt(db, req, room, held, opener, now, "refused",'
-                ' reason, None)\n',
-                '        await _write_open_attempt(db, req, room, held, opener, now, "refused",'
-                ' reason,  None)\n')],
+              # NX0a re-anchor: the refusal now rewrites the owned ledger row.
+              [('        await _finish_open_attempt(db, req, now, "refused", reason, None)\n',
+                "        pass\n")],
+              [('        await _finish_open_attempt(db, req, now, "refused", reason, None)\n',
+                '        await _finish_open_attempt(db, req, now, "refused", reason,  None)\n')],
               HOLD_T, "t2_8_open_attempt"),
     # N4 - S3 server: the claim predicates, the rotation, the bind corroboration
     "M3.1": ("N4", "match_hold.py",

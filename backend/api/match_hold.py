@@ -670,16 +670,56 @@ async def _open_decide(db, req, mode, room, opener, held):
 
 
 async def _write_open_attempt(db, req, room, held, opener, now, outcome, reason, hold_id):
-    await db.execute(text(
+    """Insert one final ledger row for a request that took no action (a bad
+    signature, or a gate loser's fresh refusal transaction). True when this
+    call inserted it; False when the request id is already recorded, in which
+    case the insert waited for the recording transaction and changed nothing."""
+    got = (await db.execute(text(
         "INSERT INTO match_hold_open_attempts (request_id, room_name, game_id,"
         "        held_player_id, opener_player_id, at, outcome, reason, hold_id)"
         " VALUES (CAST(:rid AS varchar), CAST(:room AS varchar), CAST(:g AS uuid),"
         "         CAST(:held AS uuid), CAST(:opener AS uuid), CAST(:now AS timestamptz),"
         "         CAST(:outcome AS varchar), CAST(:reason AS varchar), CAST(:hid AS uuid))"
-        " ON CONFLICT (request_id) DO NOTHING"),
+        " ON CONFLICT (request_id) DO NOTHING RETURNING request_id"),
         {"rid": req.request_id, "room": room, "g": str(req.game_id),
          "held": str(held) if held else None, "opener": str(opener) if opener else None,
          "now": now, "outcome": outcome, "reason": reason,
+         "hid": str(hold_id) if hold_id else None})).scalar()
+    return got is not None
+
+
+async def _claim_open_ledger(db, req, room, held, opener) -> bool:
+    """The serialization point of one request id (NX0a): insert its ledger
+    row BEFORE any action, as the first row lock this transaction takes. The
+    primary key on request_id makes a concurrent first use of the same id
+    wait on this insert until this transaction ends; it then finds the row
+    and acts on nothing. The row is provisional (refused, pending, no clock)
+    only inside this transaction: every commit path rewrites it through
+    _finish_open_attempt first, so no other transaction reads it so.
+    True when this transaction owns the request id."""
+    got = (await db.execute(text(
+        "INSERT INTO match_hold_open_attempts (request_id, room_name, game_id,"
+        "        held_player_id, opener_player_id, at, outcome, reason, hold_id)"
+        " VALUES (CAST(:rid AS varchar), CAST(:room AS varchar), CAST(:g AS uuid),"
+        "         CAST(:held AS uuid), CAST(:opener AS uuid),"
+        "         CAST('-infinity' AS timestamptz), 'refused', 'pending', NULL)"
+        " ON CONFLICT (request_id) DO NOTHING RETURNING request_id"),
+        {"rid": req.request_id, "room": room, "g": str(req.game_id),
+         "held": str(held) if held else None,
+         "opener": str(opener) if opener else None})).scalar()
+    return got is not None
+
+
+async def _finish_open_attempt(db, req, now, outcome, reason, hold_id):
+    """Write the owned ledger row's outcome, with this transaction's clock.
+    Only the provisional row is rewritten; a final record is never changed."""
+    await db.execute(text(
+        "UPDATE match_hold_open_attempts SET at = CAST(:now AS timestamptz),"
+        "       outcome = CAST(:outcome AS varchar), reason = CAST(:reason AS varchar),"
+        "       hold_id = CAST(:hid AS uuid)"
+        " WHERE request_id = CAST(:rid AS varchar)"
+        "   AND outcome = 'refused' AND reason = 'pending'"),
+        {"rid": req.request_id, "now": now, "outcome": outcome, "reason": reason,
          "hid": str(hold_id) if hold_id else None})
 
 
@@ -693,6 +733,31 @@ async def _open_attempt_row(db, request_id: str):
 def _open_attempt_matches(row, req, room, held, opener) -> bool:
     return (row["room_name"], row["game_id"], row["held_player_id"], row["opener_player_id"]) == \
         (room, req.game_id, held, opener)
+
+
+async def _open_replay(db, req, room, held, opener) -> dict:
+    """Answer a request id another transaction already recorded, from that
+    record alone: a different tuple refuses request_mismatch, a recorded
+    refusal answers its reason, a recorded open answers its hold. Acts on
+    nothing and writes nothing."""
+    known = await _open_attempt_row(db, req.request_id)
+    if known is None:
+        await db.rollback()
+        raise HTTPException(503, "hold_open_replay_unavailable")
+    if not _open_attempt_matches(known, req, room, held, opener):
+        await db.rollback()
+        return _refused("request_mismatch")
+    if known["outcome"] == "refused":
+        await db.rollback()
+        return _refused(known["reason"])
+    hold = await _hold_row(db, known["hold_id"])
+    now = await _ctx_now(db)
+    await db.rollback()
+    if hold is None:
+        raise HTTPException(503, "hold_open_replay_unavailable")
+    out = _state_payload(hold, now)
+    out.update({"status": "opened", "repeat": known["outcome"] == "repeat"})
+    return out
 
 
 @router.post("/hold/open")
@@ -710,7 +775,10 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
     locked series row as crossed_at_hold. The held player's lease is released.
     Every request, refused or not, writes its match_hold_open_attempts row in
     the same transaction; a refusal is never a hold. A repeat for the same
-    (room, G, held player) answers the existing open row."""
+    (room, G, held player) answers the existing open row. The ledger row is
+    inserted before any action and is the serialization point of its request
+    id: of two uses of one id, exactly one acts, and the other answers the
+    tuple the first recorded."""
     from main import _lease_admission_gate, _lease_release, _team_game_crossed_two
 
     mode = _mode_or_400(req.mode)
@@ -718,31 +786,16 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
     await _require_verified_session(request, req.opener_steam_id, db)
     opener = await _player_id(db, req.opener_steam_id)
     held = await _player_id(db, req.held_steam_id)
-    known = await _open_attempt_row(db, req.request_id)
     if not _verify_hold_open_hmac(req):
-        if known is None:
-            now = await _ctx_now(db)
-            await _write_open_attempt(
-                db, req, room, None, opener, now, "refused", "bad_signature", None)
+        now = await _ctx_now(db)
+        if await _write_open_attempt(
+                db, req, room, None, opener, now, "refused", "bad_signature", None):
             await db.commit()
         else:
             await db.rollback()
         raise HTTPException(403, "Invalid hold-open signature")
-    if known is not None:
-        if not _open_attempt_matches(known, req, room, held, opener):
-            await db.rollback()
-            return _refused("request_mismatch")
-        if known["outcome"] == "refused":
-            await db.rollback()
-            return _refused(known["reason"])
-        hold = await _hold_row(db, known["hold_id"])
-        now = await _ctx_now(db)
-        await db.rollback()
-        if hold is None:
-            raise HTTPException(503, "hold_open_replay_unavailable")
-        out = _state_payload(hold, now)
-        out.update({"status": "opened", "repeat": known["outcome"] == "repeat"})
-        return out
+    if not await _claim_open_ledger(db, req, room, held, opener):
+        return await _open_replay(db, req, room, held, opener)
     reason, allowed_hold_id, row, game = await _open_decide(
         db, req, mode, room, opener, held)
     if (reason is None and mode == "team"
@@ -761,8 +814,11 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
             await db.rollback()
             await _install_database_timeouts(db)
             now = await _ctx_now(db)
-            await _write_open_attempt(
-                db, req, room, held, opener, now, "refused", "other_mode", None)
+            if not await _write_open_attempt(
+                    db, req, room, held, opener, now, "refused", "other_mode", None):
+                # The rollback released this request id and a concurrent use
+                # of it recorded first: answer that record, act on nothing.
+                return await _open_replay(db, req, room, held, opener)
             await db.commit()
             return _refused("other_mode")
         await _close_due_room_hold(db, room, now)
@@ -824,12 +880,12 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
                  "hs": HOLD_S, "crossed": crossed, "p1": req.t1_points,
                  "p2": req.t2_points})).mappings().first()
     if reason is not None:
-        await _write_open_attempt(db, req, room, held, opener, now, "refused", reason, None)
+        await _finish_open_attempt(db, req, now, "refused", reason, None)
         await db.commit()
         return _refused(reason)
     hold = made if made is not None else existing
-    await _write_open_attempt(db, req, room, held, opener, now,
-                              "opened" if made is not None else "repeat", None, hold["id"])
+    await _finish_open_attempt(db, req, now,
+                               "opened" if made is not None else "repeat", None, hold["id"])
     await db.commit()
     if made is not None:
         print(f"[HOLD] held room={room} slot={hold['slot']} n={hold['n']}")
