@@ -574,6 +574,9 @@ async def match_hold_open(req: HoldOpenReq, request: Request,
     reason, existing, row, game = await _open_decide(db, req, mode, room, opener, held)
     now = await _ctx_now(db)                 # after the series lock wait
     made = None
+    if (reason is None and mode == "team"
+            and (req.t1_points is None or req.t2_points is None)):
+        reason = "missing_points"
     if reason is None and existing is not None and not _hold_live(existing, now):
         reason = "duplicate_game"            # past its own deadline, not yet swept
     if reason is None and existing is None:

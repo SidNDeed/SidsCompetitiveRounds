@@ -90,6 +90,17 @@ MUTANTS = {
                     '                db, req, room, None, opener, now, "refused", "bad_signature", None)\n'
                     '            await  db.commit()')],
                   HOLD_T, "m6_bad_signature_records_refusal_before_403"),
+    "F1.M7": ("FIX1", "match_hold.py",
+              [('    if (reason is None and mode == "team"\n'
+                '            and (req.t1_points is None or req.t2_points is None)):\n'
+                '        reason = "missing_points"\n', '')],
+              [('    if (reason is None and mode == "team"\n'
+                '            and (req.t1_points is None or req.t2_points is None)):\n'
+                '        reason = "missing_points"\n',
+                '    if (reason is None and mode == "team"\n'
+                '            and ((req.t1_points is None) or req.t2_points is None)):\n'
+                '        reason = "missing_points"\n')],
+              HOLD_T, "m7_team_open_requires_both_point_snapshots"),
     # N2 - the game id chain and the hold latch
     "M1.7": ("N2", "match_hold.py",
              [('"   AND prev_game = CAST(:prev AS uuid)"), key)',

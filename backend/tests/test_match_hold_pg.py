@@ -841,6 +841,45 @@ def test_m6_bad_signature_records_refusal_before_403(monkeypatch):
     run_env(monkeypatch, body, prefix="rjs2m6sig")
 
 
+def test_m7_team_open_requires_both_point_snapshots(monkeypatch):
+    """Team opens refuse each missing point shape before mutation, while a
+    complete team snapshot and a 1v2 omission retain their intended behavior."""
+    async def body(env):
+        s, g, _ = await opened_series(env)
+        cases = (
+            ("req-m7-no-t1", None, 0),
+            ("req-m7-no-t2", 1, None),
+            ("req-m7-no-points", None, None),
+        )
+        for rid, t1_points, t2_points in cases:
+            refused = (await open_hold(
+                env, s, 1, 0, g, rid=rid,
+                t1_points=t1_points, t2_points=t2_points)).json()
+            assert refused == {"status": "refused", "reason": "missing_points"}, refused
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_seat_holds WHERE room_name = $1", s.room) == 0
+        reasons = await env.conn.fetch(
+            "SELECT request_id, outcome, reason FROM match_hold_open_attempts "
+            "WHERE request_id LIKE 'req-m7-%' ORDER BY request_id")
+        assert [(r["outcome"], r["reason"]) for r in reasons] == \
+            [("refused", "missing_points")] * 3
+
+        valid = (await open_hold(env, s, 1, 0, g, rid="req-m7-valid")).json()
+        assert valid["status"] == "opened"
+        stored = await hold_db(env, valid["hold_id"])
+        assert (stored["drop_t1_points"], stored["drop_t2_points"]) == (1, 0)
+
+        ovt, ovt_game, _ = await opened_series(env, "ovt")
+        omitted = (await open_hold(
+            env, ovt, 1, 0, ovt_game, rid="req-m7-ovt",
+            t1_points=None, t2_points=None)).json()
+        assert omitted["status"] == "opened"
+        ovt_stored = await hold_db(env, omitted["hold_id"])
+        assert (ovt_stored["drop_t1_points"], ovt_stored["drop_t2_points"]) == (None, None)
+
+    run_env(monkeypatch, body, prefix="rjs2m7")
+
+
 def test_t7_1_hold_open_canonical_one_field_at_a_time(monkeypatch):
     """T7.1 (hold-open half): changing any one of the eight fields of the
     hold-open canonical makes the signature reject; the team-DC canonical
