@@ -4893,6 +4893,18 @@ async def queue_cleanup_loop():
                 await db.commit()
         except Exception as e:
             print(f"[QUEUE-CLEANUP] 1v1 sweep error: {e}")
+        # Stage 2 holds (design V3 S2, NX2): stamp the closure of every hold
+        # past its own deadline (lapsed, entry_failed). The stamp is the
+        # deadline, never the sweep's time, and FOR UPDATE SKIP LOCKED leaves
+        # a row a route holds to the next pass. Own session and guard, like
+        # every arm here.
+        try:
+            async with async_session() as db:
+                _closed = await _match_hold.hold_sweep(db)
+            if _closed:
+                print(f"[HOLD] sweep closed {_closed}")
+        except Exception as e:
+            print(f"[HOLD] sweep error: {type(e).__name__}: {e}")
         # Multiplayer region maps (migration 307, Sept 10): a row outlives its
         # last write by ONE HOUR at most — the consent copy's promise; the
         # rule itself reads only maps under 180 s old. SKIP LOCKED so the
@@ -36331,6 +36343,34 @@ async def update_team_live_points(
         raise HTTPException(status_code=404, detail="Series not found")
     await _assert_no_service_subject(db, affected_player_ids=list(team_subjects))
     _seat = await _seat_gate_for_live_points(request, reporter_steam_id, db)
+
+    # Stage 2 (design V3 S2): while a team hold of this series is open, the
+    # crossing evidence is the one the hold froze (crossed_at_hold), so a post
+    # is recorded (seat attestation and a log line) and its points are ignored
+    # with reason hold_open. The series row is locked first, so a hold opening
+    # concurrently either committed before this read or waits for this post,
+    # which then precedes its crossing read. A non-member or a series that is
+    # not live falls through to the UPDATE below, which refuses it as today.
+    _held_row = (await db.execute(text("""
+        SELECT s.live_t1_points, s.live_t2_points,
+               EXISTS (SELECT 1 FROM match_seat_holds h
+                        WHERE h.series_id = s.id AND h.mode = 'team'
+                          AND h.closed_at IS NULL) AS held
+          FROM team_series s
+         WHERE s.id = :sid AND s.status = 'active' AND s.invalidated_at IS NULL
+           AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)
+           FOR NO KEY UPDATE OF s
+    """), {"sid": sid, "pid": reporter.id})).first()
+    if _held_row is not None and _held_row.held:
+        await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat,
+                                       (t1_points or 0) + (t2_points or 0))
+        await db.commit()
+        print(f"[HOLD] live points ignored series={sid} reason=hold_open "
+              f"pair={t1_points}-{t2_points}")
+        _l1, _l2 = int(_held_row[0] or 0), int(_held_row[1] or 0)
+        return {"status": "ignored", "reason": "hold_open",
+                "live_t1_points": _l1, "live_t2_points": _l2,
+                "bets_locked": (_l1 + _l2) >= 2}
 
     # Participants only, and only while the series is genuinely live. Both
     # predicates ride INSIDE the UPDATE so a completion committing mid-request

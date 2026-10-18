@@ -280,3 +280,112 @@ def test_t1_3_team_issue_relock_and_continuation(monkeypatch):
         assert (new["hold_v2"], new["hold_room"]) == (True, room), \
             ("T1.3 team continuation", dict(new), cont)
     run_w(monkeypatch, body)
+
+
+# -- NX2: the janitor sweep and the live-points post during a hold ----------
+
+class _Stop(BaseException):
+    """Ends queue_cleanup_loop after one pass (the loop catches Exception)."""
+
+
+def _one_pass_sleep(real_sleep):
+    calls = {"n": 0}
+
+    async def fake(secs, *a, **kw):
+        if secs == 60:
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise _Stop()
+            return None
+        return await real_sleep(secs, *a, **kw)
+    return fake
+
+
+def test_nx2_queue_cleanup_loop_sweeps_a_lapsed_hold(monkeypatch, capsys):
+    """NX2 (V3 S2 write-once): one pass of queue_cleanup_loop closes a hold
+    past its deadline with reason lapsed, stamped at held_until (never the
+    sweep's time), and prints the sweep line."""
+    async def body(env):
+        s, g, _ = await hold_test.opened_series(env)
+        r = await hold_test.open_hold(env, s, 1, 0, g, rid="req-nx2-sweep")
+        assert r.status_code == 200 and r.json()["status"] == "opened", ("NX2 open", r.text)
+        hid = r.json()["hold_id"]
+        await hold_test.shift_hold(env, hid, 300)
+        before = await hold_test.hold_db(env, hid)
+        assert before["closed_at"] is None, ("NX2 open before",)
+        monkeypatch.setattr(database, "async_session", env.sm)
+
+        async def _no_audit():
+            return None
+        monkeypatch.setattr(main, "_run_service_policy_audit", _no_audit)
+        monkeypatch.setattr(asyncio, "sleep", _one_pass_sleep(asyncio.sleep))
+        try:
+            await main.queue_cleanup_loop()
+        except _Stop:
+            pass
+        after = await hold_test.hold_db(env, hid)
+        assert (after["closed_reason"], after["closed_at"]) == \
+            ("lapsed", before["held_until"]), ("NX2 swept", dict(after))
+        assert after["held_until"] == before["held_until"], ("NX2 held_until moved",)
+    hold_test.run_env(monkeypatch, body, prefix="rjs2nx2")
+    assert "[HOLD] sweep closed {'lapsed': 1}" in capsys.readouterr().out, ("NX2 log",)
+
+
+def _live_sig(sid, steam, t1, t2):
+    return _sig_with(hold_test.SECRET, "team-live-points:%s:%s:%s:%s" % (sid, steam, t1, t2))
+
+
+def _sig_with(secret, canonical):
+    return _hmac.new(secret.encode(), canonical.encode(), hashlib.sha256).hexdigest()
+
+
+def test_nx2_live_points_during_an_open_team_hold_are_recorded_and_ignored(
+        monkeypatch, capsys):
+    """NX2 (V3 S2): while a team hold of the series is open, a member's
+    live-points post answers ignored with reason hold_open, writes no points
+    and no per-game record, and logs the post; once the hold is closed the
+    same post is filed as today."""
+    async def body(env):
+        s, g, _ = await hold_test.opened_series(env)
+        r = await hold_test.open_hold(env, s, 1, 0, g, rid="req-nx2-live")
+        assert r.json()["status"] == "opened", ("NX2 open", r.text)
+        hid = r.json()["hold_id"]
+
+        async def _db():
+            async with env.sm() as sess:
+                yield sess
+        monkeypatch.setitem(main.app.dependency_overrides, database.get_db, _db)
+
+        async def post():
+            steam = s.steam(0)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),
+                                         base_url="http://w", timeout=120) as cl:
+                return await cl.post(
+                    "/api/v1/team/series/%s/live-points" % s.sid,
+                    params={"t1_points": 2, "t2_points": 2, "reporter_steam_id": steam,
+                            "sig": _live_sig(s.sid, steam, 2, 2)},
+                    headers={"X-Mod-Version": VERSION, "X-Session-Token": "tok:" + steam})
+
+        ignored = await post()
+        assert ignored.status_code == 200 and \
+            (ignored.json()["status"], ignored.json()["reason"]) == ("ignored", "hold_open"), \
+            ("NX2 ignored", ignored.status_code, ignored.text)
+        row = await env.conn.fetchrow(
+            "SELECT live_t1_points, live_t2_points FROM team_series WHERE id = $1", s.sid)
+        assert (row[0] or 0, row[1] or 0) == (0, 0), ("NX2 no points", dict(row))
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM team_series_games WHERE series_id = $1", s.sid) == 0, \
+            ("NX2 no game record",)
+
+        await env.conn.execute(
+            "UPDATE match_seat_holds SET closed_at = clock_timestamp(), closed_reason = 'ended'"
+            " WHERE id = $1::uuid", hid)
+        filed = await post()
+        assert filed.status_code == 200 and filed.json()["status"] == "ok", \
+            ("NX2 filed after close", filed.status_code, filed.text)
+        row = await env.conn.fetchrow(
+            "SELECT live_t1_points, live_t2_points FROM team_series WHERE id = $1", s.sid)
+        assert (row[0], row[1]) == (2, 2), ("NX2 points after close", dict(row))
+    hold_test.run_env(monkeypatch, body, prefix="rjs2nx2l")
+    out = capsys.readouterr().out
+    assert out.count("[HOLD] live points ignored") == 1, ("NX2 log", out[-800:])
