@@ -271,6 +271,40 @@ def summary_body(page=1, pages=3, shape="pair"):
     return body
 
 
+def _two_catalog_summary_body():
+    body = summary_body()
+    first = body["catalog"][0]["ki"]
+    second = next(e for e in ae.REPORT_REGISTRY
+                  if e.is_window and e.scope == "seat" and e.ki != first)
+    body["catalog"].append(ae._catalog_row(second))
+    for row in body["summary"]:
+        cell = list(row["cells"][0])
+        cell[0] = second.ki
+        row["cells"].append(cell)
+    return body
+
+
+def _two_window_summary_body():
+    body = summary_body()
+    window = copy.deepcopy(body["windows"][0])
+    window.update(oi=1, subj=["seat", 1, 0])
+    body["windows"].append(window)
+    row = copy.deepcopy(body["summary"][0])
+    row["oi"] = 1
+    body["summary"].append(row)
+    return body
+
+
+def _request_for_body(body):
+    shape, page = body["shape"], body["page"]
+    if shape in ("game", "series"):
+        return {"shape": shape, "code": "0" * 12, "page": page}
+    if shape == "pair":
+        return {"shape": shape, "a": "1001", "b": "1002",
+                "games": 10, "page": page}
+    return {"shape": shape, "steam_id": "1001", "games": 10, "page": page}
+
+
 def _body_with_cell_kind(kind):
     entry = next(e for e in ae.REPORT_REGISTRY
                  if not e.is_window and e.scope == "seat" and e.kind == kind)
@@ -433,6 +467,25 @@ def test_m19_button_rejects_a_wrong_page_response():
     assert message.edits == []
 
 
+def test_m19_both_delivery_callers_pass_exactly_the_parsed_request():
+    found = []
+    for name in ("_aer_command", "_aer_click"):
+        fn = next(node for node in TREE.body
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and node.name == name)
+        calls = [node for node in ast.walk(fn)
+                 if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name)
+                 and node.func.id == "_aer_outcome"]
+        assert len(calls) == 1
+        expected = [kw for kw in calls[0].keywords if kw.arg == "expected"]
+        assert len(expected) == 1
+        assert isinstance(expected[0].value, ast.Name)
+        assert expected[0].value.id == "req"
+        found.append(name)
+    assert found == ["_aer_command", "_aer_click"]
+
+
 def test_m20_catalog_ki_and_canonical_key_are_injective(bot):
     duplicate_ki = game_body()
     repeated = copy.deepcopy(duplicate_ki["catalog"][0])
@@ -506,6 +559,138 @@ def test_m20_summary_catalog_role_precedes_cell_decoding(bot, monkeypatch, slot,
     assert decoded_cells == []
 
 
+def test_m20_valid_catalog_order_and_content_round_trip(bot):
+    for body in (game_body(), summary_body()):
+        page = bot["_aer_decode_response"](copy.deepcopy(body), "1a")
+        expected_kis = [row["ki"] for row in body["catalog"]]
+        assert list(page.catalog) == expected_kis
+        assert [page.catalog[ki] for ki in expected_kis] == body["catalog"]
+
+
+def _m21_game_breaks():
+    out = []
+    no_seats = game_body()
+    no_seats["games"][0]["seats"] = []
+    out.append(("no seats", no_seats))
+    one_seat = game_body()
+    one_seat["games"][0]["seats"].pop()
+    out.append(("one seat", one_seat))
+    three_seats = game_body()
+    three_seats["games"][0]["seats"].append(
+        copy.deepcopy(three_seats["games"][0]["seats"][0]))
+    out.append(("three seats", three_seats))
+    out_of_range = game_body()
+    out_of_range["games"][0]["seats"][0]["subject"] = len(out_of_range["subjects"])
+    out.append(("out-of-range seat subject", out_of_range))
+    two_reporters = game_body()
+    for seat in two_reporters["games"][0]["seats"]:
+        seat["reporter"] = True
+    out.append(("two reporters", two_reporters))
+    missing_cell = game_body()
+    missing_cell["games"][0]["seats"][0]["cells"].pop()
+    out.append(("missing game cell key", missing_cell))
+    duplicate_cell = game_body()
+    cells = duplicate_cell["games"][0]["seats"][0]["cells"]
+    cells[1][0] = cells[0][0]
+    out.append(("duplicate game cell key", duplicate_cell))
+    empty_cells = game_body()
+    empty_cells["games"][0]["seats"][0]["cells"] = []
+    out.append(("empty game cells", empty_cells))
+    empty_catalog = game_body()
+    empty_catalog["catalog"] = []
+    for seat in empty_catalog["games"][0]["seats"]:
+        seat["cells"] = []
+    out.append(("empty game catalog and cells", empty_catalog))
+    return out
+
+
+def _m21_window_breaks():
+    out = []
+    wrong_oi = summary_body()
+    wrong_oi["windows"][0]["oi"] = 1
+    out.append(("nonpositional window oi", wrong_oi))
+    wrong_scope = summary_body()
+    wrong_scope["windows"][0].update(subj=["pair", 0, 1], flag_obs=None)
+    out.append(("window scope", wrong_scope))
+    wrong_basis = summary_body()
+    wrong_basis["windows"][0]["basis"] = "player"
+    out.append(("window basis", wrong_basis))
+    repeated = summary_body()
+    repeated["windows"][0]["subj"] = ["seat", 0, 0]
+    out.append(("repeated pair subjects", repeated))
+    first_out = summary_body()
+    first_out["windows"][0]["subj"] = ["seat", 2, 1]
+    out.append(("first pair subject out of range", first_out))
+    partner_out = summary_body()
+    partner_out["windows"][0]["subj"] = ["seat", 0, 2]
+    out.append(("partner out of range", partner_out))
+    missing_partner = summary_body()
+    missing_partner["windows"][0]["subj"] = ["seat", 0, None]
+    out.append(("pair partner missing", missing_partner))
+    player_partner = summary_body(shape="player")
+    player_partner["windows"][0]["subj"] = ["seat", 0, 1]
+    out.append(("player partner present", player_partner))
+    return out
+
+
+def _m21_summary_breaks():
+    out = []
+    empty = summary_body()
+    empty["summary"][0]["cells"] = []
+    out.append(("empty summary cells", empty))
+    empty_catalog = summary_body()
+    empty_catalog["catalog"] = []
+    empty_catalog["summary"][0]["cells"] = []
+    out.append(("empty summary catalog and cells", empty_catalog))
+    missing_cell = _two_catalog_summary_body()
+    missing_cell["summary"][0]["cells"].pop()
+    out.append(("missing summary cell key", missing_cell))
+    duplicate_cell = _two_catalog_summary_body()
+    cells = duplicate_cell["summary"][0]["cells"]
+    cells[1][0] = cells[0][0]
+    out.append(("duplicate summary cell key", duplicate_cell))
+    extra_cell = summary_body()
+    extra_cell["summary"][0]["cells"].append(
+        list(extra_cell["summary"][0]["cells"][0]))
+    out.append(("extra duplicate summary cell", extra_cell))
+    missing_row = _two_window_summary_body()
+    missing_row["summary"].pop()
+    out.append(("missing summary row", missing_row))
+    duplicate_row = _two_window_summary_body()
+    duplicate_row["summary"][1]["oi"] = 0
+    out.append(("duplicate summary row", duplicate_row))
+    return out
+
+
+def test_m21_game_topology_reporter_and_cell_breaks_are_refused(bot):
+    for label, body in _m21_game_breaks():
+        with pytest.raises(bot["AerSchemaError"]):
+            bot["_aer_decode_response"](body, "1a")
+
+
+def test_m21_window_identity_breaks_are_refused(bot):
+    for label, body in _m21_window_breaks():
+        with pytest.raises(bot["AerSchemaError"]):
+            bot["_aer_decode_response"](body, "1a")
+
+
+def test_m21_summary_row_and_cell_breaks_are_refused(bot):
+    for label, body in _m21_summary_breaks():
+        with pytest.raises(bot["AerSchemaError"]):
+            bot["_aer_decode_response"](body, "1a")
+
+
+def test_m21_producer_reachable_zero_reporter_and_same_subject_remain_valid(bot):
+    zero_reporter = game_body()
+    for seat in zero_reporter["games"][0]["seats"]:
+        seat["reporter"] = False
+    same_subject = game_body()
+    same_subject["games"][0]["seats"][1]["subject"] = 0
+    for body in (zero_reporter, same_subject, _two_window_summary_body(),
+                 summary_body(shape="player")):
+        bot["_aer_plan"](bot["_aer_decode_response"](body, "1a"))
+
+
 def test_flag_identity_order_reaches_the_page_plan_and_fallback(bot, monkeypatch):
     match_id = "0" * 32
     later = ae._dt.datetime(2026, 10, 17, tzinfo=ae._dt.timezone.utc)
@@ -523,9 +708,14 @@ def test_flag_identity_order_reaches_the_page_plan_and_fallback(bot, monkeypatch
     async def baseline(*_args, **_kwargs):
         return {}
 
+    body = game_body()
+    fixture_cells = [dict(zip(ae.AER_WIRE["1a"]["seat"], cell))
+                     for cell in body["games"][0]["seats"][0]["cells"]]
     monkeypatch.setattr(ae, "_flag_rows", flag_rows)
     monkeypatch.setattr(ae, "read_baseline", baseline)
-    monkeypatch.setattr(ae, "game_seat_cells", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        ae, "game_seat_cells",
+        lambda *_args, **_kwargs: copy.deepcopy(fixture_cells))
     game = {"id": match_id, "player1_id": "p1", "player2_id": "p2",
             "ended_at": later, "is_ranked": True, "invalidated_at": None,
             "series_id": None, "p1_rounds_won": 5, "p2_rounds_won": 3}
@@ -539,7 +729,6 @@ def test_flag_identity_order_reaches_the_page_plan_and_fallback(bot, monkeypatch
     assert ae.FLAGS_SQL.upper().count("ORDER BY") == 1
     assert [f["reason"] for f in api_games[0]["flags"]] == expected
 
-    body = game_body()
     body["games"] = api_games
     page = bot["_aer_decode_response"](body, "1a")
     assert [f["reason"] for f in page.games[0]["flags"]] == expected
@@ -607,6 +796,146 @@ def _click(ns, interaction):
 
 def _public(events):
     return [e for e in events if e[0].startswith("public")]
+
+
+def _deliver_body(body, req, via):
+    events = []
+    api = _Api(lambda _path, _actor: (200, copy.deepcopy(body), {}), events)
+    ns = bot_ns(api, events)
+    message = _Message(events)
+    if via == "command":
+        assert req["page"] == 1
+        interaction = _Interaction(events, ADMIN, message=message)
+        run(_command(ns, interaction, req["shape"]))
+    else:
+        cid = ns["_aer_custom_id"](req, req["page"])
+        interaction = _Interaction(
+            events, ADMIN, custom_id=cid, message=message)
+        run(_click(ns, interaction))
+    return interaction, message, events
+
+
+def _assert_schema_delivery(body, req, via):
+    interaction, message, events = _deliver_body(body, req, via)
+    assert interaction.ephemeral == ["Evidence report: unavailable (schema)."]
+    assert _public(events) == []
+    assert message.edits == []
+
+
+def test_m19_every_binding_and_summary_relation_is_refused_by_command_and_button():
+    pair_to_game = summary_body(shape="pair")
+    wrong_page = game_body(2, 3, "game")
+    missing_pair_summary = game_body(shape="pair")
+    missing_player_summary = game_body(shape="player")
+    extra_game_summary = summary_body(shape="game")
+    extra_series_summary = summary_body(shape="series")
+    list_shape = game_body()
+    list_shape["shape"] = []
+    dict_shape = game_body()
+    dict_shape["shape"] = {}
+    cases = [
+        (pair_to_game, _request_for_body(game_body())),
+        (wrong_page, _request_for_body(game_body())),
+        (missing_pair_summary, _request_for_body(missing_pair_summary)),
+        (missing_player_summary, _request_for_body(missing_player_summary)),
+        (extra_game_summary, _request_for_body(game_body())),
+        (extra_series_summary, _request_for_body(game_body(shape="series"))),
+        (list_shape, _request_for_body(game_body())),
+        (dict_shape, _request_for_body(game_body())),
+    ]
+    for body, req in cases:
+        for via in ("command", "button"):
+            _assert_schema_delivery(body, req, via)
+
+
+def test_m19_matching_shapes_pages_and_summary_roles_reach_both_delivery_paths():
+    bodies = [game_body(), game_body(shape="series"),
+              summary_body(shape="pair"), summary_body(shape="player")]
+    for body in bodies:
+        req = _request_for_body(body)
+        for via in ("command", "button"):
+            interaction, message, events = _deliver_body(body, req, via)
+            assert interaction.ephemeral == ["Posted."]
+            assert len(_public(events)) == 1
+            assert len(message.edits) == (1 if via == "button" else 0)
+
+
+def _m20_delivery_breaks():
+    duplicate_ki = game_body()
+    row = copy.deepcopy(duplicate_ki["catalog"][0])
+    row["key"] += ".duplicate"
+    duplicate_ki["catalog"].append(row)
+
+    duplicate_key = game_body()
+    row = copy.deepcopy(duplicate_key["catalog"][0])
+    row["ki"] = max(item["ki"] for item in duplicate_key["catalog"]) + 1000
+    duplicate_key["catalog"].append(row)
+    for seat in duplicate_key["games"][0]["seats"]:
+        cell = list(seat["cells"][0])
+        cell[0] = row["ki"]
+        seat["cells"].append(cell)
+
+    missing_spread = game_body()
+    missing_spread["catalog"][0].pop("p90")
+
+    window_as_game = game_body()
+    window = next(e for e in ae.REPORT_REGISTRY if e.is_window and e.scope == "seat")
+    window_as_game["catalog"] = [ae._catalog_row(window)]
+    for seat in window_as_game["games"][0]["seats"]:
+        seat["cells"] = [list(seat["cells"][0])]
+        seat["cells"][0][0] = window.ki
+
+    base_as_summary = summary_body()
+    base = next(e for e in ae.REPORT_REGISTRY if not e.is_window and e.kind == "R")
+    base_as_summary["catalog"] = [ae._catalog_row(base)]
+    base_as_summary["summary"][0]["cells"] = []
+
+    non_r_summary = summary_body()
+    non_r_summary["catalog"][0]["kind"] = "T"
+    non_r_summary["summary"][0]["cells"] = []
+    return [duplicate_ki, duplicate_key, missing_spread, window_as_game,
+            base_as_summary, non_r_summary]
+
+
+def test_m20_every_catalog_relation_is_refused_by_command_and_button():
+    for body in _m20_delivery_breaks():
+        req = _request_for_body(body)
+        for via in ("command", "button"):
+            _assert_schema_delivery(body, req, via)
+
+
+def _assert_m21_relations_are_refused_by_both_delivery_paths(breaks):
+    for label, body in breaks:
+        req = _request_for_body(body)
+        for via in ("command", "button"):
+            _assert_schema_delivery(body, req, via)
+
+
+def test_m21_game_relations_are_refused_by_command_and_button():
+    _assert_m21_relations_are_refused_by_both_delivery_paths(_m21_game_breaks())
+
+
+def test_m21_window_relations_are_refused_by_command_and_button():
+    _assert_m21_relations_are_refused_by_both_delivery_paths(_m21_window_breaks())
+
+
+def test_m21_summary_relations_are_refused_by_command_and_button():
+    _assert_m21_relations_are_refused_by_both_delivery_paths(_m21_summary_breaks())
+
+
+def test_m21_producer_reachable_stop_cases_reach_both_delivery_paths():
+    zero_reporter = game_body()
+    for seat in zero_reporter["games"][0]["seats"]:
+        seat["reporter"] = False
+    same_subject = game_body()
+    same_subject["games"][0]["seats"][1]["subject"] = 0
+    for body in (zero_reporter, same_subject):
+        req = _request_for_body(body)
+        for via in ("command", "button"):
+            interaction, message, events = _deliver_body(body, req, via)
+            assert interaction.ephemeral == ["Posted."]
+            assert len(_public(events)) == 1
+            assert len(message.edits) == (1 if via == "button" else 0)
 
 
 def test_p3_local_gate_refuses_dm_other_channel_and_thread_before_any_api_call():

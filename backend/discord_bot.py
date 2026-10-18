@@ -15244,6 +15244,7 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
             _aer_check_number(row[k])
         canonical_keys.add(row["key"])
         catalog[ki] = dict(row)
+    catalog_kis = frozenset(catalog)
     games = []
     if not isinstance(body["games"], list):
         raise AerSchemaError("games")
@@ -15252,13 +15253,22 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
         seats = []
         if not isinstance(g["seats"], list) or g["pair_cells"] != []:
             raise AerSchemaError("seats")
+        if len(g["seats"]) != 2:
+            raise AerSchemaError("seat count")
         for seat in g["seats"]:
             _aer_keys(seat, frozenset({"subject", "reporter", "cells"}))
-            if _aer_check_int(seat["subject"], 0) >= len(subjects) or not isinstance(
-                    seat["reporter"], bool) or not isinstance(seat["cells"], list):
+            subject = _aer_check_int(seat["subject"], 0)
+            if subject >= len(subjects) or not isinstance(seat["reporter"], bool) or not isinstance(
+                    seat["cells"], list):
                 raise AerSchemaError("seat")
             cells = tuple(_aer_cell(c, "seat", catalog, phase) for c in seat["cells"])
-            seats.append((seat["subject"], seat["reporter"], cells))
+            if not cells:
+                raise AerSchemaError("empty seat cells")
+            if len(cells) != len(catalog_kis) or {cell[0] for cell in cells} != catalog_kis:
+                raise AerSchemaError("seat cell coverage")
+            seats.append((subject, seat["reporter"], cells))
+        if sum(seat[1] for seat in seats) > 1:
+            raise AerSchemaError("reporter count")
         for k in ("code", "ended_at", "match_id"):
             _aer_check_text(g[k])
         for k in ("invalidated", "series_id"):
@@ -15283,9 +15293,11 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
         if games or not isinstance(body["windows"], list) or not isinstance(body["summary"], list):
             raise AerSchemaError("summary page")
         wins = []
-        for w in body["windows"]:
+        for position, w in enumerate(body["windows"]):
             _aer_keys(w, _AER_WINDOW_KEYS)
             oi = _aer_check_int(w["oi"], 0)
+            if oi != position:
+                raise AerSchemaError("window position")
             for k in ("games", "covered"):
                 _aer_check_int(w[k], 0)
             for k in ("newest", "oldest"):
@@ -15295,11 +15307,21 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
                     or w["basis"] not in ("player", "pair")
                     or (subj[0] != "seat" and w["flag_obs"] is not None)):
                 raise AerSchemaError("window")
-            _aer_check_int(subj[1], 0)
-            _aer_check_int(subj[2], 0, nullable=True)
+            subject = _aer_check_int(subj[1], 0)
+            partner = _aer_check_int(subj[2], 0, nullable=True)
+            if subj[0] != "seat":
+                raise AerSchemaError("window scope")
+            if w["basis"] != shape:
+                raise AerSchemaError("window basis")
+            if subject >= len(subjects):
+                raise AerSchemaError("window subject")
+            if ((shape == "player" and partner is not None)
+                    or (shape == "pair" and (partner is None or partner >= len(subjects)
+                                             or partner == subject))):
+                raise AerSchemaError("window subject shape")
             if subj[0] == "seat":
                 _aer_check_int(w["flag_obs"], 0)
-            elif subj[2] is None:
+            elif partner is None:
                 raise AerSchemaError("window subject")
             wins.append(dict(w))
         cells = []
@@ -15309,7 +15331,13 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
             if oi >= len(wins) or not isinstance(s["cells"], list):
                 raise AerSchemaError("summary window")
             rows = tuple(_aer_cell(c, "summary", catalog, phase) for c in s["cells"])
+            if not rows:
+                raise AerSchemaError("empty summary cells")
+            if len(rows) != len(catalog_kis) or {row[0] for row in rows} != catalog_kis:
+                raise AerSchemaError("summary cell coverage")
             cells.append((oi, rows))
+        if len(cells) != len(wins) or {row[0] for row in cells} != set(range(len(wins))):
+            raise AerSchemaError("summary row coverage")
         windows, summary = tuple(wins), tuple(cells)
     return BotPage(shape, page, pages, tuple(subjects), dict(body["population"]),
                    dict(body["baseline"]), dict(body["registry"]), catalog, tuple(games),
