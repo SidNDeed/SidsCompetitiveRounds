@@ -565,6 +565,7 @@
   "Anonymizes your Steam ID, display name, and Discord link. Matches stay so other players' Elo and histories aren't affected. You will no longer appear on leaderboards.\n<b><color=#FF8888>IRREVERSIBLE:</color></b> this Steam ID can never re-register. Future matches from this account will show as [Deleted User] and won't count toward stats.",
   "Another Round",
   "Another player is using your seat identity",
+  "Another player left. The match ends as a disconnect.",
   "Anti-cheat",
   "Apex",
   "Apex Shark",
@@ -830,6 +831,7 @@
   "Chat overlay: NORMAL - messages fade out",
   "Chat overlay: PINNED - messages stay on screen",
   "Checking the secure connection...",
+  "Checking whether {0} can rejoin",
   "Choose a metric",
   "Choose cards (left) to compare {0}.",
   "Choose up to {0} of their cards",
@@ -1856,6 +1858,7 @@
   "Not granted",
   "Not great. Not terrible.",
   "Not in queue.",
+  "Not now",
   "Not on sale yet",
   "Not ready yet",
   "Not set",
@@ -2076,6 +2079,7 @@
   "Press\n[{0}]\nto join",
   "Press Enable on the RANKED row first - the RLFP ping is only for ranked matches.",
   "Press Esc to leave",
+  "Press Esc to leave. The match then ends as a disconnect.",
   "Press [{0}] when ready",
   "Press a key...",
   "Pretty Good",
@@ -2256,6 +2260,7 @@
   "Region distribution",
   "Regular",
   "Rejected Reports",
+  "Rejoin",
   "Reload",
   "Reloader",
   "Rematch?",
@@ -3168,6 +3173,7 @@
   "Your game is dropping frames (worst {0} ms)",
   "Your last pack ({0}) - {1}",
   "Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>",
+  "Your match is still running. Rejoin? {0}",
   "Your message was removed and you are muted for {0} minutes (auto-moderation).",
   "Your name fades from warm amber into deep pink.",
   "Your no-show penalty: <color=#FFCC44>{0}%</color>",
@@ -3508,6 +3514,7 @@
   "{0} cards",
   "{0} d ago",
   "{0} days ago",
+  "{0} did not return. The match ends as a disconnect.",
   "{0} did not return; seat released",
   "{0} dps",
   "{0} elo",
@@ -3519,6 +3526,7 @@
   "{0} half-point events",
   "{0} is back",
   "{0} is now your title.",
+  "{0} is rejoining",
   "{0} item(s), {1} cop(ies) out there.",
   "{0} keys/s",
   "{0} kills   {1} dmg",
@@ -6388,6 +6396,11 @@
    "location": "Refusal",
    "kind": "ShowNotification"
   },
+  "Another player left. The match ends as a disconnect.": {
+   "surface": "TeamHoldBanner",
+   "location": "Line",
+   "kind": "Tr"
+  },
   "Anti-cheat": {
    "surface": "InfoLibrary",
    "location": "(file scope)",
@@ -7713,6 +7726,11 @@
    "location": "Checking",
    "kind": "Tr"
   },
+  "Checking whether {0} can rejoin": {
+   "surface": "TeamHoldBanner",
+   "location": "Line",
+   "kind": "TrF"
+  },
   "Choose a metric": {
    "surface": "NativeUI",
    "location": "OpenMetricPicker",
@@ -8209,9 +8227,9 @@
    "kind": "Tr"
   },
   "Could not rejoin at this point": {
-   "surface": "FfaReadmit",
-   "location": "Refusal",
-   "kind": "ShowNotification"
+   "surface": "FfaReadmit, TeamHoldReturn",
+   "location": "End, Refusal",
+   "kind": "ShowNotification, Tr"
   },
   "Could not spectate this game.": {
    "surface": "ApiClient",
@@ -12843,6 +12861,11 @@
    "location": "BuildOneVTwoTab, RefreshOneVTwoTab",
    "kind": "CreateText, Tr"
   },
+  "Not now": {
+   "surface": "TeamHoldReturn",
+   "location": "DrawOffer",
+   "kind": "Tr"
+  },
   "Not on sale yet": {
    "surface": "TitleLaddersUI",
    "location": "ReasonText",
@@ -13943,6 +13966,11 @@
    "location": "DrawBlackout",
    "kind": "Tr"
   },
+  "Press Esc to leave. The match then ends as a disconnect.": {
+   "surface": "TeamHoldBanner",
+   "location": "Line",
+   "kind": "Tr"
+  },
   "Press [{0}] when ready": {
    "surface": "NativeUI.Keybinds",
    "location": "KeybindReadyPrompt",
@@ -14843,6 +14871,11 @@
    "location": "BuildAdminTab",
    "kind": "CreateText"
   },
+  "Rejoin": {
+   "surface": "TeamHoldReturn",
+   "location": "DrawOffer",
+   "kind": "Tr"
+  },
   "Reload": {
    "surface": "TabStatsOverlay",
    "location": "EnsureLocaleStrings",
@@ -15499,8 +15532,8 @@
    "kind": "shop"
   },
   "Seat held for {0}: {1}": {
-   "surface": "FfaReadmit",
-   "location": "OnHoldsAnswer",
+   "surface": "FfaReadmit, TeamHoldBanner",
+   "location": "Line, OnHoldsAnswer",
    "kind": "TrF"
   },
   "Seats full": {
@@ -19194,9 +19227,9 @@
    "kind": "Tr"
   },
   "You are back in the match": {
-   "surface": "FfaLateEntry",
-   "location": "OnSelfKept",
-   "kind": "ShowNotification"
+   "surface": "FfaLateEntry, TeamHoldReturn",
+   "location": "Finish, OnSelfKept",
+   "kind": "ShowNotification, Tr"
   },
   "You are in another queue": {
    "surface": "FfaReadmit",
@@ -19401,6 +19434,11 @@
   "Your match (R{0}{1}): vs <color=#FFDE88>{2}</color>": {
    "surface": "NativeUI",
    "location": "RefreshTournaments",
+   "kind": "TrF"
+  },
+  "Your match is still running. Rejoin? {0}": {
+   "surface": "TeamHoldReturn",
+   "location": "DrawOffer",
    "kind": "TrF"
   },
   "Your message was removed and you are muted for {0} minutes (auto-moderation).": {
@@ -21103,6 +21141,11 @@
    "location": "Ago",
    "kind": "TrF"
   },
+  "{0} did not return. The match ends as a disconnect.": {
+   "surface": "TeamHoldBanner",
+   "location": "Line",
+   "kind": "TrF"
+  },
   "{0} did not return; seat released": {
    "surface": "FfaReadmit",
    "location": "OnHoldsAnswer",
@@ -21149,13 +21192,18 @@
    "kind": "TrF"
   },
   "{0} is back": {
-   "surface": "FfaLateEntry",
-   "location": "AfterPair",
+   "surface": "FfaLateEntry, TeamHoldBanner",
+   "location": "AfterPair, Line",
    "kind": "TrF"
   },
   "{0} is now your title.": {
    "surface": "TitleLaddersUI",
    "location": "OnWearClicked",
+   "kind": "TrF"
+  },
+  "{0} is rejoining": {
+   "surface": "TeamHoldBanner",
+   "location": "Line",
    "kind": "TrF"
   },
   "{0} item(s), {1} cop(ies) out there.": {
