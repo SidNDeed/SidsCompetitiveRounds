@@ -253,8 +253,12 @@ namespace CompetitiveRounds
             var gm = GM_ArmsRace.instance;
             int ptw = gm != null ? gm.pointsToWinRound : 2;
             TeamHoldRules.Snapshot snap;
+            // The server tally: the claim answer carries none at the server
+            // half's tip, so the discovery answer's series_tally (a server
+            // read of the same series row) is the comparison.
+            int w0 = a.W0 >= 0 ? a.W0 : _claimed.W0, w1 = a.W1 >= 0 ? a.W1 : _claimed.W1;
             string why = TeamHoldRules.CheckSnapshot(TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TSN), digests, expected, a.G,
-                                                     a.W0, a.W1, a.BoundaryDigest, a.Slot, ptw, out snap);
+                                                     w0, w1, a.BoundaryDigest, a.Slot, ptw, out snap);
             if (why == "digest missing") return;   // a digest still in flight: wait, the entry bound ends it
             if (why != null) { Fail(TeamHoldRules.ReturnRoute.Stage.Snapshot, why); return; }
             _snap = snap;
@@ -281,8 +285,9 @@ namespace CompetitiveRounds
             TeamHoldNet.Call("POST", TeamHoldNet.PathEntered(_claimed.HoldId), TeamHoldNet.EnteredBody(a.G, actor), (st, body) =>
             {
                 if (route != _route) return;
-                if (st == 200) route.Done(TeamHoldRules.ReturnRoute.Stage.Entered, true, Now);
-                else Fail(TeamHoldRules.ReturnRoute.Stage.Entered, "entered_" + st.ToString(CultureInfo.InvariantCulture));
+                string why;
+                if (TeamHoldNet.TryParseEntered(st, body, out why)) route.Done(TeamHoldRules.ReturnRoute.Stage.Entered, true, Now);
+                else Fail(TeamHoldRules.ReturnRoute.Stage.Entered, why);
             });
         }
 

@@ -45,9 +45,10 @@ namespace CompetitiveRounds
             return int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out v) ? v : dflt;
         }
 
-        // ── The pin store (S1 step 2). Filled ONLY by KX1 from the server's
-        //    join, poll, Start and claim answers; at this lane tip nothing
-        //    pins, so every room reads unflagged and nothing changes. ───────
+        // ── The pin store (S1 step 2). Filled ONLY from the server's answers
+        //    naming the room: the team and 1v2 ready_join polls
+        //    (TeamHoldNet.PinFromJoin) and the claim answer (TeamHoldReturn).
+        //    A room no answer flagged reads unflagged, which is today. ──────
 
         internal sealed class Pin
         {

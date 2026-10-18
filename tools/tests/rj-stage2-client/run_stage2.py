@@ -37,6 +37,8 @@ PIECES = {
     "K4": ("t43_", "t45_", "t4_"),
     "K5": ("t52_", "t56_", "t58_", "t5_"),
     "K6": ("t6_",),
+    # The refit lane (claude/rj-stage2-refit), one entry per continuation piece.
+    "KX1": ("tx1_", "t16_"),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -171,6 +173,18 @@ MUTANTS = [
     ("M6.E5", "K6", "seat", [
         ("            if (first)\n                Emit(\"[SEATLOG] drift slot=\"", "            if (first && slot < 0)\n                Emit(\"[SEATLOG] drift slot=\"")],
      "t6_drift", "t0_drift"),
+    # KX1 (lane-added: the transport binding has no V3 mutant row).
+    ("MX1.1", "KX1", "net", [
+        ("try { carried = !string.IsNullOrEmpty(token()) && carries(path); } catch { carried = false; }",
+         "carried = true;")],
+     "tx1_no_token_today", "tx1_token_reaches_route"),
+    ("MX1.2", "KX1", "net", [
+        ("if (code == 401) { body = SessionRequired; return; }", "")],
+     "tx1_401_today", "tx1_map_codes"),
+    ("MX1.3", "KX1", "net", [
+        ("TeamHoldRules.PinRoom(room, BoolField(answer, \"hold\"), mode, seriesId, roster);",
+         "TeamHoldRules.PinRoom(room, true, mode, seriesId, roster);")],
+     "t16_join_pin_today", "tx1_server_shapes"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an
@@ -222,6 +236,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", required=True)
     ap.add_argument("--piece", default=None)
+    # The refit lane logs fixtures and mutants apart: fixtures runs every
+    # fixture of the piece (and the K0 inventory), mutants every mutant.
+    ap.add_argument("--part", choices=("all", "fixtures", "mutants"), default="all")
     a = ap.parse_args()
     work = os.path.abspath(a.work)
     os.makedirs(work, exist_ok=True)
@@ -256,15 +273,16 @@ def main():
     prefixes = PIECES[a.piece] if a.piece else tuple(p for v in PIECES.values() for p in v)
     cases = [c for c in listed if c.startswith(prefixes)]
     passed = 0
-    for case in cases:
+    for case in (cases if a.part != "mutants" else []):
         rc, out = run_case(dll, case)
         print(out)
         passed += rc == 0
         ok = ok and rc == 0
-    print("fixtures: %d of %d pass" % (passed, len(cases)))
-    ok = ok and len(cases) > 0
+    if a.part != "mutants":
+        print("fixtures: %d of %d pass" % (passed, len(cases)))
+        ok = ok and len(cases) > 0
 
-    mutants = [m for m in MUTANTS if a.piece is None or m[1] == a.piece]
+    mutants = [m for m in MUTANTS if (a.piece is None or m[1] == a.piece) and a.part != "fixtures"]
     caught = 0
     for name, piece, key, edits, target, control in mutants:
         src = os.path.join(PLUGIN, FILES[key])

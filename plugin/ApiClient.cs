@@ -673,6 +673,7 @@ namespace CompetitiveRounds
         {
             baseUrl = url.TrimEnd('/');
             Plugin.Log.LogInfo($"API client initialized: {baseUrl}");
+            BindTeamHold();
             // The HTTPS migration rewrites the config to the TLS endpoint and
             // Config.Bind never revisits a written value, so a player for whom
             // :8444 does not work (port-filtering network, TLS-intercepting
@@ -2997,6 +2998,38 @@ namespace CompetitiveRounds
         // not touched, not reused and not extended.
 
         internal static string SeatEvidenceSig(string canonical) { return ComputeHmacHex(canonical); }
+
+        // ── RJ Stage 2 hold routes (KX1) ─────────────────────────
+        // TeamHoldNet's transport and signer, bound to the shared request
+        // path every authenticated route uses: GetRequest (sessionAware, the
+        // detailed error text) and PostRequest, both stamping X-Mod-Version
+        // and X-Session-Token through StampVersionHeader and reading a 401
+        // through HandleSessionReject. Every hold route requires a verified
+        // session, so TeamHoldNet.Bound sends a call only while the token is
+        // held and this route's transport may carry it, and maps a 401 to
+        // NoTransport (toward today). The signer is the build HMAC over the
+        // hold-open canonical; an empty signature is no signature.
+
+        internal static void BindTeamHold()
+        {
+            TeamHoldNet.Sign = canonical =>
+            {
+                string s = ComputeHmacHex(canonical);
+                return string.IsNullOrEmpty(s) ? null : s;
+            };
+            TeamHoldNet.Send = TeamHoldNet.Bound(
+                () => SteamAuth.SessionToken,
+                path => CredentialedTransportAllowed(baseUrl + path),
+                (method, path, body, answer) =>
+                {
+                    if (Plugin.Instance == null || string.IsNullOrEmpty(baseUrl)) { answer(false, "not ready"); return; }
+                    string url = baseUrl + path;
+                    if (method == "GET")
+                        Plugin.Instance.StartCoroutine(GetRequest(url, (ok, text) => answer(ok, text), detailedErrors: true, sessionAware: true));
+                    else
+                        Plugin.Instance.StartCoroutine(PostRequest(url, body ?? "{}", (ok, text) => answer(ok, text)));
+                });
+        }
 
         /// <summary>The compat sender on a seat the other-plug-in check
         /// disabled (Initialize never runs there): sets the base the one compat
@@ -16130,6 +16163,16 @@ namespace CompetitiveRounds
                     // canonicalization sorts the same way, so all 4 clients agree.
                     int slot = ComputeMy2v2Slot(MatchTracker.LocalSteamId, data.team_assigned, data.teammates);
                     Plugin.SetPending2v2Slot(slot);
+                    // RJ Stage 2 (KX1): pin (room, hold, mode, series, roster)
+                    // from this answer, the one that names the room.
+                    try
+                    {
+                        var holdRoster = new List<string> { MatchTracker.LocalSteamId };
+                        foreach (var m in data.teammates) if (m != null) holdRoster.Add(m.steam_id);
+                        foreach (var m in data.opponents) if (m != null) holdRoster.Add(m.steam_id);
+                        TeamHoldNet.PinFromJoin(response, TeamHoldRules.MODE_TEAM, data.room_name, data.series_id, holdRoster);
+                    }
+                    catch (Exception ex) { Plugin.Log.LogWarning($"[2v2] hold pin: {ex.Message}"); }
                     // Pre-populate Photon LocalPlayer custom properties NOW, before the
                     // room is even joined. When we join the team_ room these props ride
                     // along with the Photon Player record sent to all room members, so
@@ -18920,6 +18963,20 @@ namespace CompetitiveRounds
                             }
                         }
                         Plugin.SetPendingOvtSlot(slot);
+                        // RJ Stage 2 (KX1): pin (room, hold, mode, series,
+                        // roster) from this answer, the one that names the room.
+                        try
+                        {
+                            var holdRoster = new List<string> { sid };
+                            int hsIdx = resp.IndexOf("\"solo\":");
+                            int hsStart = hsIdx >= 0 ? resp.IndexOf('{', hsIdx) : -1;
+                            int hsEnd = hsStart >= 0 ? FindMatchingBrace(resp, hsStart) : -1;
+                            if (hsStart >= 0 && hsEnd > hsStart)
+                                holdRoster.Add(ExtractJsonString(resp.Substring(hsStart, hsEnd - hsStart + 1), "steam_id"));
+                            foreach (var m in duo) if (m != null) holdRoster.Add(m.steam_id);
+                            TeamHoldNet.PinFromJoin(resp, TeamHoldRules.MODE_OVT, room, ActiveOvt1v2SeriesId, holdRoster);
+                        }
+                        catch (Exception ex) { Plugin.Log.LogWarning($"[1v2] hold pin: {ex.Message}"); }
 
                         // Pre-join Photon props — identical rationale to the
                         // 2v2 ready_join path: remote clients must have
