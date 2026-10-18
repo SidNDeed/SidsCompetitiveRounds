@@ -52,10 +52,16 @@ async def _present(env, lob, slot, t):
     return await env.census_of(lob, slot, list(range(lob.n)))
 
 
-async def _witness_gone(env, lob, gone, t, *, witnesses=(0, 2)):
+async def _witness_gone(env, lob, gone, t, *, witnesses=None):
     """At lobby age t: witnesses[1]'s stored census omits `gone`, then
     witnesses[0]'s census through the route omits it too (the gone rule's
-    census trigger, two current witnesses)."""
+    census trigger, two current witnesses).  The default witnesses are the
+    two lowest slots other than `gone` ((0, 2) for the usual gone=1): a seat
+    never witnesses its own departure, so a census it sends is not one of
+    the two the rule counts."""
+    if witnesses is None:
+        witnesses = tuple(s for s in range(lob.n) if s != gone)[:2]
+    assert gone not in witnesses, ("setup: the gone seat is its own witness", gone, witnesses)
     await env.at(lob, t)
     present = [s for s in range(lob.n) if s != gone]
     await A._omit(env, lob, [witnesses[1]], gone)
