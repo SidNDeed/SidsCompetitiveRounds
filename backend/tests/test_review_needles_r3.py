@@ -2425,6 +2425,17 @@ class _Reach:
             return None
         return v.elts[i]
 
+    def literal_display_bool_selected(self, node):
+        """The element selected by a literal bool from an unstarred display."""
+        if not isinstance(node, ast.Subscript) or not isinstance(node.value, (ast.Tuple, ast.List)) \
+                or any(isinstance(element, ast.Starred) for element in node.value.elts) \
+                or not isinstance(node.slice, ast.Constant) or type(node.slice.value) is not bool:
+            return None
+        try:
+            return node.value.elts[node.slice.value]
+        except IndexError:
+            return None
+
     def elements(self, node, seen):
         """The expressions an element of node can be, or None when the
         resolution cannot see into it."""
@@ -3230,13 +3241,8 @@ class _Reach:
                     for route in self.point_routes(node.value, seen)}
         if isinstance(node, ast.Subscript):
             selected = self.indexed(node)
-            if selected is None and isinstance(node.value, (ast.Tuple, ast.List)) \
-                    and not any(isinstance(element, ast.Starred) for element in node.value.elts) \
-                    and isinstance(node.slice, ast.Constant) and type(node.slice.value) is bool:
-                try:
-                    selected = node.value.elts[node.slice.value]
-                except IndexError:
-                    pass
+            if selected is None:
+                selected = self.literal_display_bool_selected(node)
             if selected is not None:
                 return self.point_routes(selected, seen)
             origins = self.point_routes(node.value, seen)
@@ -3260,7 +3266,10 @@ class _Reach:
                     out.add(None)
                     continue
                 for value in values:
-                    selected = self.indexed(ast.Subscript(value=value, slice=node.slice, ctx=ast.Load()))
+                    selection = ast.Subscript(value=value, slice=node.slice, ctx=ast.Load())
+                    selected = self.indexed(selection)
+                    if selected is None:
+                        selected = self.literal_display_bool_selected(selection)
                     out.update({None} if selected is None else self.point_routes(selected, seen))
             return out or {None}
         if isinstance(node, ast.Starred):
@@ -5964,3 +5973,53 @@ def test_m5_fix17c_a_transitive_generic_alias_and_bool_bases_keep_every_route():
     assert not _fix15_has(unrelated, "protocol-running callable C")
     assert _fix15_has(integer_index, "protocol-running callable C")
     assert _fix15_has(starred_display, "protocol-running callable C")
+
+
+# Fix pass eighteen: the literal-display bool selector is shared by direct and
+# prior-binding base routes, so an alias cannot hide a local container class.
+def test_m5_fix18_a_alias_delivered_bool_bases_keep_direct_mixed_and_callback_routes():
+    cases = {
+        "list_direct": ("bases = (list[str],)\nclass C(bases[False]):\n    pass\n"
+                        "def f(obj):\n    stored = C(obj)\n",
+                        "call of protocol-running callable C through unresolved base obj"),
+        "dict_direct": ("bases = (dict[str, object],)\nclass C(bases[False]):\n    pass\n"
+                        "def f(obj):\n    stored = C(obj)\n",
+                        "call of protocol-running callable C through unresolved base obj"),
+        "list_mixed": ("condition = False\nbases = (list[str],)\nclass C(bases[False]):\n    pass\n"
+                       "def local(value):\n    return ()\nrunner = C if condition else local\n"
+                       "def f(obj):\n    stored = runner(obj)\n",
+                       "call of protocol-running callable runner through unresolved base obj"),
+        "dict_mixed": ("condition = False\nbases = (dict[str, object],)\nclass C(bases[False]):\n    pass\n"
+                       "def local(value):\n    return ()\nrunner = C if condition else local\n"
+                       "def f(obj):\n    stored = runner(obj)\n",
+                       "call of protocol-running callable runner through unresolved base obj"),
+        "list_callback": ("bases = (list[str],)\nclass C(bases[False]):\n    pass\n"
+                          "def f(obj):\n    map(C, (obj,))\n",
+                          "callback of map (protocol-running callable C) through unresolved base (obj,)"),
+        "dict_callback": ("bases = (dict[str, object],)\nclass C(bases[False]):\n    pass\n"
+                          "def f(obj):\n    map(C, (obj,))\n",
+                          "callback of map (protocol-running callable C) through unresolved base (obj,)"),
+    }
+    for name, (source, expected) in cases.items():
+        assert _fix15_rows(source) == [expected], name
+
+
+def test_m5_fix18_b_alias_delivered_bool_base_controls_keep_prior_outcomes():
+    integer_index = ("bases = (list[str],)\nindex = int(False)\nclass C(bases[index]):\n    pass\n"
+                     "def f(obj):\n    stored = C(obj)\n")
+    starred = ("bases = (*(), list[str])\nclass C(bases[False]):\n    pass\n"
+               "def f(obj):\n    stored = C(obj)\n")
+    unrelated = ("from helper import Base\nbases = (Base,)\nclass C(bases[False]):\n    pass\n"
+                 "def f(obj):\n    stored = C(obj)\n")
+    ordinary = ("class Plain:\n    pass\nbases = (Plain,)\nclass C(bases[False]):\n    pass\n"
+                "def f(obj):\n    stored = C(obj)\n")
+    unmarked = "bases = (list[str],)\nclass C(bases[False]):\n    pass\nstored = C(())\n"
+    instance = ("bases = (list[str],)\nclass C(bases[False]):\n    def __call__(self, value):\n        pass\n"
+                "def f(obj):\n    c = C()\n    stored = c(obj)\n    map(c, (obj,))\n")
+    for source in (integer_index, starred, unrelated, ordinary, unmarked, instance):
+        assert not _fix15_rows(source)
+    literal_list = "class C((list[str],)[False]):\n    pass\ndef f(obj):\n    stored = C(obj)\n"
+    literal_dict = "class C((dict[str, object],)[False]):\n    pass\ndef f(obj):\n    stored = C(obj)\n"
+    expected = "call of protocol-running callable C through unresolved base obj"
+    assert _fix15_rows(literal_list) == [expected]
+    assert _fix15_rows(literal_dict) == [expected]
