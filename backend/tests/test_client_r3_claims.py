@@ -422,3 +422,23 @@ def test_the_report_number_snapshot_is_the_object_the_harness_runs():
         "would move a key that has already been taken")
     assert "if (f >= 0) _frozen = f;" in flat, (
         "an unreadable number is being stored as if it were one")
+
+
+def test_ffa_pick_protocol_declaration_names_the_older_master_bridge():
+    ffa = _read("plugin", "FfaMode.cs")
+    pick = 'private const string PropPick = "cr_ffa_pk";'
+    epoch = 'private const string PropPickEpoch = "cr_ffa_pe";'
+    assert ffa.count(pick) == 1 and ffa.count(epoch) == 1
+    span = ffa[ffa.index(pick) + len(pick):ffa.index(epoch)]
+    claim = " ".join(line.strip()[2:].strip() for line in span.splitlines()
+                     if line.strip().startswith("//"))
+    assert claim == (
+        'RJ-DRIFT N19(c) as amended (A1): a current seat writes the exact '
+        'non-empty legacy form "{roomNonce}:{game}:{cycle}:{CardName}" to '
+        'cr_ffa_pk only while following an older master. That write always '
+        'carries cr_ffa_pe beside it; otherwise the pick travels in cr_ffa_pe '
+        'as "{roomNonce}:{epoch}:{game}:{cycle}:{CardName}" while holding the '
+        'phase epoch. A current master reads cr_ffa_pk only for a seat carrying '
+        'no cr_ffa_pe (a build before the epoch protocol); identity detection '
+        'never reads it.'
+    ), claim

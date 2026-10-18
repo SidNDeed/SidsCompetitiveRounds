@@ -227,13 +227,13 @@ namespace CompetitiveRounds
         // the wrong card applied. The nonce is the room name (server-issued,
         // unique per lobby).
         private const string PropPick = "cr_ffa_pk";
-        // RJ-DRIFT N19(c): this build writes cr_ffa_pk only as "". Its picks
-        // travel in cr_ffa_pe, a NEW key old clients ignore:
-        // "{roomNonce}:{epoch}:{game}:{cycle}:{CardName}", written only while
-        // the seat holds its phase's epoch. Bugs 435/436: as master, this build
-        // reads cr_ffa_pk in CollectPicks only for a seat that carries no
-        // cr_ffa_pe (a build from before the epoch protocol; this build writes
-        // cr_ffa_pk only as "", so only an older build's value counts there);
+        // RJ-DRIFT N19(c) as amended (A1): a current seat writes the exact
+        // non-empty legacy form "{roomNonce}:{game}:{cycle}:{CardName}" to
+        // cr_ffa_pk only while following an older master. That write always
+        // carries cr_ffa_pe beside it; otherwise the pick travels in
+        // cr_ffa_pe as "{roomNonce}:{epoch}:{game}:{cycle}:{CardName}" while
+        // holding the phase epoch. A current master reads cr_ffa_pk only for
+        // a seat carrying no cr_ffa_pe (a build before the epoch protocol);
         // identity detection never reads it.
         private const string PropPickEpoch = "cr_ffa_pe";
 
