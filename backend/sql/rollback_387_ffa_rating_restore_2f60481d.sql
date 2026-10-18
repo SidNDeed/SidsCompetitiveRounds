@@ -11,6 +11,9 @@
 --   match row rating_before          2087.094158271577
 --   match row rating_after           2024.3941582715768
 --   match row rating_change          -62.7
+--   match row eligibility (pinned, never written): left_early true,
+--   left_early_involuntary false, absent false, game_points_at_leave 1,
+--   points_total 1, rounds_won 0 (re-read 08:30Z)
 -- Every value written is one of those literals, never computed.
 -- peak_rating is not written: 387 refuses unless the peak is the measured
 -- value, its GREATEST therefore cannot move it, and this file refuses
@@ -58,6 +61,9 @@ BEGIN
         FOR NO KEY UPDATE;
 
     SELECT fmp.rating_before, fmp.rating_after, fmp.rating_change,
+           fmp.left_early, fmp.left_early_involuntary, fmp.absent,
+           fmp.game_points_at_leave, fmp.points_total, fmp.rounds_won,
+           m.is_ranked, m.invalidated_at,
            g.rating AS rating_now, g.peak_rating AS peak_now, g.updated_at AS stamp_now,
            EXISTS (SELECT 1
                      FROM ffa_match_players f2
@@ -81,6 +87,21 @@ BEGIN
     END IF;
     IF r.later_rated IS NOT FALSE THEN
         RAISE EXCEPTION 'rollback 387: a later rated FFA row exists; the pre-image literals no longer apply';
+    END IF;
+    -- Eligibility columns pinned to the measured values (re-read 08:30Z),
+    -- null-safe, for BOTH the apply decision and the no-op: neither file
+    -- writes them, so any other value means the row was changed elsewhere.
+    IF NOT ((r.left_early             IS NOT DISTINCT FROM TRUE)
+            AND (r.left_early_involuntary IS NOT DISTINCT FROM FALSE)
+            AND (r.absent                 IS NOT DISTINCT FROM FALSE)
+            AND (r.game_points_at_leave   IS NOT DISTINCT FROM CAST(1 AS smallint))
+            AND (r.points_total           IS NOT DISTINCT FROM CAST(1 AS smallint))
+            AND (r.rounds_won             IS NOT DISTINCT FROM CAST(0 AS smallint))
+            AND (r.is_ranked IS TRUE)
+            AND (r.invalidated_at IS NULL)) THEN
+        RAISE EXCEPTION 'rollback 387: the match row is not the measured eligible row (left_early %, involuntary %, absent %, points at leave %, points_total %, rounds_won %, ranked %, invalidated %)',
+            r.left_early, r.left_early_involuntary, r.absent, r.game_points_at_leave,
+            r.points_total, r.rounds_won, r.is_ranked, r.invalidated_at;
     END IF;
     IF r.rating_before IS DISTINCT FROM m_before THEN
         RAISE EXCEPTION 'rollback 387: match rating_before % is not the measured %', r.rating_before, m_before;
@@ -127,7 +148,13 @@ BEGIN
        AND fmp.player_id = 'fbb3d29d-b637-43c0-9787-357c2753e28c'
        AND fmp.rating_before IS NOT DISTINCT FROM m_before
        AND fmp.rating_after  IS NOT DISTINCT FROM m_before
-       AND fmp.rating_change IS NOT DISTINCT FROM CAST(0 AS double precision);
+       AND fmp.rating_change IS NOT DISTINCT FROM CAST(0 AS double precision)
+       AND fmp.left_early             IS NOT DISTINCT FROM TRUE
+       AND fmp.left_early_involuntary IS NOT DISTINCT FROM FALSE
+       AND fmp.absent                 IS NOT DISTINCT FROM FALSE
+       AND fmp.game_points_at_leave   IS NOT DISTINCT FROM CAST(1 AS smallint)
+       AND fmp.points_total           IS NOT DISTINCT FROM CAST(1 AS smallint)
+       AND fmp.rounds_won             IS NOT DISTINCT FROM CAST(0 AS smallint);
     GET DIAGNOSTICS k = ROW_COUNT;
     IF k IS DISTINCT FROM 1::bigint THEN
         RAISE EXCEPTION 'rollback 387: match row update touched % rows, expected 1', k;

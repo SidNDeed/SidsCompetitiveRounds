@@ -15,7 +15,10 @@
 --                       2087.094158271577, updated_at
 --                       2026-10-18 04:59:48.803927+00
 --   ffa_match_players   rating_before 2087.094158271577, rating_after
---                       2024.3941582715768, rating_change -62.7
+--                       2024.3941582715768, rating_change -62.7;
+--                       eligibility left_early true, left_early_involuntary
+--                       false, absent false, game_points_at_leave 1,
+--                       points_total 1, rounds_won 0 (re-read 08:30Z)
 --   no later rated FFA row for the seat; no ffa_queue row.
 --
 -- WHAT IS WRITTEN (two rows, nothing else), every value a verified literal:
@@ -84,7 +87,7 @@ BEGIN
     -- 1. Read the state under the locks (exactly one joined row, or raise).
     SELECT fmp.rating_before, fmp.rating_after, fmp.rating_change,
            fmp.left_early, fmp.absent, fmp.left_early_involuntary,
-           fmp.game_points_at_leave,
+           fmp.game_points_at_leave, fmp.points_total, fmp.rounds_won,
            m.is_ranked, m.invalidated_at,
            g.rating AS rating_now, g.peak_rating AS peak_now, g.updated_at AS stamp_now,
            EXISTS (SELECT 1
@@ -110,15 +113,20 @@ BEGIN
     IF r.later_rated IS NOT FALSE THEN
         RAISE EXCEPTION '387: a later rated FFA row exists for the seat; this file does not apply';
     END IF;
-    IF NOT ((r.left_early IS TRUE)
-            AND (r.absent IS FALSE)
-            AND (r.left_early_involuntary IS FALSE)
+    -- Eligibility, pinned to the measured values (re-read 08:30Z) with
+    -- null-safe equality, plus the ruling's own test (< 2 points) as TRUE.
+    IF NOT ((r.left_early             IS NOT DISTINCT FROM TRUE)
+            AND (r.left_early_involuntary IS NOT DISTINCT FROM FALSE)
+            AND (r.absent                 IS NOT DISTINCT FROM FALSE)
+            AND (r.game_points_at_leave   IS NOT DISTINCT FROM CAST(1 AS smallint))
+            AND (r.points_total           IS NOT DISTINCT FROM CAST(1 AS smallint))
+            AND (r.rounds_won             IS NOT DISTINCT FROM CAST(0 AS smallint))
             AND ((r.game_points_at_leave < 2) IS TRUE)
             AND (r.is_ranked IS TRUE)
             AND (r.invalidated_at IS NULL)) THEN
-        RAISE EXCEPTION '387: the match row is not eligible under the ruling (left_early %, absent %, involuntary %, points %, ranked %, invalidated %)',
-            r.left_early, r.absent, r.left_early_involuntary, r.game_points_at_leave,
-            r.is_ranked, r.invalidated_at;
+        RAISE EXCEPTION '387: the match row is not the measured eligible row (left_early %, involuntary %, absent %, points at leave %, points_total %, rounds_won %, ranked %, invalidated %)',
+            r.left_early, r.left_early_involuntary, r.absent, r.game_points_at_leave,
+            r.points_total, r.rounds_won, r.is_ranked, r.invalidated_at;
     END IF;
     IF r.rating_before IS DISTINCT FROM m_before THEN
         RAISE EXCEPTION '387: match rating_before % is not the measured %', r.rating_before, m_before;
@@ -171,7 +179,13 @@ BEGIN
        AND fmp.player_id = 'fbb3d29d-b637-43c0-9787-357c2753e28c'
        AND fmp.rating_before IS NOT DISTINCT FROM m_before
        AND fmp.rating_after  IS NOT DISTINCT FROM m_after
-       AND fmp.rating_change IS NOT DISTINCT FROM m_change;
+       AND fmp.rating_change IS NOT DISTINCT FROM m_change
+       AND fmp.left_early             IS NOT DISTINCT FROM TRUE
+       AND fmp.left_early_involuntary IS NOT DISTINCT FROM FALSE
+       AND fmp.absent                 IS NOT DISTINCT FROM FALSE
+       AND fmp.game_points_at_leave   IS NOT DISTINCT FROM CAST(1 AS smallint)
+       AND fmp.points_total           IS NOT DISTINCT FROM CAST(1 AS smallint)
+       AND fmp.rounds_won             IS NOT DISTINCT FROM CAST(0 AS smallint);
     GET DIAGNOSTICS k = ROW_COUNT;
     IF k IS DISTINCT FROM 1::bigint THEN
         RAISE EXCEPTION '387: match row update touched % rows, expected 1', k;
