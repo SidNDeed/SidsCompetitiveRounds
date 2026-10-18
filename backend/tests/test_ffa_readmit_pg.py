@@ -1024,7 +1024,11 @@ def test_l2_attest_held_snapshot_has_an_active_lobby_fence(monkeypatch):
             return True
 
         env.mp.setattr(main, "_strict_steam_session_ok", session_ok)
-        lob = await _held(env)
+        # The close must land while the hold is still LIVE: a hold anchored at
+        # lobby age 950 runs to 1070, past the poll closer at 1000.  (Anchored
+        # at the default 50, the hold had expired by 1000, the pre-fix reader
+        # already returned an empty H, and the fence was never observed.)
+        lob = await _held(env, t_present=950.0, t_gone=960.0)
         room = (await env.lobby_row(lob))["photon_room_id"]
         roster = sorted(s for i, s in enumerate(lob.sids) if i != 1)
         req = main.SpectateAttestBody(
@@ -1054,6 +1058,9 @@ def test_l2_attest_held_snapshot_has_an_active_lobby_fence(monkeypatch):
         closed = await env.lobby_row(lob)
         assert poll.status == 200 and closed["status"] == "completed", \
             ("L2 close premise", poll.status, closed["status"])
+        live = await env.seat(lob, 1)
+        assert live["hold_n"] is not None and live["hold_until"] > env.now, \
+            ("L2 live hold premise", live["hold_n"], live["hold_until"], env.now)
         release.set()
         answer = await asyncio.wait_for(task, 10.0)
         env.mp.setattr(main, "_spectate_authoritative_roster", real_roster)
