@@ -1822,14 +1822,15 @@ class FfaPlayerEntry(BaseModel):
     # left_early = left DURING this game — still rated, so leaving at zero
     # score can't dodge the loss.
     absent: bool = False
-    # Total points the WHOLE FIELD had scored at the moment this player left —
-    # set only on left_early entries, by a client that was still in the room.
-    # Under FFA_LEAVE_GRACE_POINTS the server does not rate them (the 2026-08-20
-    # early-leave grace). None = not reported: a pre-v1.39 client, a present
-    # player, or a carried roster ghost — all of which keep pre-grace behaviour.
-    # Also OUTSIDE the frozen ffa: HMAC canonical, like `absent` and
-    # `damage_dealt`; submit_ffa_match refutes the claim against the signed
-    # tally. Bounded so a crafted value cannot overflow the SMALLINT column.
+    # Total half points the WHOLE FIELD had scored when this seat left,
+    # set only on left_early entries by a client still in the room. A field
+    # total below two full points, measured against the helper-derived
+    # half-point threshold, leaves the seat unrated for this game.
+    # None = not reported: a pre-v1.39 client, a present player, or a carried
+    # roster ghost; all keep pre-grace behaviour. Also OUTSIDE the frozen ffa:
+    # HMAC canonical, like absent and damage_dealt; submit_ffa_match refutes
+    # contradictions in the signed points and rounds. Bounded so a crafted
+    # value cannot overflow the SMALLINT column.
     game_points_at_leave: int | None = Field(None, ge=0, le=32000)
     fps: int | None = Field(None, ge=0, le=10000)
     # Generous hard bounds (reject only absurd bodies — the quarantine path

@@ -4412,6 +4412,26 @@ def test_s64_i_ii_the_false_mark_and_the_refuted_tally(monkeypatch):
     run_env(monkeypatch, body)
 
 
+def test_early_leave_grace_excludes_game_rating_xp_and_gold(monkeypatch):
+    """T6: a seat leaving below two full field points is absent from this
+    game's rating and receives no game XP or Gold through the real endpoint."""
+    async def body(env):
+        lob = await _s64_lobby(env)
+        s = lob.sids
+        res = _s64_res(lob)
+        res[s[6]] = (0, 1)
+        await env.ready_all(lob, list(range(7)))
+        rows = await _settled(
+            env, lob, 1, res, "early-leave grace", rated=False,
+            reporter=s[0], left={s[6]}, gp_leave={s[6]: 3})
+        row = rows[6]
+        assert row["absent"] is True and row["left_early"] is True
+        assert row["game_points_at_leave"] == 3
+        assert row["rating_change"] is None
+        assert row["xp_gained"] == 0 and row["gold_gained"] == 0
+    run_env(monkeypatch, body)
+
+
 def test_s64_iii_the_seats_own_leave_corroborated(monkeypatch):
     """S64 (iii): actor 7 has left, two current witnesses omit it, none lists
     it, R's own census is 30 s old: R's leave during game 1 writes gone_game

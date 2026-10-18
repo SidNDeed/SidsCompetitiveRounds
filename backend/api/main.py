@@ -50152,19 +50152,17 @@ FFA_MAX_RATED_OPPONENTS = 4
 # multi-upset corner the +1 bound can truncate (documented, accepted:
 # bounded movement is the design constraint, #213).
 FFA_UPSET_INCLUDE_GAP = 250.0
-# Early-leave grace (Sid, 2026-08-20): a player who leaves before the field has
-# scored this many points is NOT rated for the game. Same threshold and the same
-# reasoning as every other "2 points scored" rule in this file (the bet cutoff,
-# the 2v2 dc_leadforfeit gate) and as the client's own bug-#114 fresh-game
-# cancel: below two half-points nothing has been decided, so a placement built
-# out of that game is not evidence about anybody. A game can also simply break
-# and need a restart, and we never auto-penalize for that.
+# Early-leave grace (Sid, 2026-08-20): a seat that leaves before the
+# field has scored this many FULL points is not rated and receives no game
+# Gold or XP. Achievements and other earning ways are unaffected. The wire
+# reports cumulative field half points, so _ffa_leave_grace_half_points derives
+# the comparison threshold from the points-per-round engine value.
 #
-# This does NOT reopen the leave-to-dodge hole the FFA design closed. The dodge
-# it forbids is "I'm losing, so I quit at zero score" — and by the time you are
-# losing, the field is well past two points. The window here is the opening
-# seconds, before the first round converts.
-FFA_LEAVE_GRACE_POINTS = 2
+# This is separate from the betting and disconnect cutoffs that still count
+# two field half points. The grace spans the opening play before the second
+# round conversion, while a broken game can still restart without rating the
+# departed seat.
+FFA_LEAVE_GRACE_FULL_POINTS = 2
 # ── FFA betting: odds band + how long a lobby stays bettable ───────────────
 FFA_ODDS_MAX = 5.0          # ceiling, reachable only at 10 players with a low RD
 FFA_ODDS_MIN_LARGE = 2.0    # floor at 5+ players (Sid's ask)
@@ -50194,6 +50192,14 @@ FFA_BET_LIVE_ASSEMBLY_MINUTES = 15     # ...since lock, for a lobby with 0 games
 # against the report's own claims.
 FFA_ROUNDS_TO_WIN = 5
 FFA_POINTS_TO_WIN_ROUND = 2
+
+
+def _ffa_leave_grace_half_points(
+        points_to_win_round: int = FFA_POINTS_TO_WIN_ROUND) -> int:
+    """The leave-grace boundary in the half-point unit carried on the wire."""
+    return FFA_LEAVE_GRACE_FULL_POINTS * points_to_win_round
+
+
 # Feature floor for non-default lobby config: every roster member's
 # players.mod_version must be at least this or the lobby's config collapses
 # to the defaults AS A SET at Start (never partially — a mixed lobby plays
@@ -57712,7 +57718,8 @@ def _ffa_score_shape_error(report, score_target: int, n_players: int) -> str | N
     return None
 
 
-def _ffa_leave_decision(report, kills_in_canonical: bool) -> tuple[set, set, list[str]]:
+def _ffa_leave_decision(report, kills_in_canonical: bool, *,
+                        grace_half: int) -> tuple[set, set, list[str]]:
     """Who this report says did not PLAY the game it describes: the carried
     roster ghosts, the early-leave graces, and the log lines that say so.
 
@@ -57721,15 +57728,15 @@ def _ffa_leave_decision(report, kills_in_canonical: bool) -> tuple[set, set, lis
     from rating, XP, gold, everyone else's beaten counts and the payout
     denominator. The duplicate comparison has to ask the same question of a
     second report, and a second copy of this rule in the comparator is the
-    sibling-drift shape (#279/#432) — one of the two copies would be the one
+    sibling-drift shape (#279/#432) - one of the two copies would be the one
     that stopped being updated.
 
-    Both arms carry the REFUTATION GUARD: `absent` and `game_points_at_leave`
-    are client-supplied and outside the frozen HMAC canonical, while
-    rounds_won/points_total are signed, so a signed non-zero tally proves the
-    seat played and refutes the claim against it. Kills count as presence proof
-    only when they are signed too (v2) — an unsigned kills field must never
-    override an honest absent flag.
+    The two arms use different evidence. The unsigned absent claim is refuted
+    by any non-zero signed tally; kills count only in a v2 canonical. The
+    unsigned field total is a grace claim only below the required grace_half.
+    Signed own points refute that claim when they reach the threshold or exceed
+    the claimed field total, and signed round wins refute a points tally too
+    small to contain them. Kills never refute the grace.
 
     Returns (ghosts, graced, log_lines). The caller prints the lines; this
     function has no side effects, so the comparison path can ask the same
@@ -57750,17 +57757,36 @@ def _ffa_leave_decision(report, kills_in_canonical: bool) -> tuple[set, set, lis
         _gp = getattr(p, "game_points_at_leave", None)
         if not p.left_early or p.steam_id in ghosts or _gp is None:
             continue
-        if _gp >= FFA_LEAVE_GRACE_POINTS:
+        if _gp >= grace_half:
             continue
-        if p.rounds_won > 0 or p.points_total > 0 or (kills_in_canonical and p.kills > 0):
-            log.append(f"[FFA] early-leave grace REFUTED for {p.steam_id}: signed tally "
-                       f"{p.rounds_won}r/{p.points_total}p/{p.kills}k is non-zero "
-                       f"(claimed {_gp} field point(s) at leave, reporter "
-                       f"{report.reported_by_steam_id}, room {report.photon_room_id})")
+        if p.points_total >= grace_half:
+            log.append(
+                f"[FFA] early-leave grace REFUTED for {p.steam_id}: threshold bound; "
+                f"signed tally {p.rounds_won}r/{p.points_total}p/{p.kills}k has own "
+                f"points at or above {grace_half} half points (claimed {_gp} field "
+                f"half point(s) at leave, reporter {report.reported_by_steam_id}, "
+                f"room {report.photon_room_id})")
+            continue
+        if p.points_total > _gp:
+            log.append(
+                f"[FFA] early-leave grace REFUTED for {p.steam_id}: inconsistency "
+                f"bound; signed tally {p.rounds_won}r/{p.points_total}p/{p.kills}k "
+                f"has own points above the claimed {_gp} field half point(s) at "
+                f"leave (reporter {report.reported_by_steam_id}, room "
+                f"{report.photon_room_id})")
+            continue
+        _round_half = p.rounds_won * FFA_POINTS_TO_WIN_ROUND
+        if _round_half > p.points_total:
+            log.append(
+                f"[FFA] early-leave grace REFUTED for {p.steam_id}: rounds bound; "
+                f"signed tally {p.rounds_won}r/{p.points_total}p/{p.kills}k requires "
+                f"at least {_round_half} half points (claimed {_gp} field half "
+                f"point(s) at leave, reporter {report.reported_by_steam_id}, room "
+                f"{report.photon_room_id})")
             continue
         graced.add(p.steam_id)
         log.append(f"[FFA] early-leave grace for {p.steam_id}: left at {_gp} field "
-                   f"point(s) (< {FFA_LEAVE_GRACE_POINTS}) — unrated for this game "
+                   f"half point(s) (< {grace_half}) - unrated for this game "
                    f"(room {report.photon_room_id})")
     return ghosts, graced, log
 
@@ -57835,11 +57861,12 @@ def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
         differently and still reach the same decision, and the decision is what
         the game turns on;
       * KILLS WHENEVER THEY ARE SIGNED, not only where they break ties. Signed
-        kills award ffa_kills_50 and ffa_kills_100 — achievements with gold —
-        and they refute a false absent or grace claim, in every lobby. The old
-        gate was `kills_break_ties`, which additionally requires the lobby's
-        frozen kills_tiebreak flag, so in a lobby with that flag off a kills
-        difference that moved real gold was classified as agreement.
+        kills award ffa_kills_50 and ffa_kills_100 - achievements with gold -
+        and they refute a false absent claim in every lobby. The grace arm
+        reads no kills. The old gate was kills_break_ties, which additionally
+        requires the lobby's frozen kills_tiebreak flag, so in a lobby with that
+        flag off a kills difference that moved real gold was classified as
+        agreement.
 
     Where kills are NOT signed (a v1 report) they decide nothing at all and are
     still not compared: two honest clients of one game can tally them from
@@ -57869,16 +57896,14 @@ def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
 
     SIGNATURE FORM IS NOT EVIDENCE ABOUT THE GAME. The effective decision is
     recomputed here from the INCOMING report, while the flag on the row was
-    decided from the first one, and the refutation guard inside
-    _ffa_leave_decision is weaker for an unsigned (v1) report than a signed
-    one: kills count as proof of presence only when they are signed, so the
-    unsigned reading refutes fewer claims and marks a superset of seats
-    unrated. Two members of one lobby can be on different mod versions where
-    the lobby is not kills-capable, so the same claims reach this function in
-    both forms. A disagreement the form alone explains is therefore not a
-    disagreement, and both readings are computed: a recorded flag that agrees
-    with EITHER is agreement. That can only turn a refusal into an echo, and an
-    echo writes nothing — the recorded row stands either way (#283).
+    decided from the first one. Only the absent arm can differ by signature
+    form: signed kills can refute an absent claim, while unsigned kills cannot.
+    The grace arm reads the same signed rounds and points in both forms and
+    never reads kills. Two members of one lobby can use different forms where
+    the lobby is not kills-capable, so both absent-arm readings are computed:
+    a recorded flag that agrees with EITHER is agreement. That can only turn a
+    refusal into an echo, and an echo writes nothing - the recorded row stands
+    either way (#283).
 
     `prior_vec` maps steam id -> (rounds_won, points_total, kills, left_early,
     absent) as _FFA_PRIOR_VECTOR_SQL reads them back. The left_early slot is
@@ -57889,12 +57914,15 @@ def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
     if prior_winner_steam != report.winner_steam_id:
         return (f"winner {report.winner_steam_id} vs recorded "
                 f"{prior_winner_steam if prior_winner_steam is not None else 'none'}")
-    # Both readings of the SAME claims — signed and unsigned — so that a
-    # difference explained by the incoming report's HMAC form alone is not
-    # reported as a difference about the game. `kills_signed` still gates the
-    # kills comparison below, where it is a fact about what was signed.
-    _g_signed, _c_signed, _ = _ffa_leave_decision(report, True)
-    _g_plain, _c_plain, _ = _ffa_leave_decision(report, False)
+    # Both readings of the SAME absent claims - signed and unsigned - so that
+    # a difference explained by the incoming report's HMAC form alone is not
+    # reported as a difference about the game. The grace result is identical
+    # in both readings because it does not inspect kills. kills_signed still
+    # gates the kills comparison below, where it is a fact about what was signed.
+    _g_signed, _c_signed, _ = _ffa_leave_decision(
+        report, True, grace_half=_ffa_leave_grace_half_points())
+    _g_plain, _c_plain, _ = _ffa_leave_decision(
+        report, False, grace_half=_ffa_leave_grace_half_points())
     _unrated_either = ((_g_signed | _c_signed), (_g_plain | _c_plain))
     # The message names the reading that matches THIS report's own form, so a
     # log line says what the submitted report concluded rather than what the
@@ -58540,25 +58568,29 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     # comparison asks the same question of a second report and two copies of
     # one rule is the sibling-drift shape (#279/#432). The log lines it builds
     # are printed HERE, where the evidence belongs, and nowhere else.
-    # EARLY-LEAVE GRACE (Sid, 2026-08-20 — see FFA_LEAVE_GRACE_POINTS): a
-    # leaver who left THIS game before the field reached two points did not
-    # play a game anyone can be rated on. They join the ghosts in `unrated`:
-    # no rating, no XP/gold, out of everyone else's beaten counts and out of
-    # the payout denominator, exactly as a carried roster ghost is — while
-    # the players who stayed play on and are rated among themselves.
+    # EARLY-LEAVE GRACE (Sid, 2026-08-20): a leaver who left THIS
+    # game before the field reached two full points did not play a game anyone
+    # can be rated on. The half-point wire boundary is derived by
+    # _ffa_leave_grace_half_points. They join the ghosts in unrated: no
+    # rating, no game XP or Gold, out of everyone else's beaten counts and out
+    # of the payout denominator, while achievements and other earning ways are
+    # unaffected and the players who stayed are rated among themselves.
     #
-    # TRUST: `game_points_at_leave` is client-supplied and outside the frozen
-    # HMAC canonical, like `absent` and `damage_dealt`. Putting it inside would
-    # buy nothing — _verify_ffa_hmac's docstring is explicit that a signature
+    # TRUST: game_points_at_leave is client-supplied and outside the frozen
+    # HMAC canonical, like absent and damage_dealt. Putting it inside would
+    # buy nothing - _verify_ffa_hmac's docstring is explicit that a signature
     # authenticates the reporting BUILD, not gameplay truth, so signed fields
     # are reporter-attested too. Two things bound the abuse instead:
-    #   (a) the same REFUTATION GUARD the absent claim gets — a non-zero signed
-    #       tally proves they played, and refutes the claim; and
+    #   (a) consistency bounds in signed half points: own points at or above the
+    #       grace threshold, own points above the claimed field total, or round
+    #       wins unsupported by own points refute the claim; and
     #   (b) the claim can only come from a SURVIVOR. The report is built by a
     #       client still in the room at game over, never by the leaver, and
     #       voiding a leaver's result is worth nothing to the reporter.
     # Old clients omit the field entirely -> no grace, pre-fix behaviour.
-    ghosts, graced, _leave_log = _ffa_leave_decision(report, kills_in_canonical)
+    ghosts, graced, _leave_log = _ffa_leave_decision(
+        report, kills_in_canonical,
+        grace_half=_ffa_leave_grace_half_points())
     for _line in _leave_log:
         print(_line)
     # Everyone excluded from rating/economy for this game. `ghosts` still names
@@ -58934,9 +58966,10 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                # after the fact (migration 233).
                "absent": p.steam_id in unrated,
                # Stored for EVERY leaver that reports it, not just the graced
-               # ones: a refused claim (0-1 points but a non-zero signed tally)
-               # and a near-miss (left at 2) are both worth being able to see
-               # later, and `absent` already carries the decision itself.
+               # ones: a refused below-threshold claim whose signed points
+               # contradict its field total, and a boundary leave exactly at
+               # the helper-derived threshold, are both worth retaining.
+               # absent already carries the decision itself.
                "gpal": (getattr(p, "game_points_at_leave", None)
                         if p.left_early else None),
                # Bug #392 — the LABEL, never the outcome. True only when this
@@ -59065,11 +59098,12 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         if rated:
             await db.flush()
             async with db.begin_nested():
-                # Players who ACTUALLY PLAYED this game. `unrated` is the
-                # refutation-filtered absent set plus the early-leave graces (a
-                # signed non-zero tally has already refuted a false `absent` or
-                # grace claim), which is the same basis the economy meter uses
-                # for `_n_live_meter` / `n_live`.
+                # Players who ACTUALLY PLAYED this game. unrated is the
+                # refutation-filtered absent set plus the early-leave graces:
+                # any signed tally can refute only an absent claim, while signed
+                # point and round consistency bounds can refute a grace claim.
+                # This is the same basis the economy meter uses for
+                # _n_live_meter / n_live.
                 # Recomputed rather than reusing those locals so the rule reads
                 # standalone; a roster ghost must not inflate a shutout's
                 # player-count tier any more than it inflates a payout.
@@ -63954,7 +63988,8 @@ def _triage_capture_verdict(report, kills_signed: bool, ids_by_steam: dict,
     (its absent flag is _ffa_leave_decision's union, under its own form)."""
     if set(ids_by_steam.values()) != set(other_ids.values()):
         return "ROSTER DIFFERS"
-    ghosts, graced, _ = _ffa_leave_decision(other, other_signed)
+    ghosts, graced, _ = _ffa_leave_decision(
+        other, other_signed, grace_half=_ffa_leave_grace_half_points())
     unrated = ghosts | graced
     other_vec = {p.steam_id: (int(p.rounds_won), int(p.points_total), int(getattr(p, "kills", 0) or 0),
                               bool(p.left_early), p.steam_id in unrated)
