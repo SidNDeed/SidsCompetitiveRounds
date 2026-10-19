@@ -345,4 +345,3 @@ BEGIN
 END $$;
 
 COMMIT;
-

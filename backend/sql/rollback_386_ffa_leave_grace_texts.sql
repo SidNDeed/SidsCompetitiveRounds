@@ -25,4 +25,3 @@ UPDATE i18n_keys
    AND retired_at IS NULL;
 
 COMMIT;
-
