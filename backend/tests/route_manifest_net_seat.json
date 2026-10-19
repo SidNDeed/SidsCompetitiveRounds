@@ -259,7 +259,7 @@
           ],
           "main",
           "admin_quarantine_triage_group",
-          "1b6605a1b092b0ef2663deacb147054a4966f721"
+          "cebd071c499c7b58af60af7292f0578bee4532cb"
         ],
         [
           "/api/v1/admin/quarantine/{qid}/accept",
@@ -520,7 +520,7 @@
           ],
           "main",
           "submit_ffa_match",
-          "b52e1ba54a65d7570f6f9c273b3587da70be0afd"
+          "57ee04684be9089cb02c6ac7229dcdadd1501721"
         ],
         [
           "/api/v1/h2h/{steam_id}/{opponent_steam_id}",
