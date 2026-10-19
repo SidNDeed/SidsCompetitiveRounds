@@ -43,6 +43,10 @@ def _mount(env, monkeypatch):
             yield sess
     monkeypatch.setitem(main.app.dependency_overrides, database.get_db, _db)
     monkeypatch.setattr(database, "async_session", env.sm)
+    # Each body starts with empty per-address rate buckets, as the other route
+    # harnesses do: every request here comes from one test address, so the
+    # buckets of earlier tests in the process would otherwise count against it.
+    monkeypatch.setattr(main, "_RL_BUCKETS", main._rl_defaultdict(main._rl_deque))
 
 
 async def _call(method, path, steam, body=None, params=None):
