@@ -487,9 +487,17 @@ def test_383_proof_block_raises_on_a_gap():
 
 M384 = os.path.join(cf_pg.SQL_DIR, "384_i18n_keys_stage2_hold.sql")
 M385 = os.path.join(cf_pg.SQL_DIR, "385_seed_machine_translations_stage2_hold.sql")
-KEYS_384 = ("98dca83410faa64d", "21a77f99b9e86f48", "e247d0f66676e2fa", "690eba24c1191a59",
-            "b933f3c706c40e83", "dff040f0708dc38d", "fe3e2890029979eb", "5ff81c1cbcb1bc7b",
-            "66acd1c2d1011708", "bd57f21b2e779ae1", "5be7e933e570652e")
+# NX7: 384 carries thirteen keys in this file order; 385 (the Stage 2 lane's seed,
+# untouched) proposes translations for eleven of them, all but "Not now" and
+# "Rejoin" (staging notes rows 25 and 26).
+KEYS_384 = ("fe3e2890029979eb", "e247d0f66676e2fa", "990a134373f4fe9b", "21a77f99b9e86f48",
+            "df1814deb572b30b", "5ff81c1cbcb1bc7b", "dff040f0708dc38d", "690eba24c1191a59",
+            "b933f3c706c40e83", "98dca83410faa64d", "66acd1c2d1011708", "bd57f21b2e779ae1",
+            "5be7e933e570652e")
+UNSEEDED_384 = {"990a134373f4fe9b": "Not now", "df1814deb572b30b": "Rejoin"}
+KEYS_385 = tuple(k for k in KEYS_384 if k not in UNSEEDED_384)
+_ROW_384 = re.compile(r"\('([0-9a-f]{16})', 'client', \$k384\$(.*?)\$k384\$, '([0-9a-f]{40})', "
+                      r"FALSE, \$k384\$(.*?)\$k384\$\)")
 
 
 def _read(p):
@@ -509,31 +517,42 @@ def test_384_385_header_one_transaction_no_now_no_bind_in_comments():
         for line in _read(p).splitlines():
             if "--" in line:
                 assert not re.search(r":[a-z_]+\b", line.split("--", 1)[1]), line
-    rows = re.findall(r"\('([0-9a-f]{16})', 'client', \$k384\$(.*?)\$k384\$, '([0-9a-f]{40})'",
-                      _read(M384))
-    assert [k for k, _, _ in rows] == list(KEYS_384)
-    for k, eng, h in rows:
+    rows = _ROW_384.findall(_read(M384))
+    assert [k for k, _, _, _ in rows] == list(KEYS_384)
+    for k, eng, h, _ctx in rows:
         assert hashlib.sha1(("client\0" + eng).encode("utf-8")).hexdigest()[:16] == k, eng
         assert hashlib.sha1(eng.encode("utf-8")).hexdigest() == h, eng
+    assert {k: eng for k, eng, _, _ in rows if k in UNSEEDED_384} == UNSEEDED_384
     seeded = set(re.findall(r"\('([0-9a-f]{16})', '(es|ru|uk|sv)', '([0-9a-f]{40})'",
                             _read(M385)))
     assert len(seeded) == 44
-    assert {(k, h) for k, _, h in seeded} == {(k, h) for k, _, h in rows}
+    assert {(k, h) for k, _, h in seeded} == {(k, h) for k, _, h, _ in rows if k in KEYS_385}
 
 
 def test_384_385_executed_twice_and_each_post_check_raises():
     """On a scratch case schema: 385 before 384 RAISES and lands nothing;
-    384 twice leaves exactly the 11 keys live with their hashes and
-    contexts; 385 twice leaves exactly 44 pending claude-mt proposals and
-    no duplicate; 384 with one key row removed RAISES when that key is
-    retired, rolls back whole, and the real 384 then revives it."""
+    384 twice leaves exactly the 13 keys live with their hashes and
+    contexts, and its second run writes no row (updated_at unchanged); 385
+    twice leaves exactly 44 pending claude-mt proposals (11 keys) and no
+    duplicate; 384 with one key row removed RAISES when that key is retired,
+    rolls back whole, and the real 384 then revives it."""
     cf_pg.require_live_pg()
+    ctx = {k: c for k, _, _, c in _ROW_384.findall(_read(M384))}
+    assert sorted(ctx) == sorted(KEYS_384)
 
     async def count_keys(conn):
         return await conn.fetchval(
-            "SELECT count(*) FROM i18n_keys WHERE key_id = ANY($1::text[])"
-            "   AND retired_at IS NULL AND max_px IS NULL AND namespace = 'client'"
-            "   AND context LIKE 'MatchHold · %'", list(KEYS_384))
+            "SELECT count(*) FROM i18n_keys k"
+            "  JOIN unnest($1::text[], $2::text[]) AS e(key_id, context)"
+            "    ON e.key_id = k.key_id"
+            " WHERE k.retired_at IS NULL AND k.max_px IS NULL AND k.namespace = 'client'"
+            "   AND k.context = e.context",
+            list(KEYS_384), [ctx[k] for k in KEYS_384])
+
+    async def stamps(conn):
+        return [tuple(r) for r in await conn.fetch(
+            "SELECT key_id, updated_at FROM i18n_keys WHERE key_id = ANY($1::text[])"
+            " ORDER BY key_id", list(KEYS_384))]
 
     async def count_props(conn):
         return await conn.fetchval(
@@ -554,9 +573,15 @@ def test_384_385_executed_twice_and_each_post_check_raises():
             await conn.execute("ROLLBACK")
             assert await count_props(conn) == 0
 
-            for _ in range(2):
-                await conn.execute(_read(M384))
-                assert await count_keys(conn) == 11
+            await conn.execute(_read(M384))
+            assert await count_keys(conn) == 13
+            first = await stamps(conn)
+            await conn.execute(_read(M384))
+            assert await count_keys(conn) == 13
+            assert await stamps(conn) == first, "a re-run of 384 wrote a row"
+            assert await conn.fetchval(
+                "SELECT count(*) FROM i18n_proposals WHERE key_id = ANY($1::text[])",
+                list(UNSEEDED_384)) == 0
             for _ in range(2):
                 await conn.execute(_read(M385))
                 assert await count_props(conn) == 44
@@ -576,9 +601,9 @@ def test_384_385_executed_twice_and_each_post_check_raises():
                 await conn.execute(gap)
                 raise AssertionError("384 post-check passed with a key missing")
             except _asyncpg.exceptions.RaiseError as e:
-                assert "post-check FAILED: 10 of 11" in str(e), str(e)
+                assert "post-check FAILED: 12 of 13" in str(e), str(e)
             await conn.execute("ROLLBACK")
-            assert await count_keys(conn) == 10
+            assert await count_keys(conn) == 12
             await conn.execute(_read(M384))
-            assert await count_keys(conn) == 11
+            assert await count_keys(conn) == 13
     _run(go())
