@@ -115,6 +115,22 @@ _VALUE_METHODS = (
     "_asdict", "_replace", "result", "done", "locked", "cancelled", "exception")
 _MUTATORS = ("append", "extend", "add", "update", "insert", "setdefault", "appendleft",
              "discard", "remove", "clear", "sort", "__setitem__")
+_REMOVAL_METHODS = {
+    "pop": True,
+    "popitem": False,
+    "__delitem__": True,
+    "clear": False,
+    "discard": True,
+    "remove": True,
+}
+_REMOVAL_CALLS = {
+    "operator.delitem": "__delitem__",
+    "operator.__delitem__": "__delitem__",
+    "dict.pop": "pop",
+    "dict.popitem": "popitem",
+    "dict.__delitem__": "__delitem__",
+    "dict.clear": "clear",
+}
 _SET_CONTAINMENT_CALLS = frozenset({
     ".issubset", ".issuperset", ".__le__", ".__ge__", "operator.le", "operator.ge"})
 _SET_ORDERED_CALLS = frozenset({".__le__", ".__ge__", "operator.le", "operator.ge"})
@@ -292,6 +308,26 @@ class DictRef:
         self.keys = tuple(keys)
         self.vals = tuple(vals)
 
+    def remove(self, key=None, labels=(), key_ex=()):
+        """Lose presence while retaining values and what selected the removal."""
+        labels = frozenset(labels)
+        key_ex = frozenset(key_ex)
+
+        def selected(value):
+            return add_im(V(value.ex | key_ex, value.im, value.funcs,
+                            value.elems, value.item, value.alias), labels)
+
+        if labels or key_ex:
+            if self.keys is None:
+                self.item = selected(self.element())
+            else:
+                self.vals = tuple(selected(value) if key is None or slot_key == key else value
+                                  for slot_key, value in zip(self.keys, self.vals))
+        if key is None:
+            self.must_keys = frozenset()
+        else:
+            self.must_keys = self.must_keys - {key}
+
     def dynamic_update(self, new):
         self.item = vjoin(self.element(), new)
         self.keys = None
@@ -329,7 +365,7 @@ class V:
         if self.alias is not None and self.alias[0] == "dict":
             ref = self.alias[1]
             out.extend(ref.vals if ref.keys is not None else (ref.element(),))
-        elif self.alias is not None and self.alias[0] == "dict_alternatives":
+        elif self.alias is not None and self.alias[0] in ("dict_alternatives", "call_alternatives"):
             out.extend(self.alias[1])
         return out
 
@@ -351,8 +387,16 @@ class V:
         alias = self.alias
         if alias is not None and alias[0] == "dict":
             alias = alias[1].key(seen)
-        elif alias is not None and alias[0] == "dict_alternatives":
-            alias = ("dict_alternatives", tuple(arm.key(seen) for arm in alias[1]))
+        elif alias is not None and alias[0] in ("dict_alternatives", "call_alternatives"):
+            alias = (alias[0], tuple(arm.key(seen) for arm in alias[1])) + alias[2:]
+        elif alias is not None and alias[0] == "method":
+            alias = ("method", alias[1], alias[2].key(seen), id(alias[3]))
+        elif alias is not None and alias[0] == "partial":
+            alias = ("partial", tuple(v.key(seen) for v in alias[1]),
+                     alias[2].key(seen) if len(alias) > 2 else None,
+                     tuple((k, v.key(seen)) for k, v in alias[4]) if len(alias) > 4 else (),
+                     tuple(ast.dump(n, include_attributes=False) for n in alias[3]) if len(alias) > 3 else (),
+                     tuple(ast.dump(n, include_attributes=False) for n in alias[5]) if len(alias) > 5 else ())
         elif alias is not None:
             alias = _alias_key(alias)
         return (self.ex, self.im, self.funcs,
@@ -400,6 +444,8 @@ def vjoin(*vals):
                 if v.alias is not None:
                     ex |= v.ex_all()
                     im |= v.im_all()
+    if not any(_dict_arms(v) for v in vals):
+        alias = _call_alternatives(vals) or alias
     return V(ex, im, funcs, elems, item, alias)
 
 
@@ -441,7 +487,52 @@ def _dict_alternatives(values):
                 arms.append(arm)
     if not arms:
         return None
-    return ("dict_alternatives", tuple(arms))
+    return ("dict_alternatives", tuple(arms),
+            any(_callback_evidence(value, aliases_only=True) for value in values))
+
+
+def _callback_evidence(value, methods=(), aliases_only=False):
+    """Evidence of a callable target, excluding ordinary attribute data."""
+    alias = value.alias
+    if _dict_arms(value):
+        return bool(alias[0] == "dict_alternatives" and len(alias) > 2 and alias[2])
+    if alias is None:
+        return bool(value.funcs) and not aliases_only
+    if alias[0] == "call_alternatives":
+        return any(_callback_evidence(arm, methods, aliases_only) for arm in alias[1])
+    if alias[0] == "partial":
+        return True
+    if alias[0] == "method":
+        return (alias[1] in _REMOVAL_METHODS or alias[1] in methods or
+                (alias[1] == "__call__" and _callback_evidence(alias[2], methods, aliases_only)))
+    if alias[0] in ("import", "builtin"):
+        name = alias[1]
+        while name.endswith(".__call__"):
+            name = name[:-len(".__call__")]
+        if name.startswith("builtins.dict.") or name in ("builtins.map", "builtins.filter"):
+            name = name[len("builtins."):]
+        return name in _REMOVAL_CALLS or name in ("operator.call", "map", "filter", "functools.partial", "partial")
+    return bool(value.funcs) and not aliases_only
+
+
+def _call_alternatives(values):
+    """Retain every possible target when one arm has callable alias metadata."""
+    if not any(v.alias and v.alias[0] in
+               ("method", "partial", "call_alternatives", "import", "builtin") for v in values):
+        return None
+    arms, seen = [], set()
+    for value in values:
+        group = value.alias[1] if value.alias and value.alias[0] == "call_alternatives" else (value,)
+        for arm in group:
+            selected = V(arm.ex | value.ex, arm.im | value.im, arm.funcs,
+                         arm.elems, arm.item, arm.alias)
+            key = selected.key()
+            if key not in seen:
+                seen.add(key)
+                arms.append(selected)
+    if len(arms) == 1:
+        return arms[0].alias
+    return ("call_alternatives", tuple(arms))
 
 
 def _join_alias(aliases):
@@ -449,6 +540,8 @@ def _join_alias(aliases):
     alternatives do not erase it, and distinct dictionaries stay distinct."""
     present = [a for a in aliases if a is not None]
     if not present:
+        return None
+    if any(a[0] == "dict_alternatives" and len(a) > 2 and a[2] for a in present):
         return None
     dicts = [_dict_aliases(a) for a in present]
     if all(dicts):
@@ -466,8 +559,8 @@ def add_im(v, labels):
     if not labels:
         return v
     alias = v.alias
-    if alias is not None and alias[0] == "dict_alternatives":
-        alias = ("dict_alternatives", tuple(add_im(arm, labels) for arm in alias[1]))
+    if alias is not None and alias[0] in ("dict_alternatives", "call_alternatives"):
+        alias = (alias[0], tuple(add_im(arm, labels) for arm in alias[1])) + alias[2:]
     return V(v.ex, v.im | frozenset(labels), v.funcs, v.elems, v.item, alias)
 
 
@@ -907,7 +1000,8 @@ class Frame:
         elif t is ast.Assert:
             self.expr(s.test)
         elif t is ast.Delete:
-            pass
+            for target in s.targets:
+                self.delete_target(target)
         elif t in (ast.Pass, ast.Break, ast.Continue, ast.Nonlocal, ast.Import,
                    ast.ImportFrom):
             pass
@@ -917,6 +1011,17 @@ class Frame:
                 self.with_ctx(sv.flat(), lambda case=case: self.block(case.body))
         else:
             self.ps.flag(self.mod, s, "statement kind %s not handled" % t.__name__)
+
+    def delete_target(self, target):
+        if isinstance(target, ast.Subscript):
+            recv = self.expr(target.value)
+            key_value = self.expr(target.slice)
+            self.remove_presence(recv, target.slice, key_value)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            for item in target.elts:
+                self.delete_target(item)
+        elif isinstance(target, ast.Attribute):
+            self.expr(target.value)
 
     def loop_labels(self, node, it):
         """A loop over a named sequence is structural: only its D, K and O
@@ -1086,7 +1191,7 @@ class Frame:
             return V(base.ex, base.im | (idx.flat() - {C}), base.funcs, None, base.item)
         el = element(base)
         return V(el.ex | (idx.ex - {C}), el.im | idx.im, el.funcs | base.funcs, el.elems, el.item,
-                 el.alias if _dict_arms(el) else None)
+                 el.alias if _dict_arms(el) or _call_alternatives((el,)) else None)
 
     def e_Slice(self, n):
         return vjoin(V({C}), self.expr(n.lower), self.expr(n.upper), self.expr(n.step))
@@ -1246,8 +1351,63 @@ class Frame:
             if k.arg in ("cls", "mark"):
                 self.sink(k.value, "keyword %s=" % k.arg, kwvals[k.arg], APPEAR)
         fn = self.expr(n.func)
+        return self.invoke(n, fn, argvals, kwvals)
+
+    def invoke(self, n, fn, argvals, kwvals):
+        """Invoke evaluated arguments without losing the callable's selection."""
+        out = []
+        self.with_ctx(fn.im,
+                      lambda: out.append(self.call_value(n, fn, argvals, kwvals)))
+        return add_im(out[0], fn.im)
+
+    def callback_call(self, node, fn, values, nodes=None, keywords=(), kwvals=None):
+        nodes = list(nodes) if nodes is not None else [ast.Name(id="_callback_argument", ctx=ast.Load()) for _ in values]
+        call = ast.copy_location(ast.Call(func=ast.Constant(value=None), args=nodes,
+                                         keywords=list(keywords)), node)
+        return self.invoke(call, fn, list(values), kwvals or {})
+
+    def call_value(self, n, fn, argvals, kwvals):
+        def selected(value):
+            return V(value.ex | fn.ex, value.im | fn.im, value.funcs,
+                     value.elems, value.item, value.alias)
+
+        if _dict_arms(fn):
+            self.ps.flag(self.mod, n, "unresolvable call target (dictionary alternative)")
+            return V({D})
+        if fn.alias and fn.alias[0] == "call_alternatives":
+            return vjoin(*[self.invoke(n, V(arm.ex | fn.ex, arm.im | fn.im, arm.funcs,
+                                             arm.elems, arm.item, arm.alias), argvals, kwvals)
+                           for arm in fn.alias[1]])
         # unresolvable targets
         name = self.callable_name(n.func, fn)
+        if name is not None and name.startswith("builtins.dict."):
+            name = name[len("builtins."):]
+        if name in ("builtins.map", "builtins.filter"):
+            name = name[len("builtins."):]
+        if name is not None and name.endswith(".__call__"):
+            origin = name
+            while origin.endswith(".__call__"):
+                origin = origin[:-len(".__call__")]
+            if origin in ("builtins.map", "builtins.filter"):
+                origin = origin[len("builtins."):]
+            if origin in _REMOVAL_CALLS or origin in ("operator.call", "map", "filter", "functools.partial", "partial"):
+                target = V(fn.ex, fn.im, fn.funcs, alias=(fn.alias[0], origin))
+                return self.invoke(n, target, argvals, kwvals)
+        if fn.alias and fn.alias[0] == "method" and fn.alias[1] == "__call__":
+            return self.invoke(n, selected(fn.alias[2]), argvals, kwvals)
+        if name == "operator.call" and argvals:
+            return self.callback_call(n, selected(argvals[0]), argvals[1:], n.args[1:], n.keywords, kwvals)
+        if name in ("map", "filter") and argvals:
+            callback = selected(argvals[0])
+            absent = name == "filter" and isinstance(n.args[0], ast.Constant) and n.args[0].value is None
+            inputs = argvals[1:] if name == "map" else argvals[1:2]
+            returned = V({C}) if absent else self.callback_call(
+                n, callback, [element(v) for v in inputs])
+            self.third_party(name, n, argvals, kwvals, None)
+            if name == "map":
+                return V((), (), (), None, returned)
+            selected = element(inputs[0]) if inputs else V()
+            return V((), (), (), None, add_im(selected, returned.im | (returned.ex & {K, O})))
         if name in UNRESOLVABLE or (name or "").startswith("importlib") or \
                 name in ("getattr", "operator.attrgetter", "operator.methodcaller",
                          "attrgetter", "methodcaller"):
@@ -1257,15 +1417,29 @@ class Frame:
                 self.ps.flag(self.mod, n, "unresolvable call target (%s)" % name)
                 return V({D})
             if name == "getattr":
+                base = argvals[0]
+                if base.alias and base.alias[0] in ("import", "builtin"):
+                    return V(base.ex, base.im, (), alias=(
+                        base.alias[0], base.alias[1] + "." + n.args[1].value))
                 return V(argvals[0].ex, argvals[0].im, (), None, None,
-                         ("method", n.args[1].value, argvals[0]))
+                         ("method", n.args[1].value, argvals[0], n.args[0]))
         if name == "functools.partial" or name == "partial":
             if not argvals:
                 return V({D})
-            return V({C}, (), argvals[0].funcs, None, None, ("partial", tuple(argvals[1:])))
+            return V({C}, (), argvals[0].funcs, None, None,
+                     ("partial", tuple(argvals[1:]), argvals[0], tuple(n.args[1:]),
+                      tuple(kwvals.items()), tuple(n.keywords)))
         if fn.alias and fn.alias[0] == "partial":
+            if len(fn.alias) > 2:
+                bound_kw = dict(fn.alias[4])
+                bound_kw.update(kwvals)
+                return self.callback_call(n, selected(fn.alias[2]), list(fn.alias[1]) + argvals,
+                                          list(fn.alias[3]) + list(n.args),
+                                          list(fn.alias[5]) + list(n.keywords), bound_kw)
             argvals = list(fn.alias[1]) + argvals
         if fn.funcs:
+            argvals = [selected(value) for value in argvals]
+            kwvals = {key: selected(value) for key, value in kwvals.items()}
             out = []
             for fk in sorted(fn.funcs, key=str):
                 out.append(self.ps.call_func(fk, argvals, kwvals,
@@ -1273,15 +1447,43 @@ class Frame:
             # a call of a module function: methods of the module's classes
             # receive their instance as data
             return vjoin(*out)
+        if name in _REMOVAL_CALLS and argvals:
+            meth = _REMOVAL_CALLS[name]
+            actual = argvals[0]
+            recv = V(actual.ex | fn.ex, actual.im | fn.im, actual.funcs, actual.elems, actual.item, actual.alias)
+            key_node = n.args[1] if _REMOVAL_METHODS.get(meth, True) and len(n.args) > 1 else None
+            key_value = argvals[1] if key_node is not None else V({C})
+            self.remove_presence(recv, key_node, key_value)
+            if meth == "clear":
+                return self.mutate(meth, recv, n.args[0], n, argvals[1:], kwvals)
+            if meth == "__delitem__":
+                return V({C})
+            return self.third_party("." + meth, n, argvals[1:], kwvals, recv)
         if fn.alias and fn.alias[0] == "method":
             meth, recv = fn.alias[1], fn.alias[2]
+            recv = V(recv.ex | fn.ex, recv.im | fn.im, recv.funcs, recv.elems, recv.item, recv.alias)
             # methods of the module's own classes are followed
             if meth in self.mod.methods and not (recv.alias and recv.alias[0] in
                                                  ("import", "builtin")):
-                out = [self.ps.call_func((self.mod.kind, q), argvals, kwvals,
+                out = [self.ps.call_func((self.mod.kind, q),
+                                         [selected(value) for value in argvals],
+                                         {key: selected(value) for key, value in kwvals.items()},
                                          self.ctx | self.order_ctx)
                        for q in self.mod.methods[meth]]
                 return vjoin(*out)
+            if meth in _REMOVAL_METHODS:
+                effect_recv, effect_args, effect_vals = recv, n.args, argvals
+                effect_node = fn.alias[3]
+                if not _dict_arms(recv) and argvals and _dict_arms(argvals[0]):
+                    effect_recv, effect_args, effect_vals = argvals[0], n.args[1:], argvals[1:]
+                    effect_node = n.args[0]
+                key_node = effect_args[0] if _REMOVAL_METHODS[meth] and effect_args else None
+                key_value = effect_vals[0] if key_node is not None else V({C})
+                self.remove_presence(effect_recv, key_node, key_value)
+                if meth == "__delitem__":
+                    return V({C})
+                if effect_recv is not recv and meth in _MUTATORS:
+                    return self.mutate(meth, effect_recv, effect_node, n, effect_vals, kwvals)
             if meth in _MUTATORS:
                 # `items.append(x)`, or `add = items.append` then `add(x)`
                 return self.mutate(meth, recv, fn.alias[3], n, argvals, kwvals)
@@ -1306,6 +1508,17 @@ class Frame:
         if isinstance(node, ast.Name) and node.id in self.mod.consts:
             return node.id
         return None
+
+    def remove_presence(self, recv, key_node, key_value):
+        key = key_node.value if isinstance(key_node, ast.Constant) and \
+            isinstance(key_node.value, str) else None
+        seen = set()
+        for arm in _dict_arms(recv):
+            ref = arm.alias[1]
+            if ref.token not in seen:
+                seen.add(ref.token)
+                labels = self.ctx | self.order_ctx | recv.im | arm.im | key_value.im
+                ref.remove(key, labels, (key_value.ex | recv.ex | arm.ex) - {C})
 
     def literal_mutation_slots(self, meth, node, argvals, kwvals):
         """The exact slots changed by a supported literal-key dictionary call.
@@ -1433,12 +1646,26 @@ class Frame:
         # is followed, called with an element of the first argument
         first = [element(argvals[0])] if argvals else []
         called = {}
-        for v in list(argvals) + list(kwvals.values()):
-            for fk in v.funcs:
-                called[fk] = self.ps.call_func(fk, first, {}, self.ctx | self.order_ctx)
+        callback_results = {}
+        candidates = list(argvals) + list(kwvals.values())
+        if name not in ("map", "filter"):
+            for v in candidates:
+                if _dict_arms(v) and _callback_evidence(v, aliases_only=True):
+                    callback_results[id(v)] = self.callback_call(node, v, first)
+                elif v.alias and _callback_evidence(v, self.mod.methods):
+                    callback_results[id(v)] = self.callback_effect(node, v, first, candidates)
+                else:
+                    for fk in v.funcs:
+                        called[fk] = self.ps.call_func(fk, first, {}, self.ctx | self.order_ctx)
+        if name in ("sorted", "min", "max", ".sort") and "key" in kwvals:
+            key = kwvals["key"]
+            key_node = next((k.value for k in node.keywords if k.arg == "key"), None)
+            if not (isinstance(key_node, ast.Constant) and key_node.value is None):
+                callback_results[id(key)] = self.callback_call(node, key, first)
         out = vjoin(V({C}), *result) if result else V({C})
         if name in ("sorted", "min", "max", ".sort") and "key" in kwvals:
-            keyret = vjoin(*[called.get(fk, V()) for fk in kwvals["key"].funcs])
+            keyret = vjoin(callback_results.get(id(kwvals["key"]), V()),
+                           *[called.get(fk, V()) for fk in kwvals["key"].funcs])
             if keyret.flat() & {E, D, P, Q}:
                 out = V(out.ex | {O}, out.im, out.funcs, out.elems, out.item)
         if name in ("len",):
@@ -1464,6 +1691,58 @@ class Frame:
         if P in ex:
             ex = (ex - {P}) | {E}
         return V(ex, im, out.funcs)
+
+    def callback_effect(self, node, callback, first, candidates, required=False):
+        """Known callbacks at an unknown API position may receive any candidate."""
+        alias = callback.alias
+        if alias and alias[0] == "call_alternatives":
+            out = []
+            self.with_ctx(callback.im, lambda: out.extend(
+                self.callback_effect(node, V(arm.ex | callback.ex, arm.im | callback.im,
+                                             arm.funcs, arm.elems, arm.item, arm.alias),
+                                     first, candidates, True) for arm in alias[1]))
+            return vjoin(*out)
+        if alias and alias[0] == "method" and alias[1] == "__call__":
+            inner = alias[2]
+            selected = V(inner.ex | callback.ex, inner.im | callback.im, inner.funcs,
+                         inner.elems, inner.item, inner.alias)
+            return self.callback_effect(node, selected, first, candidates, required)
+        if alias and alias[0] == "partial":
+            returned = self.callback_call(node, callback, first)
+            if len(alias) > 2:
+                def fixed(target):
+                    ta = target.alias
+                    if ta and ta[0] == "call_alternatives":
+                        return all(fixed(arm) for arm in ta[1])
+                    if ta and ta[0] == "method" and ta[1] in _REMOVAL_METHODS:
+                        return bool(_dict_arms(ta[2])) and (not _REMOVAL_METHODS[ta[1]] or bool(alias[1]))
+                    tn = self.callable_name(ast.Constant(value=None), target)
+                    if tn and tn.startswith("builtins.dict."):
+                        tn = tn[len("builtins."):]
+                    return tn in _REMOVAL_CALLS and bool(alias[1]) and bool(_dict_arms(alias[1][0])) and (
+                        not _REMOVAL_METHODS[_REMOVAL_CALLS[tn]] or len(alias[1]) > 1)
+                if not fixed(alias[2]):
+                    self.callback_effect(node, alias[2], first, list(alias[1]) + candidates, True)
+            return returned
+        name = self.callable_name(ast.Constant(value=None), callback)
+        if name is not None and name.startswith("builtins.dict."):
+            name = name[len("builtins."):]
+        while name is not None and name.endswith(".__call__"):
+            name = name[:-len(".__call__")]
+        if alias and alias[0] == "method" and alias[1] in _REMOVAL_METHODS:
+            receivers = [alias[2]]
+        elif name in _REMOVAL_CALLS:
+            receivers = [candidate for value in candidates for candidate in (value, element(value))
+                         if _dict_arms(candidate)]
+        elif callback.funcs:
+            return self.callback_call(node, callback, first)
+        else:
+            return self.callback_call(node, callback, first) if required else V()
+        values = [candidate for value in candidates for candidate in (value, element(value))]
+        labels = vjoin(*[V(v.ex, v.im) for v in values], V(callback.ex, callback.im))
+        self.with_ctx(callback.im, lambda: [
+            self.remove_presence(receiver, None, labels) for receiver in receivers])
+        return vjoin(*receivers)
 
     def sink(self, node, what, v, klass):
         if klass in (VALUE, TRANSPORT, DATA):
@@ -2472,6 +2751,604 @@ def test_setdefault_state_does_not_merge_distinct_empty_literal_sites():
         '    untouched = {}\n'
         '    changed.setdefault("rank", row["rank"])\n'
         '    result = untouched.setdefault("rank", 0.0)\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+# Removal changes must-presence on the shared allocation, not retained values.
+_REMOVAL_OPERATIONS = {
+    "pop": '{receiver}.pop("rank")',
+    "popitem": '{receiver}.popitem()',
+    "del": 'del {receiver}["rank"]',
+    "dunder": '{receiver}.__delitem__("rank")',
+    "clear": '{receiver}.clear()',
+    "operator-delitem": 'operator.delitem({receiver}, "rank")',
+    "operator-dunder": 'operator.__delitem__({receiver}, "rank")',
+    "import-alias": 'op_delete({receiver}, "rank")',
+    "dict-pop": 'dict.pop({receiver}, "rank")',
+    "dict-popitem": 'dict.popitem({receiver})',
+    "dict-dunder": 'dict.__delitem__({receiver}, "rank")',
+    "dict-clear": 'dict.clear({receiver})',
+    "getattr-pop": 'getattr({receiver}, "pop")("rank")',
+    "getattr-popitem": 'getattr({receiver}, "popitem")()',
+    "getattr-dunder": 'getattr({receiver}, "__delitem__")("rank")',
+    "getattr-clear": 'getattr({receiver}, "clear")()',
+    "getattr-dict-pop": 'getattr(dict, "pop")({receiver}, "rank")',
+    "getattr-dict-popitem": 'getattr(dict, "popitem")({receiver})',
+    "getattr-dict-dunder": 'getattr(dict, "__delitem__")({receiver}, "rank")',
+    "getattr-dict-clear": 'getattr(dict, "clear")({receiver})',
+    "getattr-operator-delitem": 'getattr(operator, "delitem")({receiver}, "rank")',
+    "getattr-operator-dunder": 'getattr(operator, "__delitem__")({receiver}, "rank")',
+    'type-pop': 'type({receiver}).pop({receiver}, "rank")',
+    'type-popitem': 'type({receiver}).popitem({receiver})',
+    'type-dunder': 'type({receiver}).__delitem__({receiver}, "rank")',
+    'type-clear': 'type({receiver}).clear({receiver})',
+    'class-pop': '{receiver}.__class__.pop({receiver}, "rank")',
+    'class-popitem': '{receiver}.__class__.popitem({receiver})',
+    'class-dunder': '{receiver}.__class__.__delitem__({receiver}, "rank")',
+    'class-clear': '{receiver}.__class__.clear({receiver})',
+    'builtins-pop': 'builtins.dict.pop({receiver}, "rank")',
+    'builtins-popitem': 'builtins.dict.popitem({receiver})',
+    'builtins-dunder': 'builtins.dict.__delitem__({receiver}, "rank")',
+    'builtins-clear': 'builtins.dict.clear({receiver})',
+    'builtin-alias-pop': 'builtin_dict.pop({receiver}, "rank")',
+    'builtin-alias-popitem': 'builtin_dict.popitem({receiver})',
+    'builtin-alias-dunder': 'builtin_dict.__delitem__({receiver}, "rank")',
+    'builtin-alias-clear': 'builtin_dict.clear({receiver})',
+    'getattr-type-pop': 'getattr(type({receiver}), "pop")({receiver}, "rank")',
+    'getattr-class-pop': 'getattr({receiver}.__class__, "pop")({receiver}, "rank")',
+    "bound-alias": 'remove = {receiver}.pop\nremove("rank")',
+}
+_REMOVAL_ALL_KEYS = frozenset({
+    "popitem", "clear", "dict-popitem", "dict-clear", "getattr-popitem", "getattr-clear",
+    "getattr-dict-popitem", "getattr-dict-clear", "type-popitem", "type-clear",
+    "class-popitem", "class-clear", "builtins-popitem", "builtins-clear",
+    "builtin-alias-popitem", "builtin-alias-clear"})
+_REMOVAL_STATE_OPERATIONS = dict(
+    _REMOVAL_OPERATIONS,
+    discard='{receiver}.discard("rank")', remove='{receiver}.remove("rank")')
+_REMOVAL_IMPORTS = (
+    "import operator\nfrom operator import delitem as op_delete\n"
+    "import builtins\nfrom builtins import dict as builtin_dict\n"
+    "from fastapi import Request\n\n\n")
+
+
+def _removal_api(route, path, selected, removed_key="rank"):
+    operation = _REMOVAL_OPERATIONS[route].replace('"rank"', '"%s"' % removed_key)
+    lines = []
+    if path == "followed":
+        lines += ["def _forget(box):"]
+        lines += ["    " + line for line in operation.format(receiver="box").splitlines()]
+        lines += ["", "", ""]
+    lines += ["def evidence_report(request: Request, row):",
+              '    box = {"rank": 0.0' + (', "other": 0.0' if removed_key == "other" else '') + '}']
+    receiver = "box"
+    if path == "alias":
+        lines += ["    alias = box"]
+        receiver = "alias"
+    elif path == "nested":
+        lines += ['    outer = {"inside": box}']
+        receiver = 'outer["inside"]'
+    if path == "followed":
+        lines += ["    _forget(box)"]
+    elif path == "request":
+        lines += ['    if request.path_params["mode"]:']
+        lines += ["        " + line for line in operation.format(receiver=receiver).splitlines()]
+    else:
+        lines += ["    " + line for line in operation.format(receiver=receiver).splitlines()]
+    lines += ['    result = box.setdefault("rank", row["rank"])',
+              '    word = "COLD"',
+              '    if %s > 0.5:' % ('result' if selected == 'returned' else 'box["rank"]'),
+              '        word = "HOT"', '    return {"name": word}', '']
+    return _REMOVAL_IMPORTS + "\n".join(lines)
+
+
+_REMOVAL_FLOW_CASES = [
+    pytest.param(route, path, selected, id="%s-%s-%s" % (route, path, selected))
+    for route in _REMOVAL_OPERATIONS
+    for path in (("direct", "alias", "nested", "followed", "request")
+                 if route in ("pop", "popitem", "del", "dunder", "clear") else ("direct",))
+    for selected in ("returned", "stored")
+]
+
+
+@pytest.mark.parametrize("route,path,selected", _REMOVAL_FLOW_CASES)
+def test_removal_before_setdefault_keeps_the_data_default(route, path, selected):
+    findings = _fixture(_removal_api(route, path, selected), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (
+        route, path, selected, _fmt(findings))
+
+
+def _removal_state_frame():
+    ref = DictRef(("fixture", "removed"))
+    ref.seed(("rank", "other"), (V({C}), V({C})))
+    module = Module("api", _REMOVAL_IMPORTS, "fixture.py", lambda name: False)
+    ps = Pass([module])
+    frame = Frame(ps, module, ("api", "fixture"),
+                  {"box": V(alias=("dict", ref)), "key": V({R})}, frozenset())
+    return ref, frame
+
+
+@pytest.mark.parametrize("route", list(_REMOVAL_STATE_OPERATIONS))
+def test_removal_routes_demote_shared_presence(route):
+    ref, frame = _removal_state_frame()
+    before = ref.key()
+    operation = _REMOVAL_STATE_OPERATIONS[route].format(receiver="box")
+    frame.block(ast.parse(operation).body)
+    expected = frozenset() if route in _REMOVAL_ALL_KEYS else frozenset({"other"})
+    assert ref.must_keys == expected, (route, ref.must_keys)
+    assert ref.key() != before, route
+    assert ref.element().flat() == {C}, route
+    if route in ("clear", "dict-clear", "getattr-clear", "getattr-dict-clear", "discard", "remove",
+                 "type-clear", "class-clear", "builtins-clear", "builtin-alias-clear"):
+        assert ref.keys is None, route
+    ref.seed(("rank", "other"), (V({C}), V({C})))
+    assert ref.must_keys == expected, (route, "seed restored removed presence")
+
+
+@pytest.mark.parametrize("route", [
+    route for route in _REMOVAL_STATE_OPERATIONS if route not in _REMOVAL_ALL_KEYS])
+def test_unknown_removal_key_demotes_every_candidate(route):
+    ref, frame = _removal_state_frame()
+    operation = _REMOVAL_STATE_OPERATIONS[route].format(receiver="box").replace('"rank"', "key")
+    frame.block(ast.parse(operation).body)
+    assert ref.must_keys == frozenset(), (route, ref.must_keys)
+    assert ref.element().flat() == {C, R}, route
+
+
+def test_removal_presence_reaches_every_retained_dictionary_arm():
+    left, frame = _removal_state_frame()
+    right = DictRef(("fixture", "other-arm"))
+    right.seed(("rank", "other"), (V({C}), V({C})))
+    frame.env["box"] = vjoin(V(alias=("dict", left)), V(alias=("dict", right)))
+    frame.block(ast.parse('box.pop("rank")').body)
+    assert left.must_keys == right.must_keys == {"other"}
+
+
+def test_delete_demotes_each_target_in_a_nested_target_group():
+    left, frame = _removal_state_frame()
+    right = DictRef(("fixture", "other-target"))
+    right.seed(("rank", "other"), (V({C}), V({C})))
+    frame.env["spare"] = V(alias=("dict", right))
+    frame.block(ast.parse('del (box["rank"], (spare["rank"],))').body)
+    assert left.must_keys == right.must_keys == {"other"}
+
+
+@pytest.mark.parametrize("route", [
+    route for route in _REMOVAL_OPERATIONS if route not in _REMOVAL_ALL_KEYS])
+def test_literal_removal_keeps_other_seeded_keys_definite(route):
+    assert _fixture(_removal_api(route, "direct", "returned", "other"),
+                    _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("route", ["pop", "popitem", "del", "dunder", "clear"])
+def test_removal_does_not_merge_distinct_dictionary_sites(route):
+    operation = _REMOVAL_OPERATIONS[route].format(receiver="changed")
+    setup = ('    changed = {"rank": 0.0}\n'
+             '    untouched = {"rank": 0.0}\n'
+             + "".join("    " + line + "\n" for line in operation.splitlines())
+             + '    changed.setdefault("rank", row["rank"])\n'
+             '    result = untouched.setdefault("rank", row["rank"])\n')
+    assert _fixture(_setdefault_api(setup, helper=_REMOVAL_IMPORTS),
+                    _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("route", [
+    "pop", "popitem", "dict-pop", "dict-popitem", "getattr-pop", "getattr-popitem",
+    "getattr-dict-pop", "getattr-dict-popitem", "type-pop", "type-popitem", "class-pop",
+    "class-popitem", "builtins-pop", "builtins-popitem", "builtin-alias-pop",
+    "builtin-alias-popitem", "getattr-type-pop", "getattr-class-pop"])
+def test_pop_value_returns_keep_removed_data(route):
+    operation = _REMOVAL_OPERATIONS[route].format(receiver="box")
+    setup = ('    box = {"rank": row["rank"]}\n'
+             '    result = ' + operation + '\n')
+    selected = 'result[1]' if "popitem" in route else 'result'
+    findings = _fixture(_setdefault_api(setup, selected, _REMOVAL_IMPORTS),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (route, _fmt(findings))
+
+
+@pytest.mark.parametrize("route", [
+    "dunder", "clear", "operator-delitem", "operator-dunder", "dict-dunder",
+    "dict-clear", "getattr-dunder", "getattr-clear", "getattr-dict-dunder",
+    "getattr-dict-clear", "getattr-operator-delitem", "getattr-operator-dunder", "type-dunder",
+    "type-clear", "class-dunder", "class-clear", "builtins-dunder", "builtins-clear",
+    "builtin-alias-dunder", "builtin-alias-clear"])
+def test_constant_removal_returns_do_not_return_the_receiver_data(route):
+    operation = _REMOVAL_OPERATIONS[route].format(receiver="box")
+    api = (_REMOVAL_IMPORTS + 'def evidence_report(row):\n'
+           '    box = {"rank": row["rank"]}\n'
+           '    result = ' + operation + '\n'
+           '    return {"name": str(result)}\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("route", ["pop", "del", "dunder", "clear", "operator-delitem"])
+@pytest.mark.parametrize("selected", ["returned", "stored"])
+@pytest.mark.parametrize("choice", ["conditional", "dynamic-key"])
+def test_removal_selection_keeps_classification_labels(route, selected, choice):
+    operation = _REMOVAL_OPERATIONS[route].format(receiver="box")
+    lines = ['def evidence_report(row):', '    box = {"rank": "COLD"}']
+    if choice == "conditional":
+        lines += ['    if row["rank"] > 0.5:']
+        lines += ["        " + line for line in operation.splitlines()]
+    else:
+        lines += ['    key = "rank" if row["rank"] > 0.5 else "other"']
+        if route == "clear":
+            lines += ['    if key == "rank":', "        " + operation]
+        else:
+            lines += ["    " + operation.replace('"rank"', "key")]
+    lines += ['    result = box.setdefault("rank", "HOT")',
+              '    return {"name": %s}' % ('result' if selected == 'returned' else 'box["rank"]'), '']
+    findings = _fixture(_REMOVAL_IMPORTS + "\n".join(lines), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (
+        route, selected, choice, _fmt(findings))
+
+
+@pytest.mark.parametrize("route", ["pop", "del", "dunder", "operator-delitem"])
+def test_dynamic_removal_key_keeps_its_explicit_data_provenance(route):
+    operation = _REMOVAL_OPERATIONS[route].format(receiver="box").replace('"rank"', 'row["key"]')
+    api = (_REMOVAL_IMPORTS + 'def evidence_report(row):\n'
+           '    box = {"rank": "COLD"}\n'
+           '    ' + operation + '\n'
+           '    result = box.setdefault("rank", "HOT")\n'
+           '    return {"name": result}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads D" in str(findings[0]), (route, _fmt(findings))
+
+
+@pytest.mark.parametrize("route", ["pop", "del", "dunder", "operator-delitem"])
+def test_selected_literal_removal_does_not_label_an_untouched_sibling(route):
+    operation = _REMOVAL_OPERATIONS[route].format(receiver="box").replace('"rank"', '"other"')
+    api = (_REMOVAL_IMPORTS + 'def evidence_report(row):\n'
+           '    box = {"rank": "SAFE", "other": "COLD"}\n'
+           '    if row["rank"] > 0.5:\n'
+           '        ' + operation + '\n'
+           '    result = box.setdefault("rank", "HOT")\n'
+           '    return {"name": result}\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+def test_unbound_removal_keeps_the_original_receiver_return_labels():
+    ref, frame = _removal_state_frame()
+    frame.env["kind"] = V({D}, {O})
+    result = frame.expr(ast.parse('kind.pop(box, "rank")').body[0].value)
+    assert ref.must_keys == {"other"}
+    assert D in result.ex and O in result.im
+
+
+def test_bound_removal_does_not_demote_an_explicit_dictionary_argument():
+    ref, frame = _removal_state_frame()
+    argument = DictRef(("fixture", "argument"))
+    argument.seed(("rank",), (V({C}),))
+    frame.env["argument"] = V(alias=("dict", argument))
+    frame.block(ast.parse('box.pop(argument)').body)
+    assert ref.must_keys == frozenset()
+    assert argument.must_keys == {"rank"}
+
+
+@pytest.mark.parametrize("route", ["pop", "popitem", "del", "dunder", "clear"])
+@pytest.mark.parametrize("selected", ["returned", "stored"])
+def test_order_selected_removal_keeps_order_labels_after_the_loop(route, selected):
+    operation = _REMOVAL_OPERATIONS[route].format(receiver="box")
+    lines = ['def _removal_order(row):', '    return row["rank"]', '', '',
+             'def evidence_report(rows):', '    box = {"rank": "COLD"}',
+             '    for row in sorted(rows, key=_removal_order):']
+    lines += ["        " + line for line in operation.splitlines()]
+    lines += ['    result = box.setdefault("rank", "HOT")',
+              '    return {"name": %s}' % ('result' if selected == 'returned' else 'box["rank"]'), '']
+    findings = _fixture(_REMOVAL_IMPORTS + "\n".join(lines), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads O" in str(findings[0]), (route, selected, _fmt(findings))
+
+
+@pytest.mark.parametrize("label", [K, O])
+@pytest.mark.parametrize("key", ['"rank"', 'key'])
+def test_removal_selection_labels_survive_reseeding_without_sibling_smear(label, key):
+    ref, frame = _removal_state_frame()
+    frame.ctx = frozenset({label})
+    frame.env["key"] = V({C})
+    frame.block(ast.parse('box.pop(%s)' % key).body)
+    ref.seed(("rank", "other"), (V({C}), V({C})))
+    assert label in ref.read("rank").im
+    if key == '"rank"':
+        assert label not in ref.read("other").im
+    else:
+        assert label in ref.read("other").im
+
+
+@pytest.mark.parametrize("original", ["left", "right"])
+@pytest.mark.parametrize("selected", ["returned", "stored"])
+def test_selected_removal_receiver_keeps_choice_labels_on_original_alias(original, selected):
+    api = ('def evidence_report(row):\n'
+           '    left = {"word": "COLD"}\n'
+           '    right = {"word": "COLD"}\n'
+           '    receiver = left if row["rank"] > 0.5 else right\n'
+           '    receiver.pop("word")\n'
+           '    result = ' + original + '.setdefault("word", "HOT")\n'
+           '    return {"name": ' + ('result' if selected == 'returned' else original + '["word"]') + '}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (
+        original, selected, _fmt(findings))
+
+
+def test_removal_keeps_shallow_receiver_labels_on_only_the_selected_slot():
+    ref, frame = _removal_state_frame()
+    frame.env["box"] = V({D}, {O}, alias=("dict", ref))
+    frame.block(ast.parse('box.pop("rank")').body)
+    assert D in ref.read("rank").ex and O in ref.read("rank").im
+    assert ref.read("other").flat() == {C}
+
+
+def test_removal_does_not_fold_nested_receiver_siblings_into_the_selected_slot():
+    ref, frame = _removal_state_frame()
+    ref.slot_update("other", V({D}, {O}))
+    frame.block(ast.parse('box.pop("rank")').body)
+    assert ref.read("rank").flat() == {C}
+    assert ref.read("other").flat() == {C, D, O}
+
+
+
+
+_REMOVAL_WRAPPERS = {'operator-bound': 'operator.call(box.pop, "rank")',
+ 'operator-unbound': 'operator.call(dict.pop, box, "rank")',
+ 'operator-own': 'operator.call(_erase, box)',
+ 'operator-import': 'invoke(box.pop, "rank")',
+ 'map-bound': 'list(map(box.pop, ("rank",)))',
+ 'map-unbound': 'list(map(dict.pop, (box,), ("rank",)))',
+ 'map-own': 'list(map(_erase, (box,)))',
+ 'map-builtin-import': 'list(builtins.map(box.pop, ("rank",)))',
+ 'map-builtin-alias': 'list(builtin_map(box.pop, ("rank",)))',
+ 'filter-bound': 'list(filter(box.pop, ("rank",)))',
+ 'filter-unbound': 'list(filter(dict.clear, (box,)))',
+ 'filter-own': 'list(filter(_erase, (box,)))',
+ 'filter-builtin-import': 'list(builtins.filter(box.pop, ("rank",)))',
+ 'filter-builtin-alias': 'list(builtin_filter(box.pop, ("rank",)))',
+ 'bound-call': 'box.pop.__call__("rank")',
+ 'unbound-call': 'dict.pop.__call__(box, "rank")',
+ 'operator-dunder-call': 'operator.delitem.__call__(box, "rank")',
+ 'partial-bound': 'partial(box.pop, "rank")()',
+ 'partial-unbound': 'partial(dict.pop, box)("rank")',
+ 'partial-own': 'partial(_erase, box)()',
+ 'sorted-key': 'sorted(("rank",), key=box.pop)',
+ 'generic-bound': 'functools.reduce(box.pop, ("rank", None))',
+ 'generic-unbound': 'functools.reduce(dict.pop, ("rank",), box)',
+ 'generic-unbound-element': 'functools.reduce(dict.pop, (box, "rank"))',
+ 'generic-partial-unbound': 'functools.reduce(partial(dict.pop), ("rank",), box)',
+ 'map-builtin-call': 'list(builtins.map.__call__(box.pop, ("rank",)))',
+ 'filter-builtin-call': 'list(builtins.filter.__call__(box.pop, ("rank",)))',
+ 'unbound-double-call': 'dict.pop.__call__.__call__(box, "rank")'}
+_REMOVAL_CALLBACK_IMPORTS = (_REMOVAL_IMPORTS +
+    "from operator import call as invoke\nfrom functools import partial\nimport functools\n"
+    "from builtins import map as builtin_map, filter as builtin_filter\n\n")
+
+
+def _removal_wrapper_api(operation, selected="returned", extra="", constant=False):
+    result = "result" if selected == "returned" else 'box["rank"]'
+    return (_REMOVAL_CALLBACK_IMPORTS +
+            'def _erase(box):\n    box.pop("rank")\n\n'
+            'def _noop(value):\n    return None\n\n' + extra +
+            'def evidence_report(request: Request, row):\n'
+            '    box = {"rank": ' + ('"COLD"' if constant else '0.0') + '}\n' +
+            ''.join('    ' + line + '\n' for line in operation.splitlines()) +
+            '    result = box.setdefault("rank", ' + ('"HOT"' if constant else 'row["rank"]') + ')\n' +
+            ('    return {"name": ' + result + '}\n' if constant else
+             '    word = "COLD"\n    if ' + result + ' > 0.5:\n        word = "HOT"\n'
+             '    return {"name": word}\n'))
+
+
+@pytest.mark.parametrize("route", list(_REMOVAL_WRAPPERS))
+@pytest.mark.parametrize("selected", ["returned", "stored"])
+def test_callable_removal_wrappers_keep_shared_default(route, selected):
+    findings = _fixture(_removal_wrapper_api(_REMOVAL_WRAPPERS[route], selected),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), (route, selected, _fmt(findings))
+
+
+@pytest.mark.parametrize("route", [r for r in _REMOVAL_WRAPPERS if not r.endswith("-own")])
+def test_callable_removal_wrapper_state_is_demoted(route):
+    ref, frame = _removal_state_frame()
+    frame.mod = Module("api", _REMOVAL_CALLBACK_IMPORTS, "fixture.py", lambda name: False)
+    frame.block(ast.parse(_REMOVAL_WRAPPERS[route]).body)
+    assert "rank" not in ref.must_keys, (route, ref.must_keys)
+    assert ref.element().flat() == {C}, (route, ref.element().flat())
+
+
+@pytest.mark.parametrize("route", list(_REMOVAL_WRAPPERS))
+def test_callable_removal_wrappers_keep_distinct_receiver_control(route):
+    operation = 'other = {"rank": 0.0}\n' + _REMOVAL_WRAPPERS[route].replace('box', 'other')
+    assert _fixture(_removal_wrapper_api(operation), _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("operation", [
+    'fn = box.pop if row["rank"] > 0.5 else _noop\nfn("rank")',
+    'fn = box.pop if row["rank"] > 0.5 else _noop\noperator.call(fn, "rank")',
+    'fn = box.pop if row["rank"] > 0.5 else _noop\nlist(map(fn, ("rank",)))',
+    'fn = box.pop if row["rank"] > 0.5 else _noop\npartial(fn, "rank")()',
+    'choices = [box.pop, _noop]\nchoices[row["index"]]("rank")',
+], ids=["direct", "operator", "map", "partial", "dynamic-sequence"])
+@pytest.mark.parametrize("selected", ["returned", "stored"])
+def test_callable_removal_alternatives_keep_selection_labels(operation, selected):
+    findings = _fixture(_removal_wrapper_api(operation, selected, constant=True),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    expected = "reads D" if "choices" in operation else "reads K"
+    assert len(findings) == 1 and expected in str(findings[0]), _fmt(findings)
+
+
+@pytest.mark.parametrize("call", [
+    'fn("rank")', 'operator.call(fn, "rank")', 'list(map(fn, ("rank",)))',
+    'partial(fn, "rank")()',
+])
+def test_callable_removal_unknown_alternative_is_refused(call):
+    operation = 'fn = box.pop if request.path_params["mode"] else None\n' + call
+    findings = _fixture(_removal_wrapper_api(operation, constant=True),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable call target" in str(f) for f in findings), _fmt(findings)
+
+
+def test_dictionary_alternative_cannot_hide_a_callable_removal():
+    operation = ('fn = box.pop if request.path_params["mode"] else _noop\n'
+                 'fn = fn if request.path_params["mode"] else {}\n'
+                 'operator.call(fn, "rank")')
+    findings = _fixture(_removal_wrapper_api(operation, constant=True),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable call target" in str(f) for f in findings), _fmt(findings)
+
+
+def test_followed_same_attribute_callbacks_keep_distinct_receiver_identity():
+    extra = 'def _getter(box):\n    return box.pop\n\n'
+    operation = ('other = {"rank": 0.0}\nleft = _getter(box)\nright = _getter(other)\n'
+                 'fn = left if request.path_params["mode"] else right\noperator.call(fn, "rank")')
+    for target in ('box', 'other'):
+        api = _removal_wrapper_api(operation, extra=extra).replace(
+            'result = box.setdefault', 'result = ' + target + '.setdefault')
+        findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+        assert len(findings) == 1 and "reads K" in str(findings[0]), (target, _fmt(findings))
+
+
+def test_joined_partials_keep_distinct_bound_literal_keys():
+    ref, frame = _removal_state_frame()
+    frame.mod = Module("api", _REMOVAL_CALLBACK_IMPORTS, "fixture.py", lambda name: False)
+    frame.block(ast.parse('left = partial(box.pop, "rank")\nright = partial(box.pop, "other")\n'
+                         'fn = left if key else right\nfn()').body)
+    assert ref.must_keys == frozenset(), ref.must_keys
+
+
+def test_callable_wrapper_literal_key_does_not_demote_its_sibling():
+    operation = 'box["other"] = 0.0\noperator.call(box.pop, "other")'
+    assert _fixture(_removal_wrapper_api(operation), _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+def test_optional_none_callback_controls_remain_green():
+    api = _removal_wrapper_api('list(filter(None, ("rank",)))\nsorted(("rank",), key=None)')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("callback,iterables", [
+    ('box.pop', '("rank",)'), ('dict.pop', '(box,), ("rank",)'),
+    ('dict.popitem', '(box,)'),
+])
+def test_map_removed_value_retains_its_data_labels(callback, iterables):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n'
+           '    box = {"rank": row["rank"]}\n'
+           '    values = list(map(' + callback + ', ' + iterables + '))\n'
+           '    return {"name": values[0]}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads D" in str(findings[0]), _fmt(findings)
+
+
+def test_map_constant_removal_return_stays_chrome():
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n'
+           '    box = {"rank": row["rank"]}\n'
+           '    values = list(map(dict.clear, (box,)))\n'
+           '    return {"name": values[0]}\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+def test_callback_dynamic_getattr_refuses_without_crashing():
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n'
+           '    list(map(getattr, (operator,), (row["method"],)))\n'
+           '    return {"name": "chrome"}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable call target" in str(f) for f in findings), _fmt(findings)
+
+
+
+def test_partial_callback_fixed_literal_key_keeps_sibling_presence():
+    api = _removal_wrapper_api('box["other"] = 0.0\nsorted((None,), key=partial(box.pop, "other"))')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+def test_generic_callback_unknown_dunder_alternative_is_refused():
+    operation = ('fn = box.pop if request.path_params["mode"] else None\n'
+                 'functools.reduce(fn.__call__, ("rank", None))')
+    findings = _fixture(_removal_wrapper_api(operation, constant=True),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable call target" in str(f) for f in findings), _fmt(findings)
+
+
+
+
+
+def test_generic_dictionary_alternative_cannot_hide_callable_removal():
+    operation = ('fn = box.pop if request.path_params["mode"] else _noop\n'
+                 'fn = fn if request.path_params["mode"] else {}\n'
+                 'functools.reduce(fn, ("rank", None))')
+    findings = _fixture(_removal_wrapper_api(operation, constant=True),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable call target" in str(f) for f in findings), _fmt(findings)
+
+
+
+
+
+@pytest.mark.parametrize("operation", [
+    'operator.truth(row.name if request.path_params["mode"] else None)',
+    'str({"value": row.name if request.path_params["mode"] else None})',
+])
+def test_generic_ordinary_attribute_data_is_not_a_callback(operation):
+    api = (_REMOVAL_CALLBACK_IMPORTS +
+           'def evidence_report(request: Request, row):\n    ' + operation + '\n'
+           '    return {"name": "chrome"}\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("rejoin", [False, True], ids=["single-join", "same-dictionary-rejoin"])
+def test_generic_dictionary_and_bound_removal_keep_callback_evidence(rejoin):
+    operation = ('data = {"rank": "chrome"}\n'
+                 'fn = box.pop if request.path_params["mode"] else data\n')
+    if rejoin:
+        operation += 'fn = fn if request.path_params["mode"] else data\n'
+    operation += 'functools.reduce(fn, ("rank", None))'
+    findings = _fixture(_removal_wrapper_api(operation, constant=True),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any("unresolvable call target" in str(f) for f in findings), _fmt(findings)
+
+
+def test_callback_marker_does_not_taint_exact_dictionary_slots():
+    operation = ('data = {"rank": "chrome"}\n'
+                 'fn = box.pop if request.path_params["mode"] else data\n'
+                 'result = fn["rank"]')
+    api = _removal_wrapper_api(operation, constant=True)
+    api = api.replace('    result = box.setdefault("rank", "HOT")\n', '')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+
+
+
+_REMOVAL_DELEGATION_SELECTION = {
+    "partial": 'choices = [partial(box.pop, "rank"), _ignore_partial]\nchoices[row["index"]]()',
+    "operator": 'choices = [operator.call, _ignore_pair]\nchoices[row["index"]](box.pop, "rank")',
+    "map": 'choices = [map, _ignore_iterable]\nlist(choices[row["index"]](box.pop, ("rank",)))',
+    "filter": 'choices = [filter, _ignore_iterable]\nlist(choices[row["index"]](box.pop, ("rank",)))',
+    "method-call": 'choices = [box.pop.__call__, _noop]\nchoices[row["index"]]("rank")',
+    "own-function": 'choices = [_erase, _noop]\nchoices[row["index"]](box)',
+    "own-keyword": 'choices = [_erase, _noop_box]\nchoices[row["index"]](box=box)',
+    "own-method": 'tool = _Eraser()\nchoices = [tool.erase, _noop]\nchoices[row["index"]](box)',
+}
+_REMOVAL_DELEGATION_HELPERS = (
+    'def _ignore_partial():\n    return None\n\n'
+    'def _ignore_pair(first, second):\n    return None\n\n'
+    'def _ignore_iterable(first, second):\n    return ()\n\n'
+    'def _noop_box(box):\n    return None\n\n'
+    'class _Eraser:\n    def erase(self, box):\n        box.pop("rank")\n\n')
+
+
+@pytest.mark.parametrize("route", list(_REMOVAL_DELEGATION_SELECTION))
+@pytest.mark.parametrize("selected", ["returned", "stored"])
+def test_removal_delegation_keeps_explicit_callable_selection(route, selected):
+    api = _removal_wrapper_api(_REMOVAL_DELEGATION_SELECTION[route], selected,
+                              extra=_REMOVAL_DELEGATION_HELPERS, constant=True)
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads D" in str(findings[0]), (route, selected, _fmt(findings))
+
+
+@pytest.mark.parametrize("operation", [
+    'value = partial(row.clear)()', 'value = operator.call(row.clear)',
+    'value = row.clear.__call__()', 'value = list(map(dict.clear, (row,)))[0]',
+])
+def test_delegation_keeps_constant_removal_return_control(operation):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n    ' + operation + '\n'
+           '    return {"name": value}\n')
     assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
 
 
