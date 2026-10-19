@@ -50159,8 +50159,8 @@ FFA_UPSET_INCLUDE_GAP = 250.0
 # the comparison threshold from the points-per-round engine value.
 #
 # This is separate from the betting and disconnect cutoffs that still count
-# two field half points. The grace spans the opening play before the second
-# round conversion, while a broken game can still restart without rating the
+# two field half points. A field total below H proves fewer than two full points, so grace is
+# given; H or more only MAY mean two conversions, so the wire can refuse grace early and rate the
 # departed seat.
 FFA_LEAVE_GRACE_FULL_POINTS = 2
 # ── FFA betting: odds band + how long a lobby stays bettable ───────────────
@@ -57719,7 +57719,8 @@ def _ffa_score_shape_error(report, score_target: int, n_players: int) -> str | N
 
 
 def _ffa_leave_decision(report, kills_in_canonical: bool, *,
-                        grace_half: int) -> tuple[set, set, list[str]]:
+                        grace_half: int,
+                        points_to_win_round: int) -> tuple[set, set, list[str]]:
     """Who this report says did not PLAY the game it describes: the carried
     roster ghosts, the early-leave graces, and the log lines that say so.
 
@@ -57734,6 +57735,7 @@ def _ffa_leave_decision(report, kills_in_canonical: bool, *,
     The two arms use different evidence. The unsigned absent claim is refuted
     by any non-zero signed tally; kills count only in a v2 canonical. The
     unsigned field total is a grace claim only below the required grace_half.
+    The rounds consistency bound reads the same required points_to_win_round.
     Signed own points refute that claim when they reach the threshold or exceed
     the claimed field total, and signed round wins refute a points tally too
     small to contain them. Kills never refute the grace.
@@ -57775,7 +57777,7 @@ def _ffa_leave_decision(report, kills_in_canonical: bool, *,
                 f"leave (reporter {report.reported_by_steam_id}, room "
                 f"{report.photon_room_id})")
             continue
-        _round_half = p.rounds_won * FFA_POINTS_TO_WIN_ROUND
+        _round_half = p.rounds_won * points_to_win_round
         if _round_half > p.points_total:
             log.append(
                 f"[FFA] early-leave grace REFUTED for {p.steam_id}: rounds bound; "
@@ -57920,9 +57922,13 @@ def _ffa_report_contradiction(prior_winner_steam, prior_vec: dict, report,
     # in both readings because it does not inspect kills. kills_signed still
     # gates the kills comparison below, where it is a fact about what was signed.
     _g_signed, _c_signed, _ = _ffa_leave_decision(
-        report, True, grace_half=_ffa_leave_grace_half_points())
+        report, True,
+        grace_half=_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND),
+        points_to_win_round=FFA_POINTS_TO_WIN_ROUND)
     _g_plain, _c_plain, _ = _ffa_leave_decision(
-        report, False, grace_half=_ffa_leave_grace_half_points())
+        report, False,
+        grace_half=_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND),
+        points_to_win_round=FFA_POINTS_TO_WIN_ROUND)
     _unrated_either = ((_g_signed | _c_signed), (_g_plain | _c_plain))
     # The message names the reading that matches THIS report's own form, so a
     # log line says what the submitted report concluded rather than what the
@@ -58586,11 +58592,14 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     #       wins unsupported by own points refute the claim; and
     #   (b) the claim can only come from a SURVIVOR. The report is built by a
     #       client still in the room at game over, never by the leaver, and
-    #       voiding a leaver's result is worth nothing to the reporter.
+    #       the reporter cannot raise its own rating, game XP or game Gold beyond
+    #       what one opponent fewer in the comparison set and in the live denominator
+    #       gives a seat placed below the leaver; the departed seat gains none of those.
     # Old clients omit the field entirely -> no grace, pre-fix behaviour.
     ghosts, graced, _leave_log = _ffa_leave_decision(
         report, kills_in_canonical,
-        grace_half=_ffa_leave_grace_half_points())
+        grace_half=_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND),
+        points_to_win_round=FFA_POINTS_TO_WIN_ROUND)
     for _line in _leave_log:
         print(_line)
     # Everyone excluded from rating/economy for this game. `ghosts` still names
@@ -63989,7 +63998,9 @@ def _triage_capture_verdict(report, kills_signed: bool, ids_by_steam: dict,
     if set(ids_by_steam.values()) != set(other_ids.values()):
         return "ROSTER DIFFERS"
     ghosts, graced, _ = _ffa_leave_decision(
-        other, other_signed, grace_half=_ffa_leave_grace_half_points())
+        other, other_signed,
+        grace_half=_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND),
+        points_to_win_round=FFA_POINTS_TO_WIN_ROUND)
     unrated = ghosts | graced
     other_vec = {p.steam_id: (int(p.rounds_won), int(p.points_total), int(getattr(p, "kills", 0) or 0),
                               bool(p.left_early), p.steam_id in unrated)

@@ -1020,7 +1020,9 @@ def test_t1_live_scored_leaver_inside_grace_is_unrated():
     report = _report(vec, S2, leave={S1: (True, False, 1)})
     for kills_signed in (True, False):
         ghosts, graced, log = main._ffa_leave_decision(
-            report, kills_signed, grace_half=main._ffa_leave_grace_half_points())
+            report, kills_signed,
+            grace_half=main._ffa_leave_grace_half_points(),
+            points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
         assert ghosts == set() and graced == {S1}
         assert not any("REFUTED" in line for line in log)
 
@@ -1030,7 +1032,9 @@ def test_t1b_window_stays_open_below_two_full_points():
     report = _report(vec, S2, leave={S1: (True, False, 3)})
     for kills_signed in (True, False):
         ghosts, graced, log = main._ffa_leave_decision(
-            report, kills_signed, grace_half=main._ffa_leave_grace_half_points())
+            report, kills_signed,
+            grace_half=main._ffa_leave_grace_half_points(),
+            points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
         assert ghosts == set() and graced == {S1}
         assert not any("REFUTED" in line for line in log)
 
@@ -1042,7 +1046,9 @@ def test_t2_own_points_above_claimed_field_refute_by_inconsistency(
     vec = {S1: tally, S2: (2, 4, 0), S3: (1, 2, 0)}
     report = _report(vec, S2, leave={S1: (True, False, gp)})
     ghosts, graced, log = main._ffa_leave_decision(
-        report, kills_signed, grace_half=main._ffa_leave_grace_half_points())
+        report, kills_signed,
+        grace_half=main._ffa_leave_grace_half_points(),
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
     refuted = [line for line in log if "REFUTED" in line]
     assert ghosts == set() and graced == set()
     assert len(refuted) == 1 and "inconsistency" in refuted[0]
@@ -1053,7 +1059,9 @@ def test_t3_own_points_at_threshold_refute_before_inconsistency(kills_signed):
     vec = {S1: (2, 4, 0), S2: (2, 4, 0), S3: (1, 2, 0)}
     report = _report(vec, S2, leave={S1: (True, False, 3)})
     ghosts, graced, log = main._ffa_leave_decision(
-        report, kills_signed, grace_half=main._ffa_leave_grace_half_points())
+        report, kills_signed,
+        grace_half=main._ffa_leave_grace_half_points(),
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
     refuted = [line for line in log if "REFUTED" in line]
     assert ghosts == set() and graced == set()
     assert len(refuted) == 1 and "threshold" in refuted[0]
@@ -1064,7 +1072,9 @@ def test_t3b_a_non_claim_above_the_entry_boundary_emits_no_grace_line(kills_sign
     vec = {S1: (1, 2, 0), S2: (2, 4, 0), S3: (1, 2, 0)}
     report = _report(vec, S2, leave={S1: (True, False, 5)})
     ghosts, graced, log = main._ffa_leave_decision(
-        report, kills_signed, grace_half=main._ffa_leave_grace_half_points())
+        report, kills_signed,
+        grace_half=main._ffa_leave_grace_half_points(),
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
     assert ghosts == set() and graced == set() and log == []
 
 
@@ -1073,7 +1083,9 @@ def test_t4_rounds_without_enough_own_points_refute_by_rounds_bound(kills_signed
     vec = {S1: (1, 1, 0), S2: (2, 4, 0), S3: (1, 2, 0)}
     report = _report(vec, S2, leave={S1: (True, False, 1)})
     ghosts, graced, log = main._ffa_leave_decision(
-        report, kills_signed, grace_half=main._ffa_leave_grace_half_points())
+        report, kills_signed,
+        grace_half=main._ffa_leave_grace_half_points(),
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
     refuted = [line for line in log if "REFUTED" in line]
     assert ghosts == set() and graced == set()
     assert len(refuted) == 1 and "rounds" in refuted[0]
@@ -1083,7 +1095,9 @@ def test_t4b_signed_kills_do_not_refute_the_grace():
     vec = {S1: (0, 1, 9), S2: (2, 4, 0), S3: (1, 2, 0)}
     report = _report(vec, S2, leave={S1: (True, False, 1)})
     ghosts, graced, log = main._ffa_leave_decision(
-        report, True, grace_half=main._ffa_leave_grace_half_points())
+        report, True,
+        grace_half=main._ffa_leave_grace_half_points(),
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
     assert ghosts == set() and graced == {S1}
     assert not any("REFUTED" in line for line in log)
 
@@ -1096,13 +1110,17 @@ def test_t5_absent_arm_keeps_its_any_tally_refutation(kills_signed, tally):
     vec = {S1: tally, S2: (2, 4, 0), S3: (1, 2, 0)}
     report = _report(vec, S2, leave={S1: (True, True, None)})
     ghosts, graced, log = main._ffa_leave_decision(
-        report, kills_signed, grace_half=main._ffa_leave_grace_half_points())
+        report, kills_signed,
+        grace_half=main._ffa_leave_grace_half_points(),
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
     assert ghosts == set() and graced == set()
     assert len(log) == 1 and "absent claim REFUTED" in log[0]
     zero = _report(dict(vec, **{S1: (0, 0, 0)}), S2,
                    leave={S1: (True, True, None)})
     ghosts, graced, log = main._ffa_leave_decision(
-        zero, kills_signed, grace_half=main._ffa_leave_grace_half_points())
+        zero, kills_signed,
+        grace_half=main._ffa_leave_grace_half_points(),
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
     assert ghosts == {S1} and graced == set() and log == []
 
 
@@ -1113,12 +1131,14 @@ def test_t7_entry_boundary_is_half_open(kills_signed):
         vec = {S1: tally, S2: (2, 4, 0), S3: (1, 2, 0)}
         report = _report(vec, S2, leave={S1: (True, False, threshold)})
         ghosts, graced, log = main._ffa_leave_decision(
-            report, kills_signed, grace_half=threshold)
+            report, kills_signed, grace_half=threshold,
+            points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
         assert ghosts == set() and graced == set() and log == []
     vec = {S1: (0, 0, 0), S2: (2, 4, 0), S3: (1, 2, 0)}
     report = _report(vec, S2, leave={S1: (True, False, threshold - 1)})
     ghosts, graced, log = main._ffa_leave_decision(
-        report, kills_signed, grace_half=threshold)
+        report, kills_signed, grace_half=threshold,
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
     assert ghosts == set() and graced == {S1}
     assert len(log) == 1 and "REFUTED" not in log[0]
 
@@ -1128,7 +1148,9 @@ def test_t8_ghosts_are_decided_before_grace(kills_signed):
     vec = {S1: (0, 0, 0), S2: (2, 4, 0), S3: (1, 2, 0)}
     report = _report(vec, S2, leave={S1: (True, True, 0)})
     ghosts, graced, log = main._ffa_leave_decision(
-        report, kills_signed, grace_half=main._ffa_leave_grace_half_points())
+        report, kills_signed,
+        grace_half=main._ffa_leave_grace_half_points(),
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)
     assert ghosts == {S1} and graced == set() and log == []
 
 
@@ -1141,9 +1163,23 @@ def test_t9_threshold_is_derived_from_points_per_round(kills_signed):
     for gp, expected in ((5, {S1}), (6, set())):
         report = _report(vec, S2, leave={S1: (True, False, gp)})
         ghosts, graced, log = main._ffa_leave_decision(
-            report, kills_signed, grace_half=main._ffa_leave_grace_half_points(3))
+            report, kills_signed,
+            grace_half=main._ffa_leave_grace_half_points(3),
+            points_to_win_round=3)
         assert ghosts == set() and graced == expected
         assert not any("REFUTED" in line for line in log)
+
+    rounds_vec = {S1: (1, 2, 0), S2: (2, 4, 0), S3: (1, 2, 0)}
+    rounds_report = _report(
+        rounds_vec, S2, leave={S1: (True, False, 2)})
+    ghosts, graced, log = main._ffa_leave_decision(
+        rounds_report, kills_signed,
+        grace_half=main._ffa_leave_grace_half_points(3),
+        points_to_win_round=3)
+    refuted = [line for line in log if "REFUTED" in line]
+    assert ghosts == set() and graced == set()
+    assert len(refuted) == 1 and "rounds bound" in refuted[0]
+    assert "requires at least 3 half points" in refuted[0]
 
 
 def test_t10_comparator_uses_the_same_full_point_grace():
@@ -1171,6 +1207,34 @@ def test_the_detector_is_symmetric():
     assert main._ffa_report_contradiction(S1, _vec(ROW_B), _report(ROW_A, S3), False) is not None
 
 
+def test_the_reporter_incentive_comment_states_the_bounded_truth():
+    src = _endpoint_src()
+    block = src[src.index("# TRUST:"):src.index("# Old clients")]
+    flat = " ".join(line.lstrip().lstrip("#").strip()
+                    for line in block.splitlines())
+    assert (
+        "the reporter cannot raise its own rating, game XP or game Gold beyond "
+        "what one opponent fewer in the comparison set and in the live denominator "
+        "gives a seat placed below the leaver; the departed seat gains none of those."
+    ) in flat
+    assert "worth nothing to the reporter" not in flat.casefold()
+
+
+def test_the_full_point_comment_names_the_proxy_and_early_close_residual():
+    src = inspect.getsource(main)
+    block = src[src.index("# Early-leave grace"):
+                src.index("FFA_LEAVE_GRACE_FULL_POINTS =")]
+    flat = " ".join(line.lstrip().lstrip("#").strip()
+                    for line in block.splitlines())
+    assert (
+        "A field total below H proves fewer than two full points, so grace is "
+        "given; H or more only MAY mean two conversions, so the wire can refuse "
+        "grace early and rate the departed seat."
+    ) in flat
+    assert "the grace spans the opening play before the second round conversion" \
+        not in flat.casefold()
+
+
 def test_the_leave_rule_has_exactly_one_definition():
     """#279/#432: the settlement and the comparison ask the same question, and
     a second copy of the rule is the one that stops being updated. The endpoint
@@ -1178,7 +1242,8 @@ def test_the_leave_rule_has_exactly_one_definition():
     src = _endpoint_src()
     assert ("ghosts, graced, _leave_log = _ffa_leave_decision(\n"
             "        report, kills_in_canonical,\n"
-            "        grace_half=_ffa_leave_grace_half_points())") in src
+            "        grace_half=_ffa_leave_grace_half_points(FFA_POINTS_TO_WIN_ROUND),\n"
+            "        points_to_win_round=FFA_POINTS_TO_WIN_ROUND)") in src
     assert "ghosts.add(" not in src and "graced.add(" not in src
     assert "_ffa_leave_decision(" in inspect.getsource(main._ffa_report_contradiction)
     tree = ast.parse(inspect.getsource(main))
@@ -1187,15 +1252,21 @@ def test_the_leave_rule_has_exactly_one_definition():
              and node.func.id == "_ffa_leave_decision"]
     assert len(calls) == 4
     for call in calls:
-        passes = [kw.value for kw in call.keywords if kw.arg == "grace_half"]
-        assert len(passes) == 1
-        value = passes[0]
-        assert isinstance(value, ast.Call) and not value.args and not value.keywords
-        assert isinstance(value.func, ast.Name)
-        assert value.func.id == "_ffa_leave_grace_half_points"
-    param = inspect.signature(main._ffa_leave_decision).parameters["grace_half"]
-    assert param.kind is inspect.Parameter.KEYWORD_ONLY
-    assert param.default is inspect.Parameter.empty
+        grace_passes = [kw.value for kw in call.keywords
+                        if kw.arg == "grace_half"]
+        ppr_passes = [kw.value for kw in call.keywords
+                      if kw.arg == "points_to_win_round"]
+        assert len(grace_passes) == len(ppr_passes) == 1
+        grace_call = grace_passes[0]
+        assert isinstance(grace_call, ast.Call)
+        assert len(grace_call.args) == 1 and not grace_call.keywords
+        assert isinstance(grace_call.func, ast.Name)
+        assert grace_call.func.id == "_ffa_leave_grace_half_points"
+        assert ast.dump(grace_call.args[0]) == ast.dump(ppr_passes[0])
+    params = inspect.signature(main._ffa_leave_decision).parameters
+    for name in ("grace_half", "points_to_win_round"):
+        assert params[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params[name].default is inspect.Parameter.empty
     # The helper is PURE - it returns its log lines instead of printing them,
     # so the comparison path cannot emit a second copy of the endpoint's own
     # evidence about a report that is about to be refused.
@@ -3817,8 +3888,12 @@ def test_the_signature_form_alone_is_not_a_disagreement_about_the_game():
     claim = {S2: (True, True, None)}
     signed = _report(kills_only, S3, leave=claim)
     grace_half = main._ffa_leave_grace_half_points()
-    assert main._ffa_leave_decision(signed, True, grace_half=grace_half)[0] == set()
-    assert main._ffa_leave_decision(signed, False, grace_half=grace_half)[0] == {S2}
+    assert main._ffa_leave_decision(
+        signed, True, grace_half=grace_half,
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)[0] == set()
+    assert main._ffa_leave_decision(
+        signed, False, grace_half=grace_half,
+        points_to_win_round=main.FFA_POINTS_TO_WIN_ROUND)[0] == {S2}
     # The row was written by a v2 report: absent = False, the refuted reading.
     recorded_signed = _vec(kills_only, leave={S2: (True, False)})
     # The SAME claims delivered as a v1 report are still the same game.
