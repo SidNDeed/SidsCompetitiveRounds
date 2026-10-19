@@ -178,15 +178,21 @@ async def _assert_target_is_disposable(conn) -> None:
     Asked on the connection, immediately before the DROPs, and asked about the
     table whose loss would hurt most. A `players` table that exists and holds
     rows means this is not a fixture database whatever it is called, so the
-    run refuses instead of rebuilding it. An ABSENT table is the expected
-    state for a fresh throwaway and passes; a present-but-empty one is what
-    the second and later runs of this file see, and passes too.
+    run refuses instead of rebuilding it. An absent table passes, and so does
+    a present-but-empty one.
+
+    Two statements, on purpose. PostgreSQL resolves every relation a
+    statement names when it parses the statement, before any CASE arm runs,
+    so one statement that probes for the table and counts it in the same
+    breath raises UndefinedTableError on a database without the table: the
+    count is only issued once the probe has answered that the table exists.
+    The three states are exercised by
+    `test_the_disposability_guard_on_each_state_of_the_players_table`.
     """
-    rows = await conn.fetchval("""
-        SELECT CASE WHEN to_regclass('public.players') IS NULL THEN -1
-                    ELSE (SELECT COUNT(*) FROM players) END
-    """)
-    if rows and rows > 0:
+    if await conn.fetchval("SELECT to_regclass('public.players')") is None:
+        return
+    rows = await conn.fetchval("SELECT COUNT(*) FROM public.players")
+    if rows > 0:
         raise AssertionError(
             f"the target database holds {rows} row(s) in `players`. This file "
             f"drops and rebuilds that table as a 3-column fixture, so it will "
