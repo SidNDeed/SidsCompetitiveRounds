@@ -252,6 +252,59 @@ async def _lobby(conn, lobby):
         "  FROM ffa_lobbies WHERE id = :l"), {"l": lobby})).mappings().first()
 
 
+# ── the disposability guard itself ───────────────────────────────────────
+
+_FIXTURE_DROPS = [s for s in _statements(SCHEMA_SQL) if s.upper().startswith("DROP")]
+
+
+@pytest.mark.parametrize("state", ["absent", "holds_a_row", "emptied"])
+def test_the_disposability_guard_on_each_state_of_the_players_table(state):
+    """The guard on the three states it can meet: no `players` table at all
+    (a fresh throwaway database) passes, a table holding a row refuses with
+    the guard's own message, and the same table after TRUNCATE passes.
+
+    Until the guard became two statements the absent state raised
+    UndefinedTableError, and every run on a fresh database failed at the
+    guard; runs on a database that an earlier run had already filled passed,
+    which is how the defect hid. This test sets each state up itself, so its
+    result does not depend on what ran before it, and it leaves the fixture
+    as it found it: rebuilt if `players` existed, the fixture tables dropped
+    if it did not."""
+    async def _go():
+        conn = await asyncpg.connect(RAW_DSN)
+        try:
+            found = await conn.fetchval("SELECT to_regclass('public.players')") is not None
+            try:
+                for stmt in _FIXTURE_DROPS:
+                    await conn.execute(stmt)
+                if state != "absent":
+                    for stmt in _statements(SCHEMA_SQL):
+                        await conn.execute(stmt)
+                    await conn.execute(
+                        "INSERT INTO players (id, steam_id) VALUES ($1, $2)",
+                        uuid.uuid4(), "guard-probe-seat")
+                if state == "emptied":
+                    await conn.execute("TRUNCATE players CASCADE")
+                present = await conn.fetchval("SELECT to_regclass('public.players')") is not None
+                assert present is (state != "absent"), "the state was not set up"
+                if state == "holds_a_row":
+                    with pytest.raises(AssertionError, match=r"holds 1 row\(s\) in `players`"):
+                        await _assert_target_is_disposable(conn)
+                else:
+                    await _assert_target_is_disposable(conn)
+            finally:
+                for stmt in _FIXTURE_DROPS:
+                    await conn.execute(stmt)
+                if found:
+                    for stmt in _statements(SCHEMA_SQL):
+                        await conn.execute(stmt)
+        finally:
+            await conn.close()
+        if found:
+            await _apply_migration_raw()
+    asyncio.run(_go())
+
+
 # ── (2) the migration ────────────────────────────────────────────────────
 
 def test_migration_dry_run_then_write_then_reapply():
