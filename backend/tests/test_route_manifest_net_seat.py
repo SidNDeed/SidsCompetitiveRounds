@@ -959,7 +959,28 @@ def test_the_helper_closure_stays_affordable():
     # /api/v1/releases/recent: 6 at the base and on the lane, 75 on the
     # trunk, + auto_logs.router); inside 77, so the bound stays. The table
     # is at the code worst bound.
-    assert code_median <= 77, f"median code closure {code_median} of {total}"
+    # RJ server staging (2026-10-19, the fold of the FFA readmission and
+    # Stage 2 hold lanes): the same walk with the same route seeds over each
+    # tree's own backend/api:
+    #
+    #   tree                               routes   code m / p90 / worst   whole m / p90 / worst
+    #   base 9267b1fe                         395   76 / 141 / 422          146 / 244 / 579
+    #   FFA lane 5208f4d0                     397   76 / 141 / 422          146 / 244 / 579
+    #   Stage 2 lane 373c370e                 395   78 / 143 / 424          160 / 267 / 595
+    #   fold 41c8ae04 (hold routes mounted)   407   78 / 140 / 424          160 / 261 / 595
+    #   fold c27cb1c2 (report windows)        407   78 / 152 / 424          160 / 276 / 595
+    #   fold tip                              407   78 / 152 / 424          160 / 276 / 595
+    #
+    # The median moved on the Stage 2 lane alone: 386 of its 395 routes gain
+    # 1 to 4 code bindings and 8 gain 9 or 10, the match_hold and
+    # match_report_window names main reaches (match_hold.router and MODES,
+    # data; their import lines, whole tier only): GET
+    # /api/v1/releases/recent, the base median route, 76 -> 78 (whole
+    # 143 -> 156).
+    # Every one is a binding main really holds; no route crossed into a hub.
+    # The bound moves to 82, ~5% over the measurement, for that reason and
+    # no other.
+    assert code_median <= 82, f"median code closure {code_median} of {total}"
     # Discord collection landing (2026-09-26): the p90 moved for measured
     # growth. The same walk with the same route seeds over each tree:
     #
@@ -1229,7 +1250,16 @@ def test_the_helper_closure_stays_affordable():
     # (GET /api/v1/h2h/{steam_id}/{opponent_steam_id}: 71 at the base and on
     # the lane, 140 on the trunk, + auto_logs.router), 39 routes above it;
     # inside 147, so the bound stays. The table is at the code worst bound.
-    assert code_p90 <= 147, f"p90 code closure {code_p90} of {total}"
+    # RJ server staging (2026-10-19; the table is at the code median bound):
+    # 152 measured at the fold tip, moved at c27cb1c2 (NX4, V3 S5). The two
+    # report routes now settle through the report window and reach both
+    # settle bodies: POST /api/v1/team/matches 140 -> 206 and POST
+    # /api/v1/ovt/matches 77 -> 206 (whole 285 -> 361, 201 -> 361); both
+    # rise past the rank, and the p90 becomes the next route up, GET
+    # /api/v1/tournaments/current at 152, unchanged itself. 40 routes sit
+    # above it. The bound moves to 160, ~5% over the measurement, for that
+    # reason and no other.
+    assert code_p90 <= 160, f"p90 code closure {code_p90} of {total}"
     # Player Cards v4.13 (2026-09-15): measured 20 / 64 / 278 on e894c45 and
     # 20 / 64 / 282 on the v4.13 fold, the worst both times POST
     # /api/v1/pc/packs/open. What it gained are bindings that route runs: the
@@ -1328,7 +1358,14 @@ def test_the_helper_closure_stays_affordable():
     # on 365 (see the code worst bound); nothing either side reached is
     # missing. The bound moves to 153, ~5% over the measurement, for that
     # reason and no other.
-    assert all_median <= 153, f"median closure {all_median} of {total}"
+    # RJ server staging (2026-10-19): 160 measured (146 at the base and on
+    # the FFA lane, 160 on the Stage 2 lane; the table is at the code median
+    # bound). The same fold by name as the code median: the match_hold and
+    # match_report_window import lines main reaches (AsyncSession, Depends,
+    # HTTPException, Request, get_db, hashlib, hmac, text), +13 on GET
+    # /api/v1/releases/recent. The bound moves to 168, ~5% over the
+    # measurement, for that reason and no other.
+    assert all_median <= 168, f"median closure {all_median} of {total}"
     # Card trading (2026-09-26): measured 73 / 151 / 457 of 2648 indexed
     # bindings over 372 routes, against 72 / 140 / 457 of 2567 over 365 for
     # the same walk with the same route seeds over main 7541261's backend/api.
@@ -1514,7 +1551,13 @@ def test_the_helper_closure_stays_affordable():
     # the trunk), 39 routes above it; the same by-name fold as the median
     # above. The bound moves to 256, ~5% over the measurement, for that
     # reason and no other.
-    assert all_p90 <= 256, f"p90 closure {all_p90} of {total}"
+    # RJ server staging (2026-10-19): 276 measured at the fold tip (244 at
+    # the base, 267 on the Stage 2 lane by the median's by-name fold, 276
+    # from c27cb1c2, whose two report routes rise past the rank as at the
+    # code p90; the route at the rank is POST /api/v1/pc/portrait). The
+    # bound moves to 290, ~5% over the measurement, for that reason and no
+    # other.
+    assert all_p90 <= 290, f"p90 closure {all_p90} of {total}"
     # Steam pictures (2026-09-12): a pack open now primes the subjects'
     # Steam pictures, and that chain (claim, feed, download, the bound write
     # and its blob locks) is ~20 real bindings on top of the face path the
