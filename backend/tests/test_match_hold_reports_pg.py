@@ -371,3 +371,73 @@ def test_t5_8_unflagged_rooms_answer_as_today(monkeypatch):
             "     + (SELECT count(*) FROM match_report_journal)")
         assert n == 0, ("T5.8 no window rows", n)
     hold_test.run_env(monkeypatch, body, prefix="rjs2nx4n")
+
+
+# -- T5.9 ----------------------------------------------------------------------
+
+async def _two_filed(env, mode):
+    """A flagged series whose window of G holds two class C reports, expired;
+    returns it with the Steam id the pick chooses."""
+    s = await hold_test.seed_series(env.conn, mode)
+    g = (await hold_test.game_start(env, s, 0))["game_id"]
+    for i in (0, 1):
+        r = await post_report(mode, s, i, g)
+        assert r.status_code == 202 and r.json()["status"] == "journaled", \
+            ("T5.9 journal", mode, i, r.status_code, r.text[:300])
+    await env.conn.execute(
+        "UPDATE match_report_windows SET settle_after = clock_timestamp() - interval '1 s'"
+        " WHERE room_name = $1", s.room)
+    return s, g, min((s.steam(0), s.steam(1)), key=lambda x: (len(x), x))
+
+
+async def _untouched_then_settled(env, mode, s, g, want, out, route):
+    w, j = await window_state(env, s, g)
+    assert (out.get("bound"), out.get("refused"), w["settled_at"],
+            sorted(v[1] for v in j.values()), await recorded(env, mode, s)) == \
+        (1, None, None, ["journaled", "journaled"], []), \
+        ("T5.9 a bound tick changes nothing", route, mode, out, w and dict(w), j)
+    out = await main._report_window_janitor()
+    w, j = await window_state(env, s, g)
+    assert (out.get("settled"), [k for k, v in j.items() if v[1] == "settled"],
+            len(await recorded(env, mode, s))) == (1, [want], 1), \
+        ("T5.9 the next tick settles the pick", route, mode, out, w and dict(w), j)
+
+
+def test_t5_9_a_settle_a_bound_ends_leaves_the_window_for_the_next_tick(monkeypatch):
+    """T5.9 (the janitor census ruling of 2026-10-19): a settle ended by a
+    bound changes nothing. Lock route: the series row is held by another
+    transaction, so the settle's series lock times out (55P03); the window
+    stays unsettled, no journal row is kept, nothing is recorded, and once
+    the lock is gone the next tick settles the report the pick chose.
+    Deadline route: a settle ended by the match database deadline's 503
+    with no SQLSTATE on its chain leaves the window the same way."""
+    async def body(env):
+        _mount(env, monkeypatch)
+        for mode in ("team", "ovt"):
+            s, g, want = await _two_filed(env, mode)
+            tx = env.conn.transaction()
+            await tx.start()
+            try:
+                await env.conn.execute(
+                    "SELECT 1 FROM %s WHERE id = $1 FOR UPDATE"
+                    % ("team_series" if mode == "team" else "ovt_series"), s.sid)
+                out = await main._report_window_janitor()
+            finally:
+                await tx.rollback()
+            await _untouched_then_settled(env, mode, s, g, want, out, "lock")
+
+            s, g, want = await _two_filed(env, mode)
+
+            def _expired(_mode):
+                async def settle(db, entry):
+                    try:
+                        raise TimeoutError()
+                    except TimeoutError as exc:
+                        raise main.HTTPException(status_code=503,
+                                                 detail="database_deadline") from exc
+                return settle
+            with monkeypatch.context() as m:
+                m.setattr(main, "_report_window_settler", _expired)
+                out = await main._report_window_janitor()
+            await _untouched_then_settled(env, mode, s, g, want, out, "deadline")
+    hold_test.run_env(monkeypatch, body, prefix="rjs2nx4b")

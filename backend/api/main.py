@@ -4485,7 +4485,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:49729 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:49756 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4551,7 +4551,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:49541 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:49568 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -49398,16 +49398,33 @@ async def _finish_held_reports(db, mode, room, game_id, entered):
     return n
 
 
+def _report_window_bound_stage(exc):
+    """The bound that ended a report window settle, or None: 'lock' or
+    'stmt' by _rdm_bound_stage (55P03, 57014 or 25P02 on the exception's
+    chain), else 'deadline' for the match database deadline's 503 when its
+    timer expired with no SQLSTATE on the chain."""
+    stage = _rdm_bound_stage(exc)
+    if (stage is None and isinstance(exc, HTTPException) and exc.status_code == 503
+            and exc.detail == "database_deadline"):
+        stage = "deadline"
+    return stage
+
+
 async def _report_window_janitor() -> dict:
     """The janitor arm of the report windows: settle every expired window
     from its stored rows, and finish the held reports of every closed hold.
     Each window in its own transaction. A settle that raises keeps its
     chosen report out of the next pick (state kept), so one report no
-    settle body accepts never blocks the window. Returns counts."""
+    settle body accepts never blocks the window. Every session here is
+    armed by the janitor bound (_rdm_janitor_bound) before its first
+    statement. A settle ended by a bound (_report_window_bound_stage)
+    changes nothing: it is rolled back and the window is left for the next
+    tick. Returns counts."""
     from database import async_session
     mrw = _mrw_mod()
     out = {}
     async with async_session() as db:
+        _rdm_janitor_bound(db)
         now = await _match_hold._ctx_now(db)
         due = (await db.execute(text(
             "SELECT w.room_name, w.game_id, w.mode FROM match_report_windows w"
@@ -49431,6 +49448,7 @@ async def _report_window_janitor() -> dict:
         await db.commit()
     for w in due:
         async with async_session() as db:
+            _rdm_janitor_bound(db)
             try:
                 done = await mrw.settle_window(
                     db, mode=w["mode"], room=w["room_name"], game_id=w["game_id"],
@@ -49441,6 +49459,14 @@ async def _report_window_janitor() -> dict:
                     out["settled"] = out.get("settled", 0) + 1
             except Exception as ex:
                 await db.rollback()
+                stage = _report_window_bound_stage(ex)
+                if stage is not None:
+                    # A bound ended this settle: no row changes and the window
+                    # is left for the next tick.
+                    print(f"[HOLD] report window room={w['room_name']} game={w['game_id']}"
+                          f" bound stage={stage}; next tick")
+                    out["bound"] = out.get("bound", 0) + 1
+                    continue
                 rows = (await db.execute(text(
                     "SELECT reporter_id, reporter_steam, cls FROM match_report_journal"
                     " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
@@ -49462,6 +49488,7 @@ async def _report_window_janitor() -> dict:
                 out["refused"] = out.get("refused", 0) + 1
     for h in held:
         async with async_session() as db:
+            _rdm_janitor_bound(db)
             n = await _finish_held_reports(db, h["mode"], h["room_name"], h["game_id"],
                                            bool(h["entered"]))
             if n:

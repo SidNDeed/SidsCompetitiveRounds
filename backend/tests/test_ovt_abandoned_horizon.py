@@ -1639,10 +1639,39 @@ def test_the_janitor_lock_census_sees_orm_locks_and_not_only_sql():
     assert "set_config('lock_timeout', CAST(:lv AS text), true)" in bound_sql, bound_sql
     assert "set_config('statement_timeout', CAST(:sv AS text), true)" in bound_sql, bound_sql
     assert 0 < main.RDM_JANITOR_LOCK_TIMEOUT_MS < main.RDM_JANITOR_STATEMENT_TIMEOUT_MS
+    # Stage 2 report windows (the census ruling of 2026-10-19, pointer
+    # handoff-0926/relaunch_srv_stage_s3_census_1019.md): the report window
+    # janitor (_report_window_janitor, reached from queue_cleanup_loop) adds
+    # four waits at four sites and no decline, in the settle bodies its
+    # windows run: _settle_ovt_report (the ovt_series row, FOR NO KEY UPDATE)
+    # and _settle_team_report (the team_series row and the glicko_ratings_2v2
+    # rows, FOR UPDATE; the players rows, FOR NO KEY UPDATE). Every session
+    # the janitor opens is armed by _rdm_janitor_bound before its first
+    # statement, and a settle a bound ends changes nothing and leaves the
+    # window for the next tick (test_match_hold_reports_pg T5.9).
+    # Before: 31/21/28/18.
+    report_bounded = {("_settle_ovt_report", "FOR NO KEY UPDATE"): 1,
+                      ("_settle_team_report", "FOR UPDATE"): 2,
+                      ("_settle_team_report", "FOR NO KEY UPDATE"): 1}
+    rfuncs = {f for f, _c in report_bounded}
+    rgot = {}
+    for r in census["waits"]:
+        if r["func"] in rfuncs:
+            rgot[(r["func"], r["clause"])] = rgot.get((r["func"], r["clause"]), 0) + 1
+    assert rgot == report_bounded, rgot
+    rarms = [n for n in ast.walk(ast.parse(textwrap.dedent(
+        inspect.getsource(main._report_window_janitor)))) if isinstance(n, ast.AsyncWith)]
+    assert len(rarms) == 3, len(rarms)
+    for w in rarms:
+        first = w.body[0]
+        assert (isinstance(first, ast.Expr) and isinstance(first.value, ast.Call)
+                and getattr(first.value.func, "id", None) == "_rdm_janitor_bound"
+                and [a.id for a in first.value.args] == [w.items[0].optional_vars.id]), \
+            ast.dump(first)
     assert len(census["declines"]) == 31, census["declines"]
-    assert len(census["waits"]) == 21, census["waits"]
+    assert len(census["waits"]) == 25, census["waits"]
     assert len(census["decline_sites"]) == 28, census["decline_sites"]
-    assert len(census["wait_sites"]) == 18, census["wait_sites"]
+    assert len(census["wait_sites"]) == 22, census["wait_sites"]
 
 
 def test_a_lock_taking_path_outside_the_counted_set_reds_the_census():
