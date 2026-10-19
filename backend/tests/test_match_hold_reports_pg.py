@@ -167,7 +167,8 @@ def test_t5_1_dc_report_reads_the_crossing_the_hold_froze(monkeypatch, capsys):
             game = main._team_game_identity(row["t1_series_wins"], row["t2_series_wins"],
                                             row["photon_room_id"])
             for seat in (0, 2):
-                await main._record_team_game_points(db, s.sid, 2, 2, game, seat)
+                await main._record_team_game_points(db, s.sid, 2, 2, game, seat,
+                                                    attested=game)
             assert await main._team_game_crossed_two(db, s.sid, row), ("T5.1 record raised",)
             await db.commit()
         rep, dc = s.steam(2), s.steam(1)
@@ -347,7 +348,8 @@ def test_t5_8_unflagged_rooms_answer_as_today(monkeypatch):
                 game = main._team_game_identity(row["t1_series_wins"], row["t2_series_wins"],
                                                 row["photon_room_id"])
                 for seat in (0, 2):
-                    await main._record_team_game_points(db, s.sid, 2, 2, game, seat)
+                    await main._record_team_game_points(db, s.sid, 2, 2, game, seat,
+                                                        attested=game)
                 await db.commit()
             rep, dc = s.steam(2), s.steam(1)
             r = await _call("POST", "/api/v1/team/series/%s/report-dc" % s.sid, rep, params={
