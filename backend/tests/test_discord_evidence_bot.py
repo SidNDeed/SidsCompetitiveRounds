@@ -247,8 +247,10 @@ def game_body(page=1, pages=1, shape="game"):
             "games": [{"match_id": "0" * 32, "code": "0" * 12,
                        "ended_at": "2026-10-16T00:00:00+00:00", "is_ranked": True,
                        "invalidated": None, "series_id": None, "rounds": [5, 3],
-                       "seats": [{"subject": 0, "reporter": True, "cells": cells},
-                                 {"subject": 1, "reporter": False, "cells": cells}],
+                       "seats": [{"subject": 0, "reporter": True,
+                                  "cells": [list(cell) for cell in cells]},
+                                 {"subject": 1, "reporter": False,
+                                  "cells": [list(cell) for cell in cells]}],
                        "pair_cells": [],
                        "flags": [{"reason": "suspected_macro", "subject": 0, "reviewed": False,
                                   "current": True,
@@ -497,8 +499,9 @@ def test_m20_catalog_ki_and_canonical_key_are_injective(bot):
         cell[0] = repeated["ki"]
         seat["cells"].append(cell)
 
-    for body in (duplicate_ki, duplicate_key):
-        with pytest.raises(bot["AerSchemaError"]):
+    for body, refusal in ((duplicate_ki, "duplicate catalog ki"),
+                          (duplicate_key, "duplicate catalog key")):
+        with pytest.raises(bot["AerSchemaError"], match="^" + re.escape(refusal) + "$"):
             bot["_aer_decode_response"](body, "1a")
 
 
@@ -760,11 +763,12 @@ def test_the_1a_decoder_refuses_a_phase_leaf_of_the_wrong_type(
         bot, label, maker, mutate):
     body = maker()
     mutate(body)
-    with pytest.raises(bot["AerSchemaError"]):
+    with pytest.raises(bot["AerSchemaError"],
+                       match="^" + re.escape(_phase_leaf_refusal(label)) + "$"):
         bot["_aer_decode_response"](body, "1a")
     if label in ("T window carrying numeric summary", "D window carrying numeric summary"):
         catalog = {body["catalog"][0]["ki"]: body["catalog"][0]}
-        with pytest.raises(bot["AerSchemaError"]):
+        with pytest.raises(bot["AerSchemaError"], match="^summary cell kind$"):
             bot["_aer_cell"](body["summary"][0]["cells"][0], "summary", catalog, "1a")
 
 
@@ -1076,20 +1080,18 @@ def test_p3_metadata_schema_failures_publish_nothing(via):
 @pytest.mark.parametrize("label,maker,mutate", _phase_leaf_breaks(),
                          ids=lambda value: value if isinstance(value, str) else None)
 def test_p3_phase_leaf_schema_failures_publish_nothing(via, label, maker, mutate):
-    word = "Evidence report: unavailable (schema)."
-    events = []
     body = maker()
+    req = _request_for_body(body)
+    interaction, message, events = _deliver_body(body, req, via)
+    assert interaction.ephemeral == ["Posted."], label
+    assert len(_public(events)) == 1, label
+    assert len(message.edits) == (1 if via == "button" else 0), label
     mutate(body)
-    api = _Api(lambda p, a: (200, body, {}), events)
-    ns = bot_ns(api, events)
-    msg = _Message(events)
-    if via == "command":
-        it = _Interaction(events, ADMIN)
-        run(_command(ns, it))
-    else:
-        it = _Interaction(events, ADMIN, custom_id="aer:g:%s:2" % ("0" * 12), message=msg)
-        run(_click(ns, it))
-    assert (it.ephemeral, _public(events), msg.edits) == ([word], [], []), label
+    ns = bot_ns()
+    with pytest.raises(ns["AerSchemaError"],
+                       match="^" + re.escape(_phase_leaf_refusal(label)) + "$"):
+        ns["_aer_decode_response"](body, "1a", expected=req)
+    _assert_schema_delivery(body, req, via)
 
 
 @pytest.mark.parametrize("via", ["command", "button"])
@@ -1352,3 +1354,63 @@ def test_fix6_m21_producer_plans_and_legal_empty_collections_remain_valid(bot):
     pair["games"] = []
     for body in (series, pair):
         assert bot["_aer_decode_response"](body, "1a").games == ()
+
+
+# Fixture ownership and guard-specific controls for fix 6 M22.
+def _phase_leaf_refusal(label):
+    return {
+        "rounds object": "not a fixed list of 2",
+        "class word in numeric cell": "not a nullable number: 'c1'",
+        "mark object in catalog base": "not an integer: {'mark': True}",
+        "malformed window leaf": "not encoded text",
+        "R cell carrying text": "not a nullable number: 'c1'",
+        "T cell carrying number": "not encoded text",
+        "D cell carrying number": "not encoded text",
+        "T window carrying numeric summary": "summary catalog kind",
+        "D window carrying numeric summary": "summary catalog kind",
+    }[label]
+
+
+def test_m22_each_fixture_seat_owns_its_cells():
+    body = game_body()
+    left, right = (seat["cells"] for seat in body["games"][0]["seats"])
+    assert left == right
+    assert left is not right
+    assert all(a is not b for a, b in zip(left, right))
+    before = copy.deepcopy(right)
+    left[0][1] = 11
+    left.append(list(left[0]))
+    assert right == before
+
+
+@pytest.mark.parametrize("index,refusal", [(0, "duplicate catalog ki"),
+                                         (1, "duplicate catalog key")],
+                         ids=("duplicate-ki", "duplicate-key"))
+def test_m22_catalog_negatives_name_their_guard(bot, index, refusal):
+    body = _m20_delivery_breaks()[index]
+    expected_kis = {row["ki"] for row in body["catalog"]}
+    for seat in body["games"][0]["seats"]:
+        assert len(seat["cells"]) == len(expected_kis)
+        assert {cell[0] for cell in seat["cells"]} == expected_kis
+    with pytest.raises(bot["AerSchemaError"], match="^" + re.escape(refusal) + "$"):
+        bot["_aer_decode_response"](body, "1a")
+    for via in ("command", "button"):
+        _assert_schema_delivery(body, _request_for_body(body), via)
+
+
+def test_m22_unique_key_twin_serves_on_direct_command_and_button(bot):
+    duplicate = _m20_delivery_breaks()[1]
+    twin = copy.deepcopy(duplicate)
+    twin["catalog"][-1]["key"] += ".unique"
+    assert twin["games"] == duplicate["games"]
+    assert len({row["key"] for row in twin["catalog"]}) == len(twin["catalog"])
+    page = bot["_aer_decode_response"](twin, "1a")
+    expected_kis = [row["ki"] for row in twin["catalog"]]
+    assert list(page.catalog) == expected_kis
+    for seat in page.games[0]["seats"]:
+        assert [cell[0] for cell in seat[2]] == expected_kis
+    for via in ("command", "button"):
+        interaction, message, events = _deliver_body(twin, _request_for_body(twin), via)
+        assert interaction.ephemeral == ["Posted."]
+        assert len(_public(events)) == 1
+        assert len(message.edits) == (1 if via == "button" else 0)
