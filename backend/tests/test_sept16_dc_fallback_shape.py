@@ -1771,7 +1771,12 @@ ENDS_A_DEFERRAL = {
     "_team_dc_fallback_sweep_once": {"dc_incomplete"},
     "team_series_report_dc": {"dc_incomplete"},
     "_complete_team_series_with_ratings": {"completed"},
-    "submit_team_match": {"completed"},
+    # The completing game report's writer moved with its body: c27cb1c2 (NX4,
+    # V3 S5) split submit_team_match into the route and _settle_team_report,
+    # the settle body the route and the report window both run; the UPDATE
+    # is unchanged (the writer census ruling, pointer
+    # handoff-0926/relaunch_srv_stage_s3_census_1019.md).
+    "_settle_team_report": {"completed"},
     "admin_resolve_team_series": {"cancelled"},
     "admin_reverse_team_series": {"cancelled"},
     "team_series_state": {"canceled", "dc_incomplete"},
