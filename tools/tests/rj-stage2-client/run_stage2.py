@@ -190,7 +190,7 @@ MUTANTS = [
         ("if (code == 401) { body = SessionRequired; return; }", "")],
      "tx1_401_today", "tx1_map_codes"),
     ("MX1.3", "KX1", "net", [
-        ("TeamHoldRules.PinRoom(room, BoolField(answer, \"hold\"), mode, seriesId, roster);",
+        ("TeamHoldRules.PinRoom(room, BoolField(TopLevel(answer), \"hold\"), mode, seriesId, roster);",
          "TeamHoldRules.PinRoom(room, true, mode, seriesId, roster);")],
      "t16_join_pin_today", "tx1_server_shapes"),
     # KX2, live points (V3 M2.13; MX2.1 and MX2.2 lane-added).
