@@ -982,8 +982,7 @@ namespace CompetitiveRounds
                 _claims.Clear();
                 _act.Clear();
                 _epochBroken = false;
-                _v3LogLines = 0;
-                _v3LastState = null;
+                _v3Log.Reset();
                 _lastActivateSent = -999f;
                 _v3LastRoomEvent = -999f;
                 _v3RetakeDue = false;
@@ -1041,9 +1040,9 @@ namespace CompetitiveRounds
         // the room it stamps no LIFE message, sends and accepts no claim, sends
         // no replay, ignores summaries and handles every header by today's path.
         private static bool _epochBroken;
-        private const int V3LineCap = 24;
-        private static int _v3LogLines;
-        private static string _v3LastState;
+        // Night 2026-10-19: the v3 line budget is per point (V3LineLog), no
+        // longer 24 per room.
+        private static readonly V3LineLog _v3Log = new V3LineLog();
         private static int _activateSeq;
         private static float _lastActivateSent = -999f;
         private static float _v3LastRoomEvent = -999f;
@@ -1057,12 +1056,11 @@ namespace CompetitiveRounds
             catch { return -1; }
         }
 
-        /// <summary>Bounded v3 state lines (per room).</summary>
+        /// <summary>Bounded v3 state lines (per point, V3LineLog).</summary>
         private static void V3Line(string text)
         {
-            if (_v3LogLines >= V3LineCap) return;
-            _v3LogLines++;
-            Plugin.Log.LogInfo("[POISON-LEDGER] " + text);
+            string line = _v3Log.Note(text);
+            if (line != null) Plugin.Log.LogInfo("[POISON-LEDGER] " + line);
         }
 
         private static int[] PresentActors()
@@ -1180,7 +1178,8 @@ namespace CompetitiveRounds
                 string why;
                 bool on = V3On(out why);
                 string state = on ? "v3 " + why : "v3 off why=" + why;
-                if (state != _v3LastState) { _v3LastState = state; V3Line(state); }
+                string stateLine = _v3Log.State(state);
+                if (stateLine != null) Plugin.Log.LogInfo("[POISON-LEDGER] " + stateLine);
 
                 if (!PhotonNetwork.IsMasterClient || _epochBroken || !V3PatchesLive) return;
                 if (_act.Live && !_v3RetakeDue) return;
@@ -1608,7 +1607,7 @@ namespace CompetitiveRounds
                 recorded = _ledger.Fence(-1, () =>
                 {
                     stamped = gm != null && gm.view != null && PoisonRpcStampPatch.TryFor(gm.view.ViewID, out ts);
-                    if (stamped) _ledger.NotePointBoundary(ts);
+                    if (stamped) { _ledger.NotePointBoundary(ts); _v3Log.OnPoint(); }
                     return stamped;
                 });
             }
