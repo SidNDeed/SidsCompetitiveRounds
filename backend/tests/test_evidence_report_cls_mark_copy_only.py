@@ -389,14 +389,17 @@ def vjoin(*vals):
     if alias is None:
         alias = _dict_alternatives(vals)
         if alias is not None:
-            for v, a in zip(vals, aliases):
-                if a is not None and not _dict_aliases(a):
+            for v in vals:
+                if not _dict_arms(v):
                     ex |= v.ex_all()
                     im |= v.im_all()
-        elif all(a is not None for a in aliases):
+        else:
+            # Tuple/sequence parts are retained or folded above. A discarded
+            # alias must contribute all its labels, even beside aliasless arms.
             for v in vals:
-                ex |= v.ex_all()
-                im |= v.im_all()
+                if v.alias is not None:
+                    ex |= v.ex_all()
+                    im |= v.im_all()
     return V(ex, im, funcs, elems, item, alias)
 
 
@@ -428,11 +431,6 @@ def _dict_arms(value):
 
 def _dict_alternatives(values):
     """Retain incompatible dictionary arms without folding their sibling slots."""
-    if not all(_dict_arms(value) or
-               (value.alias is None and value.ex == frozenset({C}) and not value.funcs and
-                value.elems is None and value.item is None)
-               for value in values):
-        return None
     arms = []
     seen = set()
     for value in values:
@@ -488,7 +486,8 @@ def element(v):
     """The value of one element of `v` when iterated or indexed by a value."""
     dicts = _dict_arms(v)
     if dicts:
-        return vjoin(*[add_im(arm.alias[1].element(), arm.im) for arm in dicts])
+        return vjoin(V(v.ex, v.im),
+                     *[add_im(arm.alias[1].element(), arm.im) for arm in dicts])
     if v.item is not None:
         return add_im(v.item, v.ex | v.im)
     if v.elems is not None:
@@ -1079,7 +1078,7 @@ class Frame:
             slots = [add_im(slot, arm.im) for arm in dicts
                      for slot in (arm.alias[1].read(n.slice.value),) if slot is not None]
             if slots:
-                return vjoin(*slots)
+                return vjoin(V(base.ex, base.im), *slots)
         if base.elems is not None and isinstance(n.slice, ast.Constant) and \
                 isinstance(n.slice.value, int) and -len(base.elems) <= n.slice.value < len(base.elems):
             return add_im(base.elems[n.slice.value], base.im)
@@ -1087,7 +1086,7 @@ class Frame:
             return V(base.ex, base.im | (idx.flat() - {C}), base.funcs, None, base.item)
         el = element(base)
         return V(el.ex | (idx.ex - {C}), el.im | idx.im, el.funcs | base.funcs, el.elems, el.item,
-                 el.alias if el.alias and el.alias[0] == "dict" else None)
+                 el.alias if _dict_arms(el) else None)
 
     def e_Slice(self, n):
         return vjoin(V({C}), self.expr(n.lower), self.expr(n.upper), self.expr(n.step))
@@ -1357,7 +1356,7 @@ class Frame:
                     elif key not in ref.must_keys:
                         value = vjoin(value, default)
                 selected.append(add_im(value, arm.im))
-            return vjoin(*selected)
+            return vjoin(V(recv.ex, recv.im), *selected)
         key_value = argvals[0] if argvals else V({C})
         value = vjoin(element(recv), default)
         return V(value.ex | (key_value.ex - {C}), value.im | key_value.im,
@@ -2054,6 +2053,130 @@ def evidence_report(request: Request, row):
 '''
     findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
     assert len(findings) == 1 and "reads K" in str(findings[0]), _fmt(findings)
+
+
+@pytest.mark.parametrize("kind,sibling", [
+    ("E", '_aer_enc(row["name"])'),
+    ("F", '"%.2f" % row["rank"]'),
+    ("constant", '("EMPTY",)'),
+], ids=["E", "F", "constant"])
+@pytest.mark.parametrize("nested,needle", [
+    ('row["name"]', "D"),
+    ('"HOT" if row["rank"] > 0.5 else "COLD"', "K"),
+    ('sorted(rows, key=_order_value)', "DO"),
+], ids=["D", "K", "O"])
+@pytest.mark.parametrize("sink", ["box", "str(box)"], ids=["direct", "str"])
+def test_m14_request_mixed_arms_keep_nested_labels(kind, sibling, nested, needle, sink):
+    api = (_REQUEST_AGGREGATE_API % ("", nested, sink)).replace(
+        "        box = None", "        box = " + sibling)
+    api += '\n\ndef _aer_enc(value):\n    return str(value)\n'
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads %s" % needle in str(findings[0]), (
+        kind, sink, _fmt(findings))
+
+
+@pytest.mark.parametrize("kind", [C, E, F, P])
+@pytest.mark.parametrize("aliased", [False, True], ids=["plain", "alias"])
+@pytest.mark.parametrize("label", [D, K, O])
+@pytest.mark.parametrize("sink", ["box", "str(box)"], ids=["direct", "str"])
+def test_m14_every_sibling_kind_keeps_the_dictionary_bound(kind, aliased, label, sink):
+    mod = Module("api", "", "fixture.py", lambda q: True)
+    ps = Pass([mod])
+    ps.recording = True
+    # A constant tuple exercises a non-scalar constant arm; both views must
+    # preserve the dictionary even when no common alias can represent them.
+    sibling = V({kind}, elems=(V({C}),) if kind == C else None,
+                alias=("import", "constant") if aliased else None)
+    nested = V({D}) if label == D else V({C}, {label})
+    frame = Frame(ps, mod, ("api", "probe"),
+                  {"request": V({R}), "sibling": sibling, "nested": nested}, frozenset())
+    branch = ast.parse('({"word": nested, "safe": "SAFE"} if request else sibling)',
+                       mode="eval").body
+    frame.env["box"] = frame.expr(branch)
+    value = frame.expr(ast.parse(sink, mode="eval").body)
+    frame.sink(branch, "mixed arm", value, DISPLAY)
+    assert len(ps.findings) == 1 and label in str(next(iter(ps.findings))), _fmt(ps.findings)
+    assert label in frame.env["box"].flat()
+    # The exact safe slot stays local to each retained dictionary arm.
+    safe = frame.expr(ast.parse('box["safe"]', mode="eval").body)
+    assert not safe.flat() & {D, K, O}
+
+
+@pytest.mark.parametrize("sink", ["box", "str(box)"])
+def test_m14_report_ifexp_with_encoded_sibling_refuses_classified_word(sink):
+    api = '''from fastapi import Request
+
+
+def _aer_enc(value):
+    return str(value)
+
+
+def evidence_report(request: Request, row):
+    box = ({"word": "HOT" if row["rank"] > 0.5 else "COLD"}
+           if request.path_params["mode"] else _aer_enc(row["name"]))
+    return {"name": %s}
+''' % sink
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), _fmt(findings)
+
+
+def test_m14_unrepresented_dictionary_arm_folds_all_its_labels(monkeypatch):
+    ref = DictRef(("fixture", "unrepresented"))
+    ref.seed(("word",), (V({D}, {K, O}),))
+    dictionary = V(alias=("dict", ref))
+    # Exercise the defensive fallback independently of structural admission.
+    monkeypatch.setitem(vjoin.__globals__, "_dict_alternatives", lambda values: None)
+    joined = vjoin(dictionary, V({E}))
+    assert D in joined.ex_all() and {K, O} <= joined.im_all()
+
+
+def test_m14_retained_sequence_parts_do_not_smear_structural_positions():
+    row = V(elems=(V({S}), V({E})))
+    joined = vjoin(V(item=row), V(item=row))
+    assert joined.ex == frozenset() and joined.im == frozenset()
+    first, second = element(joined).elems
+    assert first.flat() == {S} and second.flat() == {E}
+
+
+@pytest.mark.parametrize("selection", ["box[key]", 'box["safe"]',
+                                       'box.setdefault("safe", "DEFAULT")'])
+@pytest.mark.parametrize("label", [D, K, O])
+def test_m14_selection_keeps_labels_folded_from_a_non_dictionary_arm(selection, label):
+    mod = Module("api", "", "fixture.py", lambda q: True)
+    ps = Pass([mod])
+    frame = Frame(ps, mod, ("api", "probe"), {"key": V({C})}, frozenset())
+    clean = frame.expr(ast.parse('{"safe": "SAFE"}', mode="eval").body)
+    sibling = V(item=V({label}))
+    frame.env["box"] = vjoin(clean, sibling)
+    selected = frame.expr(ast.parse(selection, mode="eval").body)
+    assert label in selected.flat()
+
+
+def test_m14_exact_read_keeps_the_outer_conditional_selection():
+    api = '''from fastapi import Request
+
+
+def evidence_report(request: Request, row):
+    box = ({"word": "HOT"} if row["rank"] > 0.5 else {"word": "COLD"})
+    return {"name": box["word"]}
+'''
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "reads K" in str(findings[0]), _fmt(findings)
+
+
+def test_m14_nested_dynamic_selection_and_repeated_joins_keep_alternatives():
+    mod = Module("api", "", "fixture.py", lambda q: True)
+    ps = Pass([mod])
+    frame = Frame(ps, mod, ("api", "probe"), {"rank": V({D}), "key": V({C})}, frozenset())
+    first = frame.expr(ast.parse('{"rank": rank, "safe": "ONE"}', mode="eval").body)
+    second = frame.expr(ast.parse('\n{"rank": rank, "safe": "TWO"}', mode="eval").body)
+    joined = vjoin(vjoin(first, V({E})), second, V({P}))
+    frame.env["boxes"] = V(item=joined)
+    selected = frame.expr(ast.parse('boxes[key]', mode="eval").body)
+    assert len(_dict_arms(selected)) == 2 and D in selected.flat()
+    frame.env["selected"] = selected
+    safe = frame.expr(ast.parse('selected["safe"]', mode="eval").body)
+    assert not safe.flat() & {D, K, O}
 
 
 def test_transport_results_do_not_aggregate_nested_payload_labels():
