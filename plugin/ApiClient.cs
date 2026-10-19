@@ -16040,7 +16040,7 @@ namespace CompetitiveRounds
             string rpFamily = $"team#{gen}", rpPings, rpGen;
             int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
             Plugin.Instance.StartCoroutine(GetRequest(
-                $"{baseUrl}/api/v1/team/queue/poll/{steamId}",
+                $"{baseUrl}/api/v1/team/queue/poll/{steamId}{TeamHoldNet.PollQuery(TeamHoldGlue.AllAttached)}",
                 (success, response) =>
                 {
                     if (success && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
@@ -16156,6 +16156,8 @@ namespace CompetitiveRounds
 
         private static void ParseTeamQueuePoll(string response)
         {
+            // KX9 (NX3): rdm=1 answered readmissible: the hold offer, no queue state.
+            if (TeamHoldReturn.OfferFromPoll(response)) return;
             string status = ExtractJsonString(response, "status");
             var data = new TeamQueuePollData
             {
@@ -17974,12 +17976,10 @@ namespace CompetitiveRounds
         {
             try
             {
-                if (TeamHoldWriter.CurrentRoom() != room) return "";
-                string tgid = TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TGID);
-                int i = string.IsNullOrEmpty(tgid) ? -1 : tgid.LastIndexOf(':');
-                string g = i > 0 ? tgid.Substring(0, i) : null;
-                if (string.IsNullOrEmpty(g) || !TeamHoldRules.Flagged(room)) return "";
-                return TeamHoldRules.GameIdFields(room, g, ComputeHmacHex(TeamHoldRules.GameIdCanonical(g, reporter, room)));
+                // KX9 (NX4): `room` is the per-game report room; the server
+                // signs and classes over the raw flagged room it names.
+                return TeamHoldRules.GameIdAdvisoryFor(room, TeamHoldWriter.CurrentRoom(),
+                    TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TGID), reporter, ComputeHmacHex);
             }
             catch { return ""; }
         }
@@ -18927,12 +18927,14 @@ namespace CompetitiveRounds
             // Sept 10 WP-B: own ping map, once per sweep per lifecycle (see the 2v2 poll).
             string rpFamily = $"ovt#{gen}", rpPings, rpGen;
             int rpRev = RegionPingSweep.PollHeaders(rpFamily, out rpPings, out rpGen);
-            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/queue/poll/{sid}", (ok, resp) =>
+            Plugin.Instance.StartCoroutine(GetRequest($"{baseUrl}/api/v1/ovt/queue/poll/{sid}{TeamHoldNet.PollQuery(TeamHoldGlue.AllAttached)}", (ok, resp) =>
             {
                 if (ok && rpRev >= 0) RegionPingSweep.NotePollHeadersAcked(rpFamily, rpRev);
                 if (!ok || string.IsNullOrEmpty(resp)) return;
                 if (!IsOvtQueuePolling) return;   // left/locked while the request was in flight
                 if (gen != ovtGen) return;        // stale lifecycle (Codex verify finding 4)
+                // KX9 (NX3): rdm=1 answered readmissible: the hold offer, no queue state.
+                if (TeamHoldReturn.OfferFromPoll(resp)) return;
                 string status = ExtractJsonString(resp, "status") ?? "";
                 OvtQueueStatus = status;
                 OvtQueueCount = ExtractJsonInt(resp, "queue_count");

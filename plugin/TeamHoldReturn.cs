@@ -98,6 +98,26 @@ namespace CompetitiveRounds
             catch { }
         }
 
+        /// <summary>KX9 (NX3): a team or 1v2 poll answered readmissible is
+        /// the discovery answer of /hold/mine (the belt for a client that
+        /// missed it). True when the answer was that, so the queue flow
+        /// reads nothing else from it; the offer shows as Discover's.</summary>
+        internal static bool OfferFromPoll(string body)
+        {
+            TeamHoldNet.MineAnswer a;
+            if (!TeamHoldNet.PollReadmissible(body, out a)) return false;
+            try
+            {
+                if (string.IsNullOrEmpty(SteamAuth.SessionToken) || PhotonNetwork.InRoom || _route != null) return true;
+                if (_offer != null && _offer.HoldId == a.HoldId) return true;
+                if (!TeamHoldRules.DiscoveryShows(a)) return true;
+                _offer = a;
+                _offerAt = Now;
+            }
+            catch { }
+            return true;
+        }
+
         internal static void Dismiss() { _offer = null; }
 
         /// <summary>Rejoin: step 1, the claim.</summary>
@@ -144,7 +164,9 @@ namespace CompetitiveRounds
             string mySid = MatchTracker.LocalSteamId;
             if (!string.IsNullOrEmpty(mySid) && mySid != "unknown") props["u_id"] = mySid;
             if (PhotonNetwork.LocalPlayer != null) PhotonNetwork.LocalPlayer.SetCustomProperties(props);
-            TeamHoldRules.PinRoom(a.Room, a.Hold, offer.Mode, a.SeriesId, null);
+            // KX9: the claim answer's roster (NX1) pins the series roster,
+            // as the join answer does for a player who never left.
+            TeamHoldRules.PinRoom(a.Room, a.Hold, offer.Mode, a.SeriesId, a.Roster);
             if (offer.Mode == TeamHoldRules.MODE_TEAM) Plugin.SetPending2v2Slot(a.Slot);
             else Plugin.SetPendingOvtSlot(a.Slot);
             Plugin.SetPendingRoom(a.Room, a.Region);

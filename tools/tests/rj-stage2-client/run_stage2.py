@@ -46,6 +46,7 @@ PIECES = {
     "KX6": ("t55_", "t57_", "tx6_"),
     "KX8": ("tx8_", "t16_", "t29_", "t39_", "t58_"),
     "KX9A": ("t16_", "tx9_", "t6_claimed"),
+    "KX9B": ("t16_", "t29_", "t36_", "t39_", "t58_", "tx9_"),
 }
 
 # (name, piece, file, [(old, new), ...], target fixture, control fixture);
@@ -297,6 +298,28 @@ MUTANTS = [
     ("MX9.5", "KX9A", "net", [
         ("Verifier = Field(body, \"verifier\")", "Verifier = Field(body, \"hand_over_verifier\")")],
      "tx9_verifier_k3", "t16_join_pin_today"),
+    # KX9 Part B, the server's landed answers (MX9.6 to MX9.12 lane-added).
+    ("MX9.6", "KX9B", "net", [
+        ('BoolField(TopLevel(answer), "hold")', 'BoolField(answer, "hold")')],
+     "t16_join_hold_top_level", "t16_join_pin_today"),
+    ("MX9.7", "KX9B", "net", [
+        ("                Roster = RosterIds(body),\n", "                Roster = null,\n")],
+     "t39_claim_roster_pins", "t16_join_pin_today"),
+    ("MX9.8", "KX9B", "net", [
+        ('Slot = IntField(top, "slot", -1)', 'Slot = IntField(body, "slot", -1)')],
+     "t39_claim_top_level_slot", "t16_join_pin_today"),
+    ("MX9.9", "KX9B", "net", [
+        ('return allAttached ? "?rdm=1" : "";', 'return "";')],
+     "t39_rdm_poll_belt", "t16_join_pin_today"),
+    ("MX9.10", "KX9B", "net", [
+        ('Field(TopLevel(body), "status") != "readmissible"', 'Field(TopLevel(body), "status") != "readmissable"')],
+     "t39_rdm_poll_belt", "t16_join_pin_today"),
+    ("MX9.11", "KX9B", "rules", [
+        ("string room = HoldRoomOfReport(reportRoom);", "string room = reportRoom;")],
+     "t58_game_id_raw_room", "t16_join_pin_today"),
+    ("MX9.12", "KX9B", "rules", [
+        ("            return presentUids.Count;\n", "            return -1;\n")],
+     "t36_attest_short_roster", "t16_join_pin_today"),
 ]
 
 # The S0 inventory (V3 S0 step 2): every line under plugin/ that CALLS an

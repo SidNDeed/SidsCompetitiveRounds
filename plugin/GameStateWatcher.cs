@@ -1698,7 +1698,13 @@ namespace CompetitiveRounds
                 else target = 2;
 
                 var sids = SpectateFighterIds(fighters);
-                if (sids.Count != target) return;   // roster incomplete — nothing to attest yet
+                // KX9 (NX3): in a flagged 2v2 or 1v2 room with a waiting
+                // hold, the present fighters one short attest as a short
+                // roster the server accepts over its held set.
+                int attestTarget = (mode == "2v2" || mode == "1v2")
+                    ? TeamHoldRules.AttestTarget(room, target, TeamHoldWriter.RoomProp(TeamHoldRules.KEY_TH), sids)
+                    : target;
+                if (attestTarget < 0 || sids.Count != attestTarget) return;   // roster incomplete — nothing to attest yet
 
                 // Roster-freeze catch-up: code rooms never pass the
                 // OnMatchStarted competitive gate (#286), so freeze here the
@@ -1708,7 +1714,7 @@ namespace CompetitiveRounds
                 {
                     // V11 K47: in a gated room the lock roster, no fighter view.
                     var lockIds = GatedFreezeIds();
-                    if (!RoomActors.RosterFrozen && (lockIds == null || lockIds.Count >= 2))
+                    if (attestTarget == target && !RoomActors.RosterFrozen && (lockIds == null || lockIds.Count >= 2))
                         RoomActors.FreezeFighterRoster(lockIds ?? sids);
                 }
                 catch { }
@@ -1739,7 +1745,7 @@ namespace CompetitiveRounds
                 // without consuming either).
                 lastSpectateAttestAt = Time.unscaledTime;
                 spectateAttestEdgePending = false;
-                ApiClient.SpectateAttest(mode, sourceRef, room, region, actor, target, cap,
+                ApiClient.SpectateAttest(mode, sourceRef, room, region, actor, attestTarget, cap,
                                          battle ? "battle" : "transition",
                                          string.Join(",", sids.ToArray()));
             }
