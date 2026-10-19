@@ -4485,7 +4485,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:49725 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:49729 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4551,7 +4551,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:49537 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:49541 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4621,7 +4621,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:49042 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:49046 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -36365,21 +36365,25 @@ async def update_team_live_points(
     # Stage 2 (design V3 S2): while a team hold of this series is open, the
     # crossing evidence is the one the hold froze (crossed_at_hold), so a post
     # is recorded (seat attestation and a log line) and its points are ignored
-    # with reason hold_open. The series row is locked first, so a hold opening
+    # with reason hold_open. The series row is locked first, and the hold is
+    # read by a statement issued after that lock is granted, so a hold opening
     # concurrently either committed before this read or waits for this post,
     # which then precedes its crossing read. A non-member or a series that is
     # not live falls through to the UPDATE below, which refuses it as today.
+    # A series without the Stage 2 flag reads no hold table: match_hold_open
+    # opens a hold only in a room the series is flagged for.
     _held_row = (await db.execute(text("""
-        SELECT s.live_t1_points, s.live_t2_points,
-               EXISTS (SELECT 1 FROM match_seat_holds h
-                        WHERE h.series_id = s.id AND h.mode = 'team'
-                          AND h.closed_at IS NULL) AS held
+        SELECT s.live_t1_points, s.live_t2_points, s.hold_v2
           FROM team_series s
          WHERE s.id = :sid AND s.status = 'active' AND s.invalidated_at IS NULL
            AND :pid IN (s.t1a_id, s.t1b_id, s.t2a_id, s.t2b_id)
            FOR NO KEY UPDATE OF s
     """), {"sid": sid, "pid": reporter.id})).first()
-    if _held_row is not None and _held_row.held:
+    _held = bool(_held_row is not None and _held_row.hold_v2 and (await db.execute(text(
+        "SELECT EXISTS (SELECT 1 FROM match_seat_holds h"
+        " WHERE h.series_id = CAST(:sid AS uuid) AND h.mode = 'team'"
+        "   AND h.closed_at IS NULL)"), {"sid": str(sid)})).scalar())
+    if _held:
         await _record_seat_attestation(db, SEAT_SURFACE_TEAM, sid, reporter.id, _seat,
                                        (t1_points or 0) + (t2_points or 0))
         await db.commit()
