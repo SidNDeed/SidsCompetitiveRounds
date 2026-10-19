@@ -60,19 +60,20 @@ namespace CompetitiveRounds
     ///   CompetitiveUI.CaptureLogBundleInputs() (three path computations and
     ///   one audio snapshot) and starting a thread. All O(1).
     ///
-    ///   WORKER THREAD: the bounded tail reads, the assembly, the scrub, the
-    ///   JSON body and the UTF-8 encoding. ApiClient.ReadLogTail now SEEKS to
-    ///   the last N bytes, so the disk input is bounded before the read as well
-    ///   as after it — a 40 MB log costs 3.5 MB of reading, not 40.
+    ///   WORKER THREAD: the bounded head-and-tail reads
+    ///   (LogBundleCore.ReadCapped reads each file's first part and seeks to
+    ///   its last, so a 40 MB log costs at most its cap in reading), the
+    ///   assembly, the scrub, the JSON body and the UTF-8 encoding.
     ///
     ///   MAIN THREAD, on the next Tick after the worker finishes: the dedup
     ///   compare and handing the finished byte[] to the upload handler. The
     ///   largest single act is that hand-off.
     ///
-    /// The worker is a background thread, so it cannot hold the process open,
-    /// and it touches no engine API — everything it reads is either a parameter
-    /// or a local. One at a time: _bundling is the gate, and a second exit
-    /// while a bundle is being built simply says so and skips.
+    /// The worker is a background thread (LogBundleCore.OffMainJob, the bug
+    /// form's mechanism too), so it cannot hold the process open, and it
+    /// touches no engine API — everything it reads is either a parameter or a
+    /// local. One at a time: the job's busy flag is the gate, and a second
+    /// exit while a bundle is being built simply says so and skips.
     /// </summary>
     internal static class AutoLogUpload
     {
@@ -110,16 +111,13 @@ namespace CompetitiveRounds
         private static float _skipLoggedAt = -99999f;
 
         // ── worker hand-off ──────────────────────────────────────────────
-        // _bundling is written on the main thread only (set before the worker
-        // starts, cleared on the main thread when the result is consumed or
-        // the start fails), so it is a plain bool. Everything the worker
-        // PRODUCES is published under _gate and read under _gate, which is
-        // both the mutual exclusion and the memory barrier — a volatile bool
-        // plus unsynchronised fields would publish the flag before the
-        // payload on a weak model.
-        private static readonly object _gate = new object();
-        private static bool _bundling;
-        private static BundleResult _ready;
+        // LogBundleCore.OffMainJob, the mechanism the bug form uses too: its
+        // busy flag is main-thread only (set by Start, cleared when
+        // TakeFinished consumes a finished build), and everything the worker
+        // PRODUCES is published under the job's lock, which is both the
+        // mutual exclusion and the memory barrier. One build at a time.
+        private static readonly LogBundleCore.OffMainJob<BundleResult> _job =
+            new LogBundleCore.OffMainJob<BundleResult>();
 
         /// <summary>What the worker hands back. Immutable once published.</summary>
         private sealed class BundleResult
@@ -131,6 +129,9 @@ namespace CompetitiveRounds
             internal string Mode;          // carried so the acceptance line stays truthful
             internal string Diagnostic;    // ComposeLogBundle's line, logged on the main thread
             internal string Failure;       // non-null = do not send; this is why
+            internal int ComposeThreadId;  // the thread the bundle was composed on
+            internal double CaptureMs;     // main-thread capture at room exit
+            internal double BuildMs;       // worker time
         }
 
         private static bool _startupDone;
@@ -270,7 +271,7 @@ namespace CompetitiveRounds
             {
                 if (_endpointAbsent) return;     // already said so, once, this session
                 if (_inFlight) return;
-                if (_bundling) { NoteSkip("the previous room's bundle is still being built"); return; }
+                if (_job.Busy) { NoteSkip("the previous room's bundle is still being built"); return; }
 
                 if (!_enabledNow()) { NoteSkip("the setting is off"); return; }
                 if (!_consentNow()) { NoteSkip("data reporting is not consented"); return; }
@@ -289,23 +290,24 @@ namespace CompetitiveRounds
                 // EVERY Unity/Photon read the bundle needs, taken HERE, while
                 // we are still on the game thread. Past this point the worker
                 // sees nothing but the values it was handed.
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 var inputs = CompetitiveUI.CaptureLogBundleInputs();
                 string modVersion = Plugin.ModVersion;
                 string gameVersion = ApiClient.SafeApplicationVersion();
+                double captureMs = sw.Elapsed.TotalMilliseconds;
 
-                _bundling = true;
-                StartBundleWorker(inputs, steamId, name, modVersion, gameVersion, mode, room, opp, series);
+                StartBundleWorker(inputs, steamId, name, modVersion, gameVersion, mode, room, opp, series, captureMs);
             }
             catch (Exception ex)
             {
-                _bundling = false;
                 _inFlight = false;
                 Plugin.Log.LogWarning("[AUTO-LOG] room-exit handling failed: " + ex.Message);
             }
         }
 
         /// <summary>The worker. Reads, assembles, scrubs, escapes and encodes —
-        /// all of it off the game thread — then publishes one BundleResult.
+        /// all of it off the game thread, through LogBundleCore.OffMainJob —
+        /// then publishes one BundleResult.
         ///
         /// It logs NOTHING: BepInEx's log sinks are not documented thread-safe
         /// and a diagnostic written from here would interleave with the game's
@@ -314,62 +316,58 @@ namespace CompetitiveRounds
         private static void StartBundleWorker(CompetitiveUI.LogBundleInputs inputs,
                                               string steamId, string name,
                                               string modVersion, string gameVersion,
-                                              string mode, string room, string opp, string series)
+                                              string mode, string room, string opp, string series,
+                                              double captureMs)
         {
-            var t = new Thread(() =>
+            bool started = _job.Start("SCR-AutoLogBundle", () =>
             {
-                var result = new BundleResult { Mode = mode };
-                try
+                var result = new BundleResult { Mode = mode, CaptureMs = captureMs };
+                var bsw = System.Diagnostics.Stopwatch.StartNew();
+                var info = new LogBundleCore.ComposeInfo();
+                string bundle = CompetitiveUI.ComposeLogBundle(inputs, info);
+                result.Diagnostic = info.Diagnostic;
+                result.Scrubbed = info.Scrubbed;
+                result.ComposeThreadId = info.ThreadId;
+                if (string.IsNullOrEmpty(bundle) || info.Scrubbed < 0)
                 {
-                    int scrubbed; string diagnostic;
-                    string bundle = CompetitiveUI.ComposeLogBundle(inputs, out scrubbed, out diagnostic);
-                    result.Diagnostic = diagnostic;
-                    result.Scrubbed = scrubbed;
-                    if (string.IsNullOrEmpty(bundle) || scrubbed < 0)
-                    {
-                        result.Failure = "the log scrub did not complete";
-                    }
-                    else
-                    {
-                        result.Chars = bundle.Length;
-                        result.Hash = StableHash(bundle);
-                        string body = ApiClient.BuildAutoLogBody(steamId, name, modVersion, gameVersion,
-                                                                 mode, room, opp, series, bundle);
-                        result.Body = Encoding.UTF8.GetBytes(body);
-                    }
+                    result.Failure = "the log scrub did not complete";
                 }
-                catch (Exception ex)
+                else
                 {
-                    // The type name only: an exception MESSAGE from a file read
-                    // can carry the path that produced it, and this one has not
-                    // been through the scrub.
-                    result.Failure = "the bundle could not be built (" + ex.GetType().Name + ")";
+                    result.Chars = bundle.Length;
+                    result.Hash = StableHash(bundle);
+                    string body = ApiClient.BuildAutoLogBody(steamId, name, modVersion, gameVersion,
+                                                             mode, room, opp, series, bundle);
+                    result.Body = Encoding.UTF8.GetBytes(body);
                 }
-                lock (_gate) { _ready = result; }
+                result.BuildMs = bsw.Elapsed.TotalMilliseconds;
+                return result;
+            },
+            // The type name only: an exception MESSAGE from a file read can
+            // carry the path that produced it, and this one has not been
+            // through the scrub.
+            ex => new BundleResult
+            {
+                Mode = mode,
+                CaptureMs = captureMs,
+                Failure = "the bundle could not be built (" + ex.GetType().Name + ")",
             });
-            t.IsBackground = true;          // must never hold the process open
-            t.Name = "SCR-AutoLogBundle";
-            try { t.Start(); }
-            catch (Exception ex)
-            {
-                _bundling = false;
-                Plugin.Log.LogWarning("[AUTO-LOG] could not start the bundle thread: " + ex.Message);
-            }
+            if (!started)
+                Plugin.Log.LogWarning("[AUTO-LOG] could not start the bundle thread");
         }
 
         /// <summary>MAIN THREAD, from Tick. Consumes at most one finished
         /// bundle per frame and hands it to Dispatch.</summary>
         private static void PumpFinishedBundle()
         {
-            BundleResult r;
-            lock (_gate)
-            {
-                r = _ready;
-                _ready = null;
-            }
+            int workerId;
+            BundleResult r = _job.TakeFinished(out workerId);
             if (r == null) return;
-            _bundling = false;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             Dispatch(r);
+            if (r.ComposeThreadId != 0)
+                CompetitiveUI.LogBundleThreadLine("auto-log", r.ComposeThreadId, workerId, r.CaptureMs, r.BuildMs,
+                                                  sw.Elapsed.TotalMilliseconds, r.Body?.Length ?? 0);
         }
 
         /// <summary>MAIN THREAD. Does the only two things that could not be

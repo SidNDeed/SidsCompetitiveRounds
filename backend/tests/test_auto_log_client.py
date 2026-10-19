@@ -47,8 +47,11 @@ LOG_SCRUB = PLUGIN / "LogScrub.cs"
 CATALOGUES = PLUGIN / "I18nCatalogues.cs"
 
 ON_ROOM_LEFT = "OnRoomLeft()"
-COMPOSE = "ComposeLogBundle(LogBundleInputs inputs, out int scrubbed, out string diagnostic)"
+COMPOSE = "ComposeLogBundle(LogBundleInputs inputs, LogBundleCore.ComposeInfo info)"
 READ_TAIL = "ReadLogTail(string path, int maxChars = BUG_REPORT_LOG_CAP_CHARS)"
+LOG_BUNDLE_CORE = PLUGIN / "LogBundleCore.cs"
+SUBMIT_FORM = "SubmitBugReportNow()"
+PUMP_FORM = "PumpBugFormBundle()"
 
 LOCALES = ("es", "ru", "uk", "sv")
 
@@ -56,19 +59,25 @@ LOCALES = ("es", "ru", "uk", "sv")
 # ── the game thread ──────────────────────────────────────────────────────
 
 # Anything whose cost scales with the size of a log file. None of these may be
-# reached from the room-exit handler, which runs on the game thread.
+# reached from the room-exit handler or the bug form's main-thread halves.
 EXPENSIVE = (
     "CompetitiveUI.BuildLogBundle(",
     "CompetitiveUI.ComposeLogBundle(",
+    "ComposeLogBundle(",
+    "LogBundleCore.Compose(",
+    "LogBundleCore.ReadCapped(",
     "ApiClient.ReadLogTail(",
     "ApiClient.BuildAutoLogBody(",
+    "ApiClient.BuildBugReportBody(",
     "ApiClient.SubmitAutoLog(",
+    "ApiClient.SubmitBugReport(",
+    "Encoding.UTF8.GetBytes(",
 )
 
 
 def test_the_room_exit_handler_does_no_log_work_on_the_game_thread():
-    # Control: put `CompetitiveUI.ComposeLogBundle(inputs, out s, out d);`
-    # back into OnRoomLeft -> red.
+    # Control: put `CompetitiveUI.ComposeLogBundle(inputs, info);` back into
+    # OnRoomLeft -> red.
     block = mask_code(cs_block(AUTO_LOG, ON_ROOM_LEFT))
     found = [needle for needle in EXPENSIVE if needle in block]
     assert not found, (
@@ -80,60 +89,106 @@ def test_the_room_exit_handler_does_no_log_work_on_the_game_thread():
     assert "StartBundleWorker(" in block
 
 
-def _worker_lambda_body() -> str:
-    """The delegate passed to `new Thread(...)`, on the mask.
+def _job_delegate(source: Path, start_needle: str, end_needle: str) -> str:
+    """The work delegate handed to an OffMainJob's Start, on the mask.
 
     Sliced rather than parsed: it is an anonymous method, so it has no
-    signature `cs_block` could find. The window ends at the publish, which is
-    the delegate's last statement.
+    signature `cs_block` could find. The window ends where the error
+    delegate (the Start call's last argument) begins.
     """
-    masked = mask_code(AUTO_LOG.read_text(encoding="utf-8"))
-    start = masked.find("new Thread(")
-    assert start != -1, "no worker thread in AutoLogUpload"
-    end = masked.find("lock (_gate)", start)
-    assert end != -1, "the worker no longer publishes under the gate"
+    masked = mask_code(source.read_text(encoding="utf-8"))
+    start = masked.find(start_needle)
+    assert start != -1, "no %s in %s" % (start_needle, source.name)
+    assert masked.find(start_needle, start + 1) == -1, \
+        "more than one %s in %s" % (start_needle, source.name)
+    end = masked.find(end_needle, start)
+    assert end != -1, "the job start in %s lost its error delegate" % source.name
     return masked[start:end]
 
 
+def _auto_log_worker() -> str:
+    return _job_delegate(AUTO_LOG, "_job.Start(", "ex => new BundleResult")
+
+
+def _bug_form_worker() -> str:
+    return _job_delegate(COMPETITIVE_UI, "_bugFormJob.Start(", "ex => new BugFormBundle")
+
+
 def test_the_bundle_is_composed_on_a_background_thread():
-    body = code_of(AUTO_LOG)
-    assert body.count("new Thread(") == 1, "expected exactly one worker thread"
-    # Control: delete either of these -> red. IsBackground is not decoration:
-    # a foreground thread mid-bundle holds the process open at quit.
-    assert "IsBackground = true" in body
-    worker = _worker_lambda_body()
+    # One mechanism for both producers: LogBundleCore.OffMainJob starts the
+    # only thread, and it is a background one. Control: delete either of
+    # these -> red. IsBackground is not decoration: a foreground thread
+    # mid-bundle holds the process open at quit.
+    core = code_of(LOG_BUNDLE_CORE)
+    assert core.count("new Thread(") == 1, "expected exactly one worker thread in the core"
+    assert "IsBackground = true" in core
+    for producer in (AUTO_LOG, COMPETITIVE_UI):
+        assert "new Thread(" not in code_of(producer), (
+            "%s starts its own thread beside the shared job" % producer.name)
+    worker = _auto_log_worker()
     for needle in ("CompetitiveUI.ComposeLogBundle(", "ApiClient.BuildAutoLogBody(",
                    "Encoding.UTF8.GetBytes("):
-        assert needle in worker, f"the worker does not do {needle} -- so something else does"
+        assert needle in worker, f"the auto-log worker does not do {needle} -- so something else does"
+    form = _bug_form_worker()
+    for needle in ("ComposeLogBundle(", "ApiClient.BuildBugReportBody(",
+                   "Encoding.UTF8.GetBytes(", "ApiClient.SensitiveBodyProbe("):
+        assert needle in form, f"the bug-form worker does not do {needle} -- so something else does"
+
+
+def test_the_bug_form_does_no_log_work_on_the_game_thread():
+    """Night of 2026-10-19: the form composed a 3.3 M-char bundle inline and
+    held a live game's frame for 907 ms. Its main-thread halves are the
+    submit handler OUTSIDE the worker delegate and the pump. Control: put
+    `string b = ComposeLogBundle(inputs, new LogBundleCore.ComposeInfo());`
+    before the job start in SubmitBugReportNow -> red."""
+    submit = mask_code(cs_block(COMPETITIVE_UI, SUBMIT_FORM))
+    worker = _bug_form_worker()
+    at = submit.find(worker)
+    assert at != -1, "the bug-form worker delegate is not inside SubmitBugReportNow"
+    outside = submit[:at] + submit[at + len(worker):]
+    found = [n for n in EXPENSIVE if n in outside]
+    assert not found, "the bug form's main thread reaches %r" % found
+    assert "CaptureLogBundleInputs(" in outside, "the form no longer captures on the main thread"
+    pump = mask_code(cs_block(COMPETITIVE_UI, PUMP_FORM))
+    found = [n for n in EXPENSIVE if n in pump]
+    assert not found, "the bug form's pump reaches %r" % found
+    assert "ApiClient.SubmitBugReportBody(" in pump, "the pump no longer hands the body to the request"
+    # The synchronous producer is gone, not merely unused.
+    assert "BuildLogBundle(" not in code_of(COMPETITIVE_UI)
 
 
 def test_the_worker_writes_nothing_to_the_log_from_its_own_thread():
     # BepInEx's sinks are not documented thread-safe, and a line written from
     # here interleaves with the game's own. Every sentence the worker wants to
     # say travels back in the result.
-    # Control: insert `Plugin.Log.LogInfo("x");` inside the delegate -> red.
-    worker = _worker_lambda_body()
-    assert "Plugin.Log" not in worker
+    # Control: insert `Plugin.Log.LogInfo("x");` inside either delegate -> red.
+    for worker in (_auto_log_worker(), _bug_form_worker()):
+        assert "Plugin.Log" not in worker
 
 
 def test_the_thread_safe_composer_touches_no_engine_api():
-    # Control: add `Plugin.Log.LogInfo(diagnostic);` to ComposeLogBundle -> red.
-    body = mask_code(cs_block(COMPETITIVE_UI, COMPOSE))
+    # Control: add `Plugin.Log.LogInfo(diagnostic);` to ComposeLogBundle or
+    # anywhere in LogBundleCore.cs -> red.
     forbidden = ("Plugin.Log", "AudioSelfCheck.", "Application.", "Time.",
                  "PhotonNetwork", "UnityEngine.", "I18n.")
-    hit = [n for n in forbidden if n in body]
-    assert not hit, (
-        "ComposeLogBundle reaches %r. It runs on a worker thread; a Unity call "
-        "there is a freeze at best and a throw at worst." % hit)
+    for name, body in (("ComposeLogBundle", mask_code(cs_block(COMPETITIVE_UI, COMPOSE))),
+                       ("LogBundleCore.cs", code_of(LOG_BUNDLE_CORE))):
+        hit = [n for n in forbidden if n in body]
+        assert not hit, (
+            "%s reaches %r. It runs on a worker thread; a Unity call there is a "
+            "freeze at best and a throw at worst." % (name, hit))
+    assert "LogBundleCore.Compose(" in mask_code(cs_block(COMPETITIVE_UI, COMPOSE))
 
 
 def test_the_body_builder_takes_its_versions_as_parameters():
-    """`Application.version` is a Unity read, so it cannot live in the body
+    """`Application.version` is a Unity read, so it cannot live in a body
     builder the worker calls. Control: replace the `gameVersion` parameter
     with a direct `UnityEngine.Application.version` read -> red."""
-    body = mask_code(cs_block(API_CLIENT, "BuildAutoLogBody(string steamId, string displayName,"))
-    assert "Application." not in body
-    assert "Plugin.ModVersion" not in body
+    for sig in ("BuildAutoLogBody(string steamId, string displayName,",
+                "BuildBugReportBody(string steamId, string displayName,"):
+        body = mask_code(cs_block(API_CLIENT, sig))
+        assert "Application." not in body, sig
+        assert "Plugin.ModVersion" not in body, sig
 
 
 # ── the read is bounded before the file is read ──────────────────────────
