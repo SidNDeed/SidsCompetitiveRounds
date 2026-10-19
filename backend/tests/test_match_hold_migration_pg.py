@@ -41,6 +41,12 @@ NEW_TABLES = ("match_games", "match_seat_holds", "match_seat_presence",
               "match_hold_open_attempts", "match_hold_attempts",
               "match_report_windows", "match_report_journal")
 
+# The eight columns 383 adds to existing tables (its ADD COLUMN statements).
+M383_COLUMNS = (("team_queue", "caps"), ("ovt_queue", "caps"),
+                ("team_series", "hold_v2"), ("team_series", "hold_room"),
+                ("ovt_series", "hold_v2"), ("ovt_series", "hold_room"),
+                ("team_matches", "fallback_cls"), ("ovt_matches", "fallback_cls"))
+
 
 def _run(coro):
     return asyncio.run(coro)
@@ -106,6 +112,13 @@ async def _build_without_383(c):
     finally:
         await engine.dispose()
     await cf_pg.lh._widen(conn, schema)
+    # The widen step adds every column a model maps, nullable and default-free.
+    # models.py declares the team-side 383 columns (NX1, learning 346), so on a
+    # build that holds 383 out they would exist before its first apply, in a
+    # shape 383 does not give them, and its ADD COLUMN IF NOT EXISTS would skip
+    # them. Production has none of them before 383: drop what the widen added.
+    for tbl, col in M383_COLUMNS:
+        await conn.execute('ALTER TABLE %s DROP COLUMN IF EXISTS "%s"' % (tbl, col))
     second = await cf_pg.lh._replay(conn, statements)
     unexpected = [f for f in second if f[1] not in cf_pg.lh._ALREADY
                   and (f[0], f[1]) not in cf_pg.lh.REPLAY_KNOWN]
