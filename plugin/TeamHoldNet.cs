@@ -129,7 +129,9 @@ namespace CompetitiveRounds
         /// A written pin never changes for its room (TeamHoldRules.PinRoom).</summary>
         internal static void PinFromJoin(string answer, string mode, string room, string seriesId, IEnumerable<string> roster)
         {
-            TeamHoldRules.PinRoom(room, BoolField(answer, "hold"), mode, seriesId, roster);
+            // KX9: `hold` is the answer's own top-level field (NX1: the team
+            // poll's TeamQueuePollResponse.hold, the 1v2 locked payload's).
+            TeamHoldRules.PinRoom(room, BoolField(TopLevel(answer), "hold"), mode, seriesId, roster);
         }
 
         /// <summary>The hold-open canonical (RJS-L3), new and separate from the
@@ -340,6 +342,113 @@ namespace CompetitiveRounds
             return a >= 0 && b >= 0;
         }
 
+        // ── KX9 Part B: the server's landed answers (staging NX1 to NX4) ──
+
+        /// <summary>The root object of a JSON answer with every nested object
+        /// and array replaced by null, so a key read from it is the answer's
+        /// own top-level field and never the same key inside a nested value
+        /// (the claim answer's `roster` objects carry slot and team; the join
+        /// answers' `rules` dict and member lists sit beside `hold`).</summary>
+        internal static string TopLevel(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return json;
+            var sb = new StringBuilder(json.Length);
+            int depth = 0;
+            bool str = false;
+            for (int i = 0; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (str)
+                {
+                    if (depth <= 1) sb.Append(c);
+                    if (c == '\\' && i + 1 < json.Length) { i++; if (depth <= 1) sb.Append(json[i]); }
+                    else if (c == '"') str = false;
+                    continue;
+                }
+                if (c == '"') { str = true; if (depth <= 1) sb.Append(c); continue; }
+                if (c == '{' || c == '[')
+                {
+                    depth++;
+                    if (depth == 1) sb.Append(c);
+                    else if (depth == 2) sb.Append("null");
+                    continue;
+                }
+                if (c == '}' || c == ']')
+                {
+                    if (depth == 1) sb.Append(c);
+                    depth--;
+                    continue;
+                }
+                if (depth <= 1) sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>The index of the bracket closing the one at
+        /// <paramref name="open"/>, strings skipped; -1 when unclosed.</summary>
+        private static int CloseOf(string json, int open)
+        {
+            int depth = 0;
+            bool str = false;
+            for (int i = open; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (str) { if (c == '\\') i++; else if (c == '"') str = false; continue; }
+                if (c == '"') { str = true; continue; }
+                if (c == '{' || c == '[') depth++;
+                else if (c == '}' || c == ']') { depth--; if (depth == 0) return i; }
+            }
+            return -1;
+        }
+
+        /// <summary>The claim answer's `roster` (NX1, match_hold._roster: a
+        /// list of {steam_id, slot, team} in slot order) as its Steam ids, in
+        /// the shape PinFromJoin pins; null when the answer carries none.</summary>
+        internal static List<string> RosterIds(string json)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string pat = "\"roster\"";
+            int k = json.IndexOf(pat, StringComparison.Ordinal);
+            if (k < 0) return null;
+            int i = k + pat.Length;
+            while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+            if (i >= json.Length || json[i] != ':') return null;
+            i++;
+            while (i < json.Length && char.IsWhiteSpace(json[i])) i++;
+            if (i >= json.Length || json[i] != '[') return null;
+            int end = CloseOf(json, i);
+            if (end < 0) return null;
+            var ids = new List<string>();
+            for (int j = i + 1; j < end; j++)
+            {
+                if (json[j] != '{') continue;
+                int close = CloseOf(json, j);
+                if (close < 0 || close > end) return null;
+                string sid = Field(json.Substring(j, close - j + 1), "steam_id");
+                if (!string.IsNullOrEmpty(sid)) ids.Add(sid);
+                j = close;
+            }
+            return ids;
+        }
+
+        /// <summary>The team and 1v2 poll query (NX3, V3 S3): rdm=1 asks the
+        /// poll to answer `readmissible` while this player has a live hold,
+        /// the belt behind /hold/mine. Sent only when every Stage 2 patch
+        /// attached (the rjs1 condition); "" otherwise, the poll of today.</summary>
+        internal static string PollQuery(bool allAttached) { return allAttached ? "?rdm=1" : ""; }
+
+        /// <summary>A team or 1v2 poll answered `readmissible` (NX3
+        /// _s2_poll_readmissible: the /hold/mine payload with status
+        /// "readmissible", readmissible 1, room_region and series_tally),
+        /// read as the discovery answer. False for every poll of today.</summary>
+        internal static bool PollReadmissible(string body, out MineAnswer a)
+        {
+            a = null;
+            if (string.IsNullOrEmpty(body) || Field(TopLevel(body), "status") != "readmissible") return false;
+            TryParseMine(200, body, out a);
+            return a != null && a.Readmissible;
+        }
+
         internal sealed class OpenAnswer
         {
             internal bool Opened;
@@ -451,19 +560,25 @@ namespace CompetitiveRounds
             internal string BoundaryDigest;
             internal string SeriesId;
             internal int W0 = -1, W1 = -1;
+            /// <summary>The pinned series roster's Steam ids (NX1), or null.</summary>
+            internal List<string> Roster;
         }
 
         internal static bool TryParseClaim(int status, string body, out ClaimAnswer a)
         {
             a = null;
             if (string.IsNullOrEmpty(body)) return false;
-            if (status != 200 || Field(body, "status") != "claimed")
-            { a = new ClaimAnswer { Ok = false, Reason = Field(body, "reason") ?? ("http_" + status.ToString(CultureInfo.InvariantCulture)) }; return true; }
+            // KX9: every scalar is read from the top level, so the roster
+            // objects' slot and team never answer for the claim's own.
+            string top = TopLevel(body);
+            if (status != 200 || Field(top, "status") != "claimed")
+            { a = new ClaimAnswer { Ok = false, Reason = Field(top, "reason") ?? ("http_" + status.ToString(CultureInfo.InvariantCulture)) }; return true; }
             a = new ClaimAnswer
             {
-                Ok = true, Token = Field(body, "token"), Room = Field(body, "room_name"), Region = Field(body, "room_region"),
-                Slot = IntField(body, "slot", -1), Team = IntField(body, "team", -1), G = Field(body, "game_id"),
-                Hold = BoolField(body, "hold"), BoundaryDigest = Field(body, "boundary_digest"), SeriesId = Field(body, "series_id"),
+                Ok = true, Token = Field(top, "token"), Room = Field(top, "room_name"), Region = Field(top, "room_region"),
+                Slot = IntField(top, "slot", -1), Team = IntField(top, "team", -1), G = Field(top, "game_id"),
+                Hold = BoolField(top, "hold"), BoundaryDigest = Field(top, "boundary_digest"), SeriesId = Field(top, "series_id"),
+                Roster = RosterIds(body),
             };
             IntPairField(body, "series_tally", out a.W0, out a.W1);
             if (string.IsNullOrEmpty(a.Token) || string.IsNullOrEmpty(a.Room) || a.Slot < 0 || string.IsNullOrEmpty(a.G))

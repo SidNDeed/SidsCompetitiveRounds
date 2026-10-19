@@ -1321,5 +1321,55 @@ namespace CompetitiveRounds
         {
             return allAttached ? ",\"caps\":\"rjs1\"" : "";
         }
+
+        // ── KX9 Part B: the report routes' advisory room, the held attest ──
+
+        /// <summary>The flagged room a report names (NX4): the report room is
+        /// `{room}_{6 digits}_r{n}`, the grammar both report routes enforce,
+        /// and the server verifies the game-id signature over the RAW room
+        /// (the series hold_room, the room /game/start minted G in). Any other
+        /// string is returned as it is.</summary>
+        internal static string HoldRoomOfReport(string reportRoom)
+        {
+            if (string.IsNullOrEmpty(reportRoom)) return reportRoom;
+            int r = reportRoom.LastIndexOf("_r", StringComparison.Ordinal);
+            if (r < 8 || r + 2 >= reportRoom.Length) return reportRoom;
+            for (int i = r + 2; i < reportRoom.Length; i++) if (reportRoom[i] < '0' || reportRoom[i] > '9') return reportRoom;
+            if (reportRoom[r - 7] != '_') return reportRoom;
+            for (int i = r - 6; i < r; i++) if (reportRoom[i] < '0' || reportRoom[i] > '9') return reportRoom;
+            return reportRoom.Substring(0, r - 7);
+        }
+
+        /// <summary>The advisory fields of a report (S5, NX4 names game_id and
+        /// game_id_sig): G from cr_tgid (`{G}:{n}`) while this client is in the
+        /// report's raw room, signed over `game-id:{G}:{reporter}:{raw room}`;
+        /// "" otherwise, the body of today.</summary>
+        internal static string GameIdAdvisoryFor(string reportRoom, string currentRoom, string tgid, string reporter,
+                                                 Func<string, string> sign)
+        {
+            string room = HoldRoomOfReport(reportRoom);
+            if (string.IsNullOrEmpty(room) || currentRoom != room || sign == null) return "";
+            int i = string.IsNullOrEmpty(tgid) ? -1 : tgid.LastIndexOf(':');
+            string g = i > 0 ? tgid.Substring(0, i) : null;
+            if (string.IsNullOrEmpty(g) || !Flagged(room)) return "";
+            return GameIdFields(room, g, sign(GameIdCanonical(g, reporter, room)));
+        }
+
+        /// <summary>The spectate attest during a hold (NX3, V3 S3 step 6): in
+        /// a flagged room whose cr_th names a waiting hold, the present
+        /// fighters one short of the mode, every one on the pinned roster,
+        /// attest as a short roster (fighter_target = present), which the
+        /// server accepts over its held set H. The full roster attests as
+        /// today; -1 is no attest.</summary>
+        internal static int AttestTarget(string room, int full, string th, IList<string> presentUids)
+        {
+            if (presentUids == null || full < 2) return -1;
+            if (presentUids.Count == full) return full;
+            if (presentUids.Count != full - 1 || !Flagged(room) || !ThLive(th)) return -1;
+            var pin = PinFor(room);
+            if (pin != null && pin.Roster.Count > 0)
+                foreach (var u in presentUids) if (!pin.Roster.Contains(u)) return -1;
+            return presentUids.Count;
+        }
     }
 }
