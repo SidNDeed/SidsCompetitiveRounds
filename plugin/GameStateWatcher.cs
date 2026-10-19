@@ -13,43 +13,6 @@ using Hashtable = ExitGames.Client.Photon.Hashtable;
 
 namespace CompetitiveRounds
 {
-    /// <summary>Bounded telemetry series that COMPRESSES instead of stopping
-    /// (Stan bug 181 root cause — the old hard 128-sample cap was a 6:24
-    /// recording ceiling every 2v2/FFA game overran). At the cap the series
-    /// drops every other sample and doubles its stride, so it always spans
-    /// the whole game in at most 128 entries: 6.4 min at 3s/sample, 12.8 at
-    /// 6s, 25.6 at 12s... Renderers must scale the x-axis by the real match
-    /// duration rather than assuming a fixed cadence. Shared by
-    /// GameStateWatcher and FfaMode.</summary>
-    internal sealed class DecimatedList<T>
-    {
-        public readonly List<T> Items = new List<T>();
-        private int stride = 1;
-        private int tick;
-
-        public int Count => Items.Count;
-
-        public void Add(T value)
-        {
-            if ((tick++ % stride) != 0) return;
-            Items.Add(value);
-            if (Items.Count >= 128)
-            {
-                int half = Items.Count / 2;
-                for (int i = 0; i < half; i++) Items[i] = Items[i * 2];
-                Items.RemoveRange(half, Items.Count - half);
-                stride *= 2;
-            }
-        }
-
-        public void Clear()
-        {
-            Items.Clear();
-            stride = 1;
-            tick = 0;
-        }
-    }
-
     public static class GameStateWatcher
     {
         // \u2500\u2500 Room state \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -182,6 +145,15 @@ namespace CompetitiveRounds
         // and opponent-heartbeat gaps (victim-side view of the same). All
         // advisory — never in the HMAC, never auto-invalidating.
         private static readonly DecimatedList<int> localFpsTimeline = new DecimatedList<int>();   // decimates at cap
+        // Night 2026-10-19: one focus flag per 5 s fps bucket, added in
+        // lockstep with localFpsTimeline (the same Add calls, so the same
+        // decimation keeps index i on bucket i): 1 = every frame of the bucket
+        // had window focus, 0 = at least one did not. The client caps at
+        // 120 fps on a focus loss ([FPSCAP]), which the server fps_dip_pattern
+        // check read as a deliberate dip; the flag lets it exclude those
+        // buckets (server lane separate; the current server ignores it).
+        private static readonly DecimatedList<int> localFpsFocusTimeline = new DecimatedList<int>();
+        private static bool tlUnfocused;
         private static int tlFrames = 0;
         private static float tlAccum = 0f;
         private static int bcFrames = 0;          // frames since last 3s broadcast (instantaneous fps)
@@ -2118,9 +2090,12 @@ namespace CompetitiveRounds
             fpsBroadcastTimer += dt;
             // 5s fps timeline bucket (own side)
             tlFrames++; tlAccum += dt;
+            try { if (!Application.isFocused) tlUnfocused = true; } catch { }
             if (tlAccum >= 5f)
             {
                 localFpsTimeline.Add((int)Math.Round(tlFrames / (double)tlAccum));
+                localFpsFocusTimeline.Add(FpsFocusCore.BucketFlag(tlUnfocused));
+                tlUnfocused = false;
                 // Aug 6 item 4: cumulative damage dealt on the same 5s grid,
                 // so the DPS chart shares the FPS chart's x-axis. Same cap.
                 localDamageTimeline.Add((int)LocalDamageDealtThisMatch);
@@ -6781,6 +6756,7 @@ namespace CompetitiveRounds
                     pointTimeline: string.Join(",", matchPointTimeline.ToArray()),
                     // July 21 item 2: FPS/lag telemetry (advisory, non-HMAC).
                     localFpsTimeline: string.Join(",", localFpsTimeline.Items),
+                    localFpsFocusTimeline: FpsFocusCore.Encode(localFpsFocusTimeline.Items),
                     oppFpsTimeline: string.Join(",", oppFpsTimeline.Items),
                     localFreezeCount: localFreezeCount,
                     localFreezeFocusedCount: localFreezeFocusedCount,
@@ -7142,6 +7118,7 @@ namespace CompetitiveRounds
             opponentAvgFps = 0;
             // July 21 item 2: per-match telemetry resets.
             localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
+            localFpsFocusTimeline.Clear(); tlUnfocused = false;
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
@@ -9287,6 +9264,7 @@ namespace CompetitiveRounds
             opponentAvgFps = 0;
             // July 21 item 2: per-match telemetry resets.
             localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
+            localFpsFocusTimeline.Clear(); tlUnfocused = false;
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;

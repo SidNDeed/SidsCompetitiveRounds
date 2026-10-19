@@ -9700,6 +9700,7 @@ namespace CompetitiveRounds
             // (focused resume = window-drag signature); recv gaps = our socket
             // silent >2s; opp hb gaps = their gstats heartbeat frozen >8s.
             string localFpsTimeline = null, string oppFpsTimeline = null,
+            string localFpsFocusTimeline = null,
             int localFreezeCount = 0, int localFreezeFocusedCount = 0,
             float localFreezeTotalSec = 0f,
             int localPingAvg = 0, int localPingMax = 0,
@@ -9832,6 +9833,10 @@ namespace CompetitiveRounds
             string oft = ClampTimeline(oppFpsTimeline);
             sb.Append($"\"local_fps_timeline\":\"{Escape(lft)}\",");
             sb.Append($"\"opp_fps_timeline\":\"{Escape(oft)}\",");
+            // Night 2026-10-19: one focus flag per local fps bucket (1 focused
+            // throughout, 0 not), aligned with local_fps_timeline. Advisory and
+            // outside the HMAC; the server ignores an undeclared field.
+            sb.Append($"\"local_fps_focus_timeline\":\"{Escape(ClampTimeline(localFpsFocusTimeline))}\",");
             sb.Append($"\"local_freeze_count\":{localFreezeCount},");
             sb.Append($"\"local_freeze_focused_count\":{localFreezeFocusedCount},");
             sb.Append($"\"local_freeze_total_sec\":{localFreezeTotalSec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)},");
