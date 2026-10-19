@@ -461,9 +461,39 @@ namespace CompetitiveRounds
             catch { return false; }
         }
 
+        // Night 2026-10-19: the per-game gate record. The evaluator wrote
+        // nothing when the setting was off, the seat was not a plain 1v1 or
+        // no window was keyed, so a night whose windows met a bar (both seats
+        // of 2026-10-19, measured by replay) could not say which gate held.
+        // One [LAG-NOTICE-GATE] line per fighter game now counts the windows
+        // that reached each gate. It is evidence, not a notice: nothing is
+        // shown, and the tag differs from [LAG-NOTICE] on purpose so a grep
+        // for state edges never counts it.
+        private static int _gWindows, _gSettingOff, _gNotPlain1v1, _gUnkeyed, _gEvaluated, _gEnters, _gSuppressed;
+
+        internal static void ResetGateCounts()
+        {
+            _gWindows = _gSettingOff = _gNotPlain1v1 = _gUnkeyed = _gEvaluated = _gEnters = _gSuppressed = 0;
+        }
+
+        /// <summary>The gate line for the game that just ended, or null when
+        /// no window reached the evaluator.</summary>
+        internal static string GateLine()
+        {
+            if (_gWindows <= 0) return null;
+            return "[LAG-NOTICE-GATE] windows=" + _gWindows.ToString(CultureInfo.InvariantCulture)
+                + " setting_off=" + _gSettingOff.ToString(CultureInfo.InvariantCulture)
+                + " not_plain_1v1=" + _gNotPlain1v1.ToString(CultureInfo.InvariantCulture)
+                + " unkeyed=" + _gUnkeyed.ToString(CultureInfo.InvariantCulture)
+                + " evaluated=" + _gEvaluated.ToString(CultureInfo.InvariantCulture)
+                + " enters=" + _gEnters.ToString(CultureInfo.InvariantCulture)
+                + " suppressed=" + _gSuppressed.ToString(CultureInfo.InvariantCulture);
+        }
+
         internal static void OnGameStarted()
         {
             EnsureStartup();
+            ResetGateCounts();
             // A new game starts every state at Off with no cooldown carried
             // over; nothing from the previous game is announced or suppressed.
             ResetAll(logExits: false, why: null);
@@ -478,6 +508,10 @@ namespace CompetitiveRounds
             // Shown states end here; the exit line is written only when the
             // setting is still on (setting off => zero lines, §4.4).
             ResetAll(logExits: SettingOn(), why: "game-end");
+            // The gate record is written whatever the setting: it is the only
+            // way a log can say why no notice appeared.
+            try { string g = GateLine(); if (g != null) Plugin.Log?.LogInfo(g); } catch { }
+            ResetGateCounts();
         }
 
         /// <summary>The only tick: called by NetworkSeatTelemetry.CloseWindow
@@ -492,8 +526,10 @@ namespace CompetitiveRounds
         {
             try
             {
+                _gWindows++;
+                if (!SettingOn()) _gSettingOff++;
                 if (!SettingOn()) { ResetAll(logExits: false, why: null); return; }
-                if (!SeatEligible()) { ResetAll(logExits: true, why: "seat"); return; }
+                if (!SeatEligible()) { _gNotPlain1v1++; ResetAll(logExits: true, why: "seat"); return; }
                 _recentCount = NetworkSeatTelemetry.RecentWindows(_recent);
                 string resetWhy;
                 int admitted = AdmitWindows(_recent, _recentCount, _keyActor, _keyId, out resetWhy);
@@ -502,7 +538,8 @@ namespace CompetitiveRounds
                 // built key, so the newest window's key is adopted after it.
                 if (resetWhy != null) ResetAll(logExits: true, why: resetWhy);
                 _recentCount = admitted;
-                if (_recentCount <= 0) return;
+                if (_recentCount <= 0) { _gUnkeyed++; return; }
+                _gEvaluated++;
                 _keyActor = _recent[0].OppActor;
                 _keyId = _recent[0].OppId;
                 double nowS = NowS();
@@ -512,9 +549,9 @@ namespace CompetitiveRounds
                     var slot = _slots[s];
                     switch (Step((State)s, slot, _recent, _recentCount, nowS))
                     {
-                        case Edge.Enter: LogEdge((State)s, "enter", slot, nowS, null); changed = true; break;
+                        case Edge.Enter: _gEnters++; LogEdge((State)s, "enter", slot, nowS, null); changed = true; break;
                         case Edge.Exit: LogEdge((State)s, "exit", slot, nowS, null); changed = true; break;
-                        case Edge.Suppressed: LogEdge((State)s, "suppressed", slot, nowS, null); break;
+                        case Edge.Suppressed: _gSuppressed++; LogEdge((State)s, "suppressed", slot, nowS, null); break;
                     }
                 }
                 // A shown line's latched number can rise on any window, so the
