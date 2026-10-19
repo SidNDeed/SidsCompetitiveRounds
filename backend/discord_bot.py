@@ -15300,6 +15300,9 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
     if summary_page:
         if games or not isinstance(body["windows"], list) or not isinstance(body["summary"], list):
             raise AerSchemaError("summary page")
+        window_plan = ((0, None),) if shape == "player" else ((0, 1), (1, 0))
+        if len(body["windows"]) != len(window_plan):
+            raise AerSchemaError("window plan count")
         wins = []
         for position, w in enumerate(body["windows"]):
             _aer_keys(w, _AER_WINDOW_KEYS)
@@ -15327,6 +15330,8 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
                     or (shape == "pair" and (partner is None or partner >= len(subjects)
                                              or partner == subject))):
                 raise AerSchemaError("window subject shape")
+            if window_plan[position:position + 1] != ((subject, partner),):
+                raise AerSchemaError("window plan subjects")
             if subj[0] == "seat":
                 _aer_check_int(w["flag_obs"], 0)
             elif partner is None:

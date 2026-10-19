@@ -255,24 +255,27 @@ def game_body(page=1, pages=1, shape="game"):
                                   "created_at": "2026-10-16T00:00:00+00:00"}]}]}
 
 
-def summary_body(page=1, pages=3, shape="pair"):
+def summary_body(page=1, pages=3, shape="player"):
     w = next(e for e in ae.REPORT_REGISTRY if e.is_window and e.scope == "seat")
     body = game_body(page, pages, shape)
     body["catalog"] = [ae._catalog_row(w)]
     body["games"] = []
     body["population"]["win_computed_at"] = "2026-10-16T00:00:00+00:00"
     basis = "player" if shape == "player" else "pair"
-    partner = None if shape == "player" else 1
-    body["windows"] = [{"oi": 0, "basis": basis, "subj": ["seat", 0, partner], "games": 10,
-                        "covered": 10, "flag_obs": 0, "newest": "a" * 12,
-                        "oldest": "b" * 12}]
-    body["summary"] = [{"oi": 0, "cells": [[w.ki, 10, 4.5, None, None, None, "none",
-                                            None, None, None, None, None, "ok"]]}]
+    plan = [(0, None)] if shape == "player" else [(0, 1), (1, 0)]
+    body["windows"] = [
+        {"oi": oi, "basis": basis, "subj": ["seat", subject, partner], "games": 10,
+         "covered": 10, "flag_obs": 0, "newest": "a" * 12, "oldest": "b" * 12}
+        for oi, (subject, partner) in enumerate(plan)]
+    body["summary"] = [
+        {"oi": oi, "cells": [[w.ki, 10, 4.5, None, None, None, "none",
+                              None, None, None, None, None, "ok"]]}
+        for oi in range(len(plan))]
     return body
 
 
 def _two_catalog_summary_body():
-    body = summary_body()
+    body = summary_body(shape="pair")
     first = body["catalog"][0]["ki"]
     second = next(e for e in ae.REPORT_REGISTRY
                   if e.is_window and e.scope == "seat" and e.ki != first)
@@ -285,14 +288,7 @@ def _two_catalog_summary_body():
 
 
 def _two_window_summary_body():
-    body = summary_body()
-    window = copy.deepcopy(body["windows"][0])
-    window.update(oi=1, subj=["seat", 1, 0])
-    body["windows"].append(window)
-    row = copy.deepcopy(body["summary"][0])
-    row["oi"] = 1
-    body["summary"].append(row)
-    return body
+    return summary_body(shape="pair")
 
 
 def _request_for_body(body):
@@ -366,8 +362,8 @@ def test_the_1a_decoder_accepts_a_served_page_and_refuses_every_break(bot):
     page = dec(game_body(), "1a")
     assert (page.shape, page.page, page.pages, len(page.games)) == ("game", 1, 1, 1)
     assert page.subjects[1][1] == ae._aer_enc("B`eta")
-    s = dec(summary_body(), "1a")
-    assert (s.shape, len(s.windows), len(s.summary), s.games) == ("pair", 1, 1, ())
+    s = dec(summary_body(shape="pair"), "1a")
+    assert (s.shape, len(s.windows), len(s.summary), s.games) == ("pair", 2, 2, ())
     kind_pages = [dec(_body_with_cell_kind(k), "1a") for k in ("R", "T", "D")]
     assert [next(iter(p.catalog.values()))["kind"] for p in kind_pages] == ["R", "T", "D"]
     assert set(page.population) == {"key", "days", "lag_s", "games", "computed_at",
@@ -531,14 +527,14 @@ def test_m20_game_catalog_rows_are_base_rows_with_every_spread(bot):
 
 
 def test_m20_summary_catalog_rows_are_r_windows(bot):
-    base_as_summary = summary_body()
+    base_as_summary = summary_body(shape="pair")
     base = next(e for e in ae.REPORT_REGISTRY if not e.is_window and e.kind == "R")
     base_as_summary["catalog"] = [ae._catalog_row(base)]
     for key in ("p50", "p90", "p99"):
         base_as_summary["catalog"][0].pop(key)
     base_as_summary["summary"][0]["cells"] = []
 
-    non_r_window = summary_body()
+    non_r_window = summary_body(shape="pair")
     non_r_window["catalog"][0]["kind"] = "T"
     non_r_window["summary"][0]["cells"] = []
 
@@ -551,7 +547,7 @@ def test_m20_summary_catalog_rows_are_r_windows(bot):
 @pytest.mark.parametrize("slot,value", [("base", None), ("kind", "T")],
                          ids=("base", "kind"))
 def test_m20_summary_catalog_role_precedes_cell_decoding(bot, monkeypatch, slot, value):
-    body = summary_body()
+    body = summary_body(shape="pair")
     body["catalog"][0][slot] = value
     decoded_cells = []
 
@@ -567,7 +563,7 @@ def test_m20_summary_catalog_role_precedes_cell_decoding(bot, monkeypatch, slot,
 
 
 def test_m20_valid_catalog_order_and_content_round_trip(bot):
-    for body in (game_body(), summary_body()):
+    for body in (game_body(), summary_body(shape="pair")):
         page = bot["_aer_decode_response"](copy.deepcopy(body), "1a")
         expected_kis = [row["ki"] for row in body["catalog"]]
         assert list(page.catalog) == expected_kis
@@ -613,25 +609,25 @@ def _m21_game_breaks():
 
 def _m21_window_breaks():
     out = []
-    wrong_oi = summary_body()
+    wrong_oi = summary_body(shape="pair")
     wrong_oi["windows"][0]["oi"] = 1
     out.append(("nonpositional window oi", wrong_oi))
-    wrong_scope = summary_body()
+    wrong_scope = summary_body(shape="pair")
     wrong_scope["windows"][0].update(subj=["pair", 0, 1], flag_obs=None)
     out.append(("window scope", wrong_scope))
-    wrong_basis = summary_body()
+    wrong_basis = summary_body(shape="pair")
     wrong_basis["windows"][0]["basis"] = "player"
     out.append(("window basis", wrong_basis))
-    repeated = summary_body()
+    repeated = summary_body(shape="pair")
     repeated["windows"][0]["subj"] = ["seat", 0, 0]
     out.append(("repeated pair subjects", repeated))
-    first_out = summary_body()
+    first_out = summary_body(shape="pair")
     first_out["windows"][0]["subj"] = ["seat", 2, 1]
     out.append(("first pair subject out of range", first_out))
-    partner_out = summary_body()
+    partner_out = summary_body(shape="pair")
     partner_out["windows"][0]["subj"] = ["seat", 0, 2]
     out.append(("partner out of range", partner_out))
-    missing_partner = summary_body()
+    missing_partner = summary_body(shape="pair")
     missing_partner["windows"][0]["subj"] = ["seat", 0, None]
     out.append(("pair partner missing", missing_partner))
     player_partner = summary_body(shape="player")
@@ -642,12 +638,13 @@ def _m21_window_breaks():
 
 def _m21_summary_breaks():
     out = []
-    empty = summary_body()
+    empty = summary_body(shape="pair")
     empty["summary"][0]["cells"] = []
     out.append(("empty summary cells", empty))
-    empty_catalog = summary_body()
+    empty_catalog = summary_body(shape="pair")
     empty_catalog["catalog"] = []
-    empty_catalog["summary"][0]["cells"] = []
+    for row in empty_catalog["summary"]:
+        row["cells"] = []
     out.append(("empty summary catalog and cells", empty_catalog))
     missing_cell = _two_catalog_summary_body()
     missing_cell["summary"][0]["cells"].pop()
@@ -656,7 +653,7 @@ def _m21_summary_breaks():
     cells = duplicate_cell["summary"][0]["cells"]
     cells[1][0] = cells[0][0]
     out.append(("duplicate summary cell key", duplicate_cell))
-    extra_cell = summary_body()
+    extra_cell = summary_body(shape="pair")
     extra_cell["summary"][0]["cells"].append(
         list(extra_cell["summary"][0]["cells"][0]))
     out.append(("extra duplicate summary cell", extra_cell))
@@ -676,8 +673,18 @@ def test_m21_game_topology_reporter_and_cell_breaks_are_refused(bot):
 
 
 def test_m21_window_identity_breaks_are_refused(bot):
+    refusals = {
+        "nonpositional window oi": "window position",
+        "window scope": "window scope",
+        "window basis": "window basis",
+        "repeated pair subjects": "window subject shape",
+        "first pair subject out of range": "window subject",
+        "partner out of range": "window subject shape",
+        "pair partner missing": "window subject shape",
+        "player partner present": "window subject shape",
+    }
     for label, body in _m21_window_breaks():
-        with pytest.raises(bot["AerSchemaError"]):
+        with pytest.raises(bot["AerSchemaError"], match="^" + refusals[label] + "$"):
             bot["_aer_decode_response"](body, "1a")
 
 
@@ -892,14 +899,14 @@ def _m20_delivery_breaks():
         seat["cells"] = [list(seat["cells"][0])]
         seat["cells"][0][0] = window.ki
 
-    base_as_summary = summary_body()
+    base_as_summary = summary_body(shape="pair")
     base = next(e for e in ae.REPORT_REGISTRY if not e.is_window and e.kind == "R")
     base_as_summary["catalog"] = [ae._catalog_row(base)]
     for key in ("p50", "p90", "p99"):
         base_as_summary["catalog"][0].pop(key)
     base_as_summary["summary"][0]["cells"] = []
 
-    non_r_summary = summary_body()
+    non_r_summary = summary_body(shape="pair")
     non_r_summary["catalog"][0]["kind"] = "T"
     non_r_summary["summary"][0]["cells"] = []
     return [duplicate_ki, duplicate_key, missing_spread, window_as_game,
@@ -1236,3 +1243,112 @@ def test_fix6_m20_producer_catalog_components_and_order_remain_valid(bot):
             assert interaction.ephemeral == ["Posted."]
             assert len(_public(events)) == 1
             assert len(message.edits) == (1 if via == "button" else 0)
+
+
+_FIX6_M21_PLAN_CASES = (
+    "player-empty-both", "pair-empty-both", "windows-empty", "deleted-window",
+    "extra-window", "same-orientation", "reversed-pair", "wrong-pair-subject",
+    "wrong-player-subject", "player-partner", "summary-empty")
+
+
+def _fix6_m21_plan_body(case):
+    player = case.startswith("player-") or case == "wrong-player-subject"
+    body = summary_body(shape="player" if player else "pair")
+    refusal = "window plan count"
+    if case.endswith("empty-both"):
+        body["windows"], body["summary"] = [], []
+    elif case == "windows-empty":
+        body["windows"] = []
+    elif case == "deleted-window":
+        body["windows"].pop()
+    elif case == "extra-window":
+        window = copy.deepcopy(body["windows"][0])
+        window["oi"] = 2
+        body["windows"].append(window)
+        row = copy.deepcopy(body["summary"][0])
+        row["oi"] = 2
+        body["summary"].append(row)
+    elif case == "same-orientation":
+        body["windows"][1]["subj"] = ["seat", 0, 1]
+        refusal = "window plan subjects"
+    elif case == "reversed-pair":
+        body["windows"][0]["subj"], body["windows"][1]["subj"] = (
+            ["seat", 1, 0], ["seat", 0, 1])
+        refusal = "window plan subjects"
+    elif case == "wrong-pair-subject":
+        body["subjects"].append({"steam_id": "1003", "name": "Gamma"})
+        body["windows"][0]["subj"] = ["seat", 2, 1]
+        refusal = "window plan subjects"
+    elif case == "wrong-player-subject":
+        body["windows"][0]["subj"] = ["seat", 1, None]
+        refusal = "window plan subjects"
+    elif case == "player-partner":
+        body["windows"][0]["subj"] = ["seat", 0, 1]
+        refusal = "window subject shape"
+    else:
+        body["summary"] = []
+        refusal = "summary row coverage"
+    return body, refusal
+
+
+@pytest.mark.parametrize("case", _FIX6_M21_PLAN_CASES)
+def test_fix6_m21_required_window_plan_refused_direct(bot, case):
+    body, refusal = _fix6_m21_plan_body(case)
+    with pytest.raises(bot["AerSchemaError"], match="^" + refusal + "$"):
+        bot["_aer_decode_response"](body, "1a")
+
+
+@pytest.mark.parametrize("via", ("command", "button"))
+@pytest.mark.parametrize("case", _FIX6_M21_PLAN_CASES)
+def test_fix6_m21_required_window_plan_refused_delivery(case, via):
+    body, _refusal = _fix6_m21_plan_body(case)
+    _assert_schema_delivery(body, _request_for_body(body), via)
+
+
+def _fix6_m21_empty_cell_catalog_body(table):
+    body = game_body() if table == "seat" else summary_body(shape="pair")
+    body["catalog"] = []
+    rows = body["games"][0]["seats"] if table == "seat" else body["summary"]
+    for row in rows:
+        row["cells"] = []
+    return body
+
+
+@pytest.mark.parametrize("table", ("seat", "summary"))
+def test_fix6_m21_cell_coverage_empty_both_refused_direct(bot, table):
+    body = _fix6_m21_empty_cell_catalog_body(table)
+    with pytest.raises(bot["AerSchemaError"], match="^empty " + table + " cells$"):
+        bot["_aer_decode_response"](body, "1a")
+
+
+@pytest.mark.parametrize("via", ("command", "button"))
+@pytest.mark.parametrize("table", ("seat", "summary"))
+def test_fix6_m21_cell_coverage_empty_both_refused_delivery(table, via):
+    body = _fix6_m21_empty_cell_catalog_body(table)
+    _assert_schema_delivery(body, _request_for_body(body), via)
+
+
+def test_fix6_m21_producer_plans_and_legal_empty_collections_remain_valid(bot):
+    for shape, expected in (("player", [["seat", 0, None]]),
+                            ("pair", [["seat", 0, 1], ["seat", 1, 0]])):
+        body = summary_body(shape=shape)
+        page = bot["_aer_decode_response"](body, "1a")
+        assert [w["subj"] for w in page.windows] == expected
+        assert [row[0] for row in page.summary] == list(range(len(expected)))
+        assert page.games == ()
+        for via in ("command", "button"):
+            interaction, message, events = _deliver_body(body, _request_for_body(body), via)
+            assert interaction.ephemeral == ["Posted."]
+            assert len(_public(events)) == 1
+            assert len(message.edits) == (1 if via == "button" else 0)
+    game = game_body()
+    game["games"][0]["flags"] = []
+    game["population"]["truncated"] = []
+    game["games"][0]["pair_cells"] = []
+    bot["_aer_decode_response"](game, "1a")
+    series = game_body(shape="series")
+    series["games"], series["subjects"] = [], []
+    pair = game_body(page=2, pages=2, shape="pair")
+    pair["games"] = []
+    for body in (series, pair):
+        assert bot["_aer_decode_response"](body, "1a").games == ()
