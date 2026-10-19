@@ -4485,7 +4485,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:49002 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:49725 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4551,7 +4551,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:48814 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:49537 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -4621,7 +4621,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
         return False
     # 'canceled', one L. Every other ovt path uses that spelling and the
     # continuation's prior-series lookup filters on it
-    # (PIN main.py:48717 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
+    # (PIN main.py:49042 "WHERE status IN ('completed', 'canceled', 'cancelled')"); the
     # janitor's original 'cancelled' made its own rows invisible to that lookup
     # and backend/sql/145_ovt_status_spelling.sql had to normalise them. A third
     # spelling would reopen that hole, so the VOID is carried by
@@ -36696,9 +36696,15 @@ async def _team_dc_hold_crossing(db, sid, s):
     """The crossing a team hold of the game in progress froze, or None.
     Closes an open hold of that game as expiry_report first (the caller
     holds the series row lock and commits). Holds closed by an entry are
-    passed over: the game continued after them."""
+    passed over: the game continued after them.
+
+    None without a statement when the series is not flagged for its
+    stored room (hold_v2, hold_room = photon_room_id): match_hold_open
+    opens a hold only in such a room, and an unflagged series reads the
+    per-game record as today, the same flag test every other Stage 2
+    reader applies."""
     room = (s["photon_room_id"] or "").strip()
-    if not room:
+    if not room or not s["hold_v2"] or (s["hold_room"] or "") != s["photon_room_id"]:
         return None
     g = (await db.execute(text(
         "SELECT id FROM match_games WHERE series_id = CAST(:sid AS uuid)"
@@ -36722,14 +36728,6 @@ async def _team_dc_hold_crossing(db, sid, s):
             " WHERE id = CAST(:hid AS uuid) AND closed_at IS NULL"), {"hid": str(h["id"])})
         print(f"[HOLD] closed by DC report series={sid} room={room}")
     return bool(h["crossed_at_hold"])
-
-
-async def _team_dc_crossed(db, sid, s, total_points, hold_crossed) -> bool:
-    """The DC report's crossing: the one a hold froze when there is one
-    (Stage 2 V3 S5), else the per-game record read now, as today."""
-    if hold_crossed is not None:
-        return hold_crossed
-    return await _team_game_crossed_two(db, sid, s, total_points)
 
 
 @app.post("/api/v1/ffa/lobbies/{lobby_id}/live-points", tags=["Betting"])
@@ -47324,7 +47322,8 @@ async def team_series_report_dc(
     s_row = await db.execute(
         text("""
             SELECT id, status, t1a_id, t1b_id, t2a_id, t2b_id,
-                   t1_series_wins, t2_series_wins, photon_room_id
+                   t1_series_wins, t2_series_wins, photon_room_id,
+                   hold_v2, hold_room
               FROM team_series WHERE id = :sid
                FOR NO KEY UPDATE
         """),
@@ -47567,8 +47566,11 @@ async def team_series_report_dc(
     # restart DC (little or no play) or an even series is NOT auto-decided — it drops
     # to dc_incomplete below for manual resolution in the mod admin panel, so a 2v2
     # that breaks and needs a restart never auto-penalizes anyone.
+    # The crossing is the one a hold of the game froze when there is one
+    # (Stage 2 V3 S5, read above), else the per-game record read now.
     if ((other_team_existing_wins or 0) >= 1
-            and await _team_dc_crossed(db, sid_uuid, s, total_points, _hold_crossed)):
+            and (_hold_crossed if _hold_crossed is not None
+                 else await _team_game_crossed_two(db, sid_uuid, s, total_points))):
         # Record a synthetic forfeit game for history parity.
         await db.execute(
             text("""INSERT INTO team_matches

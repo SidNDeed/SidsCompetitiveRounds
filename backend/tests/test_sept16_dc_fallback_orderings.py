@@ -132,7 +132,11 @@ CREATE TABLE team_series (
     -- SELECT, and a harness missing a column the route legitimately expects
     -- would be testing the harness.
     t1_color_name TEXT, t1_color_hex TEXT,
-    t2_color_name TEXT, t2_color_hex TEXT
+    t2_color_name TEXT, t2_color_hex TEXT,
+    -- Migration 383's Stage 2 flag: the DC report reads it in its series
+    -- SELECT and touches no hold table for an unflagged series.
+    hold_v2 BOOLEAN NOT NULL DEFAULT FALSE,
+    hold_room TEXT
 );
 
 CREATE TABLE team_matches (

@@ -315,8 +315,11 @@ def _controls(nl):
     binding's copy of the name."""
     writer_call = ("    await %s(db, sid, t1_points, t2_points, _game, _slot, _attested)"
                    % WRITER)
-    reader_line = "            and await %s(db, sid_uuid, s, total_points)):" % READER
-    reader_cond = "    if ((other_team_existing_wins or 0) >= 1" + nl + reader_line
+    reader_line = ("                 else await %s(db, sid_uuid, s, total_points))):"
+                   % READER)
+    reader_cond = ("    if ((other_team_existing_wins or 0) >= 1" + nl
+                   + "            and (_hold_crossed if _hold_crossed is not None" + nl
+                   + reader_line)
     pre_fix_cond = "    if (other_team_existing_wins or 0) >= 1 and total_points >= 2:"
     return [
         # The pre-fix condition: the report's snapshot decides. The two
