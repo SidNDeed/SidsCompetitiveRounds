@@ -50,6 +50,12 @@ def _mount(env, monkeypatch):
 
 
 async def _call(method, path, steam, body=None, params=None):
+    # Every request starts with empty rate buckets: all of them come from one
+    # test address, and the T5.4 matrix alone posts more reports to one
+    # sensitive bucket than its limit admits per window on a fast seat, so a
+    # per-body reset still answered 429 mid-matrix (G4 at 06e92cc8). No case
+    # here tests the rate limit.
+    main._RL_BUCKETS.clear()
     headers = {"X-Mod-Version": VERSION, "X-Session-Token": "tok:" + steam}
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app),
                                  base_url="http://r", timeout=120) as cl:
