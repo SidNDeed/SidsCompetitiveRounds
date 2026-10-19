@@ -754,7 +754,11 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # confirmed by the re-pin dry run
     # FFA mid-game readmission (2026-10-17): +2, the readmit step route and
     # the offer read (396 before), confirmed by the re-pin dry run
-    assert len(manifest) == 398
+    # Stage 2 match hold routes (RJ server staging, 2026-10-19): +10, the
+    # match_hold router NX1 mounted (game/start, hold/open, beat, end, claim,
+    # bind, entered, state, by-room, mine; 398 before), confirmed by the
+    # re-pin dry run
+    assert len(manifest) == 408
     assert len({json.dumps(item, sort_keys=True) for item in expected}) == len(expected)
     assert all(
         entry["classification"] in {"sentinel-exercised", "statically-nonconsumer"}
@@ -787,7 +791,10 @@ def test_route_manifest_net_seat_is_exhaustive_and_fails_closed_on_drift():
     # FFA mid-game readmission (2026-10-17): +2, both statically-nonconsumer:
     # the step answers a fixed readmit projection and the offer a fixed
     # projection of seat columns; neither reads the matches table (395 before)
-    assert len(static) == 397
+    # Stage 2 match hold routes (2026-10-19): +10, all statically-nonconsumer:
+    # every answer is a fixed projection (_state_payload's named fields or a
+    # literal dict) and no handler reads the matches table (397 before)
+    assert len(static) == 407
     assert _manifest_id(exercised[0]) == SENTINEL_ROUTE
 
     actual_by_identity = {
