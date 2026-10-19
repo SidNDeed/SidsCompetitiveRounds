@@ -15240,6 +15240,14 @@ def _aer_decode_response(body, phase="1a", *, expected=None):
             raise AerSchemaError("summary catalog kind")
         if not summary_page and row["base"] is not None:
             raise AerSchemaError("game catalog row")
+        key_fields = row["key"].split("|")
+        if len(key_fields) != 7:
+            raise AerSchemaError("catalog key fields")
+        if key_fields[2] != "seat":
+            raise AerSchemaError("catalog key scope")
+        if key_fields[5] not in (("win_median.cell", "win_max.cell")
+                                 if summary_page else ("cell",)):
+            raise AerSchemaError("catalog key aggregation")
         for k in _AER_SPREAD_KEYS & set(row):
             _aer_check_number(row[k])
         canonical_keys.add(row["key"])

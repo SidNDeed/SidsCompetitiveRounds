@@ -522,8 +522,11 @@ def test_m20_game_catalog_rows_are_base_rows_with_every_spread(bot):
     window_row.update(p50=None, p90=None, p99=None)
     spread_shaped_window_as_game["catalog"] = [window_row]
 
-    for body in (missing_spread, producer_window_as_game, spread_shaped_window_as_game):
-        with pytest.raises(bot["AerSchemaError"]):
+    cases = ((missing_spread, "keys ['p90']"),
+             (producer_window_as_game, "keys ['p50', 'p90', 'p99']"),
+             (spread_shaped_window_as_game, "game catalog row"))
+    for body, refusal in cases:
+        with pytest.raises(bot["AerSchemaError"], match="^" + re.escape(refusal) + "$"):
             bot["_aer_decode_response"](body, "1a")
 
 
@@ -531,14 +534,17 @@ def test_m20_summary_catalog_rows_are_r_windows(bot):
     base_as_summary = summary_body()
     base = next(e for e in ae.REPORT_REGISTRY if not e.is_window and e.kind == "R")
     base_as_summary["catalog"] = [ae._catalog_row(base)]
+    for key in ("p50", "p90", "p99"):
+        base_as_summary["catalog"][0].pop(key)
     base_as_summary["summary"][0]["cells"] = []
 
     non_r_window = summary_body()
     non_r_window["catalog"][0]["kind"] = "T"
     non_r_window["summary"][0]["cells"] = []
 
-    for body in (base_as_summary, non_r_window):
-        with pytest.raises(bot["AerSchemaError"]):
+    for body, refusal in ((base_as_summary, "summary catalog base"),
+                          (non_r_window, "summary catalog kind")):
+        with pytest.raises(bot["AerSchemaError"], match="^" + refusal + "$"):
             bot["_aer_decode_response"](body, "1a")
 
 
@@ -554,7 +560,8 @@ def test_m20_summary_catalog_role_precedes_cell_decoding(bot, monkeypatch, slot,
         return tuple(row)
 
     monkeypatch.setitem(bot, "_aer_cell", permissive_cell)
-    with pytest.raises(bot["AerSchemaError"]):
+    refusal = "summary catalog base" if slot == "base" else "summary catalog kind"
+    with pytest.raises(bot["AerSchemaError"], match="^" + refusal + "$"):
         bot["_aer_decode_response"](body, "1a")
     assert decoded_cells == []
 
@@ -888,6 +895,8 @@ def _m20_delivery_breaks():
     base_as_summary = summary_body()
     base = next(e for e in ae.REPORT_REGISTRY if not e.is_window and e.kind == "R")
     base_as_summary["catalog"] = [ae._catalog_row(base)]
+    for key in ("p50", "p90", "p99"):
+        base_as_summary["catalog"][0].pop(key)
     base_as_summary["summary"][0]["cells"] = []
 
     non_r_summary = summary_body()
@@ -1175,3 +1184,55 @@ def test_the_api_path_carries_the_request_as_typed(bot):
         ae.EVIDENCE_PREFIX + "pair?a=1&b=2&games=10&page=3"
     assert path({"shape": "player", "steam_id": "5", "games": 7, "page": 0}) == \
         ae.EVIDENCE_PREFIX + "player/5?games=7&page=0"
+
+
+_FIX6_M20_CASES = [(role, relation) for role in ("base", "summary")
+                  for relation in ("scope", "aggregation", "short", "long")]
+
+
+def _fix6_m20_catalog_body(role, relation):
+    body = game_body() if role == "base" else summary_body(shape="player")
+    fields = body["catalog"][0]["key"].split("|")
+    if relation == "scope":
+        fields[2] = "pair"
+        refusal = "catalog key scope"
+    elif relation == "aggregation":
+        fields[5] = "win_median.cell" if role == "base" else "cell"
+        refusal = "catalog key aggregation"
+    elif relation == "short":
+        fields.pop()
+        refusal = "catalog key fields"
+    else:
+        fields.append("extra")
+        refusal = "catalog key fields"
+    body["catalog"][0]["key"] = "|".join(fields)
+    return body, refusal
+
+
+@pytest.mark.parametrize("role,relation", _FIX6_M20_CASES)
+def test_fix6_m20_catalog_key_components_refused_direct(bot, role, relation):
+    body, refusal = _fix6_m20_catalog_body(role, relation)
+    with pytest.raises(bot["AerSchemaError"], match="^" + refusal + "$"):
+        bot["_aer_decode_response"](body, "1a")
+
+
+@pytest.mark.parametrize("via", ("command", "button"))
+@pytest.mark.parametrize("role,relation", _FIX6_M20_CASES)
+def test_fix6_m20_catalog_key_components_refused_delivery(role, relation, via):
+    body, _refusal = _fix6_m20_catalog_body(role, relation)
+    _assert_schema_delivery(body, _request_for_body(body), via)
+
+
+def test_fix6_m20_producer_catalog_components_and_order_remain_valid(bot):
+    for body in (game_body(), summary_body(shape="player")):
+        for row in body["catalog"]:
+            assert len(row["key"].split("|")) == 7
+            assert row["key"].split("|")[2] == "seat"
+        page = bot["_aer_decode_response"](copy.deepcopy(body), "1a")
+        assert list(page.catalog) == [row["ki"] for row in body["catalog"]]
+        assert list(page.catalog.values()) == body["catalog"]
+        for via in ("command", "button"):
+            interaction, message, events = _deliver_body(body, _request_for_body(body), via)
+            assert interaction.ephemeral == ["Posted."]
+            assert len(_public(events)) == 1
+            assert len(message.edits) == (1 if via == "button" else 0)
