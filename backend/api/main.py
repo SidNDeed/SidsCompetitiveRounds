@@ -50162,6 +50162,7 @@ FFA_UPSET_INCLUDE_GAP = 250.0
 # two field half points. A field total below H proves fewer than two full points, so grace is
 # given; H or more only MAY mean two conversions, so the wire can refuse grace early and rate the
 # departed seat.
+# The grace leaves achievements unaffected.
 FFA_LEAVE_GRACE_FULL_POINTS = 2
 # ── FFA betting: odds band + how long a lobby stays bettable ───────────────
 FFA_ODDS_MAX = 5.0          # ceiling, reachable only at 10 players with a low RD
@@ -56176,7 +56177,7 @@ async def _asm_payload_fields(db, lobby, lobby_id, steam_id) -> dict:
 
 async def _asm_report_rules(db, *, lobby, lobby_uuid, g, report, id_by_steam,
                             unrated, progress):
-    """Writer 7 in an assembly_v1 lobby, after `unrated = ghosts | graced` and
+    """Writer 7 in an assembly_v1 lobby, with the ghost exclusions as `unrated` and
     before any row is written. First the refusals, each through
     _ffa_record_and_refuse (which always raises): (c) late_reporter, sticky
     for the sitting; (d) left_reporter, a reporter whose seat's gone record
@@ -58595,6 +58596,8 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
     #       the reporter cannot raise its own rating, game XP or game Gold beyond
     #       what one opponent fewer in the comparison set and in the live denominator
     #       gives a seat placed below the leaver; the departed seat gains none of those.
+    #       Achievements are unaffected by the grace: their predicates read the
+    #       ghost and assembly exclusions, not the grace.
     # Old clients omit the field entirely -> no grace, pre-fix behaviour.
     ghosts, graced, _leave_log = _ffa_leave_decision(
         report, kills_in_canonical,
@@ -58602,17 +58605,17 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         points_to_win_round=FFA_POINTS_TO_WIN_ROUND)
     for _line in _leave_log:
         print(_line)
-    # Everyone excluded from rating/economy for this game. `ghosts` still names
-    # the carried-roster subset on its own; every "did they play THIS game"
-    # question below asks `unrated`.
-    unrated = ghosts | graced
+    # Rating and economy use `unrated`; achievement predicates use
+    # the independent ghost and assembly exclusions in `excluded`.
+    excluded = ghosts
     # Writer 7 (the connect-failure design, I2): the refusals (c), (d), (e)
-    # and the unrating (a), (b), (d) of an assembly lobby, before anything
-    # reads `unrated`. The set only ever grows.
+    # and the unrating (a), (b), (d) of an assembly lobby, before the grace
+    # joins the rating/economy set. The independent exclusions only grow.
     if lobby.get("assembly_v1"):
-        unrated = await _asm_report_rules(
+        excluded = await _asm_report_rules(
             db, lobby=lobby, lobby_uuid=lobby_uuid, g=_game_number, report=report,
-            id_by_steam=id_by_steam, unrated=unrated, progress=_progress)
+            id_by_steam=id_by_steam, unrated=excluded, progress=_progress)
+    unrated = excluded | graced
     # Strictly-beaten counts drive XP (a tied pair didn't beat each other).
     beaten_count = {
         p.steam_id: sum(1 for q in report.players
@@ -59107,17 +59110,11 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
         if rated:
             await db.flush()
             async with db.begin_nested():
-                # Players who ACTUALLY PLAYED this game. unrated is the
-                # refutation-filtered absent set plus the early-leave graces:
-                # any signed tally can refute only an absent claim, while signed
-                # point and round consistency bounds can refute a grace claim.
-                # This is the same basis the economy meter uses for
-                # _n_live_meter / n_live.
-                # Recomputed rather than reusing those locals so the rule reads
-                # standalone; a roster ghost must not inflate a shutout's
-                # player-count tier any more than it inflates a payout.
+                # The independent `excluded` set contains ghosts and assembly
+                # exclusions; grace itself never removes an achievement candidate.
+                # The economy meter keeps `unrated`, which also includes graced seats.
                 _ach_players = sorted(
-                    (p for p in report.players if p.steam_id not in unrated),
+                    (p for p in report.players if p.steam_id not in excluded),
                     key=lambda q: str(id_by_steam[q.steam_id]))
                 # THE TIER COUNTS THE PLAYERS WHO FINISHED THIS GAME (Sid,
                 # 2026-09-28: the same rule for everyone). Until then it was
@@ -59159,7 +59156,7 @@ async def submit_ffa_match(report: FfaMatchReport, request: Request, db: AsyncSe
                 _win_entry = next((p for p in report.players
                                    if p.steam_id == report.winner_steam_id), None)
                 if (_win_entry is not None
-                        and report.winner_steam_id not in unrated
+                        and report.winner_steam_id not in excluded
                         and _win_entry.rounds_won == 5
                         and all(p.rounds_won == 0 for p in report.players
                                 if p.steam_id != report.winner_steam_id)):

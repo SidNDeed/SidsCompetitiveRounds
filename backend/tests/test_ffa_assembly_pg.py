@@ -4432,6 +4432,186 @@ def test_early_leave_grace_excludes_game_rating_xp_and_gold(monkeypatch):
     run_env(monkeypatch, body)
 
 
+async def _grace_kill_awards(env, pid):
+    keys = await env.conn.fetch(
+        "SELECT achievement_key FROM player_achievements WHERE player_id = $1"
+        " ORDER BY achievement_key", pid)
+    gold = await env.conn.fetch(
+        "SELECT reference_id, amount FROM gold_transactions"
+        " WHERE player_id = $1 AND reason = 'achievement' ORDER BY reference_id", pid)
+    return [r["achievement_key"] for r in keys], [tuple(r) for r in gold]
+
+
+async def _grace_kill_game(env, kills, *, unsigned=False):
+    lob = await _s64_lobby(env)
+    s, res = lob.sids, _s64_res(lob)
+    res[s[5]] = res[s[6]] = (0, 0)
+    await env.ready_all(lob, list(range(7)))
+    if unsigned:
+        await env.set_lobby(lob, kills_tiebreak=False)
+        env.mp.setattr(main, "_verify_ffa_hmac", lambda report: "v1")
+    before = {slot: await _econ(env, lob.pids[slot]) for slot in (5, 6)}
+    report = await env.report_req(
+        lob, 1, res, reporter=s[0], left={s[5], s[6]}, absent={s[5]},
+        gp_leave={s[6]: 0})
+    next(p for p in report.players if p.steam_id == s[6]).kills = kills
+    result = await env.submit(report)
+    assert result.status == 200, result
+    return lob, before, await _mp(env, lob, 1)
+
+
+@pytest.mark.parametrize("kills,keys", [
+    pytest.param(51, ["ffa_kills_50"], id="C1-51"),
+    pytest.param(101, ["ffa_kills_100", "ffa_kills_50"], id="C2-101"),
+])
+def test_early_leave_grace_keeps_signed_kill_achievements(monkeypatch, kills, keys):
+    """C1/C2: signed kill badges and their live gold survive the game grace."""
+    async def body(env):
+        lob, before, rows = await _grace_kill_game(env, kills)
+        pid, row = lob.pids[6], rows[6]
+        assert await _grace_kill_awards(env, pid) == (
+            keys, [(key, main._achievement_gold(key)) for key in keys])
+        after = await _econ(env, pid)
+        assert after[0] == before[6][0]
+        for column in ("total_xp", "ffa_xp_earned"):
+            assert after[1][column] == before[6][1][column]
+        assert after[1]["gold_earned"] == before[6][1]["gold_earned"] + sum(
+            main._achievement_gold(key) for key in keys)
+        assert row["absent"] is True and row["left_early"] is True
+        assert row["game_points_at_leave"] == 0 and row["rating_change"] is None
+        assert row["xp_gained"] == 0 and row["gold_gained"] == 0
+        assert await _grace_kill_awards(env, lob.pids[5]) == ([], [])
+        assert await _econ(env, lob.pids[5]) == before[5]
+        assert rows[5]["absent"] is True and rows[5]["rating_change"] is None
+    run_env(monkeypatch, body)
+
+
+def test_early_leave_grace_keeps_ghosts_excluded_from_achievements(monkeypatch):
+    """C3: the zero-tally ghost in the C1 game remains excluded."""
+    async def body(env):
+        lob, before, rows = await _grace_kill_game(env, 51)
+        assert await _grace_kill_awards(env, lob.pids[5]) == ([], [])
+        assert await _econ(env, lob.pids[5]) == before[5]
+        assert rows[5]["absent"] is True and rows[5]["rating_change"] is None
+        assert rows[5]["xp_gained"] == 0 and rows[5]["gold_gained"] == 0
+    run_env(monkeypatch, body)
+
+
+def test_early_leave_grace_does_not_award_unsigned_kills(monkeypatch):
+    """C4: a v1 report preserves grace but cannot mint a kill badge or gold."""
+    async def body(env):
+        lob, before, rows = await _grace_kill_game(env, 51, unsigned=True)
+        assert await _grace_kill_awards(env, lob.pids[6]) == ([], [])
+        assert await _econ(env, lob.pids[6]) == before[6]
+        row = rows[6]
+        assert row["absent"] is True and row["left_early"] is True
+        assert row["game_points_at_leave"] == 0 and row["rating_change"] is None
+        assert row["xp_gained"] == 0 and row["gold_gained"] == 0
+    run_env(monkeypatch, body)
+
+
+def test_early_leave_grace_keeps_assembly_overlap_excluded(monkeypatch):
+    """C5: grace cannot undo an independent assembly exclusion in game two."""
+    async def body(env):
+        lob = await _s64_lobby(env, t=60.0)
+        s, res = lob.sids, _s64_res(lob)
+        await _omit(env, lob, [0, 2], 6)
+        result = await env.leave(lob, 6)
+        assert result.status == 200, result
+        seat = await env.seat(lob, 6)
+        assert (seat["gone_game"], seat["gone_path"], seat["verdict"]) == (
+            1, "leave", "granted")
+        result = await env.report(
+            lob, 1, res, reporter=s[0], left={s[6]}, gp_leave={s[6]: 5})
+        assert result.status == 200, result
+        before = await _econ(env, lob.pids[6])
+        res[s[6]] = (0, 0)
+        report = await env.report_req(
+            lob, 2, res, reporter=s[0], left={s[6]}, gp_leave={s[6]: 0})
+        next(p for p in report.players if p.steam_id == s[6]).kills = 51
+        result = await env.submit(report)
+        assert result.status == 200, result
+        assert await _grace_kill_awards(env, lob.pids[6]) == ([], [])
+        assert await _econ(env, lob.pids[6]) == before
+        row = (await _mp(env, lob, 2))[6]
+        assert row["absent"] is True and row["left_early"] is True
+        assert row["game_points_at_leave"] == 0 and row["rating_change"] is None
+        assert row["xp_gained"] == 0 and row["gold_gained"] == 0
+    run_env(monkeypatch, body)
+
+
+def test_early_leave_grace_achievement_exclusions_are_independent():
+    """S1: ghost/assembly exclusions feed both achievement filters; grace does not."""
+    import ast
+    import inspect
+    import io
+    import textwrap
+    import tokenize
+
+    raw = inspect.getsource(main.submit_ffa_match)
+    toks = [t for t in tokenize.generate_tokens(io.StringIO(textwrap.dedent(raw)).readline)
+            if t.type != tokenize.COMMENT]
+    src = tokenize.untokenize(toks)
+    tree = ast.parse(src)
+
+    def assignments(name):
+        return sorted((n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                       and any(isinstance(t, ast.Name) and t.id == name for t in n.targets)),
+                      key=lambda n: n.lineno)
+
+    independent = assignments("excluded")
+    assert len(independent) == 2
+    assert ast.dump(independent[0].value) == ast.dump(ast.Name(id="ghosts", ctx=ast.Load()))
+    assembly = independent[1].value
+    assert isinstance(assembly, ast.Await) and isinstance(assembly.value, ast.Call)
+    call = assembly.value
+    assert isinstance(call.func, ast.Name) and call.func.id == "_asm_report_rules"
+    assert [ast.dump(k.value) for k in call.keywords if k.arg == "unrated"] == [
+        ast.dump(ast.Name(id="excluded", ctx=ast.Load()))]
+    union, = assignments("unrated")
+    assert ast.dump(union.value) == ast.dump(ast.BinOp(
+        left=ast.Name(id="excluded", ctx=ast.Load()), op=ast.BitOr(),
+        right=ast.Name(id="graced", ctx=ast.Load())))
+    assert independent[0].lineno < independent[1].lineno < union.lineno
+    assert "_ach_players = sorted(" in src
+    candidates, = assignments("_ach_players")
+    candidate_filter = candidates.value.args[0].generators[0].ifs[0]
+    assert ast.dump(candidate_filter) == ast.dump(ast.Compare(
+        left=ast.Attribute(value=ast.Name(id="p", ctx=ast.Load()), attr="steam_id",
+                           ctx=ast.Load()), ops=[ast.NotIn()],
+        comparators=[ast.Name(id="excluded", ctx=ast.Load())]))
+    winners = [n for n in ast.walk(tree) if isinstance(n, ast.Compare)
+               and n.lineno > candidates.lineno
+               and isinstance(n.left, ast.Attribute)
+               and isinstance(n.left.value, ast.Name) and n.left.value.id == "report"
+               and n.left.attr == "winner_steam_id" and any(
+                   isinstance(op, ast.NotIn) for op in n.ops)]
+    assert len(winners) == 1
+    assert [ast.dump(v) for v in winners[0].comparators] == [
+        ast.dump(ast.Name(id="excluded", ctx=ast.Load()))]
+    assert sum(isinstance(n, ast.Name) and n.id == "unrated" and isinstance(n.ctx, ast.Load)
+               for n in ast.walk(tree)) == 9
+    assert sum(isinstance(n, ast.Name) and n.id == "excluded" and isinstance(n.ctx, ast.Load)
+               for n in ast.walk(tree)) == 4
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
+            assert not any(isinstance(n, ast.Name) and n.id == "graced"
+                           for n in ast.walk(node.right))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "difference":
+            assert not any(isinstance(n, ast.Name) and n.id == "graced"
+                           for arg in node.args for n in ast.walk(arg))
+    trust = raw[raw.index("# TRUST:"):raw.index("# Old clients")]
+    flat = " ".join(line.lstrip().lstrip("#").strip() for line in trust.splitlines())
+    assert ("Achievements are unaffected by the grace: their predicates read the "
+            "ghost and assembly exclusions, not the grace.") in flat
+    module_src = inspect.getsource(main)
+    block = module_src[module_src.index("# Early-leave grace"):
+                       module_src.index("FFA_LEAVE_GRACE_FULL_POINTS =")]
+    flat = " ".join(line.lstrip().lstrip("#").strip() for line in block.splitlines())
+    assert "The grace leaves achievements unaffected." in flat
+
+
 def test_s64_iii_the_seats_own_leave_corroborated(monkeypatch):
     """S64 (iii): actor 7 has left, two current witnesses omit it, none lists
     it, R's own census is 30 s old: R's leave during game 1 writes gone_game
