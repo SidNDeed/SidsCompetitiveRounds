@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Lane autolog-bundle (night of 2026-10-19 findings): executes the REAL
+       plugin/LogBundleCore.cs, the Unity-free half of the bug-report and
+       automatic-upload bundle: the head-and-tail capped read, the bundle
+       composer, the off-main-thread job both producers use, and the [CLOCK]
+       line format. run_tests.py builds it, runs every case, then builds
+       mutated COPIES of that file (CoreSource override) and requires each
+       mutant's target case to fail and its control case to pass. The tracked
+       file is never modified. DSN-free: no database, no network. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>AutologBundleTests</AssemblyName>
+    <RootNamespace>AutologBundleTests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(CoreSource)' == ''">
+    <CoreSource>$(MSBuildThisFileDirectory)..\..\..\plugin\LogBundleCore.cs</CoreSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(CoreSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>
