@@ -1213,38 +1213,61 @@ def test_m6_bad_signature_records_refusal_before_403(monkeypatch):
     run_env(monkeypatch, body, prefix="rjs2m6sig")
 
 
-async def _lock_waiters(env, want, bound=200):
-    """Wait (capped) until `want` backends of this database wait on a lock
-    in a hold-open statement; the count reached, or the bound's last count."""
-    n = 0
+async def _lock_waiters(env, blocker_pid, want, bound=200):
+    """Observe backend ids queued directly or indirectly behind the blocker.
+
+    The second request may wait on the first request's identity advisory
+    lock, before either its ledger or series statement names a table.
+    """
+    pids = ()
     for _ in range(bound):
-        n = await env.conn.fetchval(
-            "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
-            "   AND wait_event_type = 'Lock'"
-            "   AND (query LIKE '%team_series%' OR query LIKE '%match_hold_open_attempts%')")
-        if n >= want:
-            return n
+        pids = tuple(await env.conn.fetchval(
+            "WITH RECURSIVE w(pid) AS ("
+            " SELECT pid FROM pg_stat_activity WHERE datname = current_database()"
+            "   AND $1 = ANY(pg_blocking_pids(pid))"
+            " UNION SELECT a.pid FROM pg_stat_activity a JOIN w"
+            "   ON w.pid = ANY(pg_blocking_pids(a.pid))"
+            " WHERE a.datname = current_database())"
+            " SELECT COALESCE(array_agg(pid ORDER BY pid), ARRAY[]::integer[]) FROM w",
+            blocker_pid))
+        if len(pids) >= want:
+            return pids
         await asyncio.sleep(0.02)
-    return n
+    return pids
 
 
 async def _concurrent_opens(env, series_rows, calls):
-    """Start `calls` together while a blocker holds every series row in
-    `series_rows`, so each call has passed its ledger step before any can
-    act; release once both wait, and return both responses."""
+    """Hold the series rows until both request backends join the blocking chain.
+
+    Observe both contenders, including a contender queued on the earlier
+    identity advisory guard. Release the series locks before collecting
+    responses, and close every task on a failed observation or request.
+    """
     blocker = await cf_pg.harness.connect_bound(env.c.dsn, env.c.schema)
     transaction = blocker.transaction()
-    await transaction.start()
+    tasks = []
     try:
-        for sid in series_rows:
-            await blocker.execute(
-                "SELECT 1 FROM team_series WHERE id = $1 FOR NO KEY UPDATE", sid)
-        tasks = [asyncio.ensure_future(c) for c in calls]
-        assert await _lock_waiters(env, len(tasks)) >= len(tasks)
+        await transaction.start()
+        try:
+            for sid in series_rows:
+                await blocker.execute(
+                    "SELECT 1 FROM team_series WHERE id = $1 FOR NO KEY UPDATE", sid)
+            tasks = [asyncio.ensure_future(c) for c in calls]
+            observed = await _lock_waiters(env, blocker.get_server_pid(), len(tasks))
+            assert len(observed) == len(set(observed)) == len(tasks) == 2, \
+                ("FIX2 M2 both contenders", observed, len(tasks))
+        finally:
+            await transaction.rollback()
+        return await asyncio.gather(*tasks)
     finally:
-        await transaction.rollback()
-        await blocker.close()
-    return await asyncio.gather(*tasks)
+        try:
+            await blocker.close()
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def test_nx0a_concurrent_first_use_of_one_request_id_acts_once(monkeypatch):
@@ -1258,6 +1281,14 @@ def test_nx0a_concurrent_first_use_of_one_request_id_acts_once(monkeypatch):
         rid = "req-nx0a-same"
         a, b = await _concurrent_opens(env, [s.sid], [
             open_hold(env, s, 1, 0, g, rid=rid), open_hold(env, s, 1, 0, g, rid=rid)])
+        same_a = a.json() if a.status_code == 200 else {}
+        same_b = b.json() if b.status_code == 200 else {}
+        assert (a.status_code, b.status_code) == (200, 200) and \
+            isinstance(same_a, dict) and isinstance(same_b, dict) and \
+            (same_a.get("status"), same_a.get("hold_id"), same_a.get("repeat")) == \
+            (same_b.get("status"), same_b.get("hold_id"), same_b.get("repeat")) == \
+            ("opened", same_a.get("hold_id"), False), \
+            ("FIX2 M2 one action", "same tuple", a.text, b.text)
         assert (a.status_code, b.status_code) == (200, 200), (a.text, b.text)
         ja, jb = a.json(), b.json()
         assert (ja["status"], ja["hold_id"], ja["repeat"]) == \
@@ -1273,6 +1304,13 @@ def test_nx0a_concurrent_first_use_of_one_request_id_acts_once(monkeypatch):
         rid2 = "req-nx0a-split"
         rx, ry = await _concurrent_opens(env, [x.sid, y.sid], [
             open_hold(env, x, 1, 0, gx, rid=rid2), open_hold(env, y, 1, 0, gy, rid=rid2)])
+        split_answers = [response.json() if response.status_code == 200 else {}
+                         for response in (rx, ry)]
+        split_statuses = [answer.get("status") if isinstance(answer, dict) else None
+                          for answer in split_answers]
+        assert (rx.status_code, ry.status_code) == (200, 200) and \
+            split_statuses.count("opened") == split_statuses.count("refused") == 1, \
+            ("FIX2 M2 one action", "split tuple", rx.text, ry.text)
         answers = sorted([rx.json()["status"], ry.json()["status"]])
         assert answers == ["opened", "refused"], (rx.text, ry.text)
         loser = rx.json() if rx.json()["status"] == "refused" else ry.json()

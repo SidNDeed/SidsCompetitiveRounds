@@ -45,6 +45,7 @@ SQL_ENV = {M383: "MATCH_HOLD_M383", M384: "MATCH_HOLD_M384",
 # id: (piece, module file, [(anchor, mutant text)], [(anchor, control text)],
 #      test file, -k selection of the tests that must fail)
 MUTANTS = {
+    "FIX2.M2.ACTION": ('FIX2', 'match_hold.py', [('         "opener": str(opener) if opener else None})).scalar()\n    return got is not None\n', '         "opener": str(opener) if opener else None})).scalar()\n    return True\n')], [('         "opener": str(opener) if opener else None})).scalar()\n    return got is not None\n', '         "opener": str(opener) if opener else None})).scalar()\n    return (got is not None)\n')], 'test_match_hold_pg.py', 'test_nx0a_concurrent_first_use_of_one_request_id_acts_once'),
     "FIX1B.R1.SAVEPOINT": ('FIX1B', 'match_report_window.py', [('    async with db.begin_nested():\n        try:\n            await settle(db, chosen)\n', '    if True:\n        try:\n            await settle(db, chosen)\n')], [('    async with db.begin_nested():\n        try:\n            await settle(db, chosen)\n', '    async with db.begin_nested():\n        try:\n            await settle(db, (chosen))\n')], 'test_match_hold_reports_pg.py', 'test_merged_fix1b_r1_permanent_then_valid_held_reports'),
     "F1.L2.BASELINE": ("FIX1", M384,
         [('SELECT e.key_id, to_jsonb(k)\n', 'SELECT e.key_id, NULL::jsonb\n')],
