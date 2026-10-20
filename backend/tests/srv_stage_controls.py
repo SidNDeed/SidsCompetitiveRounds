@@ -30,6 +30,15 @@ RT = "test_match_hold_reports_pg.py::"
 XT = "test_match_hold_deletion_pg.py::"
 
 ROWS = [
+    {"row": "MERGED.FIX1.M1.ROLLBACK",
+     "node": RT + "test_merged_fix1_m1_quarantine_preserves_window_transaction",
+     "tag": "M1 owner transaction",
+     "mutant": [(MAIN,
+                 '    try:\n        if not _window_owned:\n            await db.rollback()\n        # Flood bound, take 2',
+                 '    try:\n        await db.rollback()\n        # Flood bound, take 2', 1)],
+     "twin": [(MAIN,
+               '    try:\n        if not _window_owned:\n            await db.rollback()\n        # Flood bound, take 2',
+               '    try:\n        if not (_window_owned):\n            await db.rollback()\n        # Flood bound, take 2', 1)]},
     {"row": "MERGED.FIX1.H3.RESELECT",
      "node": RT + "test_merged_fix1_h3_two_janitors_keep_only_their_attempt",
      "tag": "H3 exact attempted row",

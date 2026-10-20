@@ -835,3 +835,153 @@ def test_merged_fix1_h3_unknown_and_transient_failures_keep_evidence(monkeypatch
                 w, j = await window_state(env, s, g)
                 assert j[want][1] == "settled" and len(await recorded(env, mode, s)) == 1
     hold_test.run_env(monkeypatch, body, prefix="mergedh3t")
+
+
+# -- Merged fix 1 M1 -----------------------------------------------------------
+
+def test_merged_fix1_m1_quarantine_preserves_window_transaction(monkeypatch):
+    """Immediate, expiry and entry release, each at capture/quota/failure.
+
+    Pause capture before its owner commits. A competing receipt starts then;
+    NOWAIT observes the actual window lock, including the failure savepoint.
+    """
+    import asyncio
+    import asyncpg
+    import uuid
+
+    async def body(env):
+        _mount(env, monkeypatch)
+        for dispatch in ("immediate", "expired", "held"):
+            for variant in ("recorded", "quota", "failure"):
+                if dispatch == "held":
+                    s, g, hid = await hold_test.held(env, "team")
+                    low = 0
+                    initial = await post_report("team", s, low, g)
+                    assert initial.status_code == 202 and initial.json()["state"] == "held"
+                    await env.conn.execute(
+                        "UPDATE match_seat_holds SET entered_at = clock_timestamp(),"
+                        " closed_at = clock_timestamp(), closed_reason = 'entered'"
+                        " WHERE id = $1", uuid.UUID(hid))
+                else:
+                    s = await hold_test.seed_series(env.conn, "team")
+                    g = (await hold_test.game_start(env, s, 0))["game_id"]
+                    low = min(range(4), key=lambda i: (len(s.steam(i)), s.steam(i)))
+                    if dispatch == "immediate":
+                        await hold_test.beat(env, s, low)
+                        # Preexisting, empty window makes its row lock visible
+                        # to NOWAIT while the new journal is still uncommitted.
+                        async with env.sm() as db:
+                            await main._mrw_mod().lock_window(
+                                db, mode="team", room=s.room, game_id=g,
+                                now=await hold_test.dbclock(env))
+                            await db.commit()
+                    else:
+                        initial = await post_report("team", s, low, g)
+                        assert initial.status_code == 202
+                        await env.conn.execute(
+                            "UPDATE match_report_windows SET settle_after ="
+                            " clock_timestamp() - interval '1 second' WHERE room_name = $1", s.room)
+                await env.conn.execute(
+                    "UPDATE team_series SET status = 'completed' WHERE id = $1", s.sid)
+                if variant == "quota":
+                    await env.conn.execute(
+                        "INSERT INTO match_report_quarantine"
+                        " (mode,reason,http_status,group_id,payload)"
+                        " SELECT 'team','quota-control',400,$1,jsonb_build_object('seed',n)"
+                        " FROM generate_series(1,50) n", s.sid)
+                paused, release, competitor_started = (asyncio.Event() for _ in range(3))
+                captures = []
+                real_capture = main._quarantine_report
+                real_receive = main._report_window_receive
+
+                async def capture(*args, **kwargs):
+                    result = await real_capture(*args, **kwargs)
+                    if kwargs.get("in_window"):
+                        captures.append(result)
+                        if len(captures) == 1:
+                            paused.set()
+                            await release.wait()
+                    return result
+
+                async def failure(db, **kwargs):
+                    # Exercise a PostgreSQL-aborted savepoint, not only a
+                    # Python exception that leaves the transaction usable.
+                    await db.execute(main.text("SELECT 1 / 0"))
+
+                async def competing_receive(*args, **kwargs):
+                    competitor_started.set()
+                    return await real_receive(*args, **kwargs)
+
+                async def first_dispatch():
+                    if dispatch == "immediate":
+                        return await post_report("team", s, low, g)
+                    if dispatch == "expired":
+                        return await main._report_window_janitor()
+                    async with env.sm() as db:
+                        return await main._finish_held_reports(db, "team", s.room, g, hid)
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(main, "_quarantine_report", capture)
+                    if variant == "failure":
+                        patch.setattr(main, "_quarantine_on_file", failure)
+                    first = asyncio.create_task(first_dispatch())
+                    other = None
+                    try:
+                        await asyncio.wait_for(paused.wait(), 10)
+                        locked = False
+                        try:
+                            async with env.conn.transaction():
+                                await env.conn.fetchrow(
+                                    "SELECT 1 FROM match_report_windows WHERE room_name = $1"
+                                    " AND game_id = $2::uuid FOR NO KEY UPDATE NOWAIT", s.room, str(g))
+                        except asyncpg.LockNotAvailableError:
+                            locked = True
+                        assert locked, ("M1 owner transaction", dispatch, variant, locked)
+                        patch.setattr(main, "_report_window_receive", competing_receive)
+                        other = asyncio.create_task(post_report("team", s, low, g))
+                        await asyncio.wait_for(competitor_started.wait(), 10)
+                        assert not other.done(), ("M1 competing receipt waits", dispatch, variant)
+                    finally:
+                        release.set()
+                        results = await asyncio.gather(
+                            *([first, other] if other is not None else [first]),
+                            return_exceptions=True)
+                    assert not any(isinstance(r, BaseException) for r in results), \
+                        ("M1 owner transaction", dispatch, variant, results)
+                    if dispatch == "immediate":
+                        assert results[0].status_code == 400 and results[0].json() == \
+                            {"detail": "team_series is completed"}, \
+                            ("M1 refusal response", variant, results[0].text)
+                    repeat = await post_report("team", s, low, g)
+                    assert repeat.status_code == 400 and repeat.json() == {"detail": "team_series is completed"} and captures == \
+                        [{"recorded": "recorded", "quota": "quota", "failure": "failed"}[variant]], \
+                        ("M1 refusal once", dispatch, variant, captures, repeat.text)
+                w, j = await window_state(env, s, g)
+                assert w is not None and w["settled_at"] is None and w["superseded_at"] is None \
+                    and j == {s.steam(low): ("c", "kept")} and await recorded(env, "team", s) == [], \
+                    ("M1 durable refusal", dispatch, variant, w, j)
+                count = await env.conn.fetchval(
+                    "SELECT count(*) FROM match_report_quarantine WHERE group_id = $1", s.sid)
+                assert count == {"recorded": 1, "quota": 50, "failure": 0}[variant], \
+                    ("M1 capture outcome", dispatch, variant, count)
+    hold_test.run_env(monkeypatch, body, prefix="mergedm1")
+
+
+def test_merged_fix1_m1_first_refusal_keeps_new_window_and_journal(monkeypatch):
+    """The first immediate refusal owns both new inserts through its commit."""
+    async def body(env):
+        _mount(env, monkeypatch)
+        s = await hold_test.seed_series(env.conn, "team")
+        g = (await hold_test.game_start(env, s, 0))["game_id"]
+        low = min(range(4), key=lambda i: (len(s.steam(i)), s.steam(i)))
+        await hold_test.beat(env, s, low)
+        await env.conn.execute("UPDATE team_series SET status = 'completed' WHERE id = $1", s.sid)
+        response = await post_report("team", s, low, g)
+        w, j = await window_state(env, s, g)
+        assert response.status_code == 400 and response.json() == {"detail": "team_series is completed"} \
+            and w is not None and w["settled_at"] is None and j == {s.steam(low): ("c", "kept")}, \
+            ("M1 new inserts survive", response.status_code, response.text, w, j)
+        assert await recorded(env, "team", s) == []
+        assert await env.conn.fetchval(
+            "SELECT count(*) FROM match_report_quarantine WHERE group_id = $1", s.sid) == 1
+    hold_test.run_env(monkeypatch, body, prefix="mergedm1new")

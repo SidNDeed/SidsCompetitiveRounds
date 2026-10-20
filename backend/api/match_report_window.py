@@ -388,6 +388,10 @@ class PermanentReportRefusal(HTTPException):
                          headers=refusal.headers)
 
 
+class ReportRefused(Exception):
+    """A lifecycle refusal captured inside the window owner's transaction."""
+
+
 class ReportAlreadyRecorded(Exception):
     """A callback found a physical game on record; it made no settlement."""
 
@@ -409,6 +413,16 @@ async def _settle_and_mark(db, room, game_id, chosen, now, settle):
     except ReportAlreadyRecorded as exc:
         if exc.receipt:
             raise
+        await db.execute(text(
+            "UPDATE match_report_journal SET state = 'kept', decided_at = :now"
+            " WHERE room_name = :room AND game_id = CAST(:g AS uuid)"
+            " AND reporter_id = CAST(:pid AS uuid) AND state = 'journaled'"),
+            {"now": now, "room": room, "g": str(game_id),
+             "pid": str(chosen["reporter_id"])})
+        return False
+    except ReportRefused:
+        # Keep the exact attempted row once, with its original payload. A
+        # refusal has no result and never terminalizes the physical game.
         await db.execute(text(
             "UPDATE match_report_journal SET state = 'kept', decided_at = :now"
             " WHERE room_name = :room AND game_id = CAST(:g AS uuid)"
@@ -552,6 +566,8 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
         db, mode=mode, room=room, game_id=game_id, reporter_id=reporter_id,
         reporter_steam=reporter_steam, cls=cls, payload=payload, now=now, held=held)
     cls = entry["cls"]
+    if entry["state"] == "kept":
+        return {"status": "journaled", "cls": cls, "state": "kept"}
     if held or entry["state"] == "held":
         return {"status": "journaled", "cls": cls, "state": "held"}
     if cls == CLASS_C:

@@ -49255,6 +49255,10 @@ async def _report_rollback(db, in_window):
         await db.rollback()
 
 
+class _WindowQuarantineRefusal(HTTPException):
+    """A bound lifecycle refusal whose evidence belongs to the window owner."""
+
+
 async def _report_window_settle(db, mode, entry, out=None):
     """The settle callable match_report_window calls with the one report a
     window settles: the mode's settle body on the stored payload, inside the
@@ -49272,6 +49276,12 @@ async def _report_window_settle(db, mode, entry, out=None):
     outcome = {}
     try:
         resp = await settle(db, report, in_window=True, outcome=outcome)
+    except _WindowQuarantineRefusal as exc:
+        if out is not None:
+            out[str(entry["reporter_id"])] = JSONResponse(
+                status_code=exc.status_code, content={"detail": exc.detail},
+                headers=exc.headers)
+        raise _mrw_mod().ReportRefused() from exc
     except HTTPException as exc:
         # These settle-body validation refusals bind immutable payload,
         # roster, physical room or a terminal series. Retrying cannot repair
@@ -49433,19 +49443,36 @@ async def _report_window_receive(db, mode, report):
         if recorded is None:
             raise HTTPException(503, "report_window_retry")
         return await _report_window_duplicate(db, mode, series_id, report, recorded)
+    if (mode == "team" and not out.get(str(by_steam[report.reported_by_steam_id]))
+            and (res["status"] == "duplicate" or res.get("state") == "kept")):
+        # A committed refusal is immutable evidence, not a new capture attempt.
+        # Re-read the lifecycle state before repeating its original HTTP answer.
+        refused_status = (await db.execute(text(
+            "SELECT s.status FROM team_series s JOIN match_report_journal j"
+            " ON j.room_name = :room AND j.game_id = CAST(:g AS uuid)"
+            " AND j.reporter_id = CAST(:pid AS uuid) AND j.state = 'kept'"
+            " WHERE s.id = CAST(:sid AS uuid)"),
+            {"room": room, "g": str(g), "sid": str(series_id),
+             "pid": str(by_steam[report.reported_by_steam_id])})).scalar()
+        if refused_status is not None and refused_status != "active":
+            out[str(by_steam[report.reported_by_steam_id])] = JSONResponse(
+                status_code=400, content={"detail": f"team_series is {refused_status}"})
     if res["status"] == "duplicate":
         win = (await db.execute(text(
             "SELECT superseded_at FROM match_report_windows"
             " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"),
             {"room": room, "g": str(g)})).mappings().first()
         await db.commit()
+        refusal = out.get(str(by_steam[report.reported_by_steam_id]))
+        if refusal is not None:
+            return refusal
         if win is not None and win["superseded_at"] is not None:
             return JSONResponse(status_code=202,
                                 content={"status": "journaled", "state": "superseded"})
         return await _report_window_duplicate(db, mode, series_id, report)
     await db.commit()
     mine = out.get(str(by_steam[report.reported_by_steam_id]))
-    if res["status"] == "settled" and mine is not None:
+    if mine is not None:
         return mine
     print(f"[HOLD] report journaled mode={mode} room={room} cls={res.get('cls')} "
           f"state={res.get('state', res['status'])}")
@@ -51476,7 +51503,8 @@ async def _quarantine_on_file(db: AsyncSession, *, mode: str, room: str | None,
 
 async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status_code: int,
                              payload, group_id=None, photon_room_id: str | None = None,
-                             reporter_id=None, player_ids=None) -> str:
+                             reporter_id=None, player_ids=None, in_window=False,
+                             _window_owned=False) -> str:
     """Preserve a match report that was rejected for a LIFECYCLE reason.
 
     Sid, July 30, after two completed FFA games were destroyed: "if it fails
@@ -51488,10 +51516,10 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
     becomes an unauthenticated write primitive. HMAC has always been verified by
     the time any caller reaches here.
 
-    Runs in its OWN transaction, and the caller is expected to raise immediately
-    afterwards: every lifecycle gate fires BEFORE the endpoint's first write, so
-    rolling back here discards nothing. Never raises — a failure to quarantine
-    must not change the response the client already had coming (#187).
+    Ordinary callers keep the independent capture transaction. A window caller
+    uses an owned savepoint, so capture never commits or rolls back its journal,
+    window or locks. Never raises to either caller: a failed capture preserves
+    the refusal response the client already had coming (#187).
 
     RETURNS which of the five things happened, because "never raises" is not
     the same as "always recorded" and a caller whose refusal MESSAGE says the
@@ -51527,8 +51555,22 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
     the RJ-3 branches below DO claim it, and answer 503 (which the client's
     outbox retries) rather than a 409 that would spend the report.
     """
+    if in_window:
+        # A failed capture rolls back only this savepoint. The report owner
+        # keeps its window, journal and locks until it commits the refusal.
+        try:
+            async with db.begin_nested():
+                return await _quarantine_report(
+                    db, mode=mode, reason=reason, status_code=status_code,
+                    payload=payload, group_id=group_id,
+                    photon_room_id=photon_room_id, reporter_id=reporter_id,
+                    player_ids=player_ids, _window_owned=True)
+        except Exception as ex:
+            print(f"[QUARANTINE] capture failed ({mode}/{reason}): {type(ex).__name__}")
+            return "failed"
     try:
-        await db.rollback()
+        if not _window_owned:
+            await db.rollback()
         # Flood bound, take 2 (Codex round-3 finds 2+3): the round-2 one-row
         # semantic dedupe DESTROYED distinct legitimate games — an outbox
         # retrying two real games of a since-closed lobby shares the
@@ -51558,7 +51600,8 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
         _outcome, _room_taken = await _quarantine_on_file(
             db, mode=mode, room=_room, group_id=group_id, body=_body)
         if _outcome is not None:
-            await db.commit()
+            if not _window_owned:
+                await db.commit()
             print(f"[QUARANTINE] {mode} report already on file: {reason} "
                   f"room={photon_room_id} ({_outcome})")
             return _outcome
@@ -51568,7 +51611,8 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
                  WHERE mode = :m AND group_id = :g AND status = 'pending'
             """), {"m": mode, "g": group_id})).scalar() or 0
             if int(_pending) >= 50:
-                await db.rollback()
+                if not _window_owned:
+                    await db.rollback()
                 print(f"[QUARANTINE] pending quota reached for {mode} group={group_id} — not capturing more")
                 return "quota"
         if _room_taken:
@@ -51628,11 +51672,14 @@ async def _quarantine_report(db: AsyncSession, *, mode: str, reason: str, status
                            "g": group_id, "rep": reporter_id,
                            "pids": list(player_ids or []), "pl": _body})
                     _outcome = "variant"
-        await db.commit()
+        if not _window_owned:
+            await db.commit()
         print(f"[QUARANTINE] {mode} report kept for admin review: {reason} "
               f"room={photon_room_id} ({_outcome})")
         return _outcome
     except Exception as ex:
+        if _window_owned:
+            raise  # The enclosing savepoint owns failure recovery.
         print(f"[QUARANTINE] capture failed ({mode}/{reason}): {ex}")
         try:
             await db.rollback()
@@ -64102,7 +64149,7 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
         # four players are exactly the series' recorded members and whose
         # reporter is one of them — the same binding the active path enforces
         # later. HMAC + score sanity have already passed, and player rows
-        # resolve AFTER this gate, so the transaction has no writes to lose.
+        # resolve AFTER this gate; a window caller already owns its journal.
         _q_rows = (await db.execute(
             text("SELECT id, steam_id FROM players WHERE steam_id = ANY(:sids)"),
             {"sids": list(steams)},
@@ -64119,7 +64166,9 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
                 status_code=400, payload=report.model_dump(),
                 group_id=series_uuid, photon_room_id=report.photon_room_id,
                 reporter_id=_q_by_steam.get(report.reported_by_steam_id),
-                player_ids=list(_q_by_steam.values()))
+                player_ids=list(_q_by_steam.values()), in_window=in_window)
+            if in_window:
+                raise _WindowQuarantineRefusal(400, f"team_series is {series['status']}")
         raise HTTPException(400, f"team_series is {series['status']}")
 
     # Cross-series edge: two live series CAN share players (dc_incomplete husk
