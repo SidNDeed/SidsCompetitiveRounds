@@ -3675,6 +3675,18 @@ namespace CompetitiveRounds
             ["{0} (away) got {1}"] = "{0} (ausente) recibió {1}",
             ["{0} did not return; seat released"] = "{0} no volvió; plaza liberada",
             ["{0} is back"] = "{0} ha vuelto",
+            // Added 2026-10-20 (merged round 3 refit, T3c): the eight RJ Stage 2
+            // hold banner and return-offer texts the refit lane added to the source
+            // list in 39bfa994 (KX7) without catalogue entries. Sorted among
+            // themselves; existing entries above are untouched.
+            ["Another player left. The match ends as a disconnect."] = "Otro jugador se fue. La partida termina como desconexión.",
+            ["Checking whether {0} can rejoin"] = "Comprobando si {0} puede volver a entrar",
+            ["Not now"] = "Ahora no",
+            ["Press Esc to leave. The match then ends as a disconnect."] = "Pulsa Esc para salir. La partida terminará entonces como desconexión.",
+            ["Rejoin"] = "Volver a entrar",
+            ["Your match is still running. Rejoin? {0}"] = "Tu partida sigue en curso. ¿Volver a entrar? {0}",
+            ["{0} did not return. The match ends as a disconnect."] = "{0} no volvió. La partida termina como desconexión.",
+            ["{0} is rejoining"] = "{0} está volviendo a entrar",
         };
 
         private static readonly Dictionary<string, string> RU = new Dictionary<string, string>
@@ -7312,6 +7324,18 @@ namespace CompetitiveRounds
             ["{0} (away) got {1}"] = "{0} (отсутствует) получил {1}",
             ["{0} did not return; seat released"] = "{0} не вернулся; место освобождено",
             ["{0} is back"] = "{0} вернулся",
+            // Added 2026-10-20 (merged round 3 refit, T3c): the eight RJ Stage 2
+            // hold banner and return-offer texts the refit lane added to the source
+            // list in 39bfa994 (KX7) without catalogue entries. Sorted among
+            // themselves; existing entries above are untouched.
+            ["Another player left. The match ends as a disconnect."] = "Другой игрок вышел. Матч завершается как дисконнект.",
+            ["Checking whether {0} can rejoin"] = "Проверяем, может ли {0} вернуться",
+            ["Not now"] = "Не сейчас",
+            ["Press Esc to leave. The match then ends as a disconnect."] = "Нажмите Esc, чтобы выйти. Тогда матч завершится как дисконнект.",
+            ["Rejoin"] = "Вернуться",
+            ["Your match is still running. Rejoin? {0}"] = "Ваш матч ещё идёт. Вернуться? {0}",
+            ["{0} did not return. The match ends as a disconnect."] = "{0} не вернулся. Матч завершается как дисконнект.",
+            ["{0} is rejoining"] = "{0} возвращается",
         };
 
         private static readonly Dictionary<string, string> UK = new Dictionary<string, string>
@@ -10875,6 +10899,18 @@ namespace CompetitiveRounds
             ["{0} (away) got {1}"] = "{0} (відсутній) отримав {1}",
             ["{0} did not return; seat released"] = "{0} не повернувся; місце звільнено",
             ["{0} is back"] = "{0} повернувся",
+            // Added 2026-10-20 (merged round 3 refit, T3c): the eight RJ Stage 2
+            // hold banner and return-offer texts the refit lane added to the source
+            // list in 39bfa994 (KX7) without catalogue entries. Sorted among
+            // themselves; existing entries above are untouched.
+            ["Another player left. The match ends as a disconnect."] = "Інший гравець вийшов. Матч завершується як дисконект.",
+            ["Checking whether {0} can rejoin"] = "Перевіряємо, чи може {0} повернутися",
+            ["Not now"] = "Не зараз",
+            ["Press Esc to leave. The match then ends as a disconnect."] = "Натисніть Esc, щоб вийти. Тоді матч завершиться як дисконект.",
+            ["Rejoin"] = "Повернутися",
+            ["Your match is still running. Rejoin? {0}"] = "Ваш матч ще триває. Повернутися? {0}",
+            ["{0} did not return. The match ends as a disconnect."] = "{0} не повернувся. Матч завершується як дисконект.",
+            ["{0} is rejoining"] = "{0} повертається",
         };
 
         private static readonly Dictionary<string, string> SV = new Dictionary<string, string>
@@ -14438,6 +14474,18 @@ namespace CompetitiveRounds
             ["{0} (away) got {1}"] = "{0} (borta) fick {1}",
             ["{0} did not return; seat released"] = "{0} kom inte tillbaka; platsen släpptes",
             ["{0} is back"] = "{0} är tillbaka",
+            // Added 2026-10-20 (merged round 3 refit, T3c): the eight RJ Stage 2
+            // hold banner and return-offer texts the refit lane added to the source
+            // list in 39bfa994 (KX7) without catalogue entries. Sorted among
+            // themselves; existing entries above are untouched.
+            ["Another player left. The match ends as a disconnect."] = "En annan spelare lämnade. Matchen avslutas som en frånkoppling.",
+            ["Checking whether {0} can rejoin"] = "Kontrollerar om {0} kan återansluta",
+            ["Not now"] = "Inte nu",
+            ["Press Esc to leave. The match then ends as a disconnect."] = "Tryck på Esc för att lämna. Matchen avslutas då som en frånkoppling.",
+            ["Rejoin"] = "Återanslut",
+            ["Your match is still running. Rejoin? {0}"] = "Din match pågår fortfarande. Återanslut? {0}",
+            ["{0} did not return. The match ends as a disconnect."] = "{0} kom inte tillbaka. Matchen avslutas som en frånkoppling.",
+            ["{0} is rejoining"] = "{0} återansluter",
         };
     }
 }
