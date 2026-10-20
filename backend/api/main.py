@@ -48936,8 +48936,8 @@ async def ovt_queue_poll(steam_id: str, request: Request, db: AsyncSession = Dep
     return await _ovt_poll_locked_payload(db, series_id, steam_id, request=request)
 
 
-async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str,
-                                   request=None) -> dict:
+async def _ovt_join_roster(db: AsyncSession, series_id, steam_id: str):
+    """One stored-series roster projection for hosted Start and locked poll."""
     s = (await db.execute(text("""
         SELECT s.*, ps.steam_id AS solo_sid, ps.display_name AS solo_name,
                pa.steam_id AS da_sid, pa.display_name AS da_name,
@@ -48949,8 +48949,23 @@ async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str,
          WHERE s.id = :sid
     """), {"sid": series_id})).mappings().first()
     if s is None:
+        return None, {}
+    return s, {
+        "side_assigned": 1 if s["solo_sid"] == steam_id else 2,
+        "solo_extra_pick": bool(s["solo_extra_pick"]),
+        "solo": {"steam_id": s["solo_sid"], "display_name": s["solo_name"]},
+        "duo": [
+            {"steam_id": s["da_sid"], "display_name": s["da_name"]},
+            {"steam_id": s["db_sid"], "display_name": s["db_name"]},
+        ],
+    }
+
+
+async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str,
+                                   request=None) -> dict:
+    s, roster = await _ovt_join_roster(db, series_id, steam_id)
+    if s is None:
         return {"status": "searching", "queue_count": 0}
-    my_side = 1 if s["solo_sid"] == steam_id else 2
     # Room rules (migration 306): the record frozen on the series row at lock
     # / Start; revealed only to a request at or above the floor (§4.5).
     _rules = _rules_normalize(s["rules"])
@@ -48958,19 +48973,13 @@ async def _ovt_poll_locked_payload(db: AsyncSession, series_id, steam_id: str,
     return {
         "status": "ready_join",
         "series_id": str(series_id),
-        "side_assigned": my_side,
         "room_name": s["photon_room_id"],
         "room_region": s["region"],
         "rules": _rules_payload(_rules),
         "rules_prop": _rules_prop(_rules),
-        "solo_extra_pick": bool(s["solo_extra_pick"]),
         # Stage 2 (V3 S1): the flag latched for THIS room (PinFromJoin).
         "hold": bool(s["hold_v2"]) and s["hold_room"] == s["photon_room_id"],
-        "solo": {"steam_id": s["solo_sid"], "display_name": s["solo_name"]},
-        "duo": [
-            {"steam_id": s["da_sid"], "display_name": s["da_name"]},
-            {"steam_id": s["db_sid"], "display_name": s["db_name"]},
-        ],
+        **roster,
     }
 
 
@@ -53662,10 +53671,11 @@ async def ovt_lobby_start(req: _LobbyStartReq, request: Request,
     # Room rules §4.5/§4.6: the inline reveal carries the frozen record (the
     # host passed the set-time and Start gates, so this admit is a formality).
     _rules_admit(request, _lobby_rules)
+    _, _start_roster = await _ovt_join_roster(db, series_id, req.steam_id)
     return {"status": "ok", "series_id": str(series_id), "lobby_id": str(lobby_id),
             "room_name": room, "room_region": (region or "us")[:8],
             "rules": _rules_payload(_lobby_rules), "rules_prop": _rules_prop(_lobby_rules),
-            "hold": bool(_start_hold)}
+            "hold": bool(_start_hold), **_start_roster}
 
 
 # ── FFA host lobbies (July 29 redesign — Sid's spec) ───────────────────────

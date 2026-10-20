@@ -30,6 +30,11 @@ RT = "test_match_hold_reports_pg.py::"
 XT = "test_match_hold_deletion_pg.py::"
 
 ROWS = [
+    {"row": "F1.M2.ROSTER", "node": WT + "test_t1_3_ovt_start_and_poll_carry_the_latched_flag",
+     "tag": "F1.M2 Start roster",
+     "mutant": [(MAIN,
+                 '            "hold": bool(_start_hold), **_start_roster}\n',
+                 '            "hold": bool(_start_hold)}\n', 1)]},
     {"row": "MERGED.FIX1.M1.ROLLBACK",
      "node": RT + "test_merged_fix1_m1_quarantine_preserves_window_transaction",
      "tag": "M1 owner transaction",

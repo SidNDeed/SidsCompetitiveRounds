@@ -155,6 +155,41 @@ def _sig(canonical):
     return _hmac.new(SECRET.encode(), canonical.encode(), hashlib.sha256).hexdigest()
 
 
+async def _assert_join_roster(w, mode, answer, caller, tag):
+    """Compare the join's exact slot projection with the persisted roster."""
+    table = "team_series" if mode == "team" else "ovt_series"
+    row = await w.conn.fetchrow("SELECT * FROM %s WHERE id = $1::uuid" % table,
+                                answer["series_id"])
+    assert answer["room_name"] == row["photon_room_id"] and \
+        answer["hold"] == bool(row["hold_v2"] and row["hold_room"] == row["photon_room_id"]), \
+        (tag, "room, series, mode and hold", answer)
+    cols = ("t1a_id", "t1b_id", "t2a_id", "t2b_id") if mode == "team" else \
+        ("solo_id", "duo_a_id", "duo_b_id")
+    people = {p["id"]: {"steam_id": p["steam_id"], "display_name": p["display_name"]}
+              for p in await w.conn.fetch("SELECT id, steam_id, display_name FROM players WHERE id = ANY($1::uuid[])",
+                                          [row[c] for c in cols])}
+    if mode == "ovt":
+        assert (answer.get("solo"), answer.get("duo"), answer.get("solo_extra_pick"),
+                answer.get("side_assigned")) == \
+            (people[row["solo_id"]], [people[row["duo_a_id"]], people[row["duo_b_id"]]],
+             bool(row["solo_extra_pick"]), 1 if people[row["solo_id"]]["steam_id"] == caller else 2), \
+            (tag, "exact roster", answer)
+    else:
+        sides = ([row["t1a_id"], row["t1b_id"]], [row["t2a_id"], row["t2b_id"]])
+        own = 1 if caller in [people[pid]["steam_id"] for pid in sides[0]] else 2
+        expected_teammates = [dict(people[pid], team_assigned=own)
+                              for pid in sides[own - 1] if people[pid]["steam_id"] != caller]
+        expected_opponents = [dict(people[pid], team_assigned=3 - own)
+                              for pid in sides[2 - own]]
+        def members(rows):
+            return sorted((p["steam_id"], p["display_name"], p["team_assigned"])
+                          for p in rows)
+        assert answer["team_assigned"] == own and \
+            members(answer["teammates"]) == members(expected_teammates) and \
+            members(answer["opponents"]) == members(expected_opponents), \
+            (tag, "exact sides and slots", answer)
+
+
 def test_t1_3_ovt_start_and_poll_carry_the_latched_flag(monkeypatch):
     """T1.3 (1v2 Start, 1v2 locked poll, 1v2 continuation): three rjs1 rows
     latch TRUE for the issued room; the Start answer and every member's
@@ -165,10 +200,15 @@ def test_t1_3_ovt_start_and_poll_carry_the_latched_flag(monkeypatch):
         assert (row["hold_v2"], row["hold_room"]) == (True, start["room_name"]), \
             ("T1.3 ovt start row", dict(row))
         assert start["hold"] is True, ("T1.3 ovt start answer", start)
+        await _assert_join_roster(w, "ovt", start, ps[0][1], "F1.M2 Start roster")
         poll = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % ps[1][1], ps[1][1],
                           tag="ovt poll")
         assert (poll["status"], poll["room_name"], poll["hold"]) == \
             ("ready_join", start["room_name"], True), ("T1.3 ovt poll answer", poll)
+        await _assert_join_roster(w, "ovt", poll, ps[1][1], "F1.M2 poll roster")
+        for pid, steam_id in ps:
+            joined = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % steam_id, steam_id)
+            await _assert_join_roster(w, "ovt", joined, steam_id, "F1.M2 every poll roster")
 
         await w.conn.execute(
             "UPDATE ovt_series SET status = 'completed', completed_at = NOW()"
@@ -200,6 +240,7 @@ def test_t1_6_ovt_start_with_one_row_lacking_rjs1_is_today(monkeypatch, capsys):
         assert (row["hold_v2"], row["hold_room"]) == (False, start["room_name"]), \
             ("T1.6 ovt row", dict(row))
         assert start["hold"] is False, ("T1.6 ovt start answer", start)
+        await _assert_join_roster(w, "ovt", start, ps[0][1], "F1.M2 unflagged roster")
         poll = await w.ok("GET", "/api/v1/ovt/queue/poll/%s" % ps[2][1], ps[2][1],
                           tag="ovt poll")
         assert poll["hold"] is False, ("T1.6 ovt poll answer", poll)
@@ -220,6 +261,11 @@ def test_t1_3_team_issue_relock_and_continuation(monkeypatch):
             ("T1.3 team answer", poll)
         assert (row["hold_v2"], row["hold_room"]) == (True, poll["room_name"]), \
             ("T1.3 team row", dict(row))
+        await _assert_join_roster(w, "team", poll, ps[0][1], "F1.M2 team roster")
+        for pid, steam_id in ps:
+            joined = await w.ok("GET", "/api/v1/team/queue/poll/%s" % steam_id, steam_id)
+            assert joined["series_id"] == str(row["id"]), ("F1.M2 team series", joined)
+            await _assert_join_roster(w, "team", joined, steam_id, "F1.M2 every team roster")
 
         # Relock: one game played (the series is resumable while active),
         # the four drop out of the sitting (queue rows and leases gone) and
@@ -255,6 +301,11 @@ def test_t1_3_team_issue_relock_and_continuation(monkeypatch):
                            tag="re-issue poll")
         assert again["status"] == "ready_join" and again["room_name"] != old_room \
             and again["hold"] is False, ("T1.3 re-issue judges the new rows", again)
+        await _assert_join_roster(w, "team", again, ps[1][1], "F1.M2 relock roster")
+        for pid, steam_id in ps:
+            joined = await w.ok("GET", "/api/v1/team/queue/poll/%s" % steam_id, steam_id)
+            assert joined["series_id"] == str(row["id"]), ("F1.M2 relock series", joined)
+            await _assert_join_roster(w, "team", joined, steam_id, "F1.M2 every relock roster")
 
         # Continuation: a fresh four, flagged, completed, continued.
         ps2, poll2, row2 = await team_issue(w, [1, 1, 1, 1])
