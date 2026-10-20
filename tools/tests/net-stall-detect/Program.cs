@@ -26,6 +26,8 @@ namespace NetStallTests
         {
             var cases = new List<KeyValuePair<string, Func<string>>>
             {
+    new KeyValuePair<string, Func<string>>("fps_focus_clamp_wire", FpsFocusClampWire),
+    new KeyValuePair<string, Func<string>>("fps_focus_clamp_short", FpsFocusClampShort),
     new KeyValuePair<string, Func<string>>("focus_outlier_unfocused", () => FocusTrackedBucket(true)),
     new KeyValuePair<string, Func<string>>("focus_all_focused", () => FocusTrackedBucket(false)),
                 new KeyValuePair<string, Func<string>>("lag_gate_subsecond_end", () => Pin("m4_game_end") ?? LagGateZeroWindow(true)),
@@ -781,6 +783,121 @@ namespace NetStallTests
             if (flag != (unfocusedOutlier ? 0 : 1)) return "bucket flag " + flag + " for " + (unfocusedOutlier ? "unfocused" : "focused") + " outlier";
             if (anyUnfocused || frames != 0 || bucketTime != 0f) return "bucket did not reset";
             return null;
+        }
+
+        private static string FpsWireField(string wire, string key)
+        {
+            using (var doc = System.Text.Json.JsonDocument.Parse("{" + wire.TrimEnd(',') + "}"))
+                return doc.RootElement.GetProperty(key).GetString();
+        }
+
+        private static string FpsFocusClampWire()
+        {
+            var fps = Enumerable.Range(0, 103).Select(i => (1000 + i).ToString(System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+            var focus = Enumerable.Range(0, 103).Select(i => i % 7 == 3 ? "0" : "1").ToArray();
+            string fpsCsv = string.Join(",", fps), focusCsv = string.Join(",", focus);
+            int[] expectedIndices = Enumerable.Range(0, 52).Select(i => i * 2).ToArray();
+            int[] indices;
+            string clamped = FpsWireProduction.Clamp(fpsCsv, 512, out indices);
+            if (!indices.SequenceEqual(expectedIndices)) return "retained source indices " + string.Join(",", indices);
+            string expectedFps = string.Join(",", expectedIndices.Select(i => fps[i]));
+            string expectedFocus = string.Join(",", expectedIndices.Select(i => focus[i]));
+            if (clamped != expectedFps || clamped != LegacyClampTimeline(fpsCsv)) return "FPS bytes changed";
+            string wire = FpsWireProduction.Wire(fpsCsv, focusCsv);
+            string wireFps = FpsWireField(wire, "local_fps_timeline");
+            string wireFocus = FpsWireField(wire, "local_fps_focus_timeline");
+            if (wireFps != expectedFps) return "wire FPS bytes changed";
+            if (wireFocus != expectedFocus) return "wire focus source indices differ: fps=" + wireFps.Split(',').Length + " focus=" + wireFocus.Split(',').Length;
+            if (wireFps.Split(',').Length != 52 || wireFocus.Split(',').Length != 52) return "wire counts";
+
+            // The old fallback can emit a partial first sample. Keep its
+            // bytes and that sample's source index, or the whole first sample
+            // when a comma boundary fits. Neither path invents an index.
+            string error = ClampIndicesCase("1234,5678", 6, "1234", new[] { 0 });
+            if (error != null) return error;
+            error = ClampIndicesCase("123456789", 4, "1234", new[] { 0 });
+            if (error != null) return error;
+            error = ClampIndicesCase("v2|1234,5678", 9, "v2|1234", new[] { 0 });
+            if (error != null) return error;
+            error = ClampIndicesCase("1111,2222,3333,4444,5555", 6, "1111", new[] { 0 });
+            if (error != null) return error;
+            return ClampLegacyParity();
+        }
+
+        private static string FpsFocusClampShort()
+        {
+            const string fps = "60,75,90,120", focus = "1,0,0,0";
+            string wire = FpsWireProduction.Wire(fps, focus, "80,85,90");
+            if (FpsWireField(wire, "local_fps_timeline") != fps) return "short FPS changed";
+            if (FpsWireField(wire, "local_fps_focus_timeline") != focus) return "short focus changed";
+            if (FpsWireField(wire, "opp_fps_timeline") != "80,85,90") return "opponent FPS changed";
+            int[] indices;
+            if (FpsWireProduction.Clamp(fps, 512, out indices) != fps || !indices.SequenceEqual(new[] { 0, 1, 2, 3 })) return "short source indices";
+            if (FpsWireProduction.Clamp(null, 512, out indices) != "" || indices.Length != 0) return "null clamp";
+            if (FpsWireProduction.Clamp("", 512, out indices) != "" || indices.Length != 0) return "empty clamp";
+            if (FpsFocusCore.EncodeRetained(null, new[] { 0 }) != "") return "absent focus invented";
+            if (FpsFocusCore.EncodeRetained("1", new[] { 1 }) != "") return "missing focus invented";
+            return null;
+        }
+
+        private static string ClampIndicesCase(string input, int max, string expected, int[] expectedIndices)
+        {
+            int[] indices;
+            string actual = FpsWireProduction.Clamp(input, max, out indices);
+            if (actual != expected || actual != LegacyClampTimeline(input, max)) return "backstop FPS bytes changed at cap " + max;
+            if (!indices.SequenceEqual(expectedIndices)) return "backstop source indices at cap " + max + ": " + string.Join(",", indices);
+            string flags = string.Join(",", Enumerable.Range(0, input.Split(',').Length).Select(i => i == 0 ? "0" : "1"));
+            if (FpsFocusCore.EncodeRetained(flags, indices) != "0") return "backstop focus source changed";
+            return null;
+        }
+
+        private static string ClampLegacyParity()
+        {
+            // Frozen base oracle below: regression evidence for the existing
+            // bytes, independent from the new source-index calculations.
+            var inputs = new List<string> { null, "", "v2|", "1", "123456789", ",", ",,", "1,", ",1", "1,22,333,4444", "v2|1,22,333,4444" };
+            foreach (int count in new[] { 2, 3, 4, 5, 50, 102, 103, 104, 127, 260 })
+            {
+                string s = string.Join(",", Enumerable.Range(0, count).Select(i => (1000 + i).ToString(System.Globalization.CultureInfo.InvariantCulture)));
+                inputs.Add(s); inputs.Add("v2|" + s);
+            }
+            foreach (string input in inputs)
+            foreach (int max in new[] { -1, 0, 1, 2, 3, 4, 5, 6, 9, 16, 511, 512, 1024 })
+            {
+                string expected = null, actual = null;
+                Type oldError = null, newError = null;
+                try { expected = LegacyClampTimeline(input, max); } catch (Exception ex) { oldError = ex.GetType(); }
+                try { int[] ignored; actual = FpsWireProduction.Clamp(input, max, out ignored); } catch (Exception ex) { newError = ex.GetType(); }
+                if (expected != actual || oldError != newError) return "legacy clamp parity at cap " + max + " input length " + (input == null ? -1 : input.Length);
+            }
+            return null;
+        }
+
+        // Exact ClampTimeline body frozen from base 96d9f454, renamed only.
+        // It is an expected-value oracle, never the implementation under test.
+        private static string LegacyClampTimeline(string t, int max = 512)
+        {
+            t = t ?? "";
+            if (t.Length <= max) return t;
+            string prefix = "";
+            if (t.StartsWith("v2|", StringComparison.Ordinal)) { prefix = "v2|"; t = t.Substring(3); }
+            int budget = max - prefix.Length;
+            var parts = t.Split(',');
+            string joined = t;
+            while (joined.Length > budget && parts.Length > 2)
+            {
+                var kept = new List<string>(parts.Length / 2 + 2) { parts[0] };
+                for (int i = 2; i + 1 < parts.Length; i += 2) kept.Add(parts[i]);
+                kept.Add(parts[parts.Length - 1]);
+                parts = kept.ToArray();
+                joined = string.Join(",", parts);
+            }
+            if (joined.Length > budget)
+            {
+                int cut = joined.LastIndexOf(',', Math.Min(budget, joined.Length) - 1);
+                joined = cut > 0 ? joined.Substring(0, cut) : joined.Substring(0, Math.Max(0, budget));
+            }
+            return prefix + joined;
         }
 
         private static string FocusLockstep()

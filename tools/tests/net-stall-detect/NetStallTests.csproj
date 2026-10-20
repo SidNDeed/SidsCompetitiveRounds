@@ -28,6 +28,7 @@
     <LagSource Condition="'$(LagSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\LagNotices.cs</LagSource>
     <FocusSource Condition="'$(FocusSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\FpsFocusCore.cs</FocusSource>
     <DecimatedSource Condition="'$(DecimatedSource)' == ''">$(MSBuildThisFileDirectory)work\DecimatedList.cs</DecimatedSource>
+    <FpsWireSource Condition="'$(FpsWireSource)' == ''">$(MSBuildThisFileDirectory)work\FpsWireProduction_base.cs</FpsWireSource>
   </PropertyGroup>
 
   <ItemGroup>
@@ -37,6 +38,7 @@
     <Compile Include="$(LagSource)" />
     <Compile Include="$(FocusSource)" />
     <Compile Include="$(DecimatedSource)" />
+    <Compile Include="$(FpsWireSource)" />
     <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)NightWindows.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />

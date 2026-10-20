@@ -27,6 +27,23 @@ namespace CompetitiveRounds
 
         internal static int BucketFlag(bool anyUnfocusedFrame) { return anyUnfocusedFrame ? 0 : 1; }
 
+        // Input is the existing 0/1 CSV. Follow the FPS clamp's retained
+        // bucket indices; do not run a separate character-budget clamp here.
+        internal static string EncodeRetained(string flagsCsv, IList<int> retainedIndices)
+        {
+            if (string.IsNullOrEmpty(flagsCsv) || retainedIndices == null || retainedIndices.Count == 0) return "";
+            var flags = flagsCsv.Split(',');
+            var sb = new StringBuilder(retainedIndices.Count * 2);
+            for (int i = 0; i < retainedIndices.Count; i++)
+            {
+                int source = retainedIndices[i];
+                if (source < 0 || source >= flags.Length) return "";
+                if (i > 0) sb.Append(',');
+                sb.Append(flags[source]);
+            }
+            return sb.ToString();
+        }
+
         internal static string Encode(IList<int> flags)
         {
             if (flags == null || flags.Count == 0) return "";

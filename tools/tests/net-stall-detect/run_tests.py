@@ -30,8 +30,10 @@ SOURCES = {
     "ReplicaSource": "NetworkReplicaDiagnostics.cs",
     "PluginSource": "Plugin.cs",
     "WatcherSource": "GameStateWatcher.cs",
+    "ApiSource": "ApiClient.cs",
 }
 COMPILED_SOURCES = {"StallSource", "JitterSource", "PoisonSource", "LagSource", "FocusSource"}
+EXTRACTED_SOURCES = {"ApiSource"}
 # DecimatedList lives inside GameStateWatcher.cs (never moved, so the
 # keybind-surface manifest keeps its rows); the harness compiles the class
 # text itself, cut from the real file at every run.
@@ -168,6 +170,30 @@ def m4_pins(overrides=None):
     return {"m4_game_end": game_end, "m4_disconnect": disconnect}
 
 
+def extract_fps_wire(tag, overrides):
+    raw = source_text("ApiSource", overrides)
+    start_token = "            int[] localFpsKeptIndices;\n"
+    end_token = '            sb.Append($"\\"local_freeze_count\\":{localFreezeCount},");'
+    if raw.count(start_token) != 1 or raw.count(end_token) != 1:
+        raise ValueError("FPS wire block boundary count")
+    start, end = raw.index(start_token), raw.index(end_token)
+    if end <= start:
+        raise ValueError("FPS wire block order")
+    wire = raw[start:end]
+    methods = [method_text(raw, "private static string ClampTimeline(string t, int max = 512)"),
+               method_text(raw, "private static string ClampTimeline(string t, int max, out int[] retainedIndices)"),
+               method_text(raw, "private static string Escape(string s)")]
+    text = ("using System;\nusing System.Collections.Generic;\nusing System.Text;\n"
+            "namespace CompetitiveRounds { internal static class FpsWireProduction {\n"
+            "internal static string Wire(string localFpsTimeline, string localFpsFocusTimeline, string oppFpsTimeline = \"\") {\n"
+            "var sb = new StringBuilder();\n" + wire + "return sb.ToString();\n}\n"
+            "internal static string Clamp(string input, int max, out int[] indices) { return ClampTimeline(input, max, out indices); }\n"
+            + "\n".join(methods) + "\n} }\n")
+    path = os.path.join(WORK, "FpsWireProduction_" + tag + ".cs")
+    open(path, "w", encoding="utf-8", newline="\n").write(text)
+    return path
+
+
 def extract_decimated():
     raw = open(os.path.join(PLUGIN, DECIMATED_FROM), "rb").read().decode("utf-8").replace("\r\n", "\n")
     start = raw.index("    /// <summary>Bounded telemetry series that COMPRESSES")
@@ -192,6 +218,21 @@ def extract_decimated():
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
 MUTANTS = [
+    ("m6_focus_clamped_independently", "ApiSource",
+     [("Escape(FpsFocusCore.EncodeRetained(localFpsFocusTimeline, localFpsKeptIndices))",
+       "Escape(ClampTimeline(localFpsFocusTimeline))")],
+     "fps_focus_clamp_wire", "focus_lockstep"),
+    ("m6_identity_indices_reversed", "ApiSource",
+     [("for (int i = 0; i < count; i++) retainedIndices[i] = i;",
+       "for (int i = 0; i < count; i++) retainedIndices[i] = count - 1 - i;")],
+     "fps_focus_clamp_short", "focus_lockstep"),
+    ("m6_backstop_indices_untrimmed", "ApiSource",
+     [("                if (count < retainedIndices.Length) Array.Resize(ref retainedIndices, count);\n", "")],
+     "fps_focus_clamp_wire", "focus_lockstep"),
+    ("m6_decimation_indices_shifted", "ApiSource",
+     [("                    keptIndices.Add(retainedIndices[i]);\n",
+       "                    keptIndices.Add(retainedIndices[i - 1]);\n")],
+     "fps_focus_clamp_wire", "focus_lockstep"),
 
     ("m5_outlier_focus_skipped", "FocusSource",
      [("            return anyUnfocusedFrame || !focused;\n",
@@ -396,6 +437,7 @@ def build(tag, overrides):
            "-p:IntermediateOutputPath=" + os.path.join(out, "obj") + os.sep,
            "-p:OutDir=" + os.path.join(out, "bin") + os.sep]
     cmd.append("-p:DecimatedSource=" + DECIMATED_OUT)
+    cmd.append("-p:FpsWireSource=" + extract_fps_wire(tag, overrides))
     for k, v in overrides.items():
         if k in COMPILED_SOURCES:
             cmd.append("-p:%s=%s" % (k, v))
@@ -469,7 +511,7 @@ def main():
         path = os.path.join(WORK, "mut_" + name + "_" + SOURCES[key])
         open(path, "wb").write(raw.encode("utf-8"))
         overrides = {key: path}
-        mdll = build("mut_" + name, overrides) if key in COMPILED_SOURCES else dll
+        mdll = build("mut_" + name, overrides) if key in COMPILED_SOURCES | EXTRACTED_SOURCES else dll
         if mdll is None:
             print("BAD mutant %s: does not build" % name)
             ok = False
