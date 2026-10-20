@@ -106,23 +106,31 @@ async def post_report(mode, s, i, g=None):
     return await _call("POST", "/api/v1/%s/matches" % mode, s.steam(i), _report(mode, s, i, g))
 
 
-async def entered_hold(env, s, i, g):
-    """Seat i has an entered hold for (room, G): its reports are class R."""
+async def entered_hold(env, s, i, g, *, at=None):
+    """Seat i has an entered hold for (room, G): its reports are class R.
+    A supplied clock stamps the whole fixture together; the default keeps
+    the existing database-clock premise of the causal-lapse sibling."""
     slot, team = hold_test.seat_of(s, i)
     await env.conn.execute(
         "INSERT INTO match_seat_holds (mode, room_name, series_id, game_id, player_id, n,"
         "  slot, team, opener_player_id, held_anchor_at, held_at, held_until, seq,"
         "  entered_at, closed_at, closed_reason)"
-        " VALUES ($1, $2, $3, $4::uuid, $5, 1, $6, $7, $8, clock_timestamp() - interval '60 s',"
-        "  clock_timestamp() - interval '50 s', clock_timestamp() + interval '60 s', 2,"
-        "  clock_timestamp(), clock_timestamp(), 'entered')",
-        s.mode, s.room, s.sid, str(g), s.pid(i), slot, team, s.pid((i + 1) % len(s.seats)))
+        " VALUES ($1, $2, $3, $4::uuid, $5, 1, $6, $7, $8,"
+        "  COALESCE($9::timestamptz, clock_timestamp()) - interval '60 s',"
+        "  COALESCE($9::timestamptz, clock_timestamp()) - interval '50 s',"
+        "  COALESCE($9::timestamptz, clock_timestamp()) + interval '60 s', 2,"
+        "  COALESCE($9::timestamptz, clock_timestamp()),"
+        "  COALESCE($9::timestamptz, clock_timestamp()), 'entered')",
+        s.mode, s.room, s.sid, str(g), s.pid(i), slot, team, s.pid((i + 1) % len(s.seats)), at)
 
 
-async def expire_and_janitor(env, s):
-    await env.conn.execute(
-        "UPDATE match_report_windows SET settle_after = clock_timestamp() - interval '1 s'"
-        " WHERE room_name = $1", s.room)
+async def expire_and_janitor(env, s, clock):
+    """Cross the authoritative deadline without rewriting any stored stamp."""
+    from datetime import timedelta
+    deadline = await env.conn.fetchval(
+        "SELECT max(settle_after) FROM match_report_windows WHERE room_name = $1", s.room)
+    assert deadline is not None and deadline.year != 9999, ("T5.4 armed deadline", deadline)
+    clock["now"] = deadline + timedelta(microseconds=1)
     return await main._report_window_janitor()
 
 
@@ -207,23 +215,42 @@ def _assign(n, classes):
 
 
 def _matrix(mode, monkeypatch):
+    from datetime import timedelta
+
     async def body(env):
         _mount(env, monkeypatch)
+        clock = {"now": await hold_test.dbclock(env)}
+
+        async def now(db):
+            return clock["now"]
+
+        monkeypatch.setattr(main._match_hold, "_ctx_now", now)
         n = 4 if mode == "team" else 3
         for classes in _CLASS_SETS:
+            clock["now"] = await hold_test.dbclock(env)
             s = await hold_test.seed_series(env.conn, mode)
             g = (await hold_test.game_start(env, s, 0))["game_id"]
             cls_of = _assign(n, classes)
             for i, c in enumerate(cls_of):
                 if c == "r":
-                    await entered_hold(env, s, i, g)
+                    await entered_hold(env, s, i, g, at=clock["now"])
             for i, c in enumerate(cls_of):
                 r = await post_report(mode, s, i, None if c == "u" else g)
                 assert r.status_code == 202 and r.json()["status"] == "journaled", \
                     ("T5.4 journal", mode, classes, i, r.status_code, r.text[:300])
                 assert r.json()["cls"] == c, ("T5.4 class", mode, classes, i, r.json())
             assert await recorded(env, mode, s) == [], ("T5.4 none before expiry", mode, classes)
-            await expire_and_janitor(env, s)
+            deadline = await env.conn.fetchval(
+                "SELECT settle_after FROM match_report_windows WHERE room_name = $1 AND game_id = $2::uuid",
+                s.room, str(g))
+            assert deadline == clock["now"] + timedelta(seconds=30), \
+                ("T5.4 authoritative deadline", mode, classes, deadline, clock["now"])
+            clock["now"] = deadline - timedelta(microseconds=1)
+            await main._report_window_janitor()
+            before, _ = await window_state(env, s, g)
+            assert before["settled_at"] is None and await recorded(env, mode, s) == [], \
+                ("T5.4 none before deadline", mode, classes, dict(before))
+            await expire_and_janitor(env, s, clock)
             w, j = await window_state(env, s, g)
             first = next(c for c in ("c", "r", "u") if c in cls_of)
             want = min((s.steam(i) for i, c in enumerate(cls_of) if c == first),
@@ -239,10 +266,12 @@ def _matrix(mode, monkeypatch):
             assert len(await recorded(env, mode, s)) == 1, ("T5.4 still one", mode, classes)
 
         # With fresh beats the lowest class C fighter settles at its receipt.
+        clock["now"] = await hold_test.dbclock(env)
         s = await hold_test.seed_series(env.conn, mode)
         g = (await hold_test.game_start(env, s, 0))["game_id"]
         for i in range(n):
             await hold_test.beat(env, s, i)
+        clock["now"] = await hold_test.dbclock(env)
         order = sorted(range(n), key=lambda i: (len(s.steam(i)), s.steam(i)))
         low = order[0]
         r = await post_report(mode, s, order[-1], g)
@@ -1198,3 +1227,74 @@ def test_merged_fix1_m1_first_refusal_keeps_new_window_and_journal(monkeypatch):
         assert await env.conn.fetchval(
             "SELECT count(*) FROM match_report_quarantine WHERE group_id = $1", s.sid) == 1
     hold_test.run_env(monkeypatch, body, prefix="mergedm1new")
+
+
+def _fix2_m4_held_receipt_deadline(mode, monkeypatch):
+    """Held receipts do not arm; entry arms exactly thirty seconds later."""
+    from datetime import timedelta
+
+    async def body(env):
+        _mount(env, monkeypatch)
+        series, game, hold_id = await hold_test.held(env, mode)
+        clock = {"now": await hold_test.dbclock(env)}
+
+        async def now(db):
+            return clock["now"]
+
+        monkeypatch.setattr(main._match_hold, "_ctx_now", now)
+        # Unclassed reports avoid class C's intentional immediate entry
+        # settlement; this control must exercise the expiry arm itself.
+        for reporter in (0, 2):
+            if reporter == 2:
+                clock["now"] += timedelta(seconds=31)
+            response = await post_report(mode, series, reporter, None)
+            assert response.status_code == 202 and response.json().get("state") == "held", \
+                ("FIX2 M4 held receipt deadline", mode, reporter, response.status_code, response.text[:300])
+            deadline = await env.conn.fetchval(
+                "SELECT settle_after FROM match_report_windows WHERE room_name = $1 AND game_id = $2::uuid",
+                series.room, str(game))
+            assert deadline.year == 9999 and await recorded(env, mode, series) == [], \
+                ("FIX2 M4 held receipt deadline", mode, reporter, deadline)
+        journal = await env.conn.fetch(
+            "SELECT cls, state, received_at FROM match_report_journal WHERE room_name = $1 ORDER BY received_at",
+            series.room)
+        assert [(row["cls"], row["state"]) for row in journal] == [("u", "held"), ("u", "held")] \
+            and journal[1]["received_at"] - journal[0]["received_at"] == timedelta(seconds=31), \
+            ("FIX2 M4 held receipt deadline", mode, journal)
+        entered = clock["now"] + timedelta(seconds=1)
+        hold = await hold_test.hold_db(env, hold_id)
+        assert entered < hold["held_until"], ("FIX2 M4 held receipt deadline", "entry premise", mode, hold)
+        await env.conn.execute(
+            "UPDATE match_seat_holds SET entered_at = $2, closed_at = $2, closed_reason = 'entered'"
+            " WHERE id = $1::uuid", str(hold_id), entered)
+        clock["now"] = entered
+        await main._report_window_janitor()
+        deadline = await env.conn.fetchval(
+            "SELECT settle_after FROM match_report_windows WHERE room_name = $1 AND game_id = $2::uuid",
+            series.room, str(game))
+        assert deadline == entered + timedelta(seconds=30), \
+            ("FIX2 M4 held receipt deadline", mode, entered, deadline)
+        clock["now"] = deadline - timedelta(microseconds=1)
+        await main._report_window_janitor()
+        before, _ = await window_state(env, series, game)
+        assert before["settled_at"] is None and await recorded(env, mode, series) == [], \
+            ("FIX2 M4 held receipt deadline", mode, "before entry deadline", dict(before))
+        await expire_and_janitor(env, series, clock)
+        after, journal = await window_state(env, series, game)
+        assert after["settled_at"] is not None and after["settled_cls"] == "u" \
+            and sorted(value[1] for value in journal.values()) == ["kept", "settled"] \
+            and len(await recorded(env, mode, series)) == 1, \
+            ("FIX2 M4 held receipt deadline", mode, "after entry deadline", dict(after), journal)
+        await main._report_window_janitor()
+        assert len(await recorded(env, mode, series)) == 1, \
+            ("FIX2 M4 held receipt deadline", mode, "exactly once")
+
+    hold_test.run_env(monkeypatch, body, prefix="fix2m4" + mode)
+
+
+def test_fix2_m4_team_held_receipt_deadline(monkeypatch):
+    _fix2_m4_held_receipt_deadline("team", monkeypatch)
+
+
+def test_fix2_m4_ovt_held_receipt_deadline(monkeypatch):
+    _fix2_m4_held_receipt_deadline("ovt", monkeypatch)
