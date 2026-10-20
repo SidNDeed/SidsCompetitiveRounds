@@ -22,8 +22,10 @@ WORK = os.path.join(HERE, "work")
 MUTANTS = [
     # Head-and-tail reverted to the old tail-only window: the banner, the
     # cr_build line and the patch summary are cut again.
-    ("head_tail_reverted", "int head = Math.Min(headChars, maxChars / 2);", "int head = 0;",
-     "headtail", "atcap"),
+    ('head_tail_reverted', 'int head = Math.Max(0, Math.Min(headChars, maxChars / 2));', 'int head = 0;', 'headtail', 'atcap'),
+    ('h1_head_counted_in_bytes', 'int decodedKeep = PrefixEnd(decodedHead, head);', 'int decodedKeep = utf8.GetCharCount(hb, bomSkip, Math.Max(0, Utf8BoundaryAtOrBefore(hb, Math.Min(head, hb.Length)) - bomSkip));', 'head_characters', 'atcap'),
+    ('h2_fallback_restored', '            byte[] all = ReadExactly(fs, 0, (int)sampledLength, sampledLength);\n            int bom = HasUtf8Bom(all, all.Length) ? 3 : 0;\n            return new UTF8Encoding(false, true).GetString(all, bom, all.Length - bom);', '            fs.Position = 0;\n            using (var sr = new StreamReader(fs, new UTF8Encoding(false), true, 1024, true))\n            {\n                string all = sr.ReadToEnd();\n                return all.Length <= maxChars ? all : all.Substring(all.Length - maxChars);\n            }', 'snapshot', 'atcap'),
+    ('m1_marker_from_request', 'if (!captured) throw new EndOfStreamException();', '// Requested intervals are accepted without verifying the captured length.', 'changing_file', 'atcap'),
     # The builder forced onto the caller's (main) thread: Start runs the work
     # inline instead of on the thread it created.
     ("builder_on_main_thread", "t.Start();", "body();", "offmain", "clock"),

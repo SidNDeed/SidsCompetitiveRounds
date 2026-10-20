@@ -53,64 +53,156 @@ namespace CompetitiveRounds
 
         // ---- head-and-tail capped read ----------------------------------
 
-        /// <summary>
-        /// Reads a log file under a cap of <paramref name="maxChars"/> BYTES
-        /// (one UTF-8 byte yields at most one character, so the character
-        /// count is bounded by the same figure). A file at or under the cap
-        /// comes back whole. A larger file comes back as its first
-        /// <paramref name="headChars"/> bytes, one marker line naming the
-        /// omitted byte range and the full size, and its last
-        /// maxChars - headChars bytes. The file length is measured once and
-        /// both reads stop at it, so a log that grows during the read cannot
-        /// make the marker untrue. Cuts are moved to UTF-8 sequence
-        /// boundaries, never into a sequence.
-        /// </summary>
-        internal static string ReadCapped(string path, int maxChars, int headChars = HEAD_KEEP_CHARS)
+        internal const string ReadUnavailable = "[log read unavailable]";
+        private const int READ_ATTEMPTS = 2;
+
+        /// <summary>Verified source intervals. Fitting can only reduce the tail;
+        /// the decoded head and its exact source-byte cut stay fixed.</summary>
+        private sealed class CapturedWindow
         {
-            try
+            internal string Head = "", Tail = "", FixedText;
+            internal long HeadBytes, TailStart, FileBytes;
+            internal int Cap, TailBudget;
+
+            internal string Render(int tailChars)
             {
-                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return "";
-                if (maxChars <= 0) return "";
-                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-                {
-                    long len = 0;
-                    try { len = fs.Length; } catch { }
-                    if (len <= maxChars || !fs.CanSeek)
-                        return ReadWhole(fs, maxChars);
-
-                    int head = Math.Min(headChars, maxChars / 2);
-                    if (head < 0) head = 0;
-                    int tail = maxChars - head;
-
-                    byte[] hb = ReadExactly(fs, 0, head);
-                    int headCut = Utf8BoundaryAtOrBefore(hb, hb.Length);
-                    int bomSkip = HasUtf8Bom(hb, headCut) ? 3 : 0;
-
-                    long tailStart = len - tail;
-                    byte[] tb = ReadExactly(fs, tailStart, (int)(len - tailStart));
-                    int skip = 0;
-                    while (skip < 3 && skip < tb.Length && (tb[skip] & 0xC0) == 0x80) skip++;
-                    tailStart += skip;
-
-                    var utf8 = new UTF8Encoding(false);
-                    string headText = utf8.GetString(hb, bomSkip, headCut - bomSkip);
-                    string tailText = utf8.GetString(tb, skip, tb.Length - skip);
-                    var sb = new StringBuilder(headText.Length + tailText.Length + 256);
-                    sb.Append(headText);
-                    if (headText.Length > 0 && headText[headText.Length - 1] != '\n') sb.Append('\n');
-                    sb.Append(CapMarkerLine(headCut, tailStart, len, maxChars)).Append('\n');
-                    sb.Append(tailText);
-                    return sb.ToString();
-                }
+                if (FixedText != null) return FixedText;
+                int start = SuffixStart(Tail, tailChars);
+                long tailStart = TailStart + Encoding.UTF8.GetByteCount(Tail.Substring(0, start));
+                if (tailStart == HeadBytes) return Head + Tail.Substring(start);
+                string gap = Head.Length > 0 && Head[Head.Length - 1] != '\n' ? "\n" : "";
+                return Head + gap + CapMarkerLine(HeadBytes, tailStart, FileBytes, Cap)
+                     + "\n" + Tail.Substring(start);
             }
-            catch (Exception ex)
+
+            internal bool FitFileCap()
             {
-                return "[log read error: " + ex.Message + "]";
+                TailBudget = Tail.Length;
+                for (int attempt = 0; attempt < 8; attempt++)
+                {
+                    int over = Render(TailBudget).Length - Cap;
+                    if (over <= 0) return true;
+                    if (TailBudget == 0) return false;
+                    TailBudget = Math.Max(0, TailBudget - over);
+                }
+                TailBudget = 0;
+                return Render(0).Length <= Cap;
             }
         }
 
-        /// <summary>The one marker line of a capped file: the omitted byte
-        /// range (start inclusive, end exclusive) and the file's full size.</summary>
+        /// <summary>Keep decoded head characters and the remaining tail
+        /// allowance, with the truthful byte-range marker inside the cap.</summary>
+        internal static string ReadCapped(string path, int maxChars, int headChars = HEAD_KEEP_CHARS)
+        {
+            var captured = CaptureFile(path, maxChars, headChars, null);
+            return captured.Render(captured.TailBudget);
+        }
+
+        /// <summary>The same read core with an already sampled length.</summary>
+        internal static string ReadCappedSnapshot(string path, long sampledLength, int maxChars,
+                                                  int headChars = HEAD_KEEP_CHARS)
+        {
+            var captured = CaptureFile(path, maxChars, headChars, sampledLength);
+            return captured.Render(captured.TailBudget);
+        }
+
+        private static CapturedWindow FixedWindow(string text, int cap)
+        {
+            return new CapturedWindow { FixedText = text.Length <= cap ? text : "", Cap = cap };
+        }
+
+        private static void RequireCaptured(bool captured)
+        {
+            if (!captured) throw new EndOfStreamException();
+        }
+
+        private static CapturedWindow CaptureFile(string path, int maxChars, int headChars, long? sample)
+        {
+            if (maxChars <= 0) return FixedWindow("", 0);
+            try
+            {
+                if (string.IsNullOrEmpty(path) || !File.Exists(path)) return FixedWindow("", maxChars);
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    long sampledLength = sample ?? fs.Length;
+                    for (int attempt = 0; attempt < READ_ATTEMPTS; attempt++)
+                    {
+                        try
+                        {
+                            var captured = CaptureAtLength(fs, sampledLength, maxChars, headChars);
+                            RequireCaptured(fs.Length >= sampledLength);
+                            if (captured.FitFileCap()) return captured;
+                            break;
+                        }
+                        catch (IOException) { }
+                        catch (DecoderFallbackException) { }
+                    }
+                }
+            }
+            catch { }
+            return FixedWindow(ReadUnavailable, maxChars);
+        }
+
+        private static CapturedWindow CaptureAtLength(FileStream fs, long sampledLength, int maxChars, int headChars)
+        {
+            if (sampledLength < 0) throw new EndOfStreamException();
+            int head = Math.Max(0, Math.Min(headChars, maxChars / 2));
+            var result = new CapturedWindow { Cap = maxChars, FileBytes = sampledLength };
+            var utf8 = new UTF8Encoding(false, true);
+            if (sampledLength <= maxChars)
+            {
+                string all = ReadWhole(fs, sampledLength, maxChars);
+                int keep = PrefixEnd(all, head);
+                result.Head = all.Substring(0, keep);
+                result.Tail = all.Substring(keep);
+                int bom = sampledLength >= 3 && HasUtf8Bom(ReadExactly(fs, 0, 3, sampledLength), 3) ? 3 : 0;
+                result.HeadBytes = bom + Encoding.UTF8.GetByteCount(result.Head);
+                result.TailStart = result.HeadBytes;
+                return result;
+            }
+
+            int headRead = (int)Math.Min(sampledLength, 4L * head + 3);
+            byte[] hb = ReadExactly(fs, 0, headRead, sampledLength);
+            int headEnd = Utf8BoundaryAtOrBefore(hb, hb.Length);
+            if (headRead == sampledLength && headEnd != hb.Length) throw new DecoderFallbackException();
+            int bomSkip = HasUtf8Bom(hb, headEnd) ? 3 : 0;
+            string decodedHead = utf8.GetString(hb, bomSkip, headEnd - bomSkip);
+            int decodedKeep = PrefixEnd(decodedHead, head);
+            result.Head = decodedHead.Substring(0, decodedKeep);
+            result.HeadBytes = bomSkip + Encoding.UTF8.GetByteCount(result.Head);
+
+            int tailAllowance = Math.Max(0, maxChars - result.Head.Length);
+            int tailRead = (int)Math.Min(sampledLength - result.HeadBytes, 4L * tailAllowance + 3);
+            long tailStart = sampledLength - tailRead;
+            byte[] tb = ReadExactly(fs, tailStart, tailRead, sampledLength);
+            int skip = 0;
+            while (skip < tb.Length && skip < 3 && (tb[skip] & 0xC0) == 0x80) skip++;
+            string decodedTail = utf8.GetString(tb, skip, tb.Length - skip);
+            int tailCut = SuffixStart(decodedTail, tailAllowance);
+            result.Tail = decodedTail.Substring(tailCut);
+            result.TailStart = tailStart + skip + Encoding.UTF8.GetByteCount(decodedTail.Substring(0, tailCut));
+            return result;
+        }
+
+        private static int PrefixEnd(string text, int chars)
+        {
+            int end = 0, decoded = 0;
+            while (end < text.Length && decoded < Math.Max(0, chars))
+            {
+                if (char.IsHighSurrogate(text[end]) && end + 1 < text.Length && char.IsLowSurrogate(text[end + 1])) end += 2;
+                else end++;
+                decoded++;
+            }
+            return end;
+        }
+
+        private static int SuffixStart(string text, int chars)
+        {
+            int start = Math.Max(0, text.Length - Math.Max(0, chars));
+            if (start > 0 && start < text.Length && char.IsHighSurrogate(text[start - 1]) && char.IsLowSurrogate(text[start])) start++;
+            return start;
+        }
+
         internal static string CapMarkerLine(long omitFrom, long omitTo, long fileBytes, int cap)
         {
             return string.Format(CultureInfo.InvariantCulture,
@@ -118,21 +210,16 @@ namespace CompetitiveRounds
                 CapMarkerTag, omitFrom, omitTo, omitTo - omitFrom, fileBytes, fileBytes - omitTo, cap);
         }
 
-        private static string ReadWhole(FileStream fs, int maxChars)
+        private static string ReadWhole(FileStream fs, long sampledLength, int maxChars)
         {
-            using (var sr = new StreamReader(fs, new UTF8Encoding(false), true))
-            {
-                string all = sr.ReadToEnd();
-                // A file that grew past the cap between the length read and
-                // this read: keep its tail-most window, as the old reader did.
-                if (all.Length <= maxChars) return all;
-                return all.Substring(all.Length - maxChars);
-            }
+            byte[] all = ReadExactly(fs, 0, (int)sampledLength, sampledLength);
+            int bom = HasUtf8Bom(all, all.Length) ? 3 : 0;
+            return new UTF8Encoding(false, true).GetString(all, bom, all.Length - bom);
         }
 
-        private static byte[] ReadExactly(FileStream fs, long offset, int count)
+        private static byte[] ReadExactly(FileStream fs, long offset, int count, long sampledLength)
         {
-            if (count <= 0) return new byte[0];
+            if (offset < 0 || count < 0 || offset > sampledLength - count) throw new EndOfStreamException();
             var buf = new byte[count];
             fs.Position = offset;
             int got = 0;
@@ -142,20 +229,16 @@ namespace CompetitiveRounds
                 if (n <= 0) break;
                 got += n;
             }
-            if (got == count) return buf;
-            var cut = new byte[got];
-            Buffer.BlockCopy(buf, 0, cut, 0, got);
-            return cut;
+            RequireCaptured(got == count);
+            return buf;
         }
 
-        /// <summary>The largest cut at or before <paramref name="end"/> that
-        /// does not split a UTF-8 sequence.</summary>
+        /// <summary>Largest cut at or before end that cannot split a UTF-8
+        /// sequence. Strict decoding separately rejects malformed input.</summary>
         internal static int Utf8BoundaryAtOrBefore(byte[] b, int end)
         {
             if (end <= 0) return 0;
             if (end > b.Length) end = b.Length;
-            // Find the lead byte of the last sequence that starts in the
-            // window (at most three continuation bytes trail a lead).
             int i = end - 1;
             int back = 0;
             while (i > 0 && back < 3 && (b[i] & 0xC0) == 0x80) { i--; back++; }
@@ -165,7 +248,7 @@ namespace CompetitiveRounds
             else if ((lead & 0xE0) == 0xC0) need = 2;
             else if ((lead & 0xF0) == 0xE0) need = 3;
             else if ((lead & 0xF8) == 0xF0) need = 4;
-            else need = 1;   // a stray continuation run: no sequence to protect
+            else need = 1;
             return i + need <= end ? end : i;
         }
 

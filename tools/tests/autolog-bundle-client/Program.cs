@@ -23,7 +23,7 @@ namespace AutologBundleTests
         {
             CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
             LogBundleCore.RegisterMainThread();
-            _dir = Path.Combine(Path.GetTempPath(), "scr-autolog-bundle-" + Guid.NewGuid().ToString("N"));
+            _dir = Path.Combine(AppContext.BaseDirectory, "case-data-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(_dir);
             var cases = new Dictionary<string, Action>
             {
@@ -32,6 +32,9 @@ namespace AutologBundleTests
                 { "atcap", AtCap },
                 { "below", Below },
                 { "utf8", Utf8Boundaries },
+                { "head_characters", HeadCharacters },
+                { "snapshot", Snapshot },
+                { "changing_file", ChangingFile },
                 { "compose", Compose },
                 { "offmain", OffMain },
                 { "busy", Busy },
@@ -111,106 +114,157 @@ namespace AutologBundleTests
 
         // ---- the capped read ----------------------------------------------
 
-        /// <summary>A file larger than the cap keeps its head (the banner,
-        /// cr_build and the patch summary), its tail, and exactly one marker
-        /// line naming the omitted byte range and the full size.</summary>
+        private static Match Marker(string text, string where)
+        {
+            var matches = Regex.Matches(text, @"\[LOG-CAP\] omitted bytes (\d+) to (\d+) \((\d+) bytes\) of a (\d+)-byte file; kept the first (\d+) and the last (\d+) bytes \(cap (\d+)\)");
+            Check(matches.Count == 1, where, "expected exactly one byte-range marker");
+            return matches.Count == 1 ? matches[0] : null;
+        }
+
+        private static void CheckRange(string where, string got, byte[] source, int cap, long expectedHead)
+        {
+            Check(got.Length <= cap, where, "the marker-inclusive result exceeds its character cap");
+            Check(got.IndexOf('\uFFFD') < 0, where, "capture introduced U+FFFD");
+            Match m = Marker(got, where);
+            if (m == null) return;
+            long from = long.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture);
+            long to = long.Parse(m.Groups[2].Value, CultureInfo.InvariantCulture);
+            long total = long.Parse(m.Groups[4].Value, CultureInfo.InvariantCulture);
+            Check(from == expectedHead, where, "head cut is " + from + " bytes, expected " + expectedHead);
+            Check(total == source.Length && to >= from && to <= total, where, "range or sampled size is false");
+            Check(long.Parse(m.Groups[3].Value) == to - from && long.Parse(m.Groups[5].Value) == from && long.Parse(m.Groups[6].Value) == total - to,
+                  where, "marker retained/omitted byte counts disagree");
+            Check(int.Parse(m.Groups[7].Value) == cap, where, "marker cap changed");
+            if (from < 0 || to < from || to > source.Length) return;
+            var utf8 = new UTF8Encoding(false, true);
+            int bom = source.Length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF ? 3 : 0;
+            string head = utf8.GetString(source, bom, (int)from - bom);
+            string tail = utf8.GetString(source, (int)to, source.Length - (int)to);
+            string expected = head + (head.Length > 0 && head[head.Length - 1] != '\n' ? "\n" : "") + m.Value + "\n" + tail;
+            Check(got == expected, where, "marker does not describe the exact captured intervals");
+        }
+
         private static void HeadTail()
         {
             const string where = "headtail";
-            int cap = 20_000, head = 4_000, len = 75_000;
-            string text = MakeLog(len, Banner, "TAIL-END-SENTINEL");
-            string p = Write("big.log", text);
-            string got = LogBundleCore.ReadCapped(p, cap, head);
-            Check(got.StartsWith(Banner, StringComparison.Ordinal), where, "the head (banner, cr_build, patch summary) is not kept");
-            Check(got.Contains("cr_build=1.41.0|standalone|"), where, "cr_build line missing");
-            Check(got.Contains("Patches applied: 321 ok, 0 failed"), where, "patch summary missing");
+            int cap = 20_000, head = 4_000;
+            string text = MakeLog(75_000, Banner, "TAIL-END-SENTINEL");
+            string got = LogBundleCore.ReadCapped(Write("big.log", text), cap, head);
+            Check(got.StartsWith(text.Substring(0, head), StringComparison.Ordinal), where, "the complete decoded head is not kept");
             Check(got.EndsWith("TAIL-END-SENTINEL\n", StringComparison.Ordinal), where, "the tail is not kept");
-            Check(Count(got, LogBundleCore.CapMarkerTag) == 1, where, "expected exactly one marker, got " + Count(got, LogBundleCore.CapMarkerTag));
-            int tail = cap - head;
-            string expected = LogBundleCore.CapMarkerLine(head, len - tail, len, cap);
-            Check(got.Contains("\n" + expected + "\n"), where, "marker line missing or wrong: want " + expected);
-            Check(expected.Contains("omitted bytes " + head + " to " + (len - tail)), where, "marker does not state the omitted range");
-            Check(expected.Contains(len + "-byte file"), where, "marker does not state the file size");
-            // The kept bytes are exactly the file's first `head` and last
-            // `tail` bytes: the cap is the bound, nothing is padded or lost.
-            string want = text.Substring(0, head) + (text[head - 1] == '\n' ? "" : "\n") + expected + "\n" + text.Substring(len - tail);
-            Check(got == want, where, "kept text is not head + marker + tail (got " + got.Length + " chars, want " + want.Length + ")");
+            CheckRange(where, got, Encoding.UTF8.GetBytes(text), cap, head);
         }
 
-        /// <summary>The production head (HEAD_KEEP_CHARS) under the production
-        /// LogOutput.log cap: at least the first 200,000 chars are kept.</summary>
         private static void HeadTailDefaultHead()
         {
             const string where = "headtail_default";
-            int cap = 1_500_000, len = 4_000_000;
-            string text = MakeLog(len, Banner, "TAIL-END-SENTINEL");
-            string p = Write("bigger.log", text);
-            string got = LogBundleCore.ReadCapped(p, cap);
+            const int cap = 1_500_000;
+            string text = MakeLog(4_000_000, Banner, "TAIL-END-SENTINEL");
+            string got = LogBundleCore.ReadCapped(Write("bigger.log", text), cap);
             Check(LogBundleCore.HEAD_KEEP_CHARS >= 200_000, where, "HEAD_KEEP_CHARS is under 200,000");
-            Check(got.StartsWith(text.Substring(0, LogBundleCore.HEAD_KEEP_CHARS), StringComparison.Ordinal), where,
-                  "the first HEAD_KEEP_CHARS of the file are not kept");
-            Check(got.EndsWith(text.Substring(len - (cap - LogBundleCore.HEAD_KEEP_CHARS)), StringComparison.Ordinal), where,
-                  "the last cap - HEAD_KEEP_CHARS of the file are not kept");
-            Check(Count(got, LogBundleCore.CapMarkerTag) == 1, where, "expected exactly one marker");
+            Check(got.StartsWith(text.Substring(0, 200_000), StringComparison.Ordinal), where, "the first 200,000 decoded characters are not kept");
+            Check(got.EndsWith("TAIL-END-SENTINEL\n", StringComparison.Ordinal), where, "the tail is not kept");
+            CheckRange(where, got, Encoding.UTF8.GetBytes(text), cap, 200_000);
         }
 
-        /// <summary>A file exactly at the cap comes back whole, no marker.</summary>
         private static void AtCap()
         {
             const string where = "atcap";
             int cap = 20_000;
             string text = MakeLog(cap, Banner, "TAIL-END-SENTINEL");
-            string p = Write("atcap.log", text);
-            string got = LogBundleCore.ReadCapped(p, cap, 4_000);
+            string got = LogBundleCore.ReadCapped(Write("atcap.log", text), cap, 4_000);
             Check(got == text, where, "a file at the cap is not returned whole");
             Check(Count(got, LogBundleCore.CapMarkerTag) == 0, where, "a file at the cap carries a marker");
         }
 
-        /// <summary>A file under the cap comes back whole, no marker.</summary>
         private static void Below()
         {
             const string where = "below";
             int cap = 20_000;
             string text = MakeLog(cap - 1_234, Banner, "TAIL-END-SENTINEL");
-            string p = Write("below.log", text);
-            string got = LogBundleCore.ReadCapped(p, cap, 4_000);
+            string got = LogBundleCore.ReadCapped(Write("below.log", text), cap, 4_000);
             Check(got == text, where, "a file under the cap is not returned whole");
             Check(Count(got, LogBundleCore.CapMarkerTag) == 0, where, "a file under the cap carries a marker");
             Check(LogBundleCore.ReadCapped(Path.Combine(_dir, "absent.log"), cap) == "", where, "an absent file is not empty");
         }
 
-        /// <summary>Multi-byte characters straddling the head cut and the
-        /// tail start: no replacement character, and the marker's range is
-        /// where the cut really fell.</summary>
         private static void Utf8Boundaries()
         {
             const string where = "utf8";
-            int cap = 2_000, head = 1_000;
-            // Bytes 0..997 ASCII, then a 4-byte character at 998..1001: the
-            // head cut (1000) falls inside it and must move back to 998.
-            var b = new List<byte>();
-            for (int i = 0; i < 998; i++) b.Add((byte)'a');
-            b.AddRange(Encoding.UTF8.GetBytes("\U0001F600"));
-            while (b.Count < 9_000) b.Add((byte)'m');
-            // The tail window starts at len - (cap - head) = len - 1000. Put a
-            // 3-byte character one byte before it, so the window opens on its
-            // continuation bytes.
-            var tailPart = new List<byte>();
-            tailPart.AddRange(Encoding.UTF8.GetBytes("\u20AC"));     // 3 bytes
-            for (int i = 0; i < 1_000 - 2; i++) tailPart.Add((byte)'z');
-            b.AddRange(tailPart);
-            byte[] all = b.ToArray();
-            int len = all.Length;
-            string p = Path.Combine(_dir, "utf8.log");
-            File.WriteAllBytes(p, all);
-            string got = LogBundleCore.ReadCapped(p, cap, head);
-            Check(got.IndexOf('\uFFFD') < 0, where, "a cut split a UTF-8 sequence (U+FFFD in the output)");
-            Check(!got.Contains("\U0001F600"), where, "the straddling head character was kept whole past the cut");
-            Check(got.StartsWith(new string('a', 998) + "\n", StringComparison.Ordinal), where, "the head did not stop at the sequence boundary");
-            long tailStart = len - (cap - head) + 2;  // two continuation bytes skipped
-            string expected = LogBundleCore.CapMarkerLine(998, tailStart, len, cap);
-            Check(got.Contains(expected), where, "marker does not name the real cut points: want " + expected);
-            Check(got.EndsWith(new string('z', 998), StringComparison.Ordinal), where, "the tail is not kept");
+            int cap = 2_000, head = 999;
+            var sb = new StringBuilder(new string('a', 998) + "\U0001F600" + new string('m', 8_000));
+            for (int i = 0; i < 600; i++) sb.Append("\u20AC\U0001F600");
+            string text = sb.Append("TAIL\n").ToString();
+            string got = LogBundleCore.ReadCapped(Write("utf8.log", text), cap, head);
+            Check(got.StartsWith(new string('a', 998) + "\U0001F600", StringComparison.Ordinal), where, "a head-ending surrogate pair was split or dropped");
+            Check(got.EndsWith("TAIL\n", StringComparison.Ordinal), where, "UTF-8 tail missing");
+            CheckRange(where, got, Encoding.UTF8.GetBytes(text), cap, 1002);
+        }
+
+        private static void HeadCharacters()
+        {
+            const string where = "head_characters";
+            string[] units = { "a", "\u00E9", "\u20AC", "\U0001F600" };
+            int n = 0;
+            foreach (int cap in new[] { 1_500_000, 1_000_000 })
+            foreach (string unit in units)
+            {
+                const string sentinel = "HEAD-END\n";
+                var prefix = new StringBuilder();
+                for (int decoded = 0; decoded < 200_000 - sentinel.Length; decoded++) prefix.Append(unit);
+                prefix.Append(sentinel);
+                string text = prefix.ToString() + new string('m', cap + 1_000) + "TAIL-END\n";
+                byte[] body = Encoding.UTF8.GetBytes(text);
+                bool bom = unit == "a";
+                byte[] all = new byte[body.Length + (bom ? 3 : 0)];
+                if (bom) { all[0] = 0xEF; all[1] = 0xBB; all[2] = 0xBF; }
+                Buffer.BlockCopy(body, 0, all, bom ? 3 : 0, body.Length);
+                string path = Path.Combine(_dir, "characters-" + n++ + ".log");
+                File.WriteAllBytes(path, all);
+                string got = LogBundleCore.ReadCapped(path, cap);
+                Check(got.StartsWith(prefix.ToString(), StringComparison.Ordinal), where, "the sentinel ending at decoded scalar character 200,000 was lost");
+                Check(got.EndsWith("TAIL-END\n", StringComparison.Ordinal), where, "tail sentinel missing");
+                CheckRange(where, got, all, cap, Encoding.UTF8.GetByteCount(prefix.ToString()) + (bom ? 3 : 0));
+            }
+        }
+
+        private static void Snapshot()
+        {
+            const string where = "snapshot";
+            string sampled = MakeLog(12_000, Banner, "SAMPLED-END");
+            string path = Write("append-small.log", sampled + new string('z', 60_000) + "APPENDED");
+            string got = LogBundleCore.ReadCappedSnapshot(path, sampled.Length, 20_000, 4_000);
+            Check(got == sampled, where, "whole-file read escaped its sampled byte limit");
+            string large = MakeLog(55_000, Banner, "SAMPLED-TAIL");
+            path = Write("append-large.log", large + new string('z', 60_000) + "APPENDED");
+            got = LogBundleCore.ReadCappedSnapshot(path, large.Length, 20_000, 4_000);
+            Check(got.StartsWith(large.Substring(0, 4_000), StringComparison.Ordinal) && got.EndsWith("SAMPLED-TAIL\n", StringComparison.Ordinal), where, "capped snapshot lost its head or sampled tail");
+            Check(!got.Contains("APPENDED"), where, "post-sample content entered the capture");
+            CheckRange(where, got, Encoding.UTF8.GetBytes(large), 20_000, 4_000);
+        }
+
+        private static void ChangingFile()
+        {
+            const string where = "changing_file";
+            foreach (int size in new[] { 3_000, 90_000 })
+            {
+                string text = MakeLog(size, Banner, "BEFORE-TRUNCATION");
+                string got = LogBundleCore.ReadCappedSnapshot(Write("short-" + size + ".log", text), size + 1_000, 20_000, 4_000);
+                Check(got == LogBundleCore.ReadUnavailable, where, "a short read did not yield the fixed unavailable line");
+                Check(!got.Contains(LogBundleCore.CapMarkerTag), where, "a requested interval was reported as captured after truncation");
+            }
+            foreach (byte[] partial in new[] { new byte[] { 0xE2, 0x82 }, new byte[] { 0xF0, 0x9F, 0x98 } })
+            foreach (int size in new[] { 3_000, 90_000 })
+            {
+                byte[] bytes = new byte[size + partial.Length];
+                for (int i = 0; i < size; i++) bytes[i] = (byte)'a';
+                Buffer.BlockCopy(partial, 0, bytes, size, partial.Length);
+                string path = Path.Combine(_dir, "partial-" + size + "-" + partial.Length + ".log");
+                File.WriteAllBytes(path, bytes);
+                string got = LogBundleCore.ReadCappedSnapshot(path, bytes.Length, 20_000, 4_000);
+                Check(got == LogBundleCore.ReadUnavailable, where, "an incomplete sampled UTF-8 endpoint was not unavailable after retry");
+                Check(got.IndexOf('\uFFFD') < 0, where, "partial append introduced U+FFFD");
+            }
         }
 
         // ---- the composer ---------------------------------------------------
