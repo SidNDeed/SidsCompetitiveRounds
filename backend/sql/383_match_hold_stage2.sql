@@ -311,8 +311,13 @@ BEGIN
             SELECT c.relname::text AS tbl, a.attnum::integer AS ord,
                    a.attname::text AS col, format_type(a.atttypid, a.atttypmod) AS typ,
                    a.attnotnull AS not_null,
-                   regexp_replace(coalesce(pg_get_expr(d.adbin, d.adrelid, false), ''),
-                                  '[[:space:]]+', '', 'g') AS def
+                   /* M3 normalize def */
+                   (SELECT coalesce(string_agg(
+                       CASE WHEN token[1] ~ '^[[:space:]]$' THEN ''
+                            ELSE token[1] END, '' ORDER BY ord), '')
+                      FROM regexp_matches(coalesce(pg_get_expr(d.adbin, d.adrelid, false), ''),
+                           $norm$([eE]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'|"(?:[^"]|"")*"|.)$norm$, 'gs')
+                           WITH ORDINALITY AS part(token, ord)) AS def
               FROM pg_attribute a
               JOIN pg_class c ON c.oid = a.attrelid
               JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -465,8 +470,13 @@ BEGIN
                                  ON a.attrelid = c.confrelid AND a.attnum = k.attnum
                               ORDER BY k.ord)
                    END AS ref_keys,
-                   regexp_replace(pg_get_constraintdef(c.oid, false),
-                                  '[[:space:]]+', '', 'g') AS definition,
+                   /* M3 normalize definition */
+                   (SELECT coalesce(string_agg(
+                       CASE WHEN token[1] ~ '^[[:space:]]$' THEN ''
+                            ELSE token[1] END, '' ORDER BY ord), '')
+                      FROM regexp_matches(pg_get_constraintdef(c.oid, false),
+                           $norm$([eE]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'|"(?:[^"]|"")*"|.)$norm$, 'gs')
+                           WITH ORDINALITY AS part(token, ord)) AS definition,
                    c.convalidated AS validated, c.condeferrable, c.condeferred
               FROM pg_constraint c
               JOIN pg_class tc ON tc.oid = c.conrelid
@@ -513,8 +523,13 @@ BEGIN
                            FROM generate_series(1, i.indnkeyatts::integer) k
                           ORDER BY k) AS key_defs,
                    i.indisunique AS is_unique,
-                   regexp_replace(coalesce(pg_get_expr(i.indpred, i.indrelid, false), ''),
-                                  '[[:space:]]+', '', 'g') AS predicate,
+                   /* M3 normalize predicate */
+                   (SELECT coalesce(string_agg(
+                       CASE WHEN token[1] ~ '^[[:space:]]$' THEN ''
+                            ELSE token[1] END, '' ORDER BY ord), '')
+                      FROM regexp_matches(coalesce(pg_get_expr(i.indpred, i.indrelid, false), ''),
+                           $norm$([eE]'(?:[^'\\]|\\.|'')*'|'(?:[^']|'')*'|"(?:[^"]|"")*"|.)$norm$, 'gs')
+                           WITH ORDINALITY AS part(token, ord)) AS predicate,
                    (i.indnatts = i.indnkeyatts) AS no_includes,
                    (i.indexprs IS NULL) AS no_expressions,
                    i.indisprimary, i.indisexclusion, i.indnullsnotdistinct,

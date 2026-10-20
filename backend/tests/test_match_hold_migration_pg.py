@@ -429,6 +429,36 @@ def test_383_proof_block_raises_on_a_gap():
             await conn.execute(
                 "ALTER TABLE match_seat_holds ALTER COLUMN seq SET DEFAULT 0")
 
+            # A literal containing one space is not the empty-string default.
+            await conn.execute(
+                "ALTER TABLE team_queue ALTER COLUMN caps SET DEFAULT ' '")
+            await refuses(_src(), "column team_queue.caps")
+            assert "' '" in await conn.fetchval(
+                "SELECT pg_get_expr(d.adbin, d.adrelid, false) FROM pg_attrdef d "
+                "WHERE d.adrelid = 'team_queue'::regclass AND d.adnum = "
+                "(SELECT attnum FROM pg_attribute WHERE attrelid = d.adrelid "
+                "AND attname = 'caps')"), "M3 default literal was repaired"
+            await conn.execute(
+                "ALTER TABLE team_queue ALTER COLUMN caps SET DEFAULT ''")
+
+            # Removing whitespace inside this literal would admit the wrong mode.
+            await conn.execute(
+                "ALTER TABLE match_seat_holds DROP CONSTRAINT ck_msh_mode")
+            await conn.execute(
+                "ALTER TABLE match_seat_holds ADD CONSTRAINT ck_msh_mode "
+                "CHECK (mode IN ('te am', 'ovt'))")
+            await refuses(_src(), "constraint match_seat_holds.ck_msh_mode")
+            assert "'te am'" in await conn.fetchval(
+                "SELECT pg_get_constraintdef(oid, false) FROM pg_constraint "
+                "WHERE conrelid = 'match_seat_holds'::regclass "
+                "AND conname = 'ck_msh_mode'"), "M3 constraint literal was repaired"
+            await conn.execute(
+                "ALTER TABLE match_seat_holds DROP CONSTRAINT ck_msh_mode")
+            await conn.execute(
+                "ALTER TABLE match_seat_holds ADD CONSTRAINT ck_msh_mode "
+                "CHECK ( mode IN ( 'team' , 'ovt' ) )")
+            await conn.execute(_src())  # formatting-only twin remains valid
+
             # pg_constraint: the same name with another admitted set is refused.
             await conn.execute(
                 "ALTER TABLE match_seat_holds DROP CONSTRAINT ck_msh_mode")
@@ -480,6 +510,45 @@ def test_383_proof_block_raises_on_a_gap():
 
             # Every explicit restore matches the VALUES catalog and re-runs cleanly.
             await conn.execute(_src())
+    _run(go())
+
+
+def test_383_normalizers_preserve_literal_bytes():
+    """Execute all three production expressions on quoted-literal probes.
+
+    The current partial-index expectations contain no literals. Probing its
+    executable expression is therefore needed in addition to malformed catalog
+    defaults and constraints; otherwise its literal-folding mutant is vacuous.
+    """
+    cf_pg.require_live_pg()
+    sources = {
+        "def": "coalesce(pg_get_expr(d.adbin, d.adrelid, false), '')",
+        "definition": "pg_get_constraintdef(c.oid, false)",
+        "predicate": "coalesce(pg_get_expr(i.indpred, i.indrelid, false), '')",
+    }
+    found = re.findall(
+        r"/\* M3 normalize (\w+) \*/\s*(.*?) AS (def|definition|predicate)\b",
+        _src(), re.S)
+    assert len(found) == 3, "M3 executable normalizer census"
+    probes = (
+        ("  'te am' :: text \n", "'te am'::text"),
+        ("  ' ' :: character varying \t", "' '::charactervarying"),
+        ("  'te'' am' :: text ", "'te'' am'::text"),
+        (r" E'te\' am' :: text ", r"E'te\' am'::text"),
+        (r" E'te\\ am' :: text ", r"E'te\\ am'::text"),
+        (' "te am" :: text ', '"te am"::text'),
+        (" ( 1 + 2 ) ", "(1+2)"),
+        ("", ""),
+    )
+
+    async def go():
+        async with cf_pg.case("rjs2_m3literal") as (c, _sm):
+            for tag, expression, alias in found:
+                assert tag == alias and expression.count(sources[alias]) == 1
+                query = "SELECT " + expression.replace(sources[alias], "$1")
+                for value, expected in probes:
+                    actual = await c.conn.fetchval(query, value)
+                    assert actual == expected, ("M3 literal " + alias, value, actual, expected)
     _run(go())
 
 
