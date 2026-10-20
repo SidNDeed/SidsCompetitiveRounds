@@ -47,7 +47,8 @@ namespace CompetitiveRounds
         internal static readonly string[] Ids =
             { "H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M8room", "L1sprite", "L1announce",
               "H9t", "H9r", "M3x", "M8e2", "M8e3", "M8def", "M8exc", "H3remote",
-              "H9rmask", "M3xmask", "H9loop", "H9defer", "H3late", "H3after", "H3before" };
+              "H9rmask", "M3xmask", "H9loop", "H9defer", "H3late", "H3after", "H3before",
+              "B444night", "B444live", "B444unauth" };
 
         internal static void SelectFacePostfix(int faceID)
         {
@@ -237,6 +238,83 @@ namespace CompetitiveRounds
                 list.Add(p);
             }
             return list;
+        }
+
+        /// <summary>Bug 444: the menu grid as a fresh scene holds it before the
+        /// character menu is opened. No portrait's Start has run, so each one's
+        /// serialized myFace is Unity's default, an all-zero face that is not
+        /// null and is not the preset object.</summary>
+        private static List<CharacterCreatorPortrait> UnstartedGrid(int n)
+        {
+            var list = Grid(n);
+            foreach (var p in list) p.myFace = new PlayerFace();
+            return list;
+        }
+
+        private static bool IsSlotFace(int slot) => ReferenceEquals(Cch.selectedPlayerFaces[0], Cch.playerFaces[slot]);
+
+        // ---- bug 444: the apply writes the slot's preset, never a portrait's default --
+
+        private static bool okB444n, okB444l, okB444u;
+
+        /// <summary>The night of 2026-10-19 (447:15655, 447:23449): modded
+        /// default 5 (an authored face with a custom eye), vanilla default 4,
+        /// live 4, an unstarted eight-portrait grid, a private 1v2 room whose two
+        /// other fighters carry the mod. E3 applies 5, then the room ends and E6
+        /// restores 4. Each select must write the slot's own preset, and the
+        /// carrier rule must publish it.</summary>
+        private static string Night()
+        {
+            Reset(4);
+            Plugin.AvatarModdedPreset.Value = 5;
+            Plugin.AvatarVanillaPreset.Value = 4;
+            var ps = UnstartedGrid(8);
+            Room(true, true);
+            AvatarDefaults.Evaluate("E3-entered");
+            int live5 = LiveSel; bool face5 = IsSlotFace(5); var act5 = FacePublisher.LastAction; int home5 = Home;
+            bool line5 = LoggedLine("[AVATAR] E3-entered applied slot 5 (facing Modded, nominee 5, other fighters 2,");
+            Leave();
+            AvatarDefaults.Evaluate("E6-left");
+            int live4 = LiveSel; bool face4 = IsSlotFace(4); var act4 = FacePublisher.LastAction; int home4 = Home;
+            int clicks = ps.Sum(p => p.Clicks);
+            okB444n = live5 == 5 && face5 && act5 == FaceCarrierAction.Publish && home5 == 4 && line5
+                && live4 == 4 && face4 && act4 == FaceCarrierAction.Publish && home4 == -1 && clicks == 0;
+            return "E3: live " + live5 + ", selected face is preset 5=" + face5 + ", carrier " + act5 + ", home " + home5 + ", line=" + line5
+                + " | E6: live " + live4 + ", selected face is preset 4=" + face4 + ", carrier " + act4 + ", home " + home4
+                + " | portrait clicks on the unstarted grid " + clicks;
+        }
+
+        /// <summary>A started grid (each myFace is the preset object, as
+        /// vanilla's Start sets it) keeps the portrait route.</summary>
+        private static string LiveGrid()
+        {
+            Reset(4);
+            Plugin.AvatarModdedPreset.Value = 5;
+            Plugin.AvatarVanillaPreset.Value = 4;
+            var ps = Grid(8);
+            Room(true, true);
+            AvatarDefaults.Evaluate("E3-entered");
+            okB444l = LiveSel == 5 && IsSlotFace(5) && ps[5].Clicks == 1 && FacePublisher.LastAction == FaceCarrierAction.Publish;
+            return "started grid: live " + LiveSel + ", selected face is preset 5=" + IsSlotFace(5) + ", portrait 5 clicks "
+                + ps[5].Clicks + ", carrier " + FacePublisher.LastAction;
+        }
+
+        /// <summary>An unauthored modded nominee (slot 0, all-zero) in the same
+        /// room is the design's refusal: nothing is selected, the own face and
+        /// its preset stay, no carrier write, and the case-2 toast is raised.</summary>
+        private static string Unauthored()
+        {
+            Reset(4);
+            Plugin.AvatarModdedPreset.Value = 0;
+            Plugin.AvatarVanillaPreset.Value = 4;
+            UnstartedGrid(8);
+            Room(true, true);
+            int selects = Cch.SelectCalls, pubs = FacePublisher.Publishes;
+            AvatarDefaults.Evaluate("E3-entered");
+            bool toast = CompetitiveUI.Shown.Any(m => m.Contains("never been customised"));
+            okB444u = LiveSel == 4 && IsSlotFace(4) && Cch.SelectCalls == selects && FacePublisher.Publishes == pubs && toast && Home == -1;
+            return "unauthored nominee 0: live " + LiveSel + ", selected face is preset 4=" + IsSlotFace(4) + ", selects "
+                + (Cch.SelectCalls - selects) + ", publishes " + (FacePublisher.Publishes - pubs) + ", toast=" + toast + ", home " + Home;
         }
 
         private static Sprite SpriteOn(CharacterCreatorPortrait p)
@@ -834,6 +912,11 @@ namespace CompetitiveRounds
             Case("H3late", LateEarlierPick, () => ok3late);
             Case("H3after", BoundAfter, () => ok3after);
             Case("H3before", BoundBefore, () => ok3before);
+
+            // ---- bug 444 (the night of 2026-10-19) ----
+            Case("B444night", Night, () => okB444n);
+            Case("B444live", LiveGrid, () => okB444l);
+            Case("B444unauth", Unauthored, () => okB444u);
             return 0;
         }
     }
