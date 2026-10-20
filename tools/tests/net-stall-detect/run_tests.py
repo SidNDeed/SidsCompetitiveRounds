@@ -27,6 +27,8 @@ SOURCES = {
     "FocusSource": "FpsFocusCore.cs",
     "TelemetrySource": "NetworkSeatTelemetry.cs",
     "PoisonSyncSource": "PoisonSync.cs",
+    "ReplicaSource": "NetworkReplicaDiagnostics.cs",
+    "PluginSource": "Plugin.cs",
 }
 COMPILED_SOURCES = {"StallSource", "JitterSource", "PoisonSource", "LagSource", "FocusSource"}
 # DecimatedList lives inside GameStateWatcher.cs (never moved, so the
@@ -107,7 +109,47 @@ def structural_pins(overrides=None):
         'bool on = V3On(out why);',
         'string upkeepBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, evidenceLive);',
         'string stateLine = _v3Log.State(state);')
+    pins.update(m4_pins(overrides))
     return pins
+
+
+# Add these noncompiled SOURCES keys if absent:
+# "ReplicaSource": "NetworkReplicaDiagnostics.cs",
+# "PluginSource": "Plugin.cs",
+# Then: pins.update(m4_pins(overrides)) before structural_pins returns.
+# Plugin/Replica files remain read-only; their exact route is pinned.
+
+def m4_pins(overrides=None):
+    def all_pass(*checks):
+        return next((check for check in checks if check != "PASS"), "PASS")
+    telemetry = source_text("TelemetrySource", overrides)
+    start = method_text(telemetry, "internal static void OnMatchStarted()")
+    end = method_text(telemetry, "internal static void OnMatchEnded(string reason)")
+    close = method_text(telemetry, "private static void CloseWindow(bool force)")
+    room_change = method_text(telemetry, "internal static void OnRoomChanged()")
+    game_end = all_pass(
+        ordered_once(start, "_gameOpen = true;", "LagNotices.OnGameStarted();"),
+        ordered_once(end, "if (!_gameOpen) return;", "CloseWindow(force: true);",
+                     "_gameOpen = false;", "LagNotices.OnGameEnded();"),
+        ordered_once(close,
+            "if (LagNotices.WindowFeedsEvaluator(force, _gameOpen, _spectatorGame))",
+            "LagNotices.OnWindowClosed();"),
+    )
+    replica = source_text("ReplicaSource", overrides)
+    left = method_text(replica, "internal static void OnRoomLeft()")
+    reset = method_text(replica, "private static void ResetState()")
+    plugin = source_text("PluginSource", overrides)
+    disconnected = method_text(plugin, "public void OnDisconnected(Photon.Realtime.DisconnectCause cause)")
+    disconnect = all_pass(
+        game_end,
+        ordered_once(disconnected, "NetworkReplicaDiagnostics.OnRoomLeft();",
+                     "if (Diag2v2.PendingSlot() < 0) return;"),
+        ordered_once(left, "finally", "ResetState();"),
+        ordered_once(reset, "NetworkSeatTelemetry.OnRoomChanged();", "_roomActive = false;", "Actors.Clear();"),
+        ordered_once(room_change, 'if (_gameOpen) OnMatchEnded("room-left");',
+                     "ResetGame(keepFrozen: true);", "_stall.ResetRoom();"),
+    )
+    return {"m4_game_end": game_end, "m4_disconnect": disconnect}
 
 
 def extract_decimated():
@@ -134,6 +176,16 @@ def extract_decimated():
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
 MUTANTS = [
+    ("m4_zero_window_suppressed", "LagSource",
+     [('            return "[LAG-NOTICE-GATE] windows=" + _gWindows.ToString(CultureInfo.InvariantCulture)',
+       '            if (_gWindows <= 0) return null;\n            return "[LAG-NOTICE-GATE] windows=" + _gWindows.ToString(CultureInfo.InvariantCulture)')],
+     "lag_gate_subsecond_end", "lag_1v1_setting_off"),
+    ("m4_repeated_end_guard_removed", "LagSource",
+     [("            if (_gateGameStarted)\n", "            if (true)\n")],
+     "lag_gate_repeated_end", "lag_gate_subsecond_end"),
+    ("m4_disconnect_route_removed", "TelemetrySource",
+     [('            if (_gameOpen) OnMatchEnded("room-left");\n', '')],
+     "lag_gate_disconnect_before_window", "lag_gate_subsecond_end"),
     ("m3_room_keeps_capture_flag", "PoisonSource",
      [(" _lastEvidencePoint = default(LifeEpoch); _capturedBoundaryKill = false; }",
        " _lastEvidencePoint = default(LifeEpoch); }")],
@@ -292,7 +344,7 @@ MUTANTS = [
        "                        case Edge.Enter: LogEdge((State)s, \"enter\", slot, nowS, null); changed = true; break;\n")],
      "lag_1v1_fires", "lag_1v2_gate"),
     ("lag_gate_line_dropped", "LagSource",
-     [("            try { string g = GateLine(); if (g != null) Plugin.Log?.LogInfo(g); } catch { }\n", "")],
+     [("                try { string g = GateLine(); if (g != null) Plugin.Log?.LogInfo(g); } catch { }\n", "")],
      "lag_1v1_setting_off", "lag_bar_met_1v2"),
     ("lag_opp_stream_bar_off_by_one", "LagSource",
      [("        internal const int OPP_STREAM_MIN_WINDOWS = 2;", "        internal const int OPP_STREAM_MIN_WINDOWS = 3;")],

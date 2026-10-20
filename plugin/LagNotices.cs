@@ -470,17 +470,17 @@ namespace CompetitiveRounds
         // shown, and the tag differs from [LAG-NOTICE] on purpose so a grep
         // for state edges never counts it.
         private static int _gWindows, _gSettingOff, _gNotPlain1v1, _gUnkeyed, _gEvaluated, _gEnters, _gSuppressed;
+        private static bool _gateGameStarted;
 
         internal static void ResetGateCounts()
         {
             _gWindows = _gSettingOff = _gNotPlain1v1 = _gUnkeyed = _gEvaluated = _gEnters = _gSuppressed = 0;
         }
 
-        /// <summary>The gate line for the game that just ended, or null when
-        /// no window reached the evaluator.</summary>
+        /// <summary>The gate line for the game that just ended, including
+        /// a started game with no evaluated window.</summary>
         internal static string GateLine()
         {
-            if (_gWindows <= 0) return null;
             return "[LAG-NOTICE-GATE] windows=" + _gWindows.ToString(CultureInfo.InvariantCulture)
                 + " setting_off=" + _gSettingOff.ToString(CultureInfo.InvariantCulture)
                 + " not_plain_1v1=" + _gNotPlain1v1.ToString(CultureInfo.InvariantCulture)
@@ -494,6 +494,7 @@ namespace CompetitiveRounds
         {
             EnsureStartup();
             ResetGateCounts();
+            _gateGameStarted = true;
             // A new game starts every state at Off with no cooldown carried
             // over; nothing from the previous game is announced or suppressed.
             ResetAll(logExits: false, why: null);
@@ -510,7 +511,11 @@ namespace CompetitiveRounds
             ResetAll(logExits: SettingOn(), why: "game-end");
             // The gate record is written whatever the setting: it is the only
             // way a log can say why no notice appeared.
-            try { string g = GateLine(); if (g != null) Plugin.Log?.LogInfo(g); } catch { }
+            if (_gateGameStarted)
+            {
+                try { string g = GateLine(); if (g != null) Plugin.Log?.LogInfo(g); } catch { }
+            }
+            _gateGameStarted = false;
             ResetGateCounts();
         }
 

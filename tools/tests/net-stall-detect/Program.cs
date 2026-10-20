@@ -26,6 +26,9 @@ namespace NetStallTests
         {
             var cases = new List<KeyValuePair<string, Func<string>>>
             {
+                new KeyValuePair<string, Func<string>>("lag_gate_subsecond_end", () => Pin("m4_game_end") ?? LagGateZeroWindow(true)),
+                new KeyValuePair<string, Func<string>>("lag_gate_disconnect_before_window", () => Pin("m4_disconnect") ?? LagGateZeroWindow(false)),
+                new KeyValuePair<string, Func<string>>("lag_gate_repeated_end", LagGateRepeatedEnd),
                 new KeyValuePair<string, Func<string>>("stall_night", StallNight),
                 new KeyValuePair<string, Func<string>>("stall_frames_hitch", StallFramesHitch),
                 new KeyValuePair<string, Func<string>>("stall_terminal_hitch_game_end", () => StallTerminal(true, 100)),
@@ -622,6 +625,50 @@ namespace NetStallTests
             // If an observation was unavailable, the original sampled fallback still works.
             r.Ledger.NotePointBoundary(101); r.Upkeep();
             return PoisonExact("room reset restores sampled fallback", r.Lines, PoisonKilled);
+        }
+
+        private const string ZeroWindowGate = "[LAG-NOTICE-GATE] windows=0 setting_off=0 not_plain_1v1=0 unkeyed=0 evaluated=0 enters=0 suppressed=0";
+
+        private static void PrepareZeroWindowLag(bool setting)
+        {
+            Plugin.Log = new LogSink();
+            Plugin.LagNoticesEnabled = new BepInEx.Configuration.ConfigEntry<bool> { Value = setting };
+            GameStateWatcher.PlainOneVOne = true;
+            RoomActors.LocalIsSpectator = false;
+            BroadcastMode.IsBroadcastIdentity = false;
+            NetworkSeatTelemetry.Ring.Clear();
+        }
+
+        private static string LagGateZeroWindow(bool setting)
+        {
+            PrepareZeroWindowLag(setting);
+            LagNotices.OnGameStarted();
+            // A subsecond game-end/disconnect forced closure does not feed
+            // the evaluator; the started edge alone authorizes its gate line.
+            if (LagNotices.WindowFeedsEvaluator(true, true, false)) return "forced close fed evaluator";
+            LagNotices.OnGameEnded();
+            if (Plugin.Log.Lines.Count != 1 || Plugin.Log.Lines[0] != ZeroWindowGate)
+                return "zero-window game lines=" + Plugin.Log.Lines.Count + " [" + string.Join(" | ", Plugin.Log.Lines) + "]";
+            return null;
+        }
+
+        private static string LagGateRepeatedEnd()
+        {
+            string pin = Pin("m4_game_end");
+            if (pin != null) return pin;
+            PrepareZeroWindowLag(true);
+            LagNotices.OnGameStarted();
+            LagNotices.OnGameEnded();
+            if (Plugin.Log.Lines.Count != 1 || Plugin.Log.Lines[0] != ZeroWindowGate)
+                return "first started end did not write one zero record";
+            LagNotices.OnGameEnded();
+            LagNotices.OnGameEnded();
+            if (Plugin.Log.Lines.Count != 1) return "repeated end wrote " + Plugin.Log.Lines.Count + " records";
+            LagNotices.OnGameStarted();
+            LagNotices.OnGameEnded();
+            if (Plugin.Log.Lines.Count != 2 || Plugin.Log.Lines[1] != ZeroWindowGate)
+                return "next started game did not rearm gate line";
+            return null;
         }
 
         // ── LagNotices over the night's window values ────────────────────
