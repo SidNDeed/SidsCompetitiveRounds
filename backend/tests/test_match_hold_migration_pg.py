@@ -554,7 +554,10 @@ def test_383_normalizers_preserve_literal_bytes():
 
 # -- 384 and 385: the client keys and their machine-translation proposals -----
 
-M384 = os.path.join(cf_pg.SQL_DIR, "384_i18n_keys_stage2_hold.sql")
+M384_TRACKED = os.path.join(cf_pg.SQL_DIR, "384_i18n_keys_stage2_hold.sql")
+M384 = os.environ.get("MATCH_HOLD_M384") or M384_TRACKED
+R384_TRACKED = os.path.join(cf_pg.SQL_DIR, "rollback_384_i18n_keys_stage2_hold.sql")
+R384 = os.environ.get("MATCH_HOLD_R384") or R384_TRACKED
 M385 = os.path.join(cf_pg.SQL_DIR, "385_seed_machine_translations_stage2_hold.sql")
 # NX7: 384 carries thirteen keys in this file order; 385 (the Stage 2 lane's seed,
 # untouched) proposes translations for eleven of them, all but "Not now" and
@@ -662,7 +665,7 @@ def test_384_385_executed_twice_and_each_post_check_raises():
             line = next(l for l in _read(M384).splitlines(True)
                         if l.startswith("('98dca83410faa64d', 'client'"))
             gap = _read(M384).replace(line, "", 1)
-            assert gap.count("98dca83410faa64d") == 1      # only the post-check names it
+            assert gap.count("98dca83410faa64d") == _read(M384).count("98dca83410faa64d") - 1
             await conn.execute(
                 "UPDATE i18n_keys SET retired_at = clock_timestamp()"
                 " WHERE key_id = '98dca83410faa64d'")
@@ -675,4 +678,106 @@ def test_384_385_executed_twice_and_each_post_check_raises():
             assert await count_keys(conn) == 12
             await conn.execute(_read(M384))
             assert await count_keys(conn) == 13
+    _run(go())
+
+
+def test_l2_sql_copy_census():
+    for variable, actual, tracked in (
+            ("MATCH_HOLD_M384", M384, M384_TRACKED),
+            ("MATCH_HOLD_R384", R384, R384_TRACKED)):
+        wanted = os.environ.get(variable)
+        if wanted:
+            assert os.path.abspath(actual) == os.path.abspath(wanted)
+            assert _read(actual) != _read(tracked)
+        else:
+            assert actual == tracked
+
+
+def test_l2_384_owned_metadata_round_trips():
+    """Exact predecessor restoration, safe refusal of drift, repeated cycles.
+
+    The five shared keys carry their pre-384 NULL contexts. One also carries
+    metadata that the old forward arm overwrote, proving the captured baseline
+    is data and not a guessed list of defaults. New-key and shared-key source
+    and context edits each make the inverse refuse whole without changing a byte.
+    """
+    cf_pg.require_live_pg()
+    rows = _ROW_384.findall(_read(M384))
+    shared = list(KEYS_384[8:])
+    assert len(rows) == 13
+
+    async def snapshot(conn, table, column="key_id"):
+        return [tuple(r) for r in await conn.fetch(
+            "SELECT " + column + ", to_jsonb(t)::text FROM " + table + " t "
+            "WHERE key_id = ANY($1::text[]) ORDER BY " + column,
+            list(KEYS_384))]
+
+    async def refused(conn, source, label):
+        message = ""
+        try:
+            await conn.execute(source)
+        except _asyncpg.RaiseError as exc:
+            message = str(exc)
+        if conn.is_in_transaction():
+            await conn.execute("ROLLBACK")
+        assert "ownership mismatch" in message, (label, message)
+
+    async def go():
+        async with cf_pg.case("rjs2_l2owned") as (c, _sm):
+            conn = c.conn
+            for key, english, source_hash, _context in rows[8:]:
+                await conn.execute(
+                    "INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, "
+                    "sensitive, max_px, context, updated_at) "
+                    "VALUES ($1, 'client', $2, $3, FALSE, NULL, NULL, "
+                    "CAST('2026-01-01T00:00:00Z' AS timestamptz))",
+                    key, english, source_hash)
+            await conn.execute(
+                "UPDATE i18n_keys SET sensitive = TRUE, max_px = 77 "
+                "WHERE key_id = $1", shared[0])
+            baseline = await snapshot(conn, "i18n_keys")
+            await conn.execute(_read(M384))
+            await conn.execute(_read(M385))
+            await conn.execute(
+                "INSERT INTO i18n_entries (key_id, language_code, target, state, "
+                "approved_source_hash) VALUES ($1, 'zz', 'owned-control', 'machine', $2)",
+                rows[0][0], rows[0][2])
+            proposals = await snapshot(conn, "i18n_proposals", "id")
+            entries = await snapshot(conn, "i18n_entries")
+            applied = await snapshot(conn, "i18n_keys")
+            await conn.execute(_read(M384))
+            assert await snapshot(conn, "i18n_keys") == applied, "L2 forward re-run changed metadata"
+
+            # Drift on both an inserted and a pre-existing key must survive.
+            for key in (KEYS_384[0], shared[0]):
+                for column, value in (("source_hash", "f" * 40),
+                                      ("context", "later context")):
+                    before = await conn.fetchval(
+                        "SELECT to_jsonb(k)::text FROM i18n_keys k WHERE key_id = $1", key)
+                    await conn.execute(
+                        "UPDATE i18n_keys SET " + column + " = $2 WHERE key_id = $1",
+                        key, value)
+                    changed = await snapshot(conn, "i18n_keys")
+                    await refused(conn, _read(R384), "L2 inverse " + column)
+                    assert await snapshot(conn, "i18n_keys") == changed, "L2 inverse overwrote " + column
+                    await refused(conn, _read(M384), "L2 forward " + column)
+                    assert await snapshot(conn, "i18n_keys") == changed, "L2 forward overwrote " + column
+                    await conn.execute(
+                        "UPDATE i18n_keys k SET source_hash = s.source_hash, context = s.context "
+                        "FROM jsonb_populate_record(NULL::i18n_keys, CAST($2 AS jsonb)) s "
+                        "WHERE k.key_id = $1", key, before)
+
+            # Two complete forward/inverse cycles restore the exact original rows.
+            for _ in range(2):
+                await conn.execute(_read(R384))
+                restored = await snapshot(conn, "i18n_keys")
+                assert [r for r in restored if r[0] in shared] == baseline, "L2 baseline differs"
+                assert await conn.fetchval(
+                    "SELECT count(*) FROM i18n_keys WHERE key_id = ANY($1::text[]) "
+                    "AND retired_at IS NULL", list(KEYS_384[:8])) == 0, "L2 added keys remain live"
+                assert await snapshot(conn, "i18n_proposals", "id") == proposals, "L2 proposals changed"
+                assert await snapshot(conn, "i18n_entries") == entries, "L2 translations changed"
+                await conn.execute(_read(R384))
+                assert await snapshot(conn, "i18n_keys") == restored, "L2 inverse re-run wrote metadata"
+                await conn.execute(_read(M384))
     _run(go())

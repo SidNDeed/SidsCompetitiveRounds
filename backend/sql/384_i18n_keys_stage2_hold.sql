@@ -19,11 +19,52 @@
 -- value written here (IS DISTINCT FROM over every column the arm sets, retired_at
 -- included), so the re-insert of the five keys 379 created changes exactly their context
 -- once, and a second run of this file writes no row at all (updated_at included). The
--- post-check RAISES unless every expected key is live with the expected source_hash and
+-- A durable 384 ownership record keeps exact predecessor metadata for the inverse;
+-- later source or context edits are refused before another forward overwrite.
+-- The file unconditionally issues LOCK TABLE, INSERT INTO and UPDATE statements;
+-- CREATE TABLE is guarded. The post-check RAISES unless every expected key is live
+-- with the expected source_hash and
 -- context and no max_px. Explicit transaction (#340). Run order: deploy API -> apply
 -- this file -> apply 385. Inverse: rollback_384_i18n_keys_stage2_hold.sql.
 
 BEGIN;
+
+-- Capture the exact predecessor before the first overwrite. Keep it across
+-- repeated apply/inverse cycles; it also preserves the original updated_at.
+-- The same table order in both directions serializes metadata writers.
+LOCK TABLE i18n_keys IN SHARE ROW EXCLUSIVE MODE;
+CREATE TABLE IF NOT EXISTS i18n_keys_384_ownership (
+    key_id VARCHAR(16) PRIMARY KEY,
+    baseline JSONB,
+    owned JSONB,
+    reversed JSONB,
+    active BOOLEAN NOT NULL DEFAULT FALSE
+);
+LOCK TABLE i18n_keys_384_ownership IN SHARE ROW EXCLUSIVE MODE;
+
+INSERT INTO i18n_keys_384_ownership (key_id, baseline)
+SELECT e.key_id, to_jsonb(k)
+  FROM unnest(ARRAY['fe3e2890029979eb', 'e247d0f66676e2fa', '990a134373f4fe9b', '21a77f99b9e86f48', 'df1814deb572b30b', '5ff81c1cbcb1bc7b', 'dff040f0708dc38d', '690eba24c1191a59', 'b933f3c706c40e83', '98dca83410faa64d', '66acd1c2d1011708', 'bd57f21b2e779ae1', '5be7e933e570652e']::varchar[]) AS e(key_id)
+  LEFT JOIN i18n_keys k USING (key_id)
+ON CONFLICT (key_id) DO NOTHING;
+
+DO $ownership$
+BEGIN
+    -- A repeat may revive an otherwise unchanged key, as the forward contract
+    -- already permits. Changed source, context or other metadata is not owned.
+    IF EXISTS (
+        SELECT 1 FROM i18n_keys_384_ownership b
+        LEFT JOIN i18n_keys k USING (key_id)
+        WHERE b.key_id IN ('fe3e2890029979eb', 'e247d0f66676e2fa', '990a134373f4fe9b', '21a77f99b9e86f48', 'df1814deb572b30b', '5ff81c1cbcb1bc7b', 'dff040f0708dc38d', '690eba24c1191a59', 'b933f3c706c40e83', '98dca83410faa64d', '66acd1c2d1011708', 'bd57f21b2e779ae1', '5be7e933e570652e') AND b.owned IS NOT NULL
+          AND ((b.active AND
+                (to_jsonb(k) - 'retired_at' - 'updated_at') IS DISTINCT FROM
+                (b.owned - 'retired_at' - 'updated_at'))
+               OR (NOT b.active AND to_jsonb(k) IS DISTINCT FROM b.reversed))
+    ) THEN
+        RAISE EXCEPTION '384 ownership mismatch before apply';
+    END IF;
+END $ownership$;
+
 
 INSERT INTO i18n_keys (key_id, namespace, msgctxt, source_hash, sensitive, max_px, context, updated_at)
 SELECT v.key_id, v.namespace, v.msgctxt, v.source_hash, v.sensitive, NULL, v.context, clock_timestamp()
@@ -83,4 +124,11 @@ BEGIN
     END IF;
     RAISE NOTICE 'post-check OK: % stage 2 hold client keys live', v_ok;
 END $$;
+-- Record only rows the post-check proved, inside the same transaction.
+UPDATE i18n_keys_384_ownership b
+   SET owned = to_jsonb(k), active = TRUE
+  FROM i18n_keys k
+ WHERE k.key_id = b.key_id AND b.key_id IN ('fe3e2890029979eb', 'e247d0f66676e2fa', '990a134373f4fe9b', '21a77f99b9e86f48', 'df1814deb572b30b', '5ff81c1cbcb1bc7b', 'dff040f0708dc38d', '690eba24c1191a59', 'b933f3c706c40e83', '98dca83410faa64d', '66acd1c2d1011708', 'bd57f21b2e779ae1', '5be7e933e570652e')
+   AND (NOT b.active OR b.owned IS DISTINCT FROM to_jsonb(k));
+
 COMMIT;

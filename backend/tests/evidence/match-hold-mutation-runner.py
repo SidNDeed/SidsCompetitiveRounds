@@ -37,10 +37,22 @@ ADMIT_T = "test_match_hold_admission_gate_pg.py"
 WIN_T = "test_match_report_window.py"
 MIG_T = "test_match_hold_migration_pg.py"
 M383 = "383_match_hold_stage2.sql"
+M384 = "384_i18n_keys_stage2_hold.sql"
+R384 = "rollback_384_i18n_keys_stage2_hold.sql"
+SQL_ENV = {M383: "MATCH_HOLD_M383", M384: "MATCH_HOLD_M384",
+           R384: "MATCH_HOLD_R384"}
 
 # id: (piece, module file, [(anchor, mutant text)], [(anchor, control text)],
 #      test file, -k selection of the tests that must fail)
 MUTANTS = {
+    "F1.L2.BASELINE": ("FIX1", M384,
+        [('SELECT e.key_id, to_jsonb(k)\n', 'SELECT e.key_id, NULL::jsonb\n')],
+        [('SELECT e.key_id, to_jsonb(k)\n', 'SELECT e.key_id, (to_jsonb(k))\n')],
+        MIG_T, "l2_384_owned_metadata_round_trips"),
+    "F1.L2.INVERSE": ("FIX1", R384,
+        [("    IF EXISTS (\n        SELECT 1 FROM i18n_keys_384_ownership b\n        LEFT JOIN i18n_keys k USING (key_id)\n        WHERE b.key_id IN ('fe3e2890029979eb', 'e247d0f66676e2fa', '990a134373f4fe9b', '21a77f99b9e86f48', 'df1814deb572b30b', '5ff81c1cbcb1bc7b', 'dff040f0708dc38d', '690eba24c1191a59', 'b933f3c706c40e83', '98dca83410faa64d', '66acd1c2d1011708', 'bd57f21b2e779ae1', '5be7e933e570652e')\n          AND (b.owned IS NULL\n", "    IF FALSE AND EXISTS (\n        SELECT 1 FROM i18n_keys_384_ownership b\n        LEFT JOIN i18n_keys k USING (key_id)\n        WHERE b.key_id IN ('fe3e2890029979eb', 'e247d0f66676e2fa', '990a134373f4fe9b', '21a77f99b9e86f48', 'df1814deb572b30b', '5ff81c1cbcb1bc7b', 'dff040f0708dc38d', '690eba24c1191a59', 'b933f3c706c40e83', '98dca83410faa64d', '66acd1c2d1011708', 'bd57f21b2e779ae1', '5be7e933e570652e')\n          AND (b.owned IS NULL\n"), ('   AND b.active AND b.baseline IS NULL\n   AND to_jsonb(k) = b.owned;', '   AND b.active AND b.baseline IS NULL\n   AND TRUE;'), ('   AND b.active AND b.baseline IS NOT NULL\n   AND to_jsonb(k) = b.owned;', '   AND b.active AND b.baseline IS NOT NULL\n   AND TRUE;'), ("                    (to_jsonb(k) - 'retired_at' - 'updated_at') IS DISTINCT FROM\n                    (b.owned - 'retired_at' - 'updated_at')", '                    FALSE')],
+        [("    IF EXISTS (\n        SELECT 1 FROM i18n_keys_384_ownership b\n        LEFT JOIN i18n_keys k USING (key_id)\n        WHERE b.key_id IN ('fe3e2890029979eb', 'e247d0f66676e2fa', '990a134373f4fe9b', '21a77f99b9e86f48', 'df1814deb572b30b', '5ff81c1cbcb1bc7b', 'dff040f0708dc38d', '690eba24c1191a59', 'b933f3c706c40e83', '98dca83410faa64d', '66acd1c2d1011708', 'bd57f21b2e779ae1', '5be7e933e570652e')\n          AND (b.owned IS NULL\n", "     IF EXISTS (\n        SELECT 1 FROM i18n_keys_384_ownership b\n        LEFT JOIN i18n_keys k USING (key_id)\n        WHERE b.key_id IN ('fe3e2890029979eb', 'e247d0f66676e2fa', '990a134373f4fe9b', '21a77f99b9e86f48', 'df1814deb572b30b', '5ff81c1cbcb1bc7b', 'dff040f0708dc38d', '690eba24c1191a59', 'b933f3c706c40e83', '98dca83410faa64d', '66acd1c2d1011708', 'bd57f21b2e779ae1', '5be7e933e570652e')\n          AND (b.owned IS NULL\n"), ('   AND b.active AND b.baseline IS NULL\n   AND to_jsonb(k) = b.owned;', '    AND b.active AND b.baseline IS NULL\n   AND to_jsonb(k) = b.owned;'), ('   AND b.active AND b.baseline IS NOT NULL\n   AND to_jsonb(k) = b.owned;', '    AND b.active AND b.baseline IS NOT NULL\n   AND to_jsonb(k) = b.owned;'), ("                    (to_jsonb(k) - 'retired_at' - 'updated_at') IS DISTINCT FROM\n                    (b.owned - 'retired_at' - 'updated_at')", "                     (to_jsonb(k) - 'retired_at' - 'updated_at') IS DISTINCT FROM\n                    (b.owned - 'retired_at' - 'updated_at')")],
+        MIG_T, "l2_384_owned_metadata_round_trips"),
     'M5.10': ('FIX1', 'match_report_window.py', [('    held = held or (hold is not None and closure is None)\n', '    held = False\n')], [('    held = held or (hold is not None and closure is None)\n', '    held = held or ((hold is not None) and closure is None)\n')], 'test_match_hold_reports_pg.py', 'test_t5_7_held_game_over_settles_at_entry_and_is_superseded_at_lapse'),
     'MERGED.FIX1.H2.CAUSAL': ('FIX1', 'match_report_window.py', [('    return closure is not None and closure[1] == "entered"\n', '    return bool((await db.execute(text(\n        "SELECT 1 FROM match_seat_holds WHERE room_name = CAST(:room AS varchar)"\n        " AND game_id = CAST(:g AS uuid) AND closed_reason = \'entered\' LIMIT 1"),\n        {"room": hold["room_name"], "g": str(hold["game_id"])})).scalar())\n')], [('    return closure is not None and closure[1] == "entered"\n', '    return (closure is not None) and closure[1] == "entered"\n')], 'test_match_hold_reports_pg.py', 'merged_fix1_h2_causal_lapse_and_delayed_receipt'),
     'MERGED.FIX1.H2.EXPIRY': ('FIX1', 'match_report_window.py', [('    if not held and window["settle_after"] <= now:\n', '    if window["opened_at"] + timedelta(seconds=WINDOW_S) <= now:\n')], [('    if not held and window["settle_after"] <= now:\n', '    if (not held) and window["settle_after"] <= now:\n')], 'test_match_hold_reports_pg.py', 'merged_fix1_h2_held_receipts_outlive_first_receipt'),
@@ -1413,9 +1425,10 @@ def _write_copy(dest, module, text_out):
 def _run(dest, module, test_file, sel):
     env = dict(os.environ)
     env.pop("MATCH_HOLD_SRC", None)
-    env.pop("MATCH_HOLD_M383", None)
+    for variable in SQL_ENV.values():
+        env.pop(variable, None)
     if module.endswith(".sql"):
-        env["MATCH_HOLD_M383"] = os.path.join(dest, module)
+        env[SQL_ENV[module]] = os.path.join(dest, module)
     else:
         env["MATCH_HOLD_SRC"] = dest
     cmd = [sys.executable, "-m", "pytest", "--rootdir", BACKEND, "-p", "no:cacheprovider",
