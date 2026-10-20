@@ -4575,48 +4575,33 @@ namespace CompetitiveRounds
 
         /// <summary>0 = leave alone; 1 = ownerDead; 2 = posDead; 3 = armedFrozen.</summary>
         /// <summary>Bug 337 self-check: Sonigon voice slots and how many hold a
-        /// live voice — every event's transform instances, their container
-        /// holders, their voice holders — through the surface Resolve() binds.
-        /// False when it did not resolve. Read-only; touches nothing.</summary>
+        /// live voice. The shared pure walker bounds every registry level;
+        /// unresolved, exhausted or failed reads return no partial counts.
+        /// Read-only; all reflection and Unity reads stay on the caller.</summary>
         internal static bool TryCountVoices(out int active, out int slots)
         {
+            const int VOICE_VISIT_LIMIT = 2048;
+            const int VOICE_ELAPSED_LIMIT_MS = 1;
             active = 0; slots = 0;
             try
             {
+                // Include reflection setup in the elapsed budget. One ms
+                // leaves nominal room for the rest of the 5 ms capture.
+                var timer = System.Diagnostics.Stopwatch.StartNew();
                 if (!Resolve()) return false;
                 object manager = _pInstance.GetValue(null, null);
                 if (manager == null) return false;
                 object data = _pData.GetValue(manager, null);
                 var eventDict = data != null ? _fEventDict.GetValue(data) as IDictionary : null;
                 if (eventDict == null) return false;
-                foreach (DictionaryEntry eventEntry in eventDict)
-                {
-                    var transformDict = eventEntry.Value != null
-                        ? _fTransformDict.GetValue(eventEntry.Value) as IDictionary : null;
-                    if (transformDict == null) continue;
-                    foreach (DictionaryEntry instEntry in transformDict)
-                    {
-                        object inst = instEntry.Value;
-                        if (inst == null) continue;
-                        var holders = _fHolders.GetValue(inst) as Array;
-                        if (holders == null) continue;
-                        for (int h = 0; h < holders.Length; h++)
-                        {
-                            object holder = holders.GetValue(h);
-                            if (holder == null) continue;
-                            var voices = _fHolderVoices.GetValue(holder) as Array;
-                            if (voices == null) continue;
-                            for (int v = 0; v < voices.Length; v++)
-                            {
-                                object vh = voices.GetValue(v);
-                                if (vh == null) continue;
-                                slots++;
-                                if (_fVoice.GetValue(vh) != null) active++;
-                            }
-                        }
-                    }
-                }
-                return true;
+                return LogBundleCore.TryCountVoicesBounded(eventDict,
+                    e => _fTransformDict.GetValue(e) as IDictionary,
+                    i => _fHolders.GetValue(i) as Array,
+                    h => _fHolderVoices.GetValue(h) as Array,
+                    v => _fVoice.GetValue(v) != null,
+                    VOICE_VISIT_LIMIT,
+                    Math.Max(1L, System.Diagnostics.Stopwatch.Frequency * VOICE_ELAPSED_LIMIT_MS / 1000),
+                    () => timer.ElapsedTicks, out active, out slots);
             }
             catch { return false; }
         }

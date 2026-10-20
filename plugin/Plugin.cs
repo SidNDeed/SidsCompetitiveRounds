@@ -503,6 +503,9 @@ namespace CompetitiveRounds
         private void Awake()
         {
             Log = Logger;
+            // The thread every [LOG-BUNDLE] line compares its compose thread
+            // against: Awake runs on Unity's main thread.
+            try { LogBundleCore.RegisterMainThread(); } catch { }
 
             // BepInEx 5 defaults AppendLog=false, which truncates LogOutput.log
             // on every launch — meaning if a player crashes and reopens to file
@@ -3729,6 +3732,13 @@ namespace CompetitiveRounds
             // snapshot the room-exit callback needs, because OnLeftRoom runs
             // after PhotonNetwork has already let go of the room.
             try { AutoLogUpload.Tick(); } catch { }
+            // The bug form's bundle is built on a worker; its finished body is
+            // handed to the request here, on the always-on tick, so a report
+            // whose page closed while it was building is still sent.
+            try { CompetitiveUI.PumpBugFormBundle(); } catch { }
+            // [CLOCK]: one time line a minute, so every mod line can be placed
+            // within a minute and two seats aligned on the Photon server clock.
+            try { LogClock.Tick(); } catch { }
             // Quick-chat sends through the vanilla chat RPC since Sept 1 and
             // needs no receive hook (event code 48 is retired, never shipped).
             // Dance emotes (Aug 31 item 5) ride event code 49; Tick runs the

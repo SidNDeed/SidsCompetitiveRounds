@@ -12460,7 +12460,15 @@ namespace CompetitiveRounds
                 yield break;
             }
             var entries = new List<MatchHistoryEntry>(slices.Count);
-            const int PER_FRAME = 80;
+            // A TIME budget per frame, not a row count (night of 2026-10-19:
+            // 80 rows a frame held five frames at 50 to 86 ms each when the
+            // competitive page opened in a live game; a row's cost scales with
+            // its timeline strings, so no fixed count is safe). At least one
+            // row per frame, then yield once the frame's share is spent.
+            const double FRAME_BUDGET_MS = 4.0;
+            var budget = System.Diagnostics.Stopwatch.StartNew();
+            int frames = 1;
+            double worstSliceMs = 0;
             for (int i = 0; i < slices.Count; i++)
             {
                 try
@@ -12468,8 +12476,22 @@ namespace CompetitiveRounds
                     entries.Add(ParseMatchHistoryChunkEntry(slices[i]));
                 }
                 catch { }
-                if (i > 0 && i % PER_FRAME == 0) yield return null;
+                double spent = budget.Elapsed.TotalMilliseconds;
+                if (spent >= FRAME_BUDGET_MS && i < slices.Count - 1)
+                {
+                    if (spent > worstSliceMs) worstSliceMs = spent;
+                    frames++;
+                    yield return null;
+                    budget.Reset(); budget.Start();
+                }
             }
+            {
+                double spent = budget.Elapsed.TotalMilliseconds;
+                if (spent > worstSliceMs) worstSliceMs = spent;
+            }
+            Plugin.Log.LogInfo(string.Format(System.Globalization.CultureInfo.InvariantCulture,
+                "[HISTORY-PARSE] {0} rows over {1} frame(s), worst frame slice {2:F1} ms (budget {3:F0} ms)",
+                slices.Count, frames, worstSliceMs, FRAME_BUDGET_MS));
             // Fewer rows than asked for = the server ran out of history.
             MatchHistoryLoadedAll = entries.Count < requested;
             if (append && CachedMatchHistory != null)
@@ -25211,6 +25233,30 @@ namespace CompetitiveRounds
         }
 
         private static bool _loggedSensitiveBlocked;
+
+        /// <summary>The body half of SensitiveTransportBlocked: the two KEY
+        /// tokens, colon-anchored (a value cannot contain either raw sequence,
+        /// its quotes arrive escaped). THREAD-SAFE: a pure scan, so a caller
+        /// that builds a large body on a worker can run it there.</summary>
+        internal static bool BodyCarriesSensitiveKey(string json)
+        {
+            return json != null
+                && (json.IndexOf("\"admin_steam_id\":", StringComparison.Ordinal) >= 0
+                    || json.IndexOf("\"password\":", StringComparison.Ordinal) >= 0);
+        }
+
+        /// <summary>WORKER THREAD helper for a body built off the game thread:
+        /// the text SensitiveTransportBlocked is to scan. The body itself when
+        /// it carries a key token, so the gate refuses exactly as it would
+        /// have; otherwise an empty probe, on which the body clause reads
+        /// false, which is the answer the full body gives. Either way the
+        /// verdict equals the one the full text produces, and the game thread
+        /// no longer scans megabytes to reach it.</summary>
+        internal static string SensitiveBodyProbe(string json)
+        {
+            return BodyCarriesSensitiveKey(json) ? json : "";
+        }
+
         private static bool SensitiveTransportBlocked(string url, string json,
             Action<bool, string> callback)
         {
@@ -25251,9 +25297,7 @@ namespace CompetitiveRounds
                     // text rides in the REQUEST (send/reply/report bodies) and
                     // in the responses (inbox, message, blocks).
                     || IsMailRoute(url)
-                    || (json != null
-                        && (json.IndexOf("\"admin_steam_id\":", StringComparison.Ordinal) >= 0
-                            || json.IndexOf("\"password\":", StringComparison.Ordinal) >= 0));
+                    || (json != null && BodyCarriesSensitiveKey(json));
                 if (!sensitive) return false;
                 if (!_loggedSensitiveBlocked)
                 {
@@ -26340,26 +26384,11 @@ namespace CompetitiveRounds
                 done?.Invoke(false, "steam_id missing");
                 return;
             }
-            if (logText != null && logText.Length > BUG_REPORT_LOG_CAP_CHARS)
-                logText = logText.Substring(logText.Length - BUG_REPORT_LOG_CAP_CHARS); // tail-most window
-            // JsonEscapeFull everywhere — logs (and even typed descriptions) can
-            // carry raw control bytes that strict JSON parsers reject (#31).
-            var sb = new System.Text.StringBuilder();
-            sb.Append("{");
-            sb.Append($"\"steam_id\":\"{JsonEscapeFull(steamId)}\"");
-            sb.Append($",\"display_name\":\"{JsonEscapeFull(displayName ?? "")}\"");
-            sb.Append($",\"mod_version\":\"{JsonEscapeFull(Plugin.ModVersion)}\"");
-            sb.Append($",\"game_version\":\"{JsonEscapeFull(UnityEngine.Application.version ?? "")}\"");
-            sb.Append($",\"severity\":\"{JsonEscapeFull(severity ?? "medium")}\"");
-            sb.Append($",\"category\":\"{JsonEscapeFull(category ?? "other")}\"");
-            sb.Append($",\"description\":\"{JsonEscapeFull(description ?? "")}\"");
-            if (!string.IsNullOrEmpty(reproSteps))
-                sb.Append($",\"repro_steps\":\"{JsonEscapeFull(reproSteps)}\"");
-            if (!string.IsNullOrEmpty(logText))
-                sb.Append($",\"log_text\":\"{JsonEscapeFull(logText)}\"");
-            sb.Append("}");
+            string json = BuildBugReportBody(steamId, displayName, Plugin.ModVersion,
+                                             UnityEngine.Application.version ?? "",
+                                             description, reproSteps, severity, category, logText);
             Plugin.Instance.StartCoroutine(PostRequest(
-                $"{baseUrl}/api/v1/bug-reports", sb.ToString(),
+                $"{baseUrl}/api/v1/bug-reports", json,
                 (ok, response) =>
                 {
                     if (ok) Plugin.Log.LogInfo($"[BUG-REPORT] submitted ok: {response}");
@@ -26367,6 +26396,60 @@ namespace CompetitiveRounds
                     done?.Invoke(ok, response);
                 }
             ));
+        }
+
+        /// <summary>THREAD-SAFE: the bug-report body, the one shape both
+        /// senders use (SubmitBugReport for the small chat report, and the bug
+        /// form's worker for the log bundle). Same fields, same order, same
+        /// escaping and the same tail-most cap as the body always had; every
+        /// Unity read (the game version) is a parameter. JsonEscapeFull
+        /// everywhere — logs (and even typed descriptions) can carry raw
+        /// control bytes that strict JSON parsers reject (#31). The builder is
+        /// sized up front and the escaped log is appended, not interpolated,
+        /// so a 3.5 M-char log costs one escaped copy rather than three.</summary>
+        internal static string BuildBugReportBody(string steamId, string displayName,
+                                                  string modVersion, string gameVersion,
+                                                  string description, string reproSteps,
+                                                  string severity, string category, string logText)
+        {
+            if (logText != null && logText.Length > BUG_REPORT_LOG_CAP_CHARS)
+                logText = logText.Substring(logText.Length - BUG_REPORT_LOG_CAP_CHARS); // tail-most window
+            int logLen = logText?.Length ?? 0;
+            var sb = new System.Text.StringBuilder(logLen + logLen / 8 + 4096);
+            sb.Append("{");
+            sb.Append($"\"steam_id\":\"{JsonEscapeFull(steamId)}\"");
+            sb.Append($",\"display_name\":\"{JsonEscapeFull(displayName ?? "")}\"");
+            sb.Append($",\"mod_version\":\"{JsonEscapeFull(modVersion ?? "")}\"");
+            sb.Append($",\"game_version\":\"{JsonEscapeFull(gameVersion ?? "")}\"");
+            sb.Append($",\"severity\":\"{JsonEscapeFull(severity ?? "medium")}\"");
+            sb.Append($",\"category\":\"{JsonEscapeFull(category ?? "other")}\"");
+            sb.Append($",\"description\":\"{JsonEscapeFull(description ?? "")}\"");
+            if (!string.IsNullOrEmpty(reproSteps))
+                sb.Append($",\"repro_steps\":\"{JsonEscapeFull(reproSteps)}\"");
+            if (!string.IsNullOrEmpty(logText))
+                sb.Append(",\"log_text\":\"").Append(JsonEscapeFull(logText)).Append('"');
+            sb.Append("}");
+            return sb.ToString();
+        }
+
+        /// <summary>MAIN THREAD: POST an ALREADY-ENCODED bug-report body to
+        /// the same route, through the same transport and with the same
+        /// [BUG-REPORT] lines as SubmitBugReport. <paramref name="sensitiveProbe"/>
+        /// is SensitiveBodyProbe of the body, computed where the body was
+        /// built, so the transport gate reaches the verdict the full text
+        /// gives without scanning it here.</summary>
+        internal static void SubmitBugReportBody(byte[] body, string sensitiveProbe, Action<bool, string> done)
+        {
+            if (Plugin.Instance == null) { done?.Invoke(false, "not ready"); return; }
+            Plugin.Instance.StartCoroutine(PostRequestRaw(
+                $"{baseUrl}/api/v1/bug-reports", body,
+                (ok, response) =>
+                {
+                    if (ok) Plugin.Log.LogInfo($"[BUG-REPORT] submitted ok: {response}");
+                    else Plugin.Log.LogWarning($"[BUG-REPORT] submit failed: {response}");
+                    done?.Invoke(ok, response);
+                },
+                sensitiveProbe: sensitiveProbe ?? ""));
         }
 
         /// <summary>Reads the tail of a log file (BepInEx LogOutput.log or
@@ -26519,7 +26602,8 @@ namespace CompetitiveRounds
         {
             if (logText != null && logText.Length > BUG_REPORT_LOG_CAP_CHARS)
                 logText = logText.Substring(logText.Length - BUG_REPORT_LOG_CAP_CHARS); // tail-most window
-            var sb = new System.Text.StringBuilder();
+            int logLen = logText?.Length ?? 0;
+            var sb = new System.Text.StringBuilder(logLen + logLen / 8 + 4096);
             sb.Append("{");
             sb.Append($"\"steam_id\":\"{JsonEscapeFull(steamId)}\"");
             sb.Append($",\"display_name\":\"{JsonEscapeFull(displayName ?? "")}\"");
@@ -26531,7 +26615,7 @@ namespace CompetitiveRounds
                 sb.Append($",\"opponent_steam_id\":\"{JsonEscapeFull(opponentSteamId)}\"");
             if (!string.IsNullOrEmpty(seriesId))
                 sb.Append($",\"series_id\":\"{JsonEscapeFull(seriesId)}\"");
-            sb.Append($",\"log_text\":\"{JsonEscapeFull(logText ?? "")}\"");
+            sb.Append(",\"log_text\":\"").Append(JsonEscapeFull(logText ?? "")).Append('"');
             sb.Append("}");
             return sb.ToString();
         }
