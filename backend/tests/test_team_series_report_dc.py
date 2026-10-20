@@ -3466,7 +3466,9 @@ def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch
     start = watcher.index("private static void MaybeSendLivePoints(")
     body = watcher[start:watcher.index("\n        }\n", start)]
     assert body.count("TeamGameNumber.Live.TokenFor(") == 1, "MaybeSendLivePoints"
-    assert "teamGame, teamRoom, teamToken);" in body, "MaybeSendLivePoints"
+    # Merged round 3 (refit 1b1bd7ef, KX2): the post also carries the hold
+    # gate's stamp and room after the token; the token still follows the room.
+    assert "teamGame, teamRoom, teamToken, holdStamp, holdRoom);" in body, "MaybeSendLivePoints"
     assert "ReadLiveScore(), TeamGameLifecycle.HooksLive);" in body, "MaybeSendLivePoints"
     start = watcher.index("internal static string TeamTokenForReport(")
     body = watcher[start:watcher.index("\n        }\n", start)]
@@ -3483,8 +3485,10 @@ def test_the_clients_token_canonicals_are_the_ones_the_server_checks(monkeypatch
     # once, and a fallback carries none.
     plugin = _read(os.path.join(_PLUGIN_DIR, "Plugin.cs"))
     assert plugin.count("ApiClient.ReportTeamSeriesDc(") == 1
-    assert ("ApiClient.ReportTeamSeriesDc(seriesId, myId, dcSteamId, t1Points, t2Points,\n"
-            "                                             observedRoom, false);" in plugin)
+    # Merged round 3 (RJ Stage 2 5a805a02, K1): the one call sits in
+    # ExecuteDcPlan and reads the plan's fields; still no token and false.
+    assert ("ApiClient.ReportTeamSeriesDc(plan.SeriesId, plan.MyId, plan.DcSteamId, plan.T1Points, plan.T2Points,\n"
+            "                                                 plan.ObservedRoom, false);" in plugin)
     assert "TeamTokenForReport(" not in plugin, "Plugin.cs reads the report's token again"
     assert "dcToken" not in plugin, "Plugin.cs passes a token to ReportTeamSeriesDc again"
     start = api.index("public static void ReportTeamSeriesDc(")
