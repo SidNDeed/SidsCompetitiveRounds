@@ -1484,7 +1484,10 @@ class Frame:
                 effect_recv, effect_args, effect_vals = recv, n.args, argvals
                 effect_node = fn.alias[3]
                 if not _dict_arms(recv) and argvals and _dict_arms(argvals[0]):
-                    effect_recv, effect_args, effect_vals = argvals[0], n.args[1:], argvals[1:]
+                    actual = argvals[0]
+                    effect_recv = V(actual.ex | recv.ex, actual.im | recv.im, actual.funcs,
+                                    actual.elems, actual.item, actual.alias)
+                    effect_args, effect_vals = n.args[1:], argvals[1:]
                     effect_node = n.args[0]
                 key_node = effect_args[0] if _REMOVAL_METHODS[meth] and effect_args else None
                 key_value = effect_vals[0] if key_node is not None else V({C})
@@ -1701,26 +1704,42 @@ class Frame:
             ex = (ex - {P}) | {E}
         return V(ex, im, out.funcs)
 
-    def callback_effect(self, node, callback, first, candidates, required=False):
-        """Known callbacks at an unknown API position may receive any candidate."""
+    def callback_effect(self, node, callback, first, candidates, required=False, seen=frozenset()):
+        """Follow a generic callback's binding or refuse the unresolved path."""
+        binding = callback.key()
+        if binding in seen:
+            self.ps.flag(self.mod, node, "unresolvable call target (recursive callback binding)")
+            return V({D})
+        seen = seen | {binding}
         alias = callback.alias
+        if _dict_arms(callback):
+            return self.callback_call(node, callback, first)
         if alias and alias[0] == "call_alternatives":
             out = []
             self.with_ctx(callback.im, lambda: out.extend(
                 self.callback_effect(node, V(arm.ex | callback.ex, arm.im | callback.im,
                                              arm.funcs, arm.elems, arm.item, arm.alias),
-                                     first, candidates, True) for arm in alias[1]))
+                                     first, candidates, True, seen) for arm in alias[1]))
             return vjoin(*out)
         if alias and alias[0] == "method" and alias[1] == "__call__":
             inner = alias[2]
             selected = V(inner.ex | callback.ex, inner.im | callback.im, inner.funcs,
                          inner.elems, inner.item, inner.alias)
-            return self.callback_effect(node, selected, first, candidates, required)
+            return self.callback_effect(node, selected, first, candidates, required, seen)
         if alias and alias[0] == "partial":
-            returned = self.callback_call(node, callback, first)
             if len(alias) > 2:
+                target_alias = alias[2].alias
+                if target_alias and target_alias[0] == "call_alternatives":
+                    return vjoin(*[self.callback_effect(
+                        node, V(callback.ex, callback.im, arm.funcs, alias=(
+                            "partial", alias[1], V(arm.ex | alias[2].ex, arm.im | alias[2].im,
+                                arm.funcs, arm.elems, arm.item, arm.alias),
+                            alias[3], alias[4], alias[5])),
+                        first, candidates, True, seen) for arm in target_alias[1]])
                 def fixed(target):
                     ta = target.alias
+                    if target.funcs or (ta and ta[0] == "method" and ta[1] in self.mod.methods):
+                        return True
                     if ta and ta[0] == "call_alternatives":
                         return all(fixed(arm) for arm in ta[1])
                     if ta and ta[0] == "method" and ta[1] in _REMOVAL_METHODS:
@@ -1728,25 +1747,62 @@ class Frame:
                     tn = self.callable_name(ast.Constant(value=None), target)
                     if tn and tn.startswith("builtins.dict."):
                         tn = tn[len("builtins."):]
-                    return tn in _REMOVAL_CALLS and bool(alias[1]) and bool(_dict_arms(alias[1][0])) and (
-                        not _REMOVAL_METHODS[_REMOVAL_CALLS[tn]] or len(alias[1]) > 1)
-                if not fixed(alias[2]):
-                    self.callback_effect(node, alias[2], first, list(alias[1]) + candidates, True)
-            return returned
+                    if tn in _REMOVAL_CALLS:
+                        return bool(alias[1]) and bool(_dict_arms(alias[1][0])) and (
+                            not _REMOVAL_METHODS[_REMOVAL_CALLS[tn]] or len(alias[1]) > 1)
+                    if tn in ("operator.call", "map", "filter", "builtins.map", "builtins.filter",
+                              "functools.partial", "partial"):
+                        return bool(alias[1] or alias[4])
+                    return True
+                if fixed(alias[2]):
+                    return self.callback_call(node, callback, first)
+                target = alias[2]
+                selected = V(target.ex | callback.ex, target.im | callback.im, target.funcs,
+                             target.elems, target.item, target.alias)
+                return self.callback_effect(node, selected, first, list(alias[1]) + candidates,
+                                            True, seen)
+            return self.callback_call(node, callback, first)
         name = self.callable_name(ast.Constant(value=None), callback)
         if name is not None and name.startswith("builtins.dict."):
             name = name[len("builtins."):]
         while name is not None and name.endswith(".__call__"):
             name = name[:-len(".__call__")]
+        if name in ("builtins.map", "builtins.filter"):
+            name = name.split(".", 1)[1]
+        if name in ("operator.call", "map", "filter", "functools.partial", "partial"):
+            def retained(values, ex=frozenset(), im=frozenset()):
+                for value in values:
+                    selected = V(value.ex | ex, value.im | im, value.funcs,
+                                 value.elems, value.item, value.alias)
+                    if value.alias and _callback_evidence(value, self.mod.methods):
+                        yield selected
+                    elif value.elems is not None:
+                        yield from retained(value.elems, selected.ex, selected.im)
+                    elif value.item is not None:
+                        yield from retained((value.item,), selected.ex, selected.im)
+                    else:
+                        yield selected
+            targets = [value for value in retained(candidates)
+                       if value.key() not in seen and _callback_evidence(value, self.mod.methods)]
+            if not targets:
+                self.ps.flag(self.mod, node, "unresolvable call target (generic wrapper binding)")
+                return V({D})
+            return vjoin(*[self.callback_effect(
+                node, V(target.ex | callback.ex, target.im | callback.im, target.funcs,
+                        target.elems, target.item, target.alias), first, candidates, True, seen)
+                for target in targets])
         if alias and alias[0] == "method" and alias[1] in _REMOVAL_METHODS:
-            receivers = [alias[2]]
+            receivers = [alias[2]] if _dict_arms(alias[2]) else [
+                candidate for value in candidates for candidate in (value, element(value))
+                if _dict_arms(candidate)]
         elif name in _REMOVAL_CALLS:
             receivers = [candidate for value in candidates for candidate in (value, element(value))
                          if _dict_arms(candidate)]
-        elif callback.funcs:
-            return self.callback_call(node, callback, first)
         else:
-            return self.callback_call(node, callback, first) if required else V()
+            return self.callback_call(node, callback, first)
+        if not receivers:
+            self.ps.flag(self.mod, node, "unresolvable call target (generic removal binding)")
+            return V({D})
         values = [candidate for value in candidates for candidate in (value, element(value))]
         labels = vjoin(*[V(v.ex, v.im) for v in values], V(callback.ex, callback.im))
         self.with_ctx(callback.im, lambda: [
@@ -3411,6 +3467,264 @@ def test_fix7_bound_unfollowed_callback_constructor_flags(constructor):
            '    return {"name": "chrome"}\n')
     findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
     assert len(findings) == 1 and "callback constructor" in str(findings[0]), (constructor, _fmt(findings))
+
+
+
+
+_FIX7_UNBOUND_CHOICES = {
+    "type": '(type(box).get, type(box).pop)',
+    "class": '(box.__class__.get, box.__class__.pop)',
+    "class-alias": '(kind.get, kind.pop)',
+    "getattr-type": '(getattr(type(box), "get"), getattr(type(box), "pop"))',
+    "getattr-class": '(getattr(box.__class__, "get"), getattr(box.__class__, "pop"))',
+}
+
+
+@pytest.mark.parametrize("route", list(_FIX7_UNBOUND_CHOICES))
+@pytest.mark.parametrize("selector,expected", [('row["rank"] > 0.5', 'DK'), ('row["index"]', 'D')], ids=["classification", "raw-data"])
+@pytest.mark.parametrize("selected", ["returned", "stored"])
+def test_fix7_substituted_removal_receiver_keeps_selection(route, selector, expected, selected):
+    api = ('def evidence_report(row):\n'
+           '    box = {"word": "COLD"}\n'
+           '    kind = type(box)\n'
+           '    choices = ' + _FIX7_UNBOUND_CHOICES[route] + '\n'
+           '    choices[' + selector + '](box, "word")\n'
+           '    result = box.setdefault("word", "HOT")\n'
+           '    return {"name": ' + ('result' if selected == 'returned' else 'box["word"]') + '}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and ('reads ' + expected) in str(findings[0]), (route, selected, _fmt(findings))
+
+
+@pytest.mark.parametrize("route", list(_FIX7_UNBOUND_CHOICES))
+@pytest.mark.parametrize("choice", [0, 1])
+def test_fix7_substituted_removal_literal_choice_stays_chrome(route, choice):
+    api = ('def evidence_report(row):\n'
+           '    box = {"word": "COLD"}\n'
+           '    kind = type(box)\n'
+           '    choices = ' + _FIX7_UNBOUND_CHOICES[route] + '\n'
+           '    choices[' + str(choice) + '](box, "word")\n'
+           '    return {"name": box.setdefault("word", "HOT")}\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+_FIX7_GENERIC_REMOVALS = {
+    "type": 'functools.reduce(type(box).pop, ("rank",), box)',
+    "class": 'functools.reduce(box.__class__.pop, ("rank",), box)',
+    "class-alias": 'kind = type(box)\nfunctools.reduce(kind.pop, ("rank",), box)',
+    "getattr-type": 'functools.reduce(getattr(type(box), "pop"), ("rank",), box)',
+    "getattr-class": 'functools.reduce(getattr(box.__class__, "pop"), ("rank",), box)',
+    "operator-bound": 'functools.reduce(operator.call, (box.pop, "rank"))',
+    "operator-type": 'functools.reduce(operator.call, (type(box).pop, box, "rank"))',
+    "operator-class": 'functools.reduce(operator.call, (box.__class__.pop, box, "rank"))',
+    "operator-getattr-type": 'functools.reduce(operator.call, (getattr(type(box), "pop"), box, "rank"))',
+    "operator-getattr-class": 'functools.reduce(operator.call, (getattr(box.__class__, "pop"), box, "rank"))',
+    "operator-import": 'functools.reduce(invoke, (box.pop, "rank"))',
+    "operator-dunder": 'functools.reduce(operator.call.__call__, (box.pop, "rank"))',
+    "partial-type": 'functools.reduce(partial(type(box).pop), ("rank",), box)',
+    "partial-class": 'functools.reduce(partial(box.__class__.pop), ("rank",), box)',
+    "partial-getattr": 'functools.reduce(partial(getattr(type(box), "pop")), ("rank",), box)',
+}
+
+
+@pytest.mark.parametrize("route", list(_FIX7_GENERIC_REMOVALS))
+@pytest.mark.parametrize("selected", ["returned", "stored"])
+def test_fix7_generic_removal_binding_keeps_shared_default(route, selected):
+    findings = _fixture(_removal_wrapper_api(_FIX7_GENERIC_REMOVALS[route], selected),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and 'reads K' in str(findings[0]), (route, selected, _fmt(findings))
+
+
+@pytest.mark.parametrize("route", list(_FIX7_GENERIC_REMOVALS))
+def test_fix7_generic_removal_binding_demotes_retained_receiver(route):
+    ref, frame = _removal_state_frame()
+    frame.mod = Module('api', _REMOVAL_CALLBACK_IMPORTS, 'fixture.py', lambda name: False)
+    frame.block(ast.parse(_FIX7_GENERIC_REMOVALS[route]).body)
+    assert 'rank' not in ref.must_keys, (route, ref.must_keys)
+    assert ref.element().flat() == {C}, (route, ref.element().flat())
+
+
+@pytest.mark.parametrize("route", list(_FIX7_GENERIC_REMOVALS))
+def test_fix7_generic_removal_binding_keeps_distinct_allocations(route):
+    operation = 'other = {"rank": 0.0}\n' + _FIX7_GENERIC_REMOVALS[route].replace('box', 'other')
+    assert _fixture(_removal_wrapper_api(operation), _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("original", ["left", "right"])
+@pytest.mark.parametrize("selected", ["returned", "stored"])
+def test_fix7_explicit_only_receiver_choice_keeps_original_alias_labels(original, selected):
+    api = ('def evidence_report(row):\n'
+           '    left = {"word": "COLD"}\n'
+           '    right = {"word": "COLD"}\n'
+           '    receiver = (left, right)[row["index"]]\n'
+           '    receiver.pop("word")\n'
+           '    result = ' + original + '.setdefault("word", "HOT")\n'
+           '    return {"name": ' + ('result' if selected == 'returned' else original + '["word"]') + '}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and 'reads D' in str(findings[0]), (original, selected, _fmt(findings))
+
+
+@pytest.mark.parametrize("wrapper", ['builtins.map', 'builtin_map', 'builtins.filter', 'builtin_filter'])
+def test_fix7_imported_callback_wrapper_keeps_literal_sibling_precision(wrapper):
+    ref, frame = _removal_state_frame()
+    frame.mod = Module('api', _REMOVAL_CALLBACK_IMPORTS, 'fixture.py', lambda name: False)
+    frame.block(ast.parse('list(' + wrapper + '(partial(box.pop, "rank"), (None,)))').body)
+    assert ref.must_keys == {'other'}, (wrapper, ref.must_keys)
+    assert ref.read('other').flat() == {C}
+
+
+@pytest.mark.parametrize("wrapper", ['builtins.map', 'builtin_map'])
+def test_fix7_imported_map_returns_removed_data(wrapper):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n'
+           '    box = {"rank": row["rank"]}\n'
+           '    values = list(' + wrapper + '(box.pop, ("rank",)))\n'
+           '    return {"name": values[0]}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and 'reads D' in str(findings[0]), _fmt(findings)
+
+
+@pytest.mark.parametrize("wrapper", ['builtins.map', 'builtin_map'])
+def test_fix7_imported_map_constant_removal_return_stays_chrome(wrapper):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n'
+           '    box = {"rank": row["rank"]}\n'
+           '    values = list(' + wrapper + '(dict.clear, (box,)))\n'
+           '    return {"name": values[0]}\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("target", ['type(box).pop', 'box.__class__.pop', 'getattr(type(box), "pop")'])
+def test_fix7_generic_partial_target_preserves_outer_selection(target):
+    ref, frame = _removal_state_frame()
+    frame.mod = Module('api', _REMOVAL_CALLBACK_IMPORTS, 'fixture.py', lambda name: False)
+    call = ast.parse('partial(' + target + ')').body[0].value
+    partial_value = frame.expr(call)
+    callback = V({D}, alias=partial_value.alias)
+    frame.callback_effect(call, callback, [], [frame.env['box'], V({C})])
+    assert D in ref.read('rank').ex, (target, ref.read('rank').flat())
+    assert 'rank' not in ref.must_keys
+
+
+@pytest.mark.parametrize("wrapper", ['operator.call', 'map', 'filter', 'functools.partial', 'builtins.map', 'builtins.filter'])
+def test_fix7_generic_wrapper_target_preserves_outer_selection(wrapper):
+    ref, frame = _removal_state_frame()
+    frame.mod = Module('api', _REMOVAL_CALLBACK_IMPORTS, 'fixture.py', lambda name: False)
+    node = ast.parse('box.pop').body[0].value
+    target = frame.expr(node)
+    callback = V({D}, alias=('import', wrapper))
+    frame.callback_effect(node, callback, [], [V(elems=(target, V({C})))])
+    assert D in ref.read('rank').ex, (wrapper, ref.read('rank').flat())
+    assert 'rank' not in ref.must_keys
+
+
+@pytest.mark.parametrize("operation,reason", [
+    ('functools.reduce(operator.call, ("rank",))', 'generic wrapper binding'),
+    ('functools.reduce(builtins.map, ("rank",))', 'generic wrapper binding'),
+    ('functools.reduce(builtins.filter, ("rank",))', 'generic wrapper binding'),
+    ('functools.reduce(partial, ("rank",))', 'generic wrapper binding'),
+    ('functools.reduce(dict.pop, ("rank",))', 'generic removal binding'),
+    ('functools.reduce(type(box).pop, ("rank",))', 'generic removal binding'),
+    ('functools.reduce(box.__class__.pop, ("rank",))', 'generic removal binding'),
+    ('functools.reduce(getattr(type(box), "pop"), ("rank",))', 'generic removal binding'),
+], ids=['operator', 'map', 'filter', 'partial', 'dict', 'type', 'class', 'getattr'])
+def test_fix7_unresolved_generic_binding_flags_the_module(operation, reason):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n    box = {"rank": "chrome"}\n    ' + operation + '\n    return {"name": "chrome"}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert any('unresolvable call target (' + reason + ')' in str(f) for f in findings), _fmt(findings)
+
+
+@pytest.mark.parametrize("target", ['dict.pop', 'type(box).pop', 'box.__class__.pop', 'getattr(type(box), "pop")'])
+def test_fix7_resolved_generic_binding_constant_control(target):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n    box = {"rank": "chrome"}\n    ' + 'functools.reduce(' + target + ', ("rank",), box)' + '\n    return {"name": "chrome"}\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("operation", [
+    'functools.reduce(partial(_erase, box), (None, None))',
+    'sorted((None,), key=partial(_erase, box))',
+])
+def test_fix7_generic_partial_own_function_keeps_bound_arguments(operation):
+    findings = _fixture(_removal_wrapper_api(operation), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and 'reads K' in str(findings[0]), _fmt(findings)
+
+
+@pytest.mark.parametrize("kind", ['function', 'method'])
+@pytest.mark.parametrize("secret,dirty", [('row["rank"]', True), ('"chrome"', False)], ids=['data','chrome'])
+def test_fix7_generic_partial_keeps_bound_keyword_at_internal_sink(kind, secret, dirty):
+    helper = 'def _helper(*unused, secret="chrome"):\n    return {"name": secret}\n\n' if kind == 'function' else 'class _Helper:\n    def run(self, *unused, secret="chrome"):\n        return {"name": secret}\n\n'
+    target = '_helper' if kind == 'function' else '_Helper().run'
+    api = (_REMOVAL_CALLBACK_IMPORTS + helper + 'def evidence_report(row):\n    ' + 'functools.reduce(partial(' + target + ', secret=' + secret + '), ("rank",))' + '\n    return {"name": "chrome"}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    if dirty:
+        assert any('reads D' in str(f) for f in findings), _fmt(findings)
+    else:
+        assert findings == [], _fmt(findings)
+
+
+@pytest.mark.parametrize("route", ['literal-get', 'literal-pop', 'joined'])
+def test_fix7_generic_get_pop_alternatives_keep_chrome_control(route):
+    choice = {'literal-get': '0', 'literal-pop': '1', 'joined': 'row["index"]'}[route]
+    operation = 'choices = (box.get, box.pop)' + '\n' + 'functools.reduce(choices[' + choice + '], ("rank", None))'
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n    box = {"rank": "chrome"}\n    ' + operation.replace('\n', '\n' + '    ') + '\n    return {"name": "chrome"}\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("condition,dirty", [('row["rank"] > 0.5', True), ('True', False)], ids=['selected', 'literal'])
+def test_fix7_generic_wrapper_keeps_container_selection_at_internal_sink(condition, dirty):
+    helpers = 'class _Choices:\n    def cold(self, *unused):\n        return {"name": "COLD"}\n    def hot(self, *unused):\n        return {"name": "HOT"}\n\n'
+    api = (_REMOVAL_CALLBACK_IMPORTS + helpers + 'def evidence_report(row):\n    obj = _Choices()\n    picked = (obj.cold, "rank") if ' + condition + ' else (obj.hot, "rank")\n    functools.reduce(operator.call, picked)\n    return {"name": "chrome"}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    if dirty:
+        assert any('reads K' in str(f) for f in findings), _fmt(findings)
+    else:
+        assert findings == [], _fmt(findings)
+
+
+@pytest.mark.parametrize("selector,dirty", [('row["index"]', True), ('0', False)], ids=['selected','literal'])
+def test_fix7_generic_partial_selected_method_target_keeps_outer_labels(selector, dirty):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'class _Choices:\n    def cold(self, value, *unused):\n        return {"name": value}\n    def hot(self, value, *unused):\n        return {"name": value}\n\n' + 'def evidence_report(row):\n    obj = _Choices()\n    obj.cold("chrome")\n    obj.hot("chrome")\n    functools.reduce(partial((obj.cold, obj.hot)[' + selector + '], "chrome"), (None, None))\n    return {"name": "chrome"}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    if dirty:
+        assert any('reads D' in str(f) for f in findings), _fmt(findings)
+    else:
+        assert findings == [], _fmt(findings)
+
+
+@pytest.mark.parametrize("value,dirty", [('row["rank"]', True), ('"chrome"', False)], ids=['data','chrome'])
+def test_fix7_generic_partial_nonremoval_target_keeps_bound_arguments(value, dirty):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n    box = {}\n    functools.reduce(partial(box.setdefault, "rank", ' + value + '), (None, None))\n    return {"name": box["rank"]}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    if dirty:
+        assert any('reads D' in str(f) for f in findings), _fmt(findings)
+    else:
+        assert findings == [], _fmt(findings)
+
+
+@pytest.mark.parametrize("value,dirty", [('row["rank"]', True), ('"chrome"', False)], ids=['data','chrome'])
+@pytest.mark.parametrize("wrapped", [False, True], ids=['direct','operator'])
+def test_fix7_generic_partial_external_display_keeps_bound_keywords(value, dirty, wrapped):
+    target = 'operator.call, discord.ui.Button' if wrapped else 'discord.ui.Button'
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'import discord\n\ndef evidence_report(row):\n    functools.reduce(partial(' + target + ', label=' + value + '), (None, None))\n    return {"name": "chrome"}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    if dirty:
+        assert any('reads D' in str(f) for f in findings), _fmt(findings)
+    else:
+        assert findings == [], _fmt(findings)
+
+
+def test_fix7_generic_wrapper_container_tags_do_not_invoke_dictionary_data():
+    ref, frame = _removal_state_frame()
+    module = Module('api', _REMOVAL_CALLBACK_IMPORTS + 'def _unused(*values):\n    return None\n', 'fixture.py', lambda name: False)
+    frame.mod = module
+    frame.ps.mods['api'] = module
+    fk = ('api', '_unused')
+    data_ref = DictRef(('fixture', 'callback-data'))
+    data_ref.seed(('callback',), (V(funcs={fk}),))
+    data = V(funcs={fk}, alias=('dict', data_ref))
+    node = ast.parse('box.pop').body[0].value
+    target = frame.expr(node)
+    candidates = [V(funcs={fk}, elems=(data, target, V({C})))]
+    frame.callback_effect(node, V(alias=('import', 'operator.call')), [], candidates)
+    assert fk not in frame.ps.called
+    assert 'rank' not in ref.must_keys
 
 
 _BOT_GO = '''async def _aer_go(body):
