@@ -30,6 +30,11 @@ RT = "test_match_hold_reports_pg.py::"
 XT = "test_match_hold_deletion_pg.py::"
 
 ROWS = [
+    {"row": "L1.BOUND",
+     "node": "test_match_hold_admission_routes_pg.py::test_l1_shared_admission_wait_is_bounded_for_every_caller",
+     "tag": "L1 admission bound",
+     "mutant": [(MAIN, "LEAST(COALESCE(NULLIF(milliseconds, 0), 1000), 1000)::text || 'ms'", "value", 1)],
+     "twin": [(MAIN, "LEAST(COALESCE(NULLIF(milliseconds, 0), 1000), 1000)::text || 'ms'", "LEAST(COALESCE(NULLIF(milliseconds, 0), 1000), (1000))::text || 'ms'", 1)]},
     {"row": "F1.M2.ROSTER", "node": WT + "test_t1_3_ovt_start_and_poll_carry_the_latched_flag",
      "tag": "F1.M2 Start roster",
      "mutant": [(MAIN,

@@ -379,3 +379,85 @@ def test_h3_full_route_gate_in_both_winner_orders(monkeypatch, route, order):
         assert await lease_of(w.conn, case.overlap) == (c_mode, c_gid), \
             ("H3 competitor stands", route)
     _run(monkeypatch, body)
+
+
+@pytest.mark.parametrize("route", sorted(SETUPS))
+def test_l1_shared_admission_wait_is_bounded_for_every_caller(monkeypatch, route):
+    """Each formation returns while its blocker still owns the player lock.
+
+    FOR NO KEY UPDATE permits the route's foreign-key inserts, so the blocker
+    targets the shared admission acquisition. The state probe includes all
+    roster leases, queues, series, lobbies and assembly seats.
+    """
+    async def body(w, sm):
+        case = await SETUPS[route](w, monkeypatch)
+        before = await probe(w.conn, case.pids)
+        bar = Barrier(case.site, hold_after=False)
+        monkeypatch.setattr(main, "_lease_admission_gate", bar.gate)
+        task, response, after, bounded = None, None, None, False
+        async with sm() as blocker:
+            await blocker.execute(main.text(
+                "SELECT id FROM players WHERE id = CAST(:pid AS uuid) "
+                "FOR NO KEY UPDATE"), {"pid": str(case.overlap)})
+            try:
+                task = asyncio.ensure_future(case.call())
+                await _first(bar.entered.wait(), task)
+                assert bar.entered.is_set(), ("L1 route gate", route,
+                    task.done() and task.result().text[:300])
+                # The production cap is one second per contended statement.
+                # This barrier has exactly one blocked player; allow seat jitter.
+                done, _ = await asyncio.wait([task], timeout=3.0)
+                bounded = task in done
+                if bounded:
+                    response = task.result()
+                    after = await probe(w.conn, case.pids)
+            finally:
+                await blocker.rollback()
+                if task is not None and not task.done():
+                    await asyncio.wait_for(task, 30)
+        assert bounded, ("L1 admission bound", route)
+        assert response.status_code == 503, (
+            "L1 retryable refusal", route, response.status_code, response.text[:300])
+        assert after == before, ("L1 whole formation rollback", route,
+            {key: (before[key], after[key]) for key in before if before[key] != after[key]})
+    _run(monkeypatch, body)
+
+
+def test_l1_existing_tighter_bound_wins_and_success_restores_setting(monkeypatch):
+    """Read the effective server setting at the actual player-lock statement."""
+    async def body(w, sm):
+        players = await hold_test.seed_players(w.conn, 1)
+        pid = players[0][0]
+        for supplied, effective, restored in (("0", 1000, 0),
+                                              ("10s", 1000, 10000),
+                                              ("25ms", 25, 25)):
+            async with sm() as db:
+                await db.execute(main.text(
+                    "SELECT set_config('lock_timeout', :value, true)"),
+                    {"value": supplied})
+                real_execute = db.execute
+                seen = []
+
+                async def observe(statement, *args, **kwargs):
+                    if ("SELECT id FROM players" in str(statement)
+                            and "FOR NO KEY UPDATE" in str(statement)):
+                        seen.append((await real_execute(main.text(
+                            "SELECT setting::int FROM pg_settings "
+                            "WHERE name = 'lock_timeout' AND unit = 'ms'"))).scalar_one())
+                    return await real_execute(statement, *args, **kwargs)
+
+                monkeypatch.setattr(db, "execute", observe)
+                admitted, _ = await REAL_GATE(db, [pid], "ranked")
+                assert admitted, ("L1 successful formation", supplied)
+                assert seen == [effective], ("L1 tighter bound", supplied, seen)
+                assert (await real_execute(main.text(
+                    "SELECT setting::int FROM pg_settings WHERE name = 'lock_timeout' "
+                    "AND unit = 'ms'"))).scalar_one() == restored, ("L1 restored setting", supplied)
+                missing, _ = await REAL_GATE(db, [uuid.uuid4()], "ranked")
+                assert not missing, ("L1 missing player", supplied)
+                assert seen == [effective, effective], ("L1 missing-player bound", supplied, seen)
+                assert (await real_execute(main.text(
+                    "SELECT setting::int FROM pg_settings WHERE name = 'lock_timeout' "
+                    "AND unit = 'ms'"))).scalar_one() == restored, ("L1 missing-player restore", supplied)
+                await db.rollback()
+    _run(monkeypatch, body)

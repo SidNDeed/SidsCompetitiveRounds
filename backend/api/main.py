@@ -15435,13 +15435,42 @@ async def _lease_admission_gate(
     # One indexed equality statement per id makes acquisition order a Python
     # fact. A single ORDER BY query may place LockRows below Sort in a changed
     # plan and then acquire physical-row order instead of canonical UUID order.
-    for pid in pid_text:
-        locked = (await db.execute(text(
-            "SELECT id FROM players WHERE id = CAST(:pid AS uuid) "
-            "FOR NO KEY UPDATE"), {"pid": pid})).scalar()
-        if locked is None:
-            ctx_now = (await db.execute(text("SELECT clock_timestamp()"))).scalar_one()
-            return False, ctx_now
+    # pg_settings exposes milliseconds even when current_setting renders "1s".
+    # Materialization captures the old value before the volatile set_config.
+    # Only this shared acquisition is capped; an existing tighter bound wins.
+    missing_player = False
+    try:
+        previous = (await db.execute(text("""
+            WITH previous AS MATERIALIZED (
+                SELECT current_setting('lock_timeout') AS value,
+                       setting::bigint AS milliseconds
+                  FROM pg_settings WHERE name = 'lock_timeout' AND unit = 'ms'
+            )
+            SELECT value, set_config('lock_timeout',
+                LEAST(COALESCE(NULLIF(milliseconds, 0), 1000), 1000)::text || 'ms',
+                true)
+              FROM previous
+        """))).mappings().one()["value"]
+        for pid in pid_text:
+            locked = (await db.execute(text(
+                "SELECT id FROM players WHERE id = CAST(:pid AS uuid) "
+                "FOR NO KEY UPDATE"), {"pid": pid})).scalar()
+            if locked is None:
+                missing_player = True
+                break
+        await db.execute(text(
+            "SELECT set_config('lock_timeout', :previous, true)"),
+            {"previous": previous})
+    except DBAPIError as exc:
+        # A timed-out statement aborts its transaction. Discard every earlier
+        # formation write before returning a retryable refusal to any caller.
+        await db.rollback()
+        if _asm_sqlstate(exc) in ("55P03", "57014"):
+            raise HTTPException(status_code=503, detail="admission_contended") from None
+        raise
+    if missing_player:
+        ctx_now = (await db.execute(text("SELECT clock_timestamp()"))).scalar_one()
+        return False, ctx_now
 
     ctx_now = (await db.execute(text("SELECT clock_timestamp()"))).scalar_one()
     # Ranked has no group id, so (ranked, NULL) cannot prove a same-game
