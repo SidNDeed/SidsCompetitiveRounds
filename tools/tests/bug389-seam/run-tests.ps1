@@ -1282,10 +1282,11 @@ Say ''
 # now reads the one comment-blanked view, so both reddens.
 #
 # W23 is the inert twin and must stay GREEN - the patches file does not move.
+# The FFA merge lives in ArmFfaLock since ce466f38 (merged round 3, T3c).
 $wireBlockCommentCall = New-WireRoot 'blockcommentcall' 'plugin/ApiClient.cs' `
-    'public static void UpdateFfaQueuePoll(bool force)' `
-    '                            ProximityVictimGate.StageInto(prejoin);' `
-    '                            /* ProximityVictimGate.StageInto(prejoin); */' ''
+    'public static void ArmFfaLock(string resp, int gen, bool reform)' `
+    '                    ProximityVictimGate.StageInto(prejoin);' `
+    '                    /* ProximityVictimGate.StageInto(prejoin); */' ''
 $runWireBlockCommentCall = Invoke-Suite 'wire-blockcommentcall' $seam $wireBlockCommentCall
 if (-not (Assert-Mutation 'a staging call left only inside a block comment' $runWireBlockCommentCall 'W25' 'W1')) { $overall = 1 }
 if (-not (Assert-Mutation 'block-commented staging call, the member anchor sees it too' $runWireBlockCommentCall 'W7c' 'W1')) { $overall = 1 }

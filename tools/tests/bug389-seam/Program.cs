@@ -2858,10 +2858,17 @@ internal static class Program
             "plugin/ApiClient.cs",
             "public static void UpdateOvtQueuePoll(bool force)",
             "ProximityVictimGate.StageInto(prejoin);");
+        // W7c - the FFA pre-join merge lives in ArmFfaLock since ce466f38 (the
+        // lock arm the poll and the re-form path share); W7d asserts the poll
+        // still reaches it, so the advert still rides every FFA pre-join.
         CheckAnchorInMember("W7c Wiring_TheAdvertRidesTheFreeForAllPreJoin",
             "plugin/ApiClient.cs",
-            "public static void UpdateFfaQueuePoll(bool force)",
+            "public static void ArmFfaLock(string resp, int gen, bool reform)",
             "ProximityVictimGate.StageInto(prejoin);");
+        CheckAnchorInMember("W7d Wiring_TheFreeForAllPollArmsTheLockThatStagesTheAdvert",
+            "plugin/ApiClient.cs",
+            "public static void UpdateFfaQueuePoll(bool force)",
+            "ArmFfaLock(resp, gen, false);");
 
         // W8 - the no-owning-ring reasoning sits on the member that implements
         // it, not on the diagnostic sink it once drifted onto.
@@ -3534,6 +3541,8 @@ internal static class Program
         // constructor every other attachment route has to go through, so it
         // bounds routes this suite has not thought of.
         int patchSites = 0, patchAll = 0, harmonyCtors = 0;
+        int harmonyHome = 0, harmonyIce = 0;
+        const string iceRel = "plugin/IdentityClockEvidence.cs";
         var patchWhere = new List<string>();
         foreach (string rel in shippedCs)
         {
@@ -3544,6 +3553,8 @@ internal static class Program
             int pa = CallsToIn(blanked, "PatchAll");
             int hc = CountOf(blanked, "new Harmony(");
             patchSites += cp; patchAll += pa; harmonyCtors += hc;
+            if (rel == "plugin/Plugin.cs") harmonyHome += hc;
+            else if (rel == iceRel) harmonyIce += hc;
             if (cp + pa + hc != 0)
                 patchWhere.Add(rel + " CreateClassProcessor=" + cp + " PatchAll=" + pa + " newHarmony=" + hc);
         }
@@ -3556,9 +3567,47 @@ internal static class Program
             reachProblems.Add("and no PatchAll call may stand beside it anywhere in the assembly, or patches "
                 + "attach from a second site the reachability argument does not bound; found " + patchAll
                 + ": " + patchMap);
-        if (harmonyCtors != 1)
-            reachProblems.Add("and exactly one Harmony instance may be constructed in the assembly, since every "
-                + "other attachment route goes through one; found " + harmonyCtors + ": " + patchMap);
+        // THE CLOSED SET IS TWO NAMED SITES (merged round 3, T3c). Plugin.cs's
+        // bootstrap instance is the one patch site above. The second is the
+        // identity-clock evidence fixture: one instance in PostBoot.PatchListed
+        // that adds a single no-op postfix to one named method, reached only
+        // from ArmFromFile below its config-file gate (absent file: nothing is
+        // constructed). It patches no class processor and attaches none of the
+        // three cleanup callbacks, so the attachment count it could move is
+        // none. Any other constructor, a second one in either file, or that
+        // site in another shape or off its gate, is outside the set.
+        bool iceOk = harmonyIce == 0;
+        string iceWhy = "";
+        if (harmonyIce == 1)
+        {
+            SurfaceFile icePair;
+            string ice = surface.TryGetValue(iceRel, out icePair) ? icePair.Code : null;
+            int po, pc, ao, ac; string pp, ap;
+            if (ice == null) iceWhy = "cannot read " + iceRel;
+            else if (!TryMemberSpan(ice, "private static void PatchListed(string key)", out po, out pc, out pp)) iceWhy = pp;
+            else if (!TryMemberSpan(ice, "internal static void ArmFromFile()", out ao, out ac, out ap)) iceWhy = ap;
+            else
+            {
+                string patchBody = ice.Substring(po, pc - po + 1);
+                string armBody = ice.Substring(ao, ac - ao + 1);
+                var listed = CallSitesIn(ice, "PatchListed");
+                int gate = armBody.IndexOf("if (!File.Exists(path)) return;", StringComparison.Ordinal);
+                int call = armBody.IndexOf("PatchListed(", StringComparison.Ordinal);
+                if (CountOf(patchBody, "new Harmony(OWNER).Patch(target, postfix: new HarmonyMethod(typeof(PostBoot), nameof(Noop)));") != 1)
+                    iceWhy = "its constructor must be the one no-op postfix statement inside PostBoot.PatchListed";
+                else if (listed.Count != 1 || listed[0] < ao || listed[0] > ac)
+                    iceWhy = "PatchListed must be called exactly once, from ArmFromFile; found " + listed.Count;
+                else if (gate < 0 || call < 0 || gate > call)
+                    iceWhy = "ArmFromFile must reach PatchListed only below its config-file gate";
+                else iceOk = true;
+            }
+        }
+        else if (harmonyIce > 1) iceWhy = "found " + harmonyIce + " in " + iceRel;
+        if (harmonyHome != 1 || harmonyCtors != harmonyHome + harmonyIce || !iceOk)
+            reachProblems.Add("and the Harmony instances constructed in the assembly must be the closed set of two "
+                + "named sites - exactly one in plugin/Plugin.cs, and at most the config-gated no-op postfix of "
+                + iceRel + " - since every other attachment route goes through one; found " + harmonyCtors
+                + ": " + patchMap + (iceWhy.Length != 0 ? " (" + iceWhy + ")" : ""));
 
         // --- the disabled flag: ONE-WAY, over the same enumerated surface -----
         //

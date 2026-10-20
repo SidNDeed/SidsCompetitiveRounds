@@ -85,8 +85,11 @@ set carries. `H6` counts the files and holds both documents to the count, so the
 legend a reader uses to find the logs cannot name a set that is not there. The
 round-8 legend inventoried two logs for a round that ran three.
 
+BLIND-CONTROLS: r4 = 1
+BLIND-CONTROLS: r5 = 1
+BLIND-CONTROLS: r6 = 2
+BLIND-CONTROLS: r7 = 2
 BLIND-CONTROLS: r8 = 3
-BLIND-CONTROLS: r9 = 1
 
 ## The selection-method streak
 
