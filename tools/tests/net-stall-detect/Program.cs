@@ -1014,8 +1014,15 @@ namespace NetStallTests
             if (budget.Used != 0 || budget.Spent) return "same-room callback did not restore line slots: " + after;
             if (Field(after, "jitterQualifying") != "17" || Field(after, "jitterSuppressed") != "1" ||
                 Field(after, "jitterTop") != Field(before, "jitterTop")) return "same-room callback erased evidence: " + after;
-            if (VanillaFixSupport.DiagResets.Count != 3 || VanillaFixSupport.DiagResets[0] != NetworkReplicaDiagnostics.JitterDiagKey)
-                return "production callback did not take same-room diagnostics-reset branch";
+            if (VanillaFixSupport.DiagResets.Count != 3)
+                return "same-room diagnostics-reset count " + VanillaFixSupport.DiagResets.Count + " expected 3";
+            string[] expectedKeys = { "NetworkReplicaDiagnostics-jitter", "NetworkReplicaDiagnostics-game-summary", "net-view" };
+            for (int i = 0; i < expectedKeys.Length; i++)
+            {
+                string actualKey = VanillaFixSupport.DiagResets[i];
+                if (actualKey != expectedKeys[i])
+                    return "same-room diagnostics-reset index " + i + " actual " + actualKey + " expected " + expectedKeys[i];
+            }
             if (!budget.Offer(2, 350, 40, 310, 1, out reserve) || budget.Used != 1)
                 return "restored same-room slot unavailable";
             // Cumulative emitted lines are now 17 across this callback. The

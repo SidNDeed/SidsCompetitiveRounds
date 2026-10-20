@@ -76,7 +76,7 @@ namespace CompetitiveRounds
         private const int ACTOR_SCAN_CAP = 32;
         internal const string JitterDiagKey = "NetworkReplicaDiagnostics-jitter";
         internal const string GameSummaryDiagKey = "NetworkReplicaDiagnostics-game-summary";
-        private const string ViewSummaryDiagKey = "NetworkReplicaDiagnostics-view-summary";
+        private const string ViewSummaryDiagKey = "net-view";
         private static readonly Dictionary<int, ActorStats> Actors = new Dictionary<int, ActorStats>();
         private static readonly NetJitterBudgetCore _jitterBudget = new NetJitterBudgetCore();
         private static bool _roomActive, _gameActive, _gameEnded, _gamePartial;
