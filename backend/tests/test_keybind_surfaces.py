@@ -54,7 +54,9 @@ synthetic graph, a manifest without its cycle rows, and the source pin of
 each UNRESOLVED end the complete traversal reaches beyond fix pass 4's four
 (167 at item 17's fix-5 tip; 1022 at the merged v1.41.0 client tree, the
 table regenerated from the fix-5 writer's output there; 1136 at the
-merged round 3 tree, with the RJ Stage 2 and readmission ends).
+merged round 3 tree, with the RJ Stage 2 and readmission ends; 1140 with
+the night 2026-10-19 telemetry files: three using-directive ends and the
+stall detector's stream-snapshot field).
 """
 from __future__ import annotations
 
@@ -1474,6 +1476,7 @@ FIX5_ENDS = [
     ('field-FfaReadmitEntryRules.cs', 'field:FfaReadmitEntryRules.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-FfaReportRules.cs', 'field:FfaReportRules.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-FfaReportRules.cs-ServerGameSuffix', 'field:FfaReportRules.cs:ServerGameSuffix', 'DamageNumberRules.cs:Text#1'),
+    ('field-FpsFocusCore.cs', 'field:FpsFocusCore.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-GameStateWatcher.cs', 'field:GameStateWatcher.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-GameStateWatcher.cs-_tickStopwatch', 'field:GameStateWatcher.cs:_tickStopwatch', 'FfaNumberingRules.cs:StartNew'),
     ('field-Gate0TriggerWiringProbe.cs', 'field:Gate0TriggerWiringProbe.cs:?', 'DamageNumberRules.cs:Text#1'),
@@ -1484,6 +1487,7 @@ FIX5_ENDS = [
     ('field-IdentityClockCore.cs', 'field:IdentityClockCore.cs:?', 'CombatEvidenceCore.cs:Add#1'),
     ('field-IdentityClockEvidence.cs-_sw', 'field:IdentityClockEvidence.cs:_sw', 'FfaNumberingRules.cs:StartNew'),
     ('field-IdleShowcase.cs-script', 'field:IdleShowcase.cs:script', 'ShowcaseRules.cs:Script'),
+    ('field-InboundStallCore.cs', 'field:InboundStallCore.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-KeybindRules.cs', 'field:KeybindRules.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-Keybinds.cs-HookDown', 'field:Keybinds.cs:HookDown', 'Keybinds.cs:VanillaDown'),
     ('field-Keybinds.cs-HookHeld', 'field:Keybinds.cs:HookHeld', 'Keybinds.cs:VanillaHeld'),
@@ -1508,8 +1512,10 @@ FIX5_ENDS = [
     ('field-NativeUI.Settings.cs', 'field:NativeUI.Settings.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-NativeUI.cs', 'field:NativeUI.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-NativeUI.cs-_tInfoTitle', 'field:NativeUI.cs:_tInfoTitle', 'NativeUI.cs:_SYNC_INSTRUCTIONS'),
+    ('field-NetJitterBudgetCore.cs', 'field:NetJitterBudgetCore.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-NetworkReplicaDiagnostics.cs', 'field:NetworkReplicaDiagnostics.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-NetworkSeatTelemetry.cs', 'field:NetworkSeatTelemetry.cs:?', 'DamageNumberRules.cs:Text#1'),
+    ('field-NetworkSeatTelemetry.cs-_stallStreams', 'field:NetworkSeatTelemetry.cs:_stallStreams', 'NetworkReplicaDiagnostics.cs:SnapshotRemoteStreams'),
     ('field-PcQuickShardRules.cs', 'field:PcQuickShardRules.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-PcTradeRules.cs', 'field:PcTradeRules.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-PeerBuildCore.cs', 'field:PeerBuildCore.cs:?', 'DamageNumberRules.cs:Text#1'),
@@ -1909,7 +1915,7 @@ PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end
 def test_h1_fix5_the_end_table_is_every_unresolved_end_beyond_the_four(attach4):
     st, cman, att, aman = attach4
     names = [n for i, n, m in FIX5_ENDS]
-    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1136
+    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1140
     extra = set(att["unresolved"]) - set(names)
     assert len(extra) == 4 and RESET_MENU in extra, sorted(extra)
     assert set(names) <= set(att["unresolved"]), sorted(set(names) - set(att["unresolved"]))
