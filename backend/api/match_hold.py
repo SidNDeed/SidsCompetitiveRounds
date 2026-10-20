@@ -227,9 +227,64 @@ async def _ctx_now(db: AsyncSession):
     return (await db.execute(text("SELECT clock_timestamp()"))).scalar()
 
 
+async def _guard_identities(db, steam_ids):
+    """Serialize every copied identity with deletion, then read only live rows.
+
+    Stage 2 order: sorted identity guards, window, series, hold and lease rows.
+    Acquire the complete identity set before any downstream lock. Repeated
+    calls in that transaction may only reacquire its already-held subset;
+    after rollback the caller starts this order again, using fresh reads.
+    """
+    keys = sorted({str(s) for s in steam_ids if s is not None})
+    for steam in keys:
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:sid))"),
+                         {"sid": steam})
+    if not keys:
+        return {}
+    rows = (await db.execute(text(
+        "SELECT id, steam_id FROM players"
+        " WHERE steam_id = ANY(CAST(:steams AS varchar[])) AND deleted_at IS NULL"),
+        {"steams": keys})).mappings().all()
+    return {r["steam_id"]: r["id"] for r in rows}
+
+
+async def _guard_player_ids(db, player_ids, extra_steams=()):
+    """Discover natural keys, guard them, and verify the same live identities.
+
+    The unlocked discovery is never an authorization: deletion may change a
+    key while the guard waits, and the post-guard read then omits that id.
+    """
+    ids = sorted({str(p) for p in player_ids if p is not None})
+    rows = (await db.execute(text(
+        "SELECT id, steam_id FROM players WHERE id = ANY(CAST(:ids AS uuid[]))"),
+        {"ids": ids})).mappings().all() if ids else []
+    live = await _guard_identities(
+        db, [*extra_steams, *(r["steam_id"] for r in rows)])
+    return {r["id"]: r["steam_id"] for r in rows
+            if live.get(r["steam_id"]) == r["id"]}, live
+
+
+async def _guard_hold_identities(db, hold_id, steam_id=None):
+    """Guard a hold's copied identities before any hold or series lock."""
+    peek = await _hold_row(db, hold_id)
+    ids = (peek["player_id"], peek["opener_player_id"]) if peek is not None else ()
+    owners, live = await _guard_player_ids(db, ids, (steam_id,) if steam_id else ())
+    if peek is not None and any(pid not in owners for pid in ids):
+        raise HTTPException(404, "no such hold")
+    return peek, live.get(steam_id)
+
+
+async def _guard_open_identities(db, req, held, opener):
+    """The ledger's keys stay protected in both its initial and audit transaction."""
+    live = await _guard_identities(db, (req.held_steam_id, req.opener_steam_id))
+    if ((held is not None and live.get(req.held_steam_id) != held)
+            or (opener is not None and live.get(req.opener_steam_id) != opener)):
+        raise HTTPException(404, "One or more players not registered")
+
+
 async def _player_id(db: AsyncSession, steam_id: str):
     return (await db.execute(text(
-        "SELECT id FROM players WHERE steam_id = CAST(:s AS varchar)"),
+        "SELECT id FROM players WHERE steam_id = CAST(:s AS varchar) AND deleted_at IS NULL"),
         {"s": steam_id})).scalar()
 
 
@@ -561,7 +616,8 @@ async def match_hold_beat(req: BeatReq, request: Request,
     mode = _mode_or_400(req.mode)
     room = req.room.strip()
     await _require_verified_session(request, req.steam_id, db)
-    pid = await _player_id(db, req.steam_id)
+    live = await _guard_identities(db, [req.steam_id, *(s.u_id for s in req.seen)])
+    pid = live.get(req.steam_id)
     row = await _series_read(db, mode, req.series_id)
     if row is None or pid is None or pid not in _members(mode, row):
         await db.rollback()
@@ -571,7 +627,9 @@ async def match_hold_beat(req: BeatReq, request: Request,
         return _refused("not_flagged")
     self_named = req.actor is not None and all(
         s.actor == req.actor for s in req.seen if s.u_id == req.steam_id)
-    seen = json.dumps([{"actor": s.actor, "u_id": s.u_id} for s in req.seen])
+    members = _members(mode, row)
+    seen = json.dumps([{"actor": s.actor, "u_id": s.u_id} for s in req.seen
+                       if live.get(s.u_id) in members])
     now = await _ctx_now(db)
     await db.execute(text(
         "INSERT INTO match_seat_presence (room_name, player_id, mode, series_id, actor,"
@@ -689,6 +747,7 @@ async def _write_open_attempt(db, req, room, held, opener, now, outcome, reason,
     signature, or a gate loser's fresh refusal transaction). True when this
     call inserted it; False when the request id is already recorded, in which
     case the insert waited for the recording transaction and changed nothing."""
+    await _guard_open_identities(db, req, held, opener)
     got = (await db.execute(text(
         "INSERT INTO match_hold_open_attempts (request_id, room_name, game_id,"
         "        held_player_id, opener_player_id, at, outcome, reason, hold_id)"
@@ -712,6 +771,7 @@ async def _claim_open_ledger(db, req, room, held, opener) -> bool:
     only inside this transaction: every commit path rewrites it through
     _finish_open_attempt first, so no other transaction reads it so.
     True when this transaction owns the request id."""
+    await _guard_open_identities(db, req, held, opener)
     got = (await db.execute(text(
         "INSERT INTO match_hold_open_attempts (request_id, room_name, game_id,"
         "        held_player_id, opener_player_id, at, outcome, reason, hold_id)"
@@ -969,7 +1029,7 @@ async def match_hold_end(hold_id: uuid.UUID, req: HoldEndReq, request: Request,
     if req.reason not in END_REASONS:
         raise HTTPException(400, "unknown end reason")
     await _require_verified_session(request, req.steam_id, db)
-    pid = await _player_id(db, req.steam_id)
+    _, pid = await _guard_hold_identities(db, hold_id, req.steam_id)
     hold = await _hold_row(db, hold_id, lock=True)
     if hold is None or not await _member_of_hold(db, hold, pid):
         await db.rollback()
@@ -1053,6 +1113,10 @@ async def _attempt(db: AsyncSession, hold_id, kind: str, now, outcome: str,
     """One match_hold_attempts row, numbered after the hold's last one, in
     the caller's transaction (S6: rows share their transaction). Every
     caller holds the hold row lock, so the numbering cannot race."""
+    await _guard_hold_identities(db, hold_id)
+    hold = await _hold_row(db, hold_id, lock=True)
+    if hold is None:
+        raise HTTPException(404, "no such hold")
     await db.execute(text(
         "INSERT INTO match_hold_attempts (hold_id, attempt_no, kind, at, outcome, reason)"
         " SELECT CAST(:hid AS uuid), COALESCE(max(attempt_no), 0) + 1, CAST(:kind AS varchar),"
@@ -1080,11 +1144,13 @@ async def match_hold_mine(steam_id: str, request: Request,
     pid = await _player_id(db, steam_id)
     hold = None
     if pid is not None:
-        hold = (await db.execute(text(
-            f"SELECT {_HOLD_COLS} FROM match_seat_holds"
+        peek = (await db.execute(text(
+            "SELECT id FROM match_seat_holds"
             " WHERE player_id = CAST(:pid AS uuid) AND closed_at IS NULL"
-            " ORDER BY held_at DESC LIMIT 1 FOR NO KEY UPDATE"),
-            {"pid": str(pid)})).mappings().first()
+            " ORDER BY held_at DESC LIMIT 1"), {"pid": str(pid)})).scalar()
+        if peek is not None:
+            _, pid = await _guard_hold_identities(db, peek, steam_id)
+            hold = await _hold_row(db, peek, lock=True)
     now = await _ctx_now(db)
     if hold is None or not _hold_live(hold, now):
         await db.rollback()
@@ -1145,8 +1211,7 @@ async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Reque
     from main import _lease_acquire, _lease_admission_gate, LEASE_TTL_ASSEMBLY
 
     await _require_verified_session(request, req.steam_id, db)
-    pid = await _player_id(db, req.steam_id)
-    peek = await _hold_row(db, hold_id)
+    peek, pid = await _guard_hold_identities(db, hold_id, req.steam_id)
     if peek is None:
         await db.rollback()
         raise HTTPException(404, "no such hold")
@@ -1164,7 +1229,10 @@ async def match_hold_claim(hold_id: uuid.UUID, req: HoldClaimReq, request: Reque
         # the hold gives the fresh audit transaction its numbering invariant.
         await db.rollback()
         await _install_database_timeouts(db)
+        await _guard_hold_identities(db, hold_id, req.steam_id)
         hold = await _hold_row(db, hold_id, lock=True)
+        if hold is None:
+            raise HTTPException(404, "no such hold")
         now = await _ctx_now(db)
         return await _refuse_attempt(db, hold_id, "claim", now, "other_mode")
     if not _hold_live(hold, now):
@@ -1254,7 +1322,7 @@ async def match_hold_bind(hold_id: uuid.UUID, req: HoldBindReq, request: Request
     bind stamps bound_at, X and the region, seq + 1, and its attempt row,
     in one transaction."""
     await _require_verified_session(request, req.steam_id, db)
-    pid = await _player_id(db, req.steam_id)
+    _, pid = await _guard_hold_identities(db, hold_id, req.steam_id)
     hold = await _hold_row(db, hold_id, lock=True)
     if hold is None:
         await db.rollback()
@@ -1322,7 +1390,7 @@ async def match_hold_entered(hold_id: uuid.UUID, req: HoldEnteredReq, request: R
     (uncorroborated). It stamps entered_at and closed_at = entered once,
     spends T (the verifier is cleared) and seq + 1, with its attempt row."""
     await _require_verified_session(request, req.steam_id, db)
-    pid = await _player_id(db, req.steam_id)
+    _, pid = await _guard_hold_identities(db, hold_id, req.steam_id)
     hold = await _hold_row(db, hold_id, lock=True)
     if hold is None:
         await db.rollback()
@@ -1350,7 +1418,7 @@ async def match_hold_entered(hold_id: uuid.UUID, req: HoldEnteredReq, request: R
     await db.commit()
     print(f"[HOLD] entered room={hold['room_name']} slot={hold['slot']} n={hold['n']}")
     # V3 S5: the game-over reports held during the hold are released now,
-    # in their own transaction (window row first); the janitor finishes
+    # in their own transaction (identity guards, then window); the janitor finishes
     # them if this does not.
     try:
         from main import _finish_held_reports

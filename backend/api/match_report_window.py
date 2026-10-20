@@ -23,7 +23,7 @@ C fighter with the lowest Steam id among those with a fresh beat at that
 receipt settles at once; every other report is journaled behind a 30 s
 window, and an expired window settles in class order: C by lowest Steam id,
 then R, then unclassed. Exactly one report of a window ever settles: the
-window row is locked FIRST and settled_at is written once.
+identity guards precede the window lock; settled_at is written once.
 """
 
 import hashlib
@@ -33,6 +33,7 @@ from datetime import timedelta
 
 from fastapi import HTTPException
 from sqlalchemy import text
+from fastapi import HTTPException
 
 from match_hold import BEAT_FRESH_S, database_deadline
 
@@ -168,6 +169,49 @@ async def fresh_class_c_steams(db, *, room, game_id, member_ids, now):
 
 # -- the window and journal writes ---------------------------------------------------
 
+def _payload_identity_keys(mode, payload):
+    """The typed report's copied identity fields; the signed payload stays intact."""
+    stored = json.loads(payload) if isinstance(payload, str) else (payload or {})
+    fields = ("t1a", "t1b", "t2a", "t2b") if mode == "team" else ("solo", "duo_a", "duo_b")
+    out = {stored[k].get("steam_id") for k in fields if isinstance(stored.get(k), dict)}
+    out.add(stored.get("reported_by_steam_id"))
+    return {str(value) for value in out if value is not None}
+
+
+async def _guard_window_identities(db, *, room, game_id, mode=None, payload=None,
+                                   reporter_id=None, reporter_steam=None, member_ids=()):
+    """Take the complete identity set before window, series, hold or lease locks.
+
+    Discovery is unlocked and supplies guard keys only. Every identity-bearing
+    sink revalidates the identities it will store after acquisition. Existing
+    scrubbed payloads may remain for disposition without restoring their keys.
+    """
+    from match_hold import _guard_player_ids, _members, _series_read
+    game = (await db.execute(text(
+        "SELECT mode, series_id FROM match_games WHERE id = CAST(:g AS uuid)"
+        " AND room_name = CAST(:room AS varchar)"),
+        {"g": str(game_id), "room": room})).mappings().first()
+    mode = mode or (game["mode"] if game is not None else None)
+    series = await _series_read(db, mode, game["series_id"]) if game is not None else None
+    roster = set(_members(mode, series)) if series is not None else None
+    rows = (await db.execute(text(
+        "SELECT reporter_id, reporter_steam, payload FROM match_report_journal"
+        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"),
+        {"room": room, "g": str(game_id)})).mappings().all()
+    ids = set(member_ids) | (roster or set())
+    keys = _payload_identity_keys(mode, payload)
+    if reporter_id is not None:
+        ids.add(reporter_id)
+    if reporter_steam is not None:
+        keys.add(reporter_steam)
+    for row in rows:
+        ids.add(row["reporter_id"])
+        keys.add(row["reporter_steam"])
+        keys.update(_payload_identity_keys(mode, row["payload"]))
+    owners, live = await _guard_player_ids(db, ids, keys)
+    return owners, live, roster
+
+
 async def lock_window(db, *, mode, room, game_id, now, held=False):
     """Lock (room, G) before the series and hold rows. A held receipt opens
     an unarmed window; an ordinary receipt arms its acceptance deadline."""
@@ -256,6 +300,7 @@ async def finish_hold(db, *, mode, room, game_id, hold_id, now, settle):
     ordinary deadline from the entry stamp.
     """
     async with database_deadline(db):
+        await _guard_window_identities(db, mode=mode, room=room, game_id=game_id)
         window = await lock_window(db, mode=mode, room=room, game_id=game_id,
                                    now=now, held=True)
         if _window_terminal(window):
@@ -293,6 +338,14 @@ async def journal(db, *, mode, room, game_id, reporter_id, reporter_steam, cls, 
     reporter); a repeat keeps the first. `held` journals a game-over that
     arrived during a hold. Return the canonical stored row, whether this call
     inserted it or lost an insertion conflict to the first receipt."""
+    owners, live, roster = await _guard_window_identities(
+        db, mode=mode, room=room, game_id=game_id, payload=payload,
+        reporter_id=reporter_id, reporter_steam=reporter_steam)
+    keys = _payload_identity_keys(mode, payload) | {reporter_steam}
+    if (str(live.get(reporter_steam)) != str(reporter_id)
+            or any(key not in live for key in keys)
+            or (roster is not None and any(live[key] not in roster for key in keys))):
+        raise HTTPException(404, "One or more players not registered")
     inserted = (await db.execute(text(
         "INSERT INTO match_report_journal (room_name, game_id, reporter_id, mode,"
         "        reporter_steam, cls, state, payload, received_at)"
@@ -381,6 +434,10 @@ async def _settle_and_mark(db, room, game_id, chosen, now, settle):
 
 
 async def _mark_settled(db, room, game_id, chosen, now):
+    owners, _, _ = await _guard_window_identities(
+        db, room=room, game_id=game_id, reporter_id=chosen["reporter_id"])
+    if str(chosen["reporter_id"]) not in {str(pid) for pid in owners}:
+        raise HTTPException(404, "One or more players not registered")
     await db.execute(text(
         "UPDATE match_report_windows SET settled_at = CAST(:now AS timestamptz),"
         "       settled_reporter_id = CAST(:pid AS uuid), settled_cls = CAST(:cls AS varchar)"
@@ -417,10 +474,11 @@ async def settle_window(db, *, mode, room, game_id, now, settle):
 
 
 async def _settle_window(db, *, mode, room, game_id, now, settle):
-    """Settle an EXPIRED window of (room, G): lock the window row first;
+    """Settle an EXPIRED window of (room, G): take identity guards, then lock the window row;
     nothing when it is already settled or not yet expired; otherwise call
     `settle(db, entry)` once with the report `pick` chooses and write
     settled_at once. Returns the settled entry or None. The caller commits."""
+    await _guard_window_identities(db, mode=mode, room=room, game_id=game_id)
     window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
     if _window_terminal(window):
         return None
@@ -453,7 +511,7 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
                    payload, member_ids, now, settle, held=False) -> dict:
     """The settle driver for one HMAC-verified report of a flagged room.
 
-    The window row of (room, G) is locked first. A settled window answers
+    Identity guards precede the window row lock of (room, G). A settled window answers
     `duplicate` (the route answers today's duplicate). Otherwise the report
     is classed from server rows and journaled; a game-over during a hold is
     journaled `held` and settles nothing. The report of the class C fighter
@@ -461,6 +519,9 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
     settles at once through `settle(db, entry)`; any other report answers
     `journaled` (202), and an expired window settles by `pick`. The caller
     commits."""
+    await _guard_window_identities(db, mode=mode, room=room, game_id=game_id,
+                                   payload=payload, reporter_id=reporter_id,
+                                   reporter_steam=reporter_steam, member_ids=member_ids)
     window = await lock_window(db, mode=mode, room=room, game_id=game_id,
                                now=now, held=True)
     if _window_terminal(window):
@@ -523,6 +584,7 @@ async def _release_held(db, *, mode, room, game_id, now, settle,
 
     The caller proved this hold entered and that no later live or nonentry
     hold blocks release. Earlier entered holds become eligible together."""
+    await _guard_window_identities(db, mode=mode, room=room, game_id=game_id)
     window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
     params = {"now": now, "w": WINDOW_S, "room": room, "g": str(game_id),
               "hid": str(hold_id) if hold_id is not None else None}
@@ -542,10 +604,15 @@ async def _release_held(db, *, mode, room, game_id, now, settle,
         params)
     released = res.rowcount or 0
     if terminal:
-        await _mark_settled(
-            db, room, game_id,
-            {"reporter_id": window["settled_reporter_id"], "cls": window["settled_cls"]},
-            now)
+        # The result is already final. Deletion may have cleared its reporter;
+        # only dispose of released rows, preserving that NULL attribution.
+        await db.execute(text(
+            "UPDATE match_report_journal SET state = CASE"
+            " WHEN reporter_id = CAST(:pid AS uuid) THEN 'settled' ELSE 'kept' END,"
+            " decided_at = CAST(:now AS timestamptz)"
+            " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+            " AND state = 'journaled'"),
+            {**params, "pid": window["settled_reporter_id"]})
         return released
     window = await _arm_window(db, window, room=room, game_id=game_id,
                                at=entered_at if entered_at is not None else now)
@@ -564,6 +631,7 @@ async def supersede_held(db, *, mode, room, game_id, now) -> int:
 async def _supersede_held(db, *, mode, room, game_id, now) -> int:
     """At a lapse (x): the `held` reports of G are superseded, kept for
     review and never settled. Returns the rows superseded."""
+    await _guard_window_identities(db, mode=mode, room=room, game_id=game_id)
     window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
     if _window_terminal(window):
         return 0

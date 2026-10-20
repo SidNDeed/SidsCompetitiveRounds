@@ -172,6 +172,50 @@ for _name, _site in H3_SITES:
                  "mutant": [(MAIN, _site, _site.replace(")) is False:", ")) is False and False:",
                                                         1), 1)]})
 
+ROWS.append({'row': 'F1.H4.RECEIPT',
+ 'node': 'test_match_hold_deletion_pg.py::test_fix1_h4_report_writers_guard_before_their_first_lock[route]',
+ 'tag': 'FIX1 H4 report guard',
+ 'mutant': [('backend/api/main.py',
+             '    by_steam = await _match_hold._guard_identities(db, keys)\n',
+             '    by_steam = {key: pid for key in keys if (pid := await _match_hold._player_id(db, '
+             'key)) is not None}\n',
+             1)],
+ 'twin': [('backend/api/main.py',
+           '    by_steam = await _match_hold._guard_identities(db, keys)\n',
+           '    by_steam = await _match_hold._guard_identities(db, (keys))\n',
+           1)]})
+ROWS.append({'row': 'F1.H4.DELETE_WINDOW',
+ 'node': 'test_match_hold_deletion_pg.py::test_fix1_h4_deletion_terminalizes_hold_without_journal[team]',
+ 'tag': 'FIX1 H4 deleted hold terminal',
+ 'mutant': [('backend/api/main.py',
+             '        if row["close_hold"] and not mrw._window_terminal(window):\n',
+             '        if False and row["close_hold"] and not mrw._window_terminal(window):\n',
+             1)],
+ 'twin': [('backend/api/main.py',
+           '        if row["close_hold"] and not mrw._window_terminal(window):\n',
+           '        if (row["close_hold"]) and not mrw._window_terminal(window):\n',
+           1)]})
+ROWS.append({'row': 'F1.H4.RETRY',
+ 'node': 'test_match_hold_deletion_pg.py::test_fix1_h4_janitor_retry_reacquires_identity_guards',
+ 'tag': 'FIX1 H4 retry guard',
+ 'mutant': [('backend/api/main.py',
+             '                await mrw._guard_window_identities(\n'
+             '                    db, mode=w["mode"], room=w["room_name"], game_id=w["game_id"],\n'
+             '                    payload=attempt["payload"], reporter_id=attempt["reporter_id"],\n'
+             '                    reporter_steam=attempt["reporter_steam"])\n',
+             '                pass\n',
+             1)],
+ 'twin': [('backend/api/main.py',
+           '                await mrw._guard_window_identities(\n'
+           '                    db, mode=w["mode"], room=w["room_name"], game_id=w["game_id"],\n'
+           '                    payload=attempt["payload"], reporter_id=attempt["reporter_id"],\n'
+           '                    reporter_steam=attempt["reporter_steam"])\n',
+           '                await mrw._guard_window_identities(\n'
+           '                    db, mode=w["mode"], room=w["room_name"], game_id=w["game_id"],\n'
+           '                    payload=(attempt["payload"]), reporter_id=attempt["reporter_id"],\n'
+           '                    reporter_steam=attempt["reporter_steam"])\n',
+           1)]})
+
 for _row in ROWS:
     if "twin" not in _row:
         _row["twin"] = rc._site_twin(_row)

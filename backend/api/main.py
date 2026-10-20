@@ -49115,6 +49115,37 @@ async def _s2_delete_reports(db, pid, steam_id) -> None:
     NULL."""
     if not await _s2_tables_present(db):
         return
+    # Deletion owns this identity guard already. Discover every window its
+    # report scrub can touch, then lock in one order before series/hold locks.
+    # Taking peer identity guards here would invert the global identity order.
+    affected = (await db.execute(text(
+        "SELECT room_name, game_id, mode, bool_or(close_hold) AS close_hold FROM ("
+        " SELECT room_name, game_id, mode, TRUE AS close_hold FROM match_seat_holds"
+        " WHERE player_id = CAST(:pid AS uuid) OR opener_player_id = CAST(:pid AS uuid)"
+        " UNION ALL SELECT room_name, game_id, mode, FALSE FROM match_report_windows"
+        " WHERE settled_reporter_id = CAST(:pid AS uuid)"
+        " UNION ALL SELECT room_name, game_id, mode, FALSE FROM match_report_journal"
+        " WHERE reporter_id = CAST(:pid AS uuid)"
+        " OR strpos(CAST(payload AS text), CAST(:q AS text)) > 0"
+        " ) touched GROUP BY room_name, game_id, mode ORDER BY room_name, game_id"),
+        {"pid": str(pid), "q": _json.dumps(str(steam_id))})).mappings().all()
+    mrw = _mrw_mod()
+    now = await _match_hold._ctx_now(db)
+    for row in affected:
+        window = await mrw.lock_window(
+            db, mode=row["mode"], room=row["room_name"], game_id=row["game_id"],
+            now=now, held=True)
+        if row["close_hold"] and not mrw._window_terminal(window):
+            params = {"room": row["room_name"], "g": str(row["game_id"]), "now": now}
+            await db.execute(text(
+                "UPDATE match_report_windows SET superseded_at = CAST(:now AS timestamptz)"
+                " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+                " AND settled_at IS NULL AND superseded_at IS NULL"), params)
+            await db.execute(text(
+                "UPDATE match_report_journal SET state = 'superseded',"
+                " decided_at = CAST(:now AS timestamptz)"
+                " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+                " AND state = 'held'"), params)
     await db.execute(text(
         "UPDATE match_report_windows SET settled_reporter_id = NULL"
         " WHERE settled_reporter_id = CAST(:pid AS uuid)"), {"pid": str(pid)})
@@ -49362,9 +49393,10 @@ async def _report_window_receive(db, mode, report):
     if not _re.fullmatch(_re.escape(room) + r"_\d{6}_r\d+", report.photon_room_id or ""):
         return None
     members = _report_members(mode, series)
-    prows = (await db.execute(select(Player.id, Player.steam_id).where(
-        Player.steam_id.in_(list(_report_steams(mode, report)))))).all()
-    by_steam = {r.steam_id: r.id for r in prows}
+    keys = set(_report_steams(mode, report)) | {report.reported_by_steam_id}
+    by_steam = await _match_hold._guard_identities(db, keys)
+    if any(key not in by_steam for key in keys):
+        raise HTTPException(404, "One or more players not registered")
     if (len(by_steam) != len(members) or set(by_steam.values()) != set(members)
             or report.reported_by_steam_id not in by_steam):
         return None
@@ -49511,6 +49543,10 @@ async def _report_window_janitor() -> dict:
                 if not isinstance(ex, mrw.PermanentReportRefusal) or attempt is None:
                     out["retry"] = out.get("retry", 0) + 1
                     continue
+                await mrw._guard_window_identities(
+                    db, mode=w["mode"], room=w["room_name"], game_id=w["game_id"],
+                    payload=attempt["payload"], reporter_id=attempt["reporter_id"],
+                    reporter_steam=attempt["reporter_steam"])
                 window = await mrw.lock_window(
                     db, mode=w["mode"], room=w["room_name"], game_id=w["game_id"],
                     now=await _match_hold._ctx_now(db))
