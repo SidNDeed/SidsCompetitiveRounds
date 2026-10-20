@@ -31,6 +31,7 @@ import hmac
 import json
 from datetime import timedelta
 
+from fastapi import HTTPException
 from sqlalchemy import text
 
 from match_hold import BEAT_FRESH_S, database_deadline
@@ -322,6 +323,18 @@ async def _journaled(db, room, game_id):
         {"room": room, "g": str(game_id)})).mappings().all()
 
 
+class PermanentReportRefusal(HTTPException):
+    """A settle validation that the immutable physical report cannot repair.
+
+    Authentication, rate limits, conflicts, timeouts and unknown failures do
+    not use this class; their journal entry remains retryable.
+    """
+
+    def __init__(self, refusal):
+        super().__init__(status_code=refusal.status_code, detail=refusal.detail,
+                         headers=refusal.headers)
+
+
 class ReportAlreadyRecorded(Exception):
     """A callback found a physical game on record; it made no settlement."""
 
@@ -350,6 +363,19 @@ async def _settle_and_mark(db, room, game_id, chosen, now, settle):
             {"now": now, "room": room, "g": str(game_id),
              "pid": str(chosen["reporter_id"])})
         return False
+    except Exception as exc:
+        # Preserve the original type and cause chain for every bound stage.
+        # A JSON round trip snapshots the exact immutable evidence attempted.
+        payload = chosen["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        exc.attempted_report = {
+            "reporter_id": str(chosen["reporter_id"]),
+            "reporter_steam": chosen["reporter_steam"], "cls": chosen["cls"],
+            "received_at": chosen["received_at"],
+            "payload": json.dumps(payload, sort_keys=True),
+        }
+        raise
     await _mark_settled(db, room, game_id, chosen, now)
     return True
 

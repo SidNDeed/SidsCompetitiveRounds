@@ -49239,7 +49239,15 @@ async def _report_window_settle(db, mode, entry, out=None):
         report = _class_r_report(mode, report)
     settle = _settle_team_report if mode == "team" else _settle_ovt_report
     outcome = {}
-    resp = await settle(db, report, in_window=True, outcome=outcome)
+    try:
+        resp = await settle(db, report, in_window=True, outcome=outcome)
+    except HTTPException as exc:
+        # These settle-body validation refusals bind immutable payload,
+        # roster, physical room or a terminal series. Retrying cannot repair
+        # that report; 401, 408, 409, 425, 429 and 5xx remain ordinary errors.
+        if exc.status_code in (400, 403, 404, 422):
+            raise _mrw_mod().PermanentReportRefusal(exc) from exc
+        raise
     if out is not None:
         out[str(entry["reporter_id"])] = resp
     physical_game = (mode, str(UUID(report.series_id)), report.photon_room_id)
@@ -49443,9 +49451,9 @@ def _report_window_bound_stage(exc):
 async def _report_window_janitor() -> dict:
     """The janitor arm of the report windows: settle every expired window
     from its stored rows, and finish the held reports of every closed hold.
-    Each window in its own transaction. A settle that raises keeps its
-    chosen report out of the next pick (state kept), so one report no
-    settle body accepts never blocks the window. Every session here is
+    Each window is its own transaction. A permanent validation refusal keeps
+    only the exact immutable report attempted, under a reacquired window
+    lock; another worker's newly eligible report is never reselected. Every session here is
     armed by the janitor bound (_rdm_janitor_bound) before its first
     statement. A settle ended by a bound (_report_window_bound_stage)
     changes nothing: it is rolled back and the window is left for the next
@@ -49499,21 +49507,26 @@ async def _report_window_janitor() -> dict:
                           f" bound stage={stage}; next tick")
                     out["bound"] = out.get("bound", 0) + 1
                     continue
-                rows = (await db.execute(text(
-                    "SELECT reporter_id, reporter_steam, cls FROM match_report_journal"
-                    " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
-                    "   AND state = 'journaled'"),
-                    {"room": w["room_name"], "g": str(w["game_id"])})).mappings().all()
-                chosen = mrw.pick(rows)
-                if chosen is not None:
+                attempt = getattr(ex, "attempted_report", None)
+                if not isinstance(ex, mrw.PermanentReportRefusal) or attempt is None:
+                    out["retry"] = out.get("retry", 0) + 1
+                    continue
+                window = await mrw.lock_window(
+                    db, mode=w["mode"], room=w["room_name"], game_id=w["game_id"],
+                    now=await _match_hold._ctx_now(db))
+                if not mrw._window_terminal(window):
                     await db.execute(text(
                         "UPDATE match_report_journal SET state = 'kept',"
                         "       decided_at = clock_timestamp()"
                         " WHERE room_name = CAST(:room AS varchar)"
                         "   AND game_id = CAST(:g AS uuid) AND reporter_id = CAST(:pid AS uuid)"
-                        "   AND state = 'journaled'"),
+                        "   AND reporter_steam = CAST(:steam AS varchar) AND cls = CAST(:cls AS varchar)"
+                        "   AND received_at = CAST(:received AS timestamptz)"
+                        "   AND payload = CAST(:payload AS jsonb) AND state = 'journaled'"),
                         {"room": w["room_name"], "g": str(w["game_id"]),
-                         "pid": str(chosen["reporter_id"])})
+                         "pid": attempt["reporter_id"], "steam": attempt["reporter_steam"],
+                         "cls": attempt["cls"], "received": attempt["received_at"],
+                         "payload": attempt["payload"]})
                 await db.commit()
                 print(f"[HOLD] report window settle refused room={w['room_name']}: "
                       f"{type(ex).__name__}: {ex}")

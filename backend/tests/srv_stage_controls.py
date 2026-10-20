@@ -30,6 +30,11 @@ RT = "test_match_hold_reports_pg.py::"
 XT = "test_match_hold_deletion_pg.py::"
 
 ROWS = [
+    {"row": "MERGED.FIX1.H3.RESELECT",
+     "node": RT + "test_merged_fix1_h3_two_janitors_keep_only_their_attempt",
+     "tag": "H3 exact attempted row",
+     "mutant": [(MAIN, '                attempt = getattr(ex, "attempted_report", None)\n', '                rows = (await db.execute(text(\n                    "SELECT reporter_id, reporter_steam, cls, payload, received_at"\n                    " FROM match_report_journal WHERE room_name = CAST(:room AS varchar)"\n                    " AND game_id = CAST(:g AS uuid) AND state = \'journaled\'"),\n                    {"room": w["room_name"], "g": str(w["game_id"])})).mappings().all()\n                current = mrw.pick(rows)\n                attempt = dict(current) if current is not None else None\n                if attempt is not None:\n                    attempt["reporter_id"] = str(attempt["reporter_id"])\n                    payload = attempt["payload"]\n                    attempt["payload"] = payload if isinstance(payload, str) else _json.dumps(payload)\n', 1)],
+     "twin": [(MAIN, '                attempt = getattr(ex, "attempted_report", None)\n', '                attempt = getattr((ex), "attempted_report", None)\n', 1)]},
     {'row': 'F1.H1.NEW', 'node': 'test_match_hold_reports_pg.py::test_fix1_h1_racing_duplicate_does_not_spend_next_reporter', 'tag': 'F1.H1 new settlement only', 'mutant': [('backend/api/main.py', '    if not outcome.get("new_settlement") or outcome.get("physical_game") != physical_game:\n', '    if False:\n', 1)]},
     {"row": "F1.H1.GAME", "node": RT + "test_fix1_h1_recorded_game_never_touches_the_next_window",
      "tag": "F1.H1 physical game",

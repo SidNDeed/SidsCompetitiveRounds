@@ -734,3 +734,104 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                 assert w["superseded_at"] is not None and await recorded(env, mode, s) == [], \
                     ("H2 end race terminal", mode, first, w, j)
     hold_test.run_env(monkeypatch, body, prefix="mergedh2r")
+
+
+# -- Merged fix 1 H3 -----------------------------------------------------------
+
+def test_merged_fix1_h3_two_janitors_keep_only_their_attempt(monkeypatch):
+    """Both janitors reject A; the second commits before the first rechecks."""
+    import asyncio
+
+    async def body(env):
+        _mount(env, monkeypatch)
+        for mode in ("team", "ovt"):
+            s = await hold_test.seed_series(env.conn, mode)
+            g = (await hold_test.game_start(env, s, 0))["game_id"]
+            indices = sorted((0, 1), key=lambda i: (len(s.steam(i)), s.steam(i)))
+            bad_i, good_i = indices
+            for i in indices:
+                report = _report(mode, s, i, g)
+                if i == bad_i:
+                    if mode == "team":
+                        report["winner_team"] = 2
+                        canonical = "%s:%s:%s:%s:3:1:true:%s:%s:2:%s" % (
+                            s.steam(0), s.steam(1), s.steam(2), s.steam(3),
+                            s.steam(i), report["photon_room_id"], s.sid)
+                    else:
+                        report["winner_side"] = 2
+                        canonical = "%s:%s:%s:2:1:false:%s:%s:2:%s" % (
+                            s.steam(0), s.steam(1), s.steam(2), s.steam(i),
+                            report["photon_room_id"], s.sid)
+                    report["hmac_signature"] = _sig(canonical)
+                response = await _call("POST", "/api/v1/%s/matches" % mode, s.steam(i), report)
+                assert response.status_code == 202, ("H3 setup receipt", mode, response.text)
+            await env.conn.execute(
+                "UPDATE match_report_windows SET settle_after = clock_timestamp() - interval '1 s'"
+                " WHERE room_name = $1", s.room)
+            first_rolled_back, release_first = asyncio.Event(), asyncio.Event()
+            attempted = []
+            real_settler = main._report_window_settler
+            session_type = env.sm.class_
+            real_rollback = session_type.rollback
+
+            def observed_settler(the_mode):
+                settle = real_settler(the_mode)
+                async def observed(db, entry):
+                    attempted.append((asyncio.current_task().get_name(), entry["reporter_steam"]))
+                    return await settle(db, entry)
+                return observed
+
+            async def rollback(db):
+                result = await real_rollback(db)
+                if asyncio.current_task().get_name() == "h3-first":
+                    first_rolled_back.set()
+                    await release_first.wait()
+                return result
+
+            with monkeypatch.context() as patch:
+                patch.setattr(main, "_report_window_settler", observed_settler)
+                patch.setattr(session_type, "rollback", rollback)
+                first = asyncio.create_task(main._report_window_janitor(), name="h3-first")
+                try:
+                    await asyncio.wait_for(first_rolled_back.wait(), 4)
+                    second = asyncio.create_task(main._report_window_janitor(), name="h3-second")
+                    await asyncio.wait_for(second, 7)
+                finally:
+                    release_first.set()
+                await asyncio.wait_for(first, 7)
+            assert attempted == [("h3-first", s.steam(bad_i)), ("h3-second", s.steam(bad_i))], \
+                ("H3 both attempt A", mode, attempted)
+            w, j = await window_state(env, s, g)
+            assert (w["settled_at"], j[s.steam(bad_i)][1], j[s.steam(good_i)][1]) == \
+                (None, "kept", "journaled"), ("H3 exact attempted row", mode, w, j)
+            out = await main._report_window_janitor()
+            w, j = await window_state(env, s, g)
+            assert out.get("settled") == 1 and j[s.steam(good_i)][1] == "settled" \
+                and len(await recorded(env, mode, s)) == 1, \
+                ("H3 B settles next tick", mode, out, w, j)
+    hold_test.run_env(monkeypatch, body, prefix="mergedh3j")
+
+
+def test_merged_fix1_h3_unknown_and_transient_failures_keep_evidence(monkeypatch):
+    """An unknown exception or retryable HTTP response never rejects evidence."""
+    async def body(env):
+        _mount(env, monkeypatch)
+        for mode in ("team", "ovt"):
+            for failure in (RuntimeError("transient fixture"), main.HTTPException(429, "retry")):
+                s, g, want = await _two_filed(env, mode)
+                def refusing(the_mode):
+                    async def settle(db, entry):
+                        raise failure
+                    return settle
+                with monkeypatch.context() as patch:
+                    patch.setattr(main, "_report_window_settler", refusing)
+                    out = await main._report_window_janitor()
+                w, j = await window_state(env, s, g)
+                assert (out.get("retry"), out.get("refused"), w["settled_at"],
+                        sorted(v[1] for v in j.values())) == \
+                    (1, None, None, ["journaled", "journaled"]), \
+                    ("H3 unknown failure retry", mode, type(failure).__name__, out, w, j)
+                await main._report_window_janitor()
+                w, j = await window_state(env, s, g)
+                assert j[want][1] == "settled" and len(await recorded(env, mode, s)) == 1
+    hold_test.run_env(monkeypatch, body, prefix="mergedh3t")
