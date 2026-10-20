@@ -41,7 +41,7 @@ namespace CompetitiveRounds
     internal sealed class InboundStallCore
     {
         internal const int QUEUE_BOUND = 48;
-        internal const int LOW_MARK = 24;          // QUEUE_BOUND / 2: the rise is timed from the last sample at or below it
+        internal const int LOW_MARK = 24;          // QUEUE_BOUND / 2: the rise is timed from the first sampled depth above it
         internal const long MIN_STALL_MS = 1000;
         internal const int FRAME_OK_MS = 50;
         internal const int MAX_LINES_PER_ROOM = 8;
@@ -191,7 +191,7 @@ namespace CompetitiveRounds
               .Append(" stopped=").Append(stopped.ToString(CultureInfo.InvariantCulture))
               .Append(" bound=").Append(QUEUE_BOUND.ToString(CultureInfo.InvariantCulture))
               .Append(" open=").Append(openAtEnd ? "1" : "0")
-              .Append(" (durMs = depth above bound; riseMs = from the last depth at or below ")
+              .Append(" (durMs = depth above bound; riseMs = from the first sampled depth above ")
               .Append(LOW_MARK.ToString(CultureInfo.InvariantCulture)).Append("; leg undetermined)");
             return sb.ToString();
         }

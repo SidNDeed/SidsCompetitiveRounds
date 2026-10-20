@@ -265,6 +265,9 @@ def extract_decimated():
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
 MUTANTS = [
+    ("l1_description_reverted", "StallSource",
+     [("riseMs = from the first sampled depth above ", "riseMs = from the last depth at or below ")],
+     "stall_rise_explained", "stall_night"),
     ("m7_later_joiner_in_opening_cohort", "StallSource",
      [("                for (int i = 0; i < _openStreams; i++)", "                for (int i = 0; i < n; i++)")],
      "snapshot_roster", "stall_night"),

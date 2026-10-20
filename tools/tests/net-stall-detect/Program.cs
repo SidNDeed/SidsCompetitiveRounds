@@ -26,6 +26,7 @@ namespace NetStallTests
         {
             var cases = new List<KeyValuePair<string, Func<string>>>
             {
+                new KeyValuePair<string, Func<string>>("stall_rise_explained", StallRiseExplained),
                 new KeyValuePair<string, Func<string>>("snapshot_roster", SnapshotRoster),
                 new KeyValuePair<string, Func<string>>("snapshot_spectator", SnapshotSpectator),
                 new KeyValuePair<string, Func<string>>("snapshot_overflow", SnapshotOverflow),
@@ -213,6 +214,21 @@ namespace NetStallTests
         {
             return StallTerminal(true, 18) ?? StallTerminal(false, 18)
                 ?? StallTerminal(true, 23) ?? StallTerminal(false, 23);
+        }
+
+
+        private static string StallRiseExplained()
+        {
+            var core = new InboundStallCore();
+            core.OnDepth(10, 0, null, 1);
+            core.OnDepth(30, 900, null, 1);
+            core.OnDepth(49, 1000, null, 1);
+            core.OnFrame(18);
+            string line = core.OnDepth(0, 2201, null, 1);
+            if (line == null) return "no qualifying close";
+            if (Field(line, "durMs") != "1201" || Field(line, "riseMs") != "1301") return "rise numeric " + line;
+            if (!line.Contains("riseMs = from the first sampled depth above 24")) return "rise explanation " + line;
+            return null;
         }
 
         private static string StallSteadyBands()
