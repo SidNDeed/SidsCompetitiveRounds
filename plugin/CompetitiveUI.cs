@@ -6552,13 +6552,14 @@ namespace CompetitiveRounds
         // the file's size. The tail-only read cut the build identity out of
         // every capped LogOutput.log.
         //
-        // FITTING THE SENDER CAP: 3.5M of log text is exactly
-        // ApiClient.BUG_REPORT_LOG_CAP_CHARS, and the section headers, the
-        // cap markers and the audio self-check come on top. Both senders keep
-        // the TAIL-most window of what they are handed, which would cut the
-        // head of the first section (the previous session's banner), so
-        // LogBundleCore.Compose fits the scrubbed text under that cap itself
-        // by narrowing the previous session's tail window by the overflow.
+        // FITTING THE SENDER CAP: the section caps total 3.5M characters,
+        // exactly ApiClient.BUG_REPORT_LOG_CAP_CHARS, including cap markers.
+        // Section headers and the audio self-check add to that total, and
+        // scrubbing can expand it. LogBundleCore.Compose reserves every
+        // required section head and reduces the current, previous and Unity
+        // TAIL windows against the actual scrubbed lengths. A successful
+        // bundle is within the cap before either builder receives it; a
+        // required-head payload that cannot fit is withheld.
         // The audio self-check still rides at the END.
         private const int BUNDLE_CAP_BEP_CURRENT = 1_500_000;
         private const int BUNDLE_CAP_BEP_PREV    = 1_000_000;

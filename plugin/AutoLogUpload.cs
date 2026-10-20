@@ -61,8 +61,13 @@ namespace CompetitiveRounds
     ///   one audio snapshot) and starting a thread. All O(1).
     ///
     ///   WORKER THREAD: the bounded head-and-tail reads
-    ///   (LogBundleCore.ReadCapped reads each file's first part and seeks to
-    ///   its last, so a 40 MB log costs at most its cap in reading), the
+    ///   (LogBundleCore.CaptureFile bounds reads to one sampled length,
+    ///   keeping at least 200,000 decoded head characters where present.
+    ///   The remaining allowance goes to a sequence-safe tail and a marker
+    ///   with exact captured byte offsets, all within the character cap.
+    ///   Short reads or incomplete UTF-8 get a bounded retry, then an
+    ///   explicit [log read unavailable] line if no valid capture succeeds;
+    ///   even a 40 MB log has cap-bounded reading, including retry), the
     ///   assembly, the scrub, the JSON body and the UTF-8 encoding.
     ///
     ///   MAIN THREAD, on the next Tick after the worker finishes: the dedup
