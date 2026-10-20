@@ -1395,6 +1395,11 @@ class Frame:
                 return self.invoke(n, target, argvals, kwvals)
         if fn.alias and fn.alias[0] == "method" and fn.alias[1] == "__call__":
             return self.invoke(n, selected(fn.alias[2]), argvals, kwvals)
+        if name in _REMOVAL_CALLS or name in ("operator.call", "map", "filter"):
+            minimum = 2 if name in ("map", "filter") else 1
+            if len(argvals) < minimum:
+                self.ps.flag(self.mod, n, "unresolvable call binding (%s: missing target, receiver or input)" % name)
+                return V({D})
         if name == "operator.call" and argvals:
             return self.callback_call(n, selected(argvals[0]), argvals[1:], n.args[1:], n.keywords, kwvals)
         if name in ("map", "filter") and argvals:
@@ -1416,6 +1421,9 @@ class Frame:
             if name in UNRESOLVABLE or name.startswith("importlib") or not literal:
                 self.ps.flag(self.mod, n, "unresolvable call target (%s)" % name)
                 return V({D})
+            if name != "getattr":
+                self.ps.flag(self.mod, n, "unresolvable call binding (%s: callback constructor)" % name)
+                return V({D})
             if name == "getattr":
                 base = argvals[0]
                 if base.alias and base.alias[0] in ("import", "builtin"):
@@ -1425,6 +1433,7 @@ class Frame:
                          ("method", n.args[1].value, argvals[0], n.args[0]))
         if name == "functools.partial" or name == "partial":
             if not argvals:
+                self.ps.flag(self.mod, n, "unresolvable call binding (partial: missing target)")
                 return V({D})
             return V({C}, (), argvals[0].funcs, None, None,
                      ("partial", tuple(argvals[1:]), argvals[0], tuple(n.args[1:]),
@@ -3350,6 +3359,58 @@ def test_delegation_keeps_constant_removal_return_control(operation):
     api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report(row):\n    ' + operation + '\n'
            '    return {"name": value}\n')
     assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+
+
+_FIX7_EMPTY_BINDINGS = {
+    "operator": "operator.call()",
+    "map": "map()",
+    "filter": "filter()",
+    "map-input": "map(len)",
+    "filter-input": "filter(None)",
+    "pop": "dict.pop()",
+    "popitem": "dict.popitem()",
+    "delete": "dict.__delitem__()",
+    "clear": "dict.clear()",
+    "operator-delete": "operator.delitem()",
+    "operator-dunder": "operator.__delitem__()",
+    "builtin-map": "builtins.map()",
+    "builtin-filter": "builtins.filter()",
+    "builtin-pop": "builtins.dict.pop()",
+    "delegated": "operator.call.__call__()",
+    "partial": "partial()",
+    "qualified-partial": "functools.partial()",
+}
+
+
+@pytest.mark.parametrize("route", list(_FIX7_EMPTY_BINDINGS))
+def test_fix7_bound_missing_dispatch_binding_flags(route):
+    api = (_REMOVAL_CALLBACK_IMPORTS + "import functools\n" +
+           "def evidence_report():\n    " + _FIX7_EMPTY_BINDINGS[route] +
+           '\n    return {"name": "chrome"}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "unresolvable call binding" in str(findings[0]), (route, _fmt(findings))
+
+
+@pytest.mark.parametrize("operation", [
+    'operator.call(len, (None,))', 'list(map(len, ((None,),)))',
+    'list(filter(None, (None,)))', 'partial(len)((None,))',
+    'dict.pop({"word": "chrome"}, "word")', 'dict.clear({"word": "chrome"})',
+])
+def test_fix7_bound_resolved_dispatch_control(operation):
+    api = (_REMOVAL_CALLBACK_IMPORTS + 'def evidence_report():\n    ' + operation +
+           '\n    return {"name": "chrome"}\n')
+    assert _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("constructor", ["operator.attrgetter", "operator.methodcaller", "attrgetter", "methodcaller"])
+def test_fix7_bound_unfollowed_callback_constructor_flags(constructor):
+    api = (_REMOVAL_CALLBACK_IMPORTS + "from operator import attrgetter, methodcaller\n" +
+           'def evidence_report():\n    callback = ' + constructor + '("word")\n'
+           '    return {"name": "chrome"}\n')
+    findings = _fixture(api, _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "callback constructor" in str(findings[0]), (constructor, _fmt(findings))
 
 
 _BOT_GO = '''async def _aer_go(body):
