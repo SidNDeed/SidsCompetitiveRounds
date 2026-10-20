@@ -110,10 +110,14 @@ ROWS = [
     {"row": "M5.1", "node": RT + "test_t5_1_dc_report_reads_the_crossing_the_hold_froze",
      "tag": "T5.1 frozen",
      "mutant": [(MAIN,
-                 '    if hold_crossed is not None:\n'
-                 '        return hold_crossed\n'
-                 '    return await _team_game_crossed_two(db, sid, s, total_points)\n',
-                 '    return await _team_game_crossed_two(db, sid, s, total_points)\n', 1)]},
+                 '(_hold_crossed if _hold_crossed is not None\n'
+                 '                 else await _team_game_crossed_two(db, sid_uuid, s, total_points))',
+                 '(await _team_game_crossed_two(db, sid_uuid, s, total_points))', 1)],
+     "twin": [(MAIN,
+               '(_hold_crossed if _hold_crossed is not None\n'
+               '                 else await _team_game_crossed_two(db, sid_uuid, s, total_points))',
+               '((_hold_crossed) if _hold_crossed is not None\n'
+               '                 else await _team_game_crossed_two(db, sid_uuid, s, total_points))', 1)]},
     # M5.10 follows the causal receipt guard in the hold mutation runner.
     # NX6: the deletion omits one table (the player's own presence rows).
     {"row": "M6.1", "node": XT + "test_nx6_deletion_leaves_no_stage2_row_naming_the_player",
