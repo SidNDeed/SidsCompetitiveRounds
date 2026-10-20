@@ -34,6 +34,8 @@ namespace NetStallTests
                 new KeyValuePair<string, Func<string>>("stall_steady_bands", StallSteadyBands),
                 new KeyValuePair<string, Func<string>>("stall_band_crossings", StallBandCrossings),
                 new KeyValuePair<string, Func<string>>("stall_cap", StallCap),
+                new KeyValuePair<string, Func<string>>("stall_suppressed_per_game", StallSuppressedPerGame),
+                new KeyValuePair<string, Func<string>>("stall_room_reset", StallRoomReset),
                 new KeyValuePair<string, Func<string>>("stall_ordinary_spikes", StallOrdinarySpikes),
                 new KeyValuePair<string, Func<string>>("stall_streams_flowing", StallStreamsFlowing),
                 new KeyValuePair<string, Func<string>>("jitter_reserve", JitterReserve),
@@ -246,7 +248,7 @@ namespace NetStallTests
                 all.AddRange(RunSeries(core, d, 1600, 18, t => 5, baseMs: i * 10000, game: 1));
             }
             if (all.Count != InboundStallCore.MAX_LINES_PER_ROOM) return "lines=" + all.Count + " want " + InboundStallCore.MAX_LINES_PER_ROOM;
-            if (core.GameStalls != 10 || core.RoomSuppressed != 2) return "counts stalls=" + core.GameStalls + " suppressed=" + core.RoomSuppressed;
+            if (core.GameStalls != 10 || core.GameSuppressed != 2) return "counts stalls=" + core.GameStalls + " suppressed=" + core.GameSuppressed;
             core.ResetRoom();
             var again = RunSeries(core, t => t < 1500 ? 120 : 2, 1600, 18, t => 5, baseMs: 200000, game: 1);
             if (again.Count != 1) return "the room reset did not restore the budget";
@@ -260,6 +262,37 @@ namespace NetStallTests
             var core = new InboundStallCore();
             var lines = RunSeries(core, t => (t % 2000) < SampleMs ? 78 : 5, 60000, 18, t => t);
             if (lines.Count != 0 || core.GameStalls != 0) return "an ordinary spike was logged as a stall";
+            return null;
+        }
+
+        private static string OneStall(InboundStallCore core, int offset, int game)
+        {
+            core.OnDepth(60, offset, null, game);
+            core.OnFrame(18);
+            return core.OnDepth(0, offset + 1201, null, game, 18);
+        }
+
+        private static string StallSuppressedPerGame()
+        {
+            var core = new InboundStallCore();
+            int lines = 0;
+            for (int i = 0; i < 10; i++) if (OneStall(core, i * 2000, 1) != null) lines++;
+            if (lines != 8 || core.GameSuppressed != 2) return "first game budget/count";
+            core.ResetGame();
+            if (core.SummaryFields() != " stalls=0 longestStallMs=0 stallsFrameExcluded=0 stallLinesSuppressed=0")
+                return "game two inherited suppression: " + core.SummaryFields();
+            if (OneStall(core, 30000, 2) != null || core.GameSuppressed != 1 || core.GameStalls != 1)
+                return "game reset replenished room budget or miscounted suppression";
+            return null;
+        }
+
+        private static string StallRoomReset()
+        {
+            var core = new InboundStallCore();
+            for (int i = 0; i < 10; i++) OneStall(core, i * 2000, 1);
+            core.ResetRoom();
+            if (core.GameSuppressed != 0 || core.GameStalls != 0) return "room reset retained game counters";
+            if (OneStall(core, 30000, 1) == null || core.GameSuppressed != 0) return "room reset did not restore line budget";
             return null;
         }
 

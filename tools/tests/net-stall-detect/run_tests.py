@@ -108,6 +108,12 @@ def extract_decimated():
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
 MUTANTS = [
+    ("m2_suppression_room_scoped", "StallSource",
+     [("            GameSuppressed = 0;\n", "")],
+     "stall_suppressed_per_game", "stall_cap"),
+    ("m2_room_budget_not_reset", "StallSource",
+     [("            _roomLines = 0;\n", "")],
+     "stall_room_reset", "stall_suppressed_per_game"),
     ("m1_rising_gate_always_open", "StallSource",
      [("_bandFloor = LOW_MARK + 1; _bandWidth = QUEUE_BOUND - LOW_MARK - 1;",
        "_bandFloor = -1; _bandWidth = 0;")],
@@ -149,7 +155,7 @@ MUTANTS = [
      [("            if (_worstFrameMs >= FRAME_OK_MS)\n", "            if (false)\n")],
      "stall_frames_hitch", "stall_night"),
     ("stall_cap_removed", "StallSource",
-     [("            if (_roomLines >= MAX_LINES_PER_ROOM) { RoomSuppressed++; return null; }\n", "")],
+     [("            if (_roomLines >= MAX_LINES_PER_ROOM) { GameSuppressed++; return null; }\n", "")],
      "stall_cap", "stall_night"),
     ("stall_streams_always_stopped", "StallSource",
      [("                    if (!advanced) stopped++;\n", "                    stopped++;\n")],

@@ -68,7 +68,7 @@ namespace CompetitiveRounds
         internal long GameLongestMs { get; private set; }
         internal int GameFrameExcluded { get; private set; }
         private int _roomLines;
-        internal int RoomSuppressed { get; private set; }
+        internal int GameSuppressed { get; private set; }
 
         /// <summary>The remote stream snapshot the caller hands the core: the
         /// actor numbers and their cumulative accepted batch counts, n valid
@@ -177,7 +177,7 @@ namespace CompetitiveRounds
                 }
             }
             catch { }
-            if (_roomLines >= MAX_LINES_PER_ROOM) { RoomSuppressed++; return null; }
+            if (_roomLines >= MAX_LINES_PER_ROOM) { GameSuppressed++; return null; }
             _roomLines++;
             var sb = new StringBuilder(200);
             sb.Append("[NET-STALL] game=").Append(game.ToString(CultureInfo.InvariantCulture))
@@ -202,19 +202,20 @@ namespace CompetitiveRounds
             return " stalls=" + GameStalls.ToString(CultureInfo.InvariantCulture)
                 + " longestStallMs=" + GameLongestMs.ToString(CultureInfo.InvariantCulture)
                 + " stallsFrameExcluded=" + GameFrameExcluded.ToString(CultureInfo.InvariantCulture)
-                + " stallLinesSuppressed=" + RoomSuppressed.ToString(CultureInfo.InvariantCulture);
+                + " stallLinesSuppressed=" + GameSuppressed.ToString(CultureInfo.InvariantCulture);
         }
 
         internal void ResetGame()
         {
             GameStalls = 0; GameLongestMs = 0; GameFrameExcluded = 0;
+            GameSuppressed = 0;
             _open = false; _rising = false; _bandFloor = 0; _bandWidth = LOW_MARK;
         }
 
         internal void ResetRoom()
         {
             ResetGame();
-            _roomLines = 0; RoomSuppressed = 0;
+            _roomLines = 0;
         }
     }
 }
