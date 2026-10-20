@@ -464,6 +464,27 @@ namespace CompetitiveRounds
             }
         }
 
+        // ---- coalesced viewer read requests --------------------------------
+
+        /// <summary>Main-thread latch: take completed work before dispatching
+        /// one pending refresh. Failed starts leave the request pending.</summary>
+        internal sealed class ReadRequestLatch
+        {
+            private bool _requested;
+
+            internal void Request()
+            {
+                _requested = true;
+            }
+
+            internal T Pump<T>(OffMainJob<T> job, Func<bool> dispatch, out int workerThreadId) where T : class
+            {
+                T result = job.TakeFinished(out workerThreadId);
+                if (_requested && !job.Busy && dispatch()) _requested = false;
+                return result;
+            }
+        }
+
         // ---- off-main-thread job -------------------------------------------
 
         /// <summary>

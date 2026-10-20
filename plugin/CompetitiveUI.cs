@@ -6731,6 +6731,8 @@ namespace CompetitiveRounds
 
         private static readonly LogBundleCore.OffMainJob<LogViewerRead> _logViewerJob =
             new LogBundleCore.OffMainJob<LogViewerRead>();
+        private static readonly LogBundleCore.ReadRequestLatch _logViewerRequests =
+            new LogBundleCore.ReadRequestLatch();
 
         private static void OpenLogViewer()
         {
@@ -6738,15 +6740,21 @@ namespace CompetitiveRounds
             StartLogViewerRead();
         }
 
-        /// <summary>MAIN THREAD: the three paths (cheap), then the worker.</summary>
+        /// <summary>MAIN THREAD: coalesce open and refresh requests.</summary>
         private static void StartLogViewerRead()
+        {
+            _logViewerRequests.Request();
+        }
+
+        /// <summary>MAIN THREAD: the three paths (cheap), then the worker.</summary>
+        private static bool DispatchLogViewerRead()
         {
             var paths = new string[3];
             try { paths[0] = BepInExLogPath(); } catch { }
             try { paths[1] = BepInExLogPreviousPath(); } catch { }
             try { paths[2] = UnityLogPath(); } catch { }
             logViewerPaths = paths;
-            _logViewerJob.Start("SCR-LogViewerRead", () =>
+            return _logViewerJob.Start("SCR-LogViewerRead", () =>
             {
                 var r = new LogViewerRead { Paths = paths, Lines = new string[3][], Chars = new int[3] };
                 for (int i = 0; i < 3; i++)
@@ -6775,11 +6783,11 @@ namespace CompetitiveRounds
             return lines;
         }
 
-        /// <summary>MAIN THREAD, from the viewer's OnGUI: takes a finished read.</summary>
+        /// <summary>MAIN THREAD: consume a finished read before dispatching a pending refresh.</summary>
         private static void PumpLogViewerRead()
         {
             int wid;
-            var r = _logViewerJob.TakeFinished(out wid);
+            var r = _logViewerRequests.Pump(_logViewerJob, DispatchLogViewerRead, out wid);
             if (r == null) return;
             logViewerLines = r.Lines;
             logViewerPaths = r.Paths;

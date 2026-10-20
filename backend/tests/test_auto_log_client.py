@@ -185,6 +185,28 @@ def test_the_bug_form_pending_lifecycle_survives_reopen():
     assert reopen.index("if (_pending) return;") < reopen.index("Status =")
 
 
+def test_the_log_viewer_latches_requests_and_consumes_before_dispatch():
+    """Open and Refresh share the request latch exercised by the harness."""
+    opened = mask_code(cs_block(COMPETITIVE_UI, "private static void OpenLogViewer()"))
+    assert opened.count("StartLogViewerRead();") == 1
+    request = mask_code(cs_block(COMPETITIVE_UI, "private static void StartLogViewerRead()"))
+    assert "_logViewerRequests.Request();" in request
+    assert ".Start(" not in request
+    draw = mask_code(cs_block(COMPETITIVE_UI, "private static void DrawLogViewerModal()"))
+    assert draw.count("StartLogViewerRead();") == 1
+    assert draw.count("PumpLogViewerRead();") == 1
+    assert "_logViewerJob.Busy" in draw
+    pump = mask_code(cs_block(COMPETITIVE_UI, "private static void PumpLogViewerRead()"))
+    assert "_logViewerRequests.Pump(_logViewerJob, DispatchLogViewerRead, out wid)" in pump
+    dispatch = mask_code(cs_block(COMPETITIVE_UI, "private static bool DispatchLogViewerRead()"))
+    assert "return _logViewerJob.Start(" in dispatch
+    assert "ApiClient.ReadLogTail(" in dispatch and "SplitViewerLines(" in dispatch
+    latch = cs_block(LOG_BUNDLE_CORE, "internal sealed class ReadRequestLatch")
+    take = mask_code(cs_block(latch, "internal T Pump<T>("))
+    assert "if (_requested && !job.Busy && dispatch()) _requested = false;" in take
+    assert take.index("job.TakeFinished(") < take.index("dispatch()")
+
+
 def test_the_worker_writes_nothing_to_the_log_from_its_own_thread():
     # BepInEx's sinks are not documented thread-safe, and a line written from
     # here interleaves with the game's own. Every sentence the worker wants to

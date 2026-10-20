@@ -39,6 +39,8 @@ namespace AutologBundleTests
                 { "compose_real_scrub", ComposeRealScrub },
                 { "offmain", OffMain },
                 { "busy", Busy },
+                { "viewer_reopen", ViewerReopen },
+                { "viewer_refresh", ViewerRefresh },
                 { "pending_worker", PendingWorker },
                 { "pending_answer", PendingAnswer },
                 { "clock", Clock },
@@ -614,6 +616,82 @@ namespace AutologBundleTests
             Check(state.CanSubmit && state.Status == "builder failed", where, "an explicit build failure left pending");
             state.Reopen();
             Check(state.CanSubmit && state.Status == "", where, "an idle reopen did not clear the completed status");
+        }
+
+        // ---- viewer freshness, with the real worker job --------------------
+
+        private static void ViewerReopen() { ViewerReadScenario("viewer_reopen", true); }
+        private static void ViewerRefresh() { ViewerReadScenario("viewer_refresh", false); }
+
+        private static void ViewerReadScenario(string where, bool reopen)
+        {
+            string path = Write(where + ".log", "BEFORE\n");
+            var job = new LogBundleCore.OffMainJob<string>();
+            var latch = new LogBundleCore.ReadRequestLatch();
+            var captured = new ManualResetEventSlim(false);
+            var release = new ManualResetEventSlim(false);
+            Thread firstWorker = null;
+            int starts = 0;
+            Func<bool> dispatch = () =>
+            {
+                int ordinal = starts + 1;
+                bool started = job.Start("viewer-read", () =>
+                {
+                    string text = File.ReadAllText(path);
+                    if (ordinal == 1)
+                    {
+                        firstWorker = Thread.CurrentThread;
+                        captured.Set();
+                        if (!release.Wait(10_000)) throw new TimeoutException();
+                    }
+                    return text;
+                }, ex => "read-error");
+                if (started) starts++;
+                return started;
+            };
+            try
+            {
+                int wid;
+                latch.Request();
+                Check(latch.Pump(job, dispatch, out wid) == null, where, "an initial request already returned a result");
+                Check(starts == 1, where, "an idle request did not dispatch");
+                bool firstCaptured = captured.Wait(10_000);
+                Check(firstCaptured, where, "the first read never captured its snapshot");
+                if (!firstCaptured) return;
+                if (reopen)
+                {
+                    // The viewer is closed: finish and publish A without consuming it.
+                    release.Set();
+                    Check(firstWorker.Join(10_000), where, "the closed read did not finish");
+                    File.AppendAllText(path, "APPENDED\n");
+                    latch.Request();
+                }
+                else
+                {
+                    File.AppendAllText(path, "APPENDED\n");
+                    latch.Request();
+                    latch.Request();
+                    Check(latch.Pump(job, dispatch, out wid) == null, where, "a held read completed before release");
+                    Check(starts == 1, where, "refresh started a second concurrent read");
+                    release.Set();
+                    Check(firstWorker.Join(10_000), where, "the busy read did not finish");
+                }
+                string latest = latch.Pump(job, dispatch, out wid);
+                Check(latest == "BEFORE\n", where, "the completed old read was not consumed first");
+                Check(starts == 2, where, "the pending refresh was not dispatched after consuming the finished read");
+                var deadline = DateTime.UtcNow.AddSeconds(10);
+                while (job.Busy && DateTime.UtcNow < deadline)
+                {
+                    string result = latch.Pump(job, dispatch, out wid);
+                    if (result != null) latest = result;
+                    if (job.Busy) Thread.Sleep(2);
+                }
+                Check(!job.Busy, where, "the fresh read never finished");
+                Check(latest != null && latest.Contains("APPENDED\n"), where, "the published refresh lost fresh lines");
+                Check(latch.Pump(job, dispatch, out wid) == null, where, "a read was published twice");
+                Check(starts == 2, where, "refresh requests did not coalesce into exactly one further read");
+            }
+            finally { release.Set(); }
         }
 
         // ---- [CLOCK] --------------------------------------------------------
