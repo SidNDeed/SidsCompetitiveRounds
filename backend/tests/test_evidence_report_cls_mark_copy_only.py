@@ -1355,6 +1355,8 @@ class Frame:
 
     def invoke(self, n, fn, argvals, kwvals):
         """Invoke evaluated arguments without losing the callable's selection."""
+        fn = V(fn.ex, fn.im | (fn.ex & {K, O}), fn.funcs,
+               fn.elems, fn.item, fn.alias)
         out = []
         self.with_ctx(fn.im,
                       lambda: out.append(self.call_value(n, fn, argvals, kwvals)))
@@ -1668,7 +1670,7 @@ class Frame:
                     callback_results[id(v)] = self.callback_effect(node, v, first, candidates)
                 else:
                     for fk in v.funcs:
-                        called[fk] = self.ps.call_func(fk, first, {}, self.ctx | self.order_ctx)
+                        called[fk] = self.callback_call(node, V(v.ex, v.im, {fk}), first)
         if name in ("sorted", "min", "max", ".sort") and "key" in kwvals:
             key = kwvals["key"]
             key_node = next((k.value for k in node.keywords if k.arg == "key"), None)
@@ -3726,6 +3728,140 @@ def test_fix7_generic_wrapper_container_tags_do_not_invoke_dictionary_data():
     assert fk not in frame.ps.called
     assert 'rank' not in ref.must_keys
 
+
+
+
+_FIX7_CALL_SELECTION_ROUTES = ("zero", "default", "lambda", "method", "operator", "partial", "dunder")
+
+
+def _fix7_call_selection_api(route, sink="internal", selector="explicit"):
+    body = 'return {"name": "COLD"}' if sink == "internal" else 'return "COLD"'
+    hot = body.replace("COLD", "HOT")
+    args = 'value="chrome"' if route == "default" else ""
+    helpers = ('import operator\nfrom functools import partial\n\n'
+               'def _cold(' + args + '):\n    ' + body + '\n\n'
+               'def _hot(' + args + '):\n    ' + hot + '\n\n')
+    setup = ""
+    left, right = "_cold", "_hot"
+    if route == "lambda":
+        left = '(lambda: ' + ('{"name": "COLD"}' if sink == "internal" else '"COLD"') + ')'
+        right = left.replace("COLD", "HOT")
+    elif route == "method":
+        helpers += ('class _Choice:\n    def cold(self):\n        ' + body +
+                    '\n    def hot(self):\n        ' + hot + '\n\n')
+        setup = '    tool = _Choice()\n'
+        left, right = 'tool.cold', 'tool.hot'
+    choices = '(' + left + ', ' + right + ')'
+    if selector == "explicit":
+        chosen = choices + '[row["rank"] > 0.5]'
+    elif selector == "implicit":
+        chosen = left + ' if row["rank"] > 0.5 else ' + right
+    elif selector == "literal-index":
+        chosen = choices + '[0]'
+    else:
+        chosen = left + ' if True else ' + right
+    call = {"operator": "operator.call(chosen)", "partial": "partial(chosen)()",
+            "dunder": "chosen.__call__()"}.get(route, "chosen()")
+    result = '"chrome"' if sink == "internal" else "value"
+    return (helpers + 'def evidence_report(row):\n' + setup +
+            '    chosen = ' + chosen + '\n    value = ' + call + '\n'
+            '    return {"name": ' + result + '}\n')
+
+
+@pytest.mark.parametrize("route", _FIX7_CALL_SELECTION_ROUTES)
+def test_fix7_selected_callable_context_reaches_internal_sink(route):
+    findings = _fixture(_fix7_call_selection_api(route), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert findings and all("api display slot 'name' reads K" in str(f) for f in findings), (route, _fmt(findings))
+
+
+@pytest.mark.parametrize("route", _FIX7_CALL_SELECTION_ROUTES)
+def test_fix7_selected_callable_result_reaches_caller_sink(route):
+    findings = _fixture(_fix7_call_selection_api(route, "caller"), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert findings and all("api display slot 'name' reads K" in str(f) for f in findings), (route, _fmt(findings))
+
+
+@pytest.mark.parametrize("route", _FIX7_CALL_SELECTION_ROUTES)
+def test_fix7_selected_callable_cached_result_keeps_selection(route):
+    # A previously computed constant summary must acquire this call's selection
+    # even before the callee is revisited with its newly joined context.
+    source = _fix7_call_selection_api(route, "caller")
+    mod = Module("api", source, "fixture_api.py", lambda q: False)
+    ps = Pass([mod])
+    frame = Frame(ps, mod, ("api", "evidence_report"), {"row": V({D})}, frozenset())
+    body = mod.funcs["evidence_report"].body
+    frame.block(body[:-2])
+    for q in mod.funcs:
+        ps.returns[("api", q)] = V({C})
+    for key in ps.lambdas:
+        ps.returns[("api", key)] = V({C})
+    value = frame.expr(body[-2].value)
+    assert K in value.im_all(), (route, value.flat())
+    assert frame.ctx == frozenset(), (route, frame.ctx)
+
+
+@pytest.mark.parametrize("route", _FIX7_CALL_SELECTION_ROUTES)
+@pytest.mark.parametrize("selector", ["literal-index", "literal-condition"])
+def test_fix7_literal_callable_choice_control(route, selector):
+    assert _fixture(_fix7_call_selection_api(route, selector=selector),
+                    _BOT_PERMITTED, _WORKER_FIXTURE) == []
+    assert _fixture(_fix7_call_selection_api(route, "caller", selector),
+                    _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+def test_fix7_implicit_callable_selection_reaches_internal_sink():
+    findings = _fixture(_fix7_call_selection_api("zero", selector="implicit"),
+                        _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert findings and all("api display slot 'name' reads K" in str(f) for f in findings), _fmt(findings)
+
+
+def _fix7_generic_callable_api(literal=False):
+    selector = '0' if literal else 'row["rank"] > 0.5'
+    return ('import functools\n\n'
+            'def _cold(first=None, second=None):\n    return {"name": "COLD"}\n\n'
+            'def _hot(first=None, second=None):\n    return {"name": "HOT"}\n\n'
+            'def evidence_report(row):\n'
+            '    callback = (_cold, _hot)[' + selector + ']\n'
+            '    functools.reduce(callback, (None, None))\n'
+            '    return {"name": "chrome"}\n')
+
+
+def test_fix7_generic_function_callback_enters_selection_boundary():
+    findings = _fixture(_fix7_generic_callable_api(), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert findings and all("api display slot 'name' reads K" in str(f) for f in findings), _fmt(findings)
+
+
+def test_fix7_generic_function_callback_literal_control():
+    assert _fixture(_fix7_generic_callable_api(True), _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+def _fix7_selected_len_api(literal=False):
+    selector = '0' if literal else 'row["rank"] > 0.5'
+    return ('def evidence_report(row):\n'
+            '    choices = (len, len)\n'
+            '    value = choices[' + selector + ']((None,))\n'
+            '    return {"name": value}\n')
+
+
+def test_fix7_selected_constant_summary_return_keeps_selection():
+    # len produces S without copying ctx; this isolates invoke's return labels.
+    findings = _fixture(_fix7_selected_len_api(), _BOT_PERMITTED, _WORKER_FIXTURE)
+    assert len(findings) == 1 and "api display slot 'name' reads K" in str(findings[0]), _fmt(findings)
+
+
+def test_fix7_selected_constant_summary_literal_control():
+    assert _fixture(_fix7_selected_len_api(True), _BOT_PERMITTED, _WORKER_FIXTURE) == []
+
+
+@pytest.mark.parametrize("label", [K, O, D, R, Q])
+def test_fix7_callable_explicit_selection_label_partition(label):
+    mod = Module("api", "", "fixture_api.py", lambda q: False)
+    ps = Pass([mod])
+    frame = Frame(ps, mod, ("api", "fixture"),
+                  {"chosen": V({label}, alias=("builtin", "len"))}, frozenset())
+    value = frame.expr(ast.parse('chosen((None,))', mode="eval").body)
+    assert value.ex == frozenset({S}), (label, value.ex)
+    assert value.im == (frozenset({label}) if label in {K, O} else frozenset()), (label, value.im)
+    assert frame.ctx == frozenset(), frame.ctx
 
 _BOT_GO = '''async def _aer_go(body):
     page = _aer_decode_response(body)
