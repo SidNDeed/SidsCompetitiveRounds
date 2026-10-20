@@ -651,8 +651,10 @@ def _k10():
             line = t.count("\n", 0, mm.start()) + 1
             muts.append(M("unlabel_%s_%d" % (f[:-3], line), "K10 labelled", _at(rel, start, cp, ""),
                           note="the label argument dropped at %s:%d" % (f, line)))
-    if len(muts) != 18:
-        muts.append(M("site_count", "K10 labelled", _stale(AC, "%d labelled call(s), want 18" % len(muts))))
+    # 19 since the readmission client lane (05425cd4): FfaReadmit.cs Refusal,
+    # label readmit_refused.
+    if len(muts) != 19:
+        muts.append(M("site_count", "K10 labelled", _stale(AC, "%d labelled call(s), want 19" % len(muts))))
     return muts
 
 
