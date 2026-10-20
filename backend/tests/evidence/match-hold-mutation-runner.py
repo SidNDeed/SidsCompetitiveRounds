@@ -56,7 +56,7 @@ MUTANTS = {
         MIG_T, "l2_384_owned_metadata_round_trips"),
     'M5.10': ('FIX1', 'match_report_window.py', [('    held = held or (hold is not None and closure is None)\n', '    held = False\n')], [('    held = held or (hold is not None and closure is None)\n', '    held = held or ((hold is not None) and closure is None)\n')], 'test_match_hold_reports_pg.py', 'test_t5_7_held_game_over_settles_at_entry_and_is_superseded_at_lapse'),
     'MERGED.FIX1.H2.CAUSAL': ('FIX1', 'match_report_window.py', [('    return closure is not None and closure[1] == "entered"\n', '    return bool((await db.execute(text(\n        "SELECT 1 FROM match_seat_holds WHERE room_name = CAST(:room AS varchar)"\n        " AND game_id = CAST(:g AS uuid) AND closed_reason = \'entered\' LIMIT 1"),\n        {"room": hold["room_name"], "g": str(hold["game_id"])})).scalar())\n')], [('    return closure is not None and closure[1] == "entered"\n', '    return (closure is not None) and closure[1] == "entered"\n')], 'test_match_hold_reports_pg.py', 'merged_fix1_h2_causal_lapse_and_delayed_receipt'),
-    'MERGED.FIX1.H2.EXPIRY': ('FIX1', 'match_report_window.py', [('    if not held and window["settle_after"] <= now:\n', '    if window["opened_at"] + timedelta(seconds=WINDOW_S) <= now:\n')], [('    if not held and window["settle_after"] <= now:\n', '    if (not held) and window["settle_after"] <= now:\n')], 'test_match_hold_reports_pg.py', 'merged_fix1_h2_held_receipts_outlive_first_receipt'),
+    'MERGED.FIX1.H2.EXPIRY': ('FIX1', 'match_report_window.py', [('    if not held and not _window_unarmed(window) and window["settle_after"] <= now:\n', '    if window["opened_at"] + timedelta(seconds=WINDOW_S) <= now:\n')], [('    if not held and not _window_unarmed(window) and window["settle_after"] <= now:\n', '    if (not held) and not _window_unarmed(window) and window["settle_after"] <= now:\n')], 'test_match_hold_reports_pg.py', 'merged_fix1_h2_held_receipts_outlive_first_receipt'),
     'MERGED.FIX1.H1.RECEIPT': ('FIX1', 'match_report_window.py', [('        if exc.receipt:\n            raise\n', '        if False:\n            raise\n')], [('        if exc.receipt:\n            raise\n', '        if (exc.receipt):\n            raise\n')], 'test_match_hold_reports_pg.py', 'test_fix1_h1_racing_duplicate_does_not_spend_next_reporter'),
     # Fix 1 - every stage 2 route requires a positively verified session
     "F1.H1": ("FIX1", "match_hold.py",
@@ -128,13 +128,13 @@ MUTANTS = {
                      '            await _install_database_timeouts((self.db))')],
                    WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
     "F1.H4": ("FIX1", "match_report_window.py",
-              [('    if not held and window["settle_after"] <= now:\n'
+              [('    if not held and not _window_unarmed(window) and window["settle_after"] <= now:\n'
                 '        await _settle_locked(\n'
                 '            db, window, room=room, game_id=game_id, now=now, settle=settle)\n'
                 '        return {"status": "duplicate"}\n',
                 '')],
-              [('    if not held and window["settle_after"] <= now:\n',
-                '    if not held and (window["settle_after"] <= now):\n')],
+              [('    if not held and not _window_unarmed(window) and window["settle_after"] <= now:\n',
+                '    if not held and not _window_unarmed(window) and (window["settle_after"] <= now):\n')],
               WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
     "F1.H6": ('FIX1', 'match_report_window.py', [('            if not await _settle_and_mark(db, room, game_id, entry, now, settle):\n', '            if not await _settle_and_mark(db, room, game_id, dict(entry, payload=payload), now, settle):\n')], [('            if not await _settle_and_mark(db, room, game_id, entry, now, settle):\n', '            if not await _settle_and_mark(db, room, game_id, (entry), now, settle):\n')], 'test_match_report_window.py', 't5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c'),
     "F1.M5": ("FIX1", "match_report_window.py",
@@ -416,7 +416,7 @@ MUTANTS = {
                "        lo = start if (start > v) else v\n")],
              WIN_T, "t5_3_overlap"),
     "M5.5": ("N5", "match_report_window.py",
-             [("from datetime import timedelta\n",
+             [("from datetime import datetime, timedelta\n",
                "from datetime import datetime, timedelta, timezone\n"),
               ("    return any(anchor_fresh(_get(row, col), holds, now=now, window=window)",
                "    return any(anchor_fresh(_get(row, col), holds,"
@@ -1376,6 +1376,57 @@ MUTANTS.update({'MERGED.FIX1.H4.WINDOW_RECEIVE': ('FIX1',
                                            '        return (released)\n')],
                                          'test_match_hold_deletion_pg.py',
                                          'fix1_h4_terminal_release_preserves_cleared_attribution')})
+
+MUTANTS.update({'FIX2.M1.SETTLE': ('FIX2',
+                    'match_report_window.py',
+                    [('    if _window_terminal(window) or _window_unarmed(window) or '
+                      'window["settle_after"] > now:\n',
+                      '    if _window_terminal(window) or window["settle_after"] > now:\n')],
+                    [('    if _window_terminal(window) or _window_unarmed(window) or '
+                      'window["settle_after"] > now:\n',
+                      '    # Inert twin at the same window protection.\n'
+                      '    if _window_terminal(window) or _window_unarmed(window) or '
+                      'window["settle_after"] > now:\n')],
+                    'test_match_report_window.py',
+                    'fix2_m1_unarmed_guards and [settle]'),
+ 'FIX2.M1.ARM': ('FIX2',
+                 'match_report_window.py',
+                 [('    elif _window_unarmed(window):\n', '    elif False:\n')],
+                 [('    elif _window_unarmed(window):\n',
+                   '    # Inert twin at the same window protection.\n'
+                   '    elif _window_unarmed(window):\n')],
+                 'test_match_report_window.py',
+                 'fix2_m1_unarmed_guards and [arm]'),
+ 'FIX2.M1.RECEIVE': ('FIX2',
+                     'match_report_window.py',
+                     [('    if not held and not _window_unarmed(window) and window["settle_after"] '
+                       '<= now:\n',
+                       '    if not held and window["settle_after"] <= now:\n')],
+                     [('    if not held and not _window_unarmed(window) and window["settle_after"] '
+                       '<= now:\n',
+                       '    # Inert twin at the same window protection.\n'
+                       '    if not held and not _window_unarmed(window) and window["settle_after"] '
+                       '<= now:\n')],
+                     'test_match_report_window.py',
+                     'fix2_m1_unarmed_guards and [receive]'),
+ 'FIX2.M1.DEADLINE': ('FIX2',
+                      'match_report_window.py',
+                      [('    if entered_at is not None or released or _window_unarmed(window):\n',
+                        '    if True:\n')],
+                      [('    if entered_at is not None or released or _window_unarmed(window):\n',
+                        '    # Inert twin at the same window protection.\n'
+                        '    if entered_at is not None or released or _window_unarmed(window):\n')],
+                      'test_match_report_window.py',
+                      'fix2_m1_deadline_preservation_and_causal_advance'),
+ 'FIX2.M1.CAUSAL': ('FIX2',
+                    'match_report_window.py',
+                    [('    if entered_at is not None or released or _window_unarmed(window):\n',
+                      '    if released or _window_unarmed(window):\n')],
+                    [('    if entered_at is not None or released or _window_unarmed(window):\n',
+                      '    # Inert twin at the same window protection.\n'
+                      '    if entered_at is not None or released or _window_unarmed(window):\n')],
+                    'test_match_report_window.py',
+                    'fix2_m1_deadline_preservation_and_causal_advance')})
 
 def _plant(src_text, edits, mid, kind):
     out = src_text

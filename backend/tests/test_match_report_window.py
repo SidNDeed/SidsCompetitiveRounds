@@ -682,3 +682,98 @@ def test_t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c(monkeypatch):
             assert setups == 1
 
     _run(go())
+
+
+@pytest.mark.parametrize("site", ["settle", "arm", "receive"])
+def test_fix2_m1_unarmed_guards(site, monkeypatch):
+    """Exercise each infinity boundary, including an unarmed arm result.
+
+    The latter isolates the receipt comparison's own protection; the live
+    T5.4 case covers ordinary arming through PostgreSQL.
+    """
+    window = {"settle_after": datetime.max, "settled_at": None, "superseded_at": None}
+    armed = []
+
+    async def noop(*args, **kwargs):
+        return None
+
+    async def locked(*args, **kwargs):
+        return window
+
+    async def arm(*args, at, **kwargs):
+        armed.append(at)
+        if site != "receive":
+            window["settle_after"] = at + timedelta(seconds=30)
+        return window
+
+    async def classify(*args, **kwargs):
+        return "u"
+
+    async def journal(*args, **kwargs):
+        return {"cls": "u", "state": "journaled"}
+
+    async def body():
+        if site == "settle":
+            return await mrw._settle_locked(None, window, room="guard", game_id=None,
+                                             now=T0, settle=noop)
+        monkeypatch.setattr(mrw, "_guard_window_identities", noop)
+        monkeypatch.setattr(mrw, "lock_window", locked)
+        monkeypatch.setattr(mrw, "_causal_hold", noop)
+        monkeypatch.setattr(mrw, "_arm_window", arm)
+        monkeypatch.setattr(mrw, "classify", classify)
+        monkeypatch.setattr(mrw, "journal", journal)
+        monkeypatch.setattr(mrw, "_settle_locked", noop)
+        return await mrw._receive(None, mode="team", room="guard", game_id=None,
+                                  reported_game_id=None, reporter_id=None, reporter_steam="1",
+                                  payload="{}", member_ids=[], now=T0, settle=noop)
+
+    error = None
+    try:
+        result = _run(body())
+    except TypeError as exc:
+        error = str(exc)
+    tag = "FIX2 M1 unarmed " + site
+    assert error is None, (tag, error)
+    if site == "settle":
+        assert result is None, (tag, result)
+    else:
+        assert armed == [T0] and result == {"status": "journaled", "cls": "u"}, \
+            (tag, armed, result)
+
+
+def test_fix2_m1_deadline_preservation_and_causal_advance():
+    """An empty release retries unchanged; a later causal entry extends expiry."""
+    import cf_pg
+    from sqlalchemy import text
+    cf_pg.require_live_pg()
+
+    async def body():
+        async with cf_pg.case("rjs2fix2m1") as (c, sm):
+            room = "team_fix2_" + uuid.uuid4().hex[:8]
+            game = await _window_game(c.conn, "team", room)
+            now = await c.conn.fetchval("SELECT clock_timestamp()")
+
+            async def settle(db, entry):
+                raise AssertionError("FIX2 M1 empty window must not settle")
+
+            async with sm() as db:
+                await mrw.lock_window(db, mode="team", room=room, game_id=game, now=now, held=True)
+                assert await mrw.release_held(db, mode="team", room=room, game_id=game,
+                                             now=now, settle=settle) == 0
+                query = text("SELECT settle_after FROM match_report_windows WHERE room_name = :room")
+                initial = (await db.execute(query, {"room": room})).scalar()
+                assert initial == now + timedelta(seconds=30), ("FIX2 M1 initial arm", initial)
+                assert await mrw.release_held(db, mode="team", room=room, game_id=game,
+                                             now=now + timedelta(seconds=5), settle=settle) == 0
+                same = (await db.execute(query, {"room": room})).scalar()
+                assert same == initial, ("FIX2 M1 finite deadline", initial, same)
+                entry = now + timedelta(seconds=6)
+                assert await mrw.release_held(db, mode="team", room=room, game_id=game,
+                                             now=entry, entered_at=entry, settle=settle) == 0
+                advanced = (await db.execute(query, {"room": room})).scalar()
+                assert advanced == entry + timedelta(seconds=30), \
+                    ("FIX2 M1 causal advance", advanced, entry)
+                assert await mrw.settle_window(db, mode="team", room=room, game_id=game,
+                                              now=entry + timedelta(seconds=29), settle=settle) is None
+                await db.commit()
+    _run(body())

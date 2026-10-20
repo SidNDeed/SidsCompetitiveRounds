@@ -29,7 +29,7 @@ identity guards precede the window lock; settled_at is written once.
 import hashlib
 import hmac
 import json as _window_json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import HTTPException as _WindowHTTPException
 from sqlalchemy import text
@@ -326,6 +326,11 @@ async def finish_hold(db, *, mode, room, game_id, hold_id, now, settle):
         return n, entered
 
 
+def _window_unarmed(window) -> bool:
+    """PostgreSQL infinity is datetime.max, without a timezone in asyncpg."""
+    return window["settle_after"].replace(tzinfo=None) == datetime.max
+
+
 def _window_terminal(window) -> bool:
     """A settled or superseded window accepts no later report action."""
     return window["settled_at"] is not None or window["superseded_at"] is not None
@@ -506,7 +511,7 @@ async def _mark_settled(db, room, game_id, chosen, now):
 
 async def _settle_locked(db, window, *, room, game_id, now, settle):
     """Settle one already-locked expired window from only its stored rows."""
-    if _window_terminal(window) or window["settle_after"] > now:
+    if _window_terminal(window) or _window_unarmed(window) or window["settle_after"] > now:
         return None
     chosen = pick(await _journaled(db, room, game_id))
     if chosen is None:
@@ -590,9 +595,9 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
             payload = _window_json.dumps(stored)
     elif closure is not None:
         window = await _arm_window(db, window, room=room, game_id=game_id, at=closure[0])
-    elif window["settle_after"].year == 9999:
+    elif _window_unarmed(window):
         window = await _arm_window(db, window, room=room, game_id=game_id, at=now)
-    if not held and window["settle_after"] <= now:
+    if not held and not _window_unarmed(window) and window["settle_after"] <= now:
         await _settle_locked(
             db, window, room=room, game_id=game_id, now=now, settle=settle)
         return {"status": "duplicate"}
@@ -666,8 +671,9 @@ async def _release_held(db, *, mode, room, game_id, now, settle,
             " AND state = 'journaled'"),
             {**params, "pid": window["settled_reporter_id"]})
         return released
-    window = await _arm_window(db, window, room=room, game_id=game_id,
-                               at=entered_at if entered_at is not None else now)
+    if entered_at is not None or released or _window_unarmed(window):
+        window = await _arm_window(db, window, room=room, game_id=game_id,
+                                   at=entered_at if entered_at is not None else now)
     # The pre-window guard covers the roster and every journal payload, so
     # both A and its next candidate retain their identity locks on rollback.
     chosen = pick(await _journaled(db, room, game_id))
