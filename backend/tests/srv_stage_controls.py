@@ -58,8 +58,8 @@ ROWS = [
     {"row": "F1.H1.GAME", "node": RT + "test_fix1_h1_recorded_game_never_touches_the_next_window",
      "tag": "F1.H1 physical game",
      "mutant": [(MAIN,
-                 '    recorded = await _recorded_physical_report(db, mode, series_id, report, by_steam)\n',
-                 '    recorded = None\n', 1)]},
+                 '    recorded = await _recorded_physical_report(db, mode, series_id, report, by_steam)\n    if recorded is not None:\n',
+                 '    recorded = None\n    if recorded is not None:\n', 1)]},
     # NX1: the 1v2 Start issues its room without latching the hold flag.
     {"row": "M1.5", "node": WT + "test_t1_3_ovt_start_and_poll_carry_the_latched_flag",
      "tag": "T1.3 ovt start row",
@@ -199,13 +199,13 @@ ROWS.append({'row': 'F1.H4.RECEIPT',
  'node': 'test_match_hold_deletion_pg.py::test_fix1_h4_report_writers_guard_before_their_first_lock[route]',
  'tag': 'FIX1 H4 report guard',
  'mutant': [('backend/api/main.py',
-             '    by_steam = await _match_hold._guard_identities(db, keys)\n',
-             '    by_steam = {key: pid for key in keys if (pid := await _match_hold._player_id(db, '
+             '        by_steam = await _match_hold._guard_identities(db, keys)\n',
+             '        by_steam = {key: pid for key in keys if (pid := await _match_hold._player_id(db, '
              'key)) is not None}\n',
              1)],
  'twin': [('backend/api/main.py',
-           '    by_steam = await _match_hold._guard_identities(db, keys)\n',
-           '    by_steam = await _match_hold._guard_identities(db, (keys))\n',
+           '        by_steam = await _match_hold._guard_identities(db, keys)\n',
+           '        by_steam = await _match_hold._guard_identities(db, (keys))\n',
            1)]})
 ROWS.append({'row': 'F1.H4.DELETE_WINDOW',
  'node': 'test_match_hold_deletion_pg.py::test_fix1_h4_deletion_terminalizes_hold_without_journal[team]',
@@ -238,6 +238,9 @@ ROWS.append({'row': 'F1.H4.RETRY',
            '                    payload=(attempt["payload"]), reporter_id=attempt["reporter_id"],\n'
            '                    reporter_steam=attempt["reporter_steam"])\n',
            1)]})
+
+
+ROWS.append({'row': 'F1.H4.RECEIPT_BOUND', 'node': 'test_match_hold_deletion_pg.py::test_fix1_h4_receipt_identity_wait_is_bounded', 'tag': 'FIX1 H4 receipt bound', 'mutant': [('backend/api/main.py', '    async with _match_hold.database_deadline(db):\n        by_steam = await _match_hold._guard_identities(db, keys)\n', '    by_steam = await _match_hold._guard_identities(db, keys)\n', 1)], 'twin': [('backend/api/main.py', '    async with _match_hold.database_deadline(db):\n        by_steam = await _match_hold._guard_identities(db, keys)\n', '    async with _match_hold.database_deadline((db)):\n        by_steam = await _match_hold._guard_identities(db, keys)\n', 1)]})
 
 for _row in ROWS:
     if "twin" not in _row:

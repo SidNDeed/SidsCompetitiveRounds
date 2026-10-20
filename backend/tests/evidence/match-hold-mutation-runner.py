@@ -978,22 +978,10 @@ MUTANTS.update({'MERGED.FIX1.H4.WINDOW_RECEIVE': ('FIX1',
                                      '\n'
                                      '\n'
                                      'async def _guard_window_identities('),
-                                    ('    """Release only this causal hold\'s rows; arm acceptance '
-                                     'at its entry."""\n'
-                                     '    await _guard_window_identities(db, mode=mode, room=room, '
-                                     'game_id=game_id)\n',
-                                     '    """Release only this causal hold\'s rows; arm acceptance '
-                                     'at its entry."""\n'
-                                     '    await _unguarded_window_identities(db, mode=mode, '
-                                     'room=room, game_id=game_id)\n')],
-                                   [('    """Release only this causal hold\'s rows; arm acceptance '
-                                     'at its entry."""\n'
-                                     '    await _guard_window_identities(db, mode=mode, room=room, '
-                                     'game_id=game_id)\n',
-                                     '    """Release only this causal hold\'s rows; arm acceptance '
-                                     'at its entry."""\n'
-                                     '    await _guard_window_identities( db, mode=mode, '
-                                     'room=room, game_id=game_id)\n')],
+                                    ('    """Release entered causal holds together so class priority stays global.\n\n    The caller proved this hold entered and that no later live or nonentry\n    hold blocks release. Earlier entered holds become eligible together."""\n    await _guard_window_identities(db, mode=mode, room=room, game_id=game_id)\n',
+                                     '    """Release entered causal holds together so class priority stays global.\n\n    The caller proved this hold entered and that no later live or nonentry\n    hold blocks release. Earlier entered holds become eligible together."""\n    await _unguarded_window_identities(db, mode=mode, room=room, game_id=game_id)\n')],
+                                   [('    """Release entered causal holds together so class priority stays global.\n\n    The caller proved this hold entered and that no later live or nonentry\n    hold blocks release. Earlier entered holds become eligible together."""\n    await _guard_window_identities(db, mode=mode, room=room, game_id=game_id)\n',
+                                     '    """Release entered causal holds together so class priority stays global.\n\n    The caller proved this hold entered and that no later live or nonentry\n    hold blocks release. Earlier entered holds become eligible together."""\n    await _guard_window_identities( db, mode=mode, room=room, game_id=game_id)\n')],
                                    'test_match_hold_deletion_pg.py',
                                    'fix1_h4_report_writers_guard_before_their_first_lock'),
  'MERGED.FIX1.H4.WINDOW_SUPERSEDE': ('FIX1',

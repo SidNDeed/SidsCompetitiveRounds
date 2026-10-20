@@ -534,3 +534,47 @@ def test_fix1_h4_janitor_retry_reacquires_identity_guards(monkeypatch):
         await _fix1_h4_delete(env, s, 1, monkeypatch)
         await _fix1_h4_clean(env, s, 1)
     hold_test.run_env(monkeypatch, body, prefix="fix1h4retry")
+
+
+@pytest.mark.parametrize("mode", ["team", "ovt"])
+def test_fix1_h4_receipt_identity_wait_is_bounded(monkeypatch, mode):
+    """A deletion identity lock cannot outlive the report admission budget."""
+    async def body(env):
+        reports_test._mount(env, monkeypatch)
+        module = hold_test.match_hold
+        s, g, _ = await hold_test.opened_series(env, mode)
+        monkeypatch.setattr(module, "DB_LOCK_TIMEOUT_MS", 100)
+        monkeypatch.setattr(module, "DB_STATEMENT_TIMEOUT_MS", 250)
+        monkeypatch.setattr(module, "DB_REQUEST_TIMEOUT_S", 1.0)
+        blocker = env.conn.transaction()
+        await blocker.start()
+        await env.conn.execute("SELECT pg_advisory_xact_lock(hashtext($1))", s.steam(0))
+        rollbacks = []
+        rollback = AsyncSession.rollback
+
+        async def observed_rollback(db, *args, **kwargs):
+            result = await rollback(db, *args, **kwargs)
+            rollbacks.append(not db.in_transaction())
+            return result
+
+        monkeypatch.setattr(AsyncSession, "rollback", observed_rollback)
+        try:
+            try:
+                response = await asyncio.wait_for(
+                    reports_test.post_report(mode, s, 0, g), timeout=3)
+            except asyncio.TimeoutError as exc:
+                raise AssertionError(("FIX1 H4 receipt bound", mode, "watchdog expired")) from exc
+            assert response.status_code == 503 and response.json().get("detail") == "database_deadline", (
+                "FIX1 H4 receipt bound", mode, response.status_code, response.text)
+            assert rollbacks and all(rollbacks), ("FIX1 H4 receipt whole rollback", mode, rollbacks)
+        finally:
+            await blocker.rollback()
+            monkeypatch.setattr(AsyncSession, "rollback", rollback)
+        for table in ("match_report_windows", "match_report_journal"):
+            assert await env.conn.fetchval(
+                "SELECT count(*) FROM " + table + " WHERE room_name=$1", s.room) == 0, (
+                    "FIX1 H4 receipt no partial write", mode, table)
+        assert not await reports_test.recorded(env, mode, s), ("FIX1 H4 receipt no settlement", mode)
+        retried = await reports_test.post_report(mode, s, 0, g)
+        assert retried.status_code == 202, ("FIX1 H4 receipt retry", mode, retried.text)
+    hold_test.run_env(monkeypatch, body, prefix="fix1h4bound")

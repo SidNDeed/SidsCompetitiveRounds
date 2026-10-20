@@ -626,6 +626,34 @@ def test_merged_fix1_h2_held_receipts_outlive_first_receipt(monkeypatch):
     hold_test.run_env(monkeypatch, body, prefix="mergedh2e")
 
 
+def _observe_competing_identity_attempt(patch, env, attempted):
+    """Signal the competing request's first identity-lock execute call.
+
+    Context propagates through ASGI child tasks. The leader is already paused
+    while holding its locks; a downstream hook cannot observe this contender.
+    """
+    import contextvars
+    competing = contextvars.ContextVar("report_competing_request", default=False)
+    session_type = env.sm.class_
+    real_execute = session_type.execute
+
+    async def execute(db, statement, *args, **kwargs):
+        if (competing.get()
+                and "pg_advisory_xact_lock(hashtext(:sid))" in str(statement)):
+            attempted.set()
+        return await real_execute(db, statement, *args, **kwargs)
+
+    patch.setattr(session_type, "execute", execute)
+
+    async def run(request):
+        token = competing.set(True)
+        try:
+            return await request
+        finally:
+            competing.reset(token)
+    return run
+
+
 def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
     """Barrier-order receipt/open and receipt/end both ways, in both modes."""
     import asyncio
@@ -641,8 +669,6 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                 real_causal, real_decide = mrw._causal_hold, mh._open_decide
 
                 async def causal(*args, **kwargs):
-                    if first == "open":
-                        competing.set()
                     result = await real_causal(*args, **kwargs)
                     if first == "receipt":
                         ready.set()
@@ -650,8 +676,6 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                     return result
 
                 async def decide(*args, **kwargs):
-                    if first == "receipt":
-                        competing.set()
                     result = await real_decide(*args, **kwargs)
                     if first == "open":
                         ready.set()
@@ -659,6 +683,7 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                     return result
 
                 with monkeypatch.context() as patch:
+                    attempt = _observe_competing_identity_attempt(patch, env, competing)
                     patch.setattr(mrw, "_causal_hold", causal)
                     patch.setattr(mh, "_open_decide", decide)
                     async def receipt():
@@ -669,9 +694,12 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                     lead = asyncio.create_task(actions[first]())
                     await asyncio.wait_for(ready.wait(), 3)
                     other = "open" if first == "receipt" else "receipt"
-                    trail = asyncio.create_task(actions[other]())
-                    await asyncio.wait_for(competing.wait(), 3)
-                    release.set()
+                    trail = asyncio.create_task(attempt(actions[other]()))
+                    try:
+                        await asyncio.wait_for(competing.wait(), 3)
+                        assert not trail.done(), ("H2 competing identity attempt", mode, first)
+                    finally:
+                        release.set()
                     answers = await asyncio.wait_for(asyncio.gather(lead, trail), 7)
                 answer = answers[0] if first == "receipt" else answers[1]
                 opening_answer = answers[1] if first == "receipt" else answers[0]
@@ -688,8 +716,6 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                 real_causal, real_hold = mrw._causal_hold, mh._hold_row
 
                 async def causal(*args, **kwargs):
-                    if first == "end":
-                        competing.set()
                     result = await real_causal(*args, **kwargs)
                     if first == "receipt":
                         ready.set()
@@ -699,8 +725,6 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                 async def holdrow(*args, **kwargs):
                     if not kwargs.get("lock"):
                         return await real_hold(*args, **kwargs)
-                    if first == "receipt":
-                        competing.set()
                     result = await real_hold(*args, **kwargs)
                     if first == "end":
                         ready.set()
@@ -708,6 +732,7 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                     return result
 
                 with monkeypatch.context() as patch:
+                    attempt = _observe_competing_identity_attempt(patch, env, competing)
                     patch.setattr(mrw, "_causal_hold", causal)
                     patch.setattr(mh, "_hold_row", holdrow)
                     async def receipt():
@@ -719,9 +744,12 @@ def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
                     lead = asyncio.create_task(actions[first]())
                     await asyncio.wait_for(ready.wait(), 3)
                     other = "end" if first == "receipt" else "receipt"
-                    trail = asyncio.create_task(actions[other]())
-                    await asyncio.wait_for(competing.wait(), 3)
-                    release.set()
+                    trail = asyncio.create_task(attempt(actions[other]()))
+                    try:
+                        await asyncio.wait_for(competing.wait(), 3)
+                        assert not trail.done(), ("H2 competing identity attempt", mode, first)
+                    finally:
+                        release.set()
                     answers = await asyncio.wait_for(asyncio.gather(lead, trail), 7)
                 response = answers[0] if first == "receipt" else answers[1]
                 ending_answer = answers[1] if first == "receipt" else answers[0]
@@ -892,7 +920,6 @@ def test_merged_fix1_m1_quarantine_preserves_window_transaction(monkeypatch):
                 paused, release, competitor_started = (asyncio.Event() for _ in range(3))
                 captures = []
                 real_capture = main._quarantine_report
-                real_receive = main._report_window_receive
 
                 async def capture(*args, **kwargs):
                     result = await real_capture(*args, **kwargs)
@@ -908,10 +935,6 @@ def test_merged_fix1_m1_quarantine_preserves_window_transaction(monkeypatch):
                     # Python exception that leaves the transaction usable.
                     await db.execute(main.text("SELECT 1 / 0"))
 
-                async def competing_receive(*args, **kwargs):
-                    competitor_started.set()
-                    return await real_receive(*args, **kwargs)
-
                 async def first_dispatch():
                     if dispatch == "immediate":
                         return await post_report("team", s, low, g)
@@ -921,6 +944,7 @@ def test_merged_fix1_m1_quarantine_preserves_window_transaction(monkeypatch):
                         return await main._finish_held_reports(db, "team", s.room, g, hid)
 
                 with monkeypatch.context() as patch:
+                    attempt = _observe_competing_identity_attempt(patch, env, competitor_started)
                     patch.setattr(main, "_quarantine_report", capture)
                     if variant == "failure":
                         patch.setattr(main, "_quarantine_on_file", failure)
@@ -937,8 +961,7 @@ def test_merged_fix1_m1_quarantine_preserves_window_transaction(monkeypatch):
                         except asyncpg.LockNotAvailableError:
                             locked = True
                         assert locked, ("M1 owner transaction", dispatch, variant, locked)
-                        patch.setattr(main, "_report_window_receive", competing_receive)
-                        other = asyncio.create_task(post_report("team", s, low, g))
+                        other = asyncio.create_task(attempt(post_report("team", s, low, g)))
                         await asyncio.wait_for(competitor_started.wait(), 10)
                         assert not other.done(), ("M1 competing receipt waits", dispatch, variant)
                     finally:

@@ -28,12 +28,11 @@ identity guards precede the window lock; settled_at is written once.
 
 import hashlib
 import hmac
-import json
+import json as _window_json
 from datetime import timedelta
 
-from fastapi import HTTPException
+from fastapi import HTTPException as _WindowHTTPException
 from sqlalchemy import text
-from fastapi import HTTPException
 
 from match_hold import BEAT_FRESH_S, database_deadline
 
@@ -171,7 +170,7 @@ async def fresh_class_c_steams(db, *, room, game_id, member_ids, now):
 
 def _payload_identity_keys(mode, payload):
     """The typed report's copied identity fields; the signed payload stays intact."""
-    stored = json.loads(payload) if isinstance(payload, str) else (payload or {})
+    stored = _window_json.loads(payload) if isinstance(payload, str) else (payload or {})
     fields = ("t1a", "t1b", "t2a", "t2b") if mode == "team" else ("solo", "duo_a", "duo_b")
     out = {stored[k].get("steam_id") for k in fields if isinstance(stored.get(k), dict)}
     out.add(stored.get("reported_by_steam_id"))
@@ -345,7 +344,7 @@ async def journal(db, *, mode, room, game_id, reporter_id, reporter_steam, cls, 
     if (str(live.get(reporter_steam)) != str(reporter_id)
             or any(key not in live for key in keys)
             or (roster is not None and any(live[key] not in roster for key in keys))):
-        raise HTTPException(404, "One or more players not registered")
+        raise _WindowHTTPException(404, "One or more players not registered")
     inserted = (await db.execute(text(
         "INSERT INTO match_report_journal (room_name, game_id, reporter_id, mode,"
         "        reporter_steam, cls, state, payload, received_at)"
@@ -376,7 +375,7 @@ async def _journaled(db, room, game_id):
         {"room": room, "g": str(game_id)})).mappings().all()
 
 
-class PermanentReportRefusal(HTTPException):
+class PermanentReportRefusal(_WindowHTTPException):
     """A settle validation that the immutable physical report cannot repair.
 
     Authentication, rate limits, conflicts, timeouts and unknown failures do
@@ -435,12 +434,12 @@ async def _settle_and_mark(db, room, game_id, chosen, now, settle):
         # A JSON round trip snapshots the exact immutable evidence attempted.
         payload = chosen["payload"]
         if isinstance(payload, str):
-            payload = json.loads(payload)
+            payload = _window_json.loads(payload)
         exc.attempted_report = {
             "reporter_id": str(chosen["reporter_id"]),
             "reporter_steam": chosen["reporter_steam"], "cls": chosen["cls"],
             "received_at": chosen["received_at"],
-            "payload": json.dumps(payload, sort_keys=True),
+            "payload": _window_json.dumps(payload, sort_keys=True),
         }
         raise
     await _mark_settled(db, room, game_id, chosen, now)
@@ -451,7 +450,7 @@ async def _mark_settled(db, room, game_id, chosen, now):
     owners, _, _ = await _guard_window_identities(
         db, room=room, game_id=game_id, reporter_id=chosen["reporter_id"])
     if str(chosen["reporter_id"]) not in {str(pid) for pid in owners}:
-        raise HTTPException(404, "One or more players not registered")
+        raise _WindowHTTPException(404, "One or more players not registered")
     await db.execute(text(
         "UPDATE match_report_windows SET settled_at = CAST(:now AS timestamptz),"
         "       settled_reporter_id = CAST(:pid AS uuid), settled_cls = CAST(:cls AS varchar)"
@@ -549,9 +548,9 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
     if held:
         await _hold_window(db, window, room=room, game_id=game_id)
         if hold is not None:
-            stored = json.loads(payload) if isinstance(payload, str) else dict(payload)
+            stored = _window_json.loads(payload) if isinstance(payload, str) else dict(payload)
             stored["_causal_hold_id"] = str(hold["id"])
-            payload = json.dumps(stored)
+            payload = _window_json.dumps(stored)
     elif closure is not None:
         window = await _arm_window(db, window, room=room, game_id=game_id, at=closure[0])
     elif window["settle_after"].year == 9999:
