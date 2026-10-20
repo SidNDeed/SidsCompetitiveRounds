@@ -29,6 +29,7 @@ SOURCES = {
     "PoisonSyncSource": "PoisonSync.cs",
     "ReplicaSource": "NetworkReplicaDiagnostics.cs",
     "PluginSource": "Plugin.cs",
+    "WatcherSource": "GameStateWatcher.cs",
 }
 COMPILED_SOURCES = {"StallSource", "JitterSource", "PoisonSource", "LagSource", "FocusSource"}
 # DecimatedList lives inside GameStateWatcher.cs (never moved, so the
@@ -110,6 +111,21 @@ def structural_pins(overrides=None):
         'string upkeepBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, evidenceLive);',
         'string stateLine = _v3Log.State(state);')
     pins.update(m4_pins(overrides))
+    watcher = source_text("WatcherSource", overrides)
+    tick = method_text(watcher, "public static void TickFrame()")
+    pins["m5_focus_order"] = ordered_once(tick,
+        "if (!isTracking) { _lastTickStopwatchMs = -1; return; }",
+        "float dt = Time.unscaledDeltaTime;",
+        "FpsFocusCore.ObserveFrame(tlUnfocused, Application.isFocused, dt)",
+        "if (dt <= 0f || dt > 1f) return;",
+        "fpsFrameCount++;",
+        "fpsTimeAccum += dt;",
+        "tlFrames++; tlAccum += dt;",
+        "if (tlAccum >= 5f)",
+        "localFpsTimeline.Add((int)Math.Round(tlFrames / (double)tlAccum));",
+        "localFpsFocusTimeline.Add(FpsFocusCore.BucketFlag(tlUnfocused));",
+        "tlUnfocused = false;")
+
     return pins
 
 
@@ -176,6 +192,20 @@ def extract_decimated():
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
 MUTANTS = [
+
+    ("m5_outlier_focus_skipped", "FocusSource",
+     [("            return anyUnfocusedFrame || !focused;\n",
+       "            return anyUnfocusedFrame || (dt > 0f && dt <= 1f && !focused);\n")],
+     "focus_outlier_unfocused", "focus_all_focused"),
+    ("m5_focus_polarity_inverted", "FocusSource",
+     [("            return anyUnfocusedFrame || !focused;\n",
+       "            return anyUnfocusedFrame || focused;\n")],
+     "focus_all_focused", "focus_outlier_unfocused"),
+    ("m5_observation_below_return", "WatcherSource",
+     [("            try { tlUnfocused = FpsFocusCore.ObserveFrame(tlUnfocused, Application.isFocused, dt); } catch { }\n", ""),
+      ("            tlFrames++; tlAccum += dt;\n",
+       "            tlFrames++; tlAccum += dt;\n            try { tlUnfocused = FpsFocusCore.ObserveFrame(tlUnfocused, Application.isFocused, dt); } catch { }\n")],
+     "focus_outlier_unfocused", "focus_all_focused"),
     ("m4_zero_window_suppressed", "LagSource",
      [('            return "[LAG-NOTICE-GATE] windows=" + _gWindows.ToString(CultureInfo.InvariantCulture)',
        '            if (_gWindows <= 0) return null;\n            return "[LAG-NOTICE-GATE] windows=" + _gWindows.ToString(CultureInfo.InvariantCulture)')],

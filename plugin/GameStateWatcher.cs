@@ -2121,13 +2121,13 @@ namespace CompetitiveRounds
             }
             _lastTickStopwatchMs = nowMs;
             FlushFreezeBandSummary(false);
+            try { tlUnfocused = FpsFocusCore.ObserveFrame(tlUnfocused, Application.isFocused, dt); } catch { }
             if (dt <= 0f || dt > 1f) return; // skip pause / first-frame outliers (freeze recorded above)
             fpsFrameCount++;
             fpsTimeAccum += dt;
             fpsBroadcastTimer += dt;
             // 5s fps timeline bucket (own side)
             tlFrames++; tlAccum += dt;
-            try { if (!Application.isFocused) tlUnfocused = true; } catch { }
             if (tlAccum >= 5f)
             {
                 localFpsTimeline.Add((int)Math.Round(tlFrames / (double)tlAccum));

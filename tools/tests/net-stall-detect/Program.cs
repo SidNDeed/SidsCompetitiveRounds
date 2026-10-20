@@ -26,6 +26,8 @@ namespace NetStallTests
         {
             var cases = new List<KeyValuePair<string, Func<string>>>
             {
+    new KeyValuePair<string, Func<string>>("focus_outlier_unfocused", () => FocusTrackedBucket(true)),
+    new KeyValuePair<string, Func<string>>("focus_all_focused", () => FocusTrackedBucket(false)),
                 new KeyValuePair<string, Func<string>>("lag_gate_subsecond_end", () => Pin("m4_game_end") ?? LagGateZeroWindow(true)),
                 new KeyValuePair<string, Func<string>>("lag_gate_disconnect_before_window", () => Pin("m4_disconnect") ?? LagGateZeroWindow(false)),
                 new KeyValuePair<string, Func<string>>("lag_gate_repeated_end", LagGateRepeatedEnd),
@@ -743,6 +745,43 @@ namespace NetStallTests
         }
 
         // ── the focus flag beside each fps bucket ────────────────────────
+
+        private static string FocusTrackedBucket(bool unfocusedOutlier)
+        {
+            if (unfocusedOutlier)
+            {
+                string pin = Pin("m5_focus_order");
+                if (pin != null) return pin;
+            }
+            bool anyUnfocused = false;
+            int frames = 0, accepted = 0, excluded = 0, closes = 0, flag = -1;
+            float bucketTime = 0f, acceptedTime = 0f, closedTime = 0f;
+            int closedFrames = 0, fps = -1;
+            for (int frame = 0; frame < 11; frame++)
+            {
+                bool outlier = frame == 4;
+                float dt = outlier ? 1.2f : 0.5f;
+                bool focused = !outlier || !unfocusedOutlier;
+                anyUnfocused = FpsFocusCore.ObserveFrame(anyUnfocused, focused, dt);
+                if (dt <= 0f || dt > 1f) { excluded++; continue; }
+                accepted++; acceptedTime += dt;
+                frames++; bucketTime += dt;
+                if (bucketTime >= 5f)
+                {
+                    closes++;
+                    closedFrames = frames; closedTime = bucketTime;
+                    fps = (int)Math.Round(frames / (double)bucketTime);
+                    flag = FpsFocusCore.BucketFlag(anyUnfocused);
+                    anyUnfocused = false;
+                    frames = 0; bucketTime = 0f;
+                }
+            }
+            if (accepted != 10 || excluded != 1 || acceptedTime != 5f) return "FPS outlier exclusion changed";
+            if (closes != 1 || closedFrames != 10 || closedTime != 5f || fps != 2) return "not one complete five-second bucket";
+            if (flag != (unfocusedOutlier ? 0 : 1)) return "bucket flag " + flag + " for " + (unfocusedOutlier ? "unfocused" : "focused") + " outlier";
+            if (anyUnfocused || frames != 0 || bucketTime != 0f) return "bucket did not reset";
+            return null;
+        }
 
         private static string FocusLockstep()
         {

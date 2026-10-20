@@ -18,6 +18,13 @@ namespace CompetitiveRounds
     /// </summary>
     internal static class FpsFocusCore
     {
+        // Observe every tracked frame before the caller excludes an FPS
+        // outlier. dt is deliberately not a gate on the focus evidence.
+        internal static bool ObserveFrame(bool anyUnfocusedFrame, bool focused, float dt)
+        {
+            return anyUnfocusedFrame || !focused;
+        }
+
         internal static int BucketFlag(bool anyUnfocusedFrame) { return anyUnfocusedFrame ? 0 : 1; }
 
         internal static string Encode(IList<int> flags)
