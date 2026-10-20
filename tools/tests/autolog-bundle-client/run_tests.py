@@ -41,6 +41,38 @@ MUTANTS = [
 ]
 
 
+# Structural mutants use the SAME oracle as the DSN-free pytest source gate.
+# Each replacement anchor occurs once; no scheduler race is needed to reject
+# removal of the worker's publication and consumption locks.
+STRUCTURAL_MUTANTS = [
+    ("l1_publication_consumption_locks_removed", (
+        ("lock (_gate) { _ready = r; _readyThreadId = id; }",
+         "{ _ready = r; _readyThreadId = id; }"),
+        ("lock (_gate)\n                {\n                    done = _readyThreadId != 0;",
+         "{\n                    done = _readyThreadId != 0;"),
+    ), "job_locks", "job_locks"),
+]
+
+
+def check_job_locks(source):
+    from pathlib import Path
+    tests = os.path.join(REPO, "backend", "tests")
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, tests)
+    try:
+        from test_auto_log_client import assert_offmain_job_locks
+        assert_offmain_job_locks(Path(source))
+        return 0, "PASS job_locks"
+    except AssertionError as exc:
+        return 1, "FAIL job_locks: " + str(exc)
+    except Exception as exc:
+        return 2, "ERROR job_locks: oracle error " + type(exc).__name__
+    finally:
+        sys.path.pop(0)
+        sys.dont_write_bytecode = previous
+
+
 def sha(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
@@ -108,7 +140,35 @@ def main():
         for line in tout.splitlines():
             if "FAIL" in line:
                 print("    " + line.strip())
-    print("mutants: %d of %d caught" % (caught, len(MUTANTS)))
+    for name, edits, target, control in STRUCTURAL_MUTANTS:
+        mutated = raw
+        valid = True
+        for old, new in edits:
+            o, n = old.replace("\n", nl), new.replace("\n", nl)
+            count = mutated.count(o)
+            if count != 1:
+                print("BAD mutant %s: anchor occurs %d times" % (name, count))
+                ok = False
+                valid = False
+                break
+            mutated = mutated.replace(o, n, 1)
+        if not valid:
+            continue
+        path = os.path.join(WORK, "mut_" + name + ".cs")
+        open(path, "wb").write(mutated.encode("utf-8"))
+        trc, tout = check_job_locks(path)
+        crc, cout = check_job_locks(CORE)
+        hit = trc == 1 and crc == 0
+        caught += hit
+        ok = ok and hit
+        print("%s mutant %s: target %s=%s; control %s=%s" % (
+            "CAUGHT" if hit else "MISSED", name, target, "FAIL" if trc else "PASS",
+            control, "PASS" if crc == 0 else "FAIL"))
+        if trc:
+            print("    " + tout)
+        if crc:
+            print("    " + cout)
+    print("mutants: %d of %d caught" % (caught, len(MUTANTS) + len(STRUCTURAL_MUTANTS)))
     after = sha(CORE)
     print("tracked file unchanged:", after == before)
     ok = ok and after == before

@@ -114,6 +114,48 @@ def _bug_form_worker() -> str:
     return _job_delegate(COMPETITIVE_UI, "_bugFormJob.Start(", "ex => new BugFormBundle")
 
 
+def assert_offmain_job_locks(source) -> None:
+    """Shared structural oracle for pytest and the harness's mutated copy.
+
+    Only the two lock bodies may read or write the publication fields; the
+    class's field declarations are the sole allowed occurrences outside them.
+    Masks exclude comments, strings and inactive branches from this decision.
+    """
+    job = mask_code(cs_block(source, "internal sealed class OffMainJob<T>"))
+    assert len(re.findall(r"\block\s*\(\s*_gate\s*\)", job)) == 2, \
+        "OffMainJob must have exactly two shared-gate locks"
+    assert "private readonly object _gate = new object();" in " ".join(job.split()), \
+        "OffMainJob lost its one shared gate"
+    locked = []
+    for signature, role, expected in (
+        ("internal bool Start(", "publication", ("_ready = r;", "_readyThreadId = id;")),
+        ("internal T TakeFinished(", "consumption", (
+            "done = _readyThreadId != 0;", "r = _ready;",
+            "workerThreadId = _readyThreadId;", "_ready = null;", "_readyThreadId = 0;")),
+    ):
+        method = cs_block(job, signature)
+        assert len(re.findall(r"\block\s*\(\s*_gate\s*\)", method)) == 1, \
+            role + " must have exactly one shared-gate lock"
+        body = cs_block(method, "lock (_gate)")
+        compact = " ".join(body.split())
+        for statement in expected:
+            assert compact.count(statement) == 1, role + " lock lost " + statement
+        locked.append(body)
+    outside = job
+    for body in locked:
+        assert outside.count(body) == 1, "publication lock body is not unique"
+        outside = outside.replace(body, "", 1)
+    outside, declarations = re.subn(
+        r"\bprivate\s+(?:T|int)\s+_ready(?:ThreadId)?\s*;", "", outside)
+    assert declarations == 2, "publication fields are not declared exactly once each"
+    assert not re.search(r"\b_ready(?:ThreadId)?\b", outside), \
+        "publication fields are read or written outside their shared-gate locks"
+
+
+def test_the_job_publishes_and_consumes_under_one_lock():
+    assert_offmain_job_locks(LOG_BUNDLE_CORE)
+
+
 def test_the_bundle_is_composed_on_a_background_thread():
     # One mechanism for both producers: LogBundleCore.OffMainJob starts the
     # only thread, and it is a background one. Control: delete either of
