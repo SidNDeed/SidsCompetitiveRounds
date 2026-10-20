@@ -26,6 +26,7 @@
   <ItemGroup>
     <Compile Include="$(CoreSource)" />
     <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\LogScrub.cs" />
   </ItemGroup>
 
 </Project>

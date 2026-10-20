@@ -36,6 +36,7 @@ namespace AutologBundleTests
                 { "snapshot", Snapshot },
                 { "changing_file", ChangingFile },
                 { "compose", Compose },
+                { "compose_real_scrub", ComposeRealScrub },
                 { "offmain", OffMain },
                 { "busy", Busy },
                 { "clock", Clock },
@@ -312,6 +313,78 @@ namespace AutologBundleTests
             string withheld = LogBundleCore.Compose(cur, prev, uni, "AUDIO", capCur, capPrev, capUni, total, Refuse, info3);
             Check(info3.Scrubbed == -1, where, "a refused scrub is not reported as -1");
             Check(!withheld.Contains(curBanner), where, "a refused scrub still returned log text");
+        }
+
+        private static string RealScrub(string text, out int replacements)
+        {
+            return LogScrub.Scrub(text, "abc", null, out replacements);
+        }
+
+        private static string ExpandingLog(string banner, string headSentinel, string tailSentinel)
+        {
+            var text = new StringBuilder(banner);
+            while (text.Length + 4 <= 200_000 - headSentinel.Length) text.Append("abc\n");
+            while (text.Length < 200_000 - headSentinel.Length) text.Append('a');
+            text.Append(headSentinel);
+            while (text.Length < 2_000_000) text.Append("abc\n");
+            return text.Append(tailSentinel).ToString();
+        }
+
+        private static void ComposeRealScrub()
+        {
+            const string where = "compose_real_scrub";
+            string[] banners = { "PREV-EXPAND\n", "CUR-EXPAND\n", "UNI-EXPAND\n" };
+            string[] heads = { "PREV-HEAD-END\n", "CUR-HEAD-END\n", "UNI-HEAD-END\n" };
+            string[] tails = { "PREV-TAIL-END\n", "CUR-TAIL-END\n", "UNI-TAIL-END\n" };
+            string[] texts = new string[3], paths = new string[3];
+            int[] caps = { 1_000_000, 1_500_000, 1_000_000 };
+            for (int i = 0; i < 3; i++)
+            {
+                texts[i] = ExpandingLog(banners[i], heads[i], tails[i]);
+                paths[i] = Write("expanding-" + i + ".log", texts[i]);
+            }
+            var info = new LogBundleCore.ComposeInfo();
+            string got = LogBundleCore.Compose(paths[1], paths[0], paths[2], "AUDIO-EXPAND-LAST",
+                caps[1], caps[0], caps[2], 3_500_000, RealScrub, info);
+            Check(got.Length <= 3_500_000, where, "real scrub expansion escaped the sender cap");
+            Check(info.Attempts >= 2 && info.Scrubbed > 0, where, "the expanding scrub was not measured while fitting");
+            Check(Count(got, LogBundleCore.CapMarkerTag) == 3, where, "a section or its one cap marker was discarded");
+            Check(got.TrimEnd().EndsWith("AUDIO-EXPAND-LAST", StringComparison.Ordinal), where, "audio is not last");
+            string[] headers = { "===== BepInEx LogOutput-prev.log", "===== BepInEx LogOutput.log", "===== Unity Player.log", "===== audio self-check" };
+            int last = -1;
+            for (int i = 0; i < 3; i++)
+            {
+                int section = got.IndexOf(headers[i], StringComparison.Ordinal);
+                int next = got.IndexOf(headers[i + 1], StringComparison.Ordinal);
+                Check(section > last && next > section, where, "section order or presence changed");
+                last = section;
+                if (section < 0 || next <= section) continue;
+                int content = got.IndexOf('\n', section) + 1;
+                int end = next - 2 * Environment.NewLine.Length;
+                string chunk = got.Substring(content, end - content);
+                Match m = Marker(chunk, where);
+                Check(chunk.Contains(banners[i]) && chunk.Contains(heads[i]) && chunk.EndsWith(tails[i], StringComparison.Ordinal),
+                      where, "a fitted section lost its head sentinel or tail sentinel");
+                if (m == null) continue;
+                int from = int.Parse(m.Groups[1].Value), to = int.Parse(m.Groups[2].Value);
+                Check(from == 200_000 && int.Parse(m.Groups[4].Value) == Encoding.UTF8.GetByteCount(texts[i]),
+                      where, "a fitted marker changed the reserved head or sampled byte size");
+                Check(to > from && to < texts[i].Length && int.Parse(m.Groups[3].Value) == to - from
+                      && int.Parse(m.Groups[5].Value) == from && int.Parse(m.Groups[6].Value) == texts[i].Length - to,
+                      where, "a fitted marker reports false retained intervals");
+                Check(int.Parse(m.Groups[7].Value) == caps[i], where, "the production file cap changed");
+                if (to < from || to > texts[i].Length) continue;
+                string raw = texts[i].Substring(0, from) + m.Value + "\n" + texts[i].Substring(to);
+                Check(raw.Length <= caps[i], where, "a fitted section exceeded its original file cap");
+                int ignored;
+                Check(chunk == RealScrub(raw, out ignored), where, "fitted marker does not describe the scrubbed captured intervals");
+                Check(chunk.IndexOf('\uFFFD') < 0, where, "fitting introduced U+FFFD");
+            }
+            var tinyInfo = new LogBundleCore.ComposeInfo();
+            string tiny = LogBundleCore.Compose(paths[1], paths[0], paths[2], "AUDIO",
+                caps[1], caps[0], caps[2], 100, RealScrub, tinyInfo);
+            Check(tiny.Length <= 100 && tinyInfo.Scrubbed == -1 && !tiny.Contains(banners[0]), where,
+                  "mandatory content that cannot fit did not fail closed within the cap");
         }
 
         // ---- the off-main job -----------------------------------------------

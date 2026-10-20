@@ -77,7 +77,12 @@ namespace CompetitiveRounds
 
             internal bool FitFileCap()
             {
-                TailBudget = Tail.Length;
+                return FitFileCap(Tail.Length);
+            }
+
+            internal bool FitFileCap(int tailChars)
+            {
+                TailBudget = Math.Min(Tail.Length, Math.Max(0, tailChars));
                 for (int attempt = 0; attempt < 8; attempt++)
                 {
                     int over = Render(TailBudget).Length - Cap;
@@ -151,11 +156,11 @@ namespace CompetitiveRounds
             var utf8 = new UTF8Encoding(false, true);
             if (sampledLength <= maxChars)
             {
-                string all = ReadWhole(fs, sampledLength, maxChars);
+                int bom;
+                string all = ReadWhole(fs, sampledLength, maxChars, out bom);
                 int keep = PrefixEnd(all, head);
                 result.Head = all.Substring(0, keep);
                 result.Tail = all.Substring(keep);
-                int bom = sampledLength >= 3 && HasUtf8Bom(ReadExactly(fs, 0, 3, sampledLength), 3) ? 3 : 0;
                 result.HeadBytes = bom + Encoding.UTF8.GetByteCount(result.Head);
                 result.TailStart = result.HeadBytes;
                 return result;
@@ -210,10 +215,10 @@ namespace CompetitiveRounds
                 CapMarkerTag, omitFrom, omitTo, omitTo - omitFrom, fileBytes, fileBytes - omitTo, cap);
         }
 
-        private static string ReadWhole(FileStream fs, long sampledLength, int maxChars)
+        private static string ReadWhole(FileStream fs, long sampledLength, int maxChars, out int bom)
         {
             byte[] all = ReadExactly(fs, 0, (int)sampledLength, sampledLength);
-            int bom = HasUtf8Bom(all, all.Length) ? 3 : 0;
+            bom = HasUtf8Bom(all, all.Length) ? 3 : 0;
             return new UTF8Encoding(false, true).GetString(all, bom, all.Length - bom);
         }
 
@@ -271,44 +276,59 @@ namespace CompetitiveRounds
             internal int Attempts;
         }
 
-        /// <summary>
-        /// THREAD-SAFE: reads, assembles and scrubs the bundle. Sections in
-        /// the order the senders have always received them: previous session,
-        /// current BepInEx, Unity, audio self-check. Each file goes through
-        /// ReadCapped, so each keeps its head.
-        ///
-        /// The senders keep the TAIL-most <paramref name="totalCap"/> chars of
-        /// whatever they are handed, so a bundle over that cap would lose the
-        /// head of its FIRST section (the previous session's banner). Compose
-        /// therefore fits the scrubbed text under the cap itself: when it is
-        /// over, the previous session's budget comes down by the overflow and
-        /// that section alone is read again (its head is still kept; only its
-        /// tail window shrinks). At most three attempts; the per-file caps
-        /// are upper bounds and none is raised.
-        /// </summary>
+        /// <summary>Capture each file once. Every fit keeps that capture's
+        /// decoded head, reduces only tail windows, and measures the real scrub.
+        /// The final attempt is heads-only; an over-cap mandatory payload is
+        /// withheld, so no successful composition reaches a sender over its cap.</summary>
         internal static string Compose(string bepPath, string bepPrevPath, string uniPath, string audioSnapshot,
                                        int capBep, int capBepPrev, int capUni, int totalCap,
                                        ScrubFn scrub, ComposeInfo info)
         {
             if (info == null) info = new ComposeInfo();
             info.ThreadId = Thread.CurrentThread.ManagedThreadId;
-            string bep = ReadCapped(bepPath, capBep);
-            string uni = ReadCapped(uniPath, capUni);
-            int prevCap = capBepPrev;
+            var windows = new[] {
+                CaptureFile(bepPrevPath, capBepPrev, HEAD_KEEP_CHARS, null),
+                CaptureFile(bepPath, capBep, HEAD_KEEP_CHARS, null),
+                CaptureFile(uniPath, capUni, HEAD_KEEP_CHARS, null)
+            };
+            int initialPrevTail = windows[0].TailBudget;
+            Func<bool, string> assemble = headsOnly => Assemble(bepPath, bepPrevPath, uniPath, audioSnapshot,
+                windows[1].Render(headsOnly ? 0 : windows[1].TailBudget),
+                windows[0].Render(headsOnly ? 0 : windows[0].TailBudget),
+                windows[2].Render(headsOnly ? 0 : windows[2].TailBudget),
+                capBep, capBepPrev, capUni);
             string cleaned = null;
+            string reserved = null;
             int scrubbed = 0;
-            for (int attempt = 1; attempt <= 3; attempt++)
+            for (int attempt = 1; attempt <= 8; attempt++)
             {
                 info.Attempts = attempt;
-                string bepPrev = ReadCapped(bepPrevPath, prevCap);
-                string text = Assemble(bepPath, bepPrevPath, uniPath, audioSnapshot,
-                                       bep, bepPrev, uni, capBep, capBepPrev, capUni);
-                cleaned = scrub(text, out scrubbed);
+                cleaned = scrub(assemble(false), out scrubbed);
                 if (cleaned == null) break;
-                info.PrevCapUsed = prevCap;
-                if (cleaned.Length <= totalCap || string.IsNullOrEmpty(bepPrev) || prevCap <= 0) break;
-                int over = cleaned.Length - totalCap;
-                prevCap = Math.Max(0, prevCap - over - 4096);
+                info.PrevCapUsed = capBepPrev - (initialPrevTail - windows[0].TailBudget);
+                if (cleaned.Length <= totalCap) break;
+                if (reserved == null)
+                {
+                    int ignored;
+                    reserved = scrub(assemble(true), out ignored);
+                    if (reserved == null) { cleaned = null; break; }
+                }
+                if (reserved.Length > totalCap || attempt == 8)
+                {
+                    info.Scrubbed = -1;
+                    info.Diagnostic = "[LOG-SCRUB] log bundle withheld: required heads exceed the sender cap";
+                    const string unavailable = "[log bundle withheld: required heads exceed the sender cap]";
+                    return totalCap >= unavailable.Length ? unavailable : "";
+                }
+                // Compare actual scrubbed full and head-only payloads. This
+                // reserves every head and budgets the expansion of all tails.
+                double ratio = (double)(totalCap - reserved.Length) / (cleaned.Length - reserved.Length);
+                for (int i = 0; i < windows.Length; i++)
+                {
+                    int tail = windows[i].TailBudget;
+                    int next = attempt == 7 ? 0 : Math.Min(Math.Max(0, tail - 1), (int)(tail * ratio));
+                    windows[i].FitFileCap(next);
+                }
             }
             if (cleaned == null)
             {
