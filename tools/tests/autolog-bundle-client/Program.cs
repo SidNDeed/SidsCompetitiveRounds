@@ -40,6 +40,9 @@ namespace AutologBundleTests
                 { "offmain", OffMain },
                 { "busy", Busy },
                 { "clock", Clock },
+                { "voice_counts", VoiceCounts },
+                { "voice_visit_budget", VoiceVisitBudget },
+                { "voice_elapsed_budget", VoiceElapsedBudget },
             };
             var run = args.Length == 0 ? new List<string>(cases.Keys) : new List<string>(args);
             try
@@ -112,6 +115,66 @@ namespace AutologBundleTests
             "[Info   :Competitive ROUNDS] Competitive ROUNDS v1.41.0 loaded! [SCR_BUILD_VARIANT=STANDALONE]\n" +
             "[Info   :Competitive ROUNDS] [BUILD-PROP] staged cr_build=1.41.0|standalone|0123456789ab\n" +
             "[Info   :Competitive ROUNDS] Patches applied: 321 ok, 0 failed\n";
+
+        // ---- bounded audio capture ----------------------------------------
+
+        private static System.Collections.IDictionary VoiceRegistry(int count)
+        {
+            var voices = new object[count];
+            for (int i = 0; i < count; i++) voices[i] = i % 2 == 0;
+            var instances = new System.Collections.Hashtable
+            {
+                { "instance", new object[] { voices } }
+            };
+            return new System.Collections.Hashtable { { "event", instances } };
+        }
+
+        private static bool CountVoices(System.Collections.IDictionary events, int visits,
+            long ticks, Func<long> clock, out int active, out int slots)
+        {
+            return LogBundleCore.TryCountVoicesBounded(events,
+                e => (System.Collections.IDictionary)e, i => (Array)i, h => (Array)h,
+                v => (bool)v, visits, ticks, clock, out active, out slots);
+        }
+
+        private static void VoiceCounts()
+        {
+            const string where = "voice_counts";
+            int active, slots;
+            bool ok = CountVoices(VoiceRegistry(6), 9, 100, () => 0, out active, out slots);
+            Check(ok && active == 3 && slots == 6, where,
+                "under-limit registry did not return exact complete counts");
+        }
+
+        private static void VoiceVisitBudget()
+        {
+            const string where = "voice_visit_budget";
+            int active, slots;
+            bool ok = CountVoices(VoiceRegistry(5000), 64, 100, () => 0, out active, out slots);
+            Check(!ok && active == 0 && slots == 0, where,
+                "visit exhaustion returned success or partial counts");
+            var sparse = new System.Collections.Hashtable();
+            for (int i = 0; i < 5000; i++) sparse.Add(i, null);
+            ok = CountVoices(sparse, 64, 100, () => 0, out active, out slots);
+            Check(!ok && active == 0 && slots == 0, where,
+                "null registry entries escaped the visit limit");
+        }
+
+        private static void VoiceElapsedBudget()
+        {
+            const string where = "voice_elapsed_budget";
+            int active, slots;
+            long now = 0;
+            bool ok = CountVoices(VoiceRegistry(30), 100, 12, () => ++now, out active, out slots);
+            Check(!ok && active == 0 && slots == 0, where,
+                "elapsed exhaustion returned success or partial counts");
+            now = 0;
+            ok = LogBundleCore.TryCountVoicesBounded(VoiceRegistry(1),
+                e => (System.Collections.IDictionary)e, i => (Array)i, h => (Array)h,
+                v => { now = 20; return (bool)v; }, 100, 12, () => now, out active, out slots);
+            Check(!ok && active == 0 && slots == 0, where,
+                "last accessor crossed the elapsed limit without failing closed");
+        }
 
         // ---- the capped read ----------------------------------------------
 

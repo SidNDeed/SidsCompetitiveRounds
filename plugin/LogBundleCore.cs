@@ -366,6 +366,67 @@ namespace CompetitiveRounds
             return sb.ToString();
         }
 
+        // ---- bounded audio-registry walk ---------------------------------
+
+        /// <summary>Pure walk over captured accessors. Every registry entry or
+        /// array slot costs one visit, including null entries. elapsedTicks is
+        /// elapsed work from the caller's start, not a wall-clock timestamp.
+        /// Failed or exhausted captures publish no partial counts.</summary>
+        internal static bool TryCountVoicesBounded(System.Collections.IDictionary eventDict,
+            Func<object, System.Collections.IDictionary> transformsOf,
+            Func<object, Array> holdersOf, Func<object, Array> voicesOf,
+            Func<object, bool> voiceIsLive, int visitLimit, long elapsedLimitTicks,
+            Func<long> elapsedTicks, out int active, out int slots)
+        {
+            active = 0;
+            slots = 0;
+            if (eventDict == null || visitLimit <= 0 || elapsedLimitTicks <= 0) return false;
+            int visits = 0;
+            Func<bool> withinTime = () => elapsedTicks() < elapsedLimitTicks;
+            Func<bool> visit = () => visits++ < visitLimit && withinTime();
+            try
+            {
+                int foundActive = 0, foundSlots = 0;
+                if (!withinTime()) return false;
+                foreach (System.Collections.DictionaryEntry eventEntry in eventDict)
+                {
+                    if (!visit()) return false;
+                    var transforms = eventEntry.Value != null ? transformsOf(eventEntry.Value) : null;
+                    if (!withinTime()) return false;
+                    if (transforms == null) continue;
+                    foreach (System.Collections.DictionaryEntry instanceEntry in transforms)
+                    {
+                        if (!visit()) return false;
+                        var holders = instanceEntry.Value != null ? holdersOf(instanceEntry.Value) : null;
+                        if (!withinTime()) return false;
+                        if (holders == null) continue;
+                        for (int h = 0; h < holders.Length; h++)
+                        {
+                            if (!visit()) return false;
+                            object holder = holders.GetValue(h);
+                            var voices = holder != null ? voicesOf(holder) : null;
+                            if (!withinTime()) return false;
+                            if (voices == null) continue;
+                            for (int v = 0; v < voices.Length; v++)
+                            {
+                                if (!visit()) return false;
+                                object voice = voices.GetValue(v);
+                                if (voice == null) continue;
+                                foundSlots++;
+                                if (voiceIsLive(voice)) foundActive++;
+                                if (!withinTime()) return false;
+                            }
+                        }
+                    }
+                }
+                if (!withinTime()) return false;
+                active = foundActive;
+                slots = foundSlots;
+                return true;
+            }
+            catch { return false; }
+        }
+
         // ---- off-main-thread job -------------------------------------------
 
         /// <summary>

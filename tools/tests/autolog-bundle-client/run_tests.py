@@ -20,6 +20,10 @@ WORK = os.path.join(HERE, "work")
 # (name, old text, new text, target case, control case). Each old text must
 # occur exactly once in the shipped file.
 MUTANTS = [
+    ("m2_visit_limit_removed", "visits++ < visitLimit && withinTime()", "withinTime()",
+     "voice_visit_budget", "voice_counts"),
+    ("m2_elapsed_limit_removed", "elapsedTicks() < elapsedLimitTicks", "true",
+     "voice_elapsed_budget", "voice_counts"),
     # Head-and-tail reverted to the old tail-only window: the banner, the
     # cr_build line and the patch summary are cut again.
     ('head_tail_reverted', 'int head = Math.Max(0, Math.Min(headChars, maxChars / 2));', 'int head = 0;', 'headtail', 'atcap'),
