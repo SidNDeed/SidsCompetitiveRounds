@@ -32,6 +32,7 @@
     <DecimatedSource Condition="'$(DecimatedSource)' == ''">$(MSBuildThisFileDirectory)work\DecimatedList.cs</DecimatedSource>
     <FpsWireSource Condition="'$(FpsWireSource)' == ''">$(MSBuildThisFileDirectory)work\FpsWireProduction_base.cs</FpsWireSource>
     <ReplicaMethodsSource Condition="'$(ReplicaMethodsSource)' == ''">$(MSBuildThisFileDirectory)work\ReplicaMethods_base.cs</ReplicaMethodsSource>
+    <WatcherResetsSource Condition="'$(WatcherResetsSource)' == ''">$(MSBuildThisFileDirectory)work\WatcherResets_base.cs</WatcherResetsSource>
   </PropertyGroup>
 
   <ItemGroup>
@@ -43,6 +44,7 @@
     <Compile Include="$(DecimatedSource)" />
     <Compile Include="$(FpsWireSource)" />
     <Compile Include="$(ReplicaMethodsSource)" />
+    <Compile Include="$(WatcherResetsSource)" />
     <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)NightWindows.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />

@@ -33,8 +33,10 @@ namespace NetStallTests
                 new KeyValuePair<string, Func<string>>("jitter_ties", JitterTies),
                 new KeyValuePair<string, Func<string>>("jitter_same_room_reset", JitterSameRoomReset),
                 new KeyValuePair<string, Func<string>>("lag_setting_flips", LagSettingFlips),
-                new KeyValuePair<string, Func<string>>("focus_reset_match", () => Pin("m7_focus_match_reset")),
-                new KeyValuePair<string, Func<string>>("focus_reset_state", () => Pin("m7_focus_state_reset")),
+                new KeyValuePair<string, Func<string>>("focus_reset_match", () => Pin("m7_focus_match_reset") ?? FocusReset(true)),
+                new KeyValuePair<string, Func<string>>("focus_reset_state", () => Pin("m7_focus_state_reset") ?? FocusReset(false)),
+                new KeyValuePair<string, Func<string>>("focus_reset_match_partial", () => FocusResetPartial(true)),
+                new KeyValuePair<string, Func<string>>("focus_reset_state_partial", () => FocusResetPartial(false)),
     new KeyValuePair<string, Func<string>>("fps_focus_clamp_wire", FpsFocusClampWire),
     new KeyValuePair<string, Func<string>>("fps_focus_clamp_short", FpsFocusClampShort),
     new KeyValuePair<string, Func<string>>("focus_outlier_unfocused", () => FocusTrackedBucket(true)),
@@ -771,6 +773,71 @@ namespace NetStallTests
         }
 
         // ── the focus flag beside each fps bucket ────────────────────────
+
+        private static string SeedFocusReset()
+        {
+            GameStateWatcher.TestSeedFocusReset();
+            // 300 paired Adds cross both 128-entry decimation boundaries.
+            // These literals also establish that the setup has stride above 1.
+            if (GameStateWatcher.TestFpsTimeline.Count != 75 || GameStateWatcher.TestFocusTimeline.Count != 75)
+                return "seed did not decimate both timelines to 75 samples";
+            if (GameStateWatcher.TestFpsTimeline.Items[0] != 1000 ||
+                GameStateWatcher.TestFpsTimeline.Items[74] != 1296)
+                return "seed did not retain stride-four FPS samples";
+            if (GameStateWatcher.TestFocusFrames != 3 || GameStateWatcher.TestFocusAccum != 1.5f ||
+                !GameStateWatcher.TestUnfocused) return "seed did not retain the unfocused partial bucket";
+            return null;
+        }
+
+        private static string FocusReset(bool perMatch)
+        {
+            string error = SeedFocusReset();
+            if (error != null) return error;
+            GameStateWatcher.TestResetFocus(perMatch);
+            var fps = GameStateWatcher.TestFpsTimeline;
+            var focus = GameStateWatcher.TestFocusTimeline;
+            if (fps.Count != 0 || focus.Count != 0)
+                return "reset timeline counts " + fps.Count + "/" + focus.Count + " expected 0/0";
+            fps.Add(60); focus.Add(1);
+            if (fps.Count != 1 || focus.Count != 1 || fps.Items[0] != 60 || focus.Items[0] != 1)
+                return "first post-reset Add did not land at index 0 in both timelines";
+            fps.Add(75); focus.Add(0);
+            fps.Add(90); focus.Add(1);
+            if (fps.Count != 3 || focus.Count != 3 || fps.Count != focus.Count ||
+                !fps.Items.SequenceEqual(new[] { 60, 75, 90 }) ||
+                !focus.Items.SequenceEqual(new[] { 1, 0, 1 }))
+                return "post-reset Adds did not retain every aligned sample at stride 1";
+            return null;
+        }
+
+        private static string FocusResetPartial(bool perMatch)
+        {
+            string error = SeedFocusReset();
+            if (error != null) return error;
+            GameStateWatcher.TestResetFocus(perMatch);
+            if (GameStateWatcher.TestFocusFrames != 0)
+                return "partial bucket frames " + GameStateWatcher.TestFocusFrames + " expected 0";
+            if (GameStateWatcher.TestFocusAccum != 0f)
+                return "partial bucket accumulated time " + GameStateWatcher.TestFocusAccum + " expected 0";
+            if (GameStateWatcher.TestUnfocused) return "partial bucket unfocused flag expected false";
+            var fps = GameStateWatcher.TestFpsTimeline;
+            var focus = GameStateWatcher.TestFocusTimeline;
+            if (fps.Count != 0 || focus.Count != 0) return "partial reset timelines expected 0/0";
+
+            // Nine accepted frames plus an excluded outlier cannot close a
+            // fresh five-second bucket. Only the tenth post-reset frame can.
+            for (int frame = 0; frame < 10; frame++)
+                GameStateWatcher.TestFocusFrame(true, frame == 4 ? 1.2f : 0.5f);
+            if (fps.Count != 0 || focus.Count != 0 || GameStateWatcher.TestFocusFrames != 9 ||
+                GameStateWatcher.TestFocusAccum != 4.5f || GameStateWatcher.TestUnfocused)
+                return "first bucket included pre-reset frames or closed before five seconds";
+            GameStateWatcher.TestFocusFrame(true, 0.5f);
+            if (fps.Count != 1 || focus.Count != 1 || fps.Items[0] != 2 || focus.Items[0] != 1)
+                return "first complete post-reset bucket expected FPS 2 and focused flag 1 at index 0";
+            if (GameStateWatcher.TestFocusFrames != 0 || GameStateWatcher.TestFocusAccum != 0f ||
+                GameStateWatcher.TestUnfocused) return "completed post-reset bucket did not clear";
+            return null;
+        }
 
         private static string FocusTrackedBucket(bool unfocusedOutlier)
         {
