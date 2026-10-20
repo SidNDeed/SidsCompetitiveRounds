@@ -370,10 +370,13 @@ namespace CompetitiveRounds
             deferredSelectEdges++;
         }
 
-        /// <summary>Select slot through vanilla's own API. Through the live
-        /// menu portrait when exactly one carries the slot (so vanilla's Frame
-        /// marker moves with it), else SelectFace(0, ...) directly, whose player
-        /// index is a literal. Then read the selection back (fix pass 3, H9 and
+        /// <summary>Select slot through vanilla's own API. Through the menu
+        /// portrait when exactly one carries the slot AND it holds the slot's
+        /// own preset object (so vanilla's Frame marker moves with it), else
+        /// SelectFace(0, playerFaces[slot], slot) directly, whose player index
+        /// is a literal. Bug 444 (AvatarRules.SelectsThroughPortrait): a
+        /// portrait not yet started in this scene holds an all-zero default
+        /// myFace, and ClickButton selects that face. Then read the selection back (fix pass 3, H9 and
         /// M3) and return it: the evaluator clears a paid debt only when it is
         /// the slot. Only a committed selection is published as the face
         /// carrier, re-sent to the others and equipped on this seat's own body,
@@ -409,7 +412,7 @@ namespace CompetitiveRounds
             ownedApplyDepth++;
             try
             {
-                if (hits == 1 && hit.myFace != null) hit.ClickButton();
+                if (new AvatarRules().SelectsThroughPortrait(hits, hits == 1 && ReferenceEquals(hit.myFace, face))) hit.ClickButton();
                 else cch.SelectFace(0, face, slot);
             }
             catch (Exception ex) { fault = "the select threw " + ex.GetType().Name + ": " + ex.Message; }
