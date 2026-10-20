@@ -400,7 +400,41 @@ class ReportAlreadyRecorded(Exception):
         super().__init__("physical game already recorded")
 
 
-async def _settle_and_mark(db, room, game_id, chosen, now, settle):
+async def _keep_permanently_refused(db, room, game_id, attempt):
+    """Keep only the immutable attempt, under the owner's window lock."""
+    result = await db.execute(text(
+        "UPDATE match_report_journal SET state = 'kept',"
+        "       decided_at = clock_timestamp()"
+        " WHERE room_name = CAST(:room AS varchar)"
+        "   AND game_id = CAST(:g AS uuid) AND reporter_id = CAST(:pid AS uuid)"
+        "   AND reporter_steam = CAST(:steam AS varchar) AND cls = CAST(:cls AS varchar)"
+        "   AND received_at = CAST(:received AS timestamptz)"
+        "   AND payload = CAST(:payload AS jsonb) AND state = 'journaled'"),
+        {"room": room, "g": str(game_id),
+         "pid": attempt["reporter_id"], "steam": attempt["reporter_steam"],
+         "cls": attempt["cls"], "received": attempt["received_at"],
+         "payload": attempt["payload"]})
+    return result.rowcount == 1
+
+
+async def _settle_held_attempt(db, chosen, settle):
+    """Isolate settlement writes after every candidate's guards and window lock.
+
+    A lifecycle refusal deliberately captures quarantine evidence; let that
+    savepoint finish normally before its existing disposition keeps the row.
+    Permanent, transient and unknown errors escape and roll settlement back.
+    """
+    refusal = None
+    async with db.begin_nested():
+        try:
+            await settle(db, chosen)
+        except ReportRefused as exc:
+            refusal = exc
+    if refusal is not None:
+        raise refusal
+
+
+async def _settle_and_mark(db, room, game_id, chosen, now, settle, *, isolate_permanent=False):
     """Only a new settlement may terminalize this window.
 
     The callback's successful return means it recorded the chosen physical
@@ -408,7 +442,10 @@ async def _settle_and_mark(db, room, game_id, chosen, now, settle):
     exception; that receipt is kept without changing the window's outcome.
     """
     try:
-        await settle(db, chosen)
+        if isolate_permanent:
+            await _settle_held_attempt(db, chosen, settle)
+        else:
+            await settle(db, chosen)
     except ReportAlreadyRecorded as exc:
         if exc.receipt:
             raise
@@ -631,9 +668,19 @@ async def _release_held(db, *, mode, room, game_id, now, settle,
         return released
     window = await _arm_window(db, window, room=room, game_id=game_id,
                                at=entered_at if entered_at is not None else now)
+    # The pre-window guard covers the roster and every journal payload, so
+    # both A and its next candidate retain their identity locks on rollback.
     chosen = pick(await _journaled(db, room, game_id))
-    if chosen is not None and chosen["cls"] == CLASS_C:
-        await _settle_and_mark(db, room, game_id, chosen, now, settle)
+    while chosen is not None and chosen["cls"] == CLASS_C:
+        try:
+            await _settle_and_mark(db, room, game_id, chosen, now, settle,
+                                   isolate_permanent=True)
+        except PermanentReportRefusal as exc:
+            if not await _keep_permanently_refused(db, room, game_id, exc.attempted_report):
+                raise
+            chosen = pick(await _journaled(db, room, game_id))
+            continue
+        break
     return released
 
 

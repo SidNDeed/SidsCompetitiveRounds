@@ -45,6 +45,7 @@ SQL_ENV = {M383: "MATCH_HOLD_M383", M384: "MATCH_HOLD_M384",
 # id: (piece, module file, [(anchor, mutant text)], [(anchor, control text)],
 #      test file, -k selection of the tests that must fail)
 MUTANTS = {
+    "FIX1B.R1.SAVEPOINT": ('FIX1B', 'match_report_window.py', [('    async with db.begin_nested():\n        try:\n            await settle(db, chosen)\n', '    if True:\n        try:\n            await settle(db, chosen)\n')], [('    async with db.begin_nested():\n        try:\n            await settle(db, chosen)\n', '    async with db.begin_nested():\n        try:\n            await settle(db, (chosen))\n')], 'test_match_hold_reports_pg.py', 'test_merged_fix1b_r1_permanent_then_valid_held_reports'),
     "F1.L2.BASELINE": ("FIX1", M384,
         [('SELECT e.key_id, to_jsonb(k)\n', 'SELECT e.key_id, NULL::jsonb\n')],
         [('SELECT e.key_id, to_jsonb(k)\n', 'SELECT e.key_id, (to_jsonb(k))\n')],
@@ -142,10 +143,10 @@ MUTANTS = {
                 '        "   AND  m.beat_at <= CAST(:now AS timestamptz)"\n')],
               WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
     "F1.M4": ("FIX1", "match_report_window.py",
-              [('    if chosen is not None and chosen["cls"] == CLASS_C:\n',
-                '    if False and chosen is not None and chosen["cls"] == CLASS_C:\n')],
-              [('    if chosen is not None and chosen["cls"] == CLASS_C:\n',
-                '    if (chosen is not None and chosen["cls"] == CLASS_C):\n')],
+              [('    while chosen is not None and chosen["cls"] == CLASS_C:\n',
+                '    while False and chosen is not None and chosen["cls"] == CLASS_C:\n')],
+              [('    while chosen is not None and chosen["cls"] == CLASS_C:\n',
+                '    while (chosen is not None and chosen["cls"] == CLASS_C):\n')],
               WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
     "F1.H5": ("FIX1", "match_report_window.py",
               [('    return window["settled_at"] is not None or '

@@ -865,6 +865,196 @@ def test_merged_fix1_h3_unknown_and_transient_failures_keep_evidence(monkeypatch
     hold_test.run_env(monkeypatch, body, prefix="mergedh3t")
 
 
+
+# -- Merged fix 1b R1 ----------------------------------------------------------
+
+async def _fix1b_r1_held_pair(env, mode):
+    """A signed contradiction precedes a valid class-C sibling on a live hold."""
+    s, g, hid = await hold_test.held(env, mode)
+    bad_i, good_i = sorted(
+        (i for i in range(len(s.seats)) if i != 1),
+        key=lambda i: (len(s.steam(i)), s.steam(i)))[:2]
+    for i in (bad_i, good_i):
+        report = _report(mode, s, i, g)
+        if i == bad_i:
+            if mode == "team":
+                report["winner_team"] = 2
+                canonical = "%s:%s:%s:%s:3:1:true:%s:%s:2:%s" % (
+                    s.steam(0), s.steam(1), s.steam(2), s.steam(3),
+                    s.steam(i), report["photon_room_id"], s.sid)
+            else:
+                report["winner_side"] = 2
+                canonical = "%s:%s:%s:2:1:false:%s:%s:2:%s" % (
+                    s.steam(0), s.steam(1), s.steam(2), s.steam(i),
+                    report["photon_room_id"], s.sid)
+            report["hmac_signature"] = _sig(canonical)
+        response = await _call("POST", "/api/v1/%s/matches" % mode, s.steam(i), report)
+        assert response.status_code == 202 and response.json().get("state") == "held", \
+            ("R1 live held receipt", mode, i, response.status_code, response.text)
+    w, j = await window_state(env, s, g)
+    assert j == {s.steam(bad_i): ("c", "held"), s.steam(good_i): ("c", "held")} \
+        and w["settled_at"] is None and await recorded(env, mode, s) == [], \
+        ("R1 held setup", mode, w, j)
+    # This is the held-finishing owner's input, as in the M1 held control.
+    # Stamp one completed entry without invoking its automatic finishing hook.
+    entered_at = await env.conn.fetchval(
+        "UPDATE match_seat_holds h SET entered_at = stamp.at, closed_at = stamp.at,"
+        " closed_reason = 'entered' FROM (SELECT clock_timestamp() AS at) stamp"
+        " WHERE h.id = $1::uuid RETURNING h.entered_at", str(hid))
+    return s, g, hid, bad_i, good_i, entered_at
+
+
+async def _fix1b_r1_snapshot(env, s, g):
+    stable = "team_series" if s.mode == "team" else "ovt_series"
+    wins = ("t1_series_wins + t2_series_wins" if s.mode == "team"
+            else "solo_series_wins + duo_series_wins")
+    window = dict(await env.conn.fetchrow(
+        "SELECT opened_at, settle_after, settled_at, superseded_at, settled_reporter_id,"
+        " settled_cls FROM match_report_windows WHERE room_name = $1 AND game_id = $2::uuid",
+        s.room, str(g)))
+    journal = {r["reporter_steam"]: dict(r) for r in await env.conn.fetch(
+        "SELECT reporter_id, reporter_steam, cls, received_at, payload, state, decided_at"
+        " FROM match_report_journal WHERE room_name = $1 AND game_id = $2::uuid",
+        s.room, str(g))}
+    total = await env.conn.fetchval(
+        "SELECT %s FROM %s WHERE id = $1" % (wins, stable), s.sid)
+    return {"window": window, "journal": journal, "games": await recorded(env, s.mode, s),
+            "wins": total}
+
+
+def test_merged_fix1b_r1_permanent_then_valid_held_reports(monkeypatch):
+    """A real aborted settlement savepoint keeps only A and settles B once."""
+    async def body(env):
+        _mount(env, monkeypatch)
+        mrw = main._mrw_mod()
+        for mode in ("team", "ovt"):
+            s, g, hid, bad_i, good_i, entered_at = await _fix1b_r1_held_pair(env, mode)
+            before = await _fix1b_r1_snapshot(env, s, g)
+            attempts, kept_changes = [], []
+            real_settle = main._report_window_settle
+            session_type = env.sm.class_
+            real_execute = session_type.execute
+
+            async def execute(db, statement, *args, **kwargs):
+                result = await real_execute(db, statement, *args, **kwargs)
+                if "UPDATE match_report_journal SET state = 'kept'" in str(statement):
+                    params = args[0] if args else kwargs.get("params", {})
+                    kept_changes.append((str(params.get("pid")), result.rowcount))
+                return result
+
+            async def observed(db, the_mode, entry, out=None):
+                attempts.append(entry["reporter_steam"])
+                if entry["reporter_steam"] != s.steam(bad_i):
+                    return await real_settle(db, the_mode, entry, out)
+                # A settlement write must vanish while the causal release and
+                # entry-armed expiry survive. Removing begin_nested leaves a
+                # genuinely aborted PostgreSQL transaction, not a usable fake.
+                await db.execute(main.text(
+                    "UPDATE match_report_windows SET opened_at = opened_at - interval '1 second'"
+                    " WHERE room_name = :room AND game_id = CAST(:g AS uuid)"),
+                    {"room": s.room, "g": str(g)})
+                try:
+                    return await real_settle(db, the_mode, entry, out)
+                except mrw.PermanentReportRefusal as refused:
+                    try:
+                        await db.execute(main.text("SELECT 1 / 0"))
+                    except Exception as sql_error:
+                        raise refused from sql_error
+                    raise AssertionError("R1 PostgreSQL division unexpectedly succeeded")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(session_type, "execute", execute)
+                patch.setattr(main, "_report_window_settle", observed)
+                result = await main._report_window_janitor()
+                after = await _fix1b_r1_snapshot(env, s, g)
+                assert result.get("released") == 2 and result.get("held_retry", 0) == 0, \
+                    ("R1 one finishing pass", mode, result)
+                assert attempts == [s.steam(bad_i), s.steam(good_i)], \
+                    ("R1 same release attempts A then B", mode, attempts)
+                assert kept_changes == [(str(s.pid(bad_i)), 1)], \
+                    ("R1 A kept once alone", mode, kept_changes)
+                assert after["journal"][s.steam(bad_i)]["state"] == "kept" \
+                    and after["journal"][s.steam(good_i)]["state"] == "settled", \
+                    ("R1 exact disposition", mode, after)
+                for steam in (s.steam(bad_i), s.steam(good_i)):
+                    for column in ("reporter_id", "reporter_steam", "cls", "received_at", "payload"):
+                        assert after["journal"][steam][column] == before["journal"][steam][column], \
+                            ("R1 immutable evidence", mode, column)
+                    assert after["journal"][steam]["decided_at"] is not None
+                window = after["window"]
+                assert window["opened_at"] == before["window"]["opened_at"] \
+                    and (window["settle_after"] - entered_at).total_seconds() == 30 \
+                    and window["settled_at"] is not None and window["superseded_at"] is None \
+                    and window["settled_reporter_id"] == s.pid(good_i) \
+                    and window["settled_cls"] == "c", ("R1 release survives only settlement rolls back", mode, window)
+                assert len(after["games"]) == 1 and after["wins"] == before["wins"] + 1, \
+                    ("R1 one recorded game and one tally", mode, after)
+                await main._report_window_janitor()
+                assert await _fix1b_r1_snapshot(env, s, g) == after \
+                    and attempts == [s.steam(bad_i), s.steam(good_i)] \
+                    and kept_changes == [(str(s.pid(bad_i)), 1)], \
+                    ("R1 second tick changes nothing", mode, attempts, kept_changes)
+    hold_test.run_env(monkeypatch, body, prefix="mergedf1br1")
+
+
+def test_merged_fix1b_r1_transient_and_unknown_roll_back_release(monkeypatch):
+    """Unknown, retryable, deadline and chained SQL bounds roll back the owner."""
+    class BoundCause(Exception):
+        def __init__(self, sqlstate):
+            self.sqlstate = sqlstate
+            super().__init__("R1 bound fixture")
+
+    async def body(env):
+        _mount(env, monkeypatch)
+        for mode in ("team", "ovt"):
+            for failure in ("unknown", "retryable", "deadline", "55P03", "57014", "25P02"):
+                s, g, hid, bad_i, good_i, entered_at = await _fix1b_r1_held_pair(env, mode)
+                before = await _fix1b_r1_snapshot(env, s, g)
+                settler_name = "_settle_team_report" if mode == "team" else "_settle_ovt_report"
+                real_body = getattr(main, settler_name)
+
+                async def transient(db, report, **kwargs):
+                    if report.reported_by_steam_id != s.steam(good_i):
+                        return await real_body(db, report, **kwargs)
+                    # A has already been kept in this release; failing B
+                    # must roll that mark back together with release/expiry.
+                    await db.execute(main.text(
+                        "UPDATE match_report_windows SET opened_at = opened_at - interval '1 second'"
+                        " WHERE room_name = :room AND game_id = CAST(:g AS uuid)"),
+                        {"room": s.room, "g": str(g)})
+                    if failure == "unknown":
+                        raise RuntimeError("R1 unknown fixture")
+                    if failure == "retryable":
+                        raise main.HTTPException(429, "R1 retry fixture")
+                    if failure == "deadline":
+                        raise main.HTTPException(503, "database_deadline")
+                    try:
+                        raise BoundCause(failure)
+                    except BoundCause as cause:
+                        raise main.HTTPException(400, "R1 chained bound fixture") from cause
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(main, settler_name, transient)
+                    result = await main._report_window_janitor()
+                assert result.get("held_retry") == 1 and result.get("released", 0) == 0 \
+                    and await _fix1b_r1_snapshot(env, s, g) == before, \
+                    ("R1 whole release rolls back", mode, failure, result)
+                # The same immutable A remains a permanent contradiction on
+                # retry; its sibling B now settles in this finishing pass.
+                result = await main._report_window_janitor()
+                after = await _fix1b_r1_snapshot(env, s, g)
+                assert result.get("released") == 2 and result.get("held_retry", 0) == 0 \
+                    and after["journal"][s.steam(bad_i)]["state"] == "kept" \
+                    and after["journal"][s.steam(good_i)]["state"] == "settled" \
+                    and after["window"]["settled_reporter_id"] == s.pid(good_i) \
+                    and after["window"]["opened_at"] == before["window"]["opened_at"] \
+                    and len(after["games"]) == 1 and after["wins"] == before["wins"] + 1, \
+                    ("R1 retry settles exactly once", mode, failure, result, after)
+                await main._report_window_janitor()
+                assert await _fix1b_r1_snapshot(env, s, g) == after, \
+                    ("R1 retry second tick unchanged", mode, failure)
+    hold_test.run_env(monkeypatch, body, prefix="mergedf1br1t")
+
 # -- Merged fix 1 M1 -----------------------------------------------------------
 
 def test_merged_fix1_m1_quarantine_preserves_window_transaction(monkeypatch):

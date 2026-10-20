@@ -4485,7 +4485,7 @@ async def _ovt_horizon_candidates(db, days: int, limit: int):
     Idleness is measured from SERVER-CLOCK columns only: `ovt_series.created_at`
     (NOW() at insert) and, per game, `GREATEST(ovt_matches.ended_at,
     ovt_matches.created_at)` — the report sink writes `ended_at` as NOW()
-    (PIN main.py:49912 ":started, NOW(),") and `created_at` defaults to NOW()
+    (PIN main.py:49903 ":started, NOW(),") and `created_at` defaults to NOW()
     by schema. `ovt_matches.started_at`
     is the one client-supplied stamp on that row and is deliberately NOT read
     here: a client-attested value may only move the server toward the
@@ -4551,7 +4551,7 @@ async def _ovt_settle_horizon_row(db, series_id, days: int) -> bool:
     report advances the tally and can complete the series. The bound the code
     actually holds is the ordering one — this settlement and that report
     serialise on the same series row lock: the report sink's lock waits
-    (PIN main.py:49720 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
+    (PIN main.py:49711 "SELECT * FROM ovt_series WHERE id = :sid FOR NO KEY UPDATE"),
     this one declines. Whichever commits second observes the first, and a
     report arriving after the void is recorded and paid on the settled-without
     -play arm of `submit_ovt_match` rather than lost.
@@ -49324,7 +49324,8 @@ async def _report_window_settle(db, mode, entry, out=None):
         # These settle-body validation refusals bind immutable payload,
         # roster, physical room or a terminal series. Retrying cannot repair
         # that report; 401, 408, 409, 425, 429 and 5xx remain ordinary errors.
-        if exc.status_code in (400, 403, 404, 422):
+        if (exc.status_code in (400, 403, 404, 422)
+                and _report_window_bound_stage(exc) is None):
             raise _mrw_mod().PermanentReportRefusal(exc) from exc
         raise
     if out is not None:
@@ -49617,18 +49618,8 @@ async def _report_window_janitor() -> dict:
                     db, mode=w["mode"], room=w["room_name"], game_id=w["game_id"],
                     now=await _match_hold._ctx_now(db))
                 if not mrw._window_terminal(window):
-                    await db.execute(text(
-                        "UPDATE match_report_journal SET state = 'kept',"
-                        "       decided_at = clock_timestamp()"
-                        " WHERE room_name = CAST(:room AS varchar)"
-                        "   AND game_id = CAST(:g AS uuid) AND reporter_id = CAST(:pid AS uuid)"
-                        "   AND reporter_steam = CAST(:steam AS varchar) AND cls = CAST(:cls AS varchar)"
-                        "   AND received_at = CAST(:received AS timestamptz)"
-                        "   AND payload = CAST(:payload AS jsonb) AND state = 'journaled'"),
-                        {"room": w["room_name"], "g": str(w["game_id"]),
-                         "pid": attempt["reporter_id"], "steam": attempt["reporter_steam"],
-                         "cls": attempt["cls"], "received": attempt["received_at"],
-                         "payload": attempt["payload"]})
+                    await mrw._keep_permanently_refused(
+                        db, w["room_name"], w["game_id"], attempt)
                 await db.commit()
                 print(f"[HOLD] report window settle refused room={w['room_name']}: "
                       f"{type(ex).__name__}: {ex}")
