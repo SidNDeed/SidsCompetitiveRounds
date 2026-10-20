@@ -1679,6 +1679,54 @@ namespace CompetitiveRounds
                 => !string.IsNullOrEmpty(msg) && (timerLeft <= 0f || !string.Equals(showingText, msg, StringComparison.Ordinal));
         }
 
+        // ---- bug 444 (the night of 2026-10-19) ---------------------------
+
+        /// <summary>Bug 444. The night's sequence: modded default 5, vanilla
+        /// default 4, live 4, a private 1v2 room whose two other fighters both
+        /// carry the mod. The rules apply the authored nominee 5. The menu
+        /// portrait for slot 5 has not started in this scene, so it holds an
+        /// all-zero default face that is not the preset: the apply must take the
+        /// direct select, which writes playerFaces[5], and the carrier rule
+        /// publishes that face. A started portrait (it holds the preset) keeps
+        /// the portrait route; zero or two portraits take the direct select.
+        /// An unauthored nominee in the same room keeps the own face and is
+        /// reported Unauthored (design 2.4), and the carrier rule still clears
+        /// an all-zero selected face (A-H3, unchanged).</summary>
+        private static bool B444(AvatarRules r, out string got)
+        {
+            var s = Set(true, 5, 4);
+            var room = Room(true, Modded(), Modded());
+            var d = r.Evaluate(In(NotLive(), room, s, 4, -1));
+            bool unstarted = r.SelectsThroughPortrait(1, false);
+            bool started = r.SelectsThroughPortrait(1, true);
+            bool none = r.SelectsThroughPortrait(0, false);
+            bool two = r.SelectsThroughPortrait(2, true);
+            var faces = Faces();
+            var written = unstarted ? AvatarFaceIds.Of(0, 0, 0, 0) : faces[5];   // the face the select writes
+            var carrier = r.CarrierAction(false, true, true, true, written);
+            var zero = r.CarrierAction(false, true, true, true, AvatarFaceIds.Of(0, 0, 0, 0));
+            var u = r.Evaluate(In(NotLive(), room, Set(true, 0, 4), 4, -1));
+            got = "facing=" + d.Facing + " apply=" + d.Apply + " | portrait route: unstarted=" + unstarted + " started=" + started
+                + " none=" + none + " two=" + two + " | carrier on the written face=" + carrier + " on all-zero=" + zero
+                + " | unauthored nominee 0: apply=" + u.Apply + " want=" + u.Want + " unusable=" + u.Unusable;
+            return d.Facing == AvatarFacing.Modded && d.Apply == 5
+                && !unstarted && started && !none && !two
+                && carrier == FaceCarrierAction.Publish && zero == FaceCarrierAction.Clear
+                && u.Apply == -1 && u.Want == 4 && u.Unusable == AvatarUnusable.Unauthored;
+        }
+
+        /// <summary>The route before the fix: one portrait is enough, whatever
+        /// face it holds.</summary>
+        private sealed class M_B444 : AvatarRules
+        {
+            internal override bool SelectsThroughPortrait(int hits, bool portraitHoldsSlotFace) => hits == 1;
+        }
+
+        private sealed class K_B444 : AvatarRules
+        {
+            internal override bool SelectsThroughPortrait(int hits, bool portraitHoldsSlotFace) => portraitHoldsSlotFace && hits == 1;
+        }
+
         // ---- the runner -------------------------------------------------
 
         private static bool Run(Claim c, AvatarRules r, out string got)
@@ -1774,6 +1822,10 @@ namespace CompetitiveRounds
             Pair(r, "H9loop", "a persistent no-op select is bounded: one select per trigger, one debt kept, no nesting, repaid when the select works", H9Loop, new M_NoDepthGuard(), new K_DepthGuard());
             Pair(r, "H9defer", "the E9 postfix inside an owned apply that does not commit defers; the debt is kept and a later E7 retries it", H9Defer, new M_NoDepthGuard(), new K_DepthGuard());
             Pair(r, "M3e9", "repeated confirmed exits with the E9 postfix run (data missing, a throw, a normal return without commit) keep the one debt until a later trigger commits", M3Reentry, new M_NoDepthGuard(), new K_DepthGuard());
+
+            // bug 444: the apply selects through a portrait only when it holds
+            // the slot's preset (an unstarted portrait holds an all-zero default)
+            Pair(r, "B444", "the night's 1v2 sequence applies authored slot 5 by the direct select when its portrait has not started, and the carrier publishes it; an unauthored nominee keeps the own face", B444, new M_B444(), new K_B444());
             return r;
         }
 

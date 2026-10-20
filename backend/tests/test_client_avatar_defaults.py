@@ -1367,7 +1367,13 @@ PRODPROBE_IDS = ("H6a", "H6b", "H6c", "H9c", "H9s", "M3t", "BRM4", "M8apply", "M
                  # run the E9 postfix), a persistent no-op select (H9loop), the
                  # postfix deferred then retried (H9defer), the pick binding
                  # (H3late, H3after, H3before)
-                 "H9rmask", "M3xmask", "H9loop", "H9defer", "H3late", "H3after", "H3before")
+                 "H9rmask", "M3xmask", "H9loop", "H9defer", "H3late", "H3after", "H3before",
+                 # bug 444: the apply writes the slot's preset when the portrait
+                 # for it has not started (an all-zero default myFace): the
+                 # night's 1v2 sequence (B444night), a started grid keeps the
+                 # portrait route (B444live), an unauthored nominee is refused
+                 # (B444unauth)
+                 "B444night", "B444live", "B444unauth")
 
 
 def _dotnet():
