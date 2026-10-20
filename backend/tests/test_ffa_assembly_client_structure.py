@@ -973,12 +973,16 @@ def test_k10_n11_wp2_every_leave_labelled():
     """K10: every FfaLeaveQueue( call passes a label. N11 (binding): the 22
     I3 site-to-label values (21, and readmit_refused since the readmission
     client lane), each at its site with its unchanged cause, equal
-    the server's _PREROOM_LEAVE_LABELS (WP2), each at most 14 characters."""
+    the server's _PREROOM_LEAVE_LABELS (WP2), each at most 16 characters: the
+    width of the FfaLeaveQueue label parameter and of the labels column
+    (355_ffa_assembly.sql:71,142), the only bound a label has; the census is
+    15 (readmit_refused), under that 16, and the design texts' "at most 14"
+    was the census of the 21-label table, never a bound (ruling k10, 20 Oct)."""
     sites, unlabelled, dup = leave_sites()
     server = server_const("_PREROOM_LEAVE_LABELS")
     wrong = sorted(lab for lab, want in I3_SITES.items() if sites.get(lab) != want)
     facts = {"labels": sorted(sites), "unlabelled": unlabelled, "dup": dup, "wrong_site": wrong,
-             "server": sorted(server or []), "long": sorted(x for x in sites if len(x) > 14)}
+             "server": sorted(server or []), "long": sorted(x for x in sites if len(x) > 16)}
     trace(facts)
     assert not unlabelled, ("K10 labelled", unlabelled)
     assert not dup, ("N11 one site per label", dup)
