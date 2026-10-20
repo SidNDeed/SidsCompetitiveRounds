@@ -2065,6 +2065,7 @@ def test_s11f_the_leave_columns(monkeypatch):
     """S11(f), writer 5: left_at, left_cause, left_label and left_path."""
     async def body(env):
         for cause, label, want in (("", "menu_leave", (None, "menu_leave", "kept")),
+                                   ("", "readmit_refused", (None, "readmit_refused", "kept")),
                                    ("in_room_timeout", "room_exit",
                                     ("in_room_timeout", "room_exit", "departure")),
                                    ("", "not_a_site", (None, "unlabelled", "kept"))):
