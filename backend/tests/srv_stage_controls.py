@@ -276,6 +276,25 @@ ROWS.extend([{'row': 'FIX2.M3.MEMBER',
             '            "hold": bool((_start_hold)), **_start_roster}\n',
             1)]}])
 
+# Fix 2 M5: each route must leave the capture's advisory key available.
+# Each row's one anchor is inside _triage_read_txn; a READ ONLY transaction
+# can take this advisory lock, so the mutant reaches the observed hold.
+_M5_HANDLE = "        h = _TriageReadHandle(db, time.monotonic())\n"
+_M5_BLOCK = (
+    "        await db.execute(text(\"SELECT pg_advisory_xact_lock(hashtext('mrq:' || CAST(g AS text)))\"\n"
+    "                              \" FROM (SELECT DISTINCT group_id AS g FROM match_report_quarantine\"\n"
+    "                              \" WHERE status = 'pending' AND group_id IS NOT NULL) s\"))\n")
+_M5_TWIN = (
+    "        await db.execute(text(\"SELECT pg_advisory_xact_lock(hashtext('rj-triage-k2-unrelated'))\"))\n")
+for _route in ("V1", "V2", "D1"):
+    ROWS.append({
+        "row": "FIX2.M5.BLOCK." + _route,
+        "node": "test_ffa_quarantine_triage.py::test_pg_k2_a_capture_commits_while_the_route_is_open[" + _route + "]",
+        "tag": "FIX2 M5 capture during route",
+        "mutant": [(MAIN, _M5_HANDLE, _M5_BLOCK + _M5_HANDLE, 1)],
+        "twin": [(MAIN, _M5_HANDLE, _M5_TWIN + _M5_HANDLE, 1)],
+    })
+
 for _row in ROWS:
     if "twin" not in _row:
         _row["twin"] = rc._site_twin(_row)
