@@ -6219,16 +6219,15 @@ namespace CompetitiveRounds
         private static int bugSeverityIdx = 1;   // default = medium
         private static int bugCategoryIdx = 3;   // default = other
         private static bool bugSendLogs = true;  // pre-checked per requirement
-        private static string bugSubmitStatus = "";
-        private static bool bugSubmitting = false;
+        private static readonly LogBundleCore.PendingSubmission _bugSubmission =
+            new LogBundleCore.PendingSubmission();
         private static Vector2 bugDescScroll, bugReproScroll;
         private static GUIStyle bugTitleStyle, bugLabelStyle, bugFieldStyle, bugAreaStyle, bugButtonStyle, bugBtnPickedStyle;
 
         public static void OpenBugReportModal()
         {
             bugModalOpen = true;
-            bugSubmitStatus = "";
-            bugSubmitting = false;
+            _bugSubmission.Reopen();
         }
 
         private static void EnsureBugStyles()
@@ -6349,19 +6348,19 @@ namespace CompetitiveRounds
             }
 
             // Status line
-            if (!string.IsNullOrEmpty(bugSubmitStatus))
-                GUI.Label(new Rect(x, y + 460, w, 20), bugSubmitStatus, bugLabelStyle);
+            if (!string.IsNullOrEmpty(_bugSubmission.Status))
+                GUI.Label(new Rect(x, y + 460, w, 20), _bugSubmission.Status, bugLabelStyle);
 
             // Buttons
-            bool disabled = bugSubmitting || string.IsNullOrEmpty(bugDescription) || bugDescription.Trim().Length < 4;
-            GUI.enabled = !bugSubmitting;
+            bool disabled = !_bugSubmission.CanSubmit || string.IsNullOrEmpty(bugDescription) || bugDescription.Trim().Length < 4;
+            GUI.enabled = _bugSubmission.CanSubmit;
             if (GUI.Button(new Rect(x, y + h - 44, 120, 30), I18n.Tr("Cancel"), bugButtonStyle))
             {
                 bugModalOpen = false; GUI.enabled = true; return;
             }
             GUI.enabled = !disabled;
             if (GUI.Button(new Rect(x + w - 160, y + h - 44, 160, 30),
-                           bugSubmitting ? I18n.Tr("Submitting...") : I18n.Tr("Submit Report"),
+                           !_bugSubmission.CanSubmit ? I18n.Tr("Submitting...") : I18n.Tr("Submit Report"),
                            bugButtonStyle))
             {
                 SubmitBugReportNow();
@@ -6390,10 +6389,9 @@ namespace CompetitiveRounds
         /// </summary>
         private static void SubmitBugReportNow()
         {
-            if (_bugFormJob.Busy) return;
+            string pendingStatus = "<color=#88CCFF>" + I18n.Tr("Submitting...") + "</color>";
+            if (!_bugSubmission.Begin(pendingStatus) || _bugFormJob.Busy) return;
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            bugSubmitting = true;
-            bugSubmitStatus = "<color=#88CCFF>" + I18n.Tr("Submitting...") + "</color>";
             string sid = MatchTracker.LocalSteamId;
             string name = MatchTracker.LocalDisplayName ?? "";
             string desc = (bugDescription ?? "").Trim();
@@ -6435,7 +6433,7 @@ namespace CompetitiveRounds
             // carry the path that produced it, and it has not been scrubbed.
             ex => new BugFormBundle { Failure = ex.GetType().Name, CaptureMs = captureMs });
             if (!started)
-                OnBugReportAnswer(false, "could not start the report builder");
+                FailBugReportBuild("could not start the report builder");
         }
 
         /// <summary>What the bug form's worker hands back. Immutable once published.</summary>
@@ -6463,14 +6461,14 @@ namespace CompetitiveRounds
             if (r == null)
             {
                 if (workerId != 0)
-                    OnBugReportAnswer(false, "the report could not be built");
+                    FailBugReportBuild("the report could not be built");
                 return;
             }
             var sw = System.Diagnostics.Stopwatch.StartNew();
             if (r.Failure != null)
             {
                 Plugin.Log.LogWarning("[BUG-REPORT] the report could not be built (" + r.Failure + ")");
-                OnBugReportAnswer(false, "the report could not be built");
+                FailBugReportBuild("the report could not be built");
                 return;
             }
             if (!string.IsNullOrEmpty(r.Diagnostic))
@@ -6502,15 +6500,14 @@ namespace CompetitiveRounds
 
         private static void OnBugReportAnswer(bool ok, string resp)
         {
-            bugSubmitting = false;
             if (ok)
             {
                 // Pull bug_number out of the response so the user sees a
                 // human-friendly ID they can quote in chat.
                 int bn = ApiClient.ExtractJsonIntPublic(resp ?? "", "bug_number");
-                bugSubmitStatus = bn > 0
+                _bugSubmission.Answer(bn > 0
                     ? I18n.TrF("<color=#88FF88>Sent! Thank you. Filed as <b>#{0}</b>.</color>", bn)
-                    : I18n.Tr("<color=#88FF88>Sent! Thank you.</color>");
+                    : I18n.Tr("<color=#88FF88>Sent! Thank you.</color>"));
                 bugDescription = "";
                 bugRepro = "";
                 string notif = bn > 0 ? I18n.TrF("Bug report sent. Thanks! (#{0})", bn)
@@ -6520,17 +6517,21 @@ namespace CompetitiveRounds
             }
             else
             {
-                // The failure detail is server-sent English (class D) —
-                // it stays raw inside the translated template's hole.
-                // Colour lives OUTSIDE the translated literal so the key is
-                // the plain sentence. Baked-in markup made this the same
-                // message as NativeUI's "Failed: {0}" under two different
-                // keys, so translators had to translate it twice (reported
-                // by a translator, 2026-08-07).
-                bugSubmitStatus = "<color=#FF6666>"
-                                + I18n.TrF("Failed: {0}", (resp ?? "").Replace("\n", " "))
-                                + "</color>";
+                _bugSubmission.Answer(BugReportFailureStatus(resp));
             }
+        }
+
+        private static void FailBugReportBuild(string reason)
+        {
+            _bugSubmission.BuildFailure(BugReportFailureStatus(reason));
+        }
+
+        private static string BugReportFailureStatus(string resp)
+        {
+            // Keep the existing translated failure template and raw server detail.
+            return "<color=#FF6666>"
+                 + I18n.TrF("Failed: {0}", (resp ?? "").Replace("\n", " "))
+                 + "</color>";
         }
 
         // Builds the bug-report log bundle: previous-session BepInEx snapshot

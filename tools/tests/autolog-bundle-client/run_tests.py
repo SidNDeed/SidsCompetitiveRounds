@@ -20,6 +20,7 @@ WORK = os.path.join(HERE, "work")
 # (name, old text, new text, target case, control case). Each old text must
 # occur exactly once in the shipped file.
 MUTANTS = [
+    ("m3_reopen_clears", "            internal void Reopen()\n            {\n                if (_pending) return;", "            internal void Reopen()\n            {\n                _pending = false;", "pending_worker", "busy"),
     ("m2_visit_limit_removed", "visits++ < visitLimit && withinTime()", "withinTime()",
      "voice_visit_budget", "voice_counts"),
     ("m2_elapsed_limit_removed", "elapsedTicks() < elapsedLimitTicks", "true",

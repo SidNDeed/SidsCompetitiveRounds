@@ -427,6 +427,43 @@ namespace CompetitiveRounds
             catch { return false; }
         }
 
+        // ---- bug-form pending lifecycle -----------------------------------
+
+        /// <summary>Main-thread state lasting from accepted Submit through the
+        /// worker build and request answer. Closing the form does not end it.</summary>
+        internal sealed class PendingSubmission
+        {
+            private bool _pending;
+            internal bool CanSubmit { get { return !_pending; } }
+            internal string Status { get; private set; } = "";
+
+            internal bool Begin(string pendingStatus)
+            {
+                // A defensive duplicate submission still has a visible status.
+                Status = pendingStatus ?? "";
+                if (_pending) return false;
+                _pending = true;
+                return true;
+            }
+
+            internal void Reopen()
+            {
+                if (_pending) return;
+                Status = "";
+            }
+
+            internal void Answer(string status)
+            {
+                _pending = false;
+                Status = status ?? "";
+            }
+
+            internal void BuildFailure(string status)
+            {
+                Answer(status);
+            }
+        }
+
         // ---- off-main-thread job -------------------------------------------
 
         /// <summary>

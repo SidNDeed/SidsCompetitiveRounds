@@ -39,6 +39,8 @@ namespace AutologBundleTests
                 { "compose_real_scrub", ComposeRealScrub },
                 { "offmain", OffMain },
                 { "busy", Busy },
+                { "pending_worker", PendingWorker },
+                { "pending_answer", PendingAnswer },
                 { "clock", Clock },
                 { "voice_counts", VoiceCounts },
                 { "voice_visit_budget", VoiceVisitBudget },
@@ -526,6 +528,92 @@ namespace AutologBundleTests
             while (r == null && DateTime.UtcNow < deadline) { r = job2.TakeFinished(out wid); if (r == null) Thread.Sleep(2); }
             Check(r == "error:InvalidOperationException", where, "a throwing build did not come back through the error delegate");
             Check(!job2.Busy, where, "a failed build left the job busy");
+        }
+
+        // ---- bug-form lifecycle, with the real worker job ------------------
+
+        private static string TakePendingResult(LogBundleCore.OffMainJob<string> job)
+        {
+            string result = null;
+            var deadline = DateTime.UtcNow.AddSeconds(10);
+            int workerId;
+            while (result == null && DateTime.UtcNow < deadline)
+            {
+                result = job.TakeFinished(out workerId);
+                if (result == null) Thread.Sleep(2);
+            }
+            return result;
+        }
+
+        private static void PendingWorker()
+        {
+            const string where = "pending_worker";
+            const string status = "Submitting...";
+            var state = new LogBundleCore.PendingSubmission();
+            var job = new LogBundleCore.OffMainJob<string>();
+            var release = new ManualResetEventSlim(false);
+            int requests = 0, accepted = 0;
+            Func<bool> submit = () =>
+            {
+                if (!state.Begin(status) || job.Busy) return false;
+                accepted++;
+                return job.Start("pending-worker", () =>
+                {
+                    if (!release.Wait(10_000)) throw new TimeoutException();
+                    return "body";
+                }, ex => "build-error");
+            };
+            try
+            {
+                Check(submit(), where, "the initial Submit was refused");
+                // Closing has no completion transition; reopen runs the real state.
+                state.Reopen();
+                Check(!state.CanSubmit, where, "reopen enabled Submit during the build");
+                Check(state.Status == status, where, "reopen hid the pending status");
+                Check(!submit(), where, "a second Submit was accepted during the build");
+                release.Set();
+                string body = TakePendingResult(job);
+                if (body == "body") requests++;
+                Check(body == "body", where, "the delayed build did not reach handoff");
+                int wid;
+                Check(job.TakeFinished(out wid) == null, where, "a built body was handed off twice");
+                Check(accepted == 1 && requests == 1, where, "one accepted Submit did not produce exactly one request");
+                Check(!state.CanSubmit, where, "handoff ended pending before the answer");
+                state.Answer("sent");
+                Check(state.CanSubmit && state.Status == "sent", where, "answer did not finish pending");
+            }
+            finally { release.Set(); }
+        }
+
+        private static void PendingAnswer()
+        {
+            const string where = "pending_answer";
+            const string status = "Submitting...";
+            var state = new LogBundleCore.PendingSubmission();
+            var job = new LogBundleCore.OffMainJob<string>();
+            var release = new ManualResetEventSlim(false);
+            Check(state.Begin(status), where, "the initial Submit was refused");
+            Check(job.Start("pending-answer", () =>
+            {
+                if (!release.Wait(10_000)) throw new TimeoutException();
+                return "body";
+            }, ex => "build-error"), where, "the delayed worker was refused");
+            release.Set();
+            int requests = TakePendingResult(job) == "body" ? 1 : 0;
+            Check(requests == 1 && !job.Busy, where, "the build did not finish before the delayed answer");
+            state.Reopen();
+            Check(!state.CanSubmit, where, "reopen enabled Submit before the answer");
+            Check(state.Status == status, where, "reopen hid the in-flight status");
+            Check(!state.Begin(status), where, "a second Submit was accepted before the answer");
+            int wid;
+            Check(job.TakeFinished(out wid) == null && requests == 1, where, "the request was delivered again");
+            state.Answer("request failed");
+            Check(state.CanSubmit && state.Status == "request failed", where, "a failed answer did not finish pending");
+            Check(state.Begin(status), where, "the form could not submit after an answer");
+            state.BuildFailure("builder failed");
+            Check(state.CanSubmit && state.Status == "builder failed", where, "an explicit build failure left pending");
+            state.Reopen();
+            Check(state.CanSubmit && state.Status == "", where, "an idle reopen did not clear the completed status");
         }
 
         // ---- [CLOCK] --------------------------------------------------------

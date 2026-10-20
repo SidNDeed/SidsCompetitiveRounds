@@ -157,6 +157,34 @@ def test_the_bug_form_does_no_log_work_on_the_game_thread():
     assert "BuildLogBundle(" not in code_of(COMPETITIVE_UI)
 
 
+def test_the_bug_form_pending_lifecycle_survives_reopen():
+    """Every form lifecycle site drives the state exercised by the harness."""
+    opened = mask_code(cs_block(COMPETITIVE_UI, "public static void OpenBugReportModal()"))
+    assert "_bugSubmission.Reopen();" in opened
+    assert not any(s in opened for s in (".Begin(", ".Answer(", ".BuildFailure("))
+    ui = mask_code(COMPETITIVE_UI.read_text(encoding="utf-8"))
+    assert "bugSubmitting" not in ui and "bugSubmitStatus" not in ui
+    draw = mask_code(cs_block(COMPETITIVE_UI, "private static void DrawBugReportModal()"))
+    assert "bool disabled = !_bugSubmission.CanSubmit ||" in draw
+    assert "_bugSubmission.Status" in draw
+    submit = mask_code(cs_block(COMPETITIVE_UI, "private static void SubmitBugReportNow()"))
+    assert "if (!_bugSubmission.Begin(pendingStatus) || _bugFormJob.Busy) return;" in submit
+    assert submit.index("_bugSubmission.Begin(") < submit.index("_bugFormJob.Start(")
+    assert "FailBugReportBuild(" in submit
+    pump = mask_code(cs_block(COMPETITIVE_UI, "internal static void PumpBugFormBundle()"))
+    assert pump.count("FailBugReportBuild(") == 2
+    assert "_bugSubmission.Answer(" not in pump
+    assert pump.count("ApiClient.SubmitBugReportBody(") == 1
+    answer = mask_code(cs_block(COMPETITIVE_UI, "private static void OnBugReportAnswer(bool ok, string resp)"))
+    assert answer.count("_bugSubmission.Answer(") == 2
+    failed = mask_code(cs_block(COMPETITIVE_UI, "private static void FailBugReportBuild(string reason)"))
+    assert "_bugSubmission.BuildFailure(BugReportFailureStatus(reason));" in failed
+    state = cs_block(LOG_BUNDLE_CORE, "internal sealed class PendingSubmission")
+    reopen = mask_code(cs_block(state, "internal void Reopen()"))
+    assert "if (_pending) return;" in reopen
+    assert reopen.index("if (_pending) return;") < reopen.index("Status =")
+
+
 def test_the_worker_writes_nothing_to_the_log_from_its_own_thread():
     # BepInEx's sinks are not documented thread-safe, and a line written from
     # here interleaves with the game's own. Every sentence the worker wants to
