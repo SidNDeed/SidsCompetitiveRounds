@@ -31,6 +31,8 @@ namespace NetStallTests
                 new KeyValuePair<string, Func<string>>("stall_terminal_hitch_game_end", () => StallTerminal(true, 100)),
                 new KeyValuePair<string, Func<string>>("stall_terminal_hitch_depth_close", () => StallTerminal(false, 100)),
                 new KeyValuePair<string, Func<string>>("stall_terminal_fast", StallTerminalFast),
+                new KeyValuePair<string, Func<string>>("stall_steady_bands", StallSteadyBands),
+                new KeyValuePair<string, Func<string>>("stall_band_crossings", StallBandCrossings),
                 new KeyValuePair<string, Func<string>>("stall_cap", StallCap),
                 new KeyValuePair<string, Func<string>>("stall_ordinary_spikes", StallOrdinarySpikes),
                 new KeyValuePair<string, Func<string>>("stall_streams_flowing", StallStreamsFlowing),
@@ -187,6 +189,50 @@ namespace NetStallTests
         {
             return StallTerminal(true, 18) ?? StallTerminal(false, 18)
                 ?? StallTerminal(true, 23) ?? StallTerminal(false, 23);
+        }
+
+        private static string StallSteadyBands()
+        {
+            foreach (int depth in new[] { 0, 24, 25, 30, 48, 49, 60 })
+            {
+                var core = new InboundStallCore();
+                int clockReads = 0;
+                for (int i = 0; i < 100; i++)
+                {
+                    bool wants = core.Wants(depth);
+                    if (wants != (depth > 24 && i == 0)) return "steady gate depth=" + depth + " sample=" + i;
+                    if (wants) { clockReads++; core.OnDepth(depth, i, null, 1); }
+                }
+                if (clockReads != (depth > 24 ? 1 : 0)) return "clock reads depth=" + depth + ": " + clockReads;
+            }
+            return Pin("m1_band_expression");
+        }
+
+        private static string StallBandCrossings()
+        {
+            var core = new InboundStallCore();
+            int[] times = { 0, 100, 900, 1000, 1100, 1200, 1500, 1800, 2000, 2401,
+                            2500, 2600, 2700, 9000, 9100, 10301 };
+            int[] depths = { 0, 24, 25, 30, 48, 49, 49, 60, 59, 48, 49, 48, 24, 25, 49, 24 };
+            var lines = new List<string>();
+            for (int i = 0; i < times.Length; i++)
+            {
+                core.OnFrame(18);
+                if (!core.Wants(depths[i])) continue;
+                string line = core.OnDepth(depths[i], times[i], null, 1, 18);
+                if (line != null) lines.Add(line);
+            }
+            if (lines.Count != 2) return "crossing lines=" + lines.Count;
+            string[] rises = { "1501", "1301" }, peaks = { "60", "49" }, frames = { "4", "1" };
+            for (int i = 0; i < lines.Count; i++)
+                if (Field(lines[i], "durMs") != "1201" || Field(lines[i], "riseMs") != rises[i]
+                    || Field(lines[i], "peakQ") != peaks[i] || Field(lines[i], "frames") != frames[i])
+                    return "crossing fields " + lines[i];
+            if (core.SummaryFields() != " stalls=2 longestStallMs=1201 stallsFrameExcluded=0 stallLinesSuppressed=0")
+                return "crossing summary " + core.SummaryFields();
+            core.ResetGame();
+            if (core.Wants(24) || !core.Wants(25)) return "reset band";
+            return null;
         }
 
         private static string StallCap()

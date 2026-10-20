@@ -34,9 +34,9 @@ namespace CompetitiveRounds
     /// never names a leg (learning 446): a held reliable command, a slow
     /// downlink and a relay burst read the same here.
     ///
-    /// Cost: the hot path is one integer comparison against _gate on a depth
-    /// the telemetry already samples; everything else runs only while the
-    /// depth is above LOW_MARK.
+    /// Cost: the hot path is one unsigned range comparison on a depth the
+    /// telemetry already samples; only leaving the current depth band runs
+    /// the slow path (and permits the caller to read its clock).
     /// </summary>
     internal sealed class InboundStallCore
     {
@@ -47,9 +47,10 @@ namespace CompetitiveRounds
         internal const int MAX_LINES_PER_ROOM = 8;
         internal const int MAX_STREAMS = 16;
 
-        // Hot-path gate: LOW_MARK while quiet, -1 while a rise or a stall is
-        // open so every sample reaches Slow until the depth falls back.
-        private int _gate = LOW_MARK;
+        // Inclusive bands: 0..24 quiet, 25..48 rising, 49..peak open.
+        // An unsigned offset comparison catches either edge in one test.
+        private int _bandFloor;
+        private uint _bandWidth = LOW_MARK;
 
         private bool _rising;
         private long _riseStartMs;
@@ -76,14 +77,14 @@ namespace CompetitiveRounds
         internal delegate int StreamSnapshot(int[] actors, long[] batches);
 
         /// <summary>The quiet-path test the plugin makes before it reads a
-        /// clock: false for every sample at or below the gate.</summary>
-        internal bool Wants(int depth) { return depth > _gate; }
+        /// clock: false for every sample inside the current band.</summary>
+        internal bool Wants(int depth) { return unchecked((uint)(depth - _bandFloor)) > _bandWidth; }
 
         /// <summary>One depth sample. Returns the [NET-STALL] line to write
         /// when a stall closed with this sample, else null.</summary>
         internal string OnDepth(int depth, long nowMs, StreamSnapshot snap, int game, int terminalFrameMs = 0)
         {
-            if (depth <= _gate) return null;   // the one comparison on the quiet path
+            if (unchecked((uint)(depth - _bandFloor)) <= _bandWidth) return null;
             return Slow(depth, nowMs, snap, game, terminalFrameMs);
         }
 
@@ -94,10 +95,11 @@ namespace CompetitiveRounds
             {
                 if (_open) line = Close(nowMs, snap, game, false, terminalFrameMs);
                 _rising = false;
-                _gate = LOW_MARK;
+                _bandFloor = 0; _bandWidth = LOW_MARK;
                 return line;
             }
-            if (!_rising) { _rising = true; _riseStartMs = nowMs; _gate = -1; }
+            if (!_rising) { _rising = true; _riseStartMs = nowMs; }
+            _bandFloor = LOW_MARK + 1; _bandWidth = QUEUE_BOUND - LOW_MARK - 1;
             if (depth > QUEUE_BOUND)
             {
                 if (!_open)
@@ -111,6 +113,7 @@ namespace CompetitiveRounds
                     try { if (snap != null) _openStreams = Math.Min(MAX_STREAMS, Math.Max(0, snap(_openActors, _openBatches))); } catch { _openStreams = 0; }
                 }
                 else if (depth > _peak) _peak = depth;
+                _bandFloor = QUEUE_BOUND + 1; _bandWidth = (uint)(_peak - _bandFloor);
             }
             else if (_open)
             {
@@ -136,7 +139,7 @@ namespace CompetitiveRounds
         {
             string line = _open ? Close(nowMs, snap, game, true, terminalFrameMs) : null;
             _rising = false;
-            _gate = LOW_MARK;
+            _bandFloor = 0; _bandWidth = LOW_MARK;
             return line;
         }
 
@@ -205,7 +208,7 @@ namespace CompetitiveRounds
         internal void ResetGame()
         {
             GameStalls = 0; GameLongestMs = 0; GameFrameExcluded = 0;
-            _open = false; _rising = false; _gate = LOW_MARK;
+            _open = false; _rising = false; _bandFloor = 0; _bandWidth = LOW_MARK;
         }
 
         internal void ResetRoom()

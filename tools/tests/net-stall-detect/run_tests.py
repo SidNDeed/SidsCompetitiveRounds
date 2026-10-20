@@ -69,6 +69,7 @@ def structural_pins(overrides=None):
     raw = source_text("TelemetrySource", overrides)
     end = method_text(raw, "internal static void OnMatchEnded(string reason)")
     depth = method_text(raw, "internal static void NoteInboundDepth()")
+    stall = source_text("StallSource", overrides)
     return {
         "h1_game_end": ordered_once(end, "if (!_gameOpen) return;",
             "_stall.Flush(StallNowMs(), _stallStreams, _gameSeq, ReceiverWallGapMsNow())",
@@ -76,6 +77,10 @@ def structural_pins(overrides=None):
         "h1_depth_close": ordered_once(depth, "if (_stall.Wants(qi))",
             "_stall.OnDepth(qi, StallNowMs(), _stallStreams, _gameSeq,",
             "_stall.Open && qi <= InboundStallCore.QUEUE_BOUND ? ReceiverWallGapMsNow() : 0"),
+        "m1_band_expression": ordered_once(method_text(stall, "internal bool Wants(int depth)"),
+            "return unchecked((uint)(depth - _bandFloor)) > _bandWidth;")
+            if "if (unchecked((uint)(depth - _bandFloor)) <= _bandWidth) return null;" in
+                method_text(stall, "internal string OnDepth(") else "OnDepth range comparison changed",
     }
 
 
@@ -103,6 +108,17 @@ def extract_decimated():
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
 MUTANTS = [
+    ("m1_rising_gate_always_open", "StallSource",
+     [("_bandFloor = LOW_MARK + 1; _bandWidth = QUEUE_BOUND - LOW_MARK - 1;",
+       "_bandFloor = -1; _bandWidth = 0;")],
+     "stall_steady_bands", "stall_night"),
+    ("m1_rise_restarted_at_open", "StallSource",
+     [("                    _openMs = nowMs;\n", "                    _openMs = nowMs;\n                    _riseStartMs = nowMs;\n")],
+     "stall_band_crossings", "stall_terminal_fast"),
+    ("m1_extra_comparison", "StallSource",
+     [("return unchecked((uint)(depth - _bandFloor)) > _bandWidth;",
+       "return depth >= 0 && unchecked((uint)(depth - _bandFloor)) > _bandWidth;")],
+     "stall_steady_bands", "stall_night"),
     ("h1_terminal_ignored_in_core_game_end", "StallSource",
      [("            if (terminalFrameMs > _worstFrameMs) _worstFrameMs = terminalFrameMs;\n", "")],
      "stall_terminal_hitch_game_end", "stall_night"),
@@ -122,7 +138,9 @@ MUTANTS = [
      "stall_terminal_hitch_depth_close", "stall_terminal_hitch_game_end"),
     # required: the detector threshold removed
     ("stall_threshold_removed", "StallSource",
-     [("            if (depth > QUEUE_BOUND)\n", "            if (depth > 0)\n")],
+     [("            if (depth > QUEUE_BOUND)\n", "            if (depth > 0)\n"),
+      ("_bandFloor = QUEUE_BOUND + 1; _bandWidth = (uint)(_peak - _bandFloor);",
+       "_bandFloor = LOW_MARK + 1; _bandWidth = (uint)(_peak - _bandFloor);")],
      "stall_night", "stall_frames_hitch"),
     ("stall_min_duration_removed", "StallSource",
      [("            if (dur <= MIN_STALL_MS) return null;\n", "")],
