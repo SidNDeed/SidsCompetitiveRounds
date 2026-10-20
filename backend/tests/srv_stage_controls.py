@@ -95,11 +95,7 @@ ROWS = [
                  '        return hold_crossed\n'
                  '    return await _team_game_crossed_two(db, sid, s, total_points)\n',
                  '    return await _team_game_crossed_two(db, sid, s, total_points)\n', 1)]},
-    # NX4: a game-over during a hold settles at its receipt.
-    {"row": "M5.10",
-     "node": RT + "test_t5_7_held_game_over_settles_at_entry_and_is_superseded_at_lapse",
-     "tag": "T5.7 held",
-     "mutant": [(MAIN, '        held=_held)\n', '        held=False)\n', 1)]},
+    # M5.10 follows the causal receipt guard in the hold mutation runner.
     # NX6: the deletion omits one table (the player's own presence rows).
     {"row": "M6.1", "node": XT + "test_nx6_deletion_leaves_no_stage2_row_naming_the_player",
      "tag": "NX6 no identity",

@@ -1354,7 +1354,8 @@ async def match_hold_entered(hold_id: uuid.UUID, req: HoldEnteredReq, request: R
     # them if this does not.
     try:
         from main import _finish_held_reports
-        await _finish_held_reports(db, hold["mode"], hold["room_name"], hold["game_id"], True)
+        await _finish_held_reports(
+            db, hold["mode"], hold["room_name"], hold["game_id"], hold["id"])
     except Exception as ex:
         await db.rollback()
         print(f"[HOLD] held reports at entry left to the janitor: {type(ex).__name__}")

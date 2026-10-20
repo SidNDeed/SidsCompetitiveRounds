@@ -49376,10 +49376,6 @@ async def _report_window_receive(db, mode, report):
     if g is None:
         return None
     now = await _match_hold._ctx_now(db)
-    _held = bool((await db.execute(text(
-        "SELECT 1 FROM match_seat_holds WHERE room_name = CAST(:room AS varchar)"
-        "   AND game_id = CAST(:g AS uuid) AND closed_at IS NULL"),
-        {"room": room, "g": str(g)})).scalar())
     out = {}
     try:
         # This owner rolls back a receipt whose physical duplicate became
@@ -49391,7 +49387,7 @@ async def _report_window_receive(db, mode, report):
                 reporter_id=by_steam[report.reported_by_steam_id],
                 reporter_steam=report.reported_by_steam_id, payload=report.model_dump_json(),
                 member_ids=members, now=now, settle=_report_window_settler(mode, out),
-                held=_held)
+                held=False)
     except mrw.ReportAlreadyRecorded:
         recorded = await _recorded_physical_report(db, mode, series_id, report, by_steam)
         if recorded is None:
@@ -49419,29 +49415,17 @@ async def _report_window_receive(db, mode, report):
     return JSONResponse(status_code=202, content=body)
 
 
-async def _finish_held_reports(db, mode, room, game_id, entered):
-    """The held game-over reports of (room, G) once its hold has closed: on
-    an entry they are released and settle by the acceptance; on any other
-    closure (x) they are superseded, kept for review and never settled. Its
-    own transaction, committed here; nothing when no report is held."""
-    has = (await db.execute(text(
-        "SELECT 1 FROM match_report_journal WHERE room_name = CAST(:room AS varchar)"
-        "   AND game_id = CAST(:g AS uuid) AND state = 'held' LIMIT 1"),
-        {"room": room, "g": str(game_id)})).scalar()
-    if not has:
-        await db.commit()
-        return 0
+async def _finish_held_reports(db, mode, room, game_id, hold_id):
+    """Finish the exact causal hold, including a closure with no journal."""
     mrw = _mrw_mod()
     now = await _match_hold._ctx_now(db)
-    if entered:
-        n = await mrw.release_held(db, mode=mode, room=room, game_id=game_id, now=now,
-                                   settle=_report_window_settler(mode))
-    else:
-        n = await mrw.supersede_held(db, mode=mode, room=room, game_id=game_id, now=now)
+    n, entered = await mrw.finish_hold(
+        db, mode=mode, room=room, game_id=game_id, hold_id=hold_id, now=now,
+        settle=_report_window_settler(mode))
     await db.commit()
     print(f"[HOLD] held reports {'released' if entered else 'superseded'} "
           f"room={room} n={n}")
-    return n
+    return n, entered
 
 
 def _report_window_bound_stage(exc):
@@ -49481,16 +49465,18 @@ async def _report_window_janitor() -> dict:
             "                  AND j.state = 'journaled')"
             " ORDER BY w.settle_after LIMIT 50"), {"now": now})).mappings().all()
         held = (await db.execute(text(
-            "SELECT DISTINCT j.room_name, j.game_id, j.mode,"
-            "       EXISTS (SELECT 1 FROM match_seat_holds h"
-            "                WHERE h.room_name = j.room_name AND h.game_id = j.game_id"
-            "                  AND h.closed_reason = 'entered') AS entered"
-            "  FROM match_report_journal j"
-            " WHERE j.state = 'held'"
-            "   AND NOT EXISTS (SELECT 1 FROM match_seat_holds h"
-            "                    WHERE h.room_name = j.room_name AND h.game_id = j.game_id"
-            "                      AND h.closed_at IS NULL)"
-            " LIMIT 50"))).mappings().all()
+            "SELECT h.id AS hold_id, h.room_name, h.game_id, h.mode"
+            " FROM match_seat_holds h LEFT JOIN match_report_windows w"
+            "   ON w.room_name = h.room_name AND w.game_id = h.game_id"
+            " WHERE h.closed_at IS NOT NULL"
+            "   AND w.settled_at IS NULL AND w.superseded_at IS NULL"
+            "   AND (w.game_id IS NULL OR h.closed_reason <> 'entered'"
+            "        OR w.settle_after = CAST('infinity' AS timestamptz)"
+            "        OR EXISTS (SELECT 1 FROM match_report_journal j"
+            "                   WHERE j.room_name = h.room_name AND j.game_id = h.game_id"
+            "                     AND j.state = 'held'"
+            "                     AND j.payload ->> '_causal_hold_id' = CAST(h.id AS text)))"
+            " ORDER BY h.closed_at, h.id LIMIT 50"))).mappings().all()
         await db.commit()
     for w in due:
         async with async_session() as db:
@@ -49535,11 +49521,16 @@ async def _report_window_janitor() -> dict:
     for h in held:
         async with async_session() as db:
             _rdm_janitor_bound(db)
-            n = await _finish_held_reports(db, h["mode"], h["room_name"], h["game_id"],
-                                           bool(h["entered"]))
-            if n:
-                key = "released" if h["entered"] else "superseded"
-                out[key] = out.get(key, 0) + n
+            try:
+                n, entered = await _finish_held_reports(
+                    db, h["mode"], h["room_name"], h["game_id"], h["hold_id"])
+                if n:
+                    key = "released" if entered else "superseded"
+                    out[key] = out.get(key, 0) + n
+            except Exception as ex:
+                await db.rollback()
+                out["held_retry"] = out.get("held_retry", 0) + 1
+                print(f"[HOLD] held report finishing left to next tick: {type(ex).__name__}")
     return out
 
 

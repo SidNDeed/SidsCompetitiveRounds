@@ -28,6 +28,7 @@ window row is locked FIRST and settled_at is written once.
 
 import hashlib
 import hmac
+import json
 from datetime import timedelta
 
 from sqlalchemy import text
@@ -166,22 +167,118 @@ async def fresh_class_c_steams(db, *, room, game_id, member_ids, now):
 
 # -- the window and journal writes ---------------------------------------------------
 
-async def lock_window(db, *, mode, room, game_id, now):
-    """Open the window of (room, G) at its first receipt (settle_after =
-    now + WINDOW_S) and return it under FOR NO KEY UPDATE: the window row is
-    the FIRST lock of every journal and settle transaction."""
+async def lock_window(db, *, mode, room, game_id, now, held=False):
+    """Lock (room, G) before the series and hold rows. A held receipt opens
+    an unarmed window; an ordinary receipt arms its acceptance deadline."""
     await db.execute(text(
         "INSERT INTO match_report_windows (room_name, game_id, mode, opened_at, settle_after)"
         " VALUES (CAST(:room AS varchar), CAST(:g AS uuid), CAST(:mode AS varchar),"
         "         CAST(:now AS timestamptz),"
-        "         CAST(:now AS timestamptz) + make_interval(secs => CAST(:w AS integer)))"
+        "         CASE WHEN CAST(:held AS boolean) THEN CAST('infinity' AS timestamptz)"
+        "              ELSE CAST(:now AS timestamptz)"
+        "                   + make_interval(secs => CAST(:w AS integer)) END)"
         " ON CONFLICT (room_name, game_id) DO NOTHING"),
-        {"room": room, "g": str(game_id), "mode": mode, "now": now, "w": WINDOW_S})
+        {"room": room, "g": str(game_id), "mode": mode, "now": now, "w": WINDOW_S,
+         "held": held})
     return (await db.execute(text(
         "SELECT room_name, game_id, mode, opened_at, settle_after, settled_at,"
         "       superseded_at, settled_reporter_id, settled_cls FROM match_report_windows"
         " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
         " FOR NO KEY UPDATE"), {"room": room, "g": str(game_id)})).mappings().first()
+
+
+
+async def _causal_hold(db, *, mode, room, game_id, hold_id=None):
+    """Read the causal hold after window, series, then hold locking.
+
+    Any prior non-entry closure remains terminal for this physical game; a
+    later hold cannot revive it. An explicit id always selects that hold.
+
+    Open already locks the series before it changes any hold; end and entry
+    lock the hold and commit before their report finishing transaction. Thus
+    no path holding a series or hold waits for a report window.
+    """
+    from match_hold import _HOLD_COLS, _series_lock
+    sid = (await db.execute(text(
+        "SELECT series_id FROM match_games WHERE id = CAST(:g AS uuid)"
+        " AND mode = CAST(:mode AS varchar) AND room_name = CAST(:room AS varchar)"),
+        {"g": str(game_id), "mode": mode, "room": room})).scalar()
+    if sid is None:
+        return None
+    await _series_lock(db, mode, sid)
+    return (await db.execute(text(
+        f"SELECT {_HOLD_COLS} FROM match_seat_holds"
+        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+        "   AND (CAST(:hid AS uuid) IS NULL OR id = CAST(:hid AS uuid))"
+        " ORDER BY (closed_reason IS NOT NULL AND closed_reason <> 'entered') DESC,"
+        "          held_at DESC, id DESC LIMIT 1 FOR NO KEY UPDATE"),
+        {"room": room, "g": str(game_id),
+         "hid": str(hold_id) if hold_id is not None else None})).mappings().first()
+
+
+def _hold_closure(hold, now):
+    from match_hold import _effective_closure
+    return _effective_closure(hold, now) if hold is not None else None
+
+
+async def _causal_entered(db, hold, closure):
+    """Only this hold's effective closure can authorize release."""
+    return closure is not None and closure[1] == "entered"
+
+
+async def _arm_window(db, window, *, room, game_id, at):
+    """Arm on entry (or ordinary first receipt), never on a held receipt."""
+    return (await db.execute(text(
+        "UPDATE match_report_windows SET settle_after ="
+        " CASE WHEN settle_after = CAST('infinity' AS timestamptz)"
+        "      THEN CAST(:at AS timestamptz) + make_interval(secs => CAST(:w AS integer))"
+        "      ELSE GREATEST(settle_after, CAST(:at AS timestamptz)"
+        "           + make_interval(secs => CAST(:w AS integer))) END"
+        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+        "   AND settled_at IS NULL AND superseded_at IS NULL RETURNING *"),
+        {"room": room, "g": str(game_id), "at": at, "w": WINDOW_S})).mappings().first() or window
+
+
+async def _hold_window(db, window, *, room, game_id):
+    await db.execute(text(
+        "UPDATE match_report_windows SET settle_after = CAST('infinity' AS timestamptz)"
+        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
+        "   AND settled_at IS NULL AND superseded_at IS NULL"),
+        {"room": room, "g": str(game_id)})
+
+
+async def finish_hold(db, *, mode, room, game_id, hold_id, now, settle):
+    """Finish an exact causal hold under window, series, hold order.
+
+    A later live hold defers this work; any later non-entry closure ends the
+    game. The no-journal case still creates the terminal window or arms the
+    ordinary deadline from the entry stamp.
+    """
+    async with database_deadline(db):
+        window = await lock_window(db, mode=mode, room=room, game_id=game_id,
+                                   now=now, held=True)
+        if _window_terminal(window):
+            return 0, False
+        latest = await _causal_hold(db, mode=mode, room=room, game_id=game_id)
+        latest_closure = _hold_closure(latest, now)
+        if latest is not None and latest_closure is None:
+            return 0, False
+        hold = await _causal_hold(db, mode=mode, room=room, game_id=game_id,
+                                  hold_id=hold_id)
+        closure = _hold_closure(hold, now)
+        if hold is None or closure is None:
+            return 0, False
+        if latest_closure is not None and latest_closure[1] != "entered":
+            hold, closure = latest, latest_closure
+        entered = await _causal_entered(db, hold, closure)
+        if entered:
+            n = await release_held(db, mode=mode, room=room, game_id=game_id,
+                                   now=now, settle=settle, hold_id=hold["id"],
+                                   entered_at=max(closure[0], latest_closure[0])
+                                   if latest_closure is not None else closure[0])
+        else:
+            n = await supersede_held(db, mode=mode, room=room, game_id=game_id, now=now)
+        return n, entered
 
 
 def _window_terminal(window) -> bool:
@@ -299,6 +396,18 @@ async def _settle_window(db, *, mode, room, game_id, now, settle):
     `settle(db, entry)` once with the report `pick` chooses and write
     settled_at once. Returns the settled entry or None. The caller commits."""
     window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
+    if _window_terminal(window):
+        return None
+    hold = await _causal_hold(db, mode=mode, room=room, game_id=game_id)
+    closure = _hold_closure(hold, now)
+    if hold is not None and closure is None:
+        await _hold_window(db, window, room=room, game_id=game_id)
+        return None
+    if closure is not None:
+        if closure[1] != "entered":
+            await _supersede_held(db, mode=mode, room=room, game_id=game_id, now=now)
+            return None
+        window = await _arm_window(db, window, room=room, game_id=game_id, at=closure[0])
     return await _settle_locked(
         db, window, room=room, game_id=game_id, now=now, settle=settle)
 
@@ -326,10 +435,27 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
     settles at once through `settle(db, entry)`; any other report answers
     `journaled` (202), and an expired window settles by `pick`. The caller
     commits."""
-    window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
+    window = await lock_window(db, mode=mode, room=room, game_id=game_id,
+                               now=now, held=True)
     if _window_terminal(window):
         return {"status": "duplicate"}
-    if window["settle_after"] <= now:
+    hold = await _causal_hold(db, mode=mode, room=room, game_id=game_id)
+    closure = _hold_closure(hold, now)
+    if closure is not None and closure[1] != "entered":
+        await _supersede_held(db, mode=mode, room=room, game_id=game_id, now=now)
+        return {"status": "duplicate"}
+    held = held or (hold is not None and closure is None)
+    if held:
+        await _hold_window(db, window, room=room, game_id=game_id)
+        if hold is not None:
+            stored = json.loads(payload) if isinstance(payload, str) else dict(payload)
+            stored["_causal_hold_id"] = str(hold["id"])
+            payload = json.dumps(stored)
+    elif closure is not None:
+        window = await _arm_window(db, window, room=room, game_id=game_id, at=closure[0])
+    elif window["settle_after"].year == 9999:
+        window = await _arm_window(db, window, room=room, game_id=game_id, at=now)
+    if not held and window["settle_after"] <= now:
         await _settle_locked(
             db, window, room=room, game_id=game_id, now=now, settle=settle)
         return {"status": "duplicate"}
@@ -339,7 +465,7 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
         db, mode=mode, room=room, game_id=game_id, reporter_id=reporter_id,
         reporter_steam=reporter_steam, cls=cls, payload=payload, now=now, held=held)
     cls = entry["cls"]
-    if entry["state"] == "held":
+    if held or entry["state"] == "held":
         return {"status": "journaled", "cls": cls, "state": "held"}
     if cls == CLASS_C:
         fresh = await fresh_class_c_steams(db, room=room, game_id=game_id,
@@ -356,25 +482,38 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
     return {"status": "journaled", "cls": cls}
 
 
-async def release_held(db, *, mode, room, game_id, now, settle) -> int:
+async def release_held(db, *, mode, room, game_id, now, settle,
+                       hold_id=None, entered_at=None) -> int:
     """Run one held-report release inside the shared match database budget."""
     async with database_deadline(db):
         return await _release_held(
-            db, mode=mode, room=room, game_id=game_id, now=now, settle=settle)
+            db, mode=mode, room=room, game_id=game_id, now=now, settle=settle,
+            hold_id=hold_id, entered_at=entered_at)
 
 
-async def _release_held(db, *, mode, room, game_id, now, settle) -> int:
-    """At entry, release held rows under the window lock and settle the
-    lowest stored C immediately. Only a release without C opens 30 seconds."""
+async def _release_held(db, *, mode, room, game_id, now, settle,
+                        hold_id=None, entered_at=None) -> int:
+    """Release entered causal holds together so class priority stays global.
+
+    The caller proved this hold entered and that no later live or nonentry
+    hold blocks release. Earlier entered holds become eligible together."""
     window = await lock_window(db, mode=mode, room=room, game_id=game_id, now=now)
-    params = {"now": now, "w": WINDOW_S, "room": room, "g": str(game_id)}
+    params = {"now": now, "w": WINDOW_S, "room": room, "g": str(game_id),
+              "hid": str(hold_id) if hold_id is not None else None}
     terminal = _window_terminal(window)
     if terminal and window["settled_at"] is None:
         return 0
     res = await db.execute(text(
         "UPDATE match_report_journal SET state = 'journaled'"
         " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
-        "   AND state = 'held'"), params)
+        "   AND state = 'held'"
+        "   AND (CAST(:hid AS text) IS NULL OR payload ->> '_causal_hold_id' = CAST(:hid AS text)"
+        "        OR EXISTS (SELECT 1 FROM match_seat_holds cause"
+        "                   WHERE CAST(cause.id AS text) = match_report_journal.payload ->> '_causal_hold_id'"
+        "                     AND cause.room_name = match_report_journal.room_name"
+        "                     AND cause.game_id = match_report_journal.game_id"
+        "                     AND cause.closed_reason = 'entered'))"),
+        params)
     released = res.rowcount or 0
     if terminal:
         await _mark_settled(
@@ -382,17 +521,11 @@ async def _release_held(db, *, mode, room, game_id, now, settle) -> int:
             {"reporter_id": window["settled_reporter_id"], "cls": window["settled_cls"]},
             now)
         return released
+    window = await _arm_window(db, window, room=room, game_id=game_id,
+                               at=entered_at if entered_at is not None else now)
     chosen = pick(await _journaled(db, room, game_id))
     if chosen is not None and chosen["cls"] == CLASS_C:
         await _settle_and_mark(db, room, game_id, chosen, now, settle)
-        return released
-    if released == 0:
-        return 0
-    await db.execute(text(
-        "UPDATE match_report_windows"
-        "   SET settle_after = CAST(:now AS timestamptz) + make_interval(secs => CAST(:w AS integer))"
-        " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
-        "   AND settled_at IS NULL"), params)
     return released
 
 
@@ -417,5 +550,5 @@ async def _supersede_held(db, *, mode, room, game_id, now) -> int:
         "UPDATE match_report_journal SET state = 'superseded',"
         "       decided_at = CAST(:now AS timestamptz)"
         " WHERE room_name = CAST(:room AS varchar) AND game_id = CAST(:g AS uuid)"
-        "   AND state = 'held'"), {"now": now, "room": room, "g": str(game_id)})
+        "   AND state IN ('held', 'journaled')"), {"now": now, "room": room, "g": str(game_id)})
     return res.rowcount or 0

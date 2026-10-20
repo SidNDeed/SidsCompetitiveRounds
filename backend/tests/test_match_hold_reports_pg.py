@@ -535,3 +535,202 @@ def test_fix1_h1_racing_duplicate_does_not_spend_next_reporter(monkeypatch):
                 and w["settled_reporter_id"] == s.pid(low) and len(await recorded(env, mode, s)) == 2, \
                 ("F1.H1 reporter slot survives", mode, r.status_code, r.text[:300], w, j)
     hold_test.run_env(monkeypatch, body, prefix="rjs2f1h1race")
+
+
+# -- Merged fix 1 H2 -----------------------------------------------------------
+
+def test_merged_fix1_h2_causal_lapse_and_delayed_receipt(monkeypatch):
+    """An earlier entered hold never authorizes a later lapsed hold's reports."""
+    from datetime import timedelta
+
+    async def body(env):
+        _mount(env, monkeypatch)
+        for mode in ("team", "ovt"):
+            s, g, _ = await hold_test.opened_series(env, mode)
+            await entered_hold(env, s, 0, g)
+            opened = await hold_test.open_hold(env, s, 1, 0, g)
+            assert opened.status_code == 200 and opened.json()["status"] == "opened"
+            hid = opened.json()["hold_id"]
+            for i in (0, 2):
+                response = await post_report(mode, s, i, g)
+                assert response.status_code == 202 and response.json().get("state") == "held"
+            causes = await env.conn.fetch(
+                "SELECT payload ->> '_causal_hold_id' AS cause FROM match_report_journal"
+                " WHERE room_name = $1", s.room)
+            assert [r["cause"] for r in causes] == [hid, hid], ("H2 causal stamp", mode, causes)
+            stamp = (await hold_test.hold_db(env, hid))["held_until"] + timedelta(seconds=1)
+
+            async def clock(db):
+                return stamp
+
+            with monkeypatch.context() as patch:
+                patch.setattr(main._match_hold, "_ctx_now", clock)
+                async with env.sm() as db:
+                    await main._match_hold.hold_sweep(db)
+                await main._report_window_janitor()
+            w, j = await window_state(env, s, g)
+            assert (w["superseded_at"] is not None, w["settled_at"],
+                    sorted(v[1] for v in j.values()), await recorded(env, mode, s)) == \
+                (True, None, ["superseded", "superseded"], []), \
+                ("H2 causal lapse", mode, w and dict(w), j)
+
+            # A closure with no earlier report is terminal both on receipt
+            # and on the janitor path, which must not depend on journal rows.
+            for janitor_first in (False, True):
+                late, late_g, late_h = await hold_test.held(env, mode)
+                stamp = (await hold_test.hold_db(env, late_h))["held_until"] + timedelta(seconds=1)
+                with monkeypatch.context() as patch:
+                    patch.setattr(main._match_hold, "_ctx_now", clock)
+                    async with env.sm() as db:
+                        await main._match_hold.hold_sweep(db)
+                    if janitor_first:
+                        await main._report_window_janitor()
+                        prior, journal = await window_state(env, late, late_g)
+                        assert prior["superseded_at"] is not None and journal == {}, \
+                            ("H2 no-journal closure", mode, prior, journal)
+                    response = await post_report(mode, late, 0, late_g)
+                assert response.status_code == 202 and response.json().get("state") == "superseded", \
+                    ("H2 delayed first", mode, janitor_first, response.status_code, response.text)
+                assert await recorded(env, mode, late) == []
+    hold_test.run_env(monkeypatch, body, prefix="mergedh2c")
+
+
+def test_merged_fix1_h2_held_receipts_outlive_first_receipt(monkeypatch):
+    """Move the harness clock, without sleeping, across the old 30 s cutoff."""
+    from datetime import timedelta
+
+    async def body(env):
+        _mount(env, monkeypatch)
+        for mode in ("team", "ovt"):
+            s, g, hid = await hold_test.held(env, mode)
+            stamp = await hold_test.dbclock(env)
+
+            async def clock(db):
+                return stamp
+
+            with monkeypatch.context() as patch:
+                patch.setattr(main._match_hold, "_ctx_now", clock)
+                first = await post_report(mode, s, 0, g)
+                stamp += timedelta(seconds=31)
+                second = await post_report(mode, s, 2, g)
+            assert first.status_code == second.status_code == 202
+            assert first.json().get("state") == second.json().get("state") == "held", \
+                ("H2 live hold keeps receipts eligible", mode, first.text, second.text)
+            rows = await env.conn.fetch(
+                "SELECT state, received_at FROM match_report_journal WHERE room_name = $1"
+                " ORDER BY received_at", s.room)
+            assert len(rows) == 2 and [r["state"] for r in rows] == ["held", "held"], \
+                ("H2 both receipts journaled", mode, rows)
+            assert rows[1]["received_at"] - rows[0]["received_at"] == timedelta(seconds=31)
+            assert await recorded(env, mode, s) == []
+    hold_test.run_env(monkeypatch, body, prefix="mergedh2e")
+
+
+def test_merged_fix1_h2_receipt_open_and_end_races(monkeypatch):
+    """Barrier-order receipt/open and receipt/end both ways, in both modes."""
+    import asyncio
+
+    async def body(env):
+        _mount(env, monkeypatch)
+        mrw = main._mrw_mod()
+        mh = main._match_hold
+        for mode in ("team", "ovt"):
+            for first in ("receipt", "open"):
+                s, g, _ = await hold_test.opened_series(env, mode)
+                ready, release, competing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                real_causal, real_decide = mrw._causal_hold, mh._open_decide
+
+                async def causal(*args, **kwargs):
+                    if first == "open":
+                        competing.set()
+                    result = await real_causal(*args, **kwargs)
+                    if first == "receipt":
+                        ready.set()
+                        await release.wait()
+                    return result
+
+                async def decide(*args, **kwargs):
+                    if first == "receipt":
+                        competing.set()
+                    result = await real_decide(*args, **kwargs)
+                    if first == "open":
+                        ready.set()
+                        await release.wait()
+                    return result
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(mrw, "_causal_hold", causal)
+                    patch.setattr(mh, "_open_decide", decide)
+                    async def receipt():
+                        return await post_report(mode, s, 2, g)
+                    async def opening():
+                        return await hold_test.open_hold(env, s, 1, 0, g)
+                    actions = {"receipt": receipt, "open": opening}
+                    lead = asyncio.create_task(actions[first]())
+                    await asyncio.wait_for(ready.wait(), 3)
+                    other = "open" if first == "receipt" else "receipt"
+                    trail = asyncio.create_task(actions[other]())
+                    await asyncio.wait_for(competing.wait(), 3)
+                    release.set()
+                    answers = await asyncio.wait_for(asyncio.gather(lead, trail), 7)
+                answer = answers[0] if first == "receipt" else answers[1]
+                opening_answer = answers[1] if first == "receipt" else answers[0]
+                assert opening_answer.status_code == 200 and opening_answer.json()["status"] == "opened", \
+                    ("H2 opening race", mode, first, opening_answer.text)
+                assert answer.status_code == 202
+                assert answer.json().get("state") == ("held" if first == "open" else None), \
+                    ("H2 open order", mode, first, answer.text)
+                assert await recorded(env, mode, s) == []
+
+            for first in ("receipt", "end"):
+                s, g, hid = await hold_test.held(env, mode)
+                ready, release, competing = asyncio.Event(), asyncio.Event(), asyncio.Event()
+                real_causal, real_hold = mrw._causal_hold, mh._hold_row
+
+                async def causal(*args, **kwargs):
+                    if first == "end":
+                        competing.set()
+                    result = await real_causal(*args, **kwargs)
+                    if first == "receipt":
+                        ready.set()
+                        await release.wait()
+                    return result
+
+                async def holdrow(*args, **kwargs):
+                    if not kwargs.get("lock"):
+                        return await real_hold(*args, **kwargs)
+                    if first == "receipt":
+                        competing.set()
+                    result = await real_hold(*args, **kwargs)
+                    if first == "end":
+                        ready.set()
+                        await release.wait()
+                    return result
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(mrw, "_causal_hold", causal)
+                    patch.setattr(mh, "_hold_row", holdrow)
+                    async def receipt():
+                        return await post_report(mode, s, 2, g)
+                    async def ending():
+                        return await env.post("/api/v1/match/hold/%s/end" % hid, s.steam(0),
+                                              {"steam_id": s.steam(0), "reason": "refused"})
+                    actions = {"receipt": receipt, "end": ending}
+                    lead = asyncio.create_task(actions[first]())
+                    await asyncio.wait_for(ready.wait(), 3)
+                    other = "end" if first == "receipt" else "receipt"
+                    trail = asyncio.create_task(actions[other]())
+                    await asyncio.wait_for(competing.wait(), 3)
+                    release.set()
+                    answers = await asyncio.wait_for(asyncio.gather(lead, trail), 7)
+                response = answers[0] if first == "receipt" else answers[1]
+                ending_answer = answers[1] if first == "receipt" else answers[0]
+                assert ending_answer.status_code == 200
+                assert response.status_code == 202
+                assert response.json().get("state") == ("held" if first == "receipt" else "superseded"), \
+                    ("H2 end order", mode, first, response.text)
+                await main._report_window_janitor()
+                w, j = await window_state(env, s, g)
+                assert w["superseded_at"] is not None and await recorded(env, mode, s) == [], \
+                    ("H2 end race terminal", mode, first, w, j)
+    hold_test.run_env(monkeypatch, body, prefix="mergedh2r")
