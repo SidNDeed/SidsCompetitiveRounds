@@ -54,7 +54,8 @@ synthetic graph, a manifest without its cycle rows, and the source pin of
 each UNRESOLVED end the complete traversal reaches beyond fix pass 4's four
 (167 at item 17's fix-5 tip; 1022 at the merged v1.41.0 client tree, the
 table regenerated from the fix-5 writer's output there; 1136 at the
-merged round 3 tree, with the RJ Stage 2 and readmission ends).
+merged round 3 tree, with the RJ Stage 2 and readmission ends; 1137 at
+the round 3 refit tree, with the autolog fold's LogBundleCore.cs field end).
 """
 from __future__ import annotations
 
@@ -1490,6 +1491,7 @@ FIX5_ENDS = [
     ('field-Keybinds.cs-MenuToggle', 'field:Keybinds.cs:MenuToggle', 'SeatEvidenceCore.cs:Block'),
     ('field-LagNotices.cs', 'field:LagNotices.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-LetterboxClear.cs', 'field:LetterboxClear.cs:?', 'DamageNumberRules.cs:Text#1'),
+    ('field-LogBundleCore.cs', 'field:LogBundleCore.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-LogScrub.cs', 'field:LogScrub.cs:?', 'DamageNumberRules.cs:Text#1'),
     ('field-LogScrub.cs-SepAny', 'field:LogScrub.cs:SepAny', 'LogScrub.cs:BuildSepAny'),
     ('field-MailClient.cs', 'field:MailClient.cs:?', 'DamageNumberRules.cs:Text#1'),
@@ -1909,7 +1911,7 @@ PIN5 = "backend/tests/test_keybind_surfaces.py::test_h1_fix5_each_unresolved_end
 def test_h1_fix5_the_end_table_is_every_unresolved_end_beyond_the_four(attach4):
     st, cman, att, aman = attach4
     names = [n for i, n, m in FIX5_ENDS]
-    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1136
+    assert len(names) == len(set(names)) == len({i for i, n, m in FIX5_ENDS}) == 1137
     extra = set(att["unresolved"]) - set(names)
     assert len(extra) == 4 and RESET_MENU in extra, sorted(extra)
     assert set(names) <= set(att["unresolved"]), sorted(set(names) - set(att["unresolved"]))
