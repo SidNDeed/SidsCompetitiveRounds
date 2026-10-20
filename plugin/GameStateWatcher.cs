@@ -182,6 +182,15 @@ namespace CompetitiveRounds
         // and opponent-heartbeat gaps (victim-side view of the same). All
         // advisory — never in the HMAC, never auto-invalidating.
         private static readonly DecimatedList<int> localFpsTimeline = new DecimatedList<int>();   // decimates at cap
+        // Night 2026-10-19: one focus flag per 5 s fps bucket, added in
+        // lockstep with localFpsTimeline (the same Add calls, so the same
+        // decimation keeps index i on bucket i): 1 = every frame of the bucket
+        // had window focus, 0 = at least one did not. The client caps at
+        // 120 fps on a focus loss ([FPSCAP]), which the server fps_dip_pattern
+        // check read as a deliberate dip; the flag lets it exclude those
+        // buckets (server lane separate; the current server ignores it).
+        private static readonly DecimatedList<int> localFpsFocusTimeline = new DecimatedList<int>();
+        private static bool tlUnfocused;
         private static int tlFrames = 0;
         private static float tlAccum = 0f;
         private static int bcFrames = 0;          // frames since last 3s broadcast (instantaneous fps)
@@ -2112,6 +2121,7 @@ namespace CompetitiveRounds
             }
             _lastTickStopwatchMs = nowMs;
             FlushFreezeBandSummary(false);
+            try { tlUnfocused = FpsFocusCore.ObserveFrame(tlUnfocused, Application.isFocused, dt); } catch { }
             if (dt <= 0f || dt > 1f) return; // skip pause / first-frame outliers (freeze recorded above)
             fpsFrameCount++;
             fpsTimeAccum += dt;
@@ -2121,6 +2131,8 @@ namespace CompetitiveRounds
             if (tlAccum >= 5f)
             {
                 localFpsTimeline.Add((int)Math.Round(tlFrames / (double)tlAccum));
+                localFpsFocusTimeline.Add(FpsFocusCore.BucketFlag(tlUnfocused));
+                tlUnfocused = false;
                 // Aug 6 item 4: cumulative damage dealt on the same 5s grid,
                 // so the DPS chart shares the FPS chart's x-axis. Same cap.
                 localDamageTimeline.Add((int)LocalDamageDealtThisMatch);
@@ -6847,7 +6859,10 @@ namespace CompetitiveRounds
                     p1EndStats: EndStatsFor(p1SteamId),
                     p2EndStats: EndStatsFor(p2SteamId),
                     // Sept 6 item c: opaque room-occupancy id, outside the HMAC canonical.
-                    sessionUuid: SessionUuid
+                    sessionUuid: SessionUuid,
+                    // Night 2026-10-19: one focus flag per local fps bucket, last so
+                    // no earlier argument moves.
+                    localFpsFocusTimeline: FpsFocusCore.Encode(localFpsFocusTimeline.Items)
                 );
             }
 
@@ -7142,6 +7157,7 @@ namespace CompetitiveRounds
             opponentAvgFps = 0;
             // July 21 item 2: per-match telemetry resets.
             localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
+            localFpsFocusTimeline.Clear(); tlUnfocused = false;
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;
@@ -9287,6 +9303,7 @@ namespace CompetitiveRounds
             opponentAvgFps = 0;
             // July 21 item 2: per-match telemetry resets.
             localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;
+            localFpsFocusTimeline.Clear(); tlUnfocused = false;
             bcFrames = 0; bcAccum = 0f; lastBroadcastRecentFps = 0;
             oppFpsTimeline.Clear(); oppPingTimeline.Clear(); lastOppGstatsSeq = -1; lastOppSeqAdvanceTime = -1f; oppSeqBaselineTaken = false; oppSeqTransitionSeen = false; oppSeqActor = 0; oppRttCurrent = 0;
             localFreezeCount = 0; localFreezeFocusedCount = 0; localFreezeTotalSec = 0f;

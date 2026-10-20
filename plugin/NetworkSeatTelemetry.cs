@@ -152,6 +152,13 @@ namespace CompetitiveRounds
         // Self-profiler for this class's own per-frame work (bundle-only).
         private static long _tickTicks, _tickCalls;
 
+        // Night 2026-10-19: the receiver-side inbound stall detector
+        // (InboundStallCore). Fed from the existing inbound depth sample;
+        // frames counted only while a stall is open.
+        private static readonly InboundStallCore _stall = new InboundStallCore();
+        private static readonly InboundStallCore.StreamSnapshot _stallStreams = NetworkReplicaDiagnostics.SnapshotRemoteStreams;
+        private static long StallNowMs() { return System.Diagnostics.Stopwatch.GetTimestamp() * 1000L / System.Diagnostics.Stopwatch.Frequency; }
+
         // ── lifecycle (game/room edges) ──────────────────────────────────
 
         internal static void OnRoomChanged()
@@ -163,6 +170,7 @@ namespace CompetitiveRounds
             if (_gameOpen) OnMatchEnded("room-left");
             _localPlayerViewId = 0;
             ResetGame(keepFrozen: true);
+            _stall.ResetRoom();   // the 8-line budget is per room
         }
 
         internal static void OnMatchStarted()
@@ -170,6 +178,7 @@ namespace CompetitiveRounds
             // A new match discards an unconsumed snapshot of an earlier one:
             // that report, if it never happened, cannot be built any more.
             ResetGame(keepFrozen: false);
+            _stall.ResetGame();
             _gameSeq++;
             _gameOpen = true;
             _spectatorGame = false;
@@ -193,6 +202,8 @@ namespace CompetitiveRounds
             if (!_gameOpen) return;
             CloseWindow(force: true);
             SamplePeerDeltas();
+            // A stall still open at the game edge ends here (open=1).
+            try { string sl = _stall.Flush(StallNowMs(), _stallStreams, _gameSeq, ReceiverWallGapMsNow()); if (sl != null) Plugin.Log?.LogInfo(sl); } catch { }
             _gameOpen = false;
             try { LagNotices.OnGameEnded(); } catch { }   // Release B §4: shown states exit here
             try { NetworkReplicaDiagnostics.DrainFrameHookTicks(); } catch { }   // r3 MEDIUM 12: clear at the end edge too
@@ -362,6 +373,7 @@ namespace CompetitiveRounds
                 _lastUpdateTick = now;
                 _lastFrameWallMs = frameMs;
                 _lastFrameWall = frameWall;
+                if (_stall.Open) _stall.OnFrame(frameMs);
                 // Components measured inside the frame that just ended.
                 double netCbMs = 0;
                 try { netCbMs = NetworkReplicaDiagnostics.DrainFrameHookTicks() * 1000.0 / System.Diagnostics.Stopwatch.Frequency; } catch { }
@@ -614,6 +626,14 @@ namespace CompetitiveRounds
                 int qi = peer.QueuedIncomingCommands + RawInboundQueueCount(peer);
                 if (qi > QueuedInMax) QueuedInMax = qi;
                 if (qi > _wQIn) _wQIn = qi;
+                // Night 2026-10-19: one comparison on this sample while the
+                // depth is ordinary; the clock is read only past the gate.
+                if (_stall.Wants(qi))
+                {
+                    string sl = _stall.OnDepth(qi, StallNowMs(), _stallStreams, _gameSeq,
+                        _stall.Open && qi <= InboundStallCore.QUEUE_BOUND ? ReceiverWallGapMsNow() : 0);
+                    if (sl != null) Plugin.Log?.LogInfo(sl);
+                }
             }
             catch { }
         }
@@ -800,7 +820,8 @@ namespace CompetitiveRounds
               .Append(" qOutMax=").Append(QueuedOutMax).Append(" qInMax=").Append(QueuedInMax)
               .Append(" viewUpdateFaults=").Append(ViewUpdateFaults)
               .Append(" hitch50=").Append(Hitch50).Append(" hitch200=").Append(Hitch200)
-              .Append(" worstFrame=").Append(WorstFrameMs).Append("ms(").Append(WorstFrameTags).Append(')');
+              .Append(" worstFrame=").Append(WorstFrameMs).Append("ms(").Append(WorstFrameTags).Append(')')
+              .Append(_stall.SummaryFields());
             sb.Append(" hist(<8,<17,<34,<50,<100,<200,<500,<1000,>=1000)=");
             for (int i = 0; i < _hist.Length; i++) { if (i > 0) sb.Append('/'); sb.Append(_hist[i]); }
             Plugin.Log?.LogInfo(sb.ToString());

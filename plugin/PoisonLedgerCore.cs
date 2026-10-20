@@ -1344,4 +1344,76 @@ namespace CompetitiveRounds
             return "drop reason=" + (string.IsNullOrEmpty(result) ? "unnamed" : result);
         }
     }
+
+    // -- The v3 state lines (night 2026-10-19) ---------------------------------
+
+    /// <summary>The [POISON-LEDGER] v3 state and activation lines. They were
+    /// capped at 24 per ROOM, and a 1v2 room writes three or four of them per
+    /// point (the kill at the boundary, the master's offer, the receipt, the
+    /// new on), so on the night of 2026-10-19 both seats stopped writing them
+    /// six points into the first game (447:16121, 446:3798) although every
+    /// later boundary still killed the activation (ActivationCore.Evaluate).
+    /// The budget is now per POINT: PER_POINT lines between genuine ledger
+    /// epoch advances. OnPoint captures a prior activation invalidated by an
+    /// advance before a replacement can erase it, in the first new-point slot.
+    /// A point that runs out writes one cut marker. The sampled state line is
+    /// still written only on a change; a captured kill deduplicates its later
+    /// sampled state.</summary>
+    internal sealed class V3LineLog
+    {
+        internal const int PER_POINT = 12;
+
+        private int _point;
+        private bool _cutMarked;
+        private long _suppressed;
+        private string _lastState;
+        private LifeEpoch _lastEvidencePoint;
+        private bool _capturedBoundaryKill;
+
+        internal long Suppressed { get { return _suppressed; } }
+
+        /// <summary>A line to write, or null when this point's budget is spent
+        /// (the first refusal of a point returns the cut marker instead).</summary>
+        internal string Note(string text)
+        {
+            if (_point < PER_POINT) { _point++; return text; }
+            _suppressed++;
+            if (_cutMarked) return null;
+            _cutMarked = true;
+            return "v3 lines for this point cut at " + ClaimLine.N(PER_POINT) + " (the next point boundary resets the budget)";
+        }
+
+        /// <summary>The once-a-second state: a line only when it changed.</summary>
+        internal string State(string state)
+        {
+            if (state == _lastState) return null;
+            _lastState = state;
+            if (_capturedBoundaryKill && state == "v3 off why=killed:point-boundary") return null;
+            return Note(state);
+        }
+
+        /// <summary>A new point's line budget. The epoch-taking overload
+        /// decides whether the actual ledger advanced before calling this.</summary>
+        internal void OnPoint() { _point = 0; _cutMarked = false; }
+
+        /// <summary>Evidence only: compare the actual ledger epochs around
+        /// an existing mutation and the activation captured before replacement.
+        /// Duplicate/older stamps neither log nor replenish the line budget.</summary>
+        internal string OnPoint(LifeEpoch before, LifeEpoch after, LifeEpoch priorActivation, bool priorLive)
+        {
+            if (!after.Set || (before.Set && !PoisonLedgerCore.After(after.Ts, before.Ts))) return null;
+            if (_lastEvidencePoint.Set && !PoisonLedgerCore.After(after.Ts, _lastEvidencePoint.Ts)) return null;
+            _lastEvidencePoint = after;
+            _capturedBoundaryKill = false;
+            OnPoint();
+            if (!priorLive || !priorActivation.SameAs(before) || priorActivation.SameAs(after)) return null;
+            const string killed = "v3 off why=killed:point-boundary";
+            _lastState = killed;
+            _capturedBoundaryKill = true;
+            return Note(killed);
+        }
+
+        /// <summary>Room exit.</summary>
+        internal void Reset() { _point = 0; _cutMarked = false; _suppressed = 0; _lastState = null; _lastEvidencePoint = default(LifeEpoch); _capturedBoundaryKill = false; }
+    }
 }

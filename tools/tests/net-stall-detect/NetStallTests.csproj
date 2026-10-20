@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Night 2026-10-19 calibration lane: DSN-free controls over the REAL
+       plugin files InboundStallCore.cs, NetJitterBudgetCore.cs,
+       PoisonLedgerCore.cs (V3LineLog and ActivationCore), LagNotices.cs (with
+       Stubs.cs standing in for the Unity-side classes it reads), FpsFocusCore.cs
+       and DecimatedList.cs, plus exact ApiClient serialization/clamp and
+       NetworkReplicaDiagnostics snapshot/join text cut at every build.
+       run_tests.py builds it, runs every case, then
+       builds mutated COPIES (the *Source overrides) and requires each
+       mutant's target case to fail and its control to pass. The tracked
+       files are never modified. Paths are RELATIVE so no local directory
+       lands in a tracked file. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>NetStallTests</AssemblyName>
+    <RootNamespace>NetStallTests</RootNamespace>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <NoWarn>CS0067;CS0414;CS0649;CS0169</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <StallSource Condition="'$(StallSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\InboundStallCore.cs</StallSource>
+    <JitterSource Condition="'$(JitterSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\NetJitterBudgetCore.cs</JitterSource>
+    <PoisonSource Condition="'$(PoisonSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\PoisonLedgerCore.cs</PoisonSource>
+    <LagSource Condition="'$(LagSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\LagNotices.cs</LagSource>
+    <FocusSource Condition="'$(FocusSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\FpsFocusCore.cs</FocusSource>
+    <DecimatedSource Condition="'$(DecimatedSource)' == ''">$(MSBuildThisFileDirectory)work\DecimatedList.cs</DecimatedSource>
+    <FpsWireSource Condition="'$(FpsWireSource)' == ''">$(MSBuildThisFileDirectory)work\FpsWireProduction_base.cs</FpsWireSource>
+    <ReplicaMethodsSource Condition="'$(ReplicaMethodsSource)' == ''">$(MSBuildThisFileDirectory)work\ReplicaMethods_base.cs</ReplicaMethodsSource>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(StallSource)" />
+    <Compile Include="$(JitterSource)" />
+    <Compile Include="$(PoisonSource)" />
+    <Compile Include="$(LagSource)" />
+    <Compile Include="$(FocusSource)" />
+    <Compile Include="$(DecimatedSource)" />
+    <Compile Include="$(FpsWireSource)" />
+    <Compile Include="$(ReplicaMethodsSource)" />
+    <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)NightWindows.cs" />
+    <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />
+  </ItemGroup>
+
+</Project>

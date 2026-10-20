@@ -122,7 +122,7 @@ namespace CompetitiveRounds
             internal int ImpactsBlocked;  // RPCA_DoHit on the local player that the shooter's seat judged blocked
             internal int DistinctAmmo;    // distinct ammo-using projectiles with >= 1 unblocked impact
             internal int DistinctOther;   // distinct other projectiles with >= 1 unblocked impact
-            internal int Direct;          // direct damage messages over the game
+            internal int Direct;          // RPCA_SendTakeDamage messages on the local player from this remote sender over the game, ANY source (bullet, saw, area or effect tick); not impacts. Logged as dmg_msgs_any_source (night 2026-10-19: 204 such messages against 6 impacts were tick damage of 1.2 each)
             internal readonly int[] Buckets = new int[4];
             internal readonly HashSet<int> Hit = new HashSet<int>();
             internal int HitOverflow;
@@ -175,7 +175,7 @@ namespace CompetitiveRounds
               .Append(" spawned_separate=").Append(g.SpawnSeparate)
               .Append(" hit_me_ammo=").Append(g.DistinctAmmo).Append(" hit_me_other=").Append(g.DistinctOther)
               .Append(" impacts=").Append(g.Impacts).Append(" impacts_blocked=").Append(g.ImpactsBlocked)
-              .Append(" direct_msgs=").Append(g.Direct)
+              .Append(" dmg_msgs_any_source=").Append(g.Direct)
               .Append(" observed_hit_pct=").Append(g.SpawnAmmo > 0 ? F(100.0 * g.DistinctAmmo / g.SpawnAmmo) : "na");
             if (g.HitOverflow > 0) sb.Append(" overflow=").Append(g.HitOverflow);
             return sb.ToString();
@@ -186,7 +186,7 @@ namespace CompetitiveRounds
         {
             var sb = new StringBuilder("[BLOCK-MISS] game=");
             sb.Append(game).Append(" from=a").Append(actor)
-              .Append(" direct=").Append(g.Direct)
+              .Append(" dmg_msgs_any_source=").Append(g.Direct)
               .Append(" inside_0.3=").Append(g.Buckets[(int)BlockBucket.Inside])
               .Append(" 0.3_0.6=").Append(g.Buckets[(int)BlockBucket.Near])
               .Append(" later=").Append(g.Buckets[(int)BlockBucket.Later])

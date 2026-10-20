@@ -313,7 +313,11 @@ def check_evidence_tags(src):
         for ident in ("NickName", "UserId", "SteamId", "steamId", "SteamID", "GetSteamID", "DisplayName"):
             assert ident not in body, "the v3 code reads an account identity: " + ident
     v3line = _code(_member(src[PS], "private static void V3Line("))
-    assert "if (_v3LogLines >= V3LineCap) return;" in v3line, "the state lines are unbounded"
+    # Night 2026-10-19: the bound is per point (V3LineLog), reset at every
+    # recorded point boundary, so the kill line of each boundary has a slot.
+    assert "string line = _v3Log.Note(text);" in v3line, "the state lines are unbounded"
+    assert "internal const int PER_POINT = 12;" in _code(src[CORE]), "the per-point bound is gone"
+    assert "if (stamped) { _ledger.NotePointBoundary(ts); _v3Log.OnPoint(); }" in ps, "the budget is not reset at the point boundary"
 
 
 # -- V4: the point epoch, the replay, the unstamped boundary, the SILENT arm --------

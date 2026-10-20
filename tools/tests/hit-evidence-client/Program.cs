@@ -97,9 +97,9 @@ namespace HitEvidenceTests
             g.AddImpact(1, false, true); g.AddImpact(2, false, true); g.AddImpact(3, true, true);
             g.Buckets[0] = 1; g.Buckets[1] = 0; g.Buckets[2] = 1; g.Buckets[3] = 1;
             Eq("[SHOT-OBS] game=1 from=a2 spawned_ammo=4 spawned_noammo=1 spawned_separate=0 hit_me_ammo=2 hit_me_other=0"
-               + " impacts=2 impacts_blocked=1 direct_msgs=3 observed_hit_pct=50.00",
+               + " impacts=2 impacts_blocked=1 dmg_msgs_any_source=3 observed_hit_pct=50.00",
                HitEvidenceCore.ShotObsLine(1, 2, g), "SHOT-OBS");
-            Eq("[BLOCK-MISS] game=1 from=a2 direct=3 inside_0.3=1 0.3_0.6=0 later=1 never_blocked_point=1",
+            Eq("[BLOCK-MISS] game=1 from=a2 dmg_msgs_any_source=3 inside_0.3=1 0.3_0.6=0 later=1 never_blocked_point=1",
                HitEvidenceCore.BlockMissLine(1, 2, g), "BLOCK-MISS");
             Check(HitEvidenceCore.ShotObsLine(1, 2, new HitEvidenceCore.GameTally()).EndsWith("observed_hit_pct=na"), "no spawn: na");
         }

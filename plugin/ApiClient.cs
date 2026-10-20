@@ -9700,6 +9700,7 @@ namespace CompetitiveRounds
             // (focused resume = window-drag signature); recv gaps = our socket
             // silent >2s; opp hb gaps = their gstats heartbeat frozen >8s.
             string localFpsTimeline = null, string oppFpsTimeline = null,
+            string localFpsFocusTimeline = null,
             int localFreezeCount = 0, int localFreezeFocusedCount = 0,
             float localFreezeTotalSec = 0f,
             int localPingAvg = 0, int localPingMax = 0,
@@ -9828,10 +9829,15 @@ namespace CompetitiveRounds
             // July 21 item 2 — FPS/lag telemetry (advisory, not in HMAC). Timelines
             // are self-generated digit/comma strings; clamp to the 512-char columns
             // COMMA-AWARE so the stored string never ends mid-number.
-            string lft = ClampTimeline(localFpsTimeline);
+            int[] localFpsKeptIndices;
+            string lft = ClampTimeline(localFpsTimeline, 512, out localFpsKeptIndices);
             string oft = ClampTimeline(oppFpsTimeline);
             sb.Append($"\"local_fps_timeline\":\"{Escape(lft)}\",");
             sb.Append($"\"opp_fps_timeline\":\"{Escape(oft)}\",");
+            // Night 2026-10-19: one focus flag per local fps bucket (1 focused
+            // throughout, 0 not), aligned with local_fps_timeline. Advisory and
+            // outside the HMAC; the server ignores an undeclared field.
+            sb.Append($"\"local_fps_focus_timeline\":\"{Escape(FpsFocusCore.EncodeRetained(localFpsFocusTimeline, localFpsKeptIndices))}\",");
             sb.Append($"\"local_freeze_count\":{localFreezeCount},");
             sb.Append($"\"local_freeze_focused_count\":{localFreezeFocusedCount},");
             sb.Append($"\"local_freeze_total_sec\":{localFreezeTotalSec.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)},");
@@ -24695,19 +24701,43 @@ namespace CompetitiveRounds
         // no call site moves.
         private static string ClampTimeline(string t, int max = 512)
         {
+            int[] retainedIndices;
+            return ClampTimeline(t, max, out retainedIndices);
+        }
+
+        // The same clamp also exposes its source bucket indices for paired
+        // advisory series. The string decisions below remain the shared path
+        // for every caller, including the existing degenerate hard cut.
+        private static string ClampTimeline(string t, int max, out int[] retainedIndices)
+        {
             t = t ?? "";
-            if (t.Length <= max) return t;
+            if (t.Length <= max)
+            {
+                int count = t.Length == 0 || t == "v2|" ? 0 : t.Split(',').Length;
+                retainedIndices = new int[count];
+                for (int i = 0; i < count; i++) retainedIndices[i] = i;
+                return t;
+            }
             string prefix = "";
             if (t.StartsWith("v2|", StringComparison.Ordinal)) { prefix = "v2|"; t = t.Substring(3); }
             int budget = max - prefix.Length;
             var parts = t.Split(',');
+            retainedIndices = new int[parts.Length];
+            for (int i = 0; i < parts.Length; i++) retainedIndices[i] = i;
             string joined = t;
             while (joined.Length > budget && parts.Length > 2)
             {
                 var kept = new List<string>(parts.Length / 2 + 2) { parts[0] };
-                for (int i = 2; i + 1 < parts.Length; i += 2) kept.Add(parts[i]);
+                var keptIndices = new List<int>(parts.Length / 2 + 2) { retainedIndices[0] };
+                for (int i = 2; i + 1 < parts.Length; i += 2)
+                {
+                    kept.Add(parts[i]);
+                    keptIndices.Add(retainedIndices[i]);
+                }
                 kept.Add(parts[parts.Length - 1]);
+                keptIndices.Add(retainedIndices[retainedIndices.Length - 1]);
                 parts = kept.ToArray();
+                retainedIndices = keptIndices.ToArray();
                 joined = string.Join(",", parts);
             }
             // Degenerate backstop (a single oversize sample / two-sample
@@ -24717,6 +24747,8 @@ namespace CompetitiveRounds
             {
                 int cut = joined.LastIndexOf(',', Math.Min(budget, joined.Length) - 1);
                 joined = cut > 0 ? joined.Substring(0, cut) : joined.Substring(0, Math.Max(0, budget));
+                int count = joined.Length == 0 ? 0 : joined.Split(',').Length;
+                if (count < retainedIndices.Length) Array.Resize(ref retainedIndices, count);
             }
             return prefix + joined;
         }
