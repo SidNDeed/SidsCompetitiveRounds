@@ -242,6 +242,40 @@ ROWS.append({'row': 'F1.H4.RETRY',
 
 ROWS.append({'row': 'F1.H4.RECEIPT_BOUND', 'node': 'test_match_hold_deletion_pg.py::test_fix1_h4_receipt_identity_wait_is_bounded', 'tag': 'FIX1 H4 receipt bound', 'mutant': [('backend/api/main.py', '    async with _match_hold.database_deadline(db):\n        by_steam = await _match_hold._guard_identities(db, keys)\n', '    by_steam = await _match_hold._guard_identities(db, keys)\n', 1)], 'twin': [('backend/api/main.py', '    async with _match_hold.database_deadline(db):\n        by_steam = await _match_hold._guard_identities(db, keys)\n', '    async with _match_hold.database_deadline((db)):\n        by_steam = await _match_hold._guard_identities(db, keys)\n', 1)]})
 
+ROWS.extend([{'row': 'FIX2.M3.MEMBER',
+  'node': 'test_match_hold_wiring_pg.py::test_t1_3_team_issue_relock_and_continuation',
+  'tag': 'F1.M2 team roster',
+  'mutant': [('backend/api/main.py',
+              '            return TeamQueueMember(\n                steam_id=row["steam_id"],\n',
+              '            return TeamQueueMember(\n                steam_id=me["steam_id"],\n',
+              1)],
+  'twin': [('backend/api/main.py',
+            '            return TeamQueueMember(\n                steam_id=row["steam_id"],\n',
+            '            return TeamQueueMember(\n                steam_id=(row["steam_id"]),\n',
+            1)]},
+ {'row': 'FIX2.M3.SIDE',
+  'node': 'test_match_hold_wiring_pg.py::test_t1_3_team_issue_relock_and_continuation',
+  'tag': 'F1.M2 team roster',
+  'mutant': [('backend/api/main.py',
+              '                team_assigned=row["team_assigned"],\n',
+              '                team_assigned=3 - row["team_assigned"],\n',
+              1)],
+  'twin': [('backend/api/main.py',
+            '                team_assigned=row["team_assigned"],\n',
+            '                team_assigned=(row["team_assigned"]),\n',
+            1)]},
+ {'row': 'FIX2.M3.OVT',
+  'node': 'test_match_hold_wiring_pg.py::test_t1_3_ovt_start_and_poll_carry_the_latched_flag',
+  'tag': 'F1.M2 Start roster',
+  'mutant': [('backend/api/main.py',
+              '            "hold": bool(_start_hold), **_start_roster}\n',
+              '            "hold": bool(_start_hold)}\n',
+              1)],
+  'twin': [('backend/api/main.py',
+            '            "hold": bool(_start_hold), **_start_roster}\n',
+            '            "hold": bool((_start_hold)), **_start_roster}\n',
+            1)]}])
+
 for _row in ROWS:
     if "twin" not in _row:
         _row["twin"] = rc._site_twin(_row)

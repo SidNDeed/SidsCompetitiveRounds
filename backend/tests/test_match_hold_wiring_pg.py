@@ -133,11 +133,16 @@ async def team_issue(w, flags, players=None):
     host's poll issuing the room: (players, poll answer, series row)."""
     ps = players or await hold_test.seed_players(w.conn, 4)
     lob = await w.ok("POST", "/api/v1/team/lobby/create", ps[0][1],
-                     {"steam_id": ps[0][1], "caps": _caps(flags, 0)}, tag="team create")
+                     {"steam_id": ps[0][1], "display_name": "Queue initial 0", "caps": _caps(flags, 0)}, tag="team create")
     for i in (1, 2, 3):
         await w.ok("POST", "/api/v1/team/lobby/join", ps[i][1],
                    {"steam_id": ps[i][1], "lobby_id": lob["lobby_id"],
+                    "display_name": "Queue initial %d" % i,
                     "caps": _caps(flags, i)}, tag="team join")
+    assert await w.conn.fetchval(
+        "SELECT count(*) FROM team_queue q JOIN players p ON p.id = q.player_id"
+        " WHERE q.player_id = ANY($1::uuid[]) AND q.display_name IS DISTINCT FROM p.display_name",
+        [p[0] for p in ps]) == 4, ("FIX2 M3 distinct initial names",)
     start = await w.ok("POST", "/api/v1/team/lobby/start", ps[0][1],
                        {"steam_id": ps[0][1]}, tag="team start")
     await w.conn.execute(
@@ -165,9 +170,16 @@ async def _assert_join_roster(w, mode, answer, caller, tag):
         (tag, "room, series, mode and hold", answer)
     cols = ("t1a_id", "t1b_id", "t2a_id", "t2b_id") if mode == "team" else \
         ("solo_id", "duo_a_id", "duo_b_id")
-    people = {p["id"]: {"steam_id": p["steam_id"], "display_name": p["display_name"]}
-              for p in await w.conn.fetch("SELECT id, steam_id, display_name FROM players WHERE id = ANY($1::uuid[])",
-                                          [row[c] for c in cols])}
+    if mode == "team":
+        names = await w.conn.fetch(
+            "SELECT player_id AS id, steam_id, display_name FROM team_queue WHERE series_id = $1::uuid",
+            answer["series_id"])
+    else:
+        names = await w.conn.fetch(
+            "SELECT id, steam_id, display_name FROM players WHERE id = ANY($1::uuid[])",
+            [row[c] for c in cols])
+    people = {p["id"]: {"steam_id": p["steam_id"], "display_name": p["display_name"]} for p in names}
+    assert set(people) == {row[c] for c in cols}, (tag, "stored roster identities", people)
     if mode == "ovt":
         assert (answer.get("solo"), answer.get("duo"), answer.get("solo_extra_pick"),
                 answer.get("side_assigned")) == \
@@ -280,13 +292,18 @@ def test_t1_3_team_issue_relock_and_continuation(monkeypatch):
         await w.conn.execute("UPDATE team_series SET t1_series_wins = 1 WHERE id = $1",
                              row["id"])
         lob = await w.ok("POST", "/api/v1/team/lobby/create", ps[0][1],
-                         {"steam_id": ps[0][1], "caps": "rjs1",
+                         {"steam_id": ps[0][1], "display_name": "Queue relock 0", "caps": "rjs1",
                           "preferred_team": team_of[ps[0][0]]}, tag="relock create")
         for i in (1, 2, 3):
             await w.ok("POST", "/api/v1/team/lobby/join", ps[i][1],
                        {"steam_id": ps[i][1], "lobby_id": lob["lobby_id"],
+                        "display_name": "Queue relock %d" % i,
                         "caps": "rjs1" if i != 3 else "",
                         "preferred_team": team_of[ps[i][0]]}, tag="relock join")
+        assert await w.conn.fetchval(
+            "SELECT count(*) FROM team_queue q JOIN players p ON p.id = q.player_id"
+            " WHERE q.player_id = ANY($1::uuid[]) AND q.display_name IS DISTINCT FROM p.display_name",
+            ids) == 4, ("FIX2 M3 distinct relock names",)
         start = await w.ok("POST", "/api/v1/team/lobby/start", ps[0][1],
                            {"steam_id": ps[0][1]}, tag="relock start")
         assert start.get("series_id") in (None, str(row["id"])), ("adopt", start)
