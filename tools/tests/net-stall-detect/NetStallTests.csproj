@@ -4,7 +4,9 @@
        plugin files InboundStallCore.cs, NetJitterBudgetCore.cs,
        PoisonLedgerCore.cs (V3LineLog and ActivationCore), LagNotices.cs (with
        Stubs.cs standing in for the Unity-side classes it reads), FpsFocusCore.cs
-       and DecimatedList.cs. run_tests.py builds it, runs every case, then
+       and DecimatedList.cs, plus exact ApiClient serialization/clamp and
+       NetworkReplicaDiagnostics snapshot/join text cut at every build.
+       run_tests.py builds it, runs every case, then
        builds mutated COPIES (the *Source overrides) and requires each
        mutant's target case to fail and its control to pass. The tracked
        files are never modified. Paths are RELATIVE so no local directory
@@ -29,6 +31,7 @@
     <FocusSource Condition="'$(FocusSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\FpsFocusCore.cs</FocusSource>
     <DecimatedSource Condition="'$(DecimatedSource)' == ''">$(MSBuildThisFileDirectory)work\DecimatedList.cs</DecimatedSource>
     <FpsWireSource Condition="'$(FpsWireSource)' == ''">$(MSBuildThisFileDirectory)work\FpsWireProduction_base.cs</FpsWireSource>
+    <ReplicaMethodsSource Condition="'$(ReplicaMethodsSource)' == ''">$(MSBuildThisFileDirectory)work\ReplicaMethods_base.cs</ReplicaMethodsSource>
   </PropertyGroup>
 
   <ItemGroup>
@@ -39,6 +42,7 @@
     <Compile Include="$(FocusSource)" />
     <Compile Include="$(DecimatedSource)" />
     <Compile Include="$(FpsWireSource)" />
+    <Compile Include="$(ReplicaMethodsSource)" />
     <Compile Include="$(MSBuildThisFileDirectory)Stubs.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)NightWindows.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Program.cs" />

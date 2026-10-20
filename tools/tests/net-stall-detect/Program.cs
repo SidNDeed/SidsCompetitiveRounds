@@ -26,6 +26,14 @@ namespace NetStallTests
         {
             var cases = new List<KeyValuePair<string, Func<string>>>
             {
+                new KeyValuePair<string, Func<string>>("snapshot_roster", SnapshotRoster),
+                new KeyValuePair<string, Func<string>>("snapshot_spectator", SnapshotSpectator),
+                new KeyValuePair<string, Func<string>>("snapshot_overflow", SnapshotOverflow),
+                new KeyValuePair<string, Func<string>>("jitter_ties", JitterTies),
+                new KeyValuePair<string, Func<string>>("jitter_same_room_reset", JitterSameRoomReset),
+                new KeyValuePair<string, Func<string>>("lag_setting_flips", LagSettingFlips),
+                new KeyValuePair<string, Func<string>>("focus_reset_match", () => Pin("m7_focus_match_reset")),
+                new KeyValuePair<string, Func<string>>("focus_reset_state", () => Pin("m7_focus_state_reset")),
     new KeyValuePair<string, Func<string>>("fps_focus_clamp_wire", FpsFocusClampWire),
     new KeyValuePair<string, Func<string>>("fps_focus_clamp_short", FpsFocusClampShort),
     new KeyValuePair<string, Func<string>>("focus_outlier_unfocused", () => FocusTrackedBucket(true)),
@@ -898,6 +906,153 @@ namespace NetStallTests
                 joined = cut > 0 ? joined.Substring(0, cut) : joined.Substring(0, Math.Max(0, budget));
             }
             return prefix + joined;
+        }
+
+        private static string SnapshotRoster()
+        {
+            NetworkReplicaDiagnostics.TestResetReplica(false);
+            NetworkReplicaDiagnostics.TestActor(2, 102, 1, 5);
+            NetworkReplicaDiagnostics.TestActor(3, 103, 1, 9);
+            var core = new InboundStallCore();
+            core.OnDepth(80, 0, NetworkReplicaDiagnostics.SnapshotRemoteStreams, 1);
+            // Actor 2 left the live room roster. Its recorded game window
+            // remains, while actor 4 is first observed after the stall opened.
+            NetworkReplicaDiagnostics.TestActor(2, 102, 1, 5, false);
+            NetworkReplicaDiagnostics.TestActor(3, 103, 2, 10);
+            NetworkReplicaDiagnostics.TestActor(4, 104, 1, 6);
+            NetworkReplicaDiagnostics.TestActor(5, 105, 0, 0);
+            var actors = new int[16]; var batches = new long[16];
+            int n = NetworkReplicaDiagnostics.SnapshotRemoteStreams(actors, batches);
+            if (n != 3 || !actors.Take(n).Contains(2) || !actors.Take(n).Contains(4))
+                return "current snapshot lost departed actor, missed later joiner, or included empty view: n=" + n;
+            core.OnFrame(18);
+            string line = core.OnDepth(2, 1501, NetworkReplicaDiagnostics.SnapshotRemoteStreams, 1, 18);
+            if (line == null || Field(line, "remoteStreams") != "2" || Field(line, "stopped") != "1")
+                return "opening cohort must retain departed actor and omit later joiner: " + line;
+            return null;
+        }
+
+        private static string SnapshotSpectator()
+        {
+            NetworkReplicaDiagnostics.TestResetReplica(true);
+            NetworkReplicaDiagnostics.TestActor(2, 0, 1, 5);
+            NetworkReplicaDiagnostics.TestActor(3, 103, 1, 8);
+            var actors = new int[16]; var batches = new long[16];
+            int n = NetworkReplicaDiagnostics.SnapshotRemoteStreams(actors, batches);
+            int i = Array.IndexOf(actors, 2, 0, n);
+            if (n != 2 || i < 0 || batches[i] != 5) return "spectator non-Player view omitted";
+            // No Player view became known, but actor-level accepted traffic
+            // advanced. This explicitly establishes the spectator limitation.
+            NetworkReplicaDiagnostics.TestActor(2, 0, 2, 6);
+            n = NetworkReplicaDiagnostics.SnapshotRemoteStreams(actors, batches);
+            i = Array.IndexOf(actors, 2, 0, n);
+            if (n != 2 || i < 0 || batches[i] != 6) return "spectator aggregate counter did not advance";
+            SpectatorSession.IsLocalSpectator = false;
+            n = NetworkReplicaDiagnostics.SnapshotRemoteStreams(actors, batches);
+            if (n != 1 || actors[0] != 3) return "fighter snapshot admitted an unconfirmed Player view";
+            return null;
+        }
+
+        private static string SnapshotOverflow()
+        {
+            NetworkReplicaDiagnostics.TestResetReplica(false);
+            for (int i = 1; i <= 20; i++) NetworkReplicaDiagnostics.TestActor(i, 100 + i, 1, i);
+            var actors = new int[16]; var batches = new long[16];
+            int n = NetworkReplicaDiagnostics.SnapshotRemoteStreams(actors, batches);
+            if (n != 16 || actors.Distinct().Count() != 16) return "overflow snapshot n=" + n;
+            for (int i = 0; i < n; i++)
+                if (actors[i] < 1 || actors[i] > 20 || batches[i] != actors[i]) return "misaligned overflow entry=" + i;
+            if (NetworkReplicaDiagnostics.SnapshotRemoteStreams(new int[4], new long[2]) != 2)
+                return "shorter batches array bound";
+            if (NetworkReplicaDiagnostics.SnapshotRemoteStreams(null, batches) != 0 ||
+                NetworkReplicaDiagnostics.SnapshotRemoteStreams(actors, null) != 0) return "null array bound";
+            return null;
+        }
+
+        private static string JitterTies()
+        {
+            var budget = new NetJitterBudgetCore();
+            bool reserve;
+            for (int actor = 2; actor <= 5; actor++) budget.Offer(actor, 2000, 40, 1960, 1, out reserve);
+            string top = Field(budget.SummaryFields(), "jitterTop");
+            if (top != "a2:2000ms/s40/x1960/g1;a3:2000ms/s40/x1960/g1;a4:2000ms/s40/x1960/g1")
+                return "equal-gap order " + top;
+            return null;
+        }
+
+        private static string JitterSameRoomReset()
+        {
+            NetworkReplicaDiagnostics.TestResetReplica(false);
+            NetworkReplicaDiagnostics.TestPrimeSameRoom();
+            var budget = NetworkReplicaDiagnostics.TestJitterBudget;
+            bool reserve;
+            int emitted = 0;
+            for (int i = 0; i < 12; i++) if (budget.Offer(2, 350, 40, 310, 1, out reserve)) emitted++;
+            for (int i = 0; i < 4; i++) if (budget.Offer(3, 2000 + i, 40, 1960 + i, 1, out reserve)) emitted++;
+            if (budget.Offer(4, 8000, 40, 7960, 1, out reserve)) return "exhausted budget emitted";
+            string before = budget.SummaryFields();
+            if (emitted != 16 || Field(before, "jitterQualifying") != "17" || Field(before, "jitterSuppressed") != "1")
+                return "setup " + before;
+            NetworkReplicaDiagnostics.OnRoomJoined(); // exact production callback text
+            string after = budget.SummaryFields();
+            if (budget.Used != 0 || budget.Spent) return "same-room callback did not restore line slots: " + after;
+            if (Field(after, "jitterQualifying") != "17" || Field(after, "jitterSuppressed") != "1" ||
+                Field(after, "jitterTop") != Field(before, "jitterTop")) return "same-room callback erased evidence: " + after;
+            if (VanillaFixSupport.DiagResets.Count != 3 || VanillaFixSupport.DiagResets[0] != NetworkReplicaDiagnostics.JitterDiagKey)
+                return "production callback did not take same-room diagnostics-reset branch";
+            if (!budget.Offer(2, 350, 40, 310, 1, out reserve) || budget.Used != 1)
+                return "restored same-room slot unavailable";
+            // Cumulative emitted lines are now 17 across this callback. The
+            // contract is a line budget between resets, with retained evidence.
+            return null;
+        }
+
+        private static string LagSettingFlips()
+        {
+            Plugin.Log = new LogSink();
+            Plugin.LagNoticesEnabled = new BepInEx.Configuration.ConfigEntry<bool> { Value = true };
+            // Other cases replace the test configuration object. Model fresh
+            // startup for this case so the REAL EnsureStartup subscribes to
+            // this object, and every flip reaches the real event handler.
+            var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+            typeof(LagNotices).GetField("_startupDone", flags).SetValue(null, false);
+            GameStateWatcher.PlainOneVOne = true;
+            RoomActors.LocalIsSpectator = false;
+            BroadcastMode.IsBroadcastIdentity = false;
+            NetworkSeatTelemetry.Ring.Clear();
+            LagNotices.OnGameStarted();
+            int seq = 0;
+            Action<int, bool> window = (ping, keyed) =>
+            {
+                NetworkSeatTelemetry.Ring.Add(new NetworkSeatTelemetry.WindowFacts {
+                    Seq = ++seq, WorstMs = 18, OwnPing = ping, PeerRtt = 40,
+                    OppActor = keyed ? 2 : 0, OppId = keyed ? "A" : null });
+                LagNotices.OnWindowClosed();
+            };
+            window(40, false); window(40, false);
+            for (int i = 0; i < 3; i++) window(200, true);
+            if (LagNotices.ActiveLines.Length != 1) return "first OWN_PING entry missing";
+            var slots = (LagNotices.Slot[])typeof(LagNotices).GetField("_slots", flags).GetValue(null);
+            // Age only the real slot clock origin; production OnWindowClosed
+            // and Step still perform every transition and count every edge.
+            slots[(int)LagNotices.State.OWN_PING].EnterS -= 6;
+            for (int i = 0; i < 3; i++) window(40, true);
+            for (int i = 0; i < 3; i++) window(200, true);
+            if (!Plugin.Log.Lines.Any(l => l.Contains("state=OWN_PING edge=suppressed"))) return "real cooldown suppression missing";
+            Plugin.LagNoticesEnabled.Value = false;
+            window(200, false);
+            Plugin.LagNoticesEnabled.Value = true;
+            window(40, false);
+            for (int i = 0; i < 3; i++) window(200, true);
+            if (LagNotices.ActiveLines.Length != 1) return "post-flip OWN_PING entry missing";
+            Plugin.LagNoticesEnabled.Value = false;
+            if (LagNotices.ActiveLines.Length != 0) return "setting-off callback did not clear HUD immediately";
+            Plugin.LagNoticesEnabled.Value = true;
+            LagNotices.OnGameEnded();
+            string gate = Plugin.Log.Lines.LastOrDefault(l => l.StartsWith("[LAG-NOTICE-GATE] ", StringComparison.Ordinal));
+            string expected = "[LAG-NOTICE-GATE] windows=16 setting_off=1 not_plain_1v1=0 unkeyed=3 evaluated=12 enters=2 suppressed=1";
+            if (gate != expected) return "gate across flips " + gate + " expected " + expected;
+            return null;
         }
 
         private static string FocusLockstep()

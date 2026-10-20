@@ -1,7 +1,8 @@
 """Night 2026-10-19 calibration lane harness: build the controls over the REAL
 plugin files (InboundStallCore.cs, NetJitterBudgetCore.cs, PoisonLedgerCore.cs,
 LagNotices.cs, FpsFocusCore.cs, and the DecimatedList class read out of
-GameStateWatcher.cs into work/DecimatedList.cs), run every case, then build
+GameStateWatcher.cs into work/DecimatedList.cs), plus exact ApiClient wire
+text and NetworkReplicaDiagnostics snapshot/join methods, run every case, then build
 mutated COPIES (work/, the *Source overrides; the tracked files are never
 written) and require each mutant's target case to FAIL and its control case to
 PASS. Exit 0 only when everything holds.
@@ -33,7 +34,7 @@ SOURCES = {
     "ApiSource": "ApiClient.cs",
 }
 COMPILED_SOURCES = {"StallSource", "JitterSource", "PoisonSource", "LagSource", "FocusSource"}
-EXTRACTED_SOURCES = {"ApiSource"}
+EXTRACTED_SOURCES = {"ApiSource", "ReplicaSource"}
 # DecimatedList lives inside GameStateWatcher.cs (never moved, so the
 # keybind-surface manifest keeps its rows); the harness compiles the class
 # text itself, cut from the real file at every run.
@@ -128,6 +129,18 @@ def structural_pins(overrides=None):
         "localFpsFocusTimeline.Add(FpsFocusCore.BucketFlag(tlUnfocused));",
         "tlUnfocused = false;")
 
+    # Add these results to structural_pins(overrides), using the same source key
+    # M5 uses for GameStateWatcher.cs if it differs from WatcherSource.
+    raw = source_text("WatcherSource", overrides)
+    for pin_name, marker in (
+        ("m7_focus_match_reset", "private static void ResetPerMatchCombatCounters()"),
+        ("m7_focus_state_reset", "private static void ResetMatchState()"),
+    ):
+        span = method_text(raw, marker)
+        pins[pin_name] = ordered_once(span,
+            "localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;",
+            "localFpsFocusTimeline.Clear(); tlUnfocused = false;")
+
     return pins
 
 
@@ -194,6 +207,40 @@ def extract_fps_wire(tag, overrides):
     return path
 
 
+# Add SOURCES["ReplicaSource"] = "NetworkReplicaDiagnostics.cs".
+# Add SOURCES["WatcherSource"] = "GameStateWatcher.cs" if M5 has not already.
+# Both are noncompiled source keys. Add ReplicaMethodsSource property/Compile
+# to the harness project only; pass the extraction output from build().
+
+def extract_replica(tag, overrides=None):
+    raw = source_text("ReplicaSource", overrides)
+    bodies = [method_text(raw, marker) for marker in (
+        "internal static int SnapshotRemoteStreams(int[] actors, long[] batches)",
+        "internal static void OnRoomJoined()",
+    )]
+    text = ("using System;\nusing Photon.Pun;\n"
+            "namespace CompetitiveRounds\n{\n"
+            "internal static partial class NetworkReplicaDiagnostics\n{\n"
+            + "\n\n".join(bodies) + "\n}\n}\n")
+    path = os.path.join(WORK, "ReplicaMethods_" + tag + ".cs")
+    with open(path, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
+    return path
+
+# In build(tag, overrides), append:
+# cmd.append("-p:ReplicaMethodsSource=" + extract_replica(tag, overrides))
+# Project default property: $(MSBuildThisFileDirectory)work\ReplicaMethods_base.cs
+# Project Compile item: <Compile Include="$(ReplicaMethodsSource)" />
+
+def m7_scoped_edits(key, marker, old, new):
+    # Whole-method replacement gives the mutation runner a unique old anchor,
+    # even when the focus reset line has two production sibling sites.
+    span = method_text(source_text(key), marker)
+    if span.count(old) != 1:
+        raise ValueError("M7 scoped edit expected once: " + marker + " / " + old)
+    return [(span, span.replace(old, new))]
+
+
 def extract_decimated():
     raw = open(os.path.join(PLUGIN, DECIMATED_FROM), "rb").read().decode("utf-8").replace("\r\n", "\n")
     start = raw.index("    /// <summary>Bounded telemetry series that COMPRESSES")
@@ -218,6 +265,64 @@ def extract_decimated():
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
 MUTANTS = [
+    ("m7_later_joiner_in_opening_cohort", "StallSource",
+     [("                for (int i = 0; i < _openStreams; i++)", "                for (int i = 0; i < n; i++)")],
+     "snapshot_roster", "stall_night"),
+    ("m7_departed_actor_omitted", "ReplicaSource",
+     [("                        if (a == null || a.Game.Views == 0) continue;",
+       "                        if (a == null || a.Game.Views == 0 || !PhotonNetwork.CurrentRoom.Players.ContainsKey(en.Current.Key)) continue;")],
+     "snapshot_roster", "snapshot_overflow"),
+    ("m7_empty_game_view_included", "ReplicaSource",
+     [("                        if (a == null || a.Game.Views == 0) continue;", "                        if (a == null) continue;")],
+     "snapshot_roster", "snapshot_spectator"),
+    ("m7_spectator_player_gate", "ReplicaSource",
+     [("                        if (!spectator && a.PlayerViewId == 0) continue;", "                        if (a.PlayerViewId == 0) continue;")],
+     "snapshot_spectator", "snapshot_roster"),
+    ("m7_snapshot_overflow_slot_lost", "ReplicaSource",
+     [("                        if (n >= actors.Length || n >= batches.Length) break;",
+       "                        if (n >= actors.Length - 1 || n >= batches.Length) break;")],
+     "snapshot_overflow", "snapshot_roster"),
+    ("m7_jitter_ties_reversed", "JitterSource",
+     [("            while (pos > 0 && _top[pos - 1].ArrivalMs < arrivalMs) pos--;",
+       "            while (pos > 0 && _top[pos - 1].ArrivalMs <= arrivalMs) pos--;")],
+     "jitter_ties", "jitter_top"),
+    ("m7_same_room_slots_not_reset", "ReplicaSource",
+     [("                    _jitterBudget.ResetLines();\n", "")],
+     "jitter_same_room_reset", "jitter_ties"),
+    ("m7_same_room_evidence_erased", "ReplicaSource",
+     [("                    _jitterBudget.ResetLines();", "                    _jitterBudget.ResetRoom();")],
+     "jitter_same_room_reset", "jitter_ties"),
+    ("m7_unkeyed_not_counted", "LagSource",
+     [("                if (_recentCount <= 0) { _gUnkeyed++; return; }",
+       "                if (_recentCount <= 0) { return; }")],
+     "lag_setting_flips", "lag_1v2_gate"),
+    ("m7_suppressed_not_counted", "LagSource",
+     [("                        case Edge.Suppressed: _gSuppressed++; LogEdge((State)s, \"suppressed\", slot, nowS, null); break;",
+       "                        case Edge.Suppressed: LogEdge((State)s, \"suppressed\", slot, nowS, null); break;")],
+     "lag_setting_flips", "lag_1v2_gate"),
+    ("m7_setting_flip_erases_counts", "LagSource",
+     [("            try { if (!SettingOn()) ResetAll(logExits: false, why: null); } catch { }",
+       "            try { if (!SettingOn()) { ResetGateCounts(); ResetAll(logExits: false, why: null); } } catch { }")],
+     "lag_setting_flips", "lag_1v2_gate"),
+    ("m7_setting_flip_keeps_hud", "LagSource",
+     [("            try { if (!SettingOn()) ResetAll(logExits: false, why: null); } catch { }", "")],
+     "lag_setting_flips", "lag_1v2_gate"),
+    ("m7_focus_match_reset_removed", "WatcherSource",
+     m7_scoped_edits("WatcherSource", "private static void ResetPerMatchCombatCounters()",
+                     "            localFpsFocusTimeline.Clear(); tlUnfocused = false;\n", ""),
+     "focus_reset_match", "focus_reset_state"),
+    ("m7_focus_state_reset_removed", "WatcherSource",
+     m7_scoped_edits("WatcherSource", "private static void ResetMatchState()",
+                     "            localFpsFocusTimeline.Clear(); tlUnfocused = false;\n", ""),
+     "focus_reset_state", "focus_reset_match"),
+    ("m7_same_room_counters_erased", "JitterSource",
+     [("        internal void ResetLines() { _routineUsed = 0; _reserveUsed = 0; }",
+       "        internal void ResetLines() { _routineUsed = 0; _reserveUsed = 0; _qualifying = 0; _suppressed = 0; }")],
+     "jitter_same_room_reset", "jitter_ties"),
+    ("m7_same_room_ranking_erased", "JitterSource",
+     [("        internal void ResetLines() { _routineUsed = 0; _reserveUsed = 0; }",
+       "        internal void ResetLines() { _routineUsed = 0; _reserveUsed = 0; _topN = 0; Array.Clear(_top, 0, _top.Length); }")],
+     "jitter_same_room_reset", "jitter_ties"),
     ("m6_focus_clamped_independently", "ApiSource",
      [("Escape(FpsFocusCore.EncodeRetained(localFpsFocusTimeline, localFpsKeptIndices))",
        "Escape(ClampTimeline(localFpsFocusTimeline))")],
@@ -438,6 +543,7 @@ def build(tag, overrides):
            "-p:OutDir=" + os.path.join(out, "bin") + os.sep]
     cmd.append("-p:DecimatedSource=" + DECIMATED_OUT)
     cmd.append("-p:FpsWireSource=" + extract_fps_wire(tag, overrides))
+    cmd.append("-p:ReplicaMethodsSource=" + extract_replica(tag, overrides))
     for k, v in overrides.items():
         if k in COMPILED_SOURCES:
             cmd.append("-p:%s=%s" % (k, v))
