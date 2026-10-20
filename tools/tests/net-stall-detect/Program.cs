@@ -28,6 +28,9 @@ namespace NetStallTests
             {
                 new KeyValuePair<string, Func<string>>("stall_night", StallNight),
                 new KeyValuePair<string, Func<string>>("stall_frames_hitch", StallFramesHitch),
+                new KeyValuePair<string, Func<string>>("stall_terminal_hitch_game_end", () => StallTerminal(true, 100)),
+                new KeyValuePair<string, Func<string>>("stall_terminal_hitch_depth_close", () => StallTerminal(false, 100)),
+                new KeyValuePair<string, Func<string>>("stall_terminal_fast", StallTerminalFast),
                 new KeyValuePair<string, Func<string>>("stall_cap", StallCap),
                 new KeyValuePair<string, Func<string>>("stall_ordinary_spikes", StallOrdinarySpikes),
                 new KeyValuePair<string, Func<string>>("stall_streams_flowing", StallStreamsFlowing),
@@ -42,6 +45,8 @@ namespace NetStallTests
                 new KeyValuePair<string, Func<string>>("focus_lockstep", FocusLockstep),
             };
             var only = new HashSet<string>(args);
+            foreach (string name in only)
+                if (!cases.Any(c => c.Key == name)) Check(name, () => "unknown case");
             foreach (var c in cases) if (only.Count == 0 || only.Contains(c.Key)) Check(c.Key, c.Value);
             foreach (var l in Out) Console.WriteLine(l);
             Console.WriteLine("cases=" + Out.Count + " fail=" + _fail);
@@ -138,6 +143,50 @@ namespace NetStallTests
             if (lines.Count != 0) return "a stall covered by 60 ms frames was logged: " + lines[0];
             if (core.GameStalls != 0 || core.GameFrameExcluded != 1) return "counts " + core.SummaryFields();
             return null;
+        }
+
+        // Python checks exact production spans, including sources not compiled
+        // by this harness, and passes a result for these named Program cases.
+        private static string Pin(string name)
+        {
+            string result = Environment.GetEnvironmentVariable("NET_STALL_PIN_" + name);
+            return result == "PASS" ? null : "source pin " + name + ": " + (result ?? "missing");
+        }
+
+        private static string StallTerminal(bool gameEnd, int terminalMs)
+        {
+            string pin = Pin(gameEnd ? "h1_game_end" : "h1_depth_close");
+            if (pin != null) return pin;
+            foreach (int closeDepth in new[] { 24, 48 })
+            {
+                var core = new InboundStallCore();
+                core.OnDepth(60, 0, null, 1);
+                for (int i = 0; i < 60; i++) core.OnFrame(18);
+                string line = gameEnd ? core.Flush(1200, null, 1, terminalMs)
+                                      : core.OnDepth(closeDepth, 1200, null, 1, terminalMs);
+                // The delayed Update must not count or emit after closure.
+                core.OnFrame(100);
+                if (core.Flush(1300, null, 1, 100) != null) return "closure repeated";
+                if (terminalMs >= 50)
+                {
+                    if (line != null || core.GameStalls != 0 || core.GameFrameExcluded != 1)
+                        return "pending hitch qualified: " + core.SummaryFields();
+                }
+                else
+                {
+                    if (line == null) return "fast terminal frame rejected";
+                    if (Field(line, "frames") != "60" || Field(line, "worstFrameMs") != Math.Max(18, terminalMs).ToString()
+                        || Field(line, "durMs") != "1200" || Field(line, "open") != (gameEnd ? "1" : "0"))
+                        return "terminal fields " + line;
+                }
+            }
+            return null;
+        }
+
+        private static string StallTerminalFast()
+        {
+            return StallTerminal(true, 18) ?? StallTerminal(false, 18)
+                ?? StallTerminal(true, 23) ?? StallTerminal(false, 23);
         }
 
         private static string StallCap()

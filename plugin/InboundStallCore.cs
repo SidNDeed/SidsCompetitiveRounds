@@ -81,18 +81,18 @@ namespace CompetitiveRounds
 
         /// <summary>One depth sample. Returns the [NET-STALL] line to write
         /// when a stall closed with this sample, else null.</summary>
-        internal string OnDepth(int depth, long nowMs, StreamSnapshot snap, int game)
+        internal string OnDepth(int depth, long nowMs, StreamSnapshot snap, int game, int terminalFrameMs = 0)
         {
             if (depth <= _gate) return null;   // the one comparison on the quiet path
-            return Slow(depth, nowMs, snap, game);
+            return Slow(depth, nowMs, snap, game, terminalFrameMs);
         }
 
-        private string Slow(int depth, long nowMs, StreamSnapshot snap, int game)
+        private string Slow(int depth, long nowMs, StreamSnapshot snap, int game, int terminalFrameMs)
         {
             string line = null;
             if (depth <= LOW_MARK)
             {
-                if (_open) line = Close(nowMs, snap, game, false);
+                if (_open) line = Close(nowMs, snap, game, false, terminalFrameMs);
                 _rising = false;
                 _gate = LOW_MARK;
                 return line;
@@ -114,7 +114,7 @@ namespace CompetitiveRounds
             }
             else if (_open)
             {
-                line = Close(nowMs, snap, game, false);
+                line = Close(nowMs, snap, game, false, terminalFrameMs);
             }
             return line;
         }
@@ -132,9 +132,9 @@ namespace CompetitiveRounds
 
         /// <summary>Game end or room exit: a stall still open is closed here,
         /// marked open=1 (it had no drain to end it).</summary>
-        internal string Flush(long nowMs, StreamSnapshot snap, int game)
+        internal string Flush(long nowMs, StreamSnapshot snap, int game, int terminalFrameMs = 0)
         {
-            string line = _open ? Close(nowMs, snap, game, true) : null;
+            string line = _open ? Close(nowMs, snap, game, true, terminalFrameMs) : null;
             _rising = false;
             _gate = LOW_MARK;
             return line;
@@ -143,11 +143,14 @@ namespace CompetitiveRounds
         private readonly int[] _closeActors = new int[MAX_STREAMS];
         private readonly long[] _closeBatches = new long[MAX_STREAMS];
 
-        private string Close(long nowMs, StreamSnapshot snap, int game, bool openAtEnd)
+        private string Close(long nowMs, StreamSnapshot snap, int game, bool openAtEnd, int terminalFrameMs)
         {
             _open = false;
             long dur = nowMs - _openMs;
             if (dur <= MIN_STALL_MS) return null;
+            // The closing RPC can precede Update. Observe its pending wall
+            // gap without counting another completed frame.
+            if (terminalFrameMs > _worstFrameMs) _worstFrameMs = terminalFrameMs;
             if (_worstFrameMs >= FRAME_OK_MS)
             {
                 // This seat's own frames covered the hold: a local hitch, not

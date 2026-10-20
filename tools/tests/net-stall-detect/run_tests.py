@@ -25,12 +25,58 @@ SOURCES = {
     "PoisonSource": "PoisonLedgerCore.cs",
     "LagSource": "LagNotices.cs",
     "FocusSource": "FpsFocusCore.cs",
+    "TelemetrySource": "NetworkSeatTelemetry.cs",
 }
+COMPILED_SOURCES = {"StallSource", "JitterSource", "PoisonSource", "LagSource", "FocusSource"}
 # DecimatedList lives inside GameStateWatcher.cs (never moved, so the
 # keybind-surface manifest keeps its rows); the harness compiles the class
 # text itself, cut from the real file at every run.
 DECIMATED_FROM = "GameStateWatcher.cs"
 DECIMATED_OUT = os.path.join(WORK, "DecimatedList.cs")
+
+
+def source_text(key, overrides=None):
+    path = (overrides or {}).get(key, os.path.join(PLUGIN, SOURCES[key]))
+    return open(path, "rb").read().decode("utf-8").replace("\r\n", "\n")
+
+
+def method_text(raw, marker):
+    if raw.count(marker) != 1:
+        raise ValueError("method marker count: " + marker)
+    start = raw.index(marker)
+    depth, i = 0, raw.index("{", start)
+    while i < len(raw):
+        if raw[i] == "{":
+            depth += 1
+        elif raw[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return raw[start:i + 1]
+        i += 1
+    raise ValueError("unclosed method: " + marker)
+
+
+def ordered_once(span, *tokens):
+    positions = []
+    for token in tokens:
+        if span.count(token) != 1:
+            return "expected once: " + token
+        positions.append(span.index(token))
+    return "PASS" if positions == sorted(positions) else "production order changed"
+
+
+def structural_pins(overrides=None):
+    raw = source_text("TelemetrySource", overrides)
+    end = method_text(raw, "internal static void OnMatchEnded(string reason)")
+    depth = method_text(raw, "internal static void NoteInboundDepth()")
+    return {
+        "h1_game_end": ordered_once(end, "if (!_gameOpen) return;",
+            "_stall.Flush(StallNowMs(), _stallStreams, _gameSeq, ReceiverWallGapMsNow())",
+            "_gameOpen = false;"),
+        "h1_depth_close": ordered_once(depth, "if (_stall.Wants(qi))",
+            "_stall.OnDepth(qi, StallNowMs(), _stallStreams, _gameSeq,",
+            "_stall.Open && qi <= InboundStallCore.QUEUE_BOUND ? ReceiverWallGapMsNow() : 0"),
+    }
 
 
 def extract_decimated():
@@ -57,6 +103,23 @@ def extract_decimated():
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
 MUTANTS = [
+    ("h1_terminal_ignored_in_core_game_end", "StallSource",
+     [("            if (terminalFrameMs > _worstFrameMs) _worstFrameMs = terminalFrameMs;\n", "")],
+     "stall_terminal_hitch_game_end", "stall_night"),
+    ("h1_terminal_ignored_in_core_depth_close", "StallSource",
+     [("            if (terminalFrameMs > _worstFrameMs) _worstFrameMs = terminalFrameMs;\n", "")],
+     "stall_terminal_hitch_depth_close", "stall_night"),
+    ("h1_terminal_counted_as_frame", "StallSource",
+     [("            if (terminalFrameMs > _worstFrameMs) _worstFrameMs = terminalFrameMs;\n",
+       "            if (terminalFrameMs > _worstFrameMs) _worstFrameMs = terminalFrameMs;\n            _frames++;\n")],
+     "stall_terminal_fast", "stall_frames_hitch"),
+    ("h1_game_end_obs_removed", "TelemetrySource",
+     [("_stall.Flush(StallNowMs(), _stallStreams, _gameSeq, ReceiverWallGapMsNow())",
+       "_stall.Flush(StallNowMs(), _stallStreams, _gameSeq, 0)")],
+     "stall_terminal_hitch_game_end", "stall_terminal_hitch_depth_close"),
+    ("h1_depth_close_obs_removed", "TelemetrySource",
+     [("_stall.Open && qi <= InboundStallCore.QUEUE_BOUND ? ReceiverWallGapMsNow() : 0", "0")],
+     "stall_terminal_hitch_depth_close", "stall_terminal_hitch_game_end"),
     # required: the detector threshold removed
     ("stall_threshold_removed", "StallSource",
      [("            if (depth > QUEUE_BOUND)\n", "            if (depth > 0)\n")],
@@ -122,7 +185,8 @@ def build(tag, overrides):
            "-p:OutDir=" + os.path.join(out, "bin") + os.sep]
     cmd.append("-p:DecimatedSource=" + DECIMATED_OUT)
     for k, v in overrides.items():
-        cmd.append("-p:%s=%s" % (k, v))
+        if k in COMPILED_SOURCES:
+            cmd.append("-p:%s=%s" % (k, v))
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout[-3000:], r.stderr[-2000:])
@@ -130,8 +194,11 @@ def build(tag, overrides):
     return os.path.join(out, "bin", "NetStallTests.dll")
 
 
-def run(dll, cases=()):
-    r = subprocess.run(["dotnet", dll] + list(cases), capture_output=True, text=True)
+def run(dll, cases=(), overrides=None):
+    env = os.environ.copy()
+    for name, result in structural_pins(overrides).items():
+        env["NET_STALL_PIN_" + name] = result
+    r = subprocess.run(["dotnet", dll] + list(cases), capture_output=True, text=True, env=env)
     return r.returncode, r.stdout.strip()
 
 
@@ -165,6 +232,9 @@ def main():
     if missing:
         print("BAD: cases without a mutant:", ", ".join(missing))
         ok = False
+    if not ok:
+        print("RESULT FAIL (controls must be green before mutants)")
+        return 1
 
     caught = 0
     run_set = [m for m in MUTANTS if not only or m[0] in only]
@@ -186,13 +256,14 @@ def main():
             continue
         path = os.path.join(WORK, "mut_" + name + "_" + SOURCES[key])
         open(path, "wb").write(raw.encode("utf-8"))
-        mdll = build("mut_" + name, {key: path})
+        overrides = {key: path}
+        mdll = build("mut_" + name, overrides) if key in COMPILED_SOURCES else dll
         if mdll is None:
             print("BAD mutant %s: does not build" % name)
             ok = False
             continue
-        trc, tout = run(mdll, [target])
-        crc, cout = run(mdll, [control])
+        trc, tout = run(mdll, [target], overrides)
+        crc, cout = run(mdll, [control], overrides)
         hit = trc != 0 and crc == 0
         caught += hit
         ok = ok and hit

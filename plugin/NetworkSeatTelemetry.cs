@@ -203,7 +203,7 @@ namespace CompetitiveRounds
             CloseWindow(force: true);
             SamplePeerDeltas();
             // A stall still open at the game edge ends here (open=1).
-            try { string sl = _stall.Flush(StallNowMs(), _stallStreams, _gameSeq); if (sl != null) Plugin.Log?.LogInfo(sl); } catch { }
+            try { string sl = _stall.Flush(StallNowMs(), _stallStreams, _gameSeq, ReceiverWallGapMsNow()); if (sl != null) Plugin.Log?.LogInfo(sl); } catch { }
             _gameOpen = false;
             try { LagNotices.OnGameEnded(); } catch { }   // Release B §4: shown states exit here
             try { NetworkReplicaDiagnostics.DrainFrameHookTicks(); } catch { }   // r3 MEDIUM 12: clear at the end edge too
@@ -630,7 +630,8 @@ namespace CompetitiveRounds
                 // depth is ordinary; the clock is read only past the gate.
                 if (_stall.Wants(qi))
                 {
-                    string sl = _stall.OnDepth(qi, StallNowMs(), _stallStreams, _gameSeq);
+                    string sl = _stall.OnDepth(qi, StallNowMs(), _stallStreams, _gameSeq,
+                        _stall.Open && qi <= InboundStallCore.QUEUE_BOUND ? ReceiverWallGapMsNow() : 0);
                     if (sl != null) Plugin.Log?.LogInfo(sl);
                 }
             }
