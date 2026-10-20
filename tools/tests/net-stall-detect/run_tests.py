@@ -1,6 +1,7 @@
 """Night 2026-10-19 calibration lane harness: build the controls over the REAL
 plugin files (InboundStallCore.cs, NetJitterBudgetCore.cs, PoisonLedgerCore.cs,
-LagNotices.cs, FpsFocusCore.cs, DecimatedList.cs), run every case, then build
+LagNotices.cs, FpsFocusCore.cs, and the DecimatedList class read out of
+GameStateWatcher.cs into work/DecimatedList.cs), run every case, then build
 mutated COPIES (work/, the *Source overrides; the tracked files are never
 written) and require each mutant's target case to FAIL and its control case to
 PASS. Exit 0 only when everything holds.
@@ -24,8 +25,34 @@ SOURCES = {
     "PoisonSource": "PoisonLedgerCore.cs",
     "LagSource": "LagNotices.cs",
     "FocusSource": "FpsFocusCore.cs",
-    "DecimatedSource": "DecimatedList.cs",
 }
+# DecimatedList lives inside GameStateWatcher.cs (never moved, so the
+# keybind-surface manifest keeps its rows); the harness compiles the class
+# text itself, cut from the real file at every run.
+DECIMATED_FROM = "GameStateWatcher.cs"
+DECIMATED_OUT = os.path.join(WORK, "DecimatedList.cs")
+
+
+def extract_decimated():
+    raw = open(os.path.join(PLUGIN, DECIMATED_FROM), "rb").read().decode("utf-8").replace("\r\n", "\n")
+    start = raw.index("    /// <summary>Bounded telemetry series that COMPRESSES")
+    cls = raw.index("    internal sealed class DecimatedList<T>\n", start)
+    if raw.count("class DecimatedList<T>") != 1:
+        raise SystemExit("DecimatedList: expected exactly one class in " + DECIMATED_FROM)
+    depth, i = 0, raw.index("{", cls)
+    while True:
+        c = raw[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = raw[start:i + 1]
+    text = "using System.Collections.Generic;\n\nnamespace CompetitiveRounds\n{\n" + body + "\n}\n"
+    open(DECIMATED_OUT, "w", encoding="utf-8", newline="\n").write(text)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
@@ -89,6 +116,7 @@ def build(tag, overrides):
     cmd = ["dotnet", "build", PROJ, "-c", "Release", "-nologo", "-v", "q",
            "-p:IntermediateOutputPath=" + os.path.join(out, "obj") + os.sep,
            "-p:OutDir=" + os.path.join(out, "bin") + os.sep]
+    cmd.append("-p:DecimatedSource=" + DECIMATED_OUT)
     for k, v in overrides.items():
         cmd.append("-p:%s=%s" % (k, v))
     r = subprocess.run(cmd, capture_output=True, text=True)
@@ -109,6 +137,8 @@ def main():
     head = subprocess.run(["git", "-C", REPO, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
     print("commit", head)
     before = {k: sha(os.path.join(PLUGIN, f)) for k, f in SOURCES.items()}
+    before["Decimated"] = sha(os.path.join(PLUGIN, DECIMATED_FROM))
+    print("work/DecimatedList.cs cut from plugin/%s, sha256 %s" % (DECIMATED_FROM, extract_decimated()))
     for k, f in SOURCES.items():
         print("plugin/%s sha256 %s" % (f, before[k]))
     ok = True
@@ -169,6 +199,7 @@ def main():
                 print("    " + l[:300])
     print("mutants: %d of %d caught" % (caught, len(run_set)))
     after = {k: sha(os.path.join(PLUGIN, f)) for k, f in SOURCES.items()}
+    after["Decimated"] = sha(os.path.join(PLUGIN, DECIMATED_FROM))
     same = after == before
     print("tracked files unchanged:", same)
     ok = ok and same

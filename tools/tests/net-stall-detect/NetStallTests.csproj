@@ -27,7 +27,7 @@
     <PoisonSource Condition="'$(PoisonSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\PoisonLedgerCore.cs</PoisonSource>
     <LagSource Condition="'$(LagSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\LagNotices.cs</LagSource>
     <FocusSource Condition="'$(FocusSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\FpsFocusCore.cs</FocusSource>
-    <DecimatedSource Condition="'$(DecimatedSource)' == ''">$(MSBuildThisFileDirectory)..\..\..\plugin\DecimatedList.cs</DecimatedSource>
+    <DecimatedSource Condition="'$(DecimatedSource)' == ''">$(MSBuildThisFileDirectory)work\DecimatedList.cs</DecimatedSource>
   </PropertyGroup>
 
   <ItemGroup>
