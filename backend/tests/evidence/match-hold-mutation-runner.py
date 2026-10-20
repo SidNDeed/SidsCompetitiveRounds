@@ -41,6 +41,7 @@ M383 = "383_match_hold_stage2.sql"
 # id: (piece, module file, [(anchor, mutant text)], [(anchor, control text)],
 #      test file, -k selection of the tests that must fail)
 MUTANTS = {
+    'MERGED.FIX1.H1.RECEIPT': ('FIX1', 'match_report_window.py', [('        if exc.receipt:\n            raise\n', '        if False:\n            raise\n')], [('        if exc.receipt:\n            raise\n', '        if (exc.receipt):\n            raise\n')], 'test_match_hold_reports_pg.py', 'test_fix1_h1_racing_duplicate_does_not_spend_next_reporter'),
     # Fix 1 - every stage 2 route requires a positively verified session
     "F1.H1": ("FIX1", "match_hold.py",
               [('    if not _session_was_verified(request):\n'
@@ -119,14 +120,7 @@ MUTANTS = {
               [('    if window["settle_after"] <= now:\n',
                 '    if (window["settle_after"] <= now):\n')],
               WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
-    "F1.H6": ("FIX1", "match_report_window.py",
-              [('            await settle(db, entry)\n',
-                '            await settle(db, {"reporter_id": reporter_id,\n'
-                '                              "reporter_steam": reporter_steam,\n'
-                '                              "cls": cls, "payload": payload})\n')],
-              [('            await settle(db, entry)\n',
-                '            await settle(db, (entry))\n')],
-              WIN_T, "t5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c"),
+    "F1.H6": ('FIX1', 'match_report_window.py', [('            if not await _settle_and_mark(db, room, game_id, entry, now, settle):\n', '            if not await _settle_and_mark(db, room, game_id, dict(entry, payload=payload), now, settle):\n')], [('            if not await _settle_and_mark(db, room, game_id, entry, now, settle):\n', '            if not await _settle_and_mark(db, room, game_id, (entry), now, settle):\n')], 'test_match_report_window.py', 't5_4_settles_at_receipt_only_for_the_lowest_fresh_class_c'),
     "F1.M5": ("FIX1", "match_report_window.py",
               [('        "   AND m.beat_at <= CAST(:now AS timestamptz)"\n', '')],
               [('        "   AND m.beat_at <= CAST(:now AS timestamptz)"\n',

@@ -49238,13 +49238,18 @@ async def _report_window_settle(db, mode, entry, out=None):
     if cls == "r":
         report = _class_r_report(mode, report)
     settle = _settle_team_report if mode == "team" else _settle_ovt_report
-    resp = await settle(db, report, in_window=True)
+    outcome = {}
+    resp = await settle(db, report, in_window=True, outcome=outcome)
+    if out is not None:
+        out[str(entry["reporter_id"])] = resp
+    physical_game = (mode, str(UUID(report.series_id)), report.photon_room_id)
+    if not outcome.get("new_settlement") or outcome.get("physical_game") != physical_game:
+        raise _mrw_mod().ReportAlreadyRecorded(
+            outcome.get("physical_game"), receipt=out is not None)
     await db.execute(text(
         "UPDATE " + _WINDOW_TABLES[mode][1] + " SET fallback_cls = CAST(:cls AS varchar)"
         " WHERE series_id = CAST(:sid AS uuid) AND photon_room_id = CAST(:room AS varchar)"),
         {"cls": cls, "sid": str(report.series_id), "room": (report.photon_room_id or "")[:64]})
-    if out is not None:
-        out[str(entry["reporter_id"])] = resp
     print(f"[HOLD] report settled mode={mode} cls={cls} room={report.photon_room_id}")
     return resp
 
@@ -49253,6 +49258,31 @@ def _report_window_settler(mode, out=None):
     async def _settle(db, entry):
         return await _report_window_settle(db, mode, entry, out)
     return _settle
+
+
+async def _recorded_physical_report(db, mode, series_id, report, by_steam):
+    """Resolve the signed physical room and roster before selecting any G.
+
+    A valid advisory for a later G cannot change the identity of a match
+    already on record. Team slots retain their ordered duplicate identity;
+    1v2 uses the same unordered trio identity as its settlement body.
+    """
+    if mode == "team":
+        sql = (
+            "SELECT id, series_id, winner_team FROM team_matches WHERE series_id = :sid"
+            " AND photon_room_id = :room AND t1a_id = :a AND t1b_id = :b"
+            " AND t2a_id = :c AND t2b_id = :d LIMIT 1")
+        params = {"sid": series_id, "room": report.photon_room_id,
+                  "a": by_steam[report.t1a.steam_id], "b": by_steam[report.t1b.steam_id],
+                  "c": by_steam[report.t2a.steam_id], "d": by_steam[report.t2b.steam_id]}
+    else:
+        sql = (
+            "SELECT id, series_id FROM ovt_matches WHERE photon_room_id = :room"
+            " AND ARRAY[solo_id, duo_a_id, duo_b_id] @> CAST(:trio AS uuid[])"
+            " AND ARRAY[solo_id, duo_a_id, duo_b_id] <@ CAST(:trio AS uuid[]) LIMIT 1")
+        params = {"room": (report.photon_room_id or "")[:64],
+                  "trio": list(by_steam.values())}
+    return (await db.execute(text(sql), params)).mappings().first()
 
 
 async def _report_window_game(db, series_id, room, reported):
@@ -49272,12 +49302,14 @@ async def _report_window_game(db, series_id, room, reported):
     return g
 
 
-async def _report_window_duplicate(db, mode, series_id, report):
+async def _report_window_duplicate(db, mode, series_id, report, recorded=None):
     """Today's duplicate answer for a report of a settled window."""
     stable, mtable = _WINDOW_TABLES[mode]
+    if recorded is not None:
+        series_id = recorded["series_id"]
     s2 = (await db.execute(text("SELECT * FROM " + stable + " WHERE id = :sid"),
                            {"sid": series_id})).mappings().first()
-    m = (await db.execute(text(
+    m = recorded["id"] if recorded is not None else (await db.execute(text(
         "SELECT id FROM " + mtable + " WHERE series_id = :sid"
         "   AND photon_room_id = CAST(:room AS varchar) LIMIT 1"),
         {"sid": series_id, "room": (report.photon_room_id or "")[:64]})).scalar()
@@ -49289,7 +49321,8 @@ async def _report_window_duplicate(db, mode, series_id, report):
         return TeamMatchResponse(
             match_id=m, series_id=series_id, series_status=s2["status"],
             series_score=(f"{w1}-{w2}" if mine == 1 else f"{w2}-{w1}"),
-            winner_team=report.winner_team,
+            winner_team=(int(recorded["winner_team"] or report.winner_team)
+                         if recorded is not None else report.winner_team),
             message="Team match already recorded (duplicate report)")
     side = 1 if report.reported_by_steam_id == report.solo.steam_id else 2
     a, b = s2["solo_series_wins"], s2["duo_series_wins"]
@@ -49327,6 +49360,9 @@ async def _report_window_receive(db, mode, report):
     if (len(by_steam) != len(members) or set(by_steam.values()) != set(members)
             or report.reported_by_steam_id not in by_steam):
         return None
+    recorded = await _recorded_physical_report(db, mode, series_id, report, by_steam)
+    if recorded is not None:
+        return await _report_window_duplicate(db, mode, series_id, report, recorded)
     mrw = _mrw_mod()
     reported = None
     if report.game_id and mrw.verify_game_id(MATCH_HMAC_SECRET, report.game_id,
@@ -49345,12 +49381,22 @@ async def _report_window_receive(db, mode, report):
         "   AND game_id = CAST(:g AS uuid) AND closed_at IS NULL"),
         {"room": room, "g": str(g)})).scalar())
     out = {}
-    res = await mrw.receive(
-        db, mode=mode, room=room, game_id=g, reported_game_id=reported,
-        reporter_id=by_steam[report.reported_by_steam_id],
-        reporter_steam=report.reported_by_steam_id, payload=report.model_dump_json(),
-        member_ids=members, now=now, settle=_report_window_settler(mode, out),
-        held=_held)
+    try:
+        # This owner rolls back a receipt whose physical duplicate became
+        # visible only inside settlement. It must not spend a later G's
+        # immutable (game, reporter) slot, even without terminalizing G.
+        async with db.begin_nested():
+            res = await mrw.receive(
+                db, mode=mode, room=room, game_id=g, reported_game_id=reported,
+                reporter_id=by_steam[report.reported_by_steam_id],
+                reporter_steam=report.reported_by_steam_id, payload=report.model_dump_json(),
+                member_ids=members, now=now, settle=_report_window_settler(mode, out),
+                held=_held)
+    except mrw.ReportAlreadyRecorded:
+        recorded = await _recorded_physical_report(db, mode, series_id, report, by_steam)
+        if recorded is None:
+            raise HTTPException(503, "report_window_retry")
+        return await _report_window_duplicate(db, mode, series_id, report, recorded)
     if res["status"] == "duplicate":
         win = (await db.execute(text(
             "SELECT superseded_at FROM match_report_windows"
@@ -49516,7 +49562,7 @@ async def submit_ovt_match(report: OvtMatchReport, request: Request, db: AsyncSe
 
 
 async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
-                             in_window: bool = False):
+                             in_window: bool = False, outcome=None):
     """The settle body of /ovt/matches after its session and signature
     checks (V3 S5). With in_window it runs inside a report window's
     transaction, which its caller commits: its commits are flushes and its
@@ -49626,6 +49672,9 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
         two can never say different things: 200, "Already recorded", the
         series as it stands and the score from the reporter's side. Nothing
         this report did is kept."""
+        if outcome is not None:
+            outcome.update(new_settlement=False,
+                           physical_game=("ovt", str(series_uuid), report.photon_room_id))
         await _report_rollback(db, in_window)
         # Already recorded (replay). Return the current series state idempotently.
         s2 = (await db.execute(text("SELECT * FROM ovt_series WHERE id = :sid"), {"sid": series_uuid})).mappings().first()
@@ -49742,6 +49791,7 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
 
     # Insert the match. A game already on record was answered above; the
     # room+players UNIQUE — duo pair in canonical order — is the backstop.
+    _insert_savepoint = await db.begin_nested() if in_window else None
     try:
         await db.execute(text("""
             INSERT INTO ovt_matches (id, series_id, solo_id, duo_a_id, duo_b_id,
@@ -49792,8 +49842,15 @@ async def _settle_ovt_report(db: AsyncSession, report: OvtMatchReport, *,
     except IntegrityError:
         # The key conflicted: this game is already on record (the backstop
         # behind the replay check above).
+        if _insert_savepoint is not None:
+            await _insert_savepoint.rollback()
         return await _already_recorded()
+    if _insert_savepoint is not None:
+        await _insert_savepoint.commit()
 
+    if outcome is not None:
+        outcome.update(new_settlement=True,
+                       physical_game=("ovt", str(series_uuid), report.photon_room_id))
     # Per-game card picks (both duo members + solo).
     for pmd, pid in ((report.solo, solo_id), (report.duo_a, duo_a_id), (report.duo_b, duo_b_id)):
         for i, c in enumerate(pmd.cards or []):
@@ -63901,7 +63958,7 @@ async def submit_team_match(report: TeamMatchReport, request: Request, db: Async
 
 
 async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
-                              in_window: bool = False):
+                              in_window: bool = False, outcome=None):
     """The settle body of /team/matches after its session and signature
     checks (V3 S5). With in_window it runs inside a report window's
     transaction, which its caller commits: its commit is a flush and its
@@ -63975,6 +64032,9 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
          "t1a": report.t1a.steam_id, "t1b": report.t1b.steam_id,
          "t2a": report.t2a.steam_id, "t2b": report.t2b.steam_id})).first()
     if _dup is not None:
+        if outcome is not None:
+            outcome.update(new_settlement=False,
+                           physical_game=("team", str(series_uuid), report.photon_room_id))
         await _report_rollback(db, in_window)
         _dup_team = 1 if report.reported_by_steam_id in (
             report.t1a.steam_id, report.t1b.steam_id) else 2
@@ -64792,6 +64852,9 @@ async def _settle_team_report(db: AsyncSession, report: TeamMatchReport, *,
     else:
         score_str = f"{new_t2w}-{new_t1w}"
 
+    if outcome is not None:
+        outcome.update(new_settlement=True,
+                       physical_game=("team", str(series_uuid), report.photon_room_id))
     return TeamMatchResponse(
         match_id=new_match.id,
         series_id=series_uuid,

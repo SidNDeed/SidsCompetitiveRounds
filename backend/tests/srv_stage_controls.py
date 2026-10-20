@@ -30,6 +30,12 @@ RT = "test_match_hold_reports_pg.py::"
 XT = "test_match_hold_deletion_pg.py::"
 
 ROWS = [
+    {'row': 'F1.H1.NEW', 'node': 'test_match_hold_reports_pg.py::test_fix1_h1_racing_duplicate_does_not_spend_next_reporter', 'tag': 'F1.H1 new settlement only', 'mutant': [('backend/api/main.py', '    if not outcome.get("new_settlement") or outcome.get("physical_game") != physical_game:\n', '    if False:\n', 1)]},
+    {"row": "F1.H1.GAME", "node": RT + "test_fix1_h1_recorded_game_never_touches_the_next_window",
+     "tag": "F1.H1 physical game",
+     "mutant": [(MAIN,
+                 '    recorded = await _recorded_physical_report(db, mode, series_id, report, by_steam)\n',
+                 '    recorded = None\n', 1)]},
     # NX1: the 1v2 Start issues its room without latching the hold flag.
     {"row": "M1.5", "node": WT + "test_t1_3_ovt_start_and_poll_carry_the_latched_flag",
      "tag": "T1.3 ovt start row",

@@ -225,6 +225,38 @@ async def _journaled(db, room, game_id):
         {"room": room, "g": str(game_id)})).mappings().all()
 
 
+class ReportAlreadyRecorded(Exception):
+    """A callback found a physical game on record; it made no settlement."""
+
+    def __init__(self, physical_game, *, receipt=False):
+        self.physical_game = physical_game
+        self.receipt = receipt
+        super().__init__("physical game already recorded")
+
+
+async def _settle_and_mark(db, room, game_id, chosen, now, settle):
+    """Only a new settlement may terminalize this window.
+
+    The callback's successful return means it recorded the chosen physical
+    game. Production explicitly reports duplicate success through the named
+    exception; that receipt is kept without changing the window's outcome.
+    """
+    try:
+        await settle(db, chosen)
+    except ReportAlreadyRecorded as exc:
+        if exc.receipt:
+            raise
+        await db.execute(text(
+            "UPDATE match_report_journal SET state = 'kept', decided_at = :now"
+            " WHERE room_name = :room AND game_id = CAST(:g AS uuid)"
+            " AND reporter_id = CAST(:pid AS uuid) AND state = 'journaled'"),
+            {"now": now, "room": room, "g": str(game_id),
+             "pid": str(chosen["reporter_id"])})
+        return False
+    await _mark_settled(db, room, game_id, chosen, now)
+    return True
+
+
 async def _mark_settled(db, room, game_id, chosen, now):
     await db.execute(text(
         "UPDATE match_report_windows SET settled_at = CAST(:now AS timestamptz),"
@@ -249,8 +281,8 @@ async def _settle_locked(db, window, *, room, game_id, now, settle):
     chosen = pick(await _journaled(db, room, game_id))
     if chosen is None:
         return None
-    await settle(db, chosen)
-    await _mark_settled(db, room, game_id, chosen, now)
+    if not await _settle_and_mark(db, room, game_id, chosen, now, settle):
+        return None
     return chosen
 
 
@@ -313,8 +345,8 @@ async def _receive(db, *, mode, room, game_id, reported_game_id, reporter_id, re
         fresh = await fresh_class_c_steams(db, room=room, game_id=game_id,
                                            member_ids=member_ids, now=now)
         if fresh and min(fresh, key=steam_order) == entry["reporter_steam"]:
-            await settle(db, entry)
-            await _mark_settled(db, room, game_id, entry, now)
+            if not await _settle_and_mark(db, room, game_id, entry, now, settle):
+                return {"status": "duplicate"}
             return {"status": "settled", "cls": cls}
     done = await _settle_locked(
         db, window, room=room, game_id=game_id, now=now, settle=settle)
@@ -352,8 +384,7 @@ async def _release_held(db, *, mode, room, game_id, now, settle) -> int:
         return released
     chosen = pick(await _journaled(db, room, game_id))
     if chosen is not None and chosen["cls"] == CLASS_C:
-        await settle(db, chosen)
-        await _mark_settled(db, room, game_id, chosen, now)
+        await _settle_and_mark(db, room, game_id, chosen, now, settle)
         return released
     if released == 0:
         return 0

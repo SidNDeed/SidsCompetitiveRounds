@@ -447,3 +447,91 @@ def test_t5_9_a_settle_a_bound_ends_leaves_the_window_for_the_next_tick(monkeypa
                 out = await main._report_window_janitor()
             await _untouched_then_settled(env, mode, s, g, want, out, "deadline")
     hold_test.run_env(monkeypatch, body, prefix="rjs2nx4b")
+
+
+# -- Fix 1 H1: the physical report precedes its advisory window -----------------
+
+def test_fix1_h1_recorded_game_never_touches_the_next_window(monkeypatch):
+    """Both modes and valid, missing, invalid G2 advisories on a G1 replay."""
+    async def body(env):
+        _mount(env, monkeypatch)
+        for mode in ("team", "ovt"):
+            for advisory in ("valid", "missing", "invalid"):
+                s = await hold_test.seed_series(env.conn, mode)
+                g1 = (await hold_test.game_start(env, s, 0))["game_id"]
+                low = min(range(len(s.seats)), key=lambda i: (len(s.steam(i)), s.steam(i)))
+                await hold_test.beat(env, s, low)
+                build = team_report if mode == "team" else ovt_report
+
+                def make(series, reporter, game, token):
+                    # The signed series text may use a different UUID spelling.
+                    # Both the resolver and the internal outcome use its UUID value.
+                    from types import SimpleNamespace
+                    view = SimpleNamespace(sid=str(series.sid).upper(), room=series.room,
+                                           steam=series.steam)
+                    return build(view, reporter, game, token=token)
+
+                first = make(s, low, g1, token="111111")
+                r = await _call("POST", "/api/v1/%s/matches" % mode, s.steam(low), first)
+                assert r.status_code == 200, ("F1.H1 first", mode, r.status_code, r.text[:300])
+                g2 = (await hold_test.game_start(env, s, low, prev=g1))["game_id"]
+                replay = make(s, low, None if advisory == "missing" else g2, token="111111")
+                if advisory == "invalid":
+                    replay["game_id_sig"] = "invalid"
+                r = await _call("POST", "/api/v1/%s/matches" % mode, s.steam(low), replay)
+                w, j = await window_state(env, s, g2)
+                assert r.status_code == 200 and w is None and j == {}, \
+                    ("F1.H1 physical game", mode, advisory, r.status_code, r.text[:300], w, j)
+                assert "recorded" in r.json()["message"].lower(), ("F1.H1 duplicate", r.json())
+                await hold_test.beat(env, s, low)
+                second = make(s, low, g2, token="222222")
+                r = await _call("POST", "/api/v1/%s/matches" % mode, s.steam(low), second)
+                assert r.status_code == 200, ("F1.H1 second", mode, r.status_code, r.text[:300])
+                again = await _call("POST", "/api/v1/%s/matches" % mode, s.steam(low), second)
+                w, j = await window_state(env, s, g2)
+                tbl = "team_matches" if mode == "team" else "ovt_matches"
+                n = await env.conn.fetchval(
+                    "SELECT count(*) FROM %s WHERE photon_room_id = $1" % tbl,
+                    second["photon_room_id"])
+                stable = "team_series" if mode == "team" else "ovt_series"
+                wins = "t1_series_wins + t2_series_wins" if mode == "team" else "solo_series_wins + duo_series_wins"
+                total = await env.conn.fetchval("SELECT %s FROM %s WHERE id = $1" % (wins, stable), s.sid)
+                assert (again.status_code, n, total, len(await recorded(env, mode, s)),
+                        w["settled_at"] is not None, w["settled_reporter_id"]) == \
+                    (200, 1, 2, 2, True, s.pid(low)), ("F1.H1 exactly once", mode, advisory, n, total, w)
+    hold_test.run_env(monkeypatch, body, prefix="rjs2f1h1")
+
+
+def test_fix1_h1_racing_duplicate_does_not_spend_next_reporter(monkeypatch):
+    """A physical result appears after the first lookup; G2's slot survives."""
+    async def body(env):
+        _mount(env, monkeypatch)
+        for mode in ("team", "ovt"):
+            s = await hold_test.seed_series(env.conn, mode)
+            low = min(range(len(s.seats)), key=lambda i: (len(s.steam(i)), s.steam(i)))
+            g1 = (await hold_test.game_start(env, s, low))["game_id"]
+            await hold_test.beat(env, s, low)
+            r = await post_report(mode, s, low, g1)
+            assert r.status_code == 200, ("F1.H1 race setup", r.text)
+            g2 = (await hold_test.game_start(env, s, low, prev=g1))["game_id"]
+            real = main._recorded_physical_report
+            looked = []
+
+            async def race(*args):
+                looked.append(True)
+                return None if len(looked) == 1 else await real(*args)
+
+            with monkeypatch.context() as patch:
+                patch.setattr(main, "_recorded_physical_report", race)
+                r = await post_report(mode, s, low, g2)
+            w, j = await window_state(env, s, g2)
+            assert r.status_code == 200 and w is None and not j, \
+                ("F1.H1 new settlement only", mode, r.status_code, r.text[:300], w, j)
+            make = team_report if mode == "team" else ovt_report
+            r = await _call("POST", "/api/v1/%s/matches" % mode, s.steam(low),
+                            make(s, low, g2, token="222222"))
+            w, j = await window_state(env, s, g2)
+            assert r.status_code == 200 and w["settled_at"] is not None \
+                and w["settled_reporter_id"] == s.pid(low) and len(await recorded(env, mode, s)) == 2, \
+                ("F1.H1 reporter slot survives", mode, r.status_code, r.text[:300], w, j)
+    hold_test.run_env(monkeypatch, body, prefix="rjs2f1h1race")
