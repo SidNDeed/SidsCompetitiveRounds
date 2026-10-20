@@ -53801,11 +53801,12 @@ _PREROOM_LEAVE_LABELS = frozenset({
     "intent_retry", "held_in_comp", "leave_intent", "rejoin_refused",
     "lock_declined", "loop_breaker", "menu_leave", "asm_exit", "reform_abort",
     "wrong_region", "start_timeout", "join_timeout",
+    "readmit_refused",
 })
 
 
 def _preroom_leave_label(label) -> str:
-    """The label when it is one of the 21 sites' values, else 'unlabelled'."""
+    """The label when it is one of the 22 sites' values, else 'unlabelled'."""
     return label if isinstance(label, str) and label in _PREROOM_LEAVE_LABELS else "unlabelled"
 
 
