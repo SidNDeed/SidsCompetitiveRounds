@@ -1175,11 +1175,34 @@ namespace CompetitiveRounds
                 // M2: every sender's claims-past-the-rate aggregate whose second
                 // has ended is written now, so none waits on that sender's next claim.
                 try { _claims.FlushRate(NowMs(), false); DrainClaimLines(); } catch { }
+                LifeEpoch evidenceBefore = default(LifeEpoch), evidenceActivation = default(LifeEpoch);
+                bool evidenceLive = false, evidenceReady = false;
+                try
+                {
+                    evidenceBefore = _ledger.PointEpoch;
+                    evidenceActivation = _act.Epoch;
+                    evidenceLive = _act.Live;
+                    evidenceReady = true;
+                }
+                catch { }
                 string why;
                 bool on = V3On(out why);
-                string state = on ? "v3 " + why : "v3 off why=" + why;
-                string stateLine = _v3Log.State(state);
-                if (stateLine != null) Plugin.Log.LogInfo("[POISON-LEDGER] " + stateLine);
+                try
+                {
+                    if (evidenceReady)
+                    {
+                        string upkeepBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, evidenceLive);
+                        if (upkeepBoundaryLine != null) Plugin.Log.LogInfo("[POISON-LEDGER] " + upkeepBoundaryLine);
+                    }
+                }
+                catch { }
+                try
+                {
+                    string state = on ? "v3 " + why : "v3 off why=" + why;
+                    string stateLine = _v3Log.State(state);
+                    if (stateLine != null) Plugin.Log.LogInfo("[POISON-LEDGER] " + stateLine);
+                }
+                catch { }
 
                 if (!PhotonNetwork.IsMasterClient || _epochBroken || !V3PatchesLive) return;
                 if (_act.Live && !_v3RetakeDue) return;
@@ -1226,6 +1249,16 @@ namespace CompetitiveRounds
                 var fighters = (int[])a[3];
                 var point = (bool)a[5] ? LifeEpoch.At((int)a[4]) : default(LifeEpoch);
                 int master = PhotonNetwork.MasterClient != null ? PhotonNetwork.MasterClient.ActorNumber : -1;
+                LifeEpoch evidenceBefore = default(LifeEpoch), evidenceActivation = default(LifeEpoch);
+                bool evidenceLive = false, evidenceReady = false;
+                try
+                {
+                    evidenceBefore = _ledger.PointEpoch;
+                    evidenceActivation = _act.Epoch;
+                    evidenceLive = _act.Live;
+                    evidenceReady = true;
+                }
+                catch { }
                 if (!_act.OnActivate(sender, master, aid, fighters, point, NowMs()))
                 {
                     V3Line("activation ignored a=" + aid + " from=" + sender + " (not the master)");
@@ -1235,6 +1268,15 @@ namespace CompetitiveRounds
                 // master's point epoch (the send stamp that boundary RPC carries
                 // on every seat); a seat holding a newer one does not acknowledge.
                 if (point.Set) _ledger.AdoptPoint(point.Ts);
+                try
+                {
+                    if (evidenceReady)
+                    {
+                        string activationBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, evidenceLive);
+                        if (activationBoundaryLine != null) Plugin.Log.LogInfo("[POISON-LEDGER] " + activationBoundaryLine);
+                    }
+                }
+                catch { }
                 bool ack = !_epochBroken && V3PatchesLive && _act.ShouldAck(Fighters(), HasCap3, _ledger.PointEpoch);
                 bool sent = ack && RaiseTo(V3Wire.Ack(aid, sender), V3Targets.Capable(PresentActors(), HasCap3));
                 if (sent) _act.NoteSelfAck();
@@ -1602,14 +1644,33 @@ namespace CompetitiveRounds
             int ts = 0;
             bool stamped = false;
             bool recorded = false;
+            LifeEpoch evidenceBefore = default(LifeEpoch), evidenceActivation = default(LifeEpoch);
+            bool evidenceLive = false, evidenceReady = false;
+            try
+            {
+                evidenceBefore = _ledger.PointEpoch;
+                evidenceActivation = _act.Epoch;
+                evidenceLive = _act.Live;
+                evidenceReady = true;
+            }
+            catch { }
             try
             {
                 recorded = _ledger.Fence(-1, () =>
                 {
                     stamped = gm != null && gm.view != null && PoisonRpcStampPatch.TryFor(gm.view.ViewID, out ts);
-                    if (stamped) { _ledger.NotePointBoundary(ts); _v3Log.OnPoint(); }
+                    if (stamped) _ledger.NotePointBoundary(ts);
                     return stamped;
                 });
+            }
+            catch { }
+            try
+            {
+                if (evidenceReady)
+                {
+                    string pointBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, evidenceLive);
+                    if (pointBoundaryLine != null) Plugin.Log.LogInfo("[POISON-LEDGER] " + pointBoundaryLine);
+                }
             }
             catch { }
             if (!recorded)

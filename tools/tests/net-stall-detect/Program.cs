@@ -42,6 +42,13 @@ namespace NetStallTests
                 new KeyValuePair<string, Func<string>>("jitter_top", JitterTop),
                 new KeyValuePair<string, Func<string>>("poison_kill_every_epoch", PoisonKillEveryEpoch),
                 new KeyValuePair<string, Func<string>>("poison_cut_marker", PoisonCutMarker),
+                new KeyValuePair<string, Func<string>>("poison_replacement_before_upkeep", PoisonReplacementBeforeUpkeep),
+                new KeyValuePair<string, Func<string>>("poison_adoption_before_local_boundary", PoisonAdoptionBeforeLocalBoundary),
+                new KeyValuePair<string, Func<string>>("poison_duplicate_and_older_stamps", PoisonDuplicateAndOlderStamps),
+                new KeyValuePair<string, Func<string>>("poison_stamp_wrap", PoisonStampWrap),
+                new KeyValuePair<string, Func<string>>("poison_ordinary_lines_between", PoisonOrdinaryLinesBetween),
+                new KeyValuePair<string, Func<string>>("poison_two_games", PoisonTwoGames),
+                new KeyValuePair<string, Func<string>>("poison_room_reset", PoisonRoomReset),
                 new KeyValuePair<string, Func<string>>("lag_bar_met_1v2", LagBarMet1v2),
                 new KeyValuePair<string, Func<string>>("lag_1v2_gate", Lag1v2Gate),
                 new KeyValuePair<string, Func<string>>("lag_1v1_fires", Lag1v1Fires),
@@ -406,6 +413,215 @@ namespace NetStallTests
             if (written == 0 || written >= 40) return "written=" + written;
             if (log.Suppressed != 40 - written) return "suppressed=" + log.Suppressed;
             return null;
+        }
+
+        // Register all seven cases in Main. These run the real ledger,
+        // activation and diagnostic core. The accompanying source pins check
+        // that PoisonSync makes the same before/after handoffs.
+        private const string PoisonKilled = "v3 off why=killed:point-boundary";
+        private const string PoisonWaiting = "v3 off why=not-acked 0/2";
+        private const string PoisonCut = "v3 lines for this point cut at 12 (the next point boundary resets the budget)";
+
+        private sealed class PoisonCaptureRig
+        {
+            internal readonly PoisonLedgerCore Ledger = new PoisonLedgerCore();
+            internal readonly ActivationCore Act = new ActivationCore();
+            internal readonly V3LineLog Log = new V3LineLog();
+            internal readonly List<string> Lines = new List<string>();
+            private readonly int[] _fighters = { 1, 2 };
+            private int _aid = 1;
+
+            internal PoisonCaptureRig()
+            {
+                Act.OnActivate(1, 1, _aid, _fighters, default(LifeEpoch), 0);
+                Upkeep();
+            }
+            internal void Emit(string line) { if (line != null) Lines.Add(line); }
+            internal void Note(string line) { Emit(Log.Note(line)); }
+            internal void Boundary(int stamp)
+            {
+                LifeEpoch before = Ledger.PointEpoch, prior = Act.Epoch;
+                bool live = Act.Live;
+                Ledger.NotePointBoundary(stamp);
+                Emit(Log.OnPoint(before, Ledger.PointEpoch, prior, live));
+            }
+            internal void Activate(LifeEpoch point)
+            {
+                LifeEpoch before = Ledger.PointEpoch, prior = Act.Epoch;
+                bool live = Act.Live;
+                if (!Act.OnActivate(1, 1, ++_aid, _fighters, point, 0)) throw new Exception("test activation refused");
+                if (point.Set) Ledger.AdoptPoint(point.Ts);
+                Emit(Log.OnPoint(before, Ledger.PointEpoch, prior, live));
+                Note("activation received");
+            }
+            internal void Upkeep(bool capable = true)
+            {
+                LifeEpoch before = Ledger.PointEpoch, prior = Act.Epoch;
+                bool live = Act.Live;
+                string why;
+                bool on = Act.Evaluate(_fighters, actor => capable || actor != 2, 0, Ledger.PointEpoch, out why);
+                Emit(Log.OnPoint(before, Ledger.PointEpoch, prior, live));
+                Emit(Log.State(on ? "v3 " + why : "v3 off why=" + why));
+            }
+            internal void ResetRoom()
+            {
+                Ledger.Clear(); Act.Clear(); Log.Reset(); Lines.Clear();
+                Act.OnActivate(1, 1, ++_aid, _fighters, default(LifeEpoch), 0);
+            }
+        }
+
+        private static string PoisonExact(string step, List<string> lines, params string[] expected)
+        {
+            return lines.SequenceEqual(expected) ? null : step + " expected=[" + string.Join(" | ", expected)
+                + "] actual=[" + string.Join(" | ", lines) + "]";
+        }
+
+        private static string PoisonReplacementBeforeUpkeep()
+        {
+            string pin = Pin("m3_boundary_capture"); if (pin != null) return pin;
+            var r = new PoisonCaptureRig();
+            string e = PoisonExact("setup", r.Lines, PoisonWaiting); if (e != null) return e;
+            r.Lines.Clear();
+            for (int i = 0; i < 12; i++) r.Note("old" + i);
+            e = PoisonExact("old budget exhausted", r.Lines,
+                Enumerable.Range(0, 11).Select(i => "old" + i).Concat(new[] { PoisonCut }).ToArray());
+            if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(100);
+            e = PoisonExact("boundary before replacement", r.Lines, PoisonKilled); if (e != null) return e;
+            r.Activate(LifeEpoch.At(100));
+            r.Upkeep();
+            e = PoisonExact("replacement before upkeep", r.Lines, PoisonKilled, "activation received", PoisonWaiting);
+            if (e != null) return e;
+            r.Lines.Clear();
+            for (int i = 0; i < 10; i++) r.Note("new" + i);
+            return PoisonExact("kill occupied first new-point slot", r.Lines,
+                Enumerable.Range(0, 9).Select(i => "new" + i).Concat(new[] { PoisonCut }).ToArray());
+        }
+
+        private static string PoisonAdoptionBeforeLocalBoundary()
+        {
+            string pin = Pin("m3_activation_capture"); if (pin != null) return pin;
+            var r = new PoisonCaptureRig();
+            string e = PoisonExact("setup", r.Lines, PoisonWaiting); if (e != null) return e;
+            r.Lines.Clear();
+            r.Activate(LifeEpoch.At(100));
+            e = PoisonExact("adoption captured old activation", r.Lines, PoisonKilled, "activation received");
+            if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(100);
+            e = PoisonExact("same-stamp local boundary", r.Lines); if (e != null) return e;
+            r.Upkeep();
+            e = PoisonExact("new activation still waiting", r.Lines, PoisonWaiting); if (e != null) return e;
+            r.Lines.Clear();
+            for (int i = 0; i < 9; i++) r.Note("ordinary" + i);
+            e = PoisonExact("remaining new-point budget", r.Lines,
+                Enumerable.Range(0, 9).Select(i => "ordinary" + i).ToArray()); if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(100);
+            r.Note("overflow");
+            return PoisonExact("local boundary did not replenish budget", r.Lines, PoisonCut);
+        }
+
+        private static string PoisonDuplicateAndOlderStamps()
+        {
+            var r = new PoisonCaptureRig();
+            string e = PoisonExact("setup", r.Lines, PoisonWaiting); if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(100); r.Activate(LifeEpoch.At(100)); r.Upkeep();
+            e = PoisonExact("first boundary", r.Lines, PoisonKilled, "activation received", PoisonWaiting);
+            if (e != null) return e;
+            r.Lines.Clear();
+            for (int i = 0; i < 9; i++) r.Note("ordinary" + i);
+            e = PoisonExact("fill point", r.Lines, Enumerable.Range(0, 9).Select(i => "ordinary" + i).ToArray());
+            if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(100); r.Note("after duplicate");
+            e = PoisonExact("duplicate stamp", r.Lines, PoisonCut); if (e != null) return e;
+            r.Boundary(90); r.Note("after older");
+            e = PoisonExact("older boundary", r.Lines, PoisonCut); if (e != null) return e;
+            r.Activate(LifeEpoch.At(90));
+            e = PoisonExact("older adoption", r.Lines, PoisonCut); if (e != null) return e;
+            if (r.Log.Suppressed != 3) return "duplicate/older suppression=" + r.Log.Suppressed;
+            r.Lines.Clear();
+            r.Boundary(110);
+            e = PoisonExact("already-stale activation is not newly invalidated", r.Lines); if (e != null) return e;
+            r.Note("first line of later point");
+            return PoisonExact("later point budget still resets", r.Lines, "first line of later point");
+        }
+
+        private static string PoisonStampWrap()
+        {
+            var r = new PoisonCaptureRig();
+            string e = PoisonExact("setup", r.Lines, PoisonWaiting); if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(int.MaxValue - 3); r.Activate(LifeEpoch.At(int.MaxValue - 3)); r.Upkeep();
+            e = PoisonExact("before wrap", r.Lines, PoisonKilled, "activation received", PoisonWaiting);
+            if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(int.MinValue + 3);
+            e = PoisonExact("wrapped advance", r.Lines, PoisonKilled); if (e != null) return e;
+            r.Upkeep();
+            e = PoisonExact("wrapped sampled kill deduplicated", r.Lines, PoisonKilled); if (e != null) return e;
+            r.Boundary(int.MaxValue - 3);
+            return PoisonExact("pre-wrap replay is older", r.Lines, PoisonKilled);
+        }
+
+        private static string PoisonOrdinaryLinesBetween()
+        {
+            string pin = Pin("m3_upkeep_capture"); if (pin != null) return pin;
+            var r = new PoisonCaptureRig();
+            string e = PoisonExact("setup", r.Lines, PoisonWaiting); if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(100); r.Note("ordinary between boundary and upkeep");
+            e = PoisonExact("ordinary line", r.Lines, PoisonKilled, "ordinary between boundary and upkeep");
+            if (e != null) return e;
+            r.Upkeep(); r.Upkeep();
+            e = PoisonExact("sampled kill stays deduplicated", r.Lines, PoisonKilled, "ordinary between boundary and upkeep");
+            if (e != null) return e;
+            r.Upkeep(false); r.Upkeep(true);
+            return PoisonExact("intervening capability state keeps one kill", r.Lines, PoisonKilled,
+                "ordinary between boundary and upkeep", "v3 off why=cap-missing actor=2");
+        }
+
+        private static string PoisonTwoGames()
+        {
+            var r = new PoisonCaptureRig();
+            string e = PoisonExact("setup", r.Lines, PoisonWaiting); if (e != null) return e;
+            for (int game = 1; game <= 2; game++)
+            {
+                r.Lines.Clear();
+                r.Boundary(game * 100); r.Activate(LifeEpoch.At(game * 100)); r.Upkeep();
+                e = PoisonExact("game " + game, r.Lines, PoisonKilled, "activation received", PoisonWaiting);
+                if (e != null) return e;
+            }
+            return null;
+        }
+
+        private static string PoisonRoomReset()
+        {
+            var r = new PoisonCaptureRig();
+            string e = PoisonExact("setup", r.Lines, PoisonWaiting); if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(100);
+            for (int i = 0; i < 12; i++) r.Note("old" + i);
+            e = PoisonExact("old room", r.Lines, new[] { PoisonKilled }
+                .Concat(Enumerable.Range(0, 11).Select(i => "old" + i)).Concat(new[] { PoisonCut }).ToArray());
+            if (e != null) return e;
+            if (r.Log.Suppressed != 1) return "old-room suppression=" + r.Log.Suppressed;
+            r.ResetRoom();
+            if (r.Log.Suppressed != 0) return "room reset kept suppression";
+            r.Upkeep();
+            e = PoisonExact("new room state", r.Lines, PoisonWaiting); if (e != null) return e;
+            r.Lines.Clear();
+            r.Boundary(100);
+            e = PoisonExact("same stamp in new room", r.Lines, PoisonKilled); if (e != null) return e;
+            r.Upkeep();
+            e = PoisonExact("new room duplicate upkeep", r.Lines, PoisonKilled); if (e != null) return e;
+            r.ResetRoom();
+            // If an observation was unavailable, the original sampled fallback still works.
+            r.Ledger.NotePointBoundary(101); r.Upkeep();
+            return PoisonExact("room reset restores sampled fallback", r.Lines, PoisonKilled);
         }
 
         // ── LagNotices over the night's window values ────────────────────

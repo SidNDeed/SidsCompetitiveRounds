@@ -26,6 +26,7 @@ SOURCES = {
     "LagSource": "LagNotices.cs",
     "FocusSource": "FpsFocusCore.cs",
     "TelemetrySource": "NetworkSeatTelemetry.cs",
+    "PoisonSyncSource": "PoisonSync.cs",
 }
 COMPILED_SOURCES = {"StallSource", "JitterSource", "PoisonSource", "LagSource", "FocusSource"}
 # DecimatedList lives inside GameStateWatcher.cs (never moved, so the
@@ -70,7 +71,7 @@ def structural_pins(overrides=None):
     end = method_text(raw, "internal static void OnMatchEnded(string reason)")
     depth = method_text(raw, "internal static void NoteInboundDepth()")
     stall = source_text("StallSource", overrides)
-    return {
+    pins = {
         "h1_game_end": ordered_once(end, "if (!_gameOpen) return;",
             "_stall.Flush(StallNowMs(), _stallStreams, _gameSeq, ReceiverWallGapMsNow())",
             "_gameOpen = false;"),
@@ -82,6 +83,31 @@ def structural_pins(overrides=None):
             if "if (unchecked((uint)(depth - _bandFloor)) <= _bandWidth) return null;" in
                 method_text(stall, "internal string OnDepth(") else "OnDepth range comparison changed",
     }
+
+    poison = source_text("PoisonSyncSource", overrides)
+    pins['m3_boundary_capture'] = ordered_once(method_text(poison, 'internal static void NotePointBoundary(GM_ArmsRace gm)'),
+        'evidenceBefore = _ledger.PointEpoch;',
+        'evidenceActivation = _act.Epoch;',
+        'evidenceLive = _act.Live;',
+        'if (stamped) _ledger.NotePointBoundary(ts);',
+        'string pointBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, evidenceLive);',
+        'if (!recorded)')
+    pins['m3_activation_capture'] = ordered_once(method_text(poison, 'private static void OnActivate(int sender, object[] a)'),
+        'evidenceBefore = _ledger.PointEpoch;',
+        'evidenceActivation = _act.Epoch;',
+        'evidenceLive = _act.Live;',
+        'if (!_act.OnActivate(sender, master, aid, fighters, point, NowMs()))',
+        'if (point.Set) _ledger.AdoptPoint(point.Ts);',
+        'string activationBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, evidenceLive);',
+        'bool ack =')
+    pins['m3_upkeep_capture'] = ordered_once(method_text(poison, 'private static void V3Upkeep()'),
+        'evidenceBefore = _ledger.PointEpoch;',
+        'evidenceActivation = _act.Epoch;',
+        'evidenceLive = _act.Live;',
+        'bool on = V3On(out why);',
+        'string upkeepBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, evidenceLive);',
+        'string stateLine = _v3Log.State(state);')
+    return pins
 
 
 def extract_decimated():
@@ -108,6 +134,86 @@ def extract_decimated():
 # (name, source key, [(old, new), ...], target case, control case). Each old
 # text must occur exactly once in the shipped file.
 MUTANTS = [
+    ("m3_room_keeps_capture_flag", "PoisonSource",
+     [(" _lastEvidencePoint = default(LifeEpoch); _capturedBoundaryKill = false; }",
+       " _lastEvidencePoint = default(LifeEpoch); }")],
+     "poison_room_reset", "poison_cut_marker"),
+    ('m3_capture_delayed',
+     'PoisonSource',
+     [['            const string killed = "v3 off why=killed:point-boundary";\n'
+       '            _lastState = killed;\n'
+       '            _capturedBoundaryKill = true;\n'
+       '            return Note(killed);\n',
+       '            return null; // Evidence left to periodic State after replacement.\n']],
+     'poison_replacement_before_upkeep',
+     'poison_cut_marker'),
+    ('m3_prior_activation_replaced',
+     'PoisonSource',
+     [['            if (!priorLive || !priorActivation.SameAs(before) || priorActivation.SameAs(after)) return '
+       'null;\n',
+       '            priorActivation = after;\n'
+       '            if (!priorLive || !priorActivation.SameAs(before) || priorActivation.SameAs(after)) return '
+       'null;\n']],
+     'poison_adoption_before_local_boundary',
+     'poison_cut_marker'),
+    ('m3_duplicate_replenishes_budget',
+     'PoisonSource',
+     [['            if (!after.Set || (before.Set && !PoisonLedgerCore.After(after.Ts, before.Ts))) return '
+       'null;\n',
+       '            OnPoint();\n'
+       '            if (!after.Set || (before.Set && !PoisonLedgerCore.After(after.Ts, before.Ts))) return '
+       'null;\n']],
+     'poison_duplicate_and_older_stamps',
+     'poison_cut_marker'),
+    ('m3_stamp_wrap_numeric',
+     'PoisonSource',
+     [['!PoisonLedgerCore.After(after.Ts, before.Ts)', '!(after.Ts > before.Ts)']],
+     'poison_stamp_wrap',
+     'poison_cut_marker'),
+    ('m3_sampled_kill_duplicates',
+     'PoisonSource',
+     [['            if (_capturedBoundaryKill && state == "v3 off why=killed:point-boundary") return null;\n', '']],
+     'poison_ordinary_lines_between',
+     'poison_cut_marker'),
+    ('m3_only_first_epoch_captured',
+     'PoisonSource',
+     [['            if (_lastEvidencePoint.Set && !PoisonLedgerCore.After(after.Ts, _lastEvidencePoint.Ts)) '
+       'return null;\n',
+       '            if (_lastEvidencePoint.Set) return null;\n']],
+     'poison_two_games',
+     'poison_cut_marker'),
+    ('m3_room_keeps_evidence_epoch',
+     'PoisonSource',
+     [[' _lastEvidencePoint = default(LifeEpoch);', '']],
+     'poison_room_reset',
+     'poison_cut_marker'),
+    ('m3_already_stale_fabricates_kill',
+     'PoisonSource',
+     [['!priorLive || !priorActivation.SameAs(before) || priorActivation.SameAs(after)',
+       '!priorLive || priorActivation.SameAs(after)']],
+     'poison_duplicate_and_older_stamps',
+     'poison_cut_marker'),
+    ('m3_boundary_capture_removed',
+     'PoisonSyncSource',
+     [['string pointBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, '
+       'evidenceLive);',
+       'string pointBoundaryLine = null;']],
+     'poison_replacement_before_upkeep',
+     'poison_cut_marker'),
+    ('m3_activation_capture_removed',
+     'PoisonSyncSource',
+     [['string activationBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, '
+       'evidenceLive);',
+       'string activationBoundaryLine = null;']],
+     'poison_adoption_before_local_boundary',
+     'poison_cut_marker'),
+    ('m3_upkeep_capture_removed',
+     'PoisonSyncSource',
+     [['string upkeepBoundaryLine = _v3Log.OnPoint(evidenceBefore, _ledger.PointEpoch, evidenceActivation, '
+       'evidenceLive);',
+       'string upkeepBoundaryLine = null;']],
+     'poison_ordinary_lines_between',
+     'poison_cut_marker'),
     ("m2_suppression_room_scoped", "StallSource",
      [("            GameSuppressed = 0;\n", "")],
      "stall_suppressed_per_game", "stall_cap"),
