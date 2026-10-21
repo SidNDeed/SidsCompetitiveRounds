@@ -988,12 +988,12 @@ def clean_slate() -> str:
                         f"this runner terminates every backend on it and the "
                         f"suite drops its tables, so it runs against "
                         f"{EXPECTED_DB!r} and nothing else.")
-                # #940: the role running the suite is not a superuser, so the sweep
-                # names only the backends it can terminate, its own role's client
-                # backends. A superuser session or an autovacuum worker on the
-                # database makes an unfiltered sweep raise InsufficientPrivilegeError
-                # in this runner before the suite ran. Another role's session is left
-                # running and may keep a lock; the suite's 15 s DDL lock_timeout reports it.
+                # #940: the sweep names only this role's own client backends. Run by a
+                # role that is not a superuser (the seat role), an unfiltered sweep
+                # raises InsufficientPrivilegeError while a superuser session or an
+                # autovacuum worker is on the database; a superuser DSN sees no such
+                # error. A skipped session fails the suite only if it stays connected and
+                # keeps a conflicting lock past the suite's 15 s DDL lock_timeout.
                 n = (await conn.execute(text(
                     "SELECT count(*) FROM pg_stat_activity"
                     " WHERE datname = current_database()"
@@ -1014,7 +1014,7 @@ def clean_slate() -> str:
         n = asyncio.run(go())
     except Exception as exc:                      # noqa: BLE001 - reported, not raised
         return f"clean-slate probe FAILED: {exc!r}"
-    return f"cleared {n} leftover backend(s)" if n else ""
+    return f"termination requested for {n} candidate client backend(s) of this role" if n else ""
 
 
 def run_suite() -> dict:

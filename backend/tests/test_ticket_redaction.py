@@ -36,9 +36,9 @@ Live PostgreSQL is REQUIRED for the test_pg_ cases, and a missing DSN FAILS,
 naming the variable (the harness shape of test_ffa_quarantine_triage.py):
     TICKET_REDACTION_TEST_PG_DSN=postgresql+asyncpg://user@host:port/<lane database>
     TICKET_REDACTION_TEST_PG_OPTOUT=1   says out loud that this run skips them
-Each case ends its own role's other sessions on that database (#940) and
-drops and recreates its own tables there, so the harness REFUSES, before
-either, a database whose
+Each case requests termination of its own role's other client backends on
+that database (#940) and drops and recreates its own tables there, so the
+harness REFUSES, before either, a database whose
 name lacks this lane's scratch marker, that holds any relation or sequence --
 in any schema, another session's temporary schema included (round 4) --
 other than this harness's own fixtures, or whose fixture tables hold anything
@@ -551,10 +551,11 @@ ROUTES = (
 
 # ── M3: the refusals, before anything destructive ─────────────────────────
 #
-# What a case does to its database, in order: end this role's other sessions on it
-# (_clean_slate, #753), then DROP the tables below and recreate them. Pointed
-# at the wrong database, the first ends someone's sessions and the second
-# deletes their data. So three refusals run first, on their own connection:
+# What a case does to its database, in order: request the end of this role's
+# other client backends on it (_clean_slate, #753), then DROP the tables below
+# and recreate them. Pointed at the wrong database, the first requests the
+# end of someone's clients and the second deletes their data. So three
+# refusals run first, on their own connection:
 #
 #   NAME    the database's name carries this lane's scratch marker -- the
 #           scr_bug391 lane-database gate, generalised from one literal to
@@ -852,19 +853,21 @@ def _redirect_for(url):
 
 
 async def _clean_slate(url, sent):
-    """#753: a case starts from a slate it TAKES -- every other client backend
-    of this role on the lane database is ended first (#940), so a lock a dead
-    case left behind cannot hold this one's DDL. The lane database is this
-    file's alone, which is what
+    """#753: a case starts from a slate it TAKES -- termination is requested
+    first for every other client backend of this role on the lane database
+    (#940), so a lock a dead case left behind is released once that backend
+    exits; a conflicting lock that persists through the 5 s DDL lock_timeout
+    fails that DDL.
+    The lane database is this file's alone, which is what
     _refuse_unless_scratch establishes before this runs (Env.__aenter__)."""
     conn = await _connect(url, sent, search_path=BOUND_SCHEMA)
     try:
-        # #940: the role running the suite is not a superuser, so the sweep
-        # names only the backends it can terminate, its own role's client
-        # backends. A superuser session or an autovacuum worker on the
-        # database makes an unfiltered sweep raise InsufficientPrivilegeError
-        # here before the case body ran. Another role's session is left
-        # running and may keep a lock; the 5 s DDL lock_timeout reports it.
+        # #940: the sweep names only this role's own client backends. Run by a
+        # role that is not a superuser (the seat role), an unfiltered sweep
+        # raises InsufficientPrivilegeError while a superuser session or an
+        # autovacuum worker is on the database; a superuser DSN sees no such
+        # error. A skipped session fails the case only if it stays connected and
+        # keeps a conflicting lock past the 5 s DDL lock_timeout.
         await _send_destructive(conn, "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity"
                                       " WHERE datname = pg_catalog.current_database()"
                                       " AND pid <> pg_catalog.pg_backend_pid()"
@@ -1566,7 +1569,18 @@ async def _drop_probe_database(lane, name, sent, planted=frozenset()):
                            f"its case made: {shown}. It is left in place.")
     admin = await _connect(lane, sent)
     try:
-        await _send_destructive(admin, f'DROP DATABASE "{name}" WITH (FORCE)', sent)
+        # #940: request termination only for this role's client backends.
+        # PostgreSQL 16 FORCE prechecks every backend's signal rights and can
+        # raise 42501 for a seat role that is not a superuser. The plain drop
+        # signals autovacuum workers itself and waits for backends to leave;
+        # a foreign client that stays connected can still cause 55006 after
+        # that wait. The sweep does not confirm that its candidates exited.
+        await _send_destructive(admin,
+                                ("SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity"
+                                 " WHERE datname = '%s' AND pid <> pg_catalog.pg_backend_pid()"
+                                 " AND backend_type = 'client backend' AND usename = current_user")
+                                % name.replace("'", "''"), sent)
+        await _send_destructive(admin, f'DROP DATABASE "{name}"', sent)
     finally:
         await admin.close()
     _PROBES_CREATED.discard(name)
@@ -1651,13 +1665,19 @@ def _drive_env_against(monkeypatch, tmp_path, probe, setup_sql, count_sql, resol
 
 
 def _assert_the_probe_cleanup(cleanup, probe):
-    """The cleanup's own record: the probe's census ran, and after it one
-    terminate-or-drop was sent, naming this probe."""
+    """The cleanup's own record: the probe's census ran, then a termination
+    request and a plain drop were sent, in order, naming this probe."""
     census = next((i for i, s in enumerate(cleanup) if CENSUS_TAG in s), None)
     destructive = [i for i, s in enumerate(cleanup) if _destructive(s)]
     assert census is not None, f"the probe's cleanup ran no census: {cleanup}"
-    assert len(destructive) == 1 and destructive[0] > census and f'"{probe}"' in cleanup[destructive[0]], \
-        f"the probe's cleanup did not send exactly one drop, of {probe!r}, after its census: {cleanup}"
+    assert len(destructive) == 2 and destructive[0] > census, \
+        f"the probe's cleanup did not send exactly two destructive statements after its census: {cleanup}"
+    sweep, drop = (cleanup[i] for i in destructive)
+    escaped = probe.replace("'", "''")
+    assert sweep.startswith("SELECT ") and f" WHERE datname = '{escaped}' AND " in sweep, \
+        f"the probe's cleanup did not request termination on {probe!r} first: {cleanup}"
+    assert drop.split(maxsplit=2) == ["DROP", "DATABASE", f'"{probe}"'], \
+        f"the probe's cleanup did not send a plain drop of {probe!r} second: {cleanup}"
 
 
 def test_pg_the_harness_refuses_a_database_without_the_scratch_marker(monkeypatch, tmp_path):
@@ -1986,7 +2006,8 @@ def test_every_destructive_statement_goes_through_the_one_gate():
     unexplained, accounted = _sender_census(open(__file__, encoding="utf-8").read())
     assert unexplained == [], f"a second sender of a terminate or a drop: {unexplained}"
     assert accounted == [("DROP block sent", "Env.__aenter__"), ("gate call", "_clean_slate"),
-                         ("gate call", "_drop_probe_database"), ("gate call", f"{_GATE_UNIT_TEST}.body"),
+                         ("gate call", "_drop_probe_database"), ("gate call", "_drop_probe_database"),
+                         ("gate call", f"{_GATE_UNIT_TEST}.body"),
                          ("gate call", f"{_GATE_UNIT_TEST}.body"), ("module text", "DROP"),
                          ("module text", "_SENDER_WORDS")], accounted
     print(f"CENSUS: 0 unexplained; accounted {accounted}")

@@ -207,8 +207,8 @@ async def _take_clean_slate() -> None:
     PostgreSQL does not notice a vanished client until it next writes to its
     socket, which can be minutes and outlives the process. Every later case
     would then block on its own DROP TABLE. So every other client backend of
-    this role on THIS throwaway database is terminated first (#940), and the
-    schema is rebuilt under a short lock_timeout, so a DROP that is still
+    this role on THIS throwaway database has termination requested first
+    (#940), and the schema is rebuilt under a short lock_timeout, so a DROP that is still
     blocked fails loudly with a lock error instead of hanging the run.
 
     current_database() and never a name: the DSN is the throwaway cluster's,
@@ -217,12 +217,12 @@ async def _take_clean_slate() -> None:
     import asyncpg
     conn = await asyncpg.connect(_raw_dsn())
     try:
-        # #940: the role running the suite is not a superuser, so the sweep
-        # names only the backends it can terminate, its own role's client
-        # backends. A superuser session or an autovacuum worker on the
-        # database makes an unfiltered sweep raise InsufficientPrivilegeError
-        # here before the case body ran. Another role's session is left
-        # running and may keep a lock; the 5 s lock_timeout below reports it.
+        # #940: the sweep names only this role's own client backends. Run by a
+        # role that is not a superuser (the seat role), an unfiltered sweep
+        # raises InsufficientPrivilegeError while a superuser session or an
+        # autovacuum worker is on the database; a superuser DSN sees no such
+        # error. A skipped session fails this reset only if it stays connected and
+        # keeps a conflicting lock past the 5 s lock_timeout below.
         await conn.execute(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
             " WHERE datname = current_database() AND pid <> pg_backend_pid()"

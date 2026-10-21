@@ -375,9 +375,9 @@ async def _assert_dedicated_db(conn) -> str:
     if name != EXPECTED_DB:
         raise RuntimeError(
             f"BUG391_TEST_PG_DSN points at database {name!r}. This file drops "
-            f"ovt_matches, ovt_series and players and terminates every other "
-            f"backend on it, so it runs against {EXPECTED_DB!r} and nothing "
-            f"else.")
+            f"ovt_matches, ovt_series and players and requests termination of "
+            f"this role's other client backends on it, so it runs against "
+            f"{EXPECTED_DB!r} and nothing else.")
     return name
 
 # Outside the real SteamID64 space on purpose.
@@ -455,12 +455,12 @@ async def _reset(engine, schema: str = SCHEMA):
         # Before the terminate, not after it: the refusal has to come first or
         # it is documentation.
         await _assert_dedicated_db(conn)
-        # #940: the role running the suite is not a superuser, so the sweep
-        # names only the backends it can terminate, its own role's client
-        # backends. A superuser session or an autovacuum worker on the
-        # database makes an unfiltered sweep raise InsufficientPrivilegeError
-        # here before the case body ran. Another role's session is left
-        # running and may keep a lock; the 15 s lock_timeout below reports it.
+        # #940: the sweep names only this role's own client backends. Run by a
+        # role that is not a superuser (the seat role), an unfiltered sweep
+        # raises InsufficientPrivilegeError while a superuser session or an
+        # autovacuum worker is on the database; a superuser DSN sees no such
+        # error. A skipped session fails this reset only if it stays connected and
+        # keeps a conflicting lock past the 15 s lock_timeout below.
         await conn.execute(text(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
             " WHERE datname = current_database() AND pid <> pg_backend_pid()"
@@ -1016,8 +1016,9 @@ def test_the_arm_announces_itself_once_per_process(capsys):
 def test_the_live_half_refuses_any_database_but_the_dedicated_one():
     """The negative control for the fixture's own guard.
 
-    This file DROPs three tables — `players` among them — and terminates every
-    backend on the database the DSN names, both before it writes a single row.
+    This file DROPs three tables -- `players` among them -- and requests
+    termination of this role's other client backends on the database the DSN
+    names, both before it writes a single row.
     Point it at a different database on the same instance and it must refuse.
     Nothing here writes: the wrong-database connection only asks its own name.
     """
