@@ -957,7 +957,7 @@ SUMMARY = re.compile(
 
 
 def clean_slate() -> str:
-    """Terminate every other backend on the dedicated test database.
+    """Terminate this role's other client backends on the dedicated database.
 
     The suite's per-case fixture does this too, but it cannot help when the
     statement that blocks is the fixture's own DDL: the case then dies inside
@@ -966,9 +966,9 @@ def clean_slate() -> str:
     mutation's run. A cross-run leak of exactly that shape is what once put a
     false REDDENED on this runner's negative control. Bounded by construction:
     Bounded by the NAME check below, not by the belief that the DSN is the
-    right one: this terminates every backend on whatever database it is
-    pointed at, and the sibling lanes keep their own throwaway databases on
-    the same local instance (#342).
+    right one: this terminates this role's client backends (#940) on
+    whatever database it is pointed at, and the sibling lanes keep their own
+    throwaway databases on the same local instance (#342).
     """
     import asyncio
     from sqlalchemy import text
@@ -988,14 +988,23 @@ def clean_slate() -> str:
                         f"this runner terminates every backend on it and the "
                         f"suite drops its tables, so it runs against "
                         f"{EXPECTED_DB!r} and nothing else.")
+                # #940: the role running the suite is not a superuser, so the sweep
+                # names only the backends it can terminate, its own role's client
+                # backends. A superuser session or an autovacuum worker on the
+                # database makes an unfiltered sweep raise InsufficientPrivilegeError
+                # in this runner before the suite ran. Another role's session is left
+                # running and may keep a lock; the suite's 15 s DDL lock_timeout reports it.
                 n = (await conn.execute(text(
                     "SELECT count(*) FROM pg_stat_activity"
                     " WHERE datname = current_database()"
-                    "   AND pid <> pg_backend_pid()"))).scalar()
+                    "   AND pid <> pg_backend_pid()"
+                    "   AND backend_type = 'client backend' AND usename = current_user"
+                    ))).scalar()
                 await conn.execute(text(
                     "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
                     " WHERE datname = current_database()"
-                    "   AND pid <> pg_backend_pid()"))
+                    "   AND pid <> pg_backend_pid()"
+                    "   AND backend_type = 'client backend' AND usename = current_user"))
                 await conn.commit()
                 return int(n or 0)
         finally:

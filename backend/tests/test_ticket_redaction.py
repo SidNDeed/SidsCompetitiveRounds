@@ -36,8 +36,9 @@ Live PostgreSQL is REQUIRED for the test_pg_ cases, and a missing DSN FAILS,
 naming the variable (the harness shape of test_ffa_quarantine_triage.py):
     TICKET_REDACTION_TEST_PG_DSN=postgresql+asyncpg://user@host:port/<lane database>
     TICKET_REDACTION_TEST_PG_OPTOUT=1   says out loud that this run skips them
-Each case ends every other session on that database and drops and recreates
-its own tables there, so the harness REFUSES, before either, a database whose
+Each case ends its own role's other sessions on that database (#940) and
+drops and recreates its own tables there, so the harness REFUSES, before
+either, a database whose
 name lacks this lane's scratch marker, that holds any relation or sequence --
 in any schema, another session's temporary schema included (round 4) --
 other than this harness's own fixtures, or whose fixture tables hold anything
@@ -550,7 +551,7 @@ ROUTES = (
 
 # ── M3: the refusals, before anything destructive ─────────────────────────
 #
-# What a case does to its database, in order: end every other session on it
+# What a case does to its database, in order: end this role's other sessions on it
 # (_clean_slate, #753), then DROP the tables below and recreate them. Pointed
 # at the wrong database, the first ends someone's sessions and the second
 # deletes their data. So three refusals run first, on their own connection:
@@ -851,15 +852,24 @@ def _redirect_for(url):
 
 
 async def _clean_slate(url, sent):
-    """#753: a case starts from a slate it TAKES -- every other backend on the
-    lane database is ended first, so a lock a dead case left behind cannot
-    hold this one's DDL. The lane database is this file's alone, which is what
+    """#753: a case starts from a slate it TAKES -- every other client backend
+    of this role on the lane database is ended first (#940), so a lock a dead
+    case left behind cannot hold this one's DDL. The lane database is this
+    file's alone, which is what
     _refuse_unless_scratch establishes before this runs (Env.__aenter__)."""
     conn = await _connect(url, sent, search_path=BOUND_SCHEMA)
     try:
+        # #940: the role running the suite is not a superuser, so the sweep
+        # names only the backends it can terminate, its own role's client
+        # backends. A superuser session or an autovacuum worker on the
+        # database makes an unfiltered sweep raise InsufficientPrivilegeError
+        # here before the case body ran. Another role's session is left
+        # running and may keep a lock; the 5 s DDL lock_timeout reports it.
         await _send_destructive(conn, "SELECT pg_catalog.pg_terminate_backend(pid) FROM pg_catalog.pg_stat_activity"
                                       " WHERE datname = pg_catalog.current_database()"
-                                      " AND pid <> pg_catalog.pg_backend_pid()", sent)
+                                      " AND pid <> pg_catalog.pg_backend_pid()"
+                                      " AND backend_type = 'client backend' AND usename = current_user",
+                                      sent)
     finally:
         await conn.close()
 

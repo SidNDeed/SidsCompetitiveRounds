@@ -20,7 +20,8 @@ An unset DSN SKIPS the live half. A skipped live half is not an acceptance —
 it is an unrun test, and the lane's log has to show the executed run.
 
 The database NAME is checked, not assumed. This file DROPs three tables and
-terminates every other backend on whatever database the DSN names, and both of
+terminates its own role's other client backends on whatever database the DSN
+names (#940), and both of
 those happen before the first row is written — so "every steam id is outside
 the real SteamID64 space" protects the rows this file INSERTS and nothing
 else. The DSN's database must literally be EXPECTED_DB or the fixture refuses
@@ -357,7 +358,7 @@ live = pytest.mark.skipif(
     not DSN, reason="BUG391_TEST_PG_DSN unset; live-PostgreSQL acceptance half")
 
 # The only database this file may touch. Everything below DROPs tables on it
-# and terminates every other backend connected to it.
+# and terminates this role's other client backends connected to it.
 EXPECTED_DB = "scr_bug391"
 
 
@@ -447,15 +448,23 @@ async def _reset(engine, schema: str = SCHEMA):
     # The DROP below would then sit behind it and the next run would red for a
     # reason that has nothing to do with the code under test. That is exactly
     # how this file's own negative control first reddened, so the fix belongs
-    # here and not in a retry. Terminating every other backend is bounded by
-    # the name check below, not by the belief that the DSN is the right one.
+    # here and not in a retry. Terminating this role's other client backends
+    # (#940) is bounded by the name check below, not by the belief that the
+    # DSN is the right one.
     async with engine.connect() as conn:
         # Before the terminate, not after it: the refusal has to come first or
         # it is documentation.
         await _assert_dedicated_db(conn)
+        # #940: the role running the suite is not a superuser, so the sweep
+        # names only the backends it can terminate, its own role's client
+        # backends. A superuser session or an autovacuum worker on the
+        # database makes an unfiltered sweep raise InsufficientPrivilegeError
+        # here before the case body ran. Another role's session is left
+        # running and may keep a lock; the 15 s lock_timeout below reports it.
         await conn.execute(text(
             "SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-            " WHERE datname = current_database() AND pid <> pg_backend_pid()"))
+            " WHERE datname = current_database() AND pid <> pg_backend_pid()"
+            " AND backend_type = 'client backend' AND usename = current_user"))
         await conn.commit()
     async with engine.begin() as conn:
         # A blocked DDL must fail loudly, not hang the suite.

@@ -374,8 +374,15 @@ async def _clean_slate(url):
     behind cannot hold this one's DDL."""
     conn = await _pg(url)
     try:
+        # 2026-10-20: the role running the suite is not a superuser, so the
+        # sweep names only the backends it can terminate, its own role's
+        # client backends. A superuser session or an autovacuum worker on
+        # the lane database made pg_terminate_backend raise
+        # InsufficientPrivilegeError inside this fixture and turned every
+        # case red before its body ran.
         await conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity"
-                           " WHERE datname = current_database() AND pid <> pg_backend_pid()")
+                           " WHERE datname = current_database() AND pid <> pg_backend_pid()"
+                           " AND backend_type = 'client backend' AND usename = current_user")
     finally:
         await conn.close()
 
