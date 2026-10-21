@@ -34,7 +34,7 @@ SOURCES = {
     "ApiSource": "ApiClient.cs",
 }
 COMPILED_SOURCES = {"StallSource", "JitterSource", "PoisonSource", "LagSource", "FocusSource"}
-EXTRACTED_SOURCES = {"ApiSource", "ReplicaSource"}
+EXTRACTED_SOURCES = {"ApiSource", "ReplicaSource", "WatcherSource"}
 # DecimatedList lives inside GameStateWatcher.cs (never moved, so the
 # keybind-surface manifest keeps its rows); the harness compiles the class
 # text itself, cut from the real file at every run.
@@ -232,6 +232,22 @@ def extract_replica(tag, overrides=None):
 # Project default property: $(MSBuildThisFileDirectory)work\ReplicaMethods_base.cs
 # Project Compile item: <Compile Include="$(ReplicaMethodsSource)" />
 
+def extract_watcher_resets(tag, overrides=None):
+    raw = source_text("WatcherSource", overrides)
+    bodies = [method_text(raw, marker) for marker in (
+        "private static void ResetPerMatchCombatCounters()",
+        "private static void ResetMatchState()",
+    )]
+    text = ("using Photon.Pun;\nusing Hashtable = ExitGames.Client.Photon.Hashtable;\n"
+            "namespace CompetitiveRounds\n{\n"
+            "internal static partial class GameStateWatcher\n{\n"
+            + "\n\n".join(bodies) + "\n}\n}\n")
+    path = os.path.join(WORK, "WatcherResets_" + tag + ".cs")
+    with open(path, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write(text)
+    return path
+
+
 def m7_scoped_edits(key, marker, old, new):
     # Whole-method replacement gives the mutation runner a unique old anchor,
     # even when the focus reset line has two production sibling sites.
@@ -322,6 +338,16 @@ MUTANTS = [
      m7_scoped_edits("WatcherSource", "private static void ResetMatchState()",
                      "            localFpsFocusTimeline.Clear(); tlUnfocused = false;\n", ""),
      "focus_reset_state", "focus_reset_match"),
+    ("m7_focus_match_reset_disabled", "WatcherSource",
+     m7_scoped_edits("WatcherSource", "private static void ResetPerMatchCombatCounters()",
+                     "            localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;\n            localFpsFocusTimeline.Clear(); tlUnfocused = false;\n",
+                     "            if (false)\n            {\n            localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;\n            localFpsFocusTimeline.Clear(); tlUnfocused = false;\n            }\n"),
+     "focus_reset_match_partial", "focus_reset_state"),
+    ("m7_focus_state_reset_disabled", "WatcherSource",
+     m7_scoped_edits("WatcherSource", "private static void ResetMatchState()",
+                     "            localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;\n            localFpsFocusTimeline.Clear(); tlUnfocused = false;\n",
+                     "            if (false)\n            {\n            localFpsTimeline.Clear(); tlFrames = 0; tlAccum = 0f;\n            localFpsFocusTimeline.Clear(); tlUnfocused = false;\n            }\n"),
+     "focus_reset_state_partial", "focus_reset_match"),
     ("m7_same_room_counters_erased", "JitterSource",
      [("        internal void ResetLines() { _routineUsed = 0; _reserveUsed = 0; }",
        "        internal void ResetLines() { _routineUsed = 0; _reserveUsed = 0; _qualifying = 0; _suppressed = 0; }")],
@@ -551,6 +577,7 @@ def build(tag, overrides):
     cmd.append("-p:DecimatedSource=" + DECIMATED_OUT)
     cmd.append("-p:FpsWireSource=" + extract_fps_wire(tag, overrides))
     cmd.append("-p:ReplicaMethodsSource=" + extract_replica(tag, overrides))
+    cmd.append("-p:WatcherResetsSource=" + extract_watcher_resets(tag, overrides))
     for k, v in overrides.items():
         if k in COMPILED_SOURCES:
             cmd.append("-p:%s=%s" % (k, v))
