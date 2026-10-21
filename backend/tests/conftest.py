@@ -4,11 +4,17 @@ The production modules intentionally use flat imports (``from models import``),
 so tests mirror the process layout used by uvicorn and the Discord bot.
 """
 
-from pathlib import Path
-import hashlib
 import os
 import sys
 
+# Install before pytest, review_boot, and every collected test module. Plain
+# Python review drivers import this conftest too; a pytest plugin is too late.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+import review_tripwire  # noqa: E402
+
+from pathlib import Path
+import contextlib
+import hashlib
 import pytest
 
 
@@ -27,6 +33,45 @@ for path in (str(API_ROOT), str(BACKEND_ROOT), str(TESTS_ROOT)):
 # every revision in the process (review_boot.py). Importing it here, before
 # any test module is collected, installs it for the whole run.
 import review_boot  # noqa: E402,F401
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_sessionfinish(session, exitstatus):
+    """The runtime proof fails the run independently of terminal reporting."""
+    yield
+    trips = review_tripwire.verdict()
+    if trips:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        if reporter is not None:
+            reporter.write_line("review tripwire: non-clean verdict (%d trips)" % len(trips))
+
+
+# Existing synthetic read-failure tests intentionally replace these exact
+# bindings. Their positive expected-trip scopes preserve the old assertions.
+_REVIEW_FAULTS = {
+    ("test_review_needles_r3", "test_m5_a_status_failure_is_the_exit_3_refusal_never_absence"):
+        ("os.stat", "os.lstat"),
+    ("test_review_needles_r3", "test_m5_an_unreadable_directory_under_a_scan_refuses"):
+        ("os.scandir",),
+    ("test_review_needles_r3", "test_m5_the_build_tool_does_not_read_an_unreadable_draft_table_dir_as_absent"):
+        ("os.stat",),
+    ("test_review_needles_r5", "test_m4b_fix5_every_entry_that_is_not_a_regular_file_or_directory_is_refused"):
+        ("os.lstat",),
+}
+
+
+def _review_fault_scope(module, test):
+    names = _REVIEW_FAULTS.get((module, test))
+    return review_tripwire.expected_trip(*names) if names else contextlib.nullcontext()
+
+
+@pytest.fixture(autouse=True)
+def _review_expected_fault(request, monkeypatch):
+    # This fixture depends on monkeypatch so it closes before undo restores the
+    # deliberate replacements. Only the named fault tests can consume trips.
+    with _review_fault_scope(request.module.__name__, request.node.originalname):
+        yield
 
 
 # ── The tree this run is reading ─────────────────────────────────────────
