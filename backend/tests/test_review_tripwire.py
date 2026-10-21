@@ -267,3 +267,367 @@ def decorate(function):
 def defined():
     pass
 """, "<review-witness:install-control>", "exec"), vars(module))
+# Round 17 MEDIUM witnesses: literal syntax triggers a caller hook after install.
+# The same sources run with a benign hook for the negative controls.
+_M1_CASES = (
+    ("list_direct", "__iter__", """
+class Caller:
+    def __iter__(self):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return iter(())
+original = (list[str],)
+bases = original
+class C(bases[False]):
+    pass
+def trigger(obj):
+    stored = C(obj)
+trigger(Caller())
+"""),
+    ("dict_direct", "__iter__", """
+class Caller:
+    def __iter__(self):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return iter(())
+original = (dict[str, str],)
+bases = original
+class C(bases[False]):
+    pass
+def trigger(obj):
+    stored = C(obj)
+trigger(Caller())
+"""),
+    ("list_callback", "__iter__", """
+class Caller:
+    def __iter__(self):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return iter(())
+original = (list[str],)
+bases = original
+class C(bases[False]):
+    pass
+def trigger(obj):
+    stored = list(map(C, (obj,)))
+trigger(Caller())
+"""),
+    ("dict_callback", "__iter__", """
+class Caller:
+    def __iter__(self):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return iter(())
+original = (dict[str, str],)
+bases = original
+class C(bases[False]):
+    pass
+def trigger(obj):
+    stored = list(map(C, (obj,)))
+trigger(Caller())
+"""),
+)
+
+_M2_HELPER = """
+class Meta(type):
+    def __instancecheck__(cls, instance):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return False
+class C(metaclass=Meta):
+    pass
+"""
+_M2_CASES = (
+    ("imported_class", "__instancecheck__", """
+from review_witness_pattern_helper import C
+def trigger():
+    match False:
+        case C():
+            pass
+trigger()
+"""),
+    ("sequence_value", "__eq__", """
+class Caller:
+    def __eq__(self, other):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return False
+def trigger(obj):
+    match [obj]:
+        case [0]:
+            pass
+trigger(Caller())
+"""),
+    ("mapping_value", "__eq__", """
+class Caller:
+    def __eq__(self, other):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return False
+def trigger(obj):
+    match {False: obj}:
+        case {False: 0}:
+            pass
+trigger(Caller())
+"""),
+)
+
+_M3_CASES = (
+    ("mutated_set_expansion", "__hash__", """
+class Caller:
+    def __hash__(self):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return 0
+def trigger(obj):
+    items = []
+    items.append(obj)
+    stored = {*items}
+trigger(Caller())
+"""),
+    ("dictionary_store", "__hash__", """
+class Caller:
+    def __hash__(self):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return 0
+def trigger(obj):
+    d = {}
+    d[obj] = None
+trigger(Caller())
+"""),
+    ("dictionary_delete", "__hash__", """
+class Caller:
+    def __init__(self):
+        self.armed = False
+    def __hash__(self):
+        if self.armed:
+            if corrupt:
+                setattr(os, target, lambda *args, **kwargs: iter(()))
+            probe('.')
+        return 0
+def trigger(obj):
+    d = {obj: None}
+    obj.armed = True
+    del d[obj]
+trigger(Caller())
+"""),
+    ("dictionary_augmented_target", "__hash__", """
+class Caller:
+    def __init__(self):
+        self.armed = False
+    def __hash__(self):
+        if self.armed:
+            if corrupt:
+                setattr(os, target, lambda *args, **kwargs: iter(()))
+            probe('.')
+        return 0
+def trigger(obj):
+    d = {obj: 0}
+    obj.armed = True
+    d[obj] += 1
+trigger(Caller())
+"""),
+    ("list_store_index", "__index__", """
+class Caller:
+    def __index__(self):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return 0
+def trigger(obj):
+    items = [None]
+    items[obj] = False
+trigger(Caller())
+"""),
+    ("list_delete_index", "__index__", """
+class Caller:
+    def __index__(self):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return 0
+def trigger(obj):
+    items = [None]
+    del items[obj]
+trigger(Caller())
+"""),
+)
+
+_M4_HELPER = """
+def decorate(value):
+    if corrupt:
+        setattr(os, target, lambda *args, **kwargs: iter(()))
+    probe('.')
+    return value
+"""
+_M4_CASES = (
+    ("function_decorator", "decorate", """
+from review_witness_definition_helper import decorate
+@decorate
+def defined():
+    pass
+"""),
+    ("async_function_decorator", "decorate", """
+from review_witness_definition_helper import decorate
+@decorate
+async def defined():
+    pass
+"""),
+    ("class_decorator", "decorate", """
+from review_witness_definition_helper import decorate
+@decorate
+class Defined:
+    pass
+"""),
+    ("base_mro_entries", "__mro_entries__", """
+class BaseValue:
+    def __mro_entries__(self, bases):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return (object,)
+base = BaseValue()
+class Defined(base):
+    pass
+"""),
+    ("base_init_subclass", "__init_subclass__", """
+class Base:
+    def __init_subclass__(cls):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+class Defined(Base):
+    pass
+"""),
+    ("metaclass_prepare", "__prepare__", """
+class Meta(type):
+    @classmethod
+    def __prepare__(metaclass, name, bases):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+        return {}
+class Defined(metaclass=Meta):
+    pass
+"""),
+    ("metaclass_call", "make_class", """
+def make_class(name, bases, namespace):
+    if corrupt:
+        setattr(os, target, lambda *args, **kwargs: iter(()))
+    probe('.')
+    return type(name, bases, namespace)
+class Defined(metaclass=make_class):
+    pass
+"""),
+    ("descriptor_set_name", "__set_name__", """
+class Descriptor:
+    def __set_name__(self, owner, name):
+        if corrupt:
+            setattr(os, target, lambda *args, **kwargs: iter(()))
+        probe('.')
+class Defined:
+    value = Descriptor()
+"""),
+)
+
+
+def _run_round17_case(finding, case, target, corrupt):
+    """Execute only the literal sources above, with a fresh module per case."""
+    label, hook, source = case
+    filename = '<review-witness:' + finding + ':' + label + '>'
+    module = types.ModuleType('review_witness_' + finding + '_' + label)
+    values = dict(os=os, target=target, corrupt=corrupt, probe=os.path.exists)
+    module.__dict__.update(values)
+    helper_name = 'review_witness_pattern_helper'
+    helper_source = None
+    if finding == 'm2' and label == 'imported_class':
+        helper_source = _M2_HELPER
+    elif finding == 'm4' and label.endswith('_decorator'):
+        helper_name = 'review_witness_definition_helper'
+        helper_source = _M4_HELPER
+    missing = object()
+    previous = sys.modules.get(helper_name, missing)
+    helper = None
+    with tw.expected_trip('os.' + target, require=corrupt) as scope:
+        try:
+            if helper_source is not None:
+                helper = types.ModuleType(helper_name)
+                helper.__dict__.update(values)
+                exec(compile(helper_source, filename, 'exec'), helper.__dict__)
+                sys.modules[helper_name] = helper
+            exec(compile(source, filename, 'exec'), module.__dict__)
+        finally:
+            if helper is not None:
+                if previous is missing:
+                    sys.modules.pop(helper_name, None)
+                else:
+                    sys.modules[helper_name] = previous
+    if corrupt:
+        assert any(
+            row['kind'] == 'entry'
+            and row['name'] == 'os.' + target
+            and row['caller']['file'] == filename
+            and row['caller']['function'] == hook
+            and row['caller']['line'] > 0
+            for row in scope.trips
+        ), (finding, label, target, scope.trips)
+    else:
+        assert not scope.trips, (finding, label, target, scope.trips)
+
+
+@pytest.mark.parametrize('target', ('walk', 'scandir'))
+@pytest.mark.parametrize('case', _M1_CASES, ids=[row[0] for row in _M1_CASES])
+def test_m1_transitive_container_base_witness(case, target):
+    _run_round17_case('m1', case, target, True)
+
+
+@pytest.mark.parametrize('target', ('walk', 'scandir'))
+@pytest.mark.parametrize('case', _M1_CASES, ids=[row[0] for row in _M1_CASES])
+def test_m1_transitive_container_base_control(case, target):
+    _run_round17_case('m1', case, target, False)
+
+
+@pytest.mark.parametrize('target', ('walk', 'scandir'))
+@pytest.mark.parametrize('case', _M2_CASES, ids=[row[0] for row in _M2_CASES])
+def test_m2_structural_pattern_witness(case, target):
+    _run_round17_case('m2', case, target, True)
+
+
+@pytest.mark.parametrize('target', ('walk', 'scandir'))
+@pytest.mark.parametrize('case', _M2_CASES, ids=[row[0] for row in _M2_CASES])
+def test_m2_structural_pattern_control(case, target):
+    _run_round17_case('m2', case, target, False)
+
+
+@pytest.mark.parametrize('target', ('walk', 'scandir'))
+@pytest.mark.parametrize('case', _M3_CASES, ids=[row[0] for row in _M3_CASES])
+def test_m3_collection_protocol_witness(case, target):
+    _run_round17_case('m3', case, target, True)
+
+
+@pytest.mark.parametrize('target', ('walk', 'scandir'))
+@pytest.mark.parametrize('case', _M3_CASES, ids=[row[0] for row in _M3_CASES])
+def test_m3_collection_protocol_control(case, target):
+    _run_round17_case('m3', case, target, False)
+
+
+@pytest.mark.parametrize('target', ('walk', 'scandir'))
+@pytest.mark.parametrize('case', _M4_CASES, ids=[row[0] for row in _M4_CASES])
+def test_m4_definition_time_witness(case, target):
+    _run_round17_case('m4', case, target, True)
+
+
+@pytest.mark.parametrize('target', ('walk', 'scandir'))
+@pytest.mark.parametrize('case', _M4_CASES, ids=[row[0] for row in _M4_CASES])
+def test_m4_definition_time_control(case, target):
+    _run_round17_case('m4', case, target, False)
