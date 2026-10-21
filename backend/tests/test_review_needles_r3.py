@@ -38,7 +38,13 @@ prefix of its dotted path, an alias of either, or the manager itself
 (_manager_rebinds); the report names each such operation by file, line and
 kind (Reported.rebinds). The path-query alias map keeps every binding's
 value, so a name bound to two values is judged under each instead of never
-settling (_aliases)."""
+settling (_aliases).
+
+From fix pass 19, this scanner is a secondary census: its rows inform review,
+while the runtime witnesses and review_tripwire verdict provide the primary
+proof for the executed process. Historical proof helper names remain for
+compatibility and do not establish complete Python namespace safety.
+"""
 
 import ast
 import builtins
@@ -5108,7 +5114,12 @@ def walk_handler_proven(tree, handler, file="<source>") -> bool:
           pass 18 a resolved module callable off _ARG_SAFE is refused even
           without a marked argument, for assigned and disposed results alike.
           It is a bound over those lists and that data flow, not a claim
-          that every conceivable rebinding is detected."""
+          that every conceivable rebinding is detected.
+
+    From fix pass 19 this static result is a census observation whose rows
+    inform review. The runtime witnesses and review_tripwire verdict are the
+    primary proof for executed code; this helper is not a runtime guard.
+    """
     if not isinstance(handler, ast.Name):
         return False
     binds = _bindings(tree, handler.id)
