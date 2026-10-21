@@ -631,3 +631,15 @@ def test_m4_definition_time_witness(case, target):
 @pytest.mark.parametrize('case', _M4_CASES, ids=[row[0] for row in _M4_CASES])
 def test_m4_definition_time_control(case, target):
     _run_round17_case('m4', case, target, False)
+
+
+@pytest.mark.parametrize("args, clean_code", (([], 2), (["scan-dir", "."], 4)))
+def test_command_verdict_overrides_early_returns(args, clean_code, monkeypatch, capsys):
+    monkeypatch.setattr(review_needles, "STORE_ENV", "D4_SYNTHETIC_STORE")
+    monkeypatch.delenv("D4_SYNTHETIC_STORE", raising=False)
+    assert review_needles.main(args) == clean_code
+    clean_output = capsys.readouterr().out
+    with tw.expected_trip("os.walk"):
+        os.walk = lambda *a, **k: iter(())
+        assert review_needles.main(args) == 3
+        assert capsys.readouterr().out == clean_output

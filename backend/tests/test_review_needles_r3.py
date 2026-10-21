@@ -4783,6 +4783,8 @@ _MEASURED_CLEAN = {"review_needles.py": [
         ('snapshot', 'implicit truth test through unresolved base listed[rel][0] == stat.S_IFREG'),
         ('snapshot', 'implicit truth test through unresolved base listed[rel][0] == stat.S_IFREG and rel not in skip'),
         ('snapshot_rows', 'implicit iteration through unresolved base snap'),
+        ('main', 'call of unlisted callable review_tripwire.verdict through unresolved base review_tripwire.verdict'),
+        ('main', 'implicit truth test through unresolved base review_tripwire.verdict()'),
 ]}
 
 

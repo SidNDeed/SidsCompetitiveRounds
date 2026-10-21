@@ -124,7 +124,7 @@ folder and the reason; no reason carries a value of the store.
 """
 
 from __future__ import annotations
-
+import review_tripwire
 import hashlib
 import json
 import math
@@ -1050,31 +1050,35 @@ def report(label, found, n=None):
 
 
 def main(argv):
-    store = os.environ.get(STORE_ENV) or ""
-    if not argv:
-        print(__doc__.split("Modes:")[1].split("Exit 0")[0].rstrip())
-        return 2
-    if argv[0] == "seal-verify" and len(argv) == 3:
+    try:
+        store = os.environ.get(STORE_ENV) or ""
+        if not argv:
+            print(__doc__.split("Modes:")[1].split("Exit 0")[0].rstrip())
+            return 2
+        if argv[0] == "seal-verify" and len(argv) == 3:
+            try:
+                return report("seal-verify", seal_verify(argv[1], argv[2]))
+            except (NoVerdict, OSError) as e:
+                print("review_needles: no verdict (%s): refused" % (
+                    e if isinstance(e, NoVerdict) else type(e).__name__))
+                return 3
+        if not store:
+            print("review_needles: unarmed (%s is unset): refused, nothing was scanned" % STORE_ENV)
+            return 4
         try:
-            return report("seal-verify", seal_verify(argv[1], argv[2]))
+            needles = derive(store)
+        except NoVerdict as e:
+            print("review_needles: no verdict (store unreadable: %s): refused, nothing was scanned" % e)
+            return 3
+        try:
+            return _dispatch(argv[0], argv[1:], needles)
         except (NoVerdict, OSError) as e:
-            print("review_needles: no verdict (%s): refused" % (
+            print("review_needles: no verdict (a read failed: %s): refused, no result" % (
                 e if isinstance(e, NoVerdict) else type(e).__name__))
             return 3
-    if not store:
-        print("review_needles: unarmed (%s is unset): refused, nothing was scanned" % STORE_ENV)
-        return 4
-    try:
-        needles = derive(store)
-    except NoVerdict as e:
-        print("review_needles: no verdict (store unreadable: %s): refused, nothing was scanned" % e)
-        return 3
-    try:
-        return _dispatch(argv[0], argv[1:], needles)
-    except (NoVerdict, OSError) as e:
-        print("review_needles: no verdict (a read failed: %s): refused, no result" % (
-            e if isinstance(e, NoVerdict) else type(e).__name__))
-        return 3
+    finally:
+        if review_tripwire.verdict():
+            return 3
 
 
 def _dispatch(cmd, rest, needles):
