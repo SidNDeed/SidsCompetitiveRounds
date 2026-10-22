@@ -1466,8 +1466,35 @@ def _write_copy(dest, module, text_out):
 
 
 
-def _run(dest, module, test_file, sel):
+
+
+# Exact constituents retain all parameters of the former broad selections.
+_H4_WRITERS = ("ledger_final", "ledger_claim", "hold_open", "attempt", "mine",
+               "claim", "claim_audit", "bind", "entered", "end")
+BOUNDED_NODES = {
+    mid: tuple("test_fix1_h4_each_hold_writer_guards_before_downstream_lock[" + writer + "]"
+               for writer in _H4_WRITERS)
+    for mid in ("MERGED.FIX1.H4.CLAIM_AUDIT", "MERGED.FIX1.H4.BIND", "MERGED.FIX1.H4.END")
+}
+BOUNDED_NODES["MERGED.FIX1.H4.SEEN"] = tuple(
+    "test_fix1_h4_beat_deletion_orders_and_survivors[%s-%s-%s]" % (caller, order, mode)
+    for caller in (0, 1) for order in ("deletion_first", "writer_first") for mode in ("team", "ovt"))
+
+
+def combine_registry_runs(results):
+    """Combine observations without changing the strict adverse classifier."""
+    codes, runs = zip(*results)
+    exceptional = next((code for code in codes if code not in (0, 1)), None)
+    code = exceptional if exceptional is not None else int(any(codes))
+    return code, {"collected": sum(r.get("collected", 0) for r in runs),
+                  "collection_errors": [e for r in runs for e in r.get("collection_errors", [])],
+                  "reports": [e for r in runs for e in r.get("reports", [])],
+                  "constituents": len(runs)}
+
+
+def _run(dest, module, test_file, sel, mid=None):
     import tempfile
+    import test_srv_registry_seat as seat
 
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
@@ -1480,18 +1507,41 @@ def _run(dest, module, test_file, sel):
         env["MATCH_HOLD_SRC"] = dest
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
-    report = os.path.abspath(os.path.join(dest, "observations.json"))
-    env["SRV_REGISTRY_REPORT"] = report
-    basetemp = os.path.abspath(tempfile.mkdtemp(prefix="pytest_", dir=dest))
-    cmd = [sys.executable, "-B", "-m", "pytest", "--rootdir", BACKEND,
-           "-p", "no:cacheprovider", "-p", "test_srv_registry_seat",
-           "--basetemp", basetemp, "-q", "-rf", os.path.join(TESTS, test_file),
-           "-k", f"census or ({sel})"]
-    p = subprocess.run(cmd, cwd=TESTS, env=env, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", timeout=900)
-    out = p.stdout + p.stderr
+    outputs, results = [], []
+    for index, node in enumerate(BOUNDED_NODES.get(mid, (None,))):
+        report = os.path.abspath(os.path.join(dest, "observations-%02d.json" % index))
+        env["SRV_REGISTRY_REPORT"] = report
+        env["SRV_REGISTRY_POOL_EVENTS"] = report + ".pool.jsonl"
+        basetemp = os.path.abspath(tempfile.mkdtemp(prefix="pytest_", dir=dest))
+        cmd = [sys.executable, "-B", "-m", "pytest", "--rootdir", BACKEND,
+               "-p", "no:cacheprovider", "-p", "test_srv_registry_seat",
+               "--basetemp", basetemp, "-q", "-rf"]
+        target = os.path.join(TESTS, test_file)
+        cmd += [target + "::" + node] if node else [target, "-k", "census or (" + sel + ")"]
+        seat._read_seat_hold()
+        lifecycle = seat._registry_database_begin(test_file, env, mid or sel)
+        try:
+            p = seat._run_registry_child(cmd, cwd=TESTS, env=env)
+        except subprocess.TimeoutExpired:
+            print("REGISTRY TIMEOUT " + json.dumps(seat._phase_evidence(report), sort_keys=True), flush=True)
+            raise
+        phases = seat._phase_evidence(report)
+        child_output = p.stdout + p.stderr
+        try:
+            seat._registry_database_finish(test_file, env, lifecycle)
+        except BaseException as error:
+            print("REGISTRY VERIFICATION " + json.dumps({"phase": "database_finish",
+                  "phases": phases, "database_unverified": True,
+                  "exception": type(error).__name__}, sort_keys=True), flush=True)
+            print(child_output, flush=True)
+            raise
+        outputs.append("REGISTRY PHASES " + json.dumps(phases, sort_keys=True)
+                       + "\n" + child_output)
+        results.append((p.returncode, read_registry_run(report)))
+    code, observed = combine_registry_runs(results)
+    out = "\n".join(outputs)
     failed = sorted(set(re.findall(r"^FAILED \S+::(\w+)", out, re.M)))
-    return p.returncode, failed, out, read_registry_run(report)
+    return code, failed, out, observed
 
 
 import ast
@@ -2343,8 +2393,8 @@ def main():
         mdir, cdir = os.path.join(root, "mutant"), os.path.join(root, "control")
         _write_copy(mdir, module, _plant(base, medits, mid, "mutant"))
         _write_copy(cdir, module, _plant(base, cedits, mid, "control"))
-        mrc, mfail, mout, mrecord = _run(mdir, module, test_file, sel)
-        crc, cfail, cout, crecord = _run(cdir, module, test_file, sel)
+        mrc, mfail, mout, mrecord = _run(mdir, module, test_file, sel, mid=mid)
+        crc, cfail, cout, crecord = _run(cdir, module, test_file, sel, mid=mid)
         with open(os.path.join(root, "mutant.out"), "w", encoding="utf-8") as f:
             f.write(mout)
         with open(os.path.join(root, "control.out"), "w", encoding="utf-8") as f:

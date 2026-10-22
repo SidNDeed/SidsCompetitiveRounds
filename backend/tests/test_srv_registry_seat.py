@@ -6,6 +6,9 @@ assertion expression or message.  Each variant uses one fresh complete backend
 copy, removed after its result is recorded.  A child error never counts as a kill.
 """
 import ast
+import asyncio
+import faulthandler
+import itertools
 import importlib.util
 import json
 import os
@@ -178,17 +181,73 @@ def _assertion_at(path, line):
 
 # The parent does not set this variable.  Only child pytest invocations write
 # these observations, inside that variant's scratch directory.
-_CHILD_RUN = {"collected": 0, "collection_errors": [], "reports": []}
+_CHILD_RUN = {"collected": 0, "collection_errors": [], "reports": [], "events": []}
+_STACK_STREAM = None
+
+
+
+
+def _persist_observations(event=None):
+    target = os.environ.get("SRV_REGISTRY_REPORT")
+    if not target:
+        return
+    if event is not None:
+        event = {"monotonic": time.monotonic(), **event}
+        _CHILD_RUN["events"].append(event)
+        with open(target + ".events.jsonl", "a", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(event, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    temporary = Path(target + ".new")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(_CHILD_RUN, stream, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, target)
+
+
+def pytest_sessionstart(session):
+    global _STACK_STREAM
+    target = os.environ.get("SRV_REGISTRY_REPORT")
+    if target:
+        _CHILD_RUN["active"] = {"node": None, "phase": "collection"}
+        _STACK_STREAM = open(target + ".stack.txt", "w", encoding="utf-8")
+        deadline = float(os.environ.get("SRV_REGISTRY_DEADLINE", time.monotonic() + TIMEOUT_S))
+        faulthandler.dump_traceback_later(max(1, deadline - time.monotonic() - 10), file=_STACK_STREAM)
+        _persist_observations({"event": "session_start"})
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_setup(item):
+    _CHILD_RUN["active"] = {"node": item.nodeid, "phase": "setup"}
+    _persist_observations({"event": "phase_start", **_CHILD_RUN["active"]})
+    yield
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_call(item):
+    _CHILD_RUN["active"] = {"node": item.nodeid, "phase": "call"}
+    _persist_observations({"event": "phase_start", **_CHILD_RUN["active"]})
+    yield
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_teardown(item):
+    _CHILD_RUN["active"] = {"node": item.nodeid, "phase": "teardown"}
+    _persist_observations({"event": "phase_start", **_CHILD_RUN["active"]})
+    yield
 
 
 def pytest_collectreport(report):
     if os.environ.get("SRV_REGISTRY_REPORT") and report.failed:
         _CHILD_RUN["collection_errors"].append(report.nodeid)
+        _persist_observations({"event": "collection_error", "node": report.nodeid})
 
 
 def pytest_collection_finish(session):
     if os.environ.get("SRV_REGISTRY_REPORT"):
         _CHILD_RUN["collected"] = len(session.items)
+        _persist_observations({"event": "collection_finish", "collected": len(session.items)})
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -208,14 +267,22 @@ def pytest_runtest_makereport(item, call):
         if call.excinfo.traceback:
             entry = call.excinfo.traceback[-1]
             row["assertion"] = _assertion_at(entry.path, entry.lineno + 1)
+    row["seconds"] = report.duration
     _CHILD_RUN["reports"].append(row)
+    _persist_observations({"event": "phase_end", "node": item.nodeid, "phase": call.when,
+                           "outcome": report.outcome, "seconds": report.duration})
 
 
 def pytest_sessionfinish(session, exitstatus):
-    target = os.environ.get("SRV_REGISTRY_REPORT")
-    if target:
+    global _STACK_STREAM
+    if os.environ.get("SRV_REGISTRY_REPORT"):
         _CHILD_RUN["exitstatus"] = int(exitstatus)
-        Path(target).write_text(json.dumps(_CHILD_RUN, sort_keys=True), encoding="utf-8")
+        _CHILD_RUN.pop("active", None)
+        _persist_observations({"event": "session_finish", "exitstatus": int(exitstatus)})
+        faulthandler.cancel_dump_traceback_later()
+        if _STACK_STREAM is not None:
+            _STACK_STREAM.close()
+            _STACK_STREAM = None
 
 
 def _test_file(family, row):
@@ -307,6 +374,7 @@ def test_srv_registry_census(capsys):
     assert len(CASES) == len(c_ids) + len(u_ids)
     assert len({(family, mid) for family, mid, row in CASES}) == len(CASES)
     _check_intended_sources()
+    _check_bounded_constituents()
     cache, counts = {}, {"C": 0, "U": 0}
     for family, mid, row in CASES:
         counts[family] += _preflight(family, mid, row, cache)
@@ -432,20 +500,115 @@ def _stop_registry_child(process):
         raise retained from None
 
 
-def _run_registry_child(command, *, cwd, env):
+
+
+def _phase_evidence(record):
+    record = Path(record)
+    observed = U.read_registry_run(record)
+    pool_events = []
+    try:
+        for line in Path(str(record) + ".pool.jsonl").read_text(encoding="utf-8").splitlines():
+            try:
+                pool_events.append(json.loads(line))
+            except ValueError:
+                pool_events.append({"event": "incomplete_pool_record"})
+    except OSError:
+        pass
+    try:
+        stack = Path(str(record) + ".stack.txt").read_text(encoding="utf-8")
+    except OSError:
+        stack = ""
+    return {"active": observed.get("active"), "events": observed.get("events", []),
+            "reports": observed.get("reports", []), "pool_events": pool_events, "stack": stack}
+
+
+def _database_spec(test_file, env):
+    pooled = test_file != "test_ffa_quarantine_triage.py"
+    variable = "CF_TEST_PG_DSN" if pooled else "RJ_TRIAGE_TEST_PG_DSN"
+    return env[variable].replace("postgresql+asyncpg://", "postgresql://"), pooled
+
+
+def _registry_database_begin(test_file, env, reason):
+    import cf_pool
+    dsn, pooled = _database_spec(test_file, env)
+    lifecycle = asyncio.run(asyncio.wait_for(
+        cf_pool.registry_database(dsn, action="begin", pooled=pooled, reason=reason), 120))
+    env["CF_POOL_RUN_ID"] = lifecycle["owner"]
+    env["CF_POOL_ACTIVE_TOKEN"] = lifecycle["active_token"]
+    return lifecycle
+
+
+def _registry_database_finish(test_file, env, lifecycle):
+    import cf_pool
+    dsn, pooled = _database_spec(test_file, env)
+    return asyncio.run(asyncio.wait_for(cf_pool.registry_database(
+        dsn, action="finish", pooled=pooled, active_token=lifecycle["active_token"]), 120))
+
+
+def _database_waits(env):
+    async def observe():
+        import asyncpg
+        records = []
+        for variable in ("CF_TEST_PG_DSN", "RJ_TRIAGE_TEST_PG_DSN"):
+            if not env.get(variable):
+                continue
+            conn = await asyncpg.connect(env[variable].replace("postgresql+asyncpg://", "postgresql://"),
+                                         timeout=1, command_timeout=1)
+            try:
+                rows = await conn.fetch(
+                    "SELECT state, wait_event_type, wait_event, cardinality(pg_blocking_pids(pid)) "
+                    "AS blockers FROM pg_catalog.pg_stat_activity WHERE datname=current_database() "
+                    "AND pid<>pg_backend_pid() AND backend_type='client backend'")
+                records += [{"database_kind": variable.split("_TEST", 1)[0], **dict(row)} for row in rows]
+            finally:
+                await conn.close()
+        return records
+    try:
+        return asyncio.run(asyncio.wait_for(observe(), 3))
+    except Exception as error:
+        return [{"observation_error": type(error).__name__}]
+
+
+def _run_registry_child(command, *, cwd, env, force_kill_when=None):
+    env = dict(env)
+    deadline = time.monotonic() + TIMEOUT_S
+    env["SRV_REGISTRY_DEADLINE"] = str(deadline)
+    if env.get("SRV_REGISTRY_REPORT"):
+        with open(env["SRV_REGISTRY_REPORT"], "w", encoding="utf-8") as stream:
+            json.dump({"active": {"node": None, "phase": "process_start"}, "reports": [],
+                       "events": [{"phase": "process_start", "monotonic": time.monotonic()}]}, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
     process = subprocess.Popen(
         command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         start_new_session=os.name != "nt")
+    waits = []
+    sampled = False
     try:
-        stdout, stderr = process.communicate(timeout=TIMEOUT_S)
+        while True:
+            remaining = deadline - time.monotonic()
+            forced = force_kill_when is not None and Path(force_kill_when).exists()
+            if remaining <= 0 or forced:
+                stdout, stderr = _stop_registry_child(process)
+                error = subprocess.TimeoutExpired(command, TIMEOUT_S, output=stdout, stderr=stderr)
+                error.database_waits = waits
+                error.forced = forced
+                raise error
+            if not sampled and 3 < remaining <= 5:
+                # Observe before the deadline; the child is killed at its unchanged bound.
+                waits = _database_waits(env)
+                sampled = True
+                continue
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.2 if force_kill_when else 5, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
     except subprocess.TimeoutExpired:
-        stdout, stderr = _stop_registry_child(process)
-        raise subprocess.TimeoutExpired(command, TIMEOUT_S, output=stdout, stderr=stderr) from None
+        raise
     except BaseException:
-        # An interrupted communicate must receive the same bounded cleanup as
-        # a timeout before either surrounding scratch directory can disappear.
         _stop_registry_child(process)
         raise
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
@@ -474,32 +637,61 @@ def _run_variant(family, mid, row, kind, parent, emit):
             env.pop(name, None)
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
-        record = variant / "observations.json"
-        env["SRV_REGISTRY_REPORT"] = str(record)
         env["MATCH_HOLD_SCRATCH"] = str(variant / "nested")
-        command = [sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider",
-                   "-p", "test_srv_registry_seat", "-q", "-rf",
-                   "--rootdir", str(copied), "--basetemp", str(variant / "temp"),
-                   "-o", "junit_family=xunit1", "--junitxml", str(variant / "junit.xml")]
-        if family == "C":
-            command.append(str(copied / "tests" / row["node"]))
-        else:
-            command += [str(copied / "tests" / row[4]), "-k", "census or (" + row[5] + ")"]
-        try:
+        nodes = U.BOUNDED_NODES.get(mid, (None,)) if family == "U" else (None,)
+        constituent_results, outputs, phase_records = [], [], []
+        started = time.monotonic()
+        for index, node in enumerate(nodes):
+            record = variant / ("observations-%02d.json" % index)
+            env["SRV_REGISTRY_REPORT"] = str(record)
+            env["SRV_REGISTRY_POOL_EVENTS"] = str(record) + ".pool.jsonl"
+            command = [sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider",
+                       "-p", "test_srv_registry_seat", "-q", "-rf", "--rootdir", str(copied),
+                       "--basetemp", str(variant / ("temp-%02d" % index)),
+                       "-o", "junit_family=xunit1", "--junitxml", str(variant / ("junit-%02d.xml" % index))]
+            if family == "C":
+                command.append(str(copied / "tests" / row["node"]))
+            elif node:
+                command.append(str(copied / "tests" / row[4]) + "::" + node)
+            else:
+                command += [str(copied / "tests" / row[4]), "-k", "census or (" + row[5] + ")"]
             seat_line = _read_seat_hold()
             if seat_line is not None:
-                emit({"family": family, "row": mid, "kind": kind, "seat_lock_first_line": seat_line})
-            result = _run_registry_child(command, cwd=copied / "tests", env=env)
+                emit({"family": family, "row": mid, "kind": kind, "part": index,
+                      "seat_lock_first_line": seat_line})
+            lifecycle = _registry_database_begin(_test_file(family, row), env, "%s/%s/%s" % (mid, kind, index))
+            emit({"family": family, "row": mid, "kind": kind, "part": index,
+                  "database_verified_before": lifecycle["verified"], "recovered": lifecycle["recovered"]})
+            part_started = time.monotonic()
+            try:
+                result = _run_registry_child(command, cwd=copied / "tests", env=env)
+            except subprocess.TimeoutExpired as error:
+                def decoded(value):
+                    return value.decode("utf-8", "replace") if isinstance(value, bytes) else value or ""
+                output = decoded(error.stdout) + decoded(error.stderr)
+                phases = _phase_evidence(record)
+                emit({"family": family, "row": mid, "kind": kind, "part": index,
+                      "verdict": "TIMEOUT", "seconds": TIMEOUT_S, "phases": phases,
+                      "database_waits": getattr(error, "database_waits", []), "database_unverified": True}, output)
+                return "TIMEOUT", {"seconds": TIMEOUT_S, "phases": phases}, output, None
             observations = U.read_registry_run(record)
-            code = result.returncode
             output = result.stdout + result.stderr
-        except subprocess.TimeoutExpired as error:
-            def decoded(value):
-                return value.decode("utf-8", "replace") if isinstance(value, bytes) else value or ""
-            output = decoded(error.stdout) + decoded(error.stderr)
-            emit({"family": family, "row": mid, "kind": kind,
-                  "verdict": "TIMEOUT", "seconds": TIMEOUT_S}, output)
-            return "TIMEOUT", {"seconds": TIMEOUT_S}, output, None
+            phases = _phase_evidence(record)
+            try:
+                checked = _registry_database_finish(_test_file(family, row), env, lifecycle)
+            except BaseException as error:
+                emit({"family": family, "row": mid, "kind": kind, "part": index,
+                      "phase": "database_finish", "verdict": "ERROR", "phases": phases,
+                      "database_unverified": True, "exception": type(error).__name__}, output)
+                raise
+            outputs.append(output)
+            phase_records.append(phases)
+            constituent_results.append((result.returncode, observations))
+            emit({"family": family, "row": mid, "kind": kind, "part": index, "node": node,
+                  "seconds": time.monotonic() - part_started, "returncode": result.returncode,
+                  "phases": phases, "database_verified_after": checked["verified"]}, output)
+        code, observations = U.combine_registry_runs(constituent_results)
+        output = "\n".join(outputs)
         verdict, detail = U.registry_run_verdict(
             code, observations, mid=mid if family == "U" else None,
             tag=row["tag"] if family == "C" else None, selector=_selector(family, row),
@@ -517,13 +709,14 @@ def _run_variant(family, mid, row, kind, parent, emit):
                    "setup_errors": sum(r["phase"] != "call" and r["outcome"] == "failed"
                                        for r in observations.get("reports", [])),
                    "skipped": sum(r["outcome"] == "skipped" for r in observations.get("reports", []))}
-        emit({"family": family, "row": mid, "kind": kind,
-              "verdict": verdict, "detail": detail, "counts": summary}, output)
+        emit({"family": family, "row": mid, "kind": kind, "verdict": verdict,
+              "detail": detail, "counts": summary, "seconds": time.monotonic() - started,
+              "constituents": len(nodes)})
         return verdict, detail, output, summary
     except BaseException as error:
         cleanup_allowed = not isinstance(error, _RegistryScratchRetained)
-        emit({"family": family, "row": mid, "kind": kind,
-              "verdict": "ERROR", "exception": type(error).__name__, "detail": str(error),
+        emit({"family": family, "row": mid, "kind": kind, "verdict": "ERROR",
+              "exception": type(error).__name__, "detail": str(error),
               "scratch_retained": not cleanup_allowed,
               "owned_child_pid": getattr(error, "owned_child_pid", None)})
         raise
@@ -577,3 +770,143 @@ def test_srv_registry_row(family, mid, row, tmp_path, capsys):
         else:
             emit({"family": family, "row": mid, "kind": "case",
                   "scratch_retained": True, "directory": parent.name})
+
+
+
+def test_srv_registry_forced_kill_requires_verified_pool_recovery(tmp_path, capsys):
+    """A killed pending build cannot silently become the next child's database."""
+    import cf_pool
+    _require_live_case("U", U.MUTANTS["MERGED.FIX1.H4.BIND"])
+    scratch = Path(os.environ.get("MATCH_HOLD_SCRATCH") or tmp_path)
+    assert scratch.is_absolute() and not scratch.resolve().is_relative_to(BACKEND.parent)
+    scratch.mkdir(parents=True, exist_ok=True)
+    parent = Path(tempfile.mkdtemp(prefix="kill_", dir=scratch))
+    copied = parent / "backend"
+    shutil.copytree(BACKEND, copied, ignore=IGNORE)
+    cleanup_allowed = True
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env["SRV_REGISTRY_POOL_EVENTS"] = str(parent / "forced.pool.jsonl")
+    ready = parent / "ready"
+    env["SRV_REGISTRY_FORCE_READY"] = str(ready)
+    script = """
+import asyncio, os
+from pathlib import Path
+import cf_pool
+async def partial(case, **kwargs):
+    await case.conn.execute('CREATE TABLE ffa_lobbies (id integer)')
+    Path(os.environ['SRV_REGISTRY_FORCE_READY']).write_text(case.schema, encoding='ascii')
+    await asyncio.Event().wait()
+cf_pool.cf_pg.build = partial
+cf_pool.build_key = lambda faithful: 'forced_kill_control'
+async def run():
+    async with cf_pool.checkout():
+        raise AssertionError('forced build unexpectedly completed')
+asyncio.run(run())
+"""
+    try:
+        line = _read_seat_hold()
+        lifecycle = _registry_database_begin("test_match_hold_deletion_pg.py", env, "forced-kill-control")
+        try:
+            _run_registry_child([sys.executable, "-B", "-c", script], cwd=copied / "tests", env=env, force_kill_when=ready)
+        except subprocess.TimeoutExpired as error:
+            assert error.forced, "forced kill did not reach its owned pending-build barrier"
+            waits = getattr(error, "database_waits", [])
+        else:
+            raise AssertionError("forced child was not killed")
+        schema = ready.read_text(encoding="ascii")
+        dsn, _ = _database_spec("test_match_hold_deletion_pg.py", env)
+        refused = False
+        try:
+            asyncio.run(cf_pool.require_registry_verified(dsn))
+        except cf_pool.harness.CensusRefusal as error:
+            assert str(error) == "registry database is unverified"
+            refused = True
+        assert refused, "FIX3 F4 quarantined database was reusable"
+        line2 = _read_seat_hold()
+        recovered = _registry_database_begin("test_match_hold_deletion_pg.py", env, "post-kill-clean-control")
+        assert recovered["recovered"] == [schema], "FIX3 F4 cleanup was not the exact owned schema"
+        clean = """
+import asyncio
+import cf_pool
+async def run():
+    async with cf_pool.checkout() as (case, sm):
+        assert await case.conn.fetchval("SELECT to_regclass('ffa_lobbies')") is not None
+asyncio.run(run())
+print('FIX3 F4 CLEAN CONTROL GREEN', flush=True)
+"""
+        result = _run_registry_child([sys.executable, "-B", "-c", clean], cwd=copied / "tests", env=env)
+        assert result.returncode == 0, ("FIX3 F4 clean control failed", result.stdout, result.stderr)
+        assert "FIX3 F4 CLEAN CONTROL GREEN" in result.stdout
+        _registry_database_finish("test_match_hold_deletion_pg.py", env, recovered)
+        asyncio.run(cf_pool.require_registry_verified(dsn))
+        with capsys.disabled():
+            print("REGISTRY ISOLATION " + json.dumps({"forced_kill": True, "refused_before_verification": refused,
+                  "recovered": recovered["recovered"], "clean_control": "GREEN", "database_waits": waits,
+                  "seat_lock_first_lines": [line, line2]}, sort_keys=True), flush=True)
+            print((parent / "forced.pool.jsonl").read_text(encoding="utf-8"), flush=True)
+    except _RegistryScratchRetained:
+        cleanup_allowed = False
+        raise
+    finally:
+        if cleanup_allowed:
+            with capsys.disabled():
+                phases_path = parent / "forced.pool.jsonl"
+                if phases_path.exists():
+                    print("REGISTRY ISOLATION PHASES " + phases_path.read_text(encoding="utf-8"), flush=True)
+            shutil.rmtree(parent)
+            assert not parent.exists()
+
+
+
+def _check_bounded_constituents():
+    tree = ast.parse((HERE / "test_match_hold_deletion_pg.py").read_text(encoding="utf-8-sig"))
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    specifications = {
+        "test_fix1_h4_each_hold_writer_guards_before_downstream_lock":
+            ("MERGED.FIX1.H4.CLAIM_AUDIT", "MERGED.FIX1.H4.BIND", "MERGED.FIX1.H4.END"),
+        "test_fix1_h4_beat_deletion_orders_and_survivors": ("MERGED.FIX1.H4.SEEN",),
+    }
+    assert set(U.BOUNDED_NODES) == {mid for rows in specifications.values() for mid in rows}
+    for name, rows in specifications.items():
+        axes = [ast.literal_eval(d.args[1]) for d in reversed(functions[name].decorator_list)
+                if isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                and d.func.attr == "parametrize"]
+        expected = tuple(name + "[" + "-".join(map(str, values)) + "]"
+                         for values in itertools.product(*axes))
+        for mid in rows:
+            assert U.BOUNDED_NODES[mid] == expected, ("FIX3 F4 missing constituent", mid)
+            assert len(set(expected)) == len(expected)
+
+
+@pytest.mark.parametrize("route", ["V1", "V2", "D1"])
+def test_srv_k21_old_slack_triplet(route, tmp_path, capsys):
+    """Expose the frozen old-slack plants through the admitted pytest seat interface."""
+    name = "_srv_k21_frozen_registry"
+    registry = sys.modules.get(name)
+    if registry is None:
+        specification = importlib.util.spec_from_file_location(name, HERE / "rj_triage_controls.py")
+        registry = importlib.util.module_from_spec(specification)
+        # dataclass annotation resolution requires the defining module here.
+        sys.modules[name] = registry
+        try:
+            specification.loader.exec_module(registry)
+        except BaseException:
+            sys.modules.pop(name, None)
+            raise
+    names = ("K21-old-slack-restored", "K21-twin-alter-run-subtracted")
+    selected = [plant for plant in registry.P if plant.name in names]
+    assert len(selected) == 2 and {plant.name for plant in selected} == set(names), "K21 plants missing or duplicate"
+    plants = {plant.name: plant for plant in selected}
+    node = "test_ffa_quarantine_triage.py::test_pg_k21_a_capture_committing_past_the_bound_is_a_fail[" + route + "]"
+    row = {"row": "K21." + route, "node": node, "tag": "FIX2 M5 strict capture bound"}
+    for kind, plant_name in zip(("mutant", "twin"), names):
+        plant = plants[plant_name]
+        assert plant.kind == kind and node in plant.checks, ("K21 frozen plant scope", kind, route)
+        assert len(plant.edits) == 1, "K21 expected one frozen verdict edit"
+        relative, old, new = plant.edits[0]
+        assert relative == "backend/tests/test_ffa_quarantine_triage.py", "K21 unexpected target"
+        row[kind] = [(relative, old, new, 1)]
+    # The 125 registry identities remain unchanged. This additional seat case
+    # uses their same isolated children, strict classification and cleanup.
+    test_srv_registry_row("C", row["row"], row, tmp_path, capsys)

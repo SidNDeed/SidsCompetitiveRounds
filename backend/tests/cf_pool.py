@@ -45,6 +45,9 @@ import glob
 import hashlib
 import json
 import os
+import re
+import time
+import uuid
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -317,6 +320,11 @@ async def _ensure_meta(meta):
         "built_at timestamptz NOT NULL DEFAULT now(), "
         "used_at timestamptz NOT NULL DEFAULT now(), uses integer NOT NULL DEFAULT 0)"
         % META)
+    await meta.execute("ALTER TABLE %s.entries ADD COLUMN IF NOT EXISTS owner text" % META)
+    await meta.execute(
+        "CREATE TABLE IF NOT EXISTS %s.registry_state (singleton boolean PRIMARY KEY "
+        "DEFAULT true CHECK (singleton), owner text NOT NULL, unverified boolean NOT NULL "
+        "DEFAULT false, active_token text, reason text NOT NULL DEFAULT '')" % META)
 
 
 async def _drop(dsn, schema, own):
@@ -328,7 +336,7 @@ async def _drop(dsn, schema, own):
         await conn.close()
 
 
-async def _build(dsn, faithful):
+async def _build(dsn, faithful, key, owner):
     """A new pool schema: the harness's create-under-census, the build, the
     outside census, the pristine record."""
     import types
@@ -346,8 +354,17 @@ async def _build(dsn, faithful):
         if others:
             raise harness.CensusRefusal("refusing to build %s: schema(s) %r already hold "
                                         "ffa_lobbies in this database" % (schema, others))
-        await harness.create_case_schema(conn, schema)
+        # Ownership and CREATE commit together. A refused CREATE cannot leave
+        # a registration that could later authorize dropping somebody else's schema.
+        _phase("reserve", "start", schema=schema)
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO %s.entries (key, schema_name, pristine, owner) "
+                "VALUES ($1, $2, 'null', $3)" % META, key, schema, owner)
+            await harness.create_case_schema(conn, schema)
         created = True
+        _phase("reserve", "end", schema=schema)
+        _phase("build", "start", schema=schema)
         outside = await harness.outside_objects(conn, schema)
         await cf_pg.build(types.SimpleNamespace(conn=conn, schema=schema),
                           with_355=True, dsn=dsn, faithful=faithful)
@@ -356,11 +373,17 @@ async def _build(dsn, faithful):
             changed = sorted(set(after) ^ set(outside))
             raise harness.CensusRefusal("the build of %s changed %d object(s) outside it: "
                                         "%r" % (schema, len(changed), changed[:5]))
+        _phase("capture", "start", schema=schema)
         pristine = await capture(conn, schema)
+        _phase("capture", "end", schema=schema)
+        _phase("build", "end", schema=schema)
     except BaseException:
         if created:
             try:
                 await harness.drop_case_schema(conn, schema, None)
+                assert not await conn.fetchval(_NSP, schema), "owned failed build remains"
+                await conn.execute("DELETE FROM %s.entries WHERE key=$1 AND schema_name=$2 "
+                                   "AND owner=$3" % META, key, schema, owner)
             finally:
                 await conn.close()
         else:
@@ -457,62 +480,199 @@ async def _drop_declared(dsn, schema, declared):
 
 @contextlib.asynccontextmanager
 async def checkout(faithful=False):
-    """A pristine pool schema for one case; yields (case, sessionmaker)."""
+    """A pristine, positively registered schema for one case."""
     dsn = await _faithful_dsn() if faithful else cf_pg.DSN
     key = build_key(faithful)
     meta = await asyncpg.connect(dsn)
     try:
+        _phase("pool_lock", "start")
         await meta.execute("SELECT pg_advisory_lock($1)", LOCK_KEY)
+        _phase("pool_lock", "end")
         await _ensure_meta(meta)
-        row = await meta.fetchrow("SELECT schema_name, pristine FROM %s.entries "
-                                  "WHERE key = $1" % META, key)
+        state = await _owner(meta)
+        owner = state["owner"]
+        if state["unverified"] and os.environ.get("CF_POOL_ACTIVE_TOKEN") != state["active_token"]:
+            raise harness.CensusRefusal("registry database is unverified")
+        row = await meta.fetchrow("SELECT key, schema_name, pristine, owner FROM %s.entries "
+                                  "WHERE key=$1" % META, key)
         schema = pristine = None
         if row is not None:
+            if row["owner"] != owner:
+                raise harness.CensusRefusal("pool schema belongs to another run")
             schema, pristine = row["schema_name"], json.loads(row["pristine"])
-            conn = await harness.connect_bound(dsn, schema)
-            try:
-                why = await reset(conn, schema, pristine)
-            except Exception as exc:                   # pragma: no cover
-                why = "reset raised %r" % (exc,)
-            finally:
-                await conn.close()
-            if why is not None:
-                print("[cf_pool] retiring %s: %s" % (schema, why))
-                _log("retire %s key=%s: %s" % (schema, key, why))
-                await meta.execute("DELETE FROM %s.entries WHERE key = $1" % META, key)
-                await _drop(dsn, schema, pristine["own"])
-                schema = pristine = None
+            if pristine is None:
+                await _drop_registered(meta, dsn, row, owner)
+                schema = None
+            else:
+                conn = await harness.connect_bound(dsn, schema)
+                try:
+                    _phase("reset", "start", schema=schema)
+                    why = await reset(conn, schema, pristine)
+                    _phase("reset", "end", schema=schema, pristine=why is None)
+                except Exception as exc:
+                    why = "reset raised %s" % type(exc).__name__
+                finally:
+                    await conn.close()
+                if why is not None:
+                    _log("retire %s key=%s: %s" % (schema, key, why))
+                    await _drop_registered(meta, dsn, row, owner)
+                    schema = pristine = None
         if schema is None:
-            # One pool schema per database (_build's guard): another key's
-            # schema goes before this key's build.
-            for old in await meta.fetch("SELECT key, schema_name, pristine FROM %s.entries "
-                                        "WHERE key <> $1" % META, key):
-                await meta.execute("DELETE FROM %s.entries WHERE key = $1" % META,
-                                   old["key"])
-                await _drop(dsn, old["schema_name"], json.loads(old["pristine"])["own"])
-            schema, pristine = await _build(dsn, faithful)
+            for old in await meta.fetch("SELECT key, schema_name, pristine, owner FROM %s.entries "
+                                        "WHERE key<>$1" % META, key):
+                await _drop_registered(meta, dsn, old, owner)
+            schema, pristine = await _build(dsn, faithful, key, owner)
             _log("built %s key=%s" % (schema, key))
-            await meta.execute(
-                "INSERT INTO %s.entries (key, schema_name, pristine) VALUES ($1, $2, $3)"
-                % META, key, schema, json.dumps(pristine, sort_keys=True))
-        await meta.execute("UPDATE %s.entries SET used_at = now(), uses = uses + 1 "
-                           "WHERE key = $1" % META, key)
+            _phase("registration_complete", "start", schema=schema)
+            await meta.execute("UPDATE %s.entries SET pristine=$1 WHERE key=$2 AND schema_name=$3 "
+                               "AND owner=$4" % META, json.dumps(pristine, sort_keys=True), key, schema, owner)
+            _phase("registration_complete", "end", schema=schema)
+        await meta.execute("UPDATE %s.entries SET used_at=now(), uses=uses+1 WHERE key=$1" % META, key)
         c = PoolCase(dsn, schema, pristine["own"])
         await c.open()
         engine = harness.bound_engine(dsn, schema)
         try:
+            _phase("case", "start", schema=schema)
             yield c, async_sessionmaker(engine, expire_on_commit=False)
         finally:
+            _phase("case", "end", schema=schema)
+            _phase("case_cleanup", "start", schema=schema)
             await engine.dispose()
             await c.close()
             if c.declared:
                 why = await _drop_declared(dsn, schema, c.declared)
                 if why is None:
-                    _log("dropped declared %s: %r" % (schema, sorted(c.declared)))
+                    _log("dropped declared %s" % schema)
                 else:
-                    print("[cf_pool] retiring %s: %s" % (schema, why))
-                    _log("retire %s key=%s: %s" % (schema, key, why))
-                    await meta.execute("DELETE FROM %s.entries WHERE key = $1" % META, key)
-                    await _drop(dsn, schema, sorted(c.own | c.declared))
+                    row = await meta.fetchrow("SELECT key, schema_name, pristine, owner "
+                                              "FROM %s.entries WHERE key=$1" % META, key)
+                    await _drop_registered(meta, dsn, row, owner, sorted(c.own | c.declared))
+            _phase("case_cleanup", "end", schema=schema)
+    finally:
+        await meta.close()
+
+
+
+def _phase(phase, event, **values):
+    """Durable pool progress, with no DSN, query text or client identifiers."""
+    record = {"phase": phase, "event": event, "monotonic": time.monotonic(), **values}
+    target = os.environ.get("SRV_REGISTRY_POOL_EVENTS")
+    if target:
+        with open(target, "a", encoding="utf-8", newline="\n") as stream:
+            stream.write(json.dumps(record, sort_keys=True) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    _log("PHASE " + json.dumps(record, sort_keys=True))
+
+
+async def _owner(meta):
+    row = await meta.fetchrow("SELECT * FROM %s.registry_state WHERE singleton" % META)
+    # A campaign token originates in this process or its invoking parent,
+    # never in another run's stored metadata. Sequential cases share it.
+    requested = os.environ.setdefault("CF_POOL_RUN_ID", uuid.uuid4().hex)
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{1,64}", requested):
+        raise harness.CensusRefusal("invalid pool run ownership token")
+    if row is None:
+        await meta.execute("INSERT INTO %s.registry_state (owner) VALUES ($1) "
+                           "ON CONFLICT (singleton) DO NOTHING" % META, requested)
+        row = await meta.fetchrow("SELECT * FROM %s.registry_state WHERE singleton" % META)
+    if row["owner"] != requested:
+        raise harness.CensusRefusal("pool database belongs to another run")
+    return row
+
+
+async def _drop_registered(meta, dsn, row, owner, own=None):
+    schema = row["schema_name"]
+    if row["owner"] != owner or not re.fullmatch(r"cfpool_[0-9a-f]{10}", schema):
+        raise harness.CensusRefusal("pool cleanup lacks exact current-run ownership")
+    actual = await meta.fetchrow("SELECT key, schema_name, owner FROM %s.entries "
+                                "WHERE key=$1" % META, row["key"])
+    if actual is None or dict(actual) != {k: row[k] for k in ("key", "schema_name", "owner")}:
+        raise harness.CensusRefusal("pool registration changed before cleanup")
+    pristine = json.loads(row["pristine"])
+    if own is None and pristine is not None:
+        own = pristine["own"]
+    _phase("drop", "start", schema=schema)
+    await _drop(dsn, schema, own)
+    _phase("drop_sql", "end", schema=schema)
+    if await meta.fetchval(_NSP, schema):
+        raise harness.CensusRefusal("owned pool schema remains after drop")
+    _phase("deregister", "start", schema=schema)
+    await meta.execute("DELETE FROM %s.entries WHERE key=$1 AND schema_name=$2 AND owner=$3"
+                       % META, row["key"], schema, owner)
+    _phase("deregister", "end", schema=schema)
+    _phase("drop", "end", schema=schema)
+
+
+async def require_registry_verified(dsn):
+    """Read-only refusal control: no child may bypass persisted quarantine."""
+    meta = await asyncpg.connect(dsn, timeout=10, command_timeout=10)
+    try:
+        row = await meta.fetchrow("SELECT unverified FROM %s.registry_state WHERE singleton" % META)
+        if row is None or row["unverified"]:
+            raise harness.CensusRefusal("registry database is unverified")
+    finally:
+        await meta.close()
+
+
+async def registry_database(dsn, *, action, pooled=True, reason="", active_token=None):
+    """Persist in-flight ownership; recover only this run's exact registrations.
+
+    A timed-out triage child needs explicit database recreation: public triage
+    tables are outside the positively registered pool resources.
+    """
+    dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
+    meta = await asyncpg.connect(dsn, timeout=10, command_timeout=15)
+    try:
+        await _ensure_meta(meta)
+        state = await _owner(meta)
+        owner = state["owner"]
+        if not await meta.fetchval("SELECT pg_try_advisory_lock($1)", LOCK_KEY):
+            raise harness.CensusRefusal("pool is still owned by a live connection")
+        gone_deadline = time.monotonic() + 5
+        while True:
+            sessions = await meta.fetchval(
+                "SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE datname=current_database() "
+                "AND pid<>pg_backend_pid() AND backend_type='client backend'")
+            if not sessions:
+                break
+            if time.monotonic() >= gone_deadline:
+                raise harness.CensusRefusal("lane database still has client connections")
+            await asyncio.sleep(0.05)
+        rows = await meta.fetch("SELECT key, schema_name, pristine, owner FROM %s.entries "
+                                "ORDER BY key" % META)
+        if any(r["owner"] != owner or not re.fullmatch(r"cfpool_[0-9a-f]{10}", r["schema_name"])
+               for r in rows):
+            raise harness.CensusRefusal("lane has pool registrations not owned by this run")
+        recovered = []
+        if action == "begin" and state["unverified"]:
+            if not pooled:
+                raise harness.CensusRefusal("triage timeout requires verified database recreation")
+            for row in rows:
+                await _drop_registered(meta, dsn, row, owner)
+                recovered.append(row["schema_name"])
+            rows = []
+        if pooled:
+            app_schemas = await meta.fetch(
+                "SELECT DISTINCT n.nspname::text FROM pg_catalog.pg_class c "
+                "JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace "
+                "WHERE c.relname='ffa_lobbies' AND c.relkind='r'")
+            app_schemas = {r[0] for r in app_schemas}
+            registered = {r["schema_name"] for r in rows}
+            if app_schemas - registered:
+                raise harness.CensusRefusal("unregistered application schema prevents reuse")
+            if any(json.loads(r["pristine"]) is None for r in rows):
+                raise harness.CensusRefusal("incomplete pool build prevents reuse")
+        if action == "begin":
+            token = uuid.uuid4().hex
+            await meta.execute("UPDATE %s.registry_state SET unverified=true, active_token=$1, "
+                               "reason=$2 WHERE singleton" % META, token, reason)
+            return {"owner": owner, "active_token": token, "recovered": recovered,
+                    "verified": True, "client_connections": 0}
+        if action != "finish" or state["active_token"] != active_token:
+            raise harness.CensusRefusal("registry completion token does not own this child")
+        await meta.execute("UPDATE %s.registry_state SET unverified=false, active_token=NULL, "
+                           "reason='' WHERE singleton" % META)
+        return {"owner": owner, "verified": True, "client_connections": 0}
     finally:
         await meta.close()
