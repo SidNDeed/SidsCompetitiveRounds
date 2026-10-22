@@ -12,7 +12,8 @@ ALTER TABLE ffa_match_players
 
 COMMENT ON COLUMN ffa_match_players.exclusion_reasons IS
     'The reasons the settlement applied to this seat: ghost, grace, asm_a, asm_b, asm_d. '
-    'An empty array means none applied. NULL means a row settled before migration 389. '
-    'absent remains the effective decision; comparison reuses stored assembly reasons.';
+    'An empty array means none applied. NULL means no snapshot was recorded, '
+    'including rows settled before migration 389 or by a legacy writer. '
+    'absent remains the effective decision.';
 
 COMMIT;
