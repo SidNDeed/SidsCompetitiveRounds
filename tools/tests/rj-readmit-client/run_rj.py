@@ -35,11 +35,15 @@ REL = os.path.join("tools", "tests", "rj-readmit-client")
 
 APPLY_CASES = ["rolling", "local", "remote", "unknown", "quarantined", "nobody",
                "rolling_local", "throw_replay", "throw_apply", "throw_audit", "throw_rebuild",
-               "bodiless", "bodiless_plain"]
+               "bodiless", "bodiless_plain", "H1.delayed", "H1.empty", "H1.missing",
+               "H1.apply_throw", "H1.apply_false", "H1.reset_throw", "H1.room_change",
+               "H1.body_replaced", "H1.body_missing", "H1.invalidated", "H1.deck_changed", "H1.identity",
+               "H1.admitted_grant", "H1.room_incarnation", "H1.replaced_work", "H1.entered", "H1.ack",
+               "H1.master_ack", "H1.normal_late", "H1.prepare_throw", "H1.legacy_kept_exception"]
 
 # file -> MSBuild property naming its copy, per suite
 SUITE_FILES = {
-    "apply": {"FfaMode.cs": None, "FfaReadmitRules.cs": "RulesSource"},
+    "apply": {"FfaMode.cs": None, "FfaLateEntry.cs": None, "FfaReadmitRules.cs": "RulesSource"},
     "rules": {"FfaReadmitRules.cs": "RulesSource", "FfaReportRules.cs": "ReportSource",
               "FfaLateRules.cs": "LateSource", "FfaReadmitEntryRules.cs": "EntrySource",
               "RosterCensusRules.cs": "CensusSource"},
@@ -68,6 +72,39 @@ MUTANTS = [
      [("plan.Survivors = deck.Skip(count - (cardCap - 1)).ToList();",
        "plan.Survivors = deck.Take(cardCap - 1).ToList();")],
      "rolling", "remote"),
+    # ---- merged H1: production replay and admission outcome controls
+    ("M-H1c-ffa", "H1", "apply", "FfaMode.cs",
+     [("                    if (!applied) yield break;\n", "                    if (!applied) { replay.State = ReadmitReplayState.Completed; yield break; }\n")],
+     "H1.apply_false", "H1.empty"),
+    ("M-H1d", "H1", "apply", "FfaMode.cs",
+     [("                bool moved;\n", "                replay.State = ReadmitReplayState.Completed;\n                bool moved;\n")],
+     "H1.delayed", "H1.identity"),
+    ("M-H1e-ffa", "H1", "apply", "FfaLateEntry.cs",
+     [("            if (!ReadmitEnteredReady(FfaReadmit.ReadmittedInto(AdmittedLateLobby), Kept(OwnActor()),\n"
+       "                                    ReadmitActorPrepared(OwnActor(), PointEpoch))) return;\n", "")],
+     "H1.entered", "H1.identity"),
+    ("M-H1f-ffa", "H1", "apply", "FfaMode.cs",
+     [("                && replay.Lobby == FfaAssembly.RoomLobbyId && replay.Room == FfaAssembly.CurrentRoomName()\n", "")],
+     "H1.room_change", "H1.empty"),
+    ("M-H1-ack", "H1", "apply", "FfaLateEntry.cs",
+     [("            if (!ReadmitBoundaryReady(PrepareReadmitEpoch(p.N))) return;\n", "")],
+     "H1.ack", "H1.identity"),
+    ("M-H1-master", "H1", "apply", "FfaLateEntry.cs",
+     [("                        && ReadmitBoundaryReady(prepared);\n", "                        ;\n")],
+     "H1.master_ack", "H1.identity"),
+    ("M-H1-missing", "H1", "apply", "FfaMode.cs",
+     [("                            && ResolveCard(card.gameObject.name) != null && apply(card);\n", "                            && apply(card);\n")],
+     "H1.missing", "H1.empty"),
+    ("M-H1-quarantine", "H1", "apply", "FfaLateEntry.cs",
+     [("                try { if (!ReadmitActorPrepared(actor, PointEpoch)) return false; }\n"
+       "                catch { return false; }\n",
+       "                try { if (!ReadmitActorPrepared(actor, PointEpoch)) return false; }\n"
+       "                catch { return true; }\n")],
+     "H1.prepare_throw", "H1.identity"),
+    ("M-H1-prep-failure", "H1", "apply", "FfaLateEntry.cs",
+     [("            try { return PrepareReadmitEpochCore(epoch); }\n            catch { return false; }\n",
+       "            return PrepareReadmitEpochCore(epoch);\n")],
+     "H1.prepare_throw", "H1.identity"),
     # ---- C2 (P2)
     ("M2.1", "C2", "rules", "FfaReadmitRules.cs",
      [("                string first = held.FirstOf(pid);\n",
@@ -188,7 +225,14 @@ def extract(text, sig):
     raise RuntimeError("no end for %r" % sig)
 
 
-def gen_reducers(wt, new_mode_text, out_dir):
+def extract_statement(text, start):
+    if text.count(start) != 1:
+        raise RuntimeError("statement anchor must occur once: " + start)
+    begin = text.index(start)
+    return text[begin:text.index(";", begin) + 1]
+
+
+def gen_reducers(wt, new_mode_text, late_text, out_dir):
     base = subprocess.run(["git", "-C", wt, "show", BASE + ":plugin/FfaMode.cs"],
                           capture_output=True).stdout.decode("utf-8")
     if not base:
@@ -207,7 +251,41 @@ def gen_reducers(wt, new_mode_text, out_dir):
         "        internal static IEnumerator Run(int pid, string card, int cycle, bool bodiless) "
         "{ return ApplyManifestPick(pid, card, cycle, bodiless); }\n\n",
         extract(new_mode_text, amp), "\n", extract(new_mode_text, rc), "\n", extract(new_mode_text, rd),
-        "\n    }\n}\n",
+        "\n    }\n",
+        "    internal sealed class FfaReplay : ReducerBase\n    {\n",
+        next(l + "\n" for l in new_mode_text.splitlines() if "internal enum ReadmitReplayState " in l),
+        extract(new_mode_text, "internal sealed class ReadmitReplayOutcome"), "\n",
+        "        private static int _readmitReplayGeneration = 1;\n",
+        "        private static readonly Dictionary<int, ReadmitReplayOutcome> _readmitReplayOwners = new Dictionary<int, ReadmitReplayOutcome>();\n",
+        "        internal static bool Current(ReadmitReplayOutcome replay) { return ReadmitReplayCurrent(replay); }\n",
+        "        internal static int Generation { get { return _readmitReplayGeneration; } }\n",
+        extract(new_mode_text, "internal static void InvalidateReadmitReplays("), "\n",
+        extract(new_mode_text, "internal static bool ReadmitReplayReady("), "\n",
+        extract(new_mode_text, "internal static bool ReadmitReplayNames("), "\n",
+        extract(new_mode_text, "internal static void CancelReadmitReplay("), "\n",
+        extract(new_mode_text, "internal static bool CommitReadmitReplay("), "\n",
+        extract(new_mode_text, "private static bool ReadmitReplayCurrent("), "\n",
+        extract(new_mode_text, "private static bool ReadmitReplayDeckCurrent("), "\n",
+        extract(new_mode_text, "internal static bool ReadmitReplayPrepared("), "\n",
+        extract(new_mode_text, "internal static IEnumerator ReadmitReplaySteps("), "\n",
+        extract(new_mode_text, rc), "\n    }\n",
+        "    internal sealed class FfaReplayAdmission : ReadmitAdmissionBase\n    {\n",
+        "        internal static void Ack() { TryAckReadmitProposal(); }\n",
+        "        internal static void Propose() { OnProposal(ProposalEvent()); }\n",
+        extract(late_text, "private static void OnProposal("), "\n",
+        "        internal static void Entered(int game) { OnSelfKept(game); }\n",
+        "        internal static bool Prepare(int epoch) { return PrepareReadmitEpoch(epoch); }\n",
+        extract(late_text, "internal static bool IsKeptActor("), "\n",
+        extract(late_text, "private static bool PrepareReadmitEpoch("), "\n",
+        extract(late_text, "internal static bool ReadmitBoundaryReady("), "\n",
+        extract(late_text, "internal static bool ReadmitEnteredReady("), "\n",
+        extract(late_text, "private static void TryAckReadmitProposal("), "\n",
+        extract(late_text, "private static void OnSelfKept("), "\n",
+        "        internal static bool MasterAck(bool prepared)\n        {\n",
+        "            var barrier = new List<int>(); var proposal = _replayProposal; int self = OwnActor();\n",
+        "            List<int> missing; bool ackComplete;\n",
+        extract_statement(late_text, "                    ackComplete = FfaLateRules.AckComplete("), "\n",
+        "            return ackComplete;\n        }\n    }\n}\n",
     ]
     os.makedirs(out_dir, exist_ok=True)
     open(os.path.join(out_dir, "Reducers.cs"), "wb").write("".join(parts).encode("utf-8"))
@@ -248,7 +326,7 @@ def prepare(tree, wt, suite, work, tag, texts):
         open(p, "wb").write(texts[f].encode("utf-8"))
         props[prop] = p
     if suite == "apply":
-        gen_reducers(wt, texts["FfaMode.cs"], os.path.join(out, "gen"))
+        gen_reducers(wt, texts["FfaMode.cs"], texts["FfaLateEntry.cs"], os.path.join(out, "gen"))
         props["GenDir"] = os.path.join(out, "gen")
     return build(project(tree, suite), out, props)
 

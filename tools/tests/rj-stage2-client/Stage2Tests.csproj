@@ -41,6 +41,7 @@
     <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaLateRules.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)..\..\..\plugin\FfaReadmitRules.cs" />
     <Compile Include="$(MSBuildThisFileDirectory)Program*.cs" />
+    <Compile Include="$(ProductionSource)" />
   </ItemGroup>
 
 </Project>

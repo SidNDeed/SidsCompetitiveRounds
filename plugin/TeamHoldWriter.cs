@@ -443,29 +443,31 @@ namespace CompetitiveRounds
             _lastBeat = -1000;
         }
 
-        /// <summary>The survivor's replay of the returner's deck ran for this
-        /// hold (once per hold, S3 step 8).</summary>
-        private static bool _survivorReplayed;
+        /// <summary>The survivor's identity-bound replay outcome for this hold.</summary>
+        private static TeamHoldReturn.ReplayWork _survivorReplay;
 
-        /// <summary>Once per hold, when the returner's new body (owned by the
-        /// bound actor, at the held slot) exists: replay that slot's deck from
-        /// this client's own record. The departed body never qualifies: its
-        /// owner is the departed actor, never the bound one.</summary>
         private static void SurvivorReplay(TeamHoldRules.DropCut cut, TeamHoldRules.HoldKey k)
         {
-            if (_survivorReplayed || cut == null || k == null || k.BoundActor <= 0) return;
-            var pm = PlayerManager.instance;
-            if (pm == null) return;
-            foreach (var body in pm.players)
+            if (cut == null || k == null || k.BoundActor <= 0) return;
+            if (_survivorReplay != null && (_survivorReplay.HoldId != k.HoldId || _survivorReplay.Slot != cut.Slot))
+                TeamHoldReturn.InvalidateReplay(ref _survivorReplay);
+            if (_survivorReplay == null)
             {
-                if (body == null || body.PlayerID != cut.Slot) continue;
-                int owner = -1;
-                try { owner = body.data != null && body.data.view != null ? body.data.view.OwnerActorNr : -1; } catch { }
-                if (owner != k.BoundActor) continue;
-                _survivorReplayed = true;
-                TeamHoldReturn.Replay(false, cut.Slot);
-                return;
+                var pm = PlayerManager.instance;
+                if (pm == null || pm.players == null) return;
+                var body = pm.GetPlayerWithActorID(k.BoundActor);
+                if (body == null || body.PlayerID != cut.Slot || body.data == null || body.data.view == null
+                    || body.data.view.OwnerActorNr != k.BoundActor || !pm.players.Contains(body)) return;
+                _survivorReplay = TeamHoldReturn.Replay(false, cut.Slot, k.HoldId, k.BoundActor);
             }
+        }
+
+        private static bool SurvivorEntered(TeamHoldRules.DropCut cut, TeamHoldRules.HoldKey k)
+        {
+            SurvivorReplay(cut, k);
+            if (!TeamHoldReturn.ReplayReady(_survivorReplay, k.HoldId, cut.Slot)) return false;
+            Release(cut);
+            return true;
         }
 
         /// <summary>What the banner shows: the last verified state of the
@@ -495,13 +497,14 @@ namespace CompetitiveRounds
             ForgetRead();
             _writer = null;
             _endingCut = null;
-            _survivorReplayed = false;
+            TeamHoldReturn.InvalidateReplay(ref _survivorReplay);
             Shown = 'p';
             DeadlineAt = 0;
         }
 
         internal static void Reset()
         {
+            TeamHoldReturn.InvalidateReplay(ref _survivorReplay);
             _writer = null;
             ForgetRead();
             _ceil = new TeamHoldRules.Ceilings();
@@ -571,6 +574,7 @@ namespace CompetitiveRounds
                 if (v == TeamHoldRules.Verdict.End) { EndLocal(now, k, "unverified_" + k.State); return; }
                 if (v == TeamHoldRules.Verdict.Act)
                 {
+                    if ((k.State == 'b' || k.State == 'e') && _server != null) k.BoundActor = _server.BoundActor;
                     switch (k.State)
                     {
                         case 'o':
@@ -591,8 +595,9 @@ namespace CompetitiveRounds
                             try { if (TeamHoldRules.ReleaseAtBind(k, ref _releasedFor)) RoomActors.ReleaseCoveredLatches(); } catch { }
                             break;
                         case 'e':
-                            Release(cut);
-                            return;
+                            _ceil.SawC(now);
+                            try { if (SurvivorEntered(cut, k)) return; } catch { }
+                            break;
                         case 'x':
                             TeamHold.Expire(_server != null && !string.IsNullOrEmpty(_server.ClosedReason) ? _server.ClosedReason : "closed");
                             return;
@@ -624,7 +629,7 @@ namespace CompetitiveRounds
             TeamHold.Expire(reason);
         }
 
-        /// <summary>A verified e: the boundary proceeds with the returner in play.</summary>
+        /// <summary>A verified e after replay completion: the boundary proceeds.</summary>
         private static void Release(TeamHoldRules.DropCut cut)
         {
             Shown = 'e';
@@ -637,6 +642,7 @@ namespace CompetitiveRounds
 
         internal static void NoteEnded(TeamHoldRules.DropCut cut, bool second)
         {
+            TeamHoldReturn.InvalidateReplay(ref _survivorReplay);
             Shown = 'x';
             EndedName = cut != null ? cut.Name : null;
             EndedBySecond = second;

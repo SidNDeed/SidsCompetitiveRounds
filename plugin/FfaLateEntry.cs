@@ -18,11 +18,11 @@ namespace CompetitiveRounds
     /// kept-actor view, the quarantine, the authority fence, the count's
     /// EVT_SCALE, LAG_OUT, the boundary digest and the late seat's path.
     ///
-    /// Every decision is FfaLateRules' (Unity-free, executed by the late-rules
-    /// harness); this class feeds it plain values and applies the answer. In a
-    /// room the gate reads as ungated every view here passes every actor and
-    /// every master, so an ungated room keeps today's behaviour. Every view
-    /// fails safe: IsKeptActor is true, and the fence passes, on an exception.
+    /// Epoch decisions use FfaLateRules (Unity-free, executed by the late-rules
+    /// harness); this adapter also checks identity-bound replay completion at
+    /// readmission ACK and entry. Ungated rooms keep today's behaviour. The
+    /// legacy kept-rule and fence exception fallbacks are unchanged; a
+    /// readmission readiness exception separately refuses that entry.
     ///
     /// The kept epoch's events (EVT_READY, EVT_EPOCH, EVT_EPOCH_ACK and
     /// EVT_CALLIN) and the late entry exist only in an admission room (sec5.1,
@@ -144,6 +144,7 @@ namespace CompetitiveRounds
             _lateWaits.Clear();
             _runningRoom = null;
             _knownKept.Clear();
+            ClearReadmitReplay();
         }
 
         // ------------------------------------------------------------ the views (item 13)
@@ -188,10 +189,16 @@ namespace CompetitiveRounds
             return FfaLateRules.KeptSender(actor, FfaAssembly.Granted, Record, PointEpoch);
         }
 
-        /// <summary>The one kept-actor view: !GatedRunning || (HoldsGrant &amp;&amp;
-        /// kept(a)). True on an exception.</summary>
+        /// <summary>The kept-actor view also requires completed replay for a
+        /// readmitted kind-r entry; readiness exceptions refuse that entry.
+        /// The legacy kept-rule exception fallback remains true.</summary>
         internal static bool IsKeptActor(int actor)
         {
+            if (FfaAssembly.ReadmitLobby)
+            {
+                try { if (!ReadmitActorPrepared(actor, PointEpoch)) return false; }
+                catch { return false; }
+            }
             try
             {
                 return FfaLateRules.KeptActorValue(FfaAssembly.CurrentGate(), HoldsGrant, actor,
@@ -690,7 +697,10 @@ namespace CompetitiveRounds
                 List<int> missing;
                 while (true)
                 {
-                    ackComplete = FfaLateRules.AckComplete(barrier, PresentActors(), _acks, proposal, self, out missing);
+                    bool prepared = PrepareReadmitEpoch(nStar);
+                    ackComplete = FfaLateRules.AckComplete(barrier, PresentActors(), _acks, proposal, self, out missing)
+                        && ReadmitBoundaryReady(prepared);
+                    if (!prepared && !missing.Contains(self)) missing.Add(self);
                     if (ackComplete || Time.realtimeSinceStartup - a0 >= FfaAssembly.EpochAckS) break;
                     yield return null;
                 }
@@ -791,11 +801,60 @@ namespace CompetitiveRounds
                                                    + " sender=" + I(e.Sender));
                 return;
             }
-            if (Raise(EVT_EPOCH_ACK, new object[] { p.Lobby8, p.N, p.Chain, p.G, p.K },
-                      new RaiseEventOptions { TargetActors = new[] { e.Sender } }))
+            _replayProposal = p;
+            _replayAck = () =>
             {
-                _ackSent[Key(p.G, p.K)] = true;
-                JoinTimeline.Step("epoch_ack_tx", "n=" + I(p.N));
+                if (!object.ReferenceEquals(_replayProposal, p) || e.Sender != p.From) return false;
+                if (Raise(EVT_EPOCH_ACK, new object[] { p.Lobby8, p.N, p.Chain, p.G, p.K },
+                          new RaiseEventOptions { TargetActors = new[] { e.Sender } }))
+                {
+                    _ackSent[Key(p.G, p.K)] = true;
+                    JoinTimeline.Step("epoch_ack_tx", "n=" + I(p.N));
+                    return true;
+                }
+                return false;
+            };
+            TryAckReadmitProposal();
+        }
+
+        internal static bool ReadmitBoundaryReady(bool replayCompleted)
+        {
+            return replayCompleted;
+        }
+
+        internal static bool ReadmitEnteredReady(bool readmitted, bool kept, bool replayCompleted)
+        {
+            return !readmitted || (kept && replayCompleted);
+        }
+
+        private static FfaLateRules.Proposal _replayProposal;
+        private static Func<bool> _replayAck;
+
+        private static void TryAckReadmitProposal()
+        {
+            var p = _replayProposal;
+            if (p == null) { _replayAck = null; return; }
+            if (LagOutNow() || (_lastHold != null && _lastHold.G == p.G && _lastHold.K == p.K && _lastHold.Done))
+            {
+                _replayProposal = null;
+                _replayAck = null;
+                return;
+            }
+            int g = FfaMode.GameNumber;
+            bool kKnown = !LateArmed || _snapK >= 0;
+            int k = LateArmed && _snapK >= 0 ? _snapK : PointK;
+            if (!HoldsGrant || FfaLateRules.ValidateEpoch(p, MasterActor(), MasterKept(), Lobby8, Record, EpochApplied,
+                                                        AppliedChain, g, k, kKnown, PresentActors()) != null)
+            {
+                _replayProposal = null;
+                _replayAck = null;
+                return;
+            }
+            if (!ReadmitBoundaryReady(PrepareReadmitEpoch(p.N))) return;
+            if (_replayAck != null && _replayAck())
+            {
+                _replayProposal = null;
+                _replayAck = null;
             }
         }
 
@@ -998,6 +1057,13 @@ namespace CompetitiveRounds
         /// the present seats' toast).</summary>
         private static void AfterPair(string src, bool down, int g, int k)
         {
+            if (_replayProposal != null && _replayProposal.G == g && _replayProposal.K == k)
+            {
+                _replayProposal = null;
+                _replayAck = null;
+            }
+            PrepareReadmitEpoch(PointEpoch);
+            CommitReadmitEpoch(PointEpoch);
             try { RoomActors.InvalidateFighterCache(); } catch { }
             KeptLine(src, down);
             ApplyQuarantine();
@@ -1012,16 +1078,14 @@ namespace CompetitiveRounds
             {
                 if (_knownKept.Contains(a)) continue;
                 _knownKept.Add(a);
-                // V3 P4.3 step 8: a kind r seat's keep transition replays its
-                // slot's logical deck onto the body on every client, its own
-                // included; the present seats read that it is back.
-                int rslot = readmitLobby ? FfaReadmitEntryRules.ReplaySlotAtKeep(Record, PointEpoch, a, _replayedKept) : -1;
-                if (rslot >= 0)
+                // Preparation belongs to the returning slot's outcome;
+                // this transition keeps its returning-seat toast.
+                int rslot = readmitLobby ? FfaReadmitEntryRules.ReplaySlotAtKeep(Record, PointEpoch, a, null) : -1;
+                if (a == own)
                 {
-                    _pendingReplay[a] = rslot;
-                    _pendingReplayUntil[a] = Time.realtimeSinceStartup + ReplayWaitS;
+                    _pendingSelfKeptGame = g;
+                    OnSelfKept(g);
                 }
-                if (a == own) OnSelfKept(g);
                 else if (rslot >= 0)
                 {
                     if (!LateArmed)
@@ -1040,35 +1104,90 @@ namespace CompetitiveRounds
             try { ReplayTick(); } catch { }
         }
 
-        /// <summary>How long a client waits for a kept kind r body to resolve
-        /// before it gives up the replay (logged; the deck stays logical).</summary>
-        private const float ReplayWaitS = 10f;
-        private static readonly HashSet<int> _replayedKept = new HashSet<int>();
-        private static readonly Dictionary<int, int> _pendingReplay = new Dictionary<int, int>();
-        private static readonly Dictionary<int, float> _pendingReplayUntil = new Dictionary<int, float>();
+        private static readonly Dictionary<int, FfaMode.ReadmitReplayOutcome> _pendingReplay =
+            new Dictionary<int, FfaMode.ReadmitReplayOutcome>();
+        private static int _pendingSelfKeptGame;
+
+        private static void ClearReadmitReplay()
+        {
+            FfaMode.InvalidateReadmitReplays();
+            _pendingReplay.Clear();
+            _replayProposal = null;
+            _replayAck = null;
+            _pendingSelfKeptGame = 0;
+        }
+
+        private static bool ReadmitActorPrepared(int actor, int epoch)
+        {
+            if (!FfaAssembly.ReadmitLobby || Record == null) return true;
+            for (int i = Math.Min(epoch, Record.Entries.Count) - 1; i >= 0; i--)
+            {
+                var entry = Record.Entries[i];
+                if (entry.Actor != actor) continue;
+                if (entry.Kind != 'r' || entry.V != 2) return true;
+                FfaMode.ReadmitReplayOutcome replay;
+                return _pendingReplay.TryGetValue(actor, out replay)
+                    && FfaMode.ReadmitReplayPrepared(replay, FfaAssembly.RoomLobbyId, FfaAssembly.CurrentRoomName(),
+                                                    entry.Slot, i + 1, actor);
+            }
+            return true;
+        }
+
+        private static bool PrepareReadmitEpoch(int epoch)
+        {
+            try { return PrepareReadmitEpochCore(epoch); }
+            catch { return false; }
+        }
+
+        private static bool PrepareReadmitEpochCore(int epoch)
+        {
+            if (!FfaAssembly.ReadmitLobby) return true;
+            if (Record == null) return false;
+            bool prepared = true;
+            var present = PresentActors();
+            var seen = new HashSet<int>();
+            for (int i = Math.Min(epoch, Record.Entries.Count) - 1; i >= 0; i--)
+            {
+                var entry = Record.Entries[i];
+                if (!seen.Add(entry.Actor) || !present.Contains(entry.Actor) || entry.Kind != 'r' || entry.V != 2) continue;
+                FfaMode.ReadmitReplayOutcome replay;
+                if (!_pendingReplay.TryGetValue(entry.Actor, out replay)
+                    || !FfaMode.ReadmitReplayNames(replay, FfaAssembly.RoomLobbyId, FfaAssembly.CurrentRoomName(),
+                                                   entry.Slot, i + 1, entry.Actor))
+                {
+                    FfaMode.CancelReadmitReplay(replay);
+                    replay = FfaMode.ReadmitReplayAtKeep(FfaAssembly.RoomLobbyId, entry.Slot, i + 1, entry.Actor);
+                    _pendingReplay[entry.Actor] = replay;
+                }
+                if (!ReadmitActorPrepared(entry.Actor, epoch)) prepared = false;
+            }
+            return prepared;
+        }
+
+        private static void CommitReadmitEpoch(int epoch)
+        {
+            try
+            {
+                if (!FfaAssembly.ReadmitLobby || Record == null) return;
+                var seen = new HashSet<int>();
+                for (int i = Math.Min(epoch, Record.Entries.Count) - 1; i >= 0; i--)
+                {
+                    var entry = Record.Entries[i];
+                    if (!seen.Add(entry.Actor) || entry.Kind != 'r' || entry.V != 2) continue;
+                    FfaMode.ReadmitReplayOutcome replay;
+                    if (_pendingReplay.TryGetValue(entry.Actor, out replay))
+                        FfaMode.CommitReadmitReplay(replay, FfaAssembly.RoomLobbyId, FfaAssembly.CurrentRoomName(),
+                                                   entry.Slot, i + 1, entry.Actor);
+                }
+            }
+            catch { }
+        }
 
         private static void ReplayTick()
         {
-            if (_pendingReplay.Count == 0) return;
-            float now = Time.realtimeSinceStartup;
-            foreach (var a in new List<int>(_pendingReplay.Keys))
-            {
-                int slot = _pendingReplay[a];
-                bool done = false;
-                try { done = FfaMode.ReadmitReplayAtKeep(slot); } catch { }
-                if (done)
-                {
-                    _replayedKept.Add(a);
-                    _pendingReplay.Remove(a);
-                    _pendingReplayUntil.Remove(a);
-                }
-                else if (now >= _pendingReplayUntil[a])
-                {
-                    Plugin.Log.LogWarning("[FFA-RDM] replay at keep gave up: no body for slot " + I(slot) + " actor " + I(a));
-                    _pendingReplay.Remove(a);
-                    _pendingReplayUntil.Remove(a);
-                }
-            }
+            CommitReadmitEpoch(PointEpoch);
+            TryAckReadmitProposal();
+            if (_pendingSelfKeptGame > 0) OnSelfKept(_pendingSelfKeptGame);
         }
 
         private static void CallInHoldTick()
@@ -2103,13 +2222,15 @@ namespace CompetitiveRounds
             JoinTimeline.Step("late_spawn", "after_ms=" + I((int)((Time.realtimeSinceStartup - _lateArmedRt) * 1000f)));
         }
 
-        /// <summary>The call-in stamp that commits an epoch listing this seat:
-        /// its slot's recorded picks (the Stage 1 record, not built on this
-        /// lane: none), the `entered` POST, the toast and game_join.</summary>
+        /// <summary>The committed epoch admits this seat after its readmission
+        /// replay completes, then posts entered and records the toast/game_join.</summary>
         private static void OnSelfKept(int g)
         {
             if (string.IsNullOrEmpty(AdmittedLateLobby) || _lateEntered) return;
+            if (!ReadmitEnteredReady(FfaReadmit.ReadmittedInto(AdmittedLateLobby), Kept(OwnActor()),
+                                    ReadmitActorPrepared(OwnActor(), PointEpoch))) return;
             _lateEntered = true;
+            _pendingSelfKeptGame = 0;
             LateArmed = false;
             JoinTimeline.Step("late_cards", "n=0");
             string lobby = AdmittedLateLobby;
@@ -2192,9 +2313,7 @@ namespace CompetitiveRounds
             if (LateArmed) LateArmed = false;
             _readySent = 0;
             _tokenRefusals.Clear();
-            _replayedKept.Clear();
-            _pendingReplay.Clear();
-            _pendingReplayUntil.Clear();
+            ClearReadmitReplay();
         }
 
         private static string I(int v) { return v.ToString(CultureInfo.InvariantCulture); }

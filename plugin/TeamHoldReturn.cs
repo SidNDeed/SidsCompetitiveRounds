@@ -68,7 +68,9 @@ namespace CompetitiveRounds
         private static TeamHoldNet.MineAnswer _claimed;
         private static string _token;
         private static double _lastBind = -1000;
-        private static bool _callInFlight, _enteredPosted, _replayed;
+        private static bool _callInFlight, _enteredPosted;
+        private static ReplayWork _returnReplay;
+        private static int _replayGeneration;
         private static TeamHoldRules.Snapshot _snap;
 
         internal static string Message { get; private set; }
@@ -129,7 +131,8 @@ namespace CompetitiveRounds
             _route = new TeamHoldRules.ReturnRoute();
             _claimed = offer;
             _snap = null;
-            _enteredPosted = _replayed = false;
+            _enteredPosted = false;
+            InvalidateReplay(ref _returnReplay);
             _callInFlight = true;
             var route = _route;
             TeamHoldNet.Call("POST", TeamHoldNet.PathClaim(offer.HoldId), TeamHoldNet.ClaimBody(MatchTracker.LocalSteamId), (st, body) =>
@@ -183,6 +186,7 @@ namespace CompetitiveRounds
 
         private static void End(string why, string serverReason)
         {
+            InvalidateReplay(ref _returnReplay);
             var offer = _claimed;
             Message = I18n.Tr("Could not rejoin at this point");
             MessageAt = Now;
@@ -248,11 +252,7 @@ namespace CompetitiveRounds
                         if (Seam(Registered)) route.Done(TeamHoldRules.ReturnRoute.Stage.Register, true, now);
                         break;
                     case TeamHoldRules.ReturnRoute.Stage.Activate:
-                        if (Activated())
-                        {
-                            if (!_replayed) { _replayed = true; Replay(true, a.Slot); }
-                            route.Done(TeamHoldRules.ReturnRoute.Stage.Activate, true, now);
-                        }
+                        ActivateReplay(route, a, now);
                         break;
                     case TeamHoldRules.ReturnRoute.Stage.Entered:
                         PostEntered(route, a);
@@ -260,6 +260,18 @@ namespace CompetitiveRounds
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning(TeamHold.TAG + " return error: " + ex.Message); Fail(_route != null ? _route.S : TeamHoldRules.ReturnRoute.Stage.Claim, "error"); }
+        }
+
+        private static void ActivateReplay(TeamHoldRules.ReturnRoute route, TeamHoldNet.ClaimAnswer a, double now)
+        {
+            if (!Activated()) return;
+            if (_returnReplay == null)
+                _returnReplay = Replay(true, a.Slot, _claimed.HoldId,
+                    PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : 0);
+            if (_returnReplay.State == ReplayState.Failed)
+                Fail(TeamHoldRules.ReturnRoute.Stage.Activate, "replay_failed");
+            else if (ReplayReady(_returnReplay, _claimed.HoldId, a.Slot))
+                route.Done(TeamHoldRules.ReturnRoute.Stage.Activate, true, now);
         }
 
         private static bool Seam(Func<bool> f)
@@ -339,7 +351,7 @@ namespace CompetitiveRounds
 
         private static void PostEntered(TeamHoldRules.ReturnRoute route, TeamHoldNet.ClaimAnswer a)
         {
-            if (_enteredPosted) return;
+            if (_enteredPosted || !ReplayReady(_returnReplay, _claimed.HoldId, a.Slot)) return;
             _enteredPosted = true;
             int actor = PhotonNetwork.LocalPlayer != null ? PhotonNetwork.LocalPlayer.ActorNumber : 0;
             TeamHoldNet.Call("POST", TeamHoldNet.PathEntered(_claimed.HoldId), TeamHoldNet.EnteredBody(MatchTracker.LocalSteamId, a.G, actor), (st, body) =>
@@ -427,38 +439,132 @@ namespace CompetitiveRounds
 
         // ── The deck replay (S3 step 8) ────────────────────────────────────
 
-        /// <summary>Each client replays from its own SeatDeckLog through
-        /// OFFLINE_Pick: the returner every slot, a survivor the returner's
-        /// slot. One card per frame (#225). Never committed (S0 step 2). The
-        /// coroutine runs on the game mode object, which lives for the match.</summary>
-        internal static void Replay(bool returner, int heldSlot)
+        internal enum ReplayState { Running, Completed, Failed }
+
+        internal sealed class ReplayWork
         {
+            internal string HoldId;
+            internal int Slot, Generation;
+            internal object Room;
+            internal bool Valid = true;
+            internal ReplayState State = ReplayState.Running;
+            internal Func<bool> Current;
+        }
+
+        internal sealed class ReplaySlot
+        {
+            internal int Slot;
+            internal List<string> Names;
+        }
+
+        internal static void InvalidateReplay(ref ReplayWork work)
+        {
+            if (work != null) { work.Valid = false; work.State = ReplayState.Failed; }
+            work = null;
+        }
+
+        internal static bool ReplayIdentity(ReplayWork work, object room, int generation)
+        {
+            return work != null && work.Valid && work.Generation == generation && ReferenceEquals(work.Room, room);
+        }
+
+        internal static bool ReplayReady(ReplayWork work, string holdId, int slot)
+        {
+            return work != null && work.HoldId == holdId && work.Slot == slot
+                && work.State == ReplayState.Completed && ReplayCurrent(work);
+        }
+
+        private static bool ReplayCurrent(ReplayWork work)
+        {
+            try { return work != null && work.Valid && work.Current != null && work.Current(); }
+            catch { return false; }
+        }
+
+        /// <summary>Capture the hold, room incarnation and bodies before replay.
+        /// The result stays running until every apply and its frame yield finish.</summary>
+        internal static ReplayWork Replay(bool returner, int heldSlot, string holdId, int boundActor)
+        {
+            var work = new ReplayWork { HoldId = holdId, Slot = heldSlot, Room = PhotonNetwork.CurrentRoom, Generation = _replayGeneration };
             try
             {
                 var host = GM_ArmsRace.instance;
-                if (host != null) host.StartCoroutine(ReplayRun(returner, heldSlot));
-            }
-            catch { }
-        }
-
-        private static IEnumerator ReplayRun(bool returner, int heldSlot)
-        {
-            var pm = PlayerManager.instance;
-            if (pm == null) yield break;
-            var bodies = new List<Player>(pm.players);
-            foreach (var body in bodies)
-            {
-                if (body == null) continue;
-                if (!returner && body.PlayerID != heldSlot) continue;
-                SeatDeckLog.Seat seat;
-                if (!SeatDeckLog.TryGetSeat(body.PlayerID, out seat)) continue;
-                foreach (var name in new List<string>(seat.Names))
+                var pm = PlayerManager.instance;
+                if (host == null || pm == null || pm.players == null || work.Room == null || boundActor <= 0)
+                    throw new InvalidOperationException("replay body unavailable");
+                var bodies = new Dictionary<int, Player>();
+                var slots = new List<ReplaySlot>();
+                foreach (var body in new List<Player>(pm.players))
+                {
+                    if (body == null || (!returner && body.PlayerID != heldSlot)) continue;
+                    if (body.data == null || body.data.view == null || body.gameObject == null)
+                        throw new InvalidOperationException("replay body unavailable");
+                    if (body.PlayerID == heldSlot && body.data.view.OwnerActorNr != boundActor) continue;
+                    SeatDeckLog.Seat seat;
+                    if (!SeatDeckLog.TryGetSeat(body.PlayerID, out seat))
+                        throw new InvalidOperationException("replay deck unavailable");
+                    bodies.Add(body.PlayerID, body);
+                    slots.Add(new ReplaySlot { Slot = body.PlayerID, Names = new List<string>(seat.Names) });
+                }
+                if (!bodies.ContainsKey(heldSlot)) throw new InvalidOperationException("replay body unavailable");
+                if (returner)
+                    foreach (var slot in SeatDeckLog.Slots())
+                        if (!bodies.ContainsKey(slot)) throw new InvalidOperationException("replay body unavailable");
+                work.Current = () =>
+                {
+                    if (!PhotonNetwork.InRoom || !ReplayIdentity(work, PhotonNetwork.CurrentRoom, _replayGeneration)
+                        || PlayerManager.instance != pm) return false;
+                    foreach (var slot in slots)
+                    {
+                        SeatDeckLog.Seat live;
+                        if (!SeatDeckLog.TryGetSeat(slot.Slot, out live) || live.Names.Count != slot.Names.Count) return false;
+                        for (int i = 0; i < live.Names.Count; i++)
+                            if (!string.Equals(live.Names[i], slot.Names[i], StringComparison.Ordinal)) return false;
+                    }
+                    foreach (var pair in bodies)
+                    {
+                        var body = pair.Value;
+                        if (body == null || body.gameObject == null || body.data == null || body.data.view == null
+                            || body.PlayerID != pair.Key || !pm.players.Contains(body)
+                            || pm.GetPlayerWithActorID(body.data.view.OwnerActorNr) != body) return false;
+                        if (pair.Key == heldSlot && body.data.view.OwnerActorNr != boundActor) return false;
+                    }
+                    return true;
+                };
+                host.StartCoroutine(ReplayRun(work, slots, (slot, name) =>
                 {
                     var prefab = ResolveCard(name);
-                    if (prefab == null) { Plugin.Log.LogWarning(TeamHold.TAG + " replay: card '" + name + "' not found"); continue; }
-                    try { FfaMode.SpectatorApplyCard(body, prefab); } catch (Exception ex) { Plugin.Log.LogWarning(TeamHold.TAG + " replay: " + ex.Message); }
-                    yield return null;
+                    return prefab != null && FfaMode.SpectatorApplyCard(bodies[slot], prefab);
+                }));
+            }
+            catch { work.State = ReplayState.Failed; }
+            return work;
+        }
+
+        /// <summary>Replay physical cards in deck order without logical grants.
+        /// A missing card, failed apply or invalidated identity withholds completion.</summary>
+        internal static IEnumerator ReplayRun(ReplayWork work, IList<ReplaySlot> slots, Func<int, string, bool> apply)
+        {
+            try
+            {
+                if (!ReplayCurrent(work) || slots == null || apply == null) yield break;
+                foreach (var slot in slots)
+                {
+                    if (slot == null || slot.Names == null) yield break;
+                    foreach (var name in slot.Names)
+                    {
+                        if (!ReplayCurrent(work)) yield break;
+                        bool applied;
+                        try { applied = apply(slot.Slot, name); } catch { applied = false; }
+                        if (!applied) yield break;
+                        yield return null;
+                    }
                 }
+                if (!ReplayCurrent(work)) yield break;
+                work.State = ReplayState.Completed;
+            }
+            finally
+            {
+                if (work.State == ReplayState.Running) work.State = ReplayState.Failed;
             }
         }
 
@@ -516,8 +622,15 @@ namespace CompetitiveRounds
 
         internal static void OnRoomLeft()
         {
+            _replayGeneration++;
+            InvalidateReplay(ref _returnReplay);
             _snapWrittenFor = null;
             _tbdFor = null;
+            if (_route != null)
+            {
+                if (_route.BoundaryReleased) Finish();
+                else End("room_left", TeamHoldNet.ReturnEndReason(_route.S.ToString(), "room_left"));
+            }
         }
     }
 }

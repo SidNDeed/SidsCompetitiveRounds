@@ -198,8 +198,155 @@ namespace CompetitiveRounds
             return false;
         }
 
+        private static IEnumerator ReplayReset(bool fail)
+        {
+            if (fail) throw new InvalidOperationException("reset");
+            yield return null;
+        }
+
+        private static bool ReplayCase(string name)
+        {
+            ReducerBase.ResetState();
+            SetupPool();
+            PhotonNetwork.CurrentRoom = new object();
+            FfaAssembly.RoomLobbyId = "lobbyA";
+            FfaAssembly.RoomName = "roomA";
+            var body = Body(2, false, "Seat2");
+            body.data.view.OwnerActorNr = 7;
+            var replay = new FfaReplay.ReadmitReplayOutcome
+            {
+                Lobby = "lobbyA", Room = "roomA", Slot = 2, Epoch = 1, Actor = 7,
+                Generation = FfaReplay.Generation, Body = body, RoomIdentity = PhotonNetwork.CurrentRoom,
+            };
+            Func<bool> prepared = () => FfaReplay.ReadmitReplayPrepared(replay, "lobbyA", "roomA", 2, 1, 7);
+            bool ok = true;
+            if (name == "H1.identity")
+            {
+                replay.State = FfaReplay.ReadmitReplayState.Completed;
+                ok = prepared()
+                    && !FfaReplay.ReadmitReplayReady(replay, "lobbyB", "roomA", 2, 1, 7)
+                    && !FfaReplay.ReadmitReplayReady(replay, "lobbyA", "roomB", 2, 1, 7)
+                    && !FfaReplay.ReadmitReplayReady(replay, "lobbyA", "roomA", 3, 1, 7)
+                    && !FfaReplay.ReadmitReplayReady(replay, "lobbyA", "roomA", 2, 2, 7)
+                    && !FfaReplay.ReadmitReplayReady(replay, "lobbyA", "roomA", 2, 1, 8);
+            }
+            else if (name == "H1.entered" || name == "H1.ack")
+            {
+                ReadmitAdmissionBase.ResetAdmission(prepared);
+                if (name == "H1.ack") FfaReplayAdmission.Propose();
+                Action dispatch = name == "H1.entered"
+                    ? (Action)(() => FfaReplayAdmission.Entered(1)) : () => FfaReplayAdmission.Ack();
+                dispatch();
+                ok = ReadmitAdmissionBase.AckCount == 0 && FfaReadmit.Entered == 0 && !ReadmitAdmissionBase._lateEntered;
+                replay.State = FfaReplay.ReadmitReplayState.Failed;
+                dispatch();
+                ok &= ReadmitAdmissionBase.AckCount == 0 && FfaReadmit.Entered == 0 && !ReadmitAdmissionBase._lateEntered;
+                replay.State = FfaReplay.ReadmitReplayState.Completed;
+                dispatch();
+                ok &= name == "H1.entered" ? FfaReadmit.Entered == 1 && ReadmitAdmissionBase._lateEntered
+                    : ReadmitAdmissionBase.AckCount == 1;
+                if (name == "H1.entered")
+                {
+                    ReadmitAdmissionBase.ResetAdmission(prepared);
+                    ReadmitAdmissionBase.ActorKept = false;
+                    dispatch();
+                    ok &= FfaReadmit.Entered == 0 && !ReadmitAdmissionBase._lateEntered;
+                }
+            }
+            else if (name == "H1.master_ack")
+            {
+                ReadmitAdmissionBase.ResetAdmission(prepared);
+                ok = !FfaReplayAdmission.MasterAck(prepared());
+                replay.State = FfaReplay.ReadmitReplayState.Completed;
+                ok &= FfaReplayAdmission.MasterAck(prepared());
+                FfaLateRules.AllAcks = false;
+                ok &= !FfaReplayAdmission.MasterAck(prepared());
+            }
+            else if (name == "H1.prepare_throw")
+            {
+                ReadmitAdmissionBase.ResetAdmission(() => { throw new InvalidOperationException("prepare"); });
+                ok = !FfaReplayAdmission.Prepare(1) && !FfaReplayAdmission.IsKeptActor(7);
+                FfaReplayAdmission.Propose();
+                FfaReplayAdmission.Ack();
+                ok &= ReadmitAdmissionBase.AckCount == 0 && !FfaReplayAdmission.MasterAck(FfaReplayAdmission.Prepare(1));
+            }
+            else if (name == "H1.legacy_kept_exception")
+            {
+                ReadmitAdmissionBase.ResetAdmission(() => { throw new InvalidOperationException("prepare"); });
+                FfaAssembly.ReadmitLobby = false;
+                FfaLateRules.KeptThrows = true;
+                ok = FfaReplayAdmission.IsKeptActor(7);
+            }
+            else if (name == "H1.normal_late")
+            {
+                ReadmitAdmissionBase.ResetAdmission(prepared);
+                FfaReadmit.Readmitted = false;
+                FfaReplayAdmission.Entered(1);
+                ok = FfaAssembly.LateEntered == 1 && FfaReadmit.Entered == 0 && ReadmitAdmissionBase._lateEntered;
+            }
+            else
+            {
+                var cards = name == "H1.empty" ? new List<CardInfo>() : new List<CardInfo> { Card("AA"), Card("BB") };
+                if (name == "H1.missing") cards[0] = new CardInfo("ZZ");
+                replay.Cards = cards;
+                if (name == "H1.body_missing") body.gameObject = null;
+                ReducerBase.SeedDeck(2, cards);
+                var applied = new List<string>();
+                int rebuilds = 0, yields = 0;
+                bool changed = false;
+                var run = FfaReplay.ReadmitReplaySteps(replay, () => FfaReplay.Current(replay),
+                    ReplayReset(name == "H1.reset_throw"), cards, card =>
+                    {
+                        if (name == "H1.apply_throw") throw new InvalidOperationException("apply");
+                        if (name == "H1.apply_false") return false;
+                        applied.Add(card.gameObject.name);
+                        return true;
+                    }, () => rebuilds++);
+                while (run.MoveNext())
+                {
+                    yields++;
+                    // This assertion includes the frame after the final apply.
+                    ok &= replay.State == FfaReplay.ReadmitReplayState.Running && !prepared();
+                    ok &= !FfaReplayAdmission.ReadmitBoundaryReady(prepared());
+                    ok &= !FfaReplayAdmission.ReadmitEnteredReady(true, true, prepared());
+                    if (applied.Count == 1 && !changed)
+                    {
+                        if (name == "H1.room_change") FfaAssembly.RoomName = "roomB";
+                        if (name == "H1.room_incarnation") PhotonNetwork.CurrentRoom = new object();
+                        if (name == "H1.replaced_work") FfaReplay.CancelReadmitReplay(replay);
+                        if (name == "H1.body_replaced") Body(2, false, "Replacement");
+                        if (name == "H1.invalidated") FfaReplay.InvalidateReadmitReplays();
+                        if (name == "H1.deck_changed") ReducerBase.SeedDeck(2, new[] { Card("AA"), Card("BB"), Card("CC") });
+                        changed = true;
+                    }
+                }
+                bool success = name == "H1.delayed" || name == "H1.empty" || name == "H1.admitted_grant";
+                if (success)
+                {
+                    ok &= prepared() && rebuilds == 1 && yields == cards.Count + 1;
+                    ok &= applied.SequenceEqual(cards.Select(c => c.gameObject.name));
+                    if (name == "H1.admitted_grant")
+                    {
+                        ok &= FfaReplay.CommitReadmitReplay(replay, "lobbyA", "roomA", 2, 1, 7);
+                        ReducerBase.SeedDeck(2, new[] { Card("AA"), Card("BB"), Card("CC") });
+                        ok &= prepared() && replay.Admitted;
+                    }
+                }
+                else
+                {
+                    ok &= replay.State == FfaReplay.ReadmitReplayState.Failed && !prepared() && rebuilds == 0;
+                    int expected = name == "H1.room_change" || name == "H1.body_replaced" || name == "H1.invalidated"
+                        || name == "H1.deck_changed" || name == "H1.room_incarnation" || name == "H1.replaced_work" ? 1 : 0;
+                    ok &= applied.Count == expected;
+                }
+            }
+            Console.WriteLine((ok ? "PASS " : "FAIL ") + name);
+            return ok;
+        }
+
         private static bool Case(string name)
         {
+            if (name.StartsWith("H1.", StringComparison.Ordinal)) return ReplayCase(name);
             if (name == "bodiless")
             {
                 // The P2 path: the new reducer with bodiless true and NO body,
@@ -232,7 +379,10 @@ namespace CompetitiveRounds
         {
             "rolling", "local", "remote", "unknown", "quarantined", "nobody",
             "rolling_local", "throw_replay", "throw_apply", "throw_audit", "throw_rebuild",
-            "bodiless", "bodiless_plain",
+            "bodiless", "bodiless_plain", "H1.delayed", "H1.empty", "H1.missing",
+            "H1.apply_throw", "H1.apply_false", "H1.reset_throw", "H1.room_change",
+            "H1.body_replaced", "H1.body_missing", "H1.invalidated", "H1.deck_changed", "H1.identity",
+            "H1.admitted_grant", "H1.room_incarnation", "H1.replaced_work", "H1.entered", "H1.ack", "H1.master_ack", "H1.normal_late", "H1.prepare_throw", "H1.legacy_kept_exception",
         };
 
         private static int Main(string[] args)

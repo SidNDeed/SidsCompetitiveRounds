@@ -556,6 +556,7 @@ namespace CompetitiveRounds
                 {
                     var k = Key.With(a.State, a.Seq);
                     k.HoldId = a.HoldId;
+                    if ((a.State == 'b' || a.State == 'e') && a.BoundActor > 0) k.BoundActor = a.BoundActor;
                     if (a.DeadlineS > 0 && k.HoldS == 0) k.HoldS = a.DeadlineS;
                     Th(k);
                     P = Phase.Mirroring;
@@ -574,7 +575,7 @@ namespace CompetitiveRounds
                 if (a.Closed) { Th(Key.With('x', a.Seq)); P = Phase.Done; return Flush(); }
                 if (a.Seq <= Key.Seq && Rank(a.State) <= Rank(Key.State)) return Flush();
                 var k = Key.With(a.State, a.Seq);
-                if (a.State == 'b') k.BoundActor = a.BoundActor;
+                if ((a.State == 'b' || a.State == 'e') && a.BoundActor > 0) k.BoundActor = a.BoundActor;
                 Th(k);
                 if (a.State == 'e') { _out.Add(new Action { Op = Op.AppendTrd, Key = k, TrdKind = 'r' }); P = Phase.Done; }
                 return Flush();

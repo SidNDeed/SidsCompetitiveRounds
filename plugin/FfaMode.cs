@@ -5148,31 +5148,182 @@ namespace CompetitiveRounds
             return true;
         }
 
-        /// <summary>V3 P4.3 step 8: at a kind r seat's keep transition every
-        /// client replays that slot's logical deck onto the body in pick order
-        /// through the local-only apply (no pick RPC), from its own logical
-        /// deck. False while the body is not resolvable here (the caller
-        /// retries).</summary>
-        internal static bool ReadmitReplayAtKeep(int slot)
+        internal enum ReadmitReplayState { Running, Completed, Failed }
+
+        internal sealed class ReadmitReplayOutcome
         {
-            var player = ResolveFighter(slot);
-            if (player == null || player.gameObject == null || player.data == null) return false;
-            var cards = decks.TryGetValue(slot, out var deck) && deck != null ? new List<CardInfo>(deck) : new List<CardInfo>();
-            baselines.Remove(slot);           // the baseline of the body that left
-            CaptureBaselineIfNeeded(player);
-            if (Plugin.Instance != null) Plugin.Instance.StartCoroutine(ReadmitReplayRun(player, cards));
+            internal string Lobby, Room;
+            internal object RoomIdentity;
+            internal bool Admitted;
+            internal int Slot, Epoch, Actor, Generation;
+            internal Player Body;
+            internal List<CardInfo> Cards = new List<CardInfo>();
+            internal ReadmitReplayState State = ReadmitReplayState.Running;
+        }
+
+        private static int _readmitReplayGeneration;
+        private static readonly Dictionary<int, ReadmitReplayOutcome> _readmitReplayOwners =
+            new Dictionary<int, ReadmitReplayOutcome>();
+
+        internal static void InvalidateReadmitReplays()
+        {
+            _readmitReplayGeneration++;
+            foreach (var pair in _readmitReplayOwners)
+            {
+                pair.Value.State = ReadmitReplayState.Failed;
+                deckViewRebuilds.Remove(pair.Key);
+            }
+            _readmitReplayOwners.Clear();
+        }
+
+        internal static bool ReadmitReplayReady(ReadmitReplayOutcome replay, string lobby, string room,
+                                                int slot, int epoch, int actor)
+        {
+            return replay != null && replay.State == ReadmitReplayState.Completed
+                && ReadmitReplayNames(replay, lobby, room, slot, epoch, actor);
+        }
+
+        internal static bool ReadmitReplayNames(ReadmitReplayOutcome replay, string lobby, string room,
+                                                int slot, int epoch, int actor)
+        {
+            return replay != null && replay.Lobby == lobby && replay.Room == room && replay.Slot == slot
+                && replay.Epoch == epoch && replay.Actor == actor
+                && object.ReferenceEquals(replay.RoomIdentity, PhotonNetwork.CurrentRoom);
+        }
+
+        internal static void CancelReadmitReplay(ReadmitReplayOutcome replay)
+        {
+            if (replay != null) replay.State = ReadmitReplayState.Failed;
+        }
+
+        private static bool ReadmitReplayCurrent(ReadmitReplayOutcome replay)
+        {
+            return replay != null && replay.State != ReadmitReplayState.Failed
+                && !string.IsNullOrEmpty(replay.Lobby) && !string.IsNullOrEmpty(replay.Room)
+                && replay.Generation == _readmitReplayGeneration && (replay.Admitted || ReadmitReplayDeckCurrent(replay))
+                && replay.RoomIdentity != null && object.ReferenceEquals(replay.RoomIdentity, PhotonNetwork.CurrentRoom)
+                && replay.Lobby == FfaAssembly.RoomLobbyId && replay.Room == FfaAssembly.CurrentRoomName()
+                && replay.Body != null && replay.Body.gameObject != null && replay.Body.data != null
+                && object.ReferenceEquals(ResolveFighter(replay.Slot), replay.Body)
+                && FfaLateEntry.OwnerOf(replay.Body) == replay.Actor;
+        }
+
+        private static bool ReadmitReplayDeckCurrent(ReadmitReplayOutcome replay)
+        {
+            List<CardInfo> live;
+            if (!decks.TryGetValue(replay.Slot, out live) || live == null) return replay.Cards.Count == 0;
+            if (live.Count != replay.Cards.Count) return false;
+            for (int i = 0; i < live.Count; i++)
+                if (!object.ReferenceEquals(live[i], replay.Cards[i])) return false;
             return true;
         }
 
-        private static IEnumerator ReadmitReplayRun(Player player, List<CardInfo> cards)
+        internal static bool ReadmitReplayPrepared(ReadmitReplayOutcome replay, string lobby, string room,
+                                                   int slot, int epoch, int actor)
         {
-            int pid = player.PlayerID;
+            return ReadmitReplayReady(replay, lobby, room, slot, epoch, actor) && ReadmitReplayCurrent(replay);
+        }
+
+        internal static bool CommitReadmitReplay(ReadmitReplayOutcome replay, string lobby, string room,
+                                                 int slot, int epoch, int actor)
+        {
+            if (!ReadmitReplayPrepared(replay, lobby, room, slot, epoch, actor)) return false;
+            replay.Admitted = true;
+            return true;
+        }
+
+        /// <summary>The outcome belongs to this lobby, body and keep entry.
+        /// A caller joins it until completion; starting it is not admission.</summary>
+        internal static ReadmitReplayOutcome ReadmitReplayAtKeep(string lobby, int slot, int epoch, int actor)
+        {
+            var replay = new ReadmitReplayOutcome
+            {
+                Lobby = lobby, Room = FfaAssembly.CurrentRoomName(), RoomIdentity = PhotonNetwork.CurrentRoom,
+                Slot = slot, Epoch = epoch, Actor = actor, Generation = _readmitReplayGeneration, Body = ResolveFighter(slot),
+            };
+            try
+            {
+                var cards = decks.TryGetValue(slot, out var deck) && deck != null ? new List<CardInfo>(deck) : new List<CardInfo>();
+                replay.Cards = cards;
+                if (!ReadmitReplayCurrent(replay) || Plugin.Instance == null)
+                {
+                    replay.State = ReadmitReplayState.Failed;
+                    return replay;
+                }
+                if (_readmitReplayOwners.TryGetValue(slot, out var previous)) CancelReadmitReplay(previous);
+                baselines.Remove(slot);
+                CaptureBaselineIfNeeded(replay.Body);
+                Plugin.Instance.StartCoroutine(ReadmitReplayRun(replay, cards));
+            }
+            catch { replay.State = ReadmitReplayState.Failed; }
+            return replay;
+        }
+
+        private static IEnumerator ReadmitReplayRun(ReadmitReplayOutcome replay, List<CardInfo> cards)
+        {
+            int pid = replay.Slot;
+            _readmitReplayOwners[pid] = replay;
             deckViewRebuilds.Add(pid);
-            yield return RollingResetAndReplay(player, cards);
-            yield return null;
-            RebuildDeckViews(player, cards);
-            deckViewRebuilds.Remove(pid);
-            Plugin.Log.LogInfo($"[FFA-RDM] replayed {cards.Count} card(s) onto slot {pid} at keep");
+            try
+            {
+                // The existing reset runs with no cards; the strict replay below
+                // owns every apply and the frame after it, including the last.
+                yield return ReadmitReplaySteps(replay, () => ReadmitReplayCurrent(replay),
+                    RollingResetAndReplay(replay.Body, new List<CardInfo>(), true), cards,
+                    card => ApplyCardTo(replay.Body, card), () => RebuildDeckViews(replay.Body, cards));
+                if (replay.State == ReadmitReplayState.Completed)
+                    Plugin.Log.LogInfo($"[FFA-RDM] replayed {cards.Count} card(s) onto slot {pid} at keep");
+            }
+            finally
+            {
+                if (replay.State == ReadmitReplayState.Running) replay.State = ReadmitReplayState.Failed;
+                if (_readmitReplayOwners.TryGetValue(pid, out var owner) && object.ReferenceEquals(owner, replay))
+                {
+                    _readmitReplayOwners.Remove(pid);
+                    deckViewRebuilds.Remove(pid);
+                }
+            }
+        }
+
+        internal static IEnumerator ReadmitReplaySteps(ReadmitReplayOutcome replay, Func<bool> current,
+                                                       IEnumerator reset, IList<CardInfo> cards,
+                                                       Func<CardInfo, bool> apply, Action rebuild)
+        {
+            try
+            {
+                bool moved;
+                while (true)
+                {
+                    bool valid = false;
+                    try { valid = current(); moved = valid && reset.MoveNext(); }
+                    catch { valid = false; moved = false; }
+                    if (!valid) yield break;
+                    if (!moved) break;
+                    yield return reset.Current;
+                }
+                foreach (var card in cards)
+                {
+                    bool applied = false;
+                    try
+                    {
+                        applied = current() && card != null && card.gameObject != null
+                            && ResolveCard(card.gameObject.name) != null && apply(card);
+                    }
+                    catch { }
+                    if (!applied) yield break;
+                    yield return null;
+                }
+                bool finished = false;
+                try { if (current()) { rebuild(); finished = true; } }
+                catch { }
+                if (finished) replay.State = ReadmitReplayState.Completed;
+            }
+            finally
+            {
+                if (replay.State == ReadmitReplayState.Running) replay.State = ReadmitReplayState.Failed;
+                try { (reset as IDisposable)?.Dispose(); }
+                catch { replay.State = ReadmitReplayState.Failed; }
+            }
         }
 
         // ── RJ readmission P4.7: departure as death ──
@@ -5266,9 +5417,9 @@ namespace CompetitiveRounds
         /// <summary>Silent single-card apply for spectator deck replay.
         /// Same primitive the rolling replay uses (scrub + Start() +
         /// sourceCard + OFFLINE_Pick). Caller owns frame-spacing (#225).</summary>
-        internal static void SpectatorApplyCard(Player player, CardInfo prefab)
+        internal static bool SpectatorApplyCard(Player player, CardInfo prefab)
         {
-            ApplyCardTo(player, prefab);
+            return ApplyCardTo(player, prefab);
         }
 
         /// <summary>GameObject names of the live rolling deck for a pid, or
@@ -5292,7 +5443,7 @@ namespace CompetitiveRounds
         /// "Picking Card:" log, no Steam achievements) -> destroy clone.
         /// sourceCard is set explicitly so ApplyStats appends the real prefab
         /// to currentCards (Codex design find 20).</summary>
-        private static void ApplyCardTo(Player player, CardInfo prefab)
+        private static bool ApplyCardTo(Player player, CardInfo prefab)
         {
             GameObject clone = null;
             try
@@ -5318,14 +5469,16 @@ namespace CompetitiveRounds
                 if (acs == null)
                 {
                     Plugin.Log.LogWarning($"[FFA] no ApplyCardStats on '{prefab.gameObject.name}'");
-                    return;
+                    return false;
                 }
                 acs.Start();   // populates myGunStats/myPlayerStats/myBlock (publicized private)
                 acs.OFFLINE_Pick(new[] { player });
+                return true;
             }
             catch (Exception ex)
             {
                 Plugin.Log.LogError($"[FFA] ApplyCardTo({prefab?.gameObject?.name}): {ex.Message}");
+                return false;
             }
             finally
             {
@@ -5451,7 +5604,7 @@ namespace CompetitiveRounds
         /// Gun.dontAllowAutoFire), one frame for card-object teardown, the
         /// zombie-delegate/ChildRPC scrub (#92/#103), then a silent replay of
         /// the surviving cards in original order.</summary>
-        private static IEnumerator RollingResetAndReplay(Player player, List<CardInfo> survivors)
+        private static IEnumerator RollingResetAndReplay(Player player, List<CardInfo> survivors, bool failOnError = false)
         {
             int pid = player.PlayerID;
             try
@@ -5514,7 +5667,11 @@ namespace CompetitiveRounds
                     catch { }
                 }
             }
-            catch (Exception ex) { Plugin.Log.LogError($"[FFA] rolling reset({pid}): {ex.Message}"); }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogError($"[FFA] rolling reset({pid}): {ex.Message}");
+                if (failOnError) throw;
+            }
 
             // One frame: ResetStats' Object.Destroy of the card-script hosts
             // runs its OnDestroy chain at end of frame; the scrub then clears

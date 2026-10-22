@@ -25,7 +25,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 PLUGIN = os.path.join(REPO, "plugin")
 PROJ = os.path.join(HERE, "Stage2Tests.csproj")
-FILES = {"seat": "SeatDeckLog.cs", "rules": "TeamHoldRules.cs", "net": "TeamHoldNet.cs"}
+FILES = {"seat": "SeatDeckLog.cs", "rules": "TeamHoldRules.cs", "net": "TeamHoldNet.cs",
+         "return": "TeamHoldReturn.cs", "writer": "TeamHoldWriter.cs"}
 PROPS = {"seat": "SeatSource", "rules": "RulesSource", "net": "NetSource"}
 
 # Fixture name prefix per piece.
@@ -127,6 +128,36 @@ MUTANTS = [
     ("M2.E", "K2", "rules", [
         ("if (server == null) return Verdict.Inert;", "if (server == null) server = new TeamHoldNet.StateAnswer();")],
      "t23_read_pending", "t23_verified_o"),
+    # H1: production replay outcomes and their release/admission gates.
+    ('M-H1f-route', "K3", "return", [('                else End("room_left", TeamHoldNet.ReturnEndReason(_route.S.ToString(), "room_left"));', '                else { }')], 't3_replay_route_left', 't3_replay_completed_exit'),
+    ('M-H1a', "K3", 'writer', [(
+        '            if (!TeamHoldReturn.ReplayReady(_survivorReplay, k.HoldId, cut.Slot)) return false;',
+        '')],
+     't3_replay_skipped_bound', 't3_replay_bound_then_entered'),
+    ('M-H1b', "K3", 'return', [(
+        '                        yield return null;',
+        '                        work.State = ReplayState.Completed;\n                        yield return null;')],
+     't3_replay_skipped_bound', 't3_replay_bound_then_entered'),
+    ('M-H1c', "K3", 'return', [(
+        '                if (work.State == ReplayState.Running) work.State = ReplayState.Failed;',
+        '                if (work.State == ReplayState.Running) work.State = ReplayState.Completed;')],
+     't3_replay_missing', 't3_replay_bound_then_entered'),
+    ('M-H1e-team', "K3", 'return', [(
+        '            if (_enteredPosted || !ReplayReady(_returnReplay, _claimed.HoldId, a.Slot)) return;',
+        '            if (_enteredPosted) return;')],
+     't3_replay_returner', 't3_replay_bound_then_entered'),
+    ('M-H1f-team', "K3", 'return', [(
+        ' && ReferenceEquals(work.Room, room)',
+        '')],
+     't3_replay_room_change', 't3_replay_bound_then_entered'),
+    ('M-H1g-state', "K3", 'rules', [(
+        "                if ((a.State == 'b' || a.State == 'e') && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                Th(k);",
+        "                if (a.State == 'b' && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                Th(k);")],
+     't3_bound_entered', 't3_replay_bound_then_entered'),
+    ('M-H1g-byroom', "K3", 'rules', [(
+        "                    if ((a.State == 'b' || a.State == 'e') && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                    if (a.DeadlineS",
+        "                    if (a.State == 'b' && a.BoundActor > 0) k.BoundActor = a.BoundActor;\n                    if (a.DeadlineS")],
+     't3_bound_entered', 't3_replay_bound_then_entered'),
     # K3, S3
     ("M3.5", "K3", "rules", [
         ("internal static string SnapshotDigest(Snapshot s) { return Fnv64Hex(s.Format()); }",
@@ -348,13 +379,69 @@ def sha(path):
     return hashlib.sha256(open(path, "rb").read()).hexdigest()
 
 
+
+def extract_member(source, signature):
+    start = source.index(signature)
+    opening = source.index("{", start)
+    depth = 0
+    # Extraction signatures select code whose braces in literals/comments balance.
+    for end in range(opening, len(source)):
+        if source[end] == "{":
+            depth += 1
+        elif source[end] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:end + 1]
+    raise ValueError("unclosed production member " + signature)
+
+
+def gen_production(overrides):
+    def read(key):
+        with open(overrides.get(key, os.path.join(PLUGIN, FILES[key])), encoding="utf-8-sig") as f:
+            return f.read()
+    ret, writer = read("return"), read("writer")
+    # Dispatch is extracted too: the fixture cannot pass if Tick stops calling
+    # the production gate, or if a guard is restored around the extracted gate.
+    activate = ret[ret.index("case TeamHoldRules.ReturnRoute.Stage.Activate:"):ret.index("case TeamHoldRules.ReturnRoute.Stage.Entered:")]
+    entered = writer[writer.index("                        case 'e':", writer.index("internal static class TeamHoldLoop")):]
+    entered = entered[:entered.index("                        case 'x':")]
+    activation_wired = "ActivateReplay(route, a, now);" in activate and "route.Done" not in activate
+    survivor_wired = "if (SurvivorEntered(cut, k)) return;" in entered and "Release(cut)" not in entered
+    members = [extract_member(ret, sig).replace("private static", "internal static") for sig in (
+        "internal enum ReplayState", "internal sealed class ReplayWork", "internal sealed class ReplaySlot",
+        "internal static void InvalidateReplay", "internal static bool ReplayIdentity", "internal static bool ReplayReady",
+        "private static bool ReplayCurrent", "internal static ReplayWork Replay(bool", "internal static IEnumerator ReplayRun",
+        "private static void ActivateReplay", "private static void PostEntered", "internal static void OnRoomLeft()") ]
+    loop = [extract_member(writer, sig).replace("private static", "internal static") for sig in (
+        "private static void SurvivorReplay", "private static bool SurvivorEntered")]
+    return """using System;
+using System.Collections;
+using System.Collections.Generic;
+namespace CompetitiveRounds.Stage2Replay {
+internal static partial class TeamHoldReturn {
+internal static bool ActivationWired = %s;
+%s
+}
+internal static partial class TeamHoldLoop {
+internal static bool SurvivorWired = %s;
+%s
+}
+}
+""" % (str(activation_wired).lower(), "\n".join(members), str(survivor_wired).lower(), "\n".join(loop))
+
 def build(work, tag, overrides):
     out = os.path.join(work, tag)
+    os.makedirs(out, exist_ok=True)
+    generated = os.path.join(out, "Production.cs")
+    with open(generated, "w", encoding="utf-8") as f:
+        f.write(gen_production(overrides))
     cmd = ["dotnet", "build", PROJ, "-c", "Release", "-nologo", "-v", "q",
            "-p:IntermediateOutputPath=" + os.path.join(out, "obj") + os.sep,
-           "-p:OutDir=" + os.path.join(out, "bin") + os.sep]
+           "-p:OutDir=" + os.path.join(out, "bin") + os.sep,
+           "-p:ProductionSource=" + generated]
     for key, path in overrides.items():
-        cmd.append("-p:" + PROPS[key] + "=" + path)
+        if key in PROPS:
+            cmd.append("-p:" + PROPS[key] + "=" + path)
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print(r.stdout[-4000:], r.stderr[-2000:])
