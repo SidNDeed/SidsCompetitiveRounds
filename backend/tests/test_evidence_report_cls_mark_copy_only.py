@@ -4135,3 +4135,56 @@ def test_structural_request_identifier_validation_keeps_request_provenance():
     findings = ps.run()
     labels = ps.returns[("api", "_aer_ident")].flat()
     assert "R" in labels and K not in labels and findings == [], (labels, _fmt(findings))
+
+
+
+def test_fix8_recursive_callback_binding_refuses():
+    module = Module("api", "", "fixture.py", lambda name: False)
+    ps = Pass([module])
+    ps.recording = True
+    frame = Frame(ps, module, ("api", "fixture"), {}, frozenset())
+    node = ast.parse("operator.call(None)", mode="eval").body
+    callback = V({K}, alias=("import", "operator.call"))
+    candidate = V(alias=("import", "operator.call"))
+    # The candidate is admitted before selection labels make its binding recur.
+    result = frame.callback_effect(node, callback, [], [candidate])
+    assert [finding[2] for finding in ps.findings] == [
+        "unresolvable call target (recursive callback binding)"], _fmt(ps.findings)
+    assert D in result.flat(), result.flat()
+
+
+def test_fix8_nonrecursive_callback_binding_control():
+    module = Module("api", 'def _fixed(*values):\n    return "chrome"\n',
+                    "fixture.py", lambda name: False)
+    ps = Pass([module])
+    ps.recording = True
+    frame = Frame(ps, module, ("api", "fixture"), {}, frozenset())
+    node = ast.parse("operator.call(None)", mode="eval").body
+    callback = V({K}, alias=("import", "operator.call"))
+    target = ("api", "_fixed")
+    frame.callback_effect(node, callback, [], [V(funcs={target})])
+    assert target in ps.called
+    assert ps.findings == set(), _fmt(ps.findings)
+
+
+def test_fix8_marked_dictionary_callback_refusal_is_shared():
+    _, frame = _removal_state_frame()
+    frame.ps.recording = True
+    node = ast.parse("box.pop", mode="eval").body
+    data_ref = DictRef(("fixture", "callback-dictionary"))
+    data_ref.seed(("rank",), (V({C}),))
+    callback = vjoin(frame.expr(node), V(alias=("dict", data_ref)))
+    assert _dict_arms(callback) and _callback_evidence(callback, aliases_only=True)
+    result = frame.callback_effect(node, callback, [], [frame.env["box"]])
+    assert [finding[2] for finding in frame.ps.findings] == [
+        "unresolvable call target (dictionary alternative)"], _fmt(frame.ps.findings)
+    assert D in result.flat(), result.flat()
+
+
+def test_fix8_resolved_dictionary_callback_control():
+    ref, frame = _removal_state_frame()
+    frame.ps.recording = True
+    node = ast.parse("box.clear", mode="eval").body
+    frame.callback_effect(node, frame.expr(node), [], [frame.env["box"]])
+    assert ref.must_keys == frozenset()
+    assert frame.ps.findings == set(), _fmt(frame.ps.findings)
