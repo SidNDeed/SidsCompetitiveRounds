@@ -87,6 +87,15 @@ $wireFiles = @(
     # inert twin.
     'plugin/NativeUI.cs',
     'plugin/CompetitiveUI.cs',
+    # W25's closed caller sets name members in these three since the
+    # readmission and seat-evidence lanes: the FFA probe's and the readmit
+    # poll's callers (FfaReadmit.cs), the compat base's one caller
+    # (SeatEvidence.cs) and the re-form's re-entry into the lock arm
+    # (FfaAssembly.cs). Without them a mutant root resolves those sets to
+    # nothing and W25 stops being an inert twin.
+    'plugin/FfaReadmit.cs',
+    'plugin/SeatEvidence.cs',
+    'plugin/FfaAssembly.cs',
     'plugin/CompetitiveRounds.csproj',
     'tools/tests/bug389-seam/Program.cs',
     # H1 and H2 read this one: the round's finding bodies, from which the
@@ -1375,8 +1384,8 @@ $wireStageUnbound = New-WireRootEdits 'stageunbound' 'plugin/ApiClient.cs' @(
       '                            ProximityVictimGate.StageInto(prejoin);',
       '                            // (mutant) the merge has left the response callback'),
     @('public static void UpdateOvtQueuePoll(bool force)',
-      '            }));',
-      '            }));
+      '               extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));',
+      '               extraHeader2Name: rpGen != null ? "X-Region-Pings-Gen" : null, extraHeader2Value: rpGen));
             ProximityVictimGate.StageInto(new ExitGames.Client.Photon.Hashtable());')
 )
 $runWireStageUnbound = Invoke-Suite 'wire-stageunbound' $seam $wireStageUnbound
@@ -1639,10 +1648,13 @@ Say ''
 # `baseUrl ??= ...` reads as a writer and leaves the previous value standing.
 # ClassifyWrite did not know the operator at all, so the write was invisible;
 # R8 now also requires every write to that field to be a form that retargets.
+# The boot verdict now writes route.CurrentBase on BOTH branches, so the anchor
+# is bounded to the fallback branch: the region from its 'if (!reachable)' to
+# the fallback flag it sets next (one site inside).
 $wireNullCoalesceAssign = New-WireRoot 'nullcoalesceassign' 'plugin/ApiClient.cs' `
-    'private static void OnBootProbeConcluded(SecureRouteRules.Route route, SecureRouteRules.Conclusion c)' `
-    '                baseUrl = Plugin.LegacyApiUrl.TrimEnd(''/'');' `
-    '                baseUrl ??= Plugin.LegacyApiUrl.TrimEnd(''/'');' ''
+    'if (!reachable)' `
+    '                baseUrl = route.CurrentBase;' `
+    '                baseUrl ??= route.CurrentBase;' '                UsingLegacyFallback = true;'
 $runWireNullCoalesceAssign = Invoke-Suite 'wire-nullcoalesceassign' $seam $wireNullCoalesceAssign
 if (-not (Assert-Mutation 'a null-coalescing write to the request prefix' $runWireNullCoalesceAssign 'W25' 'W1')) { $overall = 1 }
 Say ''

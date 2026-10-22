@@ -59,6 +59,7 @@ PERMITTED-MEMBER: plugin/ApiClient.cs :: public static void UpdateTeamQueuePoll(
 PERMITTED-MEMBER: plugin/ApiClient.cs :: private static void FfaEnrollResult(bool ok, string resp, string intendedLobbyId, bool wasRecovery)
 PERMITTED-MEMBER: plugin/ApiClient.cs :: public static void FfaProbeServerState()
 PERMITTED-MEMBER: plugin/ApiClient.cs :: private void HandleResolveProbe(string status, string resp, string sid)
+PERMITTED-MEMBER: plugin/ApiClient.cs :: internal static void FfaStartReadmitPoll()
 PERMITTED-MEMBER: plugin/ApiClient.cs :: public static void FfaKickFromLobby(string targetSteamId)
 
 ## What the call walker actually sees
