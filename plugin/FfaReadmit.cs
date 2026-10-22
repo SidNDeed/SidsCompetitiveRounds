@@ -52,8 +52,8 @@ namespace CompetitiveRounds
         // ------------------------------------------------------------ discovery (P4.2)
 
         /// <summary>The FFA tab's opener, in place of the bare probe: the
-        /// read-only offer GET first; today's probe runs only on an answer that
-        /// offers nothing (0, an error, an older server). Once per launch, as
+        /// read-only offer GET first; today's probe runs when no offer is
+        /// accepted or already held. Once per launch, as
         /// the probe is; a seat already polling skips straight to the probe,
         /// and the poll's belt carries the offer for it.</summary>
         internal static void DiscoverThenProbe()
@@ -85,8 +85,7 @@ namespace CompetitiveRounds
                         int holdS = FfaAssembly.ExtractJsonInt(m, "hold_s", 0);
                         if (FfaReadmitEntryRules.DiscoveryOffers(rd, lobby, n, holdS))
                         {
-                            Offer(lobby, slot, n, holdS, "discovery");
-                            offered = true;
+                            offered = SuppressesDiscoveryProbe(Offer(lobby, slot, n, holdS, "discovery"));
                         }
                     }
                 }
@@ -97,18 +96,27 @@ namespace CompetitiveRounds
 
         /// <summary>The poll's belt (a ready_join for a held seat): the bar,
         /// never a join or a leave.</summary>
-        internal static void OfferFromPoll(string lobby, int slot, int n, int holdS)
+        internal static FfaReadmitEntryRules.RdmOffer OfferFromPoll(string lobby, int slot, int n, int holdS)
         {
-            if (!FfaReadmitEntryRules.DiscoveryOffers(1, lobby, n, holdS)) return;
-            Offer(lobby, slot, n, holdS, "poll");
+            if (!FfaReadmitEntryRules.DiscoveryOffers(1, lobby, n, holdS)) return FfaReadmitEntryRules.RdmOffer.Rejected;
+            return Offer(lobby, slot, n, holdS, "poll");
         }
 
-        private static void Offer(string lobby, int slot, int n, int holdS, string src)
+        internal static bool SuppressesDiscoveryProbe(FfaReadmitEntryRules.RdmOffer result)
+        {
+            return result == FfaReadmitEntryRules.RdmOffer.Accepted
+                || result == FfaReadmitEntryRules.RdmOffer.Refreshed
+                || result == FfaReadmitEntryRules.RdmOffer.Held;
+        }
+
+        private static FfaReadmitEntryRules.RdmOffer Offer(string lobby, int slot, int n, int holdS, string src)
         {
             var before = State.State;
-            FfaReadmitEntryRules.Offer(State, lobby, slot, n, holdS, Now());
+            var result = FfaReadmitEntryRules.Offer(State, lobby, slot, n, holdS, Now());
+            if (result == FfaReadmitEntryRules.RdmOffer.Rejected) return result;
             Ladder(before, false, " hold_s=" + I(holdS) + " src=" + src);
             try { NativeUI.MarkDirty(); } catch { }
+            return result;
         }
 
         /// <summary>Whether this client holds a claim for the lobby (the belt

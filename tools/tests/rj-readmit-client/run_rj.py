@@ -46,7 +46,7 @@ SUITE_FILES = {
     "apply": {"FfaMode.cs": None, "FfaLateEntry.cs": None, "FfaReadmitRules.cs": "RulesSource"},
     "rules": {"FfaReadmitRules.cs": "RulesSource", "FfaReportRules.cs": "ReportSource",
               "FfaLateRules.cs": "LateSource", "FfaReadmitEntryRules.cs": "EntrySource",
-              "RosterCensusRules.cs": "CensusSource"},
+              "RosterCensusRules.cs": "CensusSource", "FfaReadmit.cs": None},
 }
 
 # (id, piece, suite, file, [(old, new), ...], target case, control case)
@@ -176,6 +176,23 @@ MUTANTS = [
     ("M4.22", "C4", "rules", "FfaReadmitEntryRules.cs",
      [("            return readmitLobby;\n", "            return false;\n")],
      "C4.T4.12.kind_r_grant_releases_latch", "C4.T4.11.three_way_game_agreement"),
+    # ---- merged H2: pair identity and actual discovery/poll adapters
+    ('M-H2a', 'H2', 'rules', 'FfaReadmitEntryRules.cs',
+     [('c.State == RdmState.Entered && c.Lobby == lobby && n <= c.N',
+       'c.State == RdmState.Entered && n <= c.N')],
+     'C4.H2.cross_lobby_first_hold', 'C4.H2.same_lobby_terminal'),
+    ('M-H2b', 'H2', 'rules', 'FfaReadmitEntryRules.cs',
+     [('c.State == RdmState.Entered && c.Lobby == lobby && n <= c.N',
+       'c.State == RdmState.Entered && c.Lobby == lobby && false')],
+     'C4.H2.same_lobby_terminal', 'C4.H2.cross_lobby_first_hold'),
+    ('M-H2c', 'H2', 'rules', 'FfaReadmitEntryRules.cs',
+     [('            if (c.State == RdmState.Claiming || c.State == RdmState.Claimed\n                || c.State == RdmState.Binding || c.State == RdmState.Admitted)\n                return sameOffer ? RdmOffer.Held : RdmOffer.Rejected;\n',
+       '')],
+     'C4.H2.active_claim_preserved', 'C4.H2.cross_lobby_first_hold'),
+    ('M-H2d', 'H2', 'rules', 'FfaReadmit.cs',
+     [('offered = SuppressesDiscoveryProbe(Offer(lobby, slot, n, holdS, "discovery"));',
+       'Offer(lobby, slot, n, holdS, "discovery"); offered = true;')],
+     'C4.H2.discovery_fallback', 'C4.H2.poll_result'),
     # ---- C5 (P5 client rungs of the positive ladder)
     ("M5.c1", "C5", "rules", "FfaReadmitEntryRules.cs",
      [("            if (after == before) return null;\n", "")],
@@ -323,7 +340,17 @@ def prepare(tree, wt, suite, work, tag, texts):
         if prop is None:
             continue
         p = os.path.join(out, f)
-        open(p, "wb").write(texts[f].encode("utf-8"))
+        content = texts[f]
+        if suite == "rules" and f == "FfaReadmitEntryRules.cs":
+            adapter = texts["FfaReadmit.cs"]
+            content += "\nnamespace CompetitiveRounds\n{\n    internal sealed class ReadmitOfferAdapter : ReadmitOfferAdapterBase\n    {\n"
+            for sig in ("internal static void DiscoverThenProbe(",
+                        "internal static FfaReadmitEntryRules.RdmOffer OfferFromPoll(",
+                        "internal static bool SuppressesDiscoveryProbe(",
+                        "private static FfaReadmitEntryRules.RdmOffer Offer("):
+                content += extract(adapter, sig) + "\n"
+            content += "    }\n}\n"
+        open(p, "wb").write(content.encode("utf-8"))
         props[prop] = p
     if suite == "apply":
         gen_reducers(wt, texts["FfaMode.cs"], texts["FfaLateEntry.cs"], os.path.join(out, "gen"))

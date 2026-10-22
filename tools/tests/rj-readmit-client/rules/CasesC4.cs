@@ -223,6 +223,74 @@ namespace CompetitiveRounds
                 Check.Eq(2, c.N, "the new hold's n");
             });
 
+            RulesProgram.Add("C4.H2.cross_lobby_first_hold", () =>
+            {
+                var c = new FfaReadmitEntryRules.RdmClient { State = FfaReadmitEntryRules.RdmState.Entered, Lobby = "lobbyA", N = 3 };
+                Check.Eq(FfaReadmitEntryRules.RdmOffer.Accepted,
+                         FfaReadmitEntryRules.Offer(c, "lobbyB", 2, 1, 90, 100f), "another lobby starts at hold one");
+                Check.Eq(FfaReadmitEntryRules.RdmState.Offered, c.State, "the terminal record reopens");
+                Check.Eq("lobbyB", c.Lobby, "the reopened record names the new lobby");
+                Check.Eq(1, c.N, "the new lobby hold number");
+            });
+            RulesProgram.Add("C4.H2.same_lobby_terminal", () =>
+            {
+                foreach (int n in new[] { 2, 3 })
+                {
+                    var c = new FfaReadmitEntryRules.RdmClient { State = FfaReadmitEntryRules.RdmState.Entered, Lobby = "lobbyA", N = 3 };
+                    Check.Eq(FfaReadmitEntryRules.RdmOffer.Rejected,
+                             FfaReadmitEntryRules.Offer(c, "lobbyA", 2, n, 90, 100f), "a repeated or stale terminal hold stays closed");
+                    Check.Eq(FfaReadmitEntryRules.RdmState.Entered, c.State, "terminal state kept");
+                    Check.Eq(3, c.N, "terminal hold kept");
+                }
+                var next = new FfaReadmitEntryRules.RdmClient { State = FfaReadmitEntryRules.RdmState.Entered, Lobby = "lobbyA", N = 3 };
+                Check.Eq(FfaReadmitEntryRules.RdmOffer.Accepted,
+                         FfaReadmitEntryRules.Offer(next, "lobbyA", 2, 4, 90, 100f), "an increasing hold reopens");
+            });
+            RulesProgram.Add("C4.H2.active_claim_preserved", () =>
+            {
+                foreach (var state in new[] { FfaReadmitEntryRules.RdmState.Claiming, FfaReadmitEntryRules.RdmState.Claimed,
+                                             FfaReadmitEntryRules.RdmState.Binding, FfaReadmitEntryRules.RdmState.Admitted })
+                {
+                    var c = new FfaReadmitEntryRules.RdmClient { State = state, Lobby = "lobbyA", N = 3, Slot = 1,
+                        Token = Token, Room = "roomA", Region = "eu", Game = 4, Actor = 42, HoldUntil = 80f };
+                    Check.Eq(FfaReadmitEntryRules.RdmOffer.Rejected,
+                             FfaReadmitEntryRules.Offer(c, "lobbyB", 2, 1, 90, 100f), "another lobby cannot reset an active claim");
+                    Check.Eq(FfaReadmitEntryRules.RdmOffer.Rejected,
+                             FfaReadmitEntryRules.Offer(c, "lobbyA", 2, 4, 90, 100f), "another hold cannot reset an active claim");
+                    Check.Eq(FfaReadmitEntryRules.RdmOffer.Held,
+                             FfaReadmitEntryRules.Offer(c, "lobbyA", 1, 3, 90, 100f), "the identical active offer is already held");
+                    Check.True(c.State == state && c.Lobby == "lobbyA" && c.N == 3 && c.Slot == 1 && c.Token == Token
+                               && c.Room == "roomA" && c.Region == "eu" && c.Game == 4 && c.Actor == 42 && c.HoldUntil == 80f,
+                               "every active-claim field is untouched");
+                }
+            });
+            RulesProgram.Add("C4.H2.discovery_fallback", () =>
+            {
+                foreach (var state in new[] { FfaReadmitEntryRules.RdmState.None, FfaReadmitEntryRules.RdmState.Offered,
+                                             FfaReadmitEntryRules.RdmState.Claimed, FfaReadmitEntryRules.RdmState.Entered })
+                {
+                    ReadmitOfferAdapter.Reset(state, "lobbyA", 1);
+                    ReadmitOfferAdapter.DiscoverThenProbe();
+                    Check.Eq(state == FfaReadmitEntryRules.RdmState.Entered ? 1 : 0, ReadmitOfferAdapter.Probes,
+                             "only an accepted, refreshed or held discovery suppresses today's probe");
+                }
+                ReadmitOfferAdapter.Reset(FfaReadmitEntryRules.RdmState.Claimed, "lobbyB", 1);
+                ReadmitOfferAdapter.DiscoverThenProbe();
+                Check.Eq(1, ReadmitOfferAdapter.Probes, "a cross-lobby offer rejected during a claim falls back");
+                Check.Eq("lobbyB", ReadmitOfferAdapter.State.Lobby, "discovery preserves the active claim");
+            });
+            RulesProgram.Add("C4.H2.poll_result", () =>
+            {
+                ReadmitOfferAdapter.Reset(FfaReadmitEntryRules.RdmState.Entered, "lobbyA", 2);
+                Check.Eq(FfaReadmitEntryRules.RdmOffer.Accepted,
+                         ReadmitOfferAdapter.OfferFromPoll("lobbyB", 2, 1, 90), "poll returns acceptance and reopens State");
+                Check.Eq("lobbyB", ReadmitOfferAdapter.State.Lobby, "the same State record now names lobbyB");
+                Check.Eq(FfaReadmitEntryRules.RdmOffer.Refreshed,
+                         ReadmitOfferAdapter.OfferFromPoll("lobbyB", 2, 1, 80), "poll returns the repeated held offer");
+                Check.Eq(FfaReadmitEntryRules.RdmOffer.Rejected,
+                         ReadmitOfferAdapter.OfferFromPoll("", 2, 1, 90), "the discovery capability shape still gates the poll");
+            });
+
             RulesProgram.Add("C4.T4.5.every_refusal_reason_mapped", () =>
             {
                 var want = new Dictionary<string, FfaReadmitEntryRules.RefusalClass>
@@ -459,6 +527,46 @@ namespace CompetitiveRounds
                 Check.Eq(FfaReadmitEntryRules.BeltAct.Offer, FfaReadmitEntryRules.Belt(false, false, true, false, "true"),
                          "positive twin: a readmissible seat is offered, not refused");
             });
+        }
+    }
+
+    // Boundary stubs for the extracted FfaReadmit discovery and poll adapters.
+    // Offer decisions and fallback dispatch are the production method bodies.
+    internal class ReadmitOfferAdapterBase
+    {
+        internal static FfaReadmitEntryRules.RdmClient State;
+        protected static bool _discovered, _discoveryInFlight;
+        internal static int Probes;
+        internal static void Reset(FfaReadmitEntryRules.RdmState state, string lobby, int n)
+        {
+            State = new FfaReadmitEntryRules.RdmClient { State = state, Lobby = lobby, N = n };
+            _discovered = _discoveryInFlight = false;
+            Probes = 0;
+        }
+        protected static float Now() { return 100f; }
+        protected static string I(int v) { return v.ToString(CultureInfo.InvariantCulture); }
+        protected static void Ladder(FfaReadmitEntryRules.RdmState before, bool selfKept, string extra) { }
+        protected static class MatchTracker { internal static string LocalSteamId = "1001"; }
+        protected static class NativeUI { internal static void MarkDirty() { } }
+        protected static class Plugin
+        {
+            internal static readonly Logger Log = new Logger();
+            internal sealed class Logger { internal void LogWarning(string message) { } }
+        }
+        protected static class ApiClient
+        {
+            internal static bool IsFfaQueuePolling = false;
+            internal static void FfaReadmitOffer(string sid, Action<bool, string> done) { done(true, "offer"); }
+            internal static void FfaProbeServerState() { Probes++; }
+        }
+        protected static class FfaAssembly
+        {
+            internal static string Members(string response) { return response; }
+            internal static string ExtractJsonString(string response, string key) { return "lobbyA"; }
+            internal static int ExtractJsonInt(string response, string key, int fallback)
+            {
+                return key == "hold_s" ? 90 : 1;
+            }
         }
     }
 }

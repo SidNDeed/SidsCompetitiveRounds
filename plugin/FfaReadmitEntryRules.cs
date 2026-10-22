@@ -263,23 +263,29 @@ namespace CompetitiveRounds
             Done,       // entered: the token is spent
         }
 
-        internal static void Offer(RdmClient c, string lobby, int slot, int n, int holdS, float now)
+        internal enum RdmOffer { Rejected, Accepted, Refreshed, Held }
+
+        internal static RdmOffer Offer(RdmClient c, string lobby, int slot, int n, int holdS, float now)
         {
-            // A claim in flight or held is never reset by a repeated offer; a
-            // seat that entered and dropped again (step 10) is offered hold n + 1.
-            bool fresh = c.State == RdmState.None || c.State == RdmState.Offered || c.State == RdmState.Refused
-                         || c.State == RdmState.Declined || c.State == RdmState.Lapsed
-                         || (c.State == RdmState.Entered && n > c.N);
-            if (!fresh) return;
-            if (c.State == RdmState.Offered && c.Lobby == lobby && c.N == n)
+            bool sameOffer = c.Lobby == lobby && c.N == n;
+            // An active claim keeps its record and token, including when a
+            // discovery answer names another lobby or hold.
+            if (c.State == RdmState.Claiming || c.State == RdmState.Claimed
+                || c.State == RdmState.Binding || c.State == RdmState.Admitted)
+                return sameOffer ? RdmOffer.Held : RdmOffer.Rejected;
+            // Hold numbers are monotonic within a lobby, not across lobbies.
+            if (c.State == RdmState.Entered && c.Lobby == lobby && n <= c.N)
+                return RdmOffer.Rejected;
+            if (c.State == RdmState.Offered && sameOffer)
             {
                 c.HoldUntil = now + Math.Max(0, holdS);
-                return;
+                return RdmOffer.Refreshed;
             }
             c.State = RdmState.Offered;
             c.Lobby = lobby; c.Slot = slot; c.N = n;
             c.HoldUntil = now + Math.Max(0, holdS);
             c.Token = null; c.Room = null; c.Region = null; c.Game = 0; c.Actor = 0; c.LastReason = null;
+            return RdmOffer.Accepted;
         }
 
         /// <summary>The bar's countdown, whole seconds, never negative.</summary>
