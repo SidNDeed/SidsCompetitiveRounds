@@ -1243,6 +1243,38 @@ internal static class Program
         return kept;
     }
 
+    /// <summary>A syntactic call is identified by its file, enclosing member,
+    /// and opening-parenthesis offset in the CODE view. Qualified and bare
+    /// searches for the same call share that offset; two calls on one line do
+    /// not. Line numbers are only display coordinates, never identities.</summary>
+    private sealed class CallIdentity
+    {
+        internal readonly string File;
+        internal readonly string Member;
+        internal readonly int At;
+        internal CallIdentity(string file, string member, int at)
+        { File = file; Member = member; At = at; }
+        internal string Owner { get { return File + " :: " + Member; } }
+        internal string Key { get { return Owner + " @" + At; } }
+    }
+
+    private static List<CallIdentity> DistinctCallsIn(string rel, string blanked, params string[] names)
+    {
+        var calls = new List<CallIdentity>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string name in names)
+            foreach (int start in CallSitesIn(blanked, name))
+            {
+                // CallSitesIn has already matched the name followed by '('.
+                // Its opening parenthesis normalizes qualified and bare hits.
+                int at = blanked.IndexOf('(', start);
+                var call = new CallIdentity(rel, EnclosingMemberOf(blanked, at) ?? "(no enclosing member)", at);
+                if (seen.Add(call.Key)) calls.Add(call);
+            }
+        calls.Sort((a, b) => a.At.CompareTo(b.At));
+        return calls;
+    }
+
     /// <summary>One construction site: the offset of its `new` keyword, the type
     /// spelling that construction carries, and whether that spelling has a
     /// type-argument list - which is what tells a PAIR from a MAP of pairs.</summary>
@@ -3840,14 +3872,14 @@ internal static class Program
                             + ", merge at " + site);
                     continue;
                 }
-                // The parser's own entry: called exactly once in the assembly,
-                // from inside the named host, after that host's request.
+                // Every call in ApiClient must be the one host callback call;
+                // calls outside ApiClient must match the named re-entries.
                 int ho, hc; string hp;
                 if (!TryMemberSpan(apiBlank, host, out ho, out hc, out hp)) { reachProblems.Add(hp); continue; }
                 string name = MemberName(sig);
                 var callers = new List<string>();
                 int inHost = 0;
-                int otherFiles = 0;
+                int apiCalls = 0;
                 string[] reentry;
                 if (!stageReentry.TryGetValue(name, out reentry)) reentry = new string[0];
                 var reentryFound = new List<string>();
@@ -3856,28 +3888,18 @@ internal static class Program
                     SurfaceFile b2Pair;
                     if (!surface.TryGetValue(rel, out b2Pair)) continue;
                     string b2 = b2Pair.Code;
-                    var sites = CallSitesIn(b2, name);
-                    if (rel != apiRel) sites.AddRange(CallSitesIn(b2, "ApiClient." + name));
-                    if (sites.Count == 0) continue;
-                    callers.Add(rel + " x" + sites.Count);
-                    if (rel != apiRel)
+                    var calls = DistinctCallsIn(rel, b2, name, "ApiClient." + name);
+                    foreach (CallIdentity call in calls)
                     {
-                        // A qualified call is also a bare hit, so a call is one
-                        // LINE here, resolved to the member that encloses it.
-                        otherFiles++;
-                        var seenLines = new List<int>();
-                        foreach (int at in sites)
+                        callers.Add(call.Key);
+                        if (rel != apiRel)
                         {
-                            int ln = LineOf(b2, at);
-                            if (seenLines.Contains(ln)) continue;
-                            seenLines.Add(ln);
-                            reentryFound.Add(rel + " :: " + (EnclosingMemberOf(b2, at) ?? "(no enclosing member)"));
+                            reentryFound.Add(call.Owner);
+                            continue;
                         }
-                        continue;
-                    }
-                    foreach (int at in sites)
-                    {
-                        if (at < ho || at > hc) continue;
+                        apiCalls++;
+                        int at = call.At;
+                        if (call.Member != host || at < ho || at > hc) continue;
                         int hostUrl = apiBlank.IndexOf("baseUrl", ho, StringComparison.Ordinal);
                         if (hostUrl < 0 || hostUrl >= hc || hostUrl >= at) continue;
                         // R7 for the borrowed request: the parser's call site
@@ -3893,7 +3915,7 @@ internal static class Program
                 reentryWant.Sort(StringComparer.Ordinal);
                 bool reentryOk = string.Join(" | ", reentryFound.ToArray())
                     == string.Join(" | ", reentryWant.ToArray());
-                if (callers.Count - otherFiles != 1 || inHost != 1 || !reentryOk)
+                if (apiCalls != 1 || inHost != 1 || !reentryOk)
                     reachProblems.Add("'" + name + "' carries a merge but builds no request, so its own entry "
                         + "is what makes it downstream: it must be called exactly once in " + apiRel + ", from "
                         + "INSIDE the response callback of '" + host + "'s baseUrl request, and elsewhere only "
@@ -4394,11 +4416,12 @@ internal static class Program
                     SurfaceFile b2Pair;
                     if (!surface.TryGetValue(rel, out b2Pair)) continue;
                     string b2 = b2Pair.Code;
-                    var sites = CallSitesIn(b2, "NativeUI.Tick");
-                    if (sites.Count == 0) continue;
-                    uiTickSites.Add(rel + " x" + sites.Count);
-                    if (rel != compRel) continue;
-                    foreach (int at in sites) if (at >= co && at <= cc) inComp++;
+                    foreach (CallIdentity call in DistinctCallsIn(rel, b2, "NativeUI.Tick"))
+                    {
+                        uiTickSites.Add(call.Key);
+                        if (rel == compRel && call.Member == "public static void Tick()"
+                            && call.At >= co && call.At <= cc) inComp++;
+                    }
                 }
                 if (uiTickSites.Count != 1 || inComp != 1)
                     reachProblems.Add("NativeUI.Tick must be called exactly once in the assembly, from inside "
@@ -4412,12 +4435,12 @@ internal static class Program
                 SurfaceFile b2Pair;
                 if (!surface.TryGetValue(rel, out b2Pair)) continue;
                 string b2 = b2Pair.Code;
-                var sites = CallSitesIn(b2, "CompetitiveUI.Tick");
-                if (sites.Count == 0) continue;
-                compTickSites.Add(rel + " x" + sites.Count);
-                if (rel != pluginRel || gateAt < 0 || tickOpen < 0) continue;
-                foreach (int at in sites)
-                    if (at > gateAt && at >= tickOpen && at <= tickClose) compInTick++;
+                foreach (CallIdentity call in DistinctCallsIn(rel, b2, "CompetitiveUI.Tick"))
+                {
+                    compTickSites.Add(call.Key);
+                    if (rel == pluginRel && gateAt >= 0 && tickOpen >= 0
+                        && call.At > gateAt && call.At >= tickOpen && call.At <= tickClose) compInTick++;
+                }
             }
             if (compTickSites.Count != 1 || compInTick != 1)
                 reachProblems.Add("CompetitiveUI.Tick must be called exactly once in the assembly, from the "
